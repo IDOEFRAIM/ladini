@@ -14,14 +14,19 @@ Avantage : Les agents ne font plus d'appels directs SQL/API.
 Si on change de base, de fournisseur météo ou de vector DB, les agents ne changent PAS.
 """
 
-from .mcp_db import MCPDatabaseServer
-from .mcp_rag import MCPRagServer
-from .mcp_weather import MCPWeatherServer
-from .mcp_context import MCPContextServer
+from .servers.agri_db_server import AgriDBMCPServer as MCPDatabaseServer
+from .servers.agri_rag_server import AgriRAGMCPServer as MCPRagServer
+from .servers.weather_server import WeatherMCPServer as MCPWeatherServer
+# Context MCP server may be optional / implemented elsewhere. Import safely to avoid
+# circular imports during package initialization. If not available, expose None.
+try:
+    from .servers.context_server import ContextMCPServer as MCPContextServer
+except Exception:
+    MCPContextServer = None
 
 __all__ = [
-    "MCPDatabaseServer",
-    "MCPRagServer", 
-    "MCPWeatherServer",
-    "MCPContextServer",
+  "MCPDatabaseServer",
+  "MCPRagServer",
+  "MCPWeatherServer",
+  "MCPContextServer"
 ]

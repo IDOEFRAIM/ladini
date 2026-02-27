@@ -249,6 +249,16 @@ class AgriDatabase:
         session: Session = self.SessionLocal()
         conv_id = str(uuid.uuid4())
         try:
+            # Ensure the referenced user exists (create lightweight placeholder if needed)
+            user = session.query(User).filter(User.id == user_id).first()
+            if user is None:
+                try:
+                    placeholder = User(id=user_id, name=("Anonymous" if user_id == "anonymous" else "User"))
+                    session.add(placeholder)
+                    session.flush()
+                    logger.info("Created placeholder user for id=%s", user_id)
+                except Exception as e:
+                    logger.debug("Could not create placeholder user: %s", e)
             conv = Conversation(
                 id=conv_id,
                 user_id=user_id,

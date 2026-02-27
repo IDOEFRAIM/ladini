@@ -25,3 +25,5 @@ dist/
 *.egg-info/
 .cache/
 *.pytest_cache/
+
+backend/src/agriconnect/.venv

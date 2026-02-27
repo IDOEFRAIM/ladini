@@ -2,8 +2,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, TypedDict, Tuple
 
+from pydantic import BaseModel, field_validator
 from langgraph.graph import END, StateGraph
 from agriconnect.graphs.prompts import (
     SENTINELLE_USER_TEMPLATE,
@@ -13,7 +15,9 @@ from agriconnect.graphs.prompts import (
 
 from agriconnect.rag.components import get_groq_sdk
 from agriconnect.rag.metric import RAGEvaluator
-from agriconnect.rag.retriever import AgileRetriever
+
+from agriconnect.protocols.mcp.servers.agri_db_server import AgriDBMCPServer
+from agriconnect.protocols.mcp.servers.agri_rag_server import AgriRAGMCPServer
 
 from agriconnect.tools.sentinelle import SentinelleTool
 from agriconnect.tools.refine import RefineTool
@@ -39,8 +43,9 @@ class SentinelState(TypedDict, total=False):
     warnings: List[str]
     security_status: str
     security_reason: str
-    critique_retry_count:int
-    rewrited_retry_count:int
+    critique_retry_count: int
+    rewrited_retry_count: int
+    degraded_mode: bool  # True when loop guards fire
 
 
 @dataclass
@@ -65,7 +70,6 @@ class ClimateSentinel:
     def __init__(
         self,
         llm_client=None,
-        retriever: Optional[AgileRetriever] = None,
         evaluator: Optional[RAGEvaluator] = None,
     ):
         self.refine  = RefineTool(llm=llm_client)
@@ -80,11 +84,15 @@ class ClimateSentinel:
             
         self.tools = SentinelleTool(llm_client=self.llm)
 
+        # MCP Servers Initialization
         try:
-            self.retriever = retriever if retriever else AgileRetriever()
+            self.db_server = AgriDBMCPServer()
+            self.rag_server = AgriRAGMCPServer()
+            logger.info("MCP Servers (DB & RAG) initialized successfully.")
         except Exception as exc:
-            logger.error("RAG indisponible : %s", exc)
-            self.retriever = None
+            logger.error("MCP Server initialization failed: %s", exc)
+            self.db_server = None
+            self.rag_server = None
 
         try:
             self.evaluator = evaluator if evaluator else RAGEvaluator()
@@ -96,47 +104,31 @@ class ClimateSentinel:
     # Helpers                                                            #
 
     def _build_context(self, nodes: List[Any]) -> str:
-        """Construit le contexte RAG à partir des nœuds récupérés."""
+        """Construit le contexte RAG à partir des nœuds récupérés (MCP RAGDocument)."""
         if not nodes:
             return ""
         
         context_parts = []
-        for i, node_obj in enumerate(nodes):
-            # Support LlamaIndex NodeWithScore or Dict
-            if hasattr(node_obj, "node"):
-                # It is a NodeWithScore
-                text = node_obj.node.get_content()
-                meta = node_obj.node.metadata
-                source_type = meta.get("type", "Document")
-                source_name = meta.get("source", "Inconnu")
-            else:
-                # It might be a dict (legacy)
-                text = node_obj.get("text", "")
-                meta = node_obj.get("metadata", {})
-                source_type = meta.get("type", "Document")
-                source_name = meta.get("source", "Inconnu")
+        for i, doc in enumerate(nodes):
+            # Adapt to RAGDocument pydantic model from server
+            text = getattr(doc, "excerpt", "") or getattr(doc, "content", "")
+            source_name = getattr(doc, "source", "Inconnu")
             
             context_parts.append(
-                f"--- DOCUMENT {i+1} ({source_type}: {source_name}) ---\n{text}\n"
+                f"--- DOCUMENT {i+1} ({source_name}) ---\n{text}\n"
             )
             
         return "\n".join(context_parts)
 
     def _serialize_sources(self, nodes: List[Any]) -> List[Dict[str, Any]]:
-        """Extrait les métadonnées pour la traçabilité."""
+        """Extrait les métadonnées pour la traçabilité (MCP RAGDocument)."""
         sources = []
-        for node_obj in nodes:
-            if hasattr(node_obj, "node"):
-                meta = node_obj.node.metadata
-                score = node_obj.score
-            else:
-                meta = node_obj.get("metadata", {})
-                score = node_obj.get("score", 0.0)
-
+        for doc in nodes:
+            # Adapt to RAGDocument pydantic model
             sources.append({
-                "source": meta.get("source", "Unknown"),
-                "type": meta.get("type", "doc"),
-                "similarity": score
+                "source": getattr(doc, "source", "Unknown"),
+                "type": "doc",
+                "similarity": getattr(doc, "score", 0.0)
             })
         return sources
 
@@ -197,6 +189,27 @@ class ClimateSentinel:
             "status": "SIGNALS_READY",
         }
 
+    # ── Pydantic surface extractor (replaces raw regex) ──────────────
+    class _SurfaceQuery(BaseModel):
+        """Validates and normalises a surface value extracted from user text."""
+        value: float
+        unit: str  # 'ha' or 'm2'
+
+        @field_validator('value')
+        @classmethod
+        def positive(cls, v: float) -> float:
+            if v <= 0:
+                raise ValueError('Surface must be positive')
+            return v
+
+        @property
+        def area_m2(self) -> float:
+            return self.value * 10_000 if self.unit == 'ha' else self.value
+
+        @property
+        def label(self) -> str:
+            return f"{self.value} hectares" if self.unit == 'ha' else f"{self.value} m²"
+
     def _compute_surface_info(self, query_text: str, et0: float) -> str:
         """Extract surface (ha or m2) from text and compute water loss message."""
         if not query_text or et0 <= 0:
@@ -210,17 +223,15 @@ class ClimateSentinel:
 
         try:
             if ha_match:
-                val = float(ha_match.group(1).replace(",", "."))
-                area_m2 = val * 10000
-                unit_str = f"{val} hectares"
+                raw = ha_match.group(1).replace(",", ".")
+                sq = self._SurfaceQuery(value=float(raw), unit='ha')
             else:
-                val = float(m2_match.group(1).replace(",", "."))
-                area_m2 = val
-                unit_str = f"{val} m²"
+                raw = m2_match.group(1).replace(",", ".")
+                sq = self._SurfaceQuery(value=float(raw), unit='m2')
 
-            loss_liters = area_m2 * et0
+            loss_liters = sq.area_m2 * et0
             return (
-                f"CALCUL AUTOMATIQUE EFFECTUÉ : Pour {unit_str} avec une ET0 de {et0}mm, "
+                f"CALCUL AUTOMATIQUE EFFECTUÉ : Pour {sq.label} avec une ET0 de {et0}mm, "
                 f"la perte en eau est de {loss_liters:,.0f} litres AUJOURD'HUI. "
                 "Intègre ce chiffre IMPÉRATIVEMENT dans ta réponse."
             )
@@ -273,16 +284,20 @@ class ClimateSentinel:
 
         system_content = SENTINELLE_SYSTEM_TEMPLATE + f"\n\nCONSIGNE STYLE: {style_guidance}"
 
-        hazard_json = json.dumps(ctx.hazards, ensure_ascii=False)
-        metrics_json = json.dumps(ctx.metrics, ensure_ascii=False)
+        # Dynamic date — never hardcode
+        now = datetime.now(timezone.utc)
+        current_date_str = now.strftime("%d %B %Y, %H:%Mh UTC")
+
+        # Single serialisation pass — json.dumps once each (no double-encoding)
         user_content = SENTINELLE_USER_TEMPLATE.format(
-            current_date_str="13 Février 2026 (Saison Sèche)",
-            query=ctx.query,
+            current_date_str=current_date_str,
+            # Wrap user input to prevent prompt injection
+            query=f"<user_input>{ctx.query}</user_input>",
             location=ctx.location,
             risk_summary=ctx.risk_summary,
-            metrics_json=json.dumps(metrics_json, ensure_ascii=False),
+            metrics_json=json.dumps(ctx.metrics, ensure_ascii=False),
             flood_data=json.dumps(ctx.flood, ensure_ascii=False),
-            hazard_json=json.dumps(hazard_json, ensure_ascii=False),
+            hazard_json=json.dumps(ctx.hazards, ensure_ascii=False),
             context=ctx.context,
             surface_calc_info=ctx.surface_calc_info,
         )
@@ -535,13 +550,26 @@ class ClimateSentinel:
         )
         
         workflow.add_edge("compose", "critique")
-        
+
+        # ── DEGRADED_MODE loop guard ─────────────────────────────────
+        def _route_critique(state: SentinelState) -> str:
+            """Force exit to evaluate after 2 critique or rewrite retries."""
+            if (
+                state.get("critique_retry_count", 0) > 2
+                or state.get("rewrited_retry_count", 0) > 2
+            ):
+                # Mutate state to signal degraded mode to downstream nodes
+                state["degraded_mode"] = True  # type: ignore[index]
+                state["status"] = "DEGRADED_MODE"
+                return "evaluate"
+            return "evaluate" if state.get("status") == "VALIDATED" else "compose"
+
         workflow.add_conditional_edges(
             "critique",
-            lambda x: "evaluate" if x["status"] == "VALIDATED" else "compose",
-            {"evaluate": "evaluate", "compose": "compose"} # Re-rédiger si rejeté
+            _route_critique,
+            {"evaluate": "evaluate", "compose": "compose"},
         )
-        
+
         workflow.add_edge("evaluate", END)
         return workflow.compile()
     

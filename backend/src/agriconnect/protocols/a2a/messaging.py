@@ -42,6 +42,10 @@ except Exception:
 
 logger = logging.getLogger("A2A.Messaging")
 
+# Maximum agent-to-agent hops per message chain before the message is dead-lettered.
+MAX_HOPS: int = 3
+
+
 class MessageType(str, Enum):
     REQUEST = "request"
     RESPONSE = "response"
@@ -77,6 +81,12 @@ class A2AMessage:
     expires_at: str = ""
     idempotency_key: str = ""
     schema_version: str = "2.0"
+
+    # ── v2: Routing metadata ──────────────────────────────────
+    # topic: semantic channel for pub/sub routing (e.g. "market.price_check")
+    topic: str = ""
+    # hop_count: incremented at each A2AChannel.send(); rejected when >= MAX_HOPS
+    hop_count: int = 0
 
     # ── v2: Observability ─────────────────────────────────────
     trace_envelope: Optional[TraceEnvelope] = field(default=None, repr=False)
@@ -437,6 +447,24 @@ class A2AChannel:
     def send(self, message: A2AMessage) -> AsyncResult:
         """Validate, deduplicate, enqueue. Returns an ACK immediately."""
         t0 = time.monotonic()
+
+        # 0. Hop-count guard — prevent infinite A2A relay loops
+        if message.hop_count >= MAX_HOPS:
+            logger.error(
+                "A2A hop limit reached (hop_count=%d >= MAX_HOPS=%d) — "
+                "dead-lettering message %s (intent=%s, sender=%s → receiver=%s)",
+                message.hop_count, MAX_HOPS,
+                message.message_id, message.intent,
+                message.sender_id, message.receiver_id,
+            )
+            return AsyncResult(
+                correlation_id=message.correlation.correlation_id,
+                message_id=message.message_id,
+                ack_status=AckStatus.REJECTED,
+                error=f"HOP_LIMIT_EXCEEDED (hop_count={message.hop_count})",
+            )
+        # Stamp the current hop before enqueueing so the receiver sees it.
+        message.hop_count += 1
 
         # 1. Validate
         validation = message.validate()

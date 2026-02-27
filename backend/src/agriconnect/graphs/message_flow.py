@@ -54,7 +54,7 @@ from agriconnect.graphs.message_flow_parallel import ParallelExecutor
 
 # ═══ Protocoles AgriConnect 2.0 (MCP + A2A + AG-UI) ═══
 from agriconnect.protocols.mcp import MCPDatabaseServer, MCPRagServer, MCPWeatherServer, MCPContextServer
-from agriconnect.protocols.a2a import A2ADiscovery
+from agriconnect.protocols.a2a.discovery import A2ADiscovery
 from agriconnect.protocols.ag_ui import AgriResponse, WhatsAppRenderer, WebRenderer, SMSRenderer
 
 logger = logging.getLogger(__name__)
@@ -197,55 +197,137 @@ class MessageResponseFlow:
     # ==================================================================
 
     def analyze_needs(self, state: GlobalAgriState) -> Dict[str, Any]:
-            query = state.get("requete_utilisateur", "")
-            
-            # 1. Récupération dynamique des fiches métiers via A2A
-            # On demande au registre : "Donne-moi les capacités de tous les experts enregistrés"
-            agent_cards = self.ctx.a2a.get_all_agent_cards() 
-            
-            # 2. Construction du catalogue pour le LLM
-            expert_catalog = "\n".join([
-                f"- {name}: {card.description}" 
-                for name, card in agent_cards.items()
-            ])
+        query = state.get("requete_utilisateur", "")
+        
+        # 1. Récupération dynamique des fiches métiers via A2A
+        # On demande au registre : "Donne-moi les capacités de tous les experts enregistrés"
+        agent_cards = self.ctx.a2a.get_all_agent_cards() 
+        
+        # 2. Construction du catalogue pour le LLM
+        expert_catalog = "\n".join([
+            f"- {name}: {card.description}" 
+            for name, card in agent_cards.items()
+        ])
 
-            system_prompt = (
-                "Tu es le 'Cerveau Central' d'AgriConnect.\n"
-                "Analyse la requête de l'agriculteur en fonction des experts DISPONIBLES ci-dessous :\n\n"
-                f"{expert_catalog}\n\n" # <-- Injection dynamique !
-                
-                "DIRECTIVES :\n"
-                "1. Détecte les ARNAQUES (demandes de fonds/codes) -> intent: REJECT\n"
-                "2. CLASSIFICATION :\n"
-                "   - 'CHAT' : Simple politesse.\n"
-                "   - 'SOLO' : Un seul expert peut répondre.\n"
-                "   - 'COUNCIL' : Plusieurs experts requis (ex: market + marketplace).\n"
-                "   - 'REJECT' : Hors-sujet ou arnaque.\n\n"
-                "Retourne JSON strict :\n"
-                '{"intent": "REJECT"|"CHAT"|"SOLO"|"COUNCIL", '
-                '"selected_experts": ["nom_expert_1", "nom_expert_2"], '
-                '"reason": "si reject"}'
+        system_prompt = (
+            "Tu es le 'Cerveau Central' d'AgriConnect.\n"
+            "Analyse la requête de l'agriculteur en fonction des experts DISPONIBLES ci-dessous :\n\n"
+            f"{expert_catalog}\n\n" 
+            
+            "DIRECTIVES :\n"
+            "1. Détecte les ARNAQUES (demandes de fonds/codes) -> intent: REJECT\n"
+            "2. CLASSIFICATION :\n"
+            "   - 'CHAT' : Simple politesse.\n"
+            "   - 'SOLO' : Un seul expert peut répondre.\n"
+            "   - 'COUNCIL' : Plusieurs experts requis (ex: market + marketplace).\n"
+            "   - 'REJECT' : Hors-sujet ou arnaque.\n\n"
+            "Retourne JSON strict :\n"
+            '{"intent": "REJECT"|"CHAT"|"SOLO"|"COUNCIL", '
+            '"selected_experts": ["nom_expert_1", "nom_expert_2"], '
+            '"reason": "si reject"}'
+        )
+
+        try:
+            # Appel LLM (Llama-3.1-8b est parfait pour ce routage rapide)
+            response = self.llm.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "system", "content": system_prompt},
+                        {"role": "user", "content": query}],
+                temperature=0,
+                response_format={"type": "json_object"},
             )
+            analysis = json.loads(response.choices[0].message.content)
+            
+            # On stocke les experts sélectionnés dans le state
+            return {
+                "needs": analysis,
+                "execution_path": ["analyze"],
+            }
+        except Exception as e:
+            logger.error(f"Routing Error: {e}")
+            return {"needs": {"intent": "REJECT", "reason": "error"}, "execution_path": ["error"]}
 
-            try:
-                # Appel LLM (Llama-3.1-8b est parfait pour ce routage rapide)
-                response = self.llm.chat.completions.create(
-                    model="llama-3.1-8b-instant",
-                    messages=[{"role": "system", "content": system_prompt},
-                            {"role": "user", "content": query}],
-                    temperature=0,
-                    response_format={"type": "json_object"},
-                )
-                analysis = json.loads(response.choices[0].message.content)
-                
-                # On stocke les experts sélectionnés dans le state
-                return {
-                    "needs": analysis,
-                    "execution_path": ["analyze"],
-                }
-            except Exception as e:
-                logger.error(f"Routing Error: {e}")
-                return {"needs": {"intent": "REJECT", "reason": "error"}, "execution_path": ["error"]}
+
+    def select_experts(self, user_input: str, manifests: List[Dict[str, Any]], limit: int = 2) -> List[str]:
+        """Heuristic router: choose candidate agent_ids based on keyword matches and latency.
+
+        Returns a list of invoker keys (eg. 'sentinelle', 'market', ...).
+        """
+        if not manifests:
+            return []
+
+        text = (user_input or "").lower()
+        scores: List[tuple[int, Dict[str, Any]]] = []
+        for m in manifests:
+            score = 0
+            intents = [i.lower() for i in m.get("intents", [])]
+            caps = [c.lower() for c in m.get("capabilities", [])]
+            # +2 for intent keyword match, +1 for capability
+            for intent in intents:
+                if intent.replace('_', ' ') in text or intent in text:
+                    score += 2
+            for cap in caps:
+                if cap in text:
+                    score += 1
+            # small boost for lower avg response
+            avg = m.get("avg_response_ms") or 1000
+            score += max(0, 5 - (avg // 200))
+            if score > 0:
+                scores.append((score, m))
+
+        # Fallback: if nothing matched, prefer climate sentinel
+        if not scores:
+            return ["sentinelle"]
+
+        scores.sort(key=lambda x: (-x[0], x[1].get("avg_response_ms", 1000)))
+        selected = [m.get("agent_id") for _, m in scores[:limit]]
+
+        # Map agent_ids to invoker keys used in this orchestrator
+        mapping = {
+            "climate_sentinel": "sentinelle",
+            "formation_coach": "formation",
+            "market_coach": "market",
+            "marketplace_agent": "marketplace",
+            "plant_doctor": "sentinelle",
+        }
+
+        mapped = []
+        for aid in selected:
+            mapped_key = mapping.get(aid, None)
+            if not mapped_key:
+                # try by substring
+                if "sentinel" in aid or "climate" in aid:
+                    mapped_key = "sentinelle"
+                elif "market" in aid and "place" not in aid:
+                    mapped_key = "market"
+                elif "marketplace" in aid or "place" in aid:
+                    mapped_key = "marketplace"
+            if mapped_key and mapped_key not in mapped:
+                mapped.append(mapped_key)
+
+        return mapped or ["sentinelle"]
+
+
+    def route_step(self, state: GlobalAgriState) -> Dict[str, Any]:
+        """Dynamic Capability Routing step.
+
+        Uses A2A registry manifests and a lightweight router (heuristic)
+        to select which experts to fan-out to.
+        """
+        user_input = state.get("requete_utilisateur", "")
+        manifests = []
+        try:
+            manifests = self.ctx.a2a.get_all_capabilities() if self.ctx and self.ctx.a2a else []
+        except Exception as e:
+            logger.debug("Could not fetch manifests: %s", e)
+
+        selected = self.select_experts(user_input, manifests, limit=2)
+
+        if not selected:
+            selected = ["sentinelle"]
+
+        state["selected_experts"] = selected
+        return {"next_experts": selected, "execution_path": ["route"], "routing_reason": "heuristic"}
 
 
     def execute_rejection(self, state: GlobalAgriState) -> Dict[str, Any]:
@@ -300,7 +382,7 @@ class MessageResponseFlow:
     # ==================================================================
     # 4. NŒUDS DU GRAPHE
     # ==================================================================
-    # ── Nœud SOLO UNIVERSEL (Remplace tous tes execute_solo_...) ─────────────────
+    # ── Nœud SOLO UNIVERSEL. ─────────────────
 
     def execute_solo_agent(self, state: GlobalAgriState) -> Dict[str, Any]:
         """
@@ -392,7 +474,28 @@ class MessageResponseFlow:
             "expert_responses": expert_responses,
             "execution_path": ["parallel_experts_a2a"],
         }
-   # ==================================================================
+    
+    def execute_chat(self, state: GlobalAgriState) -> Dict[str, Any]:
+        """Handle simple chat intent by delegating to the generic solo agent call."""
+        try:
+            return self.execute_solo_agent(state)
+        except Exception as e:
+            logger.error("Chat execution failed: %s", e)
+            return {"final_response": "Désolé, je ne peux pas répondre pour le moment.", "execution_path": ["chat_failed"]}
+
+    def synthesize_results(self, state: GlobalAgriState) -> Dict[str, Any]:
+        """Combine expert responses into a single final_response."""
+        expert_responses = state.get("expert_responses", []) or []
+        if not expert_responses:
+            # fallback to any existing final_response
+            final = state.get("final_response", "Désolé, aucune réponse disponible.")
+            return {"final_response": final, "execution_path": ["synthesize_fallback"]}
+
+        parts = [f"{r.get('expert')}: {r.get('response', '')}" for r in expert_responses]
+        final = "\n\n".join(parts)
+        return {"final_response": final, "execution_path": ["synthesize"], "expert_responses": expert_responses}
+   
+    # ==================================================================
     # 5. NETTOYAGE TTS
     # ==================================================================
 
@@ -491,7 +594,61 @@ class MessageResponseFlow:
         workflow.add_edge("GENERATE_AUDIO", "PERSIST")
         workflow.add_edge("PERSIST", END)
 
-        return workflow.compile()
+        # Return the StateGraph instance (run/execute methods used at runtime)
+        return workflow
+
+    def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Lightweight runner: execute the main pipeline without requiring the StateGraph runtime.
+
+        This keeps the __main__ quick-tests working even if the external StateGraph API
+        isn't available at runtime.
+        """
+        s = dict(state)
+
+        # ANALYZE
+        try:
+            analysis = self.analyze_needs(s)
+        except Exception as e:
+            logger.debug("analyze_needs failed: %s", e)
+            analysis = {"needs": {"intent": "REJECT", "reason": "analyze_error"}}
+
+        s["needs"] = analysis.get("needs", {})
+
+        # ROUTE
+        try:
+            node_key = self.route_flow(s)
+        except Exception:
+            node_key = "REJECT"
+
+        # Dispatch
+        if node_key == "EXECUTE_CHAT":
+            out = self.execute_chat(s)
+        elif node_key == "PARALLEL_EXPERTS":
+            out = self.parallel_experts(s)
+            # synthesize combined result
+            s.update(out)
+            out = self.synthesize_results(s)
+        elif node_key.startswith("SOLO_"):
+            out = self.execute_solo_agent(s)
+        else:
+            out = self.execute_rejection(s)
+
+        # Merge outputs and continue pipeline
+        s.update(out or {})
+
+        # AUDIO + PERSIST
+        try:
+            audio = self.generate_audio(s)
+            s.update(audio or {})
+        except Exception:
+            s["audio_url"] = None
+
+        try:
+            self.persist(s)
+        except Exception:
+            logger.debug("persist failed")
+
+        return s
 # ======================================================================
 # TESTS RAPIDES
 # ======================================================================

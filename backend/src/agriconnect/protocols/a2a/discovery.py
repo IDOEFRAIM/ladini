@@ -35,6 +35,9 @@ class A2ADiscovery:
     def __init__(self, registry: Optional[A2ARegistry] = None, channel: Optional[A2AChannel] = None):
         self.registry = registry or A2ARegistry()
         self.channel = channel or A2AChannel()
+        # Simple in-memory cache for manifests
+        self._manifests_cache: List[Dict[str, Any]] = []
+        self._manifests_cache_ts: float = 0.0
         logger.info("🔌 A2A Discovery Service initialisé")
 
     # Cached to avoid recreating strings for frequent keys (Performance)
@@ -102,6 +105,35 @@ class A2ADiscovery:
             crop=crop, 
             domain=domain
         )
+
+    def get_all_capabilities(self, ttl_seconds: int = 30) -> List[Dict[str, Any]]:
+        """Return a list of agent manifests (dicts). Cached for `ttl_seconds` to avoid frequent registry hits."""
+        now = time.time()
+        if self._manifests_cache and (now - self._manifests_cache_ts) < ttl_seconds:
+            return self._manifests_cache
+
+        manifests: List[Dict[str, Any]] = []
+        try:
+            # Build manifests from registry agents
+            for aid, card in (self.registry._agents.items() if hasattr(self.registry, '_agents') else []):
+                manifests.append({
+                    "agent_id": card.agent_id,
+                    "name": card.name,
+                    "description": card.description,
+                    "intents": list(card.intents),
+                    "capabilities": list(card.capabilities),
+                    "zones": list(card.zones),
+                    "crops": list(card.crops),
+                    "endpoint": card.endpoint,
+                    "protocol": card.protocol,
+                    "avg_response_ms": card.avg_response_ms,
+                })
+        except Exception as e:
+            logger.debug("Error building manifests: %s", e)
+
+        self._manifests_cache = manifests
+        self._manifests_cache_ts = now
+        return manifests
 
     def route_message(self, sender: str, intent: str, payload: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Route un message. If `receiver` is provided in metadata, do a direct route; otherwise use discovery."""

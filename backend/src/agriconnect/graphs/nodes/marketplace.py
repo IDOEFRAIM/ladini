@@ -34,11 +34,39 @@ logger = logging.getLogger("Agent.Marketplace")
 
 # ── État du graphe ──────────────────────────────────────────────
 class MarketplaceState(TypedDict, total=False):
-    # ...existing code...
+    # ── Input
+    user_query: str
+    user_phone: str
+    zone_id: Optional[str]
+    # ── Identity
+    user_profile: Dict[str, Any]
+    producer_id: Optional[str]
+    farm_id: Optional[str]
+    # ── Intent parsing
+    intent: str
+    parsed: Dict[str, Any]
+    # ── Execution
+    action_result: Dict[str, Any]
+    transaction_payload: Optional[Dict[str, Any]]  # pending TX, not yet written
+    # ── Matching
+    matches: List[Dict[str, Any]]
+    # ── Output
     final_response: str
     agri_response: Optional[AgriResponse]
     status: str
-    warnings: List[str]
+    warnings: List[str]          # plain list — overwrite each cycle
+    errors: List[str]            # plain list — overwrite each cycle
+    # ── Loop guards
+    retry_counter: int           # incremented on execute retries
+    degraded_mode: bool          # True when retry_counter > MAX_RETRIES
+    # ── Financial safety
+    requires_human_review: bool  # True when total_fcfa > FINANCIAL_THRESHOLD_FCFA
+
+
+# Maximum execute-action retries before activating degraded mode
+_MAX_RETRIES: int = 2
+# Financial transactions above this amount require explicit user confirmation
+_FINANCIAL_THRESHOLD_FCFA: int = 100_000
 
 
 # ── Intents reconnus ────────────────────────────────────────────
@@ -161,13 +189,55 @@ class MarketplaceAgent:
         state["intent"] = parsed.get("intent", "HELP")
         state["parsed"] = parsed
         state["status"] = "PARSED"
+
+        # ── Financial safety guardrail ─────────────────────────────────────
+        # Flag any transaction whose estimated total exceeds the threshold so
+        # confirm_node can request explicit user consent before execution.
+        price = parsed.get("price") or 0
+        qty   = parsed.get("quantity") or 0
+        estimated_fcfa = float(price) * float(qty)
+        if estimated_fcfa > _FINANCIAL_THRESHOLD_FCFA:
+            state["requires_human_review"] = True
+            state["warnings"] = list(state.get("warnings", []))
+            state["warnings"].append(
+                f"FINANCIAL_REVIEW_REQUIRED: montant estimé {estimated_fcfa:,.0f} FCFA"
+            )
+            logger.warning(
+                "Financial safety: estimated %.0f FCFA for intent=%s — requiring human review",
+                estimated_fcfa, state["intent"],
+            )
+        else:
+            state["requires_human_review"] = False
+
         return state
 
     def execute_action_node(self, state: MarketplaceState) -> MarketplaceState:
-        """Exécute l'action CRUD correspondant à l'intention."""
+        """Exécute l'action CRUD correspondant à l'intention.
+
+        For intents that involve financial writes (SELL_PRODUCT, CREATE_ORDER)
+        the action result is stored as *pending* ``transaction_payload`` and
+        no DB write is performed here.  ``confirm_node`` then shows the payload
+        to the user and gates the actual commit behind explicit consent.
+        """
         state = dict(state)
         if state.get("status") == "ERROR":
             return state
+
+        # ── Degraded-mode loop guard ───────────────────────────────────────
+        retry_counter = int(state.get("retry_counter", 0))
+        if retry_counter > _MAX_RETRIES:
+            logger.error(
+                "MarketplaceAgent DEGRADED_MODE: retry_counter=%d > MAX=%d",
+                retry_counter, _MAX_RETRIES,
+            )
+            state["degraded_mode"] = True
+            state["status"] = "DEGRADED_MODE"
+            state["final_response"] = (
+                "⚠️ Le service rencontre des difficultés temporaires. "
+                "Votre demande a été enregistrée et sera traitée dès que possible."
+            )
+            return state
+        state["retry_counter"] = retry_counter + 1
 
         intent = state.get("intent", "HELP")
         handler = self._get_intent_handler(intent)
@@ -177,7 +247,21 @@ class MarketplaceAgent:
             logger.error("Execute action error (%s) : %s", intent, e)
             result = {"error": str(e)}
 
-        state["action_result"] = result
+        # For write intents: store as pending transaction_payload (no DB commit yet)
+        write_intents = {"SELL_PRODUCT", "CREATE_ORDER", "REGISTER_STOCK", "UPDATE_STOCK"}
+        if intent in write_intents and not result.get("error"):
+            state["transaction_payload"] = {
+                "intent": intent,
+                "data": result,
+                "parsed": state.get("parsed", {}),
+                "status": "PENDING",
+                "requires_human_review": state.get("requires_human_review", False),
+            }
+            state["action_result"] = result
+        else:
+            state["action_result"] = result
+            state["transaction_payload"] = None
+
         state["status"] = "EXECUTED"
         return state
 
@@ -313,19 +397,31 @@ class MarketplaceAgent:
 
         # Génération texte via LLM (inchangé)
         # ...existing code...
+        needs_review = state.get("requires_human_review", False)
+        tx_payload   = state.get("transaction_payload")
+
         context = {
             "intent": intent,
             "result": result,
             "parsed": parsed,
             "user_name": user.get("name", "Agriculteur"),
             "is_new_user": is_new,
+            "requires_human_review": needs_review,
+            "transaction_payload": tx_payload,
         }
+
+        review_instruction = (
+            "\n⚠️ IMPORTANT : Cette transaction dépasse 100 000 FCFA. "
+            "Demande explicitement à l'agriculteur de confirmer avec OUI avant d'exécuter.\n"
+            if needs_review else ""
+        )
 
         prompt = (
             f"{MARKETPLACE_SYSTEM_PROMPT}\n\n"
             "CONTEXTE DE L'ACTION :\n"
             f"{json.dumps(context, ensure_ascii=False, default=str)}\n\n"
             f"Message original de l'agriculteur : {state.get('user_query', '')}\n\n"
+            f"{review_instruction}"
             "Génère une réponse claire et chaleureuse en français simple.\n"
             "Si c'est un nouvel utilisateur, souhaite-lui la bienvenue.\n"
             "Confirme l'action réalisée avec les détails importants.\n"
@@ -351,7 +447,20 @@ class MarketplaceAgent:
         response_obj.add_text(final_text)
         
         # Ajout de composants interactifs selon l'intent
-        if intent == "SELL_PRODUCT":
+        if needs_review:
+            # Financial safety: require explicit user confirmation before commit
+            from agriconnect.protocols.ag_ui import ActionButton, ActionType
+            response_obj.add(ActionButton(
+                label="✅ OUI, confirmer la transaction",
+                action_type=ActionType.CONFIRM,
+                payload={"action": "commit_transaction", "tx": tx_payload},
+            ))
+            response_obj.add(ActionButton(
+                label="❌ Non, annuler",
+                action_type=ActionType.CANCEL,
+                payload={"action": "cancel_transaction"},
+            ))
+        elif intent == "SELL_PRODUCT":
              response_obj.add(ListPicker(
                 title="Options de vente :",
                 items=[
@@ -525,14 +634,24 @@ class MarketplaceAgent:
 
         workflow.set_entry_point("identify_user")
 
-        def route_after_identify(state):
+        def _route_after_identify(state: MarketplaceState) -> str:
             if state.get("status") == "ERROR":
                 return END
             return "parse_intent"
 
-        workflow.add_conditional_edges("identify_user", route_after_identify)
+        def _route_after_execute(state: MarketplaceState) -> str:
+            """Short-circuit to END when in DEGRADED_MODE; else normal confirm."""
+            if state.get("degraded_mode") or state.get("status") == "DEGRADED_MODE":
+                return END
+            return "confirm"
+
+        workflow.add_conditional_edges("identify_user", _route_after_identify)
         workflow.add_edge("parse_intent", "execute_action")
-        workflow.add_edge("execute_action", "confirm")
+        workflow.add_conditional_edges(
+            "execute_action",
+            _route_after_execute,
+            {END: END, "confirm": "confirm"},
+        )
         workflow.add_edge("confirm", "match_check")
         workflow.add_edge("match_check", END)
 

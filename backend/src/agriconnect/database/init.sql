@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     phone VARCHAR(20) UNIQUE NOT NULL,
     name VARCHAR(255),
+    email VARCHAR(255) UNIQUE,
+    password TEXT,
+    email_verified TIMESTAMP,
     language VARCHAR(10) DEFAULT 'fr', -- fr, moore, dioula, fulfulde
     role VARCHAR(50) DEFAULT 'PRODUCER',
     
@@ -58,6 +61,33 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE INDEX idx_users_phone ON users(phone);
 CREATE INDEX idx_users_zone ON users(zone_id);
 CREATE INDEX idx_users_active ON users(last_active);
+
+-- Authentication tables (NextAuth-style)
+CREATE TABLE IF NOT EXISTS accounts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    type VARCHAR(50) NOT NULL,
+    provider VARCHAR(100) NOT NULL,
+    provider_account_id VARCHAR(255) NOT NULL,
+    refresh_token TEXT,
+    access_token TEXT,
+    expires_at INT,
+    token_type VARCHAR(50),
+    scope TEXT,
+    id_token TEXT,
+    session_state TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_provider ON accounts(provider, provider_account_id);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    session_token VARCHAR(255) UNIQUE NOT NULL,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires TIMESTAMP NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
 -- ============================================
 -- 3. CULTURES DES UTILISATEURS

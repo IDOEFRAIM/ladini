@@ -17,7 +17,7 @@ from agriconnect.graphs.prompts import (
     )
 from agriconnect.rag.components import get_groq_sdk
 from agriconnect.tools.market import AgrimarketTool
-
+from agriconnect.protocols.mcp.servers.agri_db_server import AgriDBMCPServer
 
 logger = logging.getLogger("Agent.MarketCoach")
 
@@ -63,6 +63,13 @@ class MarketCoach:
         self.model_answer = "llama-3.3-70b-versatile"
         self.tool = AgrimarketTool()
         
+        # Initialize MCP Database Server
+        try:
+            self.db_server = AgriDBMCPServer()
+        except Exception as e:
+            logger.error("Failed to init MCP DB Server: %s", e)
+            self.db_server = None
+
         #efra mets cadans les tools,c est plus facile a maintenir,on aura juste a faire les calcul idoine
         self.UNIT_REGISTRY = {
             "sac": 100,      
@@ -194,51 +201,98 @@ class MarketCoach:
                 "transaction_payload": payload,
                 "transaction_hash": tx_hash,
                 "waiting_for_confirmation": True,
-                "status": "WAITING_CONFIRMATION",
             })
         else:
             updates["status"] = "MISSING_INFO"
-
+        
         return updates
 
+    def _handle_transaction_execution(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute transaction and return data fragment."""
+        data = {}
+        success = self.tool.register_surplus_offer(
+            payload["product"], 
+            payload["quantity"],
+            payload["location"]
+        )
+        
+        data["registration_status"] = "SUCCESS" if success else "OFFLINE_SAVED"
+        if payload.get("location"):
+            data["logistics"] = self.tool.get_logistics_info(payload["location"])
+        
+        return data
+
+    def _get_user_id(self, state: MarketAgentState) -> Optional[str]:
+        """Extract user ID from state profile."""
+        user_profile = state.get("user_profile")
+        if not user_profile:
+            return None
+        return user_profile.get("user_id") or user_profile.get("id")
+
+    def _filter_stocks_by_product(self, stocks: List[Any], product: str) -> List[Any]:
+        """Filter stocks matching the product name."""
+        relevant = []
+        for s in stocks:
+            s_name = getattr(s, "item_name", "") if hasattr(s, "item_name") else s.get("item_name", "")
+            if product.lower() in s_name.lower():
+                relevant.append(s)
+        return relevant
+
+    def _serialize_stocks(self, stocks: List[Any]) -> List[Dict[str, Any]]:
+        """Convert stocks to serializable format."""
+        return [s.dict() if hasattr(s, "dict") else s for s in stocks]
+
+    async def _handle_user_stock_retrieval(self, state: MarketAgentState, product: str) -> Dict[str, Any]:
+        """Retrieve user stock from MCP server."""
+        data = {}
+        if not self.db_server or not state.get("user_profile"):
+            return data
+        
+        uid = self._get_user_id(state)
+        if not uid:
+            return data
+        
+        try:
+            stocks = await self.db_server.call_tool("get_farm_stocks", arguments={"farm_id": uid})
+            relevant = self._filter_stocks_by_product(stocks, product)
+            if relevant:
+                data["user_stock"] = self._serialize_stocks(relevant)
+        except Exception as e:
+            logger.warning("MCP Stock Check failed: %s", e)
+        
+        return data
+
+    def _handle_market_data_retrieval(self, product: Optional[str]) -> Dict[str, Any]:
+        """Retrieve market prices and trends for a product."""
+        data = {}
+        if not product:
+            return data
+        
+        prices = self.tool.get_commodity_price(product)
+        if prices:
+            data["prices"] = prices
+        data["trends"] = self.tool.analyze_market_trends(product)
+        
+        return data
+
     def fetch_data_node(self, state: MarketAgentState) -> Dict[str, Any]:
-        """Executes transactions or fetches market data."""
+        """Executes transactions or fetches market data via MCP/Tools."""
         status = state.get("status")
         
         if status in ["SCAM_DETECTED", "WAITING_CONFIRMATION", "MISSING_INFO", "CANCELLED", "ERROR"]:
             return {}
 
-        data = {}
         updates = {}
 
-        # Path A: Transaction Execution
         if status == "CONFIRMED" and state.get("transaction_payload"):
-            payload = state["transaction_payload"]
-            
-            # Here we would check if tx_hash already exists in DB for idempotency
-            success = self.tool.register_surplus_offer(
-                payload["product"], 
-                payload["quantity"],
-                payload["location"]
-            )
-            
-            data["registration_status"] = "SUCCESS" if success else "OFFLINE_SAVED"
-            if payload["location"]:
-                data["logistics"] = self.tool.get_logistics_info(payload["location"])
-                
+            data = self._handle_transaction_execution(state["transaction_payload"])
             updates["status"] = "COMPLETED_TRANSACTION"
-
-        # Path B: Information Retrieval
         else:
             product = state.get("product")
-            if product:
-                prices = self.tool.get_commodity_price(product)
-                if prices:
-                    data["prices"] = prices
-                data["trends"] = self.tool.analyze_market_trends(product)
-            
+            data = self._handle_user_stock_retrieval(state, product) if product else {}
+            data.update(self._handle_market_data_retrieval(product))
             updates["status"] = "DATA_FETCHED"
-            
+        
         updates["market_data"] = data
         return updates
 

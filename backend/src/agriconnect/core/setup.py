@@ -12,7 +12,7 @@ from agriconnect.core.tracing import init_tracing
 from agriconnect.protocols.mcp import (
     MCPDatabaseServer, MCPRagServer, MCPWeatherServer, MCPContextServer
 )
-from agriconnect.protocols.a2a import A2ADiscovery
+from agriconnect.protocols.a2a.discovery import A2ADiscovery
 from agriconnect.protocols.ag_ui import WhatsAppRenderer, WebRenderer, SMSRenderer
 
 # Mémoire 3 niveaux

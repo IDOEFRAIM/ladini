@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS producers (
     id         TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     user_id    TEXT NOT NULL REFERENCES users(id),
     zone_id    TEXT REFERENCES zones(id),
-    status     TEXT DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','INACTIVE','SUSPENDED')),
+    status     TEXT DEFAULT 'PENDING' CHECK (status IN ('PENDING','ACTIVE','SUSPENDED')),
     bio        TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS stocks (
     item_name  TEXT NOT NULL,
     quantity   DOUBLE PRECISION DEFAULT 0,
     unit       TEXT DEFAULT 'kg',
-    type       TEXT DEFAULT 'HARVEST' CHECK (type IN ('HARVEST','INPUT','OTHER')),
+    type       TEXT DEFAULT 'HARVEST' CHECK (type IN ('HARVEST','INPUT','EQUIPMENT')),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -67,7 +67,7 @@ CREATE INDEX IF NOT EXISTS idx_stocks_farm ON stocks(farm_id);
 CREATE TABLE IF NOT EXISTS stock_movements (
     id         TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     stock_id   TEXT NOT NULL REFERENCES stocks(id),
-    type       TEXT NOT NULL CHECK (type IN ('IN','OUT','ADJUSTMENT')),
+    type       TEXT NOT NULL CHECK (type IN ('IN','OUT','WASTE')),
     quantity   DOUBLE PRECISION NOT NULL,
     reason     TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
@@ -96,6 +96,9 @@ CREATE TABLE IF NOT EXISTS products (
     price             DOUBLE PRECISION NOT NULL DEFAULT 0,
     unit              TEXT DEFAULT 'kg',
     quantity_for_sale DOUBLE PRECISION DEFAULT 0,
+    images            TEXT[] DEFAULT ARRAY[]::text[],
+    local_names       JSONB,
+    audio_url         TEXT,
     producer_id       TEXT NOT NULL REFERENCES producers(id),
     is_published      BOOLEAN DEFAULT true,
     created_at        TIMESTAMPTZ DEFAULT NOW(),
@@ -104,15 +107,57 @@ CREATE TABLE IF NOT EXISTS products (
 CREATE INDEX IF NOT EXISTS idx_products_producer ON products(producer_id);
 CREATE INDEX IF NOT EXISTS idx_products_name ON products(LOWER(name));
 
+-- 10. Clients (acheteurs finaux pour un Producteur)
+CREATE TABLE IF NOT EXISTS clients (
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    name TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    email TEXT,
+    location TEXT,
+    total_orders INTEGER DEFAULT 0,
+    total_spent DOUBLE PRECISION DEFAULT 0,
+    last_order_date TIMESTAMPTZ,
+    producer_id TEXT NOT NULL REFERENCES producers(id),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone);
+CREATE INDEX IF NOT EXISTS idx_clients_producer ON clients(producer_id);
+
+-- 11. Agent actions (validation / approval workflow for agent-initiated ops)
+CREATE TABLE IF NOT EXISTS agent_actions (
+    id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    agent_name TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    payload JSONB,
+    status TEXT DEFAULT 'PENDING' CHECK (status IN ('PENDING','APPROVED','REJECTED','EXECUTED','FAILED')),
+    priority TEXT DEFAULT 'MEDIUM' CHECK (priority IN ('LOW','MEDIUM','HIGH','CRITICAL')),
+    order_id TEXT UNIQUE,
+    user_id TEXT,
+    audit_trail_id TEXT,
+    ai_reasoning TEXT,
+    admin_notes TEXT,
+    validated_by_id TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_agent_actions_agent ON agent_actions(agent_name);
+
 -- 9. Commandes
 CREATE TABLE IF NOT EXISTS orders (
     id             TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+    buyer_id       TEXT REFERENCES users(id),
+    client_id      TEXT REFERENCES clients(id),
     customer_phone TEXT,
     customer_name  TEXT,
     zone_id        TEXT REFERENCES zones(id),
+    payment_method TEXT DEFAULT 'CASH',
     status         TEXT DEFAULT 'PENDING'
                        CHECK (status IN ('PENDING','CONFIRMED','SHIPPED','DELIVERED','CANCELLED')),
-    source         TEXT DEFAULT 'WHATSAPP',
+    source         TEXT DEFAULT 'APP',
+    whatsapp_id    TEXT,
+    is_agent_order BOOLEAN DEFAULT false,
+    agent_action_id TEXT REFERENCES agent_actions(id),
     total_amount   DOUBLE PRECISION DEFAULT 0,
     created_at     TIMESTAMPTZ DEFAULT NOW(),
     updated_at     TIMESTAMPTZ DEFAULT NOW()

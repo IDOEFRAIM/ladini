@@ -1,79 +1,159 @@
 """
-Database — Connexion centralisée PostgreSQL (SQLAlchemy async-ready).
-
-Usage:
-    from backend.core.database import get_db, db_engine
+Database — Connexion centralisée PostgreSQL (SQLAlchemy Async).
+Optimisé pour Digital Ocean Managed Databases et les serveurs MCP.
 """
 
 import logging
-from contextlib import contextmanager
-from typing import Generator
+import ssl
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy import text
 
 from agriconnect.core.settings import settings
 
 logger = logging.getLogger(__name__)
 
-# ---------- Engine (créé une seule fois au démarrage) ----------
+# ---------- Engine Asynchrone ----------
 
+_async_engine = None
+_AsyncSessionLocal = None
+# Compatibility aliases for synchronous tools that expect `_engine` / `_SessionLocal`
 _engine = None
 _SessionLocal = None
 
 
 def init_db() -> None:
-    """Initialise le moteur et la session factory. Appelé au startup FastAPI."""
-    global _engine, _SessionLocal
+    """Initialise le moteur asynchrone en nettoyant l'URL DigitalOcean."""
+    global _async_engine, _AsyncSessionLocal
+    
     if not settings.DATABASE_URL:
-        logger.warning("DATABASE_URL non configurée — base de données désactivée.")
+        logger.warning("DATABASE_URL non configurée.")
         return
-    _engine = create_engine(
-        settings.DATABASE_URL,
+
+  
+    clean_url = settings.DATABASE_URL.split("?")[0]
+    
+    # TRANSFORMATION : On force le driver asynchrone
+    url = clean_url.replace("postgresql://", "postgresql+asyncpg://")
+    
+    # CONFIGURATION SSL : On passe le SSL via l'objet contextuel
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE  
+
+    _async_engine = create_async_engine(
+        url,
+        connect_args={
+            "ssl": ssl_context, 
+            "prepared_statement_cache_size": 0,  
+        },
         pool_size=10,
-        max_overflow=20,
+        max_overflow=5,
         pool_pre_ping=True,
     )
-    _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
-    logger.info("✅ Database engine initialisé.")
+    
+    _AsyncSessionLocal = async_sessionmaker(
+        bind=_async_engine, 
+        class_=AsyncSession, 
+        expire_on_commit=False
+    )
+    logger.info("✅ Database engine asynchrone initialized for DigitalOcean.")
 
 
-def close_db() -> None:
-    """Ferme proprement le pool de connexions. Appelé au shutdown FastAPI."""
-    global _engine
-    if _engine:
-        _engine.dispose()
+
+async def close_db() -> None:
+    """Ferme proprement le pool de connexions asynchrone."""
+    global _async_engine
+    if _async_engine:
+        await _async_engine.dispose()
         logger.info("🔒 Database engine fermé.")
 
 
-def get_db() -> Generator[Session, None, None]:
+@asynccontextmanager
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
-    Dependency FastAPI :
-        @router.get("/items")
-        def get_items(db: Session = Depends(get_db)):
-            ...
+    Générateur de session asynchrone utilisable de deux façons :
+    1. FastAPI : async def route(db: AsyncSession = Depends(get_db))
+    2. MCP Servers : async with get_db() as session:
     """
-    if _SessionLocal is None:
+    if _AsyncSessionLocal is None:
         raise RuntimeError("Database non initialisée. Appelez init_db() d'abord.")
-    session = _SessionLocal()
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+    
+    async with _AsyncSessionLocal() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"Erreur transactionnelle : {e}")
+            raise
+        finally:
+            await session.close()
 
 
-def check_connection() -> bool:
-    """Vérifie que la base est accessible."""
-    if _engine is None:
+async def check_connection() -> bool:
+    """Vérifie que la base est accessible (Asynchrone)."""
+    if _async_engine is None:
         return False
     try:
-        with _engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
+        async with _async_engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
         return True
     except Exception as e:
-        logger.warning("DB health check échoué: %s", e)
+        logger.warning("DB health check failed: %s", e)
         return False
+    
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    async def test_database_lifecycle():
+        print("\n🔍 --- DÉBUT DES TESTS DATABASE (Digital Ocean Ready) ---")
+        
+        # 1. Test Initialisation
+        print("\n1️⃣ Initialisation du moteur...")
+        init_db()
+        
+        # 2. Test de connectivité (Health Check)
+        print("2️⃣ Vérification de la connectivité (Health Check)...")
+        is_alive = await check_connection()
+        if is_alive:
+            print("   ✅ Connexion réussie à PostgreSQL !")
+        else:
+            print("   ❌ ÉCHEC de la connexion. Vérifiez DATABASE_URL et SSL.")
+            return
+
+        # 3. Test d'une transaction réelle via get_db
+        print("3️⃣ Test d'une lecture/écriture via get_db...")
+        try:
+            async with get_db() as session:
+                # On exécute une requête simple pour tester la session
+                result = await session.execute(text("SELECT current_database(), now();"))
+                db_name, current_time = result.fetchone()
+                print(f"   ✅ Session active sur la base : '{db_name}'")
+                print(f"   ✅ Heure du serveur : {current_time}")
+        except Exception as e:
+            print(f"   ❌ Erreur lors de l'utilisation de la session : {e}")
+
+        # 4. Test de fermeture
+        print("4️⃣ Fermeture du pool de connexions...")
+        await close_db()
+        
+        # 5. Vérification après fermeture
+        # Une fois fermé, le health check doit échouer ou être impossible
+        is_alive_after = await check_connection()
+        if not is_alive_after:
+            print("   ✅ Moteur arrêté proprement.")
+        
+        print("\n🚀 --- TESTS TERMINÉS AVEC SUCCÈS ---")
+
+    # Lancement du script de test
+    try:
+        asyncio.run(test_database_lifecycle())
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(f"\n💥 Erreur fatale lors du test : {e}")

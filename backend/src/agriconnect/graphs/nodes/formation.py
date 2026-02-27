@@ -1,14 +1,17 @@
 import json
 import logging
-from typing import Any, Dict, List, Optional, TypedDict,Annotated
-from dataclasses import dataclass
-import operator
+import re
+from typing import Any, Dict, List, Optional, TypedDict
+from dataclasses import dataclass, field
 from langgraph.graph import END, StateGraph
 
 from agriconnect.graphs.prompts import FORMATION_SYSTEM_TEMPLATE, FORMATION_USER_TEMPLATE, STYLE_GUIDANCE
 
 # MCP Protocols
 from agriconnect.protocols.mcp import MCPRagServer, MCPContextServer
+
+# A2A Protocols
+from agriconnect.protocols.a2a import A2ADiscovery, A2AMessage, MessageType
 
 # AG-UI Protocols
 from agriconnect.protocols.ag_ui import (
@@ -34,16 +37,18 @@ class FormationAgentState(TypedDict, total=False):
     prerequisites: List[str]
     reasoning: str
     retrieved_context: str
-    sources: Annotated[List[Dict[str, Any]], operator.add]
+    sources: List[Dict[str, Any]]       # overwrite each cycle (no accumulation)
     answer_draft: str
     final_response: str
     evaluation: Dict[str, float]
     status: str
     is_relevant: Optional[bool]
     rejection_reason:str
-    warnings: Annotated[List[str], operator.add] # Les warnings s'ajoutent
+    warnings: List[str]                  # overwrite each cycle (no accumulation)
     critique_retry_count: int
     rewrited_retry_count: int
+    degraded_mode: bool                  # True when critique_retry_count > MAX_RETRIES
+    a2a_route_topic: Optional[str]       # set when query should be routed via A2A
     agri_response: Optional[AgriResponse]
 
 
@@ -61,6 +66,7 @@ class FormationConfig:
     llm_client: Any = None
     mcp_rag: Optional[MCPRagServer] = None
     mcp_context: Optional[MCPContextServer] = None
+    a2a: Optional[A2ADiscovery] = None   # A2A channel for semantic routing
     retriever: Any = None
     evaluator: Any = None
 
@@ -86,9 +92,16 @@ class FormationCoach:
         # Protocol Servers
         self.mcp_rag = cfg.mcp_rag
         self.mcp_context = cfg.mcp_context
+        self.a2a = cfg.a2a  # Optional A2A channel for semantic routing
 
         self.model_planner = "llama-3.1-8b-instant"
         self.model_answer = "llama-3.3-70b-versatile"
+
+        # Regex for detecting market/price queries that should be routed via A2A
+        self._market_re = re.compile(
+            r"prix|price|march\u00e9|marche|vente|vendre|achat|acheter|FCFA|CFA|tarif|cours",
+            re.IGNORECASE,
+        )
 
         try:
             from agriconnect.rag.components import get_groq_sdk
@@ -109,6 +122,7 @@ class FormationCoach:
     def analyze_node(self, state: FormationAgentState) -> FormationAgentState:
         """
         Analyse la question + Récupère le contexte via MCP Context.
+        Détecte les requêtes de type prix/marché et les marque pour routage A2A.
         """
         query = state.get("user_query", "").strip()
         if not query:
@@ -116,11 +130,56 @@ class FormationCoach:
             warnings.append("La question de formation est vide.")
             return {"status": "ERROR", "warnings": warnings}
 
+        # ── A2A semantic routing: market / price topics ───────────────────────
+        if self.a2a and self._market_re.search(query):
+            logger.info(
+                "FormationCoach: market topic detected in query — routing to A2A market.price_check"
+            )
+            return {
+                "status": "A2A_ROUTE",
+                "a2a_route_topic": "market.price_check",
+                "warnings": list(state.get("warnings", [])),
+            }
+
         profile = self._get_profile_for_analyze(state)
         warnings = list(state.get("warnings", []))
 
         analysis = self.tool._analyze_request(query, profile)
         return self._assemble_analyze_result(analysis, warnings)
+
+    def a2a_dispatch_node(self, state: FormationAgentState) -> FormationAgentState:
+        """Emit an A2A request for the detected topic and build a holding response."""
+        state = dict(state)
+        query = state.get("user_query", "")
+        topic = state.get("a2a_route_topic", "market.price_check")
+        warnings = list(state.get("warnings", []))
+
+        try:
+            msg = A2AMessage(
+                message_type=MessageType.REQUEST,
+                sender_id="agent_formation",
+                receiver_id="agent_marketplace",
+                intent="A2A_REQUEST",
+                topic=topic,
+                payload={"query": query, "source_agent": "formation"},
+            )
+            ack = self.a2a.send_message(msg)
+            logger.info("A2A dispatch to %s — correlation=%s", topic, msg.correlation.correlation_id)
+            final_text = (
+                "📊 Cette question porte sur les prix du marché. "
+                "Je consulte l'agent marché pour vous obtenir les informations les plus à jour."
+            )
+        except Exception as exc:
+            warnings.append(f"A2A dispatch échoué : {exc}")
+            final_text = (
+                "👋 Pour les questions de prix, je vous recommande de contacter "
+                "directement votre agent de marché local."
+            )
+
+        state["final_response"] = final_text
+        state["warnings"] = warnings
+        state["status"] = "COMPLETED"
+        return state
 
     def _get_profile_for_analyze(self, state: FormationAgentState) -> Dict[str, Any]:
         """Retrieve learner profile preferring MCP context when available.
@@ -395,6 +454,7 @@ class FormationCoach:
         
         # nœuds
         workflow.add_node("analyze", self.analyze_node)
+        workflow.add_node("a2a_dispatch", self.a2a_dispatch_node)
         workflow.add_node("retrieve", self.retrieve_node)
         workflow.add_node("rewrite", self.refine.rewrite_query_node) 
         workflow.add_node("compose", self.compose_node)
@@ -403,8 +463,14 @@ class FormationCoach:
 
         workflow.set_entry_point("analyze")
 
-        # Logique de routage complexe
-        workflow.add_conditional_edges("analyze", self.refine.route_after_analyze)
+        # After analyze: A2A‐route or normal flow
+        def _route_after_analyze(state: FormationAgentState) -> str:
+            if state.get("status") == "A2A_ROUTE":
+                return "a2a_dispatch"
+            return self.refine.route_after_analyze(state)
+
+        workflow.add_conditional_edges("analyze", _route_after_analyze)
+        workflow.add_edge("a2a_dispatch", END)
         
         workflow.add_conditional_edges(
             "retrieve", 
@@ -421,10 +487,25 @@ class FormationCoach:
         
         workflow.add_edge("compose", "critique")
         
+        # DEGRADED_MODE loop guard: force evaluate when retry limit exceeded
+        def _route_critique(state: FormationAgentState) -> str:
+            critique_retries  = int(state.get("critique_retry_count", 0))
+            rewrited_retries  = int(state.get("rewrited_retry_count", 0))
+            if critique_retries > 2 or rewrited_retries > 2:
+                logger.error(
+                    "FormationCoach DEGRADED_MODE: critique_retries=%d rewrited_retries=%d",
+                    critique_retries, rewrited_retries,
+                )
+                # Mutate state so downstream nodes know we are degraded
+                state["degraded_mode"] = True
+                state["status"] = "DEGRADED_MODE"
+                return "evaluate"
+            return "evaluate" if state.get("status") == "VALIDATED" else "compose"
+
         workflow.add_conditional_edges(
             "critique",
-            lambda x: "evaluate" if x["status"] == "VALIDATED" else "compose",
-            {"evaluate": "evaluate", "compose": "compose"} # Re-rédiger si rejeté
+            _route_critique,
+            {"evaluate": "evaluate", "compose": "compose"}
         )
         
         workflow.add_edge("evaluate", END)

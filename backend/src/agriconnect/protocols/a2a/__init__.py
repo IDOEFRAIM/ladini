@@ -14,11 +14,9 @@ Cas d'usage :
 
 from .registry import A2ARegistry, AgentCard, AgentDomain, AgentStatus
 from .messaging import (
-    A2AMessage, A2AChannel, MessageType, HandshakeStatus,
-    MessageBroker, InMemoryBroker, IdempotencyStore, HandshakeStore,
+  A2AMessage, A2AChannel, MessageType, HandshakeStatus,
+  MessageBroker, InMemoryBroker, RedisBroker, IdempotencyStore, HandshakeStore,
 )
-from .discovery import A2ADiscovery
-
 __all__ = [
     "A2ARegistry",
     "AgentCard",
@@ -28,11 +26,20 @@ __all__ = [
     "A2AChannel",
     "MessageType",
     "HandshakeStatus",
-    "A2ADiscovery",
+
     # v2 additions
     "MessageBroker",
     "InMemoryBroker",
     "RedisBroker",
     "IdempotencyStore",
     "HandshakeStore",
+    "A2ADiscovery",
 ]
+
+def __getattr__(name: str):
+    """Lazy-load heavyweight symbols to avoid import-time cycles."""
+    if name == "A2ADiscovery":
+        from .discovery import A2ADiscovery as _A2ADiscovery
+
+        return _A2ADiscovery
+    raise AttributeError(f"module {__name__} has no attribute {name}")

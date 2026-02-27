@@ -4,15 +4,7 @@ from pathlib import Path
 import pytest
 from bs4 import BeautifulSoup
 
-import importlib.util
-from pathlib import Path
-
-# Load module directly to avoid depending on PYTHONPATH/package installation
-fews_path = Path(__file__).resolve().parents[2] / "src" / "agriconnect" / "services" / "data_collection" / "documents" / "fews.py"
-spec = importlib.util.spec_from_file_location("agriconnect.fews", str(fews_path))
-fews_mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(fews_mod)
-FewsNetScraper = fews_mod.FewsNetScraper
+from agriconnect.services.data_collection.documents.fews import FewsNetScraper
 
 
 class MockResp:
@@ -27,8 +19,9 @@ def test_fetch_success(monkeypatch):
     def mock_get(url, headers=None, timeout=None):
         return MockResp(html, 200)
 
-    # patch the requests.get used inside the loaded module
-    monkeypatch.setattr(fews_mod.requests, "get", mock_get)
+    monkeypatch.setattr(
+        "agriconnect.services.data_collection.documents.fews.requests.get", mock_get
+    )
 
     scraper = FewsNetScraper()
     content, err = scraper._fetch("http://example.com")
@@ -62,7 +55,9 @@ def test_extract_deep_content_and_run(monkeypatch, tmp_path):
         # detail page
         return MockResp(detail_html, 200)
 
-    monkeypatch.setattr(fews_mod.requests, "get", mock_get)
+    monkeypatch.setattr(
+        "agriconnect.services.data_collection.documents.fews.requests.get", mock_get
+    )
 
     scraper = FewsNetScraper(country_slug="burkina-faso")
     # write into temp dir to avoid touching repo
