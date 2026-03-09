@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from agriconnect.core.agent_registry import internal_agents
+from agriconnect.core.settings import settings
 
 from .registry import A2ARegistry, AgentCard, AgentDomain, AgentStatus
 from .messaging import A2AChannel, A2AMessage, MessageType
@@ -53,13 +54,14 @@ class A2ADiscovery:
         payload: Dict[str, Any],
         metadata: Optional[Dict[str, Any]] = None,
     ) -> A2AMessage:
-        
         meta = metadata or {}
+        # Ensure intent_key is a string (A2AMessage expects a string for .upper())
+        intent_val = intent_key or ""
         return A2AMessage(
             sender_id=sender,
-            intent=intent_key,
+            intent=intent_val,
             payload=payload,
-            zone=self.normalize_key(meta.get("zone")),
+            zone=(self.normalize_key(meta.get("zone")) or ""),
             crop=meta.get("crop", ""),
             priority=meta.get("priority", 0),
             trace_envelope=meta.get("trace_envelope"),
@@ -71,6 +73,18 @@ class A2ADiscovery:
         for card in internal_agents:
             self._register_and_subscribe(card)
         logger.info("✅ %d agents internes enregistrés et abonnés", len(internal_agents))
+        # Ensure a small dev stub agent exists to help in quick-tests (returns canned responses)
+        # Only register the dev stub in development/debug environments to avoid noise in production.
+        try:
+            # Only enable the dev stub when explicitly requested via DEBUG or
+            # the environment variable ENABLE_DEV_STUB=true. Avoid relying on
+            # SENTRY_ENVIRONMENT default values to prevent accidental registration.
+            enable_stub = settings.DEBUG or (os.getenv("ENABLE_DEV_STUB", "false").lower() == "true")
+            if enable_stub and not any(c.name == "Dev Stub" for c in self.registry._agents.values()):
+                self.add_dev_stub_agent()
+        except Exception:
+            # don't fail startup for minor dev convenience
+            pass
 
     def register_external_agent(self, card: AgentCard) -> str:
         """Enregistre un agent externe (ex: formation, sentinelle)."""
@@ -81,15 +95,19 @@ class A2ADiscovery:
 
     def _register_and_subscribe(self, card: AgentCard) -> str:
         agent_id = self.registry.register(card)
+        # Subscribe to general intent channels. If the card explicitly declares
+        # specific zones (not 'all'), subscribe to per-zone topics as well.
         for intent in card.intents:
             intent_key = self.normalize_key(intent)
+            # Subscribe to the base intent and a GLOBAL alias
             self.channel.subscribe(agent_id, intent_key)
-            for zone in card.zones:
+            self.channel.subscribe(agent_id, f"{intent_key}_GLOBAL")
+            # If explicit zones are provided other than 'all', subscribe to them
+            explicit_zones = [z for z in card.zones if z and z.strip().lower() != 'all']
+            for zone in explicit_zones:
                 zone_key = self.normalize_key(zone)
-                if zone_key and zone_key != "ALL":
+                if zone_key:
                     self.channel.subscribe(agent_id, f"{intent_key}_{zone_key}")
-                else:
-                    self.channel.subscribe(agent_id, f"{intent_key}_GLOBAL")
         return agent_id
 
     def find_agents(
@@ -134,6 +152,121 @@ class A2ADiscovery:
         self._manifests_cache = manifests
         self._manifests_cache_ts = now
         return manifests
+
+    def call_agent(self, *args, **kwargs) -> Dict[str, Any]:
+        """Compatibility wrapper for older call signatures.
+
+        Supported call patterns:
+        - call_agent(agent_name, query, context)
+        - call_agent(agent_name=..., query=..., context=...)
+        - call_agent(sender, agent_id, intent, payload, metadata=None)
+        The wrapper normalizes the arguments and delegates to the internal
+        implementation `_call_agent_impl`.
+        """
+        # Backwards-compatible form: (agent_name, query, context)
+        if "agent_name" in kwargs or (len(args) >= 1 and isinstance(args[0], str) and (len(args) >= 2)):
+            agent_name = kwargs.get("agent_name") or args[0]
+            query = kwargs.get("query") or (args[1] if len(args) >= 2 else "")
+            context = kwargs.get("context") or (args[2] if len(args) >= 3 else {})
+            sender = kwargs.get("sender") or "agri_orchestrator"
+            intent = kwargs.get("intent") or "CHAT"
+            payload = {"query": query, "context": context}
+            timeout = float(kwargs.get("timeout_sec", kwargs.get("timeout", 2.0)))
+            return self._call_agent_impl(sender, agent_name, intent, payload, metadata=None, timeout_sec=timeout)
+
+        # New form: (sender, agent_id, intent, payload, metadata=None)
+        sender = args[0] if len(args) >= 1 else kwargs.get("sender", "agri_orchestrator")
+        agent_id = args[1] if len(args) >= 2 else kwargs.get("agent_id") or kwargs.get("agent_name")
+        intent = args[2] if len(args) >= 3 else kwargs.get("intent", "CHAT")
+        payload = args[3] if len(args) >= 4 else kwargs.get("payload", {})
+        metadata = kwargs.get("metadata")
+        timeout = float(kwargs.get("timeout_sec", kwargs.get("timeout", 2.0)))
+        return self._call_agent_impl(sender, agent_id, intent, payload, metadata=metadata, timeout_sec=timeout)
+
+    def _call_agent_impl(self, sender: str, agent_id: str, intent: str, payload: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None, timeout_sec: float = 2.0) -> Dict[str, Any]:
+        """Internal implementation used by the compatibility wrapper.
+        See `call_agent` for compatibility handling.
+        """
+        meta = metadata or {}
+        try:
+            message = self._build_message(sender, intent, payload, meta)
+            message.receiver_id = agent_id
+            # Send (returns ACK)
+            ack = self.channel.send(message)
+        except Exception as exc:
+            logger.exception("call_agent failed building/sending message: sender=%s agent_id=%s intent=%s payload=%s meta=%s", sender, agent_id, intent, repr(payload), repr(meta))
+            raise
+
+        # If a synchronous handler is registered, try calling it and capture any return
+        handler = getattr(self.channel, "_handlers", {}).get(agent_id)
+        if handler:
+            try:
+                resp = handler(message)
+                if resp is not None:
+                    # Normalize A2AMessage -> text payload for orchestrator
+                    if isinstance(resp, A2AMessage):
+                        text = resp.payload.get("text") if isinstance(resp.payload, dict) else str(resp.payload)
+                        return {"ack": ack, "response": text, "raw": resp}
+                    return {"ack": ack, "response": (resp if isinstance(resp, str) else str(resp)), "raw": resp}
+            except Exception as e:
+                logger.debug("Dev handler raised: %s", e)
+
+        # Poll the sender's inbound queue for a RESPONSE referencing our message
+        deadline = time.time() + float(timeout_sec)
+        while time.time() < deadline:
+            try:
+                inbox = self.channel.receive(sender, limit=10)
+            except Exception:
+                inbox = []
+            for m in inbox:
+                try:
+                    if m.message_type == MessageType.RESPONSE and getattr(m, "reference_id", "") == message.message_id:
+                        if isinstance(m, A2AMessage):
+                            text = m.payload.get("text") if isinstance(m.payload, dict) else str(m.payload)
+                            return {"ack": ack, "response": text, "raw": m}
+                        return {"ack": ack, "response": (m if isinstance(m, str) else str(m)), "raw": m}
+                except Exception:
+                    continue
+            time.sleep(0.05)
+
+        return {"ack": ack, "response": None}
+
+    def add_dev_stub_agent(self, agent_id: str = "dev_stub", name: str = "Dev Stub") -> str:
+        """Register a small development stub agent that replies with a canned message.
+
+        The stub registers in the local registry and sets a handler on the channel
+        which immediately sends back a textual canned RESPONSE message.
+        """
+        try:
+            card = AgentCard(
+                agent_id=agent_id,
+                name=name,
+                description="Development stub agent returning canned responses",
+                intents=["CHAT", "PING", "CHECK_WEATHER", "LEARN"],
+                capabilities=["dev_stub"],
+                zones=["ALL"],
+                crops=["all"],
+                endpoint="local://dev_stub",
+                protocol="internal",
+            )
+            aid = self._register_and_subscribe(card)
+
+            def _handler(msg: A2AMessage):
+                try:
+                    # Create a simple canned response and send it back
+                    resp = msg.create_response({"text": f"Stub response from {name}", "agent_id": aid}, status="ok")
+                    self.channel.send(resp)
+                    return resp
+                except Exception as e:
+                    logger.debug("Dev stub handler error: %s", e)
+                    return None
+
+            self.channel.register_handler(aid, _handler)
+            logger.info("🔧 Dev stub agent registered: %s (%s)", name, aid)
+            return aid
+        except Exception as e:
+            logger.debug("Failed to register dev stub agent: %s", e)
+            return ""
 
     def route_message(self, sender: str, intent: str, payload: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Route un message. If `receiver` is provided in metadata, do a direct route; otherwise use discovery."""

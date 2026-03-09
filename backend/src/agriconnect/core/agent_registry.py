@@ -22,7 +22,8 @@ internal_agents = [
                 domain=AgentDomain.MARKET,
                 intents=["CHECK_PRICE", "SELL_OFFER", "BUY_OFFER", "SCAM_CHECK", "MARKET_ANALYSIS"],
                 capabilities=["text", "voice"],
-                zones=["ouagadougou", "bobo-dioulasso", "koudougou", "ouahigouya", "kaya", "banfora", "pouytenga", "fada"],
+                # Use a generic zone subscription — agents should filter by payload.zone
+                zones=["all"],
                 crops=["all"],
                 protocol="internal",
                 avg_response_ms=600,

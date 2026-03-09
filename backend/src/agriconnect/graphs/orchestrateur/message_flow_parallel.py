@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List
 from dataclasses import dataclass
 
-from agriconnect.graphs.message_flow_helpers import ExpertInvoker
+from agriconnect.graphs.orchestrateur.message_flow_helpers import ExpertInvoker
 from agriconnect.graphs.state import ExpertResponse
 import logging
 

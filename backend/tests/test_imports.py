@@ -130,7 +130,7 @@ class TestOrchestratorImports:
     """Vérifie l'orchestrateur."""
 
     def test_import_message_flow(self):
-        from agriconnect.graphs.message_flow import MessageResponseFlow
+        from agriconnect.graphs.orchestrateur.message_flow import MessageResponseFlow
         assert MessageResponseFlow is not None
 
     def test_import_state(self):

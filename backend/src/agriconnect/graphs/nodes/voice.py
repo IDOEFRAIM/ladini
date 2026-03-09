@@ -111,7 +111,7 @@ class VoiceAgent:
                 return await self._handle_new_user(user_phone, transcript, detected_lang)
 
             # 3. Routage vers l'orchestrateur
-            from agriconnect.graphs.message_flow import MessageResponseFlow
+            from agriconnect.graphs.orchestrateur.message_flow import MessageResponseFlow
 
             orchestrator = MessageResponseFlow()
             result = orchestrator.run(

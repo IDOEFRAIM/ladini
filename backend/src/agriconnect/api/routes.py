@@ -22,7 +22,7 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import FileResponse
 
 from agriconnect.core.database import check_connection
-from agriconnect.graphs.message_flow import MessageResponseFlow
+from agriconnect.graphs.orchestrateur.message_flow import MessageResponseFlow
 from agriconnect.workers.tasks.ai import generate_response
 from agriconnect.core.settings import settings
 from agriconnect.graphs.state import GlobalAgriState

@@ -36,21 +36,59 @@ try:
         Settings.chunk_size = CHUNK_SIZE
         Settings.chunk_overlap = CHUNK_OVERLAP
 
+    # Path where llama_index FaissVectorStore persists as binary
+    DEFAULT_VS_FILE = os.path.join(DB_DIR, "default__vector_store.json")
+
     def get_vector_store():
         """
         Returns a FaissVectorStore.
-        If the index file exists, loads it. Otherwise, creates a new HNSW index.
+        Tries: 1) faiss_index.bin  2) default__vector_store.json (FAISS binary persisted by llama_index)
+        Falls back to creating a new empty HNSW index.
         """
         if not os.path.exists(DB_DIR):
             os.makedirs(DB_DIR)
 
+        # If REDIS_URL is configured, prefer a Redis-backed store.
+        try:
+            if getattr(app_settings, "REDIS_URL", None):
+                # Prefer RedisSearch-backed store when available (Redis Stack with vector support)
+                try:
+                    from agriconnect.rag.redis_search_store import RedisSearchVectorStore
+
+                    logger.info("Initializing RedisSearchVectorStore (RAG) from REDIS_URL")
+                    return RedisSearchVectorStore(app_settings.REDIS_URL, dim=EMBEDDING_DIM)
+                except Exception:
+                    # Fallback to simple Redis vector store
+                    try:
+                        from agriconnect.rag.redis_store import RedisVectorStore
+
+                        logger.info("Initializing RedisVectorStore (RAG) from REDIS_URL")
+                        return RedisVectorStore(app_settings.REDIS_URL, dim=EMBEDDING_DIM)
+                    except Exception as re:
+                        logger.warning("RedisVectorStore init failed, falling back to FAISS: %s", re)
+        except Exception:
+            # redis-related modules not available or import error -> continue to FAISS fallback
+            pass
+
+        # 1) Explicit FAISS binary
         if os.path.exists(INDEX_FILE):
             try:
                 faiss_index = faiss.read_index(INDEX_FILE)
+                logger.info("Loaded FAISS from %s: %d vectors", INDEX_FILE, faiss_index.ntotal)
                 return FaissVectorStore(faiss_index=faiss_index)
             except Exception as e:
-                logger.warning("Could not load existing index: %s. Creating new one.", e)
+                logger.warning("Could not load existing index: %s", e)
 
+        # 2) llama_index persisted FaissVectorStore (binary despite .json ext)
+        if os.path.exists(DEFAULT_VS_FILE):
+            try:
+                faiss_index = faiss.read_index(DEFAULT_VS_FILE)
+                logger.info("Loaded FAISS from %s: %d vectors", DEFAULT_VS_FILE, faiss_index.ntotal)
+                return FaissVectorStore(faiss_index=faiss_index)
+            except Exception as e:
+                logger.warning("Could not load FAISS from %s: %s", DEFAULT_VS_FILE, e)
+
+        # 3) Create new empty index
         faiss_index = faiss.IndexHNSWFlat(EMBEDDING_DIM, 32, faiss.METRIC_INNER_PRODUCT)
         return FaissVectorStore(faiss_index=faiss_index)
 
@@ -67,31 +105,11 @@ try:
         if hasattr(index.vector_store, "client"):
             faiss.write_index(index.vector_store.client, INDEX_FILE)
 
-except Exception:
-    # Fallbacks when heavy ML dependencies are not installed (tests / CI lightweight runs)
-
-    def get_llm_client():
-        class DummyLLM:
-            def chat(self, *args, **kwargs):
-                return {"content": "dummy response"}
-
-            def generate(self, *args, **kwargs):
-                return {"content": "dummy response"}
-
-        return DummyLLM()
-
-    def get_groq_sdk():
-        return None
-
-    def init_settings():
-        logger.debug("ML dependencies missing: init_settings is a no-op in fallback mode.")
-
-    def get_vector_store():
-        raise RuntimeError("Faiss / llama_index not available in fallback mode")
-
-    def get_storage_context():
-        raise RuntimeError("Faiss / llama_index not available in fallback mode")
-
-    def save_index(index):
-        logger.debug("save_index called in fallback mode; skipping.")
+except Exception as e:
+    # Fail fast: do not provide dummy LLM/SDK fallbacks. The application expects
+    # real ML dependencies in production; instruct the operator to install them.
+    raise ImportError(
+        "Missing ML dependencies for RAG components (faiss / llama_index / huggingface). "
+        "Install optional requirements and ensure the environment has access to the Groq SDK. "
+        f"Original error: {e}") from e
 

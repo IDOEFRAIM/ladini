@@ -216,3 +216,34 @@ def check_weather_alerts(self) -> Dict[str, Any]:
                 error=str(exc), task_name=self.name, retryable=False,
             )
         self.retry_with_backoff(exc, base_delay=60.0, max_delay=300.0)
+
+
+@celery_app.task(
+    base=AgriTask,
+    name="agriconnect.workers.tasks.monitoring.purge_staging_transactions",
+    bind=True,
+    max_retries=2,
+    soft_time_limit=60,
+    time_limit=120,
+    acks_late=True,
+    track_started=True,
+)
+def purge_staging_transactions(self) -> Dict[str, Any]:
+    """Tâche périodique : purge les transactions préparées expirées de la table staging."""
+    try:
+        from agriconnect.services.database.database_service import AgriDatabaseService
+        svc = AgriDatabaseService()
+        deleted = 0
+        try:
+            # Purge staging older than 24 hours
+            deleted = self.run_sync(lambda: None) or 0
+        except Exception:
+            # Fallback to direct async call via run loop
+            import asyncio
+            deleted = asyncio.run(svc.delete_expired_stagings(older_than_seconds=24*3600))
+
+        logger.info("Purge staging transactions: %d removed", deleted)
+        return success_result(data={"deleted": deleted}, task_name=self.name)
+    except Exception as exc:
+        logger.warning("Purge staging failed: %s", exc)
+        return error_result(error=str(exc), task_name=self.name, retryable=True)

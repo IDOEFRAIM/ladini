@@ -24,7 +24,7 @@ class TestMessageResponseFlowInit:
         mock_settings.AUDIO_OUTPUT_DIR = "./test_audio"
         mock_groq.return_value = MagicMock()
 
-        from agriconnect.graphs.message_flow import MessageResponseFlow
+        from agriconnect.graphs.orchestrateur.message_flow import MessageResponseFlow
         flow = MessageResponseFlow(llm_client=MagicMock())
         assert flow.db is None
         assert flow.memory is None
@@ -49,7 +49,7 @@ class TestAnalyzeNeeds:
             mock_settings.AUDIO_OUTPUT_DIR = "./test_audio"
 
             mock_llm = MagicMock()
-            from agriconnect.graphs.message_flow import MessageResponseFlow
+            from agriconnect.graphs.orchestrateur.message_flow import MessageResponseFlow
             flow = MessageResponseFlow(llm_client=mock_llm)
             yield flow
 
@@ -86,7 +86,7 @@ class TestRouteFlow:
             mock_settings.AZURE_REGION = "westeurope"
             mock_settings.AUDIO_OUTPUT_DIR = "./test_audio"
 
-            from agriconnect.graphs.message_flow import MessageResponseFlow
+            from agriconnect.graphs.orchestrateur.message_flow import MessageResponseFlow
             flow = MessageResponseFlow(llm_client=MagicMock())
             yield flow
 
@@ -126,7 +126,7 @@ class TestSynthesizeResults:
             mock_settings.AZURE_REGION = "westeurope"
             mock_settings.AUDIO_OUTPUT_DIR = "./test_audio"
 
-            from agriconnect.graphs.message_flow import MessageResponseFlow
+            from agriconnect.graphs.orchestrateur.message_flow import MessageResponseFlow
             flow = MessageResponseFlow(llm_client=MagicMock())
             yield flow
 
@@ -173,7 +173,7 @@ class TestCleanForTTS:
             mock_settings.AZURE_REGION = "westeurope"
             mock_settings.AUDIO_OUTPUT_DIR = "./test_audio"
 
-            from agriconnect.graphs.message_flow import MessageResponseFlow
+            from agriconnect.graphs.orchestrateur.message_flow import MessageResponseFlow
             flow = MessageResponseFlow(llm_client=MagicMock())
             yield flow
 

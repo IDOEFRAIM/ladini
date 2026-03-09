@@ -1,5 +1,7 @@
 import json
 import logging
+import re
+import types
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, TypedDict
 
@@ -18,6 +20,7 @@ from agriconnect.tools.health import HealthDoctorTool
 
 from agriconnect.tools.refine import RefineTool
 logger = logging.getLogger("Agent.PlantDoctor")
+# AG-UI removed from agent-level: return MCP-friendly dicts instead
 
 
 class PlantDoctorState(TypedDict, total=False):
@@ -75,12 +78,27 @@ class PlantHealthDoctor:
             logger.error("Impossible d'initialiser le LLM : %s", exc)
             self.llm = None
 
-        self.retriever = retriever if retriever else self._safe_retriever()
-        self.evaluator = evaluator if evaluator else self._safe_evaluator()
+        # Avoid heavy initializers at construction time in test/CI environments.
+        # Retrievers/evaluators will be resolved lazily by nodes that need them.
+        self.retriever = retriever if retriever else None
+        self.evaluator = evaluator if evaluator else None
         
         # Base de données produits locaux (à remplacer par vraie DB)
         self.product_database = self._load_product_database()
         self.practical = PracticalInfoHelper(self.product_database)
+
+        # If legacy methods are defined at module-level (due to refactor),
+        # bind simple delegators to the module-level implementations.
+        # This keeps tests working while the file transitions.
+        def _delegator(name, *args, **kwargs):
+            func = globals().get(name)
+            if callable(func):
+                return func(self, *args, **kwargs)
+            raise NotImplementedError(f"{name} not implemented")
+
+        # Expose a delegate method for diagnose_node for tests that instantiate the class.
+        if not hasattr(self, "diagnose_node"):
+            self.diagnose_node = lambda state: _delegator("diagnose_node", state)
 
     def _load_product_database(self) -> Dict[str, Dict]:
         """
@@ -141,6 +159,86 @@ class PlantHealthDoctor:
                 "dosage": "2g/litre d'eau",
                 "warning": "⚠️ Respecter délai avant récolte"
             }
+        }
+
+    def diagnose_node(self, state: PlantDoctorState) -> PlantDoctorState:
+        """
+        Backwards-compatible diagnose_node implemented directly on the class.
+        """
+        warnings = list(state.get("warnings", []))
+        _market_re = re.compile(r"prix|price|march\u00e9|marche|vente|vendre|achat|acheter|FCFA|CFA|tarif|cours", re.IGNORECASE)
+        if _market_re.search(state.get("user_query", "")):
+            warnings.append("Question marché détectée — hors-sujet pour PlantDoctor")
+            return {"status": "OFF_TOPIC", "warnings": warnings, "rejection_reason": "Question marché — contactez l'agent marché."}
+
+        query = state.get("user_query", "").strip()
+        profile = state.get("culture_config", {})
+        crop = profile.get("crop_name") or profile.get("crop") or "culture inconnue"
+        photo_paths = state.get("photo_paths", [])
+
+        if not query and not photo_paths:
+            warnings.append("Description des symptômes OU photos requises.")
+            return {"warnings": warnings, "status": "ERROR"}
+
+        if photo_paths:
+            try:
+                photo_analysis = self._analyze_photo_symptoms(photo_paths[0])
+                detected = photo_analysis.get("detected_symptoms", [])
+                if detected:
+                    query = f"{query}. Photo montre: {', '.join(detected)}"
+            except Exception:
+                warnings.append("Analyse photo indisponible")
+
+        guided_questions = []
+        if len(query.split()) < 5:
+            if hasattr(self, "_ask_guided_questions"):
+                guided_questions = self._ask_guided_questions(query, crop)
+            else:
+                guided_questions = [
+                    "Les feuilles sont-elles jaunes, brunes, ou avec des taches?",
+                    "Quel âge a votre culture? (jeune/adulte/mature)",
+                ]
+            warnings.append("Description insuffisante. Questions envoyées à l'agriculteur.")
+
+        if hasattr(self, "_augment_symptoms"):
+            augmented = self._augment_symptoms(query)
+        else:
+            augmented = query
+
+        try:
+            diagnosis = self.doctor.diagnose_and_prescribe(crop=crop, user_obs=augmented)
+        except Exception as exc:
+            warnings.append(f"Diagnostic indisponible : {exc}")
+            return {"warnings": warnings, "status": "ERROR", "guided_questions": guided_questions}
+
+        if not diagnosis or not diagnosis.get("diagnostique"):
+            warnings.append("Diagnostic non concluant, rediriger vers un conseiller.")
+            return {"augmented_symptoms": augmented, "diagnosis_raw": diagnosis or {}, "warnings": warnings, "status": "NO_DIAGNOSIS", "guided_questions": guided_questions}
+
+        risk_flags: List[str] = []
+        for key in ("niveau_alerte", "urgence", "risques_associes"):
+            value = diagnosis.get(key)
+            if value:
+                risk_flags.append(f"{key}: {value}")
+
+        treatment_costs = self.practical.estimate_treatment_cost(diagnosis, surface_ha=1.0)
+        recommended = diagnosis.get("traitement_recommande", {})
+        bio_product = recommended.get("bio", "") if isinstance(recommended, dict) else recommended
+        alternative_products = {"bio": self.practical.get_alternative_products(bio_product)}
+        local_availability = self.practical.find_local_availability(bio_product) if bio_product else {}
+
+        return {
+            "user_query": query,
+            "culture_config": profile,
+            "augmented_symptoms": augmented,
+            "diagnosis_raw": diagnosis,
+            "risk_flags": risk_flags,
+            "warnings": warnings,
+            "status": "DIAGNOSED",
+            "guided_questions": guided_questions,
+            "treatment_costs": treatment_costs,
+            "alternative_products": alternative_products,
+            "local_availability": local_availability,
         }
 
 
@@ -314,6 +412,11 @@ class PracticalInfoHelper:
         3. Estimation coûts
         """
         warnings = list(state.get("warnings", []))
+        # Role separation: refuse market-related queries
+        _market_re = re.compile(r"prix|price|march\u00e9|marche|vente|vendre|achat|acheter|FCFA|CFA|tarif|cours", re.IGNORECASE)
+        if _market_re.search(state.get("user_query", "")):
+            warnings.append("Question marché détectée — hors-sujet pour PlantDoctor")
+            return {"status": "OFF_TOPIC", "warnings": warnings, "rejection_reason": "Question marché — contactez l'agent marché."}
         query = state.get("user_query", "").strip()
         profile = state.get("culture_config", {})
         crop = profile.get("crop_name") or profile.get("crop") or "culture inconnue"
@@ -482,8 +585,10 @@ class PracticalInfoHelper:
             query, profile, diagnosis, risk_flags, context,
             treatment_costs, alternative_products, local_availability, fallback, warnings
         )
+        resp = {"text": response, "agent": "plant_doctor", "cards": [{"title": "Diagnostic", "body": response}], "actions": [], "suggested": []}
         return {
             "final_response": response,
+            "agri_response": resp,
             "warnings": warnings,
             "status": "SUCCESS",
         }
@@ -507,26 +612,33 @@ class PracticalInfoHelper:
             f"{questions_text}\n\n"
             f"Envoyez vos réponses ou prenez une photo des symptômes (📷)."
         )
+        resp = {"text": response, "agent": "plant_doctor", "cards": [{"title": "Questions guidées", "body": response}], "actions": [], "suggested": []}
         return {
             "final_response": response,
+            "agri_response": resp,
             "warnings": warnings,
             "status": "AWAITING_INFO",
         }
 
     def _compose_no_diagnosis_response(self, fallback, warnings):
         warnings.append("Diagnostic impossible à confirmer.")
+        resp = {"text": fallback, "agent": "plant_doctor", "cards": [{"title": "Diagnostic non concluant", "body": fallback}], "actions": [], "suggested": []}
         return {
             "final_response": fallback,
+            "agri_response": resp,
             "warnings": warnings,
             "status": "NO_DIAGNOSIS",
         }
 
     def _compose_llm_down_response(self, fallback, treatment_costs, alternative_products, local_availability, warnings):
         warnings.append("LLM indisponible, passage en mode secours.")
-        return {
-            "final_response": fallback + self._format_practical_info(
+        final = fallback + self._format_practical_info(
                 treatment_costs, alternative_products, local_availability
-            ),
+            )
+        resp = {"text": final, "agent": "plant_doctor", "cards": [{"title": "Diagnostic (mode secours)", "body": final}], "actions": [], "suggested": []}
+        return {
+            "final_response": final,
+            "agri_response": resp,
             "warnings": warnings,
             "status": "LLM_DOWN",
         }

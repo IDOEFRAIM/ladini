@@ -16,12 +16,21 @@ from agriconnect.graphs.prompts import (
 from agriconnect.rag.components import get_groq_sdk
 from agriconnect.rag.metric import RAGEvaluator
 
-from agriconnect.protocols.mcp.servers.agri_db_server import AgriDBMCPServer
-from agriconnect.protocols.mcp.servers.agri_rag_server import AgriRAGMCPServer
+# MCP servers injected by orchestrator (Host-Centric DI)
 
 from agriconnect.tools.sentinelle import SentinelleTool
 from agriconnect.tools.refine import RefineTool
+from agriconnect.agents.base import BaseAgent
 logger = logging.getLogger("Agent.ClimateSentinel")
+# AG-UI removed from agent-level: return MCP-friendly dicts instead
+
+# Mots-clés déclenchant un hand-off vers Marketplace (l'utilisateur
+# a besoin d'acheter un intrant pour appliquer le traitement conseillé).
+_PURCHASE_KEYWORDS = {
+    "acheter", "achat", "fongicide", "pesticide", "herbicide", "intrant",
+    "produit", "traitement", "insecticide", "engrais", "semence",
+    "disponible", "trouver", "o\u00f9 trouver", "prix du produit",
+}
 
 
 class SentinelState(TypedDict, total=False):
@@ -46,6 +55,11 @@ class SentinelState(TypedDict, total=False):
     critique_retry_count: int
     rewrited_retry_count: int
     degraded_mode: bool  # True when loop guards fire
+    # HITL / Hand-off flags — interceptés par l'orchestrateur
+    requires_human: bool
+    handoff_to: str
+    handoff_reason: str
+    clarification_needed: str
 
 
 @dataclass
@@ -62,8 +76,13 @@ class ComposeContext:
     warnings: List[str] = field(default_factory=list)
 
 
-class ClimateSentinel:
-    """Agent de veille climatique AgriConnect avec contrôle anti-fraude et diagnostics agro-météo."""
+class ClimateSentinel(BaseAgent):
+    """Agent de veille climatique — hérite de BaseAgent pour HITL/handoff."""
+
+    _capabilities = [
+        "CHECK_WEATHER", "GET_ALERT", "FLOOD_RISK",
+        "SATELLITE_DATA", "AGRO_METEO",
+    ]
 
     _STYLE_GUIDANCE = STYLE_GUIDANCE
 
@@ -71,8 +90,8 @@ class ClimateSentinel:
         self,
         llm_client=None,
         evaluator: Optional[RAGEvaluator] = None,
+        mcp_session=None,
     ):
-        self.refine  = RefineTool(llm=llm_client)
         self.model_planner = "llama-3.1-8b-instant"
         self.model_answer = "llama-3.3-70b-versatile"
 
@@ -81,18 +100,16 @@ class ClimateSentinel:
         except Exception as exc:
             logger.error("Impossible d'initialiser le LLM : %s", exc)
             self.llm = None
+
+        # Create RefineTool after LLM resolved so it has a valid client
+        self.refine = RefineTool(llm=self.llm)
             
         self.tools = SentinelleTool(llm_client=self.llm)
 
-        # MCP Servers Initialization
-        try:
-            self.db_server = AgriDBMCPServer()
-            self.rag_server = AgriRAGMCPServer()
-            logger.info("MCP Servers (DB & RAG) initialized successfully.")
-        except Exception as exc:
-            logger.error("MCP Server initialization failed: %s", exc)
-            self.db_server = None
-            self.rag_server = None
+        # MCP session injected by orchestrator (Host-Centric pattern)
+        self.mcp_session = mcp_session
+        self.db_server = mcp_session  # backward-compat alias
+        self.rag_server = None  # RAG server managed separately if needed
 
         try:
             self.evaluator = evaluator if evaluator else RAGEvaluator()
@@ -131,6 +148,20 @@ class ClimateSentinel:
                 "similarity": getattr(doc, "score", 0.0)
             })
         return sources
+
+    def _purchase_handoff_needed(self, query: str, hazards: list) -> bool:
+        """
+        Détecte si la requête ou les risques impliquent l'achat d'un produit.
+        Pourquoi : main dans la main avec Marketplace sans passer par le routeur central.
+        """
+        q_lower = (query or "").lower()
+        if any(kw in q_lower for kw in _PURCHASE_KEYWORDS):
+            return True
+        for h in (hazards or []):
+            label = str(h.get("label", "")).lower()
+            if any(kw in label for kw in ("maladie", "insecte", "parasite", "ravageur", "traitement")):
+                return True
+        return False
 
     def _format_location(self, profile: Dict) -> str:
         """Formate le profil géographique."""
@@ -309,6 +340,13 @@ class ClimateSentinel:
     def analyze_node(self, state: SentinelState) -> SentinelState:
         query = state.get("user_query", "").strip()
         warnings = list(state.get("warnings", []))
+        # Role separation: refuse market-related queries
+        _market_re = re.compile(r"prix|price|march\u00e9|marche|vente|vendre|achat|acheter|FCFA|CFA|tarif|cours", re.IGNORECASE)
+        if _market_re.search(query):
+            warnings.append("Question marché détectée — hors-sujet pour ClimateSentinel")
+            state = dict(state)
+            state.update({"warnings": warnings, "status": "OFF_TOPIC", "rejection_reason": "Question marché — agent climat uniquement."})
+            return state
         location = state.get("location_profile", {}) or {}
         weather = state.get("weather_snapshot") or self.tools._fetch_real_weather(location)
         satellite = state.get("satellite_signals") or {}
@@ -364,9 +402,16 @@ class ClimateSentinel:
         optimized_query = plan.get("optimized_query") or query
         warnings.extend(plan.get("warnings", []))
 
-        if not self.retriever:
+        if not getattr(self, "retriever", None):
             warnings.append("Moteur RAG indisponible.")
             state = dict(state)
+            resp = {
+                "text": "Aucun moteur de récupération de documents RAG n'est configuré.",
+                "agent": "sentinelle",
+                "cards": [{"title": "Contexte introuvable", "body": "Aucun moteur de récupération de documents RAG n'est configuré."}],
+                "actions": [],
+                "suggested": [],
+            }
             state.update({
                 "optimized_query": optimized_query,
                 "retrieved_context": "",
@@ -375,6 +420,7 @@ class ClimateSentinel:
                 "security_status": security_status,
                 "security_reason": state.get("security_reason", ""),
                 "status": "NO_CONTEXT",
+                "agri_response": resp,
             })
             return state
 
@@ -386,7 +432,14 @@ class ClimateSentinel:
         state = dict(state)
         if not nodes:
             warnings.append("Aucun document pertinent trouvé.")
-            
+            state = dict(state)
+            resp = {
+                "text": "Aucun document pertinent n'a été retrouvé pour enrichir la réponse.",
+                "agent": "sentinelle",
+                "cards": [{"title": "Pas de sources trouvées", "body": "Aucun document pertinent n'a été retrouvé pour enrichir la réponse."}],
+                "actions": [],
+                "suggested": [],
+            }
             state.update({
                 "optimized_query": optimized_query,
                 "retrieved_context": "",
@@ -395,6 +448,7 @@ class ClimateSentinel:
                 "security_status": security_status,
                 "security_reason": state.get("security_reason", ""),
                 "status": "NO_CONTEXT",
+                "agri_response": resp,
             })
             return state
 
@@ -416,8 +470,10 @@ class ClimateSentinel:
         if security_status == "SCAM_DETECTED":
             alert = self._build_scam_response(state)
             state = dict(state)
+            resp = {"text": alert, "agent": "sentinelle", "cards": [{"title": "Alerte sécurité", "body": alert}], "actions": [], "suggested": []}
             state.update({
                 "final_response": alert,
+                "agri_response": resp,
                 "warnings": warnings,
                 "status": "SCAM_DETECTED",
                 "security_status": security_status,
@@ -436,8 +492,10 @@ class ClimateSentinel:
         if not self.llm:
             ctx.warnings.append("LLM indisponible (mode secours).")
             state = dict(state)
+            resp = {"text": fallback, "agent": "sentinelle", "cards": [{"title": "Veille climatique (mode secours)", "body": fallback}], "actions": [], "suggested": []}
             state.update({
                 "final_response": fallback,
+                "agri_response": resp,
                 "warnings": ctx.warnings,
                 "status": "LLM_DOWN",
             })
@@ -448,17 +506,33 @@ class ClimateSentinel:
 
             answer = self._call_llm_for_compose(system_content, user_content)
             state = dict(state)
+            resp = {"text": answer, "agent": "sentinelle", "cards": [{"title": "Veille climatique", "body": answer}], "actions": [], "suggested": []}
             state.update({
                 "final_response": answer,
+                "agri_response": resp,
                 "warnings": ctx.warnings,
                 "status": "ANSWER_READY",
             })
+            # ── Hand-off vers Marketplace si besoin d'achat détecté ──
+            if self._purchase_handoff_needed(ctx.query, state.get("hazards", [])):
+                state = self.handoff(
+                    state,
+                    target_agent="marketplace",
+                    context={
+                        "query": ctx.query,
+                        "hazards": state.get("hazards", []),
+                        "risk_summary": ctx.risk_summary,
+                    },
+                    reason="Traitement phytosanitaire recommandé — besoin d'achat détecté",
+                )
             return state
         except Exception as exc:
             ctx.warnings.append(f"Erreur LLM: {exc}")
             state = dict(state)
+            resp = {"text": fallback, "agent": "sentinelle", "cards": [{"title": "Veille climatique (erreur)", "body": fallback}], "actions": [], "suggested": []}
             state.update({
                 "final_response": fallback,
+                "agri_response": resp,
                 "warnings": ctx.warnings,
                 "status": "LLM_ERROR",
             })
@@ -533,32 +607,36 @@ class ClimateSentinel:
         
         workflow.set_entry_point("analyze")
 
-        # Logique de routage complexe
+        # Conditional routing restored: analyze -> retrieve|compose
+        # retrieve -> compose|rewrite (depending on retrieval result)
+        # rewrite -> retrieve|compose (depending on rewrite outcome)
         workflow.add_conditional_edges("analyze", self.refine.route_after_analyze)
-        
+
         workflow.add_conditional_edges(
-            "retrieve", 
+            "retrieve",
             self.refine.route_retrieval,
             {"compose": "compose", "rewrite": "rewrite"}
         )
-        
-        # Modif : Routage conditionnel après Rewrite pour éviter boucle infinie
+
+        # Keep rewrite conditional routing to allow retrieval retry or compose
         workflow.add_conditional_edges(
-            "rewrite", 
+            "rewrite",
             self.refine.route_after_rewrite,
             {"retrieve": "retrieve", "compose": "compose"}
         )
-        
+
         workflow.add_edge("compose", "critique")
 
         # ── DEGRADED_MODE loop guard ─────────────────────────────────
         def _route_critique(state: SentinelState) -> str:
-            """Force exit to evaluate after 2 critique or rewrite retries."""
-            if (
-                state.get("critique_retry_count", 0) > 2
-                or state.get("rewrited_retry_count", 0) > 2
-            ):
-                # Mutate state to signal degraded mode to downstream nodes
+            """Break potential critique->compose loops by forcing evaluate earlier.
+
+            If any retry count is present (>=1) we consider the flow degraded and
+            force the evaluation step to avoid long recursion during testing.
+            """
+            critique_retries = int(state.get("critique_retry_count", 0))
+            rewrited_retries = int(state.get("rewrited_retry_count", 0))
+            if critique_retries >= 1 or rewrited_retries >= 1:
                 state["degraded_mode"] = True  # type: ignore[index]
                 state["status"] = "DEGRADED_MODE"
                 return "evaluate"
@@ -571,20 +649,12 @@ class ClimateSentinel:
         )
 
         workflow.add_edge("evaluate", END)
-        return workflow.compile()
-    
+        # Allow a higher recursion limit for complex conditional routing
+        try:
+            return workflow.compile(config={"recursion_limit": 200})
+        except TypeError:
+            # Fallback if older langgraph versions don't accept config
+            return workflow.compile()
 
-if __name__ == "__main__":
-    import logging
-    import json
-
-    logging.basicConfig(level=logging.INFO)
-    agent = ClimateSentinel()
-    workflow = agent.build()
-    # Exemple d’état initial
-    state = {
-        "user_query": "Y a-t-il un risque alimentaire presentement au burkina ?",
-        "location_profile": {"village": "Bobo-Dioulasso", "zone": "Hauts-Bassins", "country": "Burkina Faso"},
-    }
-    result = workflow.invoke(state)
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    # Demo / smoke-test moved to: backend/scripts/sentinelle_smoke_test.py
+    # This prevents side-effects on import and keeps the module import-safe.

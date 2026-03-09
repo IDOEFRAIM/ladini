@@ -17,6 +17,7 @@ import logging
 from typing import Optional
 
 from agriconnect.core.settings import settings
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -52,17 +53,9 @@ def get_chat_client(
             "Installez langchain-aws et complétez cette section."
         )
 
-    # Default: Groq
-    # If no API key configured, return a lightweight dummy client for tests/local
+    # Default: Groq — require an API key in production/dev
     if not getattr(settings, "llm_api_key", None):
-        class DummyChat:
-            def __init__(self, *a, **k):
-                pass
-            def chat(self, *args, **kwargs):
-                return {"content": "dummy response"}
-            def __call__(self, *args, **kwargs):
-                return self.chat(*args, **kwargs)
-        return DummyChat()
+        raise RuntimeError("No LLM API key configured. Set GROQ_API_KEY or configure settings.llm_api_key.")
 
     from langchain_groq import ChatGroq
     return ChatGroq(
@@ -91,6 +84,10 @@ def get_sdk_client():
         raise NotImplementedError("Provider 'bedrock' non implémenté.")
 
     # Default: Groq
+    # Default: Groq SDK — require API key
+    if not getattr(settings, "llm_api_key", None):
+        raise RuntimeError("No LLM API key configured. Set GROQ_API_KEY or configure settings.llm_api_key.")
+
     from groq import Groq
     return Groq(api_key=settings.llm_api_key)
 

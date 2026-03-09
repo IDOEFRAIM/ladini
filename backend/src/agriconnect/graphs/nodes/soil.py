@@ -14,6 +14,7 @@ from agriconnect.graphs.prompts import (
 from agriconnect.tools.soil import SoilDoctorTool 
 #from .tools import SoilDoctorTool # Exemple d'import relatif
 from agriconnect.rag.components import get_groq_sdk
+# AG-UI removed from agent-level: return MCP-friendly dicts instead
 
 logger = logging.getLogger("Agent.AgriSoil")
 
@@ -71,6 +72,12 @@ class AgriSoilAgent:
         C'est ici que la 'Magie' technique opère sans latence.
         """
         location_profile = state.get("location_profile", {})
+        # Role separation: refuse market-related queries
+        _market_re = re.compile(r"prix|price|march\u00e9|marche|vente|vendre|achat|acheter|FCFA|CFA|tarif|cours", re.IGNORECASE)
+        if _market_re.search(state.get("user_query", "")):
+            warnings = list(state.get("warnings", []))
+            warnings.append("Question marché détectée — hors-sujet pour AgriSoilAgent")
+            return {"status": "OFF_TOPIC", "warnings": warnings, "rejection_reason": "Question marché — agent Sol uniquement."}
         village = location_profile.get("village", "").lower()
         observation = state.get("observation", "normal")
         warnings = list(state.get("warnings", []))
@@ -140,7 +147,12 @@ class AgriSoilAgent:
                 f"Technique d'eau recommandée : {eau.get('strategie', 'N/A')}."
             )
             state = dict(state)
-            state.update({"final_response": fallback, "status": "LLM_DOWN"})
+            resp = {"text": fallback, "agent": "soil", "cards": [{"title": "Analyse sol (mode secours)", "body": fallback}], "actions": [], "suggested": []}
+            state.update({
+                "final_response": fallback,
+                "agri_response": resp,
+                "status": "LLM_DOWN",
+            })
             return state
 
         # Formatage des templates
@@ -174,7 +186,12 @@ class AgriSoilAgent:
             response = completion.choices[0].message.content
 
             state = dict(state)
-            state.update({"final_response": response, "status": "DONE"})
+            resp = {"text": response, "agent": "soil", "cards": [{"title": "Analyse sol", "body": response}], "actions": [], "suggested": []}
+            state.update({
+                "final_response": response,
+                "agri_response": resp,
+                "status": "DONE",
+            })
             return state
         
         except Exception as e:
@@ -186,7 +203,12 @@ class AgriSoilAgent:
                 f"Technique d'eau recommandée : {eau.get('strategie')}."
             )
             state = dict(state)
-            state.update({"final_response": fallback, "status": "FALLBACK"})
+            resp = {"text": fallback, "agent": "soil", "cards": [{"title": "Analyse sol (erreur)", "body": fallback}], "actions": [], "suggested": []}
+            state.update({
+                "final_response": fallback,
+                "agri_response": resp,
+                "status": "FALLBACK",
+            })
             return state
 
     # ------------------------------------------------------------------ #

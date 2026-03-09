@@ -128,3 +128,9 @@ Thumbs.db
 
 backend/.env
 backend/.env.example
+
+
+backend/src/agriconnect/agents/formation_agro.py
+frontend/gradio_ui.py
+frontend/assets/*
+frontend/agro.py

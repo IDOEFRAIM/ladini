@@ -40,11 +40,19 @@ try:
 except Exception:
     redis = None
 
+from pydantic import BaseModel, ConfigDict, ValidationError, Field
+
 logger = logging.getLogger("A2A.Messaging")
 
 # Maximum agent-to-agent hops per message chain before the message is dead-lettered.
 MAX_HOPS: int = 3
 
+
+# ═══════════════════════════════════════════════════════════════
+# ENUMS — définis AVANT les modèles qui les référencent
+# Pourquoi : évite toute référence forward ambiguë et facilite
+# l'import direct (from messaging import MessageType).
+# ═══════════════════════════════════════════════════════════════
 
 class MessageType(str, Enum):
     REQUEST = "request"
@@ -56,12 +64,34 @@ class MessageType(str, Enum):
     HEARTBEAT = "heartbeat"
     ACK = "ack"
 
+
 class HandshakeStatus(str, Enum):
     PROPOSED = "proposed"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
     COUNTER = "counter_offer"
     COMPLETED = "completed"
+
+
+class A2AMessageModel(BaseModel):
+    """Pydantic v2 schema for A2A messages (strict typing, forward compatible, HITL-ready)."""
+    model_config = ConfigDict(extra="ignore")
+
+    message_id: str
+    message_type: MessageType | str
+    sender_id: str
+    receiver_id: str
+    intent: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    zone: str | None = None
+    crop: str | None = None
+    priority: int = 0
+    created_at: str | None = None
+    expires_at: str | None = None
+    # HITL / Hand-off fields — Pydantic-validated at the transport boundary
+    requires_human: bool = False
+    handoff_to: str | None = None
+    clarification_needed: str | None = None
 
 @dataclass
 class A2AMessage:
@@ -91,6 +121,15 @@ class A2AMessage:
     # ── v2: Observability ─────────────────────────────────────
     trace_envelope: Optional[TraceEnvelope] = field(default=None, repr=False)
     correlation: CorrelationCtx = field(default_factory=CorrelationCtx)
+
+    # ── v2: HITL / Inter-agent cooperation ────────────────────
+    # requires_human   : orchestrateur doit stopper + demander confirmation
+    # handoff_to       : orchestrateur doit re-router vers cet agent
+    # clarification_needed : question renvoyée à l'utilisateur
+    requires_human: bool = False
+    handoff_to: str = ""
+    handoff_reason: str = ""
+    clarification_needed: str = ""
 
     def __post_init__(self):
         now = datetime.now(timezone.utc)
@@ -466,15 +505,38 @@ class A2AChannel:
         # Stamp the current hop before enqueueing so the receiver sees it.
         message.hop_count += 1
 
-        # 1. Validate
-        validation = message.validate()
-        if "error" in validation:
-            logger.warning("A2A message rejected: %s", validation)
+        # 1. Validate using the dataclass and a stricter Pydantic schema
+        try:
+            # Best-effort strict validation through Pydantic model to ensure
+            # messages follow the required transport schema before enqueueing.
+            payload = message.to_dict()
+            try:
+                A2AMessageModel(**payload)
+            except ValidationError as ve:
+                logger.warning("A2A message failed pydantic validation: %s", ve)
+                return AsyncResult(
+                    correlation_id=message.correlation.correlation_id,
+                    message_id=message.message_id,
+                    ack_status=AckStatus.REJECTED,
+                    error=str(ve),
+                )
+
+            validation = message.validate()
+            if "error" in validation:
+                logger.warning("A2A message rejected by dataclass validate: %s", validation)
+                return AsyncResult(
+                    correlation_id=message.correlation.correlation_id,
+                    message_id=message.message_id,
+                    ack_status=AckStatus.REJECTED,
+                    error=str(validation.get("details", "")),
+                )
+        except Exception as exc:
+            logger.debug("Unexpected error during A2A message validation: %s", exc)
             return AsyncResult(
                 correlation_id=message.correlation.correlation_id,
                 message_id=message.message_id,
                 ack_status=AckStatus.REJECTED,
-                error=str(validation.get("details", "")),
+                error=str(exc),
             )
 
         if not message.receiver_id:
@@ -489,8 +551,23 @@ class A2AChannel:
                 ack_status=AckStatus.DUPLICATE,
             )
 
-        # 3. Enqueue via broker
-        pos = self.broker.enqueue(message.receiver_id, message)
+        # 3. Enqueue via broker (graceful fallback on broker errors)
+        try:
+            pos = self.broker.enqueue(message.receiver_id, message)
+        except Exception as e:
+            logger.warning("Broker enqueue failed (%s), falling back to InMemoryBroker", e)
+            # Replace broker with an in-memory fallback to keep processing
+            try:
+                self.broker = InMemoryBroker()
+                pos = self.broker.enqueue(message.receiver_id, message)
+            except Exception as e2:
+                logger.error("InMemoryBroker enqueue also failed: %s", e2)
+                return AsyncResult(
+                    correlation_id=message.correlation.correlation_id,
+                    message_id=message.message_id,
+                    ack_status=AckStatus.REJECTED,
+                    error=str(e2),
+                )
         self._message_count += 1
 
         # 4. Persist to message log (best-effort)

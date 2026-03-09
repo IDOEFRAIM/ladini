@@ -1,4 +1,5 @@
-"""Unit Normalisation MCP Tool (async).
+"""
+Unit Normalisation MCP Server (FastMCP).
 
 Converts local/traditional units used in Burkina Faso and West Africa
 into standard SI units (kilograms) so downstream agents work with
@@ -10,24 +11,27 @@ Supported local units:
 These conversions depend on the cereal/crop type because a "tine de mil"
 weighs differently from a "tine de sorgho".
 
-Tools exposed:
+Tools:
   - convert_to_kg(value, unit, crop)      → ConversionResult
   - list_known_units(crop)                → UnitCatalogPayload
-  - normalize_market_quantity(text, crop) → NormalizedQuantity  (NLP hint helper)
+  - normalize_market_quantity(text, crop) → NormalizedQuantity  (NLP helper)
 """
 
 from __future__ import annotations
 
+import json
 import re
 import logging
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
-
-from .servers.base import AsyncMCPServer
+from pydantic import BaseModel, Field
+from fastmcp import FastMCP, Context
 
 logger = logging.getLogger("MCP.UnitsServer")
 
+# ────────────────────── FastMCP instance ──────────────────────────────────
+
+mcp = FastMCP("AgriConnect Units MCP Server")
 
 # ────────────────────── Conversion tables ─────────────────────────────────
 
@@ -110,134 +114,178 @@ class NormalizedQuantity(BaseModel):
     confidence: str = "LOW"  # LOW | MEDIUM | HIGH
 
 
-# ────────────────────── Server ────────────────────────────────────────────
+# ────────────────────── Tools ─────────────────────────────────────────────
 
-class UnitsMCPServer(AsyncMCPServer):
-    """Async MCP server for West-African agricultural unit conversions."""
+@mcp.tool()
+async def convert_to_kg(
+    value: float,
+    unit: str,
+    crop: str = "",
+    ctx: Context = None,
+) -> str:
+    """Convertit une quantité locale (tine, plat, sac…) en kilogrammes.
+
+    Args:
+        value: Quantité (ex: 3)
+        unit: Unité locale (ex: tine, sac, plat)
+        crop: Culture pour affiner la conversion (ex: mil, maïs)
+    """
+    if ctx:
+        await ctx.info(f"convert_to_kg {value} {unit} (crop={crop})")
+
+    factor = _kg_for_unit(unit, crop or None)
+    if factor is None:
+        raise ValueError(
+            f"Unité inconnue: '{unit}'. "
+            f"Unités supportées: {sorted(_GENERIC_KG.keys())}"
+        )
+
+    kg = round(value * factor, 3)
+    note = (
+        f"Facteur spécifique à {crop}"
+        if crop and _kg_for_unit(unit, crop) != _GENERIC_KG.get(unit.lower().strip())
+        else None
+    )
+    result = ConversionResult(
+        original_value=value,
+        original_unit=unit,
+        crop=crop or None,
+        kg=kg,
+        kg_per_unit=factor,
+        note=note,
+    )
+    return result.model_dump_json(indent=2)
+
+
+@mcp.tool()
+async def list_known_units(crop: str = "", ctx: Context = None) -> str:
+    """Liste toutes les unités connues avec leurs équivalences en kg.
+
+    Args:
+        crop: Culture pour afficher les surcharges spécifiques (optionnel)
+    """
+    if ctx:
+        await ctx.info(f"list_known_units crop={crop}")
+
+    crop_key = (crop or "").lower().strip()
+    override = _PER_CROP_OVERRIDES.get(crop_key, {})
+    merged = {**_GENERIC_KG, **override}
+    units = [UnitEntry(unit=u, kg_per_unit=kg) for u, kg in sorted(merged.items())]
+    payload = UnitCatalogPayload(crop=crop or None, units=units)
+    return payload.model_dump_json(indent=2)
+
+
+@mcp.tool()
+async def normalize_market_quantity(
+    text: str,
+    crop: str = "",
+    ctx: Context = None,
+) -> str:
+    """Détecte et normalise une quantité depuis du texte libre.
+
+    Ex: '3 tines de mil' → 51 kg
+
+    Args:
+        text: Texte libre contenant une quantité locale
+        crop: Culture (optionnel, détectée si absente)
+    """
+    if ctx:
+        await ctx.info(f"normalize_market_quantity text='{text[:40]}'")
+
+    text_lower = text.lower()
+
+    # Pattern: <number> <unit> (optionally: de <crop>)
+    pattern = re.compile(
+        r"(\d+(?:[.,]\d+)?)\s*"
+        r"(tine|plat|sac|botte|boite|panier|calebasse|bassine|charrette|kg|kilo|tonne|g|gramme|demi.?sac)",
+        re.IGNORECASE,
+    )
+    match = pattern.search(text_lower)
+    if not match:
+        return NormalizedQuantity(raw_text=text, confidence="LOW").model_dump_json(indent=2)
+
+    raw_val = float(match.group(1).replace(",", "."))
+    raw_unit = match.group(2).lower().replace(" ", "_").replace("-", "_")
+
+    # Extract crop from text if not provided
+    detected_crop = crop or None
+    if not detected_crop:
+        for c_key in _PER_CROP_OVERRIDES:
+            if c_key in text_lower:
+                detected_crop = c_key
+                break
+
+    factor = _kg_for_unit(raw_unit, detected_crop)
+    if factor is None:
+        return NormalizedQuantity(
+            raw_text=text, value=raw_val, unit=raw_unit, crop=detected_crop, confidence="LOW"
+        ).model_dump_json(indent=2)
+
+    kg = round(raw_val * factor, 3)
+    confidence = "HIGH" if detected_crop and detected_crop in _PER_CROP_OVERRIDES else "MEDIUM"
+    return NormalizedQuantity(
+        raw_text=text,
+        value=raw_val,
+        unit=raw_unit,
+        crop=detected_crop,
+        kg=kg,
+        confidence=confidence,
+    ).model_dump_json(indent=2)
+
+
+# ────────────────────── Resources ─────────────────────────────────────────
+
+@mcp.resource("units://catalog")
+async def units_catalog_resource() -> str:
+    """Full generic unit catalog as an MCP resource."""
+    entries = [{"unit": u, "kg": kg} for u, kg in sorted(_GENERIC_KG.items())]
+    return json.dumps(entries, ensure_ascii=False, indent=2)
+
+
+# ────────────────────── Backward-compatible class wrapper ─────────────────
+
+class UnitsMCPServer:
+    """Compat wrapper for in-process callers."""
 
     name = "units"
 
-    def _register_tools(self) -> None:
-        self.register(
-            name="convert_to_kg",
-            description="Convertit une quantité locale (tine, plat, sac…) en kilogrammes",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "value": {"type": "number", "description": "Quantité (ex: 3)"},
-                    "unit": {"type": "string", "description": "Unité locale (ex: tine, sac, plat)"},
-                    "crop": {"type": "string", "description": "Culture pour affiner la conversion (ex: mil, maïs)"},
-                },
-                "required": ["value", "unit"],
-            },
-            handler=self._convert_to_kg,
-        )
-        self.register(
-            name="list_known_units",
-            description="Liste toutes les unités connues avec leurs équivalences en kg",
-            input_schema={
-                "type": "object",
-                "properties": {"crop": {"type": "string"}},
-            },
-            handler=self._list_known_units,
-        )
-        self.register(
-            name="normalize_market_quantity",
-            description=(
-                "Détecte et normalise une quantité depuis du texte libre "
-                "(ex: '3 tines de mil' → 51 kg)"
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "crop": {"type": "string"},
-                },
-                "required": ["text"],
-            },
-            handler=self._normalize_market_quantity,
-        )
+    @staticmethod
+    def list_tools():
+        return [
+            {"name": "convert_to_kg", "description": "Convertit une quantité locale en kg"},
+            {"name": "list_known_units", "description": "Liste les unités connues et leurs équivalences"},
+            {"name": "normalize_market_quantity", "description": "Normalise une quantité depuis du texte libre"},
+        ]
 
-    # ── Handlers ──────────────────────────────────────────────────────────
+    @staticmethod
+    async def _dispatch(name: str, args: Dict[str, Any]) -> str:
+        handlers = {
+            "convert_to_kg": convert_to_kg,
+            "list_known_units": list_known_units,
+            "normalize_market_quantity": normalize_market_quantity,
+        }
+        fn = handlers.get(name)
+        if not fn:
+            raise ValueError(f"Unknown units tool: {name}")
+        return await fn(**args)
 
-    async def _convert_to_kg(self, args: Dict[str, Any]) -> ConversionResult:
-        value = float(args["value"])
-        unit = args["unit"]
-        crop = args.get("crop")
-        factor = _kg_for_unit(unit, crop)
-        if factor is None:
-            raise ValueError(
-                f"Unité inconnue: '{unit}'. "
-                f"Unités supportées: {sorted(_GENERIC_KG.keys())}"
-            )
-        kg = round(value * factor, 3)
-        note = f"Facteur spécifique à {crop}" if crop and _kg_for_unit(unit, crop) != _GENERIC_KG.get(unit) else None
-        return ConversionResult(
-            original_value=value,
-            original_unit=unit,
-            crop=crop,
-            kg=kg,
-            kg_per_unit=factor,
-            note=note,
-        )
+    def call_tool_sync(self, name: str, arguments: dict) -> dict:
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        raw = loop.run_until_complete(self._dispatch(name, arguments))
+        return {"ok": True, "data": json.loads(raw) if isinstance(raw, str) else raw}
 
-    async def _list_known_units(self, args: Dict[str, Any]) -> UnitCatalogPayload:
-        crop = args.get("crop")
-        crop_key = (crop or "").lower().strip()
-        override = _PER_CROP_OVERRIDES.get(crop_key, {})
-        merged = {**_GENERIC_KG, **override}
-        units = [UnitEntry(unit=u, kg_per_unit=kg) for u, kg in sorted(merged.items())]
-        return UnitCatalogPayload(crop=crop, units=units)
+    def call_tool(self, name: str, arguments: dict):
+        """Alias for call_tool_sync to match old interface."""
+        return self.call_tool_sync(name, arguments)
 
-    async def _normalize_market_quantity(self, args: Dict[str, Any]) -> NormalizedQuantity:
-        text: str = args["text"]
-        crop: Optional[str] = args.get("crop")
-        text_lower = text.lower()
 
-        # Pattern: <number> <unit> (optionally: de <crop>)
-        pattern = re.compile(
-            r"(\d+(?:[.,]\d+)?)\s*"
-            r"(tine|plat|sac|botte|boite|panier|calebasse|bassine|charrette|kg|kilo|tonne|g|gramme|demi.?sac)",
-            re.IGNORECASE,
-        )
-        match = pattern.search(text_lower)
-        if not match:
-            return NormalizedQuantity(raw_text=text, confidence="LOW")
-
-        raw_val = float(match.group(1).replace(",", "."))
-        raw_unit = match.group(2).lower().replace(" ", "_").replace("-", "_")
-
-        # Extract crop from text if not provided
-        detected_crop = crop
-        if not detected_crop:
-            for c_key in _PER_CROP_OVERRIDES:
-                if c_key in text_lower:
-                    detected_crop = c_key
-                    break
-
-        factor = _kg_for_unit(raw_unit, detected_crop)
-        if factor is None:
-            return NormalizedQuantity(raw_text=text, value=raw_val, unit=raw_unit, crop=detected_crop, confidence="LOW")
-
-        kg = round(raw_val * factor, 3)
-        confidence = "HIGH" if detected_crop and detected_crop in _PER_CROP_OVERRIDES else "MEDIUM"
-        return NormalizedQuantity(
-            raw_text=text,
-            value=raw_val,
-            unit=raw_unit,
-            crop=detected_crop,
-            kg=kg,
-            confidence=confidence,
-        )
-
+# ────────────────────── Entry point ───────────────────────────────────────
 
 if __name__ == "__main__":
-    import asyncio, json
-
-    server = UnitsMCPServer()
-    print("Tools:", [t["name"] for t in server.list_tools()])
-    result = asyncio.run(server.call_tool("convert_to_kg", {"value": 3, "unit": "tine", "crop": "mil"}))
-    print(json.dumps(result.model_dump(), indent=2, ensure_ascii=False))
-
-    result2 = asyncio.run(server.call_tool("normalize_market_quantity", {"text": "j'ai 10 sacs de maïs", "crop": "maïs"}))
-    print(json.dumps(result2.model_dump(), indent=2, ensure_ascii=False))
+    logger.info("Starting AgriConnect Units MCP Server")
+    mcp.run()

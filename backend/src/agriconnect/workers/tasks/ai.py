@@ -51,7 +51,7 @@ def _get_orchestrator():
         if _orchestrator_instance is not None:
             return _orchestrator_instance
         try:
-            from agriconnect.graphs.message_flow import MessageResponseFlow
+            from agriconnect.graphs.orchestrateur.message_flow import MessageResponseFlow
             _orchestrator_instance = MessageResponseFlow()
             logger.info(
                 "✅ Orchestrator loaded in worker PID=%s", os.getpid()

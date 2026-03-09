@@ -38,16 +38,37 @@ def init_db() -> None:
     # TRANSFORMATION : On force le driver asynchrone
     url = clean_url.replace("postgresql://", "postgresql+asyncpg://")
     
-    # CONFIGURATION SSL : On passe le SSL via l'objet contextuel
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE  
+    # CONFIGURATION SSL : charger le CA fourni et exiger la vérification
+    ca_path = getattr(settings, "DB_CA_PATH", None)
+    ssl_context = None
+    if ca_path:
+        # resolve relative to BASE_DIR if needed
+        try:
+            from pathlib import Path
+            p = Path(ca_path)
+            if not p.is_absolute():
+                p = Path(settings.BASE_DIR) / p
+            p = p.resolve()
+            if not p.exists():
+                raise FileNotFoundError(f"DB CA file not found at {p}")
+
+            ssl_context = ssl.create_default_context(cafile=str(p))
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+            logger.info("Using DB CA bundle at %s for SSL verification", p)
+        except Exception as e:
+            logger.error("Failed to load DB CA file (%s): %s", ca_path, e)
+            # For safety with real user data, fail fast rather than silently disable verification
+            raise
+    else:
+        logger.error("No DB_CA_PATH configured; refusing to connect without CA for production safety.")
+        raise RuntimeError("DB_CA_PATH not configured; set settings.DB_CA_PATH to a CA bundle path")
 
     _async_engine = create_async_engine(
         url,
         connect_args={
-            "ssl": ssl_context, 
-            "prepared_statement_cache_size": 0,  
+            "ssl": ssl_context,
+            "prepared_statement_cache_size": 0,
         },
         pool_size=10,
         max_overflow=5,

@@ -12,10 +12,11 @@ from .marketplace import MarketplaceAgent
 from .soil import AgriSoilAgent
 from .plant_doctor import PlantHealthDoctor
 
+# v3 — Async agents (multi-schema)
+from .marketplace_v3 import MarketplaceAgentV3
+
 # Les agents ci-dessous dépendent de modules optionnels (services.google, etc.)
 # Ils sont importés à la demande pour ne pas bloquer le startup.
-# Usage:  from backend.agents.watcher import WatcherAgent
-# Usage:  from backend.agents.voice import VoiceAgent
 
 __all__ = [
     "ClimateSentinel",
@@ -24,4 +25,6 @@ __all__ = [
     "MarketplaceAgent",
     "AgriSoilAgent",
     "PlantHealthDoctor",
+    # v3
+    "MarketplaceAgentV3",
 ]

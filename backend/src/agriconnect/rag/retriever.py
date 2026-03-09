@@ -4,6 +4,8 @@ from llama_index.core.schema import NodeWithScore
 from typing import List, Optional
 from .components import init_settings, get_storage_context, get_groq_sdk
 from .config import TOP_K_RETRIEVAL, TOP_K_RERANK, get_rag_profile, RAGProfile
+from pathlib import Path
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +27,17 @@ class AgileRetriever:
             structs = storage_context.index_store.index_structs()
             if not structs:
                 raise ValueError("No index found in storage.")
-            
+
             if hasattr(storage_context.vector_store, "client"):
-                logger.info("FAISS #total before load: %d", storage_context.vector_store.client.ntotal)
+                client = storage_context.vector_store.client
+                if hasattr(client, "ntotal"):
+                    logger.info("FAISS #total before load: %d", client.ntotal)
+                else:
+                    logger.info("Vector store client present (no ntotal attribute)")
 
             # Default to the first index found
             target_index_id = structs[0].index_id
-            
+
             self.index = load_index_from_storage(storage_context, index_id=target_index_id)
             if hasattr(self.index, "_vector_store") and hasattr(self.index._vector_store, "client"):
                 logger.info("FAISS ntotal loaded: %d", self.index._vector_store.client.ntotal)
@@ -41,7 +47,13 @@ class AgileRetriever:
             logger.warning("Error loading index: %s", e)
             self.index = None
             self.vector_retriever = None
-            
+            self.vector_store = None
+        finally:
+            # expose underlying vector_store (Redis/Faiss) for fallbacks
+            try:
+                self.vector_store = storage_context.vector_store
+            except Exception:
+                self.vector_store = None
         self.llm = get_groq_sdk()
 
     def generate_hyde_doc(self, query_str: str, tone: str = "standard") -> str:
@@ -113,6 +125,44 @@ class AgileRetriever:
         """
         if not self.vector_retriever:
             logger.warning("Index not initialized.")
+            # Fallback: if we have a RedisSearch/Redis vector_store, query it directly
+            try:
+                # Charger le profil adapté (needed for fallback limits)
+                profile = get_rag_profile(user_level)
+                if self.vector_store is not None and hasattr(self.vector_store, "query"):
+                    # compute embedding for the query
+                    try:
+                        from sentence_transformers import SentenceTransformer
+                        embedder = SentenceTransformer("all-MiniLM-L6-v2")
+                        q_emb = embedder.encode([query_str])[0].tolist()
+                    except Exception:
+                        logger.exception("Could not compute query embedding for fallback; returning empty.")
+                        return []
+
+                    raw = self.vector_store.query(q_emb, k=profile.top_k)
+                    # adapt raw to NodeWithScore-like simple list: we'll create minimal wrappers
+                    out_nodes = []
+                    for r in raw:
+                        # r: {id, text, meta, score} or {id, text, metadata, score}
+                        text = r.get("text") or r.get("content") or ""
+                        meta = r.get("meta") or r.get("metadata") or {}
+                        score = r.get("score", 0.0)
+
+                        class SimpleNode:
+                            def __init__(self, text, meta, score):
+                                class N:
+                                    def __init__(self, text, meta):
+                                        self._text = text
+                                        self.metadata = meta
+                                    def get_content(self):
+                                        return self._text
+                                self.node = N(text, meta)
+                                self.score = float(score or 0.0)
+
+                        out_nodes.append(SimpleNode(text, meta, score))
+                    return out_nodes[:profile.rerank_k]
+            except Exception:
+                logger.exception("Fallback vector_store query failed")
             return []
 
         # Charger le profil adapté
@@ -139,3 +189,40 @@ class AgileRetriever:
         # Rerank using ORIGINAL query, with profile-specific top_k
         final_nodes = self.rerank(query_str, nodes, top_k=profile.rerank_k)
         return final_nodes
+
+    def search_memory(self, user_id: str, query: str, top_k: int = 3):
+        """Search lightweight episodic memory stored as JSON in backend/rag_db/memory.json.
+
+        Returns a list of dicts with keys: id, text, category, score
+        """
+        try:
+            base = Path(__file__).resolve().parents[3]
+            mem_file = base / "rag_db" / "memory.json"
+            if not mem_file.exists():
+                return []
+
+            with mem_file.open("r", encoding="utf-8") as fh:
+                entries = json.load(fh)
+
+            # entries expected format: list of {"id":..., "user_id":..., "text":..., "category":...}
+            results = []
+            q = query.lower()
+            for e in entries:
+                if user_id and e.get("user_id") != user_id:
+                    continue
+                text = str(e.get("text", ""))
+                score = 1.0 if q in text.lower() else 0.0
+                if score > 0 or q in e.get("category", "").lower():
+                    results.append({
+                        "id": e.get("id"),
+                        "text": text,
+                        "category": e.get("category"),
+                        "score": score,
+                    })
+                if len(results) >= top_k:
+                    break
+
+            return results
+        except Exception as exc:
+            logger.exception("search_memory failed: %s", exc)
+            return []

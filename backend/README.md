@@ -70,4 +70,20 @@ Notes
 - The A2A channel now prefers Redis when `REDIS_URL` or `CELERY_BROKER_URL` is configured; it falls back to an in-memory broker for development only.
 - Add `REDIS_URL` to your deployment environment or `.env` (see `.env.example`).
 
+Redis Cloud (redislabs) guidance
+--------------------------------
+
+If you want to use Redis Cloud (Redis Labs) instead of a local Redis instance:
+
+- Use the TLS endpoint (recommended) — the URL typically looks like:
+	`rediss://default:<PASSWORD>@<HOST>:<PORT>/0`.
+- Put that value in `REDIS_URL` in your environment or in `backend/.env` (do not commit secrets).
+- The project already supports `rediss://` and will pick `settings.REDIS_URL` automatically.
+- Quick test script: `python backend/scripts/redis_cloud_example.py` (prints `PING -> True` on success).
+
+Security notes:
+
+- Rotate credentials regularly and restrict allowed CIDR/IPs in your Redis Cloud project's access control.
+- Prefer `rediss://` (TLS) for production traffic.
+
 If you want, I can add a `docker-compose.yml` that starts Redis + the backend for local development.

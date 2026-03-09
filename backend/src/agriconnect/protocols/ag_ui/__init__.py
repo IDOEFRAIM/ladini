@@ -31,6 +31,7 @@ from .components import (
     AgriResponse,
 )
 from .renderer import AGUIRenderer, WhatsAppRenderer, WebRenderer, SMSRenderer, prune_components
+from .formatter import UIFormatter
 
 # Alias rétro-compatible (ancien nom utilisé dans les agents)
 AgriComponent = AGUIComponent
@@ -56,4 +57,5 @@ __all__ = [
     "WebRenderer",
     "SMSRenderer",
     "prune_components",
+    "UIFormatter",
 ]

@@ -77,6 +77,10 @@ class GlobalAgriState(TypedDict):
     pending_action_payload: Optional[Dict[str, Any]]  # Données de l'action en attente
     hitl_status: Optional[str]                # "PENDING" | "APPROVED" | "REJECTED"
 
+    # --- LangGraph Send (fan-out per-expert) ---
+    _expert_target: Optional[str]             # Expert name for Send() dispatch
+    _expert_is_lead: Optional[bool]           # True if primary expert in fan-out
+
     # --- Context Elicitation ---
     awaiting_context: Optional[bool]          # True si données manquantes
     missing_fields: Optional[List[Dict[str, str]]]  # Champs à demander

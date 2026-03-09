@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -17,7 +18,7 @@ from agriconnect.graphs.prompts import (
     )
 from agriconnect.rag.components import get_groq_sdk
 from agriconnect.tools.market import AgrimarketTool
-from agriconnect.protocols.mcp.servers.agri_db_server import AgriDBMCPServer
+from agriconnect.agents.base import BaseAgent
 
 logger = logging.getLogger("Agent.MarketCoach")
 
@@ -26,7 +27,7 @@ class MarketAgentState(TypedDict, total=False):
     user_query: str
     user_profile: Dict[str, Any]
     user_level: str
-    
+
     # Intent & Entities
     intent: str  # CHECK_PRICE, SELL_OFFER, BUY_OFFER, SCAM_CHECK, REGISTER_SURPLUS, CONFIRM_TRANSACTION, CANCEL_TRANSACTION
     product: str
@@ -56,19 +57,29 @@ class MarketAgentState(TypedDict, total=False):
     # Security
     security_status: str
     security_reason: str
+    # HITL / Hand-off flags
+    requires_human: bool
+    handoff_to: str
+    clarification_needed: str
 
-class MarketCoach:
-    def __init__(self, llm_client=None):
+class MarketCoach(BaseAgent):
+    """Agent prix de marché — hérite de BaseAgent pour HITL/handoff."""
+
+    _capabilities = [
+        "CHECK_PRICE", "SELL_OFFER", "BUY_OFFER",
+        "SCAM_CHECK", "MARKET_ANALYSIS",
+    ]
+
+    def __init__(self, llm_client=None, mcp_session=None):
         self.model_planner = "llama-3.1-8b-instant"
         self.model_answer = "llama-3.3-70b-versatile"
         self.tool = AgrimarketTool()
-        
-        # Initialize MCP Database Server
-        try:
-            self.db_server = AgriDBMCPServer()
-        except Exception as e:
-            logger.error("Failed to init MCP DB Server: %s", e)
-            self.db_server = None
+
+        # MCP access is provided by the Orchestrator (Host) via DI.
+        # Experts NEVER create their own MCP clients.
+        self.mcp_session = mcp_session  # MCPSessionManager | None
+        self.db_server = mcp_session    # backward-compat alias
+        self.db_host = None             # host lives in orchestrator
 
         #efra mets cadans les tools,c est plus facile a maintenir,on aura juste a faire les calcul idoine
         self.UNIT_REGISTRY = {
@@ -156,7 +167,7 @@ class MarketCoach:
             return {}
 
         intent = state.get("intent")
-        if intent not in ["REGISTER_SURPLUS", "SELL", "BUY_OFFER"]:
+        if intent not in ["REGISTER_SURPLUS", "SELL_OFFER", "BUY_OFFER"]:
             return {}
 
         errors: List[str] = []
@@ -207,19 +218,42 @@ class MarketCoach:
         
         return updates
 
-    def _handle_transaction_execution(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute transaction and return data fragment."""
+    async def _handle_transaction_execution(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute transaction via MCP Shield (preferred) or local tool (fallback)."""
         data = {}
-        success = self.tool.register_surplus_offer(
-            payload["product"], 
-            payload["quantity"],
-            payload["location"]
-        )
-        
+        success = False
+
+        # Prefer MCP path — validated, audited, permission-checked
+        if self.db_host:
+            try:
+                result = await self.db_host.execute(
+                    "register_surplus_offer",
+                    {
+                        "commodity": payload["product"],
+                        "quantity": payload["quantity"],
+                        "location": payload["location"],
+                    },
+                )
+                success = True
+                data["mcp_result"] = result
+            except Exception as exc:
+                logger.warning("MCP register_surplus_offer failed, fallback to local tool: %s", exc)
+
+        # Fallback to local AgrimarketTool
+        if not success:
+            try:
+                success = self.tool.register_surplus_offer(
+                    payload["product"],
+                    payload["quantity"],
+                    payload["location"],
+                )
+            except Exception:
+                success = False
+
         data["registration_status"] = "SUCCESS" if success else "OFFLINE_SAVED"
         if payload.get("location"):
             data["logistics"] = self.tool.get_logistics_info(payload["location"])
-        
+
         return data
 
     def _get_user_id(self, state: MarketAgentState) -> Optional[str]:
@@ -243,9 +277,9 @@ class MarketCoach:
         return [s.dict() if hasattr(s, "dict") else s for s in stocks]
 
     async def _handle_user_stock_retrieval(self, state: MarketAgentState, product: str) -> Dict[str, Any]:
-        """Retrieve user stock from MCP server."""
+        """Retrieve user stock via MCP Shield (permission-checked, masked)."""
         data = {}
-        if not self.db_server or not state.get("user_profile"):
+        if not self.db_host or not state.get("user_profile"):
             return data
         
         uid = self._get_user_id(state)
@@ -253,7 +287,7 @@ class MarketCoach:
             return data
         
         try:
-            stocks = await self.db_server.call_tool("get_farm_stocks", arguments={"farm_id": uid})
+            stocks = await self.db_host.execute("get_farm_stocks", {"farm_id": uid})
             relevant = self._filter_stocks_by_product(stocks, product)
             if relevant:
                 data["user_stock"] = self._serialize_stocks(relevant)
@@ -276,25 +310,49 @@ class MarketCoach:
         return data
 
     def fetch_data_node(self, state: MarketAgentState) -> Dict[str, Any]:
-        """Executes transactions or fetches market data via MCP/Tools."""
+        """Executes transactions or fetches market data via MCP/Tools.
+
+        Handles both async MCP calls and sync local-tool calls by running
+        async helpers in the current or a new event loop.
+        """
         status = state.get("status")
-        
+
         if status in ["SCAM_DETECTED", "WAITING_CONFIRMATION", "MISSING_INFO", "CANCELLED", "ERROR"]:
             return {}
 
-        updates = {}
+        updates: Dict[str, Any] = {}
 
         if status == "CONFIRMED" and state.get("transaction_payload"):
-            data = self._handle_transaction_execution(state["transaction_payload"])
+            data = self._run_async(self._handle_transaction_execution(state["transaction_payload"]))
             updates["status"] = "COMPLETED_TRANSACTION"
         else:
             product = state.get("product")
-            data = self._handle_user_stock_retrieval(state, product) if product else {}
+            data = self._run_async(self._handle_user_stock_retrieval(state, product)) if product else {}
             data.update(self._handle_market_data_retrieval(product))
             updates["status"] = "DATA_FETCHED"
-        
+
         updates["market_data"] = data
         return updates
+
+    # ------------------------------------------------------------------ #
+    # ASYNC BRIDGE
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _run_async(coro) -> Any:
+        """Run an async coroutine from a sync context safely."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # We're inside an existing event loop (e.g. LangGraph async runner)
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(asyncio.run, coro).result(timeout=15)
+        else:
+            return asyncio.run(coro)
 
     # ------------------------------------------------------------------ #
     # EXTRA HELPERS (extracted to reduce cyclomatic complexity)
@@ -319,43 +377,9 @@ class MarketCoach:
             return []
         return [f"Lieu '{loc}' non trouvé dans le registre officiel."]
 
-    def _execute_transaction(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Perform registration and return market_data fragment."""
-        result: Dict[str, Any] = {}
-        success = False
-        try:
-            success = self.tool.register_surplus_offer(
-                payload.get("product"),
-                payload.get("quantity"),
-                payload.get("location"),
-            )
-        except Exception:
-            success = False
-
-        result["registration_status"] = "SUCCESS" if success else "OFFLINE_SAVED"
-        if payload.get("location"):
-            try:
-                result["logistics"] = self.tool.get_logistics_info(payload.get("location"))
-            except Exception:
-                result["logistics"] = {}
-        return result
-
-    def _retrieve_product_market(self, product: Optional[str]) -> Dict[str, Any]:
-        """Fetch market data for a product using the tool shim."""
-        data: Dict[str, Any] = {}
-        if not product:
-            return data
-        try:
-            prices = self.tool.get_commodity_price(product)
-            if prices:
-                data["prices"] = prices
-        except Exception:
-            data["prices"] = []
-        try:
-            data["trends"] = self.tool.analyze_market_trends(product)
-        except Exception:
-            data["trends"] = {}
-        return data
+    # NOTE: _execute_transaction and _retrieve_product_market were duplicates
+    # of _handle_transaction_execution and _handle_market_data_retrieval.
+    # They have been removed to keep a single code-path per operation.
 
     # ------------------------------------------------------------------ #
     # VALIDATION HELPERS
@@ -501,6 +525,7 @@ class MarketCoach:
         except Exception:
             return "Désolé, service indisponible."
 
+    @staticmethod
     def route_analysis(state):
         status = state.get("status")
         if status == "SCAM_DETECTED":
@@ -513,6 +538,7 @@ class MarketCoach:
             return END
         return "validate"
 
+    @staticmethod
     def route_validation(state):
         if state.get("status") in ["MISSING_INFO", "WAITING_CONFIRMATION"]:
             return "compose" # Ask user for details/confirm
@@ -531,9 +557,9 @@ class MarketCoach:
         workflow.add_node("fetch_data", self.fetch_data_node)
         workflow.add_node("compose", self.compose_node)
 
-        workflow.set_entry_point("transcribe")
-        workflow.add_edge("transcribe", "analyze")
-        
+        #workflow.set_entry_point("transcribe")
+        #workflow.add_edge("transcribe", "analyze")
+        workflow.set_entry_point("analyze")
 
         workflow.add_conditional_edges("analyze", self.route_analysis)
         

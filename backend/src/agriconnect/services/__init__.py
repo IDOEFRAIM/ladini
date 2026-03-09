@@ -1,9 +1,11 @@
-﻿"""
+"""
 Services — couche métier AgriConnect.
 
 Structure :
-  - db_handler.py     : Accès base de données (SQLAlchemy ORM)
-  - models.py         : Modèles SQLAlchemy (source unique de vérité)
+  - models.py         : Modèles SQLAlchemy legacy (flat schema)
+  - models_v3.py      : Modèles SQLAlchemy v3 (multi-schema: auth, governance, marketplace, intelligence)
+  - db_handler.py     : Accès base de données legacy (sync)
+  - database_service.py : Service DB v3 — async, multi-schema
   - voice_engine.py   : Azure TTS / STT (service layer)
   - voice.py          : Re-export de VoiceEngine (compat)
   - llm_clients.py    : Clients LLM (Groq / ChatGroq)
@@ -19,9 +21,11 @@ Structure :
 from .db_handler import AgriDatabase
 from .llm_clients import get_groq_client
 from .voice_engine import VoiceEngine
+from .database.database_service import AgriDatabaseService
 
 __all__ = [
     "AgriDatabase",
+    "AgriDatabaseService",
     "get_groq_client",
     "VoiceEngine",
 ]

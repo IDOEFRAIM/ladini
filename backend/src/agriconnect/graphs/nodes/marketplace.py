@@ -21,13 +21,8 @@ from langgraph.graph import END, StateGraph
 from agriconnect.graphs.prompts import MARKETPLACE_SYSTEM_PROMPT
 from agriconnect.tools.marketplace import MarketplaceTool
 
-# MCP & A2A & AG-UI Protocols
 from agriconnect.protocols.mcp import MCPDatabaseServer
-from agriconnect.protocols.a2a import A2ADiscovery, A2AMessage, MessageType, HandshakeStatus
-from agriconnect.protocols.ag_ui import (
-    AgriResponse, AGUIComponent, ComponentType,
-    TextBlock, Card, ActionButton, ActionType, ListPicker,
-)
+# AG-UI removed from agent-level: agents return MCP-friendly dicts
 
 logger = logging.getLogger("Agent.Marketplace")
 
@@ -52,7 +47,7 @@ class MarketplaceState(TypedDict, total=False):
     matches: List[Dict[str, Any]]
     # ── Output
     final_response: str
-    agri_response: Optional[AgriResponse]
+    agri_response: Optional[Dict[str, Any]]
     status: str
     warnings: List[str]          # plain list — overwrite each cycle
     errors: List[str]            # plain list — overwrite each cycle
@@ -61,6 +56,10 @@ class MarketplaceState(TypedDict, total=False):
     degraded_mode: bool          # True when retry_counter > MAX_RETRIES
     # ── Financial safety
     requires_human_review: bool  # True when total_fcfa > FINANCIAL_THRESHOLD_FCFA
+    # ── HITL / handoff flags (BaseAgent standard)
+    requires_human: bool
+    handoff_to: str
+    clarification_needed: str
 
 
 # Maximum execute-action retries before activating degraded mode
@@ -83,15 +82,21 @@ INTENTS = [
 ]
 
 
-class MarketplaceAgent:
-    """Agent agribusiness — sous-graphe LangGraph appelé par l'orchestrateur."""
 
-    def __init__(self, llm_client=None, mcp_db: MCPDatabaseServer = None, a2a: A2ADiscovery = None):
+from agriconnect.agents.base import BaseAgent
+
+class MarketplaceAgent(BaseAgent):
+    """Agent agribusiness — sous-graphe LangGraph appelé par l'orchestrateur. Hérite de BaseAgent pour HITL/clarification/handoff."""
+
+    def __init__(self, llm_client=None, mcp_session=None, session_id: str = "marketplace_default"):
         self.model_planner = "llama-3.1-8b-instant"
         self.model_answer = "llama-3.3-70b-versatile"
         self.tool = MarketplaceTool() # Legacy tool, gradually migrate to MCP
-        self.mcp_db = mcp_db
-        self.a2a = a2a
+
+        # MCP access is provided by the Orchestrator (Host) via DI.
+        self.mcp_session = mcp_session
+        self.mcp_db = mcp_session  # backward-compat alias
+        self.mcp_host = None       # host lives in orchestrator
 
         try:
             from agriconnect.rag.components import get_groq_sdk
@@ -197,7 +202,7 @@ class MarketplaceAgent:
         qty   = parsed.get("quantity") or 0
         estimated_fcfa = float(price) * float(qty)
         if estimated_fcfa > _FINANCIAL_THRESHOLD_FCFA:
-            state["requires_human_review"] = True
+            state = self.require_human(state, reason=f"Montant estimé {estimated_fcfa:,.0f} FCFA — confirmation requise.")
             state["warnings"] = list(state.get("warnings", []))
             state["warnings"].append(
                 f"FINANCIAL_REVIEW_REQUIRED: montant estimé {estimated_fcfa:,.0f} FCFA"
@@ -207,7 +212,7 @@ class MarketplaceAgent:
                 estimated_fcfa, state["intent"],
             )
         else:
-            state["requires_human_review"] = False
+            state["requires_human"] = False
 
         return state
 
@@ -255,7 +260,7 @@ class MarketplaceAgent:
                 "data": result,
                 "parsed": state.get("parsed", {}),
                 "status": "PENDING",
-                "requires_human_review": state.get("requires_human_review", False),
+                "requires_human_review": state.get("requires_human", False),
             }
             state["action_result"] = result
         else:
@@ -384,8 +389,6 @@ class MarketplaceAgent:
     def confirm_node(self, state: MarketplaceState) -> MarketplaceState:
         """Génère la réponse conversationnelle (AG-UI) + Texte."""
         state = dict(state)
-        agri_response = AgriResponse(agent="marketplace")
-        
         if state.get("status") == "ERROR":
             return state
 
@@ -397,7 +400,7 @@ class MarketplaceAgent:
 
         # Génération texte via LLM (inchangé)
         # ...existing code...
-        needs_review = state.get("requires_human_review", False)
+        needs_review = state.get("requires_human", False) or state.get("requires_human_review", False)
         tx_payload   = state.get("transaction_payload")
 
         context = {
@@ -406,7 +409,7 @@ class MarketplaceAgent:
             "parsed": parsed,
             "user_name": user.get("name", "Agriculteur"),
             "is_new_user": is_new,
-            "requires_human_review": needs_review,
+            "requires_human": needs_review,
             "transaction_payload": tx_payload,
         }
 
@@ -441,52 +444,46 @@ class MarketplaceAgent:
             final_text = self._fallback_response(intent, result, is_new)
         
         state["final_response"] = final_text
-        
-        # ── Construction AG-UI ──
-        response_obj = AgriResponse(agent="marketplace")
-        response_obj.add_text(final_text)
-        
-        # Ajout de composants interactifs selon l'intent
-        if needs_review:
-            # Financial safety: require explicit user confirmation before commit
-            from agriconnect.protocols.ag_ui import ActionButton, ActionType
-            response_obj.add(ActionButton(
-                label="✅ OUI, confirmer la transaction",
-                action_type=ActionType.CONFIRM,
-                payload={"action": "commit_transaction", "tx": tx_payload},
-            ))
-            response_obj.add(ActionButton(
-                label="❌ Non, annuler",
-                action_type=ActionType.CANCEL,
-                payload={"action": "cancel_transaction"},
-            ))
-        elif intent == "SELL_PRODUCT":
-             response_obj.add(ListPicker(
-                title="Options de vente :",
-                items=[
-                    {"id": "view_offers", "label": "👀 Voir les offres"},
-                    {"id": "modify_price", "label": "✏️ Modifier prix"}
-                ]
-            ))
-        elif intent == "CHECK_STOCK":
-             if result.get("stocks"):
-                 # Créer un résumé structuré du stock en Card
-                 stock_lines = "\n".join(
-                     f"• {s.get('item_name')}: {s.get('quantity')} kg"
-                     for s in result.get("stocks", [])
-                 )
-                 response_obj.add_card(
-                     title="Votre Stock",
-                     body=stock_lines,
-                 )
 
-        state["agri_response"] = response_obj
+        # Build MCP-friendly response dict instead of AG-UI objects
+        resp: Dict[str, Any] = {
+            "text": final_text,
+            "agent": "marketplace",
+            "actions": [],
+            "cards": [],
+            "suggested": [],
+        }
+
+        if needs_review:
+            resp["actions"].append({
+                "label": "✅ OUI, confirmer la transaction",
+                "type": "confirm",
+                "payload": {"action": "commit_transaction", "tx": tx_payload},
+            })
+            resp["actions"].append({
+                "label": "❌ Non, annuler",
+                "type": "cancel",
+                "payload": {"action": "cancel_transaction"},
+            })
+        elif intent == "SELL_PRODUCT":
+            resp["suggested"] = [
+                {"id": "view_offers", "label": "👀 Voir les offres"},
+                {"id": "modify_price", "label": "✏️ Modifier prix"},
+            ]
+        elif intent == "CHECK_STOCK":
+            if result.get("stocks"):
+                stock_lines = "\n".join(
+                    f"• {s.get('item_name')}: {s.get('quantity')} kg" for s in result.get("stocks", [])
+                )
+                resp["cards"].append({"title": "Votre Stock", "body": stock_lines})
+
+        state["agri_response"] = resp
         state["status"] = "CONFIRMED"
         return state
 
     def match_check_node(self, state: MarketplaceState) -> MarketplaceState:
         """
-        Vérifie les acheteurs (Local DB) ET Broadcast A2A pour la scalabilité.
+        Vérifie les acheteurs (Local DB) et diffusion inter-agent pour la scalabilité.
         """
         state = dict(state)
         intent = state.get("intent")
@@ -502,7 +499,7 @@ class MarketplaceAgent:
 
         if product_name and product_id:
             self._handle_local_matching(state)
-            self._handle_a2a_broadcast(state)
+            self._handle_inter_agent_broadcast(state)
 
         state["status"] = "COMPLETED"
         return state
@@ -525,36 +522,25 @@ class MarketplaceAgent:
 
             state["final_response"] = state.get("final_response", "") + match_msg
 
-            # Mise à jour AG-UI
+            # Mise à jour AG-UI / MCP-friendly dict
             if "agri_response" in state:
-                state["agri_response"].add_text(match_msg)
+                agri = state["agri_response"]
+                if isinstance(agri, dict):
+                    agri["text"] = agri.get("text", "") + match_msg
+                else:
+                    try:
+                        agri.add_text(match_msg)
+                    except Exception:
+                        pass
 
-    def _handle_a2a_broadcast(self, state):
+    def _handle_inter_agent_broadcast(self, state):
         product_name = state.get("parsed", {}).get("product", "")
         zone_id = state.get("zone_id")
         phone = state.get("user_phone", "")
         product_id = state.get("action_result", {}).get("product_id")
-        if self.a2a:
-            try:
-                offer_msg = A2AMessage(
-                    message_type=MessageType.BROADCAST,
-                    sender_id=f"agent_market_{phone}",
-                    intent="SELL_OFFER",
-                    zone=zone_id or "global",
-                    crop=product_name,
-                    payload={
-                        "product": product_name,
-                        "quantity": state.get("parsed", {}).get("quantity"),
-                        "price": state.get("parsed", {}).get("price"),
-                        "product_id": product_id,
-                        "seller_phone": phone
-                    }
-                )
-                topic = f"SELL_{product_name.upper()}_{zone_id}"
-                count = self.a2a.broadcast_message(offer_msg, topic=topic)
-                logger.info(f"📢 A2A Broadcast: Offre {product_name} diffusée à {count} agents.")
-            except Exception as e:
-                logger.warning(f"A2A Broadcast failed: {e}")
+        # Inter-agent broadcasting disabled at graph/node level. If needed, the
+        # orchestrator or dedicated agent will perform broadcasts.
+        logger.debug("Inter-agent broadcast skipped (node-level disabled) for product %s", product_name)
 
     # ════════════════════════════════════════════════════════════════
     # FALLBACK (sans LLM)

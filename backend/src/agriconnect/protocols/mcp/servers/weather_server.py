@@ -1,17 +1,44 @@
 """
-Agri-Weather MCP Server (Async).
+Agri-Weather MCP Server (FastMCP).
 Domain: Meteorological data, ET0 calculation, and Satellite NDVI signals.
+
+Tools:
+  - get_current_weather(location)                              → WeatherSnapshot
+  - compute_irrigation_needs(temperature_c, humidity_pct, …)   → ET0Payload
+  - get_crop_health_vitals(location)                           → SatellitePayload
 """
 
 from __future__ import annotations
+
 import logging
-import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
+
 from pydantic import BaseModel, Field
+from fastmcp import FastMCP, Context
 
-from .base import AsyncMCPServer
+logger = logging.getLogger("MCP.WeatherServer")
 
-logger = logging.getLogger("MCP.AgriWeatherServer")
+# ────────────────────── FastMCP instance ──────────────────────────────────
+
+mcp = FastMCP("AgriConnect Weather MCP Server")
+
+# ────────────────────── Lazy singleton ────────────────────────────────────
+
+_sentinelle_tool = None
+
+
+def _lazy_sentinelle():
+    """Load the SentinelleTool only when first needed (RAM saver)."""
+    global _sentinelle_tool
+    if _sentinelle_tool is None:
+        try:
+            from agriconnect.tools.sentinelle import SentinelleTool
+            _sentinelle_tool = SentinelleTool()
+            logger.info("SentinelleTool initialisé pour le serveur Weather.")
+        except Exception as exc:
+            logger.error("Échec de chargement de SentinelleTool: %s", exc)
+    return _sentinelle_tool
+
 
 # ────────────────────── Pydantic response models ──────────────────────────
 
@@ -24,6 +51,7 @@ class WeatherSnapshot(BaseModel):
     description: str
     source: str = "sentinelle"
 
+
 class ET0Payload(BaseModel):
     """Estimation de l'évapotranspiration de référence (FAO-56 simplifié)."""
     et0_mm: float
@@ -31,140 +59,163 @@ class ET0Payload(BaseModel):
     water_deficit_mm: float
     irrigation_needed: bool
 
+
 class SatellitePayload(BaseModel):
     location: str
     ndvi: Optional[float] = None
     soil_moisture_pct: Optional[float] = None
     anomaly_detected: bool = False
 
-# ────────────────────── Server ────────────────────────────────────────────
 
-class WeatherMCPServer(AsyncMCPServer):
-    """Serveur MCP pour la météo et les signaux agro-climatiques."""
+# ────────────────────── Tools ─────────────────────────────────────────────
+
+@mcp.tool()
+async def get_current_weather(location: str, ctx: Context) -> str:
+    """Obtient la météo actuelle pour une localisation précise.
+
+    Args:
+        location: Nom du village ou de la zone
+        ctx: MCP context for logging
+
+    Returns:
+        JSON string of the WeatherSnapshot
+    """
+    await ctx.info(f"Fetching weather for: {location}")
+    tool = _lazy_sentinelle()
+    raw = tool.fetch_weather(location) if tool else {}
+
+    snapshot = WeatherSnapshot(
+        location=location,
+        temperature_c=raw.get("temp", 30.0),
+        humidity_pct=raw.get("humidity", 45.0),
+        precip_mm=raw.get("precip", 0.0),
+        wind_kmh=raw.get("wind", 12.0),
+        description=raw.get("desc", "Ciel dégagé"),
+        source="API_Sentinelle_V2",
+    )
+    return snapshot.model_dump_json(indent=2)
+
+
+@mcp.tool()
+async def compute_irrigation_needs(
+    temperature_c: float,
+    humidity_pct: float,
+    wind_kmh: float = 10.0,
+    precip_mm: float = 0.0,
+    ctx: Context = None,
+) -> str:
+    """Calcule le besoin en eau (ET0) basé sur les conditions météo.
+
+    Utilise une version simplifiée de la formule de Hargreaves.
+
+    Args:
+        temperature_c: Température en degrés Celsius
+        humidity_pct: Humidité relative en pourcentage
+        wind_kmh: Vent en km/h (défaut 10)
+        precip_mm: Précipitations en mm (défaut 0)
+        ctx: MCP context for logging
+
+    Returns:
+        JSON string of the ET0Payload
+    """
+    if ctx:
+        await ctx.info(f"Computing ET0: temp={temperature_c}°C, humidity={humidity_pct}%")
+
+    et0 = (0.0023 * (temperature_c + 17.8) * (temperature_c ** 0.5) * 15) / 1.5
+    et0 = round(max(et0, 0.0), 2)
+    deficit = round(max(et0 - precip_mm, 0.0), 2)
+
+    payload = ET0Payload(
+        et0_mm=et0,
+        precip_mm=precip_mm,
+        water_deficit_mm=deficit,
+        irrigation_needed=deficit > 2.5,
+    )
+    return payload.model_dump_json(indent=2)
+
+
+@mcp.tool()
+async def get_crop_health_vitals(location: str, ctx: Context) -> str:
+    """Récupère l'indice NDVI et l'humidité du sol via satellite.
+
+    Args:
+        location: Nom du village ou de la zone
+        ctx: MCP context for logging
+
+    Returns:
+        JSON string of the SatellitePayload
+    """
+    await ctx.info(f"Fetching satellite data for: {location}")
+    tool = _lazy_sentinelle()
+    raw = tool.fetch_satellite(location) if tool else {}
+
+    payload = SatellitePayload(
+        location=location,
+        ndvi=raw.get("ndvi", 0.65),
+        soil_moisture_pct=raw.get("moisture", 22.0),
+        anomaly_detected=raw.get("anomaly", False),
+    )
+    return payload.model_dump_json(indent=2)
+
+
+# ────────────────────── Resources ─────────────────────────────────────────
+
+@mcp.resource("weather://status")
+async def weather_server_status() -> str:
+    """Health-check resource for the weather server."""
+    tool = _lazy_sentinelle()
+    return f'{{"status": "ok", "sentinelle_loaded": {str(bool(tool)).lower()}}}'
+
+
+# ────────────────────── Backward-compatible class wrapper ─────────────────
+
+class WeatherMCPServer:
+    """Thin compatibility wrapper so existing callers can use call_tool(name, args).
+
+    For new code prefer calling the FastMCP tool functions directly or
+    running the server via ``mcp.run()``.
+    """
 
     name = "weather"
 
-    def __init__(self, sentinelle_tool=None, **kwargs) -> None:
-        # Accept and ignore extra kwargs (e.g. llm_client) to remain flexible
-        # when servers are instantiated uniformly by the orchestrator.
-        self._sentinelle = sentinelle_tool
-        super().__init__()
+    def __init__(self, sentinelle_tool=None, **kwargs):
+        global _sentinelle_tool
+        if sentinelle_tool is not None:
+            _sentinelle_tool = sentinelle_tool
 
-    def _lazy_sentinelle(self):
-        """Charge le connecteur API météo/satellite seulement si nécessaire."""
-        if self._sentinelle is None:
-            try:
-                from agriconnect.tools.sentinelle import SentinelleTool
-                self._sentinelle = SentinelleTool()
-                logger.info("SentinelleTool initialisé pour le serveur Weather.")
-            except Exception as exc:
-                logger.error("Échec de chargement de SentinelleTool: %s", exc)
-        return self._sentinelle
+    @staticmethod
+    def list_tools():
+        return [
+            {"name": "get_current_weather", "description": "Obtient la météo actuelle pour une localisation précise."},
+            {"name": "compute_irrigation_needs", "description": "Calcule le besoin en eau (ET0) basé sur les conditions météo."},
+            {"name": "get_crop_health_vitals", "description": "Récupère l'indice NDVI et l'humidité du sol via satellite."},
+        ]
 
-    def _register_tools(self) -> None:
-        # --- Météo Temps Réel ---
-        self.register(
-            name="get_current_weather",
-            description="Obtient la météo actuelle pour une localisation précise.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string", "description": "Nom du village ou zone"}
-                },
-                "required": ["location"],
-            },
-            handler=self._get_current_weather,
-        )
+    @staticmethod
+    async def _dispatch(name: str, args: Dict[str, Any]) -> str:
+        handlers = {
+            "get_current_weather": get_current_weather,
+            "compute_irrigation_needs": compute_irrigation_needs,
+            "get_crop_health_vitals": get_crop_health_vitals,
+        }
+        fn = handlers.get(name)
+        if not fn:
+            raise ValueError(f"Unknown weather tool: {name}")
+        return await fn(**args)
 
-        # --- Calcul Agro-météo (ET0) ---
-        self.register(
-            name="compute_irrigation_needs",
-            description="Calcule le besoin en eau (ET0) basé sur les conditions météo.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "temperature_c": {"type": "number"},
-                    "humidity_pct": {"type": "number"},
-                    "wind_kmh": {"type": "number"},
-                    "precip_mm": {"type": "number", "default": 0},
-                },
-                "required": ["temperature_c", "humidity_pct"],
-            },
-            handler=self._compute_et0,
-        )
+    def call_tool_sync(self, name: str, arguments: dict) -> dict:
+        import asyncio, json
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        raw = loop.run_until_complete(self._dispatch(name, arguments))
+        return {"ok": True, "data": json.loads(raw) if isinstance(raw, str) else raw}
 
-        # --- Données Satellitaires ---
-        self.register(
-            name="get_crop_health_vitals",
-            description="Récupère l'indice NDVI et l'humidité du sol via satellite.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string"}
-                },
-                "required": ["location"],
-            },
-            handler=self._get_satellite_data,
-        )
 
-    # ── Handlers ──────────────────────────────────────────────────────────
-
-    async def _get_current_weather(self, args: Dict[str, Any]) -> WeatherSnapshot:
-        location = args["location"]
-        tool = self._lazy_sentinelle()
-        
-        # Simulation d'appel API via le tool Sentinelle
-        raw = tool.fetch_weather(location) if tool else {}
-        
-        return WeatherSnapshot(
-            location=location,
-            temperature_c=raw.get("temp", 30.0),
-            humidity_pct=raw.get("humidity", 45.0),
-            precip_mm=raw.get("precip", 0.0),
-            wind_kmh=raw.get("wind", 12.0),
-            description=raw.get("desc", "Ciel dégagé"),
-            source="API_Sentinelle_V2"
-        )
-
-    async def _compute_et0(self, args: Dict[str, Any]) -> ET0Payload:
-        """
-        Estimation simplifiée de l'ET0 (Penman-Monteith).
-        Utile pour dire à l'agriculteur s'il doit arroser aujourd'hui.
-        """
-        t = args["temperature_c"]
-        rh = args["humidity_pct"]
-        wind = args.get("wind_kmh", 10.0) / 3.6  # m/s
-        precip = args.get("precip_mm", 0.0)
-
-        # Calcul simplifié de l'évapotranspiration
-        # (Formule indicative pour l'exemple)
-        et0 = (0.0023 * (t + 17.8) * (t ** 0.5) * 15) / 1.5 # Hargreaves modifiée
-        et0 = round(max(et0, 0.0), 2)
-        deficit = round(max(et0 - precip, 0.0), 2)
-
-        return ET0Payload(
-            et0_mm=et0,
-            precip_mm=precip,
-            water_deficit_mm=deficit,
-            irrigation_needed=deficit > 2.5 # Seuil d'alerte
-        )
-
-    async def _get_satellite_data(self, args: Dict[str, Any]) -> SatellitePayload:
-        location = args["location"]
-        tool = self._lazy_sentinelle()
-        
-        # Appel simulé aux données Sentinelle-2
-        raw = tool.fetch_satellite(location) if tool else {}
-        
-        return SatellitePayload(
-            location=location,
-            ndvi=raw.get("ndvi", 0.65),
-            soil_moisture_pct=raw.get("moisture", 22.0),
-            anomaly_detected=raw.get("anomaly", False)
-        )
+# ────────────────────── Entry point ───────────────────────────────────────
 
 if __name__ == "__main__":
-    import asyncio
-    server = WeatherMCPServer()
-    print(f"🌦️ Serveur '{server.name}' prêt.")
-    print("Outils:", [t["name"] for t in server.list_tools()])
+    logger.info("Starting AgriConnect Weather MCP Server")
+    mcp.run()

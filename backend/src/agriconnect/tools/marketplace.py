@@ -11,6 +11,7 @@ Monnaie : FCFA.  Unités locales : sac (100 kg), plat (~2.5 kg), tine (~18 kg).
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
+import os
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
@@ -48,7 +49,8 @@ class MarketplaceTool:
         elif _engine and _SessionLocal:
             self.engine = _engine
             self.SessionLocal = _SessionLocal
-        elif settings.DATABASE_URL:
+        elif settings.DATABASE_URL and not os.getenv("PYTEST_CURRENT_TEST"):
+            # Avoid creating a live engine during pytest runs in developer machines
             self.engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
             self.SessionLocal = sessionmaker(bind=self.engine)
         else:

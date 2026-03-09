@@ -8,7 +8,12 @@ from .subvention import SubventionTool
 from .sentinelle import SentinelleTool
 from .shared_math import SahelianCropProfile, CropProfile, SoilType
 
+# v3 — Async tools (multi-schema)
+from .marketplace_v3 import MarketplaceToolV3
+from .intelligence import IntelligenceTool
+
 __all__ = [
+    # Legacy tools (per-agent)
     "HealthDoctorTool",
     "AgrimarketTool",
     "BurkinaCropTool",
@@ -19,5 +24,8 @@ __all__ = [
     "SentinelleTool",
     "SahelianCropProfile",
     "CropProfile",
-    "SoilType"
+    "SoilType",
+    # v3 — Async tools
+    "MarketplaceToolV3",
+    "IntelligenceTool",
 ]

@@ -92,7 +92,7 @@ def orchestrator(run_live):
     if not run_live:
         pytest.skip("Tests live désactivés (ajouter --run-live)")
     
-    from agriconnect.graphs.message_flow import MessageResponseFlow
+    from agriconnect.graphs.orchestrateur.message_flow import MessageResponseFlow
     return MessageResponseFlow()
 
 

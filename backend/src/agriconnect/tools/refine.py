@@ -124,16 +124,20 @@ class RefineTool:
         Détermine le chemin suivant l'analyse initiale.
         Fait office de tour de contrôle pour la sécurité et la pertinence.
         """
-        # 1. Vérification du domaine (Agriculture/Élevage)
+        # Prefer explicit relevance flag produced by analyzers
         if state.get("is_relevant") is False:
-            return "compose"  # Va direct à la réponse polie de refus
-            
-        # 2. Si tout est OK, on lance la recherche documentaire
+            return "compose"
+        if state.get("is_relevant") is True:
+            return "retrieve"
+
+        # Fallback to status-based check
+        if state.get("status") == "OFF_TOPIC":
+            return "compose"
         return "retrieve"
     
     def route_retrieval(self,state)-> str:
-        # Si on a trouvé du contexte, on va à la rédaction
-        if state.get("status") == "CONTEXT_FOUND":
+        # Si on a trouvé du contexte (divers noms possibles), on va à la rédaction
+        if state.get("status") in ("CONTEXT_FOUND", "CONTEXT_READY"):
             return "compose"
         # Si on a atteint le max de retries ou erreur, on rédige quand même (fallback)
         if state.get("status") in ["MAX_RETRIES", "ERROR"]:

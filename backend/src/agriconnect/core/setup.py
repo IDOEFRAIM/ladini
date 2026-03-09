@@ -12,7 +12,6 @@ from agriconnect.core.tracing import init_tracing
 from agriconnect.protocols.mcp import (
     MCPDatabaseServer, MCPRagServer, MCPWeatherServer, MCPContextServer
 )
-from agriconnect.protocols.a2a.discovery import A2ADiscovery
 from agriconnect.protocols.ag_ui import WhatsAppRenderer, WebRenderer, SMSRenderer
 
 # Mémoire 3 niveaux
@@ -38,8 +37,10 @@ class AgriContext:
         
         # Protocoles & Tracing
         self.mcp: Dict[str, Any] = {}
-        self.a2a: Optional[A2ADiscovery] = None
+        self.a2a: Optional[Any] = None
         self.renderers: Dict[str, Any] = {}
+        # MCP Shield (permission client) - injected by orchestrator when available
+        self.mcp_shield: Any = None
         self.tracing_enabled: bool = False
 
     def bootstrap(self):
@@ -83,30 +84,35 @@ class AgriContext:
     def _init_mcp_servers(self):
         """Initialise les serveurs MCP (Système de Tools)."""
         try:
+            # Use singleton getters to avoid repeated server initialisations
+            from agriconnect.protocols.mcp import (
+                get_mcp_db_server,
+                get_mcp_rag_server,
+                get_mcp_weather_server,
+                get_mcp_context_server,
+            )
+
             self.mcp = {
-                "db": MCPDatabaseServer(self.session_factory) if self.session_factory else None,
-                "rag": MCPRagServer(),
-                "weather": MCPWeatherServer(llm_client=self.llm),
-                "context": None
+                "db": get_mcp_db_server(self.session_factory) if self.session_factory else None,
+                "rag": get_mcp_rag_server(),
+                "weather": get_mcp_weather_server(llm_client=self.llm),
+                "context": None,
             }
-            # Initialisation du serveur de contexte (dépend de memory)
+
             if self.memory:
-                self.mcp["context"] = MCPContextServer(context_optimizer=self.memory)
+                self.mcp["context"] = get_mcp_context_server(context_optimizer=self.memory)
             elif self.session_factory:
-                self.mcp["context"] = MCPContextServer(session_factory=self.session_factory, llm_client=self.llm)
-            
-            logger.info("🔌 MCP Servers configurés")
+                self.mcp["context"] = get_mcp_context_server(session_factory=self.session_factory, llm_client=self.llm)
+
+            logger.info("🔌 MCP Servers configurés (singletons)")
         except Exception as e:
             logger.error(f"❌ Erreur MCP: {e}")
 
     def _init_a2a_discovery(self):
         """Initialise le protocole Agent-to-Agent."""
-        try:
-            self.a2a = A2ADiscovery()
-            self.a2a.register_internal_agents()
-            logger.info("📡 A2A Discovery activé")
-        except Exception as e:
-            logger.error(f"❌ Erreur A2A: {e}")
+        # A2A disabled to avoid agent-to-agent complexity for now.
+        self.a2a = None
+        logger.info("📡 A2A Discovery désactivé (mode simplifié)")
 
     def _init_renderers(self):
         """Initialise les moteurs de rendu AG-UI."""

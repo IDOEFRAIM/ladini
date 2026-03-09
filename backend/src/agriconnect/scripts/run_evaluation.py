@@ -99,7 +99,7 @@ def run_evaluation(
     Returns:
         Dict avec les résultats agrégés par catégorie.
     """
-    from agriconnect.graphs.message_flow import MessageResponseFlow
+    from agriconnect.graphs.orchestrateur.message_flow import MessageResponseFlow
 
     logger.info("🚀 Initialisation de l'orchestrateur...")
     orchestrator = MessageResponseFlow()

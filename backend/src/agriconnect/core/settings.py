@@ -19,7 +19,8 @@ class Settings(BaseSettings):
     # --- Paths ---
     BASE_DIR: Path = Path(__file__).resolve().parent.parent.parent
     AUDIO_OUTPUT_DIR: str = "./audio_output"
-
+    # Default to repository root `ca-certificate.crt` (developer-provided file)
+    DB_CA_PATH: str = str(BASE_DIR.parent.parent / "ca-certificate.crt")
     # --- API ---
     APP_NAME: str = "AgriConnect"
     APP_VERSION: str = "2.0.0"
@@ -39,8 +40,13 @@ class Settings(BaseSettings):
     @property
     def llm_api_key(self) -> str:
         """Retourne la clé API LLM disponible (Groq ou générique)."""
-        return self.AGRICONNECT_APIKEY or self.GROQ_API_KEY
-
+        # Prefer explicit project key, then provider-specific key, then environment
+        key = self.AGRICONNECT_APIKEY or self.GROQ_API_KEY
+        if not key:
+            # allow direct env override for interactive sessions
+            key = os.getenv("GROQ_API_KEY") or os.getenv("AGRICONNECT_APIKEY") or ""
+        return key
+        
     # --- Azure OpenAI (utilisé si LLM_PROVIDER=azure) ---
     AZURE_OPENAI_API_KEY: str = ""
     AZURE_OPENAI_ENDPOINT: str = ""
@@ -48,7 +54,8 @@ class Settings(BaseSettings):
     AZURE_OPENAI_API_VERSION: str = "2024-05-01-preview"
 
     # --- Database (PostgreSQL) ---
-    DATABASE_URL: str = "db_password"
+    DATABASE_URL: str = "postgresql://doadmin:AVNS_-TtxFZrkDLQSQ2W8UiX@db-postgresql-fra1-38999-do-user-31802282-0.a.db.ondigitalocean.com:25060/defaultdb?sslmode=require"
+
     # --- Redis / Celery ---
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = ""
@@ -106,8 +113,11 @@ class Settings(BaseSettings):
     RAG_EXPERT_RERANK_K: int = 8
     RAG_EXPERT_USE_HYDE: bool = True
 
-    # Pydantic Settings: utiliser le .env dans le package `agriconnect` (relatif au module)
-    env_path: ClassVar[Path] = Path(__file__).resolve().parent.parent / ".env"
+    # Pydantic Settings: prefer .env inside the package, but fall back to the
+    # repository root `.env` (e.g. backend/.env) to support developer workflows.
+    _pkg_env = Path(__file__).resolve().parent.parent / ".env"
+    _root_env = Path(__file__).resolve().parent.parent.parent.parent / ".env"
+    env_path: ClassVar[Path] = _pkg_env if _pkg_env.exists() else _root_env
     model_config = {
         "env_file": str(env_path),
         "env_file_encoding": "utf-8",

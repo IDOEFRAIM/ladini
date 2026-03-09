@@ -125,8 +125,7 @@ class FormationTool:
             f"QUESTION : {query}\n\n"
             
             "CONSIGNES DE GÉNÉRATION JSON :\n"
-            "1. is_relevant : (Boolean) True si la question concerne l'agriculture, l'élevage, la météo agricole ou la formation. False pour tout sujet hors-domaine (sport, politique, cuisine non-agricole, etc.).\n"
-            "2. rejection_reason : (String) Si is_relevant=False, explique poliment pourquoi tu ne peux pas répondre (en restant dans ton rôle d'expert agricole).\n"
+            "1. intent : Choisir parmi [FORMATION, URGENCE, CONSEIL].\n"
             "3. intent : Choisir parmi [FORMATION, URGENCE, CONSEIL].\n"
             "4. focus_topics : Liste de mots-clés optimisés pour une recherche sémantique (ex: 'entretien culture niébé', 'lutte chenilles').\n"
             "5. field_actions : Liste les catégories techniques à vérifier dans les documents (ex: 'densité de semis', 'dosage engrais'). Ne donne JAMAIS de chiffres ou de méthodes à ce stade.\n"
@@ -135,8 +134,6 @@ class FormationTool:
             
             "RÉPONDS UNIQUEMENT SOUS CE FORMAT JSON :\n"
             "{\n"
-            '  "is_relevant": true,\n'
-            '  "rejection_reason": "",\n'
             '  "intent": "...",\n'
             '  "focus_topics": [],\n'
             '  "field_actions": [],\n'
@@ -160,8 +157,6 @@ class FormationTool:
             
             analysis = json.loads(content)
             return {
-                "is_relevant": analysis.get("is_relevant", True), 
-                "rejection_reason": analysis.get("rejection_reason", ""),
                 "intent": analysis.get("intent", "FORMATION"),
                 "focus_topics": analysis.get("focus_topics", []),
                 "field_actions": analysis.get("field_actions", []),

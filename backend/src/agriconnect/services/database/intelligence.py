@@ -1,0 +1,102 @@
+from typing import Any, Dict, List, Optional
+from sqlalchemy import select, desc
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from .common import _uuid, AgentAction, Conversation, AuditLog, TrustScore, AIRatingReasoning, Anomaly, TerritoryEvent, ZoneMetric
+
+
+class IntelligenceMixin:
+    async def record_zone_metric(self, session: AsyncSession, zone_id: str, metric_name: str, value: float) -> Dict[str, Any]:
+        metric = ZoneMetric(id=_uuid(), zone_id=zone_id, metric_name=metric_name, value=value)
+        session.add(metric)
+        await session.flush()
+        return metric.to_dict()
+
+    async def log_conversation(self, session: AsyncSession, user_id: str, query: str, response: str, agent_type: str = None, crop: str = None, zone_id: str = None, mode: str = "text", audio_url: str = None, execution_path: list = None, confidence_score: float = None, tokens_used: int = 0, response_time_ms: int = None) -> str:
+        conv_id = _uuid()
+        conv = Conversation(id=conv_id, user_id=user_id, query=query, response=response, agent_type=agent_type, crop=crop, zone_id=zone_id, mode=mode, audio_url=audio_url, execution_path=execution_path, confidence_score=confidence_score, total_tokens_used=tokens_used, response_time_ms=response_time_ms)
+        session.add(conv)
+        await session.flush()
+        return conv_id
+
+    async def create_agent_action(self, session: AsyncSession, agent_name: str, action_type: str, payload: dict, user_id: str = None, priority: str = "MEDIUM", ai_reasoning: str = None, order_id: str = None) -> Dict[str, Any]:
+        action = AgentAction(id=_uuid(), agent_name=agent_name, action_type=action_type, payload=payload, user_id=user_id, priority=priority, ai_reasoning=ai_reasoning, order_id=order_id)
+        session.add(action)
+        await session.flush()
+        return action.to_dict()
+
+    async def get_pending_actions(self, session: AsyncSession, agent_name: str = None, limit: int = 20) -> List[Dict[str, Any]]:
+        stmt = select(AgentAction).where(AgentAction.status == "PENDING")
+        if agent_name:
+            stmt = stmt.where(AgentAction.agent_name == agent_name)
+        stmt = stmt.order_by(desc(AgentAction.created_at)).limit(limit)
+        result = await session.execute(stmt)
+        return [a.to_dict() for a in result.scalars()]
+
+    async def update_action_status(self, session: AsyncSession, action_id: str, new_status: str, admin_notes: str = None, validated_by_id: str = None) -> Optional[Dict[str, Any]]:
+        stmt = select(AgentAction).where(AgentAction.id == action_id)
+        result = await session.execute(stmt)
+        action = result.scalar_one_or_none()
+        if not action:
+            return None
+        action.status = new_status
+        if admin_notes:
+            action.admin_notes = admin_notes
+        if validated_by_id:
+            action.validated_by_id = validated_by_id
+        await session.flush()
+        return action.to_dict()
+
+    async def log_audit(self, session: AsyncSession, actor_id: str, action: str, entity_type: str, entity_id: str, old_value: dict = None, new_value: dict = None, ip_address: str = None) -> str:
+        log_id = _uuid()
+        log = AuditLog(id=log_id, actor_id=actor_id, action=action, entity_type=entity_type, entity_id=entity_id, old_value=old_value, new_value=new_value, ip_address=ip_address)
+        session.add(log)
+        await session.flush()
+        return log_id
+
+    async def get_trust_score(self, session: AsyncSession, user_id: str) -> Optional[Dict[str, Any]]:
+        stmt = select(TrustScore).where(TrustScore.user_id == user_id)
+        result = await session.execute(stmt)
+        ts = result.scalar_one_or_none()
+        return ts.to_dict() if ts else None
+
+    async def update_trust_score(self, session: AsyncSession, user_id: str, agent_name: str, justification: str, data_points: dict, reliability_delta: float = 0, quality_delta: float = 0, compliance_delta: float = 0, resilience_delta: float = 0) -> Dict[str, Any]:
+        stmt = select(TrustScore).where(TrustScore.user_id == user_id)
+        result = await session.execute(stmt)
+        ts = result.scalar_one_or_none()
+
+        if not ts:
+            ts = TrustScore(id=_uuid(), user_id=user_id, reliability_index=max(0, min(1, 0.5 + reliability_delta)), quality_index=max(0, min(1, 0.5 + quality_delta)), compliance_index=max(0, min(1, 0.5 + compliance_delta)), resilience_bonus=max(0, min(1, resilience_delta)))
+            session.add(ts)
+        else:
+            ts.reliability_index = max(0, min(1, ts.reliability_index + reliability_delta))
+            ts.quality_index = max(0, min(1, ts.quality_index + quality_delta))
+            ts.compliance_index = max(0, min(1, ts.compliance_index + compliance_delta))
+            ts.resilience_bonus = max(0, min(1, ts.resilience_bonus + resilience_delta))
+
+        ts.global_score = round(0.35 * ts.reliability_index + 0.30 * ts.quality_index + 0.25 * ts.compliance_index + 0.10 * ts.resilience_bonus, 3)
+
+        reasoning = AIRatingReasoning(id=_uuid(), trust_score_id=ts.id, agent_name=agent_name, justification=justification, data_points=data_points)
+        session.add(reasoning)
+        await session.flush()
+        return ts.to_dict()
+
+    async def report_anomaly(self, session: AsyncSession, zone_id: str, level: str, title: str, message: str = None, source: str = None, details: dict = None) -> Dict[str, Any]:
+        anomaly = Anomaly(id=_uuid(), zone_id=zone_id, level=level, title=title, message=message, source=source, details=details)
+        session.add(anomaly)
+        await session.flush()
+        return anomaly.to_dict()
+
+    async def get_active_anomalies(self, session: AsyncSession, zone_id: str = None, limit: int = 20) -> List[Dict[str, Any]]:
+        stmt = select(Anomaly).where(Anomaly.is_resolved.is_(False))
+        if zone_id:
+            stmt = stmt.where(Anomaly.zone_id == zone_id)
+        stmt = stmt.order_by(desc(Anomaly.created_at)).limit(limit)
+        result = await session.execute(stmt)
+        return [a.to_dict() for a in result.scalars()]
+
+    async def emit_territory_event(self, session: AsyncSession, zone_id: str, event_type: str, payload: dict = None, meta: dict = None) -> str:
+        event = TerritoryEvent(id=_uuid(), zone_id=zone_id, event_type=event_type, payload=payload, meta=meta)
+        session.add(event)
+        await session.flush()
+        return event.id

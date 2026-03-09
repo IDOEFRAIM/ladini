@@ -1,6 +1,7 @@
 import logging
 from typing import Any, Dict, Optional
 from agriconnect.services.db_handler import AgriDatabase
+from agriconnect.protocols.a2a.messaging import A2AMessage
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +38,18 @@ class AgriPersister:
     def _persist_conversation(self, state: Dict[str, Any], user_id: str) -> None:
         """Enregistre le log de chat standard."""
         try:
+            assistant_message = state.get("final_response") or "Pas de réponse générée."
+            # Normalize assistant_message: could be str, dict or A2AMessage
+            if isinstance(assistant_message, dict):
+                # prefer explicit 'response' key
+                assistant_message = assistant_message.get("response") or assistant_message.get("text") or str(assistant_message)
+            elif isinstance(assistant_message, A2AMessage):
+                assistant_message = assistant_message.payload.get("text") if isinstance(assistant_message.payload, dict) else str(assistant_message.payload)
+
             self.db.log_conversation(
                 user_id=user_id,
                 user_message=state.get("requete_utilisateur", "") or "",
-                assistant_message=state.get("final_response") or "Pas de réponse générée.",
+                assistant_message=assistant_message,
                 audio_url=state.get("audio_url"),
             )
         except Exception as e:
@@ -129,4 +138,14 @@ class AgriPersister:
 
     def _get_expert_text(self, state: Dict[str, Any], expert_name: str) -> str:
         """Utilitaire pour extraire la réponse d'un expert spécifique dans le state."""
-        return next((r["response"] for r in state.get("expert_responses", []) if r["expert"] == expert_name), "")
+        for r in state.get("expert_responses", []):
+            if r.get("expert") != expert_name:
+                continue
+            val = r.get("response")
+            # Normalize types
+            if isinstance(val, dict):
+                return val.get("response") or val.get("text") or str(val)
+            if isinstance(val, A2AMessage):
+                return val.payload.get("text") if isinstance(val.payload, dict) else str(val.payload)
+            return str(val or "")
+        return ""
