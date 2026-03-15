@@ -287,10 +287,21 @@ class AgriDBMCPServer:
             logger.info("AUDIT|%s", json.dumps(entry, ensure_ascii=False))
             # Persist to DB if runtime is ready
             if runtime.is_ready and hasattr(runtime.db, "log_conversation"):
+                # Use a deterministic UUID for system/audit events so the
+                # DB receives a valid UUID and records can be correlated.
+                try:
+                    import uuid
+
+                    system_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, "agriconnect.system"))
+                except Exception:
+                    import uuid as _uuid
+
+                    system_uuid = str(_uuid.uuid4())
+
                 await runtime.db.log_conversation(
-                    user_id="system",
-                    query_json=json.dumps({"tool": tool_name, "args_hash": args_hash}),
-                    response_json=json.dumps(entry),
+                    system_uuid,
+                    json.dumps({"tool": tool_name, "args_hash": args_hash}),
+                    json.dumps(entry),
                     agent_type="mcp_shield_audit",
                 )
         except Exception:

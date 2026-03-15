@@ -130,10 +130,13 @@ def init_experts(flow):
     shield = getattr(flow, "mcp_session", None)
 
     flow.sentinelle = ClimateSentinel(llm_client=flow.llm, mcp_session=shield)
+    # Pass the orchestrator session/permission manager (shield) to FormationCoach
+    # so it has the required Shield for MCP tool calls and auditing.
     flow.formation = FormationCoach(
         llm_client=flow.llm,
         mcp_rag=flow.mcp_rag,
         mcp_context=flow.mcp_context,
+        shield=shield,
     )
     # Market & Marketplace receive the Shield — NOT a raw MCP server
     flow.market = MarketCoach(llm_client=flow.llm, mcp_session=shield)

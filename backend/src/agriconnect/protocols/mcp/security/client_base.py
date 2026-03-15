@@ -23,6 +23,7 @@ import json
 import logging
 import re
 import time
+import uuid
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from pydantic import BaseModel, ValidationError, create_model
@@ -33,6 +34,7 @@ from .constants import (
     PermissionScope,
     RiskLevel,
 )
+from .mcp_registry import MCPToolRegistry, get_registry
 
 logger = logging.getLogger("MCP.Shield.Client")
 
@@ -97,6 +99,18 @@ class _SearchProductSchema(BaseModel):
     limit: int = 10
 
 
+class _RAGSearchSchema(BaseModel):
+    query: str
+    level: str = "debutant"
+    top_k: int = 4
+
+
+class _MemorySearchSchema(BaseModel):
+    user_id: str
+    query: str
+    top_k: int = 3
+
+
 _SCHEMA_REGISTRY.update({
     "get_user_profile":          _UserIdSchema,
     "get_user_by_phone":         _PhoneSchema,
@@ -106,6 +120,9 @@ _SCHEMA_REGISTRY.update({
     "get_farm_stocks":           _FarmIdSchema,
     "get_stocks":                _FarmIdSchema,
     "commit_staged_transaction": _TransactionIdSchema,
+    # RAG related tools
+    "search_agronomy_docs":      _RAGSearchSchema,
+    "search_past_interactions":  _MemorySearchSchema,
 })
 
 
@@ -165,12 +182,14 @@ class MCPPermissionClient:
         maintenance_mode: bool = False,
         hitl_callback: Optional[Callable[..., Coroutine[Any, Any, bool]]] = None,
         audit_sink: Optional[Callable[..., Coroutine[Any, Any, None]]] = None,
+        registry: Optional[MCPToolRegistry] = None,
     ) -> None:
         self._backend = backend
         self.session_id = session_id
         self.maintenance_mode = maintenance_mode
         self._hitl_callback = hitl_callback
         self._audit_sink = audit_sink
+        self._registry = registry or get_registry()
 
     # ────────────── Public API ────────────────────────────────────────────
 
@@ -189,9 +208,9 @@ class MCPPermissionClient:
         t0 = time.monotonic()
         args_hash = self._hash_args(arguments)
 
-        # 0. Fail-closed: reject tools not listed in the scope map
-        if tool_name not in TOOL_SCOPE_MAP:
-            reason = f"Tool '{tool_name}' not registered in TOOL_SCOPE_MAP — DENIED (fail-closed)."
+        # 0. Fail-closed: reject tools missing from the central registry
+        if not self._registry.has_tool(tool_name):
+            reason = f"Tool '{tool_name}' not registered in MCP registry — DENIED (fail-closed)."
             await self._emit_audit(tool_name, args_hash, "DENY", reason=reason, t0=t0)
             raise PermissionDenied(tool_name, reason)
 
@@ -248,11 +267,19 @@ class MCPPermissionClient:
 
         return masked_result
 
+    # Backwards-compatible alias expected by MCPSessionManager / Session API
+    async def execute(self, tool_name: str, arguments: Dict[str, Any] | None = None) -> Any:
+        """Compatibility shim: delegate to `call_tool`.
+
+        Some session helpers expect a host exposing `execute(tool, args)`;
+        historically hosts implemented that method. Provide a thin wrapper
+        to keep the surface stable.
+        """
+        return await self.call_tool(tool_name, arguments)
+
     def list_tools(self) -> list[dict]:
-        """Proxy to backend.list_tools() — safe, no permission check needed."""
-        if hasattr(self._backend, "list_tools"):
-            return self._backend.list_tools()
-        return []
+        """Return tools visible in the central registry."""
+        return self._registry.list_tools()
 
     # ────────────── Validation ────────────────────────────────────────────
 
@@ -276,9 +303,10 @@ class MCPPermissionClient:
 
     def _check_permission(self, tool_name: str, arguments: Dict[str, Any]) -> PermissionDecision:
         """Evaluate scope + risk and return a decision."""
-        scope = TOOL_SCOPE_MAP.get(tool_name, PermissionScope.DB_DATA_WRITE)
+        meta = self._registry.get_tool(tool_name)
+        scope = meta.scope if meta else TOOL_SCOPE_MAP.get(tool_name, PermissionScope.DB_DATA_WRITE)
         from .constants import TOOL_RISK_MAP
-        risk = TOOL_RISK_MAP.get(tool_name, RiskLevel.MEDIUM)
+        risk = meta.risk if meta else TOOL_RISK_MAP.get(tool_name, RiskLevel.MEDIUM)
 
         # Schema modify — always DENY unless maintenance mode
         if scope == PermissionScope.DB_SCHEMA_MODIFY:
@@ -363,15 +391,16 @@ class MCPPermissionClient:
         t0: Optional[float] = None,
         error: Optional[str] = None,
     ) -> None:
-        from .constants import TOOL_RISK_MAP
         duration_ms = round((time.monotonic() - t0) * 1000, 1) if t0 else None
-        risk = TOOL_RISK_MAP.get(tool_name, RiskLevel.MEDIUM)
+        meta = self._registry.get_tool(tool_name)
+        risk = meta.risk if meta else RiskLevel.MEDIUM
+        scope = meta.scope if meta else TOOL_SCOPE_MAP.get(tool_name, PermissionScope.DB_DATA_WRITE)
         entry = AuditEntry(
             timestamp=time.time(),
             session_id=self.session_id,
             tool_name=tool_name,
             arguments_hash=args_hash,
-            scope=TOOL_SCOPE_MAP.get(tool_name, PermissionScope.DB_DATA_WRITE).value,
+            scope=scope.value,
             risk=risk.value,
             decision=decision,
             reason=reason,
@@ -394,8 +423,17 @@ class MCPPermissionClient:
         # direct runtime.db logging only if backend doesn't support call_tool
         # or the routed call fails.
         try:
+            # Ensure we persist a valid UUID for `user_id` — map session ids
+            # (like 'test-session' or similar) to a generated UUID when needed.
+            try:
+                # Accept already-valid UUID strings
+                uuid.UUID(str(self.session_id))
+                user_uuid = str(self.session_id)
+            except Exception:
+                user_uuid = str(uuid.uuid4())
+
             payload = {
-                "user_id": self.session_id,
+                "user_id": user_uuid,
                 "query_json": json.dumps({"tool": tool_name, "args_hash": args_hash}),
                 "response_json": log_line,
                 "agent_type": "mcp_shield_audit",
@@ -413,11 +451,15 @@ class MCPPermissionClient:
             if not routed:
                 from agriconnect.protocols.mcp.infrastructure import runtime
                 if runtime.is_ready and hasattr(runtime.db, "log_conversation"):
+                    # AgriDatabaseService.log_conversation expects positional
+                    # args (user_id, query, response, ...) — avoid passing
+                    # the HTTP payload keys as unexpected keywords like
+                    # `query_json` / `response_json` which cause TypeError.
                     await runtime.db.log_conversation(
-                        user_id=payload["user_id"],
-                        query_json=payload["query_json"],
-                        response_json=payload["response_json"],
-                        agent_type=payload["agent_type"],
+                        payload["user_id"],
+                        payload["query_json"],
+                        payload["response_json"],
+                        payload.get("agent_type"),
                     )
         except Exception:
             logger.debug("DB audit persistence skipped (non-blocking)", exc_info=True)

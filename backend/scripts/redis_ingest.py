@@ -183,7 +183,18 @@ def ingest(items: List[Dict[str, Any]], store, dim: int = 384, batch_size: int =
                     arr = np.asarray(emb, dtype=np.float32)
                     b = arr.tobytes()
                     key = f"{ns}:doc:{doc_id}"
-                    mapping = {b"text": ch.encode("utf-8"), b"meta": json.dumps(meta).encode("utf-8"), b"vec": b}
+                    # When Redis client is configured with `decode_responses=True` and
+                    # encoding='latin-1' we must send text/meta as Python strings so the
+                    # client performs round-trip preserving raw bytes for the vector field.
+                    if client is not None and getattr(client, "decode_responses", False):
+                        vec_value = b.decode("latin-1")
+                        text_value = ch
+                        meta_value = json.dumps(meta, ensure_ascii=False)
+                    else:
+                        vec_value = b
+                        text_value = ch.encode("utf-8")
+                        meta_value = json.dumps(meta).encode("utf-8")
+                    mapping = {"text": text_value, "meta": meta_value, "vec": vec_value}
                     p.hset(key, mapping=mapping)
                     p.sadd(docs_key, doc_id)
                     ops += 1

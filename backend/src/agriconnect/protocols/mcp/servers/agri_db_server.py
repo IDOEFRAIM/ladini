@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import warnings
+import uuid
 from typing import Optional
 
 # ── Configuration de l'environnement ──────────────────────────────────────
@@ -40,11 +41,19 @@ def _fire_and_forget_log(user_id: Optional[str], query_json: str, response_json:
     async def _log_task():
         try:
             # Utilise l'instance db du runtime déjà initialisée
+            # Ensure user_id is a valid UUID string; generate placeholder
+            # UUID when the provided value is not valid.
+            try:
+                uuid.UUID(str(user_id))
+                user_uuid = str(user_id)
+            except Exception:
+                user_uuid = str(uuid.uuid4())
+
             await runtime.db.log_conversation(
-                user_id=user_id,
-                query_json=query_json,
-                response_json=response_json,
-                agent_type="agri_db_full_access"
+                user_uuid,
+                query_json,
+                response_json,
+                agent_type="agri_db_full_access",
             )
         except Exception:
             logger.debug("Échec discret du log auto (non-bloquant)")
@@ -63,7 +72,7 @@ def start_server():
     try:
         runtime.start()
         try:
-            mcp.run()
+            mcp.run(transport="sse",host="localhost", port=8003)
         finally:
             runtime.stop()
     except Exception as e:

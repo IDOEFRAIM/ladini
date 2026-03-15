@@ -4,8 +4,15 @@ import re
 from typing import Any, Dict, List, Optional, TypedDict
 from dataclasses import dataclass
 from langgraph.graph import END, StateGraph
+import inspect
+import asyncio
 
-from agriconnect.graphs.prompts import FORMATION_SYSTEM_TEMPLATE, FORMATION_USER_TEMPLATE, STYLE_GUIDANCE
+from agriconnect.graphs.prompts import (
+    FORMATION_SYSTEM_TEMPLATE,
+    FORMATION_SYSTEM_STRICT,
+    FORMATION_USER_TEMPLATE,
+    STYLE_GUIDANCE,
+)
 from agriconnect.protocols.mcp import MCPRagServer, MCPContextServer
 from agriconnect.tools.formation import FormationTool
 from agriconnect.tools.refine import RefineTool
@@ -57,6 +64,7 @@ class FormationConfig:
     llm_client: Any = None
     mcp_rag: Optional[MCPRagServer] = None
     mcp_context: Optional[MCPContextServer] = None
+    shield: Any = None
     retriever: Any = None
     evaluator: Any = None
 
@@ -79,6 +87,10 @@ class FormationCoach(BaseAgent):
 
         self.mcp_rag = cfg.mcp_rag
         self.mcp_context = cfg.mcp_context
+        # Shield is required for all MCP calls to enforce permissions/audit
+        self.shield = cfg.shield
+        if self.shield is None:
+            raise ValueError("FormationCoach requires a configured 'shield' in FormationConfig")
 
         self.model_planner = "llama-3.1-8b-instant"
         self.model_answer = "llama-3.3-70b-versatile"
@@ -208,12 +220,19 @@ class FormationCoach(BaseAgent):
             avg = 5
 
         if avg < 5:
-            warnings.append(f"Documents jugés peu fiables (score {avg}/10).")
-            return {"status": "NO_CONTEXT", "warnings": self._dedupe_warnings(warnings), "document_grade": avg}
+            warnings.append(f"Documents jugés peu fiables (score {avg}/10). -- passage en mode dégradé.")
+            # Instead of blocking, continue in degraded mode: allow composition
+            # but mark the state so generation is cautious about specifics.
+            return {
+                "status": "CONTEXT_DEGRADED",
+                "warnings": self._dedupe_warnings(warnings),
+                "document_grade": avg,
+                "degraded_mode": True,
+            }
 
         return {"status": "CONTEXT_READY", "warnings": self._dedupe_warnings(warnings), "document_grade": avg}
 
-    def retrieve_node(self, state: FormationAgentState) -> FormationAgentState:
+    async def retrieve_node(self, state: FormationAgentState) -> FormationAgentState:
         warnings = list(state.get("warnings", []))
         query = state.get("user_query", "").strip()
         if not query:
@@ -221,7 +240,7 @@ class FormationCoach(BaseAgent):
 
         profile = self._get_profile_for_retrieval(state)
         optimized_query = self._get_optimized_query(state, query, profile)
-        result = self._call_mcp_rag_and_parse(optimized_query, profile, warnings)
+        result = await self._call_mcp_rag_and_parse(optimized_query, profile, warnings)
 
         existing_sources = list(state.get("sources", []))
         new_sources = result.get("sources", []) or []
@@ -250,20 +269,81 @@ class FormationCoach(BaseAgent):
         norm_sources: List[Dict[str, Any]] = []
         for s in sources_raw or []:
             if isinstance(s, dict):
-                norm_sources.append({"title": s.get("source", s.get("title", "Doc")), "uri": s.get("uri")})
+                meta = s.get("metadata") if isinstance(s.get("metadata"), dict) else {}
+                # Prefer explicit uri/source fields, fallback to metadata.source/file_path
+                uri = s.get("uri") or s.get("source") or meta.get("source") or meta.get("file_path")
+
+                title = s.get("title") or meta.get("title") or meta.get("filename")
+                if not title or str(title).lower().startswith("document sans titre"):
+                    # Derive a readable title from available path-like fields
+                    candidate_path = uri or meta.get("file_path") or meta.get("source")
+                    try:
+                        import os as _os
+
+                        if candidate_path:
+                            title = _os.path.splitext(_os.path.basename(str(candidate_path)))[0]
+                    except Exception:
+                        title = title or "Document"
+
+                norm_sources.append({"title": title, "uri": uri or "db_interne"})
             else:
                 norm_sources.append({"title": str(s), "uri": None})
         return norm_sources
 
-    def _call_mcp_rag_and_parse(self, optimized_query: str, profile: Dict[str, Any], warnings: List[str]) -> FormationAgentState:
-        if not self.mcp_rag:
+    async def _call_mcp_rag_and_parse(self, optimized_query: str, profile: Dict[str, Any], warnings: List[str]) -> FormationAgentState:
+        if not getattr(self, "shield", None) and not getattr(self, "mcp_rag", None):
             warnings.append("MCP RAG Server manquant.")
             return {"status": "NO_CONTEXT", "warnings": warnings}
 
         try:
             search_level = profile.get("niveau", "debutant")
-            args = {"query": optimized_query, "level": search_level, "top_k": 4}
-            resp = self.mcp_rag.call_tool("search_agronomy_docs", args)
+            # Determine top_k adaptively: prefer explicit override in profile,
+            # else increase for queries mentioning large/complete calendars or similar.
+            try:
+                top_k = int(profile.get("search_top_k") or 0)
+            except Exception:
+                top_k = 0
+
+            if not top_k:
+                qlow = (optimized_query or "").lower()
+                if any(k in qlow for k in ("calend", "complet", "entier", "plan", "programme")):
+                    top_k = 8
+                else:
+                    # Default: balanced small set
+                    top_k = 4
+
+            args = {"query": optimized_query, "level": search_level, "top_k": top_k}
+
+            resp = None
+
+            # 1) Preferred path: Shield (ensures permission + audit)
+            shield = getattr(self, "shield", None)
+            if shield:
+                try:
+                    if hasattr(shield, "call_tool"):
+                        maybe = shield.call_tool("search_agronomy_docs", args)
+                    elif hasattr(shield, "call"):
+                        maybe = shield.call("search_agronomy_docs", args)
+                    else:
+                        maybe = shield("search_agronomy_docs", args)
+                    resp = await maybe if inspect.isawaitable(maybe) else maybe
+                except Exception as e:
+                    logger.debug("Shield call failed for search_agronomy_docs: %s", e)
+
+
+            # In production the Shield is mandatory: do NOT fallback to direct MCP clients.
+            if resp is None:
+                raise RuntimeError("Shield did not return a response for search_agronomy_docs; direct MCP calls are disallowed in production")
+
+            # Validate response shape early.
+            # Accepted shapes:
+            # 1) MCP envelope: {"status": "ok", "content": [{"text": "{...}"}]}
+            # 2) Direct payload: {"query": ..., "documents": [...], "context_text": ...}
+            if not resp:
+                logger.warning("MCP RAG returned no results or error: %s", resp)
+                warnings.append("Aucun document récupéré pour vérification.")
+                return {"status": "NO_CONTEXT", "warnings": warnings}
+
             parsed_context, parsed_sources = self._parse_mcp_response(resp)
             norm_sources = self._normalize_sources(parsed_sources)
             return {
@@ -273,13 +353,42 @@ class FormationCoach(BaseAgent):
                 "status": "CONTEXT_FOUND",
                 "warnings": warnings,
             }
+
         except Exception as e:
-            logger.error(f"MCP RAG Error: {e}")
+            logger.exception("MCP RAG Error: %s", e)
             warnings.append(f"Erreur MCP RAG: {e}")
             return {"status": "NO_CONTEXT", "warnings": warnings}
 
     def _parse_mcp_response(self, resp: Dict[str, Any]) -> tuple[str, List[Dict[str, Any]]]:
-        if not resp or resp.get("status") != "ok":
+        if not isinstance(resp, dict) or not resp:
+            raise ValueError("MCP response invalid")
+
+        def _assemble_context_from_docs(docs: List[Dict[str, Any]]) -> str:
+            parts: List[str] = []
+            for d in docs or []:
+                # try common fields for excerpt/text
+                text = d.get("text") or d.get("excerpt") or d.get("content") or d.get("body") or ""
+                meta = d.get("metadata") if isinstance(d.get("metadata"), dict) else {}
+                title = d.get("title") or meta.get("title") or meta.get("filename") or d.get("uri") or "Document"
+                header = f"Source: {title}"
+                if d.get("uri"):
+                    header += f" ({d.get('uri')})"
+                parts.append(header + "\n" + str(text))
+            # explicit delimiter between documents so the LLM can see boundaries
+            return "\n---\n".join(parts)
+
+        # Shape A: direct RAG payload returned by manager/server wrappers.
+        if "documents" in resp or "context_text" in resp:
+            if "error" in resp and not resp.get("documents"):
+                raise ValueError(f"MCP RAG error: {resp.get('error')}")
+            documents = resp.get("documents") or []
+            # prefer server-provided context_text but fall back to assembling from documents
+            context_text = str(resp.get("context_text") or _assemble_context_from_docs(documents) or "")
+            sources = documents
+            return context_text, sources
+
+        # Shape B: MCP envelope with content[0].text JSON payload.
+        if resp.get("status") != "ok":
             raise ValueError("MCP response invalid or error status")
 
         content_list = resp.get("content") or []
@@ -287,16 +396,20 @@ class FormationCoach(BaseAgent):
             raise ValueError("MCP response empty content")
 
         raw_text = content_list[0].get("text", "")
-        try:
-            parsed = json.loads(raw_text)
-        except Exception:
-            parsed = raw_text if isinstance(raw_text, dict) else {}
+        if isinstance(raw_text, dict):
+            parsed = raw_text
+        else:
+            try:
+                parsed = json.loads(raw_text)
+            except Exception:
+                parsed = {}
 
-        context_text = parsed.get("context") if isinstance(parsed, dict) else str(parsed)
-        sources = parsed.get("sources", []) if isinstance(parsed, dict) else []
+        documents = parsed.get("documents") or parsed.get("sources") or []
+        context_text = str(parsed.get("context") or parsed.get("context_text") or _assemble_context_from_docs(documents) or "")
+        sources = documents or []
         return context_text, sources
 
-    def compose_node(self, state: FormationAgentState) -> FormationAgentState:
+    async def compose_node(self, state: FormationAgentState) -> FormationAgentState:
         warnings = list(state.get("warnings", []))
         context = state.get("retrieved_context", "").strip()
         query = state.get("user_query", "").strip()
@@ -306,7 +419,7 @@ class FormationCoach(BaseAgent):
             return {"warnings": warnings, "status": "ERROR"}
 
         gen_ctx = GenerationContext(state=state, context=context, query=query, profile_text=profile_text, warnings=warnings)
-        final_answer, warnings = self._generate_final_answer(gen_ctx)
+        final_answer, warnings = await self._generate_final_answer(gen_ctx)
         agri_response = self._build_agri_response(final_answer, query, state)
 
         return {
@@ -317,7 +430,7 @@ class FormationCoach(BaseAgent):
             "status": "ANSWER_GENERATED",
         }
 
-    def _generate_final_answer(self, gen_ctx: GenerationContext):
+    async def _generate_final_answer(self, gen_ctx: GenerationContext):
         final_answer = "Réponse technique indisponible."
         state = gen_ctx.state
         context = gen_ctx.context
@@ -330,7 +443,9 @@ class FormationCoach(BaseAgent):
             style_guidance = STYLE_GUIDANCE.get(level, STYLE_GUIDANCE["default"])
 
             degraded = bool(state.get("degraded_mode", False))
-            base_system = FORMATION_SYSTEM_TEMPLATE.format(
+            # Prefer the strict system prompt when available to enforce scope
+            base_template = FORMATION_SYSTEM_STRICT if globals().get("FORMATION_SYSTEM_STRICT") else FORMATION_SYSTEM_TEMPLATE
+            base_system = base_template.format(
                 style_guidance=style_guidance,
                 culture_context=f"Culture: {profile.get('culture_actuelle', 'N/A')}"
             )
@@ -352,13 +467,14 @@ class FormationCoach(BaseAgent):
                 field_actions=field_actions_text,
             )
 
-            completion = self.llm.chat.completions.create(
+            maybe = self.llm.chat.completions.create(
                 model=self.model_answer,
                 messages=[{"role": "system", "content": system_content}, {"role": "user", "content": user_content}],
                 temperature=0.35,
                 max_tokens=900,
             )
-            final_answer = completion.choices[0].message.content
+            completion = await maybe if inspect.isawaitable(maybe) else maybe
+            final_answer = getattr(getattr(completion, "choices", [None])[0], "message", {}).content if completion and getattr(completion, "choices", None) else str(getattr(completion, "content", completion))
         except Exception as e:
             logger.error(f"LLM Error: {e}")
             final_answer = "Désolé, je rencontre une difficulté technique pour formuler le conseil."
@@ -380,6 +496,26 @@ class FormationCoach(BaseAgent):
             list_items = [{"id": "photo_upload", "label": "📷 Envoyer une photo"}, {"id": "call_expert", "label": "📞 Parler à un agent"}]
         else:
             list_items = [{"id": "more_details", "label": "🔍 Plus de détails"}, {"id": "related_topic", "label": "🌾 Sujet associé"}]
+
+        # Append a concise "Sources consultées" section to increase transparency
+        try:
+            srcs = state.get("sources") or []
+        except Exception:
+            srcs = []
+
+        if srcs:
+            sources_lines = ["\n\n📚 Sources consultées :"]
+            for s in srcs:
+                try:
+                    st = s.get("title") if isinstance(s, dict) else str(s)
+                    uri = s.get("uri") if isinstance(s, dict) else None
+                    if uri:
+                        sources_lines.append(f"- {st} ({uri})")
+                    else:
+                        sources_lines.append(f"- {st}")
+                except Exception:
+                    sources_lines.append(f"- {s}")
+            body = body + "\n" + "\n".join(sources_lines)
 
         resp = {"text": body, "agent": "formation", "actions": [], "cards": [{"title": title, "body": body}], "suggested": list_items}
         return resp
@@ -453,11 +589,141 @@ class FormationCoach(BaseAgent):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    agent = FormationCoach()
-    workflow = agent.build()
-    state = {
-        "user_query": "Que sais tu sur la saison culture au burkina?",
-        "learner_profile": {"niveau": "débutant", "région": "Boucle du Mouhoun"},
-    }
-    result = workflow.invoke(state)
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    # Try to resolve a real ShieldHub first for standalone execution.
+    # This keeps Shield-first behavior while avoiding hard failure when
+    # running this module directly from CLI.
+    real_shield = None
+    try:
+        from agriconnect.protocols.mcp.security.shield_hub import ShieldHub
+
+        real_shield = ShieldHub(session_id="formation_standalone")
+        logger.info("Using real ShieldHub for standalone run.")
+    except Exception as exc:
+        logger.info("Real ShieldHub unavailable in standalone mode: %s", exc)
+
+    # Allow a local mock shield for quick standalone testing by setting
+    # the environment variable `AGRICONNECT_ALLOW_MOCK_SHIELD=1`.
+    try:
+        import os
+
+        allow_mock = bool(os.environ.get("AGRICONNECT_ALLOW_MOCK_SHIELD"))
+    except Exception:
+        allow_mock = False
+
+    mock_shield = None
+    if allow_mock and real_shield is None:
+        try:
+            # Import the MCP helpers lazily to avoid import-time side effects
+            from agriconnect.protocols.mcp import get_mcp_rag_server, get_mcp_context_server
+
+            class _LocalMockShield:
+                def call_tool(self, name: str, args: dict):
+                    # For standalone testing we return a lightweight, deterministic
+                    # successful response for the RAG search tool to avoid heavy
+                    # model/index dependencies and event-loop juggling.
+                    if name == "search_agronomy_docs":
+                        sample_payload = {
+                            "status": "ok",
+                            "content": [
+                                {"text": json.dumps({"context": "Extrait contextuel simulé.", "sources": [{"title": "Guide local", "uri": "local://guide1"}]})}
+                            ],
+                        }
+                        return sample_payload
+
+                    # Otherwise, attempt to route to a local MCP RAG server if available.
+                    try:
+                        rag = get_mcp_rag_server()
+                        if hasattr(rag, "call_tool_sync"):
+                            return rag.call_tool_sync(name, args)
+                    except Exception:
+                        pass
+
+                    return {"ok": False, "error": "mock_shield call failed"}
+
+                # compatibility
+                def call(self, name: str, args: dict):
+                    return self.call_tool(name, args)
+
+            mock_shield = _LocalMockShield()
+            logger.info("Using local mock shield for standalone run.")
+        except Exception as exc:
+            logger.warning("Could not initialize mock shield: %s", exc)
+
+    try:
+        if real_shield is not None:
+            cfg = FormationConfig(shield=real_shield)
+            agent = FormationCoach(cfg)
+        elif mock_shield is not None:
+            cfg = FormationConfig(shield=mock_shield)
+            agent = FormationCoach(cfg)
+        else:
+            agent = FormationCoach()
+    except ValueError as exc:
+        logger.error("FormationCoach instantiation failed: %s", exc)
+        print(
+            "FormationCoach requires a configured 'shield' in FormationConfig.\n"
+            "Instantiate FormationCoach within the application where a Shield is available,\n"
+            "or set AGRICONNECT_ALLOW_MOCK_SHIELD=1 to run a local mock shield for testing.\n"
+            "Tip: prefer 'python -m agriconnect.graphs.nodes.formation' with PYTHONPATH=backend/src.",
+            flush=True,
+        )
+    else:
+        workflow = agent.build()
+        state = {
+            "user_query": "Que sais tu sur la saison culture au burkina?",
+            "learner_profile": {"niveau": "débutant", "région": "Boucle du Mouhoun"},
+        }
+
+        # For standalone/mock runs, avoid using the full StateGraph engine which
+        # can trigger recursion/async loop complexities. Instead, run a simple
+        # sequential pipeline: analyze -> retrieve -> compose.
+        if mock_shield:
+            try:
+                import asyncio
+                import inspect as _inspect
+
+                analyzed = agent.analyze_node(state)
+
+                if _inspect.iscoroutinefunction(agent.retrieve_node):
+                    retrieved = asyncio.run(agent.retrieve_node(analyzed))
+                else:
+                    retrieved = agent.retrieve_node(analyzed)
+
+                # Merge results into state for composition
+                merged_state = dict(state)
+                merged_state.update(analyzed or {})
+                merged_state.update(retrieved or {})
+
+                if _inspect.iscoroutinefunction(agent.compose_node):
+                    composed = asyncio.run(agent.compose_node(merged_state))
+                else:
+                    composed = agent.compose_node(merged_state)
+
+                final = dict(merged_state)
+                final.update(composed or {})
+                print(json.dumps(final, indent=2, ensure_ascii=False))
+            except Exception as exc:
+                logger.exception("Standalone run failed: %s", exc)
+                # As a last resort, try the compiled workflow invocation
+                try:
+                    import asyncio
+
+                    if hasattr(workflow, "ainvoke"):
+                        result = asyncio.run(workflow.ainvoke(state))
+                    else:
+                        result = workflow.invoke(state)
+                    print(json.dumps(result, indent=2, ensure_ascii=False))
+                except Exception as exc2:
+                    logger.exception("Fallback workflow invocation failed: %s", exc2)
+        else:
+            try:
+                import asyncio
+
+                if hasattr(workflow, "ainvoke"):
+                    result = asyncio.run(workflow.ainvoke(state))
+                else:
+                    result = workflow.invoke(state)
+            except Exception:
+                # Fallback to synchronous invoke when async invocation fails
+                result = workflow.invoke(state)
+            print(json.dumps(result, indent=2, ensure_ascii=False))

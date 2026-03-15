@@ -125,6 +125,25 @@ class Ingestor:
             nfd = unicodedata.normalize('NFD', text)
             return ''.join(c for c in nfd if not unicodedata.combining(c)).lower()
 
+        def _clean_excerpt(text: str) -> str:
+            if not text:
+                return ""
+            # remove JSON-like fragments (simple heuristic)
+            try:
+                text = re.sub(r"\{[^\}]{0,800}\}", " ", text)
+            except Exception:
+                pass
+            # remove URLs
+            text = re.sub(r"https?://\S+", " ", text)
+            # remove Windows-style absolute paths like C:\Users\... or C:/path
+            text = re.sub(r"[A-Za-z]:\\\\[^\s]{2,300}", " ", text)
+            text = re.sub(r"[A-Za-z]:/[^\s]{2,300}", " ", text)
+            # remove unix-like file paths ending with common extensions
+            text = re.sub(r"/[^\s]{3,300}\\.(?:pdf|txt|json)", " ", text)
+            # collapse whitespace and strip
+            text = re.sub(r"\s+", " ", text).strip()
+            return text
+
         for node in nodes:
             doc_type = node.metadata.get("doc_type", "inconnu")
             category = node.metadata.get("category", "général")
@@ -162,9 +181,22 @@ class Ingestor:
                 node.metadata["priority"] = "medium"
             else:
                 node.metadata["priority"] = "normal"
-            
-            # Modification du contenu pour l'embedding
-            node.text = header + node.get_content()
+
+                # Ensure canonical path/title/source metadata for downstream consumers
+                file_path = node.metadata.get("file_path") or node.metadata.get("file_path", None)
+                node.metadata["file_path"] = str(file_path) if file_path else node.metadata.get("file_path")
+                node.metadata["source"] = node.metadata.get("source") or node.metadata.get("file_path") or filename
+                # Derive a readable title from filename when absent
+                try:
+                    base = os.path.basename(filename)
+                    title = os.path.splitext(base)[0]
+                except Exception:
+                    title = filename
+                node.metadata["title"] = node.metadata.get("title") or title
+
+                # Clean the excerpt/text to remove extraction artifacts
+                cleaned = _clean_excerpt(node.get_content())
+                node.text = header + cleaned
             
         return nodes
     
@@ -199,7 +231,16 @@ class Ingestor:
             
             # Filtrage
             new_docs = [d for d in source_docs if d.id_ not in existing_doc_ids]
-            
+
+            # Force rebuild if environment requests it
+            try:
+                import os as _os
+                if _os.environ.get("AGRICONNECT_FORCE_REBUILD") == "1":
+                    logger.info("AGRICONNECT_FORCE_REBUILD=1 -> Forcing full reprocessing of source documents.")
+                    new_docs = source_docs
+            except Exception:
+                pass
+
             logger.info(f"Index FAISS chargé. {len(existing_doc_ids)} docs existants. {len(new_docs)} nouveaux à traiter.")
             
         except Exception as e:

@@ -72,6 +72,15 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "alter_table":               PermissionScope.DB_SCHEMA_MODIFY,
 }
 
+# RAG tools (semantic search) - treat as read-only for Shield decisions
+TOOL_SCOPE_MAP.update({
+    "search_agronomy_docs":     PermissionScope.DB_READ_ONLY,
+    "search_past_interactions": PermissionScope.DB_READ_ONLY,
+    "rag://status":             PermissionScope.DB_READ_ONLY,
+    # Persist helper used by Shield/agents to record audits
+    "persist_conversation":     PermissionScope.DB_DATA_WRITE,
+})
+
 
 # ────────────────────────────── Tool → Static Risk mapping ────────────────
 
@@ -102,6 +111,15 @@ TOOL_RISK_MAP: dict[str, RiskLevel] = {
     "drop_table":                RiskLevel.CRITICAL,
     "alter_table":               RiskLevel.CRITICAL,
 }
+
+# RAG tool risk defaults
+TOOL_RISK_MAP.update({
+    "search_agronomy_docs":     RiskLevel.LOW,
+    "search_past_interactions": RiskLevel.LOW,
+    "rag://status":             RiskLevel.LOW,
+    # Persists / audit helper
+    "persist_conversation":     RiskLevel.MEDIUM,
+})
 
 
 # ────────────────────────────── Sensitive Data ────────────────────────────

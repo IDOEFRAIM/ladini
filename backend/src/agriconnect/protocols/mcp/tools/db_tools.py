@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import csv
 from typing import Any, Dict, List, Optional
+import uuid
 
 from agriconnect.core.models import (
     GenericResult,
@@ -379,10 +380,20 @@ async def persist_conversation(user_id: str, query_json: str, response_json: str
     if db is None:
         return GenericResult(status="error", message="DB not initialized").model_dump_json()
     try:
+        # Normalize user_id to a valid UUID string for DB insertion. If the
+        # provided `user_id` is not a valid UUID, generate a placeholder.
+        try:
+            uuid.UUID(str(user_id))
+            user_uuid = str(user_id)
+        except Exception:
+            user_uuid = str(uuid.uuid4())
+
+        # AgriDatabaseService.log_conversation expects positional args
+        # (user_id, query, response, agent_type, ...).
         raw = await db.log_conversation(
-            user_id=user_id,
-            query_json=query_json,
-            response_json=response_json,
+            user_uuid,
+            query_json,
+            response_json,
             agent_type=agent_type,
         )
         return GenericResult(status="ok", data=raw).model_dump_json()

@@ -48,8 +48,8 @@ class User(Base):
 
     id = Column(String, primary_key=True)
     name = Column(String)
-    email = Column(String, unique=True)
-    email_verified = Column("emailVerified", DateTime(timezone=True))
+    # Note: `email` and `emailVerified` may not exist in the Prisma-managed schema.
+    # We keep the model minimal to avoid ORM selecting absent columns.
     image = Column(String)
     password = Column(String)
     phone = Column(String, unique=True)
@@ -78,7 +78,6 @@ class User(Base):
             "id": self.id,
             "phone": self.phone,
             "name": self.name,
-            "email": self.email,
             "role": self.role,
             "zone_id": self.zone_id,
         }

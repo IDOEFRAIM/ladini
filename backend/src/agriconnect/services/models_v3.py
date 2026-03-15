@@ -563,6 +563,74 @@ class Expense(Base):
         }
 
 
+# Inventory / Seed allocations (added to align with frontend Drizzle schema)
+class SeedAllocation(Base):
+    __tablename__ = "seed_allocations"
+    __table_args__ = {"schema": "marketplace"}
+
+    id = Column(Uuid(as_uuid=False), primary_key=True)
+    organization_id = Column("organization_id", Uuid(as_uuid=False), ForeignKey("governance.organizations.id"), nullable=False)
+    zone_id = Column("zone_id", Uuid(as_uuid=False), ForeignKey("governance.zones.id"), nullable=False)
+    seed_type = Column("seed_type", String, nullable=False)
+    total_quantity = Column("total_quantity", Integer, nullable=False)
+    remaining_quantity = Column("remaining_quantity", Integer, nullable=False)
+    unit = Column(String, default="KG", nullable=False)
+    allocated_by_id = Column("allocated_by_id", Uuid(as_uuid=False), ForeignKey("auth.users.id"))
+    created_at = Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    organization = relationship("Organization")
+    zone = relationship("Zone")
+    distributions = relationship("SeedDistribution", back_populates="allocation")
+
+
+class SeedDistribution(Base):
+    __tablename__ = "seed_distributions"
+    __table_args__ = {"schema": "marketplace"}
+
+    id = Column(Uuid(as_uuid=False), primary_key=True)
+    allocation_id = Column("allocation_id", Uuid(as_uuid=False), ForeignKey("marketplace.seed_allocations.id"), nullable=False)
+    producer_id = Column("producer_id", Uuid(as_uuid=False), ForeignKey("marketplace.producers.id"), nullable=False)
+    agent_id = Column("agent_id", Uuid(as_uuid=False), ForeignKey("auth.users.id"), nullable=False)
+    organization_id = Column("organization_id", Uuid(as_uuid=False), ForeignKey("governance.organizations.id"), nullable=False)
+    zone_id = Column("zone_id", Uuid(as_uuid=False), ForeignKey("governance.zones.id"), nullable=False)
+    quantity = Column("quantity", Integer, nullable=False)
+    cnib_provided = Column("cnib_provided", String)
+    verification_code_hash = Column("verification_code_hash", String)
+    verification_code_expires_at = Column("verification_code_expires_at", DateTime(timezone=True))
+    verification_channel = Column("verification_channel", String, default="IN_APP")
+    attempts_count = Column("attempts_count", Integer, default=0, nullable=False)
+    status = Column(String, default="PENDING", nullable=False)
+    receipt_at = Column("receipt_at", DateTime(timezone=True))
+    metadata_ = Column("metadata", JSON)
+    created_at = Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    allocation = relationship("SeedAllocation", back_populates="distributions")
+    producer = relationship("Producer")
+    agent = relationship("User")
+    organization = relationship("Organization")
+    zone = relationship("Zone")
+    attempts = relationship("SeedDistributionAttempt", back_populates="distribution")
+
+
+class SeedDistributionAttempt(Base):
+    __tablename__ = "seed_distribution_attempts"
+    __table_args__ = {"schema": "marketplace"}
+
+    id = Column(Uuid(as_uuid=False), primary_key=True)
+    distribution_id = Column("distribution_id", Uuid(as_uuid=False), ForeignKey("marketplace.seed_distributions.id"), nullable=False)
+    actor_id = Column("actor_id", Uuid(as_uuid=False), ForeignKey("auth.users.id"))
+    attempt_type = Column("attempt_type", String)
+    success = Column(Boolean, default=False, nullable=False)
+    ip_address = Column("ip_address", String)
+    metadata_ = Column("metadata", JSON)
+    created_at = Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    distribution = relationship("SeedDistribution", back_populates="attempts")
+    actor = relationship("User")
+
+
 class Product(Base):
     __tablename__ = "products"
     __table_args__ = (

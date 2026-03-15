@@ -18,7 +18,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends, Request
 from fastapi.responses import FileResponse
 
 from agriconnect.core.database import check_connection
@@ -27,6 +27,11 @@ from agriconnect.workers.tasks.ai import generate_response
 from agriconnect.core.settings import settings
 from agriconnect.graphs.state import GlobalAgriState
 from .schemas import UserRequest, SuccessResponse, AsyncQueuedResponse, TaskStatusResponse
+from fastapi import Body
+
+# MCP ShieldHub / Bridge
+from agriconnect.protocols.mcp.security.shield_hub import ShieldHub
+
 
 logger = logging.getLogger("AgriConnect.API")
 
@@ -66,6 +71,27 @@ def get_orchestrator():
     if orch is None:
         raise HTTPException(status_code=503, detail="Orchestrator unavailable. Retrying on next request.")
     return orch
+
+
+# ── ShieldHub singleton (lazy, thread-safe) ─────────────────────────────
+_shield_instances = {}
+_shield_lock = threading.Lock()
+
+
+def _get_shield(session_id: str = "web_user"):
+    """Instantiate a single ShieldHub for the app. Session_id is a default
+    placeholder; callers may override by passing X-Session-Id header.
+    """
+    global _shield_instances
+    if session_id in _shield_instances:
+        return _shield_instances[session_id]
+    with _shield_lock:
+        if session_id in _shield_instances:
+            return _shield_instances[session_id]
+        _shield_instances[session_id] = ShieldHub(session_id=session_id)
+        logger.info("ShieldHub initialized for session=%s", session_id)
+        return _shield_instances[session_id]
+
 
 
 # ── Helpers ──
@@ -349,3 +375,38 @@ def root():
         "status": "running",
         "docs": "/docs",
     }
+
+
+# ── MCP Bridge endpoints (ShieldHub) ───────────────────────────────────
+@router.post("/api/v1/mcp/call")
+async def mcp_call(request: Request, payload: dict = Body(...)):
+    """Call an MCP tool via ShieldHub. Payload: {"tool": str, "args": dict}.
+
+    Optional header `X-Session-Id` overrides the default session id used
+    when instantiating the ShieldHub (useful for per-user isolation).
+    """
+    tool = payload.get("tool")
+    args = payload.get("args") or {}
+    if not tool:
+        raise HTTPException(status_code=400, detail="Missing 'tool' in payload")
+
+    session_id = request.headers.get("X-Session-Id") or "web_user"
+    shield = _get_shield(session_id=session_id)
+    try:
+        result = await shield.call(tool, args)
+        return {"ok": True, "tool": tool, "result": result}
+    except Exception as e:
+        logger.exception("MCP call failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"MCP call error for '{tool}': {e}")
+
+
+@router.get("/api/v1/mcp/tools")
+async def mcp_list_tools():
+    """Return list of tools visible through the ShieldHub (RAG + DB)."""
+    shield = _get_shield()
+    try:
+        tools = await shield.list_tools()
+        return {"ok": True, **tools}
+    except Exception as e:
+        logger.exception("List tools failed: %s", e)
+        raise HTTPException(status_code=500, detail="Could not list tools")

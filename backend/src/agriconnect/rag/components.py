@@ -56,14 +56,27 @@ try:
                     from agriconnect.rag.redis_search_store import RedisSearchVectorStore
 
                     logger.info("Initializing RedisSearchVectorStore (RAG) from REDIS_URL")
-                    return RedisSearchVectorStore(app_settings.REDIS_URL, dim=EMBEDDING_DIM)
+                    return RedisSearchVectorStore(
+                        app_settings.REDIS_URL,
+                        dim=EMBEDDING_DIM,
+                        index_name="rag:idx",
+                        socket_timeout=20,
+                        retry_on_timeout=True,
+                        decode_responses=True,
+                    )
                 except Exception:
                     # Fallback to simple Redis vector store
                     try:
                         from agriconnect.rag.redis_store import RedisVectorStore
 
                         logger.info("Initializing RedisVectorStore (RAG) from REDIS_URL")
-                        return RedisVectorStore(app_settings.REDIS_URL, dim=EMBEDDING_DIM)
+                        return RedisVectorStore(
+                            app_settings.REDIS_URL,
+                            dim=EMBEDDING_DIM,
+                            socket_timeout=20,
+                            retry_on_timeout=True,
+                            decode_responses=True,
+                        )
                     except Exception as re:
                         logger.warning("RedisVectorStore init failed, falling back to FAISS: %s", re)
         except Exception:

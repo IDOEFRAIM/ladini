@@ -180,10 +180,11 @@ class Router:
             "   - 'SOLO' : Un seul expert peut répondre.\n"
             "   - 'COUNCIL' : Plusieurs experts requis (ex: market + marketplace).\n"
             "   - 'REJECT' : Hors-sujet ou arnaque.\n\n"
+            "IMPORTANT: Inclus un champ 'confidence_score' numérique entre 0.0 et 1.0 indiquant la confiance de la décision.\n"
             "Réponds uniquement par un JSON strict, sans explication, sans phrase d'intro ni excuse.\n"
             '{"intent": "REJECT"|"CHAT"|"SOLO"|"COUNCIL", '
             '"selected_experts": ["nom_expert_1", "nom_expert_2"], '
-            '"reason": "si reject"}'
+            '"confidence_score": 0.0, "reason": "si reject"}'
         )
 
         try:
@@ -198,6 +199,21 @@ class Router:
             raw = response.choices[0].message.content if response.choices else str(response)
             logger.info("LLM raw routing response: %s", raw)
             analysis = json.loads(raw)
+            # Ensure confidence_score exists and is numeric; provide reasonable
+            # fallbacks when the model omitted it.
+            try:
+                analysis_conf = float(analysis.get("confidence_score", None))
+            except Exception:
+                analysis_conf = None
+            if analysis_conf is None:
+                # Infer confidence: if the model selected experts or clearly
+                # set an intent, assume high confidence; otherwise low.
+                if (analysis.get("selected_experts") or []) or (analysis.get("intent") or "").upper() == "CHAT":
+                    analysis_conf = 0.85
+                else:
+                    analysis_conf = 0.0
+            # clamp
+            analysis["confidence_score"] = max(0.0, min(1.0, float(analysis_conf)))
             sel = analysis.get("selected_experts") or []
             # If the LLM provided a textual reason mentioning an expert
             # (e.g. "formation_coach") but did not populate
@@ -272,10 +288,12 @@ class Router:
                 else:
                     analysis["selected_experts"] = ["dev_stub"] if settings.DEBUG else ["sentinelle"]
 
-            return {"needs": analysis, "execution_path": ["analyze"]}
+            # Return the analysis dict directly (caller expects a plain
+            # analysis object with keys: intent, selected_experts, confidence_score)
+            return analysis
         except Exception as e:
             logger.exception("Routing Error while analyzing needs: %s", e)
-            return {"needs": {"intent": "REJECT", "reason": "error"}, "execution_path": ["error"]}
+            return {"intent": "REJECT", "selected_experts": [], "confidence_score": 0.0, "reason": "error"}
 
     def _check_multi_need_flags(self, needs: Dict[str, Any]) -> str:
         need_flags = [bool(needs.get(k)) for k in ("needs_formation", "needs_sentinelle", "needs_market", "needs_marketplace")]

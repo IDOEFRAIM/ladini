@@ -14,6 +14,9 @@ from .constants import PermissionScope, RiskLevel
 from .client_base import MCPPermissionClient
 from .host_app import MCPPermissionHostApp
 from .client_app import MCPSessionManager
+from .mcp_manager import MCPManager
+from .mcp_registry import MCPToolRegistry, get_registry
+from .schemas import MCPServerKind, MCPToolMeta
 
 __all__ = [
     "PermissionScope",
@@ -21,4 +24,9 @@ __all__ = [
     "MCPPermissionClient",
     "MCPPermissionHostApp",
     "MCPSessionManager",
+    "MCPManager",
+    "MCPToolRegistry",
+    "get_registry",
+    "MCPServerKind",
+    "MCPToolMeta",
 ]

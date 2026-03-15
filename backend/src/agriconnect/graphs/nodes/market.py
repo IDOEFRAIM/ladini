@@ -274,7 +274,34 @@ class MarketCoach(BaseAgent):
 
     def _serialize_stocks(self, stocks: List[Any]) -> List[Dict[str, Any]]:
         """Convert stocks to serializable format."""
-        return [s.dict() if hasattr(s, "dict") else s for s in stocks]
+        out: List[Dict[str, Any]] = []
+        for s in stocks:
+            if hasattr(s, "model_dump"):
+                try:
+                    out.append(s.model_dump())
+                    continue
+                except Exception:
+                    pass
+            if hasattr(s, "dict"):
+                try:
+                    out.append(s.dict())
+                    continue
+                except Exception:
+                    pass
+            if hasattr(s, "to_dict"):
+                try:
+                    out.append(s.to_dict())
+                    continue
+                except Exception:
+                    pass
+            if isinstance(s, dict):
+                out.append(s)
+            else:
+                try:
+                    out.append(vars(s))
+                except Exception:
+                    out.append({"repr": str(s)})
+        return out
 
     async def _handle_user_stock_retrieval(self, state: MarketAgentState, product: str) -> Dict[str, Any]:
         """Retrieve user stock via MCP Shield (permission-checked, masked)."""

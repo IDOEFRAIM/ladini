@@ -46,6 +46,8 @@ class AgriContext:
     def bootstrap(self):
         """Lance l'initialisation dans l'ordre de dépendance strict."""
         self._init_tracing()
+        # Initialise DB and memory first so MCP DB server can reuse
+        # the created session factory if available, then initialise MCPs.
         self._init_db_and_memory()
         self._init_mcp_servers()
         self._init_a2a_discovery()
@@ -92,17 +94,49 @@ class AgriContext:
                 get_mcp_context_server,
             )
 
+            # Attempt to instantiate MCP DB server. Prefer passing the
+            # session_factory when available, but fall back to a no-arg
+            # constructor if the first attempt returns None.
+            try:
+                logger.debug("MCPDatabaseServer class: %r", MCPDatabaseServer)
+                db_server = get_mcp_db_server(self.session_factory) if self.session_factory else get_mcp_db_server()
+                if db_server is None and self.session_factory:
+                    db_server = get_mcp_db_server()
+            except Exception:
+                db_server = None
+
             self.mcp = {
-                "db": get_mcp_db_server(self.session_factory) if self.session_factory else None,
+                "db": db_server,
                 "rag": get_mcp_rag_server(),
                 "weather": get_mcp_weather_server(llm_client=self.llm),
                 "context": None,
             }
+            # As a last resort, instantiate the infrastructure wrapper
+            # directly so the app has an MCP DB facade available.
+            if self.mcp.get("db") is None:
+                try:
+                    from agriconnect.protocols.mcp.infrastructure import AgriDBMCPServer
+
+                    self.mcp["db"] = AgriDBMCPServer()
+                    logger.debug("Instantiated AgriDBMCPServer fallback: %r", self.mcp.get("db"))
+                except Exception:
+                    logger.debug("No MCP DB server available; continuing with local DB")
+            logger.debug("MCP DB server object: %r", self.mcp.get("db"))
 
             if self.memory:
                 self.mcp["context"] = get_mcp_context_server(context_optimizer=self.memory)
             elif self.session_factory:
                 self.mcp["context"] = get_mcp_context_server(session_factory=self.session_factory, llm_client=self.llm)
+
+            # Expose the MCP DB server as `mcp_db` for tool/shield usage but
+            # keep `self.db` pointing to the local AgriDatabase instance to
+            # preserve synchronous persistence APIs used elsewhere.
+            if self.mcp.get("db"):
+                try:
+                    setattr(self, "mcp_db", self.mcp["db"])
+                    logger.debug("MCP DB facade attached on AgriContext.mcp_db")
+                except Exception:
+                    logger.exception("Échec de l'attachement du serveur MCP DB facade")
 
             logger.info("🔌 MCP Servers configurés (singletons)")
         except Exception as e:

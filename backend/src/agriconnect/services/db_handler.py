@@ -150,11 +150,22 @@ class AgriDatabase:
     
     def get_user_by_phone(self, phone: str) -> Optional[Dict[str, Any]]:
         with self._get_session() as session:
-            user = session.query(User).filter(User.phone == phone).first()
-            if user is None:
-                return None
-            return {"id": user.id, "phone": user.phone, "name": user.name,
-                    "zone_id": user.zone_id, "role": user.role}
+            # Select explicit minimal columns to avoid ORM selecting missing columns
+            try:
+                row = session.execute(
+                    text("SELECT id, name, phone, zone_id, role FROM users WHERE phone = :phone LIMIT 1"),
+                    {"phone": phone}
+                ).fetchone()
+                if not row:
+                    return None
+                return {"id": row[0], "name": row[1], "phone": row[2], "zone_id": row[3], "role": row[4]}
+            except Exception:
+                # Fallback to ORM in rare cases
+                user = session.query(User).filter(User.phone == phone).first()
+                if user is None:
+                    return None
+                return {"id": user.id, "phone": user.phone, "name": user.name,
+                        "zone_id": user.zone_id, "role": user.role}
 
     def onboard_user(self, phone: str, name: str, zone_id: str, lang: str = "fr") -> Dict[str, Any]:
         with self._get_session() as session:
@@ -166,25 +177,12 @@ class AgriDatabase:
                 zone_id=zone_id,
             )
             session.add(user)
-            return {"id": user_id, "phone": phone, "name": name,
-                    "zone_id": zone_id}
-
-    # --- LOGIQUE ALERTES (Sentinelle) ---
-
-    def create_alert(self, alert_type: str, severity: str, message: str, zone_id: str) -> Dict[str, Any]:
-        with self._get_session() as session:
-            alert_id = str(uuid.uuid4())
-            alert = Alert(
-                id=alert_id,
-                type=alert_type,
-                severity=severity,
-                message=message,
-                zone_id=zone_id,
-                processed=False
-            )
-            session.add(alert)
-            return {"id": alert_id, "type": alert_type, "severity": severity,
-                    "message": message, "zone_id": zone_id}
+            try:
+                session.flush()
+            except Exception:
+                # If flush fails, roll back will be handled by context manager
+                pass
+            return {"id": user_id, "phone": phone, "name": name, "zone_id": zone_id}
 
     def get_pending_alerts(self, zone_id: Optional[str] = None) -> List[Dict[str, Any]]:
         with self._get_session() as session:
@@ -249,19 +247,122 @@ class AgriDatabase:
         session: Session = self.SessionLocal()
         conv_id = str(uuid.uuid4())
         try:
+            # Normalize user_id: ensure we use a valid UUID for DB UUID columns.
+            user_id_for_db = user_id
+            try:
+                uuid.UUID(str(user_id))
+            except Exception:
+                generated = str(uuid.uuid4())
+                logger.warning("Non-UUID user_id passed to log_conversation (%s). Using generated id %s", user_id, generated)
+                user_id_for_db = generated
             # Ensure the referenced user exists (create lightweight placeholder if needed)
-            user = session.query(User).filter(User.id == user_id).first()
-            if user is None:
+            # Use a lightweight SQL check to avoid referencing model columns that may
+            # not exist in the underlying Prisma-managed DB (avoids UndefinedColumn errors).
+            try:
+                exists = session.execute(
+                    text("SELECT id FROM users WHERE id = :id LIMIT 1"), {"id": user_id_for_db}
+                ).fetchone()
+            except Exception:
+                # Fallback to ORM query if the simple text query fails for any reason
+                exists = session.query(User.id).filter(User.id == user_id_for_db).first()
+
+            if not exists:
                 try:
-                    placeholder = User(id=user_id, name=("Anonymous" if user_id == "anonymous" else "User"))
-                    session.add(placeholder)
-                    session.flush()
-                    logger.info("Created placeholder user for id=%s", user_id)
+                    # Use a raw INSERT with minimal columns to avoid failures when
+                    # the underlying Prisma-managed `users` table is missing
+                    # optional columns (e.g. `image`, `email_verified`). This
+                    # prevents SQLAlchemy ORM from generating INSERTs that refer
+                    # to columns absent in the DB schema.
+                    # Inspect available columns on the `users` table so we only
+                    # INSERT into columns that actually exist in the DB. This
+                    # tolerates differences between Prisma-managed schemas
+                    # (camelCase) and our SQLAlchemy models (snake_case).
+                    cols = session.execute(
+                        text("SELECT column_name FROM information_schema.columns WHERE table_name = 'users'"),
+                    ).fetchall()
+                    col_set = {c[0] for c in cols} if cols else set()
+
+                    # Candidate mappings from logical field -> possible DB column names
+                    # Limit to a minimal safe set of columns to maximize
+                    # chance of compatibility with Prisma-managed schemas.
+                    candidates = {
+                        "id": ["id"],
+                        "name": ["name"],
+                        "role": ["role"],
+                        "created_at": ["created_at", "createdAt"],
+                        "updated_at": ["updated_at", "updatedAt"],
+                    }
+
+                    insert_cols = []
+                    insert_params = {}
+                    now = datetime.utcnow()
+
+                    for logical, options in candidates.items():
+                        for opt in options:
+                            if opt in col_set:
+                                insert_cols.append(opt)
+                                if logical == "id":
+                                    insert_params[opt] = user_id_for_db
+                                elif logical == "name":
+                                    insert_params[opt] = ("Anonymous" if user_id == "anonymous" else "User")
+                                elif logical == "phone":
+                                    insert_params[opt] = None
+                                elif logical == "zone_id":
+                                    insert_params[opt] = None
+                                elif logical == "role":
+                                    insert_params[opt] = "USER"
+                                elif logical in ("created_at", "updated_at"):
+                                    insert_params[opt] = now
+                                break
+
+                    if not insert_cols:
+                        raise RuntimeError("No writable user columns detected on target DB")
+
+                    cols_sql = ", ".join(insert_cols)
+                    vals_sql = ", ".join(f":{c}" for c in insert_cols)
+                    insert_sql = text(f"INSERT INTO users ({cols_sql}) VALUES ({vals_sql})")
+                    try:
+                        session.execute(insert_sql, insert_params)
+                        session.flush()
+                        logger.debug("Created placeholder user (raw insert) for id=%s (original: %s)", user_id_for_db, user_id)
+                    except Exception:
+                        # Try schema-qualified table name (auth.users) as some
+                        # deployments place the users table under the `auth` schema.
+                        try:
+                            insert_sql2 = text(f"INSERT INTO auth.users ({cols_sql}) VALUES ({vals_sql})")
+                            session.execute(insert_sql2, insert_params)
+                            session.flush()
+                            logger.debug("Created placeholder user (raw insert auth.users) for id=%s (original: %s)", user_id_for_db, user_id)
+                        except Exception as e2:
+                            logger.exception("Failed to create placeholder user via raw insert: %s", e2)
+                            raise
                 except Exception as e:
+                    # If user placeholder creation fails due to schema mismatch (missing columns),
+                    # rollback this partial transaction to clear the session state and continue.
                     logger.debug("Could not create placeholder user: %s", e)
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
+
+            # Re-check that the user exists; if schema prevents creating users, skip persistence
+            try:
+                exists_after = session.execute(
+                    text("SELECT id FROM users WHERE id = :id LIMIT 1"), {"id": user_id_for_db}
+                ).fetchone()
+            except Exception:
+                exists_after = None
+
+            if not exists_after:
+                logger.warning("Skipping conversation persistence: user record unavailable for id=%s", user_id_for_db)
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                return conv_id
             conv = Conversation(
                 id=conv_id,
-                user_id=user_id,
+                user_id=user_id_for_db,
                 query=user_message or "",
                 response=assistant_message or "Informations indisponibles",
                 audio_url=audio_url,

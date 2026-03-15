@@ -7,24 +7,33 @@ from .common import _uuid, logger, User, Producer
 
 class AuthMixin:
     async def get_user_by_phone(self, session: AsyncSession, phone: str) -> Optional[Dict[str, Any]]:
-        stmt = select(User).where(User.phone == phone, User.deleted_at.is_(None))
+        # Select explicit, minimal columns to remain compatible with Prisma-managed users table
+        stmt = select(User.id, User.name, User.phone, User.zone_id, User.role).where(User.phone == phone)
         result = await session.execute(stmt)
-        user = result.scalar_one_or_none()
-        if not user:
+        row = result.first()
+        if not row:
             return None
-        data = user.to_dict()
-        prod_stmt = select(Producer).where(Producer.user_id == user.id)
+        data = {
+            "id": row[0],
+            "name": row[1],
+            "phone": row[2],
+            "zone_id": row[3],
+            "role": row[4],
+        }
+        prod_stmt = select(Producer).where(Producer.user_id == data["id"])
         prod_result = await session.execute(prod_stmt)
         producer = prod_result.scalar_one_or_none()
         data["producer_id"] = producer.id if producer else None
-        data["is_certified"] = producer.is_certified if producer else False
+        data["is_certified"] = getattr(producer, "is_certified", False) if producer else False
         return data
 
     async def get_user_by_id(self, session: AsyncSession, user_id: str) -> Optional[Dict[str, Any]]:
-        stmt = select(User).where(User.id == user_id)
+        stmt = select(User.id, User.name, User.phone, User.zone_id, User.role).where(User.id == user_id)
         result = await session.execute(stmt)
-        user = result.scalar_one_or_none()
-        return user.to_dict() if user else None
+        row = result.first()
+        if not row:
+            return None
+        return {"id": row[0], "name": row[1], "phone": row[2], "zone_id": row[3], "role": row[4]}
 
     async def identify_or_create_user(
         self, session: AsyncSession, phone: str, name: str = None, zone_id: str = None

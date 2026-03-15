@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple, Optional
 
 try:
@@ -43,15 +44,42 @@ logger = logging.getLogger("agriconnect.rag.redis_store")
 
 
 class RedisVectorStore:
-    def __init__(self, url: str, dim: int = 384, namespace: str = "rag"):
+    def __init__(
+        self,
+        url: str,
+        dim: int = 384,
+        namespace: str = "rag",
+        socket_timeout: int = 20,
+        retry_on_timeout: bool = True,
+        decode_responses: bool = True,
+    ):
         if redis is None:
             raise RuntimeError("redis package is required for RedisVectorStore")
         if np is None:
             raise RuntimeError("numpy is required for RedisVectorStore")
-        self.client = redis.from_url(url, decode_responses=False)
+        self.decode_responses = bool(decode_responses)
+        try:
+            self.client = redis.from_url(
+                url,
+                decode_responses=self.decode_responses,
+                socket_timeout=socket_timeout,
+                retry_on_timeout=retry_on_timeout,
+                encoding="latin-1",
+            )
+        except TypeError:
+            self.client = redis.from_url(url, decode_responses=self.decode_responses, socket_timeout=socket_timeout)
         self.dim = dim
         self.ns = namespace
         self._docs_key = f"{self.ns}:docs"
+
+        # Compatibility shim: signal that this store can be queried by embeddings
+        try:
+            if not hasattr(self, "is_embedding_query"):
+                def _is_embedding_query(q=None):
+                    return True
+                setattr(self, "is_embedding_query", _is_embedding_query)
+        except Exception:
+            pass
 
     def _doc_key(self, doc_id: str) -> str:
         return f"{self.ns}:doc:{doc_id}"
@@ -60,11 +88,12 @@ class RedisVectorStore:
         """Add or update a single document chunk."""
         arr = np.asarray(embedding, dtype=np.float32)
         b = arr.tobytes()
+        vec_value = b.decode("latin-1") if self.decode_responses else b
         key = self._doc_key(doc_id)
         mapping = {
-            b"text": text.encode("utf-8"),
-            b"meta": json.dumps(meta).encode("utf-8"),
-            b"vec": b,
+            "text": text,
+            "meta": json.dumps(meta, ensure_ascii=False),
+            "vec": vec_value,
         }
         # Use pipeline for efficiency
         p = self.client.pipeline()
@@ -79,30 +108,84 @@ class RedisVectorStore:
             return []
         p = self.client.pipeline()
         for doc_id in ids:
-            p.hget(self._doc_key(doc_id), b"vec")
-            p.hget(self._doc_key(doc_id), b"text")
-            p.hget(self._doc_key(doc_id), b"meta")
+            p.hget(self._doc_key(doc_id), "vec")
+            p.hget(self._doc_key(doc_id), "text")
+            p.hget(self._doc_key(doc_id), "meta")
         res = p.execute()
         out = []
         for i in range(0, len(res), 3):
             vec_b = res[i]
             text_b = res[i + 1]
             meta_b = res[i + 2]
+            if isinstance(vec_b, str):
+                vec_b = vec_b.encode("latin-1", errors="ignore")
             try:
                 vec = np.frombuffer(vec_b, dtype=np.float32) if vec_b else np.zeros(self.dim, dtype=np.float32)
             except Exception:
                 vec = np.zeros(self.dim, dtype=np.float32)
-            text = text_b.decode("utf-8") if text_b else ""
-            meta = json.loads(meta_b.decode("utf-8")) if meta_b else {}
+            if isinstance(text_b, bytes):
+                text = text_b.decode("utf-8", errors="ignore")
+            else:
+                text = text_b or ""
+            if isinstance(meta_b, bytes):
+                meta = json.loads(meta_b.decode("utf-8")) if meta_b else {}
+            else:
+                try:
+                    meta = json.loads(meta_b) if meta_b else {}
+                except Exception:
+                    meta = {}
             out.append((ids[i // 3], vec, text, meta))
         return out
 
-    def query(self, query_embedding: List[float], k: int = 5) -> List[Dict[str, Any]]:
-        """Return top-k nearest neighbours as list of dicts: {id, score, text, meta}."""
-        q = np.asarray(query_embedding, dtype=np.float32)
-        rows = self._fetch_all_vectors()
+    def _extract_embedding(self, obj):
+        # Accept raw list/ndarray or object (e.g. VectorStoreQuery) with common attr names
+        if isinstance(obj, (list, tuple)):
+            return np.asarray(obj, dtype=np.float32)
+        try:
+            if isinstance(obj, np.ndarray):
+                return obj.astype(np.float32)
+        except Exception:
+            pass
+        for attr in ("embedding", "query_embedding", "query_vector", "vector", "values"):
+            v = getattr(obj, attr, None)
+            if v is not None:
+                try:
+                    return np.asarray(v, dtype=np.float32)
+                except Exception:
+                    continue
+        try:
+            tolist = getattr(obj, "tolist", None) or getattr(obj, "to_list", None)
+            if callable(tolist):
+                return np.asarray(tolist(), dtype=np.float32)
+        except Exception:
+            pass
+        raise TypeError("Unsupported query_embedding type: %r" % (type(obj),))
+
+    def _make_result(self, nodes, similarities, ids):
+        try:
+            from llama_index.core.vector_stores.types import VectorStoreQueryResult
+
+            return VectorStoreQueryResult(nodes=nodes, similarities=similarities, ids=ids)
+        except Exception:
+            return SimpleNamespace(nodes=nodes, similarities=similarities, ids=ids)
+
+    def query(self, query_embedding, k: int = 5):
+        """Return top-k nearest neighbours as a VectorStoreQueryResult-like object."""
+        q = None
+        try:
+            q = self._extract_embedding(query_embedding)
+        except Exception:
+            # Last resort: try to coerce directly
+            q = np.asarray(query_embedding, dtype=np.float32)
+
+        try:
+            rows = self._fetch_all_vectors()
+        except Exception as e:
+            # If Redis is unavailable or connection reset occurs, log and return empty result
+            logger.warning("RedisVectorStore: failed to fetch vectors from Redis: %s", e)
+            return self._make_result([], [], [])
         if not rows:
-            return []
+            return self._make_result([], [], [])
         ids = [r[0] for r in rows]
         vecs = np.stack([r[1] for r in rows], axis=0)
         # cosine similarity
@@ -110,15 +193,26 @@ class RedisVectorStore:
         vecs_norm = vecs / (np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-10)
         sims = vecs_norm.dot(q_norm)
         idx = sims.argsort()[::-1][:k]
-        results = []
+        out = []
         for i in idx:
-            results.append({
+            out.append({
                 "id": ids[i],
                 "score": float(sims[i]),
                 "text": rows[i][2],
                 "meta": rows[i][3],
             })
-        return results
+
+        # Build node objects compatible with llama_index where possible
+        try:
+            from llama_index.core.schema import TextNode
+
+            nodes = [TextNode(text=(o.get("text") or ""), metadata=(o.get("meta") or {}), id_=o["id"]) for o in out]
+        except Exception:
+            nodes = [SimpleNamespace(node_id=o["id"], get_content=(lambda o=o: o.get("text")), extra_info=o.get("meta")) for o in out]
+
+        similarities = [float(o.get("score") or 0.0) for o in out]
+        ids = [o["id"] for o in out]
+        return self._make_result(nodes, similarities, ids)
 
     def delete(self, doc_id: str) -> None:
         key = self._doc_key(doc_id)

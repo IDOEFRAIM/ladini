@@ -9,14 +9,9 @@ import json
 
 logger = logging.getLogger(__name__)
 
-# Optional: Load Reranker if available
+# Optional reranker (lazy-loaded to avoid heavy model import at module import time)
 RERANKER = None
-try:
-    from sentence_transformers import CrossEncoder
-    # Initialize light reranker
-    RERANKER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-except ImportError:
-    pass
+
 
 class AgileRetriever:
     def __init__(self):
@@ -30,17 +25,30 @@ class AgileRetriever:
 
             if hasattr(storage_context.vector_store, "client"):
                 client = storage_context.vector_store.client
-                if hasattr(client, "ntotal"):
-                    logger.info("FAISS #total before load: %d", client.ntotal)
-                else:
-                    logger.info("Vector store client present (no ntotal attribute)")
+                # Guard access to optional faiss attribute `ntotal` which Redis clients
+                # do not provide (avoid AttributeError during logging).
+                try:
+                    ntotal = getattr(client, "ntotal", None)
+                    if ntotal is not None:
+                        logger.info("FAISS #total before load: %d", ntotal)
+                    else:
+                        logger.info("Vector store client present (ntotal unknown)")
+                except Exception:
+                    logger.info("Vector store client present (unable to read ntotal)")
 
             # Default to the first index found
             target_index_id = structs[0].index_id
 
             self.index = load_index_from_storage(storage_context, index_id=target_index_id)
             if hasattr(self.index, "_vector_store") and hasattr(self.index._vector_store, "client"):
-                logger.info("FAISS ntotal loaded: %d", self.index._vector_store.client.ntotal)
+                try:
+                    ntotal = getattr(self.index._vector_store.client, "ntotal", None)
+                    if ntotal is not None:
+                        logger.info("FAISS ntotal loaded: %d", ntotal)
+                    else:
+                        logger.info("Index loaded; vector store client present (ntotal unknown)")
+                except Exception:
+                    logger.info("Index loaded; unable to determine vector store ntotal")
             # Default retriever (overridden per-search)
             self.vector_retriever = self.index.as_retriever(similarity_top_k=TOP_K_RETRIEVAL)
         except Exception as e:
@@ -54,6 +62,15 @@ class AgileRetriever:
                 self.vector_store = storage_context.vector_store
             except Exception:
                 self.vector_store = None
+        try:
+            if self.vector_retriever is None:
+                self.ready = False
+            elif self.vector_store is not None and hasattr(self.vector_store, "ready"):
+                self.ready = bool(getattr(self.vector_store, "ready"))
+            else:
+                self.ready = True
+        except Exception:
+            self.ready = self.vector_retriever is not None
         self.llm = get_groq_sdk()
 
     def generate_hyde_doc(self, query_str: str, tone: str = "standard") -> str:
@@ -96,18 +113,51 @@ class AgileRetriever:
         Re-rank retrieved nodes using a CrossEncoder for higher precision.
         Le nombre de résultats dépend du profil (debutant=3, expert=8).
         """
+        global RERANKER
+        # Lazy initialize CrossEncoder to avoid heavy model downloads during module import
+        if RERANKER is None:
+            try:
+                from sentence_transformers import CrossEncoder
+
+                RERANKER = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+            except Exception:
+                RERANKER = None
+
         if not RERANKER or not nodes:
             return nodes[:top_k]
             
         texts = [n.node.get_content() for n in nodes]
         inputs = [[query, text] for text in texts]
         scores = RERANKER.predict(inputs)
-        
+
+        # Normalize scores to a 0-10 scale for downstream consumers
+        try:
+            min_s = float(min(scores))
+            max_s = float(max(scores))
+        except Exception:
+            min_s = 0.0
+            max_s = 0.0
+
+        normalized = []
+        for s in scores:
+            try:
+                raw = float(s)
+            except Exception:
+                raw = 0.0
+            if max_s > min_s:
+                scaled = (raw - min_s) / (max_s - min_s)
+            else:
+                # fallback when all scores identical
+                scaled = 1.0 if raw > 0 else 0.0
+            # map to 0-10 integer
+            norm10 = max(0.0, min(10.0, scaled * 10.0))
+            normalized.append(norm10)
+
         for i, node in enumerate(nodes):
-            node.score = float(scores[i])
-            
-        # Re-sort by relevance
-        nodes.sort(key=lambda x: x.score if x.score is not None else 0, reverse=True)
+            node.score = float(normalized[i])
+
+        # Re-sort by relevance (higher first)
+        nodes.sort(key=lambda x: x.score if x.score is not None else 0.0, reverse=True)
         return nodes[:top_k]
 
     def search(
@@ -140,13 +190,61 @@ class AgileRetriever:
                         return []
 
                     raw = self.vector_store.query(q_emb, k=profile.top_k)
-                    # adapt raw to NodeWithScore-like simple list: we'll create minimal wrappers
+                    # adapt raw results (which can be dicts or objects) into
+                    # simple wrappers with `.node.get_content()` and numeric `.score`.
                     out_nodes = []
+
+                    def _coerce_score(s):
+                        # Try common representations, return float or 0.0
+                        try:
+                            if s is None:
+                                return 0.0
+                            if isinstance(s, (int, float)):
+                                return float(s)
+                            # Some vector stores return small wrappers (e.g., VectorStoreQuery)
+                            # Try common attributes
+                            if hasattr(s, "score"):
+                                return float(getattr(s, "score") or 0.0)
+                            if hasattr(s, "value"):
+                                return float(getattr(s, "value") or 0.0)
+                            if hasattr(s, "distance"):
+                                # distance may be inverse of score; keep as float
+                                return float(getattr(s, "distance") or 0.0)
+                            # Last resort: try converting to float from string
+                            return float(str(s))
+                        except Exception:
+                            return 0.0
+
                     for r in raw:
-                        # r: {id, text, meta, score} or {id, text, metadata, score}
-                        text = r.get("text") or r.get("content") or ""
-                        meta = r.get("meta") or r.get("metadata") or {}
-                        score = r.get("score", 0.0)
+                        # dict-like
+                        if isinstance(r, dict):
+                            text = r.get("text") or r.get("content") or ""
+                            meta = r.get("meta") or r.get("metadata") or {}
+                            score = _coerce_score(r.get("score") or r.get("score", None))
+                        else:
+                            # object-like
+                            # Try to extract text from node or attributes
+                            meta = {}
+                            text = ""
+                            score = 0.0
+                            # id / metadata
+                            if hasattr(r, "node") and hasattr(r.node, "get_content"):
+                                try:
+                                    text = r.node.get_content()
+                                except Exception:
+                                    text = ""
+                                meta = getattr(r.node, "metadata", {}) or {}
+                            else:
+                                # direct content methods/attrs
+                                if hasattr(r, "get_content"):
+                                    try:
+                                        text = r.get_content()
+                                    except Exception:
+                                        text = ""
+                                else:
+                                    text = str(getattr(r, "text", ""))
+                                meta = getattr(r, "metadata", {}) or getattr(r, "meta", {}) or {}
+                            score = _coerce_score(getattr(r, "score", None))
 
                         class SimpleNode:
                             def __init__(self, text, meta, score):

@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional
 from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
+import uuid
 
 from .common import _uuid, AgentAction, Conversation, AuditLog, TrustScore, AIRatingReasoning, Anomaly, TerritoryEvent, ZoneMetric
 
@@ -14,7 +15,26 @@ class IntelligenceMixin:
 
     async def log_conversation(self, session: AsyncSession, user_id: str, query: str, response: str, agent_type: str = None, crop: str = None, zone_id: str = None, mode: str = "text", audio_url: str = None, execution_path: list = None, confidence_score: float = None, tokens_used: int = 0, response_time_ms: int = None) -> str:
         conv_id = _uuid()
-        conv = Conversation(id=conv_id, user_id=user_id, query=query, response=response, agent_type=agent_type, crop=crop, zone_id=zone_id, mode=mode, audio_url=audio_url, execution_path=execution_path, confidence_score=confidence_score, total_tokens_used=tokens_used, response_time_ms=response_time_ms)
+        # Ensure we write a valid UUID into UUID-typed columns. If the
+        # provided user_id is not a UUID, generate a placeholder UUID and
+        # create a lightweight placeholder user record so FK constraints
+        # are satisfied.
+        user_id_for_db = user_id
+        try:
+            uuid.UUID(str(user_id))
+        except Exception:
+            user_id_for_db = str(uuid.uuid4())
+            try:
+                from agriconnect.services.models_v3 import User
+
+                placeholder = User(id=user_id_for_db, name=("Anonymous" if user_id == "anonymous" else "User"))
+                session.add(placeholder)
+                await session.flush()
+            except Exception:
+                # If placeholder creation fails, continue and hope FK checks are relaxed.
+                pass
+
+        conv = Conversation(id=conv_id, user_id=user_id_for_db, query=query, response=response, agent_type=agent_type, crop=crop, zone_id=zone_id, mode=mode, audio_url=audio_url, execution_path=execution_path, confidence_score=confidence_score, total_tokens_used=tokens_used, response_time_ms=response_time_ms)
         session.add(conv)
         await session.flush()
         return conv_id
