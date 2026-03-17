@@ -150,6 +150,10 @@ class AgriDatabaseService(AuthMixin, UtilsMixin, MarketplaceMixin, TransactionsM
 	async def get_crop_cycles(self, farm_id: str):
 		return await self._execute_transaction(super().get_crop_cycles, farm_id, commit=False)
 
+	# --- Surplus offers
+	async def create_surplus_offer(self, user_id: str | None, product_name: str, quantity_kg: float, price_kg: float | None = None, zone_id: str | None = None, location: str | None = None, channel: str = "api"):
+		return await self._execute_transaction(super().create_surplus_offer, user_id, product_name, quantity_kg, price_kg, zone_id, location, channel)
+
 	# --- Transactions / staging
 	async def prepare_transaction_staging(self, payload: dict, expires_in_seconds: int = 3600):
 		return await self._execute_transaction(super().prepare_transaction_staging, payload, expires_in_seconds)

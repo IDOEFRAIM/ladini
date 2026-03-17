@@ -34,7 +34,7 @@ from agriconnect.protocols.mcp import MCPDatabaseServer
 
 logger = logging.getLogger("Agent.Marketplace.v3")
 
-
+PRODUCER_ID = "fa987f63-fafa-4147-9676-52c9af0edc75"
 # ── État du graphe ──────────────────────────────────────────────
 class MarketplaceState(TypedDict, total=False):
     # ── Input

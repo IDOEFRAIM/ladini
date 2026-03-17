@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 
 from .common import _uuid, logger, Farm, Stock, StockMovement, Product, Order, OrderItem, Client, Expense, CropCycle, Producer, User, Zone
+from agriconnect.services.models import SurplusOffer
 
 
 class MarketplaceMixin:
@@ -221,3 +222,26 @@ class MarketplaceMixin:
         stmt = select(CropCycle).where(CropCycle.farm_id == farm_id)
         result = await session.execute(stmt)
         return [c.to_dict() for c in result.scalars()]
+
+    # Surplus offers
+    async def create_surplus_offer(self, session: AsyncSession, user_id: str | None, product_name: str, quantity_kg: float, price_kg: float | None = None, zone_id: str | None = None, location: str | None = None, channel: str = "api") -> Dict[str, Any]:
+        """Persist a surplus offer reported by MarketCoach.
+
+        This is the async counterpart to the legacy `save_surplus_offer` helper
+        kept for compatibility in the synchronous DB handler.
+        """
+        offer_id = _uuid()
+        offer = SurplusOffer(
+            id=offer_id,
+            user_id=user_id or "anonymous",
+            product_name=product_name,
+            quantity_kg=quantity_kg,
+            price_kg=price_kg,
+            zone_id=zone_id,
+            location=location,
+            channel=channel,
+        )
+        session.add(offer)
+        await session.flush()
+        logger.info("💰 Surplus offer saved: %s kg of %s (id=%s)", quantity_kg, product_name, offer_id)
+        return offer.to_dict()

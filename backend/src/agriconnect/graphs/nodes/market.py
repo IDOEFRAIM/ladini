@@ -22,6 +22,9 @@ from agriconnect.agents.base import BaseAgent
 
 logger = logging.getLogger("Agent.MarketCoach")
 
+# Test producer id used for manual __main__ runs
+PRODUCER_ID = "fa987f63-fafa-4147-9676-52c9af0edc75"
+
 class MarketAgentState(TypedDict, total=False):
     # Core User Data
     user_query: str
@@ -79,7 +82,9 @@ class MarketCoach(BaseAgent):
         # Experts NEVER create their own MCP clients.
         self.mcp_session = mcp_session  # MCPSessionManager | None
         self.db_server = mcp_session    # backward-compat alias
-        self.db_host = None             # host lives in orchestrator
+        # Prefer using the injected session manager as the DB host for MCP calls.
+        # This ensures calls go through the Shield (validation, HITL, audit).
+        self.db_host = mcp_session
 
         #efra mets cadans les tools,c est plus facile a maintenir,on aura juste a faire les calcul idoine
         self.UNIT_REGISTRY = {
@@ -197,7 +202,21 @@ class MarketCoach(BaseAgent):
         updates["validation_errors"] = errors
 
         if not missing and not errors:
-            user_id = state.get("user_profile", {}).get("phone", "anon_user")
+            profile = state.get("user_profile", {}) or {}
+            user_id = profile.get("user_id") or profile.get("id") or profile.get("phone") or "anon_user"
+            # Enrich profile from MCP when possible
+            try:
+                if self.db_host and (not profile.get("name") or not profile.get("zone_id")):
+                    prof = self.mcp_get_user_profile(user_id)
+                    if prof:
+                        # prof may be GenericResult.data or raw dict
+                        if isinstance(prof, dict) and prof.get("user_id"):
+                            profile.update(prof)
+                        elif isinstance(prof, dict):
+                            profile.update(prof)
+                        updates.setdefault("user_profile", {}).update(profile)
+            except Exception:
+                pass
             payload = {
                 "product": state.get("product"),
                 "quantity": updates.get("normalized_quantity_kg", 0),
@@ -226,13 +245,12 @@ class MarketCoach(BaseAgent):
         # Prefer MCP path — validated, audited, permission-checked
         if self.db_host:
             try:
-                result = await self.db_host.execute(
-                    "register_surplus_offer",
-                    {
-                        "commodity": payload["product"],
-                        "quantity": payload["quantity"],
-                        "location": payload["location"],
-                    },
+                # Prefer the wrapper to keep MCP access consistent and auditable
+                result = self.mcp_register_surplus_offer(
+                    payload.get("user_id"),
+                    payload["product"],
+                    payload["quantity"],
+                    payload.get("location"),
                 )
                 success = True
                 data["mcp_result"] = result
@@ -253,6 +271,15 @@ class MarketCoach(BaseAgent):
         data["registration_status"] = "SUCCESS" if success else "OFFLINE_SAVED"
         if payload.get("location"):
             data["logistics"] = self.tool.get_logistics_info(payload["location"])
+
+        # Persist conversation/audit via MCP when available
+        try:
+            if self.db_host:
+                q = json.dumps(payload, ensure_ascii=False)
+                r = json.dumps(data, ensure_ascii=False)
+                self.mcp_persist_conversation(payload.get("user_id", "anon_user"), q, r, agent_type="MarketCoach")
+        except Exception:
+            pass
 
         return data
 
@@ -303,6 +330,134 @@ class MarketCoach(BaseAgent):
                     out.append({"repr": str(s)})
         return out
 
+    # ------------------------------------------------------------------ #
+    # MCP TOOL HELPERS
+    # ------------------------------------------------------------------ #
+    def _call_mcp_tool(self, tool_name: str, arguments: Dict[str, Any] | None = None) -> Any:
+        """Call an MCP tool via the injected `db_host` and normalize result.
+
+        Returns the `data` field when tools return GenericResult JSON, or
+        the raw object when the backend adapter returns native objects.
+        """
+        if not self.db_host:
+            return None
+        args = arguments or {}
+        try:
+            res = self._run_async(self.db_host.call_tool(tool_name, args))
+        except Exception as e:
+            logger.warning("MCP tool %s call failed: %s", tool_name, e)
+            return None
+
+        # Normalize JSON-string GenericResult responses
+        if isinstance(res, str):
+            try:
+                parsed = json.loads(res)
+                # Prefer returning the `data` payload when present
+                return parsed.get("data", parsed)
+            except Exception:
+                return res
+
+        return res
+
+    # Thin wrappers for commonly available MCP tools (exposed for reuse)
+    def mcp_get_user_profile(self, user_id: str) -> Any:
+        return self._call_mcp_tool("get_user_profile", {"user_id": user_id})
+
+    def mcp_get_user_by_phone(self, phone: str) -> Any:
+        return self._call_mcp_tool("get_user_by_phone", {"phone": phone})
+
+    def mcp_identify_or_create_user(self, phone: str, name: str = "", zone_id: str = "") -> Any:
+        return self._call_mcp_tool("identify_or_create_user", {"phone": phone, "name": name, "zone_id": zone_id})
+
+    def mcp_prepare_transaction_staging(self, product_id: str, quantity_kg: float, price_fcfa_per_unit: float, buyer_phone: str, zone_id: str = "", source: str = "WHATSAPP") -> Any:
+        return self._call_mcp_tool("prepare_transaction_staging", {"product_id": product_id, "quantity_kg": quantity_kg, "price_fcfa_per_unit": price_fcfa_per_unit, "buyer_phone": buyer_phone, "zone_id": zone_id, "source": source})
+
+    def mcp_create_order(self, product_id: str, quantity: float, buyer_phone: str, **kwargs) -> Any:
+        body = {"product_id": product_id, "quantity": quantity, "buyer_phone": buyer_phone}
+        body.update(kwargs)
+        return self._call_mcp_tool("create_order", body)
+
+    def mcp_commit_staged_transaction(self, transaction_id: str, approved: bool = True) -> Any:
+        return self._call_mcp_tool("commit_staged_transaction", {"transaction_id": transaction_id, "approved": approved})
+
+    def mcp_create_agent_action(self, agent_name: str, action_type: str, payload: dict, user_id: str | None = None, priority: str = "MEDIUM") -> Any:
+        return self._call_mcp_tool("create_agent_action", {"agent_name": agent_name, "action_type": action_type, "payload": payload, "user_id": user_id, "priority": priority})
+
+    def mcp_get_pending_actions(self, agent_name: str = "", limit: int = 20) -> Any:
+        return self._call_mcp_tool("get_pending_actions", {"agent_name": agent_name, "limit": limit})
+
+    def mcp_update_action_status(self, action_id: str, new_status: str, admin_notes: str | None = None, validated_by_id: str | None = None) -> Any:
+        return self._call_mcp_tool("update_action_status", {"action_id": action_id, "new_status": new_status, "admin_notes": admin_notes, "validated_by_id": validated_by_id})
+
+    def mcp_search_products(self, product_name: str, zone_id: str | None = None, limit: int = 10) -> Any:
+        return self._call_mcp_tool("search_products", {"product_name": product_name, "zone_id": zone_id, "limit": limit})
+
+    def mcp_create_product(self, producer_id: str, name: str, price: float, quantity_for_sale: float, **kwargs) -> Any:
+        body = {"producer_id": producer_id, "name": name, "price": price, "quantity_for_sale": quantity_for_sale}
+        body.update(kwargs)
+        return self._call_mcp_tool("create_product", body)
+
+    def mcp_create_auction(self, buyer_id: str, sub_category_id: str, quantity: float, max_price_per_unit: float, deadline: str, **kwargs) -> Any:
+        body = {"buyer_id": buyer_id, "sub_category_id": sub_category_id, "quantity": quantity, "max_price_per_unit": max_price_per_unit, "deadline": deadline}
+        body.update(kwargs)
+        return self._call_mcp_tool("create_auction", body)
+
+    def mcp_place_bid(self, auction_id: str, producer_id: str, offered_price: float) -> Any:
+        return self._call_mcp_tool("place_bid", {"auction_id": auction_id, "producer_id": producer_id, "offered_price": offered_price})
+
+    def mcp_get_open_auctions(self, zone_id: str | None = None, limit: int = 20) -> Any:
+        return self._call_mcp_tool("get_open_auctions", {"zone_id": zone_id, "limit": limit})
+
+    def mcp_get_farms(self, producer_id: str) -> Any:
+        return self._call_mcp_tool("get_farms", {"producer_id": producer_id})
+
+    def mcp_get_stocks(self, farm_id: str) -> Any:
+        return self._call_mcp_tool("get_stocks", {"farm_id": farm_id})
+
+    def mcp_add_stock(self, farm_id: str, item_name: str, quantity: float, **kwargs) -> Any:
+        body = {"farm_id": farm_id, "item_name": item_name, "quantity": quantity}
+        body.update(kwargs)
+        return self._call_mcp_tool("add_stock", body)
+
+    def mcp_remove_stock(self, farm_id: str, item_name: str, quantity: float, **kwargs) -> Any:
+        body = {"farm_id": farm_id, "item_name": item_name, "quantity": quantity}
+        body.update(kwargs)
+        return self._call_mcp_tool("remove_stock", body)
+
+    def mcp_add_expense(self, farm_id: str, label: str, amount: float, **kwargs) -> Any:
+        body = {"farm_id": farm_id, "label": label, "amount": amount}
+        body.update(kwargs)
+        return self._call_mcp_tool("add_expense", body)
+
+    def mcp_get_expenses(self, farm_id: str, category: str | None = None, limit: int = 50) -> Any:
+        return self._call_mcp_tool("get_expenses", {"farm_id": farm_id, "category": category, "limit": limit})
+
+    def mcp_get_expense_summary(self, farm_id: str) -> Any:
+        return self._call_mcp_tool("get_expense_summary", {"farm_id": farm_id})
+
+    def mcp_get_producer_dashboard(self, producer_id: str) -> Any:
+        return self._call_mcp_tool("get_producer_dashboard", {"producer_id": producer_id})
+
+    def mcp_get_orders(self, buyer_id: str = "", buyer_phone: str = "", status: str = "", limit: int = 20) -> Any:
+        return self._call_mcp_tool("get_orders", {"buyer_id": buyer_id, "buyer_phone": buyer_phone, "status": status, "limit": limit})
+
+    def mcp_update_stock_with_movement(self, farm_id: str, item_name: str, quantity_change: float, reason: str) -> Any:
+        return self._call_mcp_tool("update_stock_with_movement", {"farm_id": farm_id, "item_name": item_name, "quantity_change": quantity_change, "reason": reason})
+
+    def mcp_persist_conversation(self, user_id: str, query_json: str, response_json: str, agent_type: str = "MarketCoach") -> Any:
+        return self._call_mcp_tool("persist_conversation", {"user_id": user_id, "query_json": query_json, "response_json": response_json, "agent_type": agent_type})
+
+    def mcp_register_surplus_offer(self, user_id: str, commodity: str, quantity: float, location: str | None = None) -> Any:
+        body = {"user_id": user_id, "commodity": commodity, "quantity": quantity, "location": location}
+        return self._call_mcp_tool("register_surplus_offer", body)
+
+    def mcp_get_farm_stocks(self, farm_id: str) -> Any:
+        return self._call_mcp_tool("get_farm_stocks", {"farm_id": farm_id})
+
+    def mcp_list_products(self, producer_id: str) -> Any:
+        return self._call_mcp_tool("list_products", {"producer_id": producer_id})
+
+
     async def _handle_user_stock_retrieval(self, state: MarketAgentState, product: str) -> Dict[str, Any]:
         """Retrieve user stock via MCP Shield (permission-checked, masked)."""
         data = {}
@@ -314,7 +469,8 @@ class MarketCoach(BaseAgent):
             return data
         
         try:
-            stocks = await self.db_host.execute("get_farm_stocks", {"farm_id": uid})
+            # Use wrapper to fetch farm stocks via MCP Shield.
+            stocks = self.mcp_get_farm_stocks(uid)
             relevant = self._filter_stocks_by_product(stocks, product)
             if relevant:
                 data["user_stock"] = self._serialize_stocks(relevant)
@@ -602,30 +758,118 @@ class MarketCoach(BaseAgent):
 if __name__ == "__main__":
     # Persistence setup (In-Memory for testing, replace with Postgres/Sqlite for Prod)
     memory = MemorySaver()
-    coach = MarketCoach()
-    app = coach.build(checkpointer=memory)
 
-    # Simulating a conversation thread
-    thread_id = "user_123_phone_number"
-    config = {"configurable": {"thread_id": thread_id}}
+    async def _main():
+        # Try to initialize a real DB-backed service and expose a small
+        # `call_tool(name, args)` adapter. If DB isn't available we fall
+        # back to a lightweight mock that records calls.
+        mcp_client = None
+        use_real_db = False
+        try:
+            from agriconnect.core.database import init_db, check_connection
+            from agriconnect.services.database.database_service import AgriDatabaseService
 
-    print("🚀 Démarrage AgriConnect Market Coach (Persistent Mode)...\n")
+            init_db()
+            ok = await check_connection()
+            if ok:
+                svc = AgriDatabaseService()
 
-    # Step 1: Initial Request
-    print("--- User: J'ai 50 sacs de maïs à vendre à Nouna ---")
-    initial_state = {
-        "user_query": "J'ai 50 sacs de maïs à vendre à Nouna",
-        "user_profile": {"niveau": "débutant"},
-    }
-    result = app.invoke(initial_state, config=config)
-    print(f"Agent: {result.get('final_response')}\n")
+                class RealMCPAdapter:
+                    def __init__(self, svc):
+                        self._svc = svc
 
-    # Step 2: User Confirms (Persistence Check)
-    print("--- User: Oui, c'est bon ---")
-    follow_up_state = {
-        "user_query": "Oui, c'est bon",
-        # We don't need to resend profile/intent, memory handles it
-    }
-    result = app.invoke(follow_up_state, config=config)
-    print(f"Agent: {result.get('final_response')}\n")
-    print(f"Status Final: {result.get('status')}")
+                    async def call_tool(self, name: str, args: dict):
+                        if name == "register_surplus_offer":
+                            return await self._svc.create_surplus_offer(
+                                args.get("user_id"),
+                                args.get("commodity"),
+                                args.get("quantity"),
+                                zone_id=None,
+                                location=args.get("location"),
+                                channel="cli",
+                            )
+                        if name == "get_farm_stocks":
+                            return await self._svc.get_stocks(args.get("farm_id"))
+                        if name == "list_products":
+                            return await self._svc.list_products(args.get("producer_id"))
+                        raise NotImplementedError(f"Tool {name} not implemented in RealMCPAdapter")
+
+                mcp_client = RealMCPAdapter(svc)
+                use_real_db = True
+                print("Using real DB for __main__ test (AgriDatabaseService).")
+        except Exception as e:
+            print("Real DB unavailable or init failed, using MockMCP for __main__ test:", e)
+
+        if not mcp_client:
+            class MockMCP:
+                def __init__(self):
+                    self.calls = []
+
+                async def call_tool(self, name: str, args: dict):
+                    self.calls.append((name, args))
+                    return {"id": "mock-record-1", "status": "created", "args": args}
+
+            mcp_client = MockMCP()
+
+        coach = MarketCoach(mcp_session=mcp_client)
+        app = coach.build(checkpointer=memory)
+
+        # Simulating a conversation thread
+        thread_id = "user_123_phone_number"
+        config = {"configurable": {"thread_id": thread_id}}
+
+        print("🚀 Démarrage AgriConnect Market Coach (Deterministic Test Mode)...\n")
+
+        # Deterministic test: skip LLM-driven analysis and directly validate
+        # a REGISTER_SURPLUS intent so we reliably assert confirmation flow
+        # and persistence. This avoids background fetches that touch the DB.
+        print("--- Simulating REGISTER_SURPLUS (50 kg maïs, Nouna) ---")
+        test_state = {
+            "intent": "REGISTER_SURPLUS",
+            "product": "maïs",
+            "quantity_mentioned": 50,
+            "unit_mentioned": "kg",
+            "location": "Nouna",
+            "user_profile": {"user_id": PRODUCER_ID, "phone": "000000000"},
+        }
+
+        # Run validation synchronously (validate_node is sync)
+        validate_updates = coach.validate_node(test_state)
+        print(f"Validation updates: {validate_updates}")
+
+        # Expect the agent to ask for confirmation
+        if validate_updates.get("waiting_for_confirmation"):
+            print("Agent requested confirmation (OK).")
+        else:
+            print("Agent did NOT request confirmation — failing test expectation.")
+
+        # Build the transaction payload (use normalized_quantity_kg if present)
+        payload = validate_updates.get("transaction_payload") or {
+            "product": test_state["product"],
+            "quantity": validate_updates.get("normalized_quantity_kg", 50),
+            "location": test_state["location"],
+            "user_id": PRODUCER_ID,
+        }
+
+        print("--- Simulating user confirmation and executing transaction... ---")
+        # Execute transaction (this will call MCP adapter)
+        exec_result = await coach._handle_transaction_execution(payload)
+        print(f"Execution result: {exec_result}")
+
+        if use_real_db:
+            print("Real DB used — verify the `surplus_offers` table for PRODUCER_ID to confirm persistence.")
+
+        # --- Simulate user asking to list their products via MCP tools ---
+        print("\n--- User: Montre-moi mes produits en stock ---")
+        try:
+            products = coach.mcp_list_products(PRODUCER_ID)
+            print(f"Products for {PRODUCER_ID}: {products}")
+        except Exception as e:
+            print("Failed to list products via MCP:", e)
+
+    import asyncio
+
+    try:
+        asyncio.run(_main())
+    except KeyboardInterrupt:
+        pass

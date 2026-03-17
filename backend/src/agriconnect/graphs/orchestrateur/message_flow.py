@@ -48,7 +48,6 @@ from ..state import GlobalAgriState
 from agriconnect.graphs.nodes.sentinelle import ClimateSentinel
 from agriconnect.graphs.nodes.formation import FormationCoach
 from agriconnect.graphs.nodes.market import MarketCoach
-from agriconnect.graphs.nodes.marketplace import MarketplaceAgent
 from agriconnect.graphs.nodes.marketplace_v3 import MarketplaceAgentV3
 
 # Expert mapping for host-centric instantiation
@@ -56,7 +55,7 @@ EXPERT_MAP = {
     "sentinelle": ClimateSentinel,
     "formation": FormationCoach,
     "market": MarketCoach,
-    "marketplace": MarketplaceAgent,
+    "marketplace": MarketplaceAgentV3,
     "marketplace_v3": MarketplaceAgentV3,
 }
 

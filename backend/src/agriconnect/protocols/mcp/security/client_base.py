@@ -99,6 +99,44 @@ class _SearchProductSchema(BaseModel):
     limit: int = 10
 
 
+class _AddStockSchema(BaseModel):
+    farm_id: str
+    item_name: str
+    quantity: float
+    unit: str = "KG"
+    stock_type: str = "HARVEST"
+    reason: str = "Ajout via MCP"
+
+
+class _RemoveStockSchema(BaseModel):
+    farm_id: str
+    item_name: str
+    quantity: float
+    reason: str = "Retrait"
+    movement_type: str = "OUT"
+
+
+class _AddExpenseSchema(BaseModel):
+    farm_id: str
+    label: str
+    amount: float
+    category: str = "OTHER"
+
+
+class _GetExpensesSchema(BaseModel):
+    farm_id: str
+    category: Optional[str] = None
+    limit: int = 50
+
+
+class _RegisterSurplusSchema(BaseModel):
+    commodity: str
+    quantity: float
+    location: str
+    contact: str = "TBD"
+    user_id: Optional[str] = None
+
+
 class _RAGSearchSchema(BaseModel):
     query: str
     level: str = "debutant"
@@ -119,6 +157,14 @@ _SCHEMA_REGISTRY.update({
     "get_orders":                _OrderLookupSchema,
     "get_farm_stocks":           _FarmIdSchema,
     "get_stocks":                _FarmIdSchema,
+    "get_farms":                 _ProducerIdSchema,
+    "get_producer_dashboard":    _ProducerIdSchema,
+    "get_expense_summary":       _FarmIdSchema,
+    "get_expenses":              _GetExpensesSchema,
+    "add_stock":                 _AddStockSchema,
+    "remove_stock":              _RemoveStockSchema,
+    "add_expense":               _AddExpenseSchema,
+    "register_surplus_offer":    _RegisterSurplusSchema,
     "commit_staged_transaction": _TransactionIdSchema,
     # RAG related tools
     "search_agronomy_docs":      _RAGSearchSchema,

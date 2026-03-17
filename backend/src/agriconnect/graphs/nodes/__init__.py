@@ -8,7 +8,6 @@ appelé par l'orchestrateur (MessageResponseFlow / ReportFlow).
 from .sentinelle import ClimateSentinel
 from .formation import FormationCoach
 from .market import MarketCoach
-from .marketplace import MarketplaceAgent
 from .soil import AgriSoilAgent
 from .plant_doctor import PlantHealthDoctor
 
@@ -22,7 +21,6 @@ __all__ = [
     "ClimateSentinel",
     "FormationCoach",
     "MarketCoach",
-    "MarketplaceAgent",
     "AgriSoilAgent",
     "PlantHealthDoctor",
     # v3

@@ -363,6 +363,224 @@ async def get_open_auctions(zone_id: str | None = None, limit: int = 20, ctx=Non
     return res
 
 
+@mcp.tool()
+async def get_farms(producer_id: str, ctx=None) -> str:
+    if ctx:
+        await ctx.info(f"get_farms producer_id={producer_id}")
+    db = runtime.db
+    if db is None:
+        return GenericResult(status="error", message="DB not initialized").model_dump_json()
+    try:
+        raw = await db.get_farms(producer_id)
+        res = GenericResult(status="ok", data=raw).model_dump_json()
+    except Exception as exc:
+        res = GenericResult(status="error", message=str(exc)).model_dump_json()
+    _log_call("get_farms", {"producer_id": producer_id}, res)
+    return res
+
+
+@mcp.tool()
+async def get_stocks(farm_id: str, ctx=None) -> str:
+    if ctx:
+        await ctx.info(f"get_stocks farm_id={farm_id}")
+    db = runtime.db
+    if db is None:
+        return GenericResult(status="error", message="DB not initialized").model_dump_json()
+    try:
+        raw = await db.get_stocks(farm_id)
+        res = GenericResult(status="ok", data=raw).model_dump_json()
+    except Exception as exc:
+        res = GenericResult(status="error", message=str(exc)).model_dump_json()
+    _log_call("get_stocks", {"farm_id": farm_id}, res)
+    return res
+
+
+@mcp.tool()
+async def get_farm_stocks(farm_id: str, ctx=None) -> str:
+    # Alias used by some agents
+    return await get_stocks(farm_id=farm_id, ctx=ctx)
+
+
+@mcp.tool()
+async def add_stock(
+    farm_id: str,
+    item_name: str,
+    quantity: float,
+    unit: str = "KG",
+    stock_type: str = "HARVEST",
+    reason: str = "Ajout via MCP",
+    warehouse_id: str | None = None,
+    organization_id: str | None = None,
+    ctx=None,
+) -> str:
+    if ctx:
+        await ctx.info(f"add_stock farm_id={farm_id} item={item_name} qty={quantity}")
+    db = runtime.db
+    if db is None:
+        return GenericResult(status="error", message="DB not initialized").model_dump_json()
+    try:
+        raw = await db.add_stock(
+            farm_id=farm_id,
+            item_name=item_name,
+            quantity=quantity,
+            unit=unit,
+            stock_type=stock_type,
+            reason=reason,
+            warehouse_id=warehouse_id,
+            organization_id=organization_id,
+        )
+        res = GenericResult(status="ok", data=raw).model_dump_json()
+    except Exception as exc:
+        res = GenericResult(status="error", message=str(exc)).model_dump_json()
+    _log_call("add_stock", {"farm_id": farm_id, "item_name": item_name}, res)
+    return res
+
+
+@mcp.tool()
+async def remove_stock(
+    farm_id: str,
+    item_name: str,
+    quantity: float,
+    reason: str = "Retrait",
+    movement_type: str = "OUT",
+    ctx=None,
+) -> str:
+    if ctx:
+        await ctx.info(f"remove_stock farm_id={farm_id} item={item_name} qty={quantity}")
+    db = runtime.db
+    if db is None:
+        return GenericResult(status="error", message="DB not initialized").model_dump_json()
+    try:
+        raw = await db.remove_stock(
+            farm_id=farm_id,
+            item_name=item_name,
+            quantity=quantity,
+            reason=reason,
+            movement_type=movement_type,
+        )
+        res = GenericResult(status="ok", data=raw).model_dump_json()
+    except Exception as exc:
+        res = GenericResult(status="error", message=str(exc)).model_dump_json()
+    _log_call("remove_stock", {"farm_id": farm_id, "item_name": item_name}, res)
+    return res
+
+
+@mcp.tool()
+async def add_expense(farm_id: str, label: str, amount: float, category: str = "OTHER", ctx=None) -> str:
+    if ctx:
+        await ctx.info(f"add_expense farm_id={farm_id} label={label} amount={amount}")
+    db = runtime.db
+    if db is None:
+        return GenericResult(status="error", message="DB not initialized").model_dump_json()
+    try:
+        raw = await db.add_expense(farm_id=farm_id, label=label, amount=amount, category=category)
+        res = GenericResult(status="ok", data=raw).model_dump_json()
+    except Exception as exc:
+        res = GenericResult(status="error", message=str(exc)).model_dump_json()
+    _log_call("add_expense", {"farm_id": farm_id, "label": label}, res)
+    return res
+
+
+@mcp.tool()
+async def get_expenses(farm_id: str, category: str | None = None, limit: int = 50, ctx=None) -> str:
+    if ctx:
+        await ctx.info(f"get_expenses farm_id={farm_id} limit={limit}")
+    db = runtime.db
+    if db is None:
+        return GenericResult(status="error", message="DB not initialized").model_dump_json()
+    try:
+        raw = await db.get_expenses(farm_id=farm_id, category=category, limit=limit)
+        res = GenericResult(status="ok", data=raw).model_dump_json()
+    except Exception as exc:
+        res = GenericResult(status="error", message=str(exc)).model_dump_json()
+    _log_call("get_expenses", {"farm_id": farm_id, "limit": limit}, res)
+    return res
+
+
+@mcp.tool()
+async def get_expense_summary(farm_id: str, ctx=None) -> str:
+    if ctx:
+        await ctx.info(f"get_expense_summary farm_id={farm_id}")
+    db = runtime.db
+    if db is None:
+        return GenericResult(status="error", message="DB not initialized").model_dump_json()
+    try:
+        raw = await db.get_expense_summary(farm_id=farm_id)
+        res = GenericResult(status="ok", data=raw).model_dump_json()
+    except Exception as exc:
+        res = GenericResult(status="error", message=str(exc)).model_dump_json()
+    _log_call("get_expense_summary", {"farm_id": farm_id}, res)
+    return res
+
+
+@mcp.tool()
+async def get_producer_dashboard(producer_id: str, ctx=None) -> str:
+    if ctx:
+        await ctx.info(f"get_producer_dashboard producer_id={producer_id}")
+    db = runtime.db
+    if db is None:
+        return GenericResult(status="error", message="DB not initialized").model_dump_json()
+    try:
+        raw = await db.get_producer_dashboard(producer_id)
+        res = GenericResult(status="ok", data=raw).model_dump_json()
+    except Exception as exc:
+        res = GenericResult(status="error", message=str(exc)).model_dump_json()
+    _log_call("get_producer_dashboard", {"producer_id": producer_id}, res)
+    return res
+
+
+@mcp.tool()
+async def register_surplus_offer(
+    commodity: str,
+    quantity: float,
+    location: str,
+    contact: str = "TBD",
+    user_id: str | None = None,
+    ctx=None,
+) -> str:
+    """Persist a surplus declaration in an auditable way.
+
+    The current canonical async service does not expose a dedicated
+    `surplus_offers` writer. We persist this as an `agent_action` payload,
+    which keeps it in the DB with governance metadata.
+    """
+    if ctx:
+        await ctx.info(f"register_surplus_offer commodity={commodity} qty={quantity} location={location}")
+    db = runtime.db
+    if db is None:
+        return GenericResult(status="error", message="DB not initialized").model_dump_json()
+    try:
+        # Prefer dedicated surplus_offers persistence when available on the
+        # async DB service. Fall back to agent_action if not implemented.
+        try:
+            raw = await db.create_surplus_offer(
+                user_id=user_id,
+                product_name=commodity,
+                quantity_kg=quantity,
+                price_kg=None,
+                zone_id=None,
+                location=location,
+                channel="mcp",
+            )
+            res = GenericResult(status="ok", data={"record_type": "surplus_offer", "offer": raw}).model_dump_json()
+        except AttributeError:
+            # Older DB service does not expose create_surplus_offer
+            payload = {"commodity": commodity, "quantity": quantity, "location": location, "contact": contact}
+            raw = await db.create_agent_action(
+                agent_name="MarketCoach",
+                action_type="REGISTER_SURPLUS",
+                payload=payload,
+                user_id=user_id,
+                priority="MEDIUM",
+                ai_reasoning="Surplus declaration captured from market flow",
+            )
+            res = GenericResult(status="ok", data={"record_type": "agent_action", "action": raw}).model_dump_json()
+    except Exception as exc:
+        res = GenericResult(status="error", message=str(exc)).model_dump_json()
+    _log_call("register_surplus_offer", {"commodity": commodity, "quantity": quantity, "location": location}, res)
+    return res
+
+
 @mcp.resource("db://status")
 async def db_status() -> str:
     return json.dumps({"server": "AgriConnect Database MCP Server", "status": "running"})
@@ -423,6 +641,16 @@ TOOL_MAP = {
     "create_auction": create_auction,
     "place_bid": place_bid,
     "get_open_auctions": get_open_auctions,
+    "get_farms": get_farms,
+    "get_stocks": get_stocks,
+    "get_farm_stocks": get_farm_stocks,
+    "add_stock": add_stock,
+    "remove_stock": remove_stock,
+    "add_expense": add_expense,
+    "get_expenses": get_expenses,
+    "get_expense_summary": get_expense_summary,
+    "get_producer_dashboard": get_producer_dashboard,
+    "register_surplus_offer": register_surplus_offer,
     "persist_conversation": persist_conversation,
 }
 

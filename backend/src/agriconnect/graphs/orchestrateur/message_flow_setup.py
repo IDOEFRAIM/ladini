@@ -22,7 +22,6 @@ import agriconnect.core.database as _core_db
 from agriconnect.graphs.nodes.sentinelle import ClimateSentinel
 from agriconnect.graphs.nodes.formation import FormationCoach
 from agriconnect.graphs.nodes.market import MarketCoach
-from agriconnect.graphs.nodes.marketplace import MarketplaceAgent
 from agriconnect.graphs.nodes.marketplace_v3 import MarketplaceAgentV3
 from agriconnect.services.database.database_service import AgriDatabaseService
 # ParallelExecutor removed — fan-out now handled by LangGraph Send
@@ -147,10 +146,14 @@ def init_experts(flow):
         mcp_session=shield,
         db_service=db_service,
     )
-    flow.marketplace_legacy = MarketplaceAgent(
-        llm_client=flow.llm,
-        mcp_session=shield,
-    )
+    # Ensure marketplace tool uses the Shield client for MCP delegations
+    try:
+        # MarketplaceAgentV3 creates MarketplaceToolV3(self.tool)
+        if hasattr(flow.marketplace, "tool") and getattr(flow, "mcp_shield", None):
+            flow.marketplace.tool.mcp_client = flow.mcp_shield
+    except Exception:
+        logger.debug("Could not attach mcp_shield to marketplace tool; will use local db_service fallback")
+    # Legacy MarketplaceAgent removed; MarketplaceAgentV3 is the canonical implementation.
 
     # Legacy workflow builders and invoker removed: experts are instantiated
     # directly by the Host via EXPERT_MAP and DI (mcp_session / mcp_shield).
