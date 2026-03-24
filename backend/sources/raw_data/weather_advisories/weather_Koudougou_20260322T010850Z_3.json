@@ -1,0 +1,13 @@
+{
+  "title": "Météo Koudougou",
+  "content": "Zone Koudougou: temp=29.5C, pluie=0.0mm, hum=27%. Surveiller l'évapotranspiration.",
+  "metadata": {
+    "doc_type": "weather_advisory",
+    "zone": "Koudougou",
+    "forecast_date": "2026-03-22",
+    "observed_at": "2026-03-22T01:08:49.812735+00:00",
+    "source": "api_openmeteo",
+    "confidence": 0.9,
+    "bulletin_excerpt": "Bulletin mensuel: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin quotidien: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin hebdomadaire: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin de Prévisions saisonnières: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChine"
+  }
+}

@@ -23,6 +23,8 @@ Structure de données standardisée:
 """
 
 import logging
+from agriconnect.core.settings import settings
+from agriconnect.utils.s3_utils import upload_file_to_s3
 import json
 import os
 from datetime import datetime
@@ -150,6 +152,17 @@ class ResourceManager:
                 if result and result.get('status') == 'success':
                     result['category'] = category
                     result['scraped_at'] = datetime.now().isoformat()
+                    # If scraper saved a local file, upload it to S3 and rewrite the file_path
+                    try:
+                        fp = result.get('file_path')
+                        if fp and getattr(settings, 'S3_BUCKET', ''):
+                            s3_uri = upload_file_to_s3(fp)
+                            if s3_uri:
+                                result['s3_path'] = s3_uri
+                                result['file_path'] = s3_uri
+                    except Exception as _:
+                        logger.warning("S3 upload after scrape failed for %s", url)
+
                     logger.info(f"✅ [{category}] Succès: {url}")
                     return result
                 else:

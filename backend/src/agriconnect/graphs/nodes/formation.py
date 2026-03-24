@@ -127,6 +127,15 @@ class FormationCoach(BaseAgent):
             logger.exception("Error resolving LLM client: %s", exc)
             self.llm = None
 
+        # Configure tool DB access once (best-effort)
+        try:
+            from agriconnect.core.settings import settings
+            import psycopg2
+
+            self.tool.configure_db(settings.DATABASE_URL, psycopg2)
+        except Exception:
+            self.tool.configure_db(None, None)
+
     # ---------------- Graph Nodes and Helpers -----------------
 
     def analyze_node(self, state: FormationAgentState) -> FormationAgentState:
@@ -194,6 +203,8 @@ class FormationCoach(BaseAgent):
                 out.append(w)
         return out
 
+    # Business rules and DB helpers are delegated to tools/formation.py
+
     def grade_sources_node(self, state: FormationAgentState) -> FormationAgentState:
         warnings = list(state.get("warnings", []))
         sources = state.get("sources", []) or []
@@ -220,6 +231,17 @@ class FormationCoach(BaseAgent):
             avg = 5
 
         if avg < 5:
+            # Check if we can retry via rewrite
+            current_retry = int(state.get("rewrited_retry_count", 0))
+            if current_retry < 2:
+                warnings.append(f"Documents jugés peu fiables (score {avg}/10). Tentative de reformulation.")
+                return {
+                    "status": "CONTEXT_POOR",
+                    "warnings": self._dedupe_warnings(warnings),
+                    "document_grade": avg,
+                }
+            
+            # Exhausted retries -> degraded mode
             warnings.append(f"Documents jugés peu fiables (score {avg}/10). -- passage en mode dégradé.")
             # Instead of blocking, continue in degraded mode: allow composition
             # but mark the state so generation is cautious about specifics.
@@ -414,18 +436,119 @@ class FormationCoach(BaseAgent):
         context = state.get("retrieved_context", "").strip()
         query = state.get("user_query", "").strip()
         profile_text = self.tool._format_profile(state.get("learner_profile", {}))
-
         if not query:
             return {"warnings": warnings, "status": "ERROR"}
 
-        gen_ctx = GenerationContext(state=state, context=context, query=query, profile_text=profile_text, warnings=warnings)
-        final_answer, warnings = await self._generate_final_answer(gen_ctx)
+        # Determine Intent to route logic
+        intent = state.get("intent", "FORMATION").upper()
+        
+        # --- PATH A: FORMATION / ADVICE (Standard) ---
+        # If intent is FORMATION, CONSEIL, or if diagnostic is not explicitly requested
+        if intent in ["FORMATION", "CONSEIL", "ADVICE", "BEST_PRACTICE"] or "URGENCE" not in intent:
+             gen_ctx = GenerationContext(
+                state=state,
+                context=context,
+                query=query,
+                profile_text=profile_text,
+                warnings=warnings
+            )
+             final_answer, new_warnings = await self._generate_final_answer(gen_ctx)
+             warnings.extend(new_warnings)
+             
+             # Build a compatible structured response (for UI)
+             sources_list = [s.get("title", f"Source {i+1}") for i, s in enumerate(state.get("sources", []))]
+             response_json = {
+                "diagnostic": None,
+                "severity": "info",
+                "actions_immediates": state.get("field_actions", []), # Use field actions from analyze
+                "actions_7_jours": [],
+                "risks": state.get("safety_flags", []),
+                "sources": sources_list,
+                "diagnostic_id": None,
+                "action_plan_id": None,
+                "final_text": final_answer,
+            }
+             
+             agri_response = self._build_agri_response(final_answer, query, state)
+             
+             return {
+                "answer_draft": final_answer,
+                "final_response": final_answer,
+                "agri_response": agri_response,
+                "structured": response_json,
+                "warnings": warnings,
+                "status": "ANSWER_GENERATED",
+             }
+
+        # --- PATH B: DIAGNOSTIC / URGENCY (Legacy Fallback) ---
+        # Only used if intent is explicitly URGENCE or similar
+        
+        # 1) Run rule-based diagnosis (LLM not used for diagnosis)
+        profile = state.get("learner_profile", {}) or {}
+        user_profile = state.get("user_profile", {}) or {}
+        user_id = user_profile.get("id") if isinstance(user_profile, dict) else None
+        crop_name = profile.get("culture_actuelle") or profile.get("culture") or None
+
+        diag = self.tool.diagnose_from_query(query, profile, context)
+
+        # 2) Load crop technical sheet when available
+        crop_sheet = None
+        if crop_name:
+            try:
+                crop_sheet = self.tool.get_crop_sheet(crop_name)
+            except Exception:
+                crop_sheet = None
+
+        # 3) Build structured action plan from diagnosis + sheet
+        plan = self.tool.build_action_plan_from_diag(diag, crop_sheet)
+
+        # 4) Persist diagnostic and action plan (best-effort)
+        diag_id = None
+        plan_id = None
+        try:
+            diag_id = self.tool.save_diagnostic(user_id, crop_name, profile.get("zone_id"), query, diag.get("diagnosis"), diag.get("evidence"), diag.get("severity"), diag.get("rules_used"))
+            if diag_id:
+                plan_id = self.tool.save_action_plan(diag_id, plan)
+        except Exception:
+            logger.exception("Failed to persist diagnostic/action plan")
+
+        # 5) Prepare final textual explanation using LLM only for formatting
+        final_answer = None
+        try:
+            if self.llm:
+                system = "Vous êtes un assistant agricole qui donne des conseils concis et actionnables; n'utilisez pas d'affirmations non vérifiées."
+                user_msg = f"Résumé diagnostique: {diag.get('diagnosis')}\nActions immédiates: {json.dumps(plan.get('actions_immediates'), ensure_ascii=False)}\nActions 7 jours: {json.dumps(plan.get('actions_7_days'), ensure_ascii=False)}\nRisques: {json.dumps(plan.get('risks'), ensure_ascii=False)}\nSources: {json.dumps(plan.get('sources'), ensure_ascii=False)}\nDonnez une explication courte (3-4 phrases)."
+                maybe = self.llm.chat.completions.create(model=self.model_answer, messages=[{"role":"system","content":system},{"role":"user","content":user_msg}], temperature=0.2, max_tokens=200)
+                completion = await maybe if inspect.isawaitable(maybe) else maybe
+                final_answer = getattr(getattr(completion, "choices", [None])[0], "message", {}).content if completion and getattr(completion, "choices", None) else str(getattr(completion, "content", completion))
+            else:
+                # Fallback templated explanation
+                final_answer = f"Diagnostic: {diag.get('diagnosis')}. Actions immédiates: {', '.join(plan.get('actions_immediates')[:2])}. Suivi: {', '.join(plan.get('actions_7_days')[:2])}."
+        except Exception as e:
+            logger.exception("LLM formatting failed: %s", e)
+            final_answer = f"Diagnostic: {diag.get('diagnosis')}. Voir le plan d'action structuré." 
+
+        # 6) Build the JSON response for UI
+        response_json = {
+            "diagnostic": diag.get("diagnosis"),
+            "severity": diag.get("severity"),
+            "actions_immediates": plan.get("actions_immediates"),
+            "actions_7_jours": plan.get("actions_7_days"),
+            "risks": plan.get("risks"),
+            "sources": plan.get("sources"),
+            "diagnostic_id": diag_id,
+            "action_plan_id": plan_id,
+            "final_text": final_answer,
+        }
+
+        # Keep legacy agri_response for backward compatibility
         agri_response = self._build_agri_response(final_answer, query, state)
 
         return {
             "answer_draft": final_answer,
             "final_response": final_answer,
             "agri_response": agri_response,
+            "structured": response_json,
             "warnings": warnings,
             "status": "ANSWER_GENERATED",
         }
@@ -554,10 +677,17 @@ class FormationCoach(BaseAgent):
         workflow.add_conditional_edges("analyze", self.refine.route_after_analyze)
 
         workflow.add_edge("retrieve", "grade_sources")
+
+        def _route_grade_sources(state: FormationAgentState) -> str:
+            status = state.get("status")
+            if status == "CONTEXT_POOR":
+                return "rewrite"
+            return "compose"
+
         workflow.add_conditional_edges(
             "grade_sources",
-            lambda s: "compose" if s.get("status") == "CONTEXT_READY" else END,
-            {"compose": "compose", END: END},
+            _route_grade_sources,
+            {"compose": "compose", "rewrite": "rewrite"},
         )
 
         workflow.add_conditional_edges(
@@ -570,15 +700,14 @@ class FormationCoach(BaseAgent):
 
         def _route_critique(state: FormationAgentState) -> str:
             critique_retries = int(state.get("critique_retry_count", 0))
-            rewrited_retries = int(state.get("rewrited_retry_count", 0))
-            if critique_retries > 2 or rewrited_retries > 2:
+            if critique_retries > 2:
                 logger.error(
-                    "FormationCoach DEGRADED_MODE: critique_retries=%d rewrited_retries=%d",
+                    "FormationCoach DEGRADED_MODE: critique_retries=%d",
                     critique_retries,
-                    rewrited_retries,
                 )
                 state["degraded_mode"] = True
                 state["status"] = "DEGRADED_MODE"
+                state["requires_human"] = True
                 return "evaluate"
             return "evaluate" if state.get("status") == "VALIDATED" else "compose"
 
@@ -670,8 +799,8 @@ if __name__ == "__main__":
     else:
         workflow = agent.build()
         state = {
-            "user_query": "Que sais tu sur la saison culture au burkina?",
-            "learner_profile": {"niveau": "débutant", "région": "Boucle du Mouhoun"},
+            "user_query": "Quelles sont les étapes pour cultiver le maïs Barka ?",
+            "learner_profile": {"niveau": "débutant", "région": "Boucle du Mouhoun", "culture_actuelle": "Maïs"},
         }
 
         # For standalone/mock runs, avoid using the full StateGraph engine which

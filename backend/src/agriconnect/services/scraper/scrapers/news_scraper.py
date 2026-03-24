@@ -26,6 +26,8 @@ from pathlib import Path
 from urllib.parse import urlparse, urljoin
 from datetime import datetime
 import hashlib
+from agriconnect.core.settings import settings
+from agriconnect.utils.s3_utils import upload_file_to_s3
 
 logger = logging.getLogger("NewsScraper")
 
@@ -254,7 +256,20 @@ class NewsScraper:
                 
                 result['metadata_file'] = str(meta_path)
                 result['status'] = 'success'
-                
+                # Upload to S3 when configured
+                try:
+                    if getattr(settings, 'S3_BUCKET', ''):
+                        s = upload_file_to_s3(result['file_path'])
+                        if s:
+                            result['s3_path'] = s
+                            result['file_path'] = s
+                        ms = upload_file_to_s3(result['metadata_file'])
+                        if ms:
+                            result['metadata_s3'] = ms
+                            result['metadata_file'] = ms
+                except Exception:
+                    logger.warning("S3 upload failed for article: %s", url)
+
                 logger.info(f"✅ Article extrait: {result['title'][:50]}... ({len(content)} chars)")
             else:
                 # Fallback: Extraction générique

@@ -20,6 +20,8 @@ Dependencies optionnelles:
 import requests
 import hashlib
 import logging
+from agriconnect.core.settings import settings
+from agriconnect.utils.s3_utils import upload_file_to_s3
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime
@@ -318,7 +320,26 @@ class PdfDownloader:
         
         result['status'] = 'success'
         logger.info(f"✅ PDF traité: {pdf_path.name}")
-        
+        # Attempt S3 uploads if configured
+        try:
+            if getattr(settings, 'S3_BUCKET', ''):
+                s3_uri = upload_file_to_s3(str(pdf_path))
+                if s3_uri:
+                    result['s3_path'] = s3_uri
+                    result['file_path'] = s3_uri
+                if 'text_file' in result:
+                    t_s3 = upload_file_to_s3(result['text_file'])
+                    if t_s3:
+                        result['text_s3'] = t_s3
+                        result['text_file'] = t_s3
+                if 'metadata_file' in result:
+                    m_s3 = upload_file_to_s3(result['metadata_file'])
+                    if m_s3:
+                        result['metadata_s3'] = m_s3
+                        result['metadata_file'] = m_s3
+        except Exception:
+            logger.warning("S3 upload failed for PDF assets: %s", pdf_path)
+
         return result
 
     def scrape(self, url: str) -> Dict[str, Any]:

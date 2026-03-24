@@ -171,6 +171,36 @@ class AgriDatabaseService(AuthMixin, UtilsMixin, MarketplaceMixin, TransactionsM
 	async def record_zone_metric(self, zone_id: str, metric_name: str, value: float):
 		return await self._execute_transaction(super().record_zone_metric, zone_id, metric_name, value)
 
+	async def get_user_context(self, user_id: str):
+		return await self._execute_transaction(super().get_user_context, user_id, commit=False)
+
+	async def upsert_user_context(self, user_id: str, last_intent: str = None, pending_intent: str = None, draft_data: dict = None):
+		payload = {
+			"user_id": user_id,
+			"last_intent": last_intent,
+			"pending_intent": pending_intent,
+			"draft_data": draft_data,
+		}
+		return await self._execute_transaction(super().upsert_user_context, payload)
+
+	async def create_market_match(self, product_id: str, buyer_id: str = None, score: float = 0.0, status: str = "SUGGESTED", meta: dict = None):
+		payload = {
+			"product_id": product_id,
+			"buyer_id": buyer_id,
+			"score": score,
+			"status": status,
+			"meta": meta,
+		}
+		return await self._execute_transaction(super().create_market_match, payload)
+
+	async def list_market_matches(self, buyer_id: str = None, status: str = None, limit: int = 20):
+		filters = {
+			"buyer_id": buyer_id,
+			"status": status,
+			"limit": limit,
+		}
+		return await self._execute_transaction(super().list_market_matches, filters, commit=False)
+
 	async def log_conversation(self, user_id: str, query: str, response: str, agent_type: str = None, crop: str = None, zone_id: str = None, mode: str = "text", audio_url: str = None, execution_path: list = None, confidence_score: float = None, tokens_used: int = 0, response_time_ms: int = None):
 		return await self._execute_transaction(super().log_conversation, user_id, query, response, agent_type, crop, zone_id, mode, audio_url, execution_path, confidence_score, tokens_used, response_time_ms)
 

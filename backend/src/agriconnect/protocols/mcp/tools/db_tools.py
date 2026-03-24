@@ -619,6 +619,94 @@ async def persist_conversation(user_id: str, query_json: str, response_json: str
         return GenericResult(status="error", message=str(exc)).model_dump_json()
 
 
+@mcp.tool()
+async def get_user_context_state(user_id: str, ctx=None) -> str:
+    """Read persistent user context (last_intent, pending_intent, draft_data)."""
+    if ctx:
+        await ctx.info(f"get_user_context_state user_id={user_id}")
+    db = runtime.db
+    if db is None:
+        return GenericResult(status="error", message="DB not initialized").model_dump_json()
+    try:
+        raw = await db.get_user_context(user_id)
+        res = GenericResult(status="ok", data=raw).model_dump_json()
+    except Exception as exc:
+        res = GenericResult(status="error", message=str(exc)).model_dump_json()
+    _log_call("get_user_context_state", {"user_id": user_id}, res)
+    return res
+
+
+@mcp.tool()
+async def upsert_user_context_state(user_id: str, last_intent: str = "", pending_intent: str = "", draft_data_json: str = "{}", ctx=None) -> str:
+    """Upsert persistent user context row used for conversational draft state."""
+    if ctx:
+        await ctx.info(f"upsert_user_context_state user_id={user_id} pending={pending_intent}")
+    db = runtime.db
+    if db is None:
+        return GenericResult(status="error", message="DB not initialized").model_dump_json()
+
+    draft_data: Dict[str, Any]
+    try:
+        parsed = json.loads(draft_data_json) if draft_data_json else {}
+        draft_data = parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        draft_data = {}
+
+    try:
+        raw = await db.upsert_user_context(
+            user_id=user_id,
+            last_intent=last_intent or None,
+            pending_intent=pending_intent or None,
+            draft_data=draft_data,
+        )
+        res = GenericResult(status="ok", data=raw).model_dump_json()
+    except Exception as exc:
+        res = GenericResult(status="error", message=str(exc)).model_dump_json()
+    _log_call("upsert_user_context_state", {"user_id": user_id, "pending_intent": pending_intent}, res)
+    return res
+
+
+@mcp.tool()
+async def create_market_match(product_id: str, buyer_id: str = "", score: float = 0.0, status: str = "SUGGESTED", meta_json: str = "{}", ctx=None) -> str:
+    """Store an async marketplace match suggestion (background agent output)."""
+    if ctx:
+        await ctx.info(f"create_market_match product_id={product_id} score={score}")
+    db = runtime.db
+    if db is None:
+        return GenericResult(status="error", message="DB not initialized").model_dump_json()
+
+    try:
+        parsed = json.loads(meta_json) if meta_json else {}
+        meta = parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        meta = {}
+
+    try:
+        raw = await db.create_market_match(product_id=product_id, buyer_id=buyer_id or None, score=score, status=status, meta=meta)
+        res = GenericResult(status="ok", data=raw).model_dump_json()
+    except Exception as exc:
+        res = GenericResult(status="error", message=str(exc)).model_dump_json()
+    _log_call("create_market_match", {"product_id": product_id, "buyer_id": buyer_id, "score": score}, res)
+    return res
+
+
+@mcp.tool()
+async def list_market_matches(buyer_id: str = "", status: str = "", limit: int = 20, ctx=None) -> str:
+    """List previously generated marketplace match suggestions."""
+    if ctx:
+        await ctx.info(f"list_market_matches buyer_id={buyer_id} limit={limit}")
+    db = runtime.db
+    if db is None:
+        return GenericResult(status="error", message="DB not initialized").model_dump_json()
+    try:
+        raw = await db.list_market_matches(buyer_id=buyer_id or None, status=status or None, limit=limit)
+        res = GenericResult(status="ok", data=raw).model_dump_json()
+    except Exception as exc:
+        res = GenericResult(status="error", message=str(exc)).model_dump_json()
+    _log_call("list_market_matches", {"buyer_id": buyer_id, "status": status}, res)
+    return res
+
+
 
 # Explicit tool map exported for defensive discovery by the server.
 # This avoids fragile introspection of FastMCP internals — servers should
@@ -652,6 +740,10 @@ TOOL_MAP = {
     "get_producer_dashboard": get_producer_dashboard,
     "register_surplus_offer": register_surplus_offer,
     "persist_conversation": persist_conversation,
+    "get_user_context_state": get_user_context_state,
+    "upsert_user_context_state": upsert_user_context_state,
+    "create_market_match": create_market_match,
+    "list_market_matches": list_market_matches,
 }
 
 __all__ = ["TOOL_MAP"]

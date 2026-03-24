@@ -9,6 +9,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     POETRY_VIRTUALENVS_CREATE=false \
     PATH="/opt/poetry/bin:$PATH"
 
+# Make network installs more resilient
+ENV POETRY_HTTP_TIMEOUT=300 \
+    PIP_DEFAULT_TIMEOUT=100 \
+    PIP_NO_CACHE_DIR=1
+
 # Installation des dépendances système minimales
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
@@ -25,13 +30,31 @@ WORKDIR /app
 COPY pyproject.toml poetry.lock ./
 
 # On installe les dépendances (Docker mettra cette couche en cache)
-RUN poetry install --no-root --no-interaction --no-ansi --only main
+RUN poetry config virtualenvs.create false || true
+# Retry loop for network instability when installing dependencies
+RUN set -eux; \
+    n=0; \
+    until [ "$n" -ge 4 ]; do \
+        poetry install --no-root --no-interaction --no-ansi --only main && break; \
+        n=$((n+1)); \
+        echo "poetry install failed, retrying ($n)..."; \
+        sleep 15; \
+    done; \
+    if [ "$n" -ge 4 ]; then echo "poetry install failed after retries"; exit 1; fi
 
 # Maintenant on copie le reste du code
 COPY . .
 
 # Installation du projet lui-même
-RUN poetry install --only main
+RUN set -eux; \
+    n=0; \
+    until [ "$n" -ge 4 ]; do \
+        poetry install --no-interaction --no-ansi --only main && break; \
+        n=$((n+1)); \
+        echo "poetry install (project) failed, retrying ($n)..."; \
+        sleep 15; \
+    done; \
+    if [ "$n" -ge 4 ]; then echo "poetry install (project) failed after retries"; exit 1; fi
 
 EXPOSE 8000
 CMD ["python", "-m", "src.main"] # Adapte selon ton point d'entrée

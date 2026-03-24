@@ -20,5 +20,5 @@ CREATE TABLE IF NOT EXISTS agent_audit_trails (
     hash_signature VARCHAR(255)             -- (Optionnel) Hash pour sceller l'enregistrement
 );
 
-CREATE INDEX idx_audit_user ON agent_audit_trails(user_id);
-CREATE INDEX idx_audit_agent ON agent_audit_trails(agent_name);
+CREATE INDEX IF NOT EXISTS idx_audit_user ON agent_audit_trails(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_agent ON agent_audit_trails(agent_name);

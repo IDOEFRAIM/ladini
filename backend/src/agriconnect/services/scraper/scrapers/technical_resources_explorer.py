@@ -30,6 +30,8 @@ import time
 from collections import deque
 
 from .pdf_downloader import PdfDownloader
+from agriconnect.core.settings import settings
+from agriconnect.utils.s3_utils import upload_file_to_s3
 
 logger = logging.getLogger("TechnicalResourcesExplorer")
 
@@ -237,6 +239,21 @@ class TechnicalResourcesExplorer:
                     f.write(f"URL: {url}\n")
                     f.write(f"Titre: {page_data.get('title')}\n\n")
                     f.write(page_data.get('content', ''))
+                # Upload saved page to S3 when configured
+                try:
+                    if getattr(settings, 'S3_BUCKET', ''):
+                        s3p = upload_file_to_s3(str(filepath))
+                        if s3p:
+                            documents_found.append({
+                                'url': url,
+                                'type': 'html_page',
+                                'title': page_data.get('title'),
+                                'file_path': s3p,
+                                'depth': depth
+                            })
+                            continue
+                except Exception:
+                    logger.warning("S3 upload failed for page: %s", filepath)
                 
                 documents_found.append({
                     'url': url,
@@ -261,6 +278,7 @@ class TechnicalResourcesExplorer:
                             try:
                                 pdf_result = self.pdf_downloader.process_pdf(link_url, max_pages=20)
                                 if pdf_result.get('status') == 'success':
+                                    # pdf_downloader already uploads to S3; pass through
                                     documents_found.append({
                                         'url': link_url,
                                         'type': 'pdf',
@@ -309,8 +327,18 @@ class TechnicalResourcesExplorer:
         
         with open(summary_path, 'w', encoding='utf-8') as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
-        
-        result['summary_file'] = str(summary_path)
+        # Attempt to upload summary
+        try:
+            if getattr(settings, 'S3_BUCKET', ''):
+                s3sum = upload_file_to_s3(str(summary_path))
+                if s3sum:
+                    result['summary_file'] = s3sum
+                else:
+                    result['summary_file'] = str(summary_path)
+            else:
+                result['summary_file'] = str(summary_path)
+        except Exception:
+            result['summary_file'] = str(summary_path)
         
         # Pour ResourceManager, on retourne le contenu du premier document significatif
         if documents:

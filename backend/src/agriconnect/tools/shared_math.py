@@ -1,7 +1,7 @@
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Any
 
 class SoilType(Enum):
     SABLEUX = "sableux"
@@ -24,15 +24,36 @@ class SahelianCropProfile:
     name: str
     varieties: Dict[str, List[str]]
     cycle_days: int
-    seeding_density: str
+    seeding_density: str  # Kept for backward compatibility, usage deprecated
     depth_cm: int
     organic_matter_min_tha: float
     mineral_fertilizer: Dict[str, str]
     water_strategy: str
+    # V2 Enhancements for "Technical Canvas"
+    scientific_name: str = ""
+    sowing_config: Dict[str, float] = None # {inter_row_cm: 75, inter_plant_cm: 25, seeds_pocket: 2}
+    fertilizer_plan: List[Dict[str, Any]] = None # [{stage: "Semis", type: "NPK", kg_ha: 150}]
+    yield_potential: Tuple[float, float] = (0.0, 0.0) # (min, max) t/ha
+    key_pests: List[str] = None
+    key_diseases: List[str] = None
+    pre_flight_checks: List[str] = None # Questions to ask
 
 class SahelAgroMath:
     GSC = 0.0820
     
+    @staticmethod
+    def calculate_sowing_density_ha(inter_row_cm: float, inter_plant_cm: float, seeds_per_pocket: int = 1) -> int:
+        """Calcule la densité de population (plants/ha) en fonction des écartements."""
+        if inter_row_cm <= 0 or inter_plant_cm <= 0:
+            return 0
+        
+        # Surface occupée par un poquet en m²
+        area_per_pocket_m2 = (inter_row_cm / 100.0) * (inter_plant_cm / 100.0)
+        pockets_per_ha = 10000.0 / area_per_pocket_m2
+        plants_per_ha = pockets_per_ha * seeds_per_pocket
+        
+        return int(plants_per_ha)
+
     @staticmethod
     def calculate_hargreaves_et0(t_min: float, t_max: float, lat: float, doy: int) -> float:
         """Calcule l'évapotranspiration de référence (ET0)."""

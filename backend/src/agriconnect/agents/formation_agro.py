@@ -487,5 +487,29 @@ class FormationAgro:
             logger.exception("FormationAgro workflow error: %s", exc)
             return f"Erreur interne: {exc}"
 
+    async def aask(self, question: str, learner_profile: Optional[Dict[str, Any]] = None) -> str:
+        """Run the full formation workflow asynchronously and return a plain-text answer."""
+        if not question or not question.strip():
+            return "Posez votre question de formation."
+
+        state: FormationAgentState = {
+            "user_query": question,
+            "learner_profile": learner_profile or self.default_profile,
+        }
+
+        try:
+            workflow = self.build()
+            result = await workflow.ainvoke(state)
+            if isinstance(result, dict):
+                if result.get("final_response"):
+                    return result["final_response"]
+                if result.get("answer_draft"):
+                    return result["answer_draft"]
+                return json.dumps(result, indent=2, ensure_ascii=False, default=str)
+            return str(result)
+        except Exception as exc:
+            logger.exception("FormationAgro async workflow error: %s", exc)
+            return f"Erreur interne: {exc}"
+
     # Keep legacy name for backward compat
     handle_question = ask

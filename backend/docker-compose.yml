@@ -13,6 +13,8 @@ services:
       dockerfile: Dockerfile
     env_file:
       - ./src/agriconnect/.env
+      - ./.env
+    command: ["python", "-m", "agriconnect.main"]
     environment:
       # prefer explicit REDIS_URL from env file, otherwise point to redis service
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
@@ -36,6 +38,7 @@ services:
       dockerfile: Dockerfile
     env_file:
       - ./src/agriconnect/.env
+      - ./.env
     command: ["sh", "-c", "poetry run celery -A agriconnect.workers.celery_app worker --loglevel=info"]
     depends_on:
       - redis

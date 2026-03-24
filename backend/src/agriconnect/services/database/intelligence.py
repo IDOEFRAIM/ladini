@@ -3,10 +3,84 @@ from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 import uuid
 
-from .common import _uuid, AgentAction, Conversation, AuditLog, TrustScore, AIRatingReasoning, Anomaly, TerritoryEvent, ZoneMetric
+from .common import _uuid, AgentAction, Conversation, AuditLog, TrustScore, AIRatingReasoning, Anomaly, TerritoryEvent, ZoneMetric, UserContextState, MarketMatch
 
 
 class IntelligenceMixin:
+    async def get_user_context(self, session: AsyncSession, user_id: str) -> Dict[str, Any]:
+        stmt = select(UserContextState).where(UserContextState.user_id == user_id)
+        result = await session.execute(stmt)
+        row = result.scalar_one_or_none()
+        if not row:
+            return {
+                "user_id": user_id,
+                "last_intent": None,
+                "pending_intent": None,
+                "draft_data": {},
+            }
+        return row.to_dict()
+
+    async def upsert_user_context(self, session: AsyncSession, payload: dict) -> Dict[str, Any]:
+        user_id = payload.get("user_id")
+        last_intent = payload.get("last_intent")
+        pending_intent = payload.get("pending_intent")
+        draft_data = payload.get("draft_data")
+        stmt = select(UserContextState).where(UserContextState.user_id == user_id)
+        result = await session.execute(stmt)
+        row = result.scalar_one_or_none()
+
+        if not row:
+            row = UserContextState(
+                id=_uuid(),
+                user_id=user_id,
+                last_intent=last_intent,
+                pending_intent=pending_intent,
+                draft_data=draft_data or {},
+            )
+            session.add(row)
+        else:
+            if last_intent is not None:
+                row.last_intent = last_intent
+            if pending_intent is not None:
+                row.pending_intent = pending_intent
+            if draft_data is not None:
+                row.draft_data = draft_data
+
+        await session.flush()
+        return row.to_dict()
+
+    async def create_market_match(self, session: AsyncSession, payload: dict) -> Dict[str, Any]:
+        product_id = payload.get("product_id")
+        buyer_id = payload.get("buyer_id")
+        score = payload.get("score", 0.0)
+        status = payload.get("status", "SUGGESTED")
+        meta = payload.get("meta")
+        match = MarketMatch(
+            id=_uuid(),
+            product_id=product_id,
+            buyer_id=buyer_id,
+            score=max(0.0, min(1.0, float(score))),
+            status=status,
+            meta=meta or {},
+        )
+        session.add(match)
+        await session.flush()
+        return match.to_dict()
+
+    async def list_market_matches(self, session: AsyncSession, filters: dict | None = None) -> List[Dict[str, Any]]:
+        filters = filters or {}
+        buyer_id = filters.get("buyer_id")
+        status = filters.get("status")
+        limit = filters.get("limit", 20)
+        stmt = select(MarketMatch)
+        if buyer_id:
+            stmt = stmt.where(MarketMatch.buyer_id == buyer_id)
+        if status:
+            stmt = stmt.where(MarketMatch.status == status)
+        stmt = stmt.order_by(desc(MarketMatch.created_at)).limit(limit)
+        result = await session.execute(stmt)
+        return [m.to_dict() for m in result.scalars()]
+
     async def record_zone_metric(self, session: AsyncSession, zone_id: str, metric_name: str, value: float) -> Dict[str, Any]:
         metric = ZoneMetric(id=_uuid(), zone_id=zone_id, metric_name=metric_name, value=value)
         session.add(metric)

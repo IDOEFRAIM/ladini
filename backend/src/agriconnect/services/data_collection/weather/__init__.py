@@ -1,24 +1,28 @@
 """
-Weather Data Collection
+Weather Data Collection & Reconciliation
 
-Collecteurs de données météorologiques de sources diverses.
+Unified weather data pipeline containing:
+1. WeatherCollector: Orchestrates data fetching (OpenMeteo + Bulletins) and normalization (OpenCage).
+2. WeatherReconciler: Merges data sources and computes confidence scores.
+3. WeatherStorage: Handles DB persistence and S3 archiving.
 
 Modules:
-- weather_cron: Collecteur périodique avec stockage DB
-- weather_forecast: API météo avec prévisions
-- documents_meteo: Scraping de bulletins météo PDF/HTML
+- weather_collector
+- reconciliation
+- documents_meteo
 
 Usage:
-    from backend.services.data_collection.weather import WeatherCronScraper
+    from agriconnect.services.data_collection.weather.weather_collector import WeatherCollector
     
-    scraper = WeatherCronScraper()
-    scraper.run_for_all_locations()
+    collector = WeatherCollector()
+    results = collector.run()
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 __all__ = [
     "weather_cron",
     "weather_forecast",
-    "documents_meteo"
+    "documents_meteo",
+    "weather_collector",
 ]

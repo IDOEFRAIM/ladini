@@ -1,0 +1,13 @@
+{
+  "title": "Météo Ouagadougou",
+  "content": "Zone Ouagadougou: temp=39.8C, pluie=0.0mm, hum=24%. Surveiller l'évapotranspiration.",
+  "metadata": {
+    "doc_type": "weather_advisory",
+    "zone": "Ouagadougou",
+    "forecast_date": "2026-03-22",
+    "observed_at": "2026-03-22T13:08:39.523664+00:00",
+    "source": "api_openmeteo",
+    "confidence": 0.6,
+    "bulletin_excerpt": "Bulletin agrométéorologique décadaire N°4 (valable du 11 au 2O février 2026): AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin agrométéorologique décadaire N°7 (valable du 11 au 20 mars 2026): AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin agrométéorologique mensuel: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-"
+  }
+}

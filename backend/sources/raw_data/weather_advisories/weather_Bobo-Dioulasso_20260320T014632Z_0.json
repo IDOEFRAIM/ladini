@@ -1,0 +1,14 @@
+{
+  "title": "Conseil météo Bobo-Dioulasso",
+  "content": "Zone Bobo-Dioulasso: temperature=26.3C, precipitations=0.0mm, humidite=72%. Adapter l'irrigation et prioriser les parcelles sensibles.",
+  "metadata": {
+    "doc_type": "weather_advisory",
+    "category": "climat",
+    "zone": "Bobo-Dioulasso",
+    "forecast_date": "2026-03-20",
+    "valid_until": "2026-03-21T01:46:32.802339+00:00",
+    "observed_at": "2026-03-20T01:46:30.560894+00:00",
+    "source": "open-meteo",
+    "bulletin_excerpt": "Bulletin agrométéorologique mensuel: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin eau énergie: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin mensuel: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin de Prévisions saisonnières: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin Agrométéo pour les Médias: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis"
+  }
+}

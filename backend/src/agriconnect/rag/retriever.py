@@ -215,6 +215,24 @@ class AgileRetriever:
                         except Exception:
                             return 0.0
 
+                    # Convert VectorStoreQueryResult to iterable if needed
+                    if hasattr(raw, "nodes") and hasattr(raw, "similarities"):
+                        try:
+                            _raw_list = []
+                            _nodes = getattr(raw, "nodes", []) or []
+                            _scores = getattr(raw, "similarities", []) or []
+                            for i, node in enumerate(_nodes):
+                                score = _scores[i] if i < len(_scores) else 0.0
+                                # Mock object with score, compatible with loop below
+                                class _WrappedResult:
+                                    def __init__(self, n, s):
+                                        self.node = n
+                                        self.score = s
+                                _raw_list.append(_WrappedResult(node, score))
+                            raw = _raw_list
+                        except Exception:
+                            pass
+
                     for r in raw:
                         # dict-like
                         if isinstance(r, dict):

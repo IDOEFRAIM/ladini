@@ -58,6 +58,17 @@ celery_app.conf.update(get_celery_config())
 # ===================================================================
 
 celery_app.conf.beat_schedule = {
+    # ── Traitement continu des actions de matching marketplace (chaque minute) ──
+    "marketplace-matching-every-minute": {
+        "task": "agriconnect.workers.tasks.marketplace.process_pending_actions",
+        "schedule": crontab(minute="*"),
+        "options": {
+            "queue": "marketplace",
+            "expires": 50,
+            "priority": 4,
+        },
+    },
+
     # ── Monitoring météo toutes les 6 heures ──
     "weather-monitoring-every-6h": {
         "task": "agriconnect.workers.tasks.monitoring.check_weather_alerts",

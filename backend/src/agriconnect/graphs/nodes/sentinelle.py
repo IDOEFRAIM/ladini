@@ -20,6 +20,7 @@ from agriconnect.rag.metric import RAGEvaluator
 
 from agriconnect.tools.sentinelle import SentinelleTool
 from agriconnect.tools.refine import RefineTool
+from agriconnect.tools.crop import BurkinaCropTool
 from agriconnect.agents.base import BaseAgent
 logger = logging.getLogger("Agent.ClimateSentinel")
 # AG-UI removed from agent-level: return MCP-friendly dicts instead
@@ -55,6 +56,7 @@ class SentinelState(TypedDict, total=False):
     critique_retry_count: int
     rewrited_retry_count: int
     degraded_mode: bool  # True when loop guards fire
+    agronomic_advice: Dict[str, Any] # New field for synthesis
     # HITL / Hand-off flags — interceptés par l'orchestrateur
     requires_human: bool
     handoff_to: str
@@ -71,6 +73,7 @@ class ComposeContext:
     flood: Dict[str, Any]
     hazards: List[Dict[str, Any]]
     context: str
+    agronomic_advice: Dict[str, Any] = field(default_factory=dict)
     surface_calc_info: str = ""
     user_level: str = "debutant"
     warnings: List[str] = field(default_factory=list)
@@ -104,6 +107,7 @@ class ClimateSentinel(BaseAgent):
         # Create RefineTool after LLM resolved so it has a valid client
         self.refine = RefineTool(llm=self.llm)
             
+        self.crop_tools = BurkinaCropTool()
         self.tools = SentinelleTool(llm_client=self.llm)
 
         # MCP session injected by orchestrator (Host-Centric pattern)
@@ -121,33 +125,12 @@ class ClimateSentinel(BaseAgent):
     # Helpers                                                            #
 
     def _build_context(self, nodes: List[Any]) -> str:
-        """Construit le contexte RAG à partir des nœuds récupérés (MCP RAGDocument)."""
-        if not nodes:
-            return ""
-        
-        context_parts = []
-        for i, doc in enumerate(nodes):
-            # Adapt to RAGDocument pydantic model from server
-            text = getattr(doc, "excerpt", "") or getattr(doc, "content", "")
-            source_name = getattr(doc, "source", "Inconnu")
-            
-            context_parts.append(
-                f"--- DOCUMENT {i+1} ({source_name}) ---\n{text}\n"
-            )
-            
-        return "\n".join(context_parts)
+        """Construit le contexte RAG via le tool dédié."""
+        return self.tools._build_context(nodes)
 
     def _serialize_sources(self, nodes: List[Any]) -> List[Dict[str, Any]]:
-        """Extrait les métadonnées pour la traçabilité (MCP RAGDocument)."""
-        sources = []
-        for doc in nodes:
-            # Adapt to RAGDocument pydantic model
-            sources.append({
-                "source": getattr(doc, "source", "Unknown"),
-                "type": "doc",
-                "similarity": getattr(doc, "score", 0.0)
-            })
-        return sources
+        """Extrait les métadonnées via le tool dédié."""
+        return self.tools._serialize_sources(nodes)
 
     def _purchase_handoff_needed(self, query: str, hazards: list) -> bool:
         """
@@ -193,14 +176,28 @@ class ClimateSentinel(BaseAgent):
             warnings.append(security_reason)
         return {"security_status": security_status, "security_reason": security_reason}
 
-    def _compute_signals(self, weather: Dict[str, Any], satellite: Dict[str, Any], location: Dict[str, Any]) -> Dict[str, Any]:
+    def _compute_signals(self, weather: Dict[str, Any], satellite: Dict[str, Any], location: Dict[str, Any], query: str = "") -> Dict[str, Any]:
         """Compute metrics, flood risk and hazards from tools; return packed results."""
         metrics = self.tools._compute_metrics(weather, satellite)
         flood = self.tools._assess_flood_risk(weather, satellite, location)
         hazards = self.tools._derive_hazards(metrics, flood)
-        return {"metrics": metrics, "flood": flood, "hazards": hazards}
 
-    def _build_signals_state(self, metrics: Dict[str, Any], flood: Dict[str, Any], hazards: List[Dict[str, Any]], warnings: List[str]) -> Dict[str, Any]:
+        # Extraction culture basique pour fusion
+        crop_profile = None
+        # Normalisation rapide pour trouver la culture
+        q_norm = (query or "").lower()
+        if "maïs" in q_norm or "mais" in q_norm or "corn" in q_norm:
+            crop_profile = self.crop_tools.get_math_profile("maïs")
+        elif "niébé" in q_norm or "niebe" in q_norm or "cowpea" in q_norm:
+            crop_profile = self.crop_tools.get_math_profile("niébé")
+        elif "sorgho" in q_norm or "millet" in q_norm:
+            crop_profile = self.crop_tools.get_math_profile("sorgho")
+
+        advice = self.tools.synthesize_agronomic_advice(metrics, crop_profile)
+
+        return {"metrics": metrics, "flood": flood, "hazards": hazards, "agronomic_advice": advice}
+
+    def _build_signals_state(self, metrics: Dict[str, Any], flood: Dict[str, Any], hazards: List[Dict[str, Any]], advice: Dict[str, Any], warnings: List[str]) -> Dict[str, Any]:
         """Prepare the state fields derived from signals."""
         if not hazards:
             warnings.append("Aucun risque majeur détecté (veille standard).")
@@ -217,6 +214,7 @@ class ClimateSentinel(BaseAgent):
             "hazards": hazards,
             "risk_summary": risk_summary,
             "warnings": warnings,
+            "agronomic_advice": advice,
             "status": "SIGNALS_READY",
         }
 
@@ -299,6 +297,7 @@ class ClimateSentinel(BaseAgent):
             flood=state.get("flood_risk", {}),
             hazards=state.get("hazards", []),
             context=state.get("retrieved_context", ""),
+            agronomic_advice=state.get("agronomic_advice", {}),
             surface_calc_info="",
             user_level=state.get("user_level", "debutant"),
             warnings=list(state.get("warnings", [])),
@@ -327,6 +326,7 @@ class ClimateSentinel(BaseAgent):
             location=ctx.location,
             risk_summary=ctx.risk_summary,
             metrics_json=json.dumps(ctx.metrics, ensure_ascii=False),
+            agronomic_advice=json.dumps(ctx.agronomic_advice, ensure_ascii=False, indent=2),
             flood_data=json.dumps(ctx.flood, ensure_ascii=False),
             hazard_json=json.dumps(ctx.hazards, ensure_ascii=False),
             context=ctx.context,
@@ -370,8 +370,8 @@ class ClimateSentinel(BaseAgent):
             return state
 
         # Signals (metrics, flood, hazards)
-        signals = self._compute_signals(weather, satellite, location)
-        built = self._build_signals_state(signals["metrics"], signals["flood"], signals["hazards"], warnings)
+        signals = self._compute_signals(weather, satellite, location, query)
+        built = self._build_signals_state(signals["metrics"], signals["flood"], signals["hazards"], signals["agronomic_advice"], warnings)
 
         state = dict(state)
         state.update(built)

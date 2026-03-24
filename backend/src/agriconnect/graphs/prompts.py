@@ -62,6 +62,10 @@ DONNÉES DU MOMENT :
 - Date actuelle : {current_date_str}
 - Requête : {query}
 - Localisation : {location}
+
+CONTEXTE AGRONOMIQUE (FUSION CULTURES + MÉTÉO) :
+{agronomic_advice}
+
 - Risques calculés : {risk_summary}
 - Capteurs : {metrics_json}
 - Risque inondation : {flood_data}

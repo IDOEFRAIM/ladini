@@ -13,6 +13,7 @@ from .plant_doctor import PlantHealthDoctor
 
 # v3 — Async agents (multi-schema)
 from .marketplace_v3 import MarketplaceAgentV3
+from .marketplace_background import MarketplaceBackgroundAgent
 
 # Les agents ci-dessous dépendent de modules optionnels (services.google, etc.)
 # Ils sont importés à la demande pour ne pas bloquer le startup.
@@ -25,4 +26,5 @@ __all__ = [
     "PlantHealthDoctor",
     # v3
     "MarketplaceAgentV3",
+    "MarketplaceBackgroundAgent",
 ]

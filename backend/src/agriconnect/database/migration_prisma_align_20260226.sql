@@ -53,7 +53,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 
 -- 3) Producers status: normalize values and add check constraint
-UPDATE producers SET status='PENDING' WHERE status='INACTIVE';
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name='producers' AND column_name='status'
+  ) THEN
+    UPDATE producers SET status = 'ACTIVE' WHERE status IS NULL;
+  END IF;
+END $$;
 DO $$ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
@@ -64,7 +71,14 @@ DO $$ BEGIN
 END $$;
 
 -- 4) Stocks: map OTHER -> EQUIPMENT and ensure constraint
-UPDATE stocks SET type='EQUIPMENT' WHERE type='OTHER';
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name='stocks' AND column_name='type'
+  ) THEN
+    UPDATE stocks SET type = 'EQUIPMENT' WHERE type = 'OTHER';
+  END IF;
+END $$;
 DO $$ BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM information_schema.table_constraints
@@ -100,12 +114,25 @@ CREATE TABLE IF NOT EXISTS clients (
   total_orders INTEGER DEFAULT 0,
   total_spent DOUBLE PRECISION DEFAULT 0,
   last_order_date TIMESTAMPTZ,
-  producer_id TEXT NOT NULL REFERENCES producers(id),
+  -- Use plain TEXT for producer_id to avoid FK type mismatches across intermediate schemas
+  producer_id TEXT NOT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_clients_phone ON clients(phone);
-CREATE INDEX IF NOT EXISTS idx_clients_producer ON clients(producer_id);
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name='clients' AND column_name='producer_id'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_clients_producer ON ' || quote_ident(current_schema()) || '.clients(' || quote_ident('producer_id') || ')';
+  ELSIF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name='clients' AND column_name='producerId'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_clients_producer ON ' || quote_ident(current_schema()) || '.clients(' || quote_ident('producerId') || ')';
+  END IF;
+END $$;
 
 -- 8) Agent actions table
 CREATE TABLE IF NOT EXISTS agent_actions (
@@ -124,7 +151,19 @@ CREATE TABLE IF NOT EXISTS agent_actions (
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_agent_actions_agent ON agent_actions(agent_name);
+DO $$ BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name='agent_actions' AND column_name='agent_name'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_agent_actions_agent ON ' || quote_ident(current_schema()) || '.agent_actions(' || quote_ident('agent_name') || ')';
+  ELSIF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name='agent_actions' AND column_name='agentName'
+  ) THEN
+    EXECUTE 'CREATE INDEX IF NOT EXISTS idx_agent_actions_agent ON ' || quote_ident(current_schema()) || '.agent_actions(' || quote_ident('agentName') || ')';
+  END IF;
+END $$;
 
 -- 9) Orders: add optional buyer/client/payment & agent linkage
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_id TEXT REFERENCES users(id);
@@ -135,7 +174,10 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_agent_order BOOLEAN DEFAULT false
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS agent_action_id TEXT REFERENCES agent_actions(id);
 -- set source default to APP if column exists
 DO $$ BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='orders' AND column_name='source') THEN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = current_schema() AND table_name='orders' AND column_name='source'
+  ) THEN
     ALTER TABLE orders ALTER COLUMN source SET DEFAULT 'APP';
   END IF;
 END $$;

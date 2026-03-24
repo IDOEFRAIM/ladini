@@ -149,6 +149,31 @@ class _MemorySearchSchema(BaseModel):
     top_k: int = 3
 
 
+class _UserContextReadSchema(BaseModel):
+    user_id: str
+
+
+class _UserContextUpsertSchema(BaseModel):
+    user_id: str
+    last_intent: str = ""
+    pending_intent: str = ""
+    draft_data_json: str = "{}"
+
+
+class _CreateMarketMatchSchema(BaseModel):
+    product_id: str
+    buyer_id: Optional[str] = ""
+    score: float = 0.0
+    status: str = "SUGGESTED"
+    meta_json: str = "{}"
+
+
+class _ListMarketMatchesSchema(BaseModel):
+    buyer_id: Optional[str] = ""
+    status: Optional[str] = ""
+    limit: int = 20
+
+
 _SCHEMA_REGISTRY.update({
     "get_user_profile":          _UserIdSchema,
     "get_user_by_phone":         _PhoneSchema,
@@ -165,6 +190,10 @@ _SCHEMA_REGISTRY.update({
     "remove_stock":              _RemoveStockSchema,
     "add_expense":               _AddExpenseSchema,
     "register_surplus_offer":    _RegisterSurplusSchema,
+    "get_user_context_state":    _UserContextReadSchema,
+    "upsert_user_context_state": _UserContextUpsertSchema,
+    "create_market_match":       _CreateMarketMatchSchema,
+    "list_market_matches":       _ListMarketMatchesSchema,
     "commit_staged_transaction": _TransactionIdSchema,
     # RAG related tools
     "search_agronomy_docs":      _RAGSearchSchema,

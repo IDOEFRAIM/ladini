@@ -11,6 +11,7 @@ from agriconnect.services.models_v3 import (
     AgentAction, Conversation, AuditLog, TrustScore,
     AIRatingReasoning, Anomaly, TerritoryEvent, AgentTelemetry,
     Auction, Bid, ExternalContext,
+    UserContextState, MarketMatch,
     TransactionStaging,
 )
 

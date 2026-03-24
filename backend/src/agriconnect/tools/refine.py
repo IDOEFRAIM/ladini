@@ -73,7 +73,8 @@ class RefineTool:
         if verdict == "PASSED":
             return self._handle_passed_verdict(state)
 
-        return {"status": "REJECTED"}
+        # Fallback: if verdict is unknown, treat as rejected but increment count to avoid infinite loop
+        return self._handle_failed_verdict(count)
 
     def _build_critique_prompt(self, answer: str, context: str) -> str:
         return (
@@ -88,7 +89,12 @@ class RefineTool:
     def _extract_verdict_from_completion(self, completion: Any) -> str:
         try:
             content = completion.choices[0].message.content
-            return (content or "").strip().upper()
+            text = (content or "").strip().upper()
+            if "FAILED" in text:
+                return "FAILED"
+            if "PASSED" in text:
+                return "PASSED"
+            return text
         except Exception:
             return ""
 

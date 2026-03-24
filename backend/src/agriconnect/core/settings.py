@@ -54,8 +54,7 @@ class Settings(BaseSettings):
     AZURE_OPENAI_API_VERSION: str = "2024-05-01-preview"
 
     # --- Database (PostgreSQL) ---
-    DATABASE_URL: str = "postgresql://doadmin:AVNS_-TtxFZrkDLQSQ2W8UiX@db-postgresql-fra1-38999-do-user-31802282-0.a.db.ondigitalocean.com:25060/defaultdb?sslmode=require"
-
+    DATABASE_URL: str = ""
     # --- Redis / Celery ---
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = ""
@@ -127,6 +126,11 @@ class Settings(BaseSettings):
     # --- Sentry (observabilité erreurs) ---
     SENTRY_DSN: str = ""
     SENTRY_ENVIRONMENT: str = "development"
+
+    # --- AWS S3 (optional) ---
+    S3_BUCKET: str = ""
+    S3_KEY_PREFIX: str = ""
+    S3_REGION: str = ""
 
 # Singleton — importable partout
 settings = Settings()

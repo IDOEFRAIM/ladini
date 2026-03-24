@@ -24,8 +24,21 @@ CREATE TABLE IF NOT EXISTS zones (
     updated_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE INDEX idx_zones_region ON zones(region);
-CREATE INDEX idx_zones_agro_type ON zones(agro_type);
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns WHERE table_name='zones' AND column_name='region'
+    ) THEN
+        CREATE INDEX IF NOT EXISTS idx_zones_region ON zones(region);
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns WHERE table_name='zones' AND column_name='agro_type'
+    ) THEN
+        CREATE INDEX IF NOT EXISTS idx_zones_agro_type ON zones(agro_type);
+    END IF;
+END $$;
 
 -- ============================================
 -- 2. UTILISATEURS (Paysans)
@@ -58,9 +71,23 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE INDEX idx_users_phone ON users(phone);
-CREATE INDEX idx_users_zone ON users(zone_id);
-CREATE INDEX idx_users_active ON users(last_active);
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='phone') THEN
+        CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone);
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='zone_id') THEN
+        CREATE INDEX IF NOT EXISTS idx_users_zone ON users(zone_id);
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='last_active') THEN
+        CREATE INDEX IF NOT EXISTS idx_users_active ON users(last_active);
+    END IF;
+END $$;
 
 -- Authentication tables (NextAuth-style)
 CREATE TABLE IF NOT EXISTS accounts (
@@ -145,7 +172,11 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 CREATE INDEX idx_alerts_type ON alerts(type);
 CREATE INDEX idx_alerts_zone ON alerts(zone_id);
-CREATE INDEX idx_alerts_active ON alerts(is_active, start_date, end_date);
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='alerts' AND column_name='is_active') THEN
+        CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts(is_active, start_date, end_date);
+    END IF;
+END $$;
 CREATE INDEX idx_alerts_severity ON alerts(severity);
 
 -- ============================================
@@ -176,9 +207,47 @@ CREATE TABLE IF NOT EXISTS conversations (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
-CREATE INDEX idx_conversations_user ON conversations(user_id);
-CREATE INDEX idx_conversations_created ON conversations(created_at DESC);
-CREATE INDEX idx_conversations_agent ON conversations(agent_type);
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name='conversations' AND column_name='user_id'
+    ) THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_conversations_user ON ' || quote_ident(current_schema()) || '.conversations(' || quote_ident('user_id') || ')';
+    ELSIF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name='conversations' AND column_name='userId'
+    ) THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_conversations_user ON ' || quote_ident(current_schema()) || '.conversations(' || quote_ident('userId') || ')';
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name='conversations' AND column_name='created_at'
+    ) THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_conversations_created ON ' || quote_ident(current_schema()) || '.conversations(' || quote_ident('created_at') || ' DESC)';
+    ELSIF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name='conversations' AND column_name='createdAt'
+    ) THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_conversations_created ON ' || quote_ident(current_schema()) || '.conversations(' || quote_ident('createdAt') || ' DESC)';
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name='conversations' AND column_name='agent_type'
+    ) THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_conversations_agent ON ' || quote_ident(current_schema()) || '.conversations(' || quote_ident('agent_type') || ')';
+    ELSIF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name='conversations' AND column_name='agentType'
+    ) THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_conversations_agent ON ' || quote_ident(current_schema()) || '.conversations(' || quote_ident('agentType') || ')';
+    END IF;
+END $$;
 
 -- ============================================
 -- 6. DONNÉES MÉTÉO (Cache)
@@ -205,7 +274,25 @@ CREATE TABLE IF NOT EXISTS weather_data (
     UNIQUE(zone_id, date, source)
 );
 
-CREATE INDEX idx_weather_zone_date ON weather_data(zone_id, date DESC);
+DO $$ BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name='weather_data' AND column_name='zone_id'
+    ) AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name='weather_data' AND column_name='date'
+    ) THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_weather_zone_date ON ' || quote_ident(current_schema()) || '.weather_data(' || quote_ident('zone_id') || ', ' || quote_ident('date') || ' DESC)';
+    ELSIF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name='weather_data' AND column_name='zoneId'
+    ) AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name='weather_data' AND column_name='date'
+    ) THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_weather_zone_date ON ' || quote_ident(current_schema()) || '.weather_data(' || quote_ident('zoneId') || ', ' || quote_ident('date') || ' DESC)';
+    END IF;
+END $$;
 
 -- ============================================
 -- 7. PRIX DE MARCHÉ (Cache)
@@ -213,7 +300,8 @@ CREATE INDEX idx_weather_zone_date ON weather_data(zone_id, date DESC);
 
 CREATE TABLE IF NOT EXISTS market_prices (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    zone_id UUID REFERENCES zones(id) ON DELETE CASCADE,
+    -- Keep as TEXT for compatibility with legacy schemas where zones.id is VARCHAR/TEXT
+    zone_id TEXT,
     
     -- Product
     product_name VARCHAR(100) NOT NULL,
@@ -257,9 +345,23 @@ CREATE TABLE IF NOT EXISTS surplus_offers (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
-CREATE INDEX idx_surplus_status ON surplus_offers(status);
-CREATE INDEX idx_surplus_product ON surplus_offers(product_name);
-CREATE INDEX idx_surplus_zone ON surplus_offers(zone_id);
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='surplus_offers' AND column_name='status') THEN
+        CREATE INDEX IF NOT EXISTS idx_surplus_status ON surplus_offers(status);
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='surplus_offers' AND column_name='product_name') THEN
+        CREATE INDEX IF NOT EXISTS idx_surplus_product ON surplus_offers(product_name);
+    END IF;
+END $$;
+
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='surplus_offers' AND column_name='zone_id') THEN
+        CREATE INDEX IF NOT EXISTS idx_surplus_zone ON surplus_offers(zone_id);
+    END IF;
+END $$;
 
 -- ============================================
 -- 9. DIAGNOSTICS SOL (Proactif — AgriSoilAgent)
@@ -381,21 +483,58 @@ CREATE INDEX idx_scraper_jobs_status ON scraper_jobs(status);
 -- SEED DATA (Zones Agro-écologiques Burkina Faso)
 -- ============================================
 
-INSERT INTO zones (name, region, agro_type) VALUES
-('Ouagadougou - Centre', 'Centre', 'MARAICHAGE'),
-('Bobo-Dioulasso - Hauts-Bassins', 'Hauts-Bassins', 'COTON'),
-('Dedougou - Boucle du Mouhoun', 'Boucle du Mouhoun', 'GRENIER'),
-('Fada N''Gourma - Est', 'Est', 'PASTORAL'),
-('Koudougou - Centre-Ouest', 'Centre-Ouest', 'GRENIER'),
-('Ouahigouya - Nord', 'Nord', 'PASTORAL'),
-('Dori - Sahel', 'Sahel', 'PASTORAL'),
-('Banfora - Cascades', 'Cascades', 'MARAICHAGE'),
-('Kaya - Centre-Nord', 'Centre-Nord', 'GRENIER'),
-('Gaoua - Sud-Ouest', 'Sud-Ouest', 'COTON'),
-('Tenkodogo - Centre-Est', 'Centre-Est', 'GRENIER'),
-('Manga - Centre-Sud', 'Centre-Sud', 'MARAICHAGE'),
-('Djibo - Sahel', 'Sahel', 'PASTORAL')
-ON CONFLICT DO NOTHING;
+DO $$
+DECLARE
+    has_region BOOLEAN;
+    has_agro_type BOOLEAN;
+BEGIN
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name='zones' AND column_name='region'
+    ) INTO has_region;
+
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name='zones' AND column_name='agro_type'
+    ) INTO has_agro_type;
+
+    IF has_region AND has_agro_type THEN
+        INSERT INTO zones (name, region, agro_type) VALUES
+        ('Ouagadougou - Centre', 'Centre', 'MARAICHAGE'),
+        ('Bobo-Dioulasso - Hauts-Bassins', 'Hauts-Bassins', 'COTON'),
+        ('Dedougou - Boucle du Mouhoun', 'Boucle du Mouhoun', 'GRENIER'),
+        ('Fada N''Gourma - Est', 'Est', 'PASTORAL'),
+        ('Koudougou - Centre-Ouest', 'Centre-Ouest', 'GRENIER'),
+        ('Ouahigouya - Nord', 'Nord', 'PASTORAL'),
+        ('Dori - Sahel', 'Sahel', 'PASTORAL'),
+        ('Banfora - Cascades', 'Cascades', 'MARAICHAGE'),
+        ('Kaya - Centre-Nord', 'Centre-Nord', 'GRENIER'),
+        ('Gaoua - Sud-Ouest', 'Sud-Ouest', 'COTON'),
+        ('Tenkodogo - Centre-Est', 'Centre-Est', 'GRENIER'),
+        ('Manga - Centre-Sud', 'Centre-Sud', 'MARAICHAGE'),
+        ('Djibo - Sahel', 'Sahel', 'PASTORAL')
+        ON CONFLICT DO NOTHING;
+    ELSIF has_agro_type THEN
+        INSERT INTO zones (name, agro_type) VALUES
+        ('Ouagadougou - Centre', 'MARAICHAGE'),
+        ('Bobo-Dioulasso - Hauts-Bassins', 'COTON'),
+        ('Dedougou - Boucle du Mouhoun', 'GRENIER'),
+        ('Fada N''Gourma - Est', 'PASTORAL'),
+        ('Koudougou - Centre-Ouest', 'GRENIER'),
+        ('Ouahigouya - Nord', 'PASTORAL'),
+        ('Dori - Sahel', 'PASTORAL'),
+        ('Banfora - Cascades', 'MARAICHAGE'),
+        ('Kaya - Centre-Nord', 'GRENIER'),
+        ('Gaoua - Sud-Ouest', 'COTON'),
+        ('Tenkodogo - Centre-Est', 'GRENIER'),
+        ('Manga - Centre-Sud', 'MARAICHAGE'),
+        ('Djibo - Sahel', 'PASTORAL')
+        ON CONFLICT DO NOTHING;
+    ELSE
+        -- Legacy schema without expected columns/defaults: skip seed instead of failing migration.
+        RAISE NOTICE 'Skipping zones seed: expected columns (region/agro_type) are missing.';
+    END IF;
+END $$;
 
 -- ============================================
 -- FUNCTIONS & TRIGGERS

@@ -28,6 +28,10 @@ except Exception:
 
 logger = logging.getLogger("agriconnect.rag.redis_search_store")
 
+# Redis is the primary vector store for AgriConnect 2.0.
+# PGVector migration was cancelled/reversed in favor of Redis speed.
+_REDIS_LEGACY_ENABLED = True
+
 
 class RedisSearchVectorStore:
     INDEX_NAME = "rag:idx"
@@ -50,6 +54,7 @@ class RedisSearchVectorStore:
             raise RuntimeError("numpy is required for RedisSearchVectorStore")
         self.index_name = index_name or self.INDEX_NAME
         self.decode_responses = bool(decode_responses)
+
 
         # Use resilient Redis client settings; latin-1 preserves byte round-trips
         # when decode_responses=True for vector payloads.

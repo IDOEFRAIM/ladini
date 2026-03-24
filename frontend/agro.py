@@ -14,8 +14,11 @@ import sys
 from typing import Optional
 
 import requests
+import asyncio
 
-from agriconnect.agents.formation_agro import FormationAgro
+# Removed: from agriconnect.agents.formation_agro import FormationAgro
+from agriconnect.graphs.nodes.formation import FormationCoach, FormationConfig
+from agriconnect.rag.retriever import AgileRetriever
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +27,38 @@ logging.basicConfig(
 
 DEFAULT_PROFILE = {"niveau": "débutant", "région": "Boucle du Mouhoun"}
 
+class LocalShield:
+    """Mock Shield that routes 'search_agronomy_docs' to local AgileRetriever."""
+    def __init__(self):
+        try:
+            self.retriever = AgileRetriever()
+        except Exception as e:
+            logging.warning(f"Failed to initialize AgileRetriever: {e}")
+            self.retriever = None
+
+    def call_tool(self, tool_name: str, args: dict):
+        if tool_name == "search_agronomy_docs":
+            query = args.get("query", "")
+            level = args.get("level", "debutant")
+            if not self.retriever:
+                 return {"documents": []}
+            
+            # Use AgileRetriever.search -> List[NodeWithScore]
+            nodes = self.retriever.search(query, user_level=level)
+            
+            # Format for FormationCoach (Shape A: direct RAG payload)
+            documents = []
+            for node in nodes:
+                 # NodeWithScore -> dict
+                 item = {
+                     "text": node.get_content(),
+                     "score": node.score,
+                     "metadata": node.metadata or {}
+                 }
+                 documents.append(item)
+            
+            return {"documents": documents}
+        return {"error": f"Tool {tool_name} not supported by LocalShield"}
 
 def _read_profile() -> dict:
     """Optionally let the user set a learner profile at startup."""
@@ -39,9 +74,9 @@ def _read_profile() -> dict:
         return dict(DEFAULT_PROFILE)
 
 
-def run():
+async def run():
     print("=" * 60)
-    print("   FRONTEND AGRO — Test formation agent (agronome)")
+    print("   FRONTEND AGRO — Test formation agent (FormationCoach)")
     print("=" * 60)
 
     profile = _read_profile()
@@ -49,9 +84,26 @@ def run():
     # Determine whether to use remote HTTP API or local agent
     api_url = os.environ.get("AGRO_API_URL")
     use_api = bool(api_url)
-    agent: Optional[FormationAgro] = None
+    
+    # Initialize Local FormationCoach
+    agent_graph = None
     if not use_api:
-        agent = FormationAgro(learner_profile=profile)
+        shield = LocalShield()
+        # Ensure we have an LLM available (via env vars)
+        try:
+            from agriconnect.core.get_llm import get_llm
+            llm = get_llm()
+            if not llm:
+                logging.warning("No LLM available (GROQ_API_KEY missing?). FormationCoach may fail.")
+        except Exception:
+             llm = None
+             
+        config = FormationConfig(
+            shield=shield,
+            llm_client=llm
+        )
+        coach = FormationCoach(config)
+        agent_graph = coach.build()
     else:
         print(f"Using remote API at {api_url}")
 
@@ -72,10 +124,11 @@ def run():
             break
         if q.lower() == "profile":
             profile = _read_profile()
-            agent.default_profile = profile
             print(f"  Profil mis à jour : {json.dumps(profile, ensure_ascii=False)}\n")
             continue
+            
         if use_api:
+            # Keep API logic unchanged (assuming API wraps FormationCoach similarly)
             try:
                 resp = requests.post(
                     api_url,
@@ -88,20 +141,32 @@ def run():
                 else:
                     answer = f"HTTP {resp.status_code}: {resp.text}"
             except Exception as exc:
-                answer = f"Erreur HTTP: {exc} — bascule en local si possible."
-                # Try local fallback
-                try:
-                    if agent is None:
-                        agent = FormationAgro(learner_profile=profile)
-                    answer = agent.ask(q, learner_profile=profile)
-                except Exception as exc2:
-                    answer = f"Fallback failed: {exc2}"
+                answer = f"Erreur HTTP: {exc} — Mode local non supporté (API only)."
         else:
-            answer = agent.ask(q, learner_profile=profile)
+            # Local Graph Invocation
+            try:
+                inputs = {
+                    "user_query": q, 
+                    "learner_profile": profile,
+                    # Optional: inject empty history or context if needed
+                }
+                # Sync invoke (LangGraph handles async loop if needed)
+                result = await agent_graph.ainvoke(inputs)
+                answer = result.get("final_response") or result.get("answer_draft") or "Pas de réponse générée."
+                
+                # Show warnings if any
+                warnings = result.get("warnings", [])
+                if warnings:
+                    print(f"\n[Warnings]: {warnings}")
+                    
+            except Exception as e:
+                logging.exception("Error running FormationCoach graph")
+                answer = f"Erreur lors de l'exécution du graphe : {e}"
+
         print(f"\n{'─'*60}")
         print(answer)
         print(f"{'─'*60}\n")
 
 
 if __name__ == "__main__":
-    run()
+    asyncio.run(run())

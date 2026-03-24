@@ -47,11 +47,11 @@ typecheck: ## Run type checker (mypy)
 
 migrate: ## Run database migrations
 	@echo "$(GREEN)Running database migrations...$(NC)"
-	python scripts/seed_db.py
+	python backend/scripts/core/seed_db.py
 
 seed: ## Seed the database with initial data
 	@echo "$(GREEN)Seeding database...$(NC)"
-	python scripts/seed_zones.py
+	python backend/scripts/core/seed_zones.py
 
 ##@ Local Development (Docker Compose)
 build-local: ## Build Docker images locally

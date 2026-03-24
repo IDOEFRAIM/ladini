@@ -1,0 +1,14 @@
+{
+  "title": "Conseil météo Bobo-Dioulasso",
+  "content": "Zone Bobo-Dioulasso: temperature=36.9C, precipitations=0.0mm, humidite=23%. Adapter l'irrigation et prioriser les parcelles sensibles.",
+  "metadata": {
+    "doc_type": "weather_advisory",
+    "category": "climat",
+    "zone": "Bobo-Dioulasso",
+    "forecast_date": "2026-03-20",
+    "valid_until": "2026-03-21T18:38:39.193427+00:00",
+    "observed_at": "2026-03-20T18:38:31.274297+00:00",
+    "source": "open-meteo",
+    "bulletin_excerpt": "Bulletin Vague de chaleur: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin agrométéorologique décadaire N°7 (valable du 11 au 20 mars 2026): AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin Agrométéo pour les Médias: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin agrométéorologique décadaire N°03 (valable du 1er au 10 février 2026): AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin de Prévisions saisonnières: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis"
+  }
+}

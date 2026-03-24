@@ -184,6 +184,66 @@ class SentinelleTool:
             "heat_stress": heat_flag,
         }
 
+    def synthesize_agronomic_advice(self, metrics: Dict[str, Any], crop_profile: Optional[Any]) -> Dict[str, Any]:
+        """
+        Fusionne Météo + Agronomie pour donner un conseil précis (Context Synapse).
+        Calcule Delta T et Besoins Hydriques Nets.
+        """
+        # 1. Sécurité Pulvérisation (Delta T)
+        # On utilise T_max et Humidité pour le pire cas de l'après-midi
+        t_ref = metrics.get("temp_max_c", 35)
+        rh_ref = metrics.get("humidity_pct", 40)
+        
+        try:
+            delta_t, condition = SahelAgroMath.calculate_delta_t(t_ref, rh_ref)
+        except Exception:
+            delta_t, condition = 0.0, "INCONNU"
+
+        can_spray = (2 <= delta_t <= 10)
+        spray_advice = "✅ Favorable" if can_spray else f"⛔ Risqué ({condition})"
+
+        advice = {
+            "delta_t": delta_t,
+            "spray_condition": condition,
+            "spray_advice": spray_advice,
+            "can_spray": can_spray
+        }
+
+        # 2. Besoins Hydriques (ETc vs Pluie)
+        if crop_profile:
+            # Par défaut, on prend le Kc 'mid' (pleine croissance) pour sécuriser la plante
+            kc = crop_profile.kc.get('mid', 1.0)
+            et0 = metrics.get("et0_mm", 0.0)
+            precip = metrics.get("precip_mm", 0.0)
+            
+            etc_mm = et0 * kc
+            balance = precip - etc_mm # Positif = Excédent, Négatif = Déficit
+            
+            missing_water_l_m2 = max(0.0, -balance)
+            
+            advice.update({
+                "crop_name": crop_profile.name,
+                "kc_used": kc,
+                "etc_mm": round(etc_mm, 1),
+                "water_balance_mm": round(balance, 1),
+                "irrigation_needed_l_m2": round(missing_water_l_m2, 1)
+            })
+
+            if balance < -2:
+                advice["irrigation_msg"] = f"🚨 URGENCE SOIF : Il manque {missing_water_l_m2:.1f} litres/m² aujourd'hui."
+                advice["agronomic_status"] = "CRITIQUE"
+            elif balance < 0:
+                advice["irrigation_msg"] = f"⚠️ DÉFICIT LÉGER : Complétez avec {missing_water_l_m2:.1f} litres/m²."
+                advice["agronomic_status"] = "VIGILANCE"
+            else:
+                advice["irrigation_msg"] = "✅ PAS D'ARROSAGE : La pluie suffit largement."
+                advice["agronomic_status"] = "OPTIMAL"
+        
+        else:
+            advice["irrigation_msg"] = "Précisez votre culture pour un calcul de besoin en eau exact."
+            advice["agronomic_status"] = "NEUTRE"
+
+        return advice
 
     def _parse_weather_sat_inputs(self, weather: Dict[str, Any], satellite: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize and parse inputs for `_compute_metrics` to centralize defaults and casting.

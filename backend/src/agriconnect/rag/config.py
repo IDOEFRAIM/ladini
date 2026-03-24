@@ -5,8 +5,20 @@ from agriconnect.core.settings import settings
 # Paths
 # settings.BASE_DIR points to backend/src — adjust to repository layout
 BASE_DIR = settings.BASE_DIR
-# Raw data lives in backend/sources/raw_data (one level up from src)
-RAW_DATA_DIR = BASE_DIR.parent / "sources" / "raw_data"
+
+# --- RAG Source Configuration ---
+# Priority: AWS S3 > Local Filesystem
+# If S3_BUCKET is configured, we use it as the source of truth.
+if settings.S3_BUCKET:
+    _bucket = settings.S3_BUCKET
+    _prefix = (settings.S3_KEY_PREFIX or "").strip("/")
+    # Construct S3 URI: s3://bucket/prefix/raw_data
+    # We append 'raw_data' to match the local structure convention
+    RAW_DATA_DIR = f"s3://{_bucket}/{_prefix}/raw_data" if _prefix else f"s3://{_bucket}/raw_data"
+else:
+    # Fallback: Local raw data lives in backend/sources/raw_data (one level up from src)
+    RAW_DATA_DIR = BASE_DIR.parent / "sources" / "raw_data"
+
 # RAG DB folder in backend/rag_db (one level up from src)
 DB_DIR = BASE_DIR.parent / "rag_db"
 

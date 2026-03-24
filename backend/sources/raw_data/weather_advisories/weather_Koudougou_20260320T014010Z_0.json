@@ -1,0 +1,14 @@
+{
+  "title": "Conseil météo Koudougou",
+  "content": "Zone Koudougou: temperature=27.3C, precipitations=0.0mm, humidite=28%. Adapter l'irrigation et prioriser les parcelles sensibles.",
+  "metadata": {
+    "doc_type": "weather_advisory",
+    "category": "climat",
+    "zone": "Koudougou",
+    "forecast_date": "2026-03-20",
+    "valid_until": "2026-03-21T01:40:10.115249+00:00",
+    "observed_at": "2026-03-20T01:40:06.970578+00:00",
+    "source": "open-meteo",
+    "bulletin_excerpt": "Bulletin agrométéorologique mensuel: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin agrométéorologique décadaire N°6 (valable du 1er au 10 mars 2026): AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin eau énergie: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin quotidien: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin agrométéorologique décadaire N°5 (valable du 21 au 28 février 2026): AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis"
+  }
+}

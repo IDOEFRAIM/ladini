@@ -45,6 +45,17 @@ TASK_QUEUES = (
             "x-max-length": 500,  # évite l'accumulation en cas de panne LLM
         },
     ),
+    # Matching marketplace en arrière-plan
+    Queue(
+        "marketplace",
+        exchange=default_exchange,
+        routing_key="marketplace",
+        queue_arguments={
+            "x-dead-letter-exchange": "dlx",
+            "x-dead-letter-routing-key": "dlx.marketplace",
+            "x-max-length": 1000,
+        },
+    ),
     # Voice — TTS/STT Azure
     Queue(
         "voice",
@@ -94,10 +105,12 @@ TASK_QUEUES = (
 # ── Task Routing ────────────────────────────────────────────
 TASK_ROUTES = {
     "backend.workers.tasks.ai.*": {"queue": "ai", "routing_key": "ai"},
+    "backend.workers.tasks.marketplace.*": {"queue": "marketplace", "routing_key": "marketplace"},
     "backend.workers.tasks.voice.*": {"queue": "voice", "routing_key": "voice"},
     "backend.workers.tasks.whatsapp.*": {"queue": "whatsapp", "routing_key": "whatsapp"},
     "backend.workers.tasks.monitoring.*": {"queue": "monitoring", "routing_key": "monitoring"},
     "backend.workers.tasks.maintenance.*": {"queue": "maintenance", "routing_key": "maintenance"},
+    "agriconnect.workers.tasks.marketplace.*": {"queue": "marketplace", "routing_key": "marketplace"},
 }
 
 # ── Rate Limits (par tâche) ─────────────────────────────────
@@ -106,6 +119,9 @@ TASK_ANNOTATIONS = {
     # IA : max 20 requêtes/min (protège le quota Groq/Azure)
     "backend.workers.tasks.ai.generate_response": {
         "rate_limit": "20/m" if IS_PRODUCTION else "60/m",
+    },
+    "agriconnect.workers.tasks.marketplace.process_pending_actions": {
+        "rate_limit": "30/m" if IS_PRODUCTION else "120/m",
     },
     # WhatsApp : respecte les limites Twilio (1 msg/sec)
     "backend.workers.tasks.whatsapp.send_message": {
@@ -121,6 +137,7 @@ TASK_ANNOTATIONS = {
 # Différenciés par type de tâche (configurés dans la tâche elle-même)
 TIME_LIMITS = {
     "ai": {"soft": 180, "hard": 240},          # 3 min soft, 4 min hard
+    "marketplace": {"soft": 120, "hard": 180}, # traitement actions matching
     "voice": {"soft": 60, "hard": 90},          # 1 min soft, 1.5 min hard
     "whatsapp": {"soft": 30, "hard": 45},       # 30s soft, 45s hard
     "monitoring": {"soft": 300, "hard": 360},   # 5 min soft, 6 min hard
