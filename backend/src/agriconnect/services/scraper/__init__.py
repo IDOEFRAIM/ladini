@@ -15,18 +15,10 @@ __all__ = [
     'lambda_handler',
     'ScraperOrchestrator',
 
-    # Configuration
-    'ScraperConfig',
-    'SourcesConfig',
-    'get_config',
-
-    # Error Handling
-    'CircuitBreaker',
-    'RateLimiter',
-
-    # Checkpoint & Resource Management
-    'CheckpointManager',
-    'ResourceManager',
+    # Scraper framework
+    'BaseScraper',
+    'ScraperRegistry',
+    'register_scraper',
 
     # Individual Scrapers
     'GoogleWorkspaceScraper',
@@ -34,7 +26,9 @@ __all__ = [
     'FaoDoiResolver',
     'NewsScraper',
     'DataPlatformScraper',
-    'TechnicalResourcesExplorer'
+    'TechnicalResourcesExplorer',
+    'InstitutionalPdfHarvester',
+    'MeteoBurkinaScraper',
 ]
 
 
@@ -48,21 +42,14 @@ def __getattr__(name: str):
         from .scraper_orchestrator import ScraperOrchestrator
         return ScraperOrchestrator
 
-    if name in ('ScraperConfig', 'SourcesConfig', 'get_config',
-                'CircuitBreaker', 'RateLimiter', 'CheckpointManager', 'ResourceManager'):
-        from .core import (
-            ScraperConfig,
-            SourcesConfig,
-            get_config,
-            CircuitBreaker,
-            RateLimiter,
-            CheckpointManager,
-            ResourceManager,
-        )
+    if name in ('BaseScraper', 'ScraperRegistry', 'register_scraper'):
+        from .scrapers import BaseScraper, ScraperRegistry, register_scraper
         return locals()[name]
 
     if name in ('GoogleWorkspaceScraper', 'PdfDownloader', 'FaoDoiResolver',
-                'NewsScraper', 'DataPlatformScraper', 'TechnicalResourcesExplorer'):
+                'NewsScraper', 'DataPlatformScraper', 'TechnicalResourcesExplorer',
+                'InstitutionalPdfHarvester',
+                'MeteoBurkinaScraper'):
         from .scrapers import (
             GoogleWorkspaceScraper,
             PdfDownloader,
@@ -70,10 +57,12 @@ def __getattr__(name: str):
             NewsScraper,
             DataPlatformScraper,
             TechnicalResourcesExplorer,
+            InstitutionalPdfHarvester,
+            MeteoBurkinaScraper,
         )
         return locals()[name]
 
-    # Backwards-compatible mappings for legacy names that live in data_collection
+    # Backwards-compatible mappings for legacy names.
     if name == 'DocumentScraper':
         from agriconnect.services.data_collection.weather.documents_meteo import DocumentScraper
         return DocumentScraper
@@ -81,14 +70,6 @@ def __getattr__(name: str):
     if name == 'WeatherForecastService':
         from agriconnect.services.data_collection.weather.weather_forecast import WeatherForecastService
         return WeatherForecastService
-
-    if name == 'SonagessScraper':
-        from agriconnect.services.data_collection.documents.sonagess import SonagessScraper
-        return SonagessScraper
-
-    if name == 'AnamBulletinScraper':
-        from agriconnect.services.data_collection.documents.fews_pdf_harvester import AnamBulletinScraper
-        return AnamBulletinScraper
 
     raise AttributeError(f"module {__name__} has no attribute {name}")
 

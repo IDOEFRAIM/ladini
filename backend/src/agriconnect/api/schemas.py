@@ -47,18 +47,3 @@ class TaskStatusResponse(BaseModel):
     task_id: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
-
-
-class HealthResponse(BaseModel):
-    """Réponse du health check."""
-    status: str = "active"
-    component: str = "AgConnect Backend"
-
-
-class RootResponse(BaseModel):
-    """Réponse du endpoint racine."""
-    name: str = "AgriConnect Backend"
-    version: str = "2.0.0"
-    status: str = "running"
-    architecture: str = "event-driven"
-    docs: str = "/docs"

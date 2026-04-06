@@ -1,0 +1,13 @@
+{
+  "title": "Météo Bobo-Dioulasso",
+  "content": "Zone Bobo-Dioulasso: temp=33.9C, pluie=0.0mm, hum=41%. Surveiller l'évapotranspiration.",
+  "metadata": {
+    "doc_type": "weather_advisory",
+    "zone": "Bobo-Dioulasso",
+    "forecast_date": "2026-03-27",
+    "observed_at": "2026-03-27T17:51:01.086701+00:00",
+    "source": "api_openmeteo",
+    "confidence": 0.9,
+    "bulletin_excerpt": "Erreur HTTP: HTTPSConnectionPool(host='meteoburkina.bf', port=443): Read timed out. (read timeout=15) | Bulletin agrométéologique décadaire: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin agrométéorologique décadaire N°4 (valable du 11 au 2O février 2026): AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin Agrométéo pour les Médias: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'"
+  }
+}

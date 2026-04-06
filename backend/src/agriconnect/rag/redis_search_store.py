@@ -220,15 +220,40 @@ class RedisSearchVectorStore:
         arr = np.asarray(embedding, dtype=np.float32)
         b = arr.tobytes()
         key = self._doc_key(doc_id)
-        vec_value = b.decode("latin-1") if self.decode_responses else b
+        # Store text/meta as UTF-8 bytes to avoid latin-1 encode failures on Unicode chars.
+        text_value = text.encode("utf-8", errors="ignore")
+        meta_value = json.dumps(meta, ensure_ascii=False).encode("utf-8", errors="ignore")
         mapping = {
-            "text": text,
-            "meta": json.dumps(meta, ensure_ascii=False),
-            "vec": vec_value,
+            "text": text_value,
+            "meta": meta_value,
+            "vec": b,
         }
         p = self.client.pipeline()
         p.hset(key, mapping=mapping)
         p.execute()
+
+    def add_many(self, items: List[Dict[str, Any]], batch_size: int = 50) -> None:
+        if not items:
+            return
+        size = max(1, int(batch_size or 50))
+        for start in range(0, len(items), size):
+            batch = items[start : start + size]
+            p = self.client.pipeline()
+            for item in batch:
+                doc_id = str(item.get("id") or "")
+                if not doc_id:
+                    continue
+                key = self._doc_key(doc_id)
+                arr = np.asarray(item.get("embedding") or [], dtype=np.float32)
+                p.hset(
+                    key,
+                    mapping={
+                        "text": str(item.get("text") or "").encode("utf-8", errors="ignore"),
+                        "meta": json.dumps(item.get("meta") or {}, ensure_ascii=False).encode("utf-8", errors="ignore"),
+                        "vec": arr.tobytes(),
+                    },
+                )
+            p.execute()
 
     def query(self, query_embedding, k: int = 5):
         # Accept either a raw embedding list/ndarray or an object (e.g. QueryBundle
@@ -297,6 +322,8 @@ class RedisSearchVectorStore:
         last_err = None
         for knn_query in knn_query_variants:
             try:
+                # Request the stored vector as well so we can compute a proper
+                # similarity score (some Redis dialects do not return a score).
                 res = self.client.execute_command(
                     "FT.SEARCH",
                     self.index_name,
@@ -306,9 +333,10 @@ class RedisSearchVectorStore:
                     "vec",
                     vec,
                     "RETURN",
-                    "2",
+                    "3",
                     "text",
                     "meta",
+                    "vec",
                     "LIMIT",
                     "0",
                     str(top_k),
@@ -449,37 +477,67 @@ class RedisSearchVectorStore:
         total = res[0]
         out = []
         i = 1
-        while i < len(res):
-            docid = res[i].decode("utf-8") if isinstance(res[i], bytes) else str(res[i])
-            fields = res[i + 1]
-            d = {fields[j].decode("utf-8") if isinstance(fields[j], bytes) else fields[j]: fields[j + 1] for j in range(0, len(fields), 2)}
-            text = d.get("text")
-            if isinstance(text, bytes):
-                text = text.decode("utf-8", errors="replace")
-            elif isinstance(text, str):
-                try:
-                    text = text.encode("latin-1").decode("utf-8", errors="replace")
-                except Exception:
-                    pass
-            meta = d.get("meta")
-            if isinstance(meta, bytes):
-                try:
-                    meta = json.loads(meta.decode("utf-8"))
-                except Exception:
+            while i < len(res):
+                docid = res[i].decode("utf-8") if isinstance(res[i], bytes) else str(res[i])
+                fields = res[i + 1]
+                d = {fields[j].decode("utf-8") if isinstance(fields[j], bytes) else fields[j]: fields[j + 1] for j in range(0, len(fields), 2)}
+                text = d.get("text")
+                if isinstance(text, bytes):
+                    text = text.decode("utf-8", errors="replace")
+                elif isinstance(text, str):
                     try:
-                        meta = json.loads(meta.decode("latin-1"))
+                        text = text.encode("latin-1").decode("utf-8", errors="replace")
                     except Exception:
-                        meta = {}
-            elif isinstance(meta, str):
-                try:
-                    meta = json.loads(meta)
-                except Exception:
+                        pass
+                meta = d.get("meta")
+                if isinstance(meta, bytes):
                     try:
-                        meta = json.loads(meta.encode("latin-1").decode("utf-8"))
+                        meta = json.loads(meta.decode("utf-8"))
                     except Exception:
-                        meta = {}
-            out.append({"id": docid, "score": None, "text": text, "meta": meta})
-            i += 2
+                        try:
+                            meta = json.loads(meta.decode("latin-1"))
+                        except Exception:
+                            meta = {}
+                elif isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except Exception:
+                        try:
+                            meta = json.loads(meta.encode("latin-1").decode("utf-8"))
+                        except Exception:
+                            meta = {}
+
+                # Try to extract stored vector to compute cosine similarity
+                score_val = None
+                vec_field = d.get("vec")
+                try:
+                    if vec_field:
+                        if isinstance(vec_field, str):
+                            vec_bytes = vec_field.encode("latin-1")
+                        else:
+                            vec_bytes = vec_field
+                        import numpy as _np
+
+                        arr = _np.frombuffer(vec_bytes, dtype=_np.float32)
+                        if arr.size == self.dim:
+                            # compute cosine similarity with the query embedding
+                            try:
+                                q = emb_arr
+                            except NameError:
+                                try:
+                                    q = _extract_embedding(query_embedding)
+                                except Exception:
+                                    q = None
+                            if q is not None:
+                                qn = _np.asarray(q, dtype=_np.float32)
+                                qn = qn / (_np.linalg.norm(qn) + 1e-12)
+                                arrn = arr / (_np.linalg.norm(arr) + 1e-12)
+                                score_val = float(_np.dot(arrn, qn))
+                except Exception:
+                    score_val = None
+
+                out.append({"id": docid, "score": score_val, "text": text, "meta": meta})
+                i += 2
         # convert to VectorStoreQueryResult-like object for llama_index
         try:
             # prefer creating proper TextNode objects for llama_index

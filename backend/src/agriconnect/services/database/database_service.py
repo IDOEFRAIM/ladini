@@ -8,6 +8,7 @@ re-exports the composed `AgriDatabaseService` facade.
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError as SAIntegrityError
 import logging
 import asyncio
 from typing import Any, Callable
@@ -55,14 +56,34 @@ class AgriDatabaseService(AuthMixin, UtilsMixin, MarketplaceMixin, TransactionsM
 				if commit:
 					await session.commit()
 				return result
+			except asyncio.CancelledError:
+				# Keep cancellation semantics while trying to rollback safely.
+				try:
+					await session.rollback()
+				except Exception:
+					self._logger.exception("Rollback failed after cancellation in %s", getattr(func, "__name__", str(func)))
+				raise
+			except SAIntegrityError as e:
+				try:
+					await session.rollback()
+				except Exception:
+					self._logger.exception("Rollback failed after integrity error in %s", getattr(func, "__name__", str(func)))
+				self._logger.exception("Integrity error in %s: %s", getattr(func, "__name__", str(func)), e)
+				raise self.IntegrityError(f"Integrity constraint failed: {getattr(func, '__name__', str(func))}") from e
 			except SQLAlchemyError as e:
 				# Map SQLAlchemy errors to service-level errors
-				await session.rollback()
+				try:
+					await session.rollback()
+				except Exception:
+					self._logger.exception("Rollback failed after SQLAlchemy error in %s", getattr(func, "__name__", str(func)))
 				self._logger.exception("Database error in %s: %s", getattr(func, "__name__", str(func)), e)
 				# You could inspect `e` and raise more specific exceptions here
 				raise self.DatabaseServiceError(f"Database operation failed: {getattr(func, '__name__', str(func))}") from e
 			except Exception as e:
-				await session.rollback()
+				try:
+					await session.rollback()
+				except Exception:
+					self._logger.exception("Rollback failed after unexpected error in %s", getattr(func, "__name__", str(func)))
 				self._logger.exception("Unexpected error in %s: %s", getattr(func, "__name__", str(func)), e)
 				raise
 

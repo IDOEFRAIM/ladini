@@ -1,250 +1,68 @@
-# coding: utf-8
-import requests
-from bs4 import BeautifulSoup
-import io
-import json
-import csv
-from typing import List, Dict, Any, Optional
-from urllib.parse import urljoin, urlparse
-import logging
-import os
+from __future__ import annotations
 
-# Configuration du logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("DocumentScraper")
+"""Compatibility adapter for Meteo bulletin scraping.
 
-try:
-    from pypdf import PdfReader
-    HAS_PYPDF2 = True
-except ImportError:
-    HAS_PYPDF2 = False
-    logger.warning("pypdf n'est pas installé. L'extraction de contenu PDF sera limitée.")
+All scraping logic lives in `agriconnect.services.scraper.scrapers`.
+This module keeps the historical `DocumentScraper` interface used by
+weather collection services while delegating to `MeteoBurkinaScraper`.
+"""
+
+from typing import Any, Dict, List, Optional
+from urllib.parse import urljoin
+
+from agriconnect.core.schemas import RawDocument
+from agriconnect.services.scraper.scrapers import MeteoBurkinaScraper
+
 
 class DocumentScraper:
-    """
-    Classe robuste pour scraper des liens de documents (HTML ou PDF)
-    à partir d'une page d'index et extraire leur contenu.
-    """
+    """Legacy facade kept for backwards compatibility (zero scraping logic)."""
 
     def __init__(
-            self,
-            headless: bool = True,
-            index_path: str = "produits/bulletin-agrometeologique-decadaire",
-            base_url: str = "https://meteoburkina.bf"
-        ):
-        """
-        Initialise le scraper.
-
-        Args:
-            headless (bool): Indique si le navigateur est lancé en mode sans tête (non utilisé ici).
-            index_path (str): Le chemin relatif vers la page d'index des bulletins.
-            base_url (str): L'URL de base pour normaliser les liens relatifs.
-        """
-        self.headless = headless 
+        self,
+        headless: bool = True,
+        index_path: str = "produits/bulletin-agrometeologique-decadaire",
+        base_url: str = "https://meteoburkina.bf",
+    ):
+        _ = headless  # legacy arg kept for API compatibility
         self.base_url = base_url.rstrip("/")
-        self.index_path = index_path
-        self.index_url = urljoin(self.base_url + "/", self.index_path) 
-        
-        self.scraped_data: List[Dict[str, Any]] = []
+        self.index_path = index_path.lstrip("/")
+        self.index_url = urljoin(f"{self.base_url}/", self.index_path)
 
-        logger.info("Scraper initialisé. Index URL: %s", self.index_url)
-
-    def _normalize_url(self, href: str) -> str:
-        """Normalise un lien relatif ou absolu en lien absolu complet."""
-        if not href:
-            return ""
-        if not href.startswith("http"):
-            return urljoin(self.base_url + "/", href)
-        return href
-
-    def _fetch_index_links(self) -> List[str]:
-        """Récupère et filtre les liens des documents depuis la page d'index."""
-        logger.info("Récupération de la page d'index: %s", self.index_url)
-        try:
-            response = requests.get(self.index_url, timeout=15)
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            logger.error("Erreur lors de la récupération de la page d'index: %s", e)
-            return []
-
-        soup = BeautifulSoup(response.text, "html.parser")
-        
-        # Filtres robustes : liens qui semblent pointer vers un bulletin ou un document
-        keywords = ["bulletin", "situation", "document", "rapport", "pdf"]
-        links = set() # Utiliser un set pour éviter les doublons
-        
-        for a in soup.find_all("a", href=True):
-            href = self._normalize_url(a["href"])
-            if not href or href.endswith("#"):
-                continue
-            href_lower = href.lower()
-
-            if self._link_is_relevant(href, href_lower, keywords):
-                links.add(href)
-
-        logger.info("%d liens de documents uniques trouvés.", len(links))
-        return list(links)
-
-    def _link_is_relevant(self, href: str, href_lower: str, keywords: List[str]) -> bool:
-        """Détermine si un lien d'ancre est pertinent pour le scraping de documents."""
-        # Vérifie extension explicite
-        if href_lower.endswith((".pdf", ".doc", ".docx", ".xls", ".xlsx")):
-            return True
-
-        # Check keywords in path
-        if any(keyword in href_lower for keyword in keywords):
-            parsed_href = urlparse(href)
-            parsed_index = urlparse(self.index_url)
-            if parsed_href.netloc == parsed_index.netloc:
-                # Exclure la page d'index elle-même et les chemins très courts
-                if parsed_href.path != parsed_index.path and len([p for p in parsed_href.path.split('/') if p]) > 1:
-                    return True
-
-        return False
-
-    def _scrape_document_content(self, url: str) -> Dict[str, Any]:
-        """Télécharge un document (HTML ou PDF) et extrait un résumé de son contenu."""
-        logger.debug("Scraping du document: %s", url)
-        try:
-            response = requests.get(url, timeout=15)
-            response.raise_for_status()
-            content_type = response.headers.get("Content-Type", "").lower()
-
-            if "application/pdf" in content_type:
-                return self._handle_pdf_response(response, url)
-
-            if "text/html" in content_type:
-                return self._handle_html_response(response, url)
-
-            # Type non géré
-            return {
-                "url": url,
-                "type": "unknown",
-                "title": "N/A",
-                "content": f"Type non pris en charge : {content_type[:50]}"
+        self._scraper = MeteoBurkinaScraper(
+            config={
+                "base_url": self.base_url,
+                "search_urls": [self.index_url],
             }
+        )
 
-        except requests.exceptions.RequestException as e:
-            logger.error("Erreur de requête pour %s: %s", url, e)
-            return {"url": url, "type": "error", "title": "Erreur HTTP", "content": str(e)}
-        except Exception as e:
-            logger.error("Erreur d'extraction pour %s: %s", url, e)
-            return {"url": url, "type": "error", "title": "Erreur d'extraction", "content": str(e)}
-
-    def _handle_pdf_response(self, response: requests.Response, url: str) -> Dict[str, Any]:
-        """Traite une réponse PDF et extrait du texte si possible."""
-        if not HAS_PYPDF2:
-            return {
-                "url": url,
-                "type": "pdf",
-                "title": "PDF (Non lu)",
-                "content": "PyPDF2 manquant - Contenu non extrait"
-            }
-
-        try:
-            pdf_file = io.BytesIO(response.content)
-            reader = PdfReader(pdf_file)
-            text_parts = []
-            for page in reader.pages[:3]:
-                extracted = page.extract_text()
-                if extracted:
-                    text_parts.append(extracted)
-
-            title = url.split("/")[-1].replace(".pdf", "").replace("-", " ").strip()
-            return {
-                "url": url,
-                "type": "pdf",
-                "title": title or "PDF sans titre",
-                "content": "\n".join(text_parts).strip()
-            }
-        except Exception as e:
-            logger.warning(f"Erreur lecture PDF {url}: {e}")
-            return {"url": url, "type": "pdf", "title": "Erreur PDF", "content": "Lecture impossible"}
-
-    def _handle_html_response(self, response: requests.Response, url: str) -> Dict[str, Any]:
-        """Traite une réponse HTML et construit un résumé de contenu."""
-        soup = BeautifulSoup(response.text, "html.parser")
-        title = soup.title.string if soup.title else "HTML Sans titre"
-        content_elements = soup.find_all(["p", "div", "article"], limit=10)
-        paragraphs = [p.get_text(strip=True) for p in content_elements if len(p.get_text(strip=True)) > 20]
-        content_summary = " ".join(paragraphs)
+    @staticmethod
+    def _document_to_legacy_record(doc: RawDocument) -> Dict[str, Any]:
+        markdown = (doc.content_markdown or "").strip()
         return {
-            "url": url,
-            "type": "html",
-            "title": title,
-            "content": content_summary
+            "url": doc.url,
+            "type": "pdf",
+            "title": (doc.title or "Bulletin"),
+            "content": markdown,
+            "char_count": len(markdown),
+            "metadata": doc.metadata or {},
         }
 
     def scrape_bulletins(self) -> Dict[str, Any]:
-        """
-        Exécute le processus complet de scraping des bulletins et retourne 
-        les données sous forme de dictionnaire pour l'orchestrateur.
-        """
-        try:
-            links = self._fetch_index_links()
-            if not links:
-                logger.warning("Aucun lien à scraper. Arrêt de l'exécution.")
-                return {"status": "SUCCESS", "message": "Aucun bulletin trouvé sur la page d'index.", "results": []}
-
-            all_docs = []
-            # Limiter à 5 documents pour éviter de surcharger lors des tests
-            for i, link in enumerate(links[:5]):
-                logger.info("Progression: %d/%d - Scraping: %s", i + 1, min(len(links), 5), link)
-                doc_data = self._scrape_document_content(link)
-                all_docs.append(doc_data)
-            
-            self.scraped_data = all_docs
-            logger.info("Scraping terminé. %d documents traités.", len(all_docs))
-
+        # Use the scraper engine directly to keep a detailed content payload.
+        doc, log = self._scraper.engine.run(self.index_url)
+        if doc is None:
             return {
-                "status": "SUCCESS", 
-                "message": f"{len(all_docs)} bulletins agronomiques scrapés et prêts pour l'indexation.",
-                "results": all_docs
+                "status": "ERROR",
+                "message": str(log.error_trace or "harvest_failed"),
+                "results": [],
             }
-        except Exception as e:
-            logger.error("Erreur globale lors de l'exécution du scraping des bulletins: %s", e, exc_info=True)
-            return {"status": "ERROR", "message": f"Échec critique du scraping: {str(e)}", "results": []}
 
-    def save_to_json(self, filepath: str, data: Optional[List[Dict[str, Any]]] = None) -> None:
-        """Sauvegarde les données scrapées dans un fichier JSON."""
-        data_to_save = data if data is not None else self.scraped_data
-        if not data_to_save:
-            logger.warning("Aucune donnée à sauvegarder en JSON.")
-            return
-            
-        try:
-            os.makedirs(os.path.dirname(filepath) or '.', exist_ok=True)
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(data_to_save, f, indent=2, ensure_ascii=False)
-            logger.info(" Fichier JSON créé avec succès: %s (%d documents)", filepath, len(data_to_save))
-        except Exception as e:
-            logger.error("Erreur lors de la sauvegarde en JSON: %s", e)
+        results: List[Dict[str, Any]] = [self._document_to_legacy_record(doc)]
+        return {
+            "status": "SUCCESS",
+            "message": f"{len(results)} bulletin(s) scrape(s)",
+            "results": results,
+        }
 
-    def save_to_csv(self, filepath: str, data: Optional[List[Dict[str, Any]]] = None) -> None:
-        """Sauvegarde les données scrapées dans un fichier CSV."""
-        data_to_save = data if data is not None else self.scraped_data
-        if not data_to_save:
-            logger.warning("Aucune donnée à sauvegarder en CSV.")
-            return
 
-        try:
-            os.makedirs(os.path.dirname(filepath) or '.', exist_ok=True)
-            with open(filepath, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(["URL", "Type", "Titre", "Résumé/Contenu"])
-                for doc in data_to_save:
-                    content = doc.get("content", "").replace("\n", " ").strip()[:500]
-                    writer.writerow([
-                        doc.get("url", ""), 
-                        doc.get("type", "N/A"), 
-                        doc.get("title", "N/A"), 
-                        content
-                    ])
-            logger.info(" Fichier CSV créé avec succès: %s (%d documents)", filepath, len(data_to_save))
-        except Exception as e:
-            logger.error("Erreur lors de la sauvegarde en CSV: %s", e)
-
-if __name__ == '__main__':
-    document_scrapper = DocumentScraper()
-    result = document_scrapper.scrape_bulletins()
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+__all__ = ["DocumentScraper"]

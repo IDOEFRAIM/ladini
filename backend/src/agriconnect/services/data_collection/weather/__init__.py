@@ -1,28 +1,14 @@
-"""
-Weather Data Collection & Reconciliation
+"""Service-first weather acquisition package."""
 
-Unified weather data pipeline containing:
-1. WeatherCollector: Orchestrates data fetching (OpenMeteo + Bulletins) and normalization (OpenCage).
-2. WeatherReconciler: Merges data sources and computes confidence scores.
-3. WeatherStorage: Handles DB persistence and S3 archiving.
-
-Modules:
-- weather_collector
-- reconciliation
-- documents_meteo
-
-Usage:
-    from agriconnect.services.data_collection.weather.weather_collector import WeatherCollector
-    
-    collector = WeatherCollector()
-    results = collector.run()
-"""
-
-__version__ = "2.0.0"
+from .documents_meteo import DocumentScraper
+from .weather_collector import WeatherCollector, WeatherStorage
+from .reconciliation import WeatherReconciler
+from .weather_forecast import WeatherForecastService
 
 __all__ = [
-    "weather_cron",
-    "weather_forecast",
-    "documents_meteo",
-    "weather_collector",
+	"DocumentScraper",
+	"WeatherCollector",
+	"WeatherStorage",
+	"WeatherReconciler",
+	"WeatherForecastService",
 ]

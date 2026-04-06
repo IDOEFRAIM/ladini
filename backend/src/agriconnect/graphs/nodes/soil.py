@@ -1,168 +1,167 @@
+"""
+AgriSoil Agent — Production Pedology System.
+
+Features:
+- **Soil Analysis**: Interpretation of SoilGrids data.
+- **Crop Suitability**: Matching soil properties to crop needs.
+- **Audit**: Logging of soil advice.
+- **Robustness**: Fallbacks for missing local data.
+"""
+
 import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, TypedDict
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
-
 from agriconnect.graphs.prompts import (
     SOIL_SYSTEM_TEMPLATE,
     SOIL_USER_TEMPLATE
 )
-# Assurez-vous que le fichier contenant votre classe SoilDoctorTool est bien importé
+
+# Protocols & Tools (Di)
 from agriconnect.tools.soil import SoilDoctorTool 
-#from .tools import SoilDoctorTool # Exemple d'import relatif
 from agriconnect.rag.components import get_groq_sdk
-# AG-UI removed from agent-level: return MCP-friendly dicts instead
+from agriconnect.agents.base import BaseAgent
+from agriconnect.services.persistence import AgriPersister
 
 logger = logging.getLogger("Agent.AgriSoil")
 
-# ------------------------------------------------------------------ #
-# 1. DÉFINITION DE L'ÉTAT (State)
-# ------------------------------------------------------------------ #
+# ── Configuration & State ────────────────────────────────────────
+
+@dataclass
+class SoilConfig:
+    llm_client: Any = None
+    data_path: str = "backend/sources/raw_data/soil_grids"  # Configurable path
+    ctx: Any = None  # Injected Context (DB/Memory)
 
 class SoilState(TypedDict, total=False):
+    # Input
     user_query: str
     user_level: str
     location_profile: Dict[str, Any]
     observation: str  # ex: "sec", "humide"
     
-    # Données internes
-    soil_raw_data: Dict[str, Any]      # Le JSON SoilGrids brut
-    technical_diagnosis: Dict[str, Any] # Le dictionnaire de sortie de SoilDoctorTool
+    # Internal Data
+    soil_raw_data: Dict[str, Any]
+    technical_diagnosis: Dict[str, Any]
     
-    # Sortie
+    # RAG/Output
     final_response: str
-    warnings: List[str]
-    status: str
+    agri_response: Optional[Dict[str, Any]]
     
+    # Status
+    status: str
+    warnings: List[str]
+    handoff_to: str
+    handoff_reason: str
 
-# ------------------------------------------------------------------ #
-# 2. L'AGENT SPECIALISTE SOL
-# ------------------------------------------------------------------ #
-
-class AgriSoilAgent:
+class AgriSoilAgent(BaseAgent):
     """
-    Agent optimisé pour la pédologie.
-    Il utilise SoilDoctorTool (Python pur) pour le diagnostic technique
-    et un LLM uniquement pour la reformulation emphatique.
+    Production-Grade Soil Specialist.
+    Combines deterministic SoilGrids data with LLM-based advisory.
     """
+    _capabilities = ["SOIL_ANALYSIS", "FERTILIZER_ADVICE", "CROP_SUITABILITY"]
 
-    def __init__(self, llm_client=None):
-        # Instanciation de votre outil
-        self.doctor = SoilDoctorTool()
+    def __init__(self, config: Optional[SoilConfig] = None, **overrides):
+        cfg = config or SoilConfig()
+        # Merge overrides
+        for k, v in overrides.items():
+            if hasattr(cfg, k):
+                setattr(cfg, k, v)
         
-        # Modèle pour la réponse finale (Rapide et efficace)
-        self.model_answer = "llama-3.3-70b-versatile" 
+        self.data_path = cfg.data_path
+        self.doctor = SoilDoctorTool()
+        self.model_answer = "llama-3.3-70b-versatile"
 
         try:
-            self.llm = llm_client if llm_client else get_groq_sdk()
+            self.llm = cfg.llm_client if cfg.llm_client else get_groq_sdk()
         except Exception as exc:
-            logger.error("Impossible d'initialiser le LLM : %s", exc)
+            logger.error("LLM Init Failed: %s", exc)
             self.llm = None
+            
+        # Persistence (Audit)
+        self.ctx = cfg.ctx
+        if self.ctx and hasattr(self.ctx, 'db'):
+            self.persister = AgriPersister(self.ctx.db, getattr(self.ctx, 'memory', None))
+        else:
+            self.persister = None
+            logger.warning("AgriSoil: Running without persistence (Context missing)")
 
-    # ------------------------------------------------------------------ #
-    # NODE A : CHARGEMENT & DIAGNOSTIC (100% Python, Pas d'IA)
-    # ------------------------------------------------------------------ #
+    # ════════════════════════════════════════════════════════════
+    # NODES
+    # ════════════════════════════════════════════════════════════
     
-    def diagnose_node(self, state: SoilState) -> SoilState:
-        """
-        Charge les données et exécute SoilDoctorTool.
-        C'est ici que la 'Magie' technique opère sans latence.
-        """
-        location_profile = state.get("location_profile", {})
-        # Role separation: refuse market-related queries
-        _market_re = re.compile(r"prix|price|march\u00e9|marche|vente|vendre|achat|acheter|FCFA|CFA|tarif|cours", re.IGNORECASE)
-        if _market_re.search(state.get("user_query", "")):
-            warnings = list(state.get("warnings", []))
-            warnings.append("Question marché détectée — hors-sujet pour AgriSoilAgent")
-            return {"status": "OFF_TOPIC", "warnings": warnings, "rejection_reason": "Question marché — agent Sol uniquement."}
-        village = location_profile.get("village", "").lower()
+    async def diagnose_node(self, state: SoilState) -> SoilState:
+        """Load data and execute technical diagnosis."""
+        query = state.get("user_query", "")
+        location = state.get("location_profile", {}) or {}
+        village = location.get("village", "").lower()
         observation = state.get("observation", "normal")
         warnings = list(state.get("warnings", []))
 
-        # 1. Chargement du fichier JSON SoilGrids
-        # Nettoyage du nom pour éviter les erreurs de chemin ---- a dapter avec postgress
+        # 1. Market Handoff
+        if re.search(r"prix|vente|achat", query, re.IGNORECASE):
+            return {**state, "handoff_to": "MarketCoach", "handoff_reason": "Market query in soil agent"}
+
+        # 2. Data Loading (File-Based for now)
         safe_name = re.sub(r'[^a-z0-9]', '', village)
-        path = f"backend/sources/raw_data/soil_grids/{safe_name}.json"
+        target_file = os.path.join(self.data_path, f"{safe_name}.json")
         
         sg_data = {}
         try:
-            if os.path.exists(path):
-                with open(path, 'r', encoding='utf-8') as f:
+            if os.path.exists(target_file):
+                with open(target_file, 'r', encoding='utf-8') as f:
                     sg_data = json.load(f)
             else:
                 warnings.append(f"Données SoilGrids introuvables pour {village}")
-                # Fallback : on envoie un dict vide, le Doctor gérera ou on aura des valeurs par défaut
+                # We permit continuation with empty data -> Doctor returns defaults
         except Exception as e:
-            warnings.append(f"Erreur lecture fichier: {str(e)}")
+            logger.error(f"Soil Data Error: {e}")
+            warnings.append("Erreur interne lecture données sol.")
 
-        # 2. Appel au Docteur (Votre outil)
+        # 3. Technical Diagnostic (Deterministic)
         try:
-            # Cette méthode est purement déterministe (Python)
-            diagnosis = self.doctor.get_diagnosis_from_soilgrids(sg_data, observation)
-            status = "DIAGNOSIS_COMPLETE"
+            technical_diag = self.doctor.get_diagnosis_from_soilgrids(sg_data, observation)
+            status = "DIAGNOSED"
         except Exception as e:
-            logger.error(f"Echec SoilDoctor: {e}")
-            diagnosis = {}
-            warnings.append("Le diagnostic technique a échoué.")
+            logger.error(f"SoilDoctor Tool Failed: {e}")
+            technical_diag = {}
             status = "ERROR"
+            warnings.append("Échec du diagnostic technique.")
 
-        state = dict(state)
-        state.update({
+        return {
+            **state,
             "soil_raw_data": sg_data,
-            "technical_diagnosis": diagnosis,
+            "technical_diagnosis": technical_diag,
             "warnings": warnings,
             "status": status
-        })
-        return state
+        }
 
-    # ------------------------------------------------------------------ #
-    # NODE B : RÉDACTION DE LA RÉPONSE (LLM)
-    # ------------------------------------------------------------------ #
+    async def generate_node(self, state: SoilState) -> SoilState:
+        """Transform technical data into peasant-friendly advice."""
+        if state.get("handoff_to") or state.get("status") == "ERROR":
+            return state
 
-    def respond_node(self, state: SoilState) -> SoilState:
-        """
-        Transforme le JSON technique du Doctor en conseil paysan.
-        """
         diag = state.get("technical_diagnosis", {})
-        query = state.get("user_query", "")
-        location = state.get("location_profile", {}).get("village", "votre zone")
-        warnings = list(state.get("warnings", []))
-
-        if not diag:
-            return {"final_response": "Je n'ai pas pu analyser le sol de cette zone.", "status": "NO_DATA"}
-
-        # Extraction des clés spécifiques de VOTRE SoilDoctorTool
         identite = diag.get("identite_pedologique", {})
         sante = diag.get("bilan_sante", {})
         eau = diag.get("gestion_eau", {})
+        
+        # Fallback if no data loaded
+        if not diag:
+             return {**state, "final_response": "Je n'ai pas de données pour cette zone spécifique. Pouvez-vous décrire le sol (couleur, texture) ?", "status": "NO_DATA"}
 
-        if not self.llm:
-            warnings.append("LLM indisponible.")
-            fallback = (
-                f"Diagnostic technique : Sol de type {identite.get('nom_local', 'inconnu')}. "
-                f"Conseil principal : {sante.get('action_organique', 'N/A')}. "
-                f"Technique d'eau recommandée : {eau.get('strategie', 'N/A')}."
-            )
-            state = dict(state)
-            resp = {"text": fallback, "agent": "soil", "cards": [{"title": "Analyse sol (mode secours)", "body": fallback}], "actions": [], "suggested": []}
-            state.update({
-                "final_response": fallback,
-                "agri_response": resp,
-                "status": "LLM_DOWN",
-            })
-            return state
-
-        # Formatage des templates
-        system_prompt = SOIL_SYSTEM_TEMPLATE.format(
+        # Prompt
+        sys_prompt = SOIL_SYSTEM_TEMPLATE.format(
             nom_local=identite.get("nom_local", "Sol non identifié"),
             nom_technique=identite.get("nom_technique", "")
         )
         user_prompt = SOIL_USER_TEMPLATE.format(
-            location=location,
-            query=query,
+            location=state.get("location_profile", {}).get("village", "votre zone"),
+            query=state.get("user_query"),
             nom_local=identite.get("nom_local", "inconnu"),
             atouts=identite.get("atouts", "N/A"),
             cultures=", ".join(identite.get("cultures_adaptees", [])) or "non déterminé",
@@ -174,79 +173,78 @@ class AgriSoilAgent:
         )
 
         try:
-            completion = self.llm.chat.completions.create(
+            resp = self.llm.chat.completions.create(
                 model=self.model_answer,
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": sys_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.3, # Bas pour rester fidèle aux données techniques
-                max_tokens=400
+                temperature=0.3
             )
-            response = completion.choices[0].message.content
-
-            state = dict(state)
-            resp = {"text": response, "agent": "soil", "cards": [{"title": "Analyse sol", "body": response}], "actions": [], "suggested": []}
-            state.update({
-                "final_response": response,
-                "agri_response": resp,
-                "status": "DONE",
-            })
-            return state
-        
+            answer = resp.choices[0].message.content
+            return {**state, "final_response": answer, "status": "GENERATED"}
+            
         except Exception as e:
-            warnings.append(f"Erreur LLM : {e}")
-            # Fallback simple si le LLM plante
-            fallback = (
-                f"Diagnostic technique : Sol de type {identite.get('nom_local')}. "
-                f"Conseil principal : {sante.get('action_organique')}. "
-                f"Technique d'eau recommandée : {eau.get('strategie')}."
+            return {**state, "final_response": "Erreur de génération des conseils.", "status": "LLM_ERROR"}
+
+    async def finalize_node(self, state: SoilState) -> SoilState:
+        """Audit log advice."""
+        if state.get("status") == "GENERATED" and self.persister:
+            self.persister.db.log_audit_action(
+                agent_name="AgriSoil",
+                action_type="SOIL_ADVICE",
+                user_id=state.get("location_profile", {}).get("user_id", "anon"),
+                protocol="SOIL_MANAGEMENT",
+                payload={
+                    "soil_type": state.get("technical_diagnosis", {}).get("identite_pedologique", {}).get("nom_local"),
+                    "village": state.get("location_profile", {}).get("village")
+                },
+                resource="soilgrids_local",
+                confidence=0.9
             )
-            state = dict(state)
-            resp = {"text": fallback, "agent": "soil", "cards": [{"title": "Analyse sol (erreur)", "body": fallback}], "actions": [], "suggested": []}
-            state.update({
-                "final_response": fallback,
-                "agri_response": resp,
-                "status": "FALLBACK",
-            })
-            return state
+            
+        return {
+            **state,
+            "agri_response": {"response": state.get("final_response"), "diagnosis": state.get("technical_diagnosis")}
+        }
 
-    # ------------------------------------------------------------------ #
-    # CONSTRUCTION DU GRAPHE
-    # ------------------------------------------------------------------ #
-
-    def build(self):
+    # ════════════════════════════════════════════════════════════
+    # GRAPH
+    # ════════════════════════════════════════════════════════════
+    def build_graph(self):
         workflow = StateGraph(SoilState)
-
-        workflow.add_node("diagnose", self.diagnose_node)
-        workflow.add_node("respond", self.respond_node)
-
-        workflow.set_entry_point("diagnose")
-        workflow.add_edge("diagnose", "respond")
-        workflow.add_edge("respond", END)
-
+        
+        workflow.add_node("DIAGNOSE", self.diagnose_node)
+        workflow.add_node("GENERATE", self.generate_node)
+        workflow.add_node("FINALIZE", self.finalize_node)
+        
+        workflow.set_entry_point("DIAGNOSE")
+        
+        workflow.add_edge("DIAGNOSE", "GENERATE")
+        workflow.add_edge("GENERATE", "FINALIZE")
+        workflow.add_edge("FINALIZE", END)
+        
         return workflow.compile()
 
-# --- EXEMPLE D'UTILISATION (Simulé) ---
-if __name__ == "__main__":
-    # Simulation des données brutes (ce qui serait dans le JSON)
-    # Pour tester sans fichier, on peut mocker la partie chargement ou créer un fichier dummy.
-    logging.basicConfig(level=logging.INFO)
-    
-    agent = AgriSoilAgent()
-    workflow = agent.build()
-    
-    state_input = {
-        "user_query": "Est-ce que je peux faire du maïs ici ?",
-        "location_profile": {"village": "Loumbila"}, # Assurez-vous d'avoir loumbila.json ou le code gérera l'erreur
-        "observation": "Le sol est sec"
-    }
-    
-    print("--- 🚜 Démarrage Agent Sol ---")
-    result = workflow.invoke(state_input)
-    
-    print("\n--- 📝 Réponse Finale ---")
-    print(result["final_response"])
-    
-    print("\n--- 🔧 Diagnostic Technique (Debug) ---")
-    print(json.dumps(result["technical_diagnosis"], indent=2, ensure_ascii=False))
+    async def run(self, query: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Async execution wrapper."""
+        initial_state = {
+            "user_query": query,
+            "location_profile": context,
+            "observation": context.get("observation", "normal")
+        }
+        
+        app = self.build_graph()
+        final = await app.ainvoke(initial_state)
+        
+        if final.get("handoff_to"):
+            return {
+                "response": final.get("final_response", ""),
+                "handoff_to": final.get("handoff_to"),
+                "reason": final.get("handoff_reason")
+            }
+
+        return {
+            "response": final.get("final_response"),
+            "data": final.get("agri_response")
+        }

@@ -1,0 +1,632 @@
+﻿backend/
+|-- .dockerignore
+|-- .env
+|-- .env.example
+|-- .gitignore
+|-- __init__.py
+|-- docker-compose.airflow.yml
+|-- docker-compose.yml
+|-- Dockerfile
+|-- Dockerfile.airflow
+|-- global-bundle.pem
+|-- poetry.lock
+|-- poetry.toml
+|-- pyproject.toml
+|-- README.md
+|-- serve_agro.py
+|-- _legacy/
+|   |-- agro_api.py
+|   |-- agro_asgi.py
+|   |-- broadcaster.py
+|   |-- ensure_users_columns.sql
+|   |-- extract_vcf_to_csv.py
+|   |-- fix_climatic_regions.py
+|   |-- flood_risk.py
+|   |-- ingestor_archived.py
+|   |-- init_marketplace_tables.py
+|   |-- init_vector_store.sql
+|   |-- market.py
+|   |-- market_agent_tools.py
+|   |-- meteo.py
+|   |-- notification_service.py
+|   |-- patch_marketplace_tables.py
+|   |-- redis_ingest.py
+|   |-- subvention.py
+|   |-- tmp_preview.py
+|   |-- agents/
+|   |   \-- orchestrator_legacy.py
+|   |-- backend/
+|   |   \-- sources/
+|   |       \-- rapports_scraping/
+|   |           |-- bulletins_agronomiques/
+|   |           |-- donnees_geojson_brutes/
+|   |           \-- visuels_satellite/
+|   |-- backend_nested/
+|   |   \-- scripts/
+|   |       |-- README.md
+|   |       |-- archive/
+|   |       |-- core/
+|   |       |-- ingestion/
+|   |       |-- maintenance/
+|   |       |   |-- add_unique_constraint.py
+|   |       |   |-- airflow_windows.py
+|   |       |   |-- apply_knowledge_expansion.py
+|   |       |   |-- apply_knowledge_migration.py
+|   |       |   |-- apply_migration.py
+|   |       |   |-- apply_reconcile_sql.py
+|   |       |   |-- apply_sql_migrations.py
+|   |       |   |-- check_agri_vector_counts.py
+|   |       |   |-- check_db_imports.py
+|   |       |   |-- check_dimensions_file.py
+|   |       |   |-- check_products_for_producer.py
+|   |       |   |-- check_public_clients.py
+|   |       |   |-- check_public_orders.py
+|   |       |   |-- check_public_producers.py
+|   |       |   |-- check_public_products.py
+|   |       |   |-- check_public_zones.py
+|   |       |   |-- check_redis_count.py
+|   |       |   |-- check_redis_count.simple.py
+|   |       |   |-- check_remote.py
+|   |       |   |-- check_s3_and_db.py
+|   |       |   |-- create_role_and_rerun_migrations.py
+|   |       |   |-- drop_legacy_column.py
+|   |       |   |-- ensure_db_prereqs.py
+|   |       |   |-- fetch_rds_cert.py
+|   |       |   |-- final_patch_schema.py
+|   |       |   |-- fix_all.py
+|   |       |   |-- fix_all_standalone.py
+|   |       |   |-- force_drop_remote.py
+|   |       |   |-- import_check.py
+|   |       |   |-- import_check_context_optimizer.py
+|   |       |   |-- import_check_formation.py
+|   |       |   |-- import_check_refine.py
+|   |       |   |-- import_precomputed_embeddings.py
+|   |       |   |-- init_airflow_windows.py
+|   |       |   |-- insert_test_noembed.py
+|   |       |   |-- insert_test_with_embedding.py
+|   |       |   |-- inspect_agent_actions.py
+|   |       |   |-- inspect_conversations.py
+|   |       |   |-- inspect_db_schema.py
+|   |       |   |-- inspect_document_chunks.py
+|   |       |   |-- inspect_episodic_columns.py
+|   |       |   |-- inspect_table_columns.py
+|   |       |   |-- inspect_table_details.py
+|   |       |   |-- inspect_users_columns.py
+|   |       |   |-- inspect_vector_schema.py
+|   |       |   |-- list_s3_objects.py
+|   |       |   |-- migrate_rag_db_to_pgvector.py
+|   |       |   |-- migrate_versioning_hnsw.py
+|   |       |   |-- orchestrator_smoke_test.py
+|   |       |   |-- patch_vector_dimensions.py
+|   |       |   |-- patch_vector_schema.py
+|   |       |   |-- patch_vector_v2.py
+|   |       |   |-- post_migration_checks.py
+|   |       |   |-- preview_s3_file.py
+|   |       |   |-- query_md5s.py
+|   |       |   |-- redis_cloud_example.py
+|   |       |   |-- redis_ingest.py
+|   |       |   |-- redis_resume_upload.py
+|   |       |   |-- redis_search_validate.py
+|   |       |   |-- run_apply_migrations_with_env.py
+|   |       |   |-- run_formation_agent.py
+|   |       |   |-- run_formation_agent_real.py
+|   |       |   |-- run_ingestion_manual.py
+|   |       |   |-- run_migration_stepwise.py
+|   |       |   |-- run_redis_ingest_with_env.py
+|   |       |   |-- seed_minimal_for_tests.py
+|   |       |   |-- seed_with_test_ids.py
+|   |       |   |-- sentinelle_smoke_test.py
+|   |       |   |-- sync_raw_to_s3.py
+|   |       |   |-- test_db_connect.py
+|   |       |   |-- test_formation_db.py
+|   |       |   |-- test_mcp_calls.py
+|   |       |   |-- test_mcp_calls_verbose.py
+|   |       |   |-- test_s3_rds_connectivity.py
+|   |       |   |-- verify_formationcoach.py
+|   |       |   |-- verify_migration.py
+|   |       |   |-- verify_rag_config.py
+|   |       |   |-- verify_rag_setup.py
+|   |       |   \-- verify_settings_debug.py
+|   |       \-- tasks/
+|   |-- cache/
+|   |-- config/
+|   |   |-- old_root_config.py
+|   |   |-- backend_config/
+|   |   |   \-- permissions.json
+|   |   \-- old_config_dir/
+|   |       \-- security_config.py
+|   |-- docs_backup/
+|   |   |-- ARCHITECTURE.md
+|   |   |-- ARCHITECTURE_2.0.md
+|   |   |-- ARCHITECTURE_MARKET_SPLIT.md
+|   |   |-- DEPLOYMENT.md
+|   |   |-- formation_coach_design.md
+|   |   |-- GUIDE_UTILISATION.md
+|   |   |-- NO_DATA_LOSS_CHUNK_UPDATES.md
+|   |   \-- project_philosophy.md
+|   |-- eval_backup/
+|   |   |-- evaluation_report.json
+|   |   \-- evaluation_report.txt
+|   |-- external_apis/
+|   |   |-- __init__.py
+|   |   |-- earth_engine/
+|   |   |   |-- __init__.py
+|   |   |   |-- apikey.json
+|   |   |   |-- chip.py
+|   |   |   |-- engine.py
+|   |   |   |-- fao.py
+|   |   |   |-- gee_auth.py
+|   |   |   |-- nasa.py
+|   |   |   \-- soilgrid.py
+|   |   \-- weather/
+|   |       |-- __init__.py
+|   |       \-- openmeteo.py
+|   |-- logs/
+|   |   |-- agent_real_run_internal.log
+|   |   |-- agent_run.log
+|   |   |-- agent_run_real_v1.log
+|   |   |-- agent_run_v2.log
+|   |   |-- agent_run_v3.log
+|   |   |-- agent_run_v4.log
+|   |   |-- agent_run_v5.log
+|   |   |-- agent_run_v6.log
+|   |   |-- agent_run_v7.log
+|   |   |-- agent_run_v8.log
+|   |   |-- airflow_final.log
+|   |   |-- airflow_final_v2.log
+|   |   |-- airflow_really_final.log
+|   |   |-- airflow_relance.log
+|   |   |-- airflow_relance_2.log
+|   |   |-- airflow_retest.log
+|   |   |-- airflow_retest_2.log
+|   |   |-- airflow_retest_3.log
+|   |   |-- airflow_retest_final.log
+|   |   |-- airflow_retest_success.log
+|   |   |-- airflow_retest_success_v2.log
+|   |   |-- airflow_success_final.log
+|   |   |-- airflow_success_final_v2.log
+|   |   |-- airflow_success_final_v3.log
+|   |   |-- airflow_success_final_v4.log
+|   |   |-- airflow_success_final_v6.log
+|   |   |-- app.log
+|   |   |-- error.log
+|   |   |-- error_v2.log
+|   |   |-- error_v3.log
+|   |   |-- fetch_sources_rerun.log
+|   |   |-- fetch_sources_test.log
+|   |   |-- final_output.log
+|   |   |-- final_output_default.log
+|   |   |-- final_output_legacy.log
+|   |   |-- final_output_v2.log
+|   |   |-- fix_schema.log
+|   |   |-- health_check_test.log
+|   |   |-- health_check_test_v2.log
+|   |   |-- import_full.log
+|   |   |-- import_large.log
+|   |   |-- import_small.log
+|   |   |-- migration_output.log
+|   |   |-- output_real.log
+|   |   |-- output_real_v2.log
+|   |   |-- output_v3.log
+|   |   |-- patch.log
+|   |   \-- patch2.log
+|   |-- notifications/
+|   |   |-- __init__.py
+|   |   \-- matching.py
+|   |-- orchestrator_legacy/
+|   |   \-- intention.py
+|   |-- scheduling/
+|   |   |-- __init__.py
+|   |   \-- scheduler.py
+|   |-- txt/
+|   |   |-- backend_agro_info.txt
+|   |   |-- backend_listing.txt
+|   |   |-- check_remote_output.txt
+|   |   |-- drop_log.txt
+|   |   |-- expansion_output.txt
+|   |   |-- expansion_output_utf8.txt
+|   |   |-- formation_final_check.txt
+|   |   |-- formation_test_result.txt
+|   |   |-- formation_test_result_fallback.txt
+|   |   |-- formation_test_result_fallback_unbuf.txt
+|   |   |-- output_expansion_check.txt
+|   |   |-- patch_log.txt
+|   |   |-- schema_dump.txt
+|   |   |-- verify_debug.txt
+|   |   |-- verify_output.txt
+|   |   |-- verify_rag_final.txt
+|   |   \-- verify_rag_out.txt
+|   \-- utils/
+|       |-- __init__.py
+|       |-- cache.py
+|       \-- utils/
+|           |-- off_topic_guard.py
+|           |-- practical_details_enricher.py
+|           |-- sms_adapter.py
+|           \-- typo_corrector.py
+|-- airflow/
+|   |-- README.md
+|   \-- dags/
+|       |-- agri_ingestion_master.py
+|       |-- dag_gc_old_chunk_versions.py
+|       |-- dag_ingest_docs.py
+|       |-- dag_ingest_weather.py
+|       |-- dag_market_prices.py
+|       |-- dag_market_zone_matching.py
+|       |-- dag_migrate_rag_json_to_pgvector.py
+|       |-- dag_user_notification.py
+|       |-- daily_agro_push_dag.py
+|       |-- Fix_Schema_DAG.py
+|       |-- Main_Ingestion_DAG.py
+|       |-- sync_raw_to_s3_dag.py
+|       \-- system_health_check_dag.py
+|-- airflow_home/
+|   \-- airflow.db
+|-- ingestion/
+|   |-- schema.py
+|   |-- worker.py
+|   |-- collectors/
+|   |   |-- fews_collector.py
+|   |   |-- news_collector.py
+|   |   \-- weather_collector.py
+|   |-- processors/
+|   |   |-- __init__.py
+|   |   |-- base_processor.py
+|   |   |-- factory.py
+|   |   |-- fews_processor.py
+|   |   |-- news_processor.py
+|   |   |-- pdf_processor.py
+|   |   \-- weather_processor.py
+|   \-- storage/
+|       |-- s3_manager.py
+|       \-- vector_db.py
+|-- scripts/
+|   |-- _mcp_import_test.py
+|   |-- check_health.py
+|   |-- check_tables.py
+|   |-- clean_weather_advisories.py
+|   |-- create_producer_user.py
+|   |-- dashboard.py
+|   |-- kill_ports.py
+|   |-- replace_uuid_with_gen_random.py
+|   |-- run_agri_db_server.py
+|   |-- run_evaluation.py
+|   |-- validate_alignment.py
+|   |-- verify_database.py
+|   \-- seeds/
+|       |-- seed_crop_sheets.py
+|       |-- seed_db.py
+|       \-- seed_zones.py
+|-- sources/
+|   \-- resource_catalog.json
+|-- src/
+|   |-- __init__.py
+|   |-- agriconnect/
+|   |   |-- main.py
+|   |   |-- worker.py
+|   |   |-- agent_test/
+|   |   |   |-- base.py
+|   |   |   \-- formation_agro.py
+|   |   |-- api/
+|   |   |   |-- __init__.py
+|   |   |   |-- routes.py
+|   |   |   \-- schemas.py
+|   |   |-- core/
+|   |   |   |-- __init__.py
+|   |   |   |-- agent_registry.py
+|   |   |   |-- cloud_settings.py
+|   |   |   |-- database.py
+|   |   |   |-- db.py
+|   |   |   |-- get_llm.py
+|   |   |   |-- logger.py
+|   |   |   |-- models.py
+|   |   |   |-- security.py
+|   |   |   |-- settings.py
+|   |   |   |-- setup.py
+|   |   |   |-- tracing.py
+|   |   |   \-- watcher.py
+|   |   |-- database/
+|   |   |   |-- apply_migration.py
+|   |   |   |-- audit_trail.sql
+|   |   |   |-- check_schema_alignment.py
+|   |   |   |-- enable_pgvector.sql
+|   |   |   |-- enable_pgvector.sql.bak.20260328T215910Z
+|   |   |   |-- init.sql
+|   |   |   |-- init.sql.bak.20260328T215910Z
+|   |   |   |-- marketplace.sql
+|   |   |   |-- marketplace_tables_clean.sql
+|   |   |   |-- memory_migration.sql
+|   |   |   |-- memory_migration.sql.bak.20260328T215910Z
+|   |   |   |-- migration_add_inventory.py
+|   |   |   |-- migration_create_knowledge_base.sql
+|   |   |   |-- migration_data_driven_airflow_pgvector_20260319.sql
+|   |   |   |-- migration_formationcoach_20260318.sql
+|   |   |   |-- migration_market_split_20260318.sql
+|   |   |   |-- migration_prisma_align_20260226.sql
+|   |   |   |-- migration_prisma_align_20260226.sql.bak.20260328T215910Z
+|   |   |   |-- migration_prisma_align_tests.sql
+|   |   |   |-- patch_add_userid_conversations.sql
+|   |   |   |-- protocol_tables.sql
+|   |   |   |-- run_call_tool_sync.py
+|   |   |   |-- seed_sesame_sorgho.sql
+|   |   |   \-- test_instantiate_retriever.py
+|   |   |-- graphs/
+|   |   |   |-- __init__.py
+|   |   |   |-- message_flow.py
+|   |   |   |-- prompts.py
+|   |   |   |-- route.py
+|   |   |   |-- state.py
+|   |   |   |-- agents/
+|   |   |   |   |-- __init__.py
+|   |   |   |   |-- common/
+|   |   |   |   |   |-- __init__.py
+|   |   |   |   |   |-- config.py
+|   |   |   |   |   |-- domains.py
+|   |   |   |   |   \-- output.py
+|   |   |   |   |-- formation/
+|   |   |   |   |   |-- __init__.py
+|   |   |   |   |   |-- graph.py
+|   |   |   |   |   |-- nodes.py
+|   |   |   |   |   |-- prompts.py
+|   |   |   |   |   \-- state.py
+|   |   |   |   |-- market_coach/
+|   |   |   |   |   |-- __init__.py
+|   |   |   |   |   |-- graph.py
+|   |   |   |   |   |-- nodes.py
+|   |   |   |   |   |-- prompts.py
+|   |   |   |   |   \-- state.py
+|   |   |   |   |-- marketplace_v3/
+|   |   |   |   |   |-- __init__.py
+|   |   |   |   |   |-- graph.py
+|   |   |   |   |   |-- nodes.py
+|   |   |   |   |   |-- prompts.py
+|   |   |   |   |   \-- state.py
+|   |   |   |   \-- sentinelle/
+|   |   |   |       |-- __init__.py
+|   |   |   |       |-- graph.py
+|   |   |   |       |-- nodes.py
+|   |   |   |       |-- prompts.py
+|   |   |   |       \-- state.py
+|   |   |   |-- nodes/
+|   |   |   |   |-- __init__.py
+|   |   |   |   |-- marketplace_background.py
+|   |   |   |   |-- plant_doctor.py
+|   |   |   |   |-- README.md
+|   |   |   |   |-- soil.py
+|   |   |   |   |-- Untitled-1.ipynb
+|   |   |   |   \-- voice.py
+|   |   |   \-- orchestrateur/
+|   |   |       |-- graph.py
+|   |   |       |-- message_flow.py
+|   |   |       |-- message_flow_setup.py
+|   |   |       |-- nodes.py
+|   |   |       |-- prompts.py
+|   |   |       \-- state.py
+|   |   |-- protocols/
+|   |   |   |-- __init__.py
+|   |   |   |-- core.py
+|   |   |   |-- observability.py
+|   |   |   |-- a2a/
+|   |   |   |   |-- __init__.py
+|   |   |   |   |-- discovery.py
+|   |   |   |   |-- messaging.py
+|   |   |   |   \-- registry.py
+|   |   |   |-- ag_ui/
+|   |   |   |   |-- __init__.py
+|   |   |   |   |-- components.py
+|   |   |   |   |-- formatter.py
+|   |   |   |   \-- renderer.py
+|   |   |   |-- mcp/
+|   |   |   |   |-- __init__.py
+|   |   |   |   |-- app.py
+|   |   |   |   |-- client.py
+|   |   |   |   |-- main.py
+|   |   |   |   |-- mcp_config.py
+|   |   |   |   |-- mcp_weather.py
+|   |   |   |   |-- core/
+|   |   |   |   |   |-- __init__.py
+|   |   |   |   |   |-- base.py
+|   |   |   |   |   |-- client.py
+|   |   |   |   |   |-- context.py
+|   |   |   |   |   |-- infrastructure.py
+|   |   |   |   |   \-- security.py
+|   |   |   |   |-- providers/
+|   |   |   |   |   |-- __init__.py
+|   |   |   |   |   |-- agronomy.py
+|   |   |   |   |   |-- data_provider.py
+|   |   |   |   |   |-- db_tools.py
+|   |   |   |   |   |-- identity_provider.py
+|   |   |   |   |   |-- market.py
+|   |   |   |   |   |-- rag_provider.py
+|   |   |   |   |   |-- units.py
+|   |   |   |   |   \-- weather.py
+|   |   |   |   \-- servers/
+|   |   |   |       |-- __init__.py
+|   |   |   |       \-- agri_rag_server.py
+|   |   |   \-- shared/
+|   |   |       |-- __init__.py
+|   |   |       \-- schemas.py
+|   |   |-- rag/
+|   |   |   |-- __init__.py
+|   |   |   |-- components.py
+|   |   |   |-- config.py
+|   |   |   |-- ingestor.py
+|   |   |   |-- metric.py
+|   |   |   |-- orchestrator.py
+|   |   |   |-- README.md
+|   |   |   |-- redis_search_store.py
+|   |   |   |-- redis_store.py
+|   |   |   \-- retriever.py
+|   |   |-- services/
+|   |   |   |-- __init__.py
+|   |   |   |-- database_service.py
+|   |   |   |-- db_handler.py
+|   |   |   |-- knowledge_models.py
+|   |   |   |-- llm_clients.py
+|   |   |   |-- models_legacy.py
+|   |   |   |-- models_v3.py
+|   |   |   |-- persistence.py
+|   |   |   |-- voice_engine.py
+|   |   |   |-- data_collection/
+|   |   |   |   |-- __init__.py
+|   |   |   |   |-- documents/
+|   |   |   |   |   |-- __init__.py
+|   |   |   |   |   |-- fews.py
+|   |   |   |   |   |-- fews_pdf_harvester.py
+|   |   |   |   |   \-- sonagess.py
+|   |   |   |   |-- market/
+|   |   |   |   |   |-- __init__.py
+|   |   |   |   |   \-- market_collector.py
+|   |   |   |   \-- weather/
+|   |   |   |       |-- __init__.py
+|   |   |   |       |-- documents_meteo.py
+|   |   |   |       |-- reconciliation.py
+|   |   |   |       \-- weather_collector.py
+|   |   |   |-- database/
+|   |   |   |   |-- __init__.py
+|   |   |   |   |-- auth.py
+|   |   |   |   |-- common.py
+|   |   |   |   |-- dashboards.py
+|   |   |   |   |-- database_service.py
+|   |   |   |   |-- intelligence.py
+|   |   |   |   |-- marketplace.py
+|   |   |   |   |-- transactions.py
+|   |   |   |   \-- utils.py
+|   |   |   |-- market/
+|   |   |   |   |-- intent.py
+|   |   |   |   |-- repository.py
+|   |   |   |   |-- security.py
+|   |   |   |   |-- transaction.py
+|   |   |   |   \-- validation.py
+|   |   |   |-- memory/
+|   |   |   |   |-- __init__.py
+|   |   |   |   |-- context_optimizer.py
+|   |   |   |   |-- episodic_memory.py
+|   |   |   |   |-- profile_extractor.py
+|   |   |   |   \-- user_profile.py
+|   |   |   |-- notifications/
+|   |   |   |   |-- __init__.py
+|   |   |   |   \-- matching.py
+|   |   |   \-- scraper/
+|   |   |       |-- __init__.py
+|   |   |       |-- master_harvester.py
+|   |   |       |-- scraper_orchestrator.py
+|   |   |       |-- urls.py
+|   |   |       |-- core/
+|   |   |       |   |-- __init__.py
+|   |   |       |   |-- checkpoint.py
+|   |   |       |   |-- config.py
+|   |   |       |   |-- error_handling.py
+|   |   |       |   |-- logging_config.py
+|   |   |       |   \-- resource_manager.py
+|   |   |       \-- scrapers/
+|   |   |           |-- __init__.py
+|   |   |           |-- data_platform_scraper.py
+|   |   |           |-- fao_doi_resolver.py
+|   |   |           |-- google_workspace_scraper.py
+|   |   |           |-- news_scraper.py
+|   |   |           |-- pdf_downloader.py
+|   |   |           \-- technical_resources_explorer.py
+|   |   |-- tools/
+|   |   |   |-- __init__.py
+|   |   |   |-- crop.py
+|   |   |   |-- db_handler.py
+|   |   |   |-- formation.py
+|   |   |   |-- formation_advisor.py
+|   |   |   |-- health.py
+|   |   |   |-- intelligence.py
+|   |   |   |-- market.py
+|   |   |   |-- market_agent_tools.py
+|   |   |   |-- marketplace_legacy.py
+|   |   |   |-- marketplace_v3.py
+|   |   |   |-- refine.py
+|   |   |   |-- sentinelle.py
+|   |   |   |-- shared_math.py
+|   |   |   \-- soil.py
+|   |   |-- utils/
+|   |   |   |-- __init__.py
+|   |   |   \-- s3_utils.py
+|   |   \-- workers/
+|   |       |-- __init__.py
+|   |       |-- celery_app.py
+|   |       |-- celery_config.py
+|   |       |-- task_base.py
+|   |       \-- tasks/
+|   |           |-- __init__.py
+|   |           |-- ai.py
+|   |           |-- maintenance.py
+|   |           |-- marketplace.py
+|   |           |-- monitoring.py
+|   |           |-- voice.py
+|   |           \-- whatsapp.py
+|   \-- cache/
+\-- tests/
+    |-- __init__.py
+    |-- conftest.py
+    |-- test_agri_rag_server.py
+    |-- test_agriscope.py
+    |-- test_imports.py
+    |-- test_langsmith_agents.py
+    |-- test_market_coach_register_surplus.py
+    |-- test_market_coach_registration_flow.py
+    |-- test_market_mcp_tools.py
+    |-- test_market_registration_fixes.py
+    |-- test_redis_rag.py
+    |-- test_redis_search_store.py
+    |-- test_resource_manager.py
+    |-- test_route.py
+    |-- test_smoke_production.py
+    |-- agents/
+    |   |-- __init__.py
+    |   \-- test_base_agent.py
+    |-- langsmith/
+    |   |-- __init__.py
+    |   |-- datasets.py
+    |   \-- evaluators.py
+    |-- nodes/
+    |   |-- formation.py
+    |   |-- market.py
+    |   |-- marketplace.py
+    |   |-- plant_doctor.py
+    |   |-- sentinelle.py
+    |   |-- soil.py
+    |   |-- test_market_split_architecture.py
+    |   |-- test_sentinelle_routing.py
+    |   \-- voice.py
+    |-- orchestrator/
+    |   |-- test_message_flow.py
+    |   \-- test_route.py
+    |-- protocols/
+    |   |-- test_mcp_agui.py
+    |   |-- test_mcp_db_server_integration.py
+    |   |-- test_mcp_security_shield.py
+    |   |-- test_producer_info.py
+    |   \-- test_protocols.py
+    |-- services/
+    |   |-- test_database.py
+    |   |-- test_database_service_additional.py
+    |   |-- test_database_service_advanced.py
+    |   |-- test_sonagess.py
+    |   \-- test_voice.py
+    |-- tools/
+    |   |-- conftest.py
+    |   |-- test_crop_tool.py
+    |   |-- test_documents_meteo.py
+    |   |-- test_fews_pdf_harvester.py
+    |   |-- test_fews_scraper.py
+    |   |-- test_flood_risk_tool.py
+    |   |-- test_formation_tool.py
+    |   |-- test_health_tool.py
+    |   |-- test_market_tool.py
+    |   |-- test_marketplace_tool.py
+    |   |-- test_meteo_tool.py
+    |   |-- test_refine_tool.py
+    |   |-- test_sentinelle_tool.py
+    |   |-- test_shared_math.py
+    |   |-- test_soil_tool.py
+    |   |-- test_subvention_tool.py
+    |   |-- test_tools_db_handler.py
+    |   |-- test_weather_forecast.py
+    |   \-- test_workers_voice.py
+    \-- workers/
+        \-- test_marketplace_actions_worker.py

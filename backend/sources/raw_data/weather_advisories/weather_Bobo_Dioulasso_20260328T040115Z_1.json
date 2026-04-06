@@ -1,0 +1,13 @@
+{
+  "title": "Météo Bobo-Dioulasso",
+  "content": "Zone Bobo-Dioulasso: temp=27.3C, pluie=0.0mm, hum=72%. Surveiller l'évapotranspiration.",
+  "metadata": {
+    "doc_type": "weather_advisory",
+    "zone": "Bobo-Dioulasso",
+    "forecast_date": "2026-03-28",
+    "observed_at": "2026-03-28T04:01:15.302505+00:00",
+    "source": "api_openmeteo",
+    "confidence": 0.9,
+    "bulletin_excerpt": "Bulletin de Prévisions saisonnières: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin agrométéologique décadaire: AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis | Bulletin agrométéorologique décadaire N°4 (valable du 11 au 2O février 2026): AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour AlertesS'abonnerLangueFrenchEnglishSpanishArabicChineseRechercheContactez-nousRetour LangueFrenchEnglishSpanis |"
+  }
+}

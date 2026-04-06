@@ -8,8 +8,11 @@ import os
 
 # Ajout du chemin backend au PYTHONPATH pour que Airflow trouve les modules
 current_dir = os.path.dirname(os.path.abspath(__file__))
-backend_dir = os.path.dirname(os.path.dirname(current_dir)) # Remonte airflow -> backend
+# backend/airflow/dags/.. -> backend/airflow -> backend
+airflow_dir = os.path.dirname(current_dir)
+backend_dir = os.path.dirname(airflow_dir)
 src_dir = os.path.join(backend_dir, "src")
+
 if src_dir not in sys.path:
     sys.path.append(src_dir)
 
@@ -41,7 +44,7 @@ with DAG(
     'daily_agro_push',
     default_args=default_args,
     description='Envoi quotidien de conseils agro-météo aux abonnés',
-    schedule_interval='0 6 * * *',  # 6h00 matin
+    schedule='0 6 * * *',  # 6h00 matin
     start_date=days_ago(1),
     tags=['agriconnect', 'notification', 'farming'],
     catchup=False,

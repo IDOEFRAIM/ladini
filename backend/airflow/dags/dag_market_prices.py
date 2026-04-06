@@ -8,10 +8,25 @@ from airflow.decorators import dag, task  # type: ignore[reportMissingImports]
 
 
 def _bootstrap_path() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    src = repo_root / "src"
-    if str(src) not in sys.path:
-        sys.path.insert(0, str(src))
+    p = Path(__file__).resolve()
+    for _ in range(6):
+        candidate = p.parent
+        if (candidate / "src" / "agriconnect").exists():
+            sp = str(candidate / "src")
+            if sp not in sys.path:
+                sys.path.insert(0, sp)
+            return
+        if (candidate / "backend" / "src" / "agriconnect").exists():
+            sp = str(candidate / "backend" / "src")
+            if sp not in sys.path:
+                sys.path.insert(0, sp)
+            return
+        p = candidate
+    fallback = Path("/opt/airflow/agriconnect_root/backend/src")
+    if fallback.exists():
+        sf = str(fallback)
+        if sf not in sys.path:
+            sys.path.insert(0, sf)
 
 
 @dag(

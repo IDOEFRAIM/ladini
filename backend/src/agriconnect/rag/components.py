@@ -1,5 +1,6 @@
 import logging
 import os
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -48,16 +49,42 @@ try:
         if not os.path.exists(DB_DIR):
             os.makedirs(DB_DIR)
 
-        # If REDIS_URL is configured, prefer a Redis-backed store.
-        try:
-            if getattr(app_settings, "REDIS_URL", None):
+        vector_backend = (os.getenv("AGRICONNECT_VECTOR_BACKEND", "redis") or "redis").strip().lower()
+
+        redis_url = (getattr(app_settings, "REDIS_URL", "") or "").strip()
+        valkey_endpoint = (getattr(app_settings, "VALKEY_ENDPOINT", "") or "").strip()
+        valkey_token = (getattr(app_settings, "VALKEY_AUTH_TOKEN", "") or "").strip()
+        use_tls = bool(getattr(app_settings, "VALKEY_USE_TLS", True))
+
+        # Prefer an explicitly configured REDIS_URL (env or settings). Only fall back
+        # to VALKEY_ENDPOINT when REDIS_URL is not provided. This allows local tunnels
+        # (e.g., ssh port-forward) to override remote managed endpoints.
+        if not redis_url and valkey_endpoint:
+            scheme = "rediss" if use_tls else "redis"
+            if "://" in valkey_endpoint:
+                redis_url = valkey_endpoint
+            else:
+                if valkey_token:
+                    redis_url = f"{scheme}://:{quote(valkey_token)}@{valkey_endpoint}"
+                else:
+                    redis_url = f"{scheme}://{valkey_endpoint}"
+            logger.info("Using VALKEY_ENDPOINT for vector store connection")
+
+        if redis_url and "://" not in redis_url:
+            scheme = "rediss" if use_tls else "redis"
+            redis_url = f"{scheme}://{redis_url}"
+
+        redis_enabled = bool(redis_url)
+
+        if vector_backend in {"redis", "valkey", "auto"} and redis_enabled:
+            try:
                 # Prefer RedisSearch-backed store when available (Redis Stack with vector support)
                 try:
                     from agriconnect.rag.redis_search_store import RedisSearchVectorStore
 
-                    logger.info("Initializing RedisSearchVectorStore (RAG) from REDIS_URL")
+                    logger.info("Initializing RedisSearchVectorStore (RAG)")
                     return RedisSearchVectorStore(
-                        app_settings.REDIS_URL,
+                        redis_url,
                         dim=EMBEDDING_DIM,
                         index_name="rag:idx",
                         socket_timeout=20,
@@ -69,19 +96,28 @@ try:
                     try:
                         from agriconnect.rag.redis_store import RedisVectorStore
 
-                        logger.info("Initializing RedisVectorStore (RAG) from REDIS_URL")
+                        logger.info("Initializing RedisVectorStore (RAG)")
                         return RedisVectorStore(
-                            app_settings.REDIS_URL,
+                            redis_url,
                             dim=EMBEDDING_DIM,
                             socket_timeout=20,
                             retry_on_timeout=True,
                             decode_responses=True,
                         )
                     except Exception as re:
-                        logger.warning("RedisVectorStore init failed, falling back to FAISS: %s", re)
-        except Exception:
-            # redis-related modules not available or import error -> continue to FAISS fallback
-            pass
+                        logger.warning("RedisVectorStore init failed, falling back to next backend: %s", re)
+            except Exception:
+                # redis-related modules not available or import error -> continue to next fallback
+                pass
+
+        if vector_backend in {"pgvector", "postgres", "postgresql", "auto"}:
+            try:
+                from agriconnect.rag.pgvector_store import PgVectorStore
+
+                logger.info("Initializing PgVectorStore (RAG) from DATABASE_URL")
+                return PgVectorStore(dim=EMBEDDING_DIM)
+            except Exception as pe:
+                logger.warning("PgVectorStore init failed, falling back to Redis/FAISS: %s", pe)
 
         # 1) Explicit FAISS binary
         if os.path.exists(INDEX_FILE):

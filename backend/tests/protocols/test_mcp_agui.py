@@ -17,7 +17,7 @@ class TestMCPDatabaseServer:
         assert server is not None
 
     def test_call_tool_get_user(self):
-        from agriconnect.protocols.mcp.mcp_db import MCPDatabaseServer
+        from agriconnect.protocols.mcp import MCPDatabaseServer
 
         mock_factory = MagicMock()
         mock_session = MagicMock()
@@ -39,7 +39,7 @@ class TestMCPRagServer:
         assert server is not None
 
     def test_list_tools(self):
-        from agriconnect.protocols.mcp.mcp_rag import MCPRagServer
+        from agriconnect.protocols.mcp import MCPRagServer
 
         server = MCPRagServer()
         tools = server.list_tools()
@@ -60,7 +60,7 @@ class TestMCPWeatherServer:
         assert server is not None
 
     def test_list_tools(self):
-        from agriconnect.protocols.mcp.mcp_weather import MCPWeatherServer
+        from agriconnect.protocols.mcp import MCPWeatherServer
 
         server = MCPWeatherServer()
         tools = server.list_tools()
@@ -80,7 +80,7 @@ class TestMCPContextServer:
         assert server is not None
 
     def test_list_tools(self):
-        from agriconnect.protocols.mcp.mcp_context import MCPContextServer
+        from agriconnect.protocols.mcp import MCPContextServer
 
         mock_optimizer = MagicMock()
         server = MCPContextServer(context_optimizer=mock_optimizer)

@@ -57,7 +57,7 @@ class AgriPersister:
 
     def _dispatch_expert_action(self, expert: str, state: Dict[str, Any], user_id: str, zone_id: str) -> None:
         """Route l'enregistrement selon l'expert concerné."""
-        if expert in ("market", "marketplace"):
+        if expert in ("market", "market_coach", "marketplace"):
             self._handle_market(expert, state, user_id, zone_id)
         elif expert == "formation":
             self._handle_formation(state, user_id)
@@ -82,7 +82,7 @@ class AgriPersister:
         resp_text = self._get_expert_text(state, expert)
         if resp_text:
             self.db.log_audit_action(
-                agent_name="MarketCoach" if expert == "market" else "MarketplaceAgent",
+                agent_name="MarketCoach" if expert in ("market", "market_coach") else "MarketplaceAgent",
                 action_type="MARKET_ADVICE",
                 user_id=user_id,
                 protocol="A2A",

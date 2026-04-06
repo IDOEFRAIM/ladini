@@ -1,9 +1,10 @@
-import logging
+﻿import logging
 from typing import Any, Dict, Optional
 
 # Configuration et Core
 from agriconnect.core.settings import settings
 import agriconnect.core.database as _core_db
+import agriconnect.core.db as core_db_new
 from agriconnect.services.db_handler import AgriDatabase
 from agriconnect.rag.components import get_groq_sdk
 from agriconnect.core.tracing import init_tracing
@@ -14,7 +15,7 @@ from agriconnect.protocols.mcp import (
 )
 from agriconnect.protocols.ag_ui import WhatsAppRenderer, WebRenderer, SMSRenderer
 
-# Mémoire 3 niveaux
+# MÃ©moire 3 niveaux
 from agriconnect.services.memory import (
     UserFarmProfile, ProfileExtractor, EpisodicMemory, ContextOptimizer
 )
@@ -23,8 +24,8 @@ logger = logging.getLogger(__name__)
 
 class AgriContext:
     """
-    Système Nerveux Central AgriConnect.
-    Gère le cycle de vie des ressources (DB, MCP, A2A, Mémoire).
+    SystÃ¨me Nerveux Central AgriConnect.
+    GÃ¨re le cycle de vie des ressources (DB, MCP, A2A, MÃ©moire).
     """
 
     def __init__(self, llm_client=None):
@@ -44,7 +45,7 @@ class AgriContext:
         self.tracing_enabled: bool = False
 
     def bootstrap(self):
-        """Lance l'initialisation dans l'ordre de dépendance strict."""
+        """Lance l'initialisation dans l'ordre de dÃ©pendance strict."""
         self._init_tracing()
         # Initialise DB and memory first so MCP DB server can reuse
         # the created session factory if available, then initialise MCPs.
@@ -52,7 +53,7 @@ class AgriContext:
         self._init_mcp_servers()
         self._init_a2a_discovery()
         self._init_renderers()
-        logger.info("🚀 AgriContext bootstrap terminé.")
+        logger.info("ðŸš€ AgriContext bootstrap terminÃ©.")
         return self
 
     def _init_tracing(self):
@@ -60,31 +61,47 @@ class AgriContext:
         try:
             self.tracing_enabled = init_tracing()
         except Exception as e:
-            logger.warning(f"🔭 Tracing non disponible: {e}")
+            logger.warning(f"ðŸ”­ Tracing non disponible: {e}")
 
     def _init_db_and_memory(self):
-        """Initialise la persistence et la mémoire épisodique."""
-        # Setup Database
-        if _core_db._engine and _core_db._SessionLocal:
-            self.db = AgriDatabase(engine=_core_db._engine, session_factory=_core_db._SessionLocal)
-            self.session_factory = _core_db._SessionLocal
-        elif settings.DATABASE_URL:
-            self.db = AgriDatabase(db_url=settings.DATABASE_URL)
-            logger.warning("⚠️ DB: Fallback URL utilisé.")
+        """Initialise la persistence et la mÃ©moire Ã©pisodique."""
+        # Setup Database - prefer new centralized sync DB hub
+        try:
+            if getattr(core_db_new, '_SYNC_ENGINE', None) is not None and getattr(core_db_new, '_SYNC_SESSION_FACTORY', None) is not None:
+                self.db = AgriDatabase(engine=core_db_new._SYNC_ENGINE, session_factory=core_db_new._SYNC_SESSION_FACTORY)
+                self.session_factory = core_db_new._SYNC_SESSION_FACTORY
+            elif settings.DATABASE_URL:
+                self.db = AgriDatabase(db_url=settings.DATABASE_URL)
+                logger.warning("âš ï¸ DB: Fallback URL utilisÃ©.")
+            else:
+                # Try lazy init of core_db
+                try:
+                    eng = core_db_new.get_engine()
+                    sf = getattr(core_db_new, '_SYNC_SESSION_FACTORY', None)
+                    if eng is not None and sf is not None:
+                        self.db = AgriDatabase(engine=eng, session_factory=sf)
+                        self.session_factory = sf
+                except Exception:
+                    # Keep previous behavior of falling back to _core_db if present
+                    if getattr(_core_db, '_engine', None) and getattr(_core_db, '_SessionLocal', None):
+                        self.db = AgriDatabase(engine=_core_db._engine, session_factory=_core_db._SessionLocal)
+                        self.session_factory = _core_db._SessionLocal
+        except Exception as e:
+            logger.warning(f"DB init fallback triggered: {e}")
 
-        # Setup Mémoire (Dépend de la session DB)
+        # Setup MÃ©moire (DÃ©pend de la session DB)
         if self.session_factory:
             try:
                 profile = UserFarmProfile(self.session_factory)
                 episodic = EpisodicMemory(self.session_factory, llm_client=self.llm)
                 extractor = ProfileExtractor(self.llm, profile)
                 self.memory = ContextOptimizer(profile, episodic, extractor)
-                logger.info("🧠 Mémoire 3 niveaux activée")
+                logger.info("ðŸ§  MÃ©moire 3 niveaux activÃ©e")
             except Exception as e:
-                logger.error(f"❌ Erreur Mémoire: {e}")
+                logger.error(f"âŒ Erreur MÃ©moire: {e}")
 
     def _init_mcp_servers(self):
-        """Initialise les serveurs MCP (Système de Tools)."""
+        """Initialise les serveurs MCP (SystÃ¨me de Tools)."""
         try:
             # Use singleton getters to avoid repeated server initialisations
             from agriconnect.protocols.mcp import (
@@ -115,7 +132,8 @@ class AgriContext:
             # directly so the app has an MCP DB facade available.
             if self.mcp.get("db") is None:
                 try:
-                    from agriconnect.protocols.mcp.infrastructure import AgriDBMCPServer
+                    from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer
+                    
 
                     self.mcp["db"] = AgriDBMCPServer()
                     logger.debug("Instantiated AgriDBMCPServer fallback: %r", self.mcp.get("db"))
@@ -136,17 +154,17 @@ class AgriContext:
                     setattr(self, "mcp_db", self.mcp["db"])
                     logger.debug("MCP DB facade attached on AgriContext.mcp_db")
                 except Exception:
-                    logger.exception("Échec de l'attachement du serveur MCP DB facade")
+                    logger.exception("Ã‰chec de l'attachement du serveur MCP DB facade")
 
-            logger.info("🔌 MCP Servers configurés (singletons)")
+            logger.info("ðŸ”Œ MCP Servers configurÃ©s (singletons)")
         except Exception as e:
-            logger.error(f"❌ Erreur MCP: {e}")
+            logger.error(f"âŒ Erreur MCP: {e}")
 
     def _init_a2a_discovery(self):
         """Initialise le protocole Agent-to-Agent."""
         # A2A disabled to avoid agent-to-agent complexity for now.
         self.a2a = None
-        logger.info("📡 A2A Discovery désactivé (mode simplifié)")
+        logger.info("ðŸ“¡ A2A Discovery dÃ©sactivÃ© (mode simplifiÃ©)")
 
     def _init_renderers(self):
         """Initialise les moteurs de rendu AG-UI."""

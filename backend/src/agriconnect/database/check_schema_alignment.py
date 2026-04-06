@@ -3,10 +3,9 @@ Check DB tables vs SQLAlchemy models (models_v3.py).
 Run with PYTHONPATH=backend/src python .../check_schema_alignment.py
 """
 import sys
-import psycopg2
-from psycopg2.extras import RealDictCursor
+from sqlalchemy import text
 
-from agriconnect.core.settings import settings
+from agriconnect.core.db import get_engine, resolve_database_url
 
 # Import models and get SQLAlchemy Base metadata
 from agriconnect.services import models_v3 as models
@@ -17,15 +16,17 @@ DB_SCHEMAS = ["auth", "governance", "marketplace", "intelligence"]
 
 
 def get_db_tables(conn):
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    cur.execute("""
-        SELECT table_schema, table_name
-        FROM information_schema.tables
-        WHERE table_schema IN %s
-        ORDER BY table_schema, table_name
-    """, (tuple(DB_SCHEMAS),))
-    rows = cur.fetchall()
-    cur.close()
+    rows = conn.execute(
+        text(
+            """
+            SELECT table_schema, table_name
+            FROM information_schema.tables
+            WHERE table_schema = ANY(:schemas)
+            ORDER BY table_schema, table_name
+            """
+        ),
+        {"schemas": DB_SCHEMAS},
+    ).mappings().all()
     return set(f"{r['table_schema']}.{r['table_name']}" for r in rows)
 
 
@@ -36,14 +37,10 @@ def normalize_expected(table_name):
 
 
 def main():
-    db_url = settings.DATABASE_URL
-    if not db_url:
-        print("ERROR: DATABASE_URL not configured")
-        sys.exit(1)
-    conn = psycopg2.connect(db_url)
-
-    db_tables = get_db_tables(conn)
-    conn.close()
+    db_url = resolve_database_url(required=True)
+    engine = get_engine(db_url)
+    with engine.connect() as conn:
+        db_tables = get_db_tables(conn)
 
     # Build expected set with schema prefix if present in Table object
     expected = set()

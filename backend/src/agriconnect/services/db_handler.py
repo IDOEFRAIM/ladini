@@ -2,12 +2,13 @@ import uuid
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker, Session
 from contextlib import contextmanager
 import logging
+from agriconnect.core.db import get_engine
 
-from .models import (
+from .models_legacy import (
     Base, User, Zone, Alert, MarketItem, WeatherData,
     Conversation, ConversationMessage,
     UserCrop, SurplusOffer, SoilDiagnosis, PlantDiagnosis, Reminder,
@@ -40,8 +41,9 @@ class AgriDatabase:
             logger.info("✅ AgriDatabase initialisé (pool centralisé)")
         elif db_url:
             # Mode standalone : crée son propre engine
-            self.engine = create_engine(db_url, pool_pre_ping=True)
+            self.engine = get_engine(db_url)
             self.SessionLocal = sessionmaker(bind=self.engine, expire_on_commit=False)
+            self._standalone_engine = True
             logger.info("✅ AgriDatabase initialisé (engine propre)")
         else:
             raise ValueError(

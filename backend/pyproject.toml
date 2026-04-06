@@ -25,6 +25,7 @@ pillow = "^10.0"
 loguru = "^0.7"
 aiofiles = "^23.1"
 pdfminer-six = "^20221105"
+pdfplumber = "^0.11"
 pytest = "^7.0"
 # Additional dependencies requested for Agri-OS
 gtts = "^2.4"
@@ -95,6 +96,10 @@ pydantic-settings = "^2.6"
 
 # --- Utils ---
 requests = "^2.32.5"
+pyyaml = "^6.0"
+tenacity = "^9.0"
+ftfy = "^6.2"
+trafilatura = "^2.0"
 apscheduler = "^3.11.2"
 gradio = "^6.3.0"
 beautifulsoup4 = "^4.14.3"

@@ -1,258 +1,254 @@
-# orchestrator.py
-import logging
-import time
-import json
+from __future__ import annotations
+
+"""YAML-driven scraper orchestrator (zero-IO).
+
+This orchestrator centralizes source strategy in a YAML file while reusing
+registered scraper engines from `SCRAPER_REGISTRY`.
+"""
+
+from pathlib import Path
 import os
-import signal
-from datetime import datetime
-from typing import Dict, Any, Callable, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterator, List, Optional, Literal
+import logging
 
-import sys
-# Ajout du root au path pour trouver config.py
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from pydantic import BaseModel, Field
 
-import agriconnect.config as config
+from agriconnect.core.schemas import RawDocument, ScraperLog
+from .scrapers.registry import ScraperRegistry
 
-# Importer tes services (adapter si signatures différentes)
-from . import DocumentScraper, WeatherForecastService, SonagessScraper, AnamBulletinScraper
-
-# Logger
-logger = logging.getLogger("scraper.orchestrator")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-# Paramètres d'orchestration
-MAX_WORKERS = getattr(config, "ORCHESTRATOR_MAX_WORKERS", 3)
-TASK_TIMEOUT_S = getattr(config, "ORCHESTRATOR_TASK_TIMEOUT_S", 300)  # timeout par tâche
-RETRY_ATTEMPTS = getattr(config, "ORCHESTRATOR_RETRY_ATTEMPTS", 3)
-RETRY_BACKOFF_BASE = getattr(config, "ORCHESTRATOR_RETRY_BACKOFF_BASE", 2)  # seconds
-REPORT_FILE = getattr(config, "ORCHESTRATOR_REPORT_FILE", "backend/sources/orchestration_report.json")
-
-urls_default = [
-    "https://meteoburkina.bf/produits/bulletin-mensuel/",
-    "https://meteoburkina.bf/produits/etat-annuel-du-climat/",
-    "https://meteoburkina.bf/produits/bulletin-hebdomadaire/",
-    "https://meteoburkina.bf/produits/bulletin-agrometeorologique-mensuel/",
-    "https://meteoburkina.bf/produits/bulletin-quotidien/",
-    "https://meteoburkina.bf/produits/bulletin-eau-energie/",
-    "https://meteoburkina.bf/produits/bulletin-climatique-mensuel/",
-    "https://meteoburkina.bf/produits/bulletin-agrometeo-pour-les-medias/",
-    "https://meteoburkina.bf/produits/climat-du-burkina-faso/",
-    "https://meteoburkina.bf/produits/bulletin-climat-sante/",
-    "https://meteoburkina.bf/produits/bulletin-de-previsions-saisonnieres/",
-    "https://meteoburkina.bf/produits/bulletin-agrometeologique-decadaire/"
-    ]
-
-def _normalize_result(res: Any) -> Dict[str, Any]:
-    """
-    Normalise la sortie d'une tâche en dict:
-    { status: "SUCCESS"|"ERROR", results: list, error: optional str }
-    """
-    if isinstance(res, dict):
-        status = res.get("status", "SUCCESS" if res.get("results") is not None else "ERROR")
-        results = res.get("results", [])
-        error = res.get("error")
-        return {"status": status, "results": results or [], "error": error}
-    # si la fonction renvoie une liste ou autre
-    if isinstance(res, list):
-        return {"status": "SUCCESS", "results": res, "error": None}
-    if res is None:
-        return {"status": "ERROR", "results": [], "error": "No result returned"}
-    return {"status": "SUCCESS", "results": [res], "error": None}
+logger = logging.getLogger(__name__)
 
 
-def _safe_call_retryable(fn: Callable, *args, attempts: int = RETRY_ATTEMPTS, backoff_base: int = RETRY_BACKOFF_BASE, **kwargs) -> Dict[str, Any]:
-    """
-    Appelle fn(*args, **kwargs) avec retries simples et backoff exponentiel.
-    Retourne un dict normalisé.
-    """
-    last_exc = None
-    for attempt in range(1, attempts + 1):
-        try:
-            start = time.time()
-            res = fn(*args, **kwargs)
-            duration = time.time() - start
-            logger.info("Task %s succeeded in %.2fs (attempt %d/%d)", getattr(fn, "__name__", str(fn)), duration, attempt, attempts)
-            return _normalize_result(res)
-        except Exception as e:
-            last_exc = e
-            wait = backoff_base ** (attempt - 1)
-            logger.warning("Task %s failed on attempt %d/%d: %s. Backing off %ds", getattr(fn, "__name__", str(fn)), attempt, attempts, e, wait)
-            time.sleep(wait)
-    logger.error("Task %s failed after %d attempts: %s", getattr(fn, "__name__", str(fn)), attempts, last_exc)
-    return {"status": "ERROR", "results": [], "error": str(last_exc)}
+class SourceRunResult(BaseModel):
+    """Typed contract for a single source execution result."""
+
+    status: Literal["SUCCESS", "ERROR"]
+    source_id: str
+    error: Optional[str] = None
+    document: Optional[RawDocument] = None
+    log: Optional[ScraperLog | Dict[str, Any]] = None
+
+
+class OrchestratorRunResult(BaseModel):
+    """Typed contract for a batch execution summary."""
+
+    status: Literal["SUCCESS", "PARTIAL_SUCCESS"]
+    total_sources: int
+    success_count: int
+    failure_count: int
+    results: List[SourceRunResult] = Field(default_factory=list)
 
 
 class ScraperOrchestrator:
-    def __init__(self, headless: bool = True):
-        self.headless = headless
-        # Instancier les services (adapter les signatures si besoin)
-        self.document_scraper = DocumentScraper(headless=headless)
-        self.weather_service = WeatherForecastService()
-        self.bulletin_anam = AnamBulletinScraper()
-        self.sonagess_scraper = SonagessScraper(
-            start_url=getattr(config, "START_URL", config.START_URL),
-            download=True,
-            max_depth=getattr(config, "MAX_DEPTH", config.MAX_DEPTH),
-            max_pages=getattr(config, "MAX_PAGES", config.MAX_PAGES),
-            output_dir=getattr(config, "OUTPUT_DIR", config.OUTPUT_DIR),
+    """Central orchestrator that executes sources declared in YAML."""
+
+    ENGINE_ALIASES = {
+        "institutional_pdf": "institutional_pdf",
+        "news_article": "news_article",
+        "technical_crawler": "technical_crawler",
+        "technical_site": "technical_site",
+        "news": "news",
+        "technical": "technical",
+    }
+
+    def __init__(
+        self,
+        sources_file: Optional[str] = None,
+        auto_discover: bool = True,
+        headless: bool = True,
+        strict_init: bool = False,
+    ):
+        _ = headless  # kept for backward compatibility with previous orchestrator signature
+        self.sources_file = Path(sources_file) if sources_file else self._default_sources_file()
+        self.sources: Dict[str, Dict[str, Any]] = {}
+        self.init_error: Optional[str] = None
+
+        if auto_discover:
+            # Ensure decorators are loaded before create() calls.
+            try:
+                ScraperRegistry.discover("agriconnect.services.scraper.scrapers")
+            except Exception as exc:
+                msg = f"Failed to discover scrapers: {exc}"
+                logger.exception(msg)
+                if strict_init:
+                    raise RuntimeError(msg) from exc
+                self.init_error = msg
+
+        try:
+            self.sources = self._load_sources(self.sources_file)
+        except Exception as exc:
+            msg = f"Failed to initialize sources from '{self.sources_file}': {exc}"
+            logger.exception(msg)
+            if strict_init:
+                raise RuntimeError(msg) from exc
+            self.init_error = msg
+            self.sources = {}
+
+        # Disabled sources can be configured via env var `SCRAPER_DISABLED_SOURCES`
+        # as a comma-separated list of source ids. These sources will be skipped
+        # during `run_all()` without changing the YAML config.
+        raw_disabled = os.getenv("SCRAPER_DISABLED_SOURCES", "") or ""
+        self.disabled_sources = {s.strip() for s in raw_disabled.split(',') if s.strip()}
+
+    @staticmethod
+    def _default_sources_file() -> Path:
+        # backend/src/agriconnect/services/scraper/scraper_orchestrator.py -> backend/sources/sources.yaml
+        return Path(__file__).resolve().parents[4] / "sources" / "sources.yaml"
+
+    @staticmethod
+    def _read_yaml(path: Path) -> Dict[str, Any]:
+        try:
+            import yaml  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("PyYAML is required to load sources.yaml") from exc
+
+        with path.open("r", encoding="utf-8") as fh:
+            payload = yaml.safe_load(fh) or {}
+        if not isinstance(payload, dict):
+            raise ValueError("sources.yaml root must be a mapping")
+        return payload
+
+    @staticmethod
+    def _normalize_config_url(source_id: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize legacy URL keys into one explicit config.url key."""
+        cfg = dict(config or {})
+        if cfg.get("url"):
+            return cfg
+
+        legacy_candidates: List[str] = []
+
+        start_url = cfg.get("start_url")
+        if start_url:
+            legacy_candidates.append(str(start_url))
+
+        search_urls = cfg.get("search_urls")
+        if isinstance(search_urls, list) and search_urls:
+            legacy_candidates.append(str(search_urls[0]))
+
+        base_url = cfg.get("base_url")
+        if base_url:
+            legacy_candidates.append(str(base_url))
+
+        if legacy_candidates:
+            cfg["url"] = legacy_candidates[0]
+            logger.warning(
+                "Source '%s' uses legacy URL keys; normalized to config.url",
+                source_id,
+            )
+        return cfg
+
+    def _load_sources(self, path: Path) -> Dict[str, Dict[str, Any]]:
+        if not path.exists():
+            raise FileNotFoundError(f"Sources config not found: {path}")
+
+        payload = self._read_yaml(path)
+        raw_sources = payload.get("sources")
+        if not isinstance(raw_sources, list):
+            raise ValueError("sources.yaml must define a top-level 'sources' list")
+
+        loaded: Dict[str, Dict[str, Any]] = {}
+        for item in raw_sources:
+            if not isinstance(item, dict):
+                continue
+            source_id = str(item.get("id") or "").strip()
+            engine = str(item.get("engine") or "").strip()
+            if not source_id or not engine:
+                continue
+
+            raw_config = dict(item.get("config") or {})
+            config = self._normalize_config_url(source_id, raw_config)
+            if not config.get("url"):
+                logger.warning("Skipping source '%s': missing required config.url", source_id)
+                continue
+
+            loaded[source_id] = {
+                "id": source_id,
+                "engine": engine,
+                "priority": int(item.get("priority", 3)),
+                "frequency": str(item.get("frequency", "manual")),
+                "tags": list(item.get("tags") or []),
+                "config": config,
+            }
+
+        if not loaded:
+            raise ValueError("No valid sources found in sources.yaml")
+
+        return loaded
+
+    @classmethod
+    def _registry_engine_key(cls, engine_name: str) -> str:
+        normalized = (engine_name or "").strip().lower()
+        return cls.ENGINE_ALIASES.get(normalized, normalized)
+
+    @staticmethod
+    def _enrich_document(doc: RawDocument, source: Dict[str, Any]) -> RawDocument:
+        meta = dict(doc.metadata or {})
+        meta["source_id"] = source["id"]
+        meta["source_engine"] = source["engine"]
+        meta["source_priority"] = int(source.get("priority", 3))
+        meta["source_frequency"] = source.get("frequency")
+        meta["source_tags"] = list(source.get("tags") or [])
+        meta["collected_at"] = datetime.now(timezone.utc).isoformat()
+        doc.metadata = meta
+        return doc
+
+    def list_sources(self) -> List[str]:
+        return sorted(self.sources.keys())
+
+    def run_source(self, source_id: str) -> SourceRunResult:
+        source = self.sources.get(source_id)
+        if source is None:
+            return SourceRunResult(status="ERROR", source_id=source_id, error="source_not_found")
+
+        try:
+            engine_key = self._registry_engine_key(source["engine"])
+            scraper = ScraperRegistry.create(engine_key, config=source.get("config") or {})
+            target_url = str((source.get("config") or {}).get("url") or "").strip()
+            if not target_url:
+                raise ValueError(f"Source '{source_id}' is missing required config.url")
+
+            doc, log = scraper.run(target_url)
+            if doc is None:
+                error_trace = log.error_trace if hasattr(log, "error_trace") else None
+                return SourceRunResult(
+                    status="ERROR",
+                    source_id=source_id,
+                    error=error_trace or "scrape_failed",
+                    log=log,
+                )
+
+            doc = self._enrich_document(doc, source)
+            return SourceRunResult(
+                status="SUCCESS",
+                source_id=source_id,
+                error=None,
+                document=doc,
+                log=log,
+            )
+        except Exception as exc:
+            logger.exception("Source '%s' failed", source_id)
+            return SourceRunResult(status="ERROR", source_id=source_id, error=str(exc))
+
+    def run_all(self) -> Iterator[SourceRunResult]:
+        """Stream source execution results one-by-one to minimize memory usage."""
+        for source_id in self.list_sources():
+            # Skip explicitly disabled sources (operator control)
+            if source_id in getattr(self, 'disabled_sources', set()):
+                logger.info("Skipping disabled source: %s", source_id)
+                continue
+            # Do not fail-fast: one failing source must not block the rest.
+            yield self.run_source(source_id)
+
+    def run_all_summary(self) -> OrchestratorRunResult:
+        """Optional helper for callers that still need a full batch summary."""
+        results: List[SourceRunResult] = list(self.run_all())
+        success_count = sum(1 for r in results if r.status == "SUCCESS")
+        failure_count = len(results) - success_count
+        return OrchestratorRunResult(
+            status="SUCCESS" if failure_count == 0 else "PARTIAL_SUCCESS",
+            total_sources=len(results),
+            success_count=success_count,
+            failure_count=failure_count,
+            results=results,
         )
-
-        self.report: Dict[str, Any] = {}
-        self._stop_requested = False
-        # installer handler pour arrêt propre
-        signal.signal(signal.SIGINT, self._handle_stop)
-        signal.signal(signal.SIGTERM, self._handle_stop)
-
-    def _handle_stop(self, signum, frame):
-        logger.warning("Stop signal reçu (%s). Arrêt propre demandé.", signum)
-        self._stop_requested = True
-
-    def _run_task_with_timeout(self, executor: ThreadPoolExecutor, fn: Callable, *args, task_name: str = "task", timeout_s: int = TASK_TIMEOUT_S, **kwargs) -> Dict[str, Any]:
-        """
-        Soumet la tâche au ThreadPoolExecutor et attend avec timeout.
-        Utilise _safe_call_retryable pour retries internes.
-        """
-        future = executor.submit(_safe_call_retryable, fn, *args, **kwargs)
-        try:
-            result = future.result(timeout=timeout_s)
-            # Sauvegarde locale immédiate (même si cette méthode n'est pas utilisée par run_all, c'est une bonne pratique)
-            self._save_local_cache(task_name, result)
-            return result
-        except TimeoutError:
-            logger.error("Timeout: la tâche %s a dépassé %ds", task_name, timeout_s)
-            return {"status": "ERROR", "results": [], "error": f"Timeout after {timeout_s}s"}
-        except Exception as e:
-            logger.exception("Exception inattendue lors de l'exécution de %s: %s", task_name, e)
-            return {"status": "ERROR", "results": [], "error": str(e)}
-
-    def _timed_call(self, fn: Callable, *args, **kwargs) -> Dict[str, Any]:
-        """Wrapper to call a function with retries and measure duration."""
-        t0 = time.time()
-        out = _safe_call_retryable(fn, *args, **kwargs)
-        t1 = time.time()
-        return {"out": out, "duration": round(t1 - t0, 2)}
-
-    def _prepare_tasks(self) -> Dict[str, Any]:
-        """Return the mapping of task name -> (callable, args) to execute."""
-        return {
-            "weather_service": (self.weather_service.scrape_forecast, ()),
-            "meteo_burkina": (self.bulletin_anam.run, ()),
-            "sonagess_scraper": (self.sonagess_scraper.run, ()),
-        }
-
-    def _collect_results(self, futures_map: Dict[Any, str]) -> (Dict[str, Dict[str, Any]], Dict[str, float]):
-        """Collect results from futures_map and persist intermediate caches."""
-        results: Dict[str, Dict[str, Any]] = {}
-        durations: Dict[str, float] = {}
-        for fut in as_completed(futures_map):
-            name = futures_map[fut]
-            try:
-                res_wrapper = fut.result(timeout=TASK_TIMEOUT_S)
-                out = res_wrapper.get("out", {"status": "ERROR", "results": [], "error": "No output"})
-                dur = res_wrapper.get("duration", 0.0)
-                results[name] = _normalize_result(out)
-                durations[name] = dur
-
-                # Persist intermediate results
-                self._save_local_cache(name, results[name])
-
-                logger.info("Tâche %s terminée en %.2fs (status=%s)", name, dur, results[name].get("status"))
-            except TimeoutError:
-                logger.error("Timeout global pour la tâche %s", name)
-                results[name] = {"status": "ERROR", "results": [], "error": f"Timeout after {TASK_TIMEOUT_S}s"}
-                durations[name] = TASK_TIMEOUT_S
-            except Exception as e:
-                logger.exception("Erreur lors de la récupération du résultat de %s: %s", name, e)
-                results[name] = {"status": "ERROR", "results": [], "error": str(e)}
-            if self._stop_requested:
-                logger.warning("Arrêt demandé : on arrête la collecte des résultats restants.")
-                break
-        return results, durations
-
-    def _save_local_cache(self, task_name: str, data: Dict[str, Any]):
-        """Persiste les données brutes pour les Agents (Offline-First)."""
-        try:
-            # Création du dossier 'data/cache' pour ne pas polluer la racine 'data/' si nécessaire
-            # Mais par simplicité on met tout dans 'data/' comme demandé
-            filename = f"backend/sources/raw_data/{task_name}_latest.json"
-            #os.makedirs("backend/sources/raw_data", exist_ok=True)
-            with open(filename, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"💾 Données sauvegardées pour {task_name} -> {filename}")
-        except Exception as e:
-            logger.warning(f"Impossible de sauvegarder le cache local pour {task_name}: {e}")
-
-    def run_all(self, save_report: bool = True) -> Dict[str, Any]:
-        """
-        Exécute les tâches en parallèle (contrôlé), collecte les résultats,
-        construit un rapport consolidé et le sauvegarde.
-        """
-        logger.info("=== DÉMARRAGE ORCHESTRATEUR ===")
-        start_time = time.time()
-
-        tasks = self._prepare_tasks()
-        results: Dict[str, Dict[str, Any]] = {}
-        durations: Dict[str, float] = {}
-
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-            futures_map = {}
-            # soumettre toutes les tâches
-            for name, (fn, fn_args) in tasks.items():
-                if self._stop_requested:
-                    logger.warning("Arrêt demandé avant soumission de %s", name)
-                    results[name] = {"status": "ERROR", "results": [], "error": "Stopped before start"}
-                    continue
-                logger.info("Soumission de la tâche %s", name)
-                futures_map[ex.submit(self._timed_call, fn, *fn_args)] = name
-
-            # collecter les résultats
-            res, durs = self._collect_results(futures_map)
-            results.update(res)
-            durations.update(durs)
-
-        total_time = round(time.time() - start_time, 2)
-
-        # calcul du statut global
-        statuses = [r.get("status", "ERROR") for r in results.values()]
-        if all(s == "SUCCESS" for s in statuses):
-            overall_status = "SUCCESS"
-        elif all(s == "ERROR" for s in statuses):
-            overall_status = "FAILURE"
-        else:
-            overall_status = "PARTIAL_SUCCESS"
-
-        # compter documents collectés
-        def _count(r):
-            res = r.get("results", [])
-            return len(res) if isinstance(res, list) else 0
-
-        total_documents = sum(_count(r) for r in results.values())
-
-        self.report = {
-            "overall_status": overall_status,
-            "timestamp": datetime.now().isoformat(),
-            "total_duration_s": total_time,
-            "task_durations_s": durations,
-            "data_pipelines": results,
-            "total_documents_collected": total_documents,
-        }
-
-        # sauvegarde du rapport
-        if save_report:
-            try:
-                with open(REPORT_FILE, "w", encoding="utf-8") as f:
-                    json.dump(self.report, f, ensure_ascii=False, indent=2)
-                logger.info("Rapport sauvegardé: %s", REPORT_FILE)
-            except Exception as e:
-                logger.warning("Impossible de sauvegarder le rapport: %s", e)
-
-        logger.info("=== ORCHESTRATION TERMINÉE : %s (%.2fs) ===", overall_status, total_time)
-        return self.report
-
-
-# Exécution directe
-if __name__ == "__main__":
-    orch = ScraperOrchestrator(headless=True)
-    final = orch.run_all(save_report=True)
-    print(json.dumps(final, ensure_ascii=False, indent=2))

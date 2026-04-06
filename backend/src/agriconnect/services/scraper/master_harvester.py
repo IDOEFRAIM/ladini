@@ -1,27 +1,27 @@
 """
-Master Resource Harvester - Orchestration complète du scraping de ressources.
+Master Resource Harvester - Full scraping orchestration.
 
-Ce script utilise tous les scrapers spécialisés pour extraire le maximum de contenu
-depuis les sources fournies par l'utilisateur.
+This script coordinates specialized scrapers to extract content
+from sources provided by the user.
 
 Workflow:
-1. Catégorisation automatique des sources
-2. Assignation du scraper approprié
-3. Traitement par batches avec checkpoint/resume
-4. Gestion d'erreurs robuste (circuit breaker, retry, rate limiting)
-5. Génération de rapports détaillés
-6. Catalogue centralisé de toutes les ressources
+1. Automatic source categorization
+2. Assignment of the appropriate scraper
+3. Batch processing with checkpoint/resume
+4. Robust error handling (circuit breaker, retry, rate limiting)
+5. Detailed report generation
+6. Centralized catalog of all resources
 
 Architecture:
-- Dependency Injection pour testabilité
-- Configuration centralisée
-- Error handling standardisé
-- Checkpoint/resume pour AWS Lambda
-- Logging structuré pour CloudWatch
+- Dependency Injection for testability
+- Centralized configuration
+- Standardized error handling
+- Checkpoint/resume for AWS Lambda
+- Structured logging for CloudWatch
 
 Usage:
     python -m backend.services.scraper.master_harvester
-    
+
 Lambda:
     from backend.services.scraper.master_harvester import lambda_handler
 """
@@ -32,17 +32,13 @@ from typing import Dict, List, Optional
 from datetime import datetime
 import time
 
-from .core.config import ScraperConfig, SourcesConfig, get_config
-from .core.error_handling import CircuitBreaker, RateLimiter, retry_with_backoff
-from .core.checkpoint import CheckpointManager, CheckpointState
-from .core.logging_config import setup_logging, get_logger
-from .core.resource_manager import ResourceManager
-from .scrapers.google_workspace_scraper import GoogleWorkspaceScraper
-from .scrapers.pdf_downloader import PdfDownloader
-from .scrapers.fao_doi_resolver import FaoDoiResolver
-from .scrapers.news_scraper import NewsScraper
-from .scrapers.data_platform_scraper import DataPlatformScraper
-from .scrapers.technical_resources_explorer import TechnicalResourcesExplorer
+from agriconnect.core.scraper_config import ScraperConfig, SourcesConfig, get_config
+from agriconnect.core.scraper_error_handling import CircuitBreaker, RateLimiter, retry_with_backoff
+from agriconnect.core.scraper_checkpoint import CheckpointManager, CheckpointState
+from agriconnect.core.scraper_logging import setup_logging, get_logger
+from agriconnect.core.persister import Persister, FilePersister
+from .scrapers.registry import ScraperRegistry
+# Scrapers are created via ScraperRegistry to keep orchestrator decoupled
 
 # Initialize structured logging
 setup_logging(
@@ -55,23 +51,24 @@ logger = get_logger(__name__, {"component": "MasterHarvester"})
 
 class MasterHarvester:
     """
-    Orchestrateur principal pour le moissonnage de toutes les ressources.
-    
-    Principes Clean Code:
-    - Dependency Injection: Configuration et composants injectés
-    - Single Responsibility: Orchestration uniquement
-    - Testabilité: Tous les composants mockables
-    - Idempotence: Checkpoint/resume pour Lambda
+    Main orchestrator for harvesting all resources.
+
+    Clean code principles:
+    - Dependency Injection: configuration and components are injected
+    - Single Responsibility: orchestration only
+    - Testability: all components are mockable
+    - Idempotence: checkpoint/resume for Lambda
     """
 
     def __init__(
         self,
         config: Optional[ScraperConfig] = None,
         sources_config: Optional[SourcesConfig] = None,
-        resource_manager: Optional[ResourceManager] = None,
+        resource_manager: Optional[object] = None,
         checkpoint_manager: Optional[CheckpointManager] = None,
         circuit_breaker: Optional[CircuitBreaker] = None,
-        rate_limiter: Optional[RateLimiter] = None
+        rate_limiter: Optional[RateLimiter] = None,
+        persister: Optional[Persister] = None,
     ):
         """
         Initialize with dependency injection.
@@ -88,14 +85,20 @@ class MasterHarvester:
         self.config = config or get_config()
         self.sources_config = sources_config or SourcesConfig()
         
-        # Output directory
+        # Output directory (used only for default persister)
         self.output_dir = Path(self.config.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Managers
-        self.resource_manager = resource_manager or ResourceManager(
-            output_dir=str(self.output_dir)
-        )
+
+        # Persister (stores RawDocument + ScraperLog)
+        # Accept a persister explicitly, or reuse a passed resource_manager if it's a Persister (compat)
+        self.persister: Persister | None = None
+        if isinstance(resource_manager, Persister):
+            self.persister = resource_manager
+        elif persister is not None and isinstance(persister, Persister):
+            self.persister = persister
+        # Fallback to FilePersister if nothing provided
+        if self.persister is None:
+            self.persister = FilePersister(output_dir=str(self.output_dir))
         self.checkpoint_manager = checkpoint_manager or CheckpointManager()
         
         # Error handling
@@ -108,7 +111,7 @@ class MasterHarvester:
             burst_size=self.config.rate_limit_per_second * 2
         )
         
-        # Initialize scrapers with config injection
+        # Initialize scrapers with config injection (use ScraperRegistry)
         self.scrapers_map = self._initialize_scrapers()
         
         logger.info(
@@ -122,42 +125,41 @@ class MasterHarvester:
         )
     
     def _initialize_scrapers(self) -> Dict:
-        """Initialize all scrapers with proper configuration."""
-        return {
-            'google_workspace_links': GoogleWorkspaceScraper(
-                output_dir=str(self.output_dir / "google_workspace")
-            ),
-            'pdf_documents': PdfDownloader(
-                output_dir=str(self.output_dir / "pdfs")
-            ),
-            'fao_publications_doi': FaoDoiResolver(
-                output_dir=str(self.output_dir / "fao_publications")
-            ),
-            'news_and_articles': NewsScraper(
-                output_dir=str(self.output_dir / "news_articles")
-            ),
-            'statistical_platforms': DataPlatformScraper(
-                output_dir=str(self.output_dir / "data_platforms")
-            ),
-            'technical_agriculture_resources': TechnicalResourcesExplorer(
-                output_dir=str(self.output_dir / "technical_resources"),
-                max_depth=2,
-                max_pages=30
-            )
+        """Create scrapers from the central registry keyed by category.
+
+        This maps existing source category names to registry keys. If a key
+        is not registered, the category is skipped at runtime.
+        """
+        mapping = {
+            'google_workspace_links': 'google',
+            'pdf_documents': 'pdf',
+            'fao_publications_doi': 'fao',
+            'news_and_articles': 'news',
+            'statistical_platforms': 'data_platform',
+            'technical_agriculture_resources': 'technical',
         }
+
+        scrapers: Dict[str, object] = {}
+        for category, key in mapping.items():
+            try:
+                scraper = ScraperRegistry.create(key, config={})
+                scrapers[category] = scraper
+            except KeyError:
+                logger.warning(f"No registered scraper for key='{key}' (category={category})")
+        return scrapers
 
     def harvest_all(self, session_id: Optional[str] = None) -> Dict:
         """
-        Lance le moissonnage complet avec checkpoint/resume.
-        
+        Start the full harvest with checkpoint/resume.
+
         Args:
             session_id: Identifier for this scraping session (auto-generated if None)
-        
+
         Returns:
             Statistics dictionary with execution metrics
         """
         logger.info("="*80)
-        logger.info("🌾 DÉMARRAGE DU MOISSONNAGE DE RESSOURCES AGRICOLES 🌾")
+        logger.info("🌾 STARTING HARVEST OF AGRICULTURAL RESOURCES 🌾")
         logger.info("="*80)
         
         start_time = datetime.now()
@@ -190,10 +192,11 @@ class MasterHarvester:
         # Save final checkpoint
         self.checkpoint_manager.save(checkpoint)
         
-        # Generate report if complete
+        # Generate report info if complete (persister may expose in-memory store)
         if self.checkpoint_manager.is_complete():
-            report_path = self.resource_manager.generate_report()
-            logger.info(f"📄 Rapport détaillé: {report_path}")
+            store = getattr(self.persister, "store", None)
+            count = len(store) if store is not None else "unknown"
+            logger.info(f"📄 Persisted report: items={count}")
         
         # Log summary
         self._log_summary(stats, duration, checkpoint)
@@ -318,30 +321,30 @@ class MasterHarvester:
             
             start = time.time()
             
-            # Call scraper (interface varies by scraper type)
-            if hasattr(scraper, 'scrape_url'):
-                result = scraper.scrape_url(url)
-            elif hasattr(scraper, 'download_pdf'):
-                result = scraper.download_pdf(url)
-            elif hasattr(scraper, 'resolve_and_download'):
-                result = scraper.resolve_and_download(url)
-            else:
-                logger.error(f"Unknown scraper interface: {scraper.__class__.__name__}")
+            # Call the standard V2 interface: run(url) -> (RawDocument|None, ScraperLog)
+            doc, log = scraper.run(url)
+
+            # Persist only canonical objects via persister
+            try:
+                saved_path = self.persister.save(doc, log, category=category)
+                logger.info(
+                    "URL processed and persisted",
+                    extra={
+                        "url": url,
+                        "category": category,
+                        "saved_path": saved_path,
+                        "scraper": scraper.__class__.__name__,
+                    }
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to persist scrape result",
+                    extra={"error": str(e), "url": url, "category": category},
+                    exc_info=True,
+                )
                 return False
-            
-            duration_ms = (time.time() - start) * 1000
-            
-            logger.info(
-                "URL processed successfully",
-                extra={
-                    "url": url,
-                    "category": category,
-                    "duration_ms": round(duration_ms, 2),
-                    "status": "success"
-                }
-            )
-            
-            return True
+
+            return doc is not None
             
         except Exception as e:
             logger.error(
@@ -360,15 +363,15 @@ class MasterHarvester:
     def _log_summary(self, stats: Dict, duration: float, checkpoint: CheckpointState):
         """Log execution summary."""
         logger.info("\n" + "="*80)
-        logger.info("📊 RÉSUMÉ DU MOISSONNAGE")
+        logger.info("📊 HARVEST SUMMARY")
         logger.info("="*80)
-        logger.info(f"Durée totale: {duration:.1f} secondes ({duration/60:.1f} minutes)")
-        logger.info(f"Sources totales: {stats['total_sources']}")
-        logger.info(f"✅ Succès: {stats['successful']}")
-        logger.info(f"❌ Échecs: {stats['failed']}")
-        logger.info(f"⏭️  Ignorées: {stats['skipped']}")
+        logger.info(f"Total duration: {duration:.1f} seconds ({duration/60:.1f} minutes)")
+        logger.info(f"Total sources: {stats['total_sources']}")
+        logger.info(f"✅ Successes: {stats['successful']}")
+        logger.info(f"❌ Failures: {stats['failed']}")
+        logger.info(f"⏭️  Skipped: {stats['skipped']}")
         
-        logger.info("\n📂 Détail par catégorie:")
+        logger.info("\n📂 Detail by category:")
         for category, data in stats.get('by_type', {}).items():
             rate = (data['success'] / data['total'] * 100) if data['total'] > 0 else 0
             logger.info(f"  • {category}: {data['success']}/{data['total']} ({rate:.0f}%)")
@@ -376,26 +379,26 @@ class MasterHarvester:
         # Checkpoint progress
         progress = self.checkpoint_manager.get_progress()
         logger.info(
-            "\n🔄 État du checkpoint:",
+            "\n🔄 Checkpoint state:",
             extra=progress
         )
         
         logger.info("\n" + "="*80)
         if self.checkpoint_manager.is_complete():
-            logger.info("✨ MOISSONNAGE TERMINÉ ✨")
+            logger.info("✨ HARVEST COMPLETE ✨")
         else:
-            logger.info("⏸️  MOISSONNAGE EN COURS - Reprise possible")
+            logger.info("⏸️  HARVEST IN PROGRESS - resume possible")
         logger.info("="*80)
 
 
     def harvest_category(self, category: str, session_id: Optional[str] = None) -> Dict:
         """
-        Moissonne une catégorie spécifique uniquement.
-        
+        Harvest a specific category only.
+
         Args:
             category: Category name to harvest
             session_id: Session identifier (auto-generated if None)
-        
+
         Returns:
             Statistics dictionary
         """
@@ -403,11 +406,11 @@ class MasterHarvester:
         
         if category not in sources_dict:
             raise ValueError(
-                f"Catégorie inconnue: {category}. "
-                f"Catégories disponibles: {list(sources_dict.keys())}"
+                f"Unknown category: {category}. "
+                f"Available categories: {list(sources_dict.keys())}"
             )
-        
-        logger.info(f"🎯 Moissonnage de la catégorie: {category}")
+
+        logger.info(f"🎯 Harvesting category: {category}")
         
         # Create single-category sources
         filtered_sources = {category: sources_dict[category]}
@@ -419,7 +422,7 @@ class MasterHarvester:
         try:
             stats = self.harvest_all(session_id)
             logger.info(
-                f"✅ Catégorie {category} terminée",
+                f"✅ Category {category} completed",
                 extra={
                     "category": category,
                     "successful": stats['successful'],
@@ -437,10 +440,10 @@ def main():
     
     harvester = MasterHarvester()
     
-    # Option 1: Tout moissonner
+    # Option 1: Harvest everything
     stats = harvester.harvest_all()
     
-    # Option 2: Moissonner une catégorie spécifique (décommenter si besoin)
+    # Option 2: Harvest a specific category (uncomment if needed)
     # stats = harvester.harvest_category('pdf_documents')
     
     return stats

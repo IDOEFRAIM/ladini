@@ -1,3 +1,5 @@
-"""Notification matching services."""
+"""Notification and marketplace matching services."""
 
-__all__ = ["matching"]
+from .matching import NotificationMatcher
+
+__all__ = ["NotificationMatcher"]

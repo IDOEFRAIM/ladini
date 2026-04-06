@@ -1,4 +1,6 @@
 import logging
+import os
+import threading
 from llama_index.core import VectorStoreIndex, QueryBundle, load_index_from_storage
 from llama_index.core.schema import NodeWithScore
 from typing import List, Optional
@@ -16,6 +18,9 @@ RERANKER = None
 class AgileRetriever:
     def __init__(self):
         init_settings()
+        self._fallback_embedder = None
+        self._disable_vector_store_fallback = False
+        self._vector_store_query_timeout_s = float(os.getenv("AGRICONNECT_RAG_VECTOR_QUERY_TIMEOUT", "6"))
         storage_context = get_storage_context()
         # Load from persistence
         try:
@@ -64,7 +69,13 @@ class AgileRetriever:
                 self.vector_store = None
         try:
             if self.vector_retriever is None:
-                self.ready = False
+                if self.vector_store is not None and hasattr(self.vector_store, "query"):
+                    if hasattr(self.vector_store, "ready"):
+                        self.ready = bool(getattr(self.vector_store, "ready"))
+                    else:
+                        self.ready = True
+                else:
+                    self.ready = False
             elif self.vector_store is not None and hasattr(self.vector_store, "ready"):
                 self.ready = bool(getattr(self.vector_store, "ready"))
             else:
@@ -72,6 +83,33 @@ class AgileRetriever:
         except Exception:
             self.ready = self.vector_retriever is not None
         self.llm = get_groq_sdk()
+
+    def _embed_query(self, query_str: str):
+        """Compute query embedding with the already-configured embed model first.
+
+        This avoids reloading sentence-transformers on every request when the
+        main index is unavailable.
+        """
+        try:
+            from llama_index.core import Settings
+
+            embed_model = getattr(Settings, "embed_model", None)
+            if embed_model is not None and hasattr(embed_model, "get_query_embedding"):
+                vec = embed_model.get_query_embedding(query_str)
+                if vec is not None:
+                    return list(vec)
+        except Exception:
+            logger.exception("Primary embedding computation failed")
+
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            if self._fallback_embedder is None:
+                self._fallback_embedder = SentenceTransformer("all-MiniLM-L6-v2")
+            return self._fallback_embedder.encode([query_str])[0].tolist()
+        except Exception:
+            logger.exception("Fallback embedding computation failed")
+            return None
 
     def generate_hyde_doc(self, query_str: str, tone: str = "standard") -> str:
         """
@@ -180,16 +218,40 @@ class AgileRetriever:
                 # Charger le profil adapté (needed for fallback limits)
                 profile = get_rag_profile(user_level)
                 if self.vector_store is not None and hasattr(self.vector_store, "query"):
+                    if self._disable_vector_store_fallback:
+                        return []
+                    if hasattr(self.vector_store, "ready") and not bool(getattr(self.vector_store, "ready")):
+                        return []
                     # compute embedding for the query
-                    try:
-                        from sentence_transformers import SentenceTransformer
-                        embedder = SentenceTransformer("all-MiniLM-L6-v2")
-                        q_emb = embedder.encode([query_str])[0].tolist()
-                    except Exception:
+                    q_emb = self._embed_query(query_str)
+                    if q_emb is None:
                         logger.exception("Could not compute query embedding for fallback; returning empty.")
                         return []
 
-                    raw = self.vector_store.query(q_emb, k=profile.top_k)
+                    raw = None
+                    query_error = None
+
+                    def _do_query():
+                        nonlocal raw, query_error
+                        try:
+                            raw = self.vector_store.query(q_emb, k=profile.top_k)
+                        except Exception as exc:
+                            query_error = exc
+
+                    t = threading.Thread(target=_do_query, name="rag-vector-fallback", daemon=True)
+                    t.start()
+                    t.join(timeout=self._vector_store_query_timeout_s)
+                    if t.is_alive():
+                        self._disable_vector_store_fallback = True
+                        logger.warning(
+                            "vector_store fallback query timed out after %.1fs; disabling fallback for this process",
+                            self._vector_store_query_timeout_s,
+                        )
+                        return []
+                    if query_error is not None:
+                        self._disable_vector_store_fallback = True
+                        logger.exception("vector_store fallback query failed; disabling fallback for this process")
+                        return []
                     # adapt raw results (which can be dicts or objects) into
                     # simple wrappers with `.node.get_content()` and numeric `.score`.
                     out_nodes = []

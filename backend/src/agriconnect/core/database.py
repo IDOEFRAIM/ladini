@@ -6,9 +6,19 @@ Optimisé pour Digital Ocean Managed Databases et les serveurs MCP.
 import logging
 import ssl
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Tuple
 
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+try:
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+except ImportError:
+    # Fallback for SQLAlchemy < 2.0 (Airflow uses 1.4)
+    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+    from sqlalchemy.orm import sessionmaker
+
+    def async_sessionmaker(*args, **kwargs):
+        kwargs.setdefault('class_', AsyncSession)
+        return sessionmaker(*args, **kwargs)
+
 from sqlalchemy import text
 
 from agriconnect.core.settings import settings
@@ -38,31 +48,42 @@ def init_db() -> None:
     # TRANSFORMATION : On force le driver asynchrone
     url = clean_url.replace("postgresql://", "postgresql+asyncpg://")
     
-    # CONFIGURATION SSL : charger le CA fourni et exiger la vérification
+    # CONFIGURATION SSL : mode explicite piloté par settings
+    ssl_mode = str(getattr(settings, "DB_SSL_MODE", "verify-full") or "verify-full").strip().lower()
     ca_path = getattr(settings, "DB_CA_PATH", None)
     ssl_context = None
-    if ca_path:
-        # resolve relative to BASE_DIR if needed
-        try:
-            from pathlib import Path
-            p = Path(ca_path)
-            if not p.is_absolute():
-                p = Path(settings.BASE_DIR) / p
-            p = p.resolve()
-            if not p.exists():
-                raise FileNotFoundError(f"DB CA file not found at {p}")
+    if ssl_mode == "disable":
+        ssl_context = False
+        logger.warning("DB SSL mode is DISABLE (local-only).")
+    elif ssl_mode == "require":
+        ssl_context = "require"
+        logger.warning("DB SSL mode is REQUIRE without certificate validation.")
+    elif ssl_mode == "verify-full":
+        if ca_path:
+            # resolve relative to BASE_DIR if needed
+            try:
+                from pathlib import Path
+                p = Path(ca_path)
+                if not p.is_absolute():
+                    p = Path(settings.BASE_DIR) / p
+                p = p.resolve()
+                if not p.exists():
+                    raise FileNotFoundError(f"DB CA file not found at {p}")
 
-            ssl_context = ssl.create_default_context(cafile=str(p))
-            ssl_context.check_hostname = True
-            ssl_context.verify_mode = ssl.CERT_REQUIRED
-            logger.info("Using DB CA bundle at %s for SSL verification", p)
-        except Exception as e:
-            logger.error("Failed to load DB CA file (%s): %s", ca_path, e)
-            # For safety with real user data, fail fast rather than silently disable verification
-            raise
+                # Start from system trust store, then add project-specific CA.
+                ssl_context = ssl.create_default_context()
+                ssl_context.load_verify_locations(cafile=str(p))
+                ssl_context.check_hostname = True
+                ssl_context.verify_mode = ssl.CERT_REQUIRED
+                logger.info("Using DB CA bundle at %s for SSL verification", p)
+            except Exception as e:
+                logger.error("Failed to load DB CA file (%s): %s", ca_path, e)
+                raise
+        else:
+            logger.error("No DB_CA_PATH configured for verify-full SSL mode.")
+            raise RuntimeError("DB_CA_PATH not configured; set settings.DB_CA_PATH or switch DB_SSL_MODE=require for local diagnostics")
     else:
-        logger.error("No DB_CA_PATH configured; refusing to connect without CA for production safety.")
-        raise RuntimeError("DB_CA_PATH not configured; set settings.DB_CA_PATH to a CA bundle path")
+        raise RuntimeError(f"Unsupported DB_SSL_MODE: {ssl_mode}. Expected verify-full|require|disable")
 
     _async_engine = create_async_engine(
         url,
@@ -125,6 +146,57 @@ async def check_connection() -> bool:
     except Exception as e:
         logger.warning("DB health check failed: %s", e)
         return False
+
+
+async def check_connection_detailed() -> Tuple[bool, str]:
+    """Like check_connection() but returns an explicit reason for diagnostics."""
+    if _async_engine is None:
+        return False, "engine_not_initialized"
+    try:
+        async with _async_engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        return True, "ok"
+    except Exception as e:
+        msg = str(e)
+        logger.warning("DB health check (detailed) failed: %s", msg)
+        return False, msg
+
+
+async def check_connection_aggressive() -> Tuple[bool, str]:
+    """Aggressive readiness check for production MCP startup.
+
+    Validates:
+    - connectivity (SELECT 1)
+    - UUID generator availability (gen_random_uuid)
+    - pgvector extension presence
+    - write capability in a temp object
+    """
+    if _async_engine is None:
+        return False, "engine_not_initialized"
+
+    try:
+        async with _async_engine.begin() as conn:
+            await conn.execute(text("SELECT 1"))
+
+            has_uuid = await conn.scalar(text("SELECT to_regproc('gen_random_uuid') IS NOT NULL"))
+            if not bool(has_uuid):
+                return False, "gen_random_uuid_unavailable"
+
+            has_vector = await conn.scalar(
+                text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname='vector')")
+            )
+            if not bool(has_vector):
+                return False, "pgvector_unavailable"
+
+            await conn.execute(
+                text("CREATE TEMP TABLE IF NOT EXISTS _agri_health_probe(v INT) ON COMMIT DROP")
+            )
+            await conn.execute(text("INSERT INTO _agri_health_probe(v) VALUES (1)"))
+        return True, "ok"
+    except Exception as e:
+        msg = str(e)
+        logger.warning("DB aggressive health check failed: %s", msg)
+        return False, msg
     
 
 

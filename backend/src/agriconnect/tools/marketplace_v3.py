@@ -1,12 +1,12 @@
-"""
-Marketplace Tool v3 — Async, multi-schema, rich features.
+﻿"""
+Marketplace Tool v3 â€” Async, multi-schema, rich features.
 
 Couche d'abstraction entre l'agent MarketplaceAgent et le service BD.
-Toutes les méthodes sont async et exploitent database_service.py.
-Gère : identification, fermes, stocks, produits, commandes, enchères,
-       cycles de culture, clients, dépenses, matching, dashboard.
+Toutes les mÃ©thodes sont async et exploitent database_service.py.
+GÃ¨re : identification, fermes, stocks, produits, commandes, enchÃ¨res,
+       cycles de culture, clients, dÃ©penses, matching, dashboard.
 
-Monnaie : FCFA.  Unités locales : sac (100 kg), plat (~2.5 kg), tine (~18 kg).
+Monnaie : FCFA.  UnitÃ©s locales : sac (100 kg), plat (~2.5 kg), tine (~18 kg).
 """
 
 import logging
@@ -14,21 +14,21 @@ from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 from agriconnect.services.database.database_service import AgriDatabaseService
-from agriconnect.protocols.mcp.client import AgriMCPClient
+from agriconnect.infrastructure.mcp.client import AgriMCPClient
 
 logger = logging.getLogger("Tool.Marketplace.v3")
 
 """
-Le Tool délègue les conversions et règles lourdes au Service BD (Server MCP).
-Toutes les conversions, catégorisations et vérifications métier doivent être
-effectuées côté `AgriDatabaseService` pour garantir la cohérence.
+Le Tool dÃ©lÃ¨gue les conversions et rÃ¨gles lourdes au Service BD (Server MCP).
+Toutes les conversions, catÃ©gorisations et vÃ©rifications mÃ©tier doivent Ãªtre
+effectuÃ©es cÃ´tÃ© `AgriDatabaseService` pour garantir la cohÃ©rence.
 """
 
 
 class MarketplaceToolV3:
     """
-    Outil métier async pour l'agent MarketplaceAgent v3.
-    Délègue tout au AgriDatabaseService (async sessions) OU à un client MCP.
+    Outil mÃ©tier async pour l'agent MarketplaceAgent v3.
+    DÃ©lÃ¨gue tout au AgriDatabaseService (async sessions) OU Ã  un client MCP.
     """
 
     def __init__(self, db_service: AgriDatabaseService = None, mcp_client: AgriMCPClient = None):
@@ -54,19 +54,19 @@ class MarketplaceToolV3:
         method = getattr(self.db, method_name)
         return await method(**kwargs)
 
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # 1. IDENTIFICATION
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def identify_or_create_user(
         self, phone: str, name: str = None, zone_id: str = None,
     ) -> Dict[str, Any]:
-        """Identifie par téléphone ou crée User + Producer."""
+        """Identifie par tÃ©lÃ©phone ou crÃ©e User + Producer."""
         return await self._delegate("identify_or_create_user", phone=phone, name=name, zone_id=zone_id)
 
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # 2. FERMES
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def get_or_create_farm(
         self, producer_id: str, farm_name: str = "Ma ferme", zone_id: str = None,
@@ -79,16 +79,16 @@ class MarketplaceToolV3:
     async def update_farm(self, farm_id: str, **kwargs) -> Optional[Dict[str, Any]]:
         return await self.db.update_farm(farm_id, **kwargs)
 
-    # ══════════════════════════════════════════════════════════════
-    # 3. STOCKS (avec conversion d'unités locales)
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    # 3. STOCKS (avec conversion d'unitÃ©s locales)
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def add_stock(
         self, farm_id: str, item_name: str, quantity: float,
         unit: str = "kg", stock_type: str = "HARVEST",
         reason: str = "Ajout via agent",
     ) -> Dict[str, Any]:
-        """Ajoute du stock avec conversion automatique des unités locales."""
+        """Ajoute du stock avec conversion automatique des unitÃ©s locales."""
         multiplier, unit_final, qty_kg = await self.db.normalize_unit(quantity, unit)
 
         result = await self.db.add_stock(
@@ -97,7 +97,7 @@ class MarketplaceToolV3:
             stock_type=stock_type, reason=reason,
         )
 
-        # Enrichir la réponse avec les infos de conversion
+        # Enrichir la rÃ©ponse avec les infos de conversion
         if multiplier != 1.0:
             result["original_quantity"] = quantity
             result["original_unit"] = unit
@@ -124,16 +124,16 @@ class MarketplaceToolV3:
         """Historique des mouvements d'un stock."""
         return await self.db.get_stock_movements(stock_id, limit)
 
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # 4. PRODUITS (mise en vente)
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def create_product(
         self, producer_id: str, name: str, price: float,
         quantity_for_sale: float, unit: str = "kg",
         category_label: str = None, description: str = None,
     ) -> Dict[str, Any]:
-        """Crée un produit en vente. Catégorie auto-détectée si non fournie."""
+        """CrÃ©e un produit en vente. CatÃ©gorie auto-dÃ©tectÃ©e si non fournie."""
         multiplier, unit_final, qty_kg = await self.db.normalize_unit(quantity_for_sale, unit)
         cat = category_label or await self.db.guess_category(name)
 
@@ -152,9 +152,9 @@ class MarketplaceToolV3:
         """Recherche produits disponibles pour acheteurs."""
         return await self.db.search_products(product_name, zone_id, limit)
 
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # 5. COMMANDES
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def create_order(
         self, product_id: str, quantity: float,
@@ -177,16 +177,16 @@ class MarketplaceToolV3:
     ) -> Optional[Dict[str, Any]]:
         return await self.db.update_order_status(order_id, new_status, payment_status)
 
-    # ══════════════════════════════════════════════════════════════
-    # 6. ENCHÈRES (nouveau !)
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    # 6. ENCHÃˆRES (nouveau !)
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def create_auction(
         self, buyer_id: str, sub_category_id: str, quantity: float,
         max_price_per_unit: float, deadline: datetime,
         unit: str = "TONNE", target_zone_id: str = None,
     ) -> Dict[str, Any]:
-        """Crée une enchère d'achat (appel d'offres)."""
+        """CrÃ©e une enchÃ¨re d'achat (appel d'offres)."""
         return await self.db.create_auction(
             buyer_id=buyer_id, sub_category_id=sub_category_id,
             quantity=quantity, max_price_per_unit=max_price_per_unit,
@@ -196,18 +196,18 @@ class MarketplaceToolV3:
     async def get_open_auctions(
         self, zone_id: str = None, limit: int = 20,
     ) -> List[Dict[str, Any]]:
-        """Liste les enchères ouvertes (appels d'offres) dans la zone."""
+        """Liste les enchÃ¨res ouvertes (appels d'offres) dans la zone."""
         return await self.db.get_open_auctions(zone_id, limit)
 
     async def place_bid(
         self, auction_id: str, producer_id: str, offered_price: float,
     ) -> Dict[str, Any]:
-        """Soumettre une offre sur une enchère."""
+        """Soumettre une offre sur une enchÃ¨re."""
         return await self.db.place_bid(auction_id, producer_id, offered_price)
 
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # 7. CLIENTS
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def get_or_create_client(
         self, producer_id: str, name: str, phone: str,
@@ -217,15 +217,15 @@ class MarketplaceToolV3:
     async def get_clients(self, producer_id: str) -> List[Dict[str, Any]]:
         return await self.db.get_clients(producer_id)
 
-    # ══════════════════════════════════════════════════════════════
-    # 8. DÉPENSES (nouveau !)
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    # 8. DÃ‰PENSES (nouveau !)
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def add_expense(
         self, farm_id: str, label: str, amount: float,
         category: str = "OTHER",
     ) -> Dict[str, Any]:
-        """Enregistre une dépense pour la ferme."""
+        """Enregistre une dÃ©pense pour la ferme."""
         return await self.db.add_expense(farm_id, label, amount, category)
 
     async def get_expenses(
@@ -234,12 +234,12 @@ class MarketplaceToolV3:
         return await self.db.get_expenses(farm_id, category, limit)
 
     async def get_expense_summary(self, farm_id: str) -> Dict[str, Any]:
-        """Résumé des dépenses par catégorie."""
+        """RÃ©sumÃ© des dÃ©penses par catÃ©gorie."""
         return await self.db.get_expense_summary(farm_id)
 
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # 9. CYCLES DE CULTURE (nouveau !)
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def create_crop_cycle(
         self, farm_id: str, crop_type: str, area_size: float,
@@ -256,20 +256,20 @@ class MarketplaceToolV3:
     async def get_crop_cycles(self, farm_id: str) -> List[Dict[str, Any]]:
         return await self.db.get_crop_cycles(farm_id)
 
-    # ══════════════════════════════════════════════════════════════
-    # 10. MATCHING INTELLIGENT (amélioré)
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    # 10. MATCHING INTELLIGENT (amÃ©liorÃ©)
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def find_buyers_for_product(
         self, product_name: str, zone_id: str = None, limit: int = 10,
     ) -> List[Dict[str, Any]]:
-        """Cherche les enchères ouvertes correspondant au produit du vendeur."""
+        """Cherche les enchÃ¨res ouvertes correspondant au produit du vendeur."""
         auctions = await self.db.get_open_auctions(zone_id, limit)
         # Filtrer par nom de produit (fuzzy)
         matches = []
         product_lower = product_name.lower()
         for a in auctions:
-            # L'enchère contient sub_category_id; matching léger par nom
+            # L'enchÃ¨re contient sub_category_id; matching lÃ©ger par nom
             if product_lower in str(a).lower():
                 matches.append(a)
         return matches
@@ -286,11 +286,11 @@ class MarketplaceToolV3:
     ) -> List[Dict[str, Any]]:
         """
         Matching automatique : cherche des acheteurs potentiels
-        (enchères + alertes) pour un produit mis en vente.
+        (enchÃ¨res + alertes) pour un produit mis en vente.
         """
         matches = []
 
-        # 1. Enchères ouvertes dans la zone
+        # 1. EnchÃ¨res ouvertes dans la zone
         auctions = await self.find_buyers_for_product(product_name, zone_id)
         for a in auctions:
             matches.append({
@@ -313,37 +313,37 @@ class MarketplaceToolV3:
 
         return matches
 
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
     # 11. DASHBOARD & ANALYTICS
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def get_dashboard(self, producer_id: str) -> Dict[str, Any]:
-        """Dashboard complet du producteur : stock, revenus, dépenses, score."""
+        """Dashboard complet du producteur : stock, revenus, dÃ©penses, score."""
         return await self.db.get_producer_dashboard(producer_id)
 
     async def get_zone_market(self, zone_id: str) -> Dict[str, Any]:
-        """Vue marché zone : produits, prix moyens, enchères, anomalies."""
+        """Vue marchÃ© zone : produits, prix moyens, enchÃ¨res, anomalies."""
         return await self.db.get_zone_market_overview(zone_id)
 
-    # ══════════════════════════════════════════════════════════════
-    # 12. PRIX DE RÉFÉRENCE (DRDR)
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    # 12. PRIX DE RÃ‰FÃ‰RENCE (DRDR)
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def get_reference_price(
         self, product_name: str, zone_id: str,
     ) -> Optional[Dict[str, Any]]:
-        """Prix de référence DRDR pour un produit dans une zone."""
+        """Prix de rÃ©fÃ©rence DRDR pour un produit dans une zone."""
         return await self.db.get_standard_price(product_name, zone_id)
 
     async def check_price_anomaly(
         self, product_name: str, proposed_price: float, zone_id: str,
     ) -> Dict[str, Any]:
-        """Vérifie si un prix est aberrant par rapport au prix de référence."""
+        """VÃ©rifie si un prix est aberrant par rapport au prix de rÃ©fÃ©rence."""
         return await self.db.check_price_anomaly(product_name, proposed_price, zone_id)
 
-    # ══════════════════════════════════════════════════════════════
-    # 13. GOUVERNANCE — Zones
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    # 13. GOUVERNANCE â€” Zones
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def get_zone_info(self, zone_id: str) -> Optional[Dict[str, Any]]:
         return await self.db.get_zone(zone_id)
@@ -354,12 +354,13 @@ class MarketplaceToolV3:
     async def get_child_zones(self, parent_id: str) -> List[Dict[str, Any]]:
         return await self.db.get_child_zones(parent_id)
 
-    # ══════════════════════════════════════════════════════════════
-    # 14. CATÉGORIES & SOUS-CATÉGORIES
-    # ══════════════════════════════════════════════════════════════
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    # 14. CATÃ‰GORIES & SOUS-CATÃ‰GORIES
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     async def get_categories(self) -> List[Dict[str, Any]]:
         return await self.db.get_categories()
 
     async def get_sub_categories(self, category_id: str) -> List[Dict[str, Any]]:
         return await self.db.get_sub_categories(category_id)
+

@@ -18,17 +18,23 @@ import sys
 from pathlib import Path
 
 # --- Bootstrap Paths ---
-repo_root = Path(__file__).resolve().parents[2] # backend/
-src = repo_root / "src"
+backend_dir = Path(__file__).resolve().parents[2]  # backend/
+project_root = backend_dir.parent
+
+# 1. Add project 'src/' so the `agriconnect` package is importable
+src = project_root / "src"
 if str(src) not in sys.path:
     sys.path.insert(0, str(src))
-if str(repo_root.parent) not in sys.path:
-    sys.path.insert(0, str(repo_root.parent))
+
+# 2. Also allow importing `backend.*` modules
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
 # -----------------------
 
 from airflow.decorators import dag, task
 from airflow.exceptions import AirflowException
-import psycopg2
+from sqlalchemy import text
+from agriconnect.core.db import get_engine, resolve_database_url
 from agriconnect.core.settings import settings
 
 logger = logging.getLogger("SystemHealth")
@@ -59,18 +65,13 @@ def system_health_check():
     @task
     def check_rds_connectivity() -> dict:
         """Pings Postres/RDS and checks simple query latency."""
-        db_url = settings.DATABASE_URL
-        if not db_url:
-            raise AirflowException("DATABASE_URL setting is missing.")
+        db_url = resolve_database_url(required=True)
+        engine = get_engine(db_url)
 
         start_time = time.time()
         try:
-            conn = psycopg2.connect(db_url)
-            cur = conn.cursor()
-            cur.execute("SELECT 1;")
-            cur.fetchone()
-            cur.close()
-            conn.close()
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
             latency_ms = (time.time() - start_time) * 1000
             logger.info(f"RDS Ping: {latency_ms:.2f} ms")
             
@@ -85,40 +86,39 @@ def system_health_check():
     @task
     def check_vector_health() -> dict:
         """Counts null embeddings in chunks table."""
-        db_url = settings.DATABASE_URL
+        db_url = resolve_database_url(required=True)
+        engine = get_engine(db_url)
         try:
-            conn = psycopg2.connect(db_url)
-            cur = conn.cursor()
-            
-            # Check for null embeddings
-            # Note: adjust schema 'agri_vector' or 'public' based on setup
-            schema = "agri_vector" 
+            schema = "agri_vector"
             table = "document_chunks"
-            
-            # Verify table exists first
-            cur.execute("""
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables 
-                    WHERE table_schema = %s AND table_name = %s
-                );
-            """, (schema, table))
-            exists = cur.fetchone()[0]
-            
-            if not exists:
-                logger.warning(f"Table {schema}.{table} does not exist yet. Skipping check.")
-                return {"status": "skipped", "reason": "table_not_found"}
 
-            cur.execute(f"SELECT COUNT(*) FROM {schema}.{table} WHERE embedding IS NULL;")
-            null_count = cur.fetchone()[0]
-            
-            # Optional: Check total count
-            cur.execute(f"SELECT COUNT(*) FROM {schema}.{table};")
-            total_count = cur.fetchone()[0]
-            
+            with engine.connect() as conn:
+                exists = bool(
+                    conn.execute(
+                        text(
+                            """
+                            SELECT EXISTS (
+                                SELECT FROM information_schema.tables
+                                WHERE table_schema = :schema AND table_name = :table
+                            )
+                            """
+                        ),
+                        {"schema": schema, "table": table},
+                    ).scalar()
+                )
+
+                if not exists:
+                    logger.warning(f"Table {schema}.{table} does not exist yet. Skipping check.")
+                    return {"status": "skipped", "reason": "table_not_found"}
+
+                null_count = int(
+                    conn.execute(text("SELECT COUNT(*) FROM agri_vector.document_chunks WHERE embedding IS NULL")).scalar() or 0
+                )
+                total_count = int(
+                    conn.execute(text("SELECT COUNT(*) FROM agri_vector.document_chunks")).scalar() or 0
+                )
+
             logger.info(f"Vector Stats: {total_count} total, {null_count} null embeddings.")
-            
-            cur.close()
-            conn.close()
             
             if null_count > 0:
                 # Warning only, doesn't necessarily fail pipeline but alerts

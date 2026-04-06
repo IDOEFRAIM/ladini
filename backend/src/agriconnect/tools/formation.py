@@ -2,6 +2,8 @@ from typing import Any, List, Dict, Optional
 import json
 import logging
 import re
+from sqlalchemy.engine import Engine
+from agriconnect.core.db import get_engine, resolve_database_url
 from .formation_advisor import FormationAdvisor
 
 logger = logging.getLogger("FormationCoachTool")
@@ -12,7 +14,7 @@ class FormationTool:
         self.model_planner = model_planner
         self.model_answer = model_answer
         self._db_url = None
-        self._psycopg2 = None
+        self._engine: Optional[Engine] = None
         self.advisor = FormationAdvisor()
 
     def get_technical_advice(self, crop: str, zone: str, area_ha: float = 1.0) -> str:
@@ -34,20 +36,18 @@ class FormationTool:
 
     def configure_db(self, db_url: Optional[str] = None, psycopg2_module: Any = None) -> None:
         self._db_url = db_url
-        self._psycopg2 = psycopg2_module
+        self._engine = get_engine(db_url) if db_url else None
+        _ = psycopg2_module
 
     def _ensure_db(self) -> None:
-        if self._db_url and self._psycopg2:
+        if self._db_url and self._engine:
             return
         try:
-            from agriconnect.core.settings import settings
-            import psycopg2
-
-            self._db_url = settings.DATABASE_URL
-            self._psycopg2 = psycopg2
+            self._db_url = resolve_database_url(required=True)
+            self._engine = get_engine(self._db_url)
         except Exception:
             self._db_url = None
-            self._psycopg2 = None
+            self._engine = None
 
     def _extract_json_block(self, text: str) -> Dict[str, Any]:
         matches = re.findall(r"\{[\s\S]*?\}", text)
@@ -309,11 +309,13 @@ class FormationTool:
 
     def db_execute(self, sql: str, params: Optional[tuple] = None, fetch: bool = False):
         self._ensure_db()
-        if not self._psycopg2 or not self._db_url:
+        if not self._engine:
             raise RuntimeError("DB client not configured")
+
         conn = None
         try:
-            conn = self._psycopg2.connect(self._db_url)
+            # Use SQLAlchemy-managed connection while preserving existing `%s` SQL placeholders.
+            conn = self._engine.raw_connection()
             cur = conn.cursor()
             cur.execute(sql, params or ())
             rows = cur.fetchall() if fetch else None

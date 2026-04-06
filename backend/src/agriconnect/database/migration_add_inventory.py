@@ -3,9 +3,9 @@ Migration: add inventory tables for seed allocations/distributions/attempts.
 Run: python backend/src/agriconnect/database/migration_add_inventory.py
 """
 import sys
-import psycopg2
+from sqlalchemy import text
 
-from agriconnect.core.settings import settings
+from agriconnect.core.db import get_engine, resolve_database_url
 
 SQL = """
 CREATE SCHEMA IF NOT EXISTS marketplace;
@@ -69,24 +69,15 @@ CREATE INDEX IF NOT EXISTS idx_sda_actor ON marketplace.seed_distribution_attemp
 
 
 def main():
-    db_url = settings.DATABASE_URL
-    if not db_url:
-        print("ERROR: DATABASE_URL not configured in settings")
-        sys.exit(1)
-
-    conn = psycopg2.connect(db_url)
-    cur = conn.cursor()
+    db_url = resolve_database_url(required=True)
+    engine = get_engine(db_url)
     try:
-        cur.execute(SQL)
-        conn.commit()
+        with engine.begin() as conn:
+            conn.execute(text(SQL))
         print("✅ Inventory tables created/ensured")
     except Exception as e:
-        conn.rollback()
         print("❌ Migration failed:", e)
         sys.exit(1)
-    finally:
-        cur.close()
-        conn.close()
 
 
 if __name__ == '__main__':

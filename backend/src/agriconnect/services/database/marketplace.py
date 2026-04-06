@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 
 from .common import _uuid, logger, Farm, Stock, StockMovement, Product, Order, OrderItem, Client, Expense, CropCycle, Producer, User, Zone
-from agriconnect.services.models import SurplusOffer
+from agriconnect.services.models_legacy import SurplusOffer
 
 
 class MarketplaceMixin:

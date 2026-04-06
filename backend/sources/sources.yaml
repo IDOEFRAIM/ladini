@@ -1,0 +1,271 @@
+version: 1
+sources:
+  - id: meteo_agromet_decadaire
+    engine: institutional_pdf
+    priority: 5
+    frequency: 10d
+    tags: [meteo, bulletin, agrometeo, decadaire, burkina]
+    config:
+      url: https://meteoburkina.bf/produits/bulletin-agrometeologique-decadaire/
+      base_url: https://meteoburkina.bf
+      search_urls:
+        - https://meteoburkina.bf/produits/bulletin-agrometeologique-decadaire/
+      include_patterns: [bulletin, agrometeo, decadaire]
+      exclude_patterns: [login, share, whatsapp, facebook]
+      max_pages: 10
+      max_pdfs: 5
+
+  - id: meteo_previsions_saisonnieres
+    engine: institutional_pdf
+    priority: 5
+    frequency: monthly
+    tags: [meteo, bulletin, previsions, saisonnier, burkina]
+    config:
+      url: https://meteoburkina.bf/produits/bulletin-de-previsions-saisonnieres/
+      base_url: https://meteoburkina.bf
+      search_urls:
+        - https://meteoburkina.bf/produits/bulletin-de-previsions-saisonnieres/
+      include_patterns: [bulletin, previsions, saisonnier]
+      max_pages: 10
+      max_pdfs: 5
+
+  - id: meteo_bulletin_mensuel
+    engine: institutional_pdf
+    priority: 4
+    frequency: monthly
+    tags: [meteo, bulletin, mensuel, burkina]
+    config:
+      url: https://meteoburkina.bf/produits/bulletin-mensuel/
+      base_url: https://meteoburkina.bf
+      search_urls:
+        - https://meteoburkina.bf/produits/bulletin-mensuel/
+      include_patterns: [bulletin, mensuel]
+      max_pages: 10
+      max_pdfs: 5
+
+  - id: meteo_etat_annuel_climat
+    engine: institutional_pdf
+    priority: 4
+    frequency: yearly
+    tags: [meteo, climat, annuel, burkina]
+    config:
+      url: https://meteoburkina.bf/produits/etat-annuel-du-climat/
+      base_url: https://meteoburkina.bf
+      search_urls:
+        - https://meteoburkina.bf/produits/etat-annuel-du-climat/
+      include_patterns: [etat, annuel, climat]
+      max_pages: 10
+      max_pdfs: 5
+
+  - id: meteo_bulletin_hebdomadaire
+    engine: institutional_pdf
+    priority: 4
+    frequency: 7d
+    tags: [meteo, bulletin, hebdomadaire, burkina]
+    config:
+      url: https://meteoburkina.bf/produits/bulletin-hebdomadaire/
+      base_url: https://meteoburkina.bf
+      search_urls:
+        - https://meteoburkina.bf/produits/bulletin-hebdomadaire/
+      include_patterns: [bulletin, hebdomadaire]
+      max_pages: 10
+      max_pdfs: 5
+
+  - id: meteo_agromet_mensuel
+    engine: institutional_pdf
+    priority: 4
+    frequency: monthly
+    tags: [meteo, bulletin, agrometeo, mensuel, burkina]
+    config:
+      url: https://meteoburkina.bf/produits/bulletin-agrometeorologique-mensuel/
+      base_url: https://meteoburkina.bf
+      search_urls:
+        - https://meteoburkina.bf/produits/bulletin-agrometeorologique-mensuel/
+      include_patterns: [bulletin, agrometeo, mensuel]
+      max_pages: 10
+      max_pdfs: 5
+
+  - id: meteo_bulletin_quotidien
+    engine: institutional_pdf
+    priority: 3
+    frequency: 1d
+    tags: [meteo, bulletin, quotidien, burkina]
+    config:
+      url: https://meteoburkina.bf/produits/bulletin-quotidien/
+      base_url: https://meteoburkina.bf
+      search_urls:
+        - https://meteoburkina.bf/produits/bulletin-quotidien/
+      include_patterns: [bulletin, quotidien]
+      max_pages: 10
+      max_pdfs: 5
+
+  - id: meteo_bulletin_eau_energie
+    engine: institutional_pdf
+    priority: 3
+    frequency: monthly
+    tags: [meteo, bulletin, eau, energie, burkina]
+    config:
+      url: https://meteoburkina.bf/produits/bulletin-eau-energie/
+      base_url: https://meteoburkina.bf
+      search_urls:
+        - https://meteoburkina.bf/produits/bulletin-eau-energie/
+      include_patterns: [bulletin, eau, energie]
+      max_pages: 10
+      max_pdfs: 5
+
+  - id: meteo_bulletin_climatique_mensuel
+    engine: institutional_pdf
+    priority: 3
+    frequency: monthly
+    tags: [meteo, climat, bulletin, mensuel, burkina]
+    config:
+      url: https://meteoburkina.bf/produits/bulletin-climatique-mensuel/
+      base_url: https://meteoburkina.bf
+      search_urls:
+        - https://meteoburkina.bf/produits/bulletin-climatique-mensuel/
+      include_patterns: [bulletin, climatique, mensuel]
+      max_pages: 10
+      max_pdfs: 5
+
+  - id: meteo_agrometeo_medias
+    engine: institutional_pdf
+    priority: 2
+    frequency: monthly
+    tags: [meteo, bulletin, medias, agrometeo, burkina]
+    config:
+      url: https://meteoburkina.bf/produits/bulletin-agrometeo-pour-les-medias/
+      base_url: https://meteoburkina.bf
+      search_urls:
+        - https://meteoburkina.bf/produits/bulletin-agrometeo-pour-les-medias/
+      include_patterns: [bulletin, medias, agrometeo]
+      max_pages: 10
+      max_pdfs: 5
+
+  - id: meteo_climat_burkina
+    engine: institutional_pdf
+    priority: 2
+    frequency: monthly
+    tags: [meteo, climat, burkina]
+    config:
+      url: https://meteoburkina.bf/produits/climat-du-burkina-faso/
+      base_url: https://meteoburkina.bf
+      search_urls:
+        - https://meteoburkina.bf/produits/climat-du-burkina-faso/
+      include_patterns: [climat, burkina]
+      max_pages: 10
+      max_pdfs: 5
+
+  - id: meteo_bulletin_climat_sante
+    engine: institutional_pdf
+    priority: 1
+    frequency: monthly
+    tags: [meteo, bulletin, climat, sante, burkina]
+    config:
+      url: https://meteoburkina.bf/produits/bulletin-climat-sante/
+      base_url: https://meteoburkina.bf
+      search_urls:
+        - https://meteoburkina.bf/produits/bulletin-climat-sante/
+      include_patterns: [bulletin, climat, sante]
+      max_pages: 10
+      max_pdfs: 5
+
+  - id: lefaso_actualites
+    engine: news_article
+    priority: 4
+    frequency: 1d
+    tags: [news, burkina, actualites, politique, economie]
+    config:
+      url: https://lefaso.net/
+      preferred_selectors:
+        - article
+        - main
+        - "#content"
+        - ".post-content"
+        - ".entry-content"
+      site_patterns:
+        lefaso.net:
+          article: [article, main, .entry-content, .post-content]
+          title: [h1, .entry-title, title]
+
+  - id: sidwaya_actualites
+    engine: news_article
+    priority: 3
+    frequency: 1d
+    tags: [news, burkina, actualites, sidwaya]
+    config:
+      url: https://www.sidwaya.info/
+      preferred_selectors:
+        - article
+        - main
+        - "#content"
+        - ".post-content"
+        - ".entry-content"
+      site_patterns:
+        sidwaya.info:
+          article: [article, main, .entry-content, .post-content]
+          title: [h1, .entry-title, title]
+
+  - id: fao_technical_resources
+    engine: technical_crawler
+    priority: 3
+    frequency: weekly
+    tags: [technical, fao, agriculture, ressources]
+    config:
+      url: https://www.fao.org/faostat/fr/#data
+      start_url: https://www.fao.org/faostat/fr/#data
+      max_depth: 1
+      max_pages: 8
+      max_memory_limit: 15728640
+      preferred_selectors:
+        - main
+        - article
+        - "#content"
+        - ".post-content"
+        - ".entry-content"
+
+  - id: insd_microdata_resources
+    engine: technical_crawler
+    priority: 3
+    frequency: monthly
+    tags: [technical, insd, microdata, statistiques, burkina]
+    config:
+      url: https://microdata.insd.bf/index.php/catalog
+      start_url: https://microdata.insd.bf/index.php/catalog
+      max_depth: 1
+      max_pages: 10
+      max_memory_limit: 15728640
+      preferred_selectors:
+        - main
+        - article
+        - "#content"
+        - ".dataset-details"
+        - ".dataset-view"
+
+  - id: meteo_anam_bulletins
+    engine: institutional_pdf
+    priority: 1
+    frequency: daily
+    tags: [weather, bf, official]
+    config:
+      url: https://fews.net/search?region%5B0%5D=520&report_type%5B0%5D=5&report_type%5B1%5D=6&report_type%5B2%5D=34&report_type%5B3%5D=7&report_type%5B4%5D=17&page_type=report
+      include_patterns: [/burkina-faso/, report, key-message]
+      max_pages: 5
+      max_pdfs: 3
+
+  - id: agri_sonagess_prices
+    engine: institutional_pdf
+    priority: 2
+    frequency: weekly
+    tags: [prices, agri, bf]
+    config:
+      url: https://sonagess.bf/?page_id=239
+      include_patterns: [prix, bulletin, sonagess]
+      max_pages: 10
+
+  - id: fews_net_bf_outlook
+    engine: institutional_pdf
+    priority: 2
+    tags: [fews, outlook, bf]
+    config:
+      url: https://fews.net/fr/west-africa/burkina-faso
+      include_patterns: [mise-jour, perspectives, report]

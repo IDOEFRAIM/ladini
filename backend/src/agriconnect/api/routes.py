@@ -1,14 +1,14 @@
-"""
-Routes API — Endpoints de l'API AgriConnect (production-grade).
+﻿"""
+Routes API â€” Endpoints de l'API AgriConnect (production-grade).
 
-L'orchestrateur est initialisé une seule fois (lazy singleton)
-et injecté via FastAPI Depends().
+L'orchestrateur est initialisÃ© une seule fois (lazy singleton)
+et injectÃ© via FastAPI Depends().
 
 Celery dispatch :
   - Fallback automatique vers sync si le broker est indisponible
   - Validation des task_id avant lookup
   - Rate limiting implicite via Celery task annotations
-  - Résultats structurés cohérents (success/error/timeout)
+  - RÃ©sultats structurÃ©s cohÃ©rents (success/error/timeout)
 """
 
 import asyncio
@@ -30,7 +30,7 @@ from .schemas import UserRequest, SuccessResponse, AsyncQueuedResponse, TaskStat
 from fastapi import Body
 
 # MCP ShieldHub / Bridge
-from agriconnect.protocols.mcp.security.shield_hub import ShieldHub
+from agriconnect.infrastructure.mcp.security import ShieldHub
 
 
 logger = logging.getLogger("AgriConnect.API")
@@ -38,14 +38,14 @@ logger = logging.getLogger("AgriConnect.API")
 router = APIRouter()
 
 
-# ── Dependency : Orchestrator (lazy singleton, thread-safe) ──
+# â”€â”€ Dependency : Orchestrator (lazy singleton, thread-safe) â”€â”€
 
 _orchestrator_instance = None
 _orchestrator_lock = threading.Lock()
 
 
 def _get_orchestrator():
-    """Instancié une seule fois, au premier appel — thread-safe, retryable."""
+    """InstanciÃ© une seule fois, au premier appel â€” thread-safe, retryable."""
     global _orchestrator_instance
     if _orchestrator_instance is not None:
         return _orchestrator_instance
@@ -61,19 +61,19 @@ def _get_orchestrator():
             return _orchestrator_instance
         except Exception as e:
             logger.warning("Failed to load Orchestrator: %s", e, exc_info=True)
-            # Do NOT cache None — next call will retry
+            # Do NOT cache None â€” next call will retry
             return None
 
 
 def get_orchestrator():
-    """FastAPI dependency — retourne le singleton ou lève 503."""
+    """FastAPI dependency â€” retourne le singleton ou lÃ¨ve 503."""
     orch = _get_orchestrator()
     if orch is None:
         raise HTTPException(status_code=503, detail="Orchestrator unavailable. Retrying on next request.")
     return orch
 
 
-# ── ShieldHub singleton (lazy, thread-safe) ─────────────────────────────
+# â”€â”€ ShieldHub singleton (lazy, thread-safe) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 _shield_instances = {}
 _shield_lock = threading.Lock()
 
@@ -94,7 +94,7 @@ def _get_shield(session_id: str = "web_user"):
 
 
 
-# ── Helpers ──
+# â”€â”€ Helpers â”€â”€
 
 # Regex stricte pour valider un task_id Celery (UUID)
 _TASK_ID_PATTERN = re.compile(
@@ -103,7 +103,7 @@ _TASK_ID_PATTERN = re.compile(
 
 
 def _validate_task_id(task_id: str) -> str:
-    """Valide le format du task_id pour éviter les injections."""
+    """Valide le format du task_id pour Ã©viter les injections."""
     if not _TASK_ID_PATTERN.match(task_id):
         raise HTTPException(status_code=400, detail="Invalid task ID format")
     return task_id
@@ -111,8 +111,8 @@ def _validate_task_id(task_id: str) -> str:
 
 def _dispatch_to_celery(req: UserRequest) -> AsyncQueuedResponse:
     """
-    Dispatch une requête vers Celery avec gestion d'erreur robuste.
-    Lève HTTPException(503) si le broker est indisponible.
+    Dispatch une requÃªte vers Celery avec gestion d'erreur robuste.
+    LÃ¨ve HTTPException(503) si le broker est indisponible.
     """
     valid_levels = ("debutant", "intermediaire", "expert")
     user_level = req.user_level if req.user_level in valid_levels else "debutant"
@@ -129,8 +129,8 @@ def _dispatch_to_celery(req: UserRequest) -> AsyncQueuedResponse:
             },
             # Options de dispatch
             queue="ai",
-            priority=5,                    # priorité moyenne
-            expires=600,                   # expire après 10 min si pas traitée
+            priority=5,                    # prioritÃ© moyenne
+            expires=600,                   # expire aprÃ¨s 10 min si pas traitÃ©e
             retry=True,                    # retry si le broker est temporairement down
             retry_policy={
                 "max_retries": 3,
@@ -151,7 +151,7 @@ def _dispatch_to_celery(req: UserRequest) -> AsyncQueuedResponse:
         )
 
 
-# ── Routes ──────────────────────────────────────────────────
+# â”€â”€ Routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/api/v1/ask", response_model=None)
 async def ask_agent(
@@ -160,9 +160,9 @@ async def ask_agent(
     orchestrator=Depends(get_orchestrator),
 ):
     """
-    Endpoint principal — interagit avec l'Orchestrateur AgConnect.
+    Endpoint principal â€” interagit avec l'Orchestrateur AgConnect.
 
-    - async_mode=False : Traitement synchrone (réponse immédiate)
+    - async_mode=False : Traitement synchrone (rÃ©ponse immÃ©diate)
     - async_mode=True  : Queue vers Celery (TTS, tasks longues)
 
     Si le broker Celery est indisponible en mode async,
@@ -178,7 +178,7 @@ async def ask_agent(
         try:
             return _dispatch_to_celery(req)
         except HTTPException:
-            # Broker down → fallback vers sync avec warning
+            # Broker down â†’ fallback vers sync avec warning
             logger.warning(
                 "Celery broker unavailable, falling back to sync mode for user=%s",
                 req.user_id,
@@ -209,7 +209,7 @@ async def ask_agent(
     try:
         # Run blocking orchestrator in a thread pool to avoid blocking the event loop
         result = await asyncio.to_thread(orchestrator.run, initial_state)
-        final_text = result.get("final_response", "Je n'ai pas pu générer de réponse.")
+        final_text = result.get("final_response", "Je n'ai pas pu gÃ©nÃ©rer de rÃ©ponse.")
         audio_url = result.get("audio_url")
         audio_download = None
         if audio_url:
@@ -230,12 +230,12 @@ async def ask_agent(
 @router.get("/api/v1/task/{task_id}")
 async def get_task_status(task_id: str):
     """
-    Vérifier le statut d'une tâche Celery async.
+    VÃ©rifier le statut d'une tÃ¢che Celery async.
 
-    Retourne un résultat structuré :
-      - processing : tâche en cours
-      - completed  : tâche terminée avec résultat
-      - failed     : tâche échouée (erreur dans le résultat ou exception)
+    Retourne un rÃ©sultat structurÃ© :
+      - processing : tÃ¢che en cours
+      - completed  : tÃ¢che terminÃ©e avec rÃ©sultat
+      - failed     : tÃ¢che Ã©chouÃ©e (erreur dans le rÃ©sultat ou exception)
       - unknown    : broker indisponible
     """
     task_id = _validate_task_id(task_id)
@@ -245,7 +245,7 @@ async def get_task_status(task_id: str):
 
         task_result = celery_app.AsyncResult(task_id)
 
-        # Tâche pas encore terminée
+        # TÃ¢che pas encore terminÃ©e
         if not task_result.ready():
             state = task_result.state  # PENDING, STARTED, RETRY
             return {
@@ -254,11 +254,11 @@ async def get_task_status(task_id: str):
                 "state": state,
             }
 
-        # Tâche terminée avec succès
+        # TÃ¢che terminÃ©e avec succÃ¨s
         if task_result.successful():
             result = task_result.result
 
-            # Vérifier si le résultat est lui-même un error_result
+            # VÃ©rifier si le rÃ©sultat est lui-mÃªme un error_result
             if isinstance(result, dict) and result.get("status") == "error":
                 return {
                     "status": "failed",
@@ -273,7 +273,7 @@ async def get_task_status(task_id: str):
                 "result": result,
             }
 
-        # Tâche échouée (exception non attrapée)
+        # TÃ¢che Ã©chouÃ©e (exception non attrapÃ©e)
         error_info = str(task_result.result) if task_result.result else "Unknown error"
         return {
             "status": "failed",
@@ -293,7 +293,7 @@ async def get_task_status(task_id: str):
 @router.delete("/api/v1/task/{task_id}")
 async def cancel_task(task_id: str):
     """
-    Annuler (révoquer) une tâche Celery en cours ou en attente.
+    Annuler (rÃ©voquer) une tÃ¢che Celery en cours ou en attente.
     """
     task_id = _validate_task_id(task_id)
 
@@ -307,7 +307,7 @@ async def cancel_task(task_id: str):
         raise HTTPException(status_code=503, detail="Task broker unavailable")
 
 
-# ── Audio download ──────────────────────────────────────────
+# â”€â”€ Audio download â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 AUDIO_DIR = Path(settings.AUDIO_OUTPUT_DIR).resolve()
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
@@ -319,7 +319,7 @@ _AUDIO_ID_PATTERN = re.compile(r"^[a-fA-F0-9\-]{1,64}$")
 @router.get("/api/v1/audio/{audio_id}")
 async def download_audio(audio_id: str):
     """Telecharger un fichier audio genere par le TTS."""
-    # Validate audio_id format (UUID only — no slashes, dots, etc.)
+    # Validate audio_id format (UUID only â€” no slashes, dots, etc.)
     if not _AUDIO_ID_PATTERN.match(audio_id):
         raise HTTPException(status_code=400, detail="Invalid audio ID format")
 
@@ -334,11 +334,11 @@ async def download_audio(audio_id: str):
     return FileResponse(path=str(file_path), media_type="audio/wav", filename=f"{audio_id}.wav")
 
 
-# ── Health / Root ───────────────────────────────────────────
+# â”€â”€ Health / Root â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/health")
 def health_check():
-    """Health check avec état DB et Celery broker."""
+    """Health check avec Ã©tat DB et Celery broker."""
     db_ok = check_connection()
 
     # Quick broker check (ne bloque pas longtemps)
@@ -377,7 +377,7 @@ def root():
     }
 
 
-# ── MCP Bridge endpoints (ShieldHub) ───────────────────────────────────
+# â”€â”€ MCP Bridge endpoints (ShieldHub) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @router.post("/api/v1/mcp/call")
 async def mcp_call(request: Request, payload: dict = Body(...)):
     """Call an MCP tool via ShieldHub. Payload: {"tool": str, "args": dict}.
@@ -410,3 +410,4 @@ async def mcp_list_tools():
     except Exception as e:
         logger.exception("List tools failed: %s", e)
         raise HTTPException(status_code=500, detail="Could not list tools")
+

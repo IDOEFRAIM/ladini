@@ -62,7 +62,7 @@ class Router:
         mapping = {
             "climate_sentinel": "sentinelle",
             "formation_coach": "formation",
-            "market_coach": "market",
+            "market_coach": "market_coach",
             "marketplace_agent": "marketplace",
             "plant_doctor": "sentinelle",
         }
@@ -73,12 +73,13 @@ class Router:
         patterns = [
             (["sentinel", "climate"], "sentinelle"),
             (["marketplace", "place"], "marketplace"),
-            (["market"], "market"),
+            (["market_coach"], "market_coach"),
+            (["market"], "market_coach"),
         ]
         
         for keywords, result in patterns:
             if any(kw in aid for kw in keywords):
-                if result == "market" and "place" in aid:
+                if result == "market_coach" and "place" in aid:
                     continue
                 return result
 
@@ -281,7 +282,7 @@ class Router:
                     elif tokens_count > 3 and not any(query_text.strip().startswith(g) for g in greetings) and any(k in query_text for k in ("explique", "comment faire", "tutoriel", "procédé", "comment")):
                         analysis["selected_experts"] = ["formation"]
                     elif any(k in query_text for k in ("prix", "marché", "marche")):
-                        analysis["selected_experts"] = ["market"]
+                        analysis["selected_experts"] = ["market_coach"]
                     elif any(k in query_text for k in ("maladie", "feuille", "tache", "sympt", "insecte")):
                         analysis["selected_experts"] = ["sentinelle"]
                     # Otherwise keep empty for true short polite CHATs
@@ -326,7 +327,10 @@ class Router:
             if intent == "CHAT":
                 sel = needs.get("selected_experts", []) or []
                 if sel:
-                    return f"SOLO_{sel[0].upper()}"
+                    key = sel[0].lower()
+                    if key in ("market", "market_coach"):
+                        return "SOLO_MARKET"
+                    return f"SOLO_{key.upper()}"
 
                 # Prefer explicit LLM hints in `reason`
                 reason = (needs.get("reason") or "").lower()
@@ -334,6 +338,7 @@ class Router:
                     "formation": "FORMATION",
                     "formation_coach": "FORMATION",
                     "marketplace": "MARKETPLACE",
+                    "market_coach": "MARKET",
                     "market": "MARKET",
                     "sentinel": "SENTINELLE",
                     "sentinelle": "SENTINELLE",

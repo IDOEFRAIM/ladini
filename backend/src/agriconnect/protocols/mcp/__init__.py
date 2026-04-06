@@ -1,102 +1,122 @@
-"""
-MCP Servers — Sous-package "Système Nerveux" AgriConnect 2.0
-=============================================================
+from __future__ import annotations
 
-All servers use the FastMCP decorator pattern (``@mcp.tool()``,
-``@mcp.resource()``, ``@mcp.prompt()``).
+import asyncio
+import json
+from typing import Any
 
-Serveurs :
-  - mcp_db      : Base de données complète (Tools)        → get_user_profile(), create_order()…
-  - mcp_rag     : Base de connaissances agronomiques (Tools) → search_agronomy_docs()
-  - mcp_weather : Données météo et alertes (Tools)       → get_weather(), get_alerts()
-  - mcp_context : Context Optimizer (Resources + Tools)
-  - mcp_units   : Conversion d'unités locales (Tools)    → convert_to_kg()
 
-Shim classes (MCPDatabaseServer, MCPRagServer, MCPWeatherServer) provide
-backward-compatible ``call_tool()`` for in-process callers.
-"""
+class MCPRagServer:
+    """Compatibility wrapper exposing legacy RAG methods over AgronomyTools."""
 
-try:
-  from .mcp_db import MCPDatabaseServer
-except Exception:
-  try:
-    # Prefer package-local server shim when running as a module path
-    from .servers.agri_db_server import AgriDBMCPServer as MCPDatabaseServer
-  except Exception:
-    # Fallback to absolute import for installed package layout
-    from agriconnect.protocols.mcp.infrastructure import AgriDBMCPServer as MCPDatabaseServer
+    def __init__(self, *args, **kwargs):
+        from agriconnect.protocols.mcp.tools.agronomy import AgronomyTools
 
-try:
-    from .client import AgriMCPClient
-except Exception:
-    AgriMCPClient = None
+        self._provider = AgronomyTools(*args, **kwargs)
 
-try:
-  from .mcp_rag import MCPRagServer
-except Exception:
-  from .servers.agri_rag_server import AgriRAGMCPServer as MCPRagServer
+    async def search(self, query: str, limit: int = 3):
+        raw = await self._provider.search_agronomy_docs(query=query, top_k=limit)
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return parsed.get("documents", []) if isinstance(parsed, dict) else []
 
-try:
-  from .mcp_weather import MCPWeatherServer
-except Exception:
-  from .servers.weather_server import WeatherMCPServer as MCPWeatherServer
+    async def search_past_interactions(self, user_id: str, query: str, top_k: int = 3):
+        return await self._provider.search_past_interactions(user_id=user_id, query=query, top_k=top_k)
 
-try:
-  from .mcp_context import MCPContextServer
-except Exception:
-  MCPContextServer = None
+    def list_tools(self):
+        return [{"name": spec.name, "description": spec.description} for spec in self._provider.get_tools()]
 
-try:
-  from .mcp_units import UnitsMCPServer
-except Exception:
-  UnitsMCPServer = None
+    def call_tool_sync(self, name: str, arguments: dict) -> dict:
+        handlers = {
+            "search_agronomy_docs": self._provider.search_agronomy_docs,
+            "search_past_interactions": self._provider.search_past_interactions,
+        }
+        fn = handlers.get(name)
+        if fn is None:
+            return {"ok": False, "error": f"Tool {name} inconnu"}
 
-__all__ = [
-  "MCPDatabaseServer",
-  "MCPRagServer",
-  "MCPWeatherServer",
-  "MCPContextServer",
-  "UnitsMCPServer",
-]
-# Simple module-level singletons to avoid multiple instantiations across the app
-_MCP_SINGLETONS = {
-  "db": None,
-  "rag": None,
-  "weather": None,
-  "context": None,
-  "units": None,
-}
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            raw = loop.run_until_complete(fn(**arguments))
+        finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            loop.close()
+            try:
+                asyncio.set_event_loop(None)
+            except Exception:
+                pass
+
+        return {"ok": True, "data": json.loads(raw) if isinstance(raw, str) else raw}
+
+
+class MCPDatabaseServer:
+    """Lazy DB server proxy to avoid heavy imports at module import time."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        _ = args, kwargs
+        self._inner = None
+
+    def call_tool(self, name: str, arguments: dict | None = None) -> dict:
+        _ = name, arguments
+        return {"ok": False, "error": "DB runtime unavailable in lightweight compatibility mode"}
+
 
 def get_mcp_db_server(session_factory=None):
-  global _MCP_SINGLETONS
-  if _MCP_SINGLETONS["db"] is None:
-    _MCP_SINGLETONS["db"] = MCPDatabaseServer(session_factory)
-  return _MCP_SINGLETONS["db"]
+    _ = session_factory
+    return MCPDatabaseServer()
+
 
 def get_mcp_rag_server():
-  global _MCP_SINGLETONS
-  if _MCP_SINGLETONS["rag"] is None:
-    _MCP_SINGLETONS["rag"] = MCPRagServer()
-  return _MCP_SINGLETONS["rag"]
+    return MCPRagServer()
+
 
 def get_mcp_weather_server(llm_client=None):
-  global _MCP_SINGLETONS
-  if _MCP_SINGLETONS["weather"] is None:
-    _MCP_SINGLETONS["weather"] = MCPWeatherServer(llm_client=llm_client)
-  return _MCP_SINGLETONS["weather"]
+    from agriconnect.protocols.mcp.tools.weather import MCPWeatherServer
+
+    return MCPWeatherServer(llm_client=llm_client)
+
 
 def get_mcp_context_server(session_factory=None, context_optimizer=None, llm_client=None):
-  global _MCP_SINGLETONS
-  if _MCP_SINGLETONS["context"] is None:
-    # Create with context_optimizer when available, else fall back to session_factory
+    from agriconnect.infrastructure.mcp.context import MCPContextServer
+
     if context_optimizer:
-      _MCP_SINGLETONS["context"] = MCPContextServer(context_optimizer)
-    else:
-      _MCP_SINGLETONS["context"] = MCPContextServer(session_factory=session_factory, llm_client=llm_client)
-  return _MCP_SINGLETONS["context"]
+        return MCPContextServer(context_optimizer)
+    return MCPContextServer(session_factory=session_factory, llm_client=llm_client)
+
 
 def get_mcp_units_server():
-  global _MCP_SINGLETONS
-  if _MCP_SINGLETONS["units"] is None:
-    _MCP_SINGLETONS["units"] = UnitsMCPServer()
-  return _MCP_SINGLETONS["units"]
+    from agriconnect.protocols.mcp.tools.units import UnitsMCPServer
+
+    return UnitsMCPServer()
+
+
+__all__ = [
+    "MCPDatabaseServer",
+    "MCPRagServer",
+    "MCPWeatherServer",
+    "MCPContextServer",
+    "UnitsMCPServer",
+    "get_mcp_db_server",
+    "get_mcp_rag_server",
+    "get_mcp_weather_server",
+    "get_mcp_context_server",
+    "get_mcp_units_server",
+]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "MCPContextServer":
+        from agriconnect.infrastructure.mcp.context import MCPContextServer
+
+        return MCPContextServer
+    if name == "MCPWeatherServer":
+        from agriconnect.protocols.mcp.tools.weather import MCPWeatherServer
+
+        return MCPWeatherServer
+    if name == "UnitsMCPServer":
+        from agriconnect.protocols.mcp.tools.units import UnitsMCPServer
+
+        return UnitsMCPServer
+    raise AttributeError(name)

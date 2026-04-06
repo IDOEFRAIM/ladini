@@ -1,30 +1,27 @@
 """
-Agents — Agents IA spécialisés AgriConnect.
+Agents  Agents IA sp�cialis�s AgriConnect.
 
 Chaque agent est un sous-graphe LangGraph autonome,
-appelé par l'orchestrateur (MessageResponseFlow / ReportFlow).
+appel� par l'orchestrateur (MessageResponseFlow / ReportFlow).
 """
 
-from .sentinelle import ClimateSentinel
-from .formation import FormationCoach
-from .market import MarketCoach
+from agriconnect.graphs.agents.sentinelle.graph import ClimateSentinel
+from agriconnect.graphs.agents.formation.graph import FormationCoach
 from .soil import AgriSoilAgent
 from .plant_doctor import PlantHealthDoctor
+from agriconnect.graphs.agents.market_coach.graph import MarketCoach
 
-# v3 — Async agents (multi-schema)
-from .marketplace_v3 import MarketplaceAgentV3
+# v3  Async agents (multi-schema)
+from agriconnect.graphs.agents.marketplace_v3.graph import MarketplaceAgentV3
 from .marketplace_background import MarketplaceBackgroundAgent
-
-# Les agents ci-dessous dépendent de modules optionnels (services.google, etc.)
-# Ils sont importés à la demande pour ne pas bloquer le startup.
 
 __all__ = [
     "ClimateSentinel",
     "FormationCoach",
-    "MarketCoach",
     "AgriSoilAgent",
     "PlantHealthDoctor",
     # v3
     "MarketplaceAgentV3",
     "MarketplaceBackgroundAgent",
+    "MarketCoach",
 ]

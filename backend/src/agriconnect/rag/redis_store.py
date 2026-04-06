@@ -70,7 +70,10 @@ class RedisVectorStore:
             self.client = redis.from_url(url, decode_responses=self.decode_responses, socket_timeout=socket_timeout)
         self.dim = dim
         self.ns = namespace
-        self._docs_key = f"{self.ns}:docs"
+        # Use a shared hash tag so all keys map to one cluster slot.
+        # This avoids CROSSSLOT failures for pipeline/multi-key operations.
+        self._slot_tag = "{docs}"
+        self._docs_key = f"{self.ns}:{self._slot_tag}:ids"
 
         # Compatibility shim: signal that this store can be queried by embeddings
         try:
@@ -82,24 +85,48 @@ class RedisVectorStore:
             pass
 
     def _doc_key(self, doc_id: str) -> str:
-        return f"{self.ns}:doc:{doc_id}"
+        return f"{self.ns}:{self._slot_tag}:doc:{doc_id}"
 
     def add(self, doc_id: str, text: str, meta: Dict[str, Any], embedding: List[float]) -> None:
         """Add or update a single document chunk."""
         arr = np.asarray(embedding, dtype=np.float32)
         b = arr.tobytes()
-        vec_value = b.decode("latin-1") if self.decode_responses else b
         key = self._doc_key(doc_id)
         mapping = {
-            "text": text,
-            "meta": json.dumps(meta, ensure_ascii=False),
-            "vec": vec_value,
+            "text": text.encode("utf-8", errors="ignore"),
+            "meta": json.dumps(meta, ensure_ascii=False).encode("utf-8", errors="ignore"),
+            "vec": b,
         }
         # Use pipeline for efficiency
         p = self.client.pipeline()
         p.hset(key, mapping=mapping)
         p.sadd(self._docs_key, doc_id)
         p.execute()
+
+    def add_many(self, items: List[Dict[str, Any]], batch_size: int = 50) -> None:
+        """Batch insert documents with a single pipeline execution per batch."""
+        if not items:
+            return
+        size = max(1, int(batch_size or 50))
+        for start in range(0, len(items), size):
+            batch = items[start : start + size]
+            p = self.client.pipeline()
+            for item in batch:
+                doc_id = str(item.get("id") or "")
+                if not doc_id:
+                    continue
+                arr = np.asarray(item.get("embedding") or [], dtype=np.float32)
+                key = self._doc_key(doc_id)
+                p.hset(
+                    key,
+                    mapping={
+                        "text": str(item.get("text") or "").encode("utf-8", errors="ignore"),
+                        "meta": json.dumps(item.get("meta") or {}, ensure_ascii=False).encode("utf-8", errors="ignore"),
+                        "vec": arr.tobytes(),
+                    },
+                )
+                p.sadd(self._docs_key, doc_id)
+            p.execute()
 
     def _fetch_all_vectors(self) -> List[Tuple[str, np.ndarray, str, Dict[str, Any]]]:
         """Return list of (doc_id, vec_array, text, meta) for all docs."""

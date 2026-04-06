@@ -1,0 +1,46 @@
+FROM apache/airflow:2.9.0
+
+USER airflow
+
+# 1. Installer les dépendances lourdes en premier (pour le cache)
+# Mise à jour pip et retry loop pour PyTorch
+RUN pip install --upgrade pip
+RUN for i in 1 2 3 4; do pip install --default-timeout=3000 --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && break || sleep 15; done
+
+RUN for i in 1 2 3; do \
+    pip install --default-timeout=1000 --no-cache-dir \
+    sentence-transformers \
+    faiss-cpu \
+    openai-whisper && break || sleep 10; \
+    done
+
+# 2. Installer les autres dépendances
+RUN pip install --default-timeout=1000 --no-cache-dir \
+    pydantic>=2.0 \
+    pydantic-settings \
+    sqlalchemy[asyncio]>=2.0 \
+    psycopg2-binary \
+    redis \
+    celery[redis] \
+    httpx \
+    python-multipart \
+    pgvector \
+    asyncpg \
+    alembic \
+    langchain \
+    langchain-community \
+    langchain-openai \
+    langchain-groq \
+    boto3 \
+    llama-index \
+    llama-index-core \
+    llama-index-embeddings-huggingface \
+    llama-index-vector-stores-faiss \
+    azure-cognitiveservices-speech \
+    azure-storage-blob \
+    azure-identity \
+    pypdf \
+    beautifulsoup4 \
+    tqdm \
+    python-dotenv \
+    requests

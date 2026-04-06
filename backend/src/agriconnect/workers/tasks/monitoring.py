@@ -157,7 +157,7 @@ def check_weather_alerts(self) -> Dict[str, Any]:
     try:
         # ── Lazy import des dépendances lourdes ──
         try:
-            from agriconnect.graphs.nodes.sentinelle import ClimateSentinel
+            from agriconnect.graphs.agents.sentinelle.graph import get_agent_graph
             from agriconnect.rag.components import get_groq_sdk
         except ImportError as e:
             raise FatalTaskError(
@@ -165,8 +165,7 @@ def check_weather_alerts(self) -> Dict[str, Any]:
             ) from e
 
         llm = get_groq_sdk()
-        agent = ClimateSentinel(llm_client=llm)
-        workflow = agent.build()
+        workflow = get_agent_graph(llm_client=llm)
         db = _get_db()
 
         for loc in MONITORED_ZONES:

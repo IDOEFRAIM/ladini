@@ -9,11 +9,15 @@ from airflow.decorators import dag, task  # type: ignore[reportMissingImports]
 
 
 def _bootstrap_path() -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    src = repo_root / "src"
+    backend_dir = Path(__file__).resolve().parents[2]
+    
+    # 1. Add project 'backend/src' so the `agriconnect` package is importable
+    src = backend_dir / "src"
     if str(src) not in sys.path:
         sys.path.insert(0, str(src))
-    scripts = repo_root / "scripts"
+
+    # 2. Add backend scripts path for migration helper scripts
+    scripts = backend_dir / "scripts"
     if str(scripts) not in sys.path:
         sys.path.insert(0, str(scripts))
 

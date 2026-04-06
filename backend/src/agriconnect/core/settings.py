@@ -55,10 +55,25 @@ class Settings(BaseSettings):
 
     # --- Database (PostgreSQL) ---
     DATABASE_URL: str = ""
+    # SSL policy for PostgreSQL connections:
+    # - verify-full: TLS + certificate verification (recommended)
+    # - require: TLS without certificate verification (dev fallback)
+    # - disable: no TLS (local-only)
+    DB_SSL_MODE: str = "verify-full"
     # --- Redis / Celery ---
     REDIS_URL: str = "redis://localhost:6379/0"
+    VALKEY_ENDPOINT: str = ""
+    VALKEY_AUTH_TOKEN: str = ""
+    VALKEY_USE_TLS: bool = True
     CELERY_BROKER_URL: str = ""
     CELERY_RESULT_BACKEND: str = ""
+
+    # --- MCP Runtime Startup ---
+    MCP_ALLOW_DEGRADED_START: bool = False
+    MCP_DB_STARTUP_RETRIES: int = 2
+    MCP_DB_STARTUP_RETRY_DELAY_SEC: float = 1.5
+    MCP_DB_SERVER_HOST: str = "localhost"
+    MCP_DB_SERVER_PORT: int = 8003
 
     @property
     def celery_broker(self) -> str:
@@ -111,6 +126,12 @@ class Settings(BaseSettings):
     RAG_EXPERT_TOP_K: int = 20
     RAG_EXPERT_RERANK_K: int = 8
     RAG_EXPERT_USE_HYDE: bool = True
+    # --- PDF processor thresholds ---
+    PDF_MAX_CHUNK_CHARS: int = 1500
+    PDF_MIN_MERGE_CHARS: int = 50
+    # Ingestion audit thresholds
+    INGESTION_AUDIT_FAILURE_THRESHOLD: float = 0.1
+    INGESTION_AUDIT_PREFIX: str = "ingestion_audit"
 
     # Pydantic Settings: prefer .env inside the package, but fall back to the
     # repository root `.env` (e.g. backend/.env) to support developer workflows.
@@ -128,9 +149,23 @@ class Settings(BaseSettings):
     SENTRY_ENVIRONMENT: str = "development"
 
     # --- AWS S3 (optional) ---
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    AWS_SESSION_TOKEN: str = ""
+    AWS_REGION: str = ""
     S3_BUCKET: str = ""
     S3_KEY_PREFIX: str = ""
     S3_REGION: str = ""
+    # S3 ingestion hygiene: prefixes to exclude from raw ingestion (comma-separated or list)
+    # Extended with common legacy snapshot/metadata prefixes discovered during audit
+    INGESTION_S3_EXCLUDE_PREFIXES: list[str] = [
+        "crawl_snapshots",
+        "snapshots",
+        "crawl",
+        "data_platforms",
+        "fao_publications",
+        "fews_net",
+    ]
 
 # Singleton — importable partout
 settings = Settings()

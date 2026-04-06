@@ -20,8 +20,24 @@ from llama_index.core import (
     load_index_from_storage
 )
 from llama_index.core.node_parser import SentenceSplitter
-from .config import RAW_DATA_DIR, DB_DIR
-from .components import init_settings, get_storage_context, save_index
+
+try:
+    from .config.old_root_config import RAW_DATA_DIR
+except ImportError:
+    from .config.old_root_config import RAW_DATA_DIR
+
+# Define DB_DIR directly if missing from config
+DB_DIR = Path("rag_db/index_storage")
+
+from agriconnect.rag.components import init_settings, get_vector_store
+
+def get_storage_context():
+    return StorageContext.from_defaults(vector_store=get_vector_store())
+
+def save_index(index):
+    # Persist explicitly if valid directory
+    if DB_DIR:
+        index.storage_context.persist(persist_dir=str(DB_DIR))
 
 from agriconnect.core.settings import settings
 

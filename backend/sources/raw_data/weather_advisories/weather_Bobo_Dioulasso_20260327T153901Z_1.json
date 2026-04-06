@@ -1,0 +1,13 @@
+{
+  "title": "Météo Bobo-Dioulasso",
+  "content": "Zone Bobo-Dioulasso: temp=31.5C, pluie=0.0mm, hum=55%. Surveiller l'évapotranspiration.",
+  "metadata": {
+    "doc_type": "weather_advisory",
+    "zone": "Bobo-Dioulasso",
+    "forecast_date": "2026-03-27",
+    "observed_at": "2026-03-27T15:38:59.410393+00:00",
+    "source": "api_openmeteo",
+    "confidence": 0.9,
+    "bulletin_excerpt": ""
+  }
+}

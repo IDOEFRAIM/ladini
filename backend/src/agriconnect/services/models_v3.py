@@ -1,105 +1,11 @@
-from sqlalchemy.dialects.postgresql import ARRAY
-from sqlalchemy.types import Uuid
-"""
-SQLAlchemy Models — AgriConnect v3 (Multi-Schema).
+"""Compatibility shim — re-export domain models.
 
-SOURCE UNIQUE DE VÉRITÉ pour le schéma ORM côté agents.
-Aligné sur le Drizzle schema frontend (auth / governance / marketplace / intelligence).
-
-Convention :
-  - UUID v4 pour tous les IDs
-  - Timestamps created_at / updated_at partout
-  - Foreign keys explicites cross-schema
+The authoritative models are now in `agriconnect.domain.models`.
+This module keeps the historical import path `agriconnect.services.models_v3`
+working for callers that still import from `services`.
 """
 
-from sqlalchemy import (
-    Column, String, DateTime, Boolean, Integer, Float,
-    JSON, ForeignKey, Text, UniqueConstraint, Index,
-)
-from sqlalchemy.orm import declarative_base, relationship
-from sqlalchemy.sql import func
-
-Base = declarative_base()
-
-
-# ══════════════════════════════════════════════════════════════════
-# AUTH SCHEMA
-# ══════════════════════════════════════════════════════════════════
-
-class User(Base):
-    """auth.users — Utilisateurs de la plateforme."""
-    __tablename__ = "users"
-    __table_args__ = {"schema": "auth"}
-
-    id = Column(Uuid(as_uuid=False), primary_key=True)
-    name = Column(String)
-    email = Column(String, unique=True)
-    email_verified = Column("email_verified", DateTime(timezone=True))
-    image = Column(String)
-    password = Column(String)
-    phone = Column(String, unique=True)
-    role = Column(String, default="USER", nullable=False)
-    zone_id = Column("zone_id", Uuid(as_uuid=False))
-    deleted_at = Column("deleted_at", DateTime(timezone=True))
-    created_at = Column("created_at", DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column("updated_at", DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
-
-    # Relationships
-    producer = relationship("Producer", back_populates="user", uselist=False, lazy="joined")
-    trust_score = relationship("TrustScore", back_populates="user", uselist=False)
-    conversations = relationship("Conversation", back_populates="user")
-    audit_logs = relationship("AuditLog", back_populates="actor")
-
-    @property
-    def language(self) -> str:
-        return "fr"
-
-    @property
-    def is_onboarded(self) -> bool:
-        return self.deleted_at is None
-
-    @property
-    def voice_preference(self) -> str:
-        return "fr-FR-HenriNeural"
-
-    def to_dict(self):
-        return {
-            "id": self.id, "phone": self.phone, "name": self.name,
-            "email": self.email, "role": self.role, "zone_id": self.zone_id,
-        }
-
-
-class Account(Base):
-    __tablename__ = "accounts"
-    __table_args__ = (
-        UniqueConstraint("provider", "provider_account_id", name="accounts_provider_unique"),
-        {"schema": "auth"},
-    )
-
-    id = Column(Uuid(as_uuid=False), primary_key=True)
-    user_id = Column("user_id", Uuid(as_uuid=False), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False)
-    type = Column(String, nullable=False)
-    provider = Column(String, nullable=False)
-    provider_account_id = Column("provider_account_id", Uuid(as_uuid=False), nullable=False)
-    refresh_token = Column("refresh_token", String)
-    access_token = Column("access_token", String)
-    expires_at = Column("expires_at", Integer)
-    token_type = Column("token_type", String)
-    scope = Column(String)
-    id_token = Column("id_token", String)
-    session_state = Column("session_state", String)
-
-
-class Session(Base):
-    __tablename__ = "sessions"
-    __table_args__ = {"schema": "auth"}
-
-    id = Column(Uuid(as_uuid=False), primary_key=True)
-    session_token = Column("session_token", String, unique=True, nullable=False)
-    user_id = Column("user_id", Uuid(as_uuid=False), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False)
-    expires = Column(DateTime(timezone=True), nullable=False)
-
-
+from agriconnect.domain.models import *
 # ══════════════════════════════════════════════════════════════════
 # GOVERNANCE SCHEMA
 # ══════════════════════════════════════════════════════════════════
@@ -1060,3 +966,8 @@ try:
     from agriconnect.services.memory.episodic_memory import EpisodicMemoryModel
 except ImportError:
     pass
+
+
+# Export after all model declarations so legacy star-imports include symbols
+# defined in this module (e.g. Zone, Producer, Product, etc.).
+__all__ = [name for name in globals() if not name.startswith("_")]

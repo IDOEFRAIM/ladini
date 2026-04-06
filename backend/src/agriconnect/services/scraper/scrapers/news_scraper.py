@@ -1,315 +1,208 @@
+from __future__ import annotations
+
 """
-NewsScraper - Extraction intelligente d'articles de presse agricole.
+News scraper (V2)
 
-Sites supportés avec détection automatique:
-- lefaso.net: Principal site d'actualité du Burkina Faso
-- sidwaya.info: Journal officiel
-- cirad.fr: Actualités scientifiques agricoles
-- Agri-mutuel.com: Assurance agricole
-- Wikipedia: Articles de référence
+This module implements `NewsScraper`, a "Zero-IO" scraper that:
+- fetches an article page into memory;
+- extracts structured content into Markdown (via `extract_markdown_from_html`);
+- normalizes and returns a `RawDocument` and a `ScraperLog` without writing to disk.
 
-Stratégies d'extraction:
-1. Détection automatique de la structure (article, titre, date, auteur)
-2. Nettoyage intelligent des éléments non pertinents (pubs, menus, etc.)
-3. Extraction du texte principal avec préservation des paragraphes
-4. Gestion des articles multi-pages
-5. Extraction des métadonnées structurées (JSON-LD, OpenGraph, etc.)
+Contract: `scrape(url) -> (RawDocument|None, meta_dict)` and `run(url)` wraps and returns `(RawDocument, ScraperLog)`.
 """
 
-import requests
-from bs4 import BeautifulSoup
-import re
-import json
-import logging
-from typing import Dict, Any, Optional, List
-from pathlib import Path
+from typing import Dict, Optional, Tuple
 from urllib.parse import urlparse, urljoin
-from datetime import datetime
-import hashlib
-from agriconnect.core.settings import settings
-from agriconnect.utils.s3_utils import upload_file_to_s3
 
-logger = logging.getLogger("NewsScraper")
+from bs4 import BeautifulSoup
+
+from agriconnect.core.schemas import RawDocument
+from agriconnect.core.scraper_utils import extract_markdown_from_html
+
+from .base import BaseScraper
+from .registry import register_scraper
 
 
-class NewsScraper:
-    """
-    Scraper universel pour articles de presse avec détection automatique de structure.
-    """
+@register_scraper("news", "news_article", "article")
+class NewsScraper(BaseScraper):
+    """Zero-IO news scraper with markdown-preserving extraction."""
 
-    def __init__(self, output_dir: str = "backend/sources/raw_data/news_articles"):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'fr-FR,fr;q=0.9,en;q=0.8'
-        }
-        
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
-        
-        # Sélecteurs par domaine (patterns optimisés)
+    name = "news_scraper"
+    version = "2.0.0"
+
+    def __init__(self, config: Optional[Dict] = None):
+        super().__init__(config=config)
+        cfg = config or {}
+        self.headers = dict(self.session.headers)
         self.site_patterns = {
-            'lefaso.net': {
-                'article': ['.article-content', 'article', '.post-content'],
-                'title': ['h1.article-title', 'h1', '.entry-title'],
-                'date': ['.date', '.published', 'time'],
-                'author': ['.author', '.by-author', '.post-author']
-            },
-            'sidwaya.info': {
-                'article': ['article', '.post-content', '.entry-content'],
-                'title': ['h1', '.entry-title'],
-                'date': ['.published', 'time', '.post-date'],
-                'author': ['.author', '.post-author']
-            },
-            'cirad.fr': {
-                'article': ['article', '.article-body', '.content'],
-                'title': ['h1', '.article-title'],
-                'date': ['.date', 'time'],
-                'author': ['.author']
-            },
-            'default': {
-                'article': ['article', 'main', '.content', '.post', '.article'],
-                'title': ['h1', 'h2.title', '.title'],
-                'date': ['time', '.date', '.published'],
-                'author': ['.author', '.by', '.writer']
-            }
+            "lefaso.net": {"article": ["article", "main"], "title": ["h1"]},
+            "sidwaya.info": {"article": ["article", "main"], "title": ["h1"]},
+            "default": {"article": ["article", "main", "body"], "title": ["h1", "title"]},
         }
+        if isinstance(cfg.get("site_patterns"), dict):
+            for site_key, site_conf in cfg["site_patterns"].items():
+                if not isinstance(site_conf, dict):
+                    continue
+                current = self.site_patterns.get(site_key, {"article": ["article", "main"], "title": ["h1", "title"]})
+                article_selectors = site_conf.get("article")
+                title_selectors = site_conf.get("title")
+                if isinstance(article_selectors, list) and article_selectors:
+                    current["article"] = article_selectors
+                if isinstance(title_selectors, list) and title_selectors:
+                    current["title"] = title_selectors
+                self.site_patterns[site_key] = current
+        # Keep native type (list or string) from YAML/config.
+        self.preferred_selectors = cfg.get(
+            "preferred_selectors", "article, main, #content, .post-content"
+        )
 
     def identify_site(self, url: str) -> str:
-        """Identifie le site source pour appliquer les bons sélecteurs."""
         domain = urlparse(url).netloc.lower()
-        
-        for site_key in self.site_patterns.keys():
-            if site_key in domain:
-                return site_key
-        
-        return 'default'
+        for key in self.site_patterns:
+            if key != "default" and key in domain:
+                return key
+        return "default"
 
-    def extract_with_patterns(self, soup: BeautifulSoup, patterns: List[str]) -> Optional[Any]:
-        """Essaie plusieurs sélecteurs CSS jusqu'à trouver un élément."""
+    @staticmethod
+    def extract_with_patterns(soup: BeautifulSoup, patterns):
         for pattern in patterns:
             elem = soup.select_one(pattern)
-            if elem:
+            if elem is not None:
                 return elem
         return None
 
-    def extract_metadata(self, soup: BeautifulSoup, url: str) -> Dict[str, Any]:
-        """
-        Extrait les métadonnées structurées (JSON-LD, OpenGraph, Meta tags).
-        """
-        metadata = {
-            'url': url,
-            'scraped_at': datetime.now().isoformat()
+    def scrape(self, url: str) -> Tuple[Optional[RawDocument], Dict]:
+        response = self._request(url)
+        html = response.text
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Use site-specific patterns to isolate the article node when possible
+        site_id = self.identify_site(url)
+        patterns = self.site_patterns.get(site_id, self.site_patterns["default"])
+        article_node = self.extract_with_patterns(soup, patterns.get("article", []))
+
+        # Title: prefer H1 inside article, then configured title selectors, then document title
+        title_elem = None
+        if article_node is not None:
+            title_elem = self.extract_with_patterns(article_node, patterns.get("title", []))
+        if not title_elem:
+            title_elem = soup.select_one("title")
+        title = (title_elem.get_text(strip=True) if title_elem and title_elem.get_text() else "Article")
+
+        target_html = self._prepare_markdown_html(
+            str(article_node) if article_node is not None else html,
+            base_url=url,
+            preferred_selectors=self.preferred_selectors,
+        )
+        markdown = extract_markdown_from_html(target_html, include_links=True)
+
+        # Try to extract publication date (best-effort)
+        # Pass both the fragment (article_node) and the full soup so meta tags
+        # in <head> can be detected when the fragment lacks them.
+        pub_date = self._normalize_publication_date(self._extract_pub_date(article_node, soup))
+        language = self._extract_language_code(soup)
+        quality = self._assess_extraction_quality(markdown, html)
+
+        if quality.get("blocked_by_waf"):
+            return None, {
+                "http_status": response.status_code,
+                "bytes_downloaded": len(response.content or b""),
+                "raw_payload": html,
+                "blocked_by_waf": True,
+            }
+
+        if not markdown.strip():
+            return None, {
+                "http_status": response.status_code,
+                "bytes_downloaded": len(response.content or b""),
+                "raw_payload": html,
+            }
+
+        doc = self._build_document(
+            url=url,
+            title=title,
+            markdown=markdown,
+            metadata={
+                "source_type": "news_article",
+                "source_domain": self._source_domain(url),
+                "content_type": response.headers.get("Content-Type", ""),
+                "publication_date": pub_date,
+                "language": language,
+                "extraction_method": "html_to_markdown",
+                "partial_extraction": bool(quality.get("partial_extraction")),
+            },
+            language=language,
+        )
+        return doc, {
+            "http_status": response.status_code,
+            "bytes_downloaded": len(response.content or b""),
+            "raw_payload": html,
+            "partial_extraction": bool(quality.get("partial_extraction")),
         }
-        
-        # JSON-LD (format privilégié pour les articles structurés)
-        json_ld_scripts = soup.find_all('script', {'type': 'application/ld+json'})
-        for script in json_ld_scripts:
+
+    def run_listing(self, listing_url: str, limit: int = 10):
+        """Utility method returning in-memory docs from a listing page."""
+        response = self._request(listing_url)
+        soup = BeautifulSoup(response.text, "html.parser")
+        docs = []
+        seen = set()
+        domain = urlparse(listing_url).netloc.lower()
+        for anchor in soup.select("a[href]"):
+            href = anchor.get("href") or ""
+            absolute = urljoin(listing_url, href)
+            if not absolute.startswith("http"):
+                continue
+            if absolute in seen:
+                continue
+            # Filter by same domain and reasonable path depth to avoid footer/header links
+            netloc = urlparse(absolute).netloc.lower()
+            if netloc != domain:
+                continue
+            path = urlparse(absolute).path or ""
+            segments = [s for s in path.split("/") if s]
+            if len(segments) <= 4:
+                # skip shallow links (home, section, tag pages)
+                continue
+            seen.add(absolute)
             try:
-                data = json.loads(script.string)
-                if isinstance(data, dict):
-                    if data.get('@type') in ['NewsArticle', 'Article', 'BlogPosting']:
-                        metadata['title'] = data.get('headline') or data.get('name')
-                        metadata['author'] = data.get('author', {}).get('name') if isinstance(data.get('author'), dict) else data.get('author')
-                        metadata['date_published'] = data.get('datePublished')
-                        metadata['date_modified'] = data.get('dateModified')
-                        metadata['description'] = data.get('description')
-                        break
-            except:
-                pass
-        
-        # OpenGraph tags
-        og_tags = {
-            'og:title': 'title',
-            'og:description': 'description',
-            'og:type': 'type',
-            'og:published_time': 'date_published',
-            'article:published_time': 'date_published',
-            'article:author': 'author'
-        }
-        
-        for meta in soup.find_all('meta'):
-            prop = meta.get('property') or meta.get('name', '')
-            content = meta.get('content')
-            
-            if prop in og_tags and content:
-                key = og_tags[prop]
-                if key not in metadata or not metadata[key]:
-                    metadata[key] = content
-        
-        # Meta tags standard
-        for meta in soup.find_all('meta', {'name': True}):
-            name = meta['name'].lower()
-            content = meta.get('content')
-            
-            if 'description' in name and content:
-                if 'description' not in metadata:
-                    metadata['description'] = content
-            elif 'author' in name and content:
-                if 'author' not in metadata:
-                    metadata['author'] = content
-            elif 'date' in name and content:
-                if 'date_published' not in metadata:
-                    metadata['date_published'] = content
-        
-        return metadata
+                doc, log = self.run(absolute)
+            except Exception:
+                continue
+            if doc is not None:
+                docs.append((doc, log))
+            if len(docs) >= max(1, int(limit)):
+                break
+        return docs
 
-    def clean_article_text(self, article_elem) -> str:
-        """
-        Nettoie et extrait le texte d'un article en préservant la structure.
-        """
-        if not article_elem:
-            return ""
-        
-        # Supprimer les éléments non pertinents
-        for tag in article_elem(['script', 'style', 'nav', 'header', 'footer', 'aside', 
-                                 'form', 'button', '.advertisement', '.ad', '.sidebar',
-                                 '.related-posts', '.comments', '.social-share']):
-            tag.decompose()
-        
-        # Extraire le texte avec structure
-        paragraphs = []
-        for elem in article_elem.find_all(['p', 'h2', 'h3', 'h4', 'li', 'blockquote']):
-            text = elem.get_text(strip=True)
-            if len(text) > 20:  # Filtrer les paragraphes trop courts
-                paragraphs.append(text)
-        
-        return '\n\n'.join(paragraphs)
+    def _extract_pub_date(self, node: Optional[BeautifulSoup], root: Optional[BeautifulSoup] = None) -> Optional[str]:
+        """Best-effort extraction of publication date from common meta tags or time tags.
 
-    def scrape_article(self, url: str) -> Dict[str, Any]:
+        The function first searches inside `node` (article fragment), then falls
+        back to `root` (full soup) to locate <meta> tags in the document head.
         """
-        Scrape un article avec détection automatique de structure.
-        """
-        result = {
-            'status': 'failed',
-            'url': url,
-            'source_type': 'news_article'
-        }
-        
         try:
-            logger.info(f"Scraping: {url}")
-            response = self.session.get(url, timeout=20)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Identification du site
-            site_type = self.identify_site(url)
-            patterns = self.site_patterns.get(site_type, self.site_patterns['default'])
-            
-            # Extraction des métadonnées
-            metadata = self.extract_metadata(soup, url)
-            result.update(metadata)
-            
-            # Extraction du titre (avec fallback)
-            title_elem = self.extract_with_patterns(soup, patterns['title'])
-            if title_elem:
-                result['title'] = title_elem.get_text(strip=True)
-            elif not result.get('title'):
-                # Fallback: titre de la page
-                title_tag = soup.find('title')
-                result['title'] = title_tag.get_text(strip=True) if title_tag else "Article sans titre"
-            
-            # Extraction de la date
-            date_elem = self.extract_with_patterns(soup, patterns['date'])
-            if date_elem:
-                date_text = date_elem.get('datetime') or date_elem.get_text(strip=True)
-                if not result.get('date_published'):
-                    result['date_published'] = date_text
-            
-            # Extraction de l'auteur
-            author_elem = self.extract_with_patterns(soup, patterns['author'])
-            if author_elem and not result.get('author'):
-                result['author'] = author_elem.get_text(strip=True)
-            
-            # Extraction du contenu de l'article
-            article_elem = self.extract_with_patterns(soup, patterns['article'])
-            
-            if article_elem:
-                content = self.clean_article_text(article_elem)
-                result['content'] = content
-                result['content_length'] = len(content)
-                
-                # Sauvegarder l'article
-                url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
-                filename = f"article_{url_hash}.txt"
-                filepath = self.output_dir / filename
-                
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    f.write(f"Titre: {result.get('title')}\n")
-                    f.write(f"Source: {url}\n")
-                    f.write(f"Date: {result.get('date_published', 'N/A')}\n")
-                    f.write(f"Auteur: {result.get('author', 'N/A')}\n")
-                    f.write(f"\n{'-'*60}\n\n")
-                    f.write(content)
-                
-                result['file_path'] = str(filepath)
-                
-                # Sauvegarder les métadonnées
-                meta_filename = f"article_{url_hash}_meta.json"
-                meta_path = self.output_dir / meta_filename
-                
-                with open(meta_path, 'w', encoding='utf-8') as f:
-                    json.dump(result, f, indent=2, ensure_ascii=False)
-                
-                result['metadata_file'] = str(meta_path)
-                result['status'] = 'success'
-                # Upload to S3 when configured
-                try:
-                    if getattr(settings, 'S3_BUCKET', ''):
-                        s = upload_file_to_s3(result['file_path'])
-                        if s:
-                            result['s3_path'] = s
-                            result['file_path'] = s
-                        ms = upload_file_to_s3(result['metadata_file'])
-                        if ms:
-                            result['metadata_s3'] = ms
-                            result['metadata_file'] = ms
-                except Exception:
-                    logger.warning("S3 upload failed for article: %s", url)
+            if node is not None:
+                metas = node.select("meta[property='article:published_time'], meta[name='date'], meta[name='pubdate']")
+                for m in metas:
+                    if m.has_attr('content'):
+                        return (m.get('content') or '').strip()
+                t = node.select_one('time[datetime]')
+                if t and t.has_attr('datetime'):
+                    return (t.get('datetime') or '').strip()
+                for sel in ('.pubdate', '.published', '.date', '.article-date'):
+                    el = node.select_one(sel)
+                    if el and el.get_text(strip=True):
+                        return el.get_text(strip=True)
 
-                logger.info(f"✅ Article extrait: {result['title'][:50]}... ({len(content)} chars)")
-            else:
-                # Fallback: Extraction générique
-                logger.warning(f"Structure non détectée, extraction générique pour {url}")
-                body = soup.find('body')
-                if body:
-                    for tag in body(['script', 'style', 'nav', 'header', 'footer', 'aside']):
-                        tag.decompose()
-                    content = body.get_text(separator='\n', strip=True)
-                    result['content'] = content
-                    result['content_length'] = len(content)
-                    result['extraction_method'] = 'generic_fallback'
-                    result['status'] = 'partial'
-                else:
-                    result['error'] = 'Impossible d\'extraire le contenu'
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Erreur scraping {url}: {e}")
-            result['error'] = str(e)
-            return result
-
-    def scrape(self, url: str) -> Dict[str, Any]:
-        """Point d'entrée compatible avec ResourceManager."""
-        return self.scrape_article(url)
-
-
-if __name__ == "__main__":
-    # Test
-    scraper = NewsScraper()
-    
-    test_urls = [
-        "https://lefaso.net/spip.php?article141676",
-        "https://www.cirad.fr/les-actualites-du-cirad/actualites/2023/les-mils-cereales-pour-une-agriculture-resiliente"
-    ]
-    
-    for url in test_urls:
-        print(f"\n{'='*60}")
-        result = scraper.scrape_article(url)
-        print(f"Status: {result.get('status')}")
-        print(f"Titre: {result.get('title')}")
-        print(f"Contenu: {len(result.get('content', ''))} caractères")
+            # Fallback: check the full document for head/meta tags
+            if root is not None:
+                metas = root.select("meta[property='article:published_time'], meta[name='date'], meta[name='pubdate'], meta[name='publication_date']")
+                for m in metas:
+                    if m.has_attr('content'):
+                        return (m.get('content') or '').strip()
+                t = root.select_one('time[datetime]')
+                if t and t.has_attr('datetime'):
+                    return (t.get('datetime') or '').strip()
+        except Exception:
+            return None
+        return None

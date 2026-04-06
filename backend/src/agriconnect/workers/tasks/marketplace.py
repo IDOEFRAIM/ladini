@@ -1,4 +1,4 @@
-"""
+﻿"""
 Marketplace background tasks.
 
 Consumes pending agent actions for MarketplaceBackgroundAgent and executes
@@ -13,7 +13,7 @@ import threading
 from typing import Any, Dict, List
 
 from agriconnect.graphs.nodes.marketplace_background import MarketplaceBackgroundAgent
-from agriconnect.protocols.mcp.infrastructure import AgriDBMCPServer, runtime
+from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer, runtime
 from agriconnect.workers.celery_app import celery_app
 from agriconnect.workers.celery_config import TIME_LIMITS
 from agriconnect.workers.task_base import AgriTask, error_result, success_result
@@ -148,3 +148,4 @@ def process_pending_actions(self, limit: int = 20) -> Dict[str, Any]:
             task_name=self.name,
             retryable=True,
         )
+

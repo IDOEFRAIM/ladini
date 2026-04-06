@@ -1,360 +1,264 @@
+from __future__ import annotations
+
 """
-DataPlatformScraper - Exploration de plateformes de données statistiques et catalogues.
+Data Platform Scraper (V2.1)
 
-Plateformes supportées:
-1. microdata.insd.bf: Catalogue de microdonnées INSD Burkina Faso
-2. FEWS NET Data Book: Livre de données sur la sécurité alimentaire
-3. FAO Agricultural Survey Data: Données d'enquêtes agricoles
-4. Data.gov Burkina Faso: Données ouvertes gouvernementales
-
-Stratégies:
-- Exploration de catalogues avec pagination
-- Extraction de métadonnées de datasets (titre, description, format, liens)
-- Téléchargement de fichiers de données (CSV, Excel, JSON)
-- Scraping de pages de documentation de données
+Scraper specialized for data catalogs (CKAN, Socrata, INSD, FAO).
+Extracts structured metadata (JSON-LD), resource download links,
+and converts dataset description pages into Markdown.
 """
 
-import requests
-from bs4 import BeautifulSoup
-import re
 import json
-import logging
-from typing import Dict, Any, Optional, List
-from pathlib import Path
+import re
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
-import hashlib
 
-logger = logging.getLogger("DataPlatformScraper")
+from bs4 import BeautifulSoup
+
+from agriconnect.core.schemas import RawDocument
+from agriconnect.core.scraper_utils import extract_markdown_from_html
+
+from .base import BaseScraper
+from .registry import register_scraper
 
 
-class DataPlatformScraper:
-    """
-    Scraper pour plateformes de données et catalogues statistiques.
-    """
+@register_scraper("data_platform", "dataset_catalog", "statistics")
+class DataPlatformScraper(BaseScraper):
+    """V2.1 data-platform scraper (catalog metadata + markdown, zero-IO)."""
 
-    def __init__(self, output_dir: str = "backend/sources/raw_data/data_platforms"):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+    name = "data_platform_scraper"
+    version = "2.1.0"
+
+    # Extended mapping for file format detection
+    FORMAT_MAPPING = {
+        ".csv": "CSV",
+        ".xlsx": "Excel",
+        ".xls": "Excel",
+        ".json": "JSON",
+        ".xml": "XML",
+        ".zip": "ZIP",
+        ".geojson": "GeoJSON",
+        ".dta": "Stata",
+        ".sav": "SPSS",
+        ".rds": "R Data",
+        ".pdf": "PDF",
+    }
+
+    @staticmethod
+    def identify_platform(url: str, soup: Optional[BeautifulSoup] = None) -> str:
+        """Identify the data platform via HTML signatures or the URL."""
+        if soup is not None:
+            # Vérification via la balise generator
+            generator_meta = soup.select_one('meta[name="generator" i]')
+            if generator_meta:
+                val = (generator_meta.get("content") or "").strip().lower()
+                for platform in ["ckan", "socrata", "dkan", "junar", "arcgis"]:
+                    if platform in val:
+                        return platform
+
+            # Vérification via les classes CSS communes ou meta tags spécifiques
+            html_content = str(soup).lower()
+            if "ckan-" in html_content or "dataset-resources" in html_content:
+                return "ckan"
+            if "socrata" in html_content:
+                return "socrata"
+
+        low_url = url.lower()
+        if "microdata.insd.bf" in low_url:
+            return "insd_microdata"
+        if "fews.net" in low_url and "data" in low_url:
+            return "fews_data"
+        if "fao.org" in low_url and ("data" in low_url or "survey" in low_url):
+            return "fao_data"
+        if "data.gov" in low_url:
+            return "data_gov"
         
-        self.datasets_dir = self.output_dir / "datasets"
-        self.datasets_dir.mkdir(exist_ok=True)
-        
-        self.metadata_dir = self.output_dir / "metadata"
-        self.metadata_dir.mkdir(exist_ok=True)
-        
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/json,*/*'
-        }
-        
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
+        return "generic_catalog"
 
-    def identify_platform(self, url: str) -> str:
-        """Identifie le type de plateforme à partir de l'URL."""
-        url_lower = url.lower()
-        
-        if 'microdata.insd.bf' in url_lower:
-            return 'insd_microdata'
-        elif 'fews.net' in url_lower and 'data' in url_lower:
-            return 'fews_data'
-        elif 'fao.org' in url_lower and ('data' in url_lower or 'survey' in url_lower):
-            return 'fao_data'
-        elif 'data.gov' in url_lower:
-            return 'data_gov'
-        else:
-            return 'generic'
-
-    def scrape_insd_microdata(self, url: str) -> Dict[str, Any]:
+    def _extract_structured_metadata(self, soup: BeautifulSoup) -> Dict[str, Any]:
         """
-        Scrape le catalogue INSD de microdonnées.
+        Extract JSON-LD blocks (Dataset, DataCatalog).
+        Note: normalize into lists to avoid data overwrite when @graph is present.
         """
-        result = {
-            'status': 'failed',
-            'url': url,
-            'platform': 'insd_microdata'
+        results: Dict[str, List[Dict[str, Any]]] = {
+            "datasets": [],
+            "catalogs": [],
+            "organizations": [],
+            "raw_jsonld": []
         }
-        
-        try:
-            response = self.session.get(url, timeout=20)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
+
+        scripts = soup.find_all("script", {"type": "application/ld+json"})
+        for script in scripts:
+            raw = script.string or script.get_text() or ""
+            # Nettoyage des commentaires JS qui cassent le parser JSON
+            raw = re.sub(r"//.*?(?=\n|$)", "", raw)
+            raw = re.sub(r"/\*.*?\*/", "", raw, flags=re.S)
+            raw = raw.strip()
             
-            # Extraction du titre de la page/dataset
-            title = soup.find('h1') or soup.find('h2')
-            result['title'] = title.get_text(strip=True) if title else "Dataset INSD"
-            
-            # Chercher les métadonnées de dataset
-            metadata_sections = soup.find_all(['div', 'section'], class_=re.compile('metadata|overview', re.I))
-            
-            dataset_info = {}
-            for section in metadata_sections:
-                # Chercher les paires label: valeur
-                labels = section.find_all(['dt', 'strong', 'label'])
-                for label in labels:
-                    label_text = label.get_text(strip=True).lower()
-                    value_elem = label.find_next_sibling()
-                    if value_elem:
-                        value = value_elem.get_text(strip=True)
-                        if 'description' in label_text:
-                            dataset_info['description'] = value
-                        elif 'producer' in label_text or 'producteur' in label_text:
-                            dataset_info['producer'] = value
-                        elif 'year' in label_text or 'année' in label_text:
-                            dataset_info['year'] = value
-                        elif 'coverage' in label_text or 'couverture' in label_text:
-                            dataset_info['coverage'] = value
-            
-            result.update(dataset_info)
-            
-            # Chercher les liens de téléchargement
-            download_links = []
-            for a in soup.find_all('a', href=True):
-                href = a['href']
-                text = a.get_text(strip=True).lower()
+            if not raw:
+                continue
+
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                continue
+
+            # Normalisation en liste pour traitement uniforme
+            items = []
+            if isinstance(payload, dict):
+                if "@graph" in payload and isinstance(payload["@graph"], list):
+                    items.extend(payload["@graph"])
+                items.append(payload)
+            elif isinstance(payload, list):
+                items.extend(payload)
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
                 
-                # Identifier les liens de téléchargement
-                if any(word in text for word in ['download', 'télécharger', 'export']) or \
-                   any(ext in href.lower() for ext in ['.csv', '.xlsx', '.xls', '.json', '.xml', '.dta', '.sav']):
-                    full_url = urljoin(url, href)
-                    download_links.append({
-                        'url': full_url,
-                        'label': a.get_text(strip=True),
-                        'format': self._guess_file_format(href)
-                    })
-            
-            result['download_links'] = download_links
-            
-            # Extraire le contenu principal
-            main_content = soup.find('main') or soup.find('div', class_=re.compile('content|main', re.I))
-            if main_content:
-                for tag in main_content(['script', 'style', 'nav', 'aside']):
-                    tag.decompose()
-                result['content'] = main_content.get_text(separator='\n', strip=True)
-            
-            result['status'] = 'success'
-            logger.info(f"✅ INSD dataset scraped: {result['title']}")
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Erreur scraping INSD {url}: {e}")
-            result['error'] = str(e)
-            return result
-
-    def scrape_fews_data(self, url: str) -> Dict[str, Any]:
-        """
-        Scrape FEWS NET Data Book et données de sécurité alimentaire.
-        """
-        result = {
-            'status': 'failed',
-            'url': url,
-            'platform': 'fews_data'
-        }
-        
-        try:
-            response = self.session.get(url, timeout=20)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Titre
-            title = soup.find('h1') or soup.find('title')
-            result['title'] = title.get_text(strip=True) if title else "FEWS Data"
-            
-            # Chercher les tableaux de données
-            tables = soup.find_all('table')
-            result['tables_count'] = len(tables)
-            
-            # Chercher les liens de téléchargement de données
-            download_links = []
-            for a in soup.find_all('a', href=True):
-                href = a['href']
-                if any(ext in href.lower() for ext in ['.csv', '.xlsx', '.json', '.zip']):
-                    download_links.append({
-                        'url': urljoin(url, href),
-                        'label': a.get_text(strip=True)
-                    })
-            
-            result['download_links'] = download_links
-            
-            # Contenu principal
-            content = soup.get_text(separator='\n', strip=True)
-            result['content'] = content
-            result['status'] = 'success'
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Erreur scraping FEWS Data {url}: {e}")
-            result['error'] = str(e)
-            return result
-
-    def scrape_generic_data_page(self, url: str) -> Dict[str, Any]:
-        """
-        Scraping générique pour plateformes de données non spécifiques.
-        """
-        result = {
-            'status': 'failed',
-            'url': url,
-            'platform': 'generic'
-        }
-        
-        try:
-            response = self.session.get(url, timeout=20)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Titre
-            title = soup.find('h1') or soup.find('title')
-            result['title'] = title.get_text(strip=True) if title else "Data Platform"
-            
-            # Chercher les métadonnées structurées (JSON-LD, DCAT, etc.)
-            for script in soup.find_all('script', {'type': 'application/ld+json'}):
-                try:
-                    data = json.loads(script.string)
-                    if isinstance(data, dict) and data.get('@type') == 'Dataset':
-                        result['structured_metadata'] = data
-                        break
-                except:
-                    pass
-            
-            # Chercher tous les liens de fichiers de données
-            data_links = []
-            data_extensions = ['.csv', '.xlsx', '.xls', '.json', '.xml', '.geojson', 
-                             '.zip', '.dta', '.sav', '.rds']
-            
-            for a in soup.find_all('a', href=True):
-                href = a['href']
-                if any(ext in href.lower() for ext in data_extensions):
-                    data_links.append({
-                        'url': urljoin(url, href),
-                        'text': a.get_text(strip=True),
-                        'format': self._guess_file_format(href)
-                    })
-            
-            result['data_links'] = data_links
-            
-            # Description
-            desc = soup.find('meta', {'name': 'description'})
-            if desc:
-                result['description'] = desc.get('content')
-            
-            # Contenu
-            main = soup.find('main') or soup.find('article')
-            if main:
-                for tag in main(['script', 'style']):
-                    tag.decompose()
-                result['content'] = main.get_text(separator='\n', strip=True)
-            else:
-                result['content'] = soup.get_text(separator='\n', strip=True)[:5000]
-            
-            result['status'] = 'success'
-            return result
-            
-        except Exception as e:
-            logger.error(f"Erreur scraping generic data {url}: {e}")
-            result['error'] = str(e)
-            return result
-
-    def _guess_file_format(self, url: str) -> str:
-        """Devine le format de fichier à partir de l'URL."""
-        url_lower = url.lower()
-        
-        formats = {
-            '.csv': 'CSV',
-            '.xlsx': 'Excel',
-            '.xls': 'Excel',
-            '.json': 'JSON',
-            '.xml': 'XML',
-            '.zip': 'ZIP',
-            '.geojson': 'GeoJSON',
-            '.dta': 'Stata',
-            '.sav': 'SPSS',
-            '.rds': 'R Data'
-        }
-        
-        for ext, format_name in formats.items():
-            if ext in url_lower:
-                return format_name
-        
-        return 'Unknown'
-
-    def download_dataset(self, url: str, filename: Optional[str] = None) -> Optional[Path]:
-        """
-        Télécharge un fichier de données.
-        """
-        try:
-            response = self.session.get(url, timeout=60, stream=True)
-            response.raise_for_status()
-            
-            if not filename:
-                # Extraire depuis Content-Disposition ou URL
-                content_disp = response.headers.get('Content-Disposition', '')
-                filename_match = re.search(r'filename[^;=\n]*=([\'"]?)(.+?)\1', content_disp)
+                t = item.get("@type", "")
+                types = set(t) if isinstance(t, list) else {t}
                 
-                if filename_match:
-                    filename = filename_match.group(2)
-                else:
-                    url_filename = url.split('/')[-1].split('?')[0]
-                    filename = url_filename if url_filename else f"dataset_{hashlib.md5(url.encode()).hexdigest()[:8]}.dat"
-            
-            # Nettoyer le nom de fichier
-            filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-            filepath = self.datasets_dir / filename
-            
-            # Téléchargement
-            with open(filepath, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            
-            logger.info(f"✅ Dataset téléchargé: {filename}")
-            return filepath
-            
-        except Exception as e:
-            logger.error(f"Erreur téléchargement dataset {url}: {e}")
-            return None
+                if "Dataset" in types:
+                    results["datasets"].append(item)
+                elif "DataCatalog" in types:
+                    results["catalogs"].append(item)
+                elif "Organization" in types:
+                    results["organizations"].append(item)
+                
+            results["raw_jsonld"].append(payload)
 
-    def scrape(self, url: str) -> Dict[str, Any]:
-        """
-        Point d'entrée principal - détecte la plateforme et route.
-        """
-        platform = self.identify_platform(url)
-        logger.info(f"Plateforme détectée: {platform} pour {url}")
-        
-        if platform == 'insd_microdata':
-            result = self.scrape_insd_microdata(url)
-        elif platform == 'fews_data':
-            result = self.scrape_fews_data(url)
-        else:
-            result = self.scrape_generic_data_page(url)
-        
-        # Sauvegarder les métadonnées
-        if result.get('status') == 'success':
-            url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
-            meta_filename = f"data_platform_{url_hash}.json"
-            meta_path = self.metadata_dir / meta_filename
-            
-            with open(meta_path, 'w', encoding='utf-8') as f:
-                json.dump(result, f, indent=2, ensure_ascii=False)
-            
-            result['metadata_file'] = str(meta_path)
-        
-        return result
+        # Nettoyage des entrées vides
+        return {k: v for k, v in results.items() if v}
 
+    def _guess_file_format(self, url: str, anchor: Optional[Any] = None) -> str:
+        """Determine file format (URL > attributes > CSS class)."""
+        url_l = url.lower()
+        
+        # 1. Vérification par extension d'URL
+        for ext, label in self.FORMAT_MAPPING.items():
+            if ext in url_l:
+                return label
 
-if __name__ == "__main__":
-    # Test
-    scraper = DataPlatformScraper()
-    
-    test_urls = [
-        "https://microdata.insd.bf/index.php/catalog/83",
-        "https://help.fews.net/fde/v1/burkina-faso-data-book"
-    ]
-    
-    for url in test_urls:
-        print(f"\n{'='*60}")
-        result = scraper.scrape(url)
-        print(f"Status: {result.get('status')}")
-        print(f"Titre: {result.get('title')}")
-        print(f"Liens de données: {len(result.get('data_links', []))}")
+        # 2. Vérification via attributs HTML (spécifique CKAN/DKAN)
+        if anchor:
+            for attr in ["data-format", "data_format", "data-type", "type"]:
+                val = str(anchor.get(attr) or "").strip().lower()
+                for ext, label in self.FORMAT_MAPPING.items():
+                    if ext.strip(".") in val:
+                        return label
+            
+            # 3. Vérification via les classes CSS
+            classes = " ".join(anchor.get("class", [])).lower()
+            for ext, label in self.FORMAT_MAPPING.items():
+                if f"format-{ext.strip('.')}" in classes:
+                    return label
+
+        return "Unknown"
+
+    def _extract_data_links(self, soup: BeautifulSoup, page_url: str) -> List[Dict[str, str]]:
+        """Extract data download links by filtering noise."""
+        # Focus on content areas to avoid menus
+        content_area = soup.select_one(
+            "main, #content, .dataset-resources, .resource-list, .downloads, .entry-content"
+        ) or soup
+
+        links_by_url: Dict[str, Dict[str, str]] = {}
+        # Action words used to detect download links (includes English and French variants)
+        action_words = {"download", "telecharger", "télécharger", "export", "resource", "données", "data", "downloadable"}
+
+        for anchor in content_area.select("a[href]"):
+            href = anchor.get("href") or ""
+            if not href or href.startswith(("#", "javascript:")):
+                continue
+                
+            absolute = urljoin(page_url, href)
+            # Avoid loops when the link points to the page itself
+            if absolute.rstrip("/") == page_url.rstrip("/"):
+                continue
+
+            text = (anchor.get_text(strip=True) or "").lower()
+            fmt = self._guess_file_format(absolute, anchor)
+            
+            # Critères de pertinence
+            is_data_fmt = fmt != "Unknown"
+            is_action = any(word in text for word in action_words)
+            has_download_attr = anchor.has_attr("download")
+
+            if not (is_data_fmt or is_action or has_download_attr):
+                continue
+
+            # Construction du label
+            label = anchor.get_text(strip=True) or anchor.get("title") or anchor.get("aria-label")
+            if not label:
+                img = anchor.find("img")
+                label = img.get("alt") if img else ""
+            
+            if not label:
+                label = urlparse(absolute).path.split("/")[-1] or "Resource"
+
+            links_by_url[absolute] = {
+                "url": absolute,
+                "label": label[:120].strip(),
+                "format": fmt,
+            }
+
+        return list(links_by_url.values())
+
+    def scrape(self, url: str) -> Tuple[Optional[RawDocument], Dict]:
+        """Main stateless scraping method."""
+        response = self._request(url)
+        html = response.text
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Extraction du titre (priorité H1 de contenu)
+        title_elem = soup.select_one("h1, .dataset-title, .entry-title") or soup.select_one("title")
+        title = title_elem.get_text(strip=True) if title_elem else "Data Platform Page"
+
+        platform = self.identify_platform(url, soup=soup)
+        
+        # Sélecteurs optimisés pour capturer les tables de métadonnées (Data Dictionary)
+        markdown_source_html = self._prepare_markdown_html(
+            html,
+            base_url=url,
+            preferred_selectors="main, #content, .dataset-details, .dataset-view, .wrapper-content, article",
+        )
+        
+        markdown = extract_markdown_from_html(markdown_source_html, include_links=True)
+        quality = self._assess_extraction_quality(markdown, html)
+
+        if quality.get("blocked_by_waf") or not markdown.strip():
+            return None, {
+                "http_status": response.status_code,
+                "bytes_downloaded": len(response.content or b""),
+                "raw_payload": html,
+                "blocked_by_waf": bool(quality.get("blocked_by_waf")),
+            }
+
+        data_links = self._extract_data_links(soup, url)
+        structured_metadata = self._extract_structured_metadata(soup)
+
+        doc = self._build_document(
+            url=url,
+            title=title,
+            markdown=markdown,
+            metadata={
+                "source_type": "data_platform",
+                "platform": platform,
+                "source_domain": self._source_domain(url),
+                "publication_date": None, # Ideally extracted from structured_metadata later
+                "language": self._extract_language_code(soup),
+                "extraction_method": "html_to_markdown",
+                "data_links": data_links,
+                "structured_metadata": structured_metadata,
+                "partial_extraction": bool(quality.get("partial_extraction")),
+            },
+            language=self._extract_language_code(soup),
+        )
+
+        return doc, {
+            "http_status": response.status_code,
+            "bytes_downloaded": len(response.content or b""),
+            "raw_payload": html,
+            "platform_detected": platform,
+        }

@@ -1,4 +1,4 @@
-"""Helpers extracted from message_flow to reduce file size.
+﻿"""Helpers extracted from message_flow to reduce file size.
 
 Ce module regroupe l'initialisation DB, protocoles, experts,
 services et tracing qui alourdissaient `message_flow.py`.
@@ -7,6 +7,7 @@ import logging
 import os
 from agriconnect.rag.components import get_groq_sdk
 from agriconnect.core.setup import AgriContext
+import agriconnect.core.db as core_db_new
 from agriconnect.services.memory import (
     UserFarmProfile,
     ProfileExtractor,
@@ -15,29 +16,44 @@ from agriconnect.services.memory import (
 )
 from agriconnect.protocols.mcp import MCPDatabaseServer, MCPRagServer, MCPWeatherServer, MCPContextServer
 from agriconnect.protocols.ag_ui import WhatsAppRenderer, WebRenderer, SMSRenderer
-from agriconnect.services.voice import VoiceEngine
+from agriconnect.services.voice_engine import VoiceEngine
 from agriconnect.services.db_handler import AgriDatabase
 from agriconnect.core.settings import settings
 import agriconnect.core.database as _core_db
-from agriconnect.graphs.nodes.sentinelle import ClimateSentinel
-from agriconnect.graphs.nodes.formation import FormationCoach
-from agriconnect.graphs.nodes.market import MarketCoach
-from agriconnect.graphs.nodes.marketplace_v3 import MarketplaceAgentV3
+from agriconnect.graphs.agents.sentinelle.graph import ClimateSentinel
+from agriconnect.graphs.agents.formation.graph import FormationCoach
+from agriconnect.graphs.agents.market_coach.graph import MarketCoach
+from agriconnect.graphs.agents.marketplace_v3.graph import MarketplaceAgentV3
 from agriconnect.services.database.database_service import AgriDatabaseService
-# ParallelExecutor removed — fan-out now handled by LangGraph Send
+# ParallelExecutor removed â€” fan-out now handled by LangGraph Send
 
 logger = logging.getLogger(__name__)
 
 
 def init_db_and_memory(flow):
-    if _core_db._engine and _core_db._SessionLocal:
-        flow.db = AgriDatabase(engine=_core_db._engine, session_factory=_core_db._SessionLocal)
-        flow.session_factory = _core_db._SessionLocal
-    elif settings.DATABASE_URL:
-        flow.db = AgriDatabase(db_url=settings.DATABASE_URL)
-        flow.session_factory = None
-        logger.warning("⚠️  DB: fallback engine propre (core/database.py non initialisé)")
-    else:
+    # Prefer the new centralized sync DB hub if available
+    try:
+        if getattr(core_db_new, '_SYNC_ENGINE', None) is not None and getattr(core_db_new, '_SYNC_SESSION_FACTORY', None) is not None:
+            flow.db = AgriDatabase(engine=core_db_new._SYNC_ENGINE, session_factory=core_db_new._SYNC_SESSION_FACTORY)
+            flow.session_factory = core_db_new._SYNC_SESSION_FACTORY
+            logger.debug("Using centralized core.db engine/session factory")
+        elif settings.DATABASE_URL:
+            flow.db = AgriDatabase(db_url=settings.DATABASE_URL)
+            flow.session_factory = None
+            logger.warning("âš ï¸  DB: fallback engine propre (core/database.py non initialisÃ©)")
+        else:
+            # Try to lazily initialize the core DB engine (may raise)
+            try:
+                eng = core_db_new.get_engine()
+                sf = getattr(core_db_new, '_SYNC_SESSION_FACTORY', None)
+                if eng is not None and sf is not None:
+                    flow.db = AgriDatabase(engine=eng, session_factory=sf)
+                    flow.session_factory = sf
+            except Exception:
+                flow.db = None
+                flow.session_factory = None
+    except Exception as e:
+        logger.warning("DB init fallback triggered: %s", e)
         flow.db = None
         flow.session_factory = None
 
@@ -48,26 +64,26 @@ def init_db_and_memory(flow):
             _episodic = EpisodicMemory(flow.session_factory, llm_client=flow.llm)
             _extractor = ProfileExtractor(flow.llm, _profile)
             flow.memory = ContextOptimizer(_profile, _episodic, _extractor)
-            logger.info("🧠 Mémoire 3 niveaux activée")
+            logger.info("ðŸ§  MÃ©moire 3 niveaux activÃ©e")
         except Exception as e:
-            logger.warning("⚠️  Mémoire désactivée: %s", e)
+            logger.warning("âš ï¸  MÃ©moire dÃ©sactivÃ©e: %s", e)
 
 
 def init_protocols(flow):
     """Initialize MCP + Shield stack.  The Orchestrator is the SOLE HOST.
 
-    Chain: AgriDBMCPServer (backend) → MCPPermissionClient (shield)
-           → MCPPermissionHostApp (preflight) → MCPSessionManager (session/UI)
+    Chain: AgriDBMCPServer (backend) â†’ MCPPermissionClient (shield)
+           â†’ MCPPermissionHostApp (preflight) â†’ MCPSessionManager (session/UI)
 
     Experts receive **only** the MCPSessionManager via dependency injection;
     they never instantiate their own MCP clients.
     """
-    from agriconnect.protocols.mcp.security import (
+    from agriconnect.infrastructure.mcp.security import (
         MCPPermissionClient,
         MCPPermissionHostApp,
         MCPSessionManager,
     )
-    from agriconnect.protocols.mcp.infrastructure import AgriDBMCPServer
+    from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer
 
     flow.mcp_db = None
     flow.mcp_rag = None
@@ -82,13 +98,13 @@ def init_protocols(flow):
     except Exception as e:
         logger.warning("MCP Servers fallback: %s", e)
 
-    # ── Build the Shield stack (single authority) ────────────────────
+    # â”€â”€ Build the Shield stack (single authority) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     db_backend = flow.mcp_db if flow.mcp_db else AgriDBMCPServer()
 
-    # HITL callback placeholder — will be wired to Gradio/WhatsApp later
+    # HITL callback placeholder â€” will be wired to Gradio/WhatsApp later
     async def _hitl_callback(tool_name, args, reason):
         """Default HITL: deny and log. Override at runtime for real UI."""
-        logger.warning("HITL requested for '%s' — no UI wired, denying. Reason: %s", tool_name, reason)
+        logger.warning("HITL requested for '%s' â€” no UI wired, denying. Reason: %s", tool_name, reason)
         return False
 
     shield_client = MCPPermissionClient(
@@ -107,7 +123,7 @@ def init_protocols(flow):
     setattr(flow.ctx, "mcp_host", shield_host)
     setattr(flow.ctx, "mcp_session", shield_session)
 
-    # A2A disabled — local workflow invocations only
+    # A2A disabled â€” local workflow invocations only
     flow.a2a = None
 
     flow.renderers = {
@@ -118,7 +134,7 @@ def init_protocols(flow):
 
 
 def init_experts(flow):
-    """Initialize expert agents.  Experts receive the Shield via DI — they
+    """Initialize expert agents.  Experts receive the Shield via DI â€” they
     never create their own MCPPermissionClient.
 
     The ``mcp_session`` (MCPSessionManager) is passed to experts that need
@@ -128,31 +144,27 @@ def init_experts(flow):
     """
     shield = getattr(flow, "mcp_session", None)
 
-    flow.sentinelle = ClimateSentinel(llm_client=flow.llm, mcp_session=shield)
+    flow.sentinelle = ClimateSentinel.from_config(llm_client=flow.llm, mcp_session=shield)
     # Pass the orchestrator session/permission manager (shield) to FormationCoach
     # so it has the required Shield for MCP tool calls and auditing.
-    flow.formation = FormationCoach(
+    flow.formation = FormationCoach.from_config(
         llm_client=flow.llm,
         mcp_rag=flow.mcp_rag,
         mcp_context=flow.mcp_context,
         shield=shield,
     )
-    # Market & Marketplace receive the Shield — NOT a raw MCP server
-    flow.market = MarketCoach(llm_client=flow.llm, mcp_session=shield)
+    # MarketCoach & Marketplace receive the Shield â€” NOT a raw MCP server
+    flow.market_coach = MarketCoach.from_config(llm_client=flow.llm, mcp_session=shield)
+    # Backward-compat alias
+    flow.market = flow.market_coach
 
     db_service = AgriDatabaseService()
-    flow.marketplace = MarketplaceAgentV3(
+    flow.marketplace = MarketplaceAgentV3.from_config(
         llm_client=flow.llm,
         mcp_session=shield,
         db_service=db_service,
     )
-    # Ensure marketplace tool uses the Shield client for MCP delegations
-    try:
-        # MarketplaceAgentV3 creates MarketplaceToolV3(self.tool)
-        if hasattr(flow.marketplace, "tool") and getattr(flow, "mcp_shield", None):
-            flow.marketplace.tool.mcp_client = flow.mcp_shield
-    except Exception:
-        logger.debug("Could not attach mcp_shield to marketplace tool; will use local db_service fallback")
+
     # Legacy MarketplaceAgent removed; MarketplaceAgentV3 is the canonical implementation.
 
     # Legacy workflow builders and invoker removed: experts are instantiated
@@ -183,4 +195,5 @@ def init_tracing(flow):
     from agriconnect.core.tracing import init_tracing
     flow._tracing_ok = init_tracing()
     if flow._tracing_ok:
-        logger.info("🔭 LangSmith tracing actif pour l'orchestrateur")
+        logger.info("ðŸ”­ LangSmith tracing actif pour l'orchestrateur")
+

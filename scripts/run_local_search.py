@@ -1,7 +1,7 @@
 import json
 import traceback
 import sys
-from agriconnect.protocols.mcp.servers.agri_rag_server import AgriRAGMCPServer
+from agriconnect.protocols.mcp.servers.rag_server import AgriRAGMCPServer
 
 try:
     s = AgriRAGMCPServer()
