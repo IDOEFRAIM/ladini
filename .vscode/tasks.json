@@ -4,8 +4,119 @@
 		{
 			"label": "Run all tests in tests/",
 			"type": "shell",
-			"command": "pytest tests/",
+			"command": "pytest backend/tests/",
 			"group": "test"
+		},
+		{
+			"label": "Smoke test all scrapers",
+			"type": "shell",
+			"command": ".\\.venv\\Scripts\\python.exe",
+			"args": [
+				"scripts/run_all_scrapers_smoke.py",
+				"--output-dir",
+				"backend/sources/raw_data"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Run targeted certification FAO+Meteo",
+			"type": "shell",
+			"command": "C:/Users/LENOVO T14s/Documents/projet/AgriConnect/.venv/Scripts/python.exe",
+			"args": [
+				"scripts/certify_e2e_local.py",
+				"--sources",
+				"fao_technical_resources,meteo_agromet_decadaire"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Python hello check",
+			"type": "shell",
+			"command": "C:/Users/LENOVO T14s/Documents/projet/AgriConnect/.venv/Scripts/python.exe",
+			"args": [
+				"-c",
+				"print('hello')"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Run targeted certification FAO+Meteo (patched)",
+			"type": "shell",
+			"command": "C:/Users/LENOVO T14s/Documents/projet/AgriConnect/.venv/Scripts/python.exe",
+			"args": [
+				"scripts/certify_e2e_local.py",
+				"--sources",
+				"fao_technical_resources,meteo_agromet_decadaire"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Check discovery counts FAO+Meteo",
+			"type": "shell",
+			"command": "C:/Users/LENOVO T14s/Documents/projet/AgriConnect/.venv/Scripts/python.exe",
+			"args": [
+				"tmp/check_discovery_counts.py"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Check discovery counts FAO+Meteo (bounded)",
+			"type": "shell",
+			"command": "C:/Users/LENOVO T14s/Documents/projet/AgriConnect/.venv/Scripts/python.exe",
+			"args": [
+				"tmp/check_discovery_counts.py"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "Run MCP RAG integration check",
+			"type": "shell",
+			"command": "if (-not $env:DB_PASSWORD) { Write-Error 'DB_PASSWORD env var is not set'; exit 1 }; & '.\\.venv\\Scripts\\python.exe' backend/scripts/integration_mcp_rag_test.py; $rc = $LASTEXITCODE; Write-Output \"TASK_EXIT=$rc\"",
+			"isBackground": false
+		},
+		{
+			"label": "Run MCP RAG integration check",
+			"type": "shell",
+			"command": "if (-not $env:DB_PASSWORD) { Write-Error 'DB_PASSWORD env var is not set'; exit 1 }; & '.\\.venv\\Scripts\\python.exe' backend/scripts/integration_mcp_rag_test.py; $rc = $LASTEXITCODE; Write-Output \"TASK_EXIT=$rc\"",
+			"isBackground": false
+		},
+		{
+			"label": "Run MCP RAG integration check (extended timeout)",
+			"type": "shell",
+			"command": "if (-not $env:DB_PASSWORD) { Write-Error 'DB_PASSWORD env var is not set'; exit 1 }; $env:AGRICONNECT_RAG_QUERY_TIMEOUT_S = '90'; & '.\\.venv\\Scripts\\python.exe' backend/scripts/integration_mcp_rag_test.py; $rc = $LASTEXITCODE; Remove-Item Env:AGRICONNECT_RAG_QUERY_TIMEOUT_S -ErrorAction SilentlyContinue; Write-Output \"TASK_EXIT=$rc\"",
+			"isBackground": false
+		},
+		{
+			"label": "Run MCP RAG integration check (post-fix)",
+			"type": "shell",
+			"command": "& '.\\.venv\\Scripts\\python.exe' backend/scripts/integration_mcp_rag_test.py; $rc = $LASTEXITCODE; Write-Output \"TASK_EXIT=$rc\"",
+			"isBackground": false
+		},
+		{
+			"label": "Run MCP RAG integration check (final)",
+			"type": "shell",
+			"command": "$env:AGRICONNECT_RAG_QUERY_TIMEOUT_S = '90'; & '.\\.venv\\Scripts\\python.exe' backend/scripts/integration_mcp_rag_test.py; $rc = $LASTEXITCODE; Remove-Item Env:AGRICONNECT_RAG_QUERY_TIMEOUT_S -ErrorAction SilentlyContinue; Write-Output \"TASK_EXIT=$rc\"",
+			"isBackground": false
+		},
+		{
+			"label": "MCP RAG final validation",
+			"type": "shell",
+			"command": "$env:AGRICONNECT_RAG_QUERY_TIMEOUT_S = '90'; & '.\\.venv\\Scripts\\python.exe' backend/scripts/integration_mcp_rag_test.py; $rc = $LASTEXITCODE; Remove-Item Env:AGRICONNECT_RAG_QUERY_TIMEOUT_S -ErrorAction SilentlyContinue; Write-Output \"TASK_EXIT=$rc\"",
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "MCP RAG validation after env fix",
+			"type": "shell",
+			"command": "& '.\\.venv\\Scripts\\python.exe' backend/scripts/integration_mcp_rag_test.py; $rc = $LASTEXITCODE; Write-Output \"TASK_EXIT=$rc\"",
+			"isBackground": false,
+			"group": "test"
+		},
+		{
+			"label": "MCP RAG validation with .env defaults",
+			"type": "shell",
+			"command": "& '.\\.venv\\Scripts\\python.exe' backend/scripts/integration_mcp_rag_test.py; $rc = $LASTEXITCODE; Write-Output \"TASK_EXIT=$rc\"",
+			"isBackground": false
 		}
 	]
 }

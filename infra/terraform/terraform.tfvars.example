@@ -1,0 +1,17 @@
+aws_access_key = "AKIA..."
+aws_secret_key = "YOUR_SECRET_KEY"
+aws_region     = "eu-west-3"
+environment    = "dev"
+
+vpc_id            = "vpc-xxxxxxxx"
+public_subnet_ids = ["subnet-aaaaaaa", "subnet-bbbbbbb"]
+
+db_secret_arn = "arn:aws:secretsmanager:eu-west-3:123456789012:secret:agriconnect/db-xxxxx"
+
+bucket_name          = "agriconnect-ingestion-raw"
+pdf_links_queue_name = "pdf-links-queue"
+ingestion_queue_name = "s3-events-queue"
+
+scrapers_ecr_repo_name  = "agriconnect-scrapers"
+ingestion_ecr_repo_name = "agriconnect-ingestion"
+image_tag               = "latest"

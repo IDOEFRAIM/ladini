@@ -15,7 +15,7 @@ from agriconnect.protocols.mcp import (
 )
 from agriconnect.protocols.ag_ui import WhatsAppRenderer, WebRenderer, SMSRenderer
 
-# MÃ©moire 3 niveaux
+# Mémoire 3 niveaux
 from agriconnect.services.memory import (
     UserFarmProfile, ProfileExtractor, EpisodicMemory, ContextOptimizer
 )
@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 
 class AgriContext:
     """
-    SystÃ¨me Nerveux Central AgriConnect.
-    GÃ¨re le cycle de vie des ressources (DB, MCP, A2A, MÃ©moire).
+    Système Nerveux Central AgriConnect.
+    Gère le cycle de vie des ressources (DB, MCP, Mémoire).
     """
 
     def __init__(self, llm_client=None):
@@ -38,22 +38,20 @@ class AgriContext:
         
         # Protocoles & Tracing
         self.mcp: Dict[str, Any] = {}
-        self.a2a: Optional[Any] = None
         self.renderers: Dict[str, Any] = {}
         # MCP Shield (permission client) - injected by orchestrator when available
         self.mcp_shield: Any = None
         self.tracing_enabled: bool = False
 
     def bootstrap(self):
-        """Lance l'initialisation dans l'ordre de dÃ©pendance strict."""
+        """Lance l'initialisation dans l'ordre de dépendance strict."""
         self._init_tracing()
         # Initialise DB and memory first so MCP DB server can reuse
         # the created session factory if available, then initialise MCPs.
         self._init_db_and_memory()
         self._init_mcp_servers()
-        self._init_a2a_discovery()
         self._init_renderers()
-        logger.info("ðŸš€ AgriContext bootstrap terminÃ©.")
+        logger.info("AgriContext bootstrap terminé.")
         return self
 
     def _init_tracing(self):
@@ -61,10 +59,10 @@ class AgriContext:
         try:
             self.tracing_enabled = init_tracing()
         except Exception as e:
-            logger.warning(f"ðŸ”­ Tracing non disponible: {e}")
+            logger.warning(f"Tracing non disponible: {e}")
 
     def _init_db_and_memory(self):
-        """Initialise la persistence et la mÃ©moire Ã©pisodique."""
+        """Initialise la persistence et la mémoire épisodique."""
         # Setup Database - prefer new centralized sync DB hub
         try:
             if getattr(core_db_new, '_SYNC_ENGINE', None) is not None and getattr(core_db_new, '_SYNC_SESSION_FACTORY', None) is not None:
@@ -72,7 +70,7 @@ class AgriContext:
                 self.session_factory = core_db_new._SYNC_SESSION_FACTORY
             elif settings.DATABASE_URL:
                 self.db = AgriDatabase(db_url=settings.DATABASE_URL)
-                logger.warning("âš ï¸ DB: Fallback URL utilisÃ©.")
+                logger.warning("DB: Fallback URL utilisé.")
             else:
                 # Try lazy init of core_db
                 try:
@@ -89,19 +87,19 @@ class AgriContext:
         except Exception as e:
             logger.warning(f"DB init fallback triggered: {e}")
 
-        # Setup MÃ©moire (DÃ©pend de la session DB)
+        # Setup Mémoire (Dépend de la session DB)
         if self.session_factory:
             try:
                 profile = UserFarmProfile(self.session_factory)
                 episodic = EpisodicMemory(self.session_factory, llm_client=self.llm)
                 extractor = ProfileExtractor(self.llm, profile)
                 self.memory = ContextOptimizer(profile, episodic, extractor)
-                logger.info("ðŸ§  MÃ©moire 3 niveaux activÃ©e")
+                logger.info("Mémoire 3 niveaux activée")
             except Exception as e:
-                logger.error(f"âŒ Erreur MÃ©moire: {e}")
+                logger.error(f"Erreur Mémoire: {e}")
 
     def _init_mcp_servers(self):
-        """Initialise les serveurs MCP (SystÃ¨me de Tools)."""
+        """Initialise les serveurs MCP (Système de Tools)."""
         try:
             # Use singleton getters to avoid repeated server initialisations
             from agriconnect.protocols.mcp import (
@@ -154,17 +152,11 @@ class AgriContext:
                     setattr(self, "mcp_db", self.mcp["db"])
                     logger.debug("MCP DB facade attached on AgriContext.mcp_db")
                 except Exception:
-                    logger.exception("Ã‰chec de l'attachement du serveur MCP DB facade")
+                    logger.exception("Échec de l'attachement du serveur MCP DB facade")
 
-            logger.info("ðŸ”Œ MCP Servers configurÃ©s (singletons)")
+            logger.info("MCP Servers configurés (singletons)")
         except Exception as e:
-            logger.error(f"âŒ Erreur MCP: {e}")
-
-    def _init_a2a_discovery(self):
-        """Initialise le protocole Agent-to-Agent."""
-        # A2A disabled to avoid agent-to-agent complexity for now.
-        self.a2a = None
-        logger.info("ðŸ“¡ A2A Discovery dÃ©sactivÃ© (mode simplifiÃ©)")
+            logger.error(f"Erreur MCP: {e}")
 
     def _init_renderers(self):
         """Initialise les moteurs de rendu AG-UI."""

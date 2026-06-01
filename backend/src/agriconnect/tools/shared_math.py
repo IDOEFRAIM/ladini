@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Tuple, List, Any
 
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
 class SoilType(Enum):
     SABLEUX = "sableux"
     ARGILEUX = "argileux"
@@ -19,24 +21,101 @@ class CropProfile:
     cycle_days: int
     drought_sensitive: bool
 
-@dataclass
-class SahelianCropProfile:
-    name: str
-    varieties: Dict[str, List[str]]
-    cycle_days: int
-    seeding_density: str  # Kept for backward compatibility, usage deprecated
-    depth_cm: int
-    organic_matter_min_tha: float
-    mineral_fertilizer: Dict[str, str]
-    water_strategy: str
-    # V2 Enhancements for "Technical Canvas"
+class SowingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    inter_row: float = Field(gt=0)
+    inter_plant: float = Field(gt=0)
+    seeds_pocket: int = Field(gt=0)
+
+    @field_validator("inter_row", "inter_plant", mode="before")
+    @classmethod
+    def _validate_spacing_numeric_positive(cls, value: Any) -> float:
+        parsed = float(value)
+        if parsed <= 0:
+            raise ValueError("Sowing spacing values must be positive")
+        return parsed
+
+    @field_validator("seeds_pocket", mode="before")
+    @classmethod
+    def _validate_seeds_positive(cls, value: Any) -> int:
+        parsed = int(value)
+        if parsed <= 0:
+            raise ValueError("seeds_pocket must be a positive integer")
+        return parsed
+
+
+class FertilizerStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    step_order: int = Field(ge=0)
+    stage: str = Field(min_length=1)
+    type: str = Field(min_length=1)
+    dose_kg_ha: float = Field(ge=0)
+    mode: str = "Épandage"
+
+    @field_validator("stage", "type", "mode")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class SahelianCropProfile(BaseModel):
+    """Strict crop contract for deterministic advisory calculations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    varieties: Dict[str, List[str]] = Field(default_factory=dict)
+    cycle_days: int = Field(gt=0)
+    seeding_density: str = "N/A"  # Kept for backward compatibility, usage deprecated
+    depth_cm: float = Field(gt=0)
+    organic_matter_min_tha: float = Field(ge=0)
+    mineral_fertilizer: Dict[str, str] = Field(default_factory=dict)
+    water_strategy: str = ""
     scientific_name: str = ""
-    sowing_config: Dict[str, float] = None # {inter_row_cm: 75, inter_plant_cm: 25, seeds_pocket: 2}
-    fertilizer_plan: List[Dict[str, Any]] = None # [{stage: "Semis", type: "NPK", kg_ha: 150}]
-    yield_potential: Tuple[float, float] = (0.0, 0.0) # (min, max) t/ha
-    key_pests: List[str] = None
-    key_diseases: List[str] = None
-    pre_flight_checks: List[str] = None # Questions to ask
+    sowing_config: SowingConfig
+    fertilizer_plan: List[FertilizerStep] = Field(default_factory=list)
+    yield_potential: Tuple[float, float] = (0.0, 0.0)
+    key_pests: List[str] = Field(default_factory=list)
+    key_diseases: List[str] = Field(default_factory=list)
+    pre_flight_checks: List[str] = Field(default_factory=list)
+
+    @field_validator("cycle_days", mode="before")
+    @classmethod
+    def _validate_cycle_days_positive(cls, value: Any) -> int:
+        parsed = int(value)
+        if parsed <= 0:
+            raise ValueError("cycle_days must be a positive integer")
+        return parsed
+
+    @field_validator("name", "scientific_name", "water_strategy")
+    @classmethod
+    def _normalize_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("yield_potential")
+    @classmethod
+    def _validate_yield_range(cls, value: Tuple[float, float]) -> Tuple[float, float]:
+        min_y, max_y = float(value[0]), float(value[1])
+        if min_y < 0 or max_y < 0:
+            raise ValueError("yield_potential must be non-negative")
+        if min_y > max_y:
+            raise ValueError("yield_potential min cannot exceed max")
+        return (min_y, max_y)
+
+    @field_validator("varieties")
+    @classmethod
+    def _validate_varieties(cls, value: Dict[str, List[str]]) -> Dict[str, List[str]]:
+        cleaned: Dict[str, List[str]] = {}
+        for zone, names in value.items():
+            zone_key = str(zone).strip()
+            if not zone_key:
+                continue
+            cleaned_names = [str(n).strip() for n in names if str(n).strip()]
+            if cleaned_names:
+                cleaned[zone_key] = cleaned_names
+        return cleaned
 
 class SahelAgroMath:
     GSC = 0.0820

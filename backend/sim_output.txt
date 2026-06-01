@@ -1,0 +1,31 @@
+﻿python : <frozen runpy>:128: RuntimeWarning: 'agriconnect.graphs.agents.market_coach.nodes' found in sys.modules after import of package 
+'agriconnect.graphs.agents.market_coach', but prior to execution of 'agriconnect.graphs.agents.market_coach.nodes'; this may result in unpredictable behaviour
+Au caractère Ligne:1 : 1
++ python -m agriconnect.graphs.agents.market_coach.nodes 2>&1 | Out-Fil ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (<frozen runpy>:...table behaviour:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\LENOVO T14s\Documents\projet\AgriConnect\backend\src\agriconnect\graphs\agents\market_coach\nodes.py", line 2137, in <module>
+    asyncio.run(simuler_dialogue_whatsapp_bid_proactif())
+    ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\asyncio\runners.py", line 195, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "C:\Python313\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Python313\Lib\asyncio\base_events.py", line 725, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\LENOVO T14s\Documents\projet\AgriConnect\backend\src\agriconnect\graphs\agents\market_coach\nodes.py", line 2062, in 
+simuler_dialogue_whatsapp_bid_proactif
+    print("\U0001f680 Initialisation du VRAI StateGraph compilÚ (Flux Proactif PLACE_BID)...")
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Python313\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\U0001f680' in position 0: character maps to <undefined>

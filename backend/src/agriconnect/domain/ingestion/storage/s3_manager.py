@@ -6,6 +6,8 @@ import boto3
 import logging
 import os
 import json
+import hashlib
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 
 from agriconnect.core.settings import settings
@@ -92,6 +94,30 @@ class S3Manager:
     def save_raw(self, doc: RawDocument, prefix: str = "raws_data") -> str:
         """Public ingestion API: persist one streamed RawDocument immediately."""
         return self.upload_raw_json(doc=doc, prefix=prefix)
+
+    def upload_pdf_binary(self, payload: bytes, pdf_url: str, source_id: str, prefix: str = "raws_data") -> str:
+        """Upload a validated PDF binary to S3 and return the object key."""
+        ts = datetime.now(timezone.utc).strftime("%Y/%m/%d")
+        parsed = urlparse(pdf_url or "")
+        filename = os.path.basename(parsed.path or "") or "document.pdf"
+        if not filename.lower().endswith(".pdf"):
+            filename = f"{filename}.pdf"
+        safe_source = "".join([c if c.isalnum() else "_" for c in (source_id or "unknown_source")])
+        digest = hashlib.sha256(payload or b"").hexdigest()[:16]
+        key = f"{prefix}/pdf/{safe_source}/{ts}/{digest}_{filename}"
+        self.client.put_object(
+            Bucket=self.bucket,
+            Key=key,
+            Body=payload,
+            ContentType="application/pdf",
+            Metadata={
+                "source_id": safe_source,
+                "pdf_url": (pdf_url or "")[:1024],
+                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        logger.info("Uploaded PDF to s3://%s/%s", self.bucket, key)
+        return key
 
     def check_exists(self, key: str) -> bool:
         try:

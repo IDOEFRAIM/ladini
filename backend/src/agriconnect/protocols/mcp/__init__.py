@@ -1,3 +1,15 @@
+"""protocols.mcp — Unified MCP package for AgriConnect.
+
+New architecture (consolidated):
+  - ``handlers.py`` — DB adapter functions mapping MCP tools → AgriDatabaseService.
+  - ``schema.py``   — Tool metadata, permission scopes, JSON schemas.
+  - ``server.py``   — Unified FastMCP server + MCPServerApp builder.
+
+Backward-compatible facades are kept for:
+  - ``MCPRagServer``, ``MCPDatabaseServer``, ``MCPWeatherServer``
+  - ``MCPContextServer``
+  - Factory functions: ``get_mcp_db_server()``, ``get_mcp_rag_server()``, etc.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -5,6 +17,9 @@ import json
 from typing import Any
 
 
+# ---------------------------------------------------------------------------
+# Backward-compatible wrapper classes
+# ---------------------------------------------------------------------------
 class MCPRagServer:
     """Compatibility wrapper exposing legacy RAG methods over AgronomyTools."""
 
@@ -52,17 +67,55 @@ class MCPRagServer:
 
 
 class MCPDatabaseServer:
-    """Lazy DB server proxy to avoid heavy imports at module import time."""
+    """DB server proxy that delegates to centralized handlers.
+
+    In previous versions this was a stub.  Now it routes ``call_tool``
+    through ``handlers.TOOL_HANDLERS`` so it's fully functional.
+    """
 
     def __init__(self, *args, **kwargs) -> None:
         _ = args, kwargs
-        self._inner = None
 
     def call_tool(self, name: str, arguments: dict | None = None) -> dict:
-        _ = name, arguments
-        return {"ok": False, "error": "DB runtime unavailable in lightweight compatibility mode"}
+        from agriconnect.protocols.mcp.handlers import TOOL_HANDLERS
+
+        fn = TOOL_HANDLERS.get(name)
+        if fn is None:
+            return {"ok": False, "error": f"Unknown tool: {name}"}
+
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            raw = loop.run_until_complete(fn(**(arguments or {})))
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            loop.close()
+            try:
+                asyncio.set_event_loop(None)
+            except Exception:
+                pass
+
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            data = {"result": raw}
+        return {"ok": True, "data": data}
+
+    @staticmethod
+    def list_tools() -> list[dict]:
+        from agriconnect.protocols.mcp.handlers import TOOL_DESCRIPTIONS
+
+        return [{"name": n, "description": d} for n, d in TOOL_DESCRIPTIONS.items()]
 
 
+# ---------------------------------------------------------------------------
+# Factory functions (backward-compatible)
+# ---------------------------------------------------------------------------
 def get_mcp_db_server(session_factory=None):
     _ = session_factory
     return MCPDatabaseServer()
@@ -86,27 +139,28 @@ def get_mcp_context_server(session_factory=None, context_optimizer=None, llm_cli
     return MCPContextServer(session_factory=session_factory, llm_client=llm_client)
 
 
-def get_mcp_units_server():
-    from agriconnect.protocols.mcp.tools.units import UnitsMCPServer
-
-    return UnitsMCPServer()
-
-
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 __all__ = [
+    # New centralized API
+    "build_mcp_app",
+    "TOOL_HANDLERS",
+    "TOOL_DESCRIPTIONS",
+    # Backward-compatible
     "MCPDatabaseServer",
     "MCPRagServer",
     "MCPWeatherServer",
     "MCPContextServer",
-    "UnitsMCPServer",
     "get_mcp_db_server",
     "get_mcp_rag_server",
     "get_mcp_weather_server",
     "get_mcp_context_server",
-    "get_mcp_units_server",
 ]
 
 
 def __getattr__(name: str) -> Any:
+    # Lazy imports for heavy modules
     if name == "MCPContextServer":
         from agriconnect.infrastructure.mcp.context import MCPContextServer
 
@@ -115,8 +169,16 @@ def __getattr__(name: str) -> Any:
         from agriconnect.protocols.mcp.tools.weather import MCPWeatherServer
 
         return MCPWeatherServer
-    if name == "UnitsMCPServer":
-        from agriconnect.protocols.mcp.tools.units import UnitsMCPServer
+    if name == "build_mcp_app":
+        from agriconnect.protocols.mcp.server import build_mcp_app
 
-        return UnitsMCPServer
+        return build_mcp_app
+    if name == "TOOL_HANDLERS":
+        from agriconnect.protocols.mcp.handlers import TOOL_HANDLERS
+
+        return TOOL_HANDLERS
+    if name == "TOOL_DESCRIPTIONS":
+        from agriconnect.protocols.mcp.handlers import TOOL_DESCRIPTIONS
+
+        return TOOL_DESCRIPTIONS
     raise AttributeError(name)

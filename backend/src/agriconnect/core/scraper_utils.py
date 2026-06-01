@@ -9,7 +9,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from typing import Iterable, Optional, Dict
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from urllib.robotparser import RobotFileParser
 
 import requests
@@ -177,3 +177,44 @@ def with_retry(policy: HttpPolicy):
             requests.HTTPError
         )),
     )
+
+
+def canonicalize_url(url: str) -> str:
+    """Return a canonical URL for stable cross-source deduplication.
+
+    Rules:
+    - lowercase scheme and host
+    - remove fragment (#...)
+    - remove tracking query params starting with `utm_`
+    - normalize trailing slash (except root path)
+    - sort query parameters for deterministic representation
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+
+    parsed = urlparse(raw)
+    scheme = (parsed.scheme or "https").lower()
+    host = (parsed.hostname or "").lower()
+
+    port = parsed.port
+    if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+        netloc = f"{host}:{port}"
+    else:
+        netloc = host
+
+    path = parsed.path or "/"
+    if path != "/" and path.endswith("/"):
+        path = path.rstrip("/")
+
+    # Remove tracking params and sort for deterministic dedupe.
+    query_items = []
+    for k, v in parse_qsl(parsed.query, keep_blank_values=True):
+        if k.lower().startswith("utm_"):
+            continue
+        query_items.append((k, v))
+    query_items.sort(key=lambda kv: (kv[0], kv[1]))
+    query = urlencode(query_items, doseq=True)
+
+    normalized = urlunparse((scheme, netloc, path, "", query, ""))
+    return normalized

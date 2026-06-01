@@ -14,16 +14,15 @@ from agriconnect.core.llm import get_groq_sdk
 from agriconnect.graphs.state import GlobalAgriState
 from agriconnect.graphs.orchestrateur.nodes import OrchestratorNodes
 from agriconnect.graphs.orchestrateur.graph import create_graph
+from agriconnect.graphs.route import Router
 
 # Setup helpers
 from agriconnect.graphs.orchestrateur.message_flow_setup import (
-    init_db_and_memory,
     init_protocols,
     init_experts,
     init_services,
-    init_tracing,
-    AgriContext
 )
+from agriconnect.core.setup import AgriContext
 
 logger = logging.getLogger(__name__)
 
@@ -38,15 +37,18 @@ class MessageResponseFlow:
     def __init__(self, llm_client=None):
         self.llm = llm_client if llm_client is not None else get_groq_sdk()
         
-        # 1. Bootstrap Context
+        # 1. Bootstrap Context (DB, Memory, MCP servers, Renderers, Tracing)
         self.ctx = AgriContext(llm_client=self.llm).bootstrap()
         
-        # 2. Run Setup Pipelines (Side-effects on self)
-        self._init_db_and_memory()
+        # Backward-compat: expose ctx resources on flow
+        self.db = self.ctx.db
+        self.session_factory = self.ctx.session_factory
+        self.memory = self.ctx.memory
+        
+        # 2. Setup Shield stack + Experts + Services (NOT duplicated in ctx)
         self._init_protocols()
         self._init_experts()
         self._init_services()
-        self._init_tracing()
 
         # 3. Initialize Nodes
         self.nodes = OrchestratorNodes(
@@ -54,15 +56,12 @@ class MessageResponseFlow:
             ctx=self.ctx,
             mcp_shield=getattr(self, "mcp_shield", None),
             mcp_session=getattr(self, "mcp_session", None),
-            router=None  # Built-in LLM routing used
+            router=Router(llm=self.llm, ctx=self.ctx)
         )
 
         # 5. Build Graph
         # Checkpointer could be added here if needed (e.g. MemorySaver)
         self.graph = create_graph(self.nodes).compile()
-
-    def _init_db_and_memory(self):
-        return init_db_and_memory(self)
 
     def _init_protocols(self):
         init_protocols(self)
@@ -85,9 +84,6 @@ class MessageResponseFlow:
 
     def _init_services(self):
         return init_services(self)
-
-    def _init_tracing(self):
-        return init_tracing(self)
 
     def invoke(self, inputs: Dict[str, Any], config: Optional[Dict[str, Any]] = None):
         """Invoke the graph."""

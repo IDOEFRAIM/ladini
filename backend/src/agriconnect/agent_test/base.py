@@ -140,3 +140,5 @@ class BaseAgent:
     def capabilities(cls) -> List[str]:
         """Retourne la liste des intents/actions supportés par l'agent."""
         return list(cls._capabilities)
+
+

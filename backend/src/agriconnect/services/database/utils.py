@@ -1,12 +1,13 @@
 from typing import Tuple, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .common import _uuid
+from .common import clean_text, positive_float
 
 
 class UtilsMixin:
     async def normalize_unit(self, session: AsyncSession, quantity: float, unit: str) -> Tuple[float, str, float]:
-        key = (unit or "").lower().strip()
+        quantity = positive_float(quantity, "quantity", allow_zero=True)
+        key = (unit).lower().strip()
         UNIT_TO_KG = {
             "sac": 100, "sacs": 100,
             "tine": 18, "tines": 18,
@@ -19,22 +20,11 @@ class UtilsMixin:
         qty_kg = quantity * multiplier
         return multiplier, unit_final, qty_kg
 
-    async def guess_category(self, session: AsyncSession, product_name: str) -> str:
-        CATEGORY_HINTS = {
-            "maïs": "Céréales", "mais": "Céréales", "sorgho": "Céréales",
-            "mil": "Céréales", "riz": "Céréales", "fonio": "Céréales",
-            "blé": "Céréales",
-            "niébé": "Légumineuses", "arachide": "Légumineuses",
-            "soja": "Légumineuses", "haricot": "Légumineuses",
-            "tomate": "Légumes", "oignon": "Légumes", "piment": "Légumes",
-            "gombo": "Légumes", "aubergine": "Légumes", "chou": "Légumes",
-            "mangue": "Fruits", "banane": "Fruits", "papaye": "Fruits",
-            "igname": "Tubercules", "patate": "Tubercules", "manioc": "Tubercules",
-        }
-        key = (product_name or "").lower().strip()
-        return CATEGORY_HINTS.get(key, "Autres")
+   
 
     async def check_price_anomaly(self, session: AsyncSession, product_name: str, proposed_price: float, zone_id: str) -> Dict[str, Any]:
+        product_name = clean_text(product_name, "product_name", required=True)
+        proposed_price = positive_float(proposed_price, "proposed_price", allow_zero=True)
         # If a more specific 'get_standard_price' exists on the composed service, use it.
         getter = getattr(self, "get_standard_price", None)
         if callable(getter):

@@ -20,7 +20,22 @@ class AgileRetriever:
         init_settings()
         self._fallback_embedder = None
         self._disable_vector_store_fallback = False
+        self._pgvector_available = True
+        self._pgvector_disabled_reason = None
         self._vector_store_query_timeout_s = float(os.getenv("AGRICONNECT_RAG_VECTOR_QUERY_TIMEOUT", "6"))
+        self._primary_backend = (os.getenv("AGRICONNECT_RAG_PRIMARY_BACKEND", "pgvector") or "pgvector").strip().lower()
+        self._prefer_pg_only = self._primary_backend in {"pg", "postgres", "postgresql", "pgvector"}
+
+        # Prefer direct Postgres retrieval and skip legacy vector-store init to
+        # avoid Redis/FAISS connection noise on MCP startup.
+        if self._prefer_pg_only:
+            self.index = None
+            self.vector_retriever = None
+            self.vector_store = None
+            self.ready = True
+            self.llm = get_groq_sdk()
+            return
+
         storage_context = get_storage_context()
         # Load from persistence
         try:
@@ -104,8 +119,9 @@ class AgileRetriever:
         try:
             from sentence_transformers import SentenceTransformer
 
+            # Use all-mpnet-base-v2 to match ingestion embedding dimension (768)
             if self._fallback_embedder is None:
-                self._fallback_embedder = SentenceTransformer("all-MiniLM-L6-v2")
+                self._fallback_embedder = SentenceTransformer("all-mpnet-base-v2")
             return self._fallback_embedder.encode([query_str])[0].tolist()
         except Exception:
             logger.exception("Fallback embedding computation failed")
@@ -198,6 +214,90 @@ class AgileRetriever:
         nodes.sort(key=lambda x: x.score if x.score is not None else 0.0, reverse=True)
         return nodes[:top_k]
 
+    def _pg_retrieve(self, query_str: str, top_k: int = 5):
+        """Fallback retrieval using Postgres + pgvector directly.
+
+        Returns a list of SimpleNode-compatible objects with `.node.get_content()` and `.score`.
+        """
+        if not self._pgvector_available:
+            return []
+
+        try:
+            q_emb = self._embed_query(query_str)
+            if q_emb is None:
+                return []
+
+            # Build vector literal for psycopg2 '%s::vector' usage
+            vec_lit = '[' + ','.join(f"{float(v):.8f}" for v in q_emb) + ']'
+
+            from agriconnect.infrastructure.database import db as _db
+            from sqlalchemy import text
+
+            engine = _db.get_engine()
+            sql = (
+                "SELECT content, metadata, 1 - (embedding <=> %s::vector) AS similarity "
+                "FROM public.document_chunks "
+                "WHERE embedding IS NOT NULL "
+                "ORDER BY similarity DESC "
+                "LIMIT %s"
+            )
+
+            rows = []
+            # Use raw DBAPI connection for stable parameter passing (psycopg2)
+            conn = engine.raw_connection()
+            try:
+                cur = conn.cursor()
+                cur.execute(sql, (vec_lit, top_k))
+                rows = cur.fetchall()
+                cur.close()
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+            out_nodes = []
+            for r in rows:
+                try:
+                    content, metadata, similarity = r
+                except Exception:
+                    continue
+
+                # Ensure similarity is numeric
+                try:
+                    sim = float(similarity or 0.0)
+                except Exception:
+                    sim = 0.0
+
+                class SimpleNode:
+                    def __init__(self, text, meta, score):
+                        class N:
+                            def __init__(self, text, meta):
+                                self._text = text or ""
+                                self.metadata = meta or {}
+                            def get_content(self):
+                                return self._text
+                        self.node = N(text, meta)
+                        self.score = float(score or 0.0)
+
+                out_nodes.append(SimpleNode(content, metadata or {}, sim))
+
+            return out_nodes
+        except Exception as exc:
+            # Common in local/dev environments: the pgvector tables haven't been
+            # migrated/created yet. Treat as a non-fatal degraded mode.
+            pgcode = getattr(exc, "pgcode", None)
+            cls_name = exc.__class__.__name__
+            if pgcode == "42P01" or cls_name == "UndefinedTable":
+                self._pgvector_available = False
+                if self._pgvector_disabled_reason is None:
+                    self._pgvector_disabled_reason = "missing_tables"
+                    logger.warning("pgvector tables missing; disabling Postgres RAG retrieval")
+                return []
+
+            logger.warning("_pg_retrieve failed: %s", exc)
+            return []
+
     def search(
         self,
         query_str: str,
@@ -212,11 +312,17 @@ class AgileRetriever:
         - expert    : HyDe technique, top_k=20, rerank_k=8 (précision max)
         """
         if not self.vector_retriever:
-            logger.warning("Index not initialized.")
-            # Fallback: if we have a RedisSearch/Redis vector_store, query it directly
+            logger.info("Index not initialized.")
+            # Fallbacks: try Postgres pgvector first, then Redis/Faiss vector_store
             try:
                 # Charger le profil adapté (needed for fallback limits)
                 profile = get_rag_profile(user_level)
+
+                # Try Postgres pgvector retrieval if available
+                pg_nodes = self._pg_retrieve(query_str, profile.top_k)
+                if pg_nodes:
+                    return pg_nodes[: profile.rerank_k]
+
                 if self.vector_store is not None and hasattr(self.vector_store, "query"):
                     if self._disable_vector_store_fallback:
                         return []
@@ -353,16 +459,34 @@ class AgileRetriever:
         )
 
         # Adapter le retriever au top_k du profil
-        retriever = self.index.as_retriever(similarity_top_k=profile.top_k)
-
         search_query = query_str
         if should_hyde:
             hypo_doc = self.generate_hyde_doc(query_str, tone=profile.tone)
             logger.info("[HyDe] Generated hypothetical doc (%d chars, tone=%s)", len(hypo_doc), profile.tone)
             search_query = f"{query_str}\n{hypo_doc}"
-            
-        nodes = retriever.retrieve(search_query)
-        logger.info("[Retriever] Found %d raw nodes.", len(nodes))
+        # Primary retrieval: try Postgres pgvector first (preferred)
+        try:
+            pg_nodes = self._pg_retrieve(search_query, profile.top_k)
+            if pg_nodes:
+                logger.info("[Retriever][PG] Found %d nodes via Postgres pgvector.", len(pg_nodes))
+                final_nodes = self.rerank(query_str, pg_nodes, top_k=profile.rerank_k)
+                return final_nodes
+        except Exception:
+            logger.exception("Primary Postgres retrieval failed; falling back to index/vector store")
+
+        # If Postgres returned nothing, fall back to LlamaIndex vector index if available
+        retriever = None
+        try:
+            if self.index is not None:
+                retriever = self.index.as_retriever(similarity_top_k=profile.top_k)
+        except Exception:
+            logger.exception("Failed to build index retriever; will attempt fallbacks")
+
+        if retriever is not None:
+            nodes = retriever.retrieve(search_query)
+            logger.info("[Retriever] Found %d raw nodes.", len(nodes))
+        else:
+            nodes = []
         
         # Rerank using ORIGINAL query, with profile-specific top_k
         final_nodes = self.rerank(query_str, nodes, top_k=profile.rerank_k)

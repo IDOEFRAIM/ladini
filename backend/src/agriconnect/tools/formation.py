@@ -1,400 +1,122 @@
-from typing import Any, List, Dict, Optional
 import json
 import logging
 import re
-from sqlalchemy.engine import Engine
-from agriconnect.core.db import get_engine, resolve_database_url
+import os
+import inspect
+import unicodedata
+from typing import Any, List, Dict, Optional
 from .formation_advisor import FormationAdvisor
 
-logger = logging.getLogger("FormationCoachTool")
+logger = logging.getLogger("FormationTool")
 
 class FormationTool:
-    def __init__(self,llm,model_planner="llama-3.3-70b-versatile",model_answer="llama-3.3-70b-versatile"    ):
+    def __init__(self, llm, json_refs_path="agronomic_refs.json", model_planner="llama-3.3-70b-versatile"):
         self.llm = llm
         self.model_planner = model_planner
-        self.model_answer = model_answer
-        self._db_url = None
-        self._engine: Optional[Engine] = None
+        self.json_refs_path = json_refs_path
         self.advisor = FormationAdvisor()
+        # On charge la "Vérité" du JSON en mémoire vive
+        self.agri_knowledge = self._load_json_refs()
 
-    def get_technical_advice(self, crop: str, zone: str, area_ha: float = 1.0) -> str:
+    def _load_json_refs(self) -> Dict:
+        """Charge le fichier JSON des références agronomiques."""
+        if os.path.exists(self.json_refs_path):
+            with open(self.json_refs_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {"CULTURES": {}}
+
+    # -----------------------------------------------------------------
+    # 1. L'ANALYSEUR : Trouve l'intention et le TYPE
+    # -----------------------------------------------------------------
+    async def analyze_request(self, query: str) -> Dict[str, Any]:
         """
-        Génère une réponse structurée "Canvas Technique" (V2) pour une culture donnée.
-        Utilise FormationAdvisor pour éviter les réponses génériques.
+        Analyse la demande pour extraire l'intention pédagogique 
+        ET identifier le type de culture (le 'Produit').
         """
-        try:
-            canvas = self.advisor.generate_technical_diagnosis(crop, zone, area_ha)
-            # Si erreur (culture inconnue), on retourne le message d'erreur
-            if canvas.get("error"):
-                return canvas["message"]
-            
-            # Sinon on formate en Markdown
-            return self.advisor.format_as_markdown(canvas)
-        except Exception as e:
-            logger.error(f"Erreur lors de la génération du conseil technique : {e}")
-            return "Désolé, une erreur technique m'empêche de récupérer la fiche INERA."
-
-    def configure_db(self, db_url: Optional[str] = None, psycopg2_module: Any = None) -> None:
-        self._db_url = db_url
-        self._engine = get_engine(db_url) if db_url else None
-        _ = psycopg2_module
-
-    def _ensure_db(self) -> None:
-        if self._db_url and self._engine:
-            return
-        try:
-            self._db_url = resolve_database_url(required=True)
-            self._engine = get_engine(self._db_url)
-        except Exception:
-            self._db_url = None
-            self._engine = None
-
-    def _extract_json_block(self, text: str) -> Dict[str, Any]:
-        matches = re.findall(r"\{[\s\S]*?\}", text)
-        for match in matches:
-            try:
-                return json.loads(match)
-            except json.JSONDecodeError:
-                continue
-        return json.loads(text)
-
-    def _plan_retrieval(self, query: str, profile: Dict[str, Any]) -> Dict[str, Any]:
-        fallback = {
-            "optimized_query": query,
-            "modules": [],
-            "prerequisites": [],
-            "reasoning": "",
-            "warnings": [],
-        }
-
-        if not self.llm:
-            fallback["warnings"].append("LLM indisponible pour planifier la recherche.")
-            return fallback
-
-        profile_text = self._format_profile(profile)
-        planner_prompt = (
-            "Tu es l'orchestrateur pédagogique d'AgriConnect. "
-            "Analyse la question suivante et prépare une recherche RAG.\n"
-            f"Profil apprenant : {profile_text}\n"
-            f"Question : {query}\n\n"
-            'Réponds en JSON avec : {"optimized_query": "...", "modules": ["..."], '
-            '"prerequisites": ["..."], "reasoning": "..."}'
-        )
-
-        try:
-            completion = self.llm.chat.completions.create(
-                model=self.model_planner,
-                messages=[{"role": "user", "content": planner_prompt}],
-                temperature=0.2,
-                max_tokens=400,
-                response_format={"type": "json_object"},
-            )
-            content = completion.choices[0].message.content
-            if not content:
-                raise ValueError("Réponse vide du planificateur.")
-            plan = json.loads(content)
-            return {
-                "optimized_query": plan.get("optimized_query") or query,
-                "modules": plan.get("modules", []),
-                "prerequisites": plan.get("prerequisites", []),
-                "reasoning": plan.get("reasoning", ""),
-                "warnings": [],
-            }
-        except Exception as exc:
-            logger.warning("Planification RAG impossible : %s", exc)
-            fallback["warnings"].append("Planification RAG automatique indisponible.")
-            return fallback
-
-    def _build_context(self, nodes: List[Any]) -> str:
-        sections = []
-        for idx, node in enumerate(nodes, start=1):
-            metadata = node.node.metadata or {}
-            label = metadata.get("title") or metadata.get("filename") or f"Source {idx}"
-            chunk = node.node.get_content().strip()
-            sections.append(f"[Source {idx} | {label}]\n{chunk}")
-        return "\n\n".join(sections)
-
-    def _serialize_sources(self, nodes: List[Any]) -> List[Dict[str, Any]]:
-        payload: List[Dict[str, Any]] = []
-        for idx, node in enumerate(nodes, start=1):
-            metadata = node.node.metadata or {}
-            payload.append(
-                {
-                    "index": idx,
-                    "title": metadata.get("title"),
-                    "filename": metadata.get("filename"),
-                    "score": float(node.score) if node.score is not None else None,
-                }
-            )
-        return payload
-
-    def _format_profile(self, profile: Dict[str, Any]) -> str:
-        if not profile:
-            return "Non renseigné"
-        parts: List[str] = []
-        for key, value in profile.items():
-            if value in (None, "", []):
-                continue
-            parts.append(f"{key}: {value}")
-        return "; ".join(parts) if parts else "Non renseigné"
-
-    def _analyze_request(self, query: str, profile: Dict[str, Any]) -> Dict[str, Any]:
-        fallback = {
-            "intent": "FORMATION",
-            "focus_topics": [],
-            "field_actions": [],
-            "safety_flags": [],
-            "urgency": "NORMAL",
-            "warnings": [],
-        }
-
-        if not self.llm:
-            fallback["warnings"].append("LLM indisponible pour analyser la demande.")
-            return fallback
-
-        profile_text = self._format_profile(profile)
-        analyzer_prompt = (
-            "Tu es l'ingénieur pédagogique expert d'AgriConnect. Ton rôle est de qualifier la demande de l'utilisateur "
-            "pour optimiser la recherche documentaire (RAG) et garantir la sécurité des conseils.\n\n"
-            
-            f"PROFIL APPRENANT : {profile_text}\n"
-            f"QUESTION : {query}\n\n"
-            
-            "CONSIGNES DE GÉNÉRATION JSON :\n"
-            "1. intent : Choisir parmi [FORMATION, URGENCE, CONSEIL].\n"
-            "3. intent : Choisir parmi [FORMATION, URGENCE, CONSEIL].\n"
-            "4. focus_topics : Liste de mots-clés optimisés pour une recherche sémantique (ex: 'entretien culture niébé', 'lutte chenilles').\n"
-            "5. field_actions : Liste les catégories techniques à vérifier dans les documents (ex: 'densité de semis', 'dosage engrais'). Ne donne JAMAIS de chiffres ou de méthodes à ce stade.\n"
-            "6. safety_flags : Identifie les risques critiques (ex: 'toxicité pesticides', 'santé animale', 'érosion') nécessitant une attention particulière.\n"
-            "7. urgency : Choisir selon l'impact sur la récolte : [NORMAL, HAUTE, CRITIQUE].\n\n"
-            
-            "RÉPONDS UNIQUEMENT SOUS CE FORMAT JSON :\n"
-            "{\n"
-            '  "intent": "...",\n'
-            '  "focus_topics": [],\n'
-            '  "field_actions": [],\n'
-            '  "safety_flags": [],\n'
-            '  "urgency": "...",\n'
-            '  "warnings": []\n'
-            "}"
-        )
-
-        try:
-            completion = self.llm.chat.completions.create(
-                model=self.model_planner,
-                messages=[{"role": "user", "content": analyzer_prompt}],
-                temperature=0.1,
-                max_tokens=300,
-                response_format={"type": "json_object"},
-            )
-            content = completion.choices[0].message.content
-            if not content:
-                raise ValueError("Réponse vide de l'analyseur.")
-            
-            analysis = json.loads(content)
-            return {
-                "intent": analysis.get("intent", "FORMATION"),
-                "focus_topics": analysis.get("focus_topics", []),
-                "field_actions": analysis.get("field_actions", []),
-                "safety_flags": analysis.get("safety_flags", []),
-                "urgency": analysis.get("urgency", "NORMAL"),
-                "warnings": analysis.get("warnings", []),
-            }
-        except Exception as e:
-            logger.warning("Analyse de requête impossible : %s", e)
-            fallback["warnings"].append("Analyse de requête automatique indisponible.")
-            return fallback
-     
-    def _fallback_answer(
-        self,
-        query: str,
-        profile_text: str,
-        prerequisites: List[str],
-        modules: List[str],
-        sources: List[Dict[str, Any]],
-    ) -> str:
-        # Construction d'un texte propre pour les sources
-        source_titles = []
-        for s in sources:
-            title = s.get("title") or s.get("filename") or f"Source {s.get('index')}"
-            source_titles.append(title)
+        available_types = list(self.agri_knowledge.get("CULTURES", {}).keys())
         
-        sources_text = ", ".join(source_titles) if source_titles else "Fiches techniques locales"
-
-        return (
-            "Désolé, je rencontre une difficulté technique momentanée pour générer une réponse détaillée.\n\n"
-            "Cependant, voici les ressources identifiées pour vous aider :\n\n"
-            f"❓ **Question** : {query}\n"
-            f"📚 **Sujet** : {', '.join(modules) if modules else 'Agriculture générale'}\n"
-            f"📄 **Documents trouvés** : {sources_text}\n\n"
-            "Conseil : Vous pouvez consulter ces documents ou reformuler votre question."
+        prompt = (
+            f"Tu es l'ingénieur pédagogique d'AgriConnect. Analyse : '{query}'\n\n"
+            "Extraits en JSON :\n"
+            "1. intent : FORMATION, URGENCE ou CONSEIL.\n"
+            f"2. identified_crop_type : Choisis strictement parmi {available_types} ou 'UNKNOWN'.\n"
+            "3. focus_topics : Liste de mots-clés.\n"
+            "4. safety_flags : Risques (pesticides, etc.).\n"
+            "5. urgency : NORMAL, HAUTE, CRITIQUE.\n"
         )
-
-    # ---------------- Business rules / lightweight expert system ----------------
-
-    def diagnose_from_query(self, query: str, profile: Dict[str, Any], context: str) -> Dict[str, Any]:
-        q = (query or "").lower()
-        rules_used = []
-        diagnosis = None
-        severity = "medium"
-        evidence = []
-
-        if any(k in q for k in ("jauniss", "jaunissement", "feuilles jaunes", "chlorose")):
-            diagnosis = "Probable carence en azote"
-            rules_used.append("symptom:chlorosis->nitrogen_deficiency")
-            evidence.append({"symptom": "jaunissement feuilles"})
-            severity = "medium"
-
-        if any(k in q for k in ("taches", "nécrose", "moisissure", "mildiou", "tâche")):
-            diagnosis = diagnosis or "Suspicion de maladie fongique"
-            rules_used.append("symptom:spots->fungal_disease")
-            evidence.append({"symptom": "taches foliaires"})
-
-        if any(k in q for k in ("puceron", "insecte", "ravageur", "chenille", "larve")):
-            diagnosis = diagnosis or "Infestation d'insectes ravageurs"
-            rules_used.append("symptom:pest_terms->pest_infestation")
-            evidence.append({"symptom": "ravageur détecté"})
-
-        if "azote" in (context or "").lower():
-            diagnosis = "Carence en azote"
-            rules_used.append("context:azote")
-
-        if diagnosis is None:
-            diagnosis = "Diagnostic inconclus — besoin de précisions"
-            severity = "low"
-            rules_used.append("fallback:ask_more")
-
-        return {
-            "diagnosis": diagnosis,
-            "severity": severity,
-            "evidence": evidence,
-            "rules_used": rules_used,
-        }
-
-    def build_action_plan_from_diag(self, diag: Dict[str, Any], crop_sheet: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        d = diag.get("diagnosis", "")
-        immediate = []
-        seven = []
-        risks = []
-        sources = []
-
-        if crop_sheet:
-            sources.append(f"Fiche: {crop_sheet.get('crop_name')}")
-
-        if "azote" in d.lower() or "carence en azote" in d.lower() or "nitrogen" in d.lower():
-            immediate = ["Appliquer un engrais azoté conforme aux doses locales (voir fiche technique)", "Éviter l'arrosage excessif après fertilisation"]
-            seven = ["Surveiller amélioration des feuilles sur 7 jours", "Mesurer croissance et noter tout jaunissement persistant"]
-            risks = ["Excès d'azote: lessivage, sensibilité aux maladies"]
-        elif "maladie" in d.lower() or "fongique" in d.lower():
-            immediate = ["Retirer organes fortement touchés", "Appliquer traitement fongicide localement si disponible"]
-            seven = ["Surveiller la propagation; espacer les plantes si nécessaire"]
-            risks = ["Propagation rapide en conditions humides"]
-        elif "infestation" in d.lower() or "ravageur" in d.lower():
-            immediate = ["Inspecter densité d'insectes; appliquer traitement ciblé (biologique de préférence)", "Installer pièges si adapté"]
-            seven = ["Vérifier efficacité du traitement; répéter si nécessaire selon notice"]
-            risks = ["Resistance si traitement inapproprié"]
-        else:
-            immediate = ["Collecter photos de la plante et préciser stade de culture"]
-            seven = ["Faire un suivi et compléter la fiche mémoire de l'utilisateur"]
-
-        return {
-            "diagnostic": d,
-            "actions_immediates": immediate,
-            "actions_7_days": seven,
-            "risks": risks,
-            "sources": sources,
-        }
-
-    # ---------------- DB helpers ----------------
-
-    def db_execute(self, sql: str, params: Optional[tuple] = None, fetch: bool = False):
-        self._ensure_db()
-        if not self._engine:
-            raise RuntimeError("DB client not configured")
-
-        conn = None
+        
         try:
-            # Use SQLAlchemy-managed connection while preserving existing `%s` SQL placeholders.
-            conn = self._engine.raw_connection()
-            cur = conn.cursor()
-            cur.execute(sql, params or ())
-            rows = cur.fetchall() if fetch else None
-            conn.commit()
-            cur.close()
-            return rows
-        finally:
-            if conn:
-                conn.close()
-
-    def get_crop_sheet(self, crop_name: str) -> Optional[Dict[str, Any]]:
-        try:
-            rows = self.db_execute(
-                "SELECT crop_name, lifecycle, needs, seasonality, common_errors, recommendations FROM crop_tech_sheets WHERE LOWER(crop_name)=LOWER(%s)",
-                (crop_name,),
-                fetch=True,
+            maybe_completion = self.llm.chat.completions.create(
+                model=self.model_planner,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"}
             )
-            if rows:
-                rn = rows[0]
-                return {
-                    "crop_name": rn[0],
-                    "lifecycle": rn[1],
-                    "needs": rn[2],
-                    "seasonality": rn[3],
-                    "common_errors": rn[4],
-                    "recommendations": rn[5],
-                }
+            completion = await maybe_completion if inspect.isawaitable(maybe_completion) else maybe_completion
+            return json.loads(completion.choices[0].message.content)
         except Exception:
-            return None
-        return None
+            return {"intent": "FORMATION", "identified_crop_type": "UNKNOWN"}
 
-    def save_diagnostic(
-        self,
-        user_id: Optional[str],
-        crop_name: Optional[str],
-        zone_id: Optional[str],
-        query: str,
-        diagnosis: str,
-        evidence: Any,
-        severity: str,
-        rules_used: Any,
-    ) -> Optional[str]:
-        try:
-            self.db_execute(
-                "INSERT INTO diagnostics (user_id, crop_name, zone_id, query, diagnosis, evidence, severity, rules_used) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                (user_id, crop_name, zone_id, query, diagnosis, json.dumps(evidence), severity, json.dumps(rules_used)),
-            )
-            rows = self.db_execute(
-                "SELECT id FROM diagnostics WHERE user_id=%s AND query=%s ORDER BY created_at DESC LIMIT 1",
-                (user_id, query),
-                fetch=True,
-            )
-            if rows:
-                return str(rows[0][0])
-        except Exception as exc:
-            logger.exception("Failed to save diagnostic: %s", exc)
-        return None
+    # -----------------------------------------------------------------
+    # 2. LE RÉCUPÉRATEUR : Renvoie les caractéristiques du JSON
+    # -----------------------------------------------------------------
+    def get_crop_characteristics(self, crop_type: str) -> Dict[str, Any]:
+        """
+        C'est ici que l'IA va chercher 'La Vérité' après avoir identifié le type.
+        Utile pour enrichir le contexte avant le diagnostic.
+        """
+        if not crop_type or crop_type == "UNKNOWN":
+            return {}
+            
+        cultures = self.agri_knowledge.get("CULTURES", {}) or {}
 
-    def save_action_plan(self, diagnostic_id: str, plan: Dict[str, Any], created_by: str = "formation_agent") -> Optional[str]:
-        try:
-            self.db_execute(
-                "INSERT INTO action_plans (diagnostic_id, actions_immediate, actions_7_days, risks, sources, created_by) VALUES (%s,%s,%s,%s,%s,%s)",
-                (
-                    diagnostic_id,
-                    json.dumps(plan.get("actions_immediates")),
-                    json.dumps(plan.get("actions_7_days")),
-                    json.dumps(plan.get("risks")),
-                    json.dumps(plan.get("sources")),
-                    created_by,
-                ),
-            )
-            rows = self.db_execute(
-                "SELECT id FROM action_plans WHERE diagnostic_id=%s ORDER BY created_at DESC LIMIT 1",
-                (diagnostic_id,),
-                fetch=True,
-            )
-            if rows:
-                return str(rows[0][0])
-        except Exception as exc:
-            logger.exception("Failed to save action plan: %s", exc)
-        return None
+        # Direct lookup
+        specs = cultures.get(crop_type, {})
 
+        # Fallback: case/diacritics-insensitive lookup
+        if not specs and isinstance(crop_type, str):
+            def _norm(value: str) -> str:
+                value = value.strip()
+                value = "".join(
+                    ch for ch in unicodedata.normalize("NFKD", value) if not unicodedata.combining(ch)
+                )
+                return value.casefold()
+
+            target = _norm(crop_type)
+            for key, value in cultures.items():
+                if isinstance(key, str) and _norm(key) == target:
+                    specs = value or {}
+                    break
+        
+        if not specs:
+            logger.warning(f"Type {crop_type} identifié mais absent du JSON de référence.")
+            
+        return specs
+
+    # -----------------------------------------------------------------
+    # 3. LE DIAGNOSTIC : Croise tout (Analyse + JSON + MCP)
+    # -----------------------------------------------------------------
+    async def run_full_diagnostic(self, query: str, cycle_id: Optional[str] = None) -> Dict[str, Any]:
+        """Exemple de workflow complet utilisant les fonctions ci-dessus."""
+        
+        # Étape 1 : Analyser (Intent + Type)
+        analysis = await self.analyze_request(query)
+        crop_type = analysis.get("identified_crop_type")
+
+        # Étape 2 : Caractériser (On récupère la 'matière' du JSON)
+        # C'est la fonction que tu voulais absolument garder !
+        specs = self.get_crop_characteristics(crop_type)
+
+        # Étape 3 : Récupérer le Réel (MCP)
+        context_real = {}
+        if cycle_id:
+            from agriconnect.services.database.handlers import get_field_360_context
+            res = await get_field_360_context(cycle_id)
+            context_real = json.loads(res).get("data", {})
+
+        # Étape 4 : Synthèse
+        return {
+            "pédagogie": analysis,
+            "références_json": specs,
+            "terrain_mcp": context_real,
+            "diagnostic": "..." # Logique de comparaison ici
+        }

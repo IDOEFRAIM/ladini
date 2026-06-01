@@ -1,68 +1,191 @@
-from typing import Any, Dict, Optional
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+import logging
+import uuid
+from datetime import time
+from typing import Dict, Any, Optional
 
-from .common import _uuid, logger, User, Producer
+from sqlalchemy import update, func
+from sqlalchemy.exc import IntegrityError
+from agriconnect.domain.models import User, Producer
+from .common import clean_text, normalize_phone
 
+logger = logging.getLogger("AgriConnect.AuthMixin")
 
 class AuthMixin:
-    async def get_user_by_phone(self, session: AsyncSession, phone: str) -> Optional[Dict[str, Any]]:
-        # Select explicit, minimal columns to remain compatible with Prisma-managed users table
-        stmt = select(User.id, User.name, User.phone, User.zone_id, User.role).where(User.phone == phone)
-        result = await session.execute(stmt)
-        row = result.first()
-        if not row:
-            return None
-        data = {
-            "id": row[0],
-            "name": row[1],
-            "phone": row[2],
-            "zone_id": row[3],
-            "role": row[4],
-        }
-        prod_stmt = select(Producer).where(Producer.user_id == data["id"])
-        prod_result = await session.execute(prod_stmt)
-        producer = prod_result.scalar_one_or_none()
-        data["producer_id"] = producer.id if producer else None
-        data["is_certified"] = getattr(producer, "is_certified", False) if producer else False
-        return data
+    """
+    AuthMixin - Couche Spécialisée d'Écriture et Mutations d'Identité Noyau.
+    Hérite des capacités de lecture de BaseMixin pour valider les états.
+    
+    CONVENTION DE ROUTAGE UNIFIÉE :
+    - Les méthodes ne reçoivent plus 'session' en argument.
+    - Elles lisent 'self.session' issue du conteneur de contexte (ContextVar).
+    - Pas de commits sauvages ici (laissé au dispatcher principal de l'AgriDatabaseService).
+    """
 
-    async def get_user_by_id(self, session: AsyncSession, user_id: str) -> Optional[Dict[str, Any]]:
-        stmt = select(User.id, User.name, User.phone, User.zone_id, User.role).where(User.id == user_id)
-        result = await session.execute(stmt)
-        row = result.first()
-        if not row:
-            return None
-        return {"id": row[0], "name": row[1], "phone": row[2], "zone_id": row[3], "role": row[4]}
+    # ==================================================================
+    # 1. MUTATIONS ET ONBOARDING D'IDENTITÉ NOYAU
+    # ==================================================================
 
     async def identify_or_create_user(
-        self, session: AsyncSession, phone: str, name: str = None, zone_id: str = None
-    ) -> Dict[str, Any]:
-        # call the mixin implementation directly on the class to avoid dispatching
-        # to the AgriDatabaseService wrapper which expects different signature
-        existing = await AuthMixin.get_user_by_phone(self, session, phone)
-        if existing:
-            existing["is_new"] = False
-            return existing
+        self, 
+        phone: str, 
+        name: Optional[str] = None, 
+        zone_id: Optional[str] = None,
+        initial_role: str = "USER"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Onboarding intelligent du compte noyau de l'utilisateur.
+        Résilient aux écritures concurrentes grâce à une capture d'IntegrityError.
+        """
+        clean_phone = normalize_phone(phone)
+        if not clean_phone:
+            logger.warning("Tentative d'onboarding avec un numéro de téléphone invalide.")
+            return {"status": "error", "message": "Numéro de téléphone invalide."}
 
-        user_id = _uuid()
-        user = User(
-            id=user_id, phone=phone, name=name or phone,
-            zone_id=zone_id, role="PRODUCER",
-        )
-        session.add(user)
+        current_session = self.session
+        if current_session is None:
+            raise RuntimeError("Database session is missing on the current context.")
 
-        producer_id = _uuid()
-        producer = Producer(
-            id=producer_id, user_id=user_id,
-            zone_id=zone_id, status="ACTIVE",
-        )
-        session.add(producer)
-        await session.flush()
+        # 1. Idempotence : Vérification immédiate de l'existence via le BaseMixin
+        existing_row = await self._fetch_user_entities(phone=clean_phone)
+        if existing_row:
+            return await self._serialize_user_entities(existing_row)
 
-        logger.info("Nouveau User+Producer créé: %s (%s)", phone, user_id)
-        return {
-            "id": user_id, "phone": phone, "name": name or phone,
-            "zone_id": zone_id, "producer_id": producer_id,
-            "role": "PRODUCER", "is_new": True, "is_certified": False,
-        }
+        try:
+            # 2. Préparation atomique de l'identité noyau
+            user_uuid = uuid.uuid4()
+            new_user = User(
+                id=user_uuid,
+                phone=clean_phone,
+                name=clean_text(name, "name") if name else "Utilisateur",
+                role=initial_role.upper(),
+                zone_id=uuid.UUID(zone_id) if zone_id else None,
+                whatsapp_enabled=True,
+                identity_verified=False,
+                onboarding_completed=False,
+            )
+            current_session.add(new_user)
+            
+            # 3. Allocation minimale du profil satellite si requis d'entrée de jeu
+            if initial_role.upper() == "PRODUCER":
+                producer = Producer(
+                    id=uuid.uuid4(),
+                    user_id=user_uuid,
+                    status="PENDING",
+                    zone_id=new_user.zone_id
+                )
+                current_session.add(producer)
+
+            # Émission forcée vers le moteur SQL pour valider les contraintes de clés uniques
+            await current_session.flush()
+            
+            return await self.get_user_by_phone(phone=clean_phone)
+
+        except IntegrityError as race_condition:
+            # Gestion d'une concurrence d'écriture : un autre thread/agent a créé le user au même millième de seconde
+            await current_session.rollback()
+            logger.warning("Collision d'écriture détectée (Race Condition) pour le numéro %s. Redirection.", clean_phone)
+            return await self.get_user_by_phone(phone=clean_phone)
+            
+        except Exception as e:
+            logger.error("❌ Erreur critique lors de l'onboarding de %s : %s", clean_phone, e, exc_info=True)
+            return {"status": "error", "message": "Échec technique de la création du compte."}
+
+    # ==================================================================
+    # 2. VALIDATIONS ET SÉCURISATION DES PROFILS CORES
+    # ==================================================================
+
+    async def update_geo_location(self, user_id: str, lat: float, lon: float) -> Dict[str, str]:
+        """Met à jour les coordonnées géographiques noyau pour la météo et la logistique locale."""
+        current_session = self.session
+        if current_session is None:
+            raise RuntimeError("Database session is missing on the current context.")
+
+        # Validation rapide des plages géographiques (Anti-corruption de données)
+        if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+            return {"status": "error", "message": "Coordonnées géographiques hors limites mathématiques."}
+
+        try:
+            stmt = (
+                update(User)
+                .where(User.id == uuid.UUID(user_id))
+                .values(latitude=lat, longitude=lon, updated_at=func.now())
+            )
+            await current_session.execute(stmt)
+            return {"status": "success", "message": "Géolocalisation mise à jour avec succès."}
+        except Exception as e:
+            logger.error("Erreur update_geo_location pour l'utilisateur %s: %s", user_id, e)
+            return {"status": "error", "message": "Erreur d'infrastructure lors de la mise à jour géographique."}
+
+    async def verify_user_identity(self, user_id: str, cnib_number: str) -> bool:
+        """Enregistre et valide la pièce d'identité nationale (CNIB - Burkina Faso) au niveau Core."""
+        current_session = self.session
+        if current_session is None:
+            raise RuntimeError("Database session is missing on the current context.")
+
+        clean_cnib = clean_text(cnib_number, "generic").strip()
+        if not clean_cnib:
+            return False
+
+        try:
+            stmt = (
+                update(User)
+                .where(User.id == uuid.UUID(user_id))
+                .values(cnib_number=clean_cnib, identity_verified=True, updated_at=func.now())
+            )
+            await current_session.execute(stmt)
+            return True
+        except Exception as e:
+            logger.error("❌ Erreur lors de l'enregistrement CNIB pour l'user %s: %s", user_id, e)
+            return False
+
+    async def update_communication_prefs(self, user_id: str, advice_time: str, enabled: bool = True) -> Dict[str, str]:
+        """Règle l'heure de réception WhatsApp et l'état des notifications matinales de l'Agent."""
+        current_session = self.session
+        if current_session is None:
+            raise RuntimeError("Database session is missing on the current context.")
+
+        try:
+            # Découpage et validation stricte du format horaire 24h
+            hour, minute = map(int, advice_time.split(':'))
+            if not (0 <= hour <= 23) or not (0 <= minute <= 59):
+                raise ValueError()
+                
+            time_obj = time(hour, minute)
+
+            stmt = (
+                update(User)
+                .where(User.id == uuid.UUID(user_id))
+                .values(
+                    daily_advice_time=time_obj,
+                    whatsapp_enabled=enabled,
+                    updated_at=func.now()
+                )
+            )
+            await current_session.execute(stmt)
+            return {"status": "success", "message": "Préférences de notification enregistrées."}
+
+        except ValueError:
+            return {"status": "error", "message": "Le format de l'heure doit être une chaîne valide 'HH:MM'."}
+        except Exception as e:
+            logger.error("Erreur update_communication_prefs pour l'user %s: %s", user_id, e)
+            return {"status": "error", "message": "Erreur de traitement des préférences de routage."}
+
+
+
+    async def mark_onboarding_completed(self, user_id: str) -> Dict[str, str]:
+        """Marque l'utilisateur comme ayant terminé l'onboarding initial."""
+        current_session = self.session
+        if current_session is None:
+            raise RuntimeError("Database session is missing on the current context.")
+
+        try:
+            stmt = (
+                update(User)
+                .where(User.id == uuid.UUID(user_id))
+                .values(onboarding_completed=True, updated_at=func.now())
+            )
+            await current_session.execute(stmt)
+            return {"status": "success", "message": "Onboarding marqué comme terminé."}
+        except Exception as e:
+            logger.error("Erreur lors du marquage onboarding pour %s: %s", user_id, e)
+            return {"status": "error", "message": "Impossible de mettre à jour l'état d'onboarding."}

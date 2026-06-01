@@ -53,3 +53,7 @@ Un ensemble de modules Python (ex: `mcp_manager.py`, `schemas.py`, `security.py`
 1.  Éliminent les erreurs `PermissionDenied` dues à des oublis de configuration.
 2.  Corrigent définitivement les erreurs d'Event Loop asyncio.
 3.  Offrent une DX (Developer Experience) simple pour ajouter un nouvel outil sans toucher à 3 fichiers différents.
+
+
+
+Prochaine étape suggérée :Pour rendre cela concret, tu devrais essayer de transformer ta prédiction rouge en "vrai prix". Pour cela, il faut faire l'opération inverse de la dérivée fractionnaire (une intégration fractionnaire), mais c'est complexe.Une alternative plus simple pour ton IA :Utiliser la valeur prédite par l'IA pour générer un signal d'achat/vente (ex: si la courbe rouge monte de plus de $X\%$, j'achète).Calculer le gain théorique sur le S&P 500 avec cette stratégie.

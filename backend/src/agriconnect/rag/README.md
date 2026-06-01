@@ -41,3 +41,22 @@ print(response)
 ## Configuration
 Settings are in `config.py` and `components.py`.
 - Ensure `GROQ_API_KEY` or `AGRICONNECT_APIKEY` is set in `.env` for the LLM to work.
+
+## Quick verification & maintenance
+
+Run these scripts from the repository root to sanity-check RAG components and indexes:
+
+```powershell
+# run a lightweight RAG stress / integrity check (tmp/run_rag_stress.py uses RAW_DATA_DIR and embedding dim)
+python tmp/run_rag_stress.py
+
+# test connectivity to vector store (redis/pgvector)
+python backend/scripts/test_vector_search.py
+
+# trigger a gold index rebuild (if you change ingestion/indexing)
+python backend/scripts/trigger_gold_rebuild.py
+```
+
+Notes:
+- `RAW_DATA_DIR` and `RAG_EMBEDDING_DIM` (see `core/settings.py`) must match your index and embedding model.
+- If no index is present, `retriever` will raise `No index found in storage` — initialize or populate the index before running queries.

@@ -1,0 +1,35 @@
+{
+  "crops": [
+    {
+      "standard": {
+        "crop_type": "soybean",
+        "variety_type": "standard",
+        "nitrogen_needs": 0.0,
+        "phosphorus_needs": 20.0,
+        "potassium_needs": 30.0,
+        "base_temperature": 8.0,
+        "gdd_to_harvest": 1300,
+        "min_humidity_threshold": 40.0,
+        "max_temp_threshold": 35.0,
+        "max_wind_speed_treatment": 19.0,
+        "version": "v1"
+      },
+      "stages": [
+        {
+          "stage_code": 10,
+          "stage_name": "Levée",
+          "gdd_threshold": 100,
+          "nitrogen_need_kgha": 0.0,
+          "water_need_mmday": 2.0
+        },
+        {
+          "stage_code": 60,
+          "stage_name": "Floraison",
+          "gdd_threshold": 700,
+          "nitrogen_need_kgha": 0.0,
+          "water_need_mmday": 5.0
+        }
+      ]
+    }
+  ]
+}

@@ -134,3 +134,25 @@ backend/src/agriconnect/agents/formation_agro.py
 frontend/gradio_ui.py
 frontend/assets/*
 frontend/agro.py
+
+# ============================
+# Security — NEVER commit
+# ============================
+rootkey.csv
+*.csv.bak
+
+# ============================
+# Legacy / Dead Code
+# ============================
+_legacy/
+legacy/
+
+# ============================
+# Debug / Temp artifacts
+# ============================
+z/
+z.html
+tmp_*.py
+pdf_queue.json
+*.tmp
+tmp/

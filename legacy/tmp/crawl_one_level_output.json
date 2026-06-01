@@ -1,0 +1,195 @@
+[
+  {
+    "root": "https://www.fao.org/newsroom/en/",
+    "crawled_candidates_count": 63,
+    "collected": [
+      {
+        "parent": "http://www.fao.org/statistics/en/",
+        "found_pdfs": [
+          {
+            "url": "https://storage.googleapis.com/amis-9189b-strapi/AMIS_Market_Monitor_Issue_137_a7ebc7f001/AMIS_Market_Monitor_Issue_137_a7ebc7f001.pdf",
+            "anchor_text": "AMIS Market Monitor"
+          },
+          {
+            "url": "https://www.fao.org/3/cc6683en/cc6683en.pdf",
+            "anchor_text": "FAO Statistics and Data Quality Assurance Framework (SDQAF, 2023)"
+          }
+        ]
+      },
+      {
+        "parent": "http://www.fao.org/partnerships/en/",
+        "found_pdfs": [
+          {
+            "url": "https://www.fao.org/3/i3443e/i3443e.pdf",
+            "anchor_text": "FAO strategy for partnerships with Civil Society Organizations"
+          }
+        ]
+      },
+      {
+        "parent": "https://www.fao.org/newsroom/detail/green-climate-fund-approves--50-million-for-fao-supported-adaptation-project-in-jamaica/en",
+        "found_pdfs": [
+          {
+            "url": "https://www.greenclimate.fund/sites/default/files/document/gcf-brief-direct-access.pdf",
+            "anchor_text": "Direct Access Entities"
+          },
+          {
+            "url": "https://www.ipcc.ch/report/ar6/wg1/downloads/report/IPCC_AR6_WGI_SPM.pdf",
+            "anchor_text": "Sixth Assessment Report"
+          }
+        ]
+      },
+      {
+        "parent": "https://www.fao.org/employment/home/en/",
+        "found_pdfs": [
+          {
+            "url": "https://www.fao.org/media/docs/employmentlibraries/default-document-library/callforinterest_externalinvestmentadviser.pdf",
+            "anchor_text": "Call for Expression of Interest:  External Investment Adviser"
+          },
+          {
+            "url": "https://www.fao.org/3/az770e/az770e.pdf",
+            "anchor_text": "The FAO Competency Framework"
+          },
+          {
+            "url": "https://www.fao.org/3/I8446EN/i8446en.pdf",
+            "anchor_text": "Internationally Recognized Language Examinations"
+          }
+        ]
+      },
+      {
+        "parent": "https://fao.org/contact-us/data-protection-and-privacy/en/",
+        "found_pdfs": [
+          {
+            "url": "https://www.fao.org/fileadmin/user_upload/legal/docs/AC2022-06.pdf",
+            "anchor_text": "Data Protection Policy"
+          }
+        ]
+      },
+      {
+        "parent": "https://www.fao.org/unfao/procurement/en",
+        "found_pdfs": [
+          {
+            "url": "https://www.fao.org/media/docs/faoprocurementlibraries/terms-and-conditions/26gtcsgoods2025-final8344e7bfb10748c6a4b41aa3b1092027.pdf",
+            "anchor_text": ""
+          },
+          {
+            "url": "https://www.fao.org/media/docs/faoprocurementlibraries/terms-and-conditions/26gtcsgoods2025-final8344e7bfb10748c6a4b41aa3b1092027.pdf",
+            "anchor_text": ""
+          },
+          {
+            "url": "https://www.fao.org/media/docs/faoprocurementlibraries/terms-and-conditions/260210-fao-gtcs_goods---2025-final.pdf",
+            "anchor_text": "FAO General Terms & Conditions for Goods (effective February 2026)"
+          },
+          {
+            "url": "https://www.fao.org/media/docs/faoprocurementlibraries/terms-and-conditions/26gtcsgoods2025-final8344e7bfb10748c6a4b41aa3b1092027.pdf?sfvrsn=2843af5e_1",
+            "anchor_text": ""
+          },
+          {
+            "url": "https://www.fao.org/media/docs/faoprocurementlibraries/terms-and-conditions/26gtcsservices2025-final.pdf",
+            "anchor_text": "FAO General Terms & Conditions for Services (effective February 2026)"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "root": "https://meteoburkina.bf/produits/bulletin-agrometeologique-decadaire/",
+    "crawled_candidates_count": 61,
+    "collected": [
+      {
+        "parent": "https://fanfar.eu/fr/piv/",
+        "found_pdfs": [
+          {
+            "url": "https://fanfar.eu/wp-content/uploads/sites/4/2024/03/KB-FR-guide-pour-usagers.pdf",
+            "anchor_text": "Guide de l'utilisateur"
+          },
+          {
+            "url": "https://fanfar.eu/wp-content/uploads/sites/4/2024/03/KB-FR-terminologie-variables-seuils.pdf",
+            "anchor_text": "Terminologie"
+          },
+          {
+            "url": "https://fanfar.eu/wp-content/uploads/sites/4/2024/03/KB-ENFR-precision.pdf",
+            "anchor_text": "Précision"
+          }
+        ]
+      },
+      {
+        "parent": "https://meteoburkina.bf/produits/bulletin-agrometeologique-decadaire/bulletin-agrom%C3%A9t%C3%A9orologique-d%C3%A9cadaire-n9-valable-du-1er-au-10-avril-2026/",
+        "found_pdfs": [
+          {
+            "url": "https://meteoburkina.bf/documents/766/BAD26033.pdf",
+            "anchor_text": "Télécharger le document - 826,0 Kio"
+          },
+          {
+            "url": "https://meteoburkina.bf/documents/766/BAD26033.pdf",
+            "anchor_text": "Télécharger le document"
+          }
+        ]
+      },
+      {
+        "parent": "https://meteoburkina.bf/produits/bulletin-agrometeologique-decadaire/bulletin-agrom%C3%A9t%C3%A9orologique-d%C3%A9cadaire-n8-valable-du-21-au-31-mars-2026/",
+        "found_pdfs": [
+          {
+            "url": "https://meteoburkina.bf/documents/756/BAD26032.pdf",
+            "anchor_text": "Télécharger le document - 798,3 Kio"
+          },
+          {
+            "url": "https://meteoburkina.bf/documents/756/BAD26032.pdf",
+            "anchor_text": "Télécharger le document"
+          }
+        ]
+      },
+      {
+        "parent": "https://meteoburkina.bf/produits/bulletin-agrometeologique-decadaire/bulletin-agrom%C3%A9t%C3%A9orologique-d%C3%A9cadaire-n7-valable-du-11-au-20-mars-2026/",
+        "found_pdfs": [
+          {
+            "url": "https://meteoburkina.bf/documents/742/BAD26031.pdf",
+            "anchor_text": "Télécharger le document - 840,1 Kio"
+          },
+          {
+            "url": "https://meteoburkina.bf/documents/742/BAD26031.pdf",
+            "anchor_text": "Télécharger le document"
+          }
+        ]
+      },
+      {
+        "parent": "https://meteoburkina.bf/produits/bulletin-agrometeologique-decadaire/bulletin-agrom%C3%A9t%C3%A9orologique-d%C3%A9cadaire-n6-valable-du-1er-au-10-mars-2026/",
+        "found_pdfs": [
+          {
+            "url": "https://meteoburkina.bf/documents/730/BAD26023.pdf",
+            "anchor_text": "Télécharger le document - 943,2 Kio"
+          },
+          {
+            "url": "https://meteoburkina.bf/documents/730/BAD26023.pdf",
+            "anchor_text": "Télécharger le document"
+          }
+        ]
+      },
+      {
+        "parent": "https://meteoburkina.bf/produits/bulletin-agrometeologique-decadaire/bulletin-agrom%C3%A9t%C3%A9orologique-d%C3%A9cadaire-n5-valable-du-21-au-28-f%C3%A9vrier-2026/",
+        "found_pdfs": [
+          {
+            "url": "https://meteoburkina.bf/documents/719/BAD26022.pdf",
+            "anchor_text": "Télécharger le document - 945,9 Kio"
+          },
+          {
+            "url": "https://meteoburkina.bf/documents/719/BAD26022.pdf",
+            "anchor_text": "Télécharger le document"
+          }
+        ]
+      },
+      {
+        "parent": "https://meteoburkina.bf/produits/bulletin-agrometeologique-decadaire/bulletin-agrom%C3%A9t%C3%A9orologique-d%C3%A9cadaire-n4-valable-du-11-au-2o-f%C3%A9vrier-2026/",
+        "found_pdfs": [
+          {
+            "url": "https://meteoburkina.bf/documents/706/BAD26021.pdf",
+            "anchor_text": "Télécharger le document - 938,4 Kio"
+          },
+          {
+            "url": "https://meteoburkina.bf/documents/706/BAD26021.pdf",
+            "anchor_text": "Télécharger le document"
+          }
+        ]
+      }
+    ]
+  }
+]

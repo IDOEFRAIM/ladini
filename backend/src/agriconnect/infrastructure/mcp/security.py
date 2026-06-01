@@ -41,7 +41,11 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "get_open_auctions": PermissionScope.DB_READ_ONLY,
     "get_farm_stocks": PermissionScope.DB_READ_ONLY,
     "get_stocks": PermissionScope.DB_READ_ONLY,
+    "get_stock_movements": PermissionScope.DB_READ_ONLY,
     "get_stock_history": PermissionScope.DB_READ_ONLY,
+    "normalize_unit": PermissionScope.DB_READ_ONLY,
+    "guess_category": PermissionScope.DB_READ_ONLY,
+    "get_producer_dashboard": PermissionScope.DB_READ_ONLY,
     "get_clients": PermissionScope.DB_READ_ONLY,
     "get_farms": PermissionScope.DB_READ_ONLY,
     "get_expense_summary": PermissionScope.DB_READ_ONLY,
@@ -59,6 +63,7 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "commit_staged_transaction": PermissionScope.DB_DATA_WRITE,
     "create_agent_action": PermissionScope.DB_DATA_WRITE,
     "update_action_status": PermissionScope.DB_DATA_WRITE,
+    "get_or_create_farm": PermissionScope.DB_DATA_WRITE,
     "add_stock": PermissionScope.DB_DATA_WRITE,
     "remove_stock": PermissionScope.DB_DATA_WRITE,
     "add_expense": PermissionScope.DB_DATA_WRITE,
@@ -76,6 +81,49 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "persist_conversation": PermissionScope.DB_DATA_WRITE,
 }
 
+
+def _guess_scope(tool_name: str) -> PermissionScope:
+    name = (tool_name or "").lower()
+    if name.startswith(("migrate", "drop", "alter")):
+        return PermissionScope.DB_SCHEMA_MODIFY
+    if name.startswith(
+        (
+            "create",
+            "add",
+            "remove",
+            "update",
+            "upsert",
+            "commit",
+            "prepare",
+            "register",
+            "record",
+            "emit",
+            "log",
+            "place",
+            "report",
+            "adjust",
+        )
+    ):
+        return PermissionScope.DB_DATA_WRITE
+    return PermissionScope.DB_READ_ONLY
+
+
+def _autofill_tool_scopes() -> None:
+    """Ensure tools exposed by handlers are assigned a scope.
+
+    The MCP runtime is fail-closed if a tool is missing from TOOL_SCOPE_MAP.
+    Since we auto-register tools from `AgriDatabaseService`, we conservatively
+    assign a default scope when a mapping is missing.
+    """
+    try:
+        from agriconnect.protocols.mcp.h import TOOL_HANDLERS
+    except Exception as exc:
+        logger.debug("TOOL_HANDLERS import failed; cannot autofill scopes: %s", exc)
+        return
+
+    for tool in TOOL_HANDLERS.keys():
+        TOOL_SCOPE_MAP.setdefault(tool, _guess_scope(tool))
+
 TOOL_RISK_MAP: dict[str, RiskLevel] = {
     "create_order": RiskLevel.HIGH,
     "prepare_transaction_staging": RiskLevel.HIGH,
@@ -87,6 +135,9 @@ TOOL_RISK_MAP: dict[str, RiskLevel] = {
     "search_past_interactions": RiskLevel.LOW,
     "rag://status": RiskLevel.LOW,
 }
+
+
+_autofill_tool_scopes()
 
 SENSITIVE_COLUMNS = frozenset(
     {
@@ -404,7 +455,7 @@ class MCPPermissionClient:
         self._hitl_callback = hitl_callback
         self._registry = registry or get_registry()
 
-    async def call_tool(self, tool_name: str, arguments: Dict[str, Any] | None = None) -> Any:
+    async def call_tool(self, tool_name: str, arguments) -> Any:
         arguments = arguments or {}
         args_hash = self._hash_args(arguments)
         t0 = time.monotonic()
@@ -594,7 +645,7 @@ class MCPSessionManager:
 
 
 class AsyncMCPBackend(Protocol):
-    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
+    async def call_tool(self, name: str, arguments) -> Any:
         ...
 
     async def list_tools(self) -> list[dict[str, Any]]:
@@ -607,7 +658,7 @@ class RAGInProcessBackend:
 
         self._provider = AgronomyTools()
 
-    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
+    async def call_tool(self, name: str, arguments) -> Any:
         tool_map = {
             "search_agronomy_docs": self._provider.search_agronomy_docs,
             "search_past_interactions": self._provider.search_past_interactions,
@@ -633,13 +684,10 @@ class RAGInProcessBackend:
 
 
 class DBInProcessBackend:
-    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Any:
-        import agriconnect.protocols.mcp.tools.db_handler as db_tools
+    async def call_tool(self, name: str, arguments) -> Any:
+        from agriconnect.protocols.mcp.h import TOOL_HANDLERS
 
-        tool_map = getattr(db_tools, "TOOL_MAP", None)
-        if not isinstance(tool_map, dict):
-            raise RuntimeError("DB TOOL_MAP is not available")
-        fn = tool_map.get(name)
+        fn = TOOL_HANDLERS.get(name)
         if fn is None:
             raise ValueError(f"Unknown DB tool: {name}")
         raw = await fn(**arguments)
@@ -651,12 +699,9 @@ class DBInProcessBackend:
         return raw
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        import agriconnect.protocols.mcp.tools.db_handler as db_tools
+        from agriconnect.protocols.mcp.h import TOOL_DESCRIPTIONS
 
-        tool_map = getattr(db_tools, "TOOL_MAP", None)
-        if not isinstance(tool_map, dict):
-            return []
-        return [{"name": n, "description": (getattr(fn, "__doc__", "") or "").strip().split("\n")[0]} for n, fn in tool_map.items()]
+        return [{"name": n, "description": d} for n, d in TOOL_DESCRIPTIONS.items()]
 
 
 class MCPManager:

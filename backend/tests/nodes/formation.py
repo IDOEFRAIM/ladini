@@ -22,7 +22,6 @@ class TestFormationCoach:
         config.llm_client = MagicMock()
         config.mcp_rag = MagicMock()
         config.mcp_context = MagicMock()
-        config.a2a = MagicMock()
         config.evaluator = MagicMock()
         return config
 
@@ -33,7 +32,7 @@ class TestFormationCoach:
     ## --- Tests des Nœuds Individuels ---
 
     def test_analyze_node_market_routing(self, coach, mock_config):
-        """Vérifie que les questions de prix sont routées vers A2A."""
+        """Vérifie que les questions de prix sortent du scope formation."""
         state: FormationAgentState = {
             "user_query": "Quel est le prix du maïs à Ouagadougou ?",
             "warnings": []
@@ -48,8 +47,9 @@ class TestFormationCoach:
 
         result = coach.analyze_node(state)
 
-        assert result["status"] == "OFF_TOPIC"
-        mock_config.a2a.send_message.assert_not_called()
+        # Market detection removed: formation analyzes queries within its
+        # scope and does not perform market-specific routing.
+        assert result["status"] == "ANALYZED"
 
     def test_analyze_node_formation_flow(self, coach):
         """Vérifie l'analyse normale d'une question technique."""
@@ -117,20 +117,6 @@ class TestFormationCoach:
         assert result["status"] == "OFF_TOPIC"
         assert "expert AgriConnect" in result["final_response"]
         assert result["agri_response"] is not None
-
-    def test_a2a_dispatch_node_success(self, coach, mock_config):
-        """Vérifie l'émission du message A2A."""
-        state: FormationAgentState = {
-            "user_query": "Prix du riz",
-            "a2a_route_topic": "market.price_check",
-            "warnings": []
-        }
-        
-        result = coach.a2a_dispatch_node(state)
-        
-        assert result["status"] == "COMPLETED"
-        assert "agent marché" in result["final_response"]
-        mock_config.a2a.send_message.assert_called_once()
 
     ## --- Test de la logique de protection (Loop Guard) ---
 

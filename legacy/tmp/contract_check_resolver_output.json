@@ -1,0 +1,18 @@
+[
+  {
+    "input_url": "https://meteoburkina.bf/produits/bulletin-agrometeologique-decadaire/bulletin-agrom%C3%A9t%C3%A9orologique-d%C3%A9cadaire-n9-valable-du-1er-au-10-avril-2026/",
+    "resolved_pdf_url": null,
+    "meta": {
+      "reason": "failed_discovery",
+      "candidate_url": "https://meteoburkina.bf/produits/bulletin-agrometeologique-decadaire/bulletin-agrom%C3%A9t%C3%A9orologique-d%C3%A9cadaire-n9-valable-du-1er-au-10-avril-2026/"
+    }
+  },
+  {
+    "input_url": "https://meteoburkina.bf/produits/bulletin-agrometeologique-decadaire/bulletin-agrom%C3%A9t%C3%A9orologique-d%C3%A9cadaire-n8-valable-du-21-au-31-mars-2026/",
+    "resolved_pdf_url": null,
+    "meta": {
+      "reason": "failed_discovery",
+      "candidate_url": "https://meteoburkina.bf/produits/bulletin-agrometeologique-decadaire/bulletin-agrom%C3%A9t%C3%A9orologique-d%C3%A9cadaire-n8-valable-du-21-au-31-mars-2026/"
+    }
+  }
+]

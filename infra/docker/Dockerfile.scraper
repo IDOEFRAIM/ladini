@@ -1,0 +1,63 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1
+
+# Install system deps required for some Python packages
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libpq-dev build-essential curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user
+RUN useradd --create-home --shell /bin/bash appuser
+
+WORKDIR /app
+
+# Install Python runtime deps (adjust as needed for your project)
+RUN pip install --no-cache-dir \
+    boto3 \
+    requests \
+    beautifulsoup4 \
+    pypdf \
+    sqlalchemy \
+    psycopg2-binary \
+    pydantic
+
+# Copy application code (build context should be repo root or adjust when building)
+COPY . /app
+
+# Ensure files belong to non-root user
+RUN chown -R appuser:appuser /app
+
+USER appuser
+
+# Default command - adjust to your entrypoint
+CMD ["python", "run_scraper_service.py"]
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app/backend/src
+
+WORKDIR /app
+
+# Runtime dependencies only (scraping + queue publishing + DB state access)
+RUN pip install --no-cache-dir \
+    boto3 \
+    beautifulsoup4 \
+    pydantic \
+    pyyaml \
+    requests \
+    sqlalchemy \
+    psycopg2-binary \
+    python-json-logger
+
+# Source files required by scraper orchestrator and YAML source config
+COPY backend/src /app/backend/src
+COPY backend/sources /app/backend/sources
+
+# Non-root execution
+RUN useradd -m -u 10001 appuser && chown -R appuser:appuser /app
+USER appuser
+
+CMD ["python", "-m", "agriconnect.services.scraper.run_scraper_service"]

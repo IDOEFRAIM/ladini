@@ -1,23 +1,25 @@
+"""MCP main entry point.
+
+Delegates to ``server.run()`` which builds and starts the unified FastMCP
+server with all tool handlers from ``handlers.py``.
+
+For the full MCPServerApp (with providers), use ``server.build_mcp_app()``
+instead.
+"""
 from __future__ import annotations
 
 import logging
-import os
 
-from agriconnect.protocols.mcp.mcp_config import build_mcp_app
+from agriconnect.protocols.mcp.server import run as _run
 
 logger = logging.getLogger("MCP.Main")
 
 
 def run() -> None:
-    app = build_mcp_app()
-    env_name = (os.getenv("APP_ENV") or os.getenv("ENV") or "development").strip().lower()
-    default_transport = "sse" if env_name in {"prod", "production", "staging"} else "stdio"
-    transport = os.getenv("MCP_TRANSPORT", default_transport)
-    host = os.getenv("MCP_HOST")
-    port = os.getenv("MCP_PORT")
-    app.run(transport=transport, host=host, port=int(port) if port else None)
+    _run()
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     logger.info("Starting unified MCP server")
     run()

@@ -250,6 +250,26 @@ def ensure_ingestion_schema(db_url: Optional[str] = None) -> None:
 	ddl = [
 		"CREATE SCHEMA IF NOT EXISTS ingestion",
 		"""
+		CREATE TABLE IF NOT EXISTS ingestion.discovery_queue (
+			id BIGSERIAL PRIMARY KEY,
+			url_pdf TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			discovered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			status TEXT NOT NULL DEFAULT 'pending',
+			metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			locked_at TIMESTAMPTZ,
+			locked_by TEXT,
+			processed_at TIMESTAMPTZ,
+			error_message TEXT,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CONSTRAINT discovery_queue_status_chk CHECK (status IN ('pending', 'processing', 'processed', 'failed')),
+			CONSTRAINT discovery_queue_url_source_uniq UNIQUE (url_pdf, source_id)
+		)
+		""",
+		"CREATE INDEX IF NOT EXISTS idx_discovery_queue_status_discovered_at ON ingestion.discovery_queue (status, discovered_at)",
+		"CREATE INDEX IF NOT EXISTS idx_discovery_queue_locked_at ON ingestion.discovery_queue (locked_at)",
+		"""
 		CREATE TABLE IF NOT EXISTS ingestion.worker_processed_objects (
 			marker TEXT PRIMARY KEY,
 			bucket TEXT NOT NULL,
@@ -270,6 +290,7 @@ def ensure_ingestion_schema(db_url: Optional[str] = None) -> None:
 			metadata JSONB NOT NULL DEFAULT '{}'::jsonb
 		)
 		""",
+		"ALTER TABLE ingestion.ingested_documents ADD COLUMN IF NOT EXISTS error_type TEXT",
 		"""
 		CREATE TABLE IF NOT EXISTS ingestion.document_chunks (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

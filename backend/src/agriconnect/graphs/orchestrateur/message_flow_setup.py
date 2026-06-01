@@ -25,7 +25,7 @@ from agriconnect.graphs.agents.formation.graph import FormationCoach
 from agriconnect.graphs.agents.market_coach.graph import MarketCoach
 from agriconnect.graphs.agents.marketplace_v3.graph import MarketplaceAgentV3
 from agriconnect.services.database.database_service import AgriDatabaseService
-# ParallelExecutor removed â€” fan-out now handled by LangGraph Send
+# ParallelExecutor removed — fan-out now handled by LangGraph Send
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ def init_db_and_memory(flow):
         elif settings.DATABASE_URL:
             flow.db = AgriDatabase(db_url=settings.DATABASE_URL)
             flow.session_factory = None
-            logger.warning("âš ï¸  DB: fallback engine propre (core/database.py non initialisÃ©)")
+            logger.warning("DB: fallback engine propre (core/database.py non initialisé)")
         else:
             # Try to lazily initialize the core DB engine (may raise)
             try:
@@ -64,16 +64,16 @@ def init_db_and_memory(flow):
             _episodic = EpisodicMemory(flow.session_factory, llm_client=flow.llm)
             _extractor = ProfileExtractor(flow.llm, _profile)
             flow.memory = ContextOptimizer(_profile, _episodic, _extractor)
-            logger.info("ðŸ§  MÃ©moire 3 niveaux activÃ©e")
+            logger.info("Mémoire 3 niveaux activée")
         except Exception as e:
-            logger.warning("âš ï¸  MÃ©moire dÃ©sactivÃ©e: %s", e)
+            logger.warning("Mémoire désactivée: %s", e)
 
 
 def init_protocols(flow):
     """Initialize MCP + Shield stack.  The Orchestrator is the SOLE HOST.
 
-    Chain: AgriDBMCPServer (backend) â†’ MCPPermissionClient (shield)
-           â†’ MCPPermissionHostApp (preflight) â†’ MCPSessionManager (session/UI)
+    Chain: AgriDBMCPServer (backend) → MCPPermissionClient (shield)
+           → MCPPermissionHostApp (preflight) → MCPSessionManager (session/UI)
 
     Experts receive **only** the MCPSessionManager via dependency injection;
     they never instantiate their own MCP clients.
@@ -98,13 +98,13 @@ def init_protocols(flow):
     except Exception as e:
         logger.warning("MCP Servers fallback: %s", e)
 
-    # â”€â”€ Build the Shield stack (single authority) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # — Build the Shield stack (single authority) —
     db_backend = flow.mcp_db if flow.mcp_db else AgriDBMCPServer()
 
-    # HITL callback placeholder â€” will be wired to Gradio/WhatsApp later
+    # HITL callback placeholder — will be wired to Gradio/WhatsApp later
     async def _hitl_callback(tool_name, args, reason):
         """Default HITL: deny and log. Override at runtime for real UI."""
-        logger.warning("HITL requested for '%s' â€” no UI wired, denying. Reason: %s", tool_name, reason)
+        logger.warning("HITL requested for '%s' — no UI wired, denying. Reason: %s", tool_name, reason)
         return False
 
     shield_client = MCPPermissionClient(
@@ -123,9 +123,6 @@ def init_protocols(flow):
     setattr(flow.ctx, "mcp_host", shield_host)
     setattr(flow.ctx, "mcp_session", shield_session)
 
-    # A2A disabled â€” local workflow invocations only
-    flow.a2a = None
-
     flow.renderers = {
         "whatsapp": WhatsAppRenderer(),
         "web": WebRenderer(),
@@ -134,7 +131,7 @@ def init_protocols(flow):
 
 
 def init_experts(flow):
-    """Initialize expert agents.  Experts receive the Shield via DI â€” they
+    """Initialize expert agents.  Experts receive the Shield via DI — they
     never create their own MCPPermissionClient.
 
     The ``mcp_session`` (MCPSessionManager) is passed to experts that need
@@ -153,7 +150,7 @@ def init_experts(flow):
         mcp_context=flow.mcp_context,
         shield=shield,
     )
-    # MarketCoach & Marketplace receive the Shield â€” NOT a raw MCP server
+    # MarketCoach & Marketplace receive the Shield — NOT a raw MCP server
     flow.market_coach = MarketCoach.from_config(llm_client=flow.llm, mcp_session=shield)
     # Backward-compat alias
     flow.market = flow.market_coach
@@ -195,5 +192,4 @@ def init_tracing(flow):
     from agriconnect.core.tracing import init_tracing
     flow._tracing_ok = init_tracing()
     if flow._tracing_ok:
-        logger.info("ðŸ”­ LangSmith tracing actif pour l'orchestrateur")
-
+        logger.info("LangSmith tracing actif pour l'orchestrateur")

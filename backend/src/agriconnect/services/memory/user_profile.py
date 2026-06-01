@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import Column, DateTime, String, Text, Float, JSON
 from sqlalchemy.sql import func
 
-from agriconnect.services.models_legacy import Base
+from agriconnect.services.database.model import Base
 
 logger = logging.getLogger("Memory.UserProfile")
 

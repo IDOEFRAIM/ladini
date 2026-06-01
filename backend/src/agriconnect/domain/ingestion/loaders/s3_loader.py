@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 from typing import Any, Dict, Iterable, List, Optional, Set
+import boto3
 
 from agriconnect.domain.ingestion.storage.s3_manager import S3Manager
 from agriconnect.core.settings import settings
@@ -19,8 +21,31 @@ logger = logging.getLogger(__name__)
 class S3Loader:
     """Load raw objects from S3 for replay/reprocessing workflows."""
 
-    def __init__(self, s3_manager: Optional[S3Manager] = None):
-        self.s3 = s3_manager or S3Manager()
+    def __init__(self, s3_manager: Optional[S3Manager] = None, bucket_name: Optional[str] = None):
+        resolved_bucket = (
+            bucket_name
+            or os.getenv("INGESTION_S3_BUCKET")
+            or os.getenv("S3_BUCKET")
+            or getattr(settings, "S3_BUCKET", "")
+            or "agriconnect-raw"
+        )
+        region_name = (
+            os.getenv("S3_REGION")
+            or os.getenv("AWS_REGION")
+            or getattr(settings, "S3_REGION", "")
+            or getattr(settings, "AWS_REGION", "")
+            or "eu-central-1"
+        )
+
+        if s3_manager is None:
+            self.s3 = S3Manager(bucket_name=resolved_bucket, region=region_name)
+        else:
+            self.s3 = s3_manager
+            # Allow explicit env override even when a manager is injected.
+            self.s3.bucket = resolved_bucket
+
+        # Explicit boto3 client reference for stream/event-driven consumers.
+        self.client = boto3.client("s3", region_name=region_name)
 
     @staticmethod
     def build_marker(bucket: str, key: str, etag: Optional[str]) -> str:
@@ -45,7 +70,7 @@ class S3Loader:
             exclude_prefixes = [p.strip().lower() for p in raw_excludes]
 
         for prefix in prefixes:
-            paginator = self.s3.client.get_paginator("list_objects_v2")
+            paginator = self.client.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=self.s3.bucket, Prefix=prefix):
                 for obj in page.get("Contents", []):
                     key = obj.get("Key")
@@ -80,7 +105,7 @@ class S3Loader:
 
                     # Quick content-based heuristic: fetch a small JSON prefix to detect crawl snapshots / metadata files
                     try:
-                        snippet = self.s3.client.get_object(Bucket=self.s3.bucket, Key=key, Range='bytes=0-8192')["Body"].read()
+                        snippet = self.client.get_object(Bucket=self.s3.bucket, Key=key, Range='bytes=0-8192')["Body"].read()
                         try:
                             sample_obj = json.loads(snippet.decode('utf-8', errors='replace'))
                         except Exception:
@@ -128,7 +153,7 @@ class S3Loader:
         return objects
 
     def load_json(self, key: str) -> Dict[str, Any]:
-        body = self.s3.client.get_object(Bucket=self.s3.bucket, Key=key)["Body"].read()
+        body = self.client.get_object(Bucket=self.s3.bucket, Key=key)["Body"].read()
         payload = json.loads(body.decode("utf-8", errors="replace"))
 
         # New envelope format (schema versioned)

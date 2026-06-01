@@ -1,0 +1,53 @@
+services:
+  db:
+    image: postgres:15
+    container_name: agriconnect-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agriconnect
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d agriconnect"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  scraper:
+    build:
+      context: .
+      dockerfile: ./scrapers/Dockerfile
+    container_name: agriconnect-scraper
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      SCRAPER_RUN_MODE: loop
+      SCRAPER_LOOP_SECONDS: 300
+    volumes:
+      - pdf_data:/app/data/pdfs
+
+  ingestion:
+    build:
+      context: .
+      dockerfile: ./ingestion/Dockerfile
+    container_name: agriconnect-ingestion
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      INGESTION_SOURCE: local
+    volumes:
+      - pdf_data:/app/data/pdfs
+
+volumes:
+  postgres_data:
+  pdf_data:

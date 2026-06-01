@@ -4,46 +4,61 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 
 class FormationState(TypedDict, total=False):
-	# Input
-	user_query: str
-	learner_profile: Dict[str, Any]
+    # --- Input & Identity ---
+    user_query: str
+    learner_profile: Dict[str, Any]
+    crop_name: str           # Nom brut saisi par l'utilisateur
+    identified_crop: str     # Type normalisé trouvé par l'IA (ex: "MAIS")
+    zone_category: str
+    area_ha: float
+    cycle_id: Optional[str]  # ID du cycle pour le lien MCP
 
-	# Internal Reasoning
-	intent: str
-	urgency: str
-	focus_topics: List[str]
-	field_actions: List[str]
-	safety_flags: List[str]
-	optimized_query: str
+    # --- Internal Reasoning & Analysis ---
+    intent: str              # FORMATION, URGENCE, CONSEIL
+    urgency: str             # NORMAL, HAUTE, CRITIQUE
+    focus_topics: List[str]
+    field_actions: List[str]
+    safety_flags: List[str]
+    optimized_query: str
 
-	# Knowledge Retrieval
-	retrieved_context: str
-	sources: List[Dict[str, Any]]
+    # --- Agronomic Truth (The JSON "Seeds") ---
+    crop_specs: Dict[str, Any]  # Les caractéristiques extraites du JSON
 
-	# Draft & Refine
-	learning_modules: List[str]
-	prerequisites: List[str]
-	reasoning: str
-	answer_draft: str
-	evaluation: Dict[str, float]
+    # --- Knowledge Retrieval (RAG & MCP) ---
+    retrieved_context: str
+    sources: List[Dict[str, Any]]
+    technical_canvas: Dict[str, Any]
+    canvas_markdown: str
+    retrieval_mode: str        # 'JSON_ONLY', 'RAG', 'MCP_FULL'
+    advisor_error: bool
 
-	# Final Output
-	final_response: str
-	agri_response: Optional[Dict[str, Any]]
-	expert_responses: List[Dict[str, Any]]
-	concepts_appris: List[str]
+    # --- Draft & Refine ---
+    learning_modules: List[str]
+    prerequisites: List[str]
+    reasoning: str
+    answer_draft: str
+    evaluation: Dict[str, float]
 
-	# Status & Guards
-	status: str
-	warnings: List[str]
-	critique_retry_count: int
-	rewrited_retry_count: int
-	degraded_mode: bool
-	requires_human: bool
-	required_domain: str
-	handoff_to: str
-	handoff_reason: str
-	clarification_needed: str
+    # --- Final Output & Tracking ---
+    final_response: str
+    agri_response: Optional[Dict[str, Any]]
+    expert_responses: List[Dict[str, Any]]
+    concepts_appris: List[str]  # Pour le suivi pédagogique
+
+    # --- AG-UI Protocol ---
+    ag_ui_component: Optional[Dict[str, Any]]
+    response_strategy: str     # PROVIDE_ANSWER, ASK_CLARIFICATION, DEGRADED_FALLBACK
+    missing_info: List[str]    # Champs critiques manquants pour conseil précis
+
+    # --- Status & Guards ---
+    status: str                # ANALYZED, VALIDATED, CONSULTING, COMPOSED, ...
+    warnings: List[str]
+    document_grade: int
+    critique_retry_count: int
+    rewrited_retry_count: int
+    degraded_mode: bool        # True si JSON indisponible
+    requires_human: bool
+    clarification_needed: str
 
 
 __all__ = ["FormationState"]

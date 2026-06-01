@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import asyncio
+import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("AgriConnect.Services.RAG")
@@ -20,6 +21,10 @@ class RagService:
     ) -> None:
         self._retriever = retriever
         self._retriever_factory = retriever_factory
+        # Lock to protect retriever initialization from concurrent callers
+        self._init_lock = threading.Lock()
+        # Lock to serialize search calls to avoid concurrent access issues in some retriever implementations
+        self._search_lock = threading.Lock()
 
     @staticmethod
     def _safe_query_timeout() -> float:
@@ -72,18 +77,24 @@ class RagService:
     def _get_retriever(self) -> Any:
         if self._retriever is not None:
             return self._retriever
-        factory = self._retriever_factory
-        if factory is None:
-            from agriconnect.rag.retriever import AgileRetriever
 
-            factory = AgileRetriever
-        try:
-            logger.info("Initializing AgileRetriever from RagService")
-            self._retriever = factory()
-            return self._retriever
-        except Exception as exc:
-            logger.error("Retriever initialization failed: %s", exc)
-            raise RuntimeError(f"Retriever non disponible : {exc}") from exc
+        # Only one thread should initialize the retriever
+        with self._init_lock:
+            if self._retriever is not None:
+                return self._retriever
+
+            factory = self._retriever_factory
+            if factory is None:
+                from agriconnect.rag.retriever import AgileRetriever
+
+                factory = AgileRetriever
+            try:
+                logger.info("Initializing AgileRetriever from RagService")
+                self._retriever = factory()
+                return self._retriever
+            except Exception as exc:
+                logger.error("Retriever initialization failed: %s", exc)
+                raise RuntimeError(f"Retriever non disponible : {exc}") from exc
 
     async def warmup(self) -> bool:
         try:
@@ -109,8 +120,10 @@ class RagService:
 
         level = self._sanitize_level(level)
         top_k = self._sanitize_top_k(top_k)
-        retriever = self._get_retriever()
-        nodes = retriever.search(normalized_query, user_level=level)
+        # Serialize searches to avoid concurrent access issues in some retriever backends
+        with self._search_lock:
+            retriever = self._get_retriever()
+            nodes = retriever.search(normalized_query, user_level=level)
         nodes = (nodes or [])[:top_k]
 
         docs: List[Dict[str, Any]] = []

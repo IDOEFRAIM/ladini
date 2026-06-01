@@ -1,46 +1,98 @@
 from __future__ import annotations
 
-import logging
-import json
+"""AgriConnect MCP runtime (simple & predictable).
+
+Principes (alignés avec `services/database/database_service.py`):
+- Le runtime MCP ne gère pas le cycle de vie DB (pas de `init_db()` ici).
+- Il instancie et expose uniquement `AgriDatabaseService`.
+- La DB est initialisée **lorsque nécessaire** via `get_sessionmaker()`.
+
+MCP:
+- `fastmcp` est instancié **paresseusement** (lazy) via un proxy pour éviter
+  les effets de bord à l'import (certains packages font du setup lourd).
+"""
+
 import asyncio
-import time
 import concurrent.futures
+import json
+import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any
-import os
-from fastmcp import FastMCP
 
-# Imports depuis le cœur de l'application
-from agriconnect.core.database import (
-    init_db,
-    close_db,
-    check_connection,
-    check_connection_detailed,
-    check_connection_aggressive,
-)
+from agriconnect.core.database import close_db, get_sessionmaker
 from agriconnect.core.settings import settings
 from agriconnect.services.database.database_service import AgriDatabaseService
 
-mcp = FastMCP("AgriConnect Database MCP Server")
-
-# Configuration du logger pour l'infrastructure MCP
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# FastMCP lazy proxy
+# ---------------------------------------------------------------------------
+
+_mcp_instance: Any | None = None
+
+
+def _create_mcp_instance() -> Any:
+    from fastmcp import FastMCP
+
+    return FastMCP("AgriConnect Database MCP Server")
+
+
+def get_mcp() -> Any:
+    """Get (and lazily create) the underlying FastMCP instance."""
+    global _mcp_instance
+    if _mcp_instance is None:
+        _mcp_instance = _create_mcp_instance()
+    return _mcp_instance
+
+
+class _LazyMCPProxy:
+    """Lightweight proxy that defers FastMCP creation until first use."""
+
+    def __getattr__(self, item: str):
+        return getattr(get_mcp(), item)
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return "<LazyMCPProxy>"
+
+
+# Exported symbol (kept for backwards compatibility)
+mcp = _LazyMCPProxy()
+
+
+# ---------------------------------------------------------------------------
+# Runtime
+# ---------------------------------------------------------------------------
+
+
 class MCPRuntime:
+    """Gère l'accès aux ressources nécessaires aux tools MCP.
+
+    NOTE: la DB est gérée via `AgriDatabaseService` et `get_sessionmaker()`.
+    Le runtime ne fait pas de healthcheck réseau ni de retry ici — on garde
+    la même philosophie que `database_service.py` (les erreurs DB émergent
+    lors des appels métiers et sont gérées au bon niveau).
     """
-    Gère le cycle de vie du serveur MCP AgriConnect.
-    Centralise l'instance du service de base de données et gère la connexion.
-    """
-    def __init__(self):
-        # Service DB instancié à la demande uniquement quand la connexion
-        # est validée; cela évite les appels outils en mode dégradé.
+
+    def __init__(self) -> None:
         self.db: AgriDatabaseService | None = None
-        self.is_ready = False
+        self.is_ready: bool = False
         self.last_start_error: str = ""
 
     def _ensure_db_service(self) -> None:
         if self.db is None:
             self.db = AgriDatabaseService()
+
+    def _refresh_ready_state(self) -> None:
+        try:
+            sm = get_sessionmaker()
+            self.is_ready = sm is not None
+            self.last_start_error = "" if self.is_ready else "sessionmaker_unavailable"
+        except Exception as exc:
+            self.is_ready = False
+            self.last_start_error = str(exc)
 
     @staticmethod
     def _run_async_blocking(coro):
@@ -70,36 +122,19 @@ class MCPRuntime:
 
     @asynccontextmanager
     async def lifespan(self):
-        """
-        Gestionnaire de contexte pour le démarrage et l'arrêt du serveur.
-        Garantit que la DB est initialisée avant l'usage des tools.
-        """
-        logger.info("Démarrage du Runtime MCP : Initialisation de la base de données...")
+        """Context manager for server startup/shutdown."""
+        logger.info("MCP runtime startup: ensuring DB service")
+        self._ensure_db_service()
+        self._refresh_ready_state()
         try:
-            # 1. Initialisation du moteur SQLAlchemy (Engine)
-            init_db()
-            
-            # 2. Vérification de la santé de la connexion
-            self.is_ready = await check_connection()
-            if not self.is_ready:
-                logger.error("Échec de la connexion à la base de données lors du check initial.")
-                raise RuntimeError("Base de données indisponible. Vérifiez les variables d'environnement.")
-
-            self._ensure_db_service()
-            
-            logger.info("Runtime MCP opérationnel. Connexion DB établie.")
-            
-            # On cède le contrôle au serveur MCP (yield)
             yield self
-            
-        except Exception as e:
-            logger.exception(f"Erreur critique lors du démarrage du Runtime : {str(e)}")
-            raise
         finally:
-            # 3. Fermeture propre des ressources à l'arrêt du serveur
-            logger.info("Arrêt du Runtime MCP : Fermeture des connexions DB...")
-            await close_db()
-            logger.info("Ressources nettoyées avec succès.")
+            # Do not close DB by default (host responsibility).
+            if (os.getenv("MCP_CLOSE_DB_ON_STOP", "0") or "0").strip() in {"1", "true", "True"}:
+                try:
+                    await close_db()
+                except Exception:
+                    logger.exception("DB close failed during lifespan shutdown")
 
     def start(self) -> None:
         self.start_with_policy()
@@ -110,169 +145,123 @@ class MCPRuntime:
         retries: int | None = None,
         retry_delay_s: float | None = None,
     ) -> bool:
-        """Start runtime with retry and optional degraded mode.
+        """Compat API: start runtime.
 
-        Returns:
-            True when DB is connected, False when degraded mode is used.
+        `retries` and `retry_delay_s` are accepted for backwards compatibility
+        but intentionally unused to keep runtime simple.
         """
         require = (not settings.MCP_ALLOW_DEGRADED_START) if require_connection is None else require_connection
-        max_retries = settings.MCP_DB_STARTUP_RETRIES if retries is None else max(0, retries)
-        delay_s = settings.MCP_DB_STARTUP_RETRY_DELAY_SEC if retry_delay_s is None else max(0.0, retry_delay_s)
 
-        self.is_ready = False
-        self.last_start_error = ""
-
-        try:
-            init_db()
-        except Exception as exc:
-            self.last_start_error = str(exc)
-            hint = self._build_failure_hint(self.last_start_error)
-            if require:
-                logger.exception("Runtime start failed during init_db: %s", hint)
-                raise RuntimeError(f"Database unavailable ({hint})") from exc
-            logger.error("Runtime starting in degraded mode (init_db failed): %s", hint)
-            return False
-
-        for attempt in range(max_retries + 1):
-            ok = False
-            reason = "health_check_failed"
-            try:
-                ok, reason = self._run_async_blocking(check_connection_detailed())
-            except Exception as exc:
-                reason = str(exc)
-
-            if ok:
-                strict_health = (os.getenv("MCP_STRICT_DB_HEALTHCHECK", "1") or "1").strip() not in {"0", "false", "False"}
-                if strict_health:
-                    aok, areason = self._run_async_blocking(check_connection_aggressive())
-                    if not aok:
-                        self.last_start_error = f"aggressive_check_failed:{areason}"
-                        logger.error("Aggressive DB startup check failed: %s", areason)
-                        if attempt < max_retries and delay_s > 0:
-                            time.sleep(delay_s)
-                            continue
-                        break
-
-                self.is_ready = True
-                self.last_start_error = ""
-                self._ensure_db_service()
-                logger.info("Runtime MCP opérationnel. Connexion DB établie.")
-                return True
-
-            self.last_start_error = reason
-            logger.warning(
-                "DB startup check failed (attempt %s/%s): %s",
-                attempt + 1,
-                max_retries + 1,
-                reason,
-            )
-            if attempt < max_retries and delay_s > 0:
-                time.sleep(delay_s)
+        self._ensure_db_service()
+        self._refresh_ready_state()
+        if self.is_ready:
+            logger.info("MCP runtime ready (sessionmaker available)")
+            return True
 
         hint = self._build_failure_hint(self.last_start_error)
         if require:
-            logger.error("Synchronous runtime start failed after retries: %s", hint)
-            raise RuntimeError(f"Database unavailable (sync startup check failed): {hint}")
-
-        logger.error("Runtime MCP starting in degraded mode: %s", hint)
+            raise RuntimeError(f"Database unavailable ({hint})")
+        logger.warning("MCP runtime degraded: %s", hint)
         return False
 
     def stop(self) -> None:
-        """Synchronous shutdown helper for non-async entrypoints."""
+        """Compat API: stop runtime.
+
+        By default, does nothing. Set `MCP_CLOSE_DB_ON_STOP=1` for local runs.
+        """
+        if (os.getenv("MCP_CLOSE_DB_ON_STOP", "0") or "0").strip() not in {"1", "true", "True"}:
+            return
         try:
             self._run_async_blocking(close_db())
         except Exception:
             logger.exception("Synchronous runtime stop failed")
 
     async def ensure_initialized(self) -> None:
-        """Ensure DB engine/session are initialized when called from an
-        existing event loop. Safe to call multiple times.
-        """
-        try:
-            # if check_connection already returns True, nothing to do
-            if await check_connection():
-                self.is_ready = True
-                return
-        except Exception:
-            pass
-
-        # attempt to initialize engine then recheck
-        try:
-            init_db()
-        except Exception as e:
-            logger.exception("Failed to init_db during ensure_initialized: %s", e)
-            raise
-
-        ok = await check_connection()
-        if not ok:
-            logger.error("DB still unavailable after init_db()")
-            raise RuntimeError("Database unavailable")
-        self.is_ready = True
+        """Ensure service exists and sessionmaker can be resolved."""
         self._ensure_db_service()
+        self._refresh_ready_state()
+        if not self.is_ready:
+            raise RuntimeError(self._build_failure_hint(self.last_start_error))
+
 
 # --- Instance Globale ---
-# Importez cet objet 'runtime' dans vos fichiers tools.py et main.py
 runtime = MCPRuntime()
 
-# --- Utilitaires de Logging ---
-def _log_call(tool_name: str, params: dict[str, Any], response: str) -> None:
-    """
-    Centralise le logging des appels de tools pour le debugging et l'audit.
-    """
-    try:
-        # On limite la taille de la réponse dans les logs pour la lisibilité
-        res_preview = (response[:250] + '...') if len(response) > 250 else response
-        logger.info(f"MCP_CALL [{tool_name}] | PARAMS: {params} | RES: {res_preview}")
-    except Exception as e:
-        logger.warning(f"Erreur lors du logging de l'appel {tool_name}: {e}")
 
-# --- Fonctions de compatibilité (Legacy) ---
-# legacy accessor removed — use `runtime.db` directly
+# ---------------------------------------------------------------------------
+# Logging helpers
+# ---------------------------------------------------------------------------
+
+
+def _log_call(tool_name: str, params: dict[str, Any], response: str) -> None:
+    """Centralise le logging des appels de tools pour le debugging et l'audit."""
+    try:
+        res_preview = (response[:250] + "...") if len(response) > 250 else response
+        logger.info("MCP_CALL [%s] | PARAMS: %s | RES: %s", tool_name, params, res_preview)
+    except Exception as exc:
+        logger.warning("Erreur lors du logging de l'appel %s: %s", tool_name, exc)
+
+
+# ---------------------------------------------------------------------------
+# MCP DB server wrapper (security / tool resolution)
+# ---------------------------------------------------------------------------
+
 
 class AgriDBMCPServer:
-    """Lightweight in-process MCP backend — **Fail-Closed** by default.
-
-    Security policy:
-    - Unknown tools (not in TOOL_SCOPE_MAP) → DENY.
-    - Pre-flight check failure → DENY (never fail-open).
-    - Permission check failure → DENY.
-    - All calls are audited to ``runtime.db`` when available.
-    """
+    """Lightweight in-process MCP backend — **Fail-Closed** by default."""
 
     name = "agri_db_full_access"
-
-    # ── Configurable policy ──────────────────────────────────────────
-    FAIL_CLOSED: bool = True  # Set to False only for debugging
+    FAIL_CLOSED: bool = True
 
     def __init__(self, *_args, **_kwargs) -> None:
-        # Compatibility: legacy callers pass session_factory/extra args.
         pass
 
     @staticmethod
     def list_tools() -> list[dict]:
-        try:
-            import agriconnect.protocols.mcp.tools.db_handler as db_tools
-            tm = getattr(db_tools, "TOOL_MAP", None) or getattr(db_tools, "TOOLS", None)
-            if isinstance(tm, dict):
-                return [{"name": n, "description": (fn.__doc__ or "").strip().split("\n")[0]} for n, fn in tm.items()]
-        except Exception:
-            pass
-
-        tools_attr = getattr(mcp, "_tools", None) or getattr(mcp, "tools", None)
-        if isinstance(tools_attr, dict):
-            return [{"name": n, "description": (getattr(fn, "__doc__", "") or "").strip().split("\n")[0]} for n, fn in tools_attr.items()]
-        return []
-
-    async def call_tool(self, name: str, arguments: dict | None = None):
-        """Execute a tool after fail-closed security checks.
-
-        Raises ValueError, HostBlockedError, or PermissionDenied on any
-        security violation.  ALL outcomes are persisted to the audit log.
         """
-        arguments = arguments or {}
-        fn = self._resolve_tool_fn(name)
+        Retourne la liste des outils formatée pour le protocole MCP.
+        Inclut le nom, la description et le JSON Schema des arguments.
+        """
+        # Imports locaux pour éviter les cycles au démarrage
+        from agriconnect.protocols.mcp.h import TOOL_DESCRIPTIONS, TOOL_SCHEMAS
 
-        # ── Server-side Fail-Closed pre-flight ───────────────────────
+        tools = []
+        for name, description in TOOL_DESCRIPTIONS.items():
+            # Récupération du schéma généré par l'introspection
+            # Si le schéma n'existe pas, on renvoie un objet vide par défaut
+            schema = TOOL_SCHEMAS.get(name, {
+                "type": "object", 
+                "properties": {}, 
+                "required": []
+            })
+
+            tools.append({
+                "name": name,
+                "description": description,
+                "inputSchema": schema  # CRITIQUE : C'est ce champ qui active les inputs dans l'UI
+            })
+            
+        return tools
+        
+    async def call_tool(self, name: str, arguments: dict | None = None, **kwargs):
+        """
+        Point d'entrée principal pour l'exécution des outils dans le Backend.
+        Gère la fusion des arguments, la sécurité (Preflight/Permissions) et l'audit.
+        """
+        # 1. FUSION ET NETTOYAGE DES ARGUMENTS
+        # On combine le dictionnaire MCP ('arguments') et les éventuels kwargs
+        full_args = {**(arguments or {}), **kwargs}
+        
+        # CRITIQUE : On retire 'name' pour éviter l'erreur "multiple values for argument 'name'"
+        # car 'name' est déjà passé en premier paramètre positionnel.
+        tool_identity = name
+
+        logger.info("Backend call_tool: tool=%s, args=%s", tool_identity, full_args)
+        # 2. RÉSOLUTION DU HANDLER
+        # Récupère la fonction métier (ex: get_user_profile) définie dans handlers.py
+        fn = self._resolve_tool_fn(tool_identity)
+
+        # Imports locaux pour la couche de sécurité
         from agriconnect.infrastructure.mcp.security import (
             HostBlockedError,
             MCPPermissionClient,
@@ -281,49 +270,66 @@ class AgriDBMCPServer:
             TOOL_SCOPE_MAP,
         )
 
-        # Block unknown tools immediately
-        if name not in TOOL_SCOPE_MAP:
-            reason = f"Tool '{name}' is not registered in TOOL_SCOPE_MAP — DENIED by fail-closed policy."
-            logger.warning("FAIL-CLOSED DENY | tool=%s | reason=unknown_tool", name)
-            await self._persist_audit(name, arguments, "DENY", reason)
-            raise PermissionDenied(name, reason)
+        # 3. VÉRIFICATION DU SCOPE (Fail-Closed)
+        if tool_identity not in TOOL_SCOPE_MAP:
+            reason = f"L'outil '{tool_identity}' n'est pas autorisé (absent de TOOL_SCOPE_MAP)."
+            logger.error("DENY | tool=%s | reason=not_in_scope", tool_identity)
+            await self._persist_audit(tool_identity, full_args, "DENY", reason)
+            raise PermissionDenied(tool_identity, reason)
 
         try:
+            # 4. SÉCURITÉ HÔTE (Preflight Scan)
             host = MCPPermissionHostApp(client=None)
-            preflight = host._preflight_scan(name, arguments)
-            if not preflight:
-                await self._persist_audit(name, arguments, "DENY", preflight.reason)
+            preflight = host._preflight_scan(tool_identity, full_args)
+            
+            # Vérification robuste de l'autorisation du scan
+            if hasattr(preflight, "allowed") and not preflight.allowed:
+                reason = getattr(preflight, "reason", "Scan de sécurité échoué")
+                await self._persist_audit(tool_identity, full_args, "DENY", reason)
                 raise HostBlockedError(
-                    tool_name=name,
-                    agent_message=preflight.reason,
-                    suggestion=host._suggest_fix(name, preflight.reason),
+                    tool_name=tool_identity,
+                    agent_message=reason,
+                    suggestion=host._suggest_fix(tool_identity, reason),
                 )
 
-            # Scope / risk check (stateless — no backend call)
+            # 5. VÉRIFICATION DES PERMISSIONS CLIENT
             tmp_client = MCPPermissionClient(backend=self, session_id="mcp_server_proxy")
-            decision = tmp_client._check_permission(name, arguments)
+            decision = tmp_client._check_permission(tool_identity, full_args)
+            
             if not decision.allowed:
-                await self._persist_audit(name, arguments, decision.decision, decision.reason)
-                raise PermissionDenied(name, decision.reason)
+                await self._persist_audit(tool_identity, full_args, "DENY", decision.reason)
+                raise PermissionDenied(tool_identity, decision.reason)
 
         except (HostBlockedError, PermissionDenied):
+            # On laisse remonter ces erreurs spécifiques pour le traitement par le serveur MCP
             raise
         except Exception as exc:
-            # *** FAIL-CLOSED: any unexpected error during checks → DENY ***
-            reason = f"Unexpected security check error: {exc}"
-            logger.exception("FAIL-CLOSED DENY | tool=%s | %s", name, reason)
-            await self._persist_audit(name, arguments, "DENY", reason)
-            if self.FAIL_CLOSED:
-                raise PermissionDenied(name, reason) from exc
-            # Only reachable when FAIL_CLOSED is explicitly disabled
+            reason = f"Erreur fatale lors du contrôle de sécurité : {exc}"
+            logger.exception("SECURITY_EXCEPTION | tool=%s", tool_identity)
+            await self._persist_audit(tool_identity, full_args, "DENY", reason)
+            raise PermissionDenied(tool_identity, reason)
 
-        # ── Execute ──────────────────────────────────────────────────
-        raw = await fn(**arguments)
-        result = self._normalize_output(raw)
-        await self._persist_audit(name, arguments, "ALLOW", None)
-        return result
+        # 6. EXÉCUTION MÉTIER
+        try:
+            # On injecte les arguments nettoyés dans la fonction cible via **
+            # Grâce au @wraps(fn) dans handlers.py, la signature est préservée.
+            raw = await fn(**full_args)
+            
+            # 7. NORMALISATION ET AUDIT FINAL
+            result = self._normalize_output(raw)
+            await self._persist_audit(tool_identity, full_args, "ALLOW", None)
+            return result
 
-    def call_tool_sync(self, name: str, arguments: dict | None = None, timeout: float = 10.0) -> dict:
+        except TypeError as te:
+            # Capture les erreurs de paramètres (ex: paramètre manquant ou inconnu)
+            logger.error("SIGNATURE_MISMATCH | tool=%s | %s", tool_identity, te)
+            raise ValueError(f"Arguments invalides pour l'outil '{tool_identity}' : {te}")
+        except Exception as e:
+            # Erreurs internes au handler (Base de données, etc.)
+            logger.exception("EXECUTION_ERROR | tool=%s", tool_identity)
+            raise RuntimeError(f"Erreur lors de l'exécution de l'outil '{tool_identity}' : {e}")
+
+    def call_tool_sync(self, name: str, arguments: dict , timeout: float = 10.0) -> dict:
         new_loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(new_loop)
@@ -340,35 +346,21 @@ class AgriDBMCPServer:
                 pass
         return {"ok": True, "data": result}
 
-    # ── Internal helpers ─────────────────────────────────────────────
-
     def _resolve_tool_fn(self, name: str):
-        """Resolve tool function from registry — raises ValueError if not found."""
-        fn = None
-        try:
-            import agriconnect.protocols.mcp.tools.db_handler as db_tools
-            tm = getattr(db_tools, "TOOL_MAP", None) or getattr(db_tools, "TOOLS", None)
-            if isinstance(tm, dict) and name in tm:
-                fn = tm[name]
-        except Exception:
-            pass
-        if fn is None:
-            tools_attr = getattr(mcp, "_tools", None) or getattr(mcp, "tools", None)
-            if isinstance(tools_attr, dict) and name in tools_attr:
-                fn = tools_attr[name]
+        from agriconnect.protocols.mcp.h import TOOL_HANDLERS
+
+        fn = TOOL_HANDLERS.get(name)
         if fn is None or not callable(fn):
             raise ValueError(f"Unknown DB tool: {name}")
         return fn
 
     @staticmethod
     def _normalize_output(raw: Any) -> Any:
-        """Force all tool outputs to valid JSON dicts. No raw text allowed."""
         if isinstance(raw, dict):
             return raw
         if isinstance(raw, str):
             try:
-                parsed = json.loads(raw)
-                return parsed
+                return json.loads(raw)
             except (json.JSONDecodeError, TypeError):
                 return {"result": raw}
         if isinstance(raw, (list, tuple)):
@@ -378,9 +370,9 @@ class AgriDBMCPServer:
     async def _persist_audit(
         self, tool_name: str, arguments: dict, decision: str, reason: str | None
     ) -> None:
-        """Persist an audit row to DB via ``runtime.db`` when available."""
-        import time
         import hashlib
+        import time
+
         try:
             args_hash = hashlib.sha256(
                 json.dumps(arguments, sort_keys=True, default=str).encode()
@@ -394,10 +386,7 @@ class AgriDBMCPServer:
                 "reason": reason or "",
             }
             logger.info("AUDIT|%s", json.dumps(entry, ensure_ascii=False))
-            # Persist to DB if runtime is ready
-            if runtime.is_ready and hasattr(runtime.db, "log_conversation"):
-                # Use a deterministic UUID for system/audit events so the
-                # DB receives a valid UUID and records can be correlated.
+            if runtime.is_ready and runtime.db is not None and hasattr(runtime.db, "log_conversation"):
                 try:
                     import uuid
 
@@ -417,5 +406,85 @@ class AgriDBMCPServer:
             logger.debug("Audit persistence failed (non-blocking)", exc_info=True)
 
 
-# Exports explicites
-__all__ = ["mcp", "runtime", "_log_call", "AgriDBMCPServer"]
+__all__ = ["mcp", "runtime", "_log_call", "AgriDBMCPServer", "get_mcp"]
+
+
+def _load_backend_env() -> None:
+    """Load backend/.env when running the module directly."""
+    try:
+        from dotenv import load_dotenv  # type: ignore
+    except Exception:
+        return
+
+    here = os.path.abspath(__file__)
+    backend_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(here))))
+    env_file = os.path.join(backend_root, ".env")
+    try:
+        if os.path.exists(env_file):
+            load_dotenv(env_file, override=False)
+    except Exception:
+        pass
+
+async def _main() -> None:
+    """
+    Point d'entrée de test pour AgriDBMCPServer.
+    Vérifie la chaîne complète : Runtime -> Security Shield -> DB Service.
+    """
+    _load_backend_env()
+    
+    # Configuration des logs pour voir les sorties "AUDIT|" et "FAIL-CLOSED"
+    level = os.getenv("AGRICONNECT_LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=getattr(logging, level),
+        format="%(levelname)s | %(name)s | %(message)s"
+    )
+
+    logger.info("🧪 Démarrage du test unitaire du serveur MCP...")
+
+    try:
+        # 1. Initialisation du runtime (nécessaire pour runtime.db utilisé dans _persist_audit)
+        ok = runtime.start_with_policy()
+        if not ok or not runtime.is_ready:
+            logger.error("❌ Impossible de démarrer le runtime : %s", runtime.last_start_error)
+            return
+
+        # 2. Instanciation du serveur de sécurité
+        server = AgriDBMCPServer()
+
+        # 3. Paramètres de test
+        test_tool = "get_producer_dashboard"
+        test_args = {"producer_id": "9e37a423-45cf-4e63-a563-075a46d104bf"}
+
+        logger.info("📡 Appel de l'outil : %s", test_tool)
+
+        # 4. Exécution via call_tool (déclenche le scan de sécurité et l'audit)
+        response = await server.call_tool(name=test_tool, arguments=test_args)
+        
+        # 5. Validation du résultat
+        logger.info("✅ RÉPONSE REÇUE : %s", json.dumps(response, indent=2, ensure_ascii=False))
+
+    except Exception as exc:
+        # Ici on attrape notamment les PermissionDenied si la sécurité bloque
+        logger.error("❌ ÉCHEC DU TEST : %s", str(exc))
+        if hasattr(exc, 'suggestion'):
+             logger.info("💡 Suggestion du shield : %s", exc.suggestion)
+
+    finally:
+        # 6. Arrêt propre
+        logger.info("Cleaning up runtime...")
+        try:
+            runtime.stop()
+        except Exception:
+            pass
+
+if __name__ == "__main__":
+    import asyncio
+    import json
+    import os
+    import logging
+    
+    # On lance le test
+    try:
+        asyncio.run(_main())
+    except KeyboardInterrupt:
+        logger.info("Test interrompu par l'utilisateur.")

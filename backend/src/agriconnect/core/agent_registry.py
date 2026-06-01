@@ -1,6 +1,30 @@
 """Registre statique des agents internes AgriConnect."""
 
-from agriconnect.protocols.a2a.registry import AgentCard, AgentDomain
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import List
+
+
+class AgentDomain(str, Enum):
+    DIAGNOSIS = "diagnosis"
+    MARKET = "market"
+    FORMATION = "formation"
+    WEATHER = "weather"
+    MARKETPLACE = "marketplace"
+
+
+@dataclass
+class AgentCard:
+    agent_id: str
+    name: str
+    description: str
+    domain: AgentDomain
+    intents: List[str] = field(default_factory=list)
+    capabilities: List[str] = field(default_factory=list)
+    zones: List[str] = field(default_factory=lambda: ["all"])
+    crops: List[str] = field(default_factory=lambda: ["all"])
+    protocol: str = "internal"
+    avg_response_ms: int = 0
 
 internal_agents = [
             AgentCard(

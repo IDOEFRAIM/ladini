@@ -1,0 +1,15 @@
+{
+  "Name": "ladini-daily-advice-0600-gmt",
+  "Description": "Daily personalized weather-agri advice for active farmers at 06:00 GMT",
+  "ScheduleExpression": "cron(0 6 * * ? *)",
+  "ScheduleExpressionTimezone": "Etc/UTC",
+  "State": "ENABLED",
+  "FlexibleTimeWindow": {
+    "Mode": "OFF"
+  },
+  "Target": {
+    "Arn": "arn:aws:lambda:eu-north-1:123456789012:function:ladini-daily-advice",
+    "RoleArn": "arn:aws:iam::123456789012:role/eventbridge-scheduler-invoke-lambda-role",
+    "Input": "{\"trigger\":\"eventbridge-scheduler\",\"job\":\"daily-advice\"}"
+  }
+}

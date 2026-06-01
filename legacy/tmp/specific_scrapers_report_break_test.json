@@ -1,0 +1,50 @@
+{
+  "status": "PARTIAL_SUCCESS",
+  "targets": [
+    {
+      "source_id": "fao_technical_resources",
+      "engine": "news_article",
+      "status": "SUCCESS",
+      "classification": "success",
+      "http_status": 200,
+      "response_time_ms": 2426.84,
+      "content_size": 812,
+      "title": "News"
+    },
+    {
+      "source_id": "insd_microdata_resources",
+      "engine": "data_platform",
+      "status": "SUCCESS",
+      "classification": "success",
+      "http_status": 200,
+      "response_time_ms": 2338.01,
+      "content_size": 2974,
+      "title": "Dataset Catalog API"
+    },
+    {
+      "source_id": "meteo_anam_bulletins",
+      "engine": "institutional_pdf",
+      "status": "SUCCESS",
+      "classification": "success",
+      "http_status": 200,
+      "response_time_ms": 12377.11,
+      "content_size": 9635,
+      "title": "Institutional Resource"
+    },
+    {
+      "source_id": "sidwaya_actualites",
+      "engine": "news_article",
+      "status": "ERROR",
+      "classification": "other",
+      "error": "scrape_failed",
+      "http_status": 200,
+      "response_time_ms": 2781.17,
+      "content_size": 0
+    }
+  ],
+  "summary": {
+    "success": 3,
+    "failed": 1,
+    "total": 4
+  }
+}

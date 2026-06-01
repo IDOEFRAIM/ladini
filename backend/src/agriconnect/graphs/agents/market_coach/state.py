@@ -1,64 +1,454 @@
-"""Local state for MarketCoach sub-graph."""
+"""MarketAgentState — Single Source of Truth pour la machine à états MarketCoach.
 
-import operator
-from typing import Any, Dict, List, Optional, TypedDict, Annotated
+Contrat strict d'état partagé entre tous les nodes du graphe LangGraph.
+Implémente le paradigme d'Analyse Pilotée par l'Attente (Expectation-Driven)
+pour le canal WhatsApp.
+
+Règles de conception :
+  - Tous les reducers sont **purs** (pas de filtrage caché). Un node qui
+    écrit None ou une chaîne vide signale explicitement un reset.
+  - Les listes sont **remplacées intégralement** (jamais accumulées en silence).
+  - Les dictionnaires utilisent un **merge shallow** (la nouvelle valeur écrase
+    l'ancienne pour les clés en collision).
+  - Le node `Goal Planner` est SEUL responsable de l'écriture de `current_goal`,
+    `goal_stack`, `suspended_goal`. Les autres nodes ne touchent jamais ces clés.
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, List, Literal, Optional
+from typing_extensions import Annotated, TypedDict
 
 
-def merge_fields(old_value: Any, new_value: Any) -> Any:
-	if new_value is None:
-		return old_value
-	if isinstance(new_value, str) and not new_value.strip():
-		return old_value
-	return new_value
+# =====================================================================
+# REDUCERS (purs, conformes au contrat AG-UI)
+# =====================================================================
+
+def replace_value(old: Any, new: Any) -> Any:
+    """Écrasement pur : la nouvelle valeur remplace systématiquement l'ancienne."""
+    return new
 
 
-def merge_intent(old_value: Any, new_value: Any) -> Any:
-	transactional_intents = {"REGISTER_SURPLUS", "CREATE_PRODUCT", "BUY_OFFER"}
-	if new_value is None:
-		return old_value
-	if isinstance(new_value, str) and not new_value.strip():
-		return old_value
-	if str(new_value).upper() == "CHECK_PRICE" and str(old_value).upper() in transactional_intents:
-		return old_value
-	return new_value
+def replace_list(old: List[Any], new: List[Any]) -> List[Any]:
+    """Remplacement total de la liste — pas d'accumulation implicite."""
+    return new
 
+
+def merge_dict(old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge shallow : les clés de `new` écrasent celles de `old`."""
+    return {**(old or {}), **(new or {})}
+
+
+# =====================================================================
+# EVENT TYPES
+# =====================================================================
+
+UserEvent = Literal[
+    "NEW_TASK",
+    "ANSWER",
+    "CONFIRM",
+    "REJECT",
+    "SELECTION",
+    "UPDATE",
+    "INTERRUPTION",
+    "RESUME",
+    "OUT_OF_SCOPE",
+    "UNKNOWN",
+]
+
+
+# =====================================================================
+# MAIN STATE
+# =====================================================================
 
 class MarketAgentState(TypedDict, total=False):
-	user_query: str
-	user_profile: Dict[str, Any]
-	user_level: str
 
-	intent: Annotated[Optional[str], merge_intent]
-	product: Annotated[Any, merge_fields]
-	location: Annotated[Any, merge_fields]
-	price_mentioned: Annotated[Optional[float], merge_fields]
-	quantity_mentioned: Annotated[Optional[float], merge_fields]
-	unit_mentioned: Annotated[Optional[str], merge_fields]
-	normalized_quantity_kg: Optional[float]
+    # ================================================================
+    # 1. RAW INPUT LAYER
+    # ================================================================
 
-	market_data: Dict[str, Any]
-	scam_analysis: Dict[str, Any]
-	final_response: str
-	status: str
+    user_query: Annotated[str, replace_value]
 
-	warnings: Annotated[List[str], operator.add]
-	missing_fields: Annotated[List[str], operator.add]
-	validation_errors: Annotated[List[str], operator.add]
-	validation_warnings: Annotated[List[str], operator.add]
+    normalized_text: Annotated[str, replace_value]
 
-	waiting_for_confirmation: bool
-	transaction_payload: Dict[str, Any]
-	transaction_hash: str
-	audio_file_path: Optional[str]
+    detected_language: Annotated[str, replace_value]
 
-	security_status: str
-	security_reason: str
-	requires_human: bool
-	handoff_to: str
-	clarification_needed: str
-	pending_user_intent: Annotated[str, merge_fields]
-	draft_data: Annotated[Dict[str, Any], merge_fields]
-	proposed_action: Dict[str, Any]
+    translated_text: Annotated[str, replace_value]
+
+    audio_file_path: Annotated[Optional[str], replace_value]
+
+    transcribed_audio: Annotated[Optional[str], replace_value]
+
+    timestamp: Annotated[float, replace_value]
+
+    # ================================================================
+    # 2. USER / SESSION CONTEXT
+    # ================================================================
+
+    user_phone: Annotated[str, replace_value]
+
+    session_id: Annotated[str, replace_value]
+
+    user_role: Annotated[str, replace_value]
+
+    user_name: Annotated[Optional[str], replace_value]
+
+    zone_name: Annotated[Optional[str], replace_value]
+
+    zone_id: Annotated[Optional[str], replace_value]
+
+    user_context_loaded: Annotated[bool, replace_value]
+
+    user_id: Annotated[Optional[str], replace_value]
+
+    turn_count: Annotated[int, replace_value]
+
+    user_farms_cache: Annotated[Optional[List[Dict[str, Any]]], replace_value]
+
+    proactive_hint: Annotated[Optional[str], replace_value]
+
+    conversation_progress: Annotated[Optional[Dict[str, Any]], replace_value]
+
+    # ================================================================
+    # 3. SECURITY / TRUST
+    # ================================================================
+
+    security_status: Annotated[
+        Literal[
+            "SAFE",
+            "SUSPICIOUS",
+            "SCAM_DETECTED",
+            "BLOCKED"
+        ],
+        replace_value
+    ]
+
+    security_reason: Annotated[Optional[str], replace_value]
+
+    trust_score: Annotated[Optional[float], replace_value]
+
+    requires_human: Annotated[bool, replace_value]
+
+    # ================================================================
+    # 4. INTERPRETER OUTPUT
+    # ================================================================
+
+    interpreted_event: Annotated[UserEvent, replace_value]
+
+    detected_intent: Annotated[str, replace_value]
+
+    interpreter_confidence: Annotated[float, replace_value]
+
+    extracted_entities: Annotated[
+        Dict[str, Any],
+        merge_dict
+    ]
+
+    raw_analysis: Annotated[
+        Dict[str, Any],
+        merge_dict
+    ]
+
+    intent_competition: Annotated[
+        List[Dict[str, Any]],
+        replace_list
+    ]
+
+    cognitive_decision: Annotated[
+        Dict[str, Any],
+        merge_dict
+    ]
+
+    # ================================================================
+    # 5. GOAL MANAGEMENT
+    # ================================================================
+
+    current_goal: Annotated[Optional[str], replace_value]
+
+    pending_goal: Annotated[
+        Optional[str],
+        replace_value
+    ]
+
+    goal_stack: Annotated[
+        List[str],
+        replace_list
+    ]
+
+    goal_status: Annotated[
+        Literal[
+            "ACTIVE",
+            "IDLE",
+            "WAITING_INPUT",
+            "WAITING_CONFIRMATION",
+            "EXECUTING",
+            "COMPLETED",
+            "FAILED",
+            "INTERRUPTED"
+        ],
+        replace_value
+    ]
+
+    current_plan_id: Annotated[
+        Optional[str],
+        replace_value
+    ]
+
+    # ================================================================
+    # 6. EXPECTATION ENGINE (Focus Formulaire IHM)
+    # ================================================================
+
+    expected_input: Annotated[
+        Optional[
+            Literal[
+                "PRODUCT",
+                "PRICE",
+                "QUANTITY",
+                "UNIT",
+                "CONFIRMATION",
+                "SELECTION",
+                "LOCATION",
+                "DATE",
+                "NONE"
+            ]
+        ],
+        replace_value
+    ]
+
+    last_agent_question: Annotated[
+        Optional[str],
+        replace_value
+    ]
+
+    expected_candidates: Annotated[
+        List[str],
+        replace_list
+    ]
+
+    last_missing_field: Annotated[
+        Optional[str],
+        replace_value
+    ]
+
+    # ================================================================
+    # 7. WORKING MEMORY
+    # ================================================================
+
+    working_memory: Annotated[
+        Dict[str, Any],
+        merge_dict
+    ]
+
+    transaction_payload: Annotated[
+        Dict[str, Any],
+        merge_dict
+    ]
+
+    draft_payload: Annotated[
+        Dict[str, Any],
+        merge_dict
+    ]
+
+    stable_entities: Annotated[
+        Dict[str, Any],
+        merge_dict
+    ]
+
+    volatile_entities: Annotated[
+        Dict[str, Any],
+        merge_dict
+    ]
+
+    available_mapping: Annotated[
+        Dict[str, str],
+        replace_value
+    ]
+
+    # ================================================================
+    # 8. SLOT TRACKING (Deltas du validateur)
+    # ================================================================
+
+    required_fields: Annotated[
+        List[str],
+        replace_list
+    ]
+
+    missing_fields: Annotated[
+        List[str],
+        replace_list
+    ]
+
+    completed_fields: Annotated[
+        List[str],
+        replace_list
+    ]
+
+    validation_errors: Annotated[
+        List[str],
+        replace_list
+    ]
+
+    warnings: Annotated[
+        List[str],
+        replace_list
+    ]
+
+    # ================================================================
+    # 9. INTERRUPTIONS / MULTI-TASK
+    # ================================================================
+
+    interruption_detected: Annotated[
+        bool,
+        replace_value
+    ]
+
+    interruption_type: Annotated[
+        Optional[str],
+        replace_value
+    ]
+
+    interruption_payload: Annotated[
+        Dict[str, Any],
+        merge_dict
+    ]
+
+    suspended_goal: Annotated[
+        Optional[str],
+        replace_value
+    ]
+
+    suspended_payload: Annotated[
+        Dict[str, Any],
+        merge_dict
+    ]
+
+    # ================================================================
+    # 10. CONFIRMATION / EXECUTION
+    # ================================================================
+
+    waiting_for_confirmation: Annotated[
+        bool,
+        replace_value
+    ]
+
+    is_certified: Annotated[
+        bool,
+        replace_value
+    ]
+
+    confirmation_summary: Annotated[
+        Optional[str],
+        replace_value
+    ]
+
+    execution_authorized: Annotated[
+        bool,
+        replace_value
+    ]
+
+    execution_result: Annotated[
+        Dict[str, Any],
+        merge_dict
+    ]
+
+    # ================================================================
+    # 11. MCP / TOOL EXECUTION
+    # ================================================================
+
+    selected_tool: Annotated[
+        Optional[str],
+        replace_value
+    ]
+
+    selected_tool_args: Annotated[
+        Dict[str, Any],
+        merge_dict
+    ]
+
+    tool_execution_history: Annotated[
+        List[Dict[str, Any]],
+        replace_list
+    ]
+
+    retry_count: Annotated[
+        int,
+        replace_value
+    ]
+
+    # ================================================================
+    # 12. RESPONSE GENERATION
+    # ================================================================
+
+    final_response: Annotated[
+        Optional[str],
+        replace_value
+    ]
+
+    ag_ui_component: Annotated[
+        Optional[Dict[str, Any]],
+        replace_value
+    ]
+
+    reply_audio_url: Annotated[
+        Optional[str],
+        replace_value
+    ]
+
+    response_strategy: Annotated[
+        Optional[
+            Literal[
+                "ASK_MISSING_FIELD",
+                "CONFIRMATION",
+                "SELECTION_MENU",
+                "SUCCESS",
+                "ERROR",
+                "RECOVERY",
+                "CLARIFICATION",
+                "INTERRUPTION_HANDLER"
+            ]
+        ],
+        replace_value
+    ]
+
+    # ================================================================
+    # 13. SYSTEM FLAGS
+    # ================================================================
+
+    status: Annotated[
+        Literal[
+            "START",
+            "INTERPRETING",
+            "PLANNING",
+            "VALIDATING",
+            "WAITING_INPUT",
+            "WAITING_CONFIRMATION",
+            "EXECUTING",
+            "COMPLETED",
+            "ERROR",
+            "BLOCKED"
+        ],
+        replace_value
+    ]
+
+    is_locked: Annotated[
+        bool,
+        replace_value
+    ]
+
+    should_replan: Annotated[
+        bool,
+        replace_value
+    ]
+
+    should_interrupt: Annotated[
+        bool,
+        replace_value
+    ]
 
 
-__all__ = ["MarketAgentState", "merge_fields", "merge_intent"]
+__all__ = [
+    "MarketAgentState",
+    "UserEvent",
+    "replace_value",
+    "replace_list",
+    "merge_dict",
+]

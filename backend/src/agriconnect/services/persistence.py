@@ -1,7 +1,6 @@
 import logging
 from typing import Any, Dict, Optional
 from agriconnect.services.db_handler import AgriDatabase
-from agriconnect.protocols.a2a.messaging import A2AMessage
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +38,10 @@ class AgriPersister:
         """Enregistre le log de chat standard."""
         try:
             assistant_message = state.get("final_response") or "Pas de réponse générée."
-            # Normalize assistant_message: could be str, dict or A2AMessage
+            # Normalize assistant_message: could be str or dict
             if isinstance(assistant_message, dict):
                 # prefer explicit 'response' key
                 assistant_message = assistant_message.get("response") or assistant_message.get("text") or str(assistant_message)
-            elif isinstance(assistant_message, A2AMessage):
-                assistant_message = assistant_message.payload.get("text") if isinstance(assistant_message.payload, dict) else str(assistant_message.payload)
 
             self.db.log_conversation(
                 user_id=user_id,
@@ -85,7 +82,7 @@ class AgriPersister:
                 agent_name="MarketCoach" if expert in ("market", "market_coach") else "MarketplaceAgent",
                 action_type="MARKET_ADVICE",
                 user_id=user_id,
-                protocol="A2A",
+                protocol="INTERNAL",
                 resource="market_db",
                 payload={"query": state.get("requete_utilisateur"), "advice": resp_text[:500]},
                 confidence=0.9,
@@ -145,7 +142,5 @@ class AgriPersister:
             # Normalize types
             if isinstance(val, dict):
                 return val.get("response") or val.get("text") or str(val)
-            if isinstance(val, A2AMessage):
-                return val.payload.get("text") if isinstance(val.payload, dict) else str(val.payload)
             return str(val or "")
         return ""

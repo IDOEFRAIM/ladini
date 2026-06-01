@@ -4,14 +4,15 @@ from __future__ import annotations
 
 All scraping logic lives in `agriconnect.services.scraper.scrapers`.
 This module keeps the historical `DocumentScraper` interface used by
-weather collection services while delegating to `MeteoBurkinaScraper`.
+weather collection services while delegating to the generic
+`InstitutionalPdfHarvester` engine.
 """
 
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
 from agriconnect.core.schemas import RawDocument
-from agriconnect.services.scraper.scrapers import MeteoBurkinaScraper
+from agriconnect.services.scraper.scrapers import InstitutionalPdfHarvester
 
 
 class DocumentScraper:
@@ -28,10 +29,15 @@ class DocumentScraper:
         self.index_path = index_path.lstrip("/")
         self.index_url = urljoin(f"{self.base_url}/", self.index_path)
 
-        self._scraper = MeteoBurkinaScraper(
+        self._scraper = InstitutionalPdfHarvester(
             config={
                 "base_url": self.base_url,
                 "search_urls": [self.index_url],
+                "include_patterns": ["bulletin", "agrometeo", "decadaire"],
+                "selectors": {
+                    "listing_links": "a[href]",
+                    "pdf_links": "a[href]",
+                },
             }
         )
 
@@ -49,7 +55,7 @@ class DocumentScraper:
 
     def scrape_bulletins(self) -> Dict[str, Any]:
         # Use the scraper engine directly to keep a detailed content payload.
-        doc, log = self._scraper.engine.run(self.index_url)
+        doc, log = self._scraper.run(self.index_url)
         if doc is None:
             return {
                 "status": "ERROR",

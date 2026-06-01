@@ -28,7 +28,6 @@ __all__ = [
     'DataPlatformScraper',
     'TechnicalResourcesExplorer',
     'InstitutionalPdfHarvester',
-    'MeteoBurkinaScraper',
 ]
 
 
@@ -48,8 +47,7 @@ def __getattr__(name: str):
 
     if name in ('GoogleWorkspaceScraper', 'PdfDownloader', 'FaoDoiResolver',
                 'NewsScraper', 'DataPlatformScraper', 'TechnicalResourcesExplorer',
-                'InstitutionalPdfHarvester',
-                'MeteoBurkinaScraper'):
+                'InstitutionalPdfHarvester'):
         from .scrapers import (
             GoogleWorkspaceScraper,
             PdfDownloader,
@@ -58,7 +56,6 @@ def __getattr__(name: str):
             DataPlatformScraper,
             TechnicalResourcesExplorer,
             InstitutionalPdfHarvester,
-            MeteoBurkinaScraper,
         )
         return locals()[name]
 

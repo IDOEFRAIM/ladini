@@ -1,19 +1,51 @@
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+
 import logging
-from typing import Dict, List, Any, Optional
-from .shared_math import SahelianCropProfile, CropProfile
+from typing import Any, Dict, Optional
+
+from agriconnect.infrastructure.database.db import get_async_db
+from pydantic import ValidationError
+
+from .shared_math import CropProfile, SahelianCropProfile
 
 logger = logging.getLogger("BurkinaCropTool")
 
-import logging
-from typing import Dict, List, Any, Optional
-from sqlalchemy.orm import Session
-from sqlalchemy import select
 
-from .shared_math import SahelianCropProfile, CropProfile
-from agriconnect.tools.db_handler import get_db
-from agriconnect.services.knowledge_models import CropKnowledge
+class CropProfileNotFoundError(LookupError):
+    """Raised when the requested crop profile does not exist in DB."""
 
-logger = logging.getLogger("BurkinaCropTool")
+
+class CropProfileValidationError(ValueError):
+    """Raised when DB data cannot be validated as SahelianCropProfile."""
+
+
+class CropProfileBackendUnavailableError(RuntimeError):
+    """Raised when the DB backend/tables required for crop profiles are unavailable."""
+
+
+def _is_undefined_table_error(exc: Exception) -> bool:
+    """Return True if exception indicates a missing relation/table in Postgres."""
+    # SQLAlchemy DBAPIError often wraps the original asyncpg/psycopg2 exception in `.orig`.
+    orig = getattr(exc, "orig", None)
+
+    # asyncpg: UndefinedTableError(sqlstate='42P01')
+    sqlstate = getattr(orig, "sqlstate", None) or getattr(exc, "sqlstate", None)
+    if sqlstate == "42P01":
+        return True
+
+    # psycopg2: errors.UndefinedTable has pgcode='42P01'
+    pgcode = getattr(orig, "pgcode", None) or getattr(exc, "pgcode", None)
+    if pgcode == "42P01":
+        return True
+
+    # Fallback: class name checks
+    if (getattr(orig, "__class__", None) and orig.__class__.__name__ in {"UndefinedTableError", "UndefinedTable"}):
+        return True
+    if exc.__class__.__name__ in {"UndefinedTableError", "UndefinedTable"}:
+        return True
+
+    return False
 
 class BurkinaCropTool:
     """
@@ -29,94 +61,203 @@ class BurkinaCropTool:
             "sorgho": CropProfile("Sorgho", 10, 40, {'ini': 0.3, 'mid': 1.1, 'end': 0.55}, 110, False)
         }
 
-    def _get_profile_from_db(self, crop: str, zone: str) -> Optional[SahelianCropProfile]:
-        """Récupère le profil technique depuis la base de données."""
-        db = get_db()
-        if not db:
-            logger.warning("DB unavailable for crop profile fetch.")
-            return None
-            
-        session: Session = db.SessionLocal()
+    async def _get_profile_from_db(self, crop: str, zone: str) -> SahelianCropProfile:
+        """Fetch and validate crop profile from DB.
+
+        Returns:
+            SahelianCropProfile: validated deterministic profile.
+        Raises:
+            CropProfileNotFoundError: when crop/zone is unavailable.
+            CropProfileValidationError: when DB payload violates profile contract.
+            Exception: DB access errors.
+        """
+        deferred_backend_error: Optional[CropProfileBackendUnavailableError] = None
+
         try:
-            # Recherche flexible : Crop + Zone
-            # On cherche une entrée qui correspond à la culture et à la zone
-            stmt = select(CropKnowledge).where(
-                CropKnowledge.crop_name.ilike(crop),
-                CropKnowledge.zone_category.ilike(zone)
-            )
-            result = session.execute(stmt).scalars().first()
-            
-            if not result:
-                # Fallback : Recherche par culture uniquement (profil générique ?)
-                 stmt = select(CropKnowledge).where(CropKnowledge.crop_name.ilike(crop))
-                 result = session.execute(stmt).scalars().first()
-            
-            if not result:
-                return None
+            async with get_async_db() as session:
+                def with_default(field_name: str, raw_value: Any, default_value: Any) -> Any:
+                    if raw_value is None:
+                        logger.warning(
+                            "Missing optional field '%s' for crop=%s zone=%s; defaulting to %r",
+                            field_name,
+                            crop,
+                            zone,
+                            default_value,
+                        )
+                        return default_value
+                    return raw_value
 
-            data = result.technical_sheet
-            
-            # Reconstruction de l'objet SahelianCropProfile depuis le JSON
-            # Note: Le JSON en BDD est plat et adapté au Canvas Technique
-            # On mappe les champs pour compatibilité
-            
-            return SahelianCropProfile(
-                name=data.get("name", crop),
-                varieties={result.zone_category: [result.variety]} if result.variety else {},
-                cycle_days=data.get("cycle_days", 90),
-                seeding_density="N/A", # Deprecated
-                depth_cm=data.get("depth_cm", 5),
-                organic_matter_min_tha=data.get("organic_matter_min_tha", 0.0),
-                mineral_fertilizer={}, # Deprecated, use fertilizer_plan
-                water_strategy=data.get("water_strategy", ""),
-                scientific_name=data.get("scientific_name", ""),
-                sowing_config=data.get("sowing_config"),
-                fertilizer_plan=data.get("fertilizer_plan"),
-                yield_potential=tuple(data.get("yield_potential", [0, 0])),
-                key_pests=data.get("key_pests", []),
-                key_diseases=data.get("key_diseases", []),
-                pre_flight_checks=data.get("pre_flight_checks", [])
-            )
-            
-        except Exception as e:
-            logger.error(f"Error fetching crop profile: {e}")
-            return None
-        finally:
-            session.close()
+                stmt = text(
+                    "SELECT id, slug, crop_name, variety, zone_category, scientific_name, cycle_days, depth_cm, organic_matter_min_tha, water_strategy, inter_row_cm, inter_plant_cm, seeds_pocket, yield_min_t_ha, yield_max_t_ha, key_pests, key_diseases, pre_flight_checks"
+                    " FROM crop_profiles"
+                    " WHERE lower(slug) = lower(:slug) OR (lower(crop_name) = lower(:crop) AND lower(zone_category) = lower(:zone))"
+                    " LIMIT 1"
+                )
+                try:
+                    result = await session.execute(stmt, {"slug": crop.lower(), "crop": crop, "zone": zone})
+                    row = result.first()
+                except Exception as exc:
+                    # If the schema isn't migrated yet, avoid triggering noisy transaction logs.
+                    if _is_undefined_table_error(exc):
+                        logger.warning("Crop profile tables missing; running without DB calibration")
+                        deferred_backend_error = CropProfileBackendUnavailableError("crop profile tables missing")
+                        try:
+                            await session.rollback()
+                        except Exception:
+                            pass
+                        row = None
+                    else:
+                        raise
 
-    def get_technical_sheet(self, crop: str, zone: str) -> str:
+                # If DB calibration tables are missing, skip further DB work.
+                if deferred_backend_error is None:
+                    if not row:
+                        stmt2 = text(
+                            "SELECT id, slug, crop_name, NULL as variety, zone_category, ''::text as scientific_name, cycle_days, depth_cm, organic_matter_min_tha, water_strategy, inter_row_cm, inter_plant_cm, seeds_pocket, yield_min_t_ha, yield_max_t_ha, key_pests, key_diseases, pre_flight_checks FROM crop_knowledge_compat WHERE lower(slug) = lower(:slug) OR lower(crop_name) = lower(:crop) LIMIT 1"
+                        )
+                        try:
+                            result2 = await session.execute(stmt2, {"slug": crop.lower(), "crop": crop})
+                            row = result2.first()
+                        except Exception as exc:
+                            if _is_undefined_table_error(exc):
+                                logger.warning("Crop knowledge compat view missing; running without DB calibration")
+                                deferred_backend_error = CropProfileBackendUnavailableError("crop knowledge compat view missing")
+                                try:
+                                    await session.rollback()
+                                except Exception:
+                                    pass
+                                row = None
+                            else:
+                                raise
+
+                if deferred_backend_error is None:
+                    if not row:
+                        raise CropProfileNotFoundError(
+                            f"No calibrated crop profile found for crop='{crop}' zone='{zone}'"
+                        )
+
+                    (
+                        profile_id,
+                        _slug,
+                        crop_name_db,
+                        variety,
+                        zone_category,
+                        scientific_name,
+                        cycle_days,
+                        depth_cm,
+                        organic_matter_min_tha,
+                        water_strategy,
+                        inter_row_cm,
+                        inter_plant_cm,
+                        seeds_pocket,
+                        yield_min_t_ha,
+                        yield_max_t_ha,
+                        key_pests,
+                        key_diseases,
+                        pre_flight_checks,
+                    ) = row
+
+                    fert_stmt = text(
+                        "SELECT step_order, stage, product_type, dose_kg_ha, application_mode FROM crop_fertilizer_steps WHERE crop_profile_id = :pid ORDER BY step_order ASC, id ASC"
+                    )
+                    try:
+                        fert_res = await session.execute(fert_stmt, {"pid": profile_id})
+                    except Exception as exc:
+                        if _is_undefined_table_error(exc):
+                            logger.warning("crop_fertilizer_steps missing; continuing with empty fertilizer plan")
+                            fert_res = None
+                        else:
+                            raise
+                    fertilizer_plan = [
+                        {
+                            "step_order": int(with_default("fertilizer_plan.step_order", fr[0], 1)),
+                            "stage": str(with_default("fertilizer_plan.stage", fr[1], "Semis")),
+                            "type": str(with_default("fertilizer_plan.type", fr[2], "NPK")),
+                            "dose_kg_ha": float(with_default("fertilizer_plan.dose_kg_ha", fr[3], 0.0)),
+                            "mode": str(with_default("fertilizer_plan.mode", fr[4], "Épandage")),
+                        }
+                        for fr in (fert_res.fetchall() if fert_res is not None else [])
+                    ]
+
+                    payload: Dict[str, Any] = {
+                        "name": str(crop_name_db or crop),
+                        "varieties": {str(zone_category or zone): [str(variety)]} if variety else {},
+                        "cycle_days": int(with_default("cycle_days", cycle_days, 90)),
+                        "seeding_density": "N/A",
+                        "depth_cm": float(with_default("depth_cm", depth_cm, 5.0)),
+                        "organic_matter_min_tha": float(with_default("organic_matter_min_tha", organic_matter_min_tha, 0.0)),
+                        "mineral_fertilizer": {},
+                        "water_strategy": str(with_default("water_strategy", water_strategy, "")),
+                        "scientific_name": str(with_default("scientific_name", scientific_name, "")),
+                        "sowing_config": {
+                            "inter_row": float(with_default("sowing_config.inter_row", inter_row_cm, 80.0)),
+                            "inter_plant": float(with_default("sowing_config.inter_plant", inter_plant_cm, 40.0)),
+                            "seeds_pocket": int(with_default("sowing_config.seeds_pocket", seeds_pocket, 2)),
+                        },
+                        "fertilizer_plan": fertilizer_plan,
+                        "yield_potential": (
+                            float(with_default("yield_potential.min", yield_min_t_ha, 0.0)),
+                            float(with_default("yield_potential.max", yield_max_t_ha, 0.0)),
+                        ),
+                        "key_pests": list(with_default("key_pests", key_pests, [])),
+                        "key_diseases": list(with_default("key_diseases", key_diseases, [])),
+                        "pre_flight_checks": list(with_default("pre_flight_checks", pre_flight_checks, [])),
+                    }
+
+                    return SahelianCropProfile.model_validate(payload)
+
+            if deferred_backend_error is not None:
+                raise deferred_backend_error
+        except CropProfileNotFoundError:
+            raise
+        except CropProfileBackendUnavailableError:
+            raise
+        except ValidationError as exc:
+            logger.error("Crop profile validation error for crop=%s zone=%s: %s", crop, zone, exc)
+            raise CropProfileValidationError(f"Invalid crop profile payload for crop='{crop}' zone='{zone}'") from exc
+        except DBAPIError as exc:
+            # DB connection/config errors should not spam stack traces in local Gradio runs.
+            logger.warning("DB error fetching crop profile for crop=%s zone=%s: %s", crop, zone, exc)
+            raise
+        except Exception as exc:
+            logger.warning("Async error fetching crop profile for crop=%s zone=%s: %s", crop, zone, exc)
+            raise
+
+    async def get_technical_sheet(self, crop: str, zone: str) -> str:
         """Récupère la fiche technique pour une culture donnée (Via DB)."""
-        p = self._get_profile_from_db(crop, zone)
-        if not p: return f"Culture '{crop}' non répertoriée en base INERA."
+        try:
+            p = await self._get_profile_from_db(crop, zone)
+        except CropProfileNotFoundError:
+            return f"Culture '{crop}' non répertoriée en base INERA."
         
         # Adaptation de l'affichage legacy si besoin, ou renvoi vers Advisor
         # Pour l'instant on garde le format texte simple
         vars_zone = p.varieties.get(zone.capitalize(), [p.name])
-        inera_seed = f"INERA-{crop[:3].upper()}-Hybrid"
         
         return (
             f"📍 **FICHE TECHNIQUE : {p.name.upper()} ({zone.upper()})**\n"
             f"--- \n"
             f"🧬 **Variété :** {', '.join(vars_zone)}\n"
             f"⏱️ **Cycle :** {p.cycle_days} jours\n"
-            f"📏 **Semis :** {p.sowing_config.get('inter_row')}cm x {p.sowing_config.get('inter_plant')}cm\n"
+            f"📏 **Semis :** {p.sowing_config.inter_row}cm x {p.sowing_config.inter_plant}cm\n"
             f"💩 **Fumure Orga :** {p.organic_matter_min_tha} t/ha\n"
             f"💧 **Eau :** {p.water_strategy}"
         )
 
-    def calculate_inputs(self, crop: str, surface_ha: float) -> Dict[str, Any]:
+    async def calculate_inputs(self, crop: str, surface_ha: float) -> Dict[str, Any]:
         """Calcule les intrants nécessaires (Via DB logic)."""
         # On suppose une zone par défaut ou on fait une moyenne si zone inconnue
         # Pour simplifier, on prend le premier profil trouvé
-        p = self._get_profile_from_db(crop, "Centre") 
-        if not p: return {}
+        try:
+            p = await self._get_profile_from_db(crop, "Centre")
+        except CropProfileNotFoundError:
+            return {}
         
         inputs = {}
         if p.fertilizer_plan:
             for item in p.fertilizer_plan:
-                # item: {type: "NPK", dose_kg_ha: 150, ...}
-                product_type = item.get("type", "Engrais")
-                dose = item.get("dose_kg_ha", 0) * surface_ha
+                product_type = item.type or "Engrais"
+                dose = float(item.dose_kg_ha) * float(surface_ha)
                 # On regroupe par famille simplifié si besoin
                 key = f"{product_type}_kg"
                 inputs[key] = inputs.get(key, 0) + dose

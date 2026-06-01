@@ -1,29 +1,27 @@
-"""Scraper bricks registry and implementations."""
+"""Cloud-native scraper package: jobs, shared primitives, and lambdas."""
 
-from .base import BaseScraper
-from .registry import ScraperRegistry, register_scraper
+from .shared import BaseScraper, ScraperQueueMessage, SQSProvider
+from .jobs import (
+    DataPlatformScraper,
+    FaoDoiResolver,
+    GoogleWorkspaceScraper,
+    InstitutionalPdfHarvester,
+    NewsScraper,
+    PdfDownloader,
+    TechnicalResourcesExplorer,
+)
 
-from .google_workspace_scraper import GoogleWorkspaceScraper
-from .pdf_downloader import PdfDownloader
-from .fao_doi_resolver import FaoDoiResolver
-from .news_scraper import NewsScraper
-from .data_platform_scraper import DataPlatformScraper
-from .technical_resources_explorer import TechnicalResourcesExplorer
-from .meteo_burkina import MeteoBurkinaScraper
-from .institutional_pdf_harvester import InstitutionalPdfHarvester
-
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 
 __all__ = [
     "BaseScraper",
-    "ScraperRegistry",
-    "register_scraper",
+    "ScraperQueueMessage",
+    "SQSProvider",
     "GoogleWorkspaceScraper",
     "PdfDownloader",
     "FaoDoiResolver",
     "NewsScraper",
     "DataPlatformScraper",
     "TechnicalResourcesExplorer",
-    "MeteoBurkinaScraper",
     "InstitutionalPdfHarvester",
 ]

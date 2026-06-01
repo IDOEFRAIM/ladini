@@ -1,0 +1,14 @@
+# Ignore ingestion downloads folder (out of scope)
+**/downloads/
+downloads/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Logs
+*.log
+
+# IDE
+.vscode/

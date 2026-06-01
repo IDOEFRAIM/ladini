@@ -9,9 +9,20 @@ from .market import AgrimarketTool
 from .market_agent_tools import MarketAgentTools
 
 # v3  Async tools (multi-schema)
-from .marketplace_v3 import MarketplaceToolV3
-from .intelligence import IntelligenceTool
-from .marketplace_legacy import MarketplaceTool as MarketplaceToolLegacy
+try:
+    from .marketplace_v3 import MarketplaceToolV3
+except Exception:
+    MarketplaceToolV3 = None
+
+try:
+    from .intelligence import IntelligenceTool
+except Exception:
+    IntelligenceTool = None
+
+try:
+    from .marketplace_legacy import MarketplaceTool as MarketplaceToolLegacy
+except Exception:
+    MarketplaceToolLegacy = None
 
 __all__ = [
     "HealthDoctorTool",

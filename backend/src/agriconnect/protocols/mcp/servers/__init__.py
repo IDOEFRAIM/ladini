@@ -1,10 +1,8 @@
-from agriconnect.protocols.mcp.servers.market_server import _MCP as market_mcp
-from agriconnect.protocols.mcp.servers.rag_server import AgriRAGMCPServer, rag_server_status
-from agriconnect.protocols.mcp.servers.weather_server import _MCP as weather_mcp
+"""MCP servers package.
 
-__all__ = [
-    "AgriRAGMCPServer",
-    "market_mcp",
-    "rag_server_status",
-    "weather_mcp",
-]
+Avoid eager imports here to prevent side-effects when a submodule is executed
+directly with `python -m ...` (which can otherwise trigger duplicate module
+initialization warnings).
+"""
+
+__all__ = []

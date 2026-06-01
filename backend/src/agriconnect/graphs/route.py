@@ -155,8 +155,7 @@ class Router:
             return "(no agent catalog)"
 
     def _fetch_agent_cards(self, ctx) -> Dict[str, Any]:
-        # A2A is disabled in the simplified orchestrator; return empty
-        # manifest list so routing falls back to default heuristics.
+        # External agent discovery is disabled for now; keep local heuristic routing.
         return {}
 
     # --- Analyze / route ---
@@ -166,7 +165,7 @@ class Router:
 
         query = state.get("requete_utilisateur", "")
 
-        # fetch manifests from A2A if available
+        # Fetch manifests from local discovery hook if available
         agent_cards = self._fetch_agent_cards(_ctx) if _ctx else {}
         expert_catalog = self._build_expert_catalog(agent_cards)
 
@@ -253,7 +252,7 @@ class Router:
                     sel = analysis.get("selected_experts") or []
 
             # Avoid forcing a default expert for simple CHAT intents; short
-            # chat messages should be handled locally without A2A calls.
+            # chat messages should be handled locally.
             intent_val = (analysis.get("intent") or "").upper()
             # If the LLM didn't return selected_experts, apply lightweight
             # heuristics (based on reason text and the user query) to

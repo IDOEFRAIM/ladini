@@ -24,6 +24,14 @@ DB_DIR = BASE_DIR.parent / "rag_db"
 
 # Model Config — single source of truth from settings
 EMBEDDING_MODEL_NAME = settings.EMBEDDING_MODEL
+EMBEDDING_BACKEND = "llamaindex_huggingface"
+EMBEDDING_POOLING = "mean"
+EMBEDDING_NORMALIZE_L2 = True
+EMBEDDING_DISTANCE_METRIC = "cosine"
+_IS_E5 = "e5" in (EMBEDDING_MODEL_NAME or "").lower()
+EMBEDDING_QUERY_PREFIX = "query: " if _IS_E5 else ""
+EMBEDDING_PASSAGE_PREFIX = "passage: " if _IS_E5 else ""
+USE_E5_INSTRUCTION_PREFIXES = bool(_IS_E5)
 RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # LLM Config
@@ -31,7 +39,9 @@ LLM_MODEL_NAME = settings.LLM_MODEL
 
 # RAG Parameters — defaults (backward-compatible)
 CHUNK_SIZE = settings.CHUNK_SIZE
-CHUNK_OVERLAP = settings.CHUNK_OVERLAP
+_min_overlap = max(1, int(CHUNK_SIZE * 0.10))
+_max_overlap = max(_min_overlap, int(CHUNK_SIZE * 0.15))
+CHUNK_OVERLAP = min(max(settings.CHUNK_OVERLAP, _min_overlap), _max_overlap)
 TOP_K_RETRIEVAL = settings.TOP_K_RETRIEVAL
 TOP_K_RERANK = settings.TOP_K_RERANK
 

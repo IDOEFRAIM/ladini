@@ -11,7 +11,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from agriconnect.core.database import init_db, check_connection, get_db, close_db
-from agriconnect.services.models_v3 import Product, CropCycle, AgentAction, Auction, Bid, TransactionStaging, TrustScore
+from agriconnect.domain.models import Product, CropCycle, AgentAction, Auction, Bid, TransactionStaging, TrustScore
 from agriconnect.services.database.database_service import AgriDatabaseService
 
 # Global session setup

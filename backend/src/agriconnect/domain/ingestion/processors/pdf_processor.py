@@ -1,5 +1,4 @@
 from typing import List
-import hashlib
 
 from llama_index.core.schema import Document as LlamaDocument
 from llama_index.core.node_parser import MarkdownNodeParser
@@ -40,6 +39,9 @@ class PDFProcessor(BaseProcessor):
 
         self.MAX_CHUNK_CHARS = default_max
         self.MIN_MERGE_CHARS = default_min
+
+    def process(self, document: RawDocument) -> List[DocumentChunk]:
+        return super().process(document)
 
     def clean(self, document: RawDocument) -> RawDocument:
         text = document.content_markdown or ""
@@ -104,18 +106,16 @@ class PDFProcessor(BaseProcessor):
             parts = [node_text] if len(node_text) <= MAX_CHUNK_CHARS else split_text_to_chunks(node_text, MAX_CHUNK_CHARS)
 
             for part_idx, part in enumerate(parts):
-                content_hash = hashlib.sha256(part.encode("utf-8")).hexdigest()
-                # Stable idempotent identifier: independent of splitting strategy.
-                id_components = f"{document.id}:{content_hash}"
-                chunk_id = hashlib.sha256(id_components.encode("utf-8")).hexdigest()
-
-                chunk = DocumentChunk(
-                    chunk_id=chunk_id,
-                    parent_doc_id=document.id,
-                    chunk_index=global_index,
+                chunk = self._build_chunk(
+                    document=document,
                     text_content=part,
-                    content_hash=content_hash,
-                    metadata={**(document.metadata or {}), **node_meta, "chunk_size": len(part), "split_from_node": i, "split_index": part_idx},
+                    chunk_index=global_index,
+                    extra_metadata={
+                        **node_meta,
+                        "chunk_size": len(part),
+                        "split_from_node": i,
+                        "split_index": part_idx,
+                    },
                 )
                 chunks.append(chunk)
                 global_index += 1
@@ -178,16 +178,13 @@ class PDFProcessor(BaseProcessor):
         final: List[DocumentChunk] = []
         for idx, ch in enumerate(merged):
             text = ch.text_content or ""
-            content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
-            id_comp = f"{document.id}:{content_hash}"
-            chunk_id = hashlib.sha256(id_comp.encode("utf-8")).hexdigest()
-            ch.chunk_id = chunk_id
-            ch.parent_doc_id = document.id
-            ch.chunk_index = idx
-            ch.content_hash = content_hash
-            # ensure metadata chunk_size accurate
-            ch.metadata = {**(ch.metadata or {}), "chunk_size": len(text)}
-            final.append(ch)
+            final_chunk = self._build_chunk(
+                document=document,
+                text_content=text,
+                chunk_index=idx,
+                extra_metadata={**(ch.metadata or {}), "chunk_size": len(text)},
+            )
+            final.append(final_chunk)
 
         return final
         

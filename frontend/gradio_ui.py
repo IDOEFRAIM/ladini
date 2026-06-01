@@ -13,6 +13,15 @@ import os
 import logging
 import gradio as gr
 import requests
+import sys
+import asyncio
+
+# ensure backend package is importable when running the UI locally
+ROOT_BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backend", "src"))
+if ROOT_BACKEND not in sys.path:
+    sys.path.insert(0, ROOT_BACKEND)
+# Allow local runs without MCP/Shield by setting bypass flag
+os.environ.setdefault("FORMATION_LOCAL_NO_SHIELD", "1")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("gradio.agro")
@@ -32,22 +41,38 @@ def generate_answer(question: str, profile_text: str) -> str:
         logger.warning("Invalid profile JSON: %s", e)
         profile = dict(DEFAULT_PROFILE)
 
-    api_url = "http://127.0.0.1:8000/formation"
-    if not api_url:
-        return (
-            "AGRO_API_URL not set. This UI only forwards requests to the API.\n"
-            "Set environment variable AGRO_API_URL=http://127.0.0.1:8000/formation"
-        )
+    api_url = os.environ.get("AGRO_API_URL")
+    if api_url:
+        try:
+            resp = requests.post(api_url, json={"question": question, "profile": profile}, timeout=60)
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("answer") or json.dumps(data, ensure_ascii=False)
+            return f"HTTP {resp.status_code}: {resp.text}"
+        except Exception as exc:
+            logger.exception("Remote API call failed: %s", exc)
+            return f"Erreur HTTP: {exc}"
 
+    # Local mode: invoke Formation graph directly using the compiled graph (advisor-first)
     try:
-        resp = requests.post(api_url, json={"question": question, "profile": profile}, timeout=60)
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get("answer") or json.dumps(data, ensure_ascii=False)
-        return f"HTTP {resp.status_code}: {resp.text}"
+        from agriconnect.graphs.agents.formation.graph import FormationCoach
+
+        coach = FormationCoach.from_config()
+        context = profile
+        # try sync handle first, fall back to async run
+        try:
+            out = coach.handle(question, context)
+        except Exception:
+            out = asyncio.run(coach.run(question, context))
+
+        # `out` is a dict with standardized keys
+        if isinstance(out, dict):
+            resp_text = out.get("full_text") or (out.get("structured_data") and json.dumps(out.get("structured_data"), ensure_ascii=False)) or str(out)
+            return resp_text
+        return str(out)
     except Exception as exc:
-        logger.exception("Remote API call failed: %s", exc)
-        return f"Erreur HTTP: {exc}"
+        logger.exception("Local Formation graph invocation failed: %s", exc)
+        return f"Erreur locale: {exc}"
 
 
 def build_ui():

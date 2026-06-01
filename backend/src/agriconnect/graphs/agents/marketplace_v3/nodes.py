@@ -71,8 +71,9 @@ def build_runtime(config: Optional[MarketplaceConfig] = None, **overrides: Any) 
 		if hasattr(cfg, key):
 			setattr(cfg, key, value)
 
-	svc = cfg.db_service or runtime.db
-	if not cfg.mcp_client and not svc:
+	mcp_client = cfg.mcp_client or cfg.mcp_session
+	svc = None if mcp_client else (cfg.db_service or runtime.db)
+	if not mcp_client and not svc:
 		svc = AgriDatabaseService()
 
 	if cfg.ctx and hasattr(cfg.ctx, "db"):
@@ -90,7 +91,7 @@ def build_runtime(config: Optional[MarketplaceConfig] = None, **overrides: Any) 
 		llm = None
 
 	return MarketplaceRuntime(
-		tool=MarketplaceToolV3(db_service=svc, mcp_client=cfg.mcp_client),
+		tool=MarketplaceToolV3(db_service=svc, mcp_client=mcp_client),
 		intel=IntelligenceTool(db_service=svc),
 		persister=persister,
 		llm=llm,
@@ -198,19 +199,19 @@ async def execute_action_node(state: MarketplaceState, runtime: MarketplaceRunti
 		if intent == "REGISTER_STOCK":
 			res = await runtime.tool.add_stock(
 				farm_id=state.get("farm_id"),
-				product=parsed.get("product"),
+				item_name=parsed.get("product"),
 				quantity=parsed.get("quantity"),
-				unit=parsed.get("unit"),
-				category=parsed.get("category"),
+				unit=parsed.get("unit") or "kg",
 			)
 		elif intent == "SELL_PRODUCT":
-			res = await runtime.tool.create_sell_offer(
-				user_id=user_id,
-				product=parsed.get("product"),
-				quantity=parsed.get("quantity"),
+			res = await runtime.tool.create_product(
+				producer_id=state.get("producer_id"),
+				name=parsed.get("product"),
+				quantity_for_sale=parsed.get("quantity"),
+				unit=parsed.get("unit") or "kg",
 				price=parsed.get("price"),
+				category_label=parsed.get("category"),
 				description=parsed.get("description"),
-				zone_id=state.get("zone_id"),
 			)
 			_audit(runtime, "OFFER_CREATED", user_id, parsed)
 		elif intent == "ADD_EXPENSE":
@@ -225,7 +226,7 @@ async def execute_action_node(state: MarketplaceState, runtime: MarketplaceRunti
 			price = await runtime.intel.check_market_price(parsed.get("product"), state.get("zone_id"))
 			res = {"success": True, "price": price, "product": parsed.get("product")}
 		elif intent == "DASHBOARD":
-			res = await runtime.tool.get_producer_dashboard(state.get("producer_id"))
+			res = await runtime.tool.get_dashboard(state.get("producer_id"))
 		else:
 			res = {"success": True, "message": "Commande reÃ§ue (simulation)."}
 

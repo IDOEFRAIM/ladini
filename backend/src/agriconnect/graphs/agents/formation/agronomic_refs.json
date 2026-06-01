@@ -1,0 +1,107 @@
+{
+  "METADATA": {
+    "version": "1.0",
+    "last_update": "2024-05-20",
+    "description": "Base de connaissances agronomiques pour l'Agent Formation"
+  },
+  "CULTURES": {
+    "MAIS": {
+      "nom_scientifique": "Zea mays",
+      "famille": "Poacées",
+      "cycle_vie": {
+        "duree_totale_jours": 120,
+        "somme_temperatures_gdd": 1600
+      },
+      "besoins_hydriques": {
+        "total_cycle_mm": 600,
+        "frequence_hebdo_mm": 35,
+        "stade_critique": "Floraison"
+      },
+      "temperature_optimale": {
+        "min": 10,
+        "max": 35,
+        "ideal_jour": 25,
+        "ideal_nuit": 18
+      },
+      "sol": {
+        "ph_ideal": [5.5, 7.0],
+        "texture": "Franc-sableux à argileux",
+        "profondeur_racines_cm": 60
+      },
+      "stades_clefs": [
+        {
+          "code": "BBCH_10",
+          "nom": "Levée",
+          "caracteristiques": "Apparition de la première feuille",
+          "conseil": "Surveiller les attaques de corvidés et le gel précoce."
+        },
+        {
+          "code": "BBCH_30",
+          "nom": "Élongation",
+          "caracteristiques": "Le premier noeud est à 1cm au-dessus du plateau de tallage",
+          "conseil": "Période cruciale pour l'apport d'azote (N)."
+        }
+      ],
+      "alertes_expert": {
+        "jaunissement": "Signe probable de carence en azote ou stress hydrique.",
+        "enroulement_feuilles": "Mécanisme de défense contre une évapotranspiration excessive."
+      }
+    },
+    "NIEBE": {
+      "nom_scientifique": "Vigna unguiculata",
+      "famille": "Fabacées",
+      "cycle_vie": {
+        "duree_totale_jours": 75,
+        "somme_temperatures_gdd": 1100
+      },
+      "besoins_hydriques": {
+        "total_cycle_mm": 300,
+        "frequence_hebdo_mm": 20,
+        "stade_critique": "Formation des gousses"
+      },
+      "temperature_optimale": {
+        "min": 15,
+        "max": 40,
+        "ideal_jour": 30,
+        "ideal_nuit": 22
+      },
+      "sol": {
+        "ph_ideal": [6.0, 7.5],
+        "texture": "Sableux à limoneux",
+        "profondeur_racines_cm": 40
+      },
+      "stades_clefs": [
+        {
+          "code": "BBCH_60",
+          "nom": "Floraison",
+          "caracteristiques": "Premières fleurs ouvertes",
+          "conseil": "Vérifier la présence de pucerons et de thrips."
+        }
+      ],
+      "alertes_expert": {
+        "fixation_azote": "Le niébé enrichit le sol, réduire les apports d'engrais azotés."
+      }
+    },
+    "CAFE_ROBUSTA": {
+      "nom_scientifique": "Coffea canephora",
+      "famille": "Rubiacées",
+      "cycle_vie": {
+        "duree_totale_jours": 365,
+        "type": "Pérenne"
+      },
+      "besoins_hydriques": {
+        "total_annuel_mm": 1800,
+        "frequence": "Besoin d'une saison sèche courte pour induire la floraison"
+      },
+      "temperature_optimale": {
+        "min": 18,
+        "max": 30,
+        "ideal": 24
+      },
+      "alertes_expert": {
+        "scolyte": "Surveiller les petits trous dans les cerises.",
+        "rouille": "Taches orangées sous les feuilles."
+      }
+    }
+  }
+}

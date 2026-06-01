@@ -1,7 +1,9 @@
 import logging
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any
+
 from .crop import BurkinaCropTool
 from .shared_math import SahelAgroMath
+from .crop import CropProfileNotFoundError, CropProfileValidationError, CropProfileBackendUnavailableError
 
 logger = logging.getLogger("FormationAdvisor")
 
@@ -15,7 +17,7 @@ class FormationAdvisor:
     def __init__(self):
         self.crop_tool = BurkinaCropTool()
 
-    def generate_technical_diagnosis(self, crop: str, zone: str, area_ha: float = 1.0) -> Dict[str, Any]:
+    async def generate_technical_diagnosis(self, crop: str, zone: str, area_ha: float = 1.0) -> Dict[str, Any]:
         """
         Génère un diagnostic complet sous forme de Canvas Technique.
         
@@ -27,13 +29,49 @@ class FormationAdvisor:
         - Économie (Rendement cible, Coût intrants estimé)
         - Alertes (Gardes-fous)
         """
-        # 1. Récupération Profil + Validation "Seed Catalog" (from DB)
-        profile = self.crop_tool._get_profile_from_db(crop, zone)
-        
-        if not profile:
+        logger.info("[FormationAdvisor] start diagnosis crop=%s zone=%s area_ha=%s", crop, zone, area_ha)
+
+        try:
+            area_ha = float(area_ha)
+        except Exception:
+            area_ha = 1.0
+        if area_ha <= 0:
+            area_ha = 1.0
+
+        try:
+            profile = await self.crop_tool._get_profile_from_db(crop, zone)
+            logger.info(
+                "[FormationAdvisor] db profile loaded crop=%s cycle_days=%s depth_cm=%s",
+                profile.name,
+                profile.cycle_days,
+                profile.depth_cm,
+            )
+        except CropProfileNotFoundError:
             return {
-                "error": True, 
-                "message": f"Désolé, la culture '{crop}' n'est pas encore calibrée dans notre base INERA."
+                "status": "UNAVAILABLE",
+                "error": True,
+                "message": f"Désolé, la culture '{crop}' n'est pas encore calibrée dans notre base INERA.",
+            }
+        except CropProfileValidationError as exc:
+            logger.error("[FormationAdvisor] invalid profile payload: %s", exc)
+            return {
+                "status": "UNAVAILABLE",
+                "error": True,
+                "message": "Le profil technique récupéré est invalide. Merci de contacter l'équipe support.",
+            }
+        except CropProfileBackendUnavailableError:
+            logger.warning("[FormationAdvisor] DB calibration backend unavailable; continuing in degraded mode")
+            return {
+                "status": "UNAVAILABLE",
+                "error": True,
+                "message": "La base technique n'est pas encore initialisée sur cet environnement (mode dégradé).",
+            }
+        except Exception as exc:
+            logger.error("[FormationAdvisor] profile fetch failed: %s", exc)
+            return {
+                "status": "UNAVAILABLE",
+                "error": True,
+                "message": "Le service de calibration est temporairement indisponible.",
             }
 
         # 2. "Pre-flight Check" Logic (Simulation, normally from user input)
@@ -41,17 +79,29 @@ class FormationAdvisor:
         required_checks = profile.pre_flight_checks or []
 
         # 3. Calculs Agronomiques (Densité & Intrants)
-        sowing_cfg = profile.sowing_config or {"inter_row": 80, "inter_plant": 40, "seeds_pocket": 2}
-        density_ha = SahelAgroMath.calculate_sowing_density_ha(
-            sowing_cfg["inter_row"], 
-            sowing_cfg["inter_plant"], 
-            sowing_cfg["seeds_pocket"]
-        )
+        try:
+            sowing_cfg = profile.sowing_config
+            density_ha = SahelAgroMath.calculate_sowing_density_ha(
+                float(sowing_cfg.inter_row),
+                float(sowing_cfg.inter_plant),
+                int(sowing_cfg.seeds_pocket),
+            )
+        except Exception as exc:
+            logger.error("[FormationAdvisor] sowing density calculation failed: %s", exc)
+            return {
+                "status": "UNAVAILABLE",
+                "error": True,
+                "message": "Impossible de calculer la densité de semis avec les paramètres actuels.",
+            }
         
         # Garde-fou Agronomique : Densité
         alerts = []
-        if crop.lower() == "maïs" and density_ha < 30000:
-             alerts.append(f"⚠️ Alerte Densité : {density_ha} plants/ha est trop faible pour du Maïs performant (Cible > 40,000). Vérifiez vos écartements (Actuel: {sowing_cfg['inter_row']}x{sowing_cfg['inter_plant']}).")
+        crop_key = str(profile.name).strip().lower()
+        if crop_key in {"maïs", "mais"} and density_ha < 30000:
+            alerts.append(
+                f"⚠️ Alerte Densité : {density_ha} plants/ha est trop faible pour du Maïs performant (Cible > 40,000). "
+                f"Vérifiez vos écartements (Actuel: {sowing_cfg.inter_row}x{sowing_cfg.inter_plant})."
+            )
         
         # 4. Fertilisation Précise (Pas de "environ")
         fert_plan = []
@@ -60,21 +110,38 @@ class FormationAdvisor:
         
         if profile.fertilizer_plan:
             for step in profile.fertilizer_plan:
-                dose_total = step.get("dose_kg_ha", 0) * area_ha
-                if "NPK" in step["type"]: total_npk += dose_total
-                elif "Urée" in step["type"]: total_uree += dose_total
-                
+                try:
+                    dose_kg_ha = float(step.dose_kg_ha)
+                    dose_total = dose_kg_ha * float(area_ha)
+                except Exception as exc:
+                    logger.error("[FormationAdvisor] invalid fertilizer dose for step=%s: %s", step, exc)
+                    continue
+
+                if "NPK" in step.type:
+                    total_npk += dose_total
+                    logger.info("[FormationAdvisor] NPK dose step=%s dose_kg_ha=%s total_for_area=%s", step.stage, dose_kg_ha, dose_total)
+                elif "Urée" in step.type or "Uree" in step.type:
+                    total_uree += dose_total
+                    logger.info("[FormationAdvisor] UREE dose step=%s dose_kg_ha=%s total_for_area=%s", step.stage, dose_kg_ha, dose_total)
+
                 fert_plan.append({
-                    "moment": step["stage"],
-                    "produit": step["type"],
-                    "dose_ha": f"{step['dose_kg_ha']} kg/ha",
+                    "moment": step.stage,
+                    "produit": step.type,
+                    "dose_ha": f"{dose_kg_ha} kg/ha",
                     "dose_user": f"{int(dose_total)} kg pour {area_ha} ha",
-                    "mode": step.get("mode", "Épandage")
+                    "mode": step.mode or "Épandage"
                 })
 
         # 5. Rendement & Économie
-        yield_min, yield_max = profile.yield_potential or (0,0)
-        potential_tonnage = (yield_min * area_ha, yield_max * area_ha)
+        try:
+            yield_min, yield_max = profile.yield_potential or (0.0, 0.0)
+            yield_min = float(yield_min)
+            yield_max = float(yield_max)
+            potential_tonnage = (yield_min * float(area_ha), yield_max * float(area_ha))
+        except Exception as exc:
+            logger.error("[FormationAdvisor] yield calculation failed: %s", exc)
+            yield_min, yield_max = 0.0, 0.0
+            potential_tonnage = (0.0, 0.0)
 
         # 6. Protection (Spécifique)
         pests = profile.key_pests or ["Ravageurs généraux"]
@@ -83,12 +150,12 @@ class FormationAdvisor:
         canvas = {
             "meta": {
                 "culture": profile.name,
-                "variete_recommandee": f"{profile.varieties.get(zone, ['Standard'])[0]} (Zone {zone})",
+                "variete_recommandee": f"{profile.varieties.get(zone, [profile.name])[0]} (Zone {zone})",
                 "cycle": f"{profile.cycle_days} jours",
                 "scientific_name": profile.scientific_name
             },
             "semis": {
-                "ecartement": f"{sowing_cfg['inter_row']} cm x {sowing_cfg['inter_plant']} cm",
+                "ecartement": f"{sowing_cfg.inter_row} cm x {sowing_cfg.inter_plant} cm",
                 "densite_theorique": f"{density_ha:,} plants/ha".replace(",", " "),
                 "profondeur": f"{profile.depth_cm} cm"
             },
@@ -96,7 +163,7 @@ class FormationAdvisor:
             "synthese_intrants": {
                 "NPK_total": f"{total_npk} kg ({int(total_npk/50)} sacs de 50kg)",
                 "Uree_total": f"{total_uree} kg ({int(total_uree/50)} sacs de 50kg)",
-                "Fumure_orga": f"{profile.organic_matter_min_tha * area_ha} tonnes"
+                "Fumure_orga": f"{float(profile.organic_matter_min_tha) * float(area_ha)} tonnes"
             },
             "protection_critique": {
                 "ravageur_majeur_1": pests[0] if len(pests) > 0 else "N/A",
@@ -117,6 +184,8 @@ class FormationAdvisor:
         """Transforme le dictionnaire en réponse lisible pour l'Agent."""
         if canvas.get("error"):
             return f"❌ {canvas['message']}"
+        if canvas.get("status") == "UNAVAILABLE":
+            return f"❌ {canvas.get('message', 'Culture indisponible pour calibration.')}"
 
         meta = canvas["meta"]
         semis = canvas["semis"]
@@ -129,6 +198,8 @@ class FormationAdvisor:
 **Cycle** : {meta['cycle']} | **Science** : *{meta['scientific_name']}*
 
 ## 1. 📏 OPECTIF SEMIS (Précision)
+<!-- TECHNICAL_BLOCK_START -->
+```
 | Paramètre | Valeur Cible |
 |-----------|--------------|
 | Écartement | **{semis['ecartement']}** |
@@ -147,6 +218,8 @@ class FormationAdvisor:
 - NPK : {canvas['synthese_intrants']['NPK_total']}
 - Urée : {canvas['synthese_intrants']['Uree_total']}
 - Organique : {canvas['synthese_intrants']['Fumure_orga']}
+```
+<!-- TECHNICAL_BLOCK_END -->
 
 ## 3. 🛡️ PROTECTION CRITIQUE (Vigilance Rouge)
 Ne laissez pas ces ravageurs détruire votre investissement :

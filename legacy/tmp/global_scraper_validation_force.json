@@ -1,0 +1,164 @@
+{
+  "status": "PARTIAL_SUCCESS",
+  "elapsed_seconds": 789.53,
+  "summary": {
+    "total": 19,
+    "success": 17,
+    "failed": 2,
+    "success_rate": 89.47
+  },
+  "results": [
+    {
+      "source_id": "agri_sonagess_prices",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 189411,
+      "title": "Institutional Reports",
+      "duration_ms": 68929
+    },
+    {
+      "source_id": "fao_technical_resources",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 812,
+      "title": "News",
+      "duration_ms": 3425
+    },
+    {
+      "source_id": "fews_net_bf_outlook",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 9635,
+      "title": "Institutional Resource",
+      "duration_ms": 9925
+    },
+    {
+      "source_id": "insd_microdata_resources",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 2974,
+      "title": "Dataset Catalog API",
+      "duration_ms": 3576
+    },
+    {
+      "source_id": "lefaso_actualites",
+      "status": "ERROR",
+      "error": "scrape_failed",
+      "content_size": 0,
+      "title": null,
+      "duration_ms": 5445
+    },
+    {
+      "source_id": "meteo_agromet_decadaire",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 1732,
+      "title": "Institutional Resource",
+      "duration_ms": 40748
+    },
+    {
+      "source_id": "meteo_agromet_mensuel",
+      "status": "ERROR",
+      "error": "Traceback (most recent call last):\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\.venv\\Lib\\site-packages\\urllib3\\connectionpool.py\", line 787, in urlopen\n    response = self._make_request(\n        conn,\n    ...<10 lines>...\n        **response_kw,\n    )\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\.venv\\Lib\\site-packages\\urllib3\\connectionpool.py\", line 534, in _make_request\n    response = conn.getresponse()\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\.venv\\Lib\\site-packages\\urllib3\\connection.py\", line 571, in getresponse\n    httplib_response = super().getresponse()\n  File \"C:\\Python313\\Lib\\http\\client.py\", line 1430, in getresponse\n    response.begin()\n    ~~~~~~~~~~~~~~^^\n  File \"C:\\Python313\\Lib\\http\\client.py\", line 331, in begin\n    version, status, reason = self._read_status()\n                              ~~~~~~~~~~~~~~~~~^^\n  File \"C:\\Python313\\Lib\\http\\client.py\", line 292, in _read_status\n    line = str(self.fp.readline(_MAXLINE + 1), \"iso-8859-1\")\n               ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^\n  File \"C:\\Python313\\Lib\\socket.py\", line 719, in readinto\n    return self._sock.recv_into(b)\n           ~~~~~~~~~~~~~~~~~~~~^^^\n  File \"C:\\Python313\\Lib\\ssl.py\", line 1304, in recv_into\n    return self.read(nbytes, buffer)\n           ~~~~~~~~~^^^^^^^^^^^^^^^^\n  File \"C:\\Python313\\Lib\\ssl.py\", line 1138, in read\n    return self._sslobj.read(len, buffer)\n           ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^\nConnectionResetError: [WinError 10054] Une connexion existante a dû être fermée par l’hôte distant\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\.venv\\Lib\\site-packages\\requests\\adapters.py\", line 644, in send\n    resp = conn.urlopen(\n        method=request.method,\n    ...<9 lines>...\n        chunked=chunked,\n    )\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\.venv\\Lib\\site-packages\\urllib3\\connectionpool.py\", line 841, in urlopen\n    retries = retries.increment(\n        method, url, error=new_e, _pool=self, _stacktrace=sys.exc_info()[2]\n    )\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\.venv\\Lib\\site-packages\\urllib3\\util\\retry.py\", line 490, in increment\n    raise reraise(type(error), error, _stacktrace)\n          ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\.venv\\Lib\\site-packages\\urllib3\\util\\util.py\", line 38, in reraise\n    raise value.with_traceback(tb)\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\.venv\\Lib\\site-packages\\urllib3\\connectionpool.py\", line 787, in urlopen\n    response = self._make_request(\n        conn,\n    ...<10 lines>...\n        **response_kw,\n    )\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\.venv\\Lib\\site-packages\\urllib3\\connectionpool.py\", line 534, in _make_request\n    response = conn.getresponse()\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\.venv\\Lib\\site-packages\\urllib3\\connection.py\", line 571, in getresponse\n    httplib_response = super().getresponse()\n  File \"C:\\Python313\\Lib\\http\\client.py\", line 1430, in getresponse\n    response.begin()\n    ~~~~~~~~~~~~~~^^\n  File \"C:\\Python313\\Lib\\http\\client.py\", line 331, in begin\n    version, status, reason = self._read_status()\n                              ~~~~~~~~~~~~~~~~~^^\n  File \"C:\\Python313\\Lib\\http\\client.py\", line 292, in _read_status\n    line = str(self.fp.readline(_MAXLINE + 1), \"iso-8859-1\")\n               ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^\nurllib3.exceptions.ProtocolError: ('Connection aborted.', ConnectionResetError(10054, 'Une connexion existante a dû être fermée par l’hôte distant', None, 10054, None))\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\backend\\src\\agriconnect\\services\\scraper\\scrapers\\base.py\", line 327, in run\n    doc, meta = self.scrape(url)\n                ~~~~~~~~~~~^^^^^\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\backend\\src\\agriconnect\\services\\scraper\\scrapers\\institutional_pdf_harvester.py\", line 131, in scrape\n    pdf_urls = self._collect_pdf_links(page)\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\backend\\src\\agriconnect\\services\\scraper\\scrapers\\institutional_pdf_harvester.py\", line 91, in _collect_pdf_links\n    response = self._request(page_url)\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\backend\\src\\agriconnect\\services\\scraper\\scrapers\\base.py\", line 96, in _request\n    response = self.session.get(url, timeout=self.policy.timeout)\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\.venv\\Lib\\site-packages\\requests\\sessions.py\", line 602, in get\n    return self.request(\"GET\", url, **kwargs)\n           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\.venv\\Lib\\site-packages\\requests\\sessions.py\", line 589, in request\n    resp = self.send(prep, **send_kwargs)\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\.venv\\Lib\\site-packages\\requests\\sessions.py\", line 703, in send\n    r = adapter.send(request, **kwargs)\n  File \"C:\\Users\\LENOVO T14s\\Documents\\projet\\AgriConnect\\.venv\\Lib\\site-packages\\requests\\adapters.py\", line 659, in send\n    raise ConnectionError(err, request=request)\nrequests.exceptions.ConnectionError: ('Connection aborted.', ConnectionResetError(10054, 'Une connexion existante a dû être fermée par l’hôte distant', None, 10054, None))\n",
+      "content_size": 0,
+      "title": null,
+      "duration_ms": 387608
+    },
+    {
+      "source_id": "meteo_agrometeo_medias",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 1350,
+      "title": "Institutional Resource",
+      "duration_ms": 22006
+    },
+    {
+      "source_id": "meteo_anam_bulletins",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 9635,
+      "title": "Institutional Resource",
+      "duration_ms": 15077
+    },
+    {
+      "source_id": "meteo_bulletin_climat_sante",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 584,
+      "title": "Institutional Resource",
+      "duration_ms": 28264
+    },
+    {
+      "source_id": "meteo_bulletin_climatique_mensuel",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 1109,
+      "title": "Institutional Resource",
+      "duration_ms": 24565
+    },
+    {
+      "source_id": "meteo_bulletin_eau_energie",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 633,
+      "title": "Institutional Resource",
+      "duration_ms": 24097
+    },
+    {
+      "source_id": "meteo_bulletin_hebdomadaire",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 2128,
+      "title": "Institutional Resource",
+      "duration_ms": 24474
+    },
+    {
+      "source_id": "meteo_bulletin_mensuel",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 1915,
+      "title": "Institutional Resource",
+      "duration_ms": 21165
+    },
+    {
+      "source_id": "meteo_bulletin_quotidien",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 1194,
+      "title": "Institutional Resource",
+      "duration_ms": 24267
+    },
+    {
+      "source_id": "meteo_climat_burkina",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 988,
+      "title": "Institutional Resource",
+      "duration_ms": 38972
+    },
+    {
+      "source_id": "meteo_etat_annuel_climat",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 1525,
+      "title": "Institutional Resource",
+      "duration_ms": 19023
+    },
+    {
+      "source_id": "meteo_previsions_saisonnieres",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 2034,
+      "title": "Institutional Resource",
+      "duration_ms": 21909
+    },
+    {
+      "source_id": "sidwaya_actualites",
+      "status": "SUCCESS",
+      "error": null,
+      "content_size": 19504,
+      "title": "Quotidien Sidwaya",
+      "duration_ms": 5640
+    }
+  ]
+}

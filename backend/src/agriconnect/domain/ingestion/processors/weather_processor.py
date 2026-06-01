@@ -1,5 +1,4 @@
 from typing import List
-import hashlib
 from llama_index.core.node_parser import SentenceSplitter
 
 from agriconnect.core.schemas import RawDocument, DocumentChunk
@@ -16,6 +15,9 @@ class WeatherProcessor(BaseProcessor):
         # Weather updates are usually short, chunk size can be smaller or match standard
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
+
+    def process(self, document: RawDocument) -> List[DocumentChunk]:
+        return super().process(document)
 
     def clean(self, document: RawDocument) -> RawDocument:
         # Assuming content is already formatted text from JSON collector
@@ -39,23 +41,11 @@ class WeatherProcessor(BaseProcessor):
         
         chunks = []
         for i, node_text in enumerate(nodes):
-            content_hash = hashlib.sha256(node_text.encode("utf-8")).hexdigest()
-            page_info = (document.metadata or {}).get("page_number")
-            id_components = f"{document.id}:{content_hash}"
-            if page_info is not None:
-                id_components = f"{id_components}:{page_info}"
-            chunk_id = hashlib.sha256(id_components.encode("utf-8")).hexdigest()
-            
-            chunk = DocumentChunk(
-                chunk_id=chunk_id,
-                parent_doc_id=document.id,
-                chunk_index=i,
+            chunk = self._build_chunk(
+                document=document,
                 text_content=node_text,
-                content_hash=content_hash,
-                metadata={
-                    **(document.metadata or {}),
-                    "is_weather": True
-                }
+                chunk_index=i,
+                extra_metadata={"is_weather": True},
             )
             chunks.append(chunk)
 

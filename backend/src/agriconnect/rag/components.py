@@ -16,8 +16,8 @@ try:
     from agriconnect.core.settings import settings as app_settings
     from .config import EMBEDDING_MODEL_NAME, CHUNK_SIZE, CHUNK_OVERLAP, DB_DIR
 
-    # Dimension for sentence-transformers/all-MiniLM-L6-v2
-    EMBEDDING_DIM = 384
+    # Keep vector dimension aligned with settings/DB schema.
+    EMBEDDING_DIM = int(getattr(app_settings, "RAG_EMBEDDING_DIM", 768) or 768)
     INDEX_FILE = os.path.join(DB_DIR, "faiss_index.bin")
 
     def get_embedding_model():
@@ -49,7 +49,9 @@ try:
         if not os.path.exists(DB_DIR):
             os.makedirs(DB_DIR)
 
-        vector_backend = (os.getenv("AGRICONNECT_VECTOR_BACKEND", "redis") or "redis").strip().lower()
+        # Postgres/pgvector is the preferred backend in this deployment.
+        # Keep env override support for redis/auto/faiss scenarios.
+        vector_backend = (os.getenv("AGRICONNECT_VECTOR_BACKEND", "pgvector") or "pgvector").strip().lower()
 
         redis_url = (getattr(app_settings, "REDIS_URL", "") or "").strip()
         valkey_endpoint = (getattr(app_settings, "VALKEY_ENDPOINT", "") or "").strip()
@@ -74,6 +76,11 @@ try:
             scheme = "rediss" if use_tls else "redis"
             redis_url = f"{scheme}://{redis_url}"
 
+        # Force IPv4 loopback when user provided localhost or IPv6 loopback
+        # to ensure SSH tunnels bound to 127.0.0.1 are used instead of ::1.
+        if redis_url:
+            redis_url = redis_url.replace("localhost", "127.0.0.1").replace("[::1]", "127.0.0.1").replace("::1", "127.0.0.1")
+
         redis_enabled = bool(redis_url)
 
         if vector_backend in {"redis", "valkey", "auto"} and redis_enabled:
@@ -83,27 +90,42 @@ try:
                     from agriconnect.rag.redis_search_store import RedisSearchVectorStore
 
                     logger.info("Initializing RedisSearchVectorStore (RAG)")
-                    return RedisSearchVectorStore(
+                    store = RedisSearchVectorStore(
                         redis_url,
                         dim=EMBEDDING_DIM,
                         index_name="rag:idx",
-                        socket_timeout=20,
+                        socket_timeout=10,
                         retry_on_timeout=True,
                         decode_responses=True,
                     )
+                    # Verify SSH tunnel / Redis availability via a ping to give a clear error
+                    try:
+                        if hasattr(store, "client"):
+                            store.client.ping()
+                    except Exception as ping_exc:
+                        logger.error("Tunnel SSH non détecté sur 127.0.0.1:6380 (%s)", ping_exc)
+                        raise RuntimeError("Tunnel SSH non détecté sur 127.0.0.1:6380") from ping_exc
+                    return store
                 except Exception:
                     # Fallback to simple Redis vector store
                     try:
                         from agriconnect.rag.redis_store import RedisVectorStore
 
                         logger.info("Initializing RedisVectorStore (RAG)")
-                        return RedisVectorStore(
+                        store = RedisVectorStore(
                             redis_url,
                             dim=EMBEDDING_DIM,
-                            socket_timeout=20,
+                            socket_timeout=10,
                             retry_on_timeout=True,
                             decode_responses=True,
                         )
+                        try:
+                            if hasattr(store, "client"):
+                                store.client.ping()
+                        except Exception as ping_exc:
+                            logger.error("Tunnel SSH non détecté sur 127.0.0.1:6380 (%s)", ping_exc)
+                            raise RuntimeError("Tunnel SSH non détecté sur 127.0.0.1:6380") from ping_exc
+                        return store
                     except Exception as re:
                         logger.warning("RedisVectorStore init failed, falling back to next backend: %s", re)
             except Exception:

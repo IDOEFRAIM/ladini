@@ -1,0 +1,63 @@
+{
+  "retriever": "AgileRetriever",
+  "retriever_ready": true,
+  "total_questions": 5,
+  "top5_hits": 0,
+  "top1_hits": 0,
+  "hit_rate_top5_percent": 0.0,
+  "precision_at_1_percent": 0.0,
+  "semantic_alert_count": 0,
+  "semantic_alerts": [],
+  "results": [
+    {
+      "question": "Quelle source est utilisée pour projeter le prix du maïs blanc au marché de Sankaryaré, Ouagadougou ?",
+      "expected_source": "sonagess_fews_perspectives_2025_2026",
+      "expected_context": "Estimations de FEWS NET à partir des données de SIM/SONAGESS, Burkina Faso",
+      "top5_hit": false,
+      "top1_hit": false,
+      "expected_positions": [],
+      "top5": [],
+      "semantic_alert": null
+    },
+    {
+      "question": "Selon la mise à jour FEWS de décembre 2025, quelle baisse de prix des denrées est mentionnée pour novembre par rapport à l’année passée ?",
+      "expected_source": "sonagess_fews_darbinda_update",
+      "expected_context": "Conformément aux baisses de 23 à 26 pour cent enregistrés en novembre comparés à l’année passée",
+      "top5_hit": false,
+      "top1_hit": false,
+      "expected_positions": [],
+      "top5": [],
+      "semantic_alert": null
+    },
+    {
+      "question": "Quel mois de 2024 est indiqué comme le plus chaud jamais enregistré au Burkina Faso ?",
+      "expected_source": "anam_etat_climat_2024",
+      "expected_context": "Le mois de mars 2024 a été le plus chaud des mois de mars jamais enregistré au Burkina Faso",
+      "top5_hit": false,
+      "top1_hit": false,
+      "expected_positions": [],
+      "top5": [],
+      "semantic_alert": null
+    },
+    {
+      "question": "Dans le rapport climat 2023, quelle valeur maximale est indiquée et où a-t-elle été enregistrée ?",
+      "expected_source": "anam_etat_climat_2023",
+      "expected_context": "La température maximale la plus élevée, qui est de 44,2°C, a été enregistrée à Ouahigouya le 10 mai 2023",
+      "top5_hit": false,
+      "top1_hit": false,
+      "expected_positions": [],
+      "top5": [],
+      "semantic_alert": null
+    },
+    {
+      "question": "Dans l’article Sidwaya sur Yancheng, quelle capacité journalière est annoncée pour l’unité de traitement du riz raffiné ?",
+      "expected_source": "sidwaya_yancheng_2023",
+      "expected_context": "une unité industrielle de traitement du riz raffiné d’une capacité journalière de 200 tonnes",
+      "top5_hit": false,
+      "top1_hit": false,
+      "expected_positions": [],
+      "top5": [],
+      "semantic_alert": null
+    }
+  ]
+}

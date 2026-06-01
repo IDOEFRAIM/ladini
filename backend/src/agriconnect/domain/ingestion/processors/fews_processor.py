@@ -1,5 +1,4 @@
 from typing import List
-import hashlib
 
 from llama_index.core.schema import Document as LlamaDocument
 from llama_index.core.node_parser import MarkdownNodeParser
@@ -20,6 +19,9 @@ class FEWSProcessor(BaseProcessor):
 
     def __init__(self):
         self.parser = MarkdownNodeParser()
+
+    def process(self, document: RawDocument) -> List[DocumentChunk]:
+        return super().process(document)
 
     def clean(self, document: RawDocument) -> RawDocument:
         # Operate only on Markdown provided by the scraper
@@ -43,31 +45,21 @@ class FEWSProcessor(BaseProcessor):
         nodes = self.parser.get_nodes_from_documents([llama_doc])
 
         chunks: List[DocumentChunk] = []
-        for i, node in enumerate(nodes):
+        chunk_index = 0
+        for node in nodes:
             node_text = (getattr(node, "text", None) or "").strip()
             if not node_text:
                 continue
 
-            # Deterministic content hash and content-based chunk ID.
-            content_hash = hashlib.sha256(node_text.encode("utf-8")).hexdigest()
-            # If page information is available either at node or document level, include it in the id
             node_meta = getattr(node, "metadata", {}) or {}
-            page_info = node_meta.get("page") or (document.metadata or {}).get("page_number")
-            id_components = f"{document.id}:{content_hash}"
-            if page_info is not None:
-                id_components = f"{id_components}:{page_info}"
-            chunk_id = hashlib.sha256(id_components.encode("utf-8")).hexdigest()
-
-            section = (getattr(node, "metadata", {}) or {}).get("Header 1") or "general"
-
-            chunk = DocumentChunk(
-                chunk_id=chunk_id,
-                parent_doc_id=document.id,
-                chunk_index=i,
+            section = node_meta.get("Header 1") or "general"
+            chunk = self._build_chunk(
+                document=document,
                 text_content=node_text,
-                content_hash=content_hash,
-                metadata={**(document.metadata or {}), "section": str(section)},
+                chunk_index=chunk_index,
+                extra_metadata={"section": str(section), **node_meta},
             )
             chunks.append(chunk)
+            chunk_index += 1
 
         return chunks

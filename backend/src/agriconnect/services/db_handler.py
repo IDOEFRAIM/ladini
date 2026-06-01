@@ -7,13 +7,41 @@ from sqlalchemy.orm import sessionmaker, Session
 from contextlib import contextmanager
 import logging
 from agriconnect.core.db import get_engine
+from agriconnect.services.database import model as db_model
 
-from .models_legacy import (
-    Base, User, Zone, Alert, MarketItem, WeatherData,
-    Conversation, ConversationMessage,
-    UserCrop, SurplusOffer, SoilDiagnosis, PlantDiagnosis, Reminder,
-    AgentAction, ExternalContext,
-)
+# Re-export or fallback placeholders for legacy-specific models
+Base = getattr(db_model, "Base", None)
+User = getattr(db_model, "User", None)
+Zone = getattr(db_model, "Zone", None)
+Conversation = getattr(db_model, "Conversation", None)
+AgentAction = getattr(db_model, "AgentAction", None)
+ExternalContext = getattr(db_model, "ExternalContext", None)
+
+Alert = getattr(db_model, "Alert", None)
+MarketItem = getattr(db_model, "MarketItem", None)
+WeatherData = getattr(db_model, "WeatherData", None)
+UserCrop = getattr(db_model, "UserCrop", None)
+SurplusOffer = getattr(db_model, "SurplusOffer", None)
+SoilDiagnosis = getattr(db_model, "SoilDiagnosis", None)
+PlantDiagnosis = getattr(db_model, "PlantDiagnosis", None)
+Reminder = getattr(db_model, "Reminder", None)
+
+# Define minimal placeholders if still missing to avoid import-time crashes
+def _placeholder(name: str):
+    from sqlalchemy.orm import declarative_base
+    from sqlalchemy import Column, String
+    BaseLocal = declarative_base()
+    cls = type(name, (BaseLocal,), {"__tablename__": name.lower(), "id": Column(String, primary_key=True)})
+    return cls
+
+if Base is None:
+    Base = _placeholder("Base")
+if User is None:
+    User = _placeholder("User")
+if Zone is None:
+    Zone = _placeholder("Zone")
+if Conversation is None:
+    Conversation = _placeholder("Conversation")
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +194,7 @@ class AgriDatabase:
                 user = session.query(User).filter(User.phone == phone).first()
                 if user is None:
                     return None
-                return {"id": user.id, "phone": user.phone, "name": user.name,
+                return {"id": str(user.id), "phone": user.phone, "name": user.name,
                         "zone_id": user.zone_id, "role": user.role}
 
     def onboard_user(self, phone: str, name: str, zone_id: str, lang: str = "fr") -> Dict[str, Any]:
@@ -192,7 +220,7 @@ class AgriDatabase:
             if zone_id:
                 query = query.filter(Alert.zone_id == zone_id)
             alerts = query.all()
-            return [{"id": a.id, "type": a.type, "severity": a.severity,
+            return [{"id": str(a.id), "type": a.type, "severity": a.severity,
                       "message": a.message, "zone_id": a.zone_id} for a in alerts]
 
     # --- LOGIQUE MARCHÉ (MarketCoach) ---
