@@ -1,30 +1,5 @@
 FROM python:3.11-slim
 
-ENV PYTHONUNBUFFERED=1
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc libpq-dev build-essential curl \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN useradd --create-home --shell /bin/bash appuser
-
-WORKDIR /app
-
-RUN pip install --no-cache-dir \
-    boto3 \
-    sqlalchemy \
-    psycopg2-binary \
-    pydantic \
-    pgvector
-
-COPY . /app
-RUN chown -R appuser:appuser /app
-
-USER appuser
-
-CMD ["python", "-m", "agriconnect.services.ingestion_service.s3_event_consumer"]
-FROM python:3.11-slim
-
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -32,7 +7,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Runtime dependencies for ingestion worker (AWS + parsing + DB + vectors)
+# Runtime dependencies for the ingestion worker (AWS + parsing + DB + vectors)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libpq-dev build-essential curl \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir \
     boto3 \
     requests \
@@ -51,4 +30,4 @@ COPY backend/sources /app/backend/sources
 RUN useradd -m -u 10001 appuser && chown -R appuser:appuser /app
 USER appuser
 
-CMD ["python", "-m", "agriconnect.services.ingestion_service.s3_event_consumer"]
+CMD ["python", "-m", "agriconnect.domain.ingestion.worker", "--mode", "harvest", "--max-queue-items", "0"]

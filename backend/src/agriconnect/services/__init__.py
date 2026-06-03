@@ -1,21 +1,13 @@
-"""
-Services — couche métier AgriConnect.
+"""Service layer modules for AgriConnect.
 
-Structure :
-  - models.py         : Modèles SQLAlchemy legacy (flat schema)
-  - models_v3.py      : Modèles SQLAlchemy v3 (multi-schema: auth, governance, marketplace, intelligence)
-  - db_handler.py     : Accès base de données legacy (sync)
-  - database_service.py : Service DB v3 — async, multi-schema
-  - voice_engine.py   : Azure TTS / STT (service layer)
-  - voice.py          : Re-export de VoiceEngine (compat)
-  - llm_clients.py    : Clients LLM (Groq / ChatGroq)
-  - memory/           : Mémoire 3 niveaux (profil, épisodique, optimiseur)
-  - broadcaster.py    : Diffusion d'alertes multi-canal
-  - external_apis/    : Intégrations APIs externes
-  - data_collection/  : Collecteurs de données
-  - scraper/          : Système de scraping
-  - scheduling/       : Orchestration temporelle
-  - utils/            : Utilitaires transverses
+Principaux blocs encore supportés :
+  - ``db_handler``          : accès PostgreSQL synchrone (hérité).
+  - ``database``            : AgriDatabaseService v3 (async/multi-schema).
+  - ``voice_engine``        : synthèse et transcription vocale Azure.
+  - ``llm_clients``         : clients Groq et wrappers SDK.
+  - ``memory``              : profil utilisateur, mémoire épisodique, optimiseur de contexte.
+  - ``data_collection`` / ``scraper`` : collecte météo + orchestrateur de scrapers.
+  - ``persistence`` / ``rag_service`` : couches utilitaires utilisées par les agents.
 """
 
 from typing import Any

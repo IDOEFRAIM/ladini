@@ -179,19 +179,3 @@ class TestAgriDatabaseOperations:
         )
         assert result["product_name"] == "Mil"
         assert result["quantity_kg"] == 200.0
-
-
-class TestToolsDBHandler:
-    """Teste le wrapper tools/db_handler.py."""
-
-    def test_get_db_returns_none_without_config(self):
-        with patch("agriconnect.tools.db_handler._core_db") as mock_core:
-            mock_core._engine = None
-            mock_core._SessionLocal = None
-            with patch("agriconnect.tools.db_handler.settings") as mock_settings:
-                mock_settings.DATABASE_URL = None
-                # Reset singleton
-                import agriconnect.tools.db_handler as mod
-                mod._db_instance = None
-                result = mod.get_db()
-                assert result is None

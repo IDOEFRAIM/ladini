@@ -217,23 +217,8 @@ async def run_full_integration_test():
     }
 
     try:
-        newAuction = await db_service.create_auction(
-            phone=TARGET_PRODUCER_PHONE,
-            product_query="Tomate",
-            qty=500.0,
-            unit="KG",
-            max_price=250.0,
-            deadline=datetime.utcnow() + timedelta(days=7),
-            # --- Nouveaux champs obligatoires ---
-            delivery_location="Gaoua", 
-            delivery_deadline=datetime.utcnow() + timedelta(days=10),
-            incoterm="DDP",
-            # ------------------------------------
-            zone_query="Gaoua",
-            description="Tomates de qualité export, calibre moyen.",
-            auto_extend=True
-        )
-        print("auction",newAuction)
+        user = await db_service.get_user_by_phone(TARGET_PRODUCER_PHONE)        
+        print('user',user)
     except Exception as e:
         logger.error(f"Erreur critique lors de l'exécution des tests : {e}")
     finally:

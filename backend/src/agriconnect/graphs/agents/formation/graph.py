@@ -1,5 +1,6 @@
 """Formation sub-graph wiring and orchestration adapter."""
 
+import asyncio
 from functools import partial
 from typing import Any, Dict, Optional
 import logging
@@ -239,13 +240,23 @@ class FormationCoach:
             "agri_response": {},
         }
 
+    def _run_sync(self, coro, context_label: str):
+        try:
+            return asyncio.run(coro)
+        except RuntimeError as exc:
+            if "event loop is running" in str(exc).lower():
+                raise RuntimeError(
+                    f"{context_label} cannot be used inside a running event loop — use the async `run` method instead."
+                ) from exc
+            raise
+
     def handle(self, query: str, context: Dict[str, Any]) -> Dict[str, Any]:
         app = self._ensure_app()
         initial_state: FormationState = {
             "user_query": query,
             "learner_profile": context,
         }
-        final = app.invoke(initial_state)
+        final = self._run_sync(app.ainvoke(initial_state), "FormationCoach.handle()")
         output = AgriAgentOutput(
             full_text=final.get("final_response", ""),
             structured_data=final.get("agri_response") or {},

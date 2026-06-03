@@ -8,9 +8,8 @@ Architecture :
   - graph_builder       : factory `build_graph(role)` qui assemble le StateGraph
   - security            : `SecurityService` (modération anti-scam)
 
-Ce package est consommé par les deux agents :
+Ce package est consommé par l'agent :
   - `graphs/agents/market_coach/` (PRODUCER)
-  - `graphs/agents/market_buyer/` (BUYER)
 """
 
 from .security import SecurityService

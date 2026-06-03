@@ -453,6 +453,22 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
                 },
             }
 
+        # 🔍 CAS 2B : Dictionnaire simple {farm_name, stocks}
+        elif isinstance(tool_data, dict) and "stocks" in tool_data:
+            stocks_list = tool_data.get("stocks") or []
+            farm_label = tool_data.get("farm_name") or tool_data.get("name") or "cette exploitation"
+
+            if not stocks_list:
+                text_output = (
+                    f"Aucun produit n'est actuellement enregistré en stock pour {farm_label}. "
+                    "Souhaitez-vous ajouter une nouvelle récolte ?"
+                )
+                ag_component = {
+                    "lc_type": "constructor",
+                    "id": ["ag_ui", "StatusComponent"],
+                    "kwargs": {"type": "info", "message": text_output},
+                }
+
         # 🔍 CAS 3 : Fallback transactionnel unitaire (si l'outil ne renvoie pas de collection)
         if not ag_component:
             if not tool_msg:

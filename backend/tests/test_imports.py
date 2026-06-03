@@ -114,16 +114,21 @@ class TestToolImports:
 
     def test_import_tools_package(self):
         from agriconnect.tools import (
-            HealthDoctorTool, AgrimarketTool, BurkinaCropTool,
-            MeteoAdvisorTool, FloodRiskTool, SoilDoctorTool,
-            SubventionTool, SentinelleTool,
+            BurkinaCropTool,
+            SentinelleTool,
+            SahelianCropProfile,
+            FormationTool,
+            FormationAdvisor,
+            MarketplaceToolV3,
+            IntelligenceTool,
         )
-        assert HealthDoctorTool is not None
+        assert BurkinaCropTool is not None
         assert SentinelleTool is not None
-
-    def test_import_tools_db_handler(self):
-        from agriconnect.tools.db_handler import get_db
-        assert callable(get_db)
+        assert SahelianCropProfile is not None
+        assert FormationTool is not None
+        assert FormationAdvisor is not None
+        # Optional async tools (can be None if optional deps missing)
+        assert MarketplaceToolV3 is not None or IntelligenceTool is not None
 
 
 class TestOrchestratorImports:

@@ -10,6 +10,7 @@ Stable DI-friendly entrypoint utilisé par l'orchestrateur :
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -188,12 +189,23 @@ class MarketCoach:
                 "expert_metadata": {"name": "market_coach", "confidence": 0.0},
             }
 
+    def _run_sync(self, coro, context_label: str) -> Dict[str, Any]:
+        try:
+            return asyncio.run(coro)
+        except RuntimeError as exc:
+            if "event loop is running" in str(exc).lower():
+                raise RuntimeError(
+                    f"{context_label} cannot be used inside a running event loop — use `await run(...)` instead."
+                ) from exc
+            raise
+
     def handle(self, query: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        app = self._ensure_app()
         user_id = context.get("user_id") or context.get("id") or "anonymous"
         config = {"configurable": {"thread_id": user_id}}
         initial_state = _build_initial_state(query, context)
 
-        final = self._app.invoke(initial_state, config=config)
+        final = self._run_sync(app.ainvoke(initial_state, config=config), "MarketCoach.handle()")
         return self._prepare_output(final)
 
 

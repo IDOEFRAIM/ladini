@@ -26,6 +26,9 @@ from typing import Any, Optional
 
 from langgraph.graph import END, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.redis import AsyncRedisSaver
+import redis.asyncio as redis
+
 
 from agriconnect.graphs.agents.market_coach.state import MarketAgentState
 from agriconnect.graphs.agents.market_coach.utils import (
@@ -129,7 +132,8 @@ def build_graph(
     # implementation so multi-turn WhatsApp/AG-UI flows keep their tunnel state
     # (working_memory/current_goal/expected_input/available_mapping) per thread_id.
     if checkpointer is None:
-        checkpointer = MemorySaver()
+        redis_client = redis.from_url("redis-19909.crce310.us-east-1-6.ec2.cloud.redislabs.com:19909")
+        checkpointer = AsyncRedisSaver(redis_client)
 
     # Nœuds et routes spécialisés AG-UI
     input_interpreter = make_input_interpreter(role_up)

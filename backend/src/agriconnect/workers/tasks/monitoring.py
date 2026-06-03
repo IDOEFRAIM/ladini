@@ -10,6 +10,7 @@ PRINCIPES :
   - Structured result avec compteurs et détails
 """
 
+import asyncio
 import hashlib
 import logging
 from datetime import datetime, timezone
@@ -83,10 +84,23 @@ def _process_single_zone(
     }
 
     try:
-        result = workflow.invoke({
+        payload = {
             "user_query": f"Alertes météo pour {zone_name}",
             "location_profile": location,
-        })
+        }
+
+        try:
+            result = workflow.invoke(payload)
+        except AttributeError:
+            if hasattr(workflow, "ainvoke"):
+                result = asyncio.run(workflow.ainvoke(payload))
+            else:
+                raise
+        except TypeError as exc:
+            if "No synchronous function provided" in str(exc) and hasattr(workflow, "ainvoke"):
+                result = asyncio.run(workflow.ainvoke(payload))
+            else:
+                raise
 
         hazards = result.get("hazards", [])
         critical = [
@@ -157,7 +171,7 @@ def check_weather_alerts(self) -> Dict[str, Any]:
     try:
         # ── Lazy import des dépendances lourdes ──
         try:
-            from agriconnect.graphs.agents.sentinelle.graph import get_agent_graph
+            from backend._legacy.sentinelle.graph import get_agent_graph
             from agriconnect.rag.components import get_groq_sdk
         except ImportError as e:
             raise FatalTaskError(

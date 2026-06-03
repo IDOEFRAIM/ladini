@@ -16,24 +16,19 @@ from langgraph.types import Send, interrupt
 
 from agriconnect.graphs.agents.common.domains import AgentDomain
 from agriconnect.graphs.state import GlobalAgriState, ExpertResponse
-from agriconnect.graphs.agents.sentinelle.graph import ClimateSentinel
 from agriconnect.graphs.agents.formation.graph import FormationCoach
 from agriconnect.graphs.agents.market_coach.graph import MarketCoach
-from agriconnect.graphs.agents.marketplace_v3.graph import MarketplaceAgentV3
+
 from agriconnect.graphs.orchestrateur.prompts import build_routing_prompt
-from agriconnect.services.persistence import AgriPersister
 
 # Configure logger
 logger = logging.getLogger(__name__)
 
 # Expert mapping
 EXPERT_MAP = {
-    "sentinelle": ClimateSentinel,
     "formation": FormationCoach,
     "market": MarketCoach,
-    "market_coach": MarketCoach,
-    "marketplace": MarketplaceAgentV3,
-    "marketplace_v3": MarketplaceAgentV3,
+    "market_coach": MarketCoach
 }
 
 # Centralized domain routing table: agents signal a required domain,
@@ -41,8 +36,6 @@ EXPERT_MAP = {
 DOMAIN_EXPERT_MAP = {
     AgentDomain.MARKET.value: "market_coach",
     AgentDomain.FORMATION.value: "formation",
-    AgentDomain.SENTINELLE.value: "sentinelle",
-    AgentDomain.MARKETPLACE.value: "marketplace_v3",
 }
 
 MIN_CONFIDENCE = 0.7
@@ -65,8 +58,8 @@ class OrchestratorNodes:
         
         # Expert catalog description for LLM
         expert_catalog = (
-              "sentinelle: maladies/météo; market_coach: prix/tendances; "
-            "formation: tutoriels; marketplace: achats"
+              " market_coach: prix/tendances; "
+            "formation: tutoriels"
         )
 
         try:
@@ -183,7 +176,7 @@ class OrchestratorNodes:
 
     def run_expert_node(self, state: GlobalAgriState) -> Dict[str, Any]:
         """Execute a single expert workflow."""
-        name = state.get("_expert_target", "sentinelle")
+        name = state.get("_expert_target")
         is_lead = state.get("_expert_is_lead", False)
         query = state.get("requete_utilisateur", "")
         
@@ -325,8 +318,7 @@ class OrchestratorNodes:
             return "LOW"
         if agent_name.lower().startswith("formation"):
             return "LOW"
-        if agent_name.lower().startswith("sentinelle"):
-            return "READ_ONLY"
+     
         return "ASK"
 
     def hitl_gate(self, state: GlobalAgriState) -> Dict[str, Any]:
@@ -435,7 +427,7 @@ class OrchestratorNodes:
             return {}
 
         try:
-            persister = AgriPersister(db=self.ctx.db, memory=self.ctx.memory)
+            persister = {}
             persister.save_all(state)
         except Exception as e:
             logger.error("Persistence failed: %s", e)

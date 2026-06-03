@@ -1,9 +1,4 @@
-﻿"""Helpers extracted from message_flow to reduce file size.
-
-Ce module regroupe l'initialisation DB, protocoles, experts,
-services et tracing qui alourdissaient `message_flow.py`.
-"""
-import logging
+﻿﻿import logging
 import os
 from agriconnect.rag.components import get_groq_sdk
 from agriconnect.core.setup import AgriContext
@@ -20,7 +15,7 @@ from agriconnect.services.voice_engine import VoiceEngine
 from agriconnect.services.db_handler import AgriDatabase
 from agriconnect.core.settings import settings
 import agriconnect.core.database as _core_db
-from agriconnect.graphs.agents.sentinelle.graph import ClimateSentinel
+from backend._legacy.sentinelle.graph import ClimateSentinel
 from agriconnect.graphs.agents.formation.graph import FormationCoach
 from agriconnect.graphs.agents.market_coach.graph import MarketCoach
 from agriconnect.graphs.agents.marketplace_v3.graph import MarketplaceAgentV3

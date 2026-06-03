@@ -1,5 +1,6 @@
 import logging
 import os
+from typing import Any, Optional
 from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
@@ -11,10 +12,12 @@ try:
     from llama_index.vector_stores.faiss import FaissVectorStore
 
     # ── LLM : délégué au provider abstrait (Groq/Azure/Bedrock) ──
-    from agriconnect.services.llm_clients import get_chat_client, get_sdk_client
+    from agriconnect.core.get_llm import get_llm
 
     from agriconnect.core.settings import settings as app_settings
     from .config import EMBEDDING_MODEL_NAME, CHUNK_SIZE, CHUNK_OVERLAP, DB_DIR
+
+    _GROQ_SDK_SINGLETON: Optional[Any] = None
 
     # Keep vector dimension aligned with settings/DB schema.
     EMBEDDING_DIM = int(getattr(app_settings, "RAG_EMBEDDING_DIM", 768) or 768)
@@ -26,11 +29,41 @@ try:
     # ── Aliases rétro-compatibles pour tous les imports existants ──
     def get_llm_client():
         """Retourne un client LangChain Chat (provider-agnostic)."""
-        return get_chat_client()
+        return get_llm()
 
-    def get_groq_sdk():
-        """Retourne un SDK client brut (provider-agnostic)."""
-        return get_sdk_client()
+    def get_groq_sdk(force_refresh: bool = False):
+        """Retourne un SDK client brut (provider-agnostic).
+
+        Crée et met en cache une instance du client Groq officiel, afin que
+        ``core.get_llm`` puisse l'adapter sans retomber dans une récursion.
+        """
+
+        global _GROQ_SDK_SINGLETON
+
+        if not force_refresh and _GROQ_SDK_SINGLETON is not None:
+            return _GROQ_SDK_SINGLETON
+
+        provider = (getattr(app_settings, "LLM_PROVIDER", "groq") or "groq").strip().lower()
+        if provider not in {"groq", "default", "auto"}:
+            raise RuntimeError(
+                "get_groq_sdk() n'est disponible que lorsque LLM_PROVIDER=groq (ou auto)."
+            )
+
+        api_key = app_settings.llm_api_key
+        if not api_key:
+            raise RuntimeError("Aucune clé GROQ_API_KEY/AGRICONNECT_APIKEY n'est définie pour initialiser le SDK Groq.")
+
+        try:
+            from groq import Groq
+        except ImportError as exc:
+            raise RuntimeError(
+                "Le package python 'groq' est requis pour instancier le SDK Groq.\n"
+                "Installez-le via `pip install groq`."
+            ) from exc
+
+        _GROQ_SDK_SINGLETON = Groq(api_key=api_key)
+        logger.info("Groq SDK initialisé et mis en cache")
+        return _GROQ_SDK_SINGLETON
 
     def init_settings():
         Settings.embed_model = get_embedding_model()

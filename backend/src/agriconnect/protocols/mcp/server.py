@@ -6,6 +6,7 @@ All business log capabilities are discovered dynamically.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os

@@ -6,6 +6,7 @@ and builds the LangGraph using the `OrchestratorNodes` and `create_graph` logic.
 Refactored for robustness and clean separation of concerns.
 """
 
+import asyncio
 import logging
 import json
 from typing import Dict, Any, Optional
@@ -63,6 +64,17 @@ class MessageResponseFlow:
         # Checkpointer could be added here if needed (e.g. MemorySaver)
         self.graph = create_graph(self.nodes).compile()
 
+    @staticmethod
+    def _run_sync(coro, context_label: str):
+        try:
+            return asyncio.run(coro)
+        except RuntimeError as exc:
+            if "event loop is running" in str(exc).lower():
+                raise RuntimeError(
+                    f"{context_label} cannot be used inside a running event loop — await `ainvoke`/`astream` instead."
+                ) from exc
+            raise
+
     def _init_protocols(self):
         init_protocols(self)
         # Verify injection
@@ -85,12 +97,21 @@ class MessageResponseFlow:
     def _init_services(self):
         return init_services(self)
 
+    async def ainvoke(self, inputs: Dict[str, Any], config: Optional[Dict[str, Any]] = None):
+        """Async invoke helper for the orchestrator graph."""
+        return await self.graph.ainvoke(inputs, config)
+
     def invoke(self, inputs: Dict[str, Any], config: Optional[Dict[str, Any]] = None):
-        """Invoke the graph."""
-        return self.graph.invoke(inputs, config)
+        """Synchronous-friendly invoke with asyncio fallback."""
+        return self._run_sync(self.ainvoke(inputs, config), "MessageResponseFlow.invoke()")
     
+    async def astream(self, inputs: Dict[str, Any], config: Optional[Dict[str, Any]] = None):
+        """Async stream helper delegating to LangGraph astream."""
+        async for chunk in self.graph.astream(inputs, config):
+            yield chunk
+
     def stream(self, inputs: Dict[str, Any], config: Optional[Dict[str, Any]] = None):
-        """Stream the graph options."""
+        """Synchronous-friendly stream wrapper."""
         return self.graph.stream(inputs, config)
 
     # --- Backward Compatibility / Lightweight Runner ---
