@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     # - disable: no TLS (local-only)
     DB_SSL_MODE: str = "require"
     # --- Redis / Celery ---
-    REDIS_URL: str = "rediss://localhost:6379/0"
+    REDIS_URL: str = "a"
     VALKEY_ENDPOINT: str = ""
     VALKEY_AUTH_TOKEN: str = ""
     VALKEY_USE_TLS: bool = True
@@ -94,13 +94,13 @@ class Settings(BaseSettings):
 
     @property
     def celery_backend(self) -> str:
-        return self.CELERY_RESULT_BACKEND or "rediss://localhost:6379/1"
+        return self.CELERY_RESULT_BACKEND or "a"
 
     # --- Azure Speech (TTS/STT — indépendant du LLM provider) ---
     AZURE_SPEECH_KEY: str = ""
     AZURE_SPEECH_KEY_2: str = ""
     AZURE_REGION: str = "westeurope"
-    AZURE_SPEECH_ENDPOINT: str = "https://westeurope.api.cognitive.microsoft.com/"
+    AZURE_SPEECH_ENDPOINT: str = "a"
     USE_AZURE_SPEECH: bool = False
 
     # --- Twilio / WhatsApp ---
@@ -112,7 +112,7 @@ class Settings(BaseSettings):
     LANGCHAIN_TRACING_V2: bool = False
     LANGCHAIN_API_KEY: str = ""
     LANGCHAIN_PROJECT: str = "agriconnect"
-    LANGCHAIN_ENDPOINT: str = "https://api.smith.langchain.com"
+    LANGCHAIN_ENDPOINT: str = "a"
     LANGSMITH_API_KEY: str = ""
 
     @property
