@@ -164,6 +164,7 @@ backend/src/agriconnect/utils
 backend/src/agriconnect/workers
 backend/src/agriconnect/main.py
 backend/src/agriconnect/worker.py
+backend/src/agriconnect/services/memory/
 
 backend/AUDIT_MARKET_AGENTS.md
 backend/SYSTEM_COMPONENTS.md
