@@ -138,7 +138,7 @@ async def simuler_dialogue_whatsapp_bid_proactif():
         config = {"configurable": {"thread_id": "producteur_bid_test_2026_ultra"}}
 
         state = {
-            "user_phone": "+22601479800",
+            "user_phone": "+22601479804",
             "session_id": "whatsapp_session_bid_999",
             "transaction_payload": {},
             "extracted_entities": {},
@@ -155,9 +155,12 @@ async def simuler_dialogue_whatsapp_bid_proactif():
 
         messages_test = [
             "Je veux faire une offre pour le mais s'il vous plaît",
-            "1",
-            "300120 fcfa",
-            "OK",
+            "Je suis Adolphe kabore",
+            "je vis a bobo dioulasso",
+            "je vis a OUAGADOUGOU",
+            "je suis a banfora"
+
+       
         ]
 
         for i, message in enumerate(messages_test, 1):
@@ -179,7 +182,9 @@ async def simuler_dialogue_whatsapp_bid_proactif():
                 print(f"🔹 Statut Machine Intern  : {state.get('status')}")
                 print(f"\n💬 RÉPONSE ROUTÉE VERS LE SMARTPHONE DU PRODUCTEUR : \n")
                 print("--------------------------------------------------")
-                print(state.get('final_response'))
+                print("##########################################################")
+                print(state)
+                print("##########################################################")
                 print("--------------------------------------------------")
             except Exception as e:
                 logger.error(f"💥 Le graphe a crashé au tour {i} : {str(e)}", exc_info=True)

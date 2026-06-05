@@ -10,7 +10,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from agriconnect.core.database import init_db, check_connection, get_db, close_db
-from agriconnect.services.database.database_service import AgriDatabaseService
+from agriconnect.services.database import AgriDatabaseService
 
 
 @pytest_asyncio.fixture(scope="function", autouse=True)

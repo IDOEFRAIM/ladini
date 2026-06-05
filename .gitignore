@@ -1,14 +1,175 @@
-# Ignore ingestion downloads folder (out of scope)
-**/downloads/
-downloads/
-
+# ============================
 # Python
-.venv/
+# ============================
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
 
-# Logs
-*.log
-
-# IDE
+.gradio/
 .vscode/
+# ============================
+# Virtual Environments
+# ============================
+.venv/
+venv/
+ENV/
+
+# ============================
+# IDE / Editor
+# ============================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ============================
+# Environment Variables
+# ============================
+.env
+.env.local
+.env.consolidated
+
+# ============================
+# Node.js
+# ============================
+node_modules/
+package-lock.json
+
+# ============================
+# Data & Cache
+# ============================
+
+cache/
+*.sqlite
+*.db
+
+# ============================
+# RAG / Vector Store
+# ============================
+backend/rag_db/
+*.bin
+
+# ============================
+# Logs & Reports
+# ============================
+*.log
+app.log
+reports/
+orchestration_report.json
+
+# ============================
+# Docker
+# ============================
+docker-compose.override.yml
+
+# ============================
+# OS files
+# ============================
+.DS_Store
+Thumbs.db
+
+# ============================
+# Test & Coverage
+# ============================
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# ============================
+# Audio test files
+# ============================
+*.wav
+
+# ============================
+# Gradio
+# ============================
+.gradio/
+
+# ============================
+# Poetry
+# ============================
+poetry.lock
+
+# ============================
+# Credentials & Secrets
+# ============================
+backend/services/external_apis/earth_engine/apikey.json
+*.key
+*.pem
+*.p12
+*.crt
+*.bak
+
+
+
+# ============================
+# OS-specific
+# ============================
+.DS_Store
+Thumbs.db
+
+# ============================
+# Notebooks
+# ============================
+*.ipynb
+
+# ============================
+# env
+# ============================
+
+backend/.env
+backend/.env.example
+
+
+
+# ============================
+# Security — NEVER commit
+# ============================
+rootkey.csv
+*.csv.bak
+
+
+
+
+# ============================
+# Debug / Temp artifacts
+# ============================
+z/
+z.py
+z.html
+ca-certificates.crt
+global-bundle.pem
+tmp_*.py
+pdf_queue.json
+*.tmp
+tmp/
+
+
+backend/_legacy/
+
+backend/_pycache__/
+backend/_.pytest_cache__/
+backend/.venv
+backend/tests
+backend/src/agriconnect/graphs/agent_test/
+backend/src/agriconnect/utils
+backend/src/agriconnect/workers
+backend/src/agriconnect/main.py
+backend/src/agriconnect/worker.py
+
+backend/AUDIT_MARKET_AGENTS.md
+backend/SYSTEM_COMPONENTS.md
+
+backend/.env
+backend/.env.example
+infra/
+frontend/
+

@@ -324,9 +324,19 @@ def make_input_interpreter(role: str = "PRODUCER"):
     async def input_interpreter(state: MarketAgentState, mc_runtime: MarketRuntime) -> Dict[str, Any]:
         text = state.get("normalized_text") or state.get("user_query") or ""
         expected_input = state.get("expected_input")
+        onboarding_active = bool(state.get("is_onboarding") or state.get("onboarding_step"))
+
+        def _emit_onboarding(extracted: Dict[str, Any], source: str) -> Dict[str, Any]:
+            return {
+                "interpreted_event": "ONBOARDING_INPUT",
+                "detected_intent": "ONBOARDING",
+                "interpreter_confidence": 1.0,
+                "extracted_entities": extracted,
+                "raw_analysis": {"path": source, "role": role_up},
+            }
 
         # 1. Traitement prioritaire par Fast-path structurel rigide
-        fast = _interpret_fast_path(state, text)
+        fast = None if onboarding_active else _interpret_fast_path(state, text)
         if fast is not None:
             return fast
 
@@ -334,6 +344,8 @@ def make_input_interpreter(role: str = "PRODUCER"):
         llm = getattr(mc_runtime, "llm", None)
         if llm is None:
             logger.warning("No LLM on runtime — interpreter returns UNKNOWN")
+            if onboarding_active:
+                return _emit_onboarding({}, "onboarding_no_llm")
             return {
                 "interpreted_event": "UNKNOWN",
                 "detected_intent": "UNKNOWN",
@@ -368,6 +380,8 @@ def make_input_interpreter(role: str = "PRODUCER"):
             parsed = json.loads(completion.choices[0].message.content or "{}")
         except Exception as exc:
             logger.error("Interpreter LLM CRASH : %s — forcing UNKNOWN", exc, exc_info=True)
+            if onboarding_active:
+                return _emit_onboarding({}, "onboarding_llm_crash")
             return {
                 "interpreted_event": "UNKNOWN",
                 "detected_intent": "UNKNOWN",
@@ -386,7 +400,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
             logger.warning("Dérive conversationnelle détectée : attendait %s, utilisateur a dévié.", expected_input)
             raw_event = "UNKNOWN"
 
-        if raw_event not in {"NEW_TASK", "ANSWER", "CONFIRM", "REJECT", "SELECTION", "UPDATE", "INTERRUPTION", "RESUME", "OUT_OF_SCOPE", "UNKNOWN"}:
+        if raw_event not in {"NEW_TASK", "ANSWER", "CONFIRM", "REJECT", "SELECTION", "UPDATE", "INTERRUPTION", "RESUME", "OUT_OF_SCOPE", "UNKNOWN", "ONBOARDING_INPUT"}:
             raw_event = "UNKNOWN"
 
         raw_intent = str(parsed.get("detected_intent") or "UNKNOWN").upper().strip()
@@ -399,11 +413,15 @@ def make_input_interpreter(role: str = "PRODUCER"):
         except (TypeError, ValueError):
             confidence = 0.0
 
+        remapped_entities = _remap_entities(parsed.get("extracted_entities") or {})
+        if onboarding_active:
+            return _emit_onboarding(remapped_entities, "onboarding_override")
+
         return {
             "interpreted_event": raw_event,
             "detected_intent": raw_intent,
             "interpreter_confidence": confidence,
-            "extracted_entities": _remap_entities(parsed.get("extracted_entities") or {}),
+            "extracted_entities": remapped_entities,
             "raw_analysis": {"path": "llm", "role": role_up},
         }
 

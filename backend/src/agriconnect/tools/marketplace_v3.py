@@ -8,7 +8,7 @@ import json
 from typing import Any, Dict, List, Optional, Union,Tuple
 from datetime import datetime
 
-from agriconnect.services.database.database_service import AgriDatabaseService
+from agriconnect.services.database import AgriDatabaseService
 from agriconnect.infrastructure.mcp.client import AgriMCPClient
 
 logger = logging.getLogger("Tool.Marketplace.v3")

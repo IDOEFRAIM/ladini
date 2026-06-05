@@ -45,6 +45,70 @@ logger = logging.getLogger("AgriConnect.Market.SharedCore")
 _WRITE_GOALS = frozenset(MARKET_WRITE_ACTIONS_MAP.keys())
 _READ_GOALS = frozenset(MARKET_READ_ACTIONS_MAP.keys())
 
+def _clean_candidate_text(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    cleaned = re.sub(r"\s+", " ", value).strip(" '\"\n\r\t")
+    return cleaned or None
+
+
+async def _llm_extract_onboarding_field(
+    mc_runtime: MarketRuntime,
+    field: str,
+    user_text: str,
+) -> Optional[str]:
+    """Utilise le LLM pour extraire de manière robuste un champ d'onboarding (name, zone, role)."""
+    if not user_text:
+        return None
+    llm = getattr(mc_runtime, "llm", None)
+    if llm is None:
+        return None
+
+    # Définition des instructions par champ
+    instructions = {
+        "name": "Si le message contient un nom complet ou un prénom, retourne-le. Sinon retourne vide.",
+        "zone": "Si le message mentionne une ville/zone/province, retourne le nom propre. Sinon retourne vide.",
+        "role": "Analyse l'intention de l'utilisateur. Retourne 'PRODUCER' s'il veut vendre ou cultiver, ou 'BUYER' s'il veut acheter. Retourne 'PRODUCER' par défaut si ambigu.",
+    }
+    
+    # Validation du champ
+    field_key = field if field in instructions else "name"
+    
+    system_prompt = (
+        "Tu extrais des informations d'onboarding pour AgriConnect. "
+        "Réponds uniquement un JSON {\"value\": \"...\"}. "
+        f"Instruction: {instructions.get(field_key)}"
+    )
+
+    try:
+        completion = await asyncio.to_thread(
+            lambda: llm.chat.completions.create(
+                model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_text},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                max_tokens=60,
+            )
+        )
+        payload = json.loads(completion.choices[0].message.content or "{}")
+        value = payload.get("value")
+        
+        # Nettoyage spécifique pour le rôle afin de garantir les valeurs attendues par la BDD
+        if field_key == "role":
+            val = str(value).upper()
+            return "BUYER" if "BUY" in val else "PRODUCER"
+            
+        return _clean_candidate_text(value)
+        
+    except Exception as exc:
+        logger.debug("[Onboarding] LLM extraction failed for %s: %s", field, exc)
+        return "PRODUCER" if field == "role" else None
+
+
+
 def _now() -> float:
     return time.time()
 
@@ -180,42 +244,74 @@ async def input_normalizer(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
             res_dict = ensure_dict(profile_raw)
             logger.debug("[Normalizer] get_user_by_phone status=%s", (res_dict or {}).get("status"))
 
-            
-            if res_dict.get("status") == "success" and "data" in res_dict:
+            # --- CORRECTION DU NORMALIZER ---
+            # Utiliser .upper() ou comparer avec "SUCCESS" pour être cohérent avec votre méthode pivot
+            status = str(res_dict.get("status", "")).upper()
+
+            if status == "SUCCESS" and "data" in res_dict:
                 profile = res_dict["data"] or {}
-                updates["user_name"] = profile.get("name") or profile.get("full_name") or "Producteur"
-                updates["zone_name"] = profile.get("zone_name")
-                updates["zone_id"] = profile.get("zone_id")
+                updates["user_name"] = profile.get("name") or "N/A"
+                updates["zone_name"] = profile.get("zone", {}).get("name")
+                updates["zone_id"] = profile.get("zone", {}).get("id")
+                # Correction importante : récupérer le rôle depuis le champ 'role' retourné par _serialize_user_entities
                 updates["user_role"] = profile.get("role") or state.get("user_role") or "PRODUCER"
                 updates["user_context_loaded"] = True
+                updates["is_onboarding"] = False
+                updates["onboarding_step"] = None
                 
-                user_uuid = profile.get("id") or profile.get("user_id")
+                # Votre méthode de sérialisation renvoie "id" directement
+                user_uuid = profile.get("id")
                 if user_uuid:
                     updates["user_id"] = str(user_uuid)
 
-                # Préchargement proactif du cache des fermes (Via l'outil officiel get_producer_farm)
+                # Préchargement proactif
                 if state.get("user_farms_cache") is None:
                     try:
-                        # 💡 Utilisation du bon nom d'outil MCP validé en tests : get_producer_farm
+                        # Assurez-vous que l'outil 'get_producer_farm' accepte bien le format de 'phone' 
+                        # utilisé dans _fetch_user_entities
                         farms_raw = await mc_runtime.call_db("get_producer_farm", phone=str(phone).strip())
                         farms_data = ensure_dict(farms_raw)
                         farm_list = farms_data.get("data") or farms_data.get("farms") or []
                         
-                        if isinstance(farm_list, list):
-                            updates["user_farms_cache"] = farm_list
-                            logger.info(f"[Normalizer] Cache synchronisé avec succès : {len(farm_list)} ferme(s) chargée(s).")
-                        else:
-                            updates["user_farms_cache"] = []
+                        updates["user_farms_cache"] = farm_list if isinstance(farm_list, list) else []
+                        logger.info(f"[Normalizer] Cache synchronisé : {len(updates['user_farms_cache'])} ferme(s).")
                     except Exception as farm_exc:
                         logger.warning(f"[Normalizer] Échec non-fatal du préchargement des fermes: {str(farm_exc)}")
                         updates["user_farms_cache"] = []
+            elif status == "NEW_USER":
+                tx_payload = dict(state.get("transaction_payload") or {})
+                if phone:
+                    tx_payload["phone"] = str(phone).strip()
+
+                current_step = state.get("onboarding_step") or "COLLECT_NAME"
+                updates.update({
+                    "user_context_loaded": False,
+                    "is_onboarding": True,
+                    "onboarding_step": current_step,
+                    "transaction_payload": tx_payload,
+                    "user_phone": str(phone).strip() if phone else state.get("user_phone"),
+                })
+
+
             else:
-                logger.warning(f"[Normalizer] Profil introuvable ou rejeté par le serveur MCP pour {phone}: {res_dict.get('message')}")
+                # Si on arrive ici, soit status n'est pas "SUCCESS", soit le profil est réellement absent
+                logger.warning(f"[Normalizer] Profil introuvable ou erreur status ({status}) pour {phone}")
                 updates["user_context_loaded"] = False
                 
         except Exception as db_err:
             logger.error(f"[Normalizer] Erreur de communication critique avec le serveur MCP DB: {str(db_err)}", exc_info=True)
             updates["user_context_loaded"] = False
+
+    onboarding_active = bool(
+        updates.get("is_onboarding")
+        or state.get("is_onboarding")
+        or state.get("onboarding_step")
+    )
+    if onboarding_active:
+        updates["interpreted_event"] = "ONBOARDING_INPUT"
+        updates["detected_intent"] = "ONBOARDING"
+        updates["interpreter_confidence"] = 1.0
+        updates.setdefault("status", "WAITING_INPUT")
 
     # 4. Alignement du contexte de tunnel transactionnel (Immuabilité préservée)
     current_goal = state.get("current_goal")
@@ -487,6 +583,23 @@ async def cognitive_orchestrator(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
 ) -> Dict[str, Any]:
+    if state.get("is_onboarding"):
+        event = str(state.get("interpreted_event") or "").upper()
+        intent = str(state.get("detected_intent") or "UNKNOWN").upper()
+        confidence = float(state.get("interpreter_confidence") or 0.0)
+        return {
+            "cognitive_decision": {
+                "phase": "reason",
+                "next_step": "onboarding",
+                "reason": "onboarding",
+                "loop": ["perceive", "think", "decide", "act", "observe", "reason", "retry"],
+                "event": event,
+                "intent": intent,
+                "current_goal": None,
+                "confidence": confidence,
+            },
+            "should_replan": False,
+        }
     event = str(state.get("interpreted_event") or "").upper()
     intent = str(state.get("detected_intent") or "UNKNOWN").upper()
     current_goal = str(state.get("current_goal") or "").upper()
@@ -728,6 +841,220 @@ async def clarification_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -
         logger.warning("[ClarificationNode] LLM call failed: %s", exc)
 
     return {}
+
+
+# =====================================================================
+# NODE 6A-ter — ONBOARDING NODE
+# =====================================================================
+
+
+async def onboarding_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+    """Collecte les informations essentielles (nom, zone, rôle) pour les nouveaux utilisateurs."""
+    
+    in_onboarding = bool(state.get("is_onboarding"))
+    existing_strategy = str(state.get("response_strategy") or "").upper()
+    if not in_onboarding and existing_strategy != "ONBOARDING":
+        logger.info("[Onboarding] Sortie immédiate : conditions d'onboarding non remplies.")
+        return {}
+
+    
+
+    payload = dict(state.get("transaction_payload") or {})
+    extracted = state.get("extracted_entities") or {}
+    normalized_query = (state.get("normalized_text") or state.get("user_query") or "").strip()
+    
+    # 🛡️ Consolidation du numéro de téléphone
+    phone = payload.get("phone") or state.get("user_phone") or state.get("phone") or state.get("phone_number")
+    if phone:
+        payload["phone"] = str(phone).strip()
+
+    step = state.get("onboarding_step") or "COLLECT_NAME"
+    logger.info("[Onboarding] ---> ENTRÉE DANS ONBOARDING_NODE | Étape actuelle: %s", step)
+    prompt: str = ""
+    updates: Dict[str, Any] = {
+        "response_strategy": "ONBOARDING",
+        "status": "WAITING_INPUT",
+        "ag_ui_component": None,
+        "onboarding_step": step,
+    }
+
+    # Fonction utilitaire pour garantir la persistance du payload à chaque étape
+    def _sync_payload() -> None:
+        updates["transaction_payload"] = dict(payload)
+
+    _sync_payload()
+
+    # 🛡️ NOUVEAU : Extraction proactive du rôle dès que possible
+    if not payload.get("role") and normalized_query:
+        extracted_role = await _llm_extract_onboarding_field(mc_runtime, "role", normalized_query)
+        if extracted_role:
+            payload["role"] = extracted_role
+            _sync_payload()
+            logger.debug("[Onboarding] Rôle extrait via LLM: %s", extracted_role)
+
+    # ==========================================
+    # ETAPE 1 : COLLECTE DU NOM
+    # ==========================================
+    if step == "COLLECT_NAME":
+        candidate_name = payload.get("name") or extracted.get("name")
+        
+        # Secours via LLM si l'entité classique a échoué
+        if not candidate_name and normalized_query:
+            candidate_name = await _llm_extract_onboarding_field(mc_runtime, "name", normalized_query)
+            if candidate_name:
+                logger.debug("[Onboarding] Nom extrait via LLM: %s", candidate_name)
+        
+        if candidate_name:
+            payload["name"] = str(candidate_name).strip()
+            _sync_payload()
+            step = "COLLECT_ZONE"
+            updates["onboarding_step"] = step
+            prompt = (
+                f"Enchanté {payload['name']} ! Dans quelle zone travaillez-vous ? "
+                "Vous pouvez répondre par une ville comme Ouagadougou, Bobo Dioulasso, Banfora ou Ziniaré."
+            )
+        else:
+            prompt = "Bienvenue sur AgriConnect ! Quel est votre nom complet ?"
+
+    # ==========================================
+    # ETAPE 2 : COLLECTE DE LA ZONE & CREATION
+    # ==========================================
+    elif step == "COLLECT_ZONE":
+        previous_zone_name = str(payload.get("zone_name") or "").strip()
+        zone_name = (
+            extracted.get("zone_name")
+            or extracted.get("location")
+            or extracted.get("zone")
+            or payload.get("zone_name")
+        )
+        
+        # Secours via LLM si l'entité classique a échoué
+        if not zone_name and normalized_query:
+            zone_name = await _llm_extract_onboarding_field(mc_runtime, "zone", normalized_query)
+            if zone_name:
+                logger.debug("[Onboarding] Zone extraite via LLM: %s", zone_name)
+
+        if zone_name:
+            normalized_zone = str(zone_name).strip()
+            if (
+                previous_zone_name
+                and normalized_zone
+                and normalized_zone.lower() != previous_zone_name.lower()
+                and payload.pop("zone_id", None) is not None
+            ):
+                logger.debug(
+                    "[Onboarding] Zone modifiée (%s → %s), remise à zéro du zone_id",
+                    previous_zone_name,
+                    normalized_zone,
+                )
+            payload["zone_name"] = normalized_zone
+            _sync_payload()
+
+        zone_id = payload.get("zone_id") or extracted.get("zone_id")
+        if zone_id:
+            payload["zone_id"] = str(zone_id).strip()
+            _sync_payload()
+
+        # Validation de la zone auprès de la base de données
+        if payload.get("zone_name") and not payload.get("zone_id"):
+            try:
+                res_zone = await mc_runtime.call_db("get_zone_by_name", name=payload["zone_name"])
+                zone_data = ensure_dict(res_zone)
+            except Exception as zone_err:
+                logger.error("[Onboarding] Échec de la recherche de zone: %s", zone_err)
+                zone_data = {"status": "ERROR", "message": str(zone_err)}
+                
+            if str(zone_data.get("status", "")).upper() == "SUCCESS":
+                zone_payload = zone_data.get("data") or {}
+                if zone_payload.get("id"):
+                    payload["zone_id"] = str(zone_payload["id"])
+                if zone_payload.get("name"):
+                    payload["zone_name"] = zone_payload["name"]
+                _sync_payload()
+            else:
+                prompt = (
+                    f"Je n'ai pas trouvé la zone '{payload['zone_name']}'. "
+                    "Merci d'indiquer une ville ou province valide (ex : Ouagadougou, Bobo Dioulasso, Banfora). "
+                    "Si vous hésitez, donnez la ville la plus proche ou contactez le support au +22601479800 pour ajouter votre zone."
+                )
+                updates.update({
+                    "onboarding_prompt": prompt,
+                    "status": "WAITING_INPUT",
+                    "onboarding_step": "COLLECT_ZONE",
+                })
+                _sync_payload()
+                return updates
+
+        # 🛡️ VALIDATION FINALE & CRÉATION DU PROFIL
+        if payload.get("zone_name") and payload.get("zone_id") and payload.get("name") and payload.get("phone"):
+            create_payload = {
+                "phone": payload["phone"],
+                "name": payload["name"],
+                "role": payload.get("role") or state.get("user_role") or "PRODUCER",
+                "zone_id": payload["zone_id"],
+            }
+
+            try:
+                result = await mc_runtime.call_db("create_user_profile", data=create_payload)
+                res_dict = ensure_dict(result)
+                
+                if str(res_dict.get("status", "")).upper() == "SUCCESS":
+                    prompt = "Merci ! Votre profil est créé. Que souhaitez-vous faire maintenant ?"
+                    updates.update({
+                        "is_onboarding": False,
+                        "onboarding_step": None,
+                        "transaction_payload": {},
+                        "status": "PLANNING",
+                        "user_phone": create_payload["phone"],
+                    })
+
+                    # Tentative de rechargement du profil complet en mémoire
+                    try:
+                        profile_raw = await mc_runtime.call_db("get_user_by_phone", phone=create_payload["phone"])
+                        profile_dict = ensure_dict(profile_raw)
+                        if str(profile_dict.get("status", "")).upper() == "SUCCESS":
+                            profile = profile_dict.get("data") or {}
+                            zone_meta = profile.get("zone") or {}
+                            updates.update({
+                                "user_context_loaded": True,
+                                "user_name": profile.get("name") or create_payload["name"],
+                                "user_role": profile.get("role") or create_payload["role"],
+                                "user_id": str(profile.get("id")) if profile.get("id") else None,
+                                "zone_name": zone_meta.get("name"),
+                                "zone_id": zone_meta.get("id"),
+                            })
+                    except Exception as profile_err:  # pragma: no cover - log only
+                        logger.warning("[Onboarding] Impossible de rafraîchir le profil: %s", profile_err)
+                else:
+                    prompt = "Impossible de créer votre profil pour le moment. Pouvez-vous confirmer votre zone ?"
+                    updates["status"] = "ERROR"
+                    updates["onboarding_step"] = "COLLECT_ZONE"
+                    _sync_payload()
+                    
+            except Exception as exc:  # pragma: no cover - log only
+                logger.error("[Onboarding] create_user_profile a échoué: %s", exc)
+                prompt = "Une erreur technique est survenue. Merci de préciser à nouveau votre zone pour réessayer."
+                updates["status"] = "ERROR"
+                updates["onboarding_step"] = "COLLECT_ZONE"
+                _sync_payload()
+        else:
+            prompt = "Dans quelle zone (ville ou province) opérez-vous ?"
+            
+    # ==========================================
+    # FALLBACK
+    # ==========================================
+    else:
+        step = "COLLECT_NAME"
+        updates["onboarding_step"] = step
+        prompt = "Bienvenue sur AgriConnect ! Quel est votre nom complet ?"
+
+    # Assignation finale des champs
+    if "onboarding_prompt" not in updates:
+        updates["onboarding_prompt"] = prompt or "Merci de partager ces informations."
+    if "transaction_payload" not in updates:
+        updates["transaction_payload"] = dict(payload)
+        
+    return updates
 
 
 # =====================================================================
@@ -1858,6 +2185,7 @@ __all__ = [
     "cognitive_guard",
     "semantic_disambiguation",
     "clarification_node",
+    "onboarding_node",
     "memory_update",
     "validator",
     "confirmation_gate",

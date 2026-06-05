@@ -169,6 +169,18 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
     # This node is the single source of truth for the final text + AG-UI.
 
     # -----------------------------------------------------------------
+    # STRATÉGIE 0 : ONBOARDING — prompts déterministes
+    # -----------------------------------------------------------------
+    if strategy == "ONBOARDING":
+        prompt = state.get("onboarding_prompt") or (
+            f"{salutation}Bienvenue sur AgriConnect ! Quel est votre nom complet ?"
+        )
+        return {
+            "final_response": prompt,
+            "ag_ui_component": state.get("ag_ui_component"),
+        }
+
+    # -----------------------------------------------------------------
     # STRATÉGIE 1 : ASK_MISSING_FIELD — Question LLM + FormInputComponent
     # -----------------------------------------------------------------
     if strategy == "ASK_MISSING_FIELD":

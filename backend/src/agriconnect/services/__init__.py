@@ -22,7 +22,7 @@ def __getattr__(name: str) -> Any:
 
     return AgriDatabase
   if name == "AgriDatabaseService":
-    from .database.database_service import AgriDatabaseService
+    from .database import AgriDatabaseService
 
     return AgriDatabaseService
   if name == "get_groq_client":

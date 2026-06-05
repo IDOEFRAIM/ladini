@@ -5,8 +5,8 @@ from twilio.rest import Client
 def send_whatsapp_template(to_number: str, content_sid: str, variables: dict):
     # Remplace CES VALEURS par tes vraies clés, sans utiliser os.getenv pour le moment
     # Assure-toi qu'il n'y a PAS d'espaces avant ou après
-    sid = "ACcd7d65c7687f8672af5c6ed59ebc4f3a"
-    token = "4b95d9e3aa5830f96e149590a2ed86a7"
+    sid = "d"
+    token = "d"
     
     # Debug : vérification simple
     print(f"DEBUG: SID est bien ACcd7d65...")

@@ -14,7 +14,7 @@ Fournit aux agents les capacités d'intelligence :
 import logging
 from typing import Any, Dict, List, Optional
 
-from agriconnect.services.database.database_service import AgriDatabaseService
+from agriconnect.services.database import AgriDatabaseService
 
 logger = logging.getLogger("Tool.Intelligence")
 

@@ -27,6 +27,12 @@ async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
     missing_fields = state.get("missing_fields") or []
     last_missing_field = state.get("last_missing_field")
     existing_strategy = str(state.get("response_strategy") or "").upper().strip()
+    if existing_strategy == "ONBOARDING" or state.get("is_onboarding"):
+        return {
+            "response_strategy": "ONBOARDING",
+            "status": "WAITING_INPUT" if state.get("is_onboarding") else status or "WAITING_INPUT",
+            "ag_ui_component": state.get("ag_ui_component"),
+        }
     cognitive = state.get("cognitive_decision") or {}
     cognitive_action = cognitive.get("action", "")
 

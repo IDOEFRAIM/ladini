@@ -22,7 +22,7 @@ from typing import Any
 
 from agriconnect.core.database import close_db, get_sessionmaker
 from agriconnect.core.settings import settings
-from agriconnect.services.database.database_service import AgriDatabaseService
+from agriconnect.services.database import AgriDatabaseService
 
 logger = logging.getLogger(__name__)
 

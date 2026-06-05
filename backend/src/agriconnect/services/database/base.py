@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
+import uuid
 
 from sqlalchemy.orm import joinedload
 from typing import Any, Dict, Tuple
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from agriconnect.domain.models import User, Producer, BuyerProfile, DeliveryAgent, Farm
+from agriconnect.domain.models import User, Producer, BuyerProfile, DeliveryAgent, Farm,Zone
 from .common import normalize_phone
 
 logger = logging.getLogger("AgriConnect.BaseMixin")
@@ -32,6 +33,55 @@ class BaseMixin:
     # ==================================================================
     # 1. COEUR INFRASTRUCTURE (Objets SQLAlchemy Bruts & Sérialisation)
     # ==================================================================
+    async def create_user_profile(self, data: Dict[str, Any]) -> str:
+            """
+            CRÉATION POLYMORPHE ATOMIQUE :
+            Persiste un User et son profil lié en une seule transaction asynchrone.
+            Respecte la signature et les patterns de performance des fonctions de lecture.
+            """
+            current_session = self.session
+            if current_session is None:
+                logger.error("Erreur d'infrastructure : Aucune session active pour la création.")
+                raise RuntimeError("Database session is missing or uninitialized.")
+
+            try:
+                # Transaction asynchrone atomique pour garantir l'intégrité des relations
+                async with current_session.begin_nested():
+                    # 1. Création de l'entité User (Racine)
+                    new_user = User(
+                        phone=normalize_phone(data["phone"]),
+                        name=data.get("name", "Producteur"),
+                        role=data.get("role", "PRODUCER"),
+                        zone_id=data.get("zone_id"),
+                        onboarding_completed=True
+                    )
+                    current_session.add(new_user)
+                    await current_session.flush() # Récupération de l'ID généré
+
+                    # 2. Création du profil métier (Polymorphisme)
+                    role = data.get("role", "PRODUCER")
+                    if role == "PRODUCER":
+                        profile = Producer(user_id=new_user.id, status="ACTIVE")
+                    elif role == "BUYER":
+                        profile = BuyerProfile(user_id=new_user.id)
+                    elif role == "DELIVERY":
+                        profile = DeliveryAgent(user_id=new_user.id)
+                    else:
+                        profile = None
+                    
+                    if profile:
+                        current_session.add(profile)
+                    
+                    # Commit explicite de la transaction
+                    await current_session.commit()
+                    return str(new_user.id)
+
+            except Exception as exc:
+                # Rollback automatique en cas d'erreur pour éviter les données orphelines
+                await current_session.rollback()
+                logger.error(f"Erreur critique lors de la création de profil pour {data.get('phone')}: {exc}", exc_info=True)
+                raise RuntimeError(f"Échec de création utilisateur : {str(exc)}") from exc
+        
 
     async def _fetch_user_entities(
         self, phone: str
@@ -57,6 +107,7 @@ class BaseMixin:
                 .outerjoin(Producer, Producer.user_id == User.id)
                 .outerjoin(BuyerProfile, BuyerProfile.user_id == User.id)
                 .outerjoin(DeliveryAgent, DeliveryAgent.user_id == User.id)
+                .outerjoin(Zone, Zone.id == User.zone_id)
                 .where(User.phone == clean_phone)
             )
             
@@ -76,7 +127,7 @@ class BaseMixin:
         en un dictionnaire plat standardisé et blindé pour l'Agent IA.
         Évite les allers-retours redondants avec la base de données.
         """
-        user_obj, producer_obj, buyer_obj, delivery_obj = row
+        user_obj, producer_obj, buyer_obj, delivery_obj,zone_obj = row
         
         # Protection Robustesse : Génération d'un nom de secours en cas de champ vide
         phone_str = user_obj.phone or ""
@@ -87,7 +138,10 @@ class BaseMixin:
             "name": name_fallback,
             "phone": phone_str,
             "role": user_obj.role or "USER",
-            "zone_id": str(user_obj.zone_id) if user_obj.zone_id else None,
+            "zone": { # Retourner un objet zone est plus pratique pour l'agent
+            "id": str(zone_obj.id) if zone_obj else None,
+            "name": zone_obj.name if zone_obj else "Zone inconnue"
+            },
             "longitude": user_obj.longitude,
             "latitude": user_obj.latitude,
             "profile_ids": {
@@ -118,12 +172,16 @@ class BaseMixin:
         Résout l'identité complète à partir d'un téléphone et retourne le dictionnaire standardisé.
         Garantit qu'aucun bug de mapping interne n'est masqué silencieusement.
         """
+        clean_phone = normalize_phone(phone)
         try:
-            row = await self._fetch_user_entities(phone=phone)
+            row = await self._fetch_user_entities(phone=clean_phone)
             if not row:
-                return None
+                return {
+                    "status": "NEW_USER",
+                    "phone": clean_phone,
+                }
             
-            return self._serialize_user_entities(row)
+            return {"status": "SUCCESS", "data": self._serialize_user_entities(row)}
 
         except (AttributeError, TypeError, KeyError) as bug:
             logger.critical("Bug de logique interne détecté lors du mapping utilisateur pour %s: %s", phone, bug, exc_info=True)
@@ -279,3 +337,29 @@ class BaseMixin:
         except Exception as e:
             logger.error(f"❌ Erreur critique dans get_producer_farm : {str(e)}", exc_info=True)
             raise e
+
+    async def get_zone_by_name(self, name: str) -> Dict[str, Any]:
+            """
+            Résout le nom d'une zone (ex: 'Berrechid') en UUID via la base de données.
+            """
+            current_session = self.session
+            if not current_session:
+                raise RuntimeError("Database session missing.")
+
+            try:
+                # Recherche insensible à la casse avec 'ilike'
+                stmt = select(Zone).where(Zone.name.ilike(name))
+                result = await current_session.execute(stmt)
+                zone_obj = result.scalar_one_or_none()
+                
+                if zone_obj:
+                    return {
+                        "status": "SUCCESS",
+                        "data": {"id": str(zone_obj.id), "name": zone_obj.name}
+                    }
+                
+                return {"status": "NOT_FOUND", "message": f"Zone '{name}' introuvable."}
+                
+            except Exception as e:
+                logger.error(f"[BaseMixin] Erreur lors de la résolution de zone '{name}': {e}")
+                return {"status": "ERROR", "message": str(e)}

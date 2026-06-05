@@ -25,7 +25,7 @@ from agriconnect.services.database.producer import ProducerMgmtMixin
 from agriconnect.services.database.product import ProductMixin
 from agriconnect.services.database.auction import AuctionMixin
 
-from agriconnect.domain.models import Farm, Stock, StockMovement
+
 
 # Déclaration du conteneur de contexte pour isoler la session par tâche asynchrone (Coroutining/Greenlets)
 db_session_ctx: ContextVar[Optional[AsyncSession]] = ContextVar("db_session_ctx", default=None)
@@ -217,7 +217,7 @@ async def run_full_integration_test():
     }
 
     try:
-        user = await db_service.get_user_by_phone(TARGET_PRODUCER_PHONE)        
+        user = await db_service._fetch_user_entities(TARGET_PRODUCER_PHONE)        
         print('user',user)
     except Exception as e:
         logger.error(f"Erreur critique lors de l'exécution des tests : {e}")

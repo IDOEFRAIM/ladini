@@ -244,7 +244,7 @@ def check_weather_alerts(self) -> Dict[str, Any]:
 def purge_staging_transactions(self) -> Dict[str, Any]:
     """Tâche périodique : purge les transactions préparées expirées de la table staging."""
     try:
-        from agriconnect.services.database.database_service import AgriDatabaseService
+        from agriconnect.services.database import AgriDatabaseService
         svc = AgriDatabaseService()
         deleted = 0
         try:

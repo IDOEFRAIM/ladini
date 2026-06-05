@@ -53,6 +53,7 @@ UserEvent = Literal[
     "RESUME",
     "OUT_OF_SCOPE",
     "UNKNOWN",
+    "ONBOARDING_INPUT",
 ]
 
 
@@ -99,6 +100,10 @@ class MarketAgentState(TypedDict, total=False):
     user_context_loaded: Annotated[bool, replace_value]
 
     user_id: Annotated[Optional[str], replace_value]
+
+    is_onboarding: Annotated[bool, replace_value]
+
+    onboarding_step: Annotated[Optional[str], replace_value]
 
     turn_count: Annotated[int, replace_value]
 
@@ -403,11 +408,14 @@ class MarketAgentState(TypedDict, total=False):
                 "ERROR",
                 "RECOVERY",
                 "CLARIFICATION",
-                "INTERRUPTION_HANDLER"
+                "INTERRUPTION_HANDLER",
+                "ONBOARDING",
             ]
         ],
         replace_value
     ]
+
+    onboarding_prompt: Annotated[Optional[str], replace_value]
 
     # ================================================================
     # 13. SYSTEM FLAGS

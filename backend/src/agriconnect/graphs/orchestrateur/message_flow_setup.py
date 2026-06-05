@@ -19,7 +19,7 @@ from backend._legacy.sentinelle.graph import ClimateSentinel
 from agriconnect.graphs.agents.formation.graph import FormationCoach
 from agriconnect.graphs.agents.market_coach.graph import MarketCoach
 from agriconnect.graphs.agents.marketplace_v3.graph import MarketplaceAgentV3
-from agriconnect.services.database.database_service import AgriDatabaseService
+from agriconnect.services.database import AgriDatabaseService
 # ParallelExecutor removed — fan-out now handled by LangGraph Send
 
 logger = logging.getLogger(__name__)

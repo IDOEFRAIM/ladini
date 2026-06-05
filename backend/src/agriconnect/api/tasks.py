@@ -10,8 +10,8 @@ from agriconnect.api.dependencies import get_checkpointer, get_mc_runtime
 logger = logging.getLogger("AgriConnect.Worker")
 
 # Correction : chargement sécurisé (avec fallback au cas où l'env est vide)
-TWILIO_ACCOUNT_SID = "ACcd7d65c7687f8672af5c6ed59ebc4f3a"
-TWILIO_AUTH_TOKEN =  "4b95d9e3aa5830f96e149590a2ed86a7"
+TWILIO_ACCOUNT_SID = "a"
+TWILIO_AUTH_TOKEN =  "a"
 TWILIO_WHATSAPP_NUMBER = "whatsapp:+14155238886"
 
 async def _run_graph(role: str, phone_number: str, user_query: str, state_updates: dict = None):

@@ -21,14 +21,16 @@ l'intention LLM est ambiguë ET qu'un déclencheur lexical matche.
 from __future__ import annotations
 
 import logging
+import sqlite3
 from functools import partial
 from typing import Any, Optional
 
 from langgraph.graph import END, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.checkpoint.redis import AsyncRedisSaver
 import redis.asyncio as redis
-
 
 from agriconnect.graphs.agents.market_coach.state import MarketAgentState
 from agriconnect.graphs.agents.market_coach.utils import (
@@ -59,11 +61,14 @@ from .shared_core import (
     input_normalizer,
     mcp_tool_executor,
     memory_update,
+    onboarding_node,
     response_strategy,
     security_moderation,
     semantic_disambiguation,
     validator,
 )
+
+logger = logging.getLogger("AgriConnect.Market.GraphBuilder")
 
 
 def _route_after_clarification(state: MarketAgentState) -> str:
@@ -95,7 +100,12 @@ def _route_after_disambiguation(state: MarketAgentState) -> str:
         return "to_strategy"
     return "to_planner"
 
-logger = logging.getLogger("AgriConnect.Market.GraphBuilder")
+
+def _route_after_cognitive(state: MarketAgentState) -> str:
+    """Route prioritaire vers le nœud d'onboarding lorsque nécessaire."""
+    if state.get("is_onboarding"):
+        return "to_onboarding"
+    return "to_clarification"
 
 
 def build_graph(
@@ -110,7 +120,7 @@ def build_graph(
     Args:
         role: "PRODUCER" (par défaut) ou "BUYER".
         mc_runtime: instance MarketRuntime déjà construite. Prioritaire si fourni.
-        checkpointer: checkpointer LangGraph (memory / db).
+        checkpointer: checkpointer LangGraph (de préférence AsyncSqliteSaver en prod).
         llm_client: client LLM (Groq, OpenAI...) si mc_runtime n'est pas fourni.
         mcp_session: session MCP partagée fournie par l'orchestrateur.
 
@@ -128,12 +138,18 @@ def build_graph(
         else:
             mc_runtime = build_runtime(llm_client=llm_client)
 
-    # If caller doesn't provide a checkpointer, default to an in-memory
-    # implementation so multi-turn WhatsApp/AG-UI flows keep their tunnel state
-    # (working_memory/current_goal/expected_input/available_mapping) per thread_id.
+    # ---------------------------------------------------------
+    # GESTION DE LA MÉMOIRE (CHECKPOINTER)
+    # ---------------------------------------------------------
     if checkpointer is None:
-        redis_client = redis.from_url("redis-19909.crce310.us-east-1-6.ec2.cloud.redislabs.com:19909")
-        checkpointer = AsyncRedisSaver(redis_client)
+        # Fallback de secours : si aucun checkpointer n'est fourni, on utilise 
+        # la version synchrone de SqliteSaver pour ne pas bloquer les tests locaux.
+        # En production, Celery DOIT injecter son AsyncSqliteSaver.
+        logger.info("Aucun checkpointer fourni. Initialisation d'un SqliteSaver (synchrone) de fallback.")
+        db_connection = sqlite3.connect("agriconnect_memory.db", check_same_thread=False)
+        checkpointer = SqliteSaver(db_connection)
+    else:
+        logger.info("Checkpointer injecté avec succès : %s", type(checkpointer).__name__)
 
     # Nœuds et routes spécialisés AG-UI
     input_interpreter = make_input_interpreter(role_up)
@@ -161,6 +177,7 @@ def build_graph(
         ("mcp_tool_executor", mcp_tool_executor),
         ("response_strategy", response_strategy),
         ("final_response", final_response),
+        ("onboarding_node", onboarding_node),
     ]
     for name, fn in node_specs:
         workflow.add_node(name, partial(_safe_node(fn, name), mc_runtime=mc_runtime))
@@ -178,19 +195,19 @@ def build_graph(
 
     workflow.add_edge("input_interpreter", "cognitive_guard")
     workflow.add_edge("cognitive_guard", "cognitive_orchestrator")
-    workflow.add_edge("cognitive_orchestrator", "clarification_node")
+    
+    workflow.add_conditional_edges(
+        "cognitive_orchestrator",
+        _route_after_cognitive,
+        {"to_onboarding": "onboarding_node", "to_clarification": "clarification_node"},
+    )
 
-    # clarification_node: pass-through silencieux sauf OUT_OF_SCOPE/UNKNOWN.
-    # Si elle a généré une réponse ou si cognitive_guard a décidé RECOVERY,
-    # on court-circuite vers response_strategy.
     workflow.add_conditional_edges(
         "clarification_node",
         _route_after_clarification,
         {"to_disambiguation": "semantic_disambiguation", "to_strategy": "response_strategy"},
     )
 
-    # semantic_disambiguation: pass-through silencieux → goal_planner, ou
-    # court-circuit vers response_strategy si menu d'ambiguïté affiché.
     workflow.add_conditional_edges(
         "semantic_disambiguation",
         _route_after_disambiguation,
@@ -235,6 +252,7 @@ def build_graph(
 
     workflow.add_edge("response_strategy", "final_response")
     workflow.add_edge("final_response", END)
+    workflow.add_edge("onboarding_node", "response_strategy")
 
     logger.info("Market graph compiled successfully for role=%s", role_up)
     return workflow.compile(checkpointer=checkpointer)
