@@ -3,9 +3,6 @@
 Principaux blocs encore supportés :
   - ``db_handler``          : accès PostgreSQL synchrone (hérité).
   - ``database``            : AgriDatabaseService v3 (async/multi-schema).
-  - ``voice_engine``        : synthèse et transcription vocale Azure.
-  - ``llm_clients``         : clients Groq et wrappers SDK.
-  - ``memory``              : profil utilisateur, mémoire épisodique, optimiseur de contexte.
   - ``data_collection`` / ``scraper`` : collecte météo + orchestrateur de scrapers.
   - ``persistence`` / ``rag_service`` : couches utilitaires utilisées par les agents.
 """
