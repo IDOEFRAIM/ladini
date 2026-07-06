@@ -10,6 +10,8 @@ Usage:
 import os
 from pathlib import Path
 from typing import ClassVar
+
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -62,6 +64,9 @@ class Settings(BaseSettings):
     # - require: TLS without certificate verification (dev fallback)
     # - disable: no TLS (local-only)
     DB_SSL_MODE: str = "require"
+    DB_POOL_SIZE: int = 20
+    DB_POOL_MAX_OVERFLOW: int = 20
+    DB_POOL_TIMEOUT: float = 60.0
     # --- Redis / Celery ---
     REDIS_URL: str = "a"
     VALKEY_ENDPOINT: str = ""
@@ -87,6 +92,22 @@ class Settings(BaseSettings):
     MCP_DB_STARTUP_RETRY_DELAY_SEC: float = 1.5
     MCP_DB_SERVER_HOST: str = "localhost"
     MCP_DB_SERVER_PORT: int = 8003
+    MCP_DB_TRANSPORT: str = "stdio"
+    MCP_DB_STDIO_ENTRYPOINT: str = str((Path(__file__).resolve().parent.parent.parent) / "agriconnect" / "protocols" / "mcp" / "servers" / "db_server.py")
+    MCP_DB_STDIO_CWD: str = str(Path(__file__).resolve().parent.parent.parent.parent)
+    MCP_DB_STDIO_PYTHON: str = ""
+    MCP_DB_STDIO_ENV: dict[str, str] = Field(
+        default_factory=lambda: {
+            "PYTHONPATH": str(Path(__file__).resolve().parent.parent.parent)
+        }
+    )
+    MCP_DB_HTTP_URL: str = ""
+    MCP_DB_HTTP_HEADERS: dict[str, str] = Field(default_factory=dict)
+    MCP_DB_GRPC_TARGET: str = ""
+    MCP_DB_GRPC_TLS: bool = False
+    MCP_DB_GRPC_METADATA: dict[str, str] = Field(default_factory=dict)
+    MCP_DB_GRPC_LIST_TOOLS_METHOD: str = "/agriconnect.mcp.MCP/ListTools"
+    MCP_DB_GRPC_CALL_TOOL_METHOD: str = "/agriconnect.mcp.MCP/CallTool"
 
     @property
     def celery_broker(self) -> str:

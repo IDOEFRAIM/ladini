@@ -16,7 +16,7 @@ import os
 # from .models import Alert, Zone, WeatherData
 
 from agriconnect.services.google.openmeteo import OpenMeteoService
-from agriconnect.tools.sentinelle import SentinelleTool
+from futur.tools.sentinelle import SentinelleTool
 
 logger = logging.getLogger("WatcherAgent")
 

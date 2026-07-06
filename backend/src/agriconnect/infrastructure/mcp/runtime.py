@@ -13,15 +13,21 @@ MCP:
 """
 
 import asyncio
-import concurrent.futures
 import json
 import logging
 import os
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
+try:
+    import asyncpg  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    asyncpg = None
+
 from agriconnect.core.database import close_db, get_sessionmaker
 from agriconnect.core.settings import settings
+from agriconnect.infrastructure.mcp.utils import run_coro_blocking
 from agriconnect.services.database import AgriDatabaseService
 
 logger = logging.getLogger(__name__)
@@ -80,10 +86,12 @@ class MCPRuntime:
         self.db: AgriDatabaseService | None = None
         self.is_ready: bool = False
         self.last_start_error: str = ""
+        self._service_lock = asyncio.Lock()
 
-    def _ensure_db_service(self) -> None:
-        if self.db is None:
-            self.db = AgriDatabaseService()
+    async def _ensure_db_service(self) -> None:
+        async with self._service_lock:
+            if self.db is None:
+                self.db = AgriDatabaseService()
 
     def _refresh_ready_state(self) -> None:
         try:
@@ -93,21 +101,6 @@ class MCPRuntime:
         except Exception as exc:
             self.is_ready = False
             self.last_start_error = str(exc)
-
-    @staticmethod
-    def _run_async_blocking(coro):
-        """Run coroutine from sync code, even if an event loop already exists."""
-        try:
-            asyncio.get_running_loop()
-            in_running_loop = True
-        except RuntimeError:
-            in_running_loop = False
-
-        if not in_running_loop:
-            return asyncio.run(coro)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result(timeout=20)
 
     def _build_failure_hint(self, raw_reason: str) -> str:
         reason = raw_reason or "unknown"
@@ -124,7 +117,7 @@ class MCPRuntime:
     async def lifespan(self):
         """Context manager for server startup/shutdown."""
         logger.info("MCP runtime startup: ensuring DB service")
-        self._ensure_db_service()
+        await self._ensure_db_service()
         self._refresh_ready_state()
         try:
             yield self
@@ -152,7 +145,7 @@ class MCPRuntime:
         """
         require = (not settings.MCP_ALLOW_DEGRADED_START) if require_connection is None else require_connection
 
-        self._ensure_db_service()
+        run_coro_blocking(self._ensure_db_service())
         self._refresh_ready_state()
         if self.is_ready:
             logger.info("MCP runtime ready (sessionmaker available)")
@@ -172,13 +165,13 @@ class MCPRuntime:
         if (os.getenv("MCP_CLOSE_DB_ON_STOP", "0") or "0").strip() not in {"1", "true", "True"}:
             return
         try:
-            self._run_async_blocking(close_db())
+            run_coro_blocking(close_db())
         except Exception:
             logger.exception("Synchronous runtime stop failed")
 
     async def ensure_initialized(self) -> None:
         """Ensure service exists and sessionmaker can be resolved."""
-        self._ensure_db_service()
+        await self._ensure_db_service()
         self._refresh_ready_state()
         if not self.is_ready:
             raise RuntimeError(self._build_failure_hint(self.last_start_error))
@@ -223,7 +216,7 @@ class AgriDBMCPServer:
         Inclut le nom, la description et le JSON Schema des arguments.
         """
         # Imports locaux pour éviter les cycles au démarrage
-        from agriconnect.protocols.mcp.h import TOOL_DESCRIPTIONS, TOOL_SCHEMAS
+        from agriconnect.protocols.mcp.servers.h import TOOL_DESCRIPTIONS, TOOL_SCHEMAS
 
         tools = []
         for name, description in TOOL_DESCRIPTIONS.items():
@@ -248,106 +241,91 @@ class AgriDBMCPServer:
         Point d'entrée principal pour l'exécution des outils dans le Backend.
         Gère la fusion des arguments, la sécurité (Preflight/Permissions) et l'audit.
         """
-        # 1. FUSION ET NETTOYAGE DES ARGUMENTS
-        # On combine le dictionnaire MCP ('arguments') et les éventuels kwargs
-        full_args = {**(arguments or {}), **kwargs}
-        
-        # CRITIQUE : On retire 'name' pour éviter l'erreur "multiple values for argument 'name'"
-        # car 'name' est déjà passé en premier paramètre positionnel.
         tool_identity = name
+        full_args = {**(arguments or {}), **kwargs}
 
         logger.info("Backend call_tool: tool=%s, args=%s", tool_identity, full_args)
-        # 2. RÉSOLUTION DU HANDLER
-        # Récupère la fonction métier (ex: get_user_profile) définie dans handlers.py
-        fn = self._resolve_tool_fn(tool_identity)
 
-        # Imports locaux pour la couche de sécurité
+        from agriconnect.infrastructure.mcp.context import FarmerContext, get_mcp_context, mcp_context_scope
         from agriconnect.infrastructure.mcp.security import (
             HostBlockedError,
-            MCPPermissionClient,
             MCPPermissionHostApp,
             PermissionDenied,
             TOOL_SCOPE_MAP,
+            get_execution_policy,
         )
 
-        # 3. VÉRIFICATION DU SCOPE (Fail-Closed)
-        if tool_identity not in TOOL_SCOPE_MAP:
-            reason = f"L'outil '{tool_identity}' n'est pas autorisé (absent de TOOL_SCOPE_MAP)."
-            logger.error("DENY | tool=%s | reason=not_in_scope", tool_identity)
-            await self._persist_audit(tool_identity, full_args, "DENY", reason)
-            raise PermissionDenied(tool_identity, reason)
+        def _derive_context_identity(payload: dict[str, Any]) -> FarmerContext | None:
+            def _pick(*keys: str) -> str:
+                for key in keys:
+                    value = payload.get(key)
+                    if value not in (None, "", [], {}):
+                        return str(value).strip()
+                return ""
 
-        try:
-            # 4. SÉCURITÉ HÔTE (Preflight Scan)
-            host = MCPPermissionHostApp(client=None)
-            preflight = host._preflight_scan(tool_identity, full_args)
-            
-            # Vérification robuste de l'autorisation du scan
-            if hasattr(preflight, "allowed") and not preflight.allowed:
-                reason = getattr(preflight, "reason", "Scan de sécurité échoué")
+            user_id = _pick("user_id", "producer_id", "buyer_id", "farmer_id")
+            phone = _pick("phone", "user_phone", "phone_number")
+            session_id = _pick("session_id", "request_id")
+            if not user_id and not phone:
+                return None
+            return FarmerContext(
+                user_id=user_id or phone,
+                phone_number=phone or "unknown",
+                session_id=session_id or str(uuid.uuid4()),
+            )
+
+        context_identity = get_mcp_context()
+        if context_identity is None:
+            context_identity = _derive_context_identity(full_args)
+        if context_identity is None:
+            raise PermissionDenied(tool_identity, "missing_context_identity")
+
+        with mcp_context_scope(context_identity):
+            if tool_identity not in TOOL_SCOPE_MAP:
+                reason = f"L'outil '{tool_identity}' n'est pas autorisé (absent de TOOL_SCOPE_MAP)."
+                logger.error("DENY | tool=%s | reason=not_in_scope", tool_identity)
                 await self._persist_audit(tool_identity, full_args, "DENY", reason)
-                raise HostBlockedError(
-                    tool_name=tool_identity,
-                    agent_message=reason,
-                    suggestion=host._suggest_fix(tool_identity, reason),
-                )
+                raise PermissionDenied(tool_identity, reason)
 
-            # 5. VÉRIFICATION DES PERMISSIONS CLIENT
-            tmp_client = MCPPermissionClient(backend=self, session_id="mcp_server_proxy")
-            decision = tmp_client._check_permission(tool_identity, full_args)
-            
-            if not decision.allowed:
-                await self._persist_audit(tool_identity, full_args, "DENY", decision.reason)
-                raise PermissionDenied(tool_identity, decision.reason)
+            policy = get_execution_policy()
+            sanitized_args = policy.sanitize_arguments(full_args)
 
-        except (HostBlockedError, PermissionDenied):
-            # On laisse remonter ces erreurs spécifiques pour le traitement par le serveur MCP
-            raise
-        except Exception as exc:
-            reason = f"Erreur fatale lors du contrôle de sécurité : {exc}"
-            logger.exception("SECURITY_EXCEPTION | tool=%s", tool_identity)
-            await self._persist_audit(tool_identity, full_args, "DENY", reason)
-            raise PermissionDenied(tool_identity, reason)
+            try:
+                host = MCPPermissionHostApp(client=None)
+                preflight = host._preflight_scan(tool_identity, sanitized_args)
+                if hasattr(preflight, "allowed") and not preflight.allowed:
+                    reason = getattr(preflight, "reason", "Scan de sécurité échoué")
+                    await self._persist_audit(tool_identity, sanitized_args, "DENY", reason)
+                    raise HostBlockedError(
+                        tool_name=tool_identity,
+                        agent_message=reason,
+                        suggestion=host._suggest_fix(tool_identity, reason),
+                    )
+            except (HostBlockedError, PermissionDenied):
+                raise
+            except Exception as exc:
+                reason = f"Erreur fatale lors du contrôle de sécurité : {exc}"
+                logger.exception("SECURITY_EXCEPTION | tool=%s", tool_identity)
+                await self._persist_audit(tool_identity, sanitized_args, "DENY", reason)
+                raise PermissionDenied(tool_identity, reason)
 
-        # 6. EXÉCUTION MÉTIER
-        try:
-            # On injecte les arguments nettoyés dans la fonction cible via **
-            # Grâce au @wraps(fn) dans handlers.py, la signature est préservée.
-            raw = await fn(**full_args)
-            
-            # 7. NORMALISATION ET AUDIT FINAL
-            result = self._normalize_output(raw)
-            await self._persist_audit(tool_identity, full_args, "ALLOW", None)
-            return result
-
-        except TypeError as te:
-            # Capture les erreurs de paramètres (ex: paramètre manquant ou inconnu)
-            logger.error("SIGNATURE_MISMATCH | tool=%s | %s", tool_identity, te)
-            raise ValueError(f"Arguments invalides pour l'outil '{tool_identity}' : {te}")
-        except Exception as e:
-            # Erreurs internes au handler (Base de données, etc.)
-            logger.exception("EXECUTION_ERROR | tool=%s", tool_identity)
-            raise RuntimeError(f"Erreur lors de l'exécution de l'outil '{tool_identity}' : {e}")
+            fn = self._resolve_tool_fn(tool_identity)
+            envelope = await policy.execute(
+                tool_identity,
+                fn,
+                sanitized_args,
+                user_id=context_identity.user_id,
+                request_id=str(uuid.uuid4()),
+            )
+            await self._persist_audit(tool_identity, sanitized_args, "ALLOW", None)
+            return envelope.get("data", envelope)
 
     def call_tool_sync(self, name: str, arguments: dict , timeout: float = 10.0) -> dict:
-        new_loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(new_loop)
-            result = new_loop.run_until_complete(self.call_tool(name, arguments or {}))
-        finally:
-            try:
-                new_loop.run_until_complete(new_loop.shutdown_asyncgens())
-            except Exception:
-                pass
-            new_loop.close()
-            try:
-                asyncio.set_event_loop(None)
-            except Exception:
-                pass
+        result = run_coro_blocking(self.call_tool(name, arguments or {}))
         return {"ok": True, "data": result}
 
     def _resolve_tool_fn(self, name: str):
-        from agriconnect.protocols.mcp.h import TOOL_HANDLERS
+        from agriconnect.protocols.mcp.servers.h import TOOL_HANDLERS
 
         fn = TOOL_HANDLERS.get(name)
         if fn is None or not callable(fn):
@@ -387,21 +365,7 @@ class AgriDBMCPServer:
             }
             logger.info("AUDIT|%s", json.dumps(entry, ensure_ascii=False))
             if runtime.is_ready and runtime.db is not None and hasattr(runtime.db, "log_conversation"):
-                try:
-                    import uuid
-
-                    system_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, "agriconnect.system"))
-                except Exception:
-                    import uuid as _uuid
-
-                    system_uuid = str(_uuid.uuid4())
-
-                await runtime.db.log_conversation(
-                    system_uuid,
-                    json.dumps({"tool": tool_name, "args_hash": args_hash}),
-                    json.dumps(entry),
-                    agent_type="mcp_shield_audit",
-                )
+                await _log_audit_entry(tool_name, args_hash, entry)
         except Exception:
             logger.debug("Audit persistence failed (non-blocking)", exc_info=True)
 
@@ -425,66 +389,40 @@ def _load_backend_env() -> None:
     except Exception:
         pass
 
-async def _main() -> None:
-    """
-    Point d'entrée de test pour AgriDBMCPServer.
-    Vérifie la chaîne complète : Runtime -> Security Shield -> DB Service.
-    """
-    _load_backend_env()
-    
-    # Configuration des logs pour voir les sorties "AUDIT|" et "FAIL-CLOSED"
-    level = os.getenv("AGRICONNECT_LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        level=getattr(logging, level),
-        format="%(levelname)s | %(name)s | %(message)s"
-    )
 
-    logger.info("🧪 Démarrage du test unitaire du serveur MCP...")
+def _should_reset_db(exc: Exception) -> bool:
+    if asyncpg and isinstance(exc, asyncpg.exceptions.ConnectionDoesNotExistError):
+        return True
+    msg = str(exc).lower()
+    return "connection was closed" in msg or "connection does not exist" in msg
 
-    try:
-        # 1. Initialisation du runtime (nécessaire pour runtime.db utilisé dans _persist_audit)
-        ok = runtime.start_with_policy()
-        if not ok or not runtime.is_ready:
-            logger.error("❌ Impossible de démarrer le runtime : %s", runtime.last_start_error)
-            return
 
-        # 2. Instanciation du serveur de sécurité
-        server = AgriDBMCPServer()
-
-        # 3. Paramètres de test
-        test_tool = "get_producer_dashboard"
-        test_args = {"producer_id": "9e37a423-45cf-4e63-a563-075a46d104bf"}
-
-        logger.info("📡 Appel de l'outil : %s", test_tool)
-
-        # 4. Exécution via call_tool (déclenche le scan de sécurité et l'audit)
-        response = await server.call_tool(name=test_tool, arguments=test_args)
-        
-        # 5. Validation du résultat
-        logger.info("✅ RÉPONSE REÇUE : %s", json.dumps(response, indent=2, ensure_ascii=False))
-
-    except Exception as exc:
-        # Ici on attrape notamment les PermissionDenied si la sécurité bloque
-        logger.error("❌ ÉCHEC DU TEST : %s", str(exc))
-        if hasattr(exc, 'suggestion'):
-             logger.info("💡 Suggestion du shield : %s", exc.suggestion)
-
-    finally:
-        # 6. Arrêt propre
-        logger.info("Cleaning up runtime...")
+async def _log_audit_entry(tool_name: str, args_hash: str, entry: dict[str, Any]) -> None:
+    for attempt in range(2):
         try:
-            runtime.stop()
-        except Exception:
-            pass
+            await runtime.ensure_initialized()
+            if runtime.db is None:
+                return
+            import uuid
 
-if __name__ == "__main__":
-    import asyncio
-    import json
-    import os
-    import logging
-    
-    # On lance le test
-    try:
-        asyncio.run(_main())
-    except KeyboardInterrupt:
-        logger.info("Test interrompu par l'utilisateur.")
+            system_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, "agriconnect.system"))
+        except Exception:
+            import uuid as _uuid
+
+            system_uuid = str(_uuid.uuid4())
+
+        try:
+            await runtime.db.log_conversation(
+                system_uuid,
+                json.dumps({"tool": tool_name, "args_hash": args_hash}),
+                json.dumps(entry),
+                agent_type="mcp_shield_audit",
+            )
+            return
+        except Exception as exc:
+            if attempt == 1 or not _should_reset_db(exc):
+                logger.debug("Audit log_conversation failed", exc_info=True)
+                return
+            logger.warning("Audit log_conversation lost DB connection; reinitializing", exc_info=True)
+            runtime.db = None
+

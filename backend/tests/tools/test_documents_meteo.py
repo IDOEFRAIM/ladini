@@ -2,7 +2,7 @@ import sys
 sys.path.insert(0, "backend/src")
 
 from agriconnect.core.schemas import RawDocument
-import agriconnect.services.data_collection.weather.documents_meteo as dm
+import futur.data_collection.weather.documents_meteo as dm
 
 
 class DummyLog:

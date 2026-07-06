@@ -1,4 +1,5 @@
 from typing import Dict, Any
+import uuid
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
@@ -14,9 +15,10 @@ from agriconnect.domain.models import (
     Product,
     Stock,
     TrustScore,
+    User,
     Zone
 )
-from .common import clean_text
+from .common import clean_text, normalize_phone
 
 class DashboardsMixin:
     async def get_all_producer_dashboard(self, session: AsyncSession) -> Dict[str, Any]:
@@ -54,16 +56,52 @@ class DashboardsMixin:
             for p in producers
         ]
 
-    async def get_producer_dashboard(self, session: AsyncSession, producer_id: str) -> Dict[str, Any]:
+    async def get_producer_dashboard(
+        self,
+        session: AsyncSession,
+        producer_id: str | None = None,
+        *,
+        phone: str | None = None,
+    ) -> Dict[str, Any]:
         """
         Récupère les statistiques complètes d'un producteur spécifique.
         Inclut les infos utilisateur, les stocks, les finances et le TrustScore.
         """
+        resolved_producer_uuid: uuid.UUID | None = None
+        candidate_phone = phone
+
+        if producer_id:
+            try:
+                resolved_producer_uuid = uuid.UUID(str(producer_id))
+            except (TypeError, ValueError):
+                candidate_phone = candidate_phone or producer_id
+
+        if resolved_producer_uuid is None:
+            if not candidate_phone:
+                return {"error": "Profil producteur introuvable."}
+            clean_phone = normalize_phone(candidate_phone)
+            if not clean_phone:
+                return {"error": "Profil producteur introuvable."}
+
+            stmt = (
+                select(Producer.id)
+                .join(User, Producer.user_id == User.id)
+                .where(User.phone == clean_phone)
+                .limit(1)
+            )
+            result = await session.execute(stmt)
+            prod_id = result.scalar_one_or_none()
+            if not prod_id:
+                return {"error": "Profil producteur introuvable."}
+            resolved_producer_uuid = uuid.UUID(str(prod_id))
+
+        producer_uuid = resolved_producer_uuid
+
         # 1. Récupération du Producteur avec son Utilisateur (via selectinload pour l'async)
         prod_stmt = (
             select(Producer)
             .options(selectinload(Producer.user))
-            .where(Producer.id == producer_id)
+            .where(Producer.id == producer_uuid)
         )
         prod_result = await session.execute(prod_stmt)
         producer = prod_result.scalar_one_or_none()
@@ -78,7 +116,7 @@ class DashboardsMixin:
                 func.coalesce(func.sum(Stock.quantity), 0).label("total_kg")
             )
             .join(Farm, Farm.id == Stock.farm_id)
-            .where(Farm.producer_id == producer_id)
+            .where(Farm.producer_id == producer_uuid)
         )
         stocks_agg = (await session.execute(stocks_stmt)).first()
 
@@ -87,7 +125,7 @@ class DashboardsMixin:
             select(func.coalesce(func.sum(OrderItem.price_at_sale * OrderItem.quantity), 0))
             .join(Order, Order.id == OrderItem.order_id)
             .join(Product, Product.id == OrderItem.product_id)
-            .where(Product.producer_id == producer_id, Order.status == "DELIVERED")
+            .where(Product.producer_id == producer_uuid, Order.status == "DELIVERED")
         )
         total_revenue = (await session.execute(revenue_stmt)).scalar() or 0
 
@@ -95,12 +133,12 @@ class DashboardsMixin:
         expenses_stmt = (
             select(func.coalesce(func.sum(Expense.amount), 0))
             .join(Farm, Farm.id == Expense.farm_id)
-            .where(Farm.producer_id == producer_id)
+            .where(Farm.producer_id == producer_uuid)
         )
         total_expenses = (await session.execute(expenses_stmt)).scalar() or 0
 
         # 5. Nombre de clients uniques rattachés
-        clients_stmt = select(func.count(Client.id)).where(Client.producer_id == producer_id)
+        clients_stmt = select(func.count(Client.id)).where(Client.producer_id == producer_uuid)
         client_count = (await session.execute(clients_stmt)).scalar() or 0
 
         # 6. Trust Score (Basé sur l'user_id du producteur)

@@ -110,24 +110,14 @@ class VoiceAgent:
             if not user:
                 return await self._handle_new_user(user_phone, transcript, detected_lang)
 
-            # 3. Routage vers l'orchestrateur
-            from agriconnect.graphs.orchestrateur.message_flow import MessageResponseFlow
+            # 3. Routage vers l'Orchestrator unique
+            from agriconnect.orchestrator import Orchestrator
 
-            orchestrator = MessageResponseFlow()
-            result = orchestrator.run(
-                {
-                    "requete_utilisateur": transcript,
-                    "user_id": user.id,
-                    "zone_id": user.zoneId,
-                    "crop": user.crops[0].crop_name if user.crops else "Inconnue",
-                    "is_sms_mode": False,
-                    "flow_type": "MESSAGE",
-                    "execution_path": [],
-                }
-            )
+            orchestrator = Orchestrator()
+            result = await orchestrator.handle(phone=user_phone, user_query=transcript)
 
             response_text = result.get("final_response", "Je n'ai pas compris votre question.")
-            agent_used = result.get("agent_used", "Unknown")
+            agent_used = result.get("agent", "Unknown")
 
             # 4. TTS
             response_audio_url = await self._tts(response_text, getattr(user, "language", "fr"))

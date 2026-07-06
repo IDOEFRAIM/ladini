@@ -1,7 +1,7 @@
 import sys
 sys.path.insert(0, "backend/src")
 
-from agriconnect.services.data_collection.weather.weather_forecast import WeatherForecastService
+from futur.data_collection.weather.weather_forecast import WeatherForecastService
 
 
 class MockOption:

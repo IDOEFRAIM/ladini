@@ -1,0 +1,95 @@
+from typing import Any, Dict, Optional
+from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
+from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
+from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import (
+    _detect_disambiguation_candidates,
+)
+import asyncio
+
+logger = get_node_logger("ClarificationNode")
+
+async def clarification_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+    """Noeud de clarification pédagogique.
+
+    Activé quand :
+    - L'événement est OUT_OF_SCOPE ou UNKNOWN sans tunnel actif
+    - Le cognitive_guard a décidé d'abandonner un tunnel
+
+    Utilise le LLM pour générer une réponse contextualisée, chaleureuse
+    et pédagogique plutôt qu'un message d'erreur froid.
+    """
+    event = str(state.get("interpreted_event") or "").upper()
+    current_goal = state.get("current_goal")
+    expected_input = str(state.get("expected_input") or "NONE").upper()
+    cognitive = state.get("cognitive_decision") or {}
+    cognitive_action = cognitive.get("action", "")
+    user_role = str(state.get("user_role") or "PRODUCER").upper()
+    user_name = state.get("user_name","") 
+    text = state.get("normalized_text") or state.get("user_query") or ""
+
+    # Only intervene on specific conditions
+    needs_clarification = (
+        (event in {"OUT_OF_SCOPE", "UNKNOWN"} and expected_input == "NONE" and not current_goal)
+        or cognitive_action == "abandon_tunnel_max_retries"
+    )
+    if not needs_clarification:
+        return {}
+    if _detect_disambiguation_candidates(text.lower()):
+        return {}
+
+    # Try LLM-powered clarification
+    llm = getattr(mc_runtime, "llm", None)
+    if llm is None:
+        return {}  # fallback handled by final_response CLARIFICATION
+
+    if user_role == "BUYER":
+        capabilities = (
+            "chercher des produits agricoles, lancer un appel d'offres, "
+            "voir les offres en cours, ou suivre vos commandes"
+        )
+    else:
+        capabilities = (
+            "enregistrer une récolte, mettre en vente un produit, "
+            "gérer votre stock, ou répondre aux demandes d'acheteurs"
+        )
+
+    context_parts = []
+    if cognitive_action == "abandon_tunnel_max_retries":
+        context_parts.append("L'opération précédente a été annulée car je n'arrivais pas à comprendre.")
+    if text:
+        context_parts.append(f"L'utilisateur a dit : \"{text}\"")
+
+    prompt = (
+        f"Tu es un assistant commercial agricole WhatsApp au Burkina Faso.\n"
+        f"Ton style : coach amical, encourageant, patient.\n"
+        f"L'utilisateur ({user_name or 'un producteur'}, rôle {user_role}) "
+        f"a envoyé un message que tu ne comprends pas.\n"
+        f"{'  '.join(context_parts)}\n\n"
+        f"Tu peux l'aider à : {capabilities}.\n"
+        f"Explique brièvement ce que tu peux faire et encourage-le à reformuler.\n"
+        f"Donne 2-3 exemples concrets de phrases qu'il pourrait dire.\n"
+        f"Réponds en 2-3 phrases max, en français simple et direct."
+    )
+
+    try:
+        completion = await asyncio.to_thread(
+            lambda: llm.chat.completions.create(
+                model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.4,
+                max_tokens=150,
+            )
+        )
+        result = (completion.choices[0].message.content or "").strip()
+        if result:
+            return {
+                "final_response": result,
+                "response_strategy": "CLARIFICATION",
+                "ag_ui_component": None,
+            }
+    except Exception as exc:
+        logger.warning("[ClarificationNode] LLM call failed: %s", exc)
+
+    return {}
+
+

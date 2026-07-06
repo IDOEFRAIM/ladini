@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import logging
 import uuid
-
-from sqlalchemy.orm import joinedload
 from typing import Any, Dict, Tuple
-from sqlalchemy.future import select
+
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
-from agriconnect.domain.models import User, Producer, BuyerProfile, DeliveryAgent, Farm,Zone
+from sqlalchemy.orm import joinedload
+
+from agriconnect.domain.models import (
+    User,
+    Producer,
+    BuyerProfile,
+    DeliveryAgent,
+    Farm,
+    Zone
+)
 from .common import normalize_phone
 
 logger = logging.getLogger("AgriConnect.BaseMixin")
@@ -85,7 +93,7 @@ class BaseMixin:
 
     async def _fetch_user_entities(
         self, phone: str
-    ) -> Tuple[User, Producer | None, BuyerProfile | None, DeliveryAgent | None] | None:
+    ) -> Tuple[User, Producer | None, BuyerProfile | None, DeliveryAgent | None, Zone | None] | None:
         """
         LA REQUÊTE UNIQUE : Jointure polymorphe massive à haute performance.
         Exécutée en une seule passe via le contexte actif pour minimiser la latence réseau.
@@ -103,7 +111,7 @@ class BaseMixin:
             clean_phone = normalize_phone(phone)
             
             stmt = (
-                select(User, Producer, BuyerProfile, DeliveryAgent)
+                select(User, Producer, BuyerProfile, DeliveryAgent, Zone)
                 .outerjoin(Producer, Producer.user_id == User.id)
                 .outerjoin(BuyerProfile, BuyerProfile.user_id == User.id)
                 .outerjoin(DeliveryAgent, DeliveryAgent.user_id == User.id)
@@ -119,8 +127,63 @@ class BaseMixin:
             logger.error("Erreur critique lors de l'exécution de la requête polymorphe pour %s: %s", phone, exc, exc_info=True)
             raise RuntimeError(f"Impossible de résoudre l'identité pour le numéro {phone} suite à une panne de base de données.") from exc
 
+    async def _resolve_producer_phone(
+        self,
+        *,
+        producer_id: uuid.UUID | str | None = None,
+        phone: str | None = None,
+    ) -> str:
+        """Retourne un numéro de téléphone normalisé à partir d'une identité producteur."""
+
+        identity_hint = {
+            "producer_id": str(producer_id) if producer_id else None,
+            "phone": phone,
+        }
+        logger.debug("resolve_producer_phone:start", extra={"identity": identity_hint})
+
+        if phone:
+            cleaned = normalize_phone(phone)
+            if cleaned:
+                logger.debug(
+                    "resolve_producer_phone:phone_normalized",
+                    extra={"identity": identity_hint, "resolved_phone": cleaned},
+                )
+                return cleaned
+
+        if producer_id is None:
+            raise ValueError("Identité producteur manquante : phone ou producer_id requis.")
+
+        try:
+            producer_uuid = uuid.UUID(str(producer_id))
+        except (TypeError, ValueError):
+            cleaned = normalize_phone(str(producer_id))
+            if cleaned:
+                return cleaned
+            raise ValueError("Identifiant producteur invalide : impossible de déterminer le téléphone.")
+
+        current_session = self.session
+        if current_session is None:
+            raise RuntimeError("Session de base de données introuvable pour la résolution d'identité producteur.")
+
+        stmt = (
+            select(User.phone)
+            .join(Producer, Producer.user_id == User.id)
+            .where(Producer.id == producer_uuid)
+            .limit(1)
+        )
+        result = await current_session.execute(stmt)
+        phone_value = result.scalar_one_or_none()
+        cleaned_phone = normalize_phone(phone_value) if phone_value else None
+        if not cleaned_phone:
+            raise ValueError("Numéro de téléphone introuvable pour le producteur fourni.")
+        logger.debug(
+            "resolve_producer_phone:resolved_from_uuid",
+            extra={"identity": identity_hint, "resolved_phone": cleaned_phone},
+        )
+        return cleaned_phone
+
     def _serialize_user_entities(
-        self, row: Tuple[User, Producer | None, BuyerProfile | None, DeliveryAgent | None]
+        self, row: Tuple[User, Producer | None, BuyerProfile | None, DeliveryAgent | None, Zone | None]
     ) -> Dict[str, Any]:
         """
         TRANSFORMATION EN O(1) : Convertit des entités SQL déjà chargées en mémoire
@@ -202,7 +265,7 @@ class BaseMixin:
             raise ValueError(f"Aucun compte utilisateur trouvé pour le numéro : {phone}")
         
         # 2. Extraction des objets SQLAlchemy mappés
-        user_obj, producer_obj, _, _ = row
+        user_obj, producer_obj, _, _, _ = row
         
         # 3. Validation de l'existence du profil producteur rattaché
         if not producer_obj:
@@ -277,7 +340,7 @@ class BaseMixin:
         pour permettre des mises à jour fluides en langage naturel.
         """
         try:
-            clean_phone = str(phone).strip()
+            clean_phone = normalize_phone(phone) or str(phone).strip()
             logger.debug(f"[get_producer_farm] Recherche des fermes et stocks pour : {clean_phone}")
 
             # 🚀 ON AJOUTE LE PRÉCHARGEMENT DES STOCKS (Farm.stocks)
@@ -339,27 +402,68 @@ class BaseMixin:
             raise e
 
     async def get_zone_by_name(self, name: str) -> Dict[str, Any]:
+        """
+        Résout le nom d'une zone via une recherche par similarité (trigram).
+        """
+        current_session = self.session
+        if not current_session:
+            raise RuntimeError("Database session missing.")
+
+        try:
+            logger.info(
+                "[BaseMixin] get_zone_by_name session=%s (id=%s) name=%s",
+                current_session,
+                hex(id(current_session)),
+                name,
+            )
+            # 1. Recherche par similarité trigram
+            # Le threshold par défaut est 0.3. On utilise l'opérateur '%' 
+            # pour comparer la similarité entre la colonne et l'input.
+            stmt = (
+                select(Zone)
+                .where(Zone.name.op("%")(name))
+                .order_by(func.similarity(Zone.name, name).desc())
+                .limit(1)
+            )
+            
+            result = await current_session.execute(stmt)
+            zone_obj = result.scalar_one_or_none()
+            
+            if zone_obj:
+                return {
+                    "status": "SUCCESS",
+                    "data": {"id": str(zone_obj.id), "name": zone_obj.name}
+                }
+            
+            return {"status": "NOT_FOUND", "message": f"Zone '{name}' introuvable."}
+            
+        except Exception as e:
+            logger.error(f"[BaseMixin] Erreur lors de la résolution de zone '{name}': {e}")
+            return {"status": "ERROR", "message": str(e)}
+
+    async def get_available_zones(self) -> list[dict[str, Any]]:
             """
-            Résout le nom d'une zone (ex: 'Berrechid') en UUID via la base de données.
+            Récupère la liste de toutes les zones disponibles.
             """
             current_session = self.session
             if not current_session:
                 raise RuntimeError("Database session missing.")
 
             try:
-                # Recherche insensible à la casse avec 'ilike'
-                stmt = select(Zone).where(Zone.name.ilike(name))
+                logger.info(
+                    "[BaseMixin] get_available_zones session=%s (id=%s)",
+                    current_session,
+                    hex(id(current_session)),
+                )
+                stmt = select(Zone)
                 result = await current_session.execute(stmt)
-                zone_obj = result.scalar_one_or_none()
+                zones = result.scalars().all()
                 
-                if zone_obj:
-                    return {
-                        "status": "SUCCESS",
-                        "data": {"id": str(zone_obj.id), "name": zone_obj.name}
-                    }
-                
-                return {"status": "NOT_FOUND", "message": f"Zone '{name}' introuvable."}
+                return {
+                    "status": "SUCCESS",
+                    "data": [{"id": str(z.id), "label": z.name} for z in zones]
+                }
                 
             except Exception as e:
-                logger.error(f"[BaseMixin] Erreur lors de la résolution de zone '{name}': {e}")
-                return {"status": "ERROR", "message": str(e)}
+                logger.error(f"[BaseMixin] Erreur lors de la récupération des zones: {e}")
+                return {"error": True, "message": str(e)}

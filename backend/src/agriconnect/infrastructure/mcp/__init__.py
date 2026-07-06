@@ -9,6 +9,7 @@ __all__ = [
     "MCPProvider",
     "MCPServerApp",
     "MCPToolSpec",
+    "MCPTransportConfig",
     "ShieldHub",
     "UnifiedMCPClient",
     "mcp",
@@ -21,10 +22,14 @@ def __getattr__(name: str) -> Any:
         from agriconnect.infrastructure.mcp.base import MCPProvider, MCPServerApp, MCPToolSpec
 
         return {"MCPProvider": MCPProvider, "MCPServerApp": MCPServerApp, "MCPToolSpec": MCPToolSpec}[name]
-    if name in {"AgriMCPClient", "UnifiedMCPClient"}:
-        from agriconnect.infrastructure.mcp.client import AgriMCPClient, UnifiedMCPClient
+    if name in {"AgriMCPClient", "UnifiedMCPClient", "MCPTransportConfig"}:
+        from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig, UnifiedMCPClient
 
-        return {"AgriMCPClient": AgriMCPClient, "UnifiedMCPClient": UnifiedMCPClient}[name]
+        return {
+            "AgriMCPClient": AgriMCPClient,
+            "UnifiedMCPClient": UnifiedMCPClient,
+            "MCPTransportConfig": MCPTransportConfig,
+        }[name]
     if name == "MCPContextServer":
         from agriconnect.infrastructure.mcp.context import MCPContextServer
 

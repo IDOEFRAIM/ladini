@@ -100,7 +100,7 @@ class TestProtocolImports:
         assert MCPContextServer is not None
 
     def test_import_a2a(self):
-        from agriconnect.protocols.a2a import A2ADiscovery, A2AMessage, MessageType
+        from futur.a2a import A2ADiscovery, A2AMessage, MessageType
         assert A2ADiscovery is not None
         assert A2AMessage is not None
 
@@ -113,7 +113,7 @@ class TestToolImports:
     """Vérifie que les outils se chargent."""
 
     def test_import_tools_package(self):
-        from agriconnect.tools import (
+        from futur.tools import (
             BurkinaCropTool,
             SentinelleTool,
             SahelianCropProfile,

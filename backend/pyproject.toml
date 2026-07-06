@@ -104,6 +104,7 @@ apscheduler = "^3.11.2"
 gradio = "^6.3.0"
 beautifulsoup4 = "^4.14.3"
 groq = ">=0.30.0,<1.0.0"
+rapidfuzz = "^3.9"
 fastmcp = ">=0.1"
 earthengine-api = "^1.7.10"
 # removed: psycopg2 source build (use psycopg2-binary)

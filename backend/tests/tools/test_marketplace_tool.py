@@ -6,7 +6,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from agriconnect.tools import marketplace as mp_mod
+from futur.tools import marketplace as mp_mod
 
 
 def test_marketplace_no_db_initialization_and_session_error():

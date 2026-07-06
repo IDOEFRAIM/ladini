@@ -1,23 +1,228 @@
+from __future__ import annotations
+
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Literal, Union
 from decimal import Decimal
 
-from sqlalchemy import select, update, delete, and_, desc, func
-from sqlalchemy.orm import selectinload, joinedload
+from sqlalchemy import select, update, delete, and_, or_, desc, func
+from sqlalchemy.orm import selectinload, joinedload, load_only, with_loader_criteria
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agriconnect.domain.models import (
-    Producer, Farm, Stock, StockMovement, User, Product, 
-    CropCycle, Order, Client, Expense, SurplusOffer, SubCategory, Category,Stock
+    Producer,
+    Farm,
+    Stock,
+    StockMovement,
+    User,
+    Product,
+    CropCycle,
+    Order,
+    OrderItem,
+    Client,
+    Expense,
+    SurplusOffer,
+    SubCategory,
+    Category,
 )
 from .base import BaseMixin
-from .common import clean_text, positive_float, normalize_phone
+from .common import clean_text, positive_float, normalize_phone, clamp_limit
 
 logger = logging.getLogger("agriconnect.services.producer_mgmt")
 
 MovementType = Literal['IN', 'OUT', 'WASTE']
+
+
+_BOOL_TRUE = {"1", "true", "on", "yes", "y", "oui", "vrai"}
+
+
+def _as_uuid(value: Any, field: str) -> uuid.UUID:
+    if value in (None, ""):
+        raise ValueError(f"{field} est obligatoire")
+    try:
+        return uuid.UUID(str(value))
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"{field} doit être un UUID valide") from exc
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in _BOOL_TRUE:
+        return True
+    if text in {"0", "false", "off", "no", "non", "n", "faux"}:
+        return False
+    return default
+
+
+def _coerce_float(value: Any, field: str, *, allow_zero: bool = True, positive: bool = False, default: Optional[float] = None) -> Optional[float]:
+    if value in (None, ""):
+        return default
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} doit être numérique") from exc
+    if positive and parsed < 0:
+        raise ValueError(f"{field} doit être positif")
+    if not allow_zero and parsed == 0:
+        raise ValueError(f"{field} ne peut pas être zéro")
+    return parsed
+
+
+def _parse_datetime(value: Any, field: str, *, required: bool = False) -> Optional[datetime]:
+    if value in (None, ""):
+        if required:
+            raise ValueError(f"{field} est obligatoire")
+        return None
+    if isinstance(value, datetime):
+        dt_value = value
+    else:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt_value = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(f"{field} doit être une date ISO (YYYY-MM-DD ou YYYY-MM-DDTHH:MM)") from exc
+    if dt_value.tzinfo is None:
+        dt_value = dt_value.replace(tzinfo=timezone.utc)
+    return dt_value
+
+
+def _utc_naive(value: Optional[datetime]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _normalize_future_production_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Le payload doit être un objet JSON")
+
+    normalized: Dict[str, Any] = {}
+    normalized["farm_id"] = _as_uuid(payload.get("farm_id"), "farm_id")
+
+    production_type = str(payload.get("production_type") or payload.get("type") or "CROP").strip().upper()
+    if production_type not in {"CROP", "LIVESTOCK"}:
+        raise ValueError("production_type doit valoir 'CROP' ou 'LIVESTOCK'")
+    normalized["production_type"] = production_type
+
+    crop_label = payload.get("crop_type") or payload.get("product") or payload.get("culture")
+    species_label = payload.get("species")
+
+    if production_type == "CROP":
+        if not crop_label:
+            raise ValueError("Le nom de la culture est obligatoire pour une production végétale")
+        normalized["crop_type"] = str(crop_label).strip()
+        normalized["species"] = None
+        normalized["unit"] = str(payload.get("unit") or payload.get("unit_mentioned") or "KG").upper()
+        area_size = payload.get("area_size") or payload.get("surface")
+        if area_size in (None, ""):
+            raise ValueError("La surface cultivée (area_size) est obligatoire")
+        normalized["area_size"] = positive_float(area_size, "area_size")
+        normalized["planted_at"] = _parse_datetime(payload.get("planted_at"), "planted_at", required=True)
+        normalized["expected_harvest_date"] = _parse_datetime(payload.get("expected_harvest_date"), "expected_harvest_date", required=True)
+        normalized["estimated_available_at"] = _parse_datetime(payload.get("estimated_available_at"), "estimated_available_at") or normalized["expected_harvest_date"]
+        available_qty_source = payload.get("available_quantity") or payload.get("quantity") or payload.get("quantity_mentioned") or payload.get("target_yield")
+        if available_qty_source in (None, ""):
+            raise ValueError("La quantité disponible prévue est obligatoire (available_quantity)")
+        normalized["available_quantity"] = positive_float(available_qty_source, "available_quantity")
+        normalized["initial_stock"] = None
+        normalized["current_stock"] = None
+        normalized["hatch_date"] = None
+    else:
+        species_value = species_label or crop_label
+        if not species_value:
+            raise ValueError("Le champ species est obligatoire pour l'élevage")
+        normalized["species"] = str(species_value).strip()
+        normalized["crop_type"] = payload.get("crop_type") or normalized["species"]
+        normalized["unit"] = str(payload.get("unit") or payload.get("unit_mentioned") or "HEAD").upper()
+        normalized["area_size"] = _coerce_float(payload.get("area_size") or payload.get("surface"), "area_size")
+        normalized["planted_at"] = _parse_datetime(payload.get("planted_at"), "planted_at")
+        normalized["hatch_date"] = _parse_datetime(payload.get("hatch_date"), "hatch_date")
+        normalized["expected_harvest_date"] = _parse_datetime(payload.get("expected_harvest_date"), "expected_harvest_date")
+        normalized["estimated_available_at"] = _parse_datetime(payload.get("estimated_available_at"), "estimated_available_at")
+        initial_stock = payload.get("initial_stock") or payload.get("quantity") or payload.get("quantity_mentioned")
+        if initial_stock in (None, ""):
+            raise ValueError("initial_stock est obligatoire pour déclarer un lot d'élevage")
+        normalized["initial_stock"] = positive_float(initial_stock, "initial_stock")
+        current_stock = payload.get("current_stock") or payload.get("available_quantity")
+        normalized["current_stock"] = _coerce_float(current_stock, "current_stock", allow_zero=True, default=normalized["initial_stock"], positive=True)
+        normalized["available_quantity"] = _coerce_float(payload.get("available_quantity") or payload.get("quantity") or payload.get("quantity_mentioned"), "available_quantity", allow_zero=True, positive=True, default=normalized["current_stock"])
+        if normalized["planted_at"] is None:
+            normalized["planted_at"] = normalized["hatch_date"] or datetime.now(timezone.utc)
+        if normalized["expected_harvest_date"] is None:
+            normalized["expected_harvest_date"] = normalized["estimated_available_at"] or normalized["planted_at"]
+        if normalized.get("estimated_available_at") is None:
+            normalized["estimated_available_at"] = normalized["expected_harvest_date"]
+
+    normalized["variety"] = payload.get("variety")
+    normalized["breed"] = payload.get("breed") or payload.get("race")
+    normalized["growth_stage"] = payload.get("growth_stage") or payload.get("stage_name")
+    normalized["target_yield"] = _coerce_float(payload.get("target_yield"), "target_yield", allow_zero=True, positive=True)
+    normalized["expected_yield"] = _coerce_float(payload.get("expected_yield"), "expected_yield", allow_zero=True, positive=True)
+    normalized["reserved_quantity"] = _coerce_float(payload.get("reserved_quantity"), "reserved_quantity", allow_zero=True, positive=True, default=0.0) or 0.0
+    _raw_price = _coerce_float(payload.get("price_per_unit") or payload.get("price_mentioned"), "price_per_unit", allow_zero=True, positive=True)
+    normalized["price_per_unit"] = round(_raw_price, 2) if _raw_price is not None else None
+    normalized["preorder_enabled"] = _coerce_bool(payload.get("preorder_enabled"), default=False)
+    normalized["is_public"] = _coerce_bool(payload.get("is_public"), default=False)
+    status_label = str(payload.get("status") or "PLANNED").strip().upper()
+    normalized["status"] = status_label or "PLANNED"
+
+    if normalized.get("estimated_available_at") is None:
+        normalized["estimated_available_at"] = normalized.get("expected_harvest_date")
+
+    # Defensive defaults for fields that must exist
+    normalized.setdefault("available_quantity", 0.0)
+    if production_type == "LIVESTOCK":
+        normalized.setdefault("current_stock", normalized.get("initial_stock") or 0.0)
+
+    return normalized
+
+
+def _cycle_to_payload(cycle: CropCycle, farm: Optional[Farm] = None) -> Dict[str, Any]:
+    def _iso(dt_value: Optional[datetime]) -> Optional[str]:
+        return dt_value.isoformat() if isinstance(dt_value, datetime) else None
+
+    farm_name = farm.name if farm else getattr(getattr(cycle, "farm", None), "name", None)
+    farm_id = str(farm.id) if farm else str(getattr(cycle, "farm_id", ""))
+    display_name = cycle.crop_type or cycle.species or "Production"
+    unit = (cycle.unit or "KG").upper()
+
+    return {
+        "cycle_id": str(cycle.id),
+        "farm_id": farm_id,
+        "farm_name": farm_name or "Ferme",
+        "crop_type": cycle.crop_type,
+        "production_type": (cycle.production_type or "CROP").upper(),
+        "species": cycle.species,
+        "breed": cycle.breed,
+        "variety": cycle.variety,
+        "status": (cycle.status or "PLANNED").upper(),
+        "area_size": float(cycle.area_size) if cycle.area_size not in (None, "") else None,
+        "planted_at": _iso(cycle.planted_at),
+        "expected_harvest_date": _iso(cycle.expected_harvest_date),
+        "estimated_available_at": _iso(cycle.estimated_available_at),
+        "hatch_date": _iso(cycle.hatch_date),
+        "available_quantity": float(cycle.available_quantity) if cycle.available_quantity is not None else None,
+        "reserved_quantity": float(cycle.reserved_quantity) if cycle.reserved_quantity is not None else 0.0,
+        "unit": unit,
+        "price_per_unit": float(cycle.price_per_unit) if cycle.price_per_unit is not None else None,
+        "preorder_enabled": bool(cycle.preorder_enabled),
+        "is_public": bool(cycle.is_public),
+        "initial_stock": float(cycle.initial_stock) if cycle.initial_stock is not None else None,
+        "current_stock": float(cycle.current_stock) if cycle.current_stock is not None else None,
+        "growth_stage": cycle.growth_stage,
+        "target_yield": float(cycle.target_yield) if cycle.target_yield is not None else None,
+        "expected_yield": float(cycle.expected_yield) if cycle.expected_yield is not None else None,
+        "display_label": display_name,
+    }
 
 
 class ProducerMgmtMixin(BaseMixin):
@@ -76,83 +281,103 @@ class ProducerMgmtMixin(BaseMixin):
         return "AUTRES"
 
     # ─── SECTION 1 : GESTION DES FERMES (FARMS) ───────────────────────────
-    async def get_or_create_farm(self, phone: str, farm_name: str, zone_id: str = None) -> Dict[str, Any]:
+    async def get_or_create_farm(
+        self,
+        producer_id: str | None = None,
+        farm_name: str = "Ma ferme",
+        zone_id: str | None = None,
+        *,
+        phone: str | None = None,
+    ) -> Dict[str, Any]:
         """
         Récupère la ferme existante d'un producteur ou en crée une nouvelle par défaut via self.session.
         """
-        # 1. On récupère proprement l'utilisateur via le service (gère le format dict/objet)
-        user = await self.get_user_by_phone(phone)
-        user_id = user["id"] if isinstance(user, dict) else user.id
-        user_name = user.get("name") if isinstance(user, dict) else getattr(user, "name", None)
+        resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
 
-        # 2. On vérifie et crée le Producer si manquant par rapport à l'unicité de user_id
-        producer_stmt = select(Producer).where(Producer.user_id == (user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id))))
-        producer = (await self.session.execute(producer_stmt)).scalar_one_or_none()
+        # 1. Résolution de l'identité complète (User + Producer)
+        row = await self._fetch_user_entities(phone=resolved_phone)
+        if not row:
+            raise ValueError(f"Aucun utilisateur trouvé pour le numéro {resolved_phone}")
         
-        if not producer:
-            logger.info("ℹ️ Profil producteur manquant pour l'utilisateur %s, création automatique...", user_id)
-            producer = Producer(
-                id=user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id)),
-                user_id=user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id)),
-                business_name=user_name or "Mon Agrobusiness"
+        user_obj, producer_obj, _, _, _ = row
+
+        # 2. Création du Producer s'il n'existe pas encore
+        if not producer_obj:
+            logger.info("ℹ️ Profil producteur manquant pour l'utilisateur %s, création automatique...", user_obj.id)
+            producer_obj = Producer(
+                id=user_obj.id,
+                user_id=user_obj.id,
+                business_name=user_obj.name or "Mon Agrobusiness"
             )
-            self.session.add(producer)
+            self.session.add(producer_obj)
             await self.session.flush()
 
-        # 3. Maintenant on cherche la ferme de manière sécurisée
-        stmt = select(Farm).where(Farm.producer_id == producer.id)
-        # 💡 CORRECTION : .scalars().first() au lieu de .scalar_one_or_none()
+        # 3. Recherche de la première ferme existante
+        stmt = select(Farm).where(Farm.producer_id == producer_obj.id).limit(1)
         farm = (await self.session.execute(stmt)).scalars().first()
         
         if farm:
-            logger.info("ℹ️ Ferme existante trouvée pour le producteur %s", phone)
+            logger.info("ℹ️ Ferme existante trouvée pour le producteur %s", resolved_phone)
             return farm.to_dict()
 
-        # Sinon, création de la ferme s'il n'en a aucune
+        # 4. Création d'une ferme par défaut si aucune n'existe
         farm = Farm(
             id=uuid.uuid4(), 
             name=farm_name, 
-            producer_id=producer.id, 
+            producer_id=producer_obj.id, 
             zone_id=uuid.UUID(str(zone_id)) if zone_id else None
         )
         self.session.add(farm)
         await self.session.flush()
         await self.session.refresh(farm)
         
-        logger.info("✅ Ferme créée automatiquement : %s pour le numéro %s", farm_name, phone)
+        logger.info("✅ Ferme créée automatiquement : %s pour le numéro %s", farm_name, resolved_phone)
         return farm.to_dict()
 
 
-    async def create_farm(self, phone: str, name: str, location: str = None, size: float = None, soil_type: str = None, water_source: str = None, zone_id: str = None) -> Dict[str, Any]:
+    async def create_farm(
+        self,
+        name: str,
+        location: str = None,
+        size: float = None,
+        soil_type: str = None,
+        water_source: str = None,
+        zone_id: str = None,
+        *,
+        producer_id: str | None = None,
+        phone: str | None = None,
+    ) -> Dict[str, Any]:
         """
         Crée explicitement une ferme via self.session en s'appuyant sur le profil existant.
         """
-        phone = clean_text(phone, "phone", required=True)
+        phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
         name = clean_text(name, "name", required=True)
 
-        # 🚀 UTILISATION DE BASE.PY : On récupère l'objet Producer d'origine (pas un dict !)
-        try:
-            _, producer = await self.get_producer_profile(phone=phone)
-        except ValueError:
-            # Si le profil producteur n'existe pas encore, on le génère à la volée
-            user = await self.get_user_by_phone(phone)
-            user_id = user["id"] if isinstance(user, dict) else user.id
-            user_name = user.get("name") if isinstance(user, dict) else getattr(user, "name", None)
-            
-            producer = Producer(
-                id=user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id)),
-                user_id=user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id)),
-                business_name=user_name or "Mon Agrobusiness"
+        # 1. Résolution de l'identité complète
+        row = await self._fetch_user_entities(phone=phone)
+        if not row:
+            raise ValueError(f"Impossible de créer une ferme : aucun utilisateur avec le numéro {phone}")
+        
+        user_obj, producer_obj, _, _, _ = row
+
+        # 2. On s'assure que le Producer existe (sinon create_farm échouerait sur la FK)
+        if not producer_obj:
+            logger.info("ℹ️ Profil producteur manquant pour %s (User: %s), création à la volée...", phone, user_obj.id)
+            producer_obj = Producer(
+                id=user_obj.id,
+                user_id=user_obj.id,
+                business_name=user_obj.name or "Mon Agrobusiness"
             )
-            self.session.add(producer)
+            self.session.add(producer_obj)
             await self.session.flush()
 
+        # 3. Création de la ferme
         new_farm = Farm(
             id=uuid.uuid4(),
-            producer_id=producer.id,  # Garanti d'être un attribut d'objet valide
+            producer_id=producer_obj.id,
             name=name,
             location=location,
-            size=size,
+            size=positive_float(size),
             soil_type=soil_type,
             water_source=water_source,
             zone_id=uuid.UUID(str(zone_id)) if zone_id else None
@@ -162,37 +387,82 @@ class ProducerMgmtMixin(BaseMixin):
         await self.session.refresh(new_farm)
         return new_farm.to_dict()
 
-    async def update_farm(self, phone: str, **kwargs) -> Optional[Dict[str, Any]]:
+    async def update_farm(
+        self,
+        phone: str | None = None,
+        farm_id: str | None = None,
+        *,
+        producer_id: str | None = None,
+        **kwargs,
+    ) -> Optional[Dict[str, Any]]:
         """
-        Met à jour dynamiquement les attributs de la ferme via self.session.
+        Met à jour dynamiquement les attributs d'une ferme.
+        Prend farm_id en priorité, sinon cherche la première ferme du producteur.
         """
         try:
-            farm = await self.get_producer_farm(phone)
+            # 1. Identification de la ferme
+            resolved_phone: str | None = None
+            if farm_id:
+                stmt = select(Farm).where(Farm.id == uuid.UUID(str(farm_id)))
+            else:
+                resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+                row = await self._fetch_user_entities(phone=resolved_phone)
+                if not row or not row[1]:
+                    raise ValueError(f"Aucun profil producteur pour {resolved_phone}")
+                stmt = select(Farm).where(Farm.producer_id == row[1].id).limit(1)
+            
+            farm = (await self.session.execute(stmt)).scalars().first()
+            if not farm:
+                identity = resolved_phone or phone or "<inconnu>"
+                logger.warning("Ferme non trouvée pour %s / %s", identity, farm_id)
+                return None
 
+            # 2. Mise à jour dynamique des champs autorisés
+            PROTECTED = ("id", "producer_id", "created_at", "updated_at")
             for key, value in kwargs.items():
-                if key not in ("id", "producer_id") and hasattr(farm, key):
+                if key not in PROTECTED and hasattr(farm, key):
                     if key == "zone_id" and value:
                         setattr(farm, key, uuid.UUID(str(value)))
+                    elif key == "size":
+                        setattr(farm, key, positive_float(value))
                     else:
                         setattr(farm, key, value)
-                else:
-                    logger.debug(f"Attribut ignoré ou protégé : {key}")
 
             await self.session.flush()
             await self.session.refresh(farm)
             return farm.to_dict()
 
-        except ValueError as e:
-            logger.warning(f"Échec de mise à jour de la ferme pour {phone} : {e}")
-            return None
         except Exception as e:
-            logger.error(f"Erreur critique lors de l'update de la ferme ({phone}) : {e}")
+            logger.error(f"Erreur critique lors de l'update de la ferme ({phone}): {e}", exc_info=True)
             raise
+
+    async def get_farms(
+        self,
+        producer_id: str | None = None,
+        *,
+        phone: str | None = None,
+    ) -> Dict[str, Any]:
+        """Retourne la liste structurée des fermes du producteur en résolvant l'identité."""
+
+        try:
+            resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc), "data": []}
+
+        farms_response = await self.get_producer_farm(resolved_phone)
+        if isinstance(farms_response, dict):
+            return farms_response
+
+        # Sécurise le format si la méthode de base évolue vers une liste brute.
+        return {
+            "status": "success",
+            "count": len(farms_response),
+            "data": farms_response,
+        }
 
     # ─── SECTION 2 : GESTION DU CATALOGUE PRODUITS ───────────────────────
     async def create_product(
             self, 
-            phone: str, 
             name: str, 
             price: float, 
             quantity_for_sale: float, 
@@ -200,11 +470,15 @@ class ProducerMgmtMixin(BaseMixin):
             category_label: str = None, 
             sub_category_id: str = None, 
             description: str = None, 
-            local_names: dict = None
+            local_names: dict = None,
+            *,
+            producer_id: str | None = None, 
+            phone: str | None = None
         ) -> Dict[str, Any]:
             """
             Ajoute un produit au catalogue public de vente du producteur via self.session.
             """
+            phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
             phone = clean_text(phone, "phone", required=True)
             name = clean_text(name, "name", required=True)
             price = positive_float(price, "price", allow_zero=True)
@@ -277,12 +551,12 @@ class ProducerMgmtMixin(BaseMixin):
                 logger.error(f"❌ Erreur système dans create_product : {str(e)}")
                 return {"status": "error", "message": f"Erreur technique lors du stockage du produit : {str(e)}"}
 
-    async def list_products(self, phone: str) -> Dict[str, Any]:
+    async def list_products(self, producer_id: str | None = None, *, phone: str | None = None) -> Dict[str, Any]:
         """
         Vision Phone-First : Liste tous les produits via self.session.
         """
         try:
-            clean_phone = normalize_phone(phone)
+            clean_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
             profile_res = await self.get_producer_profile(clean_phone)
             if not profile_res or profile_res[0] is None:
                 return {"status": "error", "message": "Votre compte producteur n'est pas identifié."}
@@ -428,72 +702,600 @@ class ProducerMgmtMixin(BaseMixin):
 
 
 
-    async def get_stocks(self, phone: str, *args, **kwargs) -> Dict[str, Any]:
-        """Récupère l'intégralité des stocks d'un producteur via son numéro de téléphone.
-        
-        Structure le retour ferme par ferme en évitant les crashs de Lazy Loading.
-        """
+    async def get_stocks(self, phone: str | None = None, *, producer_id: str | None = None, **kwargs) -> Dict[str, Any]:
+        """Récupère les stocks, le catalogue et les futures récoltes d'un producteur."""
+
         try:
-            clean_phone = str(phone).strip()
+            clean_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
             logger.debug(f"[get_stocks] Extraction des stocks pour le téléphone : {clean_phone}")
 
-            # 🚀 1. REQUÊTE AVEC JOINTURE ET PRÉ-CHARGEMENT (joinedload)
-            # On dit explicitement à SQLAlchemy de charger aussi les relations enfants 'stocks'
-            # pour éviter qu'il essaie de re-contacter la base de données dans la boucle 'for'.
-            farm_stmt = (
-                select(Farm)
-                .join(Farm.producer)
-                .join(Producer.user)
-                .options(joinedload(Farm.stocks))  # 🧠 Charge les stocks de la ferme immédiatement !
-                .where(User.phone == clean_phone)
-            )
+            producer_uuid: uuid.UUID | None = None
+            if producer_id:
+                try:
+                    producer_uuid = uuid.UUID(str(producer_id))
+                except (TypeError, ValueError):
+                    producer_uuid = None
 
-            farm_result = await self.session.execute(farm_stmt)
-            # unique() est obligatoire ici car joinedload crée des doublons de lignes dans le résultat brut SQL
-            farms = farm_result.scalars().unique().all()
+            if producer_uuid is None:
+                profile_res = await self.get_producer_profile(clean_phone)
+                if not profile_res or profile_res[0] is None:
+                    raise ValueError("Profil producteur introuvable pour la consultation des stocks.")
 
-            if not farms:
+                _user_obj, producer_obj = profile_res
+                producer_uuid = getattr(producer_obj, "id", None)
+
+            safe_catalog_limit = clamp_limit(kwargs.get("catalog_limit"), default=30, maximum=200)
+            farm_limit = clamp_limit(kwargs.get("farm_limit"), default=20, maximum=50)
+            stock_limit = clamp_limit(kwargs.get("stock_limit"), default=500, maximum=5000)
+            cycle_limit = clamp_limit(kwargs.get("cycle_limit"), default=150, maximum=2000)
+            date_cutoff = datetime.utcnow() - timedelta(days=1)
+            inactive_statuses = ("HARVESTED", "CANCELLED", "ABANDONED")
+
+            if producer_uuid:
+                farm_stmt = (
+                    select(Farm.id, Farm.name, Farm.location, Farm.size)
+                    .where(Farm.producer_id == producer_uuid)
+                    .limit(farm_limit)
+                )
+            else:
+                farm_stmt = (
+                    select(Farm.id, Farm.name, Farm.location, Farm.size)
+                    .join(Farm.producer)
+                    .join(Producer.user)
+                    .where(User.phone == clean_phone)
+                    .limit(farm_limit)
+                )
+
+            farm_rows = (await self.session.execute(farm_stmt)).all()
+            farm_ids: list[uuid.UUID] = [row[0] for row in farm_rows if row and row[0] is not None]
+
+            catalog_snapshot: List[Dict[str, Any]] = []
+            if producer_uuid:
+                product_stmt = (
+                    select(Product)
+                    .options(
+                        load_only(
+                            Product.id,
+                            Product.name,
+                            Product.short_code,
+                            Product.price,
+                            Product.unit,
+                            Product.quantity_for_sale,
+                            Product.is_available,
+                            Product.updated_at,
+                        )
+                    )
+                    .where(Product.producer_id == producer_uuid)
+                    .order_by(desc(Product.updated_at))
+                    .limit(safe_catalog_limit)
+                )
+                product_result = await self.session.execute(product_stmt)
+                products = product_result.scalars().all()
+                for prod in products:
+                    price_val = float(prod.price) if isinstance(prod.price, Decimal) else prod.price
+                    catalog_snapshot.append(
+                        {
+                            "product_id": str(prod.id),
+                            "name": prod.name,
+                            "short_code": prod.short_code,
+                            "price": price_val,
+                            "unit": prod.unit,
+                            "quantity": prod.quantity_for_sale,
+                            "status": "AVAILABLE" if getattr(prod, "is_available", True) else "HIDDEN",
+                            "updated_at": prod.updated_at.isoformat() if getattr(prod, "updated_at", None) else None,
+                        }
+                    )
+
+            global_cycles: List[Dict[str, Any]] = []
+
+            if not farm_rows:
                 return {
                     "status": "success",
                     "message": f"Aucune exploitation trouvée pour le numéro {clean_phone}.",
-                    "data": {}
+                    "data": {
+                        "farms": {},
+                        "catalog": catalog_snapshot,
+                        "upcoming_cycles": [],
+                    },
                 }
 
-            # 2. Regroupement des stocks ferme par ferme (ZÉRO requêtes SQL ici, tout est en mémoire cache !)
-            stocks_farm_by_farm = {}
+            stocks_farm_by_farm: Dict[str, Dict[str, Any]] = {}
+            farm_name_by_id: Dict[uuid.UUID, str] = {}
+            farm_loc_by_id: Dict[uuid.UUID, str] = {}
+            farm_size_by_id: Dict[uuid.UUID, float] = {}
 
-            for farm in farms:
-                farm_id_str = str(farm.id)
-                
-                # Plus besoin de faire un select(Stock) ici ! On lit directement la relation pré-chargée
-                # On trie simplement par nom d'article en Python pour respecter ton 'order_by'
-                sorted_stocks = sorted(farm.stocks, key=lambda s: s.item_name if s.item_name else "")
+            for farm_id, farm_name, farm_location, farm_size in farm_rows:
+                farm_name_by_id[farm_id] = str(farm_name) if farm_name else "Ferme sans nom"
+                farm_loc_by_id[farm_id] = str(farm_location) if farm_location else "Non spécifiée"
+                farm_size_by_id[farm_id] = float(farm_size) if farm_size else 0.0
+                stocks_farm_by_farm[str(farm_id)] = {
+                    "farm_name": farm_name_by_id[farm_id],
+                    "location": farm_loc_by_id[farm_id],
+                    "size": farm_size_by_id[farm_id],
+                    "stocks": [],
+                    "upcoming_cycles": [],
+                }
 
-                farm_stocks_list = [
-                    {
-                        "stock_id": str(s.id) if hasattr(s, "id") else str(s.stock_id),
-                        "item_name": str(s.item_name),
-                        "quantity": float(s.quantity) if s.quantity else 0.0
+            if farm_ids:
+                stock_stmt = (
+                    select(Stock.id, Stock.farm_id, Stock.item_name, Stock.quantity, Stock.unit)
+                    .where(Stock.farm_id.in_(farm_ids))
+                    .order_by(Stock.farm_id, Stock.item_name)
+                    .limit(stock_limit)
+                )
+                stock_rows = (await self.session.execute(stock_stmt)).all()
+                for stock_id, farm_id, item_name, quantity, unit in stock_rows:
+                    bucket = stocks_farm_by_farm.get(str(farm_id))
+                    if bucket is None:
+                        continue
+                    bucket["stocks"].append(
+                        {
+                            "stock_id": str(stock_id),
+                            "item_name": str(item_name or ""),
+                            "quantity": float(quantity) if quantity else 0.0,
+                            "unit": unit or "KG",
+                        }
+                    )
+
+                cycle_stmt = (
+                    select(
+                        CropCycle.id,
+                        CropCycle.farm_id,
+                        CropCycle.crop_type,
+                        CropCycle.production_type,
+                        CropCycle.species,
+                        CropCycle.breed,
+                        CropCycle.variety,
+                        CropCycle.status,
+                        CropCycle.area_size,
+                        CropCycle.planted_at,
+                        CropCycle.expected_harvest_date,
+                        CropCycle.estimated_available_at,
+                        CropCycle.hatch_date,
+                        CropCycle.available_quantity,
+                        CropCycle.reserved_quantity,
+                        CropCycle.unit,
+                        CropCycle.price_per_unit,
+                        CropCycle.preorder_enabled,
+                        CropCycle.is_public,
+                        CropCycle.initial_stock,
+                        CropCycle.current_stock,
+                        CropCycle.growth_stage,
+                        CropCycle.target_yield,
+                        CropCycle.expected_yield,
+                    )
+                    .where(
+                        CropCycle.farm_id.in_(farm_ids),
+                        CropCycle.status.notin_(inactive_statuses),
+                        or_(
+                            and_(
+                                CropCycle.estimated_available_at.is_(None),
+                                CropCycle.expected_harvest_date.is_(None),
+                                CropCycle.hatch_date.is_(None),
+                            ),
+                            CropCycle.estimated_available_at >= date_cutoff,
+                            CropCycle.expected_harvest_date >= date_cutoff,
+                            CropCycle.hatch_date >= date_cutoff,
+                        ),
+                    )
+                    .limit(cycle_limit)
+                )
+                cycle_rows = (await self.session.execute(cycle_stmt)).all()
+
+                for (
+                    cycle_id,
+                    farm_id,
+                    crop_type,
+                    production_type,
+                    species,
+                    breed,
+                    variety,
+                    status,
+                    area_size,
+                    planted_at,
+                    expected_harvest_date,
+                    estimated_available_at,
+                    hatch_date,
+                    available_quantity,
+                    reserved_quantity,
+                    unit,
+                    price_per_unit,
+                    preorder_enabled,
+                    is_public,
+                    initial_stock,
+                    current_stock,
+                    growth_stage,
+                    target_yield,
+                    expected_yield,
+                ) in cycle_rows:
+                    farm_name = farm_name_by_id.get(farm_id)
+                    payload = {
+                        "cycle_id": str(cycle_id),
+                        "farm_id": str(farm_id),
+                        "farm_name": farm_name or "Ferme",
+                        "crop_type": crop_type,
+                        "production_type": (production_type or "CROP").upper() if production_type else "CROP",
+                        "species": species,
+                        "breed": breed,
+                        "variety": variety,
+                        "status": (status or "PLANNED").upper() if status else "PLANNED",
+                        "area_size": float(area_size) if area_size not in (None, "") else None,
+                        "planted_at": planted_at.isoformat() if isinstance(planted_at, datetime) else None,
+                        "expected_harvest_date": expected_harvest_date.isoformat() if isinstance(expected_harvest_date, datetime) else None,
+                        "estimated_available_at": estimated_available_at.isoformat() if isinstance(estimated_available_at, datetime) else None,
+                        "hatch_date": hatch_date.isoformat() if isinstance(hatch_date, datetime) else None,
+                        "available_quantity": float(available_quantity) if available_quantity is not None else None,
+                        "reserved_quantity": float(reserved_quantity) if reserved_quantity is not None else 0.0,
+                        "unit": (unit or "KG").upper(),
+                        "price_per_unit": float(price_per_unit) if price_per_unit is not None else None,
+                        "preorder_enabled": bool(preorder_enabled),
+                        "is_public": bool(is_public),
+                        "initial_stock": float(initial_stock) if initial_stock is not None else None,
+                        "current_stock": float(current_stock) if current_stock is not None else None,
+                        "growth_stage": growth_stage,
+                        "target_yield": float(target_yield) if target_yield is not None else None,
+                        "expected_yield": float(expected_yield) if expected_yield is not None else None,
+                        "display_label": crop_type or species or "Production",
                     }
-                    for s in sorted_stocks
-                ]
-
-                stocks_farm_by_farm[farm_id_str] = {
-                    "farm_name": str(farm.name) if farm.name else "Ferme sans nom",
-                    "location": str(farm.location) if farm.location else "Non spécifiée",
-                    "size": float(farm.size) if farm.size else 0.0,
-                    "stocks": farm_stocks_list
-                }
+                    bucket = stocks_farm_by_farm.get(str(farm_id))
+                    if bucket is not None:
+                        bucket["upcoming_cycles"].append(payload)
+                    global_cycles.append(payload)
 
             return {
                 "status": "success",
-                "message": f"Stocks de {len(farms)} ferme(s) récupérés avec succès.",
-                "data": stocks_farm_by_farm
+                "message": f"Stocks de {len(farm_rows)} ferme(s) récupérés avec succès.",
+                "data": {
+                    "farms": stocks_farm_by_farm,
+                    "catalog": catalog_snapshot,
+                    "upcoming_cycles": global_cycles,
+                },
             }
 
         except Exception as e:
             logger.error(f"❌ Erreur SQL de jointure dans get_stocks : {str(e)}", exc_info=True)
             raise e
+
+
+
+    async def declare_future_production(
+        self,
+        payload: Dict[str, Any],
+        *,
+        phone: str | None = None,
+        producer_id: str | None = None,
+    ) -> Dict[str, Any]:
+        """Déclare une production future (culture ou élevage) prête pour les précommandes."""
+
+        resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        normalized = _normalize_future_production_payload(payload)
+
+        farm = await self.session.get(Farm, normalized["farm_id"])
+        if not farm:
+            raise ValueError("Ferme introuvable pour l'identifiant fourni")
+
+        user_row = await self._fetch_user_entities(resolved_phone)
+        if not user_row or not user_row[1]:
+            raise ValueError("Profil producteur introuvable pour ce numéro")
+        producer_obj = user_row[1]
+        if farm.producer_id != producer_obj.id:
+            raise ValueError("Cette exploitation n'appartient pas à votre profil producteur")
+
+        planted_at = _utc_naive(normalized.get("planted_at") or datetime.now(timezone.utc))
+        expected_harvest = _utc_naive(
+            normalized.get("expected_harvest_date") or normalized.get("estimated_available_at") or planted_at
+        )
+        estimated_available_at = _utc_naive(normalized.get("estimated_available_at"))
+        hatch_date = _utc_naive(normalized.get("hatch_date"))
+
+        cycle = CropCycle(
+            id=uuid.uuid4(),
+            farm_id=farm.id,
+            crop_type=normalized.get("crop_type"),
+            variety=normalized.get("variety"),
+            area_size=normalized.get("area_size") or 0.0,
+            planted_at=planted_at,
+            expected_harvest_date=expected_harvest,
+            target_yield=normalized.get("target_yield"),
+            expected_yield=normalized.get("expected_yield"),
+            status=normalized.get("status"),
+            farming_method=payload.get("farming_method") or "conventional",
+            production_type=normalized.get("production_type"),
+            species=normalized.get("species"),
+            breed=normalized.get("breed"),
+            hatch_date=hatch_date,
+            estimated_available_at=estimated_available_at or expected_harvest,
+            available_quantity=normalized.get("available_quantity") or 0.0,
+            reserved_quantity=normalized.get("reserved_quantity") or 0.0,
+            price_per_unit=normalized.get("price_per_unit"),
+            unit=normalized.get("unit"),
+            preorder_enabled=normalized.get("preorder_enabled"),
+            is_public=normalized.get("is_public"),
+            initial_stock=normalized.get("initial_stock") or 0.0,
+            current_stock=normalized.get("current_stock") or normalized.get("initial_stock") or 0.0,
+            growth_stage=normalized.get("growth_stage"),
+        )
+
+        self.session.add(cycle)
+        await self.session.flush()
+        await self.session.refresh(cycle)
+
+        snapshot = _cycle_to_payload(cycle, farm)
+        label = snapshot.get("display_label") or "production"
+        return {
+            "status": "success",
+            "message": f"✅ Production future '{label}' enregistrée sur {snapshot.get('farm_name')}.",
+            "data": snapshot,
+        }
+
+
+    # ─── SECTION 4 : VISION COMMANDES PRODUCTEUR ───────────────────────
+    async def get_producer_orders(
+        self,
+        *,
+        phone: str | None = None,
+        producer_id: str | None = None,
+        status: str | None = None,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        """Retourne les commandes associées au producteur (catalogue + précommandes)."""
+
+        try:
+            resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc), "data": []}
+
+        profile_res = await self.get_producer_profile(resolved_phone)
+        if not profile_res or not profile_res[1]:
+            return {"status": "error", "message": "Profil producteur introuvable pour ce numéro.", "data": []}
+
+        producer_obj = profile_res[1]
+        safe_limit = clamp_limit(limit, default=20, maximum=50)
+        status_filter = (status or "").strip().upper()
+
+        product_order_ids = (
+            select(OrderItem.order_id)
+            .join(Product, Product.id == OrderItem.product_id)
+            .where(Product.producer_id == producer_obj.id)
+            .distinct()
+        )
+        cycle_order_ids = (
+            select(Order.id)
+            .join(CropCycle, CropCycle.id == Order.crop_cycle_id)
+            .join(Farm, Farm.id == CropCycle.farm_id)
+            .where(Farm.producer_id == producer_obj.id)
+            .distinct()
+        )
+
+        candidate_ids = select(Order.id).where(
+            or_(
+                Order.id.in_(product_order_ids),
+                Order.id.in_(cycle_order_ids),
+            )
+        )
+
+        if status_filter:
+            candidate_ids = candidate_ids.where(func.upper(Order.status) == status_filter)
+
+        order_ids = (
+            candidate_ids.order_by(desc(Order.created_at)).limit(safe_limit * 2)
+        ).subquery()
+
+        stmt = (
+            select(Order)
+            .options(
+                selectinload(Order.items).selectinload(OrderItem.product),
+                selectinload(Order.crop_cycle).selectinload(CropCycle.farm),
+            )
+            .where(Order.id.in_(select(order_ids.c.id)))
+            .order_by(desc(Order.created_at))
+        )
+
+        if status_filter:
+            stmt = stmt.where(func.upper(Order.status) == status_filter)
+
+        result = await self.session.execute(stmt)
+        orders = result.scalars().unique().all()
+
+        if not orders:
+            message = (
+                f"Aucune commande avec le statut '{status_filter}' n'a été trouvée."
+                if status_filter
+                else "Aucune commande n'a encore été passée auprès de vos produits."
+            )
+            return {"status": "success", "count": 0, "message": message, "data": []}
+
+        status_icons = {
+            "PENDING": "🟡",
+            "CONFIRMED": "🟢",
+            "COMPLETED": "✅",
+            "DELIVERED": "✅",
+            "IN_PROGRESS": "🔵",
+            "CANCELLED": "❌",
+            "FAILED": "❌",
+        }
+
+        def _fmt_amount(amount: float | None, currency: str | None = "XOF") -> str:
+            if amount in (None, ""):
+                return "—"
+            pretty = f"{float(amount):,.0f}".replace(",", " ").replace(".", ",")
+            return f"{pretty} {currency or 'XOF'}"
+
+        payload: List[Dict[str, Any]] = []
+        menu_lines = ["📦 *Vos commandes récentes :*"]
+        mapping: Dict[str, str] = {}
+
+        for idx, order in enumerate(orders, start=1):
+            relevant_items: List[Dict[str, Any]] = []
+            for item in order.items or []:
+                product = item.product
+                if not product or getattr(product, "producer_id", None) != producer_obj.id:
+                    continue
+                relevant_items.append(
+                    {
+                        "product_id": str(product.id),
+                        "product_name": product.name,
+                        "quantity": float(item.quantity or 0.0),
+                        "unit": (product.unit or "UNITE").upper(),
+                        "price_at_sale": float(item.price_at_sale or 0.0),
+                    }
+                )
+
+            cycle_context = None
+            if not relevant_items and order.crop_cycle and order.crop_cycle.farm:
+                if order.crop_cycle.farm.producer_id == producer_obj.id:
+                    cycle_label = order.crop_cycle.crop_type or order.crop_cycle.species or "Production future"
+                    cycle_context = {
+                        "product_id": str(order.crop_cycle.id),
+                        "product_name": cycle_label,
+                        "quantity": float(order.crop_cycle.available_quantity or 0.0),
+                        "unit": (order.crop_cycle.unit or "KG").upper(),
+                        "source": "CROP_CYCLE",
+                    }
+                    relevant_items.append(cycle_context)
+
+            status_value = (order.status or "PENDING").upper()
+            status_label = f"{status_icons.get(status_value, '🧾')} {status_value.title()}"
+            order_code = (order.whatsapp_id or str(order.id))[:8].upper()
+            amount_label = _fmt_amount(order.total_amount, order.currency)
+            buyer_label = order.customer_name or "Acheteur"
+            buyer_phone = order.customer_phone or "-"
+            source_type = "PREORDER" if order.crop_cycle_id else (order.order_type or "STANDARD").upper()
+
+            summary_items = ", ".join(
+                f"{item['product_name']} ({item['quantity']:.0f} {item['unit']})"
+                for item in relevant_items
+                if item.get("quantity") is not None
+            )
+            if not summary_items:
+                summary_items = cycle_context["product_name"] if cycle_context else "—"
+
+            menu_lines.append(
+                f"\n*{idx}. {status_label}* · {amount_label}\n"
+                f"{summary_items}\n"
+                f"👤 {buyer_label} ({buyer_phone}) · Réf: #{order_code}"
+            )
+            mapping[str(idx)] = str(order.id)
+
+            payload.append(
+                {
+                    "order_id": str(order.id),
+                    "reference": order_code,
+                    "status": status_value,
+                    "delivery_status": (order.delivery_status or "PENDING").upper(),
+                    "payment_status": (order.payment_status or "PENDING").upper(),
+                    "created_at": order.created_at.isoformat() if order.created_at else None,
+                    "total_amount": float(order.total_amount or 0.0),
+                    "currency": order.currency or "XOF",
+                    "buyer_name": buyer_label,
+                    "buyer_phone": buyer_phone,
+                    "order_type": source_type,
+                    "items": relevant_items,
+                }
+            )
+
+        return {
+            "status": "success",
+            "count": len(payload),
+            "formatted_menu": "\n".join(menu_lines),
+            "mapping": mapping,
+            "data": payload,
+        }
+
+
+    async def update_production_visibility(
+        self,
+        cycle_id: str,
+        *,
+        phone: str | None = None,
+        producer_id: str | None = None,
+        is_public: bool | None = None,
+        preorder_enabled: bool | None = None,
+    ) -> Dict[str, Any]:
+        """Permet d'activer/désactiver l'exposition d'un lot de production future."""
+
+        resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        cycle_uuid = _as_uuid(cycle_id, "cycle_id")
+
+        stmt = (
+            select(CropCycle, Farm)
+            .join(Farm, Farm.id == CropCycle.farm_id)
+            .where(CropCycle.id == cycle_uuid)
+        )
+        result = await self.session.execute(stmt)
+        row = result.first()
+        if not row:
+            raise ValueError("Cycle introuvable pour l'identifiant fourni")
+        cycle, farm = row
+
+        user_row = await self._fetch_user_entities(resolved_phone)
+        if not user_row or not user_row[1]:
+            raise ValueError("Profil producteur introuvable")
+        if farm.producer_id != user_row[1].id:
+            raise ValueError("Vous n'êtes pas autorisé à modifier cette production")
+
+        if is_public is not None:
+            cycle.is_public = bool(is_public)
+        if preorder_enabled is not None:
+            cycle.preorder_enabled = bool(preorder_enabled)
+
+        await self.session.flush()
+        snapshot = _cycle_to_payload(cycle, farm)
+        return {
+            "status": "success",
+            "message": "✅ Visibilité mise à jour.",
+            "data": snapshot,
+        }
+
+
+
+    async def get_producer_stocks(
+        self,
+        phone: Optional[str] = None,
+        producer_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Retourne un inventaire aplati (liste d'items) pour l'agent conversationnel."""
+
+        try:
+            lookup_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        except ValueError:
+            return {
+                "status": "error",
+                "message": "Identité producteur introuvable pour la consultation des stocks.",
+                "data": [],
+            }
+
+        base_res = await self.get_stocks(phone=lookup_phone)
+        if (base_res or {}).get("status") != "success":
+            return base_res
+
+        farms = base_res.get("data") or {}
+        if not isinstance(farms, dict):
+            return base_res
+
+        flattened: List[Dict[str, Any]] = []
+        for farm_id, metadata in farms.items():
+            stocks = metadata.get("stocks") or []
+            if not isinstance(stocks, list):
+                continue
+            for entry in stocks:
+                flattened.append(
+                    {
+                        "stock_id": entry.get("stock_id"),
+                        "item_name": entry.get("item_name"),
+                        "quantity": entry.get("quantity"),
+                        "unit": entry.get("unit", "KG"),
+                        "farm_id": farm_id,
+                        "farm_name": metadata.get("farm_name"),
+                        "location": metadata.get("location"),
+                    }
+                )
+
+        return {
+            "status": "success",
+            "count": len(flattened),
+            "data": flattened,
+        }
 
     async def add_stock_movement(
         self, 
@@ -641,7 +1443,16 @@ class ProducerMgmtMixin(BaseMixin):
         await self.session.refresh(order)
         return order.to_dict()
 
-    async def get_or_create_client(self, phone: str, name: str, client_phone: str, email: str = None, location: str = None) -> Dict[str, Any]:
+    async def get_or_create_client(
+        self,
+        name: str,
+        client_phone: str,
+        email: str = None,
+        location: str = None,
+        *,
+        producer_id: str | None = None,
+        phone: str | None = None,
+    ) -> Dict[str, Any]:
         """
         Identifie ou ajoute un client via self.session.
         """
@@ -649,7 +1460,8 @@ class ProducerMgmtMixin(BaseMixin):
         client_phone = clean_text(client_phone, "client_phone", required=True, max_length=40)
         
         try:
-            user, _ = await self.get_producer_profile(phone)
+            resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+            user, _ = await self.get_producer_profile(resolved_phone)
             
             stmt = select(Client).where(Client.producer_id == user.id, Client.phone == client_phone)
             result = await self.session.execute(stmt)
@@ -666,12 +1478,13 @@ class ProducerMgmtMixin(BaseMixin):
         except ValueError as e:
             return {"error": str(e)}
 
-    async def get_clients(self, phone: str) -> Union[List[Dict[str, Any]], Dict[str, str]]:
+    async def get_clients(self, producer_id: str | None = None, *, phone: str | None = None) -> Union[List[Dict[str, Any]], Dict[str, str]]:
         """
         Liste les clients via self.session.
         """
         try:
-            user, _ = await self.get_producer_profile(phone)
+            resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+            user, _ = await self.get_producer_profile(resolved_phone)
             stmt = select(Client).where(Client.producer_id == user.id).order_by(desc(Client.total_spent))
             result = await self.session.execute(stmt)
             return [c.to_dict() for c in result.scalars()]

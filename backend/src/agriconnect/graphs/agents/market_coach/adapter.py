@@ -17,8 +17,8 @@ import uuid
 from typing import Any, Dict
 
 from agriconnect.graphs.agents.common.output import AgriAgentOutput, ExpertMetadata
-from agriconnect.graphs.agents.market_coach.nodes import build
-from agriconnect.graphs.agents.market_coach.state import MarketAgentState
+from agriconnect.graphs.agents.market_coach.core.graph_builder import build_graph as build
+from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
 
 logger = logging.getLogger("Agent.MarketCoach.adapter")
 
@@ -83,6 +83,7 @@ def _build_initial_state(query: str, context: Dict[str, Any]) -> MarketAgentStat
         "interpreted_event": "UNKNOWN",
         "detected_intent": "UNKNOWN",
         "interpreter_confidence": 0.0,
+        "validation_status": None,
         "extracted_entities": {},
         "raw_analysis": {},
         # 5. GOAL

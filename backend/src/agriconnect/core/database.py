@@ -115,16 +115,38 @@ def init_db() -> None:
     else:
         raise RuntimeError(f"Unsupported DB_SSL_MODE: {ssl_mode}. Expected verify-full|require|disable")
 
-    connect_args = {"prepared_statement_cache_size": 0}
+    # Disable asyncpg statement caches because DigitalOcean regularly rotates
+    # schema metadata during maintenance windows, which invalidates prepared
+    # plans and triggers InvalidCachedStatementError. Let SQLAlchemy re-prepare
+    # on demand for each execution instead of relying on server caches.
+    connect_args = {
+        "prepared_statement_cache_size": 0,
+        "statement_cache_size": 0,
+    }
     # Only pass ssl when a context is present (asyncpg doesn't accept False)
     if ssl_context is not None:
         connect_args["ssl"] = ssl_context
 
+    pool_size = getattr(settings, "DB_POOL_SIZE", 10) or 10
+    max_overflow = getattr(settings, "DB_POOL_MAX_OVERFLOW", 5) or 5
+    pool_timeout = getattr(settings, "DB_POOL_TIMEOUT", 30.0) or 30.0
+
+    if pool_size < 5:
+        logger.warning("DB_POOL_SIZE trop faible (%s) — forçage à 5.", pool_size)
+        pool_size = 5
+    if max_overflow < 0:
+        logger.warning("DB_POOL_MAX_OVERFLOW négatif (%s) — forçage à 0.", max_overflow)
+        max_overflow = 0
+    if pool_timeout < 10:
+        logger.warning("DB_POOL_TIMEOUT trop faible (%s) — forçage à 10s.", pool_timeout)
+        pool_timeout = 10.0
+
     _async_engine = create_async_engine(
         url,
         connect_args=connect_args,
-        pool_size=10,
-        max_overflow=5,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_timeout=pool_timeout,
         pool_pre_ping=True,
         echo=bool(getattr(settings, "DEBUG", False)),
     )

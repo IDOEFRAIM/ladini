@@ -1,4 +1,4 @@
-﻿import logging
+﻿﻿import logging
 from typing import Any, Dict, Optional
 
 # Configuration et Core
@@ -6,7 +6,7 @@ from agriconnect.core.settings import settings
 import agriconnect.core.database as _core_db
 import agriconnect.core.db as core_db_new
 from agriconnect.services.db_handler import AgriDatabase
-from agriconnect.rag.components import get_groq_sdk
+from futur.rag.components import get_groq_sdk
 from agriconnect.core.tracing import init_tracing
 
 # Protocoles

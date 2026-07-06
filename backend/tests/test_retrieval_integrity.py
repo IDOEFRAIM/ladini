@@ -3,9 +3,9 @@ import json
 import pytest
 import numpy as np
 
-from agriconnect.rag.providers.redis_search_provider import RedisSearchProvider
-from agriconnect.rag.components import get_embedding_model
-from agriconnect.rag.errors import DimensionMismatchError
+from futur.rag.providers.redis_search_provider import RedisSearchProvider
+from futur.rag.components import get_embedding_model
+from futur.rag.errors import DimensionMismatchError
 from agriconnect.core.settings import settings
 
 
@@ -76,7 +76,7 @@ def test_retrieval_integrity_top3():
     assert q_vec.size == int(settings.RAG_EMBEDDING_DIM)
 
     # Run retrieval (allow degraded manual similarity)
-    from agriconnect.rag.core.models import QueryBundle
+    from futur.rag.core.models import QueryBundle
 
     bundle = QueryBundle(vector=q_vec.tolist(), top_k=3, filters={"is_indexed": True}, text_query=query_sentence)
     results = provider.query(bundle)

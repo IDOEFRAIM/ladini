@@ -172,7 +172,7 @@ def check_weather_alerts(self) -> Dict[str, Any]:
         # ── Lazy import des dépendances lourdes ──
         try:
             from backend._legacy.sentinelle.graph import get_agent_graph
-            from agriconnect.rag.components import get_groq_sdk
+            from futur.rag.components import get_groq_sdk
         except ImportError as e:
             raise FatalTaskError(
                 f"Required modules not available: {e}"

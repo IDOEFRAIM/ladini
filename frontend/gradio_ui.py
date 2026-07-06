@@ -55,7 +55,7 @@ def generate_answer(question: str, profile_text: str) -> str:
 
     # Local mode: invoke Formation graph directly using the compiled graph (advisor-first)
     try:
-        from agriconnect.graphs.agents.formation.graph import FormationCoach
+        from futur.formation.graph import FormationCoach
 
         coach = FormationCoach.from_config()
         context = profile

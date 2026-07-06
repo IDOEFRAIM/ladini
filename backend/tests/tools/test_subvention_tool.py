@@ -7,7 +7,7 @@ if ROOT not in sys.path:
 
 import pytest
 
-from agriconnect.tools import subvention as sub_mod
+from futur.tools import subvention as sub_mod
 
 
 def test_check_eligibility_profiles():

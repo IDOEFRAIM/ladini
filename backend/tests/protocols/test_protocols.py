@@ -10,7 +10,7 @@ class TestA2ARegistry:
     """Tests du registre d'agents A2A."""
 
     def test_register_agent(self):
-        from agriconnect.protocols.a2a.registry import A2ARegistry, AgentCard, AgentDomain
+        from futur.a2a.registry import A2ARegistry, AgentCard, AgentDomain
 
         reg = A2ARegistry()
         card = AgentCard(
@@ -25,7 +25,7 @@ class TestA2ARegistry:
         assert len(agent_id) > 0
 
     def test_discover_by_domain(self):
-        from agriconnect.protocols.a2a.registry import A2ARegistry, AgentCard, AgentDomain
+        from futur.a2a.registry import A2ARegistry, AgentCard, AgentDomain
 
         reg = A2ARegistry()
         card = AgentCard(
@@ -41,7 +41,7 @@ class TestA2ARegistry:
         assert any(c.name == "FormationAgent" for c in found)
 
     def test_discover_by_intent(self):
-        from agriconnect.protocols.a2a.registry import A2ARegistry, AgentCard, AgentDomain
+        from futur.a2a.registry import A2ARegistry, AgentCard, AgentDomain
 
         reg = A2ARegistry()
         card = AgentCard(
@@ -56,7 +56,7 @@ class TestA2ARegistry:
         assert found[0].name == "PriceAgent"
 
     def test_register_and_unregister(self):
-        from agriconnect.protocols.a2a.registry import A2ARegistry, AgentCard, AgentDomain
+        from futur.a2a.registry import A2ARegistry, AgentCard, AgentDomain
 
         reg = A2ARegistry()
         card = AgentCard(name="TempAgent", domain=AgentDomain.SOIL)
@@ -66,7 +66,7 @@ class TestA2ARegistry:
         assert len(reg.discover()) == 0
 
     def test_heartbeat_updates_status(self):
-        from agriconnect.protocols.a2a.registry import (
+        from futur.a2a.registry import (
             A2ARegistry, AgentCard, AgentDomain, AgentStatus,
         )
 
@@ -77,7 +77,7 @@ class TestA2ARegistry:
         assert reg._agents[agent_id].status == AgentStatus.BUSY
 
     def test_stats(self):
-        from agriconnect.protocols.a2a.registry import A2ARegistry, AgentCard, AgentDomain
+        from futur.a2a.registry import A2ARegistry, AgentCard, AgentDomain
 
         reg = A2ARegistry()
         reg.register(AgentCard(name="A", domain=AgentDomain.FORMATION, intents=["LEARN"]))
@@ -91,7 +91,7 @@ class TestA2AMessaging:
     """Tests du canal de messagerie A2A."""
 
     def test_create_message(self):
-        from agriconnect.protocols.a2a.messaging import A2AMessage, MessageType
+        from futur.a2a.messaging import A2AMessage, MessageType
 
         msg = A2AMessage(
             sender_id="agent_1",
@@ -106,7 +106,7 @@ class TestA2AMessaging:
         assert msg.intent == "CHECK_PRICE"
 
     def test_message_validation_ok(self):
-        from agriconnect.protocols.a2a.messaging import A2AMessage, MessageType
+        from futur.a2a.messaging import A2AMessage, MessageType
 
         msg = A2AMessage(
             sender_id="a1",
@@ -117,14 +117,14 @@ class TestA2AMessaging:
         assert result == {"status": "ok"}
 
     def test_message_validation_missing_sender(self):
-        from agriconnect.protocols.a2a.messaging import A2AMessage
+        from futur.a2a.messaging import A2AMessage
 
         msg = A2AMessage(receiver_id="a2", intent="SELL")
         result = msg.validate()
         assert "error" in result
 
     def test_copy_for_receiver(self):
-        from agriconnect.protocols.a2a.messaging import A2AMessage, MessageType
+        from futur.a2a.messaging import A2AMessage, MessageType
 
         msg = A2AMessage(
             sender_id="broadcaster",
@@ -141,7 +141,7 @@ class TestA2AMessaging:
         assert copy.message_id != msg.message_id
 
     def test_channel_send_receive(self):
-        from agriconnect.protocols.a2a.messaging import A2AChannel, A2AMessage, MessageType
+        from futur.a2a.messaging import A2AChannel, A2AMessage, MessageType
         from agriconnect.protocols.core import AckStatus
 
         channel = A2AChannel()
@@ -161,7 +161,7 @@ class TestA2AMessaging:
         assert inbox[0].payload["type"] == "FLOOD"
 
     def test_send_requires_receiver_id(self):
-        from agriconnect.protocols.a2a.messaging import A2AChannel, A2AMessage
+        from futur.a2a.messaging import A2AChannel, A2AMessage
 
         channel = A2AChannel()
         msg = A2AMessage(sender_id="a1", intent="SELL")  # no receiver_id
@@ -169,7 +169,7 @@ class TestA2AMessaging:
             channel.send(msg)
 
     def test_broadcast_creates_copies(self):
-        from agriconnect.protocols.a2a.messaging import A2AChannel, A2AMessage, MessageType
+        from futur.a2a.messaging import A2AChannel, A2AMessage, MessageType
 
         channel = A2AChannel()
         channel.subscribe("a1", "ALERTS")
@@ -194,7 +194,7 @@ class TestA2AMessaging:
         assert inbox_a1[0].message_type == MessageType.BROADCAST
 
     def test_broadcast_excludes_sender(self):
-        from agriconnect.protocols.a2a.messaging import A2AChannel, A2AMessage
+        from futur.a2a.messaging import A2AChannel, A2AMessage
 
         channel = A2AChannel()
         channel.subscribe("broadcaster", "NEWS")
@@ -206,7 +206,7 @@ class TestA2AMessaging:
         assert "listener" in delivered
 
     def test_handshake_requires_receiver_id(self):
-        from agriconnect.protocols.a2a.messaging import A2AChannel, A2AMessage
+        from futur.a2a.messaging import A2AChannel, A2AMessage
 
         channel = A2AChannel()
         msg = A2AMessage(sender_id="a1", intent="NEGOTIATE")
@@ -214,7 +214,7 @@ class TestA2AMessaging:
             channel.initiate_handshake(msg)
 
     def test_handshake_full_cycle(self):
-        from agriconnect.protocols.a2a.messaging import (
+        from futur.a2a.messaging import (
             A2AChannel, A2AMessage, HandshakeStatus, MessageType,
         )
 
@@ -234,7 +234,7 @@ class TestA2AMessaging:
         assert resp.sender_id == "seller"
 
     def test_idempotency_dedup(self):
-        from agriconnect.protocols.a2a.messaging import A2AChannel, A2AMessage
+        from futur.a2a.messaging import A2AChannel, A2AMessage
         from agriconnect.protocols.core import AckStatus
 
         channel = A2AChannel()
@@ -247,7 +247,7 @@ class TestA2AMessaging:
         assert len(inbox) == 1
 
     def test_channel_stats(self):
-        from agriconnect.protocols.a2a.messaging import A2AChannel, A2AMessage
+        from futur.a2a.messaging import A2AChannel, A2AMessage
 
         channel = A2AChannel()
         channel.send(A2AMessage(sender_id="a", receiver_id="b", intent="X"))
@@ -260,14 +260,14 @@ class TestA2ADiscovery:
     """Tests du service de découverte A2A."""
 
     def test_discovery_init(self):
-        from agriconnect.protocols.a2a import A2ADiscovery
+        from futur.a2a import A2ADiscovery
 
         discovery = A2ADiscovery()
         assert discovery.registry is not None
         assert discovery.channel is not None
 
     def test_register_internal_agents(self):
-        from agriconnect.protocols.a2a import A2ADiscovery
+        from futur.a2a import A2ADiscovery
 
         discovery = A2ADiscovery()
         discovery.register_internal_agents()
@@ -277,7 +277,7 @@ class TestA2ADiscovery:
         assert stats["active"] >= 5
 
     def test_discover_agent_by_intent(self):
-        from agriconnect.protocols.a2a import A2ADiscovery
+        from futur.a2a import A2ADiscovery
 
         discovery = A2ADiscovery()
         discovery.register_internal_agents()
@@ -431,7 +431,7 @@ class TestAsyncACK:
     """Tests for async ACK pattern on A2AChannel."""
 
     def test_send_returns_async_result(self):
-        from agriconnect.protocols.a2a.messaging import A2AChannel, A2AMessage
+        from futur.a2a.messaging import A2AChannel, A2AMessage
         from agriconnect.protocols.core import AckStatus
 
         channel = A2AChannel()
@@ -442,7 +442,7 @@ class TestAsyncACK:
         assert ack.queue_position >= 1
 
     def test_send_rejected_invalid_message(self):
-        from agriconnect.protocols.a2a.messaging import A2AChannel, A2AMessage
+        from futur.a2a.messaging import A2AChannel, A2AMessage
         from agriconnect.protocols.core import AckStatus
 
         channel = A2AChannel()
@@ -452,7 +452,7 @@ class TestAsyncACK:
         assert ack.error
 
     def test_send_duplicate_returns_duplicate(self):
-        from agriconnect.protocols.a2a.messaging import A2AChannel, A2AMessage
+        from futur.a2a.messaging import A2AChannel, A2AMessage
         from agriconnect.protocols.core import AckStatus
 
         channel = A2AChannel()
@@ -467,14 +467,14 @@ class TestMessageTraceEnvelope:
     """Tests that A2AMessage carries trace_envelope and records steps."""
 
     def test_message_auto_creates_trace(self):
-        from agriconnect.protocols.a2a.messaging import A2AMessage
+        from futur.a2a.messaging import A2AMessage
 
         msg = A2AMessage(sender_id="a1", receiver_id="a2", intent="SELL")
         assert msg.trace_envelope is not None
         assert msg.trace_envelope.trace_id
 
     def test_send_records_trace_step(self):
-        from agriconnect.protocols.a2a.messaging import A2AChannel, A2AMessage
+        from futur.a2a.messaging import A2AChannel, A2AMessage
 
         channel = A2AChannel()
         msg = A2AMessage(sender_id="a1", receiver_id="a2", intent="SELL")
@@ -484,13 +484,13 @@ class TestMessageTraceEnvelope:
         assert msg.trace_envelope.steps[0].action == "send"
 
     def test_message_schema_v2(self):
-        from agriconnect.protocols.a2a.messaging import A2AMessage
+        from futur.a2a.messaging import A2AMessage
 
         msg = A2AMessage(sender_id="a1", intent="X")
         assert msg.schema_version == "2.0"
 
     def test_message_to_dict_includes_trace(self):
-        from agriconnect.protocols.a2a.messaging import A2AMessage
+        from futur.a2a.messaging import A2AMessage
 
         msg = A2AMessage(sender_id="a1", receiver_id="a2", intent="SELL")
         d = msg.to_dict()
@@ -676,7 +676,7 @@ class TestBrokerAbstraction:
     """Tests for the message broker layer."""
 
     def test_in_memory_broker_enqueue_dequeue(self):
-        from agriconnect.protocols.a2a.messaging import InMemoryBroker, A2AMessage
+        from futur.a2a.messaging import InMemoryBroker, A2AMessage
 
         broker = InMemoryBroker()
         msg = A2AMessage(sender_id="a1", receiver_id="a2", intent="X")
@@ -691,7 +691,7 @@ class TestBrokerAbstraction:
         assert broker.queue_length("a2") == 0
 
     def test_channel_with_custom_broker(self):
-        from agriconnect.protocols.a2a.messaging import (
+        from futur.a2a.messaging import (
             A2AChannel, A2AMessage, InMemoryBroker,
         )
         from agriconnect.protocols.core import AckStatus
@@ -710,7 +710,7 @@ class TestScoredDiscovery:
     """Tests for scored agent discovery with trace recording."""
 
     def test_discover_scored_returns_scores(self):
-        from agriconnect.protocols.a2a.registry import (
+        from futur.a2a.registry import (
             A2ARegistry, AgentCard, AgentDomain,
         )
 

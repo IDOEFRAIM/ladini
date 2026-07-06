@@ -4,7 +4,7 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from agriconnect.rag.redis_search_store import RedisSearchVectorStore
+from futur.rag.redis_search_store import RedisSearchVectorStore
 
 
 def make_vec_bytes(dim=384):

@@ -18,9 +18,16 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+import asyncio
+import time
+from collections import OrderedDict
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Any, Dict, Generator, List, Optional
 
 from fastmcp import FastMCP, Context
+from agriconnect.infrastructure.mcp.utils import run_coro_blocking
 
 logger = logging.getLogger("MCP.Context")
 
@@ -28,12 +35,49 @@ logger = logging.getLogger("MCP.Context")
 
 mcp = FastMCP("AgriConnect Context MCP Server")
 
+# ────────────────────── Scoped context state ──────────────────────────────
+
+
+@dataclass(frozen=True)
+class FarmerContext:
+    user_id: str
+    phone_number: str
+    session_id: str
+    language: str = "fr"
+
+
+_MCP_CONTEXT: ContextVar[Optional[FarmerContext]] = ContextVar("agriconnect_mcp_context", default=None)
+
+
+def set_mcp_context(context: Optional[FarmerContext]) -> None:
+    _MCP_CONTEXT.set(context)
+
+
+def get_mcp_context(default: Optional[FarmerContext] = None) -> Optional[FarmerContext]:
+    return _MCP_CONTEXT.get(default)
+
+
+@contextmanager
+def mcp_context_scope(context: Optional[FarmerContext]) -> Generator[None, None, None]:
+    token = _MCP_CONTEXT.set(context)
+    try:
+        yield
+    finally:
+        _MCP_CONTEXT.reset(token)
+
+
 # ────────────────────── Module-level state ────────────────────────────────
 
 _optimizer = None
 _session_factory = None
 _llm_client = None
-_context_cache: Dict[str, Dict[str, Any]] = {}
+@dataclass
+class _CacheEntry:
+    payload: Dict[str, Any]
+    expires_at: float
+
+
+_context_cache: "OrderedDict[str, _CacheEntry]" = OrderedDict()
 _default_ttl: int = 300  # 5 min
 
 
@@ -67,6 +111,41 @@ def _lazy_optimizer():
         except Exception as exc:
             logger.error("ContextOptimizer unavailable: %s", exc)
     return _optimizer
+
+
+def _cache_set(user_id: str, payload: Dict[str, Any]) -> None:
+    expires = time.monotonic() + _default_ttl
+    _context_cache[user_id] = _CacheEntry(payload=payload, expires_at=expires)
+    _context_cache.move_to_end(user_id)
+    _prune_context_cache()
+
+
+def _cache_get(user_id: str) -> Optional[Dict[str, Any]]:
+    entry = _context_cache.get(user_id)
+    if not entry:
+        return None
+    if entry.expires_at < time.monotonic():
+        _context_cache.pop(user_id, None)
+        return None
+    return entry.payload
+
+
+def _prune_context_cache() -> None:
+    now = time.monotonic()
+    stale_keys = [key for key, value in _context_cache.items() if value.expires_at < now]
+    for key in stale_keys:
+        _context_cache.pop(key, None)
+    # Keep cache bounded (e.g., 512 entries) to avoid memory leaks
+    while len(_context_cache) > 512:
+        _context_cache.popitem(last=False)
+
+
+def _sync_await(coro):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return run_coro_blocking(coro)
+    raise RuntimeError("Synchronous MCPContextServer API called from running event loop; use async equivalent")
 
 
 # ────────────────────── Tools ─────────────────────────────────────────────
@@ -105,7 +184,7 @@ async def build_context(
         user_id, query, zone=zone or None, crop=crop or None,
     )
     # cache result
-    _context_cache[user_id] = result
+    _cache_set(user_id, result)
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
@@ -247,40 +326,30 @@ class MCPContextServer:
             raise ValueError(f"Unknown context tool: {name}")
         return await fn(**args)
 
-    def call_tool(self, name: str, arguments: dict) -> dict:
-        """Synchronous call_tool returning ``{status, content}`` dict."""
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+    async def call_tool_async(self, name: str, arguments: dict) -> dict:
+        raw = await self._dispatch(name, arguments)
+        return {
+            "status": "ok",
+            "content": [{"type": "text", "text": raw}],
+        }
 
+    def call_tool(self, name: str, arguments: dict) -> dict:
         try:
-            raw = loop.run_until_complete(self._dispatch(name, arguments))
-            return {
-                "status": "ok",
-                "content": [{"type": "text", "text": raw}],
-            }
+            return _sync_await(self.call_tool_async(name, arguments))
         except Exception as exc:
             logger.error("call_tool error (%s): %s", name, exc)
             return {"status": "error", "error": str(exc)}
 
-    def read_resource(self, uri: str, params: dict = None) -> dict:
-        """Synchronous resource reader."""
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+    async def read_resource_async(self, uri: str, params: dict = None) -> dict:
+        raw = await context_status()
+        return {
+            "status": "ok",
+            "contents": [{"uri": uri, "mimeType": "application/json", "text": raw}],
+        }
 
+    def read_resource(self, uri: str, params: dict = None) -> dict:
         try:
-            raw = loop.run_until_complete(context_status())
-            return {
-                "status": "ok",
-                "contents": [{"uri": uri, "mimeType": "application/json", "text": raw}],
-            }
+            return _sync_await(self.read_resource_async(uri, params))
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
@@ -308,17 +377,11 @@ class MCPContextServer:
         except Exception:
             bypass = False
 
-        if user_id in _context_cache and not bypass:
-            return _context_cache[user_id]
+        cached = _cache_get(user_id)
+        if cached and not bypass:
+            return cached
 
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        raw = loop.run_until_complete(
+        raw = _sync_await(
             build_context(user_id=user_id or "anonymous", query=query, zone=zone, crop=crop)
         )
         try:

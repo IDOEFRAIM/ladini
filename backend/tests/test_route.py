@@ -10,7 +10,7 @@ from agriconnect.graphs.route import Router
 def _real_llm():
     # Use the configured SDK client from our RAG components. This will
     # raise a clear error if the environment isn't configured for a real LLM.
-    from agriconnect.rag.components import get_groq_sdk
+    from futur.rag.components import get_groq_sdk
 
     return get_groq_sdk()
 
@@ -164,7 +164,7 @@ def test_map_agent_id_to_key_variants():
 # it checks that the LLM returns a valid analysis structure.
 @pytest.mark.skipif(os.getenv("TEST_REAL_LLM", "").lower() not in ("1", "true", "yes"), reason="Real LLM tests disabled")
 def test_analyze_needs_with_real_llm():
-    from agriconnect.rag.components import get_groq_sdk
+    from futur.rag.components import get_groq_sdk
 
     llm = get_groq_sdk()
     router = Router(llm=llm, ctx=None)

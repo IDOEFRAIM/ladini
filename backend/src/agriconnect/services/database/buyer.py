@@ -1,9 +1,10 @@
 import logging
+import unicodedata
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Dict, List
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, desc, update, case,literal
+from sqlalchemy import select, desc, update, case, literal, or_
 from sqlalchemy.orm import selectinload, joinedload
 
 
@@ -12,10 +13,83 @@ from .base import BaseMixin
 # Import des modèles alignés sur le schéma
 from agriconnect.domain.models import (
     BuyerProfile, Order, OrderItem, Delivery, 
-    Product, User, BuyerType, Zone, Producer, TrustScore
+    Product, User, BuyerType, Zone, Producer, TrustScore,
+    Auction, Bid, CropCycle, Farm
 )
 
 logger = logging.getLogger("agriconnect.services.database.buyer")
+
+_LIVESTOCK_KEYWORDS: tuple[str, ...] = (
+    "chevre",
+    "chevres",
+    "chevrettes",
+    "mouton",
+    "moutons",
+    "ovin",
+    "ovins",
+    "caprin",
+    "caprins",
+    "bovin",
+    "bovins",
+    "vache",
+    "vaches",
+    "boeuf",
+    "boeufs",
+    "taureau",
+    "taureaux",
+    "veau",
+    "veaux",
+    "poulet",
+    "poulets",
+    "poule",
+    "poules",
+    "volaille",
+    "volailles",
+    "canard",
+    "canards",
+    "dinde",
+    "dindes",
+    "dindon",
+    "dindons",
+    "pintade",
+    "pintades",
+    "porc",
+    "porcs",
+    "cochon",
+    "cochons",
+    "porcelet",
+    "porcelets",
+    "lapin",
+    "lapins",
+    "cobaye",
+    "cobayes",
+    "ane",
+    "anes",
+    "cheval",
+    "chevaux",
+    "poussins",
+    "poussin",
+)
+
+
+def _normalize_ascii_lower(text: Optional[str]) -> str:
+    if not text:
+        return ""
+    decomposed = unicodedata.normalize("NFKD", text)
+    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return stripped.lower()
+
+
+def _guess_display_unit(product_name: Optional[str], db_unit: Optional[str]) -> str:
+    unit = (db_unit or "").strip().upper()
+    if unit in {"KILOGRAMME", "KILOGRAMMES", "KGS"}:
+        unit = "KG"
+    if unit and unit not in {"", "KG"}:
+        return unit
+    normalized_name = _normalize_ascii_lower(product_name)
+    if normalized_name and any(keyword in normalized_name for keyword in _LIVESTOCK_KEYWORDS):
+        return "TETE"
+    return unit or "KG"
 
 class BuyerMixin(BaseMixin):
     """
@@ -101,10 +175,11 @@ class BuyerMixin(BaseMixin):
 
 
     async def search_products(self, product: str, phone: str, limit: int = 15) -> Dict[str, Any]:
-        """Recherche Marketplace robuste avec jointures défensives (outerjoin).
-        
-        Garantit que les produits s'affichent même si les relations producteurs, 
-        utilisateurs ou zones sont partiellement incomplètes en base de données.
+        """Recherche unifiée Buyer : catalogue immédiat + productions futures.
+
+        Retourne un schéma homogène pour permettre au flow buyer de distinguer
+        clairement les produits disponibles (DIRECT) et les précommandes futures
+        (FUTURE / CropCycle) sans heuristique textuelle.
         """
         current_session = self.session
         if not current_session:
@@ -134,56 +209,133 @@ class BuyerMixin(BaseMixin):
                 
             priority_score = case(*conditions, else_=3).label("priority") if conditions else literal(3).label("priority")
 
-            # 🛡️ UTILISATION DE OUTERJOIN (LEFT JOIN) POUR ÉVITER L'ÉVAPORATION DES PRODUITS
-            stmt = (
+            catalog_stmt = (
                 select(
-                    Product.id, 
-                    Product.name, 
-                    Product.price, 
-                    Product.quantity_for_sale, 
+                    Product.id,
+                    Product.name,
+                    Product.price,
+                    Product.quantity_for_sale,
                     Product.unit,
-                    User.name.label("producer_name"), 
-                    priority_score
+                    Producer.id.label("producer_id"),
+                    User.name.label("producer_name"),
+                    Zone.name.label("zone_name"),
+                    priority_score,
                 )
                 .outerjoin(Producer, Producer.id == Product.producer_id)
                 .outerjoin(User, User.id == Producer.user_id)
                 .outerjoin(Zone, Zone.id == Producer.zone_id)
                 .where(
-                    Product.name.ilike(f"%{clean_product}%"), 
-                    Product.quantity_for_sale > 0
+                    Product.name.ilike(f"%{clean_product}%"),
+                    Product.quantity_for_sale > 0,
                 )
                 .order_by("priority", Product.price.asc())
                 .limit(limit)
             )
 
-            result = await current_session.execute(stmt)
-            rows = result.mappings().all()
+            future_priority_score = case(*conditions, else_=3).label("priority") if conditions else literal(3).label("priority")
+            future_stmt = (
+                select(
+                    CropCycle.id,
+                    CropCycle.crop_type,
+                    CropCycle.species,
+                    CropCycle.production_type,
+                    CropCycle.price_per_unit,
+                    CropCycle.available_quantity,
+                    CropCycle.estimated_available_at,
+                    Producer.id.label("producer_id"),
+                    User.name.label("producer_name"),
+                    Zone.name.label("zone_name"),
+                    future_priority_score,
+                )
+                .outerjoin(Farm, Farm.id == CropCycle.farm_id)
+                .outerjoin(Producer, Producer.id == Farm.producer_id)
+                .outerjoin(User, User.id == Producer.user_id)
+                .outerjoin(Zone, Zone.id == Producer.zone_id)
+                .where(
+                    or_(
+                        CropCycle.crop_type.ilike(f"%{clean_product}%"),
+                        CropCycle.species.ilike(f"%{clean_product}%"),
+                    ),
+                    CropCycle.is_public.is_(True),
+                    CropCycle.preorder_enabled.is_(True),
+                    CropCycle.available_quantity > 0,
+                )
+                .order_by("priority", CropCycle.price_per_unit.asc())
+                .limit(limit)
+            )
+
+            catalog_rows = (await current_session.execute(catalog_stmt)).mappings().all()
+            future_rows = (await current_session.execute(future_stmt)).mappings().all()
             
-            if not rows:
+            if not catalog_rows and not future_rows:
                 return {
                     "status": "empty", 
                     "message": f"Désolé, aucun produit correspondant à '{clean_product}' n'est disponible."
                 }
 
-            formatted_results = []
-            for idx, row in enumerate(rows, 1):
+            combined_results: List[Dict[str, Any]] = []
+
+            for row in catalog_rows:
                 is_local = target_uuid is not None and row.get("priority") and int(row["priority"]) <= 2
                 tag = "📍 Local" if is_local else "🌐 National"
                 
-                formatted_results.append({
-                    "display_index": idx,
+                unit_label = _guess_display_unit(row['name'], row["unit"])
+
+                combined_results.append({
                     "id": str(row["id"]),
                     "name": f"{row['name']} ({tag})",
                     "price": float(row["price"]),
-                    "unit": str(row["unit"] or "KG").upper(),
+                    "priority": int(row.get("priority") or 3),
+                    "unit": unit_label,
                     "vendor": row["producer_name"] or "Producteur Anonyme",
-                    "is_local": is_local
+                    "vendor_name": row["producer_name"] or "Producteur Anonyme",
+                    "producer_name": row["producer_name"] or "Producteur Anonyme",
+                    "producer_id": str(row.get("producer_id") or ""),
+                    "zone_name": row.get("zone_name"),
+                    "is_local": is_local,
+                    "source_type": "DIRECT",
+                    "availability_kind": "CATALOG",
+                    "available_quantity": float(row.get("quantity_for_sale") or 0.0),
                 })
+
+            for row in future_rows:
+                estimated = row.get("estimated_available_at")
+                estimated_iso = estimated.isoformat() if estimated else None
+                crop_name = row.get("crop_type") or row.get("species") or clean_product
+                is_local = target_uuid is not None and row.get("priority") and int(row["priority"]) <= 2
+                tag = "📍 Local" if is_local else "🌐 National"
+                display_name = f"{crop_name} ({tag} • ⏳ Future)"
+
+                combined_results.append({
+                    "id": str(row["id"]),
+                    "name": display_name,
+                    "price": float(row.get("price_per_unit") or 0.0),
+                    "priority": int(row.get("priority") or 3),
+                    "unit": _guess_display_unit(crop_name, row.get("production_type") == "LIVESTOCK" and "TETE" or "KG"),
+                    "vendor": row.get("producer_name") or "Producteur Anonyme",
+                    "vendor_name": row.get("producer_name") or "Producteur Anonyme",
+                    "producer_name": row.get("producer_name") or "Producteur Anonyme",
+                    "producer_id": str(row.get("producer_id") or ""),
+                    "zone_name": row.get("zone_name"),
+                    "is_local": is_local,
+                    "source_type": "FUTURE",
+                    "availability_kind": "FUTURE",
+                    "estimated_available_at": estimated_iso,
+                    "available_quantity": float(row.get("available_quantity") or 0.0),
+                    "crop_cycle_id": str(row["id"]),
+                })
+
+            combined_results.sort(key=lambda r: (int(r.get("priority") or 3), 0 if r.get("source_type") == "DIRECT" else 1, float(r.get("price") or 0.0)))
+            formatted_results = []
+            for idx, item in enumerate(combined_results[: max(1, int(limit))], 1):
+                item["display_index"] = idx
+                item.pop("priority", None)
+                formatted_results.append(item)
 
             return {
                 "status": "success",
                 "results": formatted_results,
-                "search_info": "Trié par circuits courts ou par défaut (Prix)."
+                "search_info": "Inclut produits disponibles (catalogue) et productions futures (précommande)."
             }
             
         except Exception as e:
@@ -360,7 +512,6 @@ class BuyerMixin(BaseMixin):
                 .options(selectinload(Order.items).joinedload(OrderItem.product))
                 .where(Order.buyer_id == profile_obj.id)
                 .order_by(desc(Order.created_at))
-                .limit(5)
             )
             result = await current_session.execute(stmt)
             orders = result.unique().scalars().all()
@@ -371,7 +522,7 @@ class BuyerMixin(BaseMixin):
                     "formatted_menu": "📦 *Vos Commandes :*\n\nVous n'avez pas encore passé de commande sur AgriConnect. Tapez *Marketplace* pour voir les produits disponibles !"
                 }
 
-            menu_lines = ["📦 *SUIVI DE VOS COMMANDES (Top 5) :*"]
+            menu_lines = ["📦 *SUIVI DE VOS COMMANDES :*"]
             mapping_cache = {}
 
             for idx, order in enumerate(orders, start=1):
@@ -399,7 +550,7 @@ class BuyerMixin(BaseMixin):
             logger.error(f"Erreur get_buyer_orders_dashboard pour {phone}: {e}")
             return {"status": "error", "message": "Impossible de charger votre suivi de commande."}
 
-    async def cancel_pending_order(self, order_id: str, phone: str) -> Dict[str, Any]:
+    async def cancel_pending_order(self, order_id: str, phone: str, reason: Optional[str] = None) -> Dict[str, Any]:
         """Annule une commande PENDING et recrédite les stocks des produits associés."""
         current_session = self.session
         if not current_session:
@@ -431,11 +582,25 @@ class BuyerMixin(BaseMixin):
                         product.quantity_for_sale += item.quantity
 
             order.status = "CANCELLED"
+            order.cancellation_role = "BUYER"
+            normalized_reason = None
+            if reason:
+                candidate = reason.strip()
+                if candidate:
+                    normalized_reason = candidate
+                    existing_desc = order.delivery_desc or ""
+                    reason_log = f"[CancelReason] {normalized_reason}"
+                    order.delivery_desc = (
+                        f"{existing_desc}\n{reason_log}" if existing_desc else reason_log
+                    )
             await current_session.flush()
 
             return {
                 "status": "success",
-                "message": f"❌ La commande #{str(order.id)[:8].upper()} a été annulée. Les stocks ont été restitués aux agriculteurs."
+                "message": (
+                    f"❌ La commande #{str(order.id)[:8].upper()} a été annulée. Les stocks ont été restitués aux agriculteurs."
+                    + (f"\n📝 Raison : {normalized_reason}" if normalized_reason else "")
+                )
             }
         except Exception as e:
             logger.error(f"Erreur annulation commande {order_id} par {phone}: {e}")
@@ -501,4 +666,698 @@ class BuyerMixin(BaseMixin):
         except Exception as e:
             logger.error(f"Erreur estimation transport pour {phone}: {e}")
             return {"status": "error", "message": "Calcul logistique indisponible temporairement."}
+
+    # ─── SECTION 6 : TUNNEL TRANSACTIONNEL "GRADE ENTREPRISE" ────────────────
+    # Outils MCP alignés sur les modèles Product, Stock, Order/OrderItem,
+    # Auction, Bid. Chaque outil retourne TOUJOURS un dict structuré
+    # (status SUCCESS/FAILURE/error) et alimente, en cas d'échec métier, une
+    # clé `fallback` exploitée par le buyer_flow pour proposer une alternative.
+
+    @staticmethod
+    def _to_uuid(value: Any) -> Optional[uuid.UUID]:
+        """Convertit une valeur en UUID, tolérante aux None / formats invalides."""
+        if value is None:
+            return None
+        if isinstance(value, uuid.UUID):
+            return value
+        try:
+            return uuid.UUID(str(value))
+        except (TypeError, ValueError):
+            return None
+
+    async def validate_stock_availability_atomic(
+        self,
+        product_id: str,
+        quantity: float,
+        unit: Optional[str] = None,
+        buyer_phone: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Vérifie et verrouille la disponibilité réelle d'un produit avant précommande.
+
+        Pose un verrou ligne (FOR UPDATE) sur le produit pour éviter les
+        survente en conditions concurrentes. En cas de stock insuffisant,
+        propose des alternatives (mêmes produits chez d'autres producteurs).
+        """
+        current_session = self.session
+        if not current_session:
+            return {"status": "error", "message": "Session de base de données indisponible."}
+
+        p_uuid = self._to_uuid(product_id)
+        if p_uuid is None:
+            return {"status": "error", "message": "Identifiant produit invalide."}
+
+        try:
+            requested = float(quantity)
+        except (TypeError, ValueError):
+            return {"status": "error", "message": "Quantité demandée invalide."}
+        if requested <= 0:
+            return {"status": "error", "message": "La quantité demandée doit être strictement positive."}
+
+        try:
+            product = await current_session.scalar(
+                select(Product).where(Product.id == p_uuid).with_for_update()
+            )
+            if not product:
+                return {
+                    "status": "FAILURE",
+                    "reason": "product_not_found",
+                    "message": "Ce produit n'existe plus dans le catalogue.",
+                    "fallback": [],
+                }
+
+            available = float(product.quantity_for_sale or 0.0)
+            if available >= requested:
+                response_unit = _guess_display_unit(product.name, unit or product.unit)
+                return {
+                    "status": "SUCCESS",
+                    "product_id": str(product.id),
+                    "product_name": product.name,
+                    "available_quantity": available,
+                    "requested_quantity": requested,
+                    "unit": response_unit,
+                    "unit_price": float(product.price or 0.0),
+                    "producer_id": str(product.producer_id) if product.producer_id else None,
+                    "message": f"{requested} {response_unit} de {product.name} disponibles.",
+                }
+
+            # Stock insuffisant → recherche d'alternatives (résilience).
+            alt_rows = await current_session.execute(
+                select(Product.id, Product.name, Product.price, Product.quantity_for_sale, Product.unit)
+                .where(
+                    Product.name.ilike(f"%{product.name}%"),
+                    Product.id != product.id,
+                    Product.quantity_for_sale >= requested,
+                )
+                .order_by(Product.price.asc())
+                .limit(3)
+            )
+            fallback = [
+                {
+                    "product_id": str(r.id),
+                    "name": r.name,
+                    "price": float(r.price or 0.0),
+                    "available_quantity": float(r.quantity_for_sale or 0.0),
+                    "unit": _guess_display_unit(r.name, r.unit),
+                }
+                for r in alt_rows.mappings().all()
+            ]
+
+            return {
+                "status": "FAILURE",
+                "reason": "insufficient_stock",
+                "product_id": str(product.id),
+                "product_name": product.name,
+                "available_quantity": available,
+                "requested_quantity": requested,
+                "message": (
+                    f"Stock insuffisant pour {product.name} : "
+                    f"{available} disponible(s) sur {requested} demandé(s)."
+                ),
+                "fallback": fallback,
+            }
+        except Exception as e:
+            logger.error(f"validate_stock_availability_atomic({product_id}): {e}", exc_info=True)
+            return {"status": "error", "message": "Erreur technique lors de la vérification du stock."}
+
+    async def create_preorder_draft(
+        self,
+        buyer_phone: str,
+        cart_items: List[Dict[str, Any]],
+        expected_fulfillment_date: Optional[str] = None,
+        payment_method: str = "CASH",
+        delivery_zone_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Crée une commande brouillon (PREORDER) multi-items sans débiter les stocks.
+
+        Le brouillon matérialise le panier en Order(status=DRAFT, order_type=PREORDER)
+        + OrderItem. Les stocks ne sont PAS décrémentés tant que la précommande
+        n'est pas convertie en commande ferme (preorder_converted_at).
+        """
+        current_session = self.session
+        if not current_session:
+            return {"status": "error", "message": "Session indisponible."}
+        if not cart_items:
+            return {"status": "error", "message": "Le panier est vide, impossible de créer une précommande."}
+
+        try:
+            user_obj, profile_obj = await self.get_buyer_profile(phone=buyer_phone)
+
+            zone_uuid = self._to_uuid(delivery_zone_id) or user_obj.zone_id
+            if not zone_uuid:
+                return {
+                    "status": "error",
+                    "reason": "missing_zone",
+                    "message": "Veuillez configurer votre zone de livraison avant de précommander.",
+                }
+
+            fulfillment_dt = None
+            if expected_fulfillment_date:
+                try:
+                    fulfillment_dt = datetime.fromisoformat(str(expected_fulfillment_date))
+                except ValueError:
+                    fulfillment_dt = None
+            if fulfillment_dt is not None and getattr(fulfillment_dt, "tzinfo", None) is not None:
+                fulfillment_dt = fulfillment_dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+            new_order = Order(
+                id=uuid.uuid4(),
+                buyer_id=profile_obj.id,
+                zone_id=zone_uuid,
+                customer_name=getattr(profile_obj, "establishment_name", None) or user_obj.name,
+                customer_phone=normalize_phone(buyer_phone, required=False),
+                total_amount=0.0,
+                subtotal=0.0,
+                status="DRAFT",
+                payment_status="PENDING",
+                delivery_status="PENDING",
+                payment_method=self._map_payment_method(str(payment_method).lower())
+                if hasattr(self, "_map_payment_method") else "CASH",
+                source="WHATSAPP",
+                order_type="PREORDER",
+                is_agent_order=True,
+                expected_fulfillment_date=fulfillment_dt,
+                created_at=datetime.utcnow(),
+            )
+            current_session.add(new_order)
+            await current_session.flush()
+
+            running_total = 0.0
+            summary_items: List[str] = []
+            unresolved: List[str] = []
+
+            for item in cart_items:
+                p_uuid = self._to_uuid(item.get("product_id"))
+                try:
+                    qty = float(item.get("quantity") or 0)
+                except (TypeError, ValueError):
+                    qty = 0.0
+                if p_uuid is None or qty <= 0:
+                    continue
+
+                product = await current_session.scalar(select(Product).where(Product.id == p_uuid))
+                if not product:
+                    unresolved.append(str(item.get("product_id")))
+                    continue
+
+                price = float(product.price or 0.0)
+                line_total = price * qty
+                running_total += line_total
+
+                current_session.add(OrderItem(
+                    id=uuid.uuid4(),
+                    order_id=new_order.id,
+                    product_id=product.id,
+                    quantity=qty,
+                    price_at_sale=price,
+                ))
+                summary_items.append(f"{product.name} (x{qty} {product.unit or 'KG'})")
+
+            if not summary_items:
+                return {
+                    "status": "error",
+                    "reason": "no_valid_items",
+                    "message": "Aucun article valide dans le panier pour la précommande.",
+                }
+
+            new_order.subtotal = running_total
+            new_order.total_amount = running_total
+            await current_session.flush()
+
+            return {
+                "status": "SUCCESS",
+                "order_id": str(new_order.id),
+                "preorder_id": str(new_order.id),
+                "order_number": str(new_order.id)[:8].upper(),
+                "order_type": "PREORDER",
+                "subtotal": running_total,
+                "total_amount": running_total,
+                "currency": new_order.currency or "XOF",
+                "items_count": len(summary_items),
+                "summary": ", ".join(summary_items),
+                "unresolved_items": unresolved,
+                "message": (
+                    f"📝 Précommande brouillon créée — {len(summary_items)} article(s), "
+                    f"total estimé {running_total} FCFA."
+                ),
+            }
+        except Exception as e:
+            try:
+                await current_session.rollback()
+            except Exception:
+                logger.exception("create_preorder_draft(%s): rollback failed", buyer_phone)
+            logger.error(f"create_preorder_draft({buyer_phone}): {e}", exc_info=True)
+            return {"status": "error", "message": "Erreur technique lors de la création de la précommande."}
+
+    async def initiate_negotiation_session(
+        self,
+        buyer_phone: str,
+        product_id: str,
+        offered_price: float,
+        quantity: Optional[float] = None,
+        message: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Ouvre une session de négociation acheteur→producteur via un Auction ancré.
+
+        Matérialise l'offre comme un Auction(status=OPEN) rattaché à la
+        sous-catégorie du produit ciblé. Le prix proposé devient
+        max_price_per_unit, et le prix catalogue du producteur sert de
+        référence (seller_minimum). Retourne un negotiation_id réutilisable.
+        """
+        current_session = self.session
+        if not current_session:
+            return {"status": "error", "message": "Session indisponible."}
+
+        p_uuid = self._to_uuid(product_id)
+        if p_uuid is None:
+            return {"status": "error", "message": "Identifiant produit invalide."}
+        try:
+            offer = float(offered_price)
+        except (TypeError, ValueError):
+            return {"status": "error", "message": "Prix proposé invalide."}
+        if offer <= 0:
+            return {"status": "error", "message": "Le prix proposé doit être strictement positif."}
+
+        try:
+            user_obj, profile_obj = await self.get_buyer_profile(phone=buyer_phone)
+
+            product = await current_session.scalar(select(Product).where(Product.id == p_uuid))
+            if not product:
+                return {
+                    "status": "FAILURE",
+                    "reason": "product_not_found",
+                    "message": "Produit introuvable, impossible d'ouvrir une négociation.",
+                    "fallback": [],
+                }
+            if not product.sub_category_id:
+                return {
+                    "status": "FAILURE",
+                    "reason": "missing_subcategory",
+                    "message": "Ce produit n'est pas catégorisé, négociation impossible pour l'instant.",
+                    "fallback": [],
+                }
+
+            seller_minimum = float(product.price or 0.0)
+            qty = None
+            try:
+                qty = float(quantity) if quantity is not None else None
+            except (TypeError, ValueError):
+                qty = None
+            qty = qty or float(product.quantity_for_sale or 1.0) or 1.0
+
+            zone_name = "À convenir"
+            if user_obj.zone_id:
+                zname = await current_session.scalar(select(Zone.name).where(Zone.id == user_obj.zone_id))
+                if zname:
+                    zone_name = zname
+
+            deadline = datetime.now(timezone.utc) + timedelta(days=7)
+            new_auction = Auction(
+                id=uuid.uuid4(),
+                buyer_id=profile_obj.id,
+                sub_category_id=product.sub_category_id,
+                quantity=qty,
+                unit=(product.unit or "KG").upper(),
+                max_price_per_unit=offer,
+                description=(message or f"Négociation sur {product.name} (prix proposé: {offer} FCFA)."),
+                delivery_location=zone_name,
+                delivery_deadline=deadline,
+                deadline=deadline,
+                target_zone_id=user_obj.zone_id,
+                status="OPEN",
+                created_at=datetime.now(timezone.utc),
+            )
+            current_session.add(new_auction)
+            await current_session.flush()
+
+            price_gap = round(seller_minimum - offer, 2)
+            return {
+                "status": "PENDING",
+                "negotiation_id": str(new_auction.id),
+                "auction_id": str(new_auction.id),
+                "product_id": str(product.id),
+                "product_name": product.name,
+                "producer_id": str(product.producer_id) if product.producer_id else None,
+                "buyer_offer": offer,
+                "seller_minimum": seller_minimum,
+                "price_gap": price_gap,
+                "quantity": qty,
+                "unit": (product.unit or "KG").upper(),
+                "next_expected_action": "SELLER_RESPONSE",
+                "message": (
+                    f"🤝 Négociation ouverte sur {product.name} : vous proposez {offer} FCFA "
+                    f"(prix catalogue {seller_minimum} FCFA)."
+                ),
+            }
+        except Exception as e:
+            logger.error(f"initiate_negotiation_session({buyer_phone}): {e}", exc_info=True)
+            return {"status": "error", "message": "Erreur technique lors de l'ouverture de la négociation."}
+
+    async def get_transaction_summary(
+        self,
+        buyer_phone: Optional[str] = None,
+        order_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Vue agrégée d'une transaction (commande + items + négociation liée).
+
+        Si `order_id` est fourni, retourne le détail de cette commande. Sinon,
+        retourne la dernière transaction en cours de l'acheteur identifié par
+        `buyer_phone`.
+        """
+        current_session = self.session
+        if not current_session:
+            return {"status": "error", "message": "Session indisponible."}
+
+        try:
+            stmt = (
+                select(Order)
+                .options(selectinload(Order.items).joinedload(OrderItem.product))
+                .order_by(desc(Order.created_at))
+                .limit(1)
+            )
+
+            o_uuid = self._to_uuid(order_id)
+            if o_uuid is not None:
+                stmt = stmt.where(Order.id == o_uuid)
+            elif buyer_phone:
+                _, profile_obj = await self.get_buyer_profile(phone=buyer_phone)
+                stmt = stmt.where(Order.buyer_id == profile_obj.id)
+            else:
+                return {"status": "error", "message": "Fournir order_id ou buyer_phone."}
+
+            order = await current_session.scalar(stmt)
+            if not order:
+                return {
+                    "status": "empty",
+                    "message": "Aucune transaction trouvée.",
+                    "data": None,
+                }
+
+            items = [
+                {
+                    "product_id": str(it.product_id),
+                    "product_name": it.product.name if it.product else "?",
+                    "quantity": float(it.quantity or 0.0),
+                    "unit_price": float(it.price_at_sale or 0.0),
+                    "line_total": float(it.quantity or 0.0) * float(it.price_at_sale or 0.0),
+                }
+                for it in (order.items or [])
+            ]
+
+            negotiation = None
+            if order.auction_id:
+                auction = await current_session.scalar(
+                    select(Auction).where(Auction.id == order.auction_id)
+                )
+                if auction:
+                    negotiation = {
+                        "auction_id": str(auction.id),
+                        "status": auction.status,
+                        "max_price_per_unit": float(auction.max_price_per_unit or 0.0),
+                        "quantity": float(auction.quantity or 0.0),
+                        "winner_bid_id": str(auction.winner_bid_id) if auction.winner_bid_id else None,
+                    }
+
+            return {
+                "status": "SUCCESS",
+                "data": {
+                    "order_id": str(order.id),
+                    "order_number": str(order.id)[:8].upper(),
+                    "order_type": order.order_type,
+                    "status": order.status,
+                    "payment_status": order.payment_status,
+                    "delivery_status": order.delivery_status,
+                    "subtotal": float(order.subtotal or 0.0),
+                    "delivery_fee": float(order.delivery_fee or 0.0),
+                    "total_amount": float(order.total_amount or 0.0),
+                    "currency": order.currency or "XOF",
+                    "items": items,
+                    "negotiation": negotiation,
+                    "created_at": order.created_at.isoformat() if order.created_at else None,
+                },
+                "message": (
+                    f"Commande #{str(order.id)[:8].upper()} — {order.status} — "
+                    f"{float(order.total_amount or 0.0)} {order.currency or 'XOF'}."
+                ),
+            }
+        except Exception as e:
+            logger.error(f"get_transaction_summary(order={order_id}, phone={buyer_phone}): {e}", exc_info=True)
+            return {"status": "error", "message": "Erreur technique lors de la récupération de la transaction."}
+
+
+    async def confirm_preorder_draft(self, buyer_phone: str, preorder_id: str) -> Dict[str, Any]:
+        """Convertit une précommande brouillon (Order.status=DRAFT) en commande ferme.
+
+        - Verrouille la commande et les produits (FOR UPDATE) pour éviter la survente.
+        - Débite `Product.quantity_for_sale`.
+        - Marque `preorder_converted_at` et passe le statut en `CONFIRMED`.
+        """
+        current_session = self.session
+        if not current_session:
+            return {"status": "error", "message": "Session indisponible."}
+
+        o_uuid = self._to_uuid(preorder_id)
+        if o_uuid is None:
+            return {"status": "error", "message": "Identifiant précommande invalide."}
+
+        try:
+            _, profile_obj = await self.get_buyer_profile(phone=buyer_phone)
+
+            stmt = (
+                select(Order)
+                .options(selectinload(Order.items).joinedload(OrderItem.product))
+                .where(Order.id == o_uuid, Order.buyer_id == profile_obj.id)
+                .with_for_update()
+            )
+            order = await current_session.scalar(stmt)
+            if not order:
+                return {"status": "error", "message": "Précommande introuvable ou non autorisée."}
+
+            if str(order.status or "").upper() != "DRAFT":
+                return {
+                    "status": "FAILURE",
+                    "reason": "not_draft",
+                    "message": f"Cette précommande n'est pas en brouillon (statut={order.status}).",
+                }
+
+            # Vérification / débit stock atomique par produit
+            insufficient: List[Dict[str, Any]] = []
+            running_total = 0.0
+
+            for item in order.items or []:
+                if not item.product_id:
+                    continue
+
+                product = await current_session.scalar(
+                    select(Product)
+                    .where(Product.id == item.product_id)
+                    .with_for_update()
+                )
+                if not product:
+                    insufficient.append({
+                        "product_id": str(item.product_id),
+                        "reason": "product_not_found",
+                    })
+                    continue
+
+                requested = float(item.quantity or 0.0)
+                available = float(product.quantity_for_sale or 0.0)
+                if available < requested:
+                    insufficient.append({
+                        "product_id": str(product.id),
+                        "name": product.name,
+                        "requested": requested,
+                        "available": available,
+                        "unit": (product.unit or "KG").upper(),
+                    })
+                    continue
+
+                product.quantity_for_sale = available - requested
+                running_total += float(item.price_at_sale or 0.0) * requested
+
+            if insufficient:
+                return {
+                    "status": "FAILURE",
+                    "reason": "insufficient_stock",
+                    "message": "Stock insuffisant sur un ou plusieurs articles — précommande non confirmée.",
+                    "details": insufficient,
+                }
+
+            # Postgres column is TIMESTAMP WITHOUT TIME ZONE → store naive UTC
+            order.preorder_converted_at = datetime.utcnow().replace(tzinfo=None)
+            order.status = "CONFIRMED"
+            order.payment_status = order.payment_status or "PENDING"
+            order.subtotal = running_total
+            order.total_amount = running_total
+            await current_session.flush()
+
+            return {
+                "status": "SUCCESS",
+                "order_id": str(order.id),
+                "order_number": str(order.id)[:8].upper(),
+                "total_amount": float(order.total_amount or 0.0),
+                "currency": order.currency or "XOF",
+                "message": (
+                    f"✅ Précommande confirmée. Commande #{str(order.id)[:8].upper()} "
+                    f"pour {float(order.total_amount or 0.0)} {order.currency or 'XOF'}."
+                ),
+            }
+
+        except Exception as e:
+            logger.error(f"confirm_preorder_draft({buyer_phone}, {preorder_id}): {e}", exc_info=True)
+            return {"status": "error", "message": "Erreur technique lors de la confirmation de la précommande."}
+
+
+    async def cancel_preorder_draft(
+        self,
+        buyer_phone: str,
+        preorder_id: str,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Annule une précommande brouillon sans impacter les stocks (non débitée)."""
+        current_session = self.session
+        if not current_session:
+            return {"status": "error", "message": "Session indisponible."}
+
+        o_uuid = self._to_uuid(preorder_id)
+        if o_uuid is None:
+            return {"status": "error", "message": "Identifiant précommande invalide."}
+
+        try:
+            _, profile_obj = await self.get_buyer_profile(phone=buyer_phone)
+
+            stmt = (
+                select(Order)
+                .where(Order.id == o_uuid, Order.buyer_id == profile_obj.id)
+                .with_for_update()
+            )
+            order = await current_session.scalar(stmt)
+            if not order:
+                return {"status": "error", "message": "Précommande introuvable ou non autorisée."}
+
+            if str(order.status or "").upper() != "DRAFT":
+                return {
+                    "status": "FAILURE",
+                    "reason": "not_draft",
+                    "message": f"Impossible d'annuler une précommande non brouillon (statut={order.status}).",
+                }
+
+            order.status = "CANCELLED"
+            order.cancellation_role = "BUYER"
+            if reason:
+                order.delivery_desc = (order.delivery_desc or "") + f"\n[CancelReason] {reason}"
+            await current_session.flush()
+
+            return {
+                "status": "SUCCESS",
+                "order_id": str(order.id),
+                "message": f"❌ Précommande #{str(order.id)[:8].upper()} annulée.",
+            }
+        except Exception as e:
+            logger.error(f"cancel_preorder_draft({buyer_phone}, {preorder_id}): {e}", exc_info=True)
+            return {"status": "error", "message": "Erreur technique lors de l'annulation de la précommande."}
+
+
+    async def update_negotiation_offer(
+        self,
+        buyer_phone: str,
+        negotiation_id: str,
+        new_price: float,
+    ) -> Dict[str, Any]:
+        """Met à jour le prix plafond (max_price_per_unit) d'une négociation (Auction)."""
+        current_session = self.session
+        if not current_session:
+            return {"status": "error", "message": "Session indisponible."}
+
+        a_uuid = self._to_uuid(negotiation_id)
+        if a_uuid is None:
+            return {"status": "error", "message": "Identifiant négociation invalide."}
+        try:
+            price = float(new_price)
+        except (TypeError, ValueError):
+            return {"status": "error", "message": "Nouveau prix invalide."}
+        if price <= 0:
+            return {"status": "error", "message": "Le nouveau prix doit être strictement positif."}
+
+        try:
+            _, profile_obj = await self.get_buyer_profile(phone=buyer_phone)
+            stmt = (
+                select(Auction)
+                .where(Auction.id == a_uuid, Auction.buyer_id == profile_obj.id)
+                .with_for_update()
+            )
+            auction = await current_session.scalar(stmt)
+            if not auction:
+                return {"status": "error", "message": "Négociation introuvable ou non autorisée."}
+
+            if str(auction.status or "").upper() not in {"OPEN"}:
+                return {
+                    "status": "FAILURE",
+                    "reason": "auction_closed",
+                    "message": f"Négociation déjà clôturée (statut={auction.status}).",
+                }
+
+            old = float(auction.max_price_per_unit or 0.0)
+            auction.max_price_per_unit = price
+            auction.version = int(auction.version or 0) + 1
+            await current_session.flush()
+
+            return {
+                "status": "SUCCESS",
+                "negotiation_id": str(auction.id),
+                "old_price": old,
+                "new_price": price,
+                "message": f"🔁 Offre mise à jour : {old} → {price} FCFA/{auction.unit}.",
+            }
+        except Exception as e:
+            logger.error(f"update_negotiation_offer({buyer_phone}, {negotiation_id}): {e}", exc_info=True)
+            return {"status": "error", "message": "Erreur technique lors de la mise à jour de l'offre."}
+
+
+    async def close_negotiation_session(
+        self,
+        buyer_phone: str,
+        negotiation_id: str,
+        reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Clôture une négociation (Auction) côté acheteur (annulation)."""
+        current_session = self.session
+        if not current_session:
+            return {"status": "error", "message": "Session indisponible."}
+
+        a_uuid = self._to_uuid(negotiation_id)
+        if a_uuid is None:
+            return {"status": "error", "message": "Identifiant négociation invalide."}
+
+        try:
+            _, profile_obj = await self.get_buyer_profile(phone=buyer_phone)
+            stmt = (
+                select(Auction)
+                .where(Auction.id == a_uuid, Auction.buyer_id == profile_obj.id)
+                .with_for_update()
+            )
+            auction = await current_session.scalar(stmt)
+            if not auction:
+                return {"status": "error", "message": "Négociation introuvable ou non autorisée."}
+
+            if str(auction.status or "").upper() != "OPEN":
+                return {
+                    "status": "FAILURE",
+                    "reason": "already_closed",
+                    "message": f"Négociation déjà clôturée (statut={auction.status}).",
+                }
+
+            auction.status = "CANCELLED"
+            auction.cancelled_at = datetime.now(timezone.utc)
+            if reason:
+                auction.cancellation_reason = str(reason)
+            await current_session.flush()
+
+            return {
+                "status": "SUCCESS",
+                "negotiation_id": str(auction.id),
+                "message": "❌ Négociation annulée.",
+            }
+        except Exception as e:
+            logger.error(f"close_negotiation_session({buyer_phone}, {negotiation_id}): {e}", exc_info=True)
+            return {"status": "error", "message": "Erreur technique lors de la clôture de la négociation."}
 

@@ -125,7 +125,7 @@ def get_llm(llm_client: Optional[Any] = None) -> Optional[Any]:
 
     try:
         # Lazy import of rag components to avoid heavy SDK imports at module import
-        from agriconnect.rag.components import get_groq_sdk
+        from futur.rag.components import get_groq_sdk
 
         raw = get_groq_sdk()
         if raw is None:

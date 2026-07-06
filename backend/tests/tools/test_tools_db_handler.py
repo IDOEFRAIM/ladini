@@ -8,7 +8,7 @@ if ROOT not in sys.path:
 import importlib
 import types
 
-from agriconnect.tools import db_handler as dbmod
+from futur.tools import db_handler as dbmod
 
 
 def test_get_db_returns_none_when_unconfigured(monkeypatch):

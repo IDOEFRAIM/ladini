@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid as _uuid_mod
+import json
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,7 +9,7 @@ from typing import Any, Dict, Optional
 from datetime import datetime,time
 import logging
 import uuid
-from sqlalchemy import select, update, and_,func,desc
+from sqlalchemy import select, update, and_,func,desc, text
 from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert
@@ -49,6 +50,20 @@ def _coerce_uuid(value: Any, *, fallback: str | None = None) -> str:
 
 
 class IntelligenceMixin:
+    _TABLE_COLUMN_CACHE: Dict[tuple[str, str], set[str]] = {}
+
+    async def _get_table_columns(self, session: AsyncSession, schema: str, table: str) -> set[str]:
+        key = (schema, table)
+        cached = self._TABLE_COLUMN_CACHE.get(key)
+        if cached is not None:
+            return cached
+        stmt = text(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = :schema AND table_name = :table"
+        )
+        result = await session.execute(stmt, {"schema": schema, "table": table})
+        cols = {row[0] for row in result}
+        self._TABLE_COLUMN_CACHE[key] = cols
+        return cols
     async def get_user_context(self, session: AsyncSession, user_id: str) -> Dict[str, Any]:
         user_id = clean_text(user_id, "user_id", required=True)
         stmt = select(UserContextState).where(UserContextState.user_id == user_id)
@@ -133,11 +148,23 @@ class IntelligenceMixin:
         await session.flush()
         return metric.to_dict()
 
-    async def log_conversation(self, session: AsyncSession, user_id: str, query: str, response: str, agent_type: str = None, crop: str = None, zone_id: str = None, mode: str = "text", audio_url: str = None, execution_path: list = None, confidence_score: float = None, tokens_used: int = 0, response_time_ms: int = None) -> Dict[str, Any]:
+    async def log_conversation(
+        self,
+        session: AsyncSession,
+        user_id: str,
+        query: str,
+        response: str,
+        agent_type: str = None,
+        crop: str = None,
+        zone_id: str = None,
+        mode: str = "text",
+        audio_url: str = None,
+        execution_path: list = None,
+        confidence_score: float = None,
+        tokens_used: int = 0,
+        response_time_ms: int = None,
+    ) -> Dict[str, Any]:
         conv_id = _uuid()
-        # conversations.user_id is UUID-typed + FK to users.id.
-        # If caller passes a non-UUID (e.g. "anonymous"), write a placeholder UUID
-        # and insert a minimal users row so FK constraints are satisfied.
         user_id_for_db = user_id
         try:
             user_id_for_db = _coerce_uuid(user_id)
@@ -150,16 +177,72 @@ class IntelligenceMixin:
                 session.add(placeholder)
                 await session.flush()
 
-        conv = Conversation(id=conv_id, user_id=user_id_for_db, query=query, response=response, agent_type=agent_type, crop=crop, zone_id=zone_id, mode=mode, audio_url=audio_url, execution_path=execution_path, confidence_score=confidence_score, total_tokens_used=tokens_used, response_time_ms=response_time_ms)
-        session.add(conv)
-        await session.flush()
+        columns = await self._get_table_columns(session, "intelligence", "conversations")
+        payload = {
+            "id": conv_id,
+            "user_id": user_id_for_db,
+            "query": query,
+            "response": response,
+            "agent_type": agent_type,
+            "crop": crop,
+            "zone_id": zone_id,
+            "mode": mode,
+            "audio_url": audio_url,
+            "execution_path": json.dumps(execution_path or []) if execution_path is not None else None,
+            "confidence_score": confidence_score,
+            "total_tokens_used": tokens_used,
+            "response_time_ms": response_time_ms,
+        }
+
+        insert_cols = [col for col in payload.keys() if col in columns]
+        if not insert_cols:
+            logger.warning("log_conversation: no matching columns found in conversations table; skipping insert")
+            return {"conversation_id": conv_id, "user_id": user_id_for_db, "status": "skipped"}
+
+        col_sql = ", ".join(insert_cols)
+        val_sql = ", ".join(f":{col}" for col in insert_cols)
+        stmt = text(f"INSERT INTO intelligence.conversations ({col_sql}) VALUES ({val_sql})")
+        params = {col: payload[col] for col in insert_cols}
+        await session.execute(stmt, params)
         return {"conversation_id": conv_id, "user_id": user_id_for_db}
 
-    async def create_agent_action(self, session: AsyncSession, agent_name: str, action_type: str, payload: dict, user_id: str = None, priority: str = "MEDIUM", ai_reasoning: str = None, order_id: str = None) -> Dict[str, Any]:
-        action = AgentAction(id=_uuid(), agent_name=agent_name, action_type=action_type, payload=payload, user_id=user_id, priority=priority, ai_reasoning=ai_reasoning, order_id=order_id)
-        session.add(action)
-        await session.flush()
-        return action.to_dict()
+    async def create_agent_action(
+        self,
+        session: AsyncSession,
+        agent_name: str,
+        action_type: str,
+        payload: dict,
+        user_id: str = None,
+        priority: str = "MEDIUM",
+        ai_reasoning: str = None,
+        order_id: str = None,
+    ) -> Dict[str, Any]:
+        action_id = _uuid()
+        columns = await self._get_table_columns(session, "intelligence", "agent_actions")
+        payload_json = json.dumps(payload or {})
+        base_values = {
+            "id": action_id,
+            "agent_name": agent_name,
+            "action_type": action_type,
+            "payload": payload_json,
+            "user_id": user_id,
+            "priority": priority,
+            "ai_reasoning": ai_reasoning,
+            "order_id": order_id,
+            "status": "PENDING",
+        }
+
+        insert_cols = [col for col in base_values.keys() if col in columns]
+        if not insert_cols:
+            logger.warning("create_agent_action: no matching columns found in agent_actions table; skipping insert")
+            return {"action_id": action_id, "agent_name": agent_name, "status": "skipped"}
+
+        col_sql = ", ".join(insert_cols)
+        val_sql = ", ".join(f":{col}" for col in insert_cols)
+        stmt = text(f"INSERT INTO intelligence.agent_actions ({col_sql}) VALUES ({val_sql})")
+        params = {col: base_values[col] for col in insert_cols}
+        await session.execute(stmt, params)
+        return {"action_id": action_id, "agent_name": agent_name, "status": "stored"}
 
     async def get_pending_actions(self, session: AsyncSession, agent_name: str = None, limit: int = 20) -> List[Dict[str, Any]]:
         limit = clamp_limit(limit)

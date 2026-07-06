@@ -1,6 +1,7 @@
 import os
 import uuid
 
+from futur.rag import redis_search_store
 import pytest
 
 try:
@@ -8,7 +9,7 @@ try:
 except Exception:
     np = None
 
-from agriconnect.rag import redis_store, redis_search_store
+from futur.rag import redis_store
 
 
 REDIS_URL = os.getenv("REDIS_URL")

@@ -7,7 +7,7 @@ if ROOT not in sys.path:
 
 import pytest
 
-from agriconnect.tools import sentinelle as sent_mod
+from futur.tools import sentinelle as sent_mod
 
 
 def test_resolve_coords_defaults():

@@ -8,7 +8,7 @@ import uuid
 
 from sqlalchemy import text, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from agriconnect.core.database import get_sessionmaker
+from agriconnect.core.database import get_sessionmaker, close_db
 from datetime import datetime, timezone,timedelta
 # Imports des Mixins
 from agriconnect.services.database.auth import AuthMixin
@@ -25,10 +25,22 @@ from agriconnect.services.database.producer import ProducerMgmtMixin
 from agriconnect.services.database.product import ProductMixin
 from agriconnect.services.database.auction import AuctionMixin
 
+try:
+    import asyncpg  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    asyncpg = None
+
 
 
 # Déclaration du conteneur de contexte pour isoler la session par tâche asynchrone (Coroutining/Greenlets)
 db_session_ctx: ContextVar[Optional[AsyncSession]] = ContextVar("db_session_ctx", default=None)
+
+
+def _is_connection_lost(exc: Exception) -> bool:
+    if asyncpg and isinstance(exc, asyncpg.exceptions.ConnectionDoesNotExistError):
+        return True
+    message = str(exc).lower()
+    return "connection was closed" in message or "connection does not exist" in message
 
 class AgriDatabaseService(
     AuthMixin, UtilsMixin,
@@ -63,6 +75,12 @@ class AgriDatabaseService(
         "get_farms", "get_stocks", "get_stock_movements", "list_products", 
         "search_products", "get_orders", "list_market_matches",
         "get_producer_stocks",
+
+        # Auctions / bids (reads)
+        "get_auction_bids",
+
+        # Buyer transactional reads (Grade Entreprise)
+        "validate_stock_availability_atomic", "get_transaction_summary",
         
         # Transactions & Staging
         "get_staged_transaction", "get_pending_actions",
@@ -72,11 +90,15 @@ class AgriDatabaseService(
         "get_active_anomalies", "get_producer_dashboard", "get_zone_market_overview",
         
         # Crop Management (Agent Formation / Knowledge Retrieval)
+        "get_crop_profile",
         "get_cycle_with_context", "get_yield_performance_metrics", 
         "get_biological_readiness", "get_cycle_economics", 
         "get_active_sanitary_risks", "get_crop_requirements", 
         "analyze_thermal_stress", "check_growth_compliance", 
-        "get_instant_resource_needs", "get_expenses", "get_expense_summary"
+        "get_instant_resource_needs", "calculate_irrigation_need",
+        "calculate_custom_fertilization", "evaluate_disease_and_climate_risk",
+        "calculate_sowing_density", "check_soil_salinity_hazard",
+        "get_expenses", "get_expense_summary"
     }
 
 # ==================================================================
@@ -102,6 +124,12 @@ class AgriDatabaseService(
                 existing_session = db_session_ctx.get()
                 if existing_session is not None:
                     try:
+                        # Injection transparente de la session si le mixin l'attend
+                        import inspect
+                        sig = inspect.signature(attr)
+                        if "session" in sig.parameters and "session" not in kwargs:
+                            kwargs["session"] = existing_session
+                            
                         # On réutilise la session du contexte actuel sans altérer le self décalé
                         return await attr(*args, **kwargs)
                     except TypeError as e:
@@ -113,33 +141,60 @@ class AgriDatabaseService(
 
                 # 👀 CAS B : Sommet de la pile d'exécution -> Génération de la Session Racine (Étanche)
                 session_factory = get_sessionmaker()
-                async with session_factory() as new_session:
-                    # Fixation de la session dans le stockage local de la coroutine (ContextVar)
-                    token = db_session_ctx.set(new_session)
-                    try:
-                        # Injection transparente de la session dans les kwargs si le mixin l'attend
-                        if "session" in kwargs:
-                            kwargs["session"] = new_session
+                if session_factory is None:
+                    raise RuntimeError("Database sessionmaker unavailable; ensure init_db() ran")
 
-                        # Exécution de la méthode du mixin
-                        res = await attr(*args, **kwargs)
-                        
-                        # Commit uniquement si la méthode n'est pas enregistrée en READ-ONLY
-                        if should_commit:
-                            await new_session.commit()
-                        return res
-                        
-                    except TypeError as e:
-                        await new_session.rollback()
-                        self._logger.error("❌ Erreur de signature Python dans le wrapper pour %s: %s", name, e)
-                        raise e
-                    except Exception as e:
-                        await new_session.rollback()
-                        self._logger.error("❌ Erreur SQL critique interceptée et annulée dans %s: %s", name, e, exc_info=True)
-                        raise
-                    finally:
-                        # Libération étanche du slot mémoire pour les coroutines concurrentes
-                        db_session_ctx.reset(token)
+                for attempt in range(2):
+                    async with session_factory() as new_session:
+                        # Fixation de la session dans le stockage local de la coroutine (ContextVar)
+                        token = db_session_ctx.set(new_session)
+                        try:
+                            # Injection transparente de la session si le mixin l'attend
+                            # On utilise inspect pour vérifier si 'session' est dans la signature
+                            import inspect
+                            sig = inspect.signature(attr)
+                            if "session" in sig.parameters and "session" not in kwargs:
+                                kwargs["session"] = new_session
+
+                            # Exécution de la méthode du mixin
+                            res = await attr(*args, **kwargs)
+
+                            # Commit uniquement si la méthode n'est pas enregistrée en READ-ONLY
+                            if should_commit:
+                                await new_session.commit()
+                            return res
+
+                        except TypeError as e:
+                            await new_session.rollback()
+                            self._logger.error("❌ Erreur de signature Python dans le wrapper pour %s: %s", name, e)
+                            raise e
+                        except Exception as e:
+                            await new_session.rollback()
+                            if _is_connection_lost(e) and attempt == 0:
+                                self._logger.warning(
+                                    "🔁 Session DB perdue (%s). Réinitialisation du pool et nouvelle tentative.",
+                                    e,
+                                )
+                                db_session_ctx.reset(token)
+                                try:
+                                    await close_db()
+                                except Exception:
+                                    self._logger.exception("Échec lors de la fermeture du pool après perte de connexion")
+                                session_factory = get_sessionmaker()
+                                if session_factory is None:
+                                    raise RuntimeError("Database sessionmaker unavailable après réinitialisation") from e
+                                continue
+
+                            self._logger.error(
+                                "❌ Erreur SQL critique interceptée et annulée dans %s: %s",
+                                name,
+                                e,
+                                exc_info=True,
+                            )
+                            raise
+                        finally:
+                            # Libération étanche du slot mémoire pour les coroutines concurrentes
+                            db_session_ctx.reset(token)
 
             return auto_transaction_wrapper
 
@@ -171,60 +226,32 @@ class AgriDatabaseService(
 
     class DatabaseServiceError(Exception): pass
     class IntegrityError(DatabaseServiceError): pass
-
-
-
-import asyncio
-import logging
-import sys
-import uuid
-from datetime import datetime, timezone
-
-# 🚀 Imports SQLAlchemy indispensables pour le nettoyage automatique
-from sqlalchemy import select, update, delete
-
-# 🚀 Import des modèles réels pour le bloc de nettoyage final
-# (Ajuste le chemin d'import si tes classes ne sont pas dans agriconnect.domain.models)
-from agriconnect.domain.models import Product, SurplusOffer
-
-# ⚠️ Import de ton service de base de données
-from agriconnect.services.database.d import AgriDatabaseService 
-
-# Configuration de l'affichage des logs dans la console
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    stream=sys.stdout
-)
-logger = logging.getLogger("Agriconnect.FullIntegrationTest")
-
-
-async def run_full_integration_test():
-    # ⚠️ REQUIS : Ce numéro doit exister dans ta table 'Users' pour pouvoir tester
-    TARGET_PRODUCER_PHONE = "+22601479808" 
     
-    logger.info("🚀 Lancement de la suite complète de tests réels (ZÉRO MOCK)...")
-    
-    # Initialisation de ton service central autonome
-    db_service = AgriDatabaseService()
-    
-    # Dictionnaires pour mémoriser les IDs générés et nettoyer la BDD à la fin
-    created_resources = {
-        "product_ids": [],
-        "stock_ids": [],
-        "client_ids": [],
-        "surplus_ids": []
-    }
 
-    try:
-        user = await db_service._fetch_user_entities(TARGET_PRODUCER_PHONE)        
-        print('user',user)
-    except Exception as e:
-        logger.error(f"Erreur critique lors de l'exécution des tests : {e}")
-    finally:
-        print("\n🏁 Fin du grand cycle d'intégration. Ta base de données est propre et tout est validé !")
+async def te():
+    import time
+    se = AgriDatabaseService()
+    PRODUCER_ID = "0669b8b0-8e8b-4838-81de-aaef50538974"
 
+    session_factory = get_sessionmaker()
+    if session_factory is None:
+        print("❌ Error retrieving market overview: sessionmaker unavailable (init_db non exécuté)")
+        return
+
+    async with session_factory() as session:
+        token = db_session_ctx.set(session)
+        try:
+            try:
+                start = time.time()
+                res = await se.get_producer_orders(phone='+212782901759',producer_id=PRODUCER_ID)
+                end = time.time()
+                print(f"Temps:{end-start}")
+                print("✅ Market overview retrieved:", res)
+            except Exception as e:
+                print("❌ Error retrieving market overview:", e)
+        finally:
+            db_session_ctx.reset(token)
 
 if __name__ == "__main__":
-    # Exécution asynchrone du script
-    asyncio.run(run_full_integration_test())
+    import asyncio
+    asyncio.run(te())

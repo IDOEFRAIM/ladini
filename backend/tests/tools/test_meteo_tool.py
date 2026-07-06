@@ -5,8 +5,8 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from agriconnect.tools import meteo as meteo_mod
-from agriconnect.tools.shared_math import SoilType
+from futur.tools import meteo as meteo_mod
+from futur.tools.shared_math import SoilType
 
 
 def test_calculate_pe_values():

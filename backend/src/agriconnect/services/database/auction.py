@@ -1,8 +1,10 @@
 from typing import Any, Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
+import unicodedata
 import uuid
-from sqlalchemy import select, and_, func,update
+from rapidfuzz import fuzz, process
+from sqlalchemy import select, and_, func, update
 from sqlalchemy.orm import aliased
 from .common import normalize_phone
 
@@ -11,6 +13,27 @@ from agriconnect.domain.models import Auction, Bid, SubCategory, Zone, BuyerProf
 from .base import BaseMixin
 
 logger = logging.getLogger("agriconnect.services.database.auction")
+
+_FUZZY_SUBCATEGORY_THRESHOLD = 78
+
+
+def _normalize_product_label(value: str) -> str:
+    """Low-tech normalizer to align plural/diacritics variations for product names."""
+    if value is None:
+        return ""
+    text = str(value).strip().lower()
+    if not text:
+        return ""
+    text = text.replace("œ", "oe").replace("æ", "ae")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    tokens: List[str] = []
+    for token in text.split():
+        cleaned = "".join(ch for ch in token if ch.isalnum())
+        if len(cleaned) > 3 and cleaned.endswith("s"):
+            cleaned = cleaned[:-1]
+        tokens.append(cleaned)
+    return " ".join(t for t in tokens if t)
 
 class AuctionMixin(BaseMixin):
     """
@@ -23,7 +46,50 @@ class AuctionMixin(BaseMixin):
     """
 
     # ─── SECTION 1 : LOGIQUE DE RÉSOLUTION AUXILIAIRE ────────────────────
+    async def _fuzzy_match_sub_category(self, product_query: str) -> Optional[SubCategory]:
+        """Fallback when the exact ILIKE fails (handles accents, plurals, typos)."""
+        current_session = self.session
+        if not current_session:
+            return None
 
+        normalized_query = _normalize_product_label(product_query)
+        if not normalized_query:
+            return None
+
+        rows: List[SubCategory] = (await current_session.execute(select(SubCategory))).scalars().all()
+        if not rows:
+            return None
+
+        normalized_index: Dict[str, SubCategory] = {}
+        for sub_cat in rows:
+            normalized = _normalize_product_label(sub_cat.name)
+            if not normalized:
+                continue
+            normalized_index.setdefault(normalized, sub_cat)
+
+        direct_match = normalized_index.get(normalized_query)
+        if direct_match:
+            return direct_match
+
+        match = process.extractOne(
+            normalized_query,
+            list(normalized_index.keys()),
+            scorer=fuzz.WRatio,
+        )
+        if match and match[1] >= _FUZZY_SUBCATEGORY_THRESHOLD:
+            resolved = normalized_index.get(match[0])
+            if resolved:
+                logger.info(
+                    "[Auction] Fuzzy product mapping '%s' -> '%s' (score=%s)",
+                    product_query,
+                    resolved.name,
+                    match[1],
+                )
+            return resolved
+
+        return None
+
+        
     async def resolve_sub_category(self, name: str) -> Optional[uuid.UUID]:
         """Recherche floue pour récupérer l'ID d'une sous-catégorie de produit."""
         current_session = self.session
@@ -93,14 +159,18 @@ class AuctionMixin(BaseMixin):
             target_zone_id = user_obj.zone_id
             final_zone_name = "Zone non spécifiée"
 
+            product_query_clean = str(product_query or "").strip()
+
             # 2. Résolution du produit
             sub_cat_stmt = (
                 select(SubCategory)
-                .where(SubCategory.name.ilike(f"%{product_query.strip()}%"))
+                .where(SubCategory.name.ilike(f"%{product_query_clean}%"))
                 .order_by(func.length(SubCategory.name).asc())
                 .limit(1)
             )
             sub_cat = await current_session.scalar(sub_cat_stmt)
+            if not sub_cat:
+                sub_cat = await self._fuzzy_match_sub_category(product_query_clean)
             if not sub_cat:
                 return {"status": "error", "message": f"Produit '{product_query}' inconnu."}
 
@@ -121,6 +191,15 @@ class AuctionMixin(BaseMixin):
             if deadline <= now:
                 return {"status": "error", "message": "Date limite invalide."}
                 
+            delivery_deadline_dt = delivery_deadline
+            if isinstance(delivery_deadline_dt, str):
+                try:
+                    delivery_deadline_dt = datetime.fromisoformat(delivery_deadline_dt.replace(" ", "T"))
+                except ValueError:
+                    delivery_deadline_dt = None
+            if not isinstance(delivery_deadline_dt, datetime):
+                delivery_deadline_dt = deadline + timedelta(days=3)
+
             # 5. Instanciation avec tous les champs requis par le modèle SQLAlchemy
             new_auction = Auction(
                 id=uuid.uuid4(),
@@ -134,7 +213,7 @@ class AuctionMixin(BaseMixin):
                 # Champs logistiques qui causaient le NotNullViolationError
                 incoterm=incoterm.upper().strip(),
                 delivery_location=delivery_location.strip(),
-                delivery_deadline=delivery_deadline,
+                delivery_deadline=delivery_deadline_dt,
                 # États par défaut
                 auto_extend=auto_extend,
                 status="OPEN",

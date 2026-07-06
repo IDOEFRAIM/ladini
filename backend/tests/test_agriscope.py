@@ -3,7 +3,7 @@ Test du filtre AgriScope (détection hors-sujet par LLM)
 """
 
 from agriconnect.orchestrator.intention import AgriScopeChecker
-from agriconnect.rag.components import get_llm_client
+from futur.rag.components import get_llm_client
 
 def test_agriscope():
     """Test de la détection hors-sujet intelligente"""

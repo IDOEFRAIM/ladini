@@ -5,7 +5,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from agriconnect.tools import crop as crop_mod
+from futur.tools import crop as crop_mod
 
 
 def test_get_technical_sheet_known_crop():

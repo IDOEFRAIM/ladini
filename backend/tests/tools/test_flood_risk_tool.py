@@ -5,7 +5,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from agriconnect.tools import flood_risk as flood_mod
+from futur.tools import flood_risk as flood_mod
 
 
 def test_check_flood_risk_structure():

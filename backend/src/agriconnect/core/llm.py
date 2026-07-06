@@ -19,6 +19,6 @@ def get_groq_sdk():
     Délègue à ``rag.components.get_groq_sdk`` pour l'instanciation,
     mais expose un chemin d'import canonique unique.
     """
-    from agriconnect.rag.components import get_groq_sdk as _get_groq_sdk
+    from futur.rag.components import get_groq_sdk as _get_groq_sdk
 
     return _get_groq_sdk()

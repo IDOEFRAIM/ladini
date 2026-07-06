@@ -8,6 +8,7 @@ because the service mixins return dictionaries.
 from __future__ import annotations
 
 import uuid
+from uuid import uuid4
 from typing import Optional
 
 from sqlalchemy import (
@@ -18,11 +19,12 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
-    Text,
+    Text,Numeric,
     Time,
     func,
     text,Index, UniqueConstraint,JSON
 )
+
 
 
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID, ARRAY as PG_ARRAY,DOUBLE_PRECISION
@@ -46,6 +48,38 @@ Base = declarative_base(cls=_ToDictMixin)
 
 def _uuid4():
     return str(uuid.uuid4())
+
+# ── IA Core: Recommendations (defined early to satisfy relationship lookups) ─────
+class AIRecommendation(Base):
+    __tablename__ = "ai_recommendations"
+    __table_args__ = (
+        Index('ai_rec_farm_idx', 'farm_id'),
+        Index('ai_rec_crop_cycle_idx', 'crop_cycle_id'),
+        Index('ai_rec_user_idx', 'user_id'),
+        Index('ai_rec_type_idx', 'recommendation_type'),
+        Index('ai_rec_status_idx', 'status'),
+        Index('ai_rec_created_idx', 'created_at'),
+        {"schema": "intelligence"}
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    crop_cycle_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.crop_cycles.id"))
+    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
+    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
+    agent_name = Column(Text, nullable=False)
+    recommendation_type = Column(Text, nullable=False)
+    title = Column(Text, nullable=False)
+    content = Column(Text, nullable=False)
+    actionable_steps = Column(JSONB, default=list)
+    confidence_score = Column(DOUBLE_PRECISION)
+    data_sources_used = Column(JSONB)
+    priority = Column(Text, default="MEDIUM", nullable=False)
+    status = Column(Text, default="PENDING", nullable=False)
+    applied_at = Column(DateTime)
+    expires_at = Column(DateTime)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    user = relationship("User", back_populates="recommendations")
 
 ##**************************************
 ## Auth -User
@@ -537,21 +571,23 @@ class Farm(Base):
 #### crop
 ##################################
 
-
 class CropCycle(Base):
     __tablename__ = 'crop_cycles'
     __table_args__ = (
         Index('crop_cycles_farm_idx', 'farm_id'),
         Index('crop_cycles_status_idx', 'status'),
+        Index('crop_cycles_subcategory_idx', 'sub_category_id'),
+        Index('crop_cycles_public_idx', 'is_public'),
+        Index('crop_cycles_preorder_idx', 'preorder_enabled'),
+        Index('crop_cycles_available_at_idx', 'estimated_available_at'),
+        UniqueConstraint('farm_id', 'crop_type', 'planted_at', name='uq_crop_cycle_farm_crop_planted'),
         {"schema": "marketplace"}
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey('marketplace.farms.id'), nullable=False)
     
-    # Clé étrangère vers la ferme
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey('marketplace.farms.id'), nullable=False, index=True)
-    sub_category_id = Column(PG_UUID(as_uuid=True), ForeignKey('governance.sub_categories.id'))
-    
+    # Informations de base
     crop_type = Column(String, nullable=False)
     area_size = Column(Float, nullable=False)
     planted_at = Column(DateTime, nullable=False)
@@ -563,22 +599,36 @@ class CropCycle(Base):
     farming_method = Column(String, server_default='conventional')
     soil_type = Column(String)
     last_intervention_date = Column(DateTime)
-    actual_harvested_yield = Column(Float)
-    actual_harvest_date = Column(DateTime)
-    destruction_reason = Column(Text)
-    
+
+    # Nouveaux champs Drizzle alignés
+    sub_category_id = Column(PG_UUID(as_uuid=True), ForeignKey('governance.sub_categories.id'))
+    growth_stage = Column(String)
+    is_public = Column(Boolean, default=False, nullable=False)
+    preorder_enabled = Column(Boolean, default=False, nullable=False)
+    estimated_available_at = Column(DateTime)
+    available_quantity = Column(Float, default=0.0, nullable=False)
+    reserved_quantity = Column(Float, default=0.0, nullable=False)
+    price_per_unit = Column(Numeric(10, 2))
+    unit = Column(String, default='KG', nullable=False)
+    production_type = Column(String, default='CROP', nullable=False)
+    species = Column(String)
+    breed = Column(String)
+    initial_stock = Column(Float, default=0.0, nullable=False)
+    current_stock = Column(Float, default=0.0, nullable=False)
+    hatch_date = Column(DateTime)
+
+    # Timestamps
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
     # Relations ORM
-    # Assurez-vous que Farm a bien 'cycles = relationship("CropCycle", back_populates="farm")'
     farm = relationship("Farm", back_populates="cycles")
     sub_category = relationship("SubCategory", back_populates="crop_cycles")
     preorders = relationship("Order", back_populates="crop_cycle")
     growth_logs = relationship("CropGrowthLog", back_populates="crop_cycle", cascade="all, delete-orphan")
-    # Assurez-vous que FieldIntervention a bien 'crop_cycle = relationship("CropCycle", back_populates="interventions")'
     interventions = relationship("FieldIntervention", back_populates="crop_cycle", cascade="all, delete-orphan")
-    
+
+
 # ── 2. FIELD INTERVENTIONS ────────────────────────────────────────────────
 class FieldIntervention(Base):
     __tablename__ = 'field_interventions'
@@ -1073,217 +1123,351 @@ class MarketplaceRating(Base):
 ###*************************************
 
 
-# ── 1. Audit Logs ────────────────────────────────────────────────────────
+
+
+# ── Crop Knowledge & Agronomy ───────────────────────────────────────────
+
+
+import enum
+from datetime import datetime
+from uuid import uuid4
+from sqlalchemy import (
+    MetaData, Column, Integer, String, Numeric, Text, Boolean, 
+    DateTime, Float, ForeignKey, Index, func, text, Enum
+)
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB, DOUBLE_PRECISION
+from sqlalchemy.orm import DeclarativeBase, relationship
+
+# Définition de la métadonnée centralisée sur le schéma "intelligence"
+metadata_obj = MetaData(schema="intelligence")
+
+class Base(DeclarativeBase):
+    metadata = metadata_obj
+
+# ── Énumérations (pour remplacer les Enums Drizzle) ─────────────────────
+
+class AgentActionStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+
+class ValidationPriority(str, enum.Enum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+# ── Profils de cultures & Fertilisation ──────────────────────────────────
+
+class CropProfile(Base):
+    __tablename__ = "crop_profiles"
+    __table_args__ = (
+        Index('crop_profiles_unique_triplet', 'crop_name', 'zone_category', 'variety', unique=True),
+        Index('idx_crop_profiles_lookup', 'crop_name', 'zone_category'),
+        Index('idx_crop_profiles_active', 'is_active'),
+        {"schema": "intelligence"}
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    slug = Column(String(255), unique=True, nullable=False)
+    crop_name = Column(String(100), nullable=False)
+    zone_category = Column(String(50), nullable=False)
+    variety = Column(String(100))
+    scientific_name = Column(String(255))
+    cycle_days = Column(Integer, nullable=False)
+    
+    # Constantes thermiques avancées (GDD / DJC)
+    base_temperature_c = Column(Numeric(5, 2))
+    max_temperature_c = Column(Numeric(5, 2))
+    expected_gdd = Column(Numeric(8, 2))
+    
+    depth_cm = Column(Integer, nullable=False)
+    ph_min = Column(Numeric(4, 2))
+    ph_max = Column(Numeric(4, 2))
+    organic_matter_min_tha = Column(Numeric(10, 2), default=0.0, nullable=False)
+    
+    # Hydrologie et Coefficients Culturaux (Moteur d'irrigation WhatsApp)
+    water_strategy = Column(Text)
+    water_needs_mm_per_cycle = Column(Numeric(8, 2))
+    kc_stages = Column(JSONB, default=list, nullable=False)
+    critical_stops_drought = Column(JSONB, default=list, nullable=False)
+    
+    # Besoins globaux d'exportations pour calculs de fumure personnalisés
+    nutrient_requirements_per_ton = Column(
+        JSONB, 
+        default=lambda: {"N": 0, "P2O5": 0, "K2O": 0, "CaO": 0, "MgO": 0}, 
+        nullable=False
+    )
+    salinity_tolerance_ec = Column(Numeric(4, 2))
+    
+    inter_row_cm = Column(Numeric(10, 2), nullable=False)
+    inter_plant_cm = Column(Numeric(10, 2), nullable=False)
+    seeds_pocket = Column(Integer, nullable=False)
+    yield_min_t_ha = Column(Numeric(10, 2), default=0.0, nullable=False)
+    yield_max_t_ha = Column(Numeric(10, 2), default=0.0, nullable=False)
+    
+    phenological_stages = Column(JSONB, default=list, nullable=False)
+    key_pests = Column(JSONB, default=list, nullable=False)
+    key_diseases = Column(JSONB, default=list, nullable=False)
+    pre_flight_checks = Column(JSONB, default=list, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class CropFertilizerStep(Base):
+    __tablename__ = "crop_fertilizer_steps"
+    __table_args__ = (
+        Index('crop_fertilizer_steps_unique_order', 'crop_profile_id', 'step_order', unique=True),
+        Index('idx_crop_fertilizer_steps_profile', 'crop_profile_id'),
+        Index('idx_crop_fertilizer_steps_timing', 'days_after_sowing'),
+        {"schema": "intelligence"}
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    crop_profile_id = Column(PG_UUID(as_uuid=True), ForeignKey("intelligence.crop_profiles.id", ondelete="CASCADE"), nullable=False)
+    step_order = Column(Integer, nullable=False)
+    stage = Column(String(120), nullable=False)
+    bbch_scale_id = Column(Integer)
+    bbch_scale_code = Column(String(20))
+    days_after_sowing = Column(Integer)
+    product_type = Column(String(120), nullable=False)
+    nutrient_target = Column(JSONB, default=lambda: {"N": 0, "P2O5": 0, "K2O": 0, "CaO": 0, "MgO": 0})
+    dose_kg_ha = Column(Numeric(10, 2), nullable=False)
+    application_mode = Column(String(120))
+    efficiency_factor = Column(Numeric(3, 2), default=1.00)
+    is_mandatory = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class SoilAnalysis(Base):
+    __tablename__ = "soil_analyses"
+    __table_args__ = (
+        Index('idx_soil_analyses_farm', 'farm_id'),
+        Index('idx_soil_analyses_zone', 'zone_id'),
+        Index('idx_soil_analyses_date', 'sample_date'),
+        {"schema": "intelligence"}
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"), nullable=False)
+    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
+    sample_date = Column(DateTime, nullable=False)
+    
+    # Physico-chimie fondamentale du sol
+    ph = Column(Numeric(4, 2))
+    salinity_ec = Column(Numeric(5, 2))
+    cation_exchange_capacity = Column(Numeric(6, 2))
+    carbon_nitrogen_ratio = Column(Numeric(5, 2))
+    organic_matter_percent = Column(Numeric(5, 2))
+    
+    # Macronutriments et éléments secondaires
+    nitrogen_ppm = Column(Numeric(8, 2))
+    phosphorus_ppm = Column(Numeric(8, 2))
+    potassium_ppm = Column(Numeric(8, 2))
+    calcium_ppm = Column(Numeric(8, 2))
+    magnesium_ppm = Column(Numeric(8, 2))
+    
+    # Texture et propriétés hydriques calculées du sol
+    texture = Column(String(50))
+    clay_percent = Column(Numeric(5, 2))
+    sand_percent = Column(Numeric(5, 2))
+    silt_percent = Column(Numeric(5, 2))
+    bulk_density = Column(Numeric(4, 2))
+    wilting_point_percent = Column(Numeric(4, 2))
+    field_capacity_percent = Column(Numeric(4, 2))
+    
+    raw_lab_results = Column(JSONB)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+# ── Operations & Agent Core ─────────────────────────────────────────────
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     __table_args__ = (
         Index('audit_logs_actor_idx', 'actor_id'),
         Index('audit_logs_entity_idx', 'entity_id'),
-        {"schema": "intelligence"} # Isolation stricte du schéma
+        {"schema": "intelligence"}
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     actor_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
-    action = Column(String, nullable=False)
-    entity_type = Column(String, nullable=False)
-    entity_id = Column(String, nullable=False)
+    action = Column(Text, nullable=False)
+    entity_id = Column(Text, nullable=False)
+    entity_type = Column(Text, nullable=False)
     old_value = Column(JSONB)
     new_value = Column(JSONB)
-    ip_address = Column(String)
+    ip_address = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
-# ── 2. Agent Actions (Sécurisé avec Guardrails & HITL) ──────────────────
 class AgentAction(Base):
     __tablename__ = "agent_actions"
     __table_args__ = (
         Index('agent_actions_status_idx', 'status'),
         Index('agent_actions_batch_idx', 'batch_id'),
         Index('agent_actions_name_idx', 'agent_name'),
+        Index('agent_actions_order_unique', 'order_id', unique=True),
         {"schema": "intelligence"}
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    agent_name = Column(String, nullable=False)
-    action_type = Column(String, nullable=False)
-    batch_id = Column(String) # Conservé en String pour compatibilité migration
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    agent_name = Column(Text, nullable=False)
+    action_type = Column(Text, nullable=False)
+    batch_id = Column(Text)
     payload = Column(JSONB)
-    status = Column(String, default="PENDING", nullable=False)
-    priority = Column(String, default="MEDIUM", nullable=False)
-    
-    # Sécurité IA & Validation humaine (HITL)
-    is_human_required = Column(Boolean, default=False, nullable=False)
-    guardrail_status = Column(String, default="PASSED", nullable=False)
-    error_message = Column(Text)
-    
-    # Clés étrangères multi-schémas explicites
+    status = Column(Enum(AgentActionStatus), default=AgentActionStatus.PENDING, nullable=False)
+    priority = Column(Enum(ValidationPriority), default=ValidationPriority.MEDIUM, nullable=False)
     order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), unique=True)
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
-    
-    validated_by_id = Column(String) # Conservé en String pour compatibilité migration
-    audit_trail_id = Column(String)
+    audit_trail_id = Column(Text)
     ai_reasoning = Column(Text)
     admin_notes = Column(Text)
+    validated_by_id = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
-# ── 3. Agent Telemetry ───────────────────────────────────────────────────
 class AgentTelemetry(Base):
     __tablename__ = "agent_telemetry"
     __table_args__ = (
         Index('agent_telemetry_user_idx', 'user_id'),
         {"schema": "intelligence"}
     )
-    
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
-    latitude = Column(Float)
-    longitude = Column(Float)
+    latitude = Column(DOUBLE_PRECISION)
+    longitude = Column(DOUBLE_PRECISION)
     battery = Column(Integer)
-    signal = Column(String)
+    signal = Column(Text)
+    device_info = Column(JSONB)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
-# ── 4. External Context (Base de connaissances RAG) ─────────────────────
 class ExternalContextFile(Base):
     __tablename__ = "external_context_files"
-    __table_args__ = {"schema": "intelligence"}
+    __table_args__ = (
+        Index('ext_context_zone_idx', 'zone_id'),
+        Index('ext_context_category_idx', 'category'),
+        {"schema": "intelligence"}
+    )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    file_name = Column(String, nullable=False)
-    file_type = Column(String, nullable=False)
-    file_url = Column(String, nullable=False)
-    category = Column(String)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    file_name = Column(Text, nullable=False)
+    file_type = Column(Text, nullable=False)
+    file_url = Column(Text, nullable=False)
+    category = Column(Text)
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
+    crop_profile_id = Column(PG_UUID(as_uuid=True), ForeignKey("intelligence.crop_profiles.id"))
     is_vectorized = Column(Boolean, default=False, nullable=False)
-    
-    # Tracking de l'indexation vectorielle
-    vector_index_name = Column(String)
-    chunk_count = Column(Integer)
-    file_size = Column(Integer)
-    
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
-    mcp_server_id = Column(String)
+    mcp_server_id = Column(Text)
+    embedding_version = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
-# ── 5. Conversations (Gestion des fils de discussion et tracking LLM) ───
 class Conversation(Base):
     __tablename__ = "conversations"
     __table_args__ = (
         Index('conversations_user_idx', 'user_id'),
-        Index('conversations_parent_idx', 'parent_conversation_id'),
+        Index('conversations_farm_idx', 'farm_id'),
         Index('conversations_agent_idx', 'agent_type'),
         Index('conversations_created_idx', 'created_at'),
-        Index('conversations_audit_trail_idx', 'audit_trail_id'),
+        Index('conversations_followup_idx', 'needs_follow_up'),
+        Index('conversations_audit_unique', 'audit_trail_id', unique=True),
         {"schema": "intelligence"}
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
-    parent_conversation_id = Column(PG_UUID(as_uuid=True), ForeignKey("intelligence.conversations.id")) # Chaînage des messages pour continuité
-    
+    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
     query = Column(Text, nullable=False)
     response = Column(Text)
-    agent_type = Column(String)
-    crop = Column(String)
+    agent_type = Column(Text)
+    crop = Column(Text)
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
-    
-    mode = Column(String, default="text", nullable=False)
-    audio_url = Column(String)
-    audio_duration_ms = Column(Integer) # Monitoring coût STT (Whisper)
-    
+    mode = Column(Text, default="text", nullable=False)
+    audio_url = Column(Text)
     is_waiting_for_input = Column(Boolean, default=False, nullable=False)
     missing_slots = Column(JSONB)
-    
     execution_path = Column(JSONB)
-    confidence_score = Column(Float)
+    confidence_score = Column(DOUBLE_PRECISION)
+    user_intent = Column(Text)
+    needs_follow_up = Column(Boolean, default=False, nullable=False)
     total_tokens_used = Column(Integer, default=0, nullable=False)
-    response_time_ms = Column(Integer)
-    
-    # Feedback RLHF utilisateur
-    feedback_rating = Column(Integer)
-    feedback_comment = Column(Text)
-    
-    audit_trail_id = Column(String, unique=True)
+    responseTimeMs = Column(Integer)
+    audit_trail_id = Column(Text, unique=True)
     anomaly_id = Column(PG_UUID(as_uuid=True), ForeignKey("intelligence.anomalies.id"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
-    # Relations Python (Utile pour l'ORM)
-    user = relationship("User", foreign_keys=[user_id])
 
+# ── Events, Anomalies & Trust ───────────────────────────────────────────
 
-# ── 6. Territory Events ──────────────────────────────────────────────────
 class TerritoryEvent(Base):
     __tablename__ = "territory_events"
     __table_args__ = (
         Index('territory_events_zone_idx', 'zone_id'),
         Index('territory_events_type_idx', 'event_type'),
+        Index('territory_events_status_idx', 'status'),
         {"schema": "intelligence"}
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"), nullable=False)
-    event_type = Column(String, nullable=False)
+    event_type = Column(Text, nullable=False)
     payload = Column(JSONB)
     meta = Column(JSONB)
-    status = Column(String, default="NEW", nullable=False)
-    expires_at = Column(DateTime) # Auto-expiration des événements éphémères
+    severity = Column(Text, default="INFO", nullable=False)
+    status = Column(Text, default="NEW", nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     processed_at = Column(DateTime)
     processed_by_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
 
 
-# ── 7. Anomalies (Détection des fraudes et alertes terrain) ──────────────
 class Anomaly(Base):
     __tablename__ = "anomalies"
     __table_args__ = (
         Index('anomalies_zone_idx', 'zone_id'),
-        Index('anomalies_category_idx', 'category'),
+        Index('anomalies_farm_idx', 'farm_id'),
         Index('anomalies_resolved_idx', 'is_resolved'),
         {"schema": "intelligence"}
     )
-    
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"), nullable=False)
-    source = Column(String)
-    category = Column(String, default="GENERAL", nullable=False) 
-    level = Column(String, nullable=False)
-    title = Column(String, nullable=False)
+    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
+    source = Column(Text)
+    level = Column(Text, nullable=False)
+    title = Column(Text, nullable=False)
     message = Column(Text)
     details = Column(JSONB)
     is_resolved = Column(Boolean, default=False, nullable=False)
-    false_positive_justification = Column(Text) # Apprentissage de l'IA sur ses faux positifs
     resolved_by_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
     resolved_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
-# ── 8. Trust Scores ──────────────────────────────────────────────────────
 class TrustScore(Base):
     __tablename__ = "trust_scores"
     __table_args__ = {"schema": "intelligence"}
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True)
-    global_score = Column(Float, default=0.0, nullable=False)
-    reliability_index = Column(Float, default=0.0, nullable=False)
-    quality_index = Column(Float, default=0.0, nullable=False)
-    compliance_index = Column(Float, default=0.0, nullable=False)
-    resilience_bonus = Column(Float, default=0.0, nullable=False)
-    
-    # Contexte pour la fiabilité du score
-    transaction_count_evaluated = Column(Integer, default=0, nullable=False)
-    score_trend = Column(String, default="STABLE", nullable=False)
-    
+    global_score = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
+    reliability_index = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
+    quality_index = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
+    compliance_index = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
+    resilience_bonus = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
-# ── 9. AI Rating Reasonings ──────────────────────────────────────────────
 class AIRatingReasoning(Base):
     __tablename__ = "ai_rating_reasonings"
     __table_args__ = (
@@ -1292,83 +1476,68 @@ class AIRatingReasoning(Base):
         {"schema": "intelligence"}
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     trust_score_id = Column(PG_UUID(as_uuid=True), ForeignKey("intelligence.trust_scores.id"), nullable=False)
-    agent_name = Column(String, nullable=False)
+    agent_name = Column(Text, nullable=False)
     justification = Column(Text, nullable=False)
     data_points = Column(JSONB, nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
-# ── 10. Cerveau IA : Recommandations stockées ────────────────────────────
-class AIRecommendation(Base):
-    __tablename__ = "ai_recommendations"
-    __table_args__ = (
-        Index('ai_rec_farm_idx', 'farm_id'),
-        Index('ai_rec_crop_cycle_idx', 'crop_cycle_id'),
-        Index('ai_rec_user_idx', 'user_id'),
-        Index('ai_rec_type_idx', 'recommendation_type'),
-        Index('ai_rec_status_idx', 'status'),
-        Index('ai_rec_created_idx', 'created_at'),
-        {"schema": "intelligence"}
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
-    crop_cycle_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.crop_cycles.id"))
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
-    agent_name = Column(String, nullable=False)
-    recommendation_type = Column(String, nullable=False)
-    title = Column(String, nullable=False)
-    content = Column(Text, nullable=False)
-    confidence_score = Column(Float)
-    data_sources_used = Column(JSONB)
-    priority = Column(String, default="MEDIUM", nullable=False)
-    status = Column(String, default="PENDING", nullable=False)
-
-    user = relationship("User", back_populates="recommendations")
-    crop_cycle = relationship("CropCycle", foreign_keys=[crop_cycle_id])
-    farm = relationship("Farm", foreign_keys=[farm_id])
-    applied_at = Column(DateTime)
-    expires_at = Column(DateTime)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-
-
-# ── 11. Cerveau IA : Cache météo externe ( NASA / Open-Meteo ) ───────────
 class WeatherDataLog(Base):
     __tablename__ = "weather_data_logs"
     __table_args__ = (
         Index('wdl_zone_idx', 'zone_id'),
         Index('wdl_farm_idx', 'farm_id'),
         Index('wdl_date_idx', 'record_date'),
-        Index('wdl_farm_date_source_unique', 'farm_id', 'record_date', 'source', unique=True),
+        Index('wdl_horizon_idx', 'forecast_horizon_days'),
+        Index('wdl_farm_date_source_horizon_unique', 'farm_id', 'record_date', 'source', 'forecast_horizon_days', unique=True),
         {"schema": "intelligence"}
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
     farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
-    latitude = Column(Float, nullable=False)
-    longitude = Column(Float, nullable=False)
+    latitude = Column(DOUBLE_PRECISION, nullable=False)
+    longitude = Column(DOUBLE_PRECISION, nullable=False)
     record_date = Column(DateTime, nullable=False)
-    temp_min = Column(Float)
-    temp_max = Column(Float)
-    temp_mean = Column(Float)
-    precipitation_mm = Column(Float)
-    humidity_percent = Column(Float)
-    wind_speed_kmh = Column(Float)
-    solar_radiation = Column(Float)
-    evapotranspiration = Column(Float)
-    gdd_contribution = Column(Float)
     
-    forecast_horizon_days = Column(Integer, default=0, nullable=False) # 0 = Réel historique, >0 = Prévision J+N
+    temp_min = Column(DOUBLE_PRECISION)
+    temp_max = Column(DOUBLE_PRECISION)
+    temp_mean = Column(DOUBLE_PRECISION)
+    temp_dew_point = Column(DOUBLE_PRECISION)
     
-    source = Column(String, default="OPEN_METEO", nullable=False)
+    precipitation_mm = Column(DOUBLE_PRECISION)
+    precipitation_probability = Column(Integer)
+    
+    humidity_percent = Column(DOUBLE_PRECISION)
+    humidity_min = Column(DOUBLE_PRECISION)
+    humidity_max = Column(DOUBLE_PRECISION)
+    
+    wind_speed_kmh = Column(DOUBLE_PRECISION)
+    wind_direction_degrees = Column(Integer)
+    wind_gusts_kmh = Column(DOUBLE_PRECISION)
+    
+    solar_radiation = Column(DOUBLE_PRECISION)
+    uv_index = Column(DOUBLE_PRECISION)
+    
+    evapotranspiration = Column(DOUBLE_PRECISION)
+    gdd_contribution = Column(DOUBLE_PRECISION)
+    leaf_wetness_duration_minutes = Column(Integer)
+    
+    soil_temperature_depth_0cm = Column(DOUBLE_PRECISION)
+    soil_temperature_depth_10cm = Column(DOUBLE_PRECISION)
+    soil_moisture_volumetric_percent = Column(DOUBLE_PRECISION)
+    
+    disease_risk_index = Column(JSONB)
+    alert_triggers = Column(JSONB)
+    whatsapp_pushed_alerts = Column(JSONB)
+    
+    forecast_horizon_days = Column(Integer, default=0, nullable=False)
+    source = Column(Text, default="OPEN_METEO", nullable=False)
     raw_payload = Column(JSONB)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
-
-# ── 12. Cerveau IA : Mémoire contextuelle de l'agent ─────────────────────
 
 class AgentContextMemory(Base):
     __tablename__ = "agent_context_memory"
@@ -1380,26 +1549,19 @@ class AgentContextMemory(Base):
         {"schema": "intelligence"}
     )
 
-    # Utilisation de gen_random_uuid() pour éviter les erreurs de génération côté Python
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    
-    # Ajout de ForeignKeys pour assurer l'intégrité des données de contexte
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, index=True)
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"), index=True)
-    crop_cycle_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.crop_cycles.id"), index=True)
-    
-    context_key = Column(String, nullable=False)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
+    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
+    crop_cycle_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.crop_cycles.id"))
+    context_key = Column(Text, nullable=False)
     context_value = Column(JSONB, nullable=False)
-    source = Column(String, default="AGENT", nullable=False)
-    
-    is_long_term = Column(Boolean, default=False, nullable=False)
-    confidence = Column(Float)
+    source = Column(Text, default="AGENT", nullable=False)
+    confidence = Column(DOUBLE_PRECISION)
     expires_at = Column(DateTime)
-    
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
-
+    
 ##**************************************
 ## Inventory
 ###*************************************

@@ -20,13 +20,23 @@ class AgentRequest(BaseModel):
 @router.post("/producer")
 async def producer_agent(request: AgentRequest):
     """Envoie la tâche de l'agent PRODUCER au worker Celery."""
-    task = process_agent_task.delay("PRODUCER", request.phone_number, request.message)
+    task = process_agent_task.delay(
+        phone_number=request.phone_number,
+        user_query=request.message,
+        workspace_type="producer",
+        force_role=True,
+    )
     return {"task_id": task.id, "status": "processing"}
 
 @router.post("/buyer")
 async def buyer_agent(request: AgentRequest):
     """Envoie la tâche de l'agent BUYER au worker Celery."""
-    task = process_agent_task.delay("BUYER", request.phone_number, request.message)
+    task = process_agent_task.delay(
+        phone_number=request.phone_number,
+        user_query=request.message,
+        workspace_type="buyer",
+        force_role=True,
+    )
     return {"task_id": task.id, "status": "processing"}
 
 @router.get("/status/{task_id}")

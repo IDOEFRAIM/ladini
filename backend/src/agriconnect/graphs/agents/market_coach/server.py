@@ -24,36 +24,32 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from agriconnect.graphs.agents.market_coach.nodes import build_graph, build_runtime
+from agriconnect.graphs.agents.market_coach.utils import build_runtime
+from agriconnect.graphs.factory import GraphFactory
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("AgriConnect.AGUI.Server")
 
-# Initialisation globale des workflows pour le typage des endpoints
-producer_workflow = None
-buyer_workflow = None
+graph_factory = GraphFactory()
 mc_runtime = build_runtime()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Gestionnaire moderne du cycle de vie des runtimes et graphes AgriConnect."""
-    global producer_workflow, buyer_workflow
-    
     logger.info("⚡ Connexion au Runtime Market Coach (MCP)...")
     await mc_runtime.__aenter__()
     logger.info("🚀 Runtime MCP connecté avec succès.")
     
-    logger.info("📦 Compilation des StateGraphs LangGraph...")
-    producer_workflow = build_graph(role="PRODUCER", mc_runtime=mc_runtime)
-    buyer_workflow = build_graph(role="BUYER", mc_runtime=mc_runtime)
-    
-    # Injection dynamique des routes une fois les graphes compilés en mémoire
-    add_langgraph_fastapi_endpoint(app, producer_workflow, "/api/agents/producer")
-    add_langgraph_fastapi_endpoint(app, buyer_workflow, "/api/agents/buyer")
+    logger.info("📦 Initialisation des endpoints LangGraph role-based...")
+    add_langgraph_fastapi_endpoint(app, lambda: graph_factory.get_graph("PRODUCER", mc_runtime=mc_runtime), "/api/agents/producer")
+    add_langgraph_fastapi_endpoint(app, lambda: graph_factory.get_graph("BUYER", mc_runtime=mc_runtime), "/api/agents/buyer")
     
     yield
     
+    logger.info("🧹 Purge du cache GraphFactory...")
+    graph_factory.clear()
+
     logger.info("🛑 Déconnexion du Runtime MCP...")
     await mc_runtime.__exit__(None, None, None)
     logger.info("🛑 Serveur AgriConnect éteint proprement.")

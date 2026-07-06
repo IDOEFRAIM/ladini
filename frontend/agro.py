@@ -18,7 +18,7 @@ import asyncio
 
 # Removed: from agriconnect.agents.formation_agro import FormationAgro
 from agriconnect.graphs.nodes.formation import FormationCoach, FormationConfig
-from agriconnect.rag.retriever import AgileRetriever
+from futur.rag.retriever import AgileRetriever
 
 logging.basicConfig(
     level=logging.INFO,

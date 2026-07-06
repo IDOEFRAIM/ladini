@@ -6,7 +6,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from agriconnect.tools import formation as form_mod
+from futur.tools import formation as form_mod
 
 
 class DummyLLM:

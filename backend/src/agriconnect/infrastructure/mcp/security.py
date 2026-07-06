@@ -4,13 +4,15 @@ import asyncio
 import os
 import contextvars
 import hashlib
+import importlib
 import json
 import logging
 import re
 import time
 import uuid
+from collections import deque
 from enum import Enum
-from typing import Any, Callable, Coroutine, Dict, Iterable, List, Optional, Protocol
+from typing import Any, Callable, Coroutine, Dict, Iterable, List, Optional, Protocol, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -77,7 +79,6 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "alter_table": PermissionScope.DB_SCHEMA_MODIFY,
     "search_agronomy_docs": PermissionScope.DB_READ_ONLY,
     "search_past_interactions": PermissionScope.DB_READ_ONLY,
-    "rag://status": PermissionScope.DB_READ_ONLY,
     "persist_conversation": PermissionScope.DB_DATA_WRITE,
 }
 
@@ -115,13 +116,28 @@ def _autofill_tool_scopes() -> None:
     Since we auto-register tools from `AgriDatabaseService`, we conservatively
     assign a default scope when a mapping is missing.
     """
-    try:
-        from agriconnect.protocols.mcp.h import TOOL_HANDLERS
-    except Exception as exc:
-        logger.debug("TOOL_HANDLERS import failed; cannot autofill scopes: %s", exc)
+
+    handlers = None
+    last_error: Exception | None = None
+    for module_path in (
+        "agriconnect.protocols.mcp.servers.h",
+        "agriconnect.protocols.mcp.handlers",
+       
+    ):
+        try:
+            module = importlib.import_module(module_path)
+            handlers = getattr(module, "TOOL_HANDLERS", None)
+        except Exception as exc:  # pragma: no cover - defensive
+            last_error = exc
+            continue
+        if handlers:
+            break
+
+    if not handlers:
+        logger.debug("TOOL_HANDLERS import failed; cannot autofill scopes: %s", last_error)
         return
 
-    for tool in TOOL_HANDLERS.keys():
+    for tool in handlers.keys():
         TOOL_SCOPE_MAP.setdefault(tool, _guess_scope(tool))
 
 TOOL_RISK_MAP: dict[str, RiskLevel] = {
@@ -133,7 +149,6 @@ TOOL_RISK_MAP: dict[str, RiskLevel] = {
     "alter_table": RiskLevel.CRITICAL,
     "search_agronomy_docs": RiskLevel.LOW,
     "search_past_interactions": RiskLevel.LOW,
-    "rag://status": RiskLevel.LOW,
 }
 
 
@@ -167,11 +182,12 @@ SQL_INJECTION_PATTERNS = [
     r"(?i)\\bUNION\\s+(ALL\\s+)?SELECT\\b",
 ]
 
+SQL_INJECTION_REGEX = [re.compile(pattern) for pattern in SQL_INJECTION_PATTERNS]
+
 SENSITIVE_FILE_PATTERNS = [r"\\.env", r"id_rsa", r"\\.pem$", r"\\.key$", r"credentials"]
 
 
 class MCPServerKind(str, Enum):
-    RAG = "rag"
     DB = "db"
 
 
@@ -202,23 +218,31 @@ class ToolExecutionEnvelope(BaseModel):
 
 
 class ToolRateLimiter:
-    """In-memory per-user per-tool rate limiter (sliding window)."""
+    """In-memory per-user per-tool rate limiter (sliding window with eviction)."""
 
-    def __init__(self, max_calls: int = 60, window_seconds: float = 60.0) -> None:
+    def __init__(self, max_calls: int = 60, window_seconds: float = 60.0, max_keys: int = 2048) -> None:
         self.max_calls = max(1, int(max_calls))
         self.window_seconds = max(1.0, float(window_seconds))
-        self._events: dict[str, list[float]] = {}
+        self.max_keys = max(128, int(max_keys))
+        self._events: dict[str, deque[float]] = {}
 
     def check(self, key: str) -> tuple[bool, str]:
         now = time.monotonic()
-        events = self._events.setdefault(key, [])
+        events = self._events.setdefault(key, deque())
         cutoff = now - self.window_seconds
         while events and events[0] < cutoff:
-            events.pop(0)
+            events.popleft()
         if len(events) >= self.max_calls:
             return False, f"rate_limit_exceeded:{self.max_calls}/{int(self.window_seconds)}s"
         events.append(now)
+        if len(self._events) > self.max_keys:
+            self._prune_stale(now)
         return True, "ok"
+
+    def _prune_stale(self, now: float) -> None:
+        stale_keys = [k for k, v in self._events.items() if not v or v[-1] < now - (self.window_seconds * 5)]
+        for key in stale_keys:
+            self._events.pop(key, None)
 
 
 class ToolExecutionPolicy:
@@ -249,6 +273,7 @@ class ToolExecutionPolicy:
         rid = request_id or _REQUEST_ID_CTX.get() or str(uuid.uuid4())
         _REQUEST_ID_CTX.set(rid)
 
+        logger.info(f"TOOL_NAME:{tool_name} - TIMEOUT_SECONDS:{timeout_seconds}")
         limiter_key = f"{user_id}:{tool_name}"
         allowed, reason = self._limiter.check(limiter_key)
         if not allowed:
@@ -266,6 +291,8 @@ class ToolExecutionPolicy:
 
         try:
             raw = await asyncio.wait_for(handler(**arguments), timeout=timeout)
+            
+            
             normalized = MCPPermissionClient._normalize_output(raw)
             elapsed = round((time.monotonic() - start) * 1000, 1)
             envelope = ToolExecutionEnvelope(
@@ -365,14 +392,13 @@ class MCPToolRegistry:
         self.register_defaults()
 
     def register_defaults(self) -> None:
-        rag_tools = {"search_agronomy_docs", "search_past_interactions", "rag://status"}
         for name, scope in TOOL_SCOPE_MAP.items():
             self._tools[name] = MCPToolMeta(
                 name=name,
-                server=MCPServerKind.RAG if name in rag_tools else MCPServerKind.DB,
+                server= MCPServerKind.DB,
                 scope=scope,
                 risk=TOOL_RISK_MAP.get(name, RiskLevel.MEDIUM),
-                timeout_seconds=60.0 if name in rag_tools else 12.0,
+                timeout_seconds= 90.0,
                 retries=1,
             )
 
@@ -399,10 +425,10 @@ class MCPToolRegistry:
             self._tools[name] = MCPToolMeta(
                 name=name,
                 server=server,
-                scope=PermissionScope.DB_READ_ONLY if server == MCPServerKind.RAG else PermissionScope.DB_DATA_WRITE,
-                risk=RiskLevel.LOW if server == MCPServerKind.RAG else RiskLevel.MEDIUM,
+                scope=PermissionScope.DB_DATA_WRITE,
+                risk= RiskLevel.MEDIUM,
                 description=str(item.get("description") or ""),
-                timeout_seconds=20.0 if server == MCPServerKind.RAG else 12.0,
+                timeout_seconds= 30.0,
                 retries=1,
             )
 
@@ -463,7 +489,7 @@ class MCPPermissionClient:
         if not self._registry.has_tool(tool_name):
             raise PermissionDenied(tool_name, "Tool not registered in registry")
 
-        decision = self._check_permission(tool_name)
+        decision = self._check_permission(tool_name, arguments)
         if not decision.allowed:
             if decision.decision == "HITL_REQUIRED":
                 approved = await self._request_hitl(tool_name, arguments, decision.reason)
@@ -501,6 +527,11 @@ class MCPPermissionClient:
         scope = meta.scope if meta else TOOL_SCOPE_MAP.get(tool_name, PermissionScope.DB_DATA_WRITE)
         risk = meta.risk if meta else TOOL_RISK_MAP.get(tool_name, RiskLevel.MEDIUM)
 
+        if arguments:
+            suspicious, reason = self._scan_arguments_for_risk(arguments)
+            if suspicious:
+                return PermissionDecision(allowed=False, decision="HITL_REQUIRED", reason=reason, scope=scope, risk=RiskLevel.CRITICAL)
+
         if scope == PermissionScope.DB_SCHEMA_MODIFY:
             if self.maintenance_mode:
                 return PermissionDecision(allowed=True, decision="ALLOW", reason="maintenance", scope=scope, risk=risk)
@@ -522,19 +553,36 @@ class MCPPermissionClient:
         except Exception:
             return False
 
-    def _mask_sensitive(self, data: Any) -> Any:
+    def _mask_sensitive(self, data: Any, seen: Optional[set[int]] = None) -> Any:
+        if seen is None:
+            seen = set()
+        obj_id = id(data)
+        if obj_id in seen:
+            return "***RECURSION***"
+        seen.add(obj_id)
         if isinstance(data, dict):
-            return {k: ("***MASKED***" if k.lower() in SENSITIVE_COLUMNS else self._mask_sensitive(v)) for k, v in data.items()}
+            return {k: ("***MASKED***" if k.lower() in SENSITIVE_COLUMNS else self._mask_sensitive(v, seen)) for k, v in data.items()}
         if isinstance(data, list):
-            return [self._mask_sensitive(x) for x in data]
+            return [self._mask_sensitive(x, seen) for x in data]
         if isinstance(data, str):
             try:
                 parsed = json.loads(data)
                 if isinstance(parsed, (dict, list)):
-                    return self._mask_sensitive(parsed)
+                    return self._mask_sensitive(parsed, seen)
             except Exception:
                 pass
         return data
+
+    def _scan_arguments_for_risk(self, arguments: Dict[str, Any]) -> Tuple[bool, str]:
+        json_blob = json.dumps(arguments, default=str, ensure_ascii=False)
+        if any(pattern.search(json_blob) for pattern in SQL_INJECTION_REGEX):
+            return True, "sql_pattern_detected"
+        for key, value in arguments.items():
+            if isinstance(value, str) and len(value) > 4000:
+                return True, f"arg_{key}_too_large"
+            if "sql" in key.lower():
+                return True, f"arg_{key}_sql_key"
+        return False, "ok"
 
     @staticmethod
     def _normalize_output(data: Any) -> dict:
@@ -569,7 +617,7 @@ class MCPPermissionHostApp:
     def __init__(self, client: MCPPermissionClient, block_raw_sql: bool = True) -> None:
         self._client = client
         self._block_raw_sql = block_raw_sql
-        self._sql_re = [re.compile(p) for p in SQL_INJECTION_PATTERNS]
+        self._sql_re = SQL_INJECTION_REGEX
         self._file_re = [re.compile(p) for p in SENSITIVE_FILE_PATTERNS]
 
     async def execute(self, tool_name: str, arguments: Dict[str, Any] | None = None) -> Any:
@@ -652,40 +700,10 @@ class AsyncMCPBackend(Protocol):
         ...
 
 
-class RAGInProcessBackend:
-    def __init__(self) -> None:
-        from agriconnect.protocols.mcp.tools.agronomy import AgronomyTools
-
-        self._provider = AgronomyTools()
-
-    async def call_tool(self, name: str, arguments) -> Any:
-        tool_map = {
-            "search_agronomy_docs": self._provider.search_agronomy_docs,
-            "search_past_interactions": self._provider.search_past_interactions,
-            "rag://status": self._provider.rag_status,
-        }
-        fn = tool_map.get(name)
-        if fn is None:
-            raise ValueError(f"Unknown RAG tool: {name}")
-        raw = await fn(**arguments)
-        if isinstance(raw, str):
-            try:
-                return json.loads(raw)
-            except Exception:
-                return {"result": raw}
-        return raw
-
-    async def list_tools(self) -> list[dict[str, Any]]:
-        return [
-            {"name": "search_agronomy_docs", "description": "Semantic search in agronomy docs"},
-            {"name": "search_past_interactions", "description": "Search episodic memory"},
-            {"name": "rag://status", "description": "RAG provider status"},
-        ]
-
 
 class DBInProcessBackend:
     async def call_tool(self, name: str, arguments) -> Any:
-        from agriconnect.protocols.mcp.h import TOOL_HANDLERS
+        from agriconnect.protocols.mcp.servers.h import TOOL_HANDLERS
 
         fn = TOOL_HANDLERS.get(name)
         if fn is None:
@@ -699,7 +717,7 @@ class DBInProcessBackend:
         return raw
 
     async def list_tools(self) -> list[dict[str, Any]]:
-        from agriconnect.protocols.mcp.h import TOOL_DESCRIPTIONS
+        from agriconnect.protocols.mcp.servers.h import TOOL_DESCRIPTIONS
 
         return [{"name": n, "description": d} for n, d in TOOL_DESCRIPTIONS.items()]
 
@@ -707,8 +725,8 @@ class DBInProcessBackend:
 class MCPManager:
     def __init__(self, registry: MCPToolRegistry | None = None) -> None:
         self.registry = registry or get_registry()
+
         self._backends: dict[MCPServerKind, AsyncMCPBackend] = {
-            MCPServerKind.RAG: RAGInProcessBackend(),
             MCPServerKind.DB: DBInProcessBackend(),
         }
         self._ready = False
@@ -716,10 +734,11 @@ class MCPManager:
     async def ensure_ready(self) -> None:
         if self._ready:
             return
-        rag_tools = await self._backends[MCPServerKind.RAG].list_tools()
+        
+        # Synchronisation uniquement pour le backend DB
         db_tools = await self._backends[MCPServerKind.DB].list_tools()
-        self.registry.sync_discovered_tools(MCPServerKind.RAG, rag_tools)
         self.registry.sync_discovered_tools(MCPServerKind.DB, db_tools)
+        
         self._ready = True
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any] | None = None) -> Any:
@@ -732,6 +751,7 @@ class MCPManager:
         backend = self._backends[meta.server]
         attempts = 1 + max(0, int(meta.retries))
         last_error: Optional[Exception] = None
+        
         for attempt in range(1, attempts + 1):
             try:
                 return await backend.call_tool(tool_name, arguments)
@@ -739,12 +759,13 @@ class MCPManager:
                 last_error = exc
                 if attempt >= attempts:
                     break
+                    
         raise RuntimeError(f"MCP call failed for '{tool_name}': {last_error}")
 
     async def list_tools(self) -> dict[str, list[dict[str, Any]]]:
         await self.ensure_ready()
+        # Exposition uniquement des outils DB
         return {
-            "rag_tools": self.registry.list_tools(MCPServerKind.RAG),
             "db_tools": self.registry.list_tools(MCPServerKind.DB),
         }
 
