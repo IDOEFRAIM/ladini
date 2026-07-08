@@ -9,6 +9,7 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuRequest,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.buyer_common import safe_call_tool
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import ProductGateway
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, is_success_response
 
 from .helpers import (
@@ -339,7 +340,7 @@ async def _resolve_product_ref(
     """Resolve a product name to a catalog reference."""
     if not product_name:
         return None
-    res = await safe_call_tool(mc_runtime, "search_products", product=str(product_name), phone=str(phone))
+    res = await ProductGateway(mc_runtime).search_products(product=str(product_name), phone=str(phone))
     if not is_success_response(res):
         return None
     results = res.get("results") or (res.get("data") or {}).get("results") or []

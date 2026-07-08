@@ -36,7 +36,7 @@ from agriconnect.graphs.agents.market_coach.services.domain.cart_service import 
     CartDomainService,
     SOURCE_TYPE_LABELS,
 )
-from agriconnect.graphs.agents.market_coach.services.mcp.gateway import AuctionGateway
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import AuctionGateway, ProductGateway
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     ensure_dict,
@@ -662,7 +662,7 @@ async def _resolve_product_ref(
     """
     if not product_name:
         return None
-    res = await safe_call_tool(mc_runtime, "search_products", product=str(product_name), phone=str(phone))
+    res = await ProductGateway(mc_runtime).search_products(product=str(product_name), phone=str(phone))
     if not is_success_response(res):
         return None
     results = res.get("results") or (res.get("data") or {}).get("results") or []

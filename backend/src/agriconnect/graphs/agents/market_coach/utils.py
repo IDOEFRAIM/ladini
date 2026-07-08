@@ -234,14 +234,17 @@ def ensure_dict(obj: Any) -> Dict[str, Any]:
 
 
 def is_success_response(res: Dict[str, Any]) -> bool:
-    status = str((res or {}).get("status") or "").lower()
+    if not res:
+        return False
+    status = str(res.get("status") or "").lower()
     if status in {"ok", "success", "completed"}:
         return True
     if status in {"error", "failed", "rejected", "not_found"}:
         return False
-    if (res or {}).get("error"):
+    if res.get("error") or res.get("_exception"):
         return False
-    return "status" not in (res or {})
+    if "status" not in res:
+        return bool(res.get("data"))
 
 
 def norm_intent(intent: Any) -> str:
@@ -377,7 +380,20 @@ class MarketRuntime:
             self.db_client = None
 
     def ensure_db(self) -> Any:
-        """Lazy-load an AgriDatabaseService instance shared across the runtime."""
+        """Lazy-load an AgriDatabaseService instance shared across the runtime.
+
+        .. deprecated::
+            Use MCP gateways (``services/mcp/gateway.py``) instead of direct
+            DB access.  All MarketCoach code should call MCP tools through
+            typed gateways so that rate-limiting, timeouts, and audit apply
+            uniformly.
+        """
+        import warnings
+        warnings.warn(
+            "ensure_db() bypasses MCP tooling — use a gateway instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if self.db_service is not None:
             return self.db_service
         try:

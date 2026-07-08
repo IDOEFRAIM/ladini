@@ -12,6 +12,7 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
 from agriconnect.graphs.agents.market_coach.flows.common.menu_text import (
     render_cart_actions_hint,
 )
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import ProductGateway
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, is_success_response
 
 from .buyer_common import SUPPORT_FOOTER, safe_call_tool, with_support_footer
@@ -28,9 +29,7 @@ class CartDomainService:
     ) -> Tuple[List[Dict[str, Any]], bool]:
         if not product_name:
             return [], False
-        res = await safe_call_tool(
-            self.mc_runtime,
-            "search_products",
+        res = await ProductGateway(self.mc_runtime).search_products(
             product=str(product_name),
             phone=str(phone),
         )

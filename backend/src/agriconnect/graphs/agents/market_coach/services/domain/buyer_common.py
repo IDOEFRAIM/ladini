@@ -5,7 +5,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from agriconnect.graphs.agents.market_coach.services.mcp.gateway import _BaseGateway
+from agriconnect.graphs.agents.market_coach.services.mcp.error_translation import (
+    classify_error,
+    INFRA_ERROR_CODE,
+)
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
+    MCPCallError,
+    _BaseGateway,
+)
 
 logger = logging.getLogger("AgriConnect.Market.BuyerCommon")
 
@@ -29,12 +36,30 @@ class _BuyerGateway(_BaseGateway):
     async def safe_call(self, tool: str, **kwargs: Any) -> Dict[str, Any]:
         try:
             result = await self._call(tool, **kwargs)
-            logger.info("safe_call | tool=%s | status=%s", tool, result.get("status"))
+            logger.info(
+                "safe_call | tool=%s | status=%s | rid=%s",
+                tool, result.get("status"), result.get("_request_id"),
+            )
             return result
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("safe_call | tool=%s | échec: %s", tool, exc)
+        except MCPCallError as exc:
+            logger.error(
+                "safe_call | tool=%s | code=%s | rid=%s | %s",
+                tool, exc.error_code, exc.request_id, exc,
+            )
             return {
                 "status": "error",
+                "error_code": exc.error_code,
+                "tool": tool,
+                "message": with_support_footer(str(exc)),
+                "_exception": str(exc),
+                "_request_id": exc.request_id,
+            }
+        except Exception as exc:  # noqa: BLE001
+            error_code = classify_error(str(exc))
+            logger.exception("safe_call | tool=%s | code=%s | %s", tool, error_code, exc)
+            return {
+                "status": "error",
+                "error_code": error_code,
                 "tool": tool,
                 "message": with_support_footer(
                     "Service temporairement indisponible, veuillez réessayer."

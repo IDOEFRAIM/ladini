@@ -18,7 +18,25 @@ _MCP_ERROR_TRANSLATIONS: Dict[str, str] = {
     "invalid": "Les données envoyées ne sont pas valides. Vérifiez et réessayez.",
     "stock": "Problème lié au stock. Vérifiez vos quantités.",
     "closed": "Cette enchère ou offre est déjà clôturée.",
+    "timeout": "Le service met trop de temps à répondre. Veuillez réessayer.",
+    "connection": "Impossible de joindre le service. Veuillez réessayer dans quelques instants.",
+    "unavailable": "Le service est temporairement indisponible. Veuillez réessayer.",
 }
+
+INFRA_ERROR_CODE = "infrastructure_unavailable"
+BUSINESS_ERROR_CODE = "business_error"
+
+_INFRA_KEYWORDS = frozenset({
+    "timeout", "connection", "unavailable", "unreachable", "refused",
+    "reset", "eof", "broken pipe", "dns", "ssl", "tls",
+})
+
+
+def classify_error(raw_error: str) -> str:
+    lower = (raw_error or "").lower()
+    if any(kw in lower for kw in _INFRA_KEYWORDS):
+        return INFRA_ERROR_CODE
+    return BUSINESS_ERROR_CODE
 
 
 def translate_mcp_error(raw_error: str) -> str:
@@ -29,4 +47,10 @@ def translate_mcp_error(raw_error: str) -> str:
     return GENERIC_TECHNICAL_ERROR
 
 
-__all__ = ["GENERIC_TECHNICAL_ERROR", "translate_mcp_error"]
+__all__ = [
+    "GENERIC_TECHNICAL_ERROR",
+    "translate_mcp_error",
+    "classify_error",
+    "INFRA_ERROR_CODE",
+    "BUSINESS_ERROR_CODE",
+]

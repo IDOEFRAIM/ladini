@@ -12,11 +12,26 @@ Usage::
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any, Dict, List
 
+from agriconnect.graphs.agents.market_coach.services.mcp.error_translation import (
+    classify_error,
+    translate_mcp_error,
+)
 from agriconnect.graphs.agents.market_coach.utils import ensure_dict
 
 logger = logging.getLogger("AgriConnect.Market.MCPGateway")
+
+
+class MCPCallError(Exception):
+    """Raised when an MCP gateway call fails after ensure_dict."""
+
+    def __init__(self, tool: str, message: str, error_code: str, request_id: str):
+        self.tool = tool
+        self.error_code = error_code
+        self.request_id = request_id
+        super().__init__(message)
 
 
 class _BaseGateway:
@@ -26,8 +41,29 @@ class _BaseGateway:
         self._rt = mc_runtime
 
     async def _call(self, tool: str, **kwargs: Any) -> Dict[str, Any]:
-        raw = await self._rt.call_db(tool, **{k: v for k, v in kwargs.items() if v is not None})
-        return ensure_dict(raw)
+        request_id = str(uuid.uuid4())[:8]
+        safe_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        logger.debug(
+            "GW_CALL | rid=%s | tool=%s | keys=%s",
+            request_id, tool, list(safe_kwargs.keys()),
+        )
+        try:
+            raw = await self._rt.call_db(tool, **safe_kwargs)
+        except Exception as exc:
+            error_code = classify_error(str(exc))
+            logger.error(
+                "GW_FAIL | rid=%s | tool=%s | code=%s | err=%s",
+                request_id, tool, error_code, exc,
+            )
+            raise MCPCallError(
+                tool=tool,
+                message=translate_mcp_error(str(exc)),
+                error_code=error_code,
+                request_id=request_id,
+            ) from exc
+        result = ensure_dict(raw)
+        result["_request_id"] = request_id
+        return result
 
 
 # ── Profile ────────────────────────────────────────────────────────
@@ -164,6 +200,7 @@ class AgentActionGateway(_BaseGateway):
 
 
 __all__ = [
+    "MCPCallError",
     "ProfileGateway",
     "FarmGateway",
     "AuctionGateway",

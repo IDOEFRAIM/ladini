@@ -14,9 +14,11 @@ from agriconnect.graphs.agents.market_coach.interpreter.entities import (
     _KNOWN_PRODUCT_KEYWORDS,
     _SUSPICIOUS_PRODUCT_TOKENS,
 )
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import ProductGateway
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     _clean_candidate_text,
+    is_success_response,
 )
 
 logger = logging.getLogger("AgriConnect.Market.ProductValidation")
@@ -26,13 +28,8 @@ async def _catalog_has_product(name: str, mc_runtime: Optional[MarketRuntime]) -
     if not mc_runtime:
         return False
     try:
-        db_service = mc_runtime.ensure_db()
-    except Exception:
-        return False
-    if not db_service or not hasattr(db_service, "get_public_products"):
-        return False
-    try:
-        result = await db_service.get_public_products(search=name, limit=1)
+        gw = ProductGateway(mc_runtime)
+        result = await gw.search_products(product=name, phone="")
     except Exception as exc:
         logger.debug("Product catalog lookup failed: %s", exc)
         return False
