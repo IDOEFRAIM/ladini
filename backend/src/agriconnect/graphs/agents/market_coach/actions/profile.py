@@ -4,13 +4,36 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Tuple
 
 from agriconnect.graphs.agents.market_coach.registry import register_action
-from agriconnect.graphs.agents.market_coach.actions.common import require, require_phone, normalize_quantity_to_kg
+from agriconnect.graphs.agents.market_coach.actions.tooling import ToolResolver
+from agriconnect.graphs.agents.market_coach.domain import DomainContext
+from agriconnect.graphs.agents.market_coach.domain.profile import (
+    ProfileService,
+    ProfileGetMcpUserCommand,
+    ProfileGetTrustCommand,
+    ProfileGetContextCommand,
+    ProfileSetGeoCommand,
+    ProfileSetPrefsCommand,
+    ProfileSwitchRoleCommand,
+)
+from agriconnect.graphs.agents.market_coach.actions.profile_dto import (
+    ProfileGetMcpUserPayload,
+    ProfileGetTrustPayload,
+    ProfileGetContextPayload,
+    ProfileSetGeoPayload,
+    ProfileSetPrefsPayload,
+    ProfileSwitchRolePayload,
+)
 
 @register_action("PROFILE_GET_MCP_USER", mode="READ")
 def prep_profile_get_mcp_user(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
     """Prépare la résolution de profil par téléphone."""
-    target_phone = str(require(payload, "phone"))
-    return "get_user_by_phone", {"phone": target_phone}
+    context = DomainContext.from_state(state)
+    dto = ProfileGetMcpUserPayload.from_payload(payload)
+    command = ProfileGetMcpUserCommand(phone=dto.phone)
+    service = ProfileService(context=context)
+    result = service.get_mcp_user(command)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "get_user_by_phone")
+    return tool_name, dict(result.tool_args)
 
 
 @register_action("PROFILE_GET_TRUST", mode="READ")
@@ -20,8 +43,13 @@ def prep_profile_get_trust(state: Mapping[str, Any], payload: Mapping[str, Any])
     Outil MCP auto-enregistré : get_trust_score(user_id).
     Le résolveur de schéma mappe phone → user_id via _lookup_arg_value.
     """
-    phone = require_phone(state)
-    return "get_trust_score", {"user_id": phone}
+    context = DomainContext.from_state(state)
+    _dto = ProfileGetTrustPayload.from_payload(payload)
+    command = ProfileGetTrustCommand(phone=context.phone)
+    service = ProfileService(context=context)
+    result = service.get_trust(command)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "get_trust_score")
+    return tool_name, dict(result.tool_args)
 
 
 @register_action("PROFILE_GET_CONTEXT", mode="READ")
@@ -30,35 +58,43 @@ def prep_profile_get_context(state: Mapping[str, Any], payload: Mapping[str, Any
 
     Auparavant manquant — l'absence faisait crasher le module au chargement.
     """
-    phone = require_phone(state)
-    return "get_user_context", {"user_id": phone}
+    context = DomainContext.from_state(state)
+    _dto = ProfileGetContextPayload.from_payload(payload)
+    command = ProfileGetContextCommand(phone=context.phone)
+    service = ProfileService(context=context)
+    result = service.get_context(command)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "get_user_context")
+    return tool_name, dict(result.tool_args)
 
 
 @register_action("PROFILE_SET_GEO", mode="WRITE")
 def prep_profile_set_geo(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    phone = require_phone(state)
-    lat = float(require(payload, "latitude"))
-    lon = float(require(payload, "longitude"))
-    return "update_geo_location", {"user_id": phone, "lat": lat, "lon": lon}
+    context = DomainContext.from_state(state)
+    dto = ProfileSetGeoPayload.from_payload(payload)
+    command = ProfileSetGeoCommand(phone=context.phone, latitude=dto.latitude, longitude=dto.longitude)
+    service = ProfileService(context=context)
+    result = service.set_geo(command)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "update_geo_location")
+    return tool_name, dict(result.tool_args)
 
 
 @register_action("PROFILE_SET_PREFS", mode="WRITE")
 def prep_profile_set_prefs(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    phone = require_phone(state)
-    lang = str(require(payload, "language"))
-    return "update_communication_prefs", {
-        "user_id": phone,
-        "advice_time": lang,
-        "enabled": bool(payload.get("allow_voice", True)),
-    }
+    context = DomainContext.from_state(state)
+    dto = ProfileSetPrefsPayload.from_payload(payload)
+    command = ProfileSetPrefsCommand(phone=context.phone, language=dto.language, allow_voice=bool(dto.allow_voice) if dto.allow_voice is not None else True)
+    service = ProfileService(context=context)
+    result = service.set_prefs(command)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "update_communication_prefs")
+    return tool_name, dict(result.tool_args)
 
 
 @register_action("PROFILE_SWITCH_ROLE", mode="WRITE")
 def prep_profile_switch_role(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    phone = require_phone(state)
-    role = str(require(payload, "target_role")).upper().strip()
-    return "create_agent_action", {
-        "agent_name": "MarketCoach",
-        "action_type": "PROFILE_SWITCH_ROLE",
-        "payload": {"phone": phone, "target_role": role},
-    }
+    context = DomainContext.from_state(state)
+    dto = ProfileSwitchRolePayload.from_payload(payload)
+    command = ProfileSwitchRoleCommand(phone=context.phone, target_role=dto.target_role)
+    service = ProfileService(context=context)
+    result = service.switch_role(command)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "create_agent_action")
+    return tool_name, dict(result.tool_args)

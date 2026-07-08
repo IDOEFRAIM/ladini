@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from agriconnect.graphs.agents.market_coach.utils import ensure_dict
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import _BaseGateway
 
 logger = logging.getLogger("AgriConnect.Market.BuyerCommon")
 
@@ -23,25 +23,30 @@ def with_support_footer(message: Optional[str]) -> Optional[str]:
     return f"{message.rstrip()}\n\n{SUPPORT_FOOTER}"
 
 
+class _BuyerGateway(_BaseGateway):
+    """Thin buyer-specific wrapper that adds SUPPORT_FOOTER on errors."""
+
+    async def safe_call(self, tool: str, **kwargs: Any) -> Dict[str, Any]:
+        try:
+            result = await self._call(tool, **kwargs)
+            logger.info("safe_call | tool=%s | status=%s", tool, result.get("status"))
+            return result
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("safe_call | tool=%s | échec: %s", tool, exc)
+            return {
+                "status": "error",
+                "tool": tool,
+                "message": with_support_footer(
+                    "Service temporairement indisponible, veuillez réessayer."
+                ),
+                "_exception": str(exc),
+            }
+
+
 async def safe_call_tool(mc_runtime: Any, tool_name: str, **kwargs: Any) -> Dict[str, Any]:
-    """Wrapper unique et sécurisé pour tout appel MCP du buyer_flow."""
-    try:
-        raw = await mc_runtime.call_db(
-            tool_name, **{k: v for k, v in kwargs.items() if v is not None}
-        )
-        result = ensure_dict(raw)
-        logger.info("safe_call_tool | tool=%s | status=%s", tool_name, result.get("status"))
-        return result
-    except Exception as exc:  # noqa: BLE001 — résilience volontaire
-        logger.exception("safe_call_tool | tool=%s | échec: %s", tool_name, exc)
-        return {
-            "status": "error",
-            "tool": tool_name,
-            "message": with_support_footer(
-                "Service temporairement indisponible, veuillez réessayer."
-            ),
-            "_exception": str(exc),
-        }
+    """Legacy wrapper — delegates to _BuyerGateway.safe_call."""
+    gw = _BuyerGateway(mc_runtime)
+    return await gw.safe_call(tool_name, **kwargs)
 
 
-__all__ = ["SUPPORT_FOOTER", "with_support_footer", "safe_call_tool"]
+__all__ = ["SUPPORT_FOOTER", "with_support_footer", "safe_call_tool", "_BuyerGateway"]

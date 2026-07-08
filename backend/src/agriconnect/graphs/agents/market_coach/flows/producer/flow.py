@@ -26,6 +26,11 @@ from agriconnect.graphs.agents.market_coach.utils import (
     ensure_dict,
     is_success_response,
 )
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
+    AuctionGateway,
+    FarmGateway,
+    StockGateway,
+)
 
 # Goals MCP qui exigent un farm_id en argument. Dérivé dynamiquement de
 # INTENT_CONFIG : tout intent dont les `required` listent "farm_id" est
@@ -68,8 +73,8 @@ async def _resolve_auction(mc_runtime: MarketRuntime, phone: str, payload: Dict[
         kwargs["zone_name"] = str(zone)
 
     logger.info("_resolve_auction: calling get_auctions with %s", kwargs)
-    raw = await mc_runtime.call_db("get_auctions", **kwargs)
-    result = ensure_dict(raw)
+    auction_gw = AuctionGateway(mc_runtime)
+    result = await auction_gw.search_open_auctions(**kwargs)
     
     if not is_success_response(result) or int(result.get("count") or 0) == 0:
         msg = result.get("message") or "Aucun marché disponible pour ce produit actuellement."
@@ -120,8 +125,8 @@ async def _resolve_my_bids(mc_runtime: MarketRuntime, phone: str, payload: Dict[
             "ag_ui_component": None,
         }
 
-    raw = await mc_runtime.call_db("get_my_active_bids", phone=str(phone))
-    result = ensure_dict(raw)
+    auction_gw = AuctionGateway(mc_runtime)
+    result = await auction_gw.get_my_active_bids(str(phone))
     
     if not is_success_response(result):
         msg = result.get("message") or "Impossible de charger vos offres en cours."
@@ -184,8 +189,8 @@ async def _resolve_bid(mc_runtime: MarketRuntime, phone: str, payload: Dict[str,
     if phone:
         kwargs["phone"] = str(phone)
 
-    raw = await mc_runtime.call_db("get_auctions_bids", **kwargs)
-    data = ensure_dict(raw).get("data") or []
+    auction_gw = AuctionGateway(mc_runtime)
+    data = (await auction_gw.get_auctions_bids(**kwargs)).get("data") or []
     
     if not isinstance(data, list) or not data:
         return {
@@ -295,10 +300,8 @@ async def _resolve_default_farm(
         farms = cached_farms
         logger.info("[FarmResolve] Using cached farms (%d entries)", len(farms))
     else:
-        raw = await mc_runtime.call_db("get_farms", phone=str(phone))
-        farms = ensure_dict(raw).get("data") or []
-        if not isinstance(farms, list):
-            farms = []
+        farm_gw = FarmGateway(mc_runtime)
+        farms = await farm_gw.list_farms_alt(str(phone))
 
     if not farms:
         # On ne bloque plus ici avec une erreur. 
@@ -380,8 +383,8 @@ async def _resolve_stock(mc_runtime: MarketRuntime, phone: str, payload: Dict[st
             "ag_ui_component": None,
         }
 
-    raw = await mc_runtime.call_db("get_producer_stocks", phone=str(phone))
-    items = ensure_dict(raw).get("data") or []
+    stock_gw = StockGateway(mc_runtime)
+    items = (await stock_gw.get_producer_stocks(str(phone))).get("data") or []
     
     if not isinstance(items, list) or not items:
         return {

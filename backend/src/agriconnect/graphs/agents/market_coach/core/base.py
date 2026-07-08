@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Dict, FrozenSet, Tuple
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 from agriconnect.graphs.agents.market_coach.registry import (
     iter_actions,
@@ -27,7 +27,7 @@ class FarmRuleConfig(BaseModel):
     write_requires_farm: FrozenSet[str] = Field(default_factory=frozenset)
     read_optional_farm: FrozenSet[str] = Field(default_factory=frozenset)
 
-    @validator("write_requires_farm", "read_optional_farm", pre=True)
+    @field_validator("write_requires_farm", "read_optional_farm", mode="before")
     def _normalize(cls, value):
         if not value:
             return frozenset()
@@ -41,7 +41,7 @@ class FarmRuleConfig(BaseModel):
 class IntentConfigEntry(BaseModel):
     required: FrozenSet[str] = Field(default_factory=frozenset)
 
-    @validator("required", pre=True)
+    @field_validator("required", mode="before")
     def _normalize_required(cls, value):
         if not value:
             return frozenset()
@@ -53,7 +53,7 @@ class MarketValidationConfig(BaseModel):
     farm: FarmRuleConfig
     intents: Dict[str, IntentConfigEntry] = Field(default_factory=dict)
 
-    @validator("intents", pre=True)
+    @field_validator("intents", mode="before")
     def _normalize_intent_keys(cls, value):
         if not value:
             return {}

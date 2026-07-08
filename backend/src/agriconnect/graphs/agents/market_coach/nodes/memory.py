@@ -12,6 +12,10 @@ from agriconnect.graphs.agents.market_coach.utils import (
     normalize_slot_keys,
     slot_has_value,
 )
+from agriconnect.graphs.agents.market_coach.core.slots import build_alias_mirrors
+from agriconnect.graphs.agents.market_coach.core.state_compaction import (
+    build_compaction_patch,
+)
 
 logger = get_logger("AgriConnect.MarketCoach.MemoryUpdate")
 
@@ -30,20 +34,11 @@ _ADD_TO_CART_DRAFT_FIELDS = {
 
 _PRIMARY_CANONICAL_UNITS = {"KG", "TONNE", "SAC", "UNITE"}
 
-_ALIAS_MIRRORS = {
-    "product": ("product_name",),
-    "quantity": ("quantity_mentioned",),
-    "unit": ("unit_mentioned",),
-    "price": ("price_mentioned",),
-    "zone": ("zone_name",),
-    "original_quantity": ("original_quantity_mentioned",),
-    "original_unit": ("original_unit_mentioned",),
-}
+# _ALIAS_MIRRORS is now derived from core/slots.py (single source of truth).
+_ALIAS_MIRRORS = build_alias_mirrors()
 
 _EMPTY_SLOT_VALUES = (None, "", [], {})
 _CORRECTION_HISTORY_LIMIT = 5
-_MAX_MESSAGE_HISTORY = 5
-_MAX_TOOL_HISTORY = 10
 _ORDER_MAPPING_KINDS = frozenset({"order", "order_list", "buyer_orders"})
 _EPHEMERAL_WORKING_KEYS = frozenset({"payload_richness", "last_confidence", "step_index"})
 _PRODUCT_CASCADE_FIELDS = (
@@ -72,38 +67,6 @@ def _mirror_aliases(container: Dict[str, Any]) -> None:
                 container.pop(alias, None)
 
 
-def _trim_sequence_window(items: Any, limit: int) -> Optional[List[Any]]:
-    if isinstance(items, list) and len(items) > limit:
-        return items[-limit:]
-    return None
-
-
-def _compact_order_tracking_context(raw_ctx: Any) -> Optional[Dict[str, Any]]:
-    if not isinstance(raw_ctx, dict):
-        return None
-    if "mapping_cache" in raw_ctx:
-        compacted = dict(raw_ctx)
-        compacted.pop("mapping_cache", None)
-        return compacted
-    return None
-
-
-def _build_compaction_patch(state: Dict[str, Any]) -> Dict[str, Any]:
-    patch: Dict[str, Any] = {}
-    for key in ("messages", "history", "conversation_history"):
-        trimmed = _trim_sequence_window(state.get(key), _MAX_MESSAGE_HISTORY)
-        if trimmed is not None:
-            patch[key] = trimmed
-
-    trimmed_tool_history = _trim_sequence_window(state.get("tool_execution_history"), _MAX_TOOL_HISTORY)
-    if trimmed_tool_history is not None:
-        patch["tool_execution_history"] = trimmed_tool_history
-
-    compacted_tracking = _compact_order_tracking_context(state.get("order_tracking_context"))
-    if compacted_tracking is not None:
-        patch["order_tracking_context"] = compacted_tracking
-
-    return patch
 
 
 def _values_equal(a: Any, b: Any) -> bool:
@@ -401,7 +364,15 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
                 resolved_id = mapping.get(str(sel_val))
         if resolved_id is None and snapshot_id:
             selection_token = sel_idx if sel_idx is not None else sel_val
-            resolved_id = menu_snapshot_store.resolve(session_id, snapshot_id, selection_token)
+            try:
+                resolved_id = menu_snapshot_store.resolve(session_id, snapshot_id, selection_token)
+            except Exception as snap_exc:
+                logger.warning(
+                    "[MemoryUpdate] menu_snapshot_store.resolve failed (snapshot=%s token=%s): %s",
+                    snapshot_id,
+                    selection_token,
+                    snap_exc,
+                )
 
         if resolved_id:
             resolved_str = str(resolved_id)
@@ -417,10 +388,21 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
                 payload["order_id"] = resolved_str
             elif mapping_kind == "intent_disambiguation":
                 pass
+            elif mapping_kind == "product_vendor":
+                # cart_management resolves the vendor by integer position in
+                # vendor_selection_context.vendors — it needs the original numeric
+                # selection_index, NOT the resolved UUID.  Do NOT inject the UUID and
+                # do NOT clear selection_index here; cart_management pops it itself
+                # once it has successfully located the vendor.
+                pass
             else:
                 payload["resolved_id"] = resolved_str
-            payload.pop("selection_index", None)
-            payload.pop("selected_value", None)
+            # For product_vendor, keep selection_index so cart_management can use it.
+            # Clearing it here would cause cart_management to skip vendor resolution
+            # and re-show the vendor menu on every turn (infinite loop).
+            if mapping_kind != "product_vendor":
+                payload.pop("selection_index", None)
+                payload.pop("selected_value", None)
 
     # --- Update stable entities uniquement après complétion ---
     status = str(state.get("status") or "").upper()
@@ -488,7 +470,7 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
     elif existing_draft:
         result["draft_payload"] = existing_draft
 
-    compaction_patch = _build_compaction_patch(state)
+    compaction_patch = build_compaction_patch(state, tracking_strategy="drop")
     if compaction_patch:
         result.update(compaction_patch)
 

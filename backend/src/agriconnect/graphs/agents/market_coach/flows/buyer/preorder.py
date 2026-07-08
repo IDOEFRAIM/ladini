@@ -84,7 +84,8 @@ async def update_preorder_phase(state: Dict[str, Any], mc_runtime: MarketRuntime
     goal = str(state.get("current_goal") or "").upper().strip()
     preorder_flow: Dict[str, Any] = dict(state.get("preorder_workflow") or {})
     phase = str(preorder_flow.get("phase") or "CART").upper().strip()
-    cart_has_items = bool(state.get("active_cart"))
+    working_snapshot = (state.get("working_memory") or {}).get("last_active_cart")
+    cart_has_items = bool(state.get("active_cart") or working_snapshot)
 
     def _phase_patch(new_phase: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         p: Dict[str, Any] = {"phase": new_phase}
@@ -154,7 +155,9 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
     goal = str(state.get("current_goal") or "").upper()
     payload: Dict[str, Any] = dict(state.get("transaction_payload") or {})
     phone = str(state.get("user_phone") or "")
-    cart: List[Dict[str, Any]] = list(state.get("active_cart") or [])
+    working_snapshot = (state.get("working_memory") or {}).get("last_active_cart")
+    cart_source = state.get("active_cart") or working_snapshot or []
+    cart: List[Dict[str, Any]] = list(cart_source)
     preorder_flow: Dict[str, Any] = dict(state.get("preorder_workflow") or {})
     phase = str(preorder_flow.get("phase") or "CART").upper().strip()
 
@@ -267,6 +270,7 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
             "current_goal": "BUYER_PREORDER_INIT",
             "ag_ui_component": None,
             "pending_menu": po_menu,
+            "active_cart": cart,
         }
 
     # --- PHASE 2: PREORDER_DRAFTED → CONFIRMED ---
@@ -287,6 +291,7 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
                 "current_goal": "BUYER_PREORDER_INIT",
                 "ag_ui_component": None,
                 "pending_menu": po_menu,
+                "active_cart": cart,
             }
 
         # Confirm via MCP

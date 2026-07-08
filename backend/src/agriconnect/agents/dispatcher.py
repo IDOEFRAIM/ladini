@@ -62,7 +62,7 @@ class BaseAgentDispatcher:
     # Registration & lookup
     # ------------------------------------------------------------------
     def register_action(self, intent: str, spec: ActionSpec) -> None:
-        key = (intent or "").upper()
+        key = intent.upper()
         if not key:
             raise ValueError("intent name must be a non-empty string")
         if key in self._actions:
@@ -70,10 +70,10 @@ class BaseAgentDispatcher:
         self._actions[key] = spec
 
     def has_action(self, intent: str) -> bool:
-        return (intent or "").upper() in self._actions
+        return intent.upper() in self._actions
 
     def get_action(self, intent: str) -> ActionSpec:
-        key = (intent or "").upper()
+        key = intent.upper()
         if key not in self._actions:
             raise KeyError(f"Unknown action '{intent}' for agent {self.agent_name}")
         return self._actions[key]

@@ -25,30 +25,40 @@ class WorkspaceResolver:
     async def resolve(
         self,
         workspace_id: str,
-        user_query: str,  # Kept for API compatibility (unused).
         workspace_type: Optional[str] = None,
     ) -> Workspace:
         ws = await self.store.get(workspace_id)
         if ws is None:
             ws = self._build_initial_workspace(workspace_id, workspace_type)
-            logger.info("New workspace %s → agent=%s type=%s", workspace_id, ws.active_agent, ws.workspace_type)
+            logger.info(
+                "WorkspaceResolver: new workspace %s type=%s",
+                workspace_id, ws.workspace_type,
+            )
             return ws
 
         if workspace_type and ws.workspace_type != workspace_type:
+            logger.info(
+                "WorkspaceResolver: %s type updated %s → %s",
+                workspace_id, ws.workspace_type, workspace_type,
+            )
             ws.workspace_type = workspace_type
+            ws.mark_dirty()
 
-        if ws.active_agent != "market":
-            logger.info("Workspace %s forced to MarketCoach agent (was %s)", workspace_id, ws.active_agent)
-            ws.active_agent = "market"
-
-        if self._has_active_tunnel(ws):
-            ws.locked_agent = ws.locked_agent or ws.active_agent
-            logger.info("Workspace %s tunnel actif → locked_agent=%s", workspace_id, ws.locked_agent)
-        else:
-            ws.locked_agent = None
+        has_tunnel = self._has_active_tunnel(ws)
+        ws.tunnel_locked = has_tunnel
+        if has_tunnel:
+            logger.info(
+                "WorkspaceResolver: %s tunnel actif goal=%r form=%r",
+                workspace_id,
+                ws.active_goal,
+                ws.active_form,
+            )
 
         # router_clarification is no longer produced, but we clear any stale value.
-        ws.metadata.pop("router_clarification", None)
+        if ws.metadata.pop("router_clarification", None) is not None:
+            ws.mark_dirty()
+
+        logger.debug("WorkspaceResolver: resolved %r", ws)
         return ws
 
     @staticmethod
@@ -62,6 +72,5 @@ class WorkspaceResolver:
     ) -> Workspace:
         return Workspace(
             workspace_id=workspace_id,
-            active_agent="market",
             workspace_type=(workspace_type or "producer"),
         )

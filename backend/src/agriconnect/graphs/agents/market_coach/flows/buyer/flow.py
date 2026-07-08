@@ -105,6 +105,16 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
     phone = state.get("user_phone")
     preorder_flow: Dict[str, Any] = dict(state.get("preorder_workflow") or {})
     phase = str(preorder_flow.get("phase") or "CART").upper().strip()
+    working_memory = state.get("working_memory") or {}
+    last_cart_snapshot = working_memory.get("last_active_cart")
+    active_cart = state.get("active_cart") or []
+
+    if not active_cart and last_cart_snapshot:
+        logger.info("buyer_context_resolver: repopulating active_cart from working_memory snapshot (items=%d)", len(last_cart_snapshot))
+        state = dict(state)
+        state["active_cart"] = list(last_cart_snapshot)
+        active_cart = state["active_cart"]
+
     detected_intent = str(state.get("detected_intent") or "").upper().strip()
     interpreted_event = str(state.get("interpreted_event") or "").upper().strip()
     stable_entities = state.get("stable_entities") or {}
@@ -112,7 +122,7 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
     logger.info(
         "buyer_context_resolver: goal=%s phase=%s intent=%s event=%s cart_items=%d",
         goal, phase, detected_intent or "", interpreted_event or "",
-        len(state.get("active_cart") or []),
+        len(active_cart),
     )
 
     # ── Finalize helper ──────────────────────────────────────────────

@@ -366,9 +366,9 @@ async def _resolve_product_ref(
 async def negotiation_gate(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
     """Negotiation gate — deterministic phase-based routing."""
     goal = (state.get("current_goal") or "").upper()
-    payload: Dict[str, Any] = state.get("transaction_payload") or {}
+    payload: Dict[str, Any] = dict(state.get("transaction_payload") or {})
     phone = str(state.get("user_phone") or "")
-    stable_entities = state.get("stable_entities") or {}
+    stable_entities = dict(state.get("stable_entities") or {})
 
     nctx: Dict[str, Any] = dict(state.get("negotiation_context") or {})
     nphase = str(nctx.get("phase") or "NEGOTIATION_MENU").upper().strip()

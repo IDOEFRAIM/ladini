@@ -15,13 +15,19 @@ from agriconnect.graphs.agents.market_coach.utils import (
 )
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from agriconnect.graphs.agents.market_coach.nodes.response_handlers import _label_for_field
+from agriconnect.graphs.agents.market_coach.core.state_compaction import (
+    build_compaction_patch,
+)
+from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+    UNIT_SYNONYMS as _CANONICAL_UNIT_SYNONYMS,
+    normalize_unit_token as _normalize_unit_token_canonical,
+    parse_quantity_unit_from_text as _parse_qty_unit,
+    extract_unit_only_from_text as _extract_unit_only,
+)
 
 logger = get_logger("AgriConnect.MarketCoach.Validator")
 
 _AUTO_RESOLVABLE_FIELDS = frozenset({"farm_id", "phone"})
-_MAX_MESSAGE_HISTORY = 5
-_MAX_TOOL_HISTORY = 10
-_MAX_MAPPING_CACHE_SIZE = 10
 
 _FIELD_PRIORITY: Dict[str, int] = {
     "product": 0,
@@ -55,40 +61,6 @@ _PRODUCTION_TYPE_SYNONYMS = {
 }
 
 
-def _trim_sequence_window(items: Any, limit: int) -> Optional[List[Any]]:
-    if isinstance(items, list) and len(items) > limit:
-        return items[-limit:]
-    return None
-
-
-def _compact_order_tracking_context(raw_ctx: Any) -> Optional[Dict[str, Any]]:
-    if not isinstance(raw_ctx, dict):
-        return None
-    mapping = raw_ctx.get("mapping_cache")
-    if isinstance(mapping, dict) and len(mapping) > _MAX_MAPPING_CACHE_SIZE:
-        trimmed_entries = list(mapping.items())[:_MAX_MAPPING_CACHE_SIZE]
-        compacted = dict(raw_ctx)
-        compacted["mapping_cache"] = dict(trimmed_entries)
-        return compacted
-    return None
-
-
-def _build_compaction_patch(state: Dict[str, Any]) -> Dict[str, Any]:
-    patch: Dict[str, Any] = {}
-    for key in ("messages", "history", "conversation_history"):
-        trimmed = _trim_sequence_window(state.get(key), _MAX_MESSAGE_HISTORY)
-        if trimmed is not None:
-            patch[key] = trimmed
-
-    trimmed_tool_history = _trim_sequence_window(state.get("tool_execution_history"), _MAX_TOOL_HISTORY)
-    if trimmed_tool_history is not None:
-        patch["tool_execution_history"] = trimmed_tool_history
-
-    compacted_tracking = _compact_order_tracking_context(state.get("order_tracking_context"))
-    if compacted_tracking is not None:
-        patch["order_tracking_context"] = compacted_tracking
-
-    return patch
 
 
 def _canonical_field_name(field: str) -> str:
@@ -108,7 +80,7 @@ def _canonicalize_required_fields(fields: List[str]) -> List[str]:
 
 
 def _finalize_validator_response(state: Dict[str, Any], response: Dict[str, Any]) -> Dict[str, Any]:
-    cleanup = _build_compaction_patch(state)
+    cleanup = build_compaction_patch(state)
     if cleanup:
         response.update(cleanup)
     return response
@@ -131,68 +103,19 @@ def _merge_extracted_entities(state: Dict[str, Any], payload: Dict[str, Any]) ->
             payload[key] = value
 
 
-_INLINE_QUANTITY_PATTERNS: List[re.Pattern[str]] = [
-    re.compile(r"(\d+[\d\s,.]*)\s*([a-zA-ZÀ-ÖØ-öø-ÿ.]+)", re.IGNORECASE),
-]
+_UNIT_SYNONYM_MAP = _CANONICAL_UNIT_SYNONYMS
 
-_UNIT_ONLY_PATTERN = re.compile(r"\b([a-zA-ZÀ-ÖØ-öø-ÿ.]{1,12})\b", re.IGNORECASE)
-
-
-def _normalize_unit_token(raw: str) -> str:
-    if not raw:
-        return ""
-    token = unicodedata.normalize("NFKD", str(raw).strip().lower())
-    token = "".join(ch for ch in token if not unicodedata.combining(ch))
-    return token.replace(".", "")
-
-
-_UNIT_SYNONYM_MAP = {
-    "k": "KG",
-    "kg": "KG",
-    "kgs": "KG",
-    "kilo": "KG",
-    "kilos": "KG",
-    "kilogramme": "KG",
-    "kilogrammes": "KG",
-    "ton": "TONNE",
-    "tons": "TONNE",
-    "tone": "TONNE",
-    "tones": "TONNE",
-    "tonne": "TONNE",
-    "tonnes": "TONNE",
-    "t": "TONNE",
-    "sac": "SAC",
-    "sacs": "SAC",
-    "sachet": "SAC",
-    "sachets": "SAC",
-    "panier": "PANIER",
-    "paniers": "PANIER",
-}
+_normalize_unit_token = _normalize_unit_token_canonical
 
 
 def _extract_quantity_unit_from_text(text: str, state: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    normalized = text or ""
-    for pattern in _INLINE_QUANTITY_PATTERNS:
-        match = pattern.search(normalized)
-        if not match:
-            continue
-        qty_raw = match.group(1).replace(" ", "").replace(",", ".")
-        unit_raw = _normalize_unit_token(match.group(2))
-        try:
-            quantity = float(qty_raw)
-        except (TypeError, ValueError):
-            quantity = None
-        mapped_unit = _UNIT_SYNONYM_MAP.get(unit_raw)
-        result: Dict[str, Any] = {}
-        if quantity is not None:
-            result["quantity"] = quantity
-        if mapped_unit:
-            result["unit"] = mapped_unit
-        if result:
-            if state is not None:
-                return _finalize_validator_response(state, result)
-            return result
-    return None
+    parsed = _parse_qty_unit(text or "")
+    if not parsed:
+        return None
+    result = parsed.as_dict()
+    if result and state is not None:
+        return _finalize_validator_response(state, result)
+    return result if result else None
 
 
 def _extract_production_type_from_text(text: str) -> Optional[str]:
@@ -209,13 +132,7 @@ def _extract_production_type_from_text(text: str) -> Optional[str]:
 
 
 def _extract_unit_only_from_text(text: str) -> Optional[str]:
-    if not text:
-        return None
-    for match in _UNIT_ONLY_PATTERN.finditer(text):
-        mapped = _UNIT_SYNONYM_MAP.get(_normalize_unit_token(match.group(1)))
-        if mapped:
-            return mapped
-    return None
+    return _extract_unit_only(text)
 
 
 def _extract_surface_from_text(text: str) -> Optional[float]:
@@ -465,103 +382,34 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
         if payload.get("size") and not payload.get("surface"):
             payload["surface"] = payload.get("size")
 
-    if "farm_id" in required_for_goal and payload.get("farm_id") in (None, "", [], {}):
-        farms_cache = state.get("user_farms_cache")
-        farms: List[Dict[str, Any]] = farms_cache if isinstance(farms_cache, list) else []
-
-        farm_name_in = payload.get("farm_name")
-        if farm_name_in and farms:
-            def _n(s: Any) -> str:
-                return re.sub(r"\s+", " ", str(s or "")).strip().casefold()
-
-            target = _n(farm_name_in)
-            matches = [f for f in farms if _n(f.get("name")) == target]
-            if len(matches) == 1:
-                payload["farm_id"] = str(matches[0].get("farm_id") or matches[0].get("id") or "")
-
-        if payload.get("farm_id") in (None, "", [], {}):
-            if len(farms) == 1:
-                only = farms[0]
-                resolved = only.get("farm_id") or only.get("id")
-                if resolved:
-                    payload["farm_id"] = str(resolved)
-            elif len(farms) > 1:
-                candidates: List[str] = []
-                mapping: Dict[str, str] = {}
-                for idx, farm in enumerate(farms, start=1):
-                    name = str(farm.get("name") or "Exploitation").strip()
-                    location = str(farm.get("location") or "").strip()
-                    label = f"{name} — {location}" if location else name
-                    candidates.append(label)
-                    farm_id = farm.get("farm_id") or farm.get("id")
-                    if farm_id:
-                        mapping[str(idx)] = str(farm_id)
-
-                wm = dict(state.get("working_memory") or {})
-                wm["available_mapping_kind"] = "farm"
-                return _finalize_validator_response(
-                    state,
-                    {
-                        "status": "WAITING_INPUT",
-                        "goal_status": "WAITING_INPUT",
-                        "missing_fields": [],
-                        "completed_fields": [f for f in required_for_goal if payload.get(f) not in (None, "", [], {})],
-                        "validation_errors": [],
-                        "last_missing_field": None,
-                        "expected_input": "SELECTION",
-                        "response_strategy": "SELECTION_MENU",
-                        "expected_candidates": candidates,
-                        "available_mapping": mapping,
-                        "working_memory": wm,
-                        "transaction_payload": payload,
-                        "ag_ui_component": None,
-                    },
-                )
-
-    if goal == "MARKET_GET_REQUESTS" and not payload.get("auction_id"):
-        return _finalize_validator_response(
-            state,
-            {
-                "status": "PLANNING",
-                "missing_fields": [],
-                "last_missing_field": None,
-                "expected_input": "NONE",
-                "completed_fields": [k for k in ["product"] if payload.get(k)],
-                "validation_errors": [],
-                "transaction_payload": payload,
-                "ag_ui_component": None,
-            },
-        )
-
-    if goal == "SALES_PLACE_BID" and payload.get("product") and not payload.get("auction_id"):
-        return _finalize_validator_response(
-            state,
-            {
-                "status": "PLANNING",
-                "missing_fields": [],
-                "last_missing_field": None,
-                "expected_input": "NONE",
-                "completed_fields": ["product"],
-                "validation_errors": [],
-                "transaction_payload": payload,
-                "ag_ui_component": None,
-            },
-        )
-
-    if goal in {"MARKET_GET_MY_PROPOSALS", "SALES_ACCEPT_CONTRACT", "PROCUREMENT_ACCEPT_OFFER"} and not payload.get("bid_id"):
-        return _finalize_validator_response(
-            state,
-            {
-                "status": "PLANNING",
-                "missing_fields": [],
-                "last_missing_field": None,
-                "expected_input": "NONE",
-                "completed_fields": [],
-                "validation_errors": [],
-                "transaction_payload": payload,
-                "ag_ui_component": None,
-            },
-        )
+    # Pass-through to context resolver for goals that resolve IDs dynamically
+    _RESOLVER_PASSTHROUGH = {
+        "MARKET_GET_REQUESTS": ("auction_id", ["product"]),
+        "SALES_PLACE_BID": ("auction_id", ["product"]),
+        "MARKET_GET_MY_PROPOSALS": ("bid_id", []),
+        "SALES_ACCEPT_CONTRACT": ("bid_id", []),
+        "PROCUREMENT_ACCEPT_OFFER": ("bid_id", []),
+    }
+    passthrough = _RESOLVER_PASSTHROUGH.get(goal_upper)
+    if passthrough:
+        id_field, hint_fields = passthrough
+        needs_resolver = not payload.get(id_field)
+        if goal_upper == "SALES_PLACE_BID":
+            needs_resolver = needs_resolver and bool(payload.get("product"))
+        if needs_resolver:
+            return _finalize_validator_response(
+                state,
+                {
+                    "status": "PLANNING",
+                    "missing_fields": [],
+                    "last_missing_field": None,
+                    "expected_input": "NONE",
+                    "completed_fields": [k for k in hint_fields if payload.get(k)],
+                    "validation_errors": [],
+                    "transaction_payload": payload,
+                    "ag_ui_component": None,
+                },
+            )
 
     # -----------------------------------------------------------------
     # ÉVALUATION FINALE DES ERREURS ET DES CHAMPS MANQUANTS

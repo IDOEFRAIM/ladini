@@ -20,6 +20,7 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
 )
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import OrderTrackingGateway
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     ensure_dict,
@@ -635,12 +636,10 @@ async def order_tracking_resolver(
 async def _safe_tracking_call(
     mc_runtime: MarketRuntime, tool_name: str, **kwargs: Any
 ) -> Dict[str, Any]:
-    """Wrapper résilient pour les appels MCP de tracking."""
+    """Wrapper résilient pour les appels MCP de tracking — delegates to gateway."""
     try:
-        raw = await mc_runtime.call_db(
-            tool_name, **{k: v for k, v in kwargs.items() if v is not None}
-        )
-        return ensure_dict(raw)
+        gw = OrderTrackingGateway(mc_runtime)
+        return await gw._call(tool_name, **kwargs)
     except Exception as exc:
         logger.exception("_safe_tracking_call | tool=%s | error: %s", tool_name, exc)
         return {"status": "error", "message": "Service temporairement indisponible."}

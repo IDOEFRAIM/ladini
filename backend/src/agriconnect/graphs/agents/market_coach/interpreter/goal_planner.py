@@ -1,0 +1,520 @@
+"""Goal Planner — deterministic state machine for intent lifecycle.
+
+Extracted from ``interpreter/routing.py`` so that the planner logic
+(~400 lines of pure state-machine rules) lives in its own module.
+"""
+from __future__ import annotations
+
+import logging
+import re as _re
+from typing import Any, Dict, Optional
+
+from agriconnect.graphs.agents.market_coach.interpreter.intent import (
+    INTENT_CONFIG,
+    INTENT_DISAMBIGUATION,
+)
+from agriconnect.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
+from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
+
+logger = logging.getLogger("AgriConnect.Market.GoalPlanner")
+
+
+# ── Shared constants (also used by routing.py interpreter) ──────────
+
+INTENT_TO_GOAL_MAP: Dict[str, str] = {}
+
+_NAVIGATION_INTENTS: frozenset = frozenset({
+    "BUYER_VIEW_CART",
+    "BUYER_LIST_ORDERS",
+    "BUYER_CHECK_ORDER_STATUS",
+    "BUYER_CANCEL_ORDER",
+    "MARKET_GET_REQUESTS",
+})
+
+
+def _init_intent_to_goal_map(producer_intents: frozenset, buyer_intents: frozenset, common_intents: frozenset) -> None:
+    """Populate INTENT_TO_GOAL_MAP once role-based sets are available.
+
+    Called from routing.py at module-load time to avoid a circular import
+    (this module must not import role sets directly from routing).
+    """
+    INTENT_TO_GOAL_MAP.clear()
+    for intent_key in producer_intents | buyer_intents | common_intents:
+        INTENT_TO_GOAL_MAP[intent_key] = intent_key
+
+
+# ── Buyer product request heuristic ────────────────────────────────
+
+_BUYER_PRODUCT_HINTS = (
+    "je veux",
+    "je voudrais",
+    "j'aimerais",
+    "je cherche",
+    "je recherche",
+    "il me faut",
+    "besoin de",
+    "j'ai besoin",
+    "cherche",
+)
+_BUYER_PRODUCT_EXCLUDES = (
+    "commande",
+    "commandes",
+    "suivre",
+    "statut",
+    "paiement",
+    "appels",
+    "appel d'offres",
+    "appel d offres",
+    "appel",
+    "prix",
+)
+_BUYER_FILLER_WORDS = frozenset({
+    "je",
+    "veux",
+    "voudrais",
+    "cherches",
+    "cherche",
+    "recherche",
+    "du",
+    "de",
+    "des",
+    "de la",
+    "d",
+    "un",
+    "une",
+    "le",
+    "la",
+    "les",
+    "il",
+    "me",
+    "faut",
+    "besoin",
+    "avoir",
+    "jai",
+    "j",
+    "ai",
+    "pour",
+    "acheter",
+})
+
+
+def _looks_like_buyer_product_request(clean_text: str) -> bool:
+    if not clean_text:
+        return False
+    if not any(hint in clean_text for hint in _BUYER_PRODUCT_HINTS):
+        return False
+    if any(ex in clean_text for ex in _BUYER_PRODUCT_EXCLUDES):
+        return False
+    tokens = _re.findall(r"[a-zàâçéèêëîïôûùüÿñæœ']+", clean_text)
+    meaningful = [t for t in tokens if t not in _BUYER_FILLER_WORDS]
+    return bool(meaningful)
+
+
+# ── Goal planner node ──────────────────────────────────────────────
+
+async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+    """Machine à états pure pour la gestion du cycle de vie des intentions."""
+    event = str(state.get("interpreted_event") or "UNKNOWN").upper()
+    detected_intent = str(state.get("detected_intent") or "UNKNOWN").upper()
+    working = state.get("working_memory") or {}
+    current_goal = state.get("current_goal") or working.get("active_goal") or working.get("locked_intent")
+    expected_input = state.get("expected_input")
+    goal_stack = list(state.get("goal_stack") or [])
+    in_tunnel = bool(current_goal and expected_input and expected_input != "NONE")
+    text = str(state.get("normalized_text") or state.get("user_query") or "").strip().lower()
+    if not text:
+        messages = state.get("messages") or []
+        if isinstance(messages, list):
+            for msg in reversed(messages):
+                if not isinstance(msg, dict):
+                    continue
+                role2 = str(msg.get("role") or "").lower().strip()
+                if role2 != "user":
+                    continue
+                content = msg.get("content")
+                if isinstance(content, str) and content.strip():
+                    text = content.strip().lower()
+                    break
+    is_short = len(text) <= 4 or text.isdigit() or text in {"oui", "non", "ok", "yes", "no"}
+
+    updates: Dict[str, Any] = {
+        "status": "PLANNING",
+        "interruption_detected": False,
+    }
+
+    logger.info(
+        "[GoalPlanner IN] event=%s intent=%s current_goal=%s expected=%s",
+        event,
+        detected_intent,
+        current_goal,
+        expected_input,
+    )
+
+    def _lock(goal: Optional[str], extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        wm = dict(working)
+        if goal and goal != "DISAMBIGUATION_PENDING":
+            wm["active_goal"] = goal
+            wm["locked_intent"] = goal
+            wm.setdefault("step_index", 0)
+        if extra:
+            wm.update(extra)
+        return wm
+
+    def _clear_goal_lock() -> Dict[str, Any]:
+        """Conserve les caches, supprime uniquement les verrous de tunnel/UI."""
+        wm = dict(working)
+        for k in (
+            "active_goal",
+            "locked_intent",
+            "step_index",
+            "available_mapping_kind",
+            "auction_menu",
+            "bids_menu",
+            "stocks_menu",
+            "generic_menu",
+            "disambiguation_pending",
+            "disambiguation_trigger_id",
+        ):
+            wm.pop(k, None)
+        return wm
+
+    def _purge_transaction_state() -> Dict[str, Any]:
+        """Purge totale des champs transactionnels/AG-UI lors d'un switch d'intention."""
+        return {
+            "transaction_payload": {"__reset__": True},
+            "draft_payload": {"__reset__": True},
+            "stable_entities": {"__reset__": True},
+            "missing_fields": [],
+            "completed_fields": [],
+            "last_missing_field": None,
+            "expected_input": "NONE",
+            "expected_candidates": [],
+            "available_mapping": {},
+            "waiting_for_confirmation": False,
+            "confirmation_summary": None,
+            "selected_tool": None,
+            "selected_tool_args": {"__reset__": True},
+            "execution_result": {"__reset__": True},
+            "retry_count": 0,
+            "vendor_selection_context": {"__reset__": True},
+            "negotiation_context": {"__reset__": True},
+            "preorder_workflow": {"__reset__": True},
+        }
+
+    def _with_goal_metadata(payload: Dict[str, Any], goal_hint: Optional[str] = None) -> Dict[str, Any]:
+        target_goal = goal_hint
+        if target_goal is None:
+            target_goal = payload.get("current_goal")
+            if not target_goal:
+                wm_payload = payload.get("working_memory") or {}
+                target_goal = (
+                    wm_payload.get("active_goal")
+                    or wm_payload.get("locked_intent")
+                    or state.get("current_goal")
+                )
+        goal_key = str(target_goal or "").upper().strip()
+        cfg = INTENT_CONFIG.get(goal_key, {})
+        lifecycle = str(cfg.get("lifecycle_mode") or "").upper().strip()
+        if lifecycle not in {"CREATE", "UPDATE", "READ"}:
+            lifecycle = "READ"
+        payload["goal_metadata"] = {
+            "lifecycle_mode": lifecycle,
+            "update_mode": lifecycle == "UPDATE",
+        }
+        return payload
+
+    # RÈGLE 0bis — RÉSOLUTION DE DÉSAMBIGUÏSATION
+    if current_goal == "DISAMBIGUATION_PENDING":
+        override_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
+        if event in {"INTERRUPTION", "NEW_TASK"} and override_goal and override_goal != "DISAMBIGUATION_PENDING":
+            logger.info(
+                "[Disambiguation Override] event=%s intent=%s -> current_goal=%s",
+                event,
+                detected_intent,
+                override_goal,
+            )
+            return _with_goal_metadata({
+                "status": "PLANNING",
+                "current_goal": override_goal,
+                "goal_status": "ACTIVE",
+                "interruption_detected": event == "INTERRUPTION",
+                "working_memory": {
+                    **_lock(override_goal),
+                    "disambiguation_pending": False,
+                    "available_mapping_kind": None,
+                },
+                **_purge_transaction_state(),
+            }, override_goal)
+
+        extracted = state.get("extracted_entities") or {}
+        mapping = dict(state.get("available_mapping") or {})
+
+        trigger_id = str((state.get("working_memory") or {}).get("disambiguation_trigger_id") or "").strip()
+        if trigger_id:
+            entry = INTENT_DISAMBIGUATION.get(trigger_id)
+            if entry:
+                rebuilt: Dict[str, str] = {}
+                for i, opt in enumerate(entry.get("options") or [], start=1):
+                    intent_key = None
+                    if isinstance(opt, (tuple, list)) and len(opt) >= 2:
+                        intent_key = opt[0]
+                    elif isinstance(opt, dict):
+                        intent_key = opt.get("intent")
+                    if intent_key:
+                        rebuilt[str(i)] = str(intent_key)
+                if rebuilt:
+                    if mapping and mapping != rebuilt:
+                        logger.warning(
+                            "[Disambiguation] stale mapping overridden by trigger=%s",
+                            trigger_id,
+                        )
+                    mapping = rebuilt
+                    logger.info(
+                        "[Disambiguation] rebuilt mapping from trigger=%s with %d options",
+                        trigger_id,
+                        len(mapping),
+                    )
+
+        sel_idx = extracted.get("selection_index")
+        sel_val = extracted.get("selected_value")
+
+        resolved_intent: Optional[str] = None
+        if sel_idx is not None:
+            resolved_intent = mapping.get(str(sel_idx))
+        if resolved_intent is None and sel_val is not None:
+            resolved_intent = mapping.get(str(sel_val))
+
+        if (
+            resolved_intent is None
+            and detected_intent in INTENT_TO_GOAL_MAP
+            and detected_intent not in {"", "UNKNOWN", "DISAMBIGUATION_PENDING"}
+        ):
+            resolved_intent = detected_intent
+
+        if resolved_intent and resolved_intent in INTENT_TO_GOAL_MAP:
+            logger.info(
+                "[Disambiguation Resolved] selection=%s promoted to current_goal=%s",
+                sel_idx or sel_val, resolved_intent,
+            )
+            return _with_goal_metadata({
+                "status": "PLANNING",
+                "current_goal": resolved_intent,
+                "goal_status": "ACTIVE",
+                "interruption_detected": False,
+                "expected_input": "NONE",
+                "expected_candidates": [],
+                "available_mapping": {},
+                "missing_fields": [],
+                "completed_fields": [],
+                "working_memory": {
+                    **_lock(resolved_intent),
+                    "disambiguation_pending": False,
+                    "available_mapping_kind": None,
+                },
+            }, resolved_intent)
+        # Sélection invalide ou pas encore reçue : on garde le menu actif.
+        updates["current_goal"] = "DISAMBIGUATION_PENDING"
+        updates["goal_status"] = "WAITING_INPUT"
+        updates["expected_input"] = "SELECTION"
+        updates["waiting_for_confirmation"] = False
+        updates["confirmation_summary"] = None
+        updates["response_strategy"] = "SELECTION_MENU"
+        updates["working_memory"] = {
+            **dict(working),
+            "disambiguation_pending": True,
+            "available_mapping_kind": "intent_disambiguation",
+        }
+        return _with_goal_metadata(updates)
+
+    # RÈGLE 1 — CANCEL/REJECT (Annulation explicite)
+    if event == "REJECT":
+        waiting_confirm = bool(state.get("waiting_for_confirmation") or str(expected_input or "").upper() == "CONFIRMATION")
+        if not waiting_confirm:
+            return _with_goal_metadata({
+                "status": "WAITING_INPUT",
+                "current_goal": None,
+                "goal_status": "IDLE",
+                "interruption_detected": False,
+                "response_strategy": "CLARIFICATION",
+                "working_memory": _clear_goal_lock(),
+                **_purge_transaction_state(),
+            })
+
+        # Rejet pendant confirmation : laisser confirmation_gate gérer la logique.
+        updates["current_goal"] = current_goal
+        updates["goal_status"] = "ACTIVE"
+        updates["working_memory"] = _lock(current_goal)
+        return _with_goal_metadata(updates)
+
+    # RÈGLE 1bis — TUNNEL LOCKING (Maintien des formulaires d'IHM)
+    if event in {"CONFIRM", "SELECTION", "ANSWER", "UPDATE"}:
+        updates["current_goal"] = current_goal
+        updates["goal_status"] = "ACTIVE"
+        updates["working_memory"] = _lock(current_goal)
+        return _with_goal_metadata(updates)
+
+    # RÈGLE 1ter — PERSISTENCE PAR DÉFAUT
+    if current_goal and detected_intent == "UNKNOWN" and event in {"UNKNOWN", "NEW_TASK"}:
+        updates["current_goal"] = current_goal
+        updates["detected_intent"] = str(current_goal).upper()
+        updates["goal_status"] = "ACTIVE" if expected_input in (None, "", "NONE") else "WAITING_INPUT"
+        updates["working_memory"] = _lock(current_goal)
+        return _with_goal_metadata(updates)
+
+    # RÈGLE 1quater — VERROUILLAGE PENDANT SLOT-FILLING
+    if current_goal and event == "NEW_TASK" and expected_input not in (None, "", "NONE"):
+        confidence = float(state.get("interpreter_confidence") or 0.0)
+        td = tunnel_manager.evaluate(
+            current_goal=current_goal,
+            expected_input=expected_input,
+            incoming_event=event,
+            incoming_intent=detected_intent,
+            confidence=confidence,
+        )
+        if td.allow_interrupt:
+            new_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
+            if new_goal:
+                if current_goal:
+                    goal_stack.append(current_goal)
+                updates["current_goal"] = new_goal
+                updates["goal_status"] = "ACTIVE"
+                updates["interruption_detected"] = True
+                updates["suspended_goal"] = current_goal
+                updates["suspended_payload"] = state.get("transaction_payload") or {}
+                updates["goal_stack"] = goal_stack
+                updates["working_memory"] = _lock(new_goal)
+                updates.update(_purge_transaction_state())
+                logger.info(
+                    "[GoalPlanner] TunnelManager allowed NEW_TASK switch: %s → %s (reason=%s)",
+                    current_goal, new_goal, td.reason,
+                )
+                return _with_goal_metadata(updates)
+        # Tunnel stays locked — re-assert current goal.
+        updates["current_goal"] = current_goal
+        updates["detected_intent"] = str(current_goal).upper()
+        updates["goal_status"] = "WAITING_INPUT"
+        updates["working_memory"] = _lock(current_goal)
+        return _with_goal_metadata(updates)
+
+    if is_short and current_goal:
+        updates["current_goal"] = current_goal
+        updates["detected_intent"] = str(current_goal).upper()
+        updates["goal_status"] = "ACTIVE" if expected_input in {None, "NONE"} else "WAITING_INPUT"
+        updates["working_memory"] = _lock(current_goal)
+        return _with_goal_metadata(updates)
+
+    # RÈGLE 2 — POLLUTION PENDANT SLOT-FILLING
+    if event == "UNKNOWN" and in_tunnel:
+        updates["current_goal"] = current_goal
+        updates["goal_status"] = "WAITING_INPUT"
+        updates["detected_intent"] = str(current_goal).upper()
+        updates["working_memory"] = _lock(current_goal)
+        return _with_goal_metadata(updates)
+
+    # RÈGLE 3 — OUT_OF_SCOPE
+    if event == "OUT_OF_SCOPE":
+        updates["current_goal"] = current_goal
+        updates["goal_status"] = "ACTIVE" if current_goal else "IDLE"
+        updates["response_strategy"] = "CLARIFICATION"
+        updates["status"] = "WAITING_INPUT"
+        updates["working_memory"] = _lock(current_goal)
+        return _with_goal_metadata(updates)
+
+    # RÈGLE 4 — INTERRUPTION (Suspension d'un workflow IHM en cours)
+    if event == "INTERRUPTION":
+        confidence = float(state.get("interpreter_confidence") or 0.0)
+        td = tunnel_manager.evaluate(
+            current_goal=current_goal,
+            expected_input=expected_input,
+            incoming_event=event,
+            incoming_intent=detected_intent,
+            confidence=confidence,
+        )
+        new_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
+        if td.allow_interrupt and new_goal and new_goal != current_goal:
+            if current_goal:
+                goal_stack.append(current_goal)
+            return _with_goal_metadata({
+                "status": "PLANNING",
+                "current_goal": new_goal,
+                "goal_stack": goal_stack,
+                "goal_status": "ACTIVE",
+                "interruption_detected": True,
+                "suspended_goal": current_goal,
+                "suspended_payload": state.get("transaction_payload") or {},
+                **_purge_transaction_state(),
+                "working_memory": _lock(new_goal),
+            }, new_goal)
+        updates["current_goal"] = current_goal
+        updates["response_strategy"] = "CLARIFICATION"
+        updates["status"] = "WAITING_INPUT"
+        updates["goal_status"] = "ACTIVE" if current_goal else "IDLE"
+        updates["working_memory"] = _lock(current_goal)
+        return _with_goal_metadata(updates)
+
+    # RÈGLE 4bis — RESUME (Reprise d'une tâche suspendue dans goal_stack)
+    if event == "RESUME":
+        if goal_stack:
+            resumed = goal_stack.pop()
+            return _with_goal_metadata({
+                "status": "PLANNING",
+                "current_goal": resumed,
+                "goal_stack": goal_stack,
+                "goal_status": "ACTIVE",
+                "interruption_detected": False,
+                "suspended_goal": None,
+                "transaction_payload": state.get("suspended_payload") or {},
+                "suspended_payload": {},
+                "stable_entities": {},
+                "missing_fields": [],
+                "completed_fields": [],
+                "last_missing_field": None,
+                "expected_input": "NONE",
+                "expected_candidates": [],
+                "available_mapping": {},
+                "waiting_for_confirmation": False,
+                "confirmation_summary": None,
+                "working_memory": _lock(resumed),
+            }, resumed)
+        # Aucun goal suspendu — traiter comme clarification
+        updates["current_goal"] = current_goal
+        updates["response_strategy"] = "CLARIFICATION"
+        updates["status"] = "WAITING_INPUT"
+        updates["goal_status"] = "ACTIVE" if current_goal else "IDLE"
+        updates["working_memory"] = _lock(current_goal)
+        return _with_goal_metadata(updates)
+
+    # RÈGLE 5 — NEW_TASK (Instanciation et purge des champs AG-UI)
+    if event == "NEW_TASK":
+        new_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
+        if new_goal:
+            updates["current_goal"] = new_goal
+            updates["goal_status"] = "ACTIVE"
+            updates["working_memory"] = _lock(new_goal)
+            if current_goal and new_goal != current_goal:
+                updates.update(_purge_transaction_state())
+            logger.info("[GoalPlanner OUT] new_goal=%s", new_goal)
+            logger.debug("[GoalPlanner OUT] new_goal=%s", new_goal)
+            return _with_goal_metadata(updates)
+
+    # Fallback par défaut vers clarification
+    updates["current_goal"] = current_goal
+    updates["response_strategy"] = "CLARIFICATION"
+    updates["status"] = "WAITING_INPUT"
+    updates["goal_status"] = "ACTIVE" if current_goal else "IDLE"
+    if current_goal:
+        updates["detected_intent"] = str(current_goal).upper()
+    updates["working_memory"] = _lock(current_goal)
+    return _with_goal_metadata(updates)
+
+
+__all__ = [
+    "INTENT_TO_GOAL_MAP",
+    "_NAVIGATION_INTENTS",
+    "_init_intent_to_goal_map",
+    "_looks_like_buyer_product_request",
+    "_BUYER_PRODUCT_HINTS",
+    "_BUYER_PRODUCT_EXCLUDES",
+    "_BUYER_FILLER_WORDS",
+    "goal_planner",
+]

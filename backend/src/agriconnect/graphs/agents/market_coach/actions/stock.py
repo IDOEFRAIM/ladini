@@ -5,14 +5,14 @@ from typing import Any, Dict, Mapping, Tuple
 
 from agriconnect.graphs.agents.market_coach.registry import register_action
 from agriconnect.graphs.agents.market_coach.actions.common import (
-    coalesce_entity_value,
     is_update_mode,
     normalize_quantity_to_kg,
-    require,
     require_current_entity,
-    require_phone,
-    to_float,
 )
+from agriconnect.graphs.agents.market_coach.actions.tooling import ToolResolver
+from agriconnect.graphs.agents.market_coach.domain import DomainContext
+from agriconnect.graphs.agents.market_coach.domain.stock import StockService, StockUpdateLevelCommand
+from agriconnect.graphs.agents.market_coach.actions.stock_dto import StockUpdateLevelPayload
 
 @register_action("STOCK_GET_SUMMARY", mode="READ")
 def prep_stock_get_summary(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
@@ -22,8 +22,11 @@ def prep_stock_get_summary(state: Mapping[str, Any], payload: Mapping[str, Any])
     Depuis la refonte d'identité, `get_stocks` accepte explicitement `phone`
     ou `producer_id` et ne réutilise plus le champ détourné `farm_id`.
     """
-    phone = require_phone(state)
-    return "get_stocks", {"phone": phone}
+    context = DomainContext.from_state(state)
+    service = StockService(context=context)
+    result = service.get_summary(state, payload)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "get_stocks")
+    return tool_name, dict(result.tool_args)
 
 
 @register_action("STOCK_GET_DETAIL", mode="READ")
@@ -32,9 +35,11 @@ def prep_stock_get_detail(state: Mapping[str, Any], payload: Mapping[str, Any]) 
 
     Outil MCP : get_farm_stocks(farm_id). Phone n'est pas attendu.
     """
-    require_phone(state)  # safety check
-    farm_id = str(require(payload, "farm_id"))
-    return "get_farm_stocks", {"farm_id": farm_id}
+    context = DomainContext.from_state(state)
+    service = StockService(context=context)
+    result = service.get_detail(state, payload)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "get_farm_stocks")
+    return tool_name, dict(result.tool_args)
 
 
 @register_action("STOCK_GET_MOVEMENTS", mode="READ")
@@ -44,116 +49,80 @@ def prep_stock_get_movements(state: Mapping[str, Any], payload: Mapping[str, Any
     Outil MCP : get_stock_movements(stock_id, limit?).
     Phone n'est PAS un paramètre MCP.
     """
-    require_phone(state)  # safety check
-    stock_id = str(require(payload, "stock_id"))
-    return "get_stock_movements", {"stock_id": stock_id}
+    context = DomainContext.from_state(state)
+    service = StockService(context=context)
+    result = service.get_movements(state, payload)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "get_stock_movements")
+    return tool_name, dict(result.tool_args)
 
 
 @register_action("STOCK_REGISTER_HARVEST", mode="WRITE")
 def prep_stock_register_harvest(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    require_phone(state)
-    farm_id = str(require(payload, "farm_id"))
-    product = str(require(payload, "product"))
-    qty_raw = float(require(payload, "quantity_mentioned"))
-    qty_kg, unit = normalize_quantity_to_kg(qty_raw, payload.get("unit_mentioned"))
-    return "add_stock", {
-        "farm_id": farm_id,
-        "item_name": product,
-        "quantity": qty_kg,
-        "unit": unit,
-        "stock_type": "HARVEST",
-        "reason": payload.get("reason") or "Enregistrement récolte via agent",
-    }
+    context = DomainContext.from_state(state)
+    service = StockService(context=context)
+    result = service.register_harvest(state, payload)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "add_stock")
+    return tool_name, dict(result.tool_args)
 
 
 @register_action("STOCK_RECORD_MOVEMENT", mode="WRITE")
 def prep_stock_record_movement(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    phone = require_phone(state)
-    stock_id = str(require(payload, "stock_id"))
-    movement_type = str(require(payload, "movement_type")).upper().strip()
-    qty_raw = float(require(payload, "quantity_mentioned"))
-    qty_kg, _ = normalize_quantity_to_kg(qty_raw, payload.get("unit_mentioned"))
-    return "add_stock_movement_by_id", {
-        "producer_id": phone,
-        "stock_id": stock_id,
-        "movement_type": movement_type,
-        "quantity": qty_kg,
-        "reason": payload.get("reason") or f"Mouvement {movement_type} via agent",
-    }
+    context = DomainContext.from_state(state)
+    service = StockService(context=context)
+    result = service.record_movement(state, payload)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "add_stock_movement_by_id")
+    return tool_name, dict(result.tool_args)
 
 
 @register_action("STOCK_ADJUST", mode="WRITE")
 def prep_stock_adjust(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    phone = require_phone(state)
-    stock_id = str(require(payload, "stock_id"))
-    qty_raw = float(require(payload, "quantity_mentioned"))
-    qty_kg, _ = normalize_quantity_to_kg(qty_raw, payload.get("unit_mentioned"))
-    return "adjust_stock_by_id", {
-        "producer_id": phone,
-        "stock_id": stock_id,
-        "new_quantity": qty_kg,
-        "reason": payload.get("reason") or "Ajustement inventaire physique",
-    }
+    context = DomainContext.from_state(state)
+    service = StockService(context=context)
+    result = service.adjust(state, payload)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "adjust_stock_by_id")
+    return tool_name, dict(result.tool_args)
 
 
 @register_action("STOCK_REMOVE_PARTIAL", mode="WRITE")
 def prep_stock_remove_partial(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    phone = require_phone(state)
-    stock_id = str(require(payload, "stock_id"))
-    qty_raw = float(require(payload, "quantity_mentioned"))
-    qty_kg, _ = normalize_quantity_to_kg(qty_raw, payload.get("unit_mentioned"))
-    return "remove_stock_by_id", {
-        "producer_id": phone,
-        "stock_id": stock_id,
-        "quantity": qty_kg,
-        "reason": payload.get("reason") or "Retrait partiel via agent",
-    }
+    context = DomainContext.from_state(state)
+    service = StockService(context=context)
+    result = service.remove_partial(state, payload)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "remove_stock_by_id")
+    return tool_name, dict(result.tool_args)
 
 
 @register_action("STOCK_DELETE", mode="WRITE")
 def prep_stock_delete(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    phone = require_phone(state)
-    stock_id = str(require(payload, "stock_id"))
-    return "delete_stock_by_id", {"producer_id": phone, "stock_id": stock_id}
+    context = DomainContext.from_state(state)
+    service = StockService(context=context)
+    result = service.delete(state, payload)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "delete_stock_by_id")
+    return tool_name, dict(result.tool_args)
 
 
 @register_action("STOCK_UPDATE_LEVEL", mode="WRITE")
 def prep_stock_update_level(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    phone = require_phone(state)
     if not is_update_mode(state):
         raise ValueError("STOCK_UPDATE_LEVEL doit être invoqué en mode update.")
 
     entity = require_current_entity(state, intent="STOCK_UPDATE_LEVEL")
-    stock_id = coalesce_entity_value(
-        payload,
-        entity,
-        payload_keys=("stock_id",),
-        entity_keys=("stock_id", "id"),
-    )
-    if not stock_id:
-        raise ValueError("Impossible d'identifier le lot de stock à modifier.")
+    dto = StockUpdateLevelPayload.from_state_and_payload(payload=payload, entity=entity)
 
-    qty_raw = coalesce_entity_value(
-        payload,
-        entity,
-        payload_keys=("quantity_mentioned", "quantity"),
-        entity_keys=("quantity", "quantity_for_sale"),
-    )
-    qty_value = to_float(qty_raw, field="quantity")
-    if qty_value is None:
-        raise ValueError("Aucune nouvelle quantité fournie pour la mise à jour du lot.")
+    context = DomainContext.from_state(state)
+    if not context.phone:
+        raise ValueError("Le numéro de téléphone du producteur est requis pour mettre à jour le stock.")
 
-    unit = coalesce_entity_value(
-        payload,
-        entity,
-        payload_keys=("unit_mentioned", "unit"),
-        entity_keys=("unit",),
+    # Application-layer translation: DTO -> Command
+    quantity_kg, _ = normalize_quantity_to_kg(dto.quantity, dto.unit)
+    command = StockUpdateLevelCommand(
+        producer_id=context.phone,
+        stock_id=dto.stock_id,
+        new_quantity_kg=quantity_kg,
+        reason=dto.reason or "Ajustement de niveau via update",
     )
-    qty_normalized, _ = normalize_quantity_to_kg(qty_value, unit)
-    reason = payload.get("reason") or "Ajustement de niveau via update"
-    return "adjust_stock_by_id", {
-        "producer_id": phone,
-        "stock_id": str(stock_id),
-        "new_quantity": qty_normalized,
-        "reason": reason,
-    }
+
+    service = StockService(context=context)
+    result = service.update_level(command)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "adjust_stock_by_id")
+    return tool_name, dict(result.tool_args)

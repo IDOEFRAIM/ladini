@@ -82,7 +82,7 @@ Output: {"product": "tomates", "quantity": 20.0, "unit": null, "validation_statu
 INTERPRETER_USER_PROMPT = """\
 Contexte agent :
 - current_goal : {current_goal}
-- expected_input : {expected_input}
+- expected_input : {expected_input}{slot_hint_line}
 - last_agent_question : {last_agent_question}
 - expected_candidates : {expected_candidates}
 

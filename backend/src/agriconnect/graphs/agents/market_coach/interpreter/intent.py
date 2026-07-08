@@ -1,4 +1,6 @@
 
+from agriconnect.graphs.agents.market_coach.core.slots import build_canonical_field_aliases
+
 
 INTENT_CONFIG = {
     # =======================================================================
@@ -705,19 +707,8 @@ for _intent_key, _cfg in INTENT_CONFIG.items():
     _cfg["lifecycle_mode"] = lifecycle
 
 
-_CANONICAL_FIELD_ALIASES = {
-    "product_name": "product",
-    "produit": "product",
-    "quantity_mentioned": "quantity",
-    "quantity_for_sale": "quantity",
-    "qty": "quantity",
-    "unit_mentioned": "unit",
-    "unite": "unit",
-    "price_mentioned": "price",
-    "prix": "price",
-    "zone_name": "zone",
-    "location": "zone",
-}
+# _CANONICAL_FIELD_ALIASES is now derived from core/slots.py (single source of truth).
+_CANONICAL_FIELD_ALIASES = build_canonical_field_aliases()
 
 
 def _canonicalize_field_name(field: str) -> str:

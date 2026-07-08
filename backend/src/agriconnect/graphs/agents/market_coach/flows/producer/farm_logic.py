@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, Optional
 from agriconnect.core.logging import get_logger
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, ensure_dict
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import FarmGateway
 from agriconnect.graphs.agents.market_coach.core.base import (
     _AUTO_FARM_NOTICE,
     MARKET_VALIDATION_CONFIG,
@@ -60,14 +61,8 @@ async def ensure_farm_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
     else:
         farms_cache = []
         try:
-            farms_raw = await mc_runtime.call_db("get_producer_farm", phone=str(phone).strip())
-            farms_data = ensure_dict(farms_raw)
-            farms_cache = (
-                farms_data.get("data")
-                or farms_data.get("farms")
-                or farms_data.get("results")
-                or []
-            )
+            farm_gw = FarmGateway(mc_runtime)
+            farms_cache = await farm_gw.list_farms(str(phone))
         except Exception as exc:  # pragma: no cover - log only
             logger.warning("[AutoFarm] Impossible de récupérer les fermes existantes: %s", exc)
 
@@ -136,12 +131,8 @@ async def ensure_farm_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
             create_payload["location"] = zone_name
 
         try:
-            creation = await mc_runtime.call_db(
-                "create_farm",
-                **{k: v for k, v in create_payload.items() if v},
-            )
-            creation_dict = ensure_dict(creation)
-            farm_data = creation_dict.get("data") or creation_dict
+            farm_gw = FarmGateway(mc_runtime)
+            farm_data = await farm_gw.create_farm(**{k: v for k, v in create_payload.items() if v})
             farm_id = str(farm_data.get("id") or farm_data.get("farm_id") or "")
             if farm_id:
                 updates["auto_farm_notice"] = _AUTO_FARM_NOTICE

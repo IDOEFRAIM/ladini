@@ -44,11 +44,25 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
 
     def _with_base(extra: Dict[str, Any]) -> Dict[str, Any]:
         base: Dict[str, Any] = {"active_cart": cart}
+        if goal and "current_goal" not in extra:
+            base["current_goal"] = goal
+            if "goal_status" not in extra:
+                base["goal_status"] = "ACTIVE"
         if "final_response" not in extra:
             base["final_response"] = None
         if "ag_ui_component" not in extra:
             base["ag_ui_component"] = None
         base.update(extra)
+
+        # Persist the last known cart snapshot in working_memory to survive
+        # cross-goal transitions (ex: précommande). This is cheap (replace_list)
+        # and prevents empty payloads when the planner reroutes via INIT.
+        snapshot = base.get("active_cart") or cart
+        if snapshot:
+            wm_patch = dict(base.get("working_memory") or {})
+            wm_patch["last_active_cart"] = snapshot
+            base["working_memory"] = wm_patch
+
         return base
 
     # --- Free-text preorder trigger ---
@@ -135,6 +149,10 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
         vendor_ctx_payload: Dict[str, Any] = dict(vendor_ctx or {})
         chosen_vendor = vendor_ctx_payload.get("chosen_vendor")
         selection_idx = payload.get("selection_index")
+        # Fallback: memory_update may have already resolved+cleared selection_index
+        # in a previous step; extracted_entities still carries the raw value.
+        if selection_idx is None:
+            selection_idx = (state.get("extracted_entities") or {}).get("selection_index")
 
         if selection_idx is not None:
             vendors_list = vendor_ctx_payload.get("vendors") or []

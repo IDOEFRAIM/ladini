@@ -1,13 +1,13 @@
-"""Market — Interpreter & Goal Planner.
+"""Market — Interpreter & Routing.
 
-Centralise l'appel LLM d'interprétation et l'automate de planification.
+Centralise l'appel LLM d'interprétation et le routage post-validator.
 Le prompt système est construit dynamiquement à partir de `INTENT_CONFIG`
 filtré par rôle (PRODUCER / BUYER) afin d'éviter qu'un LLM ne propose
 une intention inappropriée pour le profil utilisateur.
 
-Le `goal_planner` reste une machine à états purement déterministe : aucune
-heuristique de texte, aucun appel LLM. Il consomme `interpreted_event` et
-`detected_intent` produits en amont.
+Entity normalisation lives in ``interpreter/entities.py``.
+Product validation lives in ``services/domain/product_validation.py``.
+The goal planner state machine lives in ``interpreter/goal_planner.py``.
 """
 from __future__ import annotations
 
@@ -15,23 +15,36 @@ import asyncio
 import json
 import logging
 import re as _re
-import unicodedata as _unicodedata
 from string import Template
 from typing import Any, Dict, List, Optional
 
 from agriconnect.graphs.agents.market_coach.interpreter.intent import (
     INTENT_CONFIG,
     INTENT_ROLE,
-    INTENT_DISAMBIGUATION,
 )
 from agriconnect.graphs.agents.market_coach.interpreter.prompts import INTERPRETER_USER_PROMPT
 from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
+from agriconnect.graphs.agents.market_coach.core.slots import get_slot_hint
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     canonical_unit_label,
-    normalize_slot_keys,
-    slot_has_value,
-    _clean_candidate_text,
+)
+
+from agriconnect.graphs.agents.market_coach.interpreter.entities import (
+    _UNIT_SYNONYMS,
+    _normalize_unit_token,
+    _remap_entities,
+    _fallback_quantity_unit_from_text,
+)
+from agriconnect.graphs.agents.market_coach.services.domain.product_validation import (
+    _validate_and_sanitize_product,
+)
+from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
+    INTENT_TO_GOAL_MAP,
+    _NAVIGATION_INTENTS,
+    _init_intent_to_goal_map,
+    _looks_like_buyer_product_request,
+    goal_planner,
 )
 
 logger = logging.getLogger("AgriConnect.Market.InterpreterRouting")
@@ -52,6 +65,9 @@ COMMON_INTENTS: frozenset = frozenset(
     k for k, role in INTENT_ROLE.items() if role == "BOTH"
 )
 
+# Populate the goal planner's INTENT_TO_GOAL_MAP now that role sets exist.
+_init_intent_to_goal_map(PRODUCER_INTENTS, BUYER_INTENTS, COMMON_INTENTS)
+
 
 def allowed_intents_for_role(role: str) -> frozenset:
     """Retourne l'ensemble des intentions autorisées pour un rôle utilisateur.
@@ -69,277 +85,6 @@ def allowed_intents_for_role(role: str) -> frozenset:
         )
     base = BUYER_INTENTS if role_up == "BUYER" else PRODUCER_INTENTS
     return base | COMMON_INTENTS | frozenset(missing)
-
-
-# =====================================================================
-# ENTITY KEY REMAPPER (Normalisation vers les clés MCP standard)
-# =====================================================================
-
-_ENTITY_KEY_REMAP: Dict[str, str] = {
-    "prix": "price",
-    "price": "price",
-    "montant": "price",
-    "montant_enchere": "price",
-    "offered_price": "price",
-    "max_price": "price",
-    "prix_unitaire": "price",
-    "quantite": "quantity",
-    "quantity": "quantity",
-    "qty": "quantity",
-    "volume": "quantity",
-    "quantity_kg": "quantity",
-    "quantity_for_sale": "quantity",
-    "unite": "unit",
-    "unit": "unit",
-    "produit": "product",
-    "name": "product",
-    "item_name": "product",
-    "commodity": "product",
-    "culture": "product",
-    "product_name": "product",
-    "zone": "zone",
-    "region": "zone",
-    "localite": "zone",
-    "target_zone": "zone",
-    "price_mentioned": "price",
-    "quantity_mentioned": "quantity",
-    "unit_mentioned": "unit",
-    "zone_name": "zone",
-    "selection_index": "selection_index",
-    "selected_value": "selected_value",
-    "movement_type": "movement_type",
-    "reason": "reason",
-}
-
-
-_UNIT_SYNONYMS: Dict[str, str] = {
-    "k": "KG",
-    "kg": "KG",
-    "kgs": "KG",
-    "kilo": "KG",
-    "kilos": "KG",
-    "kilogramme": "KG",
-    "kilogrammes": "KG",
-    "ton": "TONNE",
-    "tons": "TONNE",
-    "tone": "TONNE",
-    "tones": "TONNE",
-    "tonne": "TONNE",
-    "tonnes": "TONNE",
-    "t": "TONNE",
-    "sac": "SAC",
-    "sacs": "SAC",
-    "sachet": "SAC",
-    "sachets": "SAC",
-    "panier": "PANIER",
-    "paniers": "PANIER",
-    "tete": "TETE",
-    "tetes": "TETE",
-    "unite": "UNITE",
-    "unites": "UNITE",
-}
-
-
-def _normalize_unit_token(raw: str) -> str:
-    if not raw:
-        return ""
-    token = _unicodedata.normalize("NFKD", str(raw).strip().lower())
-    token = "".join(ch for ch in token if not _unicodedata.combining(ch))
-    return token.replace(".", "")
-
-_QUANTITY_UNIT_PATTERN = _re.compile(
-    r"(?P<qty>\d+[\d\s.,]*)\s*(?P<unit>[a-zA-ZÀ-ÖØ-öø-ÿ.]+)",
-    _re.IGNORECASE,
-)
-
-
-_GENERIC_PRODUCT_STOPWORDS = {
-    "merci",
-    "bonjour",
-    "bonsoir",
-    "salut",
-    "d'accord",
-    "ok",
-    "c'est bon",
-    "aucun",
-    "nothing",
-}
-
-_KNOWN_PRODUCT_KEYWORDS = {
-    "maïs",
-    "mais",
-    "riz",
-    "sorgho",
-    "soja",
-    "arachide",
-    "oignon",
-    "tomate",
-    "piment",
-    "gombo",
-    "banane",
-    "igname",
-    "coton",
-    "manioc",
-    "mil",
-    "niébé",
-    "engrais",
-    "urée",
-    "npk",
-    "intrant",
-    "semence",
-    "fertilisant",
-    "poivron",
-    "carotte",
-    "chou",
-}
-
-_SUSPICIOUS_PRODUCT_TOKENS = {
-    "commande",
-    "commandes",
-    "precommande",
-    "précommande",
-    "précommander",
-    "precommander",
-    "prix",
-    "payer",
-    "paiement",
-    "client",
-    "livraison",
-    "acheteur",
-    "achete",
-    "acheté",
-    "acheter",
-    "vendeur",
-    "vendre",
-    "bonjour",
-    "bonsoir",
-    "merci",
-    "urgent",
-}
-
-
-async def _catalog_has_product(name: str, mc_runtime: Optional[MarketRuntime]) -> bool:
-    if not mc_runtime:
-        return False
-    try:
-        db_service = mc_runtime.ensure_db()
-    except Exception:
-        return False
-    if not db_service or not hasattr(db_service, "get_public_products"):
-        return False
-    try:
-        result = await db_service.get_public_products(search=name, limit=1)
-    except Exception as exc:
-        logger.debug("Product catalog lookup failed: %s", exc)
-        return False
-    if not isinstance(result, dict):
-        return False
-    for key in ("items", "data", "results"):
-        items = result.get(key)
-        if isinstance(items, list) and items:
-            return True
-    return False
-
-
-async def _validate_and_sanitize_product(
-    product_value: Optional[str], mc_runtime: Optional[MarketRuntime]
-) -> Optional[str]:
-    if not product_value:
-        return None
-    candidate = _clean_candidate_text(product_value)
-    if not candidate:
-        return None
-    lowered = candidate.lower()
-    if lowered in _GENERIC_PRODUCT_STOPWORDS:
-        return None
-    if len(candidate) < 2 or len(candidate) > 40:
-        return None
-    if any(token in lowered for token in _SUSPICIOUS_PRODUCT_TOKENS):
-        return None
-    if _re.search(r"http[s]?://|www\\.|@|#", lowered):
-        return None
-    words = lowered.split()
-    if any(tok in lowered for tok in _KNOWN_PRODUCT_KEYWORDS):
-        return candidate
-    if len(words) <= 3:
-        return candidate
-    has_catalog_match = await _catalog_has_product(candidate, mc_runtime)
-    return candidate if has_catalog_match else None
-
-
-def _sanitize_product_candidate(value: Any) -> Optional[str]:
-    candidate = _clean_candidate_text(str(value)) if isinstance(value, str) else None
-    if not candidate:
-        return None
-    lowered = candidate.lower()
-    if lowered in _GENERIC_PRODUCT_STOPWORDS:
-        return None
-    if any(tok in lowered for tok in _KNOWN_PRODUCT_KEYWORDS):
-        return candidate
-    words = lowered.split()
-    if len(words) > 6:
-        return None
-    if _re.search(r"http[s]?://|www\.|@|#", lowered):
-        return None
-    if not _re.search(r"[a-zàâçéèêëîïôûùüÿñæœ]", lowered):
-        return None
-    return candidate
-
-
-def _remap_entities(raw_entities: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalise les clés d'entités extraites par le LLM vers les clés canoniques."""
-
-    canonicalized = normalize_slot_keys({
-        _ENTITY_KEY_REMAP.get(str(k).lower().strip(), k): v
-        for k, v in (raw_entities or {}).items()
-    })
-    normalized: Dict[str, Any] = {}
-    for key, value in canonicalized.items():
-        if not slot_has_value(value):
-            continue
-        if key in {"price", "quantity"}:
-            try:
-                clean_str = str(value).replace(",", ".").replace(" ", "").replace("\xa0", "")
-                normalized[key] = float(clean_str)
-            except (ValueError, TypeError):
-                logger.warning("Entity '%s' non numérique: %r — ignoré", key, value)
-                continue
-        elif key == "selection_index":
-            try:
-                normalized[key] = int(value)
-            except (ValueError, TypeError):
-                logger.warning("selection_index non entier: %r — ignoré", value)
-                continue
-        elif key == "product":
-            sanitized = _sanitize_product_candidate(value)
-            if sanitized:
-                normalized[key] = sanitized
-        else:
-            normalized[key] = str(value).strip() if isinstance(value, str) else value
-    return normalized
-
-
-def _fallback_quantity_unit_from_text(text: str) -> Optional[Dict[str, Any]]:
-    """Capture déterministe d'un motif numérique suivi d'une unité standard."""
-    if not text:
-        return None
-    match = _QUANTITY_UNIT_PATTERN.search(text)
-    if not match:
-        return None
-
-    qty_raw = (match.group("qty") or "").replace(" ", "").replace("\xa0", "").replace(",", ".")
-    try:
-        qty_val = float(qty_raw)
-    except (ValueError, TypeError):
-        return None
-
-    unit_raw = _normalize_unit_token(match.group("unit") or "")
-    mapped_unit = _UNIT_SYNONYMS.get(unit_raw)
-
-    result: Dict[str, Any] = {"quantity": qty_val}
-    if mapped_unit:
-        result["unit"] = mapped_unit
-    return result
 
 
 # =====================================================================
@@ -515,7 +260,6 @@ def _interpret_fast_path(state: Dict[str, Any], text: str) -> Optional[Dict[str,
         return None
 
     # Priorité slot-filling : en attente de quantité/prix, un nombre doit rester une ANSWER
-    # (et ne jamais être interprété comme un nouveau nom de produit).
     if expected in ("PRICE", "QUANTITY"):
         number_match = _re.search(r"\b(\d+[\d\s,.]*)\b", clean)
         if number_match:
@@ -602,7 +346,6 @@ def _interpret_fast_path(state: Dict[str, Any], text: str) -> Optional[Dict[str,
         }
 
     # Fast-path 0ter : escalade explicite "appel" depuis un menu de sélection acheteur.
-    # Objectif : éviter le garde-fou (expected_input=SELECTION => UNKNOWN) qui déclenche RECOVERY.
     if (
         role_up == "BUYER"
         and str(locked_goal or "").upper() == "BUYER_REQUEST"
@@ -674,7 +417,7 @@ def _interpret_fast_path(state: Dict[str, Any], text: str) -> Optional[Dict[str,
                 "raw_analysis": {"path": "fast_path_selection_index"},
             }
 
-    # Fast-path 2 : Saisie de valeur numérique directe lors du slot-filling actif (ex: prix ou quantité)
+    # Fast-path 2 : Saisie de valeur numérique directe lors du slot-filling actif
     if expected in ("PRICE", "QUANTITY"):
         num_match = _re.match(
             r"^[\s]*(\d+[\s,.]?\d*)\s*(k|kg|kgs?|kilo|kilogramme|ton|tonne|tonnes|t|sac|sacs|sachet|sachets|panier|paniers|fcfa|f|cfa)?[\s]*$",
@@ -730,8 +473,6 @@ def make_input_interpreter(role: str = "PRODUCER"):
                         text = content.strip()
                         break
         expected_input = state.get("expected_input")
-        # Only consider onboarding active if is_onboarding is explicitly True.
-        # onboarding_step can be stale ("COMPLETED") from metadata — ignore it.
         onboarding_active = bool(state.get("is_onboarding"))
         working = state.get("working_memory") or {}
         locked_goal = state.get("current_goal") or working.get("active_goal") or working.get("locked_intent")
@@ -780,9 +521,13 @@ def make_input_interpreter(role: str = "PRODUCER"):
 
         # 3. Résolution dynamique des contextes de prompts
         system_prompt = _build_dynamic_interpreter_prompt(role_up)
+        _exp_input = expected_input or "NONE"
+        _slot_hint = get_slot_hint(_exp_input.lower()) if _exp_input not in ("NONE", "CONFIRMATION", "SELECTION") else ""
+        _slot_hint_line = f" → {_slot_hint}" if _slot_hint and _slot_hint != _exp_input.lower() else ""
         user_prompt = INTERPRETER_USER_PROMPT.format(
             current_goal=state.get("current_goal") or "AUCUN",
-            expected_input=expected_input or "NONE",
+            expected_input=_exp_input,
+            slot_hint_line=_slot_hint_line,
             last_agent_question=state.get("last_agent_question") or "—",
             expected_candidates=", ".join(state.get("expected_candidates") or []) or "—",
             normalized_text=text,
@@ -819,28 +564,50 @@ def make_input_interpreter(role: str = "PRODUCER"):
         if raw_event == "PROVIDE_INFO":
             raw_event = "ANSWER"
 
-        # Conservation de session : quand on attend un slot (quantité/prix/produit...),
-        # un "NEW_TASK" est souvent une réponse partielle (ex: "100kg").
-        if expected_input in {"PRODUCT", "PRICE", "QUANTITY", "UNIT", "LOCATION", "DATE"} and raw_event == "NEW_TASK":
-            raw_event = "ANSWER"
-
-        # Protection stricte IHM : Si l'utilisateur dévie alors qu'on attend une action binaire/choix de bouton
-        if expected_input in {"SELECTION", "CONFIRMATION"} and raw_event not in {"SELECTION", "CONFIRM", "REJECT"}:
-            logger.warning("Dérive conversationnelle détectée : attendait %s, utilisateur a dévié.", expected_input)
-            raw_event = "UNKNOWN"
-
-        if raw_event not in {"NEW_TASK", "ANSWER", "CONFIRM", "REJECT", "SELECTION", "UPDATE", "INTERRUPTION", "RESUME", "OUT_OF_SCOPE", "UNKNOWN", "ONBOARDING_INPUT"}:
-            raw_event = "UNKNOWN"
-
         raw_intent = str(parsed.get("detected_intent") or "UNKNOWN").upper().strip()
         if raw_intent != "UNKNOWN" and raw_intent not in allowed:
-            logger.warning("LLM a retourné une intention hors-périmètre %s pour le rôle %s — ignoré", raw_intent, role_up)
+            logger.warning(
+                "LLM a retourné une intention hors-périmètre %s pour le rôle %s — ignoré",
+                raw_intent,
+                role_up,
+            )
             raw_intent = "UNKNOWN"
 
         try:
             confidence = max(0.0, min(1.0, float(parsed.get("interpreter_confidence") or 0.0)))
         except (TypeError, ValueError):
             confidence = 0.0
+
+        if role_up == "BUYER" and _looks_like_buyer_product_request(text.strip().lower()):
+            if raw_event == "UNKNOWN":
+                raw_event = "NEW_TASK"
+            if raw_intent not in {"BUYER_REQUEST", "BUYER_ADD_TO_CART", "PROCUREMENT_CREATE_REQUEST"}:
+                raw_intent = "BUYER_REQUEST"
+                confidence = max(confidence, 0.85)
+
+        if expected_input in {"PRODUCT", "PRICE", "QUANTITY", "UNIT", "LOCATION", "DATE"} and raw_event == "NEW_TASK":
+            raw_event = "ANSWER"
+
+        if expected_input in {"SELECTION", "CONFIRMATION"} and raw_event not in {"SELECTION", "CONFIRM", "REJECT"}:
+            if raw_intent != "UNKNOWN" and confidence >= 0.55:
+                logger.info(
+                    "Interruption détectée pendant %s → intent=%s (confidence=%.2f)",
+                    expected_input,
+                    raw_intent,
+                    confidence,
+                )
+                raw_event = "INTERRUPTION"
+            else:
+                logger.warning(
+                    "Dérive conversationnelle détectée : attendait %s, utilisateur a dévié (intent=%s, confidence=%.2f).",
+                    expected_input,
+                    raw_intent,
+                    confidence,
+                )
+                raw_event = "UNKNOWN"
+
+        if raw_event not in {"NEW_TASK", "ANSWER", "CONFIRM", "REJECT", "SELECTION", "UPDATE", "INTERRUPTION", "RESUME", "OUT_OF_SCOPE", "UNKNOWN", "ONBOARDING_INPUT"}:
+            raw_event = "UNKNOWN"
 
         remapped_entities = _remap_entities(parsed.get("extracted_entities") or {})
         fallback_entities = _fallback_quantity_unit_from_text(text)
@@ -881,400 +648,6 @@ def make_input_interpreter(role: str = "PRODUCER"):
         }
 
     return input_interpreter
-
-
-# =====================================================================
-# NODE 4 — GOAL PLANNER (Machine à États Pure orientée Formulaires UI)
-# =====================================================================
-
-INTENT_TO_GOAL_MAP: Dict[str, str] = {
-    intent_key: intent_key for intent_key in PRODUCER_INTENTS | BUYER_INTENTS | COMMON_INTENTS
-}
-
-_NAVIGATION_INTENTS = frozenset({
-    "BUYER_VIEW_CART",
-    "BUYER_LIST_ORDERS",
-    "BUYER_CHECK_ORDER_STATUS",
-    "BUYER_CANCEL_ORDER",
-    "MARKET_GET_REQUESTS",
-})
-
-
-async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
-    """Machine à états pure pour la gestion du cycle de vie des intentions."""
-    event = str(state.get("interpreted_event") or "UNKNOWN").upper()
-    detected_intent = str(state.get("detected_intent") or "UNKNOWN").upper()
-    working = state.get("working_memory") or {}
-    current_goal = state.get("current_goal") or working.get("active_goal") or working.get("locked_intent")
-    expected_input = state.get("expected_input")
-    goal_stack = list(state.get("goal_stack") or [])
-    in_tunnel = bool(current_goal and expected_input and expected_input != "NONE")
-    text = str(state.get("normalized_text") or state.get("user_query") or "").strip().lower()
-    if not text:
-        messages = state.get("messages") or []
-        if isinstance(messages, list):
-            for msg in reversed(messages):
-                if not isinstance(msg, dict):
-                    continue
-                role2 = str(msg.get("role") or "").lower().strip()
-                if role2 != "user":
-                    continue
-                content = msg.get("content")
-                if isinstance(content, str) and content.strip():
-                    text = content.strip().lower()
-                    break
-    is_short = len(text) <= 4 or text.isdigit() or text in {"oui", "non", "ok", "yes", "no"}
-
-    updates: Dict[str, Any] = {
-        "status": "PLANNING",
-        "interruption_detected": False,
-    }
-
-    logger.info(
-        "[GoalPlanner IN] event=%s intent=%s current_goal=%s expected=%s",
-        event,
-        detected_intent,
-        current_goal,
-        expected_input,
-    )
-
-    def _lock(goal: Optional[str], extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        wm = dict(working)
-        if goal and goal != "DISAMBIGUATION_PENDING":
-            wm["active_goal"] = goal
-            wm["locked_intent"] = goal
-            wm.setdefault("step_index", 0)
-        if extra:
-            wm.update(extra)
-        return wm
-
-    def _clear_goal_lock() -> Dict[str, Any]:
-        """Conserve les caches, supprime uniquement les verrous de tunnel/UI."""
-        wm = dict(working)
-        for k in (
-            "active_goal",
-            "locked_intent",
-            "step_index",
-            "available_mapping_kind",
-            "auction_menu",
-            "bids_menu",
-            "stocks_menu",
-            "generic_menu",
-            "disambiguation_pending",
-            "disambiguation_trigger_id",
-        ):
-            wm.pop(k, None)
-        return wm
-
-    def _purge_transaction_state() -> Dict[str, Any]:
-        """Purge totale des champs transactionnels/AG-UI lors d'un switch d'intention."""
-        return {
-            "transaction_payload": {"__reset__": True},
-            "draft_payload": {"__reset__": True},
-            "stable_entities": {"__reset__": True},
-            "missing_fields": [],
-            "completed_fields": [],
-            "last_missing_field": None,
-            "expected_input": "NONE",
-            "expected_candidates": [],
-            "available_mapping": {},
-            "waiting_for_confirmation": False,
-            "confirmation_summary": None,
-            "selected_tool": None,
-            "selected_tool_args": {"__reset__": True},
-            "execution_result": {"__reset__": True},
-            "retry_count": 0,
-            "vendor_selection_context": {"__reset__": True},
-            "negotiation_context": {"__reset__": True},
-            "preorder_workflow": {"__reset__": True},
-        }
-
-    def _with_goal_metadata(payload: Dict[str, Any], goal_hint: Optional[str] = None) -> Dict[str, Any]:
-        target_goal = goal_hint
-        if target_goal is None:
-            target_goal = payload.get("current_goal")
-            if not target_goal:
-                wm_payload = payload.get("working_memory") or {}
-                target_goal = (
-                    wm_payload.get("active_goal")
-                    or wm_payload.get("locked_intent")
-                    or state.get("current_goal")
-                )
-        goal_key = str(target_goal or "").upper().strip()
-        cfg = INTENT_CONFIG.get(goal_key, {})
-        lifecycle = str(cfg.get("lifecycle_mode") or "").upper().strip()
-        if lifecycle not in {"CREATE", "UPDATE", "READ"}:
-            lifecycle = "READ"
-        payload["goal_metadata"] = {
-            "lifecycle_mode": lifecycle,
-            "update_mode": lifecycle == "UPDATE",
-        }
-        return payload
-
-    # RÈGLE 0bis — RÉSOLUTION DE DÉSAMBIGUÏSATION
-    # Si l'utilisateur a sélectionné dans le menu posé par semantic_disambiguation,
-    # on lit la sélection directement depuis state.extracted_entities +
-    # state.available_mapping (goal_planner s'exécute AVANT memory_update).
-    if current_goal == "DISAMBIGUATION_PENDING":
-        override_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
-        if event in {"INTERRUPTION", "NEW_TASK"} and override_goal and override_goal != "DISAMBIGUATION_PENDING":
-            logger.info(
-                "[Disambiguation Override] event=%s intent=%s -> current_goal=%s",
-                event,
-                detected_intent,
-                override_goal,
-            )
-            return _with_goal_metadata({
-                "status": "PLANNING",
-                "current_goal": override_goal,
-                "goal_status": "ACTIVE",
-                "interruption_detected": event == "INTERRUPTION",
-                "working_memory": {
-                    **_lock(override_goal),
-                    "disambiguation_pending": False,
-                    "available_mapping_kind": None,
-                },
-                **_purge_transaction_state(),
-            }, override_goal)
-
-        extracted = state.get("extracted_entities") or {}
-        mapping = dict(state.get("available_mapping") or {})
-
-        trigger_id = str((state.get("working_memory") or {}).get("disambiguation_trigger_id") or "").strip()
-        if trigger_id:
-            entry = INTENT_DISAMBIGUATION.get(trigger_id)
-            if entry:
-                rebuilt: Dict[str, str] = {}
-                for i, opt in enumerate(entry.get("options") or [], start=1):
-                    intent_key = None
-                    if isinstance(opt, (tuple, list)) and len(opt) >= 2:
-                        intent_key = opt[0]
-                    elif isinstance(opt, dict):
-                        intent_key = opt.get("intent")
-                    if intent_key:
-                        rebuilt[str(i)] = str(intent_key)
-                if rebuilt:
-                    if mapping and mapping != rebuilt:
-                        logger.warning(
-                            "[Disambiguation] stale mapping overridden by trigger=%s",
-                            trigger_id,
-                        )
-                    mapping = rebuilt
-                    logger.info(
-                        "[Disambiguation] rebuilt mapping from trigger=%s with %d options",
-                        trigger_id,
-                        len(mapping),
-                    )
-                        
-        sel_idx = extracted.get("selection_index")
-        sel_val = extracted.get("selected_value")
-
-        resolved_intent: Optional[str] = None
-        if sel_idx is not None:
-            resolved_intent = mapping.get(str(sel_idx))
-        if resolved_intent is None and sel_val is not None:
-            resolved_intent = mapping.get(str(sel_val))
-
-        if (
-            resolved_intent is None
-            and detected_intent in INTENT_TO_GOAL_MAP
-            and detected_intent not in {"", "UNKNOWN", "DISAMBIGUATION_PENDING"}
-        ):
-            resolved_intent = detected_intent
-
-        if resolved_intent and resolved_intent in INTENT_TO_GOAL_MAP:
-            logger.info(
-                "[Disambiguation Resolved] selection=%s promoted to current_goal=%s",
-                sel_idx or sel_val, resolved_intent,
-            )
-            return _with_goal_metadata({
-                "status": "PLANNING",
-                "current_goal": resolved_intent,
-                "goal_status": "ACTIVE",
-                "interruption_detected": False,
-                "expected_input": "NONE",
-                "expected_candidates": [],
-                "available_mapping": {},
-                "missing_fields": [],
-                "completed_fields": [],
-                "working_memory": {
-                    **_lock(resolved_intent),
-                    "disambiguation_pending": False,
-                    "available_mapping_kind": None,
-                },
-            }, resolved_intent)
-        # Sélection invalide ou pas encore reçue : on garde le menu actif.
-        updates["current_goal"] = "DISAMBIGUATION_PENDING"
-        updates["goal_status"] = "WAITING_INPUT"
-        updates["expected_input"] = "SELECTION"
-        updates["waiting_for_confirmation"] = False
-        updates["confirmation_summary"] = None
-        updates["response_strategy"] = "SELECTION_MENU"
-        updates["working_memory"] = {
-            **dict(working),
-            "disambiguation_pending": True,
-            "available_mapping_kind": "intent_disambiguation",
-        }
-        return _with_goal_metadata(updates)
-
-    # RÈGLE 1 — CANCEL/REJECT (Annulation explicite)
-    # Si l'utilisateur rejette en dehors du contexte de confirmation, on purge.
-    if event == "REJECT":
-        waiting_confirm = bool(state.get("waiting_for_confirmation") or str(expected_input or "").upper() == "CONFIRMATION")
-        if not waiting_confirm:
-            return _with_goal_metadata({
-                "status": "WAITING_INPUT",
-                "current_goal": None,
-                "goal_status": "IDLE",
-                "interruption_detected": False,
-                "response_strategy": "CLARIFICATION",
-                "working_memory": _clear_goal_lock(),
-                **_purge_transaction_state(),
-            })
-
-        # Rejet pendant confirmation : laisser confirmation_gate gérer la logique.
-        updates["current_goal"] = current_goal
-        updates["goal_status"] = "ACTIVE"
-        updates["working_memory"] = _lock(current_goal)
-        return _with_goal_metadata(updates)
-
-    # RÈGLE 1bis — TUNNEL LOCKING (Maintien des formulaires d'IHM)
-    if event in {"CONFIRM", "SELECTION", "ANSWER", "UPDATE"}:
-        updates["current_goal"] = current_goal
-        updates["goal_status"] = "ACTIVE"
-        updates["working_memory"] = _lock(current_goal)
-        return _with_goal_metadata(updates)
-
-    # RÈGLE 1ter — PERSISTENCE PAR DÉFAUT
-    # Si aucune nouvelle intention fiable n'est détectée, on reste verrouillé sur le tunnel courant.
-    if current_goal and detected_intent == "UNKNOWN" and event in {"UNKNOWN", "NEW_TASK"}:
-        updates["current_goal"] = current_goal
-        updates["detected_intent"] = str(current_goal).upper()
-        updates["goal_status"] = "ACTIVE" if expected_input in (None, "", "NONE") else "WAITING_INPUT"
-        updates["working_memory"] = _lock(current_goal)
-        return _with_goal_metadata(updates)
-
-    # RÈGLE 1quater — VERROUILLAGE PENDANT SLOT-FILLING
-    # Tant qu'on attend explicitement une information utilisateur, on n'autorise pas un switch
-    # d'intention via NEW_TASK (sauf via event=INTERRUPTION).
-    if current_goal and event == "NEW_TASK" and expected_input not in (None, "", "NONE"):
-        nav_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
-        if nav_goal in _NAVIGATION_INTENTS:
-            updates["current_goal"] = nav_goal
-            updates["goal_status"] = "ACTIVE"
-            updates["working_memory"] = _lock(nav_goal)
-            updates.update(_purge_transaction_state())
-            logger.info("[GoalPlanner] Navigation override vers %s", nav_goal)
-            return _with_goal_metadata(updates)
-
-        updates["current_goal"] = current_goal
-        updates["detected_intent"] = str(current_goal).upper()
-        updates["goal_status"] = "WAITING_INPUT"
-        updates["working_memory"] = _lock(current_goal)
-        return _with_goal_metadata(updates)
-
-    if is_short and current_goal:
-        updates["current_goal"] = current_goal
-        updates["detected_intent"] = str(current_goal).upper()
-        updates["goal_status"] = "ACTIVE" if expected_input in {None, "NONE"} else "WAITING_INPUT"
-        updates["working_memory"] = _lock(current_goal)
-        return _with_goal_metadata(updates)
-
-    # RÈGLE 2 — POLLUTION PENDANT SLOT-FILLING
-    if event == "UNKNOWN" and in_tunnel:
-        updates["current_goal"] = current_goal
-        updates["goal_status"] = "WAITING_INPUT"
-        updates["detected_intent"] = str(current_goal).upper()
-        updates["working_memory"] = _lock(current_goal)
-        return _with_goal_metadata(updates)
-
-    # RÈGLE 3 — OUT_OF_SCOPE
-    if event == "OUT_OF_SCOPE":
-        updates["current_goal"] = current_goal
-        updates["goal_status"] = "ACTIVE" if current_goal else "IDLE"
-        updates["response_strategy"] = "CLARIFICATION"
-        updates["status"] = "WAITING_INPUT"
-        updates["working_memory"] = _lock(current_goal)
-        return _with_goal_metadata(updates)
-
-    # RÈGLE 4 — INTERRUPTION (Suspension d'un workflow IHM en cours)
-    if event == "INTERRUPTION":
-        new_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
-        if new_goal and new_goal != current_goal:
-            if current_goal:
-                goal_stack.append(current_goal)
-            return _with_goal_metadata({
-                "status": "PLANNING",
-                "current_goal": new_goal,
-                "goal_stack": goal_stack,
-                "goal_status": "ACTIVE",
-                "interruption_detected": True,
-                "suspended_goal": current_goal,
-                "suspended_payload": state.get("transaction_payload") or {},
-                **_purge_transaction_state(),
-                "working_memory": _lock(new_goal),
-            }, new_goal)
-        updates["current_goal"] = current_goal
-        updates["response_strategy"] = "CLARIFICATION"
-        updates["status"] = "WAITING_INPUT"
-        updates["goal_status"] = "ACTIVE" if current_goal else "IDLE"
-        updates["working_memory"] = _lock(current_goal)
-        return _with_goal_metadata(updates)
-
-    # RÈGLE 4bis — RESUME (Reprise d'une tâche suspendue dans goal_stack)
-    if event == "RESUME":
-        if goal_stack:
-            resumed = goal_stack.pop()
-            return _with_goal_metadata({
-                "status": "PLANNING",
-                "current_goal": resumed,
-                "goal_stack": goal_stack,
-                "goal_status": "ACTIVE",
-                "interruption_detected": False,
-                "suspended_goal": None,
-                "transaction_payload": state.get("suspended_payload") or {},
-                "suspended_payload": {},
-                "stable_entities": {},
-                "missing_fields": [],
-                "completed_fields": [],
-                "last_missing_field": None,
-                "expected_input": "NONE",
-                "expected_candidates": [],
-                "available_mapping": {},
-                "waiting_for_confirmation": False,
-                "confirmation_summary": None,
-                "working_memory": _lock(resumed),
-            }, resumed)
-        # Aucun goal suspendu — traiter comme clarification
-        updates["current_goal"] = current_goal
-        updates["response_strategy"] = "CLARIFICATION"
-        updates["status"] = "WAITING_INPUT"
-        updates["goal_status"] = "ACTIVE" if current_goal else "IDLE"
-        updates["working_memory"] = _lock(current_goal)
-        return _with_goal_metadata(updates)
-
-    # RÈGLE 5 — NEW_TASK (Instanciation et purge des champs AG-UI)
-    if event == "NEW_TASK":
-        new_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
-        if new_goal:
-            updates["current_goal"] = new_goal
-            updates["goal_status"] = "ACTIVE"
-            updates["working_memory"] = _lock(new_goal)
-            if current_goal and new_goal != current_goal:
-                updates.update(_purge_transaction_state())
-            logger.info("[GoalPlanner OUT] new_goal=%s", new_goal)
-            logger.debug("[GoalPlanner OUT] new_goal=%s", new_goal)
-            return _with_goal_metadata(updates)
-
-    # Fallback par défaut vers clarification
-    updates["current_goal"] = current_goal
-    updates["response_strategy"] = "CLARIFICATION"
-    updates["status"] = "WAITING_INPUT"
-    updates["goal_status"] = "ACTIVE" if current_goal else "IDLE"
-    if current_goal:
-        updates["detected_intent"] = str(current_goal).upper()
-    updates["working_memory"] = _lock(current_goal)
-    return _with_goal_metadata(updates)
 
 
 # =====================================================================
@@ -1336,7 +709,7 @@ def make_route_after_validator(role: str = "PRODUCER"):
 
             return "to_resolver"
 
-        # 2B. MENU DE SÉLECTION (sans missing_fields) — ex: choix ferme / enchère / stock
+        # 2B. MENU DE SÉLECTION (sans missing_fields)
         if state.get("status") == "WAITING_INPUT" and (expected_input == "SELECTION" or strategy == "SELECTION_MENU"):
             logger.info(
                 "[%s ROUTER] Sélection attendue — Routage vers response_strategy",

@@ -814,16 +814,36 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
         # 🔍 CAS 3 : Fallback transactionnel unitaire (si l'outil ne renvoie pas de collection)
         if not ag_component:
             if not tool_msg:
-                prod_name = payload.get("product") or "votre demande"
-                qty = _fmt_num(payload.get("quantity") or "")
-                unit = str(payload.get("unit") or "").upper()
+                prod_name = payload.get("product") or payload.get("product_name") or "votre demande"
+                qty = _fmt_num(
+                    payload.get("quantity")
+                    or payload.get("quantity_mentioned")
+                    or payload.get("quantity_desired")
+                    or ""
+                )
+                unit = str(
+                    payload.get("unit")
+                    or payload.get("unit_mentioned")
+                    or payload.get("unit_desired")
+                    or ""
+                ).upper()
                 q_info = f" pour {qty} {unit}" if qty else ""
 
-                g = goal or ""
-                if "PUBLISH" in g or "SELL" in g:
-                    text_output = f"✅ {salutation}Votre offre de vente{q_info} de *{prod_name}* a bien été publiée sur le marché."
-                elif "AUCTION" in g or "BUY" in g:
+                g = (goal or "").upper()
+                if "BUYER_ADD_TO_CART" == g:
+                    text_output = (
+                        f"🛒 {salutation}*{prod_name}*{q_info} a été ajouté à votre panier. "
+                        "Tapez *précommander* pour valider ou ajoutez un autre produit."
+                    )
+                elif g.startswith("BUYER_PREORDER"):
+                    text_output = (
+                        f"✅ {salutation}Votre précommande{q_info} pour *{prod_name}* est enregistrée. "
+                        "Vous recevrez le récapitulatif complet dans un instant."
+                    )
+                elif g.startswith("PROCUREMENT_") or "AUCTION" in g:
                     text_output = f"✅ {salutation}Votre appel d'offres{q_info} de *{prod_name}* a été enregistré avec succès."
+                elif "PUBLISH" in g or "SELL" in g:
+                    text_output = f"✅ {salutation}Votre offre de vente{q_info} de *{prod_name}* a bien été publiée sur le marché."
                 elif "BID" in g:
                     price_bid = _fmt_num(payload.get("price"))
                     p_info = f" à {price_bid} FCFA" if price_bid else ""
@@ -951,10 +971,46 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
                 "final_response": "Je bascule vers la confirmation de votre précommande. Le récapitulatif arrive.",
                 "ag_ui_component": None,
             }
-        return {
-            "final_response": "Je mets en pause la saisie en cours pour traiter votre nouvelle demande.",
-            "ag_ui_component": None,
-        }
+        suspended = str(state.get("suspended_goal") or "").upper().strip()
+        current_goal = str(state.get("current_goal") or "").upper().strip()
+        expected = str(state.get("expected_input") or "").upper().strip()
+
+        suspended_label = (
+            (INTENT_CONFIG.get(suspended) or {}).get("label")
+            if suspended
+            else ""
+        )
+        current_label = (
+            (INTENT_CONFIG.get(current_goal) or {}).get("label")
+            if current_goal
+            else ""
+        )
+
+        expected_hint = ""
+        if expected == "SELECTION":
+            expected_hint = "un numéro du menu (ex: 1)"
+        elif expected == "CONFIRMATION":
+            expected_hint = "oui / non"
+        elif expected and expected not in {"NONE", ""}:
+            expected_hint = expected.lower()
+
+        head = "Je traite votre nouvelle demande." 
+        if current_label:
+            head = f"Je passe à : *{current_label}*."
+
+        tail = ""
+        if suspended_label and expected_hint:
+            tail = (
+                f"\n\nPour reprendre ensuite *{suspended_label}*, j'attendais {expected_hint}. "
+                "Vous pouvez aussi dire *annuler* si vous ne souhaitez plus continuer."
+            )
+        elif suspended_label:
+            tail = (
+                f"\n\nL'étape *{suspended_label}* est mise de côté. "
+                "Dites *reprendre* pour revenir dessus, ou *annuler*."
+            )
+
+        return {"final_response": head + tail, "ag_ui_component": None}
 
     # -----------------------------------------------------------------
     # FALLBACK : CLARIFICATION (Coach proactif role-aware)

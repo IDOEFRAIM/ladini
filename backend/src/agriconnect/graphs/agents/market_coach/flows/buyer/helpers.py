@@ -9,6 +9,9 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
 )
+from agriconnect.graphs.agents.market_coach.flows.common.menu_text import (
+    render_numbered_menu,
+)
 from agriconnect.graphs.agents.market_coach.services.domain.buyer_common import (
     SUPPORT_FOOTER,
     with_support_footer,
@@ -100,6 +103,7 @@ def resolve_product(
         product = infer_product_from_text(state)
         if product:
             payload["product"] = product
+            payload["_product_from_text"] = True
     if not product:
         working = state.get("working_memory") or {}
         last = working.get("buyer_request_last_product")
@@ -112,13 +116,20 @@ def resolve_product(
 def resolve_quantity(
     payload: Dict[str, Any],
     stable_entities: Dict[str, Any],
+    *,
+    allow_stable_fallback: bool = True,
 ) -> Any:
     """Resolve quantity from payload → stable entities, normalizing key."""
     quantity = payload.get("quantity_mentioned")
     if quantity in (None, "", 0):
-        quantity = payload.get("quantity") or stable_entities.get("quantity_mentioned")
+        quantity = payload.get("quantity")
         if quantity not in (None, "", 0):
             payload["quantity_mentioned"] = quantity
+    if quantity in (None, "", 0) and allow_stable_fallback:
+        quantity = stable_entities.get("quantity_mentioned")
+        if quantity not in (None, "", 0):
+            payload["quantity_mentioned"] = quantity
+            payload["_auto_quantity_fill"] = True
     return quantity
 
 
@@ -290,12 +301,7 @@ def negotiation_choice_from_index(index: Any) -> Optional[str]:
 
 def render_interactive_menu(options: Sequence[MenuOption], header: Optional[str] = None) -> str:
     """Build a numbered menu string for WhatsApp / AG-UI."""
-    lines: List[str] = []
-    if header:
-        lines.append(header)
-    for opt in options:
-        lines.append(f"[{opt.index}] {opt.label}")
-    return "\n".join(lines)
+    return render_numbered_menu(options, header=header)
 
 
 def preorder_action_menu(preorder_id: str, **extra_meta: Any) -> MenuRequest:

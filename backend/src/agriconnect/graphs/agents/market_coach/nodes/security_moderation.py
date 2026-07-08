@@ -16,9 +16,18 @@ async def security_moderation(state: Dict[str, Any], mc_runtime: MarketRuntime) 
     if security is None or not hasattr(security, "moderate_content"):
         return {"security_status": "SAFE", "trust_score": 0.8, "ag_ui_component": None}
 
-    raw = security.moderate_content(text)
-    if inspect.isawaitable(raw) or asyncio.iscoroutine(raw):
-        raw = await raw
+    try:
+        _call = security.moderate_content(text)
+        if inspect.isawaitable(_call) or asyncio.iscoroutine(_call):
+            raw = await asyncio.wait_for(_call, timeout=5.0)
+        else:
+            raw = _call
+    except asyncio.TimeoutError:
+        logger.warning("[SecurityModeration] moderate_content timed out — defaulting to SAFE (degraded)")
+        return {"security_status": "SAFE", "trust_score": 0.3, "ag_ui_component": None}
+    except Exception as mod_exc:
+        logger.warning("[SecurityModeration] moderate_content failed: %s — defaulting to SAFE (degraded)", mod_exc)
+        return {"security_status": "SAFE", "trust_score": 0.3, "ag_ui_component": None}
 
     if not isinstance(raw, dict):
         return {"security_status": "SAFE", "trust_score": 0.5, "ag_ui_component": None}

@@ -8,6 +8,22 @@ import asyncio
 
 logger = get_node_logger("ClarificationNode")
 
+_MAX_USER_TEXT_IN_PROMPT = 200
+
+
+def _sanitize_for_prompt(text: str) -> str:
+    """Nettoie le texte utilisateur avant injection dans un prompt LLM.
+
+    - Tronque à _MAX_USER_TEXT_IN_PROMPT caractères
+    - Supprime les retours à la ligne (vecteur d'injection classique)
+    - Remplace les guillemets doubles pour ne pas casser la structure du prompt
+    """
+    if not text:
+        return ""
+    clean = text.replace("\r", " ").replace("\n", " ").replace('"', "'").strip()
+    return clean[:_MAX_USER_TEXT_IN_PROMPT]
+
+
 async def clarification_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
     """Noeud de clarification pédagogique.
 
@@ -57,7 +73,7 @@ async def clarification_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -
     if cognitive_action == "abandon_tunnel_max_retries":
         context_parts.append("L'opération précédente a été annulée car je n'arrivais pas à comprendre.")
     if text:
-        context_parts.append(f"L'utilisateur a dit : \"{text}\"")
+        context_parts.append(f"L'utilisateur a dit : \"{_sanitize_for_prompt(text)}\"")
 
     prompt = (
         f"Tu es un assistant commercial agricole WhatsApp au Burkina Faso.\n"

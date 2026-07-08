@@ -41,6 +41,18 @@ async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
         return {"response_strategy": "ERROR", "status": "BLOCKED", "ag_ui_component": None}
 
     if state.get("interruption_detected") or interpreted_event == "INTERRUPTION" or existing_strategy == "INTERRUPTION_HANDLER":
+        # If upstream nodes already produced a concrete UI (menu/form), keep it.
+        if existing_strategy in {"SELECTION_MENU", "ASK_MISSING_FIELD", "ERROR", "CONFIRMATION", "SUCCESS"}:
+            updates: Dict[str, Any] = {"response_strategy": existing_strategy}
+            if existing_strategy == "CONFIRMATION":
+                updates["status"] = "WAITING_CONFIRMATION"
+            if existing_strategy == "ASK_MISSING_FIELD":
+                updates["status"] = "WAITING_INPUT"
+            return updates
+        if expected_input == "SELECTION" and (state.get("pending_menu") or state.get("expected_candidates")):
+            return {"response_strategy": "SELECTION_MENU", "status": "WAITING_INPUT", "ag_ui_component": None}
+        if expected_input == "CONFIRMATION":
+            return {"response_strategy": "CONFIRMATION", "status": "WAITING_CONFIRMATION", "ag_ui_component": None}
         return {"response_strategy": "INTERRUPTION_HANDLER", "ag_ui_component": None}
 
     # Global explicit cancel/refusal should never be blocked by missing_fields.
@@ -49,6 +61,11 @@ async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
 
     # --- COGNITIVE GUARD DECISIONS take priority (after global commands) ---
     if cognitive_action == "recover_active_tunnel":
+        # Prefer re-showing menus/confirmations instead of verbose coaching.
+        if expected_input == "SELECTION" and (state.get("pending_menu") or state.get("expected_candidates")):
+            return {"response_strategy": "SELECTION_MENU", "status": "WAITING_INPUT", "ag_ui_component": None}
+        if expected_input == "CONFIRMATION":
+            return {"response_strategy": "CONFIRMATION", "status": "WAITING_CONFIRMATION", "ag_ui_component": None}
         return {"response_strategy": "RECOVERY", "status": "WAITING_INPUT", "ag_ui_component": None}
     if cognitive_action == "abandon_tunnel_max_retries":
         return {"response_strategy": "CLARIFICATION", "ag_ui_component": None}

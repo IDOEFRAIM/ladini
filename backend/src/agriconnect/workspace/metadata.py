@@ -7,6 +7,7 @@ business data (catalogs, stocks, traces, etc.).
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List
 
 LANGGRAPH_STATE_KEY = "_langgraph_state"
@@ -23,10 +24,14 @@ ALLOWED_METADATA_KEYS = frozenset(
         "expected_candidates",
         "disambiguation_trigger_id",
         "available_mapping_kind",
+        "last_active_cart",
     }
 )
 _INTERNAL_METADATA_KEYS = frozenset()
 _MAX_FORM_VALUE_LENGTH = 256
+# Hard cap on the total serialized metadata column — enforced in filter_metadata_dict.
+_MAX_METADATA_BYTES = 48_000  # 48 KB
+_MAX_CART_SNAPSHOT_ITEMS = 20  # keep at most 20 cart lines in the metadata snapshot
 
 _FORM_WHITELIST = frozenset(
     {
@@ -102,10 +107,32 @@ def clean_candidates(candidates: Any) -> List[str]:
     return cleaned
 
 
+_CART_LINE_KEYS = frozenset({"product", "product_name", "quantity", "unit", "price", "vendor_phone", "vendor_name"})
+
+
+def clean_cart_snapshot(cart: Any) -> List[Dict[str, Any]]:
+    """Sanitize a list of cart line dicts down to essential scalar fields only."""
+    if not isinstance(cart, (list, tuple)):
+        return []
+    cleaned: List[Dict[str, Any]] = []
+    for item in cart[:_MAX_CART_SNAPSHOT_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        line: Dict[str, Any] = {}
+        for k in _CART_LINE_KEYS:
+            v = item.get(k)
+            if v is not None:
+                line[k] = _safe_scalar(v)
+        if line:
+            cleaned.append(line)
+    return cleaned
+
+
 _METADATA_NORMALIZERS = {
     "form_data": clean_form_data,
     "available_mapping": clean_mapping,
     "expected_candidates": clean_candidates,
+    "last_active_cart": clean_cart_snapshot,
 }
 
 
@@ -157,12 +184,25 @@ def build_metadata_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
     if session_id:
         snapshot["session_id"] = str(session_id)
 
+    # Persist a lightweight cart snapshot so the resolver can restore it if the
+    # LangGraph state is dropped (e.g. after a workspace reset).
+    raw_cart = state.get("active_cart")
+    if not raw_cart:
+        raw_cart = (state.get("working_memory") or {}).get("last_active_cart")
+    cleaned_cart = clean_cart_snapshot(raw_cart)
+    if cleaned_cart:
+        snapshot["last_active_cart"] = cleaned_cart
+
     return snapshot
 
 
 def filter_metadata_dict(meta: Any) -> Dict[str, Any]:
-    """Filter an existing metadata dict down to the allowed keys only."""
+    """Filter an existing metadata dict down to the allowed keys only.
 
+    Also enforces ``_MAX_METADATA_BYTES``: if the filtered dict is still too
+    large (e.g. because of a big ``last_active_cart``), the cart snapshot is
+    dropped first, then the entire dict if still over budget.
+    """
     if not isinstance(meta, dict):
         return {}
 
@@ -187,4 +227,11 @@ def filter_metadata_dict(meta: Any) -> Dict[str, Any]:
             filtered[key] = safe_value
 
     filtered.update(internal)
+
+    # Size guard — drop optional bulk fields first, then give up entirely.
+    if len(json.dumps(filtered, ensure_ascii=False).encode("utf-8")) > _MAX_METADATA_BYTES:
+        filtered.pop("last_active_cart", None)
+    if len(json.dumps(filtered, ensure_ascii=False).encode("utf-8")) > _MAX_METADATA_BYTES:
+        return {}
+
     return filtered

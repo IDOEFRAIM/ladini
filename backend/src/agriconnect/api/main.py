@@ -7,7 +7,7 @@ from agriconnect.api.routes.twilio_webhook import router as twilio_router # 1. I
 logger = logging.getLogger("AgriConnect.API")
 
 app = FastAPI(
-    title="AgriConnect MarketCoach API",
+    title=" LADINI MarketCoach API",
     version="1.1.0",
 )
 

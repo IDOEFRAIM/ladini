@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+import json
 import logging
 from dataclasses import asdict, dataclass
-from typing import Any, AsyncIterator, Dict, Iterable, Mapping, MutableMapping, Sequence
+import time
+from typing import Any, AsyncIterator, Callable, Dict, Iterable, Mapping, MutableMapping, Sequence
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -27,8 +29,21 @@ logger = logging.getLogger("AgriConnect.Workspace.Checkpointer")
 
 _DEFAULT_NS = ""
 _STATE_VERSION = 1
-_MAX_CHECKPOINTS_PER_NS = 20
-_MAX_WRITES_PER_CHECKPOINT = 200
+# In-memory checkpoint window per namespace during a single process lifetime.
+_MAX_CHECKPOINTS_PER_NS = 5
+# Only the latest checkpoint is persisted to Postgres; older ones are pruned.
+_MAX_PERSISTED_CHECKPOINTS = 1
+# Hard cap on the full persisted JSONB blob (post-prune safety net).
+_MAX_PERSISTED_BYTES = 480_000  # 480 KB — must align with store._MAX_STATE_BYTES
+# Soft cap for conversational history retained per checkpoint.
+_MAX_MESSAGE_WINDOW = 32
+_MESSAGE_KEYS = (
+    "messages",
+    "conversation_history",
+    "turn_history",
+    "history",
+    "events",
+)
 
 
 @dataclass(slots=True)
@@ -58,12 +73,21 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
         super().__init__(serde=serde)
         self.store = store or WorkspaceStore()
         self.state_key = state_key
+        # In-memory write cache: (thread_id, namespace, checkpoint_id) → {entry_key: payload}
+        # aput_writes populates this; aput drains it into the persisted bucket.
+        # Avoids a DB round-trip on every intermediate node write (~15+ per turn).
+        self._write_cache: Dict[tuple, Dict[str, Any]] = {}
+        # Active workspaces injected by the orchestrator (dirty writes stay in RAM)
+        self._session_workspaces: Dict[str, Workspace] = {}
+        self._session_hooks: Dict[str, Callable[[Dict[str, Any]], None]] = {}
 
     # ----------------------------
     # Orchestrator helper API
     # ----------------------------
     async def export_state(self, thread_id: str) -> Dict[str, Any] | None:
-        workspace = await self.store.get(thread_id)
+        workspace = self._session_workspaces.get(thread_id)
+        if workspace is None:
+            workspace = await self.store.get(thread_id)
         if not workspace:
             return None
         state = workspace.agent_state
@@ -77,7 +101,9 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
         if not thread_id:
             return None
         namespace = self._namespace(config)
-        workspace = await self.store.get(thread_id)
+        workspace = self._session_workspaces.get(thread_id)
+        if workspace is None:
+            workspace = await self.store.get(thread_id)
         if not workspace:
             return None
         state = workspace.agent_state
@@ -107,10 +133,12 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
         if not thread_id:
             return
         namespace = self._namespace(config)
-        workspace = await self.store.get(thread_id)
+        workspace = self._session_workspaces.get(thread_id)
+        if workspace is None:
+            workspace = await self.store.get(thread_id)
         if not workspace:
             return
-        state = workspace.metadata.get(self.state_key)
+        state = workspace.agent_state  # BUG FIX: was metadata.get(state_key)
         if not isinstance(state, dict):
             return
         bucket = self._namespace_bucket(state, namespace, create=False)
@@ -157,7 +185,13 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
             "parent": parent_id,
             "ts": checkpoint.get("ts"),
         }
-        bucket.setdefault("writes", {}).setdefault(checkpoint_id, {})
+        # Drain any in-memory writes accumulated by aput_writes for this checkpoint.
+        cache_key = (thread_id, namespace, checkpoint_id)
+        cached_writes = self._write_cache.pop(cache_key, {})
+        if cached_writes:
+            bucket.setdefault("writes", {}).setdefault(checkpoint_id, {}).update(cached_writes)
+        else:
+            bucket.setdefault("writes", {}).setdefault(checkpoint_id, {})
 
         await self._persist_state(workspace, state)
         return {
@@ -175,33 +209,42 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
         task_id: str,
         task_path: str = "",
     ) -> None:
+        """Accumulate intermediate node writes in memory — NO database call.
+
+        LangGraph invokes this after every node execution (~15 times per user
+        turn).  Persisting each write to Postgres would cost 30 DB round-trips
+        per turn and inflate the JSONB blob to hundreds of MB.
+
+        Writes are held in ``_write_cache`` and flushed into the persisted
+        bucket on the next ``aput`` (superstep checkpoint).
+        """
+        if not writes:
+            return
         thread_id = self._require_thread_id(config)
         namespace = self._namespace(config)
         checkpoint_id = self._require_checkpoint_id(config)
-        if not writes:
-            return
 
-        workspace = await self._load_or_create_workspace(thread_id)
-        state = self._clone_state(workspace)
-        bucket = self._namespace_bucket(state, namespace)
-        write_bucket = bucket.setdefault("writes", {}).setdefault(checkpoint_id, {})
+        cache_key = (thread_id, namespace, checkpoint_id)
+        bucket = self._write_cache.setdefault(cache_key, {})
 
         for idx, (channel, value) in enumerate(writes):
             key = f"{task_id}:{idx}"
-            if key in write_bucket:
+            if key in bucket:
                 continue
-            write_bucket[key] = {
+            bucket[key] = {
                 "task_id": task_id,
                 "channel": channel,
                 "value": asdict(_SerializedValue.encode(self.serde, value)),
                 "task_path": task_path,
                 "index": idx,
             }
-            self._trim_writes(write_bucket)
-
-        await self._persist_state(workspace, state)
 
     async def adelete_thread(self, thread_id: str) -> None:
+        # Clear in-memory write cache for this thread.
+        stale_keys = [k for k in self._write_cache if k[0] == thread_id]
+        for k in stale_keys:
+            self._write_cache.pop(k, None)
+
         workspace = await self.store.get(thread_id)
         if not workspace:
             return
@@ -297,6 +340,9 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
         return str(checkpoint_id)
 
     async def _load_or_create_workspace(self, thread_id: str) -> Workspace:
+        workspace = self._session_workspaces.get(thread_id)
+        if workspace:
+            return workspace
         workspace = await self.store.get(thread_id)
         if workspace:
             return workspace
@@ -338,15 +384,48 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
             if ck_id not in checkpoints:
                 writes.pop(ck_id, None)
 
-    def _trim_writes(self, write_bucket: MutableMapping[str, Any]) -> None:
-        while len(write_bucket) > _MAX_WRITES_PER_CHECKPOINT:
-            oldest_key = next(iter(write_bucket))
-            write_bucket.pop(oldest_key, None)
-
     async def _persist_state(self, workspace: Workspace, state: Dict[str, Any]) -> None:
         workspace.metadata = dict(workspace.metadata or {})
-        workspace.agent_state = state
-        await self.store.save(workspace)
+        pruned_state, metrics = self._prune_for_persistence(state)
+        workspace.agent_state = pruned_state
+
+        if workspace.workspace_id in self._session_workspaces:
+            workspace.mark_dirty()
+            hook = self._session_hooks.get(workspace.workspace_id)
+            if hook:
+                hook(metrics)
+            logger.info(
+                "Workspace state staged in RAM | workspace=%s | bytes=%s | checkpoints=%s | truncated=%s",
+                workspace.workspace_id,
+                metrics.get("payload_bytes"),
+                metrics.get("total_checkpoints"),
+                metrics.get("truncated", False),
+            )
+        else:
+            await self.store.save(workspace)
+            logger.info(
+                "Workspace state persisted (legacy flow) | workspace=%s | bytes=%s | checkpoints=%s | truncated=%s",
+                workspace.workspace_id,
+                metrics.get("payload_bytes"),
+                metrics.get("total_checkpoints"),
+                metrics.get("truncated", False),
+            )
+
+    def attach_workspace(
+        self,
+        workspace: Workspace,
+        *,
+        on_checkpoint: Callable[[Dict[str, Any]], None] | None = None,
+    ) -> None:
+        """Pin a workspace in-memory for the duration of an orchestration."""
+
+        self._session_workspaces[workspace.workspace_id] = workspace
+        if on_checkpoint:
+            self._session_hooks[workspace.workspace_id] = on_checkpoint
+
+    def detach_workspace(self, workspace_id: str) -> None:
+        self._session_workspaces.pop(workspace_id, None)
+        self._session_hooks.pop(workspace_id, None)
 
     def _resolve_checkpoint_id(self, config: RunnableConfig, ids: Iterable[str]) -> str | None:
         if checkpoint_id := get_checkpoint_id(config):
@@ -362,6 +441,141 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
                 return False
         return True
 
+    def _prune_for_persistence(self, state: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        """Produce a minimal snapshot safe to store in Postgres.
+
+        Strategy (in order):
+        1. Drop *all* write logs — they are ephemeral and can reach hundreds of MB.
+        2. Keep only the single latest checkpoint per namespace
+           (``_MAX_PERSISTED_CHECKPOINTS = 1``).
+        3. Apply a sliding-window strategy on conversation history so Postgres
+           never receives the full transcript.
+        4. Attach a synthetic ``summary`` block describing the retained data so
+           orchestration/monitoring layers can introspect without inflating size.
+        5. If the resulting payload still exceeds ``_MAX_PERSISTED_BYTES``, fall
+           back to a summary-only payload (namespaces wiped) to protect Postgres.
+        """
+
+        if not isinstance(state, dict):
+            return {"version": _STATE_VERSION, "namespaces": {}}, {"payload_bytes": 0}
+
+        trimmed = copy.deepcopy(state)
+        namespaces = trimmed.get("namespaces")
+        if not isinstance(namespaces, dict):
+            trimmed["namespaces"] = {}
+            namespaces = trimmed["namespaces"]
+
+        for bucket in namespaces.values():
+            if not isinstance(bucket, dict):
+                continue
+
+            # Drop write logs entirely — they can explode to hundreds of MB.
+            if "writes" in bucket:
+                bucket["writes"] = {}
+
+            checkpoints = bucket.get("checkpoints")
+            if not isinstance(checkpoints, dict):
+                continue
+
+            if _MAX_PERSISTED_CHECKPOINTS and len(checkpoints) > _MAX_PERSISTED_CHECKPOINTS:
+                keep = set(list(checkpoints.keys())[-_MAX_PERSISTED_CHECKPOINTS:])
+                for key in list(checkpoints.keys()):
+                    if key not in keep:
+                        checkpoints.pop(key, None)
+
+        windows, window_meta = self._apply_message_windows(trimmed, state)
+        summary = self._build_summary(state, window_meta)
+        trimmed["summary"] = summary
+        if windows:
+            trimmed["message_window"] = windows
+
+        payload_bytes = len(json.dumps(trimmed, ensure_ascii=False).encode("utf-8"))
+        metrics: Dict[str, Any] = {
+            "payload_bytes": payload_bytes,
+            "windowed_fields": window_meta,
+            "total_namespaces": len(namespaces),
+            "total_checkpoints": summary.get("total_checkpoints", 0),
+        }
+        if payload_bytes > _MAX_PERSISTED_BYTES:
+            logger.warning(
+                "WorkspaceCheckpointer payload exceeded %s bytes (%s) — persisting summary only",
+                _MAX_PERSISTED_BYTES,
+                payload_bytes,
+            )
+            trimmed = {
+                "version": _STATE_VERSION,
+                "namespaces": {},
+                "summary": summary,
+                "message_window": windows,
+                "truncated": True,
+            }
+            payload_bytes = len(json.dumps(trimmed, ensure_ascii=False).encode("utf-8"))
+            metrics["payload_bytes"] = payload_bytes
+            metrics["truncated"] = True
+
+        metrics["summary_ts"] = summary.get("ts")
+        return trimmed, metrics
+
+    def _apply_message_windows(
+        self,
+        trimmed: Dict[str, Any],
+        original: Mapping[str, Any],
+    ) -> tuple[Dict[str, Any], Dict[str, Dict[str, int]]]:
+        """Keep a bounded window of conversational history per known field."""
+
+        windows: Dict[str, Any] = {}
+        meta: Dict[str, Dict[str, int]] = {}
+
+        for key in _MESSAGE_KEYS:
+            source = original.get(key) if isinstance(original, Mapping) else None
+            target = trimmed.get(key)
+
+            data = source if isinstance(source, list) else (target if isinstance(target, list) else None)
+            if not data:
+                continue
+
+            total = len(data)
+            window = data[-_MAX_MESSAGE_WINDOW:]
+            trimmed[key] = window
+            windows[key] = window
+            meta[key] = {"total": total, "kept": len(window)}
+
+        return windows, meta
+
+    def _build_summary(
+        self,
+        state: Mapping[str, Any],
+        window_meta: Mapping[str, Dict[str, int]],
+    ) -> Dict[str, Any]:
+        namespaces = state.get("namespaces") if isinstance(state, Mapping) else {}
+        summary: Dict[str, Any] = {
+            "version": _STATE_VERSION,
+            "ts": int(time.time()),
+            "namespaces": {},
+            "total_checkpoints": 0,
+            "window_meta": window_meta,
+        }
+
+        if not isinstance(namespaces, Mapping):
+            return summary
+
+        total = 0
+        for ns, bucket in namespaces.items():
+            if not isinstance(bucket, Mapping):
+                continue
+            checkpoints = bucket.get("checkpoints")
+            if not isinstance(checkpoints, Mapping) or not checkpoints:
+                summary["namespaces"][ns] = {"latest": None, "count": 0}
+                continue
+            ids = list(checkpoints.keys())
+            latest = max(ids)
+            count = len(ids)
+            total += count
+            summary["namespaces"][ns] = {"latest": latest, "count": count}
+
+        summary["total_checkpoints"] = total
+        return summary
+
     def _build_tuple(
         self,
         thread_id: str,
@@ -373,7 +587,11 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
         checkpoint = _SerializedValue(**entry["checkpoint"]).decode(self.serde)
         metadata = entry.get("metadata", {})
         parent_id = entry.get("parent")
-        writes_bucket = bucket.get("writes", {}).get(checkpoint_id, {})
+        # Merge persisted writes with any in-memory cache (cache wins on conflict).
+        persisted_writes = bucket.get("writes", {}).get(checkpoint_id, {})
+        cache_key = (thread_id, namespace, checkpoint_id)
+        cached_writes = self._write_cache.get(cache_key, {})
+        writes_bucket = {**persisted_writes, **cached_writes}
         pending_writes = [
             (
                 payload["task_id"],

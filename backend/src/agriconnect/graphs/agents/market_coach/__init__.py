@@ -35,7 +35,7 @@ __all__ = [
 
 def __getattr__(name):
     if name == "graph":
-        from agriconnect.graphs.agents.market_coach.graph import get_agent_graph
+        from agriconnect.graphs.agents.market_coach.waste.graph import get_agent_graph
         return get_agent_graph
     if name == "onboarding_node":
         from agriconnect.graphs.agents.market_coach.flows.producer.onboarding import onboarding_node

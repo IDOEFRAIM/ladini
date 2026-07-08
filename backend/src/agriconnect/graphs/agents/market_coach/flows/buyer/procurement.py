@@ -13,11 +13,14 @@ from agriconnect.graphs.agents.market_coach.services.domain.buyer_common import 
     safe_call_tool,
     with_support_footer,
 )
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import AuctionGateway
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     ensure_dict,
     is_success_response,
 )
+
+from .cart import cart_management
 
 from .helpers import (
     CONFIRM_KEYWORDS,
@@ -113,6 +116,25 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
     if not phone:
         return phone_missing_error()
 
+    vendor_ctx = state.get("vendor_selection_context")
+    vendor_ctx_active = bool(vendor_ctx) and not (isinstance(vendor_ctx, dict) and vendor_ctx.get("__reset__"))
+    if vendor_ctx_active:
+        raw_selection = payload.get("selection_index")
+        if raw_selection is None:
+            raw_selection = (state.get("extracted_entities") or {}).get("selection_index")
+        if raw_selection is None:
+            raw_text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+            if raw_text.isdigit():
+                raw_selection = raw_text
+
+        if raw_selection is not None:
+            next_payload = dict(payload)
+            next_payload["selection_index"] = raw_selection
+            next_state = dict(state)
+            next_state["current_goal"] = "BUYER_ADD_TO_CART"
+            next_state["transaction_payload"] = next_payload
+            return await cart_management(next_state, mc_runtime)
+
     stable_entities = state.get("stable_entities") or {}
     working_memory = dict(state.get("working_memory") or {})
     normalized_text = str(state.get("normalized_text") or state.get("user_query") or "").strip().lower()
@@ -122,8 +144,15 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
 
     # --- Entity resolution ---
     product_name = resolve_product(payload, stable_entities, state)
+    inferred_from_text = bool(payload.pop("_product_from_text", False))
     unit = resolve_unit(payload, stable_entities)
     payload.setdefault("product", product_name)
+
+    text_has_digits = any(ch.isdigit() for ch in normalized_text)
+    reset_quantity = inferred_from_text and not text_has_digits
+    if reset_quantity:
+        payload.pop("quantity_mentioned", None)
+        payload.pop("quantity", None)
 
     def _escalate(message: str, unit_hint: Optional[str] = None) -> Dict[str, Any]:
         return build_procurement_escalation(payload, working_memory, product_name, unit_hint or unit, message)
@@ -176,7 +205,12 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
         }
 
     # --- Catalog lookup ---
-    quantity = resolve_quantity(payload, stable_entities)
+    allow_stable_quantity = not reset_quantity
+    quantity = resolve_quantity(
+        payload,
+        stable_entities,
+        allow_stable_fallback=allow_stable_quantity,
+    )
     vendors, has_multiple = await cart_service.resolve_product_vendors(phone, str(product_name))
 
     if vendors:
@@ -239,8 +273,8 @@ async def resolve_own_auctions(
         kwargs["product_name"] = str(product)
 
     logger.info("resolve_own_auctions: calling get_auctions with %s", kwargs)
-    raw = await mc_runtime.call_db("get_auctions", **kwargs)
-    result = ensure_dict(raw)
+    auction_gw = AuctionGateway(mc_runtime)
+    result = await auction_gw.search_open_auctions(**kwargs)
 
     if not is_success_response(result) or int(result.get("count") or 0) == 0:
         msg = result.get("message") or "Vous n'avez aucun appel d'offres ouvert pour l'instant. Si vous pensez que c'est une erreur, veuillez réessayer."
@@ -290,8 +324,8 @@ async def resolve_received_bids(
         return phone_missing_error()
     kwargs["phone"] = str(phone)
 
-    raw = await mc_runtime.call_db("get_auctions_bids", **kwargs)
-    result = ensure_dict(raw)
+    auction_gw = AuctionGateway(mc_runtime)
+    result = await auction_gw.get_auctions_bids(**kwargs)
 
     if not is_success_response(result):
         msg = result.get("message") or "Impossible de charger les offres reçues."
@@ -364,8 +398,8 @@ async def resolve_buyer_bid_pick(
     if phone:
         kwargs["phone"] = str(phone)
 
-    raw = await mc_runtime.call_db("get_auctions_bids", **kwargs)
-    data = ensure_dict(raw).get("data") or []
+    auction_gw = AuctionGateway(mc_runtime)
+    data = (await auction_gw.get_auctions_bids(**kwargs)).get("data") or []
 
     if not isinstance(data, list) or not data:
         return {

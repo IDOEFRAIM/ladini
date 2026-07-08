@@ -21,6 +21,7 @@ l'intention LLM est ambiguë ET qu'un déclencheur lexical matche.
 from __future__ import annotations
 
 import asyncio
+import sys
 import logging
 import uuid
 from functools import partial
@@ -382,6 +383,80 @@ __all__ = ["build_graph"]
 
 import asyncio
 
+COMMAND_TEST_PHONE = "+22601479800"
+DEFAULT_REAL_DIALOG: List[str] = [
+    "Bonjour, je veux acheter du maïs",
+    "Je veux ajouter 50 kg de maïs blanc",
+    "précommander",
+    "confirmer la commande",
+    "ouvrir négociation",
+    "montre les offres",
+    "je veux faire une contre offre",
+    "je propose 260",
+    "accepter offre 1",
+]
+
+
+class DemoRuntime:
+    async def call_db(self, tool_name: str, **kwargs: Any) -> Dict[str, Any]:  # noqa: D401
+        if tool_name == "search_products":
+            return {
+                "status": "success",
+                "results": [
+                    {
+                        "id": "maize-001",
+                        "name": "Maïs blanc",
+                        "price": 250,
+                        "unit": "KG",
+                        "vendor": {"name": "Ferme Koudougou"},
+                    }
+                ],
+            }
+        if tool_name == "validate_stock_availability_atomic":
+            return {
+                "status": "SUCCESS",
+                "unit_price": 260,
+                "unit": "KG",
+                "producer_id": "farm-001",
+                "message": "Stock réservé",
+            }
+        if tool_name == "initiate_negotiation_session":
+            return {
+                "status": "PENDING",
+                "negotiation_id": "neg-001",
+                "auction_id": "neg-001",
+                "product_id": "maize-001",
+                "producer_id": "farm-001",
+                "buyer_offer": kwargs.get("offered_price", 240),
+                "seller_minimum": 260,
+                "price_gap": 20,
+                "message": "🤝 Négociation ouverte sur Maïs blanc.",
+            }
+        if tool_name == "get_auction_bids":
+            return {
+                "status": "success",
+                "bids": [
+                    {
+                        "bid_id": "bid-001",
+                        "producer_name": "Ferme A",
+                        "price": 255,
+                        "product": "Maïs blanc",
+                    },
+                    {
+                        "bid_id": "bid-002",
+                        "producer_name": "Ferme B",
+                        "price": 258,
+                        "product": "Maïs blanc",
+                    },
+                ],
+            }
+        if tool_name == "select_winning_bid":
+            return {
+                "status": "success",
+                "summary_buyer": "✅ Offre acceptée pour Maïs blanc.",
+            }
+        return {"status": "success", "message": f"{tool_name} stubbed"}
+
 
 async def test_onboarding_flow() -> None:
     """Legacy helper: exige un accès LLM réel pour l'extraction complète."""
@@ -396,7 +471,7 @@ async def test_onboarding_flow() -> None:
             ("okay je suis d'accord", "COMPLETED"),
         ]
 
-        current_state = {"user_phone": "+22631479808", "transaction_payload": {}}
+        current_state = {"user_phone": COMMAND_TEST_PHONE, "transaction_payload": {}}
 
         for user_input, expected_step in conversation_steps:
             print(f"\n--- Simulation input: '{user_input}' ---")
@@ -421,71 +496,7 @@ async def test_onboarding_flow() -> None:
 
 
 async def demo_buyer_purchase_flow() -> None:
-    """Démonstration déterministe du parcours Acheteur (panier → précommande → négociation).
-
-    Cette démo n'utilise pas le graphe complet : elle cible directement les nodes métier
-    pour valider la logique côté buyer en s'appuyant sur un runtime MCP fictif.
-    """
-
-    class DemoRuntime:
-        async def call_db(self, tool_name: str, **kwargs: Any) -> Dict[str, Any]:  # noqa: D401
-            if tool_name == "search_products":
-                return {
-                    "status": "success",
-                    "results": [
-                        {
-                            "id": "maize-001",
-                            "name": "Maïs blanc",
-                            "price": 250,
-                            "unit": "KG",
-                            "vendor": {"name": "Ferme Koudougou"},
-                        }
-                    ],
-                }
-            if tool_name == "validate_stock_availability_atomic":
-                return {
-                    "status": "SUCCESS",
-                    "unit_price": 260,
-                    "unit": "KG",
-                    "producer_id": "farm-001",
-                    "message": "Stock réservé",
-                }
-            if tool_name == "initiate_negotiation_session":
-                return {
-                    "status": "PENDING",
-                    "negotiation_id": "neg-001",
-                    "auction_id": "neg-001",
-                    "product_id": "maize-001",
-                    "producer_id": "farm-001",
-                    "buyer_offer": kwargs.get("offered_price", 240),
-                    "seller_minimum": 260,
-                    "price_gap": 20,
-                    "message": "🤝 Négociation ouverte sur Maïs blanc.",
-                }
-            if tool_name == "get_auction_bids":
-                return {
-                    "status": "success",
-                    "bids": [
-                        {
-                            "bid_id": "bid-001",
-                            "producer_name": "Ferme A",
-                            "price": 255,
-                            "product": "Maïs blanc",
-                        },
-                        {
-                            "bid_id": "bid-002",
-                            "producer_name": "Ferme B",
-                            "price": 258,
-                            "product": "Maïs blanc",
-                        },
-                    ],
-                }
-            if tool_name == "select_winning_bid":
-                return {
-                    "status": "success",
-                    "summary_buyer": "✅ Offre acceptée pour Maïs blanc.",
-                }
-            return {"status": "success", "message": f"{tool_name} stubbed"}
+    """Démonstration déterministe du parcours Acheteur (panier → précommande → négociation)."""
 
     runtime = DemoRuntime()
 
@@ -503,7 +514,7 @@ async def demo_buyer_purchase_flow() -> None:
             print(f"Menu → {menu.title} ({len(menu.options)} options)")
 
     state: Dict[str, Any] = {
-        "user_phone": "+22670000000",
+        "user_phone": COMMAND_TEST_PHONE,
         "current_goal": "BUYER_ADD_TO_CART",
         "transaction_payload": {"product": "maïs blanc", "quantity_mentioned": 50, "unit_mentioned": "KG"},
         "preorder_workflow": {"phase": "CART"},
@@ -582,5 +593,108 @@ async def demo_buyer_purchase_flow() -> None:
     print("\n✅ Parcours buyer complet simulé avec succès (données stubs).")
 
 
+def _is_success_status(result: Dict[str, Any]) -> bool:
+    status = str(result.get("status") or "").upper()
+    return status not in {"ERROR", "FAILED"}
+
+
+async def run_command_logic_test_suite() -> None:
+    """Set de tests réalistes pour valider la logique de commande acheteur."""
+
+    from agriconnect.graphs.agents.market_coach.flows.buyer.flow import _create_preorder
+
+    runtime = DemoRuntime()
+    phone = COMMAND_TEST_PHONE
+    test_results: List[Dict[str, Any]] = []
+
+    state: Dict[str, Any] = {
+        "user_phone": phone,
+        "current_goal": "BUYER_ADD_TO_CART",
+        "transaction_payload": {"product": "maïs blanc", "quantity_mentioned": 50, "unit_mentioned": "KG"},
+        "preorder_workflow": {"phase": "CART"},
+    }
+
+    cart_result = await cart_management(state, runtime)
+    state.update(cart_result)
+    test_results.append({"label": "Cart → sélection produit", "result": cart_result, "success": _is_success_status(cart_result)})
+
+    if state.get("vendor_selection_context") and not state["vendor_selection_context"].get("__reset__"):
+        state["transaction_payload"] = {"selection_index": 1, "product": "maïs blanc", "quantity_mentioned": 50}
+        state["current_goal"] = "BUYER_ADD_TO_CART"
+        cart_result2 = await cart_management(state, runtime)
+        state.update(cart_result2)
+        test_results.append({"label": "Cart → choix vendeur", "result": cart_result2, "success": _is_success_status(cart_result2)})
+
+    state["current_goal"] = "BUYER_PREORDER_INIT"
+    state["transaction_payload"] = {}
+    draft_result = await _create_preorder(state, runtime)
+    state.update(draft_result)
+    test_results.append({"label": "Précommande brouillon", "result": draft_result, "success": _is_success_status(draft_result)})
+
+    state["current_goal"] = "BUYER_PREORDER_CONFIRM"
+    state["transaction_payload"] = {"resolved_id": "PREORDER_CONFIRM"}
+    confirm_result = await _create_preorder(state, runtime)
+    state.update(confirm_result)
+    test_results.append({"label": "Précommande confirmation", "result": confirm_result, "success": _is_success_status(confirm_result)})
+
+    negotiation_state: Dict[str, Any] = {
+        "user_phone": phone,
+        "current_goal": "BUYER_NEGOTIATE_PRICE",
+        "transaction_payload": {
+            "product": "maïs blanc",
+            "quantity_mentioned": 50,
+            "price_mentioned": 240,
+        },
+        "stable_entities": {},
+    }
+
+    neg_open = await negotiation_gate(negotiation_state, runtime)
+    negotiation_state.update(neg_open)
+    test_results.append({"label": "Négociation ouverture", "result": neg_open, "success": _is_success_status(neg_open)})
+
+    negotiation_state["transaction_payload"] = {"resolved_id": "NEGOTIATION_VIEW_OFFERS"}
+    neg_offers = await negotiation_gate(negotiation_state, runtime)
+    negotiation_state.update(neg_offers)
+    test_results.append({"label": "Négociation – offres", "result": neg_offers, "success": _is_success_status(neg_offers)})
+
+    negotiation_state["transaction_payload"] = {"resolved_id": "NEGOTIATION_COUNTER"}
+    neg_counter = await negotiation_gate(negotiation_state, runtime)
+    negotiation_state.update(neg_counter)
+    test_results.append({"label": "Négociation – demande contre-offre", "result": neg_counter, "success": _is_success_status(neg_counter)})
+
+    negotiation_state["transaction_payload"] = {"price_mentioned": 260}
+    neg_submit = await negotiation_gate(negotiation_state, runtime)
+    negotiation_state.update(neg_submit)
+    test_results.append({"label": "Négociation – soumission prix", "result": neg_submit, "success": _is_success_status(neg_submit)})
+
+    negotiation_state["transaction_payload"] = {"resolved_id": "NEGOTIATION_VIEW_OFFERS"}
+    neg_offers2 = await negotiation_gate(negotiation_state, runtime)
+    negotiation_state.update(neg_offers2)
+    negotiation_state["transaction_payload"] = {"bid_id": "bid-001"}
+    neg_accept = await negotiation_gate(negotiation_state, runtime)
+    test_results.append({"label": "Négociation – acceptation offre", "result": neg_accept, "success": _is_success_status(neg_accept)})
+
+    print("\n=== RAPPORT TEST LOGIQUE COMMANDE ===")
+    global_success = True
+    for entry in test_results:
+        success = entry["success"]
+        result = entry["result"]
+        status = result.get("status")
+        print(f"[{entry['label']}] {'✅' if success else '❌'} status={status} strategy={result.get('response_strategy')}")
+        if not success:
+            global_success = False
+            print(f"   ↪ Détails: {result}")
+
+    if global_success:
+        print("✅ Tous les scénarios critiques de commande ont abouti sans erreur (runtime démo).")
+    else:
+        print("❌ Des erreurs ont été détectées — inspecter les logs ci-dessus.")
+
+
+async def run_manual_smoke_tests() -> None:
+    await demo_buyer_purchase_flow()
+    await run_command_logic_test_suite()
+
+
 if __name__ == "__main__":
-    asyncio.run(demo_buyer_purchase_flow())
+    asyncio.run(run_manual_smoke_tests())

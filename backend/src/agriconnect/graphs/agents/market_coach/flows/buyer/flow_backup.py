@@ -36,10 +36,23 @@ from agriconnect.graphs.agents.market_coach.services.domain.cart_service import 
     CartDomainService,
     SOURCE_TYPE_LABELS,
 )
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import AuctionGateway
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     ensure_dict,
     is_success_response,
+)
+from agriconnect.graphs.agents.market_coach.flows.buyer.helpers import (
+    CART_ACTION_KEYWORDS as _CART_ACTION_KEYWORDS,
+    PREORDER_ACTION_OPTIONS as _PREORDER_ACTION_OPTIONS,
+    NEGOTIATION_ACTION_OPTIONS as _NEGOTIATION_ACTION_OPTIONS,
+    resolve_menu_value_by_index as _resolve_menu_value_by_index,
+    preorder_choice_from_index as _preorder_choice_from_index,
+    negotiation_choice_from_index as _negotiation_choice_from_index,
+    render_interactive_menu,
+    preorder_action_menu as _preorder_action_menu,
+    negotiation_action_menu as _negotiation_action_menu,
+    detect_cart_action as _detect_cart_action,
 )
 
 logger = logging.getLogger("AgriConnect.Market.BuyerFlow")
@@ -134,8 +147,8 @@ async def _resolve_own_auctions(mc_runtime: MarketRuntime, phone: str, payload: 
         kwargs["product_name"] = str(product)
 
     logger.info("_resolve_own_auctions: calling get_auctions with %s", kwargs)
-    raw = await mc_runtime.call_db("get_auctions", **kwargs)
-    result = ensure_dict(raw)
+    auction_gw = AuctionGateway(mc_runtime)
+    result = await auction_gw.search_open_auctions(**kwargs)
     
     if not is_success_response(result) or int(result.get("count") or 0) == 0:
         msg = result.get("message") or "Vous n'avez aucun appel d'offres ouvert pour l'instant.Si vous pensez que c'est une erreur.Veuillez reessayer"
@@ -417,8 +430,8 @@ async def _resolve_received_bids(mc_runtime: MarketRuntime, phone: str, payload:
     if phone:
         kwargs["phone"] = str(phone)
 
-    raw = await mc_runtime.call_db("get_auctions_bids", **kwargs)
-    result = ensure_dict(raw)
+    auction_gw = AuctionGateway(mc_runtime)
+    result = await auction_gw.get_auctions_bids(**kwargs)
     
     if not is_success_response(result):
         msg = result.get("message") or "Impossible de charger les offres reçues."
@@ -484,8 +497,8 @@ async def _resolve_buyer_bid_pick(mc_runtime: MarketRuntime, phone: str, payload
     if phone:
         kwargs["phone"] = str(phone)
 
-    raw = await mc_runtime.call_db("get_auctions_bids", **kwargs)
-    data = ensure_dict(raw).get("data") or []
+    auction_gw = AuctionGateway(mc_runtime)
+    data = (await auction_gw.get_auctions_bids(**kwargs)).get("data") or []
 
     if not isinstance(data, list) or not data:
         return {
@@ -565,99 +578,6 @@ _DRAFT_FIELD_PAIRS = (
     ("quantity_mentioned", "quantity"),
     ("unit_mentioned", "unit"),
 )
-
-_PREORDER_ACTION_OPTIONS = [
-    MenuOption(index="1", label="✅ Confirmer la commande", value="PREORDER_CONFIRM"),
-    MenuOption(index="2", label="↩️ Annuler et revenir au panier", value="PREORDER_CANCEL"),
-    MenuOption(index="3", label="➕ Ajouter d'autres produits", value="PREORDER_ADD_MORE"),
-]
-
-_NEGOTIATION_ACTION_OPTIONS = [
-    MenuOption(index="1", label="📥 Voir les offres reçues", value="NEGOTIATION_VIEW_OFFERS"),
-    MenuOption(index="2", label="🔁 Proposer un autre prix", value="NEGOTIATION_COUNTER"),
-    MenuOption(index="3", label="❌ Abandonner", value="NEGOTIATION_ABORT"),
-]
-
-_CART_ACTION_KEYWORDS = {
-    "precommander": "PREORDER",
-    "précommander": "PREORDER",
-    "precommande": "PREORDER",
-    "précommande": "PREORDER",
-    "confirmer": "PREORDER",
-    "valider": "PREORDER",
-    "ajouter": "ADD_MORE",
-    "ajoute": "ADD_MORE",
-    "ajouter encore": "ADD_MORE",
-    "annuler": "CANCEL",
-}
-
-
-def _resolve_menu_value_by_index(options: Sequence[MenuOption], index: Any) -> Optional[str]:
-    if index in (None, ""):
-        return None
-    idx_str = str(index)
-    for opt in options:
-        if opt.index == idx_str:
-            value = opt.value if opt.value is not None else opt.index
-            return str(value)
-    return None
-
-
-def _preorder_choice_from_index(index: Any) -> Optional[str]:
-    return _resolve_menu_value_by_index(_PREORDER_ACTION_OPTIONS, index)
-
-
-def _negotiation_choice_from_index(index: Any) -> Optional[str]:
-    return _resolve_menu_value_by_index(_NEGOTIATION_ACTION_OPTIONS, index)
-
-
-def render_interactive_menu(options: Sequence[MenuOption], header: Optional[str] = None) -> str:
-    """Construit un menu numéroté prêt à envoyer sur Twilio / AG-UI."""
-    lines: List[str] = []
-    if header:
-        lines.append(header)
-    for opt in options:
-        lines.append(f"[{opt.index}] {opt.label}")
-    return "\n".join(lines)
-
-
-def _preorder_action_menu(preorder_id: str, **extra_meta: Any) -> MenuRequest:
-    """Fabrique le menu standard d'actions précommande."""
-    options = list(_PREORDER_ACTION_OPTIONS)
-    return MenuRequest(
-        title="Précommande créée",
-        options=options,
-        kind="preorder_action",
-        metadata={"preorder_id": str(preorder_id), **extra_meta},
-        preformatted_text=render_interactive_menu(options, "Choisissez une option :"),
-    )
-
-
-def _negotiation_action_menu(auction_id: str, **extra_meta: Any) -> MenuRequest:
-    """Fabrique le menu standard d'actions négociation."""
-    return MenuRequest(
-        title="Négociation",
-        options=list(_NEGOTIATION_ACTION_OPTIONS),
-        kind="negotiation_action",
-        metadata={"auction_id": str(auction_id), **extra_meta},
-    )
-
-
-def _detect_cart_action(state: Dict[str, Any]) -> Optional[str]:
-    text = str(state.get("normalized_text") or state.get("user_query") or "").lower()
-    if not text.strip():
-        return None
-    expected = str(state.get("expected_input") or "").upper().strip() or "SELECTION"
-    if expected not in {"SELECTION", "NONE", ""}:
-        return None
-    working = state.get("working_memory") or {}
-    mapping_kind = str(working.get("available_mapping_kind") or working.get("available_mapping_meta") or "").lower().strip()
-    if mapping_kind not in {"cart", "preorder_action"}:
-        return None
-    for keyword, action in _CART_ACTION_KEYWORDS.items():
-        if keyword in text:
-            return action
-    return None
 
 
 async def _update_preorder_phase(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any] | None:

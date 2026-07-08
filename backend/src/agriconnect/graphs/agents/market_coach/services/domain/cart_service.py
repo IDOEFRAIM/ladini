@@ -9,6 +9,9 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
 )
+from agriconnect.graphs.agents.market_coach.flows.common.menu_text import (
+    render_cart_actions_hint,
+)
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, is_success_response
 
 from .buyer_common import SUPPORT_FOOTER, safe_call_tool, with_support_footer
@@ -196,11 +199,7 @@ class CartDomainService:
                 has_auction_items = True
 
         lines.append(f"\n💰 *Total estimé : {meta.get('total_amount')} {meta.get('currency')}*")
-
-        actions_hint = "\n_Répondez *précommander* pour valider, ou ajoutez un autre produit._"
-        if has_auction_items:
-            actions_hint += "\n_Pour les articles en enchère : *négocier* pour faire une contre-offre._"
-        lines.append(actions_hint)
+        lines.append(render_cart_actions_hint(has_auction_items))
 
         if pending_line:
             lines.append("\n" + pending_line)

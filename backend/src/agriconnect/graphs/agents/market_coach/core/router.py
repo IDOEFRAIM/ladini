@@ -20,6 +20,7 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     DomainResult,
     MenuRequest,
 )
+from agriconnect.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
 
 logger = logging.getLogger("AgriConnect.Market.DomainRouter")
 
@@ -115,19 +116,27 @@ class DefaultDomainRouter:
                 or ""
             ).upper()
 
-            # Règle 2 : Cart goals → cart_management SEULEMENT si validation OK
+            # Règle 2 : Cart goals → cart_management SEULEMENT si aucun champ
+            # requis ne manque encore (TunnelManager).  Quand le validateur est
+            # en WAITING_INPUT avec des champs manquants, response_strategy doit
+            # demander l'info — on ne force PAS le passage vers cart_management.
             if goal in BUYER_CART_GOALS:
-                if status == "ERROR":
-                    return "to_strategy"
-                if status == "WAITING_INPUT":
+                missing = list(state.get("missing_fields") or [])
+                if not tunnel_manager.is_cart_routeable(status, missing):
                     logger.info(
-                        "[DomainRouter] Routing cart intent to cart node despite WAITING_INPUT (goal=%s)",
-                        goal,
+                        "[DomainRouter] Cart routing blocked by TunnelManager "
+                        "(status=%s, missing=%s) → to_strategy",
+                        status, missing,
                     )
-                    return "to_cart"
-                logger.info("[DomainRouter] Routing cart intent to cart node (goal=%s, status=%s)", goal, status)
+                    return "to_strategy"
+                logger.info(
+                    "[DomainRouter] Routing cart intent to cart node (goal=%s, status=%s)",
+                    goal, status,
+                )
                 return "to_cart"
             if goal in BUYER_NEGOTIATION_GOALS:
+                if not tunnel_manager.is_negotiation_routeable(status):
+                    return "to_strategy"
                 return "to_negotiation"
             if goal in BUYER_ORDER_TRACKING_GOALS:
                 return "to_order_tracking"

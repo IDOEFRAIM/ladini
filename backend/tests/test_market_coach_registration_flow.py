@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, AsyncMock
 
 # Adjust imports to point to your actual backend structure
 from agriconnect.graphs.agents.market_coach.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.graph import get_agent_graph as MarketCoach
+from agriconnect.graphs.agents.market_coach.waste.graph import get_agent_graph as MarketCoach
 
 
 def _merge_non_null(target: dict, updates: dict) -> None:

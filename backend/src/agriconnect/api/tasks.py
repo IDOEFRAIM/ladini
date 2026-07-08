@@ -3,6 +3,7 @@ import logging
 from typing import List, Optional
 
 from twilio.rest import Client
+from celery.signals import worker_process_init, worker_process_shutdown
 
 from agriconnect.api.celery_app import celery_app
 from agriconnect.core.database import close_db
@@ -11,19 +12,41 @@ from agriconnect.orchestrator import Orchestrator
 
 logger = logging.getLogger("AgriConnect.Worker")
 
-_orchestrator = Orchestrator()
+# On définit ces variables au niveau global, elles seront initialisées par le signal
+_loop: Optional[asyncio.AbstractEventLoop] = None
+_orchestrator: Optional[Orchestrator] = None
 
 _TWILIO_SOFT_LIMIT = 1500
 _TWILIO_DISCLAIMER = " (Détails complets disponibles sur votre dashboard)"
 
 
-def _chunk_whatsapp_body(body: str, limit: int = _TWILIO_SOFT_LIMIT) -> List[str]:
-    """Split outgoing message into Twilio-compliant chunks (1600 chars).
+# --- Initialisation de la boucle d'événements au démarrage du Worker ---
 
-    We keep a safety margin (default 1500) and prefer newline boundaries.
-    When text is too long even after chunking, we append a dashboard disclaimer.
+@worker_process_init.connect
+def init_worker_process(**kwargs):
+    """ Exécuté une seule fois à l'initialisation du processus worker Celery.
+    On crée une boucle d'événements unique et on instancie l'Orchestrateur.
     """
+    global _loop, _orchestrator
+    logger.info("Initialisation de la boucle d'événements asyncio globale pour le Worker.")
+    _loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(_loop)
+    
+    # L'orchestrateur est instancié UNE SEULE FOIS par worker et garde ses connexions chaudes
+    _orchestrator = Orchestrator()
 
+
+@worker_process_shutdown.connect
+def shutdown_worker_process(**kwargs):
+    """ Exécuté à la fermeture du worker. On nettoie proprement les ressources. """
+    global _loop
+    if _loop and _loop.is_running():
+        _loop.close()
+    logger.info("Boucle d'événements asyncio globale fermée.")
+
+
+def _chunk_whatsapp_body(body: str, limit: int = _TWILIO_SOFT_LIMIT) -> List[str]:
+    """Split outgoing message into Twilio-compliant chunks (1600 chars)."""
     if not body:
         return [""]
 
@@ -50,6 +73,8 @@ def _chunk_whatsapp_body(body: str, limit: int = _TWILIO_SOFT_LIMIT) -> List[str
     return chunks
 
 
+# --- Tâche Celery ---
+
 @celery_app.task(
     bind=True,
     max_retries=3,
@@ -65,7 +90,11 @@ def process_agent_task(
     role: Optional[str] = None,
     force_role: bool = False,
 ):
-    """Point d'entrée worker : délègue tout à l'Orchestrator unique."""
+    """Point d'entrée worker : exécute la coroutine dans la boucle persistante."""
+    global _loop, _orchestrator
+
+    if _loop is None or _orchestrator is None:
+        raise RuntimeError("Le worker Celery n'a pas été initialisé correctement (boucle/orchestrateur manquant).")
 
     async def _run():
         try:
@@ -74,6 +103,8 @@ def process_agent_task(
             if not resolved_type and role:
                 resolved_type = "buyer" if role.upper() == "BUYER" else "producer"
                 forced = True
+            
+            # Utilisation de l'instance d'orchestrateur partagée
             return await _orchestrator.handle(
                 phone_number,
                 user_query,
@@ -87,7 +118,8 @@ def process_agent_task(
                 logger.warning("close_db failed: %s", exc)
 
     try:
-        result = asyncio.run(_run())
+        # ◄ CORRECTION ICI : Au lieu de asyncio.run(), on pousse la coroutine dans la boucle existante
+        result = _loop.run_until_complete(_run())
     except Exception as e:
         logger.error("Erreur orchestrateur: %s", e)
         raise

@@ -11,6 +11,8 @@ Aucune autre couche métier. Checkpointer = WorkspaceStore (colonne metadata JSO
 """
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
 import logging
 from typing import Any, Dict
@@ -25,9 +27,65 @@ logger = logging.getLogger("AgriConnect.Orchestrator")
 
 # Clés d'état NON sérialisables / transitoires à exclure du snapshot Workspace.
 _SNAPSHOT_EXCLUDE = frozenset({
-    "mc_runtime", "agent_config", "_runtime", "llm", "llm_client",
-    "mcp_session", "db_client", "checkpointer",
+    "mc_runtime",
+    "agent_config",
+    "_runtime",
+    "llm",
+    "llm_client",
+    "mcp_session",
+    "db_client",
+    "checkpointer",
 })
+
+_FALLBACK_RESPONSE = (
+    "Désolé, une difficulté technique est survenue. Veuillez reessayer.Si cela persiste,"
+    "vous pouvez nous contacter au +226 68 81 52 99. L'equipe de LADINI vous presente ses escuses pour ce desagreement"
+)
+_MAX_AGENT_STEPS = 48
+_AGENT_TIMEOUT_SECONDS = 45.0
+
+
+class AgentCircuitBreaker(RuntimeError):
+    """Raised when the LangGraph loop exceeds the allowed number of checkpoints."""
+
+
+class _WorkspaceRunGuard:
+    """Pins a workspace in RAM and enforces step limits."""
+
+    def __init__(
+        self,
+        workspace: Workspace,
+        checkpointer: WorkspaceCheckpointer,
+        *,
+        max_steps: int,
+    ) -> None:
+        self._workspace = workspace
+        self._checkpointer = checkpointer
+        self._max_steps = max_steps
+        self._steps = 0
+        self._attached = False
+
+    def attach(self) -> None:
+        if self._attached:
+            return
+        self._checkpointer.attach_workspace(
+            self._workspace,
+            on_checkpoint=self._on_checkpoint,
+        )
+        self._attached = True
+
+    def detach(self) -> None:
+        if not self._attached:
+            return
+        self._checkpointer.detach_workspace(self._workspace.workspace_id)
+        self._attached = False
+
+    def _on_checkpoint(self, metrics: Dict[str, Any]) -> None:
+        self._steps += 1
+        if self._steps > self._max_steps:
+            raise AgentCircuitBreaker(
+                f"workspace={self._workspace.workspace_id} exceeded {self._max_steps} checkpoints"
+            )
 
 
 def _json_safe(value: Any) -> Any:
@@ -65,27 +123,46 @@ class Orchestrator:
         force_role: bool = False,
     ) -> Dict[str, Any]:
         workspace_id = (phone or "anonymous").strip()
-        ws = await self.resolver.resolve(workspace_id, user_query, workspace_type)
+        ws = await self.resolver.resolve(workspace_id, workspace_type)
 
+        guard = _WorkspaceRunGuard(ws, self._checkpointer, max_steps=_MAX_AGENT_STEPS)
+        guard.attach()
         try:
-            final = await self._run_market(ws, user_query, phone, force_role=force_role)
+            final = await asyncio.wait_for(
+                self._run_market(ws, user_query, phone, force_role=force_role),
+                timeout=_AGENT_TIMEOUT_SECONDS,
+            )
+        except AgentCircuitBreaker as exc:
+            logger.error(
+                "Agent circuit breaker triggered | workspace=%s | reason=%s",
+                workspace_id,
+                exc,
+            )
+            await self._flush_workspace(ws, reason="circuit_breaker")
+            return self._build_failure_response(ws, workspace_id)
+        except asyncio.TimeoutError:
+            logger.error(
+                "Agent timeout | workspace=%s | timeout=%ss",
+                workspace_id,
+                _AGENT_TIMEOUT_SECONDS,
+            )
+            await self._flush_workspace(ws, reason="timeout")
+            return self._build_failure_response(ws, workspace_id)
         except Exception as exc:  # pragma: no cover - safety net
             logger.error("Agent %s failed for %s: %s", ws.active_agent, workspace_id, exc, exc_info=True)
+            await self._flush_workspace(ws, reason="agent_error")
+            return self._build_failure_response(ws, workspace_id)
+        else:
+            langgraph_blob = copy.deepcopy(ws.agent_state) if isinstance(ws.agent_state, dict) else None
+            self._sync_workspace(ws, final, langgraph_blob)
+            await self._flush_workspace(ws, reason="completed")
             return {
-                "final_response": "Désolé, une difficulté technique est survenue. Veuillez reessayer.Si cela persiste,vous pouvez nous contacter au +226 68 81 52 99. L'equipe de LADINI vous presente ses escuses pour ce desagreement",
+                "final_response": final.get("final_response", _FALLBACK_RESPONSE),
                 "agent": ws.active_agent,
                 "workspace_id": workspace_id,
             }
-
-        langgraph_blob = await self._checkpointer.export_state(ws.workspace_id)
-        self._sync_workspace(ws, final, langgraph_blob)
-        await self.resolver.store.save(ws)
-
-        return {
-            "final_response": final.get("final_response", "Je n'ai pas pu générer de réponse.Veuillez reessayer.Si cela persiste,vous pouvez nous contacter au +226 68 81 52 99. L'equipe de LADINI vous presente ses escuses pour ce desagreement"),
-            "agent": ws.active_agent,
-            "workspace_id": workspace_id,
-        }
+        finally:
+            guard.detach()
 
     # ------------------------------------------------------------------
     # Agent execution
@@ -108,8 +185,6 @@ class Orchestrator:
             "user_phone": phone,
             "current_goal": ws.active_goal,
             "active_form": ws.active_form,
-            "workspace_agent": ws.active_agent,
-            "locked_agent": ws.locked_agent,
         }
         runtime = build_runtime()
         async with runtime as live_runtime:
@@ -178,3 +253,47 @@ class Orchestrator:
             ws.locked_agent = ws.active_agent
         else:
             ws.locked_agent = None
+        ws.mark_dirty()
+
+    async def _flush_workspace(self, ws: Workspace, *, reason: str) -> None:
+        if not ws.is_dirty:
+            logger.debug(
+                "Workspace flush skipped | workspace=%s | reason=%s (clean state)",
+                ws.workspace_id,
+                reason,
+            )
+            return
+
+        logger.info(
+            "Workspace flush | workspace=%s | reason=%s",
+            ws.workspace_id,
+            reason,
+        )
+        try:
+            persisted = await self.resolver.store.save(ws)
+        except Exception as exc:  # pragma: no cover - persistence safety net
+            logger.error(
+                "Workspace flush failed | workspace=%s | reason=%s | error=%s",
+                ws.workspace_id,
+                reason,
+                exc,
+                exc_info=True,
+            )
+            return
+
+        if persisted:
+            ws.reset_dirty()
+        else:
+            logger.error(
+                "Workspace flush unsuccessful (store.save returned False) | workspace=%s | reason=%s",
+                ws.workspace_id,
+                reason,
+            )
+
+    @staticmethod
+    def _build_failure_response(ws: Workspace, workspace_id: str) -> Dict[str, Any]:
+        return {
+            "final_response": _FALLBACK_RESPONSE,
+            "agent": ws.active_agent,
+            "workspace_id": workspace_id,
+        }
