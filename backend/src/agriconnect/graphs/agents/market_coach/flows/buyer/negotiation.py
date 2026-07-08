@@ -9,7 +9,11 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuRequest,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.buyer_common import safe_call_tool
-from agriconnect.graphs.agents.market_coach.services.mcp.gateway import ProductGateway
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
+    AuctionGateway,
+    NegotiationGateway,
+    ProductGateway,
+)
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, is_success_response
 
 from .helpers import (
@@ -72,7 +76,7 @@ async def _fetch_and_show_bids(
     target_phase: str = "VIEWING_OFFERS",
 ) -> Dict[str, Any]:
     """Fetch auction bids and return a menu state patch or fallback to negotiation menu."""
-    bids_res = await safe_call_tool(mc_runtime, "get_auction_bids", auction_id=str(auction_id))
+    bids_res = await AuctionGateway(mc_runtime).get_auction_bids(auction_id=str(auction_id))
     bids = bids_res.get("bids") or []
 
     if str(bids_res.get("status") or "").lower() != "success" or not bids:
@@ -117,9 +121,7 @@ async def _handle_counter_price(
             "ag_ui_component": None,
         }
 
-    upd = await safe_call_tool(
-        mc_runtime,
-        "update_negotiation_offer",
+    upd = await NegotiationGateway(mc_runtime).update_offer(
         buyer_phone=phone,
         negotiation_id=str(auction_id),
         new_price=price,
@@ -156,7 +158,7 @@ async def _handle_viewing_offers(
     """Process bid selection or re-display bids."""
     bid_id = payload.get("bid_id")
     if bid_id:
-        win = await safe_call_tool(mc_runtime, "select_winning_bid", bid_id=str(bid_id))
+        win = await AuctionGateway(mc_runtime).select_winning_bid(bid_id=str(bid_id))
         if str(win.get("status") or "").lower() != "success":
             return {
                 "status": "COMPLETED",
@@ -232,9 +234,7 @@ async def _handle_negotiation_menu(
         }
 
     # NEGOTIATION_ABORT or unknown → close
-    close_res = await safe_call_tool(
-        mc_runtime,
-        "close_negotiation_session",
+    close_res = await NegotiationGateway(mc_runtime).close_session(
         buyer_phone=phone,
         negotiation_id=str(auction_id),
         reason="buyer_abandoned",
@@ -278,9 +278,7 @@ async def _initiate_negotiation(
     except (TypeError, ValueError):
         offer = 0.0
 
-    res = await safe_call_tool(
-        mc_runtime,
-        "initiate_negotiation_session",
+    res = await NegotiationGateway(mc_runtime).initiate_session(
         buyer_phone=phone,
         product_id=ref["product_id"],
         offered_price=offer,

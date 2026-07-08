@@ -144,6 +144,17 @@ class ProductGateway(_BaseGateway):
 # ── Negotiation ────────────────────────────────────────────────────
 
 class NegotiationGateway(_BaseGateway):
+    async def initiate_session(
+        self, buyer_phone: str, product_id: str, offered_price: Any, quantity: Any,
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "initiate_negotiation_session",
+            buyer_phone=buyer_phone,
+            product_id=product_id,
+            offered_price=offered_price,
+            quantity=quantity,
+        )
+
     async def update_offer(self, buyer_phone: str, negotiation_id: str, new_price: Any) -> Dict[str, Any]:
         return await self._call(
             "update_negotiation_offer",

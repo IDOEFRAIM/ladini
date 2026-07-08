@@ -12,7 +12,11 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
 from agriconnect.graphs.agents.market_coach.flows.common.menu_text import (
     render_cart_actions_hint,
 )
-from agriconnect.graphs.agents.market_coach.services.mcp.gateway import ProductGateway
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
+    AgentActionGateway,
+    ProductGateway,
+    StockGateway,
+)
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, is_success_response
 
 from .buyer_common import SUPPORT_FOOTER, safe_call_tool, with_support_footer
@@ -244,9 +248,7 @@ class CartDomainService:
                 "vendor_selection_context": {"__reset__": True},
             }
 
-        check = await safe_call_tool(
-            self.mc_runtime,
-            "validate_stock_availability_atomic",
+        check = await StockGateway(self.mc_runtime).validate_stock_availability(
             product_id=ref.get("product_id") or ref.get("id"),
             quantity=qty,
             unit=ref.get("unit"),
@@ -304,9 +306,7 @@ class CartDomainService:
             "source_type": source_type,
         }
 
-        notification_result = await safe_call_tool(
-            self.mc_runtime,
-            "create_agent_action",
+        notification_result = await AgentActionGateway(self.mc_runtime).create_action(
             agent_name="MarketCoach",
             action_type="notify_interested_buyer",
             payload=notification_payload,

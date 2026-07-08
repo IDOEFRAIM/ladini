@@ -36,7 +36,12 @@ from agriconnect.graphs.agents.market_coach.services.domain.cart_service import 
     CartDomainService,
     SOURCE_TYPE_LABELS,
 )
-from agriconnect.graphs.agents.market_coach.services.mcp.gateway import AuctionGateway, ProductGateway
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
+    AuctionGateway,
+    NegotiationGateway,
+    PreorderGateway,
+    ProductGateway,
+)
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     ensure_dict,
@@ -1064,9 +1069,7 @@ async def _create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
         ]
         meta = CartDomainService.recompute_cart_meta(cart)
 
-        draft_res = await safe_call_tool(
-            mc_runtime,
-            "create_preorder_draft",
+        draft_res = await PreorderGateway(mc_runtime).create_draft(
             buyer_phone=phone,
             cart_items=items_payload,
             payment_method=state.get("preferred_payment_method") or "CASH",
@@ -1125,9 +1128,7 @@ async def _create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
             }
 
         # Confirm the preorder via MCP
-        confirm_res = await safe_call_tool(
-            mc_runtime,
-            "confirm_preorder_draft",
+        confirm_res = await PreorderGateway(mc_runtime).confirm_draft(
             buyer_phone=phone,
             preorder_id=str(preorder_id),
         )
@@ -1230,9 +1231,7 @@ async def negotiation_gate(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
                 "ag_ui_component": None,
             }
 
-        upd = await safe_call_tool(
-            mc_runtime,
-            "update_negotiation_offer",
+        upd = await NegotiationGateway(mc_runtime).update_offer(
             buyer_phone=phone,
             negotiation_id=str(auction_id),
             new_price=price,
@@ -1257,7 +1256,7 @@ async def negotiation_gate(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
     if auction_id and nphase == "VIEWING_OFFERS":
         bid_id = payload.get("bid_id")
         if bid_id:
-            win = await safe_call_tool(mc_runtime, "select_winning_bid", bid_id=str(bid_id))
+            win = await AuctionGateway(mc_runtime).select_winning_bid(bid_id=str(bid_id))
             if str(win.get("status") or "").lower() != "success":
                 return {
                     "status": "COMPLETED",
@@ -1276,7 +1275,7 @@ async def negotiation_gate(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
                 "ag_ui_component": None,
             }
 
-        bids_res = await safe_call_tool(mc_runtime, "get_auction_bids", auction_id=str(auction_id))
+        bids_res = await AuctionGateway(mc_runtime).get_auction_bids(auction_id=str(auction_id))
         bids = bids_res.get("bids") or []
         if str(bids_res.get("status") or "").lower() != "success" or not bids:
             msg = bids_res.get("message") or "Aucune offre reçue pour l'instant."
@@ -1348,7 +1347,7 @@ async def negotiation_gate(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
             }
 
         if action == "NEGOTIATION_VIEW_OFFERS":
-            bids_res = await safe_call_tool(mc_runtime, "get_auction_bids", auction_id=str(auction_id))
+            bids_res = await AuctionGateway(mc_runtime).get_auction_bids(auction_id=str(auction_id))
             bids = bids_res.get("bids") or []
             if str(bids_res.get("status") or "").lower() != "success" or not bids:
                 msg = bids_res.get("message") or "Aucune offre reçue pour l'instant."
@@ -1406,9 +1405,7 @@ async def negotiation_gate(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
                 "ag_ui_component": None,
             }
 
-        close_res = await safe_call_tool(
-            mc_runtime,
-            "close_negotiation_session",
+        close_res = await NegotiationGateway(mc_runtime).close_session(
             buyer_phone=phone,
             negotiation_id=str(auction_id),
             reason="buyer_abandoned",
@@ -1446,9 +1443,7 @@ async def negotiation_gate(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
     except (TypeError, ValueError):
         offer = 0.0
 
-    res = await safe_call_tool(
-        mc_runtime,
-        "initiate_negotiation_session",
+    res = await NegotiationGateway(mc_runtime).initiate_session(
         buyer_phone=phone,
         product_id=ref["product_id"],
         offered_price=offer,

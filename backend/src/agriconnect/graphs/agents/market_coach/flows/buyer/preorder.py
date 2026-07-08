@@ -10,6 +10,7 @@ from agriconnect.graphs.agents.market_coach.services.domain.cart_service import 
     CartDomainService,
     SOURCE_TYPE_LABELS,
 )
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import PreorderGateway
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, is_success_response
 
 from .helpers import (
@@ -234,9 +235,7 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
         ]
         meta = CartDomainService.recompute_cart_meta(cart)
 
-        draft_res = await safe_call_tool(
-            mc_runtime,
-            "create_preorder_draft",
+        draft_res = await PreorderGateway(mc_runtime).create_draft(
             buyer_phone=phone,
             cart_items=items_payload,
             payment_method=state.get("preferred_payment_method") or "CASH",
@@ -295,9 +294,7 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
             }
 
         # Confirm via MCP
-        confirm_res = await safe_call_tool(
-            mc_runtime,
-            "confirm_preorder_draft",
+        confirm_res = await PreorderGateway(mc_runtime).confirm_draft(
             buyer_phone=phone,
             preorder_id=str(preorder_id),
         )
