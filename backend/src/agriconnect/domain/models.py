@@ -1,15 +1,17 @@
-"""Canonical SQLAlchemy ORM models for AgriConnect.
+"""Canonical SQLAlchemy ORM models for AgriConnect — Marketplace edition.
 
-This file is the single source-of-truth for ORM models used by the async
-database services. It intentionally includes a small `to_dict()` helper
-because the service mixins return dictionaries.
+Single source-of-truth for ORM models used by the async database services.
+Aligned 1-for-1 with the Drizzle schema (frontag/src/db/schema). All legacy
+"conseil" models (agronomy, sensors, weather, recommendations) have been removed.
+
+`crop_cycles` -> `market_offers`. A backward-compat alias `CropCycle` is kept
+so in-flight imports do not crash during the migration of call sites.
 """
 
 from __future__ import annotations
 
 import uuid
-from uuid import uuid4
-from typing import Optional
+from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
@@ -18,19 +20,24 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    Numeric,
     String,
-    Text,Numeric,
+    Text,
     Time,
+    UniqueConstraint,
+    Index,
     func,
-    text,Index, UniqueConstraint,JSON
+    text,
 )
-
-
-
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID, ARRAY as PG_ARRAY,DOUBLE_PRECISION
+from sqlalchemy.dialects.postgresql import (
+    JSONB,
+    UUID as PG_UUID,
+    ARRAY as PG_ARRAY,
+    DOUBLE_PRECISION,
+)
 from sqlalchemy.inspection import inspect
 from sqlalchemy.orm import declarative_base, relationship
-from datetime import datetime
+
 
 class _ToDictMixin:
     def to_dict(self) -> dict:
@@ -49,43 +56,10 @@ Base = declarative_base(cls=_ToDictMixin)
 def _uuid4():
     return str(uuid.uuid4())
 
-# ── IA Core: Recommendations (defined early to satisfy relationship lookups) ─────
-class AIRecommendation(Base):
-    __tablename__ = "ai_recommendations"
-    __table_args__ = (
-        Index('ai_rec_farm_idx', 'farm_id'),
-        Index('ai_rec_crop_cycle_idx', 'crop_cycle_id'),
-        Index('ai_rec_user_idx', 'user_id'),
-        Index('ai_rec_type_idx', 'recommendation_type'),
-        Index('ai_rec_status_idx', 'status'),
-        Index('ai_rec_created_idx', 'created_at'),
-        {"schema": "intelligence"}
-    )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    crop_cycle_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.crop_cycles.id"))
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
-    agent_name = Column(Text, nullable=False)
-    recommendation_type = Column(Text, nullable=False)
-    title = Column(Text, nullable=False)
-    content = Column(Text, nullable=False)
-    actionable_steps = Column(JSONB, default=list)
-    confidence_score = Column(DOUBLE_PRECISION)
-    data_sources_used = Column(JSONB)
-    priority = Column(Text, default="MEDIUM", nullable=False)
-    status = Column(Text, default="PENDING", nullable=False)
-    applied_at = Column(DateTime)
-    expires_at = Column(DateTime)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-
-    user = relationship("User", back_populates="recommendations")
-
-##**************************************
-## Auth -User
-###*************************************
-
-
+# ══════════════════════════════════════════════════════════════════════════
+# AUTH
+# ══════════════════════════════════════════════════════════════════════════
 class User(Base):
     __tablename__ = "users"
     __table_args__ = {"schema": "auth"}
@@ -99,31 +73,17 @@ class User(Base):
     phone = Column(String, unique=True, index=True)
     whatsapp_enabled = Column(Boolean, default=True)
     onboarding_completed = Column(Boolean, nullable=False, server_default=text("false"))
-    daily_advice_time = Column(Time, server_default="07:00", nullable=False) # Utiliser func ou un objet time
     latitude = Column(Float)
     longitude = Column(Float)
     cnib_number = Column(String, unique=True)
     role = Column(String, default="USER", nullable=False)
     identity_verified = Column(Boolean, default=False)
-    
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
-    
     deleted_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
-    # Relations
-    recommendations = relationship(
-        "AIRecommendation",
-        back_populates="user",
-        lazy="selectin",
-    )
 
-    producer = relationship(
-        "Producer",
-        back_populates="user",
-        uselist=False  # Indique à SQLAlchemy qu'un User n'a qu'UN SEUL profil Producer
-    )
-   
+    producer = relationship("Producer", back_populates="user", uselist=False)
 
 
 class Account(Base):
@@ -131,7 +91,6 @@ class Account(Base):
     __table_args__ = {"schema": "auth"}
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    # Correction : Toujours préciser le schéma dans la ForeignKey
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False)
     type = Column(String, nullable=False)
     provider = Column(String, nullable=False)
@@ -155,40 +114,9 @@ class Session(Base):
     expires = Column(DateTime, nullable=False)
 
 
-from sqlalchemy import Column, String, Float, DateTime, ForeignKey, Index, Boolean, Text, text
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.sql import func
-
-class UserCulture(Base):
-    __tablename__ = "user_cultures"
-    __table_args__ = (
-        Index('user_cultures_user_idx', 'user_id'),
-        {"schema": "auth"}
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False)
-    culture_name = Column(String, nullable=False)
-    planting_date = Column(DateTime, nullable=False)
-    is_association = Column(Boolean, default=False)
-    status = Column(String, default="active")
-
-class DailyAdviceLog(Base):
-    __tablename__ = "daily_advice_logs"
-    __table_args__ = {"schema": "auth"}
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False)
-    culture_name = Column(String, nullable=False)
-    advice_content = Column(Text, nullable=False)
-    sent_at = Column(DateTime, server_default=func.now(), nullable=False)
-    is_useful = Column(Boolean)
-
-
-##**************************************
-## Governance
-###*************************************
-
+# ══════════════════════════════════════════════════════════════════════════
+# GOVERNANCE
+# ══════════════════════════════════════════════════════════════════════════
 class Organization(Base):
     __tablename__ = "organizations"
     __table_args__ = {"schema": "governance"}
@@ -202,11 +130,12 @@ class Organization(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
+
 class UserOrganization(Base):
     __tablename__ = "user_organizations"
     __table_args__ = (
-        UniqueConstraint('user_id', 'organization_id', name='user_org_unique'),
-        {"schema": "governance"}
+        UniqueConstraint("user_id", "organization_id", name="user_org_unique"),
+        {"schema": "governance"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
@@ -215,6 +144,7 @@ class UserOrganization(Base):
     role = Column(String, default="FIELD_AGENT", nullable=False)
     role_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.role_definitions.id"))
     managed_zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
+
 
 class RoleDefinition(Base):
     __tablename__ = "role_definitions"
@@ -226,6 +156,7 @@ class RoleDefinition(Base):
     permissions = Column(PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
+
 class ClimaticRegion(Base):
     __tablename__ = "climatic_regions"
     __table_args__ = {"schema": "governance"}
@@ -236,15 +167,16 @@ class ClimaticRegion(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
+
 class Zone(Base):
     __tablename__ = "zones"
     __table_args__ = (
-        Index('zones_region_idx', 'climatic_region_id'),
-        Index('zones_org_idx', 'organization_id'),
-        Index('zones_active_idx', 'is_active'),
-        Index('zones_parent_idx', 'parent_id'),
-        Index('zones_path_idx', 'path'),
-        {"schema": "governance"}
+        Index("zones_region_idx", "climatic_region_id"),
+        Index("zones_org_idx", "organization_id"),
+        Index("zones_active_idx", "is_active"),
+        Index("zones_parent_idx", "parent_id"),
+        Index("zones_path_idx", "path"),
+        {"schema": "governance"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
@@ -261,13 +193,14 @@ class Zone(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
+
 class WorkZone(Base):
     __tablename__ = "work_zones"
     __table_args__ = (
-        UniqueConstraint('organization_id', 'zone_id', name='work_zones_org_zone_unique'),
-        Index('work_zones_org_idx', 'organization_id'),
-        Index('work_zones_zone_idx', 'zone_id'),
-        {"schema": "governance"}
+        UniqueConstraint("organization_id", "zone_id", name="work_zones_org_zone_unique"),
+        Index("work_zones_org_idx", "organization_id"),
+        Index("work_zones_zone_idx", "zone_id"),
+        {"schema": "governance"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
@@ -278,11 +211,12 @@ class WorkZone(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
+
 class ZoneMetric(Base):
     __tablename__ = "zone_metrics"
     __table_args__ = (
-        Index('zone_metrics_composite_idx', 'zone_id', 'date', 'metric_name'),
-        {"schema": "governance"}
+        Index("zone_metrics_composite_idx", "zone_id", "date", "metric_name"),
+        {"schema": "governance"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
@@ -291,6 +225,7 @@ class ZoneMetric(Base):
     metric_name = Column(String, nullable=False)
     value = Column(Float, nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
 
 class Category(Base):
     __tablename__ = "categories"
@@ -302,11 +237,12 @@ class Category(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
+
 class SubCategory(Base):
     __tablename__ = "sub_categories"
     __table_args__ = (
-        UniqueConstraint('category_id', 'name', name='sub_categories_cat_name_unique'),
-        {"schema": "governance"}
+        UniqueConstraint("category_id", "name", name="sub_categories_cat_name_unique"),
+        {"schema": "governance"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
@@ -316,14 +252,13 @@ class SubCategory(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
-    crop_cycles = relationship("CropCycle", back_populates="sub_category")
 
 class StandardPrice(Base):
     __tablename__ = "standard_prices"
     __table_args__ = (
-        UniqueConstraint('sub_category_id', 'zone_id', name='standard_prices_sub_zone_unique'),
-        Index('standard_prices_zone_idx', 'zone_id'),
-        {"schema": "governance"}
+        UniqueConstraint("sub_category_id", "zone_id", name="standard_prices_sub_zone_unique"),
+        Index("standard_prices_zone_idx", "zone_id"),
+        {"schema": "governance"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
@@ -335,12 +270,13 @@ class StandardPrice(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
+
 class ZoneSetting(Base):
     __tablename__ = "zone_settings"
     __table_args__ = (
-        UniqueConstraint('zone_id', 'key', name='zone_settings_zone_key_unique'),
-        Index('zone_settings_zone_idx', 'zone_id'),
-        {"schema": "governance"}
+        UniqueConstraint("zone_id", "key", name="zone_settings_zone_key_unique"),
+        Index("zone_settings_zone_idx", "zone_id"),
+        {"schema": "governance"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
@@ -350,12 +286,13 @@ class ZoneSetting(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
+
 class OverlayLayer(Base):
     __tablename__ = "overlay_layers"
     __table_args__ = (
-        UniqueConstraint('zone_id', 'key', name='overlay_layers_zone_key_unique'),
-        Index('overlay_layers_zone_idx', 'zone_id'),
-        {"schema": "governance"}
+        UniqueConstraint("zone_id", "key", name="overlay_layers_zone_key_unique"),
+        Index("overlay_layers_zone_idx", "zone_id"),
+        {"schema": "governance"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
@@ -367,66 +304,64 @@ class OverlayLayer(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
-##**************************************
-## Marketplace
-###*************************************
-from sqlalchemy import Column, String, Float, Integer, Boolean, DateTime, ForeignKey, Index, Text, text
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
-from sqlalchemy.sql import func
-from sqlalchemy.orm import relationship
 
-# ── 1. WAREHOUSE ──────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════
+# MARKETPLACE
+# ══════════════════════════════════════════════════════════════════════════
 class Warehouse(Base):
     __tablename__ = "warehouses"
-    __table_args__ = (Index('warehouses_zone_idx', 'zone_id'), {"schema": "marketplace"})
+    __table_args__ = (Index("warehouses_zone_idx", "zone_id"), {"schema": "marketplace"})
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     name = Column(String, nullable=False)
     type = Column(String, nullable=False)
     capacity = Column(Float)
     location = Column(String)
-    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey('governance.zones.id'))
+    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
-# ── 2. PRODUCER ───────────────────────────────────────────────────────────
+
 class Producer(Base):
     __tablename__ = "producers"
     __table_args__ = (
-        Index('producers_status_idx', 'status'),
-        Index('producers_org_idx', 'organization_id'),
-        Index('producers_zone_idx', 'zone_id'),
-        {"schema": "marketplace"}
+        Index("producers_status_idx", "status"),
+        Index("producers_org_idx", "organization_id"),
+        Index("producers_zone_idx", "zone_id"),
+        {"schema": "marketplace"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True)
     organization_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id"))
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
-    
     business_name = Column(String)
     status = Column(String, default="PENDING", nullable=False)
     is_certified = Column(Boolean, default=False, nullable=False)
     region = Column(String)
     province = Column(String)
     commune = Column(String)
-
-    
+    logo_url = Column(String)
+    phone_number = Column(String)
+    rating = Column(Integer)
+    reviews_count = Column(Integer, default=0, nullable=False)
+    company_registration_number = Column(String)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
     user = relationship("User", back_populates="producer", lazy="joined", foreign_keys=[user_id])
     farms = relationship("Farm", back_populates="producer", cascade="all, delete-orphan")
     clients = relationship("Client", back_populates="producer", cascade="all, delete-orphan")
+    offers = relationship("MarketOffer", back_populates="producer", cascade="all, delete-orphan")
 
-# ── 3. CLIENT ─────────────────────────────────────────────────────────────
+
 class Client(Base):
     __tablename__ = "clients"
     __table_args__ = (
-        Index('clients_phone_idx', 'phone'),
-        Index('clients_name_idx', 'name'),
-        Index('clients_producer_idx', 'producer_id'),
-        {"schema": "marketplace"}
+        Index("clients_phone_idx", "phone"),
+        Index("clients_name_idx", "name"),
+        Index("clients_producer_idx", "producer_id"),
+        {"schema": "marketplace"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
@@ -438,16 +373,13 @@ class Client(Base):
     total_orders = Column(Integer, default=0, nullable=False)
     total_spent = Column(Float, default=0.0, nullable=False)
     last_order_date = Column(DateTime)
-    
     tax_id = Column(String)
     prefered_payement_method = Column(JSONB)
-    
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
     producer = relationship("Producer", back_populates="clients", foreign_keys=[producer_id])
 
-# ── 4. BUYER PROFILES ─────────────────────────────────────────────────────
 
 class BuyerType(Base):
     __tablename__ = "buyer_types"
@@ -463,16 +395,15 @@ class BuyerType(Base):
 class BuyerProfile(Base):
     __tablename__ = "buyer_profiles"
     __table_args__ = (
-        Index('buyer_profiles_user_idx', 'user_id'),
-        Index('buyer_profiles_type_idx', 'buyer_type_id'),
-        Index('buyer_profiles_verified_idx', 'is_verified'),
-        {"schema": "marketplace"}
+        Index("buyer_profiles_user_idx", "user_id"),
+        Index("buyer_profiles_type_idx", "buyer_type_id"),
+        Index("buyer_profiles_verified_idx", "is_verified"),
+        {"schema": "marketplace"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True)
     buyer_type_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.buyer_types.id"))
-    
     establishment_name = Column(String)
     default_delivery_address = Column(Text)
     is_verified = Column(Boolean, default=False, nullable=False)
@@ -482,13 +413,12 @@ class BuyerProfile(Base):
     company_registration_number = Column(String)
     verified_at = Column(DateTime)
     verified_by_id = Column(PG_UUID(as_uuid=True))
-    
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
     user = relationship("User", foreign_keys=[user_id])
 
-# ── 5. DELIVERY AGENT ─────────────────────────────────────────────────────
+
 class DeliveryAgent(Base):
     __tablename__ = "delivery_agents"
     __table_args__ = {"schema": "marketplace"}
@@ -497,29 +427,27 @@ class DeliveryAgent(Base):
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True)
     vehicle_type = Column(String)
     license_number = Column(String)
-    zone_id = Column(PG_UUID(as_uuid=True))
     status = Column(String, default="OFFLINE", nullable=False)
+    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
-    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
-
     user = relationship("User", foreign_keys=[user_id])
 
-# ── 6. DELIVERY ───────────────────────────────────────────────────────────
+
 class Delivery(Base):
     __tablename__ = "deliveries"
     __table_args__ = (
-        Index('deliveries_order_unique', 'order_id', unique=True),
-        Index('deliveries_agent_idx', 'delivery_agent_id'),
-        Index('deliveries_status_idx', 'status'),
-        {"schema": "marketplace"}
+        Index("deliveries_order_unique", "order_id", unique=True),
+        Index("deliveries_agent_idx", "delivery_agent_id"),
+        Index("deliveries_status_idx", "status"),
+        Index("deliveries_agent_status_idx", "delivery_agent_id", "status"),
+        {"schema": "marketplace"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False, unique=True)
     delivery_agent_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.delivery_agents.id"))
-    
     status = Column(String, default="PENDING", nullable=False)
     delivery_code = Column(String)
     origin_gps_lat = Column(Float)
@@ -528,15 +456,13 @@ class Delivery(Base):
     destination_gps_lng = Column(Float)
     destination_desc = Column(Text)
     estimated_distance_km = Column(Float)
-    shipping_condition = Column(String)
     actual_distance_km = Column(Float)
+    shipping_condition = Column(String)
     proof_of_delivery_url = Column(String)
-    
     assigned_at = Column(DateTime)
     picked_up_at = Column(DateTime)
     delivered_at = Column(DateTime)
     failed_at = Column(DateTime)
-    
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -546,227 +472,72 @@ class Delivery(Base):
 
 class Farm(Base):
     __tablename__ = "farms"
-    __table_args__ = {"schema": "marketplace"}
+    __table_args__ = (
+        Index("farms_producer_idx", "producer_id"),
+        Index("farms_zone_idx", "zone_id"),
+        {"schema": "marketplace"},
+    )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
     name = Column(String, nullable=False)
     location = Column(String)
     size = Column(Float)
-    soil_type = Column(String)
-    water_source = Column(String)
     producer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"), nullable=False)
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
-
-    cycles = relationship("CropCycle", back_populates="farm", cascade="all, delete-orphan")
-    # Relations manquantes pour fermer la boucle avec les enfants
-    soil_profiles = relationship("SoilProfile", back_populates="farm", cascade="all, delete-orphan")
-    telemetry_history = relationship("SensorTelemetryHistory", back_populates="farm", cascade="all, delete-orphan")
-    sensor_summary = relationship("SensorDataSummary", back_populates="farm", uselist=False, cascade="all, delete-orphan")
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    producer = relationship("Producer", back_populates="farms")
     stocks = relationship("Stock", back_populates="farm", cascade="all, delete-orphan")
-    producer =  relationship("Producer", back_populates="farms")
+    offers = relationship("MarketOffer", back_populates="farm")
 
 
-#### crop
-##################################
+class MarketOffer(Base):
+    """Offre de vente / prévente (ex crop_cycles)."""
 
-class CropCycle(Base):
-    __tablename__ = 'crop_cycles'
+    __tablename__ = "market_offers"
     __table_args__ = (
-        Index('crop_cycles_farm_idx', 'farm_id'),
-        Index('crop_cycles_status_idx', 'status'),
-        Index('crop_cycles_subcategory_idx', 'sub_category_id'),
-        Index('crop_cycles_public_idx', 'is_public'),
-        Index('crop_cycles_preorder_idx', 'preorder_enabled'),
-        Index('crop_cycles_available_at_idx', 'estimated_available_at'),
-        UniqueConstraint('farm_id', 'crop_type', 'planted_at', name='uq_crop_cycle_farm_crop_planted'),
-        {"schema": "marketplace"}
+        Index("market_offers_producer_idx", "producer_id"),
+        Index("market_offers_farm_idx", "farm_id"),
+        Index("market_offers_subcategory_idx", "sub_category_id"),
+        Index("market_offers_available_at_idx", "estimated_available_at"),
+        Index("market_offers_public_status_idx", "is_public", "status"),
+        Index("market_offers_preorder_idx", "preorder_enabled"),
+        {"schema": "marketplace"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey('marketplace.farms.id'), nullable=False)
-    
-    # Informations de base
-    crop_type = Column(String, nullable=False)
-    area_size = Column(Float, nullable=False)
-    planted_at = Column(DateTime, nullable=False)
-    expected_harvest_date = Column(DateTime, nullable=False)
-    target_yield = Column(Float)
-    expected_yield = Column(Float)
-    status = Column(String, nullable=False)
-    variety = Column(String)
-    farming_method = Column(String, server_default='conventional')
-    soil_type = Column(String)
-    last_intervention_date = Column(DateTime)
+    producer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"), nullable=False)
+    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
+    sub_category_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.sub_categories.id"))
 
-    # Nouveaux champs Drizzle alignés
-    sub_category_id = Column(PG_UUID(as_uuid=True), ForeignKey('governance.sub_categories.id'))
-    growth_stage = Column(String)
+    product_label = Column(String, nullable=False)
+    production_type = Column(String, default="CROP", nullable=False)
+    species = Column(String)
+    breed = Column(String)
+
+    unit = Column(String, default="KG", nullable=False)
+    price_per_unit = Column(Numeric(12, 2))
+    available_quantity = Column(Numeric(14, 3), default=0, nullable=False)
+    reserved_quantity = Column(Numeric(14, 3), default=0, nullable=False)
+    current_stock = Column(Numeric(14, 3), default=0, nullable=False)
+
     is_public = Column(Boolean, default=False, nullable=False)
     preorder_enabled = Column(Boolean, default=False, nullable=False)
     estimated_available_at = Column(DateTime)
-    available_quantity = Column(Float, default=0.0, nullable=False)
-    reserved_quantity = Column(Float, default=0.0, nullable=False)
-    price_per_unit = Column(Numeric(10, 2))
-    unit = Column(String, default='KG', nullable=False)
-    production_type = Column(String, default='CROP', nullable=False)
-    species = Column(String)
-    breed = Column(String)
-    initial_stock = Column(Float, default=0.0, nullable=False)
-    current_stock = Column(Float, default=0.0, nullable=False)
-    hatch_date = Column(DateTime)
+    expected_harvest_date = Column(DateTime)
+    status = Column(String, default="DRAFT", nullable=False)
 
-    # Timestamps
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
-    # Relations ORM
-    farm = relationship("Farm", back_populates="cycles")
-    sub_category = relationship("SubCategory", back_populates="crop_cycles")
-    preorders = relationship("Order", back_populates="crop_cycle")
-    growth_logs = relationship("CropGrowthLog", back_populates="crop_cycle", cascade="all, delete-orphan")
-    interventions = relationship("FieldIntervention", back_populates="crop_cycle", cascade="all, delete-orphan")
+    producer = relationship("Producer", back_populates="offers")
+    farm = relationship("Farm", back_populates="offers")
+    orders = relationship("Order", back_populates="offer")
 
 
-# ── 2. FIELD INTERVENTIONS ────────────────────────────────────────────────
-class FieldIntervention(Base):
-    __tablename__ = 'field_interventions'
-    __table_args__ = {"schema": "marketplace"}
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    crop_cycle_id = Column(PG_UUID(as_uuid=True), ForeignKey('marketplace.crop_cycles.id'), nullable=False, index=True)
-    type = Column(String, nullable=False, index=True)
-    description = Column(String)
-    input_used = Column(String)
-    quantity = Column(Float)
-    unit = Column(String)
-    cost_per_unit = Column(Float, default=0.0)
-    machinery_used = Column(String)
-    fuel_consumption = Column(Float)
-    hours_worked = Column(Float)
-    observed_bbch_stage = Column(Integer)
-    performed_at = Column(DateTime, nullable=False, index=True)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-
-    crop_cycle = relationship("CropCycle", back_populates="interventions")
-
-# ── 3. SENSOR DATA SUMMARY ────────────────────────────────────────────────
-class SensorDataSummary(Base):
-    __tablename__ = 'sensor_data_summary'
-    __table_args__ = {"schema": "marketplace"}
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey('marketplace.farms.id'), nullable=False, unique=True)
-    soil_moisture = Column(Float)
-    last_rainfall = Column(Float)
-    accumulated_gdd = Column(Integer)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-
-    farm = relationship("Farm", back_populates="sensor_summary")
-
-# ── 4. AGRONOMIC STANDARDS ────────────────────────────────────────────────
-class AgronomicStandard(Base):
-    __tablename__ = 'agronomic_standards'
-    __table_args__ = (
-        UniqueConstraint('crop_type', 'variety_type', name='as_crop_variety_unique'),
-        {"schema": "marketplace"}
-    )
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    crop_type = Column(String, nullable=False, index=True)
-    variety_type = Column(String)
-    nitrogen_needs = Column(Float)
-    phosphorus_needs = Column(Float)
-    potassium_needs = Column(Float)
-    base_temperature = Column(Float)
-    gdd_to_harvest = Column(Integer)
-    min_humidity_threshold = Column(Float)
-    max_wind_speed_treatment = Column(Float, server_default="19.0")
-    version = Column(String)
-
-# ── 5. PEST & DISEASE CATALOG ─────────────────────────────────────────────
-class PestDiseaseCatalog(Base):
-    __tablename__ = 'pest_disease_catalog'
-    __table_args__ = {"schema": "marketplace"}
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    name = Column(String, nullable=False, index=True)
-    type = Column(String, nullable=False, index=True)
-    target_crops = Column(PG_ARRAY(String), nullable=False)
-    symptoms_description = Column(Text)
-    critical_stage_bbch = Column(Integer)
-    weather_triggers = Column(JSONB)
-    treatment_threshold = Column(String)
-    recommended_molecules = Column(PG_ARRAY(String))
-    bio_solutions = Column(PG_ARRAY(String))
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-
-# ── 6. SOIL PROFILES ──────────────────────────────────────────────────────
-class SoilProfile(Base):
-    __tablename__ = 'soil_profiles'
-    __table_args__ = {"schema": "marketplace"}
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey('marketplace.farms.id'), nullable=False, index=True)
-    clay_percentage = Column(Float)
-    sand_percentage = Column(Float)
-    silt_percentage = Column(Float)
-    organic_matter = Column(Float)
-    ph_value = Column(Float)
-    water_retention_capacity = Column(Float)
-    sampling_date = Column(DateTime, nullable=False, index=True)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-
-    farm = relationship("Farm", back_populates="soil_profiles")
-
-# ── 7. SENSOR TELEMETRY HISTORY ──────────────────────────────────────────
-class SensorTelemetryHistory(Base):
-    __tablename__ = 'sensor_telemetry_history'
-    __table_args__ = (
-        Index('telemetry_farm_time_idx', 'farm_id', 'timestamp'),
-        {"schema": "marketplace"}
-    )
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey('marketplace.farms.id'), nullable=False)
-    soil_moisture = Column(Float)
-    temperature = Column(Float)
-    humidity = Column(Float)
-    solar_radiation = Column(Float)
-    timestamp = Column(DateTime, server_default=func.now(), nullable=False)
-
-    farm = relationship("Farm", back_populates="telemetry_history")
-
-
-
-class CropGrowthLog(Base):
-    __tablename__ = 'crop_growth_logs'
-    __table_args__ = {"schema": "marketplace"}
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    crop_cycle_id = Column(PG_UUID(as_uuid=True), ForeignKey('marketplace.crop_cycles.id'), nullable=False, index=True)
-    stage_code = Column(Integer, nullable=False)
-    observed_at = Column(DateTime, server_default=func.now())
-    image_snapshot_url = Column(String)
-    accumulated_gdd_at_stage = Column(Integer)
-
-    crop_cycle = relationship("CropCycle", back_populates="growth_logs")
-
-
-class CropGrowthStage(Base):
-    __tablename__ = 'crop_growth_stages'
-    __table_args__ = (
-        UniqueConstraint('crop_type', 'stage_code', name='cgs_crop_stage_unique'),
-        Index('cgs_crop_type_idx', 'crop_type'),
-        {"schema": "marketplace"}
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    crop_type = Column(String, nullable=False)
-    stage_code = Column(Integer, nullable=False)
-    stage_name = Column(String, nullable=False)
-    gdd_threshold = Column(Integer, nullable=False)
-    nitrogen_need_kgha = Column(Float, server_default='0')
-    water_need_mmday = Column(Float, server_default='0')
-    agronomic_advice = Column(Text)
-    version = Column(String, server_default='v1')
-
-
+# Backward-compat alias (call sites migrent progressivement vers MarketOffer)
+CropCycle = MarketOffer
 
 
 class Stock(Base):
@@ -774,50 +545,43 @@ class Stock(Base):
     __table_args__ = {"schema": "marketplace"}
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    
-    # Relation vers la ferme (déjà présente, mais consolidée ici)
     farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"), index=True)
-    farm = relationship("Farm", back_populates="stocks")
-
-    # Relation vers l'entrepôt
     warehouse_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.warehouses.id"), index=True)
-    
-    # Relation vers l'utilisateur ayant vérifié le stock
     verified_by_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), index=True)
-    
     organization_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id"))
     item_name = Column(String, nullable=False)
-    quantity = Column(Float, default=0.0, nullable=False)
+    quantity = Column(Numeric(14, 3), default=0, nullable=False)
     unit = Column(String, default="KG", nullable=False)
     type = Column(String, default="HARVEST", nullable=False)
     verified_at = Column(DateTime)
-    
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    farm = relationship("Farm", back_populates="stocks")
 
 
 class StockMovement(Base):
     __tablename__ = "stock_movements"
     __table_args__ = (
-        Index('stock_movements_stock_idx', 'stock_id'),
-        Index('stock_movements_created_idx', 'created_at'),
-        {"schema": "marketplace"}
+        Index("stock_movements_stock_idx", "stock_id"),
+        Index("stock_movements_created_idx", "created_at"),
+        {"schema": "marketplace"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     stock_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.stocks.id"), nullable=False)
-    # Remplacez String par votre objet Enum si vous en avez un défini (ex: Enum('IN', 'OUT', name='movement_type'))
-    type = Column(String, nullable=False) 
-    quantity = Column(DOUBLE_PRECISION, nullable=False)
+    type = Column(String, nullable=False)
+    quantity = Column(Numeric(14, 3), nullable=False)
     reason = Column(String)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
 
 class Batch(Base):
     __tablename__ = "batches"
     __table_args__ = (
-        Index('batches_stock_idx', 'stock_id'),
-        Index('batches_org_idx', 'organization_id'),
-        {"schema": "marketplace"}
+        Index("batches_stock_idx", "stock_id"),
+        Index("batches_org_idx", "organization_id"),
+        {"schema": "marketplace"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
@@ -825,38 +589,40 @@ class Batch(Base):
     organization_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id"), nullable=False)
     batch_number = Column(String, unique=True, nullable=False)
     origin_farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
-    quantity = Column(DOUBLE_PRECISION, nullable=False)
+    quantity = Column(Numeric(14, 3), nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
 
 class Expense(Base):
     __tablename__ = "expenses"
     __table_args__ = (
-        Index('expenses_farm_idx', 'farm_id'),
-        Index('expenses_category_idx', 'category'),
-        Index('expenses_date_idx', 'date'),
-        {"schema": "marketplace"}
+        Index("expenses_farm_idx", "farm_id"),
+        Index("expenses_category_idx", "category"),
+        Index("expenses_date_idx", "date"),
+        {"schema": "marketplace"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"), nullable=False)
     label = Column(String, nullable=False)
-    amount = Column(DOUBLE_PRECISION, nullable=False)
-    # Si votre Enum est défini ailleurs, remplacez String par votre objet Enum
-    category = Column(String, server_default='OTHER', nullable=False)
+    amount = Column(Numeric(14, 2), nullable=False)
+    category = Column(String, server_default="OTHER", nullable=False)
     date = Column(DateTime, server_default=func.now(), nullable=False)
 
-# ── 2. PRODUCTS ───────────────────────────────────────────────────────────
+
 class Product(Base):
     __tablename__ = "products"
     __table_args__ = (
-        Index('products_producer_idx', 'producer_id'),
-        Index('products_category_idx', 'category_label'),
-        Index('products_subcategory_idx', 'sub_category_id'),
-        Index('products_price_idx', 'price'),
-        Index('products_created_idx', 'created_at'),
-        Index('products_verifier_idx', 'verified_by_id'),
-        {"schema": "marketplace"}
+        Index("products_producer_idx", "producer_id"),
+        Index("products_category_idx", "category_label"),
+        Index("products_subcategory_idx", "sub_category_id"),
+        Index("products_price_idx", "price"),
+        Index("products_created_idx", "created_at"),
+        Index("products_verifier_idx", "verified_by_id"),
+        Index("products_producer_available_idx", "producer_id", "is_available"),
+        Index("products_category_available_idx", "category_label", "is_available"),
+        {"schema": "marketplace"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
@@ -866,54 +632,50 @@ class Product(Base):
     sub_category_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.sub_categories.id"))
     local_names = Column(JSONB)
     description = Column(Text)
-    price = Column(Float, nullable=False)
+    price = Column(Numeric(12, 2), nullable=False)
     unit = Column(String, default="KG", nullable=False)
-    quantity_for_sale = Column(Float, default=0.0, nullable=False)
+    quantity_for_sale = Column(Numeric(14, 3), default=0, nullable=False)
     images = Column(PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]"))
     audio_url = Column(String)
-    
-    # Nouveaux champs de test synchronisés avec Drizzle Web
     quality_class = Column(String)
     min_order_quality = Column(String)
     packaging_type = Column(String)
     harvest_date = Column(DateTime)
     is_available = Column(Boolean, default=True, nullable=False)
-
     producer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"), nullable=False)
     verified_at = Column(DateTime)
     verified_by_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
-    
-    # Relations Python
-    producer = relationship("Producer", backref="products")
-    sub_category = relationship("SubCategory", primaryjoin="Product.sub_category_id == SubCategory.id")
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
+    producer = relationship("Producer", backref="products")
+    sub_category = relationship("SubCategory", primaryjoin="Product.sub_category_id == SubCategory.id")
 
-# ── 3. ORDERS ─────────────────────────────────────────────────────────────
+
 class Order(Base):
     __tablename__ = "orders"
     __table_args__ = (
-        Index('orders_buyer_idx', 'buyer_id'),
-        Index('orders_org_idx', 'organization_id'),
-        Index('orders_status_idx', 'status'),
-        Index('orders_delivery_status_idx', 'delivery_status'),
-        Index('orders_zone_idx', 'zone_id'),
-        Index('orders_created_idx', 'created_at'),
-        Index('orders_phone_idx', 'customer_phone'),
-        Index('orders_type_idx', 'order_type'),
-        Index('orders_crop_cycle_idx', 'crop_cycle_id'),
-        Index('orders_auction_unique', 'auction_id', unique=True),
-        Index('orders_winning_bid_idx', 'winning_bid_id'),
-        {"schema": "marketplace"}
+        Index("orders_buyer_idx", "buyer_id"),
+        Index("orders_org_idx", "organization_id"),
+        Index("orders_status_idx", "status"),
+        Index("orders_delivery_status_idx", "delivery_status"),
+        Index("orders_zone_idx", "zone_id"),
+        Index("orders_created_idx", "created_at"),
+        Index("orders_phone_idx", "customer_phone"),
+        Index("orders_type_idx", "order_type"),
+        Index("orders_market_offer_idx", "market_offer_id"),
+        Index("orders_auction_unique", "auction_id", unique=True),
+        Index("orders_winning_bid_idx", "winning_bid_id"),
+        Index("orders_buyer_status_idx", "buyer_id", "status"),
+        Index("orders_payment_status_idx", "payment_status"),
+        {"schema": "marketplace"},
     )
-    
+
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
     buyer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.buyer_profiles.id"))
     client_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.clients.id"))
     organization_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id"))
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
-    
     customer_name = Column(String)
     customer_phone = Column(String)
     payment_method = Column(String, default="CASH", nullable=False)
@@ -928,373 +690,259 @@ class Order(Base):
     source = Column(String, default="APP", nullable=False)
     order_type = Column(String, default="STANDARD", nullable=False)
     whatsapp_id = Column(String)
-    total_amount = Column(Float, nullable=False)
+    total_amount = Column(Numeric(14, 2), nullable=False)
     is_agent_order = Column(Boolean, default=False, nullable=False)
-    
-    # Nouveaux champs financiers et enchères synchronisés avec Drizzle Web
     delivery_date = Column(DateTime)
-    subtotal = Column(Float, default=0.0, nullable=False)
-    tax_amount = Column(Float, default=0.0, nullable=False)
+    subtotal = Column(Numeric(14, 2), default=0, nullable=False)
+    tax_amount = Column(Numeric(14, 2), default=0, nullable=False)
     currency = Column(String, default="XOF", nullable=False)
-    delivery_fee = Column(Float, default=0.0, nullable=False)
+    delivery_fee = Column(Numeric(14, 2), default=0, nullable=False)
     cancellation_role = Column(String)
     escrow_wallet_id = Column(PG_UUID(as_uuid=True), nullable=True)
-    crop_cycle_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.crop_cycles.id"))
+    market_offer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.market_offers.id"))
     expected_fulfillment_date = Column(DateTime)
     preorder_converted_at = Column(DateTime)
-    
-    auction_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.auctions.id"), unique=True)  
+    confirmed_at = Column(DateTime)
+    auction_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.auctions.id"), unique=True)
     winning_bid_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.bids.id"))
-    
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
-    
-    # Relations Python
+
     items = relationship("OrderItem", back_populates="order", lazy="selectin")
     delivery = relationship("Delivery", back_populates="order", uselist=False)
-    crop_cycle = relationship("CropCycle", back_populates="preorders")
+    offer = relationship("MarketOffer", back_populates="orders")
+    payments = relationship("Payment", back_populates="order", cascade="all, delete-orphan")
+    status_history = relationship("OrderStatusHistory", back_populates="order", cascade="all, delete-orphan")
+    reminders = relationship("OrderReminder", back_populates="order", cascade="all, delete-orphan")
 
 
-# ── 4. ORDER ITEMS ────────────────────────────────────────────────────────
 class OrderItem(Base):
     __tablename__ = "order_items"
     __table_args__ = (
-        Index('order_items_order_idx', 'order_id'),
-        Index('order_items_product_idx', 'product_id'),
-        {"schema": "marketplace"}
+        Index("order_items_order_idx", "order_id"),
+        Index("order_items_product_idx", "product_id"),
+        {"schema": "marketplace"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
     order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False)
     product_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.products.id"), nullable=False)
-    
-    quantity = Column(Float, nullable=False)
-    price_at_sale = Column(Float, nullable=False)
-    
-    # Relations Python
+    quantity = Column(Numeric(14, 3), nullable=False)
+    price_at_sale = Column(Numeric(12, 2), nullable=False)
+
     order = relationship("Order", back_populates="items")
     product = relationship("Product", lazy="selectin")
 
 
-# ── 5. ORDER DISPUTES ─────────────────────────────────────────────────────
+class Payment(Base):
+    """Journal de paiement (audit, retries, escrow, réconciliation)."""
+
+    __tablename__ = "payments"
+    __table_args__ = (
+        Index("payments_order_idx", "order_id"),
+        Index("payments_status_idx", "status"),
+        Index("payments_provider_ref_unique", "provider_ref", unique=True),
+        {"schema": "marketplace"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False)
+    amount = Column(Numeric(14, 2), nullable=False)
+    currency = Column(String, default="XOF", nullable=False)
+    method = Column(String, default="CASH", nullable=False)
+    status = Column(String, default="PENDING", nullable=False)
+    provider = Column(String)
+    provider_ref = Column(String)
+    escrow_wallet_id = Column(PG_UUID(as_uuid=True))
+    failure_reason = Column(Text)
+    authorized_at = Column(DateTime)
+    captured_at = Column(DateTime)
+    refunded_at = Column(DateTime)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    order = relationship("Order", back_populates="payments")
+
+
+class OrderStatusHistory(Base):
+    """Traçabilité fine Commande→Paiement→Livraison→Confirmation."""
+
+    __tablename__ = "order_status_history"
+    __table_args__ = (
+        Index("osh_order_idx", "order_id"),
+        Index("osh_order_type_idx", "order_id", "status_type"),
+        Index("osh_created_idx", "created_at"),
+        {"schema": "marketplace"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False)
+    status_type = Column(String, nullable=False)  # ORDER | PAYMENT | DELIVERY
+    from_status = Column(String)
+    to_status = Column(String, nullable=False)
+    actor_id = Column(PG_UUID(as_uuid=True))
+    note = Column(Text)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    order = relationship("Order", back_populates="status_history")
+
+
+class OrderReminder(Base):
+    """Relances automatiques (paiement dû, confirmation, avis)."""
+
+    __tablename__ = "order_reminders"
+    __table_args__ = (
+        Index("order_reminders_order_idx", "order_id"),
+        Index("order_reminders_due_idx", "status", "scheduled_at"),
+        {"schema": "marketplace"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False)
+    type = Column(String, nullable=False)
+    channel = Column(String, default="WHATSAPP", nullable=False)
+    status = Column(String, default="SCHEDULED", nullable=False)
+    scheduled_at = Column(DateTime, nullable=False)
+    sent_at = Column(DateTime)
+    attempts = Column(Integer, default=0, nullable=False)
+    last_error = Column(Text)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    order = relationship("Order", back_populates="reminders")
+
+
 class OrderDispute(Base):
     __tablename__ = "order_disputes"
     __table_args__ = (
-        Index('order_disputes_order_idx', 'order_id'),
-        Index('order_disputes_status_idx', 'status'),
-        Index('order_disputes_raised_by_idx', 'raised_by_id'),
-        Index('order_disputes_escrow_idx', 'escrow_wallet_id'),
-        {"schema": "marketplace"}
+        Index("order_disputes_order_idx", "order_id"),
+        Index("order_disputes_status_idx", "status"),
+        Index("order_disputes_raised_by_idx", "raised_by_id"),
+        Index("order_disputes_escrow_idx", "escrow_wallet_id"),
+        {"schema": "marketplace"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
     order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False)
     escrow_wallet_id = Column(PG_UUID(as_uuid=True), nullable=True)
-    raised_by_id = Column(PG_UUID(as_uuid=True), nullable=False) # Lié à l'ID auteur du litige
+    raised_by_id = Column(PG_UUID(as_uuid=True), nullable=False)
     reason_category = Column(String, nullable=False)
     description = Column(Text, nullable=False)
     evidence_images = Column(PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]"))
     requested_solution = Column(String, nullable=False)
-    disputed_amount = Column(Float, default=0.0, nullable=False)
+    disputed_amount = Column(Numeric(14, 2), default=0, nullable=False)
     escrow_payout_status = Column(String, default="HELD", nullable=False)
     status = Column(String, default="PENDING", nullable=False)
     resolution_notes = Column(Text)
-    
     resolved_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
-# ── 6. AUCTIONS ───────────────────────────────────────────────────────────
 class Auction(Base):
     __tablename__ = "auctions"
     __table_args__ = (
-        Index('auctions_status_idx', 'status'),
-        Index('auctions_buyer_idx', 'buyer_id'),
-        Index('auctions_escrow_status_idx', 'escrow_status'),
-        Index('auctions_zone_idx', 'target_zone_id'),
-        Index('auctions_deadline_idx', 'deadline'),
-        Index('auctions_delivery_deadline_idx', 'delivery_deadline'),
-        {"schema": "marketplace"}
+        Index("auctions_status_idx", "status"),
+        Index("auctions_buyer_idx", "buyer_id"),
+        Index("auctions_escrow_status_idx", "escrow_status"),
+        Index("auctions_zone_idx", "target_zone_id"),
+        Index("auctions_deadline_idx", "deadline"),
+        {"schema": "marketplace"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
     buyer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.buyer_profiles.id"), nullable=False)
     sub_category_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.sub_categories.id"), nullable=False)
-    winner_bid_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.bids.id")) # Géré circulairement
-    
-    quantity = Column(Float, nullable=False)
+    winner_bid_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.bids.id"))
+    quantity = Column(Numeric(14, 3), nullable=False)
     unit = Column(String, default="TONNE", nullable=False)
-    max_price_per_unit = Column(Float, nullable=False)
+    max_price_per_unit = Column(Numeric(12, 2), nullable=False)
     description = Column(Text)
-    
-    # Métriques Logistique, Qualité & Sécurité (Ajouts synchronisés)
     incoterm = Column(String, default="DDP", nullable=False)
     delivery_location = Column(String, nullable=False)
     delivery_deadline = Column(DateTime, nullable=False)
     quality_grading = Column(String)
     required_certifications = Column(PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]"))
     preferred_packaging = Column(String)
-    
     deadline = Column(DateTime, nullable=False)
     auto_extend = Column(Boolean, default=True, nullable=False)
-    escrow_wallet_id = Column(PG_UUID(as_uuid=True),nullable=True)
+    escrow_wallet_id = Column(PG_UUID(as_uuid=True), nullable=True)
     escrow_status = Column(String, default="NONE", nullable=False)
     status = Column(String, default="OPEN", nullable=False)
-    
     cancellation_reason = Column(String)
     target_zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
     version = Column(Integer, default=0, nullable=False)
-    
     awarded_at = Column(DateTime)
     cancelled_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
-# ── 7. BIDS ───────────────────────────────────────────────────────────────
 class Bid(Base):
     __tablename__ = "bids"
     __table_args__ = (
-        Index('bids_auction_producer_unique', 'auction_id', 'producer_id', unique=True),
-        Index('bids_auction_idx', 'auction_id'),
-        Index('bids_producer_idx', 'producer_id'),
-        Index('bids_linked_stock_idx', 'linked_stock_id'),
-        Index('bids_status_idx', 'status'),
-        {"schema": "marketplace"}
+        Index("bids_auction_producer_unique", "auction_id", "producer_id", unique=True),
+        Index("bids_auction_idx", "auction_id"),
+        Index("bids_producer_idx", "producer_id"),
+        Index("bids_linked_stock_idx", "linked_stock_id"),
+        Index("bids_status_idx", "status"),
+        {"schema": "marketplace"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
     auction_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.auctions.id"), nullable=False)
     producer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"), nullable=False)
-    offered_price = Column(Float, nullable=False)
-    linked_stock_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.stocks.id")) # Pourra se lier à marketplace.stocks.id
+    offered_price = Column(Numeric(12, 2), nullable=False)
+    linked_stock_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.stocks.id"))
     is_winner = Column(Boolean, default=False, nullable=False)
     status = Column(String, default="PENDING", nullable=False)
     message = Column(Text)
     notified_at = Column(DateTime)
-    
-    # Nouveaux champs de test synchronisés avec Drizzle Web
     valid_until = Column(DateTime)
     estimated_delivery_date = Column(DateTime)
-    
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
-# ── 8. MARKETPLACE RATINGS ────────────────────────────────────────────────
 class MarketplaceRating(Base):
     __tablename__ = "marketplace_ratings"
     __table_args__ = (
-        Index('mr_order_idx', 'order_id'),
-        Index('mr_author_idx', 'author_id'),
-        Index('mr_target_idx', 'target_id'),
-        Index('mr_order_author_unique', 'order_id', 'author_id', unique=True),
-        {"schema": "marketplace"}
+        Index("mr_order_idx", "order_id"),
+        Index("mr_author_idx", "author_id"),
+        Index("mr_target_idx", "target_id"),
+        Index("mr_order_author_unique", "order_id", "author_id", unique=True),
+        {"schema": "marketplace"},
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
     order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False)
-    
-    author_type = Column(String, nullable=False) # 'BUYER' ou 'PRODUCER'
+    author_type = Column(String, nullable=False)
     author_id = Column(PG_UUID(as_uuid=True), nullable=False)
-    target_type = Column(String, nullable=False) # 'BUYER' ou 'PRODUCER'
+    target_type = Column(String, nullable=False)
     target_id = Column(PG_UUID(as_uuid=True), nullable=False)
-
-    # Critères spécifiques producteurs
     rating_product_quality = Column(Integer)
     rating_packaging = Column(Integer)
-    
-    # Critères spécifiques acheteurs
     rating_reception_speed = Column(Integer)
     rating_communication = Column(Integer)
-
-    # Critères communs
     rating_reliability = Column(Integer, nullable=False)
     global_rating = Column(Float, nullable=False)
     comment = Column(Text)
-    
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
-
-##**************************************
-## Intelligence
-###*************************************
-
-
-
-
-# ── Crop Knowledge & Agronomy ───────────────────────────────────────────
-
-
-import enum
-from datetime import datetime
-from uuid import uuid4
-from sqlalchemy import (
-    MetaData, Column, Integer, String, Numeric, Text, Boolean, 
-    DateTime, Float, ForeignKey, Index, func, text, Enum
-)
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB, DOUBLE_PRECISION
-from sqlalchemy.orm import DeclarativeBase, relationship
-
-# Définition de la métadonnée centralisée sur le schéma "intelligence"
-metadata_obj = MetaData(schema="intelligence")
-
-class Base(DeclarativeBase):
-    metadata = metadata_obj
-
-# ── Énumérations (pour remplacer les Enums Drizzle) ─────────────────────
-
-class AgentActionStatus(str, enum.Enum):
-    PENDING = "PENDING"
-    PROCESSING = "PROCESSING"
-    SUCCESS = "SUCCESS"
-    FAILED = "FAILED"
-
-class ValidationPriority(str, enum.Enum):
-    LOW = "LOW"
-    MEDIUM = "MEDIUM"
-    HIGH = "HIGH"
-    CRITICAL = "CRITICAL"
-
-# ── Profils de cultures & Fertilisation ──────────────────────────────────
-
-class CropProfile(Base):
-    __tablename__ = "crop_profiles"
-    __table_args__ = (
-        Index('crop_profiles_unique_triplet', 'crop_name', 'zone_category', 'variety', unique=True),
-        Index('idx_crop_profiles_lookup', 'crop_name', 'zone_category'),
-        Index('idx_crop_profiles_active', 'is_active'),
-        {"schema": "intelligence"}
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    slug = Column(String(255), unique=True, nullable=False)
-    crop_name = Column(String(100), nullable=False)
-    zone_category = Column(String(50), nullable=False)
-    variety = Column(String(100))
-    scientific_name = Column(String(255))
-    cycle_days = Column(Integer, nullable=False)
-    
-    # Constantes thermiques avancées (GDD / DJC)
-    base_temperature_c = Column(Numeric(5, 2))
-    max_temperature_c = Column(Numeric(5, 2))
-    expected_gdd = Column(Numeric(8, 2))
-    
-    depth_cm = Column(Integer, nullable=False)
-    ph_min = Column(Numeric(4, 2))
-    ph_max = Column(Numeric(4, 2))
-    organic_matter_min_tha = Column(Numeric(10, 2), default=0.0, nullable=False)
-    
-    # Hydrologie et Coefficients Culturaux (Moteur d'irrigation WhatsApp)
-    water_strategy = Column(Text)
-    water_needs_mm_per_cycle = Column(Numeric(8, 2))
-    kc_stages = Column(JSONB, default=list, nullable=False)
-    critical_stops_drought = Column(JSONB, default=list, nullable=False)
-    
-    # Besoins globaux d'exportations pour calculs de fumure personnalisés
-    nutrient_requirements_per_ton = Column(
-        JSONB, 
-        default=lambda: {"N": 0, "P2O5": 0, "K2O": 0, "CaO": 0, "MgO": 0}, 
-        nullable=False
-    )
-    salinity_tolerance_ec = Column(Numeric(4, 2))
-    
-    inter_row_cm = Column(Numeric(10, 2), nullable=False)
-    inter_plant_cm = Column(Numeric(10, 2), nullable=False)
-    seeds_pocket = Column(Integer, nullable=False)
-    yield_min_t_ha = Column(Numeric(10, 2), default=0.0, nullable=False)
-    yield_max_t_ha = Column(Numeric(10, 2), default=0.0, nullable=False)
-    
-    phenological_stages = Column(JSONB, default=list, nullable=False)
-    key_pests = Column(JSONB, default=list, nullable=False)
-    key_diseases = Column(JSONB, default=list, nullable=False)
-    pre_flight_checks = Column(JSONB, default=list, nullable=False)
-    is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
-
-
-class CropFertilizerStep(Base):
-    __tablename__ = "crop_fertilizer_steps"
-    __table_args__ = (
-        Index('crop_fertilizer_steps_unique_order', 'crop_profile_id', 'step_order', unique=True),
-        Index('idx_crop_fertilizer_steps_profile', 'crop_profile_id'),
-        Index('idx_crop_fertilizer_steps_timing', 'days_after_sowing'),
-        {"schema": "intelligence"}
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    crop_profile_id = Column(PG_UUID(as_uuid=True), ForeignKey("intelligence.crop_profiles.id", ondelete="CASCADE"), nullable=False)
-    step_order = Column(Integer, nullable=False)
-    stage = Column(String(120), nullable=False)
-    bbch_scale_id = Column(Integer)
-    bbch_scale_code = Column(String(20))
-    days_after_sowing = Column(Integer)
-    product_type = Column(String(120), nullable=False)
-    nutrient_target = Column(JSONB, default=lambda: {"N": 0, "P2O5": 0, "K2O": 0, "CaO": 0, "MgO": 0})
-    dose_kg_ha = Column(Numeric(10, 2), nullable=False)
-    application_mode = Column(String(120))
-    efficiency_factor = Column(Numeric(3, 2), default=1.00)
-    is_mandatory = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
-
-
-class SoilAnalysis(Base):
-    __tablename__ = "soil_analyses"
-    __table_args__ = (
-        Index('idx_soil_analyses_farm', 'farm_id'),
-        Index('idx_soil_analyses_zone', 'zone_id'),
-        Index('idx_soil_analyses_date', 'sample_date'),
-        {"schema": "intelligence"}
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"), nullable=False)
-    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
-    sample_date = Column(DateTime, nullable=False)
-    
-    # Physico-chimie fondamentale du sol
-    ph = Column(Numeric(4, 2))
-    salinity_ec = Column(Numeric(5, 2))
-    cation_exchange_capacity = Column(Numeric(6, 2))
-    carbon_nitrogen_ratio = Column(Numeric(5, 2))
-    organic_matter_percent = Column(Numeric(5, 2))
-    
-    # Macronutriments et éléments secondaires
-    nitrogen_ppm = Column(Numeric(8, 2))
-    phosphorus_ppm = Column(Numeric(8, 2))
-    potassium_ppm = Column(Numeric(8, 2))
-    calcium_ppm = Column(Numeric(8, 2))
-    magnesium_ppm = Column(Numeric(8, 2))
-    
-    # Texture et propriétés hydriques calculées du sol
-    texture = Column(String(50))
-    clay_percent = Column(Numeric(5, 2))
-    sand_percent = Column(Numeric(5, 2))
-    silt_percent = Column(Numeric(5, 2))
-    bulk_density = Column(Numeric(4, 2))
-    wilting_point_percent = Column(Numeric(4, 2))
-    field_capacity_percent = Column(Numeric(4, 2))
-    
-    raw_lab_results = Column(JSONB)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
-
-
-# ── Operations & Agent Core ─────────────────────────────────────────────
-
+# ══════════════════════════════════════════════════════════════════════════
+# INTELLIGENCE (persistance opérationnelle de l'agent + réputation)
+# ══════════════════════════════════════════════════════════════════════════
 class AuditLog(Base):
     __tablename__ = "audit_logs"
     __table_args__ = (
-        Index('audit_logs_actor_idx', 'actor_id'),
-        Index('audit_logs_entity_idx', 'entity_id'),
-        {"schema": "intelligence"}
+        Index("audit_logs_actor_idx", "actor_id"),
+        Index("audit_logs_entity_idx", "entity_id"),
+        Index("audit_logs_entity_time_idx", "entity_type", "created_at"),
+        {"schema": "intelligence"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
     actor_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
     action = Column(Text, nullable=False)
     entity_id = Column(Text, nullable=False)
@@ -1308,20 +956,21 @@ class AuditLog(Base):
 class AgentAction(Base):
     __tablename__ = "agent_actions"
     __table_args__ = (
-        Index('agent_actions_status_idx', 'status'),
-        Index('agent_actions_batch_idx', 'batch_id'),
-        Index('agent_actions_name_idx', 'agent_name'),
-        Index('agent_actions_order_unique', 'order_id', unique=True),
-        {"schema": "intelligence"}
+        Index("agent_actions_status_idx", "status"),
+        Index("agent_actions_batch_idx", "batch_id"),
+        Index("agent_actions_name_idx", "agent_name"),
+        Index("agent_actions_order_unique", "order_id", unique=True),
+        Index("agent_actions_queue_idx", "status", "priority"),
+        {"schema": "intelligence"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
     agent_name = Column(Text, nullable=False)
     action_type = Column(Text, nullable=False)
     batch_id = Column(Text)
     payload = Column(JSONB)
-    status = Column(Enum(AgentActionStatus), default=AgentActionStatus.PENDING, nullable=False)
-    priority = Column(Enum(ValidationPriority), default=ValidationPriority.MEDIUM, nullable=False)
+    status = Column(String, default="PENDING", nullable=False)
+    priority = Column(String, default="MEDIUM", nullable=False)
     order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), unique=True)
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
     audit_trail_id = Column(Text)
@@ -1332,63 +981,22 @@ class AgentAction(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
-class AgentTelemetry(Base):
-    __tablename__ = "agent_telemetry"
-    __table_args__ = (
-        Index('agent_telemetry_user_idx', 'user_id'),
-        {"schema": "intelligence"}
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
-    latitude = Column(DOUBLE_PRECISION)
-    longitude = Column(DOUBLE_PRECISION)
-    battery = Column(Integer)
-    signal = Column(Text)
-    device_info = Column(JSONB)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-
-
-class ExternalContextFile(Base):
-    __tablename__ = "external_context_files"
-    __table_args__ = (
-        Index('ext_context_zone_idx', 'zone_id'),
-        Index('ext_context_category_idx', 'category'),
-        {"schema": "intelligence"}
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    file_name = Column(Text, nullable=False)
-    file_type = Column(Text, nullable=False)
-    file_url = Column(Text, nullable=False)
-    category = Column(Text)
-    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
-    crop_profile_id = Column(PG_UUID(as_uuid=True), ForeignKey("intelligence.crop_profiles.id"))
-    is_vectorized = Column(Boolean, default=False, nullable=False)
-    mcp_server_id = Column(Text)
-    embedding_version = Column(Text)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-
-
 class Conversation(Base):
     __tablename__ = "conversations"
     __table_args__ = (
-        Index('conversations_user_idx', 'user_id'),
-        Index('conversations_farm_idx', 'farm_id'),
-        Index('conversations_agent_idx', 'agent_type'),
-        Index('conversations_created_idx', 'created_at'),
-        Index('conversations_followup_idx', 'needs_follow_up'),
-        Index('conversations_audit_unique', 'audit_trail_id', unique=True),
-        {"schema": "intelligence"}
+        Index("conversations_user_idx", "user_id"),
+        Index("conversations_agent_idx", "agent_type"),
+        Index("conversations_created_idx", "created_at"),
+        Index("conversations_followup_idx", "needs_follow_up"),
+        Index("conversations_audit_unique", "audit_trail_id", unique=True),
+        {"schema": "intelligence"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
     query = Column(Text, nullable=False)
     response = Column(Text)
     agent_type = Column(Text)
-    crop = Column(Text)
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
     mode = Column(Text, default="text", nullable=False)
     audio_url = Column(Text)
@@ -1399,56 +1007,29 @@ class Conversation(Base):
     user_intent = Column(Text)
     needs_follow_up = Column(Boolean, default=False, nullable=False)
     total_tokens_used = Column(Integer, default=0, nullable=False)
-    responseTimeMs = Column(Integer)
+    response_time_ms = Column(Integer)
     audit_trail_id = Column(Text, unique=True)
-    anomaly_id = Column(PG_UUID(as_uuid=True), ForeignKey("intelligence.anomalies.id"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
-# ── Events, Anomalies & Trust ───────────────────────────────────────────
-
-class TerritoryEvent(Base):
-    __tablename__ = "territory_events"
+class AgentContextMemory(Base):
+    __tablename__ = "agent_context_memory"
     __table_args__ = (
-        Index('territory_events_zone_idx', 'zone_id'),
-        Index('territory_events_type_idx', 'event_type'),
-        Index('territory_events_status_idx', 'status'),
-        {"schema": "intelligence"}
+        Index("acm_user_idx", "user_id"),
+        Index("acm_key_idx", "context_key"),
+        Index("acm_user_key_unique", "user_id", "context_key", unique=True),
+        {"schema": "intelligence"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"), nullable=False)
-    event_type = Column(Text, nullable=False)
-    payload = Column(JSONB)
-    meta = Column(JSONB)
-    severity = Column(Text, default="INFO", nullable=False)
-    status = Column(Text, default="NEW", nullable=False)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    processed_at = Column(DateTime)
-    processed_by_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
-
-
-class Anomaly(Base):
-    __tablename__ = "anomalies"
-    __table_args__ = (
-        Index('anomalies_zone_idx', 'zone_id'),
-        Index('anomalies_farm_idx', 'farm_id'),
-        Index('anomalies_resolved_idx', 'is_resolved'),
-        {"schema": "intelligence"}
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"), nullable=False)
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
-    source = Column(Text)
-    level = Column(Text, nullable=False)
-    title = Column(Text, nullable=False)
-    message = Column(Text)
-    details = Column(JSONB)
-    is_resolved = Column(Boolean, default=False, nullable=False)
-    resolved_by_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
-    resolved_at = Column(DateTime)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
+    market_offer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.market_offers.id"))
+    context_key = Column(Text, nullable=False)
+    context_value = Column(JSONB, nullable=False)
+    source = Column(Text, default="AGENT", nullable=False)
+    confidence = Column(DOUBLE_PRECISION)
+    expires_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
@@ -1457,7 +1038,7 @@ class TrustScore(Base):
     __tablename__ = "trust_scores"
     __table_args__ = {"schema": "intelligence"}
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True)
     global_score = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
     reliability_index = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
@@ -1471,12 +1052,12 @@ class TrustScore(Base):
 class AIRatingReasoning(Base):
     __tablename__ = "ai_rating_reasonings"
     __table_args__ = (
-        Index('ai_rating_trust_idx', 'trust_score_id'),
-        Index('ai_rating_agent_idx', 'agent_name'),
-        {"schema": "intelligence"}
+        Index("ai_rating_trust_idx", "trust_score_id"),
+        Index("ai_rating_agent_idx", "agent_name"),
+        {"schema": "intelligence"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
     trust_score_id = Column(PG_UUID(as_uuid=True), ForeignKey("intelligence.trust_scores.id"), nullable=False)
     agent_name = Column(Text, nullable=False)
     justification = Column(Text, nullable=False)
@@ -1484,272 +1065,22 @@ class AIRatingReasoning(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
-class WeatherDataLog(Base):
-    __tablename__ = "weather_data_logs"
-    __table_args__ = (
-        Index('wdl_zone_idx', 'zone_id'),
-        Index('wdl_farm_idx', 'farm_id'),
-        Index('wdl_date_idx', 'record_date'),
-        Index('wdl_horizon_idx', 'forecast_horizon_days'),
-        Index('wdl_farm_date_source_horizon_unique', 'farm_id', 'record_date', 'source', 'forecast_horizon_days', unique=True),
-        {"schema": "intelligence"}
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
-    latitude = Column(DOUBLE_PRECISION, nullable=False)
-    longitude = Column(DOUBLE_PRECISION, nullable=False)
-    record_date = Column(DateTime, nullable=False)
-    
-    temp_min = Column(DOUBLE_PRECISION)
-    temp_max = Column(DOUBLE_PRECISION)
-    temp_mean = Column(DOUBLE_PRECISION)
-    temp_dew_point = Column(DOUBLE_PRECISION)
-    
-    precipitation_mm = Column(DOUBLE_PRECISION)
-    precipitation_probability = Column(Integer)
-    
-    humidity_percent = Column(DOUBLE_PRECISION)
-    humidity_min = Column(DOUBLE_PRECISION)
-    humidity_max = Column(DOUBLE_PRECISION)
-    
-    wind_speed_kmh = Column(DOUBLE_PRECISION)
-    wind_direction_degrees = Column(Integer)
-    wind_gusts_kmh = Column(DOUBLE_PRECISION)
-    
-    solar_radiation = Column(DOUBLE_PRECISION)
-    uv_index = Column(DOUBLE_PRECISION)
-    
-    evapotranspiration = Column(DOUBLE_PRECISION)
-    gdd_contribution = Column(DOUBLE_PRECISION)
-    leaf_wetness_duration_minutes = Column(Integer)
-    
-    soil_temperature_depth_0cm = Column(DOUBLE_PRECISION)
-    soil_temperature_depth_10cm = Column(DOUBLE_PRECISION)
-    soil_moisture_volumetric_percent = Column(DOUBLE_PRECISION)
-    
-    disease_risk_index = Column(JSONB)
-    alert_triggers = Column(JSONB)
-    whatsapp_pushed_alerts = Column(JSONB)
-    
-    forecast_horizon_days = Column(Integer, default=0, nullable=False)
-    source = Column(Text, default="OPEN_METEO", nullable=False)
-    raw_payload = Column(JSONB)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-
-
-class AgentContextMemory(Base):
-    __tablename__ = "agent_context_memory"
-    __table_args__ = (
-        Index('acm_user_idx', 'user_id'),
-        Index('acm_farm_idx', 'farm_id'),
-        Index('acm_key_idx', 'context_key'),
-        Index('acm_user_farm_key_unique', 'user_id', 'farm_id', 'context_key', unique=True),
-        {"schema": "intelligence"}
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
-    crop_cycle_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.crop_cycles.id"))
-    context_key = Column(Text, nullable=False)
-    context_value = Column(JSONB, nullable=False)
-    source = Column(Text, default="AGENT", nullable=False)
-    confidence = Column(DOUBLE_PRECISION)
-    expires_at = Column(DateTime)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
-
-    
-##**************************************
-## Inventory
-###*************************************
-
-
-class SeedAllocation(Base):
-    __tablename__ = "seed_allocations"
-    __table_args__ = (
-        Index('seed_allocations_org_idx', 'organization_id'),
-        Index('seed_allocations_zone_idx', 'zone_id'),
-        Index('seed_allocations_seedtype_idx', 'seed_type'),
-        {"schema": "inventory"}
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    organization_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id"), nullable=False)
-    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"), nullable=False)
-    seed_type = Column(String, nullable=False)
-    total_quantity = Column(Integer, nullable=False)
-    remaining_quantity = Column(Integer, nullable=False)
-    unit = Column(String, default="KG", nullable=False)
-    allocated_by_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
-from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Index, Boolean, text
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
-from sqlalchemy.sql import func
-
-class SeedDistribution(Base):
-    __tablename__ = "seed_distributions"
-    __table_args__ = (
-        Index('seed_distributions_alloc_idx', 'allocation_id'),
-        Index('seed_distributions_producer_idx', 'producer_id'),
-        Index('seed_distributions_agent_idx', 'agent_id'),
-        Index('seed_distributions_status_idx', 'status'),
-        {"schema": "inventory"}
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    allocation_id = Column(PG_UUID(as_uuid=True), ForeignKey("inventory.seed_allocations.id"), nullable=False)
-    producer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"), nullable=False)
-    agent_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
-    organization_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id"), nullable=False)
-    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"), nullable=False)
-    quantity = Column(Integer, nullable=False)
-    cnib_provided = Column(String)
-    verification_code_hash = Column(String)
-    verification_code_expires_at = Column(DateTime)
-    verification_channel = Column(String, default="IN_APP")
-    attempts_count = Column(Integer, default=0, nullable=False)
-    status = Column(String, default="PENDING", nullable=False)
-    receipt_at = Column(DateTime)
-    
-    # CORRECTION : Renommé pour éviter le conflit avec l'attribut réservé SQLAlchemy
-    info_json = Column(JSONB) 
-    
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
-
-class SeedDistributionAttempt(Base):
-    __tablename__ = "seed_distribution_attempts"
-    __table_args__ = (
-        Index('sda_distribution_idx', 'distribution_id'),
-        Index('sda_actor_idx', 'actor_id'),
-        {"schema": "inventory"}
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    distribution_id = Column(PG_UUID(as_uuid=True), ForeignKey("inventory.seed_distributions.id"), nullable=False)
-    actor_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
-    attempt_type = Column(String)
-    success = Column(Boolean, default=False, nullable=False)
-    ip_address = Column(String)
-    
-    # CORRECTION : Renommé également ici
-    info_json = Column(JSONB)
-    
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-
-##**************************************
-## unrelated
-###*************************************
-
-class UserContextState(Base):
-    __tablename__ = "user_context_states"
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    user_id = Column(String, unique=True, nullable=False)
-    last_intent = Column(String)
-    pending_intent = Column(String)
-    draft_data = Column(JSONB)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
-
-
-class MarketMatch(Base):
-    __tablename__ = "market_matches"
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    product_id = Column(String)
-    buyer_id = Column(String)
-    score = Column(Float, default=0.0, nullable=False)
-    status = Column(String, default="SUGGESTED", nullable=False)
-    meta = Column(JSONB)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-
-
-class TransactionStaging(Base):
-    __tablename__ = "transaction_staging"
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    transaction_id = Column(String, unique=True, nullable=False)
-    payload = Column(JSONB)
-    status = Column(String, default="PENDING", nullable=False)
-    expires_at = Column(DateTime)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-
-
-class SurplusOffer(Base):
-    __tablename__ = "surplus_offers"
-    __table_args__ = {"schema": "marketplace"}
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    user_id = Column(String)
-    product_name = Column(String, nullable=False)
-    quantity_kg = Column(Float, nullable=False)
-    price_kg = Column(Float)
-    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
-    location = Column(String)
-    channel = Column(String, default="api")
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-
-
 __all__ = [
     "Base",
     "_uuid4",
-    "User",
-    "Account",
-    "Session",
-    "Organization",
-    "UserOrganization",
-    "RoleDefinition",
-    
-    "ClimaticRegion",
-    "Zone",
-    "WorkZone",
-    "Producer",
-    "BuyerType",
-    "BuyerProfile",
-    "DeliveryAgent",
-    "Delivery",
-    "Farm",
-    "Product",
-    "Category",
-    "SubCategory",
-    "ZoneSetting",
-    "OverlayLayer",
-    "UserCulture",
-    "DailyAdviceLog",
-    "ExternalContextFile",
-    "Stock",
-    "StockMovement",
-    "Order",
-    "OrderItem",
-    "Client",
-    "Expense",
-    "CropCycle",
-    "SurplusOffer",
-    "Warehouse",
-    "TransactionStaging",
-    "Auction",
-    "Bid",
-    "Batch",
-    "SeedAllocation",
-    "SeedDistribution",
-    "SeedDistributionAttempt",
-    "StandardPrice",
-    "AgentAction",
-    "AgentTelemetry",
-    "Conversation",
-    "AuditLog",
-    "TrustScore",
-    "AIRatingReasoning",
-    "AIRecommendation",
-    "MarketplaceRating",
-    "TerritoryEvent",
-    "ZoneMetric",
-    "UserContextState",
-    "MarketMatch",
-    "Anomaly",
+    # auth
+    "User", "Account", "Session",
+    # governance
+    "Organization", "UserOrganization", "RoleDefinition", "ClimaticRegion",
+    "Zone", "WorkZone", "ZoneMetric", "Category", "SubCategory",
+    "StandardPrice", "ZoneSetting", "OverlayLayer",
+    # marketplace
+    "Warehouse", "Producer", "Client", "BuyerType", "BuyerProfile",
+    "DeliveryAgent", "Delivery", "Farm", "MarketOffer", "CropCycle",
+    "Stock", "StockMovement", "Batch", "Expense", "Product",
+    "Order", "OrderItem", "Payment", "OrderStatusHistory", "OrderReminder",
+    "OrderDispute", "Auction", "Bid", "MarketplaceRating",
+    # intelligence
+    "AuditLog", "AgentAction", "Conversation", "AgentContextMemory",
+    "TrustScore", "AIRatingReasoning",
 ]

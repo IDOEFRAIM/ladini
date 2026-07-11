@@ -104,6 +104,7 @@ class WorkspaceStore:
                 await session.execute(text(_DDL))
                 for ddl in _ALTERS:
                     await session.execute(text(ddl))
+                await session.commit()
             WorkspaceStore._table_ready = True
             return True
         except Exception as exc:
@@ -219,6 +220,7 @@ class WorkspaceStore:
                     await session.execute(text(_UPDATE), payload)
                 else:
                     await session.execute(text(_INSERT), payload)
+                await session.commit()
             logger.info(
                 "WorkspaceStore.save blob stats | workspace=%s | raw_bytes=%s | stored_bytes=%s | compressed=%s | truncated=%s",
                 workspace.workspace_id,
@@ -258,6 +260,7 @@ class WorkspaceStore:
                 result = await session.execute(text(_UPDATE), payload)
                 if not result.rowcount:
                     await session.execute(text(_INSERT), payload)
+                await session.commit()
             logger.info("WorkspaceStore: reset workspace %s to empty state", workspace_id)
             return True
         except Exception as exc:

@@ -1,11 +1,10 @@
 from typing import Tuple, Dict, Any
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from .common import clean_text, positive_float
 
 
 class UtilsMixin:
-    async def normalize_unit(self, session: AsyncSession, quantity: float, unit: str) -> Tuple[float, str, float]:
+    async def normalize_unit(self, quantity: float, unit: str) -> Tuple[float, str, float]:
         quantity = positive_float(quantity, "quantity", allow_zero=True)
         key = (unit).lower().strip()
         UNIT_TO_KG = {
@@ -20,19 +19,14 @@ class UtilsMixin:
         qty_kg = quantity * multiplier
         return multiplier, unit_final, qty_kg
 
-   
-
-    async def check_price_anomaly(self, session: AsyncSession, product_name: str, proposed_price: float, zone_id: str) -> Dict[str, Any]:
+    async def check_price_anomaly(self, product_name: str, proposed_price: float, zone_id: str) -> Dict[str, Any]:
         product_name = clean_text(product_name, "product_name", required=True)
         proposed_price = positive_float(proposed_price, "proposed_price", allow_zero=True)
-        # If a more specific 'get_standard_price' exists on the composed service, use it.
         getter = getattr(self, "get_standard_price", None)
         if callable(getter):
-            # The composed implementation expects (session, product_name, zone_id)
             try:
-                ref = await getter(session, product_name, zone_id)
+                ref = await getter(product_name, zone_id)
             except TypeError:
-                # Fallback: the method may be the wrapper that doesn't accept session
                 ref = None
         else:
             ref = None

@@ -5,7 +5,6 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import MenuRequest
-from agriconnect.graphs.agents.market_coach.services.domain.buyer_common import safe_call_tool
 from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
     CartDomainService,
     SOURCE_TYPE_LABELS,
@@ -34,10 +33,10 @@ def build_preflight_recap(cart: List[Dict[str, Any]], meta: Dict[str, Any]) -> s
     filtered_items: List[Dict[str, Any]] = []
     for item in cart:
         try:
-            qty_val = float(item.get("quantity") or 0.0)
+            qty_val = float(item.get("quantity")) or None
         except (TypeError, ValueError):
-            qty_val = 0.0
-        if qty_val <= 0:
+            qty_val = None
+        if qty_val is None or qty_val <= 0:
             continue
         filtered_items.append({"_quantity_val": qty_val, **item})
 
@@ -63,9 +62,9 @@ def build_preflight_recap(cart: List[Dict[str, Any]], meta: Dict[str, Any]) -> s
             f"   Source : {source_label}"
         )
     lines.append(f"\n💰 *TOTAL : {meta.get('total_amount')} {meta.get('currency')}*")
-    lines.append("\nFaites un choix dans le menu ci-dessous :")
+    lines.append("\n_Que souhaitez-vous faire ?_")
     lines.append(render_interactive_menu(PREORDER_ACTION_OPTIONS))
-    lines.append("Répondez uniquement avec le numéro correspondant (ex: 1).")
+    lines.append("\n👉 Répondez avec le *numéro* (1, 2 ou 3) ou tapez *confirmer* / *annuler*.")
     return "\n".join(lines)
 
 
@@ -186,7 +185,7 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
             "status": "COMPLETED",
             "response_strategy": "SUCCESS",
             "final_response": "↩️ Précommande annulée. Votre panier est toujours disponible.",
-            "preorder_workflow": {"phase": "CART"},
+            "preorder_workflow": {"__reset__": True, "phase": "CART"},
             "current_goal": "BUYER_VIEW_CART",
             "transaction_payload": {"__reset__": True},
             "working_memory": clear_active_goal(state),
@@ -201,7 +200,8 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
             "status": "WAITING_INPUT",
             "expected_input": "PRODUCT",
             "response_strategy": "ASK_MISSING_FIELD",
-            "final_response": "Quel produit souhaitez-vous ajouter au panier ?",
+            "missing_fields": ["product"],
+            "last_missing_field": "product",
             "preorder_workflow": {"phase": "CART"},
             "current_goal": "BUYER_ADD_TO_CART",
             "transaction_payload": {"__reset__": True},
@@ -215,7 +215,8 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
                 "status": "WAITING_INPUT",
                 "expected_input": "PRODUCT",
                 "response_strategy": "ASK_MISSING_FIELD",
-                "final_response": "Votre panier est vide. Ajoutez au moins un produit avant de précommander.",
+                "missing_fields": ["product"],
+                "last_missing_field": "product",
                 "preorder_workflow": {"phase": "CART"},
                 "current_goal": "BUYER_ADD_TO_CART",
                 "ag_ui_component": None,
@@ -338,7 +339,7 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
             "active_cart": [],
             "transaction_payload": {"__reset__": True},
             "draft_payload": {"__reset__": True},
-            "working_memory": clear_active_goal(state),
+            "working_memory": clear_active_goal(state, clear_cart_snapshot=True),
             "ag_ui_component": None,
         }
 

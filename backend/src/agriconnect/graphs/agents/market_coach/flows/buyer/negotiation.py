@@ -8,7 +8,6 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
 )
-from agriconnect.graphs.agents.market_coach.services.domain.buyer_common import safe_call_tool
 from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
     AuctionGateway,
     NegotiationGateway,
@@ -111,7 +110,7 @@ async def _handle_counter_price(
     auction_id: str,
 ) -> Dict[str, Any]:
     """Process the counter-offer price submission."""
-    price = payload.get("price_mentioned")
+    price = payload.get("price")
     if price in (None, "", 0):
         return {
             "status": "WAITING_INPUT",
@@ -165,6 +164,7 @@ async def _handle_viewing_offers(
                 "response_strategy": "ERROR",
                 "final_response": win.get("message") or "Impossible de valider cette offre.",
                 "transaction_payload": {"resolved_id": None},
+                "negotiation_context": {"__reset__": True},
                 "ag_ui_component": None,
             }
         return {
@@ -274,7 +274,7 @@ async def _initiate_negotiation(
         }
 
     try:
-        offer = float(payload.get("price_mentioned"))
+        offer = float(payload.get("price"))
     except (TypeError, ValueError):
         offer = 0.0
 
@@ -390,7 +390,7 @@ async def negotiation_gate(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
         return await _handle_negotiation_menu(mc_runtime, phone, payload, state, nctx, auction_id)
 
     # No active session — initiate new negotiation
-    if not product_name or payload.get("price_mentioned") in (None, "", 0):
+    if not product_name or payload.get("price") in (None, "", 0):
         return {
             "status": "WAITING_INPUT",
             "expected_input": "PRODUCT" if not product_name else "PRICE",

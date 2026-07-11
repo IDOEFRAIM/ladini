@@ -1,3 +1,14 @@
+"""MCP infrastructure — base classes for MCP server apps and tool wrapping.
+
+Role in the stack:
+  * `infrastructure/mcp/`     — engine (this file, runtime, client, context, security)
+  * `protocols/mcp/servers/`  — stdio entry points + AgriDBService introspection
+  * `market_coach/services/mcp/gateway.py` — high-level agent adapter
+
+`MCPServerApp` is the generic wrapper around FastMCP. `AgriDBMCPServer`
+(runtime.py) is the in-process backend used by the stdio entry point.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -16,7 +27,7 @@ from agriconnect.infrastructure.mcp.context import FarmerContext, get_mcp_contex
 from agriconnect.infrastructure.mcp.security import PermissionDenied, get_execution_policy
 from agriconnect.infrastructure.mcp.utils import run_coro_blocking
 
-#logger = logging.get#logger("MCP.Core.Base")
+logger = logging.getLogger("MCP.Core.Base")
 
 
 @dataclass(frozen=True)
@@ -74,7 +85,7 @@ class MCPServerApp:
             for spec in provider.get_tools():
                 wrapped = self._wrap_tool(provider.name, spec)
                 self.mcp.tool(wrapped)
-                #logger.info("Registered MCP tool '%s' from provider '%s'", spec.name, provider.name)
+                logger.info("Registered MCP tool '%s' from provider '%s'", spec.name, provider.name)
 
     def _wrap_tool(self, provider_name: str, spec: MCPToolSpec) -> Callable[..., Awaitable[dict[str, Any]]]:
         sig = inspect.signature(spec.handler)
@@ -82,7 +93,7 @@ class MCPServerApp:
 
         for param in sig.parameters.values():
             if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
-                #logger.warning(
+                logger.warning(
                     "Tool '%s' from provider '%s' has unsupported signature shape for strict wrapper; using raw handler",
                     spec.name,
                     provider_name,
@@ -101,7 +112,7 @@ class MCPServerApp:
                 validated = input_model.model_validate(validate_input).model_dump()
             except ValidationError as exc:
                 error_text = _format_validation_error(exc)
-                #logger.warning("Validation failed for tool %s: %s", spec.name, error_text)
+                logger.warning("Validation failed for tool %s: %s", spec.name, error_text)
                 raise ValidationFailure(error_text) from exc
 
             if "ctx" in clean_kwargs:
@@ -171,11 +182,11 @@ class MCPServerApp:
 
     def _install_signal_handlers(self) -> None:
         def _shutdown_handler(signum: int, _frame: Any) -> None:
-            #logger.warning("Signal %s received, terminating MCP server '%s'", signum, self.server_name)
+            logger.warning("Signal %s received, terminating MCP server '%s'", signum, self.server_name)
             try:
                 run_coro_blocking(self._run_shutdown_callbacks(), timeout=10)
             except Exception:
-                #logger.exception("Shutdown callbacks failed during signal handling")
+                logger.exception("Shutdown callbacks failed during signal handling")
             raise KeyboardInterrupt
 
         for sig_name in ("SIGINT", "SIGTERM"):
@@ -185,7 +196,7 @@ class MCPServerApp:
             try:
                 signal.signal(sig, _shutdown_handler)
             except Exception:
-                #logger.debug("Cannot register handler for %s on this platform", sig_name)
+                logger.debug("Cannot register handler for %s on this platform", sig_name)
 
     async def _run_startup_callbacks(self) -> None:
         await self._run_callbacks(self._startup_callbacks, stage="startup")
@@ -209,10 +220,10 @@ class MCPServerApp:
             else:
                 return
         except Exception:
-            #logger.exception("MCP %s callback failed", stage)
+            logger.exception("MCP %s callback failed", stage)
 
     def run(self, transport: str = "stdio", host: Optional[str] = None, port: Optional[int] = None) -> None:
-        #logger.info(
+        logger.info(
             "Starting MCP server '%s' with transport=%s host=%s port=%s",
             self.server_name,
             transport,

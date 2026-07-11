@@ -52,9 +52,9 @@ class DeliveryMixin(BaseMixin):
 
         if not agent:
             agent = DeliveryAgent(
-                id=str(_uuid4()),
+                id=_uuid4(),
                 user_id=user_id,
-                status='AVAILABLE'
+                status='AVAILABLE',
             )
             self.session.add(agent)
             await self.session.flush()
@@ -88,7 +88,7 @@ class DeliveryMixin(BaseMixin):
         existing_stmt = select(Delivery).where(Delivery.order_id == order_id)
         existing = (await self.session.execute(existing_stmt)).scalar_one_or_none()
         if existing:
-            return {"status": "already_exists", "delivery": existing.to_dict()}
+            return {"status": "success", "data": existing.to_dict(), "already_exists": True}
 
         # 3. Extraction de la localisation du producteur (Point d'enlèvement)
         origin_lat, origin_lng = None, None
@@ -103,7 +103,7 @@ class DeliveryMixin(BaseMixin):
 
         # 5. Création de l'ordre de route
         new_delivery = Delivery(
-            id=str(_uuid4()),
+            id=_uuid4(),
             order_id=order.id,
             status='PENDING',
             delivery_code=self._generate_delivery_otp(),
@@ -117,7 +117,7 @@ class DeliveryMixin(BaseMixin):
         order.delivery_status = 'PENDING'
         self.session.add(new_delivery)
         await self.session.flush()
-        return new_delivery.to_dict()
+        return {"status": "success", "data": new_delivery.to_dict()}
 
     async def claim_delivery(self, delivery_id: str, user_id: str) -> Dict[str, Any]:
         """Action du livreur : Accepte et réserve une course de livraison disponible."""
@@ -155,7 +155,7 @@ class DeliveryMixin(BaseMixin):
         )
         
         logger.info(f"Livraison {delivery_id} verrouillée avec succès par l'agent {agent.id}")
-        return {"success": True, "status": "ASSIGNED"}
+        return {"status": "success", "data": {"delivery_status": "ASSIGNED"}}
 
     async def start_delivery_transit(self, delivery_id: str, user_id: str) -> Dict[str, Any]:
         """Action du livreur : Indique qu'il a récupéré les produits et entame le transit."""
@@ -175,7 +175,7 @@ class DeliveryMixin(BaseMixin):
             update(Order).where(Order.id == delivery.order_id).values(delivery_status='IN_TRANSIT')
         )
         await self.session.flush()
-        return {"success": True, "status": "IN_TRANSIT"}
+        return {"status": "success", "data": {"delivery_status": "IN_TRANSIT"}}
 
     async def confirm_delivery_with_otp(self, delivery_id: str, otp_code: str, user_id: str) -> Dict[str, Any]:
         """Validation finale : Le livreur soumet le code secret fourni par l'acheteur."""
@@ -201,7 +201,7 @@ class DeliveryMixin(BaseMixin):
         agent.status = 'AVAILABLE'
         
         await self.session.flush()
-        return {"success": True, "status": "DELIVERED"}
+        return {"status": "success", "data": {"delivery_status": "DELIVERED"}}
 
     # ─── CONSOLE DE SUIVI MULTI-ACTEURS (IA & USERS) ───────────────────
 

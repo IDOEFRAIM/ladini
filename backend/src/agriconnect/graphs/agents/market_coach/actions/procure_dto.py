@@ -10,9 +10,9 @@ _EMPTY_SLOT_VALUES: Tuple[object, ...] = (None, "", [], {})
 
 class ProcurementCreateRequestPayload(BaseModel):
     product: str
-    quantity_mentioned: float
-    price_mentioned: float
-    unit_mentioned: Optional[str] = None
+    quantity: float
+    price: float
+    unit: Optional[str] = None
     zone_name: Optional[str] = None
     deadline: Optional[object] = None  # parsed in domain (str | datetime acceptable)
     delivery_location: Optional[str] = None
@@ -31,27 +31,27 @@ class ProcurementCreateRequestPayload(BaseModel):
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "ProcurementCreateRequestPayload":
-        product_raw = payload.get("product") or payload.get("product_name") or payload.get("name")
+        product_raw = payload.get("product")
         if product_raw in _EMPTY_SLOT_VALUES:
             raise ValueError("Le produit recherché est requis pour créer une demande.")
 
-        qty_raw = payload.get("quantity_mentioned") or payload.get("quantity")
+        qty_raw = payload.get("quantity")
         if qty_raw in _EMPTY_SLOT_VALUES:
             raise ValueError("La quantité recherchée est requise pour créer une demande.")
 
-        price_raw = payload.get("price_mentioned") or payload.get("price")
+        price_raw = payload.get("price")
         if price_raw in _EMPTY_SLOT_VALUES:
             raise ValueError("Le prix plafond proposé est requis pour créer une demande.")
 
-        unit_raw = payload.get("unit_mentioned") or payload.get("unit")
+        unit_raw = payload.get("unit")
 
         zone_raw = payload.get("zone_name") or payload.get("zone")
 
         return cls(
             product=str(product_raw).strip(),
-            quantity_mentioned=float(qty_raw),
-            price_mentioned=float(price_raw),
-            unit_mentioned=(str(unit_raw).strip().upper() if unit_raw not in _EMPTY_SLOT_VALUES else None),
+            quantity=float(qty_raw),
+            price=float(price_raw),
+            unit=(str(unit_raw).strip().upper() if unit_raw not in _EMPTY_SLOT_VALUES else None),
             zone_name=(str(zone_raw).strip() if zone_raw not in _EMPTY_SLOT_VALUES else None),
             deadline=payload.get("deadline"),
             delivery_location=(

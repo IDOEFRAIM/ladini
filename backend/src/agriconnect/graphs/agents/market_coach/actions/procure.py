@@ -24,17 +24,17 @@ def prep_procurement_create_request(state: Mapping[str, Any], payload: Mapping[s
     # Validation légère spécifique au handler (ex: présence de champs clés)
     require_phone(state)
     require(payload, "product")
-    require(payload, "quantity_mentioned")
-    require(payload, "price_mentioned")
+    require(payload, "quantity")
+    require(payload, "price")
 
     context = DomainContext.from_state(state)
     dto = ProcurementCreateRequestPayload.from_payload(payload)
     command = ProcurementCreateRequestCommand(
         phone=context.phone,
         product=dto.product,
-        quantity=dto.quantity_mentioned,
-        unit=dto.unit_mentioned,
-        max_price=dto.price_mentioned,
+        quantity=dto.quantity,
+        unit=dto.unit,
+        max_price=dto.price,
         deadline=dto.deadline,
         delivery_location=dto.delivery_location,
         delivery_deadline=dto.delivery_deadline,

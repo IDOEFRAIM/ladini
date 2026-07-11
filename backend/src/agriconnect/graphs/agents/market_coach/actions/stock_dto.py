@@ -67,7 +67,7 @@ class StockUpdateLevelPayload(BaseModel):
         quantity_raw = coalesce_entity_value(
             payload,
             entity,
-            payload_keys=("quantity_mentioned", "quantity"),
+            payload_keys=("quantity",),
             entity_keys=("quantity", "quantity_for_sale"),
         )
         quantity_value = to_float(quantity_raw, field="quantity")
@@ -77,7 +77,7 @@ class StockUpdateLevelPayload(BaseModel):
         unit_value = coalesce_entity_value(
             payload,
             entity,
-            payload_keys=("unit_mentioned", "unit"),
+            payload_keys=("unit",),
             entity_keys=("unit",),
         )
 

@@ -234,8 +234,8 @@ class AuctionMixin(BaseMixin):
             }
 
         except Exception as e:
-            logger.error(f"❌ Erreur critique create_auction: {str(e)}", exc_info=True)
-            raise
+            logger.error(f"Erreur critique create_auction: {str(e)}", exc_info=True)
+            return {"status": "error", "message": f"Erreur lors de la création de l'enchère : {str(e)}"}
         
 
 
@@ -419,7 +419,7 @@ class AuctionMixin(BaseMixin):
                     "producer": prod_name or "Producteur Anonyme",
                     "price": bid.offered_price,
                     "message": bid.message,
-                    "delivery": "Inclus" if getattr(bid, 'delivery_included', False) else "Non inclus"
+                    "delivery": "Non inclus"
                 })
 
             return {
@@ -625,7 +625,7 @@ class AuctionMixin(BaseMixin):
             bid.is_winner = True
             bid.status = "WINNING"
             auction.status = "CLOSED"
-            auction.winning_bid_id = bid.id
+            auction.winner_bid_id = bid.id
             
             # 2. Calcul financier & Instanciation de l'accord commercial officiel (Order)
             total = float(bid.offered_price * auction.quantity)

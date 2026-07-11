@@ -1,6 +1,5 @@
 import logging
 import uuid
-from datetime import time
 from typing import Dict, Any, Optional
 
 from sqlalchemy import update, func
@@ -48,7 +47,7 @@ class AuthMixin:
         # 1. Idempotence : Vérification immédiate de l'existence via le BaseMixin
         existing_row = await self._fetch_user_entities(phone=clean_phone)
         if existing_row:
-            return await self._serialize_user_entities(existing_row)
+            return self._serialize_user_entities(existing_row)
 
         try:
             # 2. Préparation atomique de l'identité noyau
@@ -145,18 +144,10 @@ class AuthMixin:
             raise RuntimeError("Database session is missing on the current context.")
 
         try:
-            # Découpage et validation stricte du format horaire 24h
-            hour, minute = map(int, advice_time.split(':'))
-            if not (0 <= hour <= 23) or not (0 <= minute <= 59):
-                raise ValueError()
-                
-            time_obj = time(hour, minute)
-
             stmt = (
                 update(User)
                 .where(User.id == uuid.UUID(user_id))
                 .values(
-                    daily_advice_time=time_obj,
                     whatsapp_enabled=enabled,
                     updated_at=func.now()
                 )

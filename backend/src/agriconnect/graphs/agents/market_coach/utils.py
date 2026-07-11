@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 import uuid
 from contextlib import nullcontext
 from typing import Any, Awaitable, Callable, Dict, Optional
@@ -22,6 +23,30 @@ from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportCon
 from agriconnect.infrastructure.mcp.context import FarmerContext, get_mcp_context, mcp_context_scope
 
 logger = logging.getLogger("Agent.MarketCoach")
+
+# ── ASCII folding (Postel's Law — MCP never receives accented strings) ──
+
+_ASCII_LIGATURE_MAP = str.maketrans({"œ": "oe", "Œ": "OE", "æ": "ae", "Æ": "AE", "’": "'"})
+
+
+def _ascii_fold_str(text: str) -> str:
+    if not text:
+        return text
+    text = text.translate(_ASCII_LIGATURE_MAP)
+    return unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+
+
+def _ascii_fold_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return _ascii_fold_str(value)
+    if isinstance(value, list):
+        return [_ascii_fold_value(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_ascii_fold_value(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _ascii_fold_value(v) for k, v in value.items()}
+    return value
+
 
 # Fields auto-resolvable from user identity (don't ask the user for them)
 _AUTO_RESOLVABLE_FIELDS = frozenset({"farm_id", "phone"})
@@ -168,20 +193,48 @@ def _to_float(value: Any) -> Optional[float]:
         return None
 
 def _safe_node(fn: Callable[..., Awaitable[Dict[str, Any]]], name: str) -> Callable[..., Awaitable[Dict[str, Any]]]:
-    """Décorateur pour sécuriser les noeuds LangGraph."""
+    """Décorateur pour sécuriser les noeuds LangGraph et tracer leur durée."""
+
     async def _wrapped(state: Dict[str, Any], mc_runtime: "MarketRuntime", **_: Any) -> Dict[str, Any]:
+        goal = str(state.get("current_goal") or "").upper()
+        status = str(state.get("status") or "").upper()
+        event = str(state.get("interpreted_event") or "").upper()
+        start_ts = time.time()
+        logger.info(
+            "NODE_START | node=%s | goal=%s | status=%s | event=%s",
+            name,
+            goal,
+            status,
+            event,
+        )
         try:
-            # Ne pas exiger la connexion MCP ici : certains noeuds (NLU, modération)
-            # fonctionnent sans accès DB. Les appels DB utiliseront `call_db`
-            # qui lèvera une erreur claire si la session MCP manque.
-            return await fn(state, mc_runtime)
+            result = await fn(state, mc_runtime)
+            elapsed_ms = round((time.time() - start_ts) * 1000, 1)
+            new_goal = str((result or {}).get("current_goal") or goal or "").upper()
+            new_status = str((result or {}).get("status") or "").upper()
+            logger.info(
+                "NODE_END | node=%s | goal=%s | status=%s | duration_ms=%s",
+                name,
+                new_goal,
+                new_status,
+                elapsed_ms,
+            )
+            return result
         except Exception as exc:
-            logger.exception("[MarketCoach] node=%s failed: %s", name, exc)
+            elapsed_ms = round((time.time() - start_ts) * 1000, 1)
+            logger.exception(
+                "NODE_ERROR | node=%s | goal=%s | duration_ms=%s | error=%s",
+                name,
+                goal,
+                elapsed_ms,
+                exc,
+            )
             return {
                 "status": "ERROR",
                 "error_message": f"Erreur technique dans le noeud '{name}'.",
                 "technical_details": str(exc),
             }
+
     return _wrapped
 
 
@@ -331,9 +384,6 @@ def build_confirmation_summary(intent: str, payload: Dict[str, Any], intent_conf
     return "\n".join(lines)
 
 
-# Backward compat: old private name
-_ensure_dict = ensure_dict
-
 
 class MarketRuntime:
     def __init__(
@@ -417,60 +467,59 @@ class MarketRuntime:
             or kwargs.get("buyer_id")
             or kwargs.get("phone")
             or kwargs.get("user_phone")
+            or kwargs.get("buyer_phone")
+            or kwargs.get("customer_phone")
             or ""
         ).strip()
-        phone = str(kwargs.get("phone") or kwargs.get("user_phone") or "").strip()
+        phone = str(
+            kwargs.get("phone")
+            or kwargs.get("user_phone")
+            or kwargs.get("buyer_phone")
+            or kwargs.get("customer_phone")
+            or ""
+        ).strip()
         if not user_id and not phone:
             context_identity = get_mcp_context()
             return context_identity
         session_id = str(kwargs.get("session_id") or uuid.uuid4())
         return FarmerContext(user_id=user_id or phone, phone_number=phone or "unknown", session_id=session_id)
 
-    async def call_db(self, tool_name: str, **kwargs) -> Any:
-        """
-        Point d'entrée unique et direct pour la base de données.
-        Ex: await runtime.call_db("get_farms", producer_id="123")
+    async def call_db(self, tool_name: str, **kwargs: Any) -> Dict[str, Any]:
+        """Single entry point for all MCP tool calls.
+
+        Responsibilities consolidated here (no other layer should duplicate):
+        1. Strip None values (Postel’s Law)
+        2. ASCII-fold string arguments
+        3. Set FarmerContext scope
+        4. Generate request_id for cross-layer tracing
+        5. Call the MCP client
+        6. Normalise the response via ensure_dict
+        7. Log success/failure with request_id
         """
         if not self.db_client:
-            raise MarketRuntimeError("Runtime non connecté. Utilisez 'async with'.")
+            raise MarketRuntimeError("Runtime non connecté. Utilisez ‘async with’.")
 
-        import unicodedata
-
-        def _ascii_fold_str(text: str) -> str:
-            if not text:
-                return text
-            text = text.translate(str.maketrans({"œ": "oe", "Œ": "OE", "æ": "ae", "Æ": "AE", "’": "'"}))
-            normalized = unicodedata.normalize("NFKD", text)
-            return normalized.encode("ascii", "ignore").decode("ascii")
-
-        def _ascii_fold_value(value: Any) -> Any:
-            if isinstance(value, str):
-                return _ascii_fold_str(value)
-            if isinstance(value, list):
-                return [_ascii_fold_value(v) for v in value]
-            if isinstance(value, tuple):
-                return tuple(_ascii_fold_value(v) for v in value)
-            if isinstance(value, dict):
-                return {k: _ascii_fold_value(v) for k, v in value.items()}
-            return value
-
-        # Postel's Law: strip None values before forwarding to MCP client
         safe_kwargs = {k: v for k, v in kwargs.items() if v is not None}
-        # AXE 4: ensure MCP never receives accented strings
         safe_kwargs = _ascii_fold_value(safe_kwargs)
 
+        request_id = str(uuid.uuid4())[:8]
         try:
             context_manager = self._context_scope(safe_kwargs)
             with context_manager:
-                return await self.db_client.call_tool(tool_name, safe_kwargs)
+                raw = await self.db_client.call_tool(tool_name, safe_kwargs)
         except Exception as exc:
             logger.error(
-                "MCP_CALL_FAILURE | tool=%s | args=%s | error=%s",
+                "MCP_CALL_FAILURE | rid=%s | tool=%s | keys=%s | error=%s",
+                request_id,
                 tool_name,
                 json.dumps(list(safe_kwargs.keys())),
                 str(exc),
             )
             raise
+
+        result = ensure_dict(raw)
+        result["_request_id"] = request_id
+        return result
 
     def ensure_ready(self):
         """Vérifie si le runtime est prêt et connecté."""
@@ -523,17 +572,25 @@ _RECOVERY_MAX_RETRIES = 2
 
 
 def _detect_disambiguation_candidates(text_lower: str) -> Optional[Dict[str, Any]]:
-    """Cherche dans INTENT_DISAMBIGUATION une entrée dont les `lexical_hints` matchent.
+    """Cherche dans INTENT_DISAMBIGUATION l'entrée la PLUS SPÉCIFIQUE dont un
+    `lexical_hint` matche le texte.
 
-    INTENT_DISAMBIGUATION est un dict {trigger_key: {candidates, title, options, lexical_hints}}.
-    Retourne (key, entry) la première paire matchée, ou None.
+    INTENT_DISAMBIGUATION est un dict {trigger_key: {candidates, title, options,
+    lexical_hints}}. On ne retourne plus la première entrée trouvée (l'ordre du
+    dict décidait arbitrairement du gagnant — ex: "suivre mes appels" matchait
+    ORDER_TRACKING via "suivre" au lieu d'AUCTION_TRACKING). On retient l'entrée
+    dont le hint matché est le plus long (signal le plus spécifique), ce qui
+    fait gagner "mes appel(s)" sur le générique "suivre".
     """
+    best: Optional[Dict[str, Any]] = None
+    best_len = 0
     for key, entry in INTENT_DISAMBIGUATION.items():
-        hints = entry.get("lexical_hints") or []
-        for hint in hints:
-            if hint and str(hint).lower() in text_lower:
-                return {"id": key, **entry}
-    return None
+        for hint in entry.get("lexical_hints") or []:
+            h = str(hint).lower().strip()
+            if h and h in text_lower and len(h) > best_len:
+                best = {"id": key, **entry}
+                best_len = len(h)
+    return best
 
 
 def _compute_progress(goal: Optional[str], payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -599,14 +656,12 @@ def _normalize_quantity_to_kg(payload: Dict[str, Any]) -> Dict[str, Any]:
     if slot_has_value(qty):
         normalized.setdefault("quantity_display", qty)
         normalized.setdefault("original_quantity", qty)
-        normalized.setdefault("original_quantity_mentioned", normalized["original_quantity"])
 
     if slot_has_value(unit_original_value):
         unit_display_upper = str(unit_original_value).strip().upper()
         unit_display = canonical_unit_label(unit_display_upper, unit or "KG")
         normalized.setdefault("unit_display", unit_display)
         normalized.setdefault("original_unit", unit_display)
-        normalized.setdefault("original_unit_mentioned", unit_display)
 
     if not slot_has_value(qty) or not unit:
         return normalized
@@ -658,101 +713,86 @@ def _clean_candidate_text(value: Optional[str]) -> Optional[str]:
 # LLM-BASED ONBOARDING FIELD EXTRACTION
 # =====================================================================
 
-async def _llm_extract_onboarding_field(
+async def _llm_extract_onboarding_all(
     mc_runtime: "MarketRuntime",
-    field: str,
     user_text: str,
-) -> Optional[str]:
-    """Extract a single onboarding field via LLM.
+) -> Dict[str, Optional[str]]:
+    """Extract every onboarding field from a single utterance in ONE LLM call.
 
-    Expected fields:
-    - name
-    - zone
-    - role (BUYER | PRODUCER | empty)
-    - confirm (YES | NO | empty)
-    - correction_field (ROLE | NAME | ZONE | empty)
+    Returns a dict with keys role / name / zone / confirm. Each is either the
+    extracted value or None. This replaces per-field sequential extraction so
+    onboarding stays sub-second even when the user says everything at once
+    (or corrects several fields mid-flow).
     """
-    if not user_text:
-        return None
+    empty: Dict[str, Optional[str]] = {"role": None, "name": None, "zone": None, "confirm": None}
+    if not user_text or not user_text.strip():
+        return empty
     llm = getattr(mc_runtime, "llm", None)
     if llm is None:
-        return None
+        return empty
 
-    instructions = {
-        "name": (
-            "Retourne uniquement un nom de personne si l'utilisateur donne explicitement son identité. "
-            "Ne retourne jamais une salutation, un rôle (acheteur/producteur), une ville, une zone, une profession, "
-            "ni un mot ambigu. Si ce n'est pas clairement un nom de personne, retourne vide."
-        ),
-        "zone": (
-            "Retourne uniquement une localité explicite (ville, zone, province, région) si l'utilisateur mentionne son lieu. "
-            "Ne retourne jamais un prénom, un nom de personne, une salutation, ni un rôle. "
-            "Si ce n'est pas clairement une localité, retourne vide."
-        ),
-        "role": (
-            "Retourne UNIQUEMENT 'BUYER' ou 'PRODUCER' en suivant ces règles : "
-            "- PRODUCTEUR = agriculteur, éleveur, fournisseur ou vendeur d'engrais/intrants/semences/outils agricoles (mots clés: engrais, intrants, semences, boutique d'intrants, distributeur, fournisseur). "
-            "- BUYER = commerçant qui achète pour revendre, grossiste, consommateur final, client à la recherche d'offres (mots clés: acheter, grossiste, client, revendre). "
-            "N'infère jamais le rôle à partir d'un prénom, d'une salutation (bonjour, bonsoir, salut, hello), d'un message de politesse ou d'une simple localité. "
-            "Exemples à IGNORER totalement (retour vide): 'bonjour', 'bonsoir je viens aux nouvelles', 'salut c'est Jojo', 'je suis là'. "
-            "Si le message n'exprime pas explicitement le rôle avec des mots liés à l'achat ou à la production agricole, retourne vide pour que l'agent repose la question."
-        ),
-        "confirm": (
-            "Retourne 'YES' si l'utilisateur confirme que les informations sont correctes. "
-            "Retourne 'NO' si l'utilisateur veut corriger. "
-            "Retourne vide si ce n'est pas clair."
-        ),
-        "correction_field": (
-            "Si l'utilisateur veut corriger, retourne UNIQUEMENT: 'ROLE' ou 'NAME' ou 'ZONE'. "
-            "Retourne vide si ce n'est pas clair."
-        ),
-    }
-    field_key = field if field in instructions else None
-    if field_key is None:
-        return None
     system_prompt = (
-        "Tu extrais des informations d'onboarding pour AgriConnect. "
-        "Réponds uniquement un JSON {\"value\": \"...\"}. "
-        f"Instruction: {instructions.get(field_key)}"
+        "Tu extrais des informations d'inscription AgriConnect a partir d'un message utilisateur. "
+        "L'utilisateur peut donner plusieurs informations dans n'importe quel ordre, ou juste une, "
+        "ou corriger une valeur precedente. Ne devine JAMAIS a partir d'une salutation ou d'une politesse.\n\n"
+        "Reponds STRICTEMENT en JSON avec exactement ces 4 cles (mets null si l'info n'est pas explicite) :\n"
+        '{\"role\": \"BUYER\"|\"PRODUCER\"|null, \"name\": string|null, \"zone\": string|null, \"confirm\": \"YES\"|\"NO\"|null}\n\n'
+        "Regles :\n"
+        "- role : 'PRODUCER' pour agriculteur, eleveur, producteur, fournisseur d'engrais/intrants/semences. "
+        "'BUYER' pour acheteur, commercant, grossiste, client, revendeur. Sinon null.\n"
+        "- name : uniquement un nom de personne (prenom, nom complet). Jamais un role, une ville, une salutation, une profession generique.\n"
+        "- zone : uniquement une localite (ville, province, region, quartier). Jamais un nom de personne.\n"
+        "- confirm : 'YES' si l'utilisateur valide/accepte/confirme explicitement. 'NO' s'il refuse, corrige ou dit que c'est faux. "
+        "Sinon null (ne devine pas depuis un simple bonjour ou une info non liee)."
     )
-
     try:
         completion = await asyncio.to_thread(
             lambda: llm.chat.completions.create(
                 model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text},
+                    {"role": "user", "content": user_text.strip()},
                 ],
                 response_format={"type": "json_object"},
                 temperature=0.0,
-                max_tokens=60,
+                max_tokens=200,
             )
         )
         payload = json.loads(completion.choices[0].message.content or "{}")
-        value = payload.get("value")
-
-        if field_key == "role":
-            val = str(value or "").strip().upper()
-            return val if val in {"BUYER", "PRODUCER"} else None
-
-        if field_key == "confirm":
-            val = str(value or "").strip().upper()
-            if val in {"YES", "NO"}:
-                return val
-            if val in {"OUI", "NON"}:
-                return "YES" if val == "OUI" else "NO"
-            return None
-
-        if field_key == "correction_field":
-            val = str(value or "").strip().upper()
-            return val if val in {"ROLE", "NAME", "ZONE"} else None
-
-        return _clean_candidate_text(value)
-
     except Exception as exc:
-        logger.debug("[Onboarding] LLM extraction failed for %s: %s", field, exc)
-        return None
+        logger.warning("ONBOARDING_BULK_EXTRACT_ERROR | %s", exc)
+        return empty
+
+    logger.info("ONBOARDING_BULK_EXTRACT | input=%r | output=%s", user_text[:120], payload)
+
+    _CONFIRM_NORMALIZE: Dict[str, str] = {
+        "OUI": "YES", "NON": "NO", "OK": "YES",
+        "CORRECT": "YES", "EXACT": "YES", "TRUE": "YES", "FALSE": "NO",
+        "VRAI": "YES", "FAUX": "NO",
+    }
+
+    def _norm(value: Any, allowed: Optional[set] = None) -> Optional[str]:
+        if value is None:
+            return None
+        s = str(value).strip()
+        if not s:
+            return None
+        if allowed is not None:
+            up = s.upper()
+            return up if up in allowed else None
+        return s
+
+    raw_confirm = _norm(payload.get("confirm"), {"YES", "NO"})
+    if raw_confirm is None:
+        raw_val = str(payload.get("confirm") or "").strip().upper()
+        raw_confirm = _CONFIRM_NORMALIZE.get(raw_val)
+
+    return {
+        "role": _norm(payload.get("role"), {"BUYER", "PRODUCER"}),
+        "name": _norm(payload.get("name")),
+        "zone": _norm(payload.get("zone")),
+        "confirm": raw_confirm,
+    }
 
 
 # =====================================================================
@@ -792,7 +832,7 @@ __all__ = [
     "_clean_candidate_text",
     "canonical_unit_label",
     # LLM helpers
-    "_llm_extract_onboarding_field",
+    "_llm_extract_onboarding_all",
     # Compute / reset
     "_compute_progress",
     "_build_proactive_hint",

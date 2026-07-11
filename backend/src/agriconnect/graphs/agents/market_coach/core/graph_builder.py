@@ -44,6 +44,13 @@ from agriconnect.graphs.agents.market_coach.core.router import (
     DefaultDomainRouter,
     BUYER_CART_GOALS,
     BUYER_NEGOTIATION_GOALS,
+    BUYER_PREORDER_GOALS,
+    BUYER_ORDER_TRACKING_GOALS,
+    BUYER_AUCTION_TRACKING_GOALS,
+)
+from agriconnect.graphs.agents.market_coach.core.policies import (
+    get_after_validator_policy,
+    get_fast_path_policy,
 )
 from agriconnect.graphs.agents.market_coach.flows.buyer.flow import (
     cart_management,
@@ -175,9 +182,14 @@ def _route_after_cognitive(state: MarketAgentState) -> str:
     return "to_clarification"
 
 
-# NOTE: _check_cart_status removed — caused infinite loops.
-# cart_management ALWAYS flows to response_strategy; it handles
-# errors/missing-fields internally by setting final_response.
+def _make_route_after_interpreter(role: str):
+    """Role-aware conditional router after input_interpreter.
+
+    Delegates to FastPathPolicy — new tunnel goals are added to the policy
+    registry in core/policies.py, not here.
+    """
+    policy = get_fast_path_policy(role)
+    return policy.route
 
 
 def build_graph(
@@ -282,7 +294,13 @@ def build_graph(
         {"to_interpreter": "input_interpreter", "to_strategy": "response_strategy"},
     )
 
-    workflow.add_edge("input_interpreter", "cognitive_guard")
+    route_after_interpreter = _make_route_after_interpreter(role_up)
+    workflow.add_conditional_edges(
+        "input_interpreter",
+        route_after_interpreter,
+        {"to_cognitive": "cognitive_guard", "to_memory_fast": "memory_update"},
+    )
+
     workflow.add_edge("cognitive_guard", "cognitive_orchestrator")
     
     workflow.add_conditional_edges(
@@ -317,9 +335,10 @@ def build_graph(
 
     workflow.add_edge("memory_update", "validator")
 
-    # Routage post-validateur : délégué au DomainRouter (rôle-agnostique).
-    # Le DomainRouter injecte les branches transactionnelles buyer si nécessaire.
-    route_after_validator = domain_router.route_after_validator
+    # Routage post-validateur : délégué à AfterValidatorPolicy (configurable).
+    # Nouveaux tunnels s'ajoutent dans core/policies.py, pas ici.
+    validator_policy = get_after_validator_policy(role_up)
+    route_after_validator = validator_policy.decide
 
     if role_up == "BUYER":
         validator_targets = {
@@ -516,7 +535,7 @@ async def demo_buyer_purchase_flow() -> None:
     state: Dict[str, Any] = {
         "user_phone": COMMAND_TEST_PHONE,
         "current_goal": "BUYER_ADD_TO_CART",
-        "transaction_payload": {"product": "maïs blanc", "quantity_mentioned": 50, "unit_mentioned": "KG"},
+        "transaction_payload": {"product": "maïs blanc", "quantity": 50, "unit": "KG"},
         "preorder_workflow": {"phase": "CART"},
     }
 
@@ -528,7 +547,7 @@ async def demo_buyer_purchase_flow() -> None:
     # Step 1b: Simulate multi-vendor selection (demo)
     if state.get("vendor_selection_context") and not state["vendor_selection_context"].get("__reset__"):
         print("\n[1b] Multi-vendor menu detected — simulating selection of vendor #1")
-        state["transaction_payload"] = {"selection_index": 1, "product": "maïs blanc", "quantity_mentioned": 50}
+        state["transaction_payload"] = {"selection_index": 1, "product": "maïs blanc", "quantity": 50}
         state["current_goal"] = "BUYER_ADD_TO_CART"
         cart_result2 = await cart_management(state, runtime)
         state.update(cart_result2)
@@ -554,8 +573,8 @@ async def demo_buyer_purchase_flow() -> None:
         "current_goal": "BUYER_NEGOTIATE_PRICE",
         "transaction_payload": {
             "product": "maïs blanc",
-            "quantity_mentioned": 50,
-            "price_mentioned": 240,
+            "quantity": 50,
+            "price": 240,
         },
         "stable_entities": {},
     }
@@ -577,7 +596,7 @@ async def demo_buyer_purchase_flow() -> None:
     _log("6. Contre-offre (demande prix)", neg_counter)
 
     # Step 7: Submit counter price
-    negotiation_state["transaction_payload"] = {"price_mentioned": 260}
+    negotiation_state["transaction_payload"] = {"price": 260}
     neg_submit = await negotiation_gate(negotiation_state, runtime)
     negotiation_state.update(neg_submit)
     _log("7. Soumission contre-offre", neg_submit)
@@ -610,7 +629,7 @@ async def run_command_logic_test_suite() -> None:
     state: Dict[str, Any] = {
         "user_phone": phone,
         "current_goal": "BUYER_ADD_TO_CART",
-        "transaction_payload": {"product": "maïs blanc", "quantity_mentioned": 50, "unit_mentioned": "KG"},
+        "transaction_payload": {"product": "maïs blanc", "quantity": 50, "unit": "KG"},
         "preorder_workflow": {"phase": "CART"},
     }
 
@@ -619,7 +638,7 @@ async def run_command_logic_test_suite() -> None:
     test_results.append({"label": "Cart → sélection produit", "result": cart_result, "success": _is_success_status(cart_result)})
 
     if state.get("vendor_selection_context") and not state["vendor_selection_context"].get("__reset__"):
-        state["transaction_payload"] = {"selection_index": 1, "product": "maïs blanc", "quantity_mentioned": 50}
+        state["transaction_payload"] = {"selection_index": 1, "product": "maïs blanc", "quantity": 50}
         state["current_goal"] = "BUYER_ADD_TO_CART"
         cart_result2 = await cart_management(state, runtime)
         state.update(cart_result2)
@@ -642,8 +661,8 @@ async def run_command_logic_test_suite() -> None:
         "current_goal": "BUYER_NEGOTIATE_PRICE",
         "transaction_payload": {
             "product": "maïs blanc",
-            "quantity_mentioned": 50,
-            "price_mentioned": 240,
+            "quantity": 50,
+            "price": 240,
         },
         "stable_entities": {},
     }
@@ -662,7 +681,7 @@ async def run_command_logic_test_suite() -> None:
     negotiation_state.update(neg_counter)
     test_results.append({"label": "Négociation – demande contre-offre", "result": neg_counter, "success": _is_success_status(neg_counter)})
 
-    negotiation_state["transaction_payload"] = {"price_mentioned": 260}
+    negotiation_state["transaction_payload"] = {"price": 260}
     neg_submit = await negotiation_gate(negotiation_state, runtime)
     negotiation_state.update(neg_submit)
     test_results.append({"label": "Négociation – soumission prix", "result": neg_submit, "success": _is_success_status(neg_submit)})

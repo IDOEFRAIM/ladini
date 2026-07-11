@@ -41,16 +41,5 @@ def _route_after_confirmation(state: MarketAgentState) -> str:
 
 
 def _route_after_executor(state: MarketAgentState) -> str:
-    """Routage post-exécution agentique.
-
-    Si l'executor a détecté un champ manquant via self-healing (status=WAITING_INPUT),
-    il route vers response_strategy pour poser la question.
-    Si erreur récupérable avec retry possible, re-route vers validator pour correction.
-    Sinon : stratégie normale.
-    """
-    status = str(state.get("status") or "").upper()
-    # Self-healing a routé vers ASK_MISSING_FIELD
-    if status == "WAITING_INPUT":
-        return "to_strategy"
-    # TODO: future feedback loop — route to validator on recoverable errors
+    """Post-execution routing — always proceeds to response strategy."""
     return "to_strategy"

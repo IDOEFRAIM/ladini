@@ -16,6 +16,9 @@ from agriconnect.graphs.agents.market_coach.core.slots import build_alias_mirror
 from agriconnect.graphs.agents.market_coach.core.state_compaction import (
     build_compaction_patch,
 )
+from agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment import (
+    enrich_payload_from_text,
+)
 
 logger = get_logger("AgriConnect.MarketCoach.MemoryUpdate")
 
@@ -32,14 +35,14 @@ _ADD_TO_CART_DRAFT_FIELDS = {
 }
 
 
-_PRIMARY_CANONICAL_UNITS = {"KG", "TONNE", "SAC", "UNITE"}
+_PRIMARY_CANONICAL_UNITS = {"KG", "TONNE", "SAC", "UNITE", "PANIER", "TETE"}
 
 # _ALIAS_MIRRORS is now derived from core/slots.py (single source of truth).
 _ALIAS_MIRRORS = build_alias_mirrors()
 
-_EMPTY_SLOT_VALUES = (None, "", [], {})
 _CORRECTION_HISTORY_LIMIT = 5
 _ORDER_MAPPING_KINDS = frozenset({"order", "order_list", "buyer_orders"})
+_AUCTION_MAPPING_KINDS = frozenset({"auction", "buyer_auction_list", "auction_bids"})
 _EPHEMERAL_WORKING_KEYS = frozenset({"payload_richness", "last_confidence", "step_index"})
 _PRODUCT_CASCADE_FIELDS = (
     "quantity",
@@ -55,6 +58,34 @@ _PRODUCT_CASCADE_FIELDS = (
 )
 _UNIT_CASCADE_FIELDS = ("price",)
 _CANONICAL_SLOT_ORDER = ("product", "quantity", "unit", "price", "zone")
+
+
+_BUYER_REQUEST_SPECIALIZATIONS = frozenset({
+    "BUYER_ADD_TO_CART",
+    "BUYER_VIEW_CART",
+    "BUYER_PREORDER_INIT",
+    "BUYER_PREORDER_CONFIRM",
+    "BUYER_NEGOTIATE_PRICE",
+    "BUYER_CHECK_ORDER_STATUS",
+    "BUYER_LIST_ORDERS",
+    "BUYER_CANCEL_ORDER",
+    "BUYER_LIST_AUCTIONS",
+    "BUYER_CHECK_AUCTION_STATUS",
+    "BUYER_CART_RESET",
+})
+
+
+def _is_goal_refinement(previous: str, incoming: str) -> bool:
+    """BUYER_REQUEST → BUYER_ADD_TO_CART is a specialization, not a real change.
+
+    The context_resolver bridges BUYER_REQUEST into specific goals (cart,
+    preorder, negotiation). This must NOT trigger a payload reset.
+    """
+    if previous == "BUYER_REQUEST" and incoming in _BUYER_REQUEST_SPECIALIZATIONS:
+        return True
+    if incoming == "BUYER_REQUEST" and previous in _BUYER_REQUEST_SPECIALIZATIONS:
+        return True
+    return False
 
 
 def _mirror_aliases(container: Dict[str, Any]) -> None:
@@ -76,7 +107,7 @@ def _values_equal(a: Any, b: Any) -> bool:
 
 
 def _format_value(value: Any) -> str:
-    if value in _EMPTY_SLOT_VALUES:
+    if not slot_has_value(value):
         return "∅"
     if isinstance(value, float):
         return ("%g" % value)
@@ -84,7 +115,7 @@ def _format_value(value: Any) -> str:
 
 
 def _resolve_unit_value(value: Any) -> Optional[str]:
-    if value in (None, "", [], {}):
+    if not slot_has_value(value):
         return None
     raw = str(value).strip().upper()
     if not raw:
@@ -113,6 +144,16 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
     payload = normalize_slot_keys(payload_source)
     stable = normalize_slot_keys(stable_source)
     draft_payload = normalize_slot_keys(draft_source)
+
+    # --- STALE TRANSIENT KEYS CLEANUP ---
+    # transaction_payload uses merge_dict reducer → post_response_cleanup
+    # cannot delete keys. Clear stale selection/resolved values here at the
+    # start of every turn unless the fresh extracted_entities carries them.
+    _interpreted_event_upper = str(state.get("interpreted_event") or "").upper().strip()
+    if _interpreted_event_upper != "SELECTION":
+        for _transient in ("selection_index", "selected_value", "resolved_id"):
+            if _transient not in extracted:
+                payload.pop(_transient, None)
     onboarding_profile = dict(state.get("onboarding_profile") or {})
 
     def _rehydrate_onboarding_slot(source_key: str, target_key: Optional[str] = None) -> None:
@@ -139,6 +180,7 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
                     recent_corrections[key] = value
     payload_reset = False
     product_slot_changed = False
+    clear_vendor_ctx = False
 
     def _record_correction(field: str, old: Any, new: Any) -> None:
         if not field:
@@ -152,11 +194,12 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         recent_corrections[field] = change_value
 
     def _reset_payload(reason: str) -> None:
-        nonlocal payload_reset, payload
+        nonlocal payload_reset, payload, clear_vendor_ctx
         if payload:
             logger.info("[MemoryUpdate] Payload reset (%s)", reason)
         payload.clear()
         payload_reset = True
+        clear_vendor_ctx = True
 
     def _cascade_clear(fields) -> None:
         for field in fields:
@@ -169,7 +212,7 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         return trimmed or None
 
     def _apply_slot(field: str, value: Any) -> None:
-        nonlocal product_slot_changed
+        nonlocal product_slot_changed, clear_vendor_ctx
         if not slot_has_value(value):
             return
         current_value = payload.get(field)
@@ -187,6 +230,7 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
             stable.pop("unit", None)
             stable.pop("stock_id", None)
             product_slot_changed = True
+            clear_vendor_ctx = True
         elif field == "unit":
             _cascade_clear(_UNIT_CASCADE_FIELDS)
             stable.pop("unit", None)
@@ -262,9 +306,10 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         incoming_intent = None
     previous_intent = _clean_upper(payload.get("intent"))
     if previous_intent and incoming_intent and previous_intent != incoming_intent and not onboarding_active:
-        _record_correction("intent", previous_intent, incoming_intent)
-        if not form_completed:
-            _reset_payload("intent_change")
+        if not _is_goal_refinement(previous_intent, incoming_intent):
+            _record_correction("intent", previous_intent, incoming_intent)
+            if not form_completed:
+                _reset_payload("intent_change")
     if incoming_intent and not onboarding_active:
         payload["intent"] = incoming_intent
     extracted.pop("intent", None)
@@ -293,7 +338,7 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         _apply_slot(field, value)
 
     for key, value in list(extracted.items()):
-        if value in _EMPTY_SLOT_VALUES:
+        if not slot_has_value(value):
             continue
         payload[key] = value
 
@@ -310,12 +355,42 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
             payload[key] = stable[key]
             logger.debug("[MemoryUpdate] Inherited stable entity %s=%s", key, stable[key])
 
+    # --- VENDOR CONTEXT RECOVERY for cart tunnel ---
+    # When the buyer is selecting a vendor, the product and quantity live in
+    # vendor_selection_context but may be absent from payload (reset between
+    # turns). Recover them so the validator doesn't block with "product missing".
+    if goal_upper in ("BUYER_ADD_TO_CART", "BUYER_VIEW_CART"):
+        vendor_ctx = state.get("vendor_selection_context")
+        if isinstance(vendor_ctx, dict) and not vendor_ctx.get("__reset__"):
+            if not slot_has_value(payload.get("product")):
+                chosen = vendor_ctx.get("chosen_vendor")
+                recovered_product = (
+                    (chosen.get("name") if isinstance(chosen, dict) else None)
+                    or vendor_ctx.get("product")
+                )
+                if slot_has_value(recovered_product):
+                    payload["product"] = recovered_product
+                    logger.info("[MemoryUpdate] Recovered product '%s' from vendor_selection_context", recovered_product)
+            if not slot_has_value(payload.get("quantity")):
+                recovered_qty = vendor_ctx.get("requested_quantity")
+                if slot_has_value(recovered_qty):
+                    payload["quantity"] = recovered_qty
+                    logger.info("[MemoryUpdate] Recovered quantity '%s' from vendor_selection_context", recovered_qty)
+            if not slot_has_value(payload.get("unit")):
+                recovered_unit = vendor_ctx.get("requested_unit")
+                if slot_has_value(recovered_unit):
+                    payload["unit"] = recovered_unit
+
     # --- ZONE INJECTION from user profile ---
-    # Si aucune zone n'est fournie et que le profil en a une, on l'utilise
     if not slot_has_value(payload.get("zone")):
         profile_zone = state.get("zone") or state.get("zone_name")
         if slot_has_value(profile_zone):
             payload["zone"] = str(profile_zone).strip()
+
+    # --- SLOT ENRICHMENT: text-based extraction (single pass) ---
+    normalized_text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+    if normalized_text and current_goal:
+        payload = await enrich_payload_from_text(payload, normalized_text, current_goal, mc_runtime)
 
     # --- AG-UI: free-text resolution of ListMenu labels ---
     user_free_text = (
@@ -376,7 +451,7 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
 
         if resolved_id:
             resolved_str = str(resolved_id)
-            if mapping_kind == "auction":
+            if mapping_kind in _AUCTION_MAPPING_KINDS:
                 payload["auction_id"] = resolved_str
             elif mapping_kind == "bid":
                 payload["bid_id"] = resolved_str
@@ -420,7 +495,7 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
     # --- Conversation metrics ---
     working["last_event"] = state.get("interpreted_event")
     working["last_confidence"] = float(state.get("interpreter_confidence") or 0.0)
-    entity_count = sum(1 for v in payload.values() if v not in (None, "", [], {}))
+    entity_count = sum(1 for v in payload.values() if slot_has_value(v))
     working["payload_richness"] = entity_count
     if current_goal and current_goal != "DISAMBIGUATION_PENDING":
         working["active_goal"] = current_goal
@@ -435,7 +510,7 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
             tracked = {
                 key: payload.get(key)
                 for key in _ADD_TO_CART_DRAFT_FIELDS
-                if payload.get(key) not in (None, "", [], {})
+                if slot_has_value(payload.get(key))
             }
             if tracked:
                 draft_patch = merge_payload(existing_draft, tracked)
@@ -464,6 +539,9 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         "working_memory": working,
         "current_goal": current_goal,
     }
+
+    if clear_vendor_ctx:
+        result["vendor_selection_context"] = None
 
     if draft_patch is not None:
         result["draft_payload"] = draft_patch

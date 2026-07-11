@@ -22,14 +22,10 @@ def __getattr__(name: str) -> Any:
         from agriconnect.infrastructure.mcp.base import MCPProvider, MCPServerApp, MCPToolSpec
 
         return {"MCPProvider": MCPProvider, "MCPServerApp": MCPServerApp, "MCPToolSpec": MCPToolSpec}[name]
-    if name in {"AgriMCPClient", "UnifiedMCPClient", "MCPTransportConfig"}:
-        from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig, UnifiedMCPClient
+    if name in {"AgriMCPClient", "MCPTransportConfig"}:
+        from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
 
-        return {
-            "AgriMCPClient": AgriMCPClient,
-            "UnifiedMCPClient": UnifiedMCPClient,
-            "MCPTransportConfig": MCPTransportConfig,
-        }[name]
+        return {"AgriMCPClient": AgriMCPClient, "MCPTransportConfig": MCPTransportConfig}[name]
     if name == "MCPContextServer":
         from agriconnect.infrastructure.mcp.context import MCPContextServer
 
@@ -38,8 +34,8 @@ def __getattr__(name: str) -> Any:
         from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer, mcp, runtime
 
         return {"AgriDBMCPServer": AgriDBMCPServer, "mcp": mcp, "runtime": runtime}[name]
-    if name == "ShieldHub":
-        from agriconnect.infrastructure.mcp.security import ShieldHub
+    if name in {"ShieldHub", "UnifiedMCPClient"}:
+        from agriconnect.infrastructure.mcp.security import ShieldHub, UnifiedMCPClient
 
-        return ShieldHub
+        return {"ShieldHub": ShieldHub, "UnifiedMCPClient": UnifiedMCPClient}[name]
     raise AttributeError(name)

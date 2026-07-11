@@ -506,18 +506,9 @@ class AgriMCPClient:
         if hasattr(message, "method") and message.method == "notifications/tools/list_changed":
             await self.refresh_tools()
 
-class UnifiedMCPClient:
-    """Point d'entrée unique avec enforcement de sécurité (Shield)."""
-
-    def __init__(self, session_id: str = "unknown") -> None:
-        # Assurez-vous que ShieldHub est bien initialisé
-        self._hub = ShieldHub(session_id=session_id)
-
-    async def call_tool(self, tool_name: str, arguments) -> Any:
-        return await self._hub.call(tool_name, arguments or {})
-
-    async def list_tools(self) -> Dict[str, List[Dict[str, Any]]]:
-        return await self._hub.list_tools()
+# NOTE: `UnifiedMCPClient` is defined once in `security.py` (canonical location,
+# closest to ShieldHub). Import it from there:
+#     from agriconnect.infrastructure.mcp.security import UnifiedMCPClient
 
 
 async def main():

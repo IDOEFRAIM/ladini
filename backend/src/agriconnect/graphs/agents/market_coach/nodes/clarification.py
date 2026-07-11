@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
 from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import (
@@ -50,7 +50,7 @@ async def clarification_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -
     )
     if not needs_clarification:
         return {}
-    if _detect_disambiguation_candidates(text.lower()):
+    if _detect_disambiguation_candidates(text.lower(), user_role):
         return {}
 
     # Try LLM-powered clarification

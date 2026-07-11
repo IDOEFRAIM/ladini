@@ -36,9 +36,13 @@ NEGOTIATION_GOALS = frozenset({"BUYER_NEGOTIATE_PRICE"})
 ORDER_TRACKING_GOALS = frozenset({
     "BUYER_CHECK_ORDER_STATUS", "BUYER_LIST_ORDERS", "BUYER_CANCEL_ORDER",
 })
+AUCTION_TRACKING_GOALS = frozenset({
+    "BUYER_LIST_AUCTIONS", "BUYER_CHECK_AUCTION_STATUS",
+})
 
 READ_ONLY_INTENTS = frozenset({
     "BUYER_VIEW_CART", "BUYER_LIST_ORDERS", "BUYER_CHECK_ORDER_STATUS",
+    "BUYER_LIST_AUCTIONS", "BUYER_CHECK_AUCTION_STATUS",
 })
 
 ESCALATE_KEYWORDS = frozenset({
@@ -96,7 +100,6 @@ def resolve_product(
     """Resolve product name from payload → stable entities → text inference → memory."""
     product = (
         payload.get("product")
-        or payload.get("product_name")
         or stable_entities.get("product")
     )
     if not product:
@@ -120,15 +123,11 @@ def resolve_quantity(
     allow_stable_fallback: bool = True,
 ) -> Any:
     """Resolve quantity from payload → stable entities, normalizing key."""
-    quantity = payload.get("quantity_mentioned")
-    if quantity in (None, "", 0):
-        quantity = payload.get("quantity")
-        if quantity not in (None, "", 0):
-            payload["quantity_mentioned"] = quantity
+    quantity = payload.get("quantity")
     if quantity in (None, "", 0) and allow_stable_fallback:
-        quantity = stable_entities.get("quantity_mentioned")
+        quantity = stable_entities.get("quantity")
         if quantity not in (None, "", 0):
-            payload["quantity_mentioned"] = quantity
+            payload["quantity"] = quantity
             payload["_auto_quantity_fill"] = True
     return quantity
 
@@ -139,12 +138,11 @@ def resolve_unit(
 ) -> Optional[str]:
     """Resolve unit from payload → stable entities."""
     unit = (
-        payload.get("unit_mentioned")
-        or payload.get("unit")
-        or stable_entities.get("unit_mentioned")
+        payload.get("unit")
+        or stable_entities.get("unit")
     )
     if unit:
-        payload.setdefault("unit_mentioned", unit)
+        payload.setdefault("unit", unit)
     return unit
 
 
@@ -154,14 +152,14 @@ def resolve_unit(
 
 _EXPECTED_INPUT_FROM_FIELD = {
     "product": "PRODUCT",
-    "quantity_mentioned": "QUANTITY",
-    "unit_mentioned": "UNIT",
+    "quantity": "QUANTITY",
+    "unit": "UNIT",
 }
 
 _DRAFT_FIELD_PAIRS = (
-    ("product", "product_name"),
-    ("quantity_mentioned", "quantity"),
-    ("unit_mentioned", "unit"),
+    ("product", None),
+    ("quantity", None),
+    ("unit", None),
 )
 
 
@@ -209,7 +207,7 @@ def capture_cart_draft(state: Dict[str, Any], payload: Dict[str, Any]) -> Option
     """Capture partial slot data into a draft payload snapshot."""
     draft = dict(state.get("draft_payload") or {})
     changed = False
-    for key in ("product", "product_name", "quantity", "quantity_mentioned", "unit", "unit_mentioned"):
+    for key in ("product", "quantity", "unit"):
         value = payload.get(key)
         if value in (None, "", 0, [], {}):
             continue
@@ -227,11 +225,13 @@ def capture_cart_draft(state: Dict[str, Any], payload: Dict[str, Any]) -> Option
 # STATE RESET HELPERS
 # =====================================================================
 
-def clear_active_goal(state: Dict[str, Any]) -> Dict[str, Any]:
+def clear_active_goal(state: Dict[str, Any], *, clear_cart_snapshot: bool = False) -> Dict[str, Any]:
     """Return a working_memory patch with the goal/lock cleared."""
     working = dict(state.get("working_memory") or {})
     working["active_goal"] = None
     working["locked_intent"] = None
+    if clear_cart_snapshot:
+        working.pop("last_active_cart", None)
     return working
 
 
@@ -333,15 +333,19 @@ def detect_cart_action(state: Dict[str, Any]) -> Optional[str]:
     expected = str(state.get("expected_input") or "").upper().strip() or "SELECTION"
     if expected not in {"SELECTION", "NONE", ""}:
         return None
+
+    cart = state.get("active_cart") or []
     working = state.get("working_memory") or {}
     mapping_kind = str(
         working.get("available_mapping_kind") or working.get("available_mapping_meta") or ""
     ).lower().strip()
-    if mapping_kind not in {"cart", "preorder_action"}:
-        return None
+
     for keyword, action in CART_ACTION_KEYWORDS.items():
         if keyword in text:
-            return action
+            if action == "PREORDER" and cart:
+                return action
+            if mapping_kind in {"cart", "preorder_action"}:
+                return action
     return None
 
 
@@ -351,7 +355,7 @@ def read_only_intent(intent: Optional[str]) -> bool:
 
 __all__ = [
     "CART_GOALS", "PREORDER_GOALS", "NEGOTIATION_GOALS",
-    "ORDER_TRACKING_GOALS", "READ_ONLY_INTENTS",
+    "ORDER_TRACKING_GOALS", "AUCTION_TRACKING_GOALS", "READ_ONLY_INTENTS",
     "ESCALATE_KEYWORDS", "CONFIRM_KEYWORDS", "DECLINE_KEYWORDS",
     "infer_product_from_text", "resolve_product", "resolve_quantity", "resolve_unit",
     "missing_draft_field", "draft_requires_completion", "draft_expected_input",

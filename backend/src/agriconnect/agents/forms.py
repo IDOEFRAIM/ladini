@@ -18,8 +18,52 @@ Agents plug this into their graph via a single node that delegates to
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
+
+from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+    parse_compound_quantity,
+    extract_unit_only_from_text,
+    default_unit_for_product,
+)
+
+
+def _coerce_number(v: Any) -> float:
+    """Extract the first numeric value from a string, tolerating units.
+
+    Handles "500", "500 kg", "300 fcfa", "1 500,50", "2.5 tonnes", 500.
+    Raises ValueError if no number can be extracted.
+    """
+    if isinstance(v, (int, float)):
+        return float(v)
+    text = str(v).strip()
+    if not text:
+        raise ValueError("empty")
+    # Match first number (integer or decimal, with , or . separator)
+    match = re.search(r"(\d[\d\s]*(?:[.,]\d+)?)", text)
+    if not match:
+        raise ValueError(f"no number in '{text}'")
+    raw = match.group(1).replace(" ", "").replace(",", ".")
+    return float(raw)
+
+
+def _coerce_quantity(v: Any) -> float:
+    """Extract quantity from text, handling compound expressions.
+
+    Handles "2 tonnes et 375 kg" → 2375.0,  "500 kg" → 500.0,  "3 sacs" → 3.0.
+    Falls back to simple number extraction for plain numerics.
+    """
+    if isinstance(v, (int, float)):
+        return float(v)
+    text = str(v).strip()
+    if not text:
+        raise ValueError("empty")
+    result = parse_compound_quantity(text)
+    if result.quantity is not None:
+        return result.quantity
+    return _coerce_number(v)
+
 
 logger = logging.getLogger("AgriConnect.Forms")
 
@@ -100,6 +144,39 @@ def _build_summary(spec: FormSpec, data: Dict[str, Any]) -> str:
     return f"📋 {spec.title}\n" + "\n".join(parts)
 
 
+_SLOT_TO_EXPECTED_INPUT: Dict[str, str] = {
+    "product": "PRODUCT",
+    "product_name": "PRODUCT",
+    "name": "PRODUCT",
+    "quantity": "QUANTITY",
+    "quantity_mentioned": "QUANTITY",
+    "qty": "QUANTITY",
+    "price": "PRICE",
+    "price_mentioned": "PRICE",
+    "unit_price": "PRICE",
+    "unit": "UNIT",
+    "unit_mentioned": "UNIT",
+    "zone": "LOCATION",
+    "zone_name": "LOCATION",
+    "location": "LOCATION",
+    "region": "LOCATION",
+    "deadline": "DATE",
+    "end_date": "DATE",
+    "sowing_date": "DATE",
+    "date": "DATE",
+}
+
+
+def _canonical_expected_input(slot_name: str) -> str:
+    if not slot_name:
+        return "NONE"
+    normalized = slot_name.lower().strip()
+    return _SLOT_TO_EXPECTED_INPUT.get(normalized, slot_name.upper())
+
+
+_QUANTITY_SLOT_NAMES = frozenset({"quantity", "quantity_mentioned", "qty"})
+
+
 def run_form_step(
     spec: FormSpec,
     state: Dict[str, Any],
@@ -137,6 +214,37 @@ def run_form_step(
         val = _resolve_slot_value(slot, extracted, existing_data)
         if val is not None:
             existing_data[slot.name] = val
+
+    # ── 1b. Cross-slot inference: auto-fill unit from quantity text ──
+    qty_slot_name = next(
+        (s.name for s in spec.slots if s.name in _QUANTITY_SLOT_NAMES),
+        None,
+    )
+    unit_slot_name = next(
+        (s.name for s in spec.slots if s.name in ("unit", "unit_mentioned")),
+        None,
+    )
+    if (
+        qty_slot_name
+        and unit_slot_name
+        and existing_data.get(qty_slot_name) not in (None, "", [], {})
+        and existing_data.get(unit_slot_name) in (None, "", [], {})
+    ):
+        raw_qty_text = str(
+            extracted.get(qty_slot_name)
+            or extracted.get("quantity")
+            or extracted.get("quantity_mentioned")
+            or state.get("normalized_text")
+            or state.get("user_query")
+            or ""
+        )
+        unit_from_text = extract_unit_only_from_text(raw_qty_text)
+        if unit_from_text:
+            existing_data[unit_slot_name] = unit_from_text
+        else:
+            # Livestock (poussins, moutons…) are counted per head, not weighed.
+            product_name = existing_data.get("product") or existing_data.get("product_name")
+            existing_data[unit_slot_name] = default_unit_for_product(product_name)
 
     # ── 2. Find first missing required slot ─────────────────────────
     missing_slot: Optional[SlotSpec] = None
@@ -213,7 +321,7 @@ def run_form_step(
             "response_strategy": "ASK_MISSING_FIELD",
             "last_missing_field": missing_slot.name,
             "missing_fields": missing_names,
-            "expected_input": missing_slot.name.upper(),
+            "expected_input": _canonical_expected_input(missing_slot.name),
             "last_agent_question": prompt,
             "status": "WAITING_INPUT",
             "final_response": prompt,
@@ -232,37 +340,60 @@ PRODUCT_FORM = FormSpec(
         SlotSpec(
             name="product",
             label="Nom du produit",
-            prompt="Quel produit souhaitez-vous publier ? (ex: Maïs, Tomate, Sorgho)",
+            prompt=(
+                "🌾 Quel produit souhaitez-vous mettre en vente ?\n"
+                "💡 _Exemples : Maïs, Tomate, Sorgho, Riz, Mil..._"
+            ),
             aliases=["product_name", "name", "item_name"],
             business_reason="Pour cibler les bons acheteurs.",
         ),
         SlotSpec(
-            name="quantity_mentioned",
+            name="quantity",
             label="Quantité",
-            prompt="Quelle quantité avez-vous à vendre ? (ex: 500 kg, 3 tonnes)",
-            aliases=["quantity", "qty"],
-            coerce=lambda v: float(str(v).replace(",", ".")),
+            prompt=(
+                "📦 Quelle quantité avez-vous à vendre ?\n"
+                "💡 _Exemples : 500 kg, 3 tonnes, 20 sacs..._"
+            ),
+            aliases=["quantity_mentioned", "qty"],
+            coerce=_coerce_quantity,
             business_reason="Pour que les acheteurs sachent ce qui est disponible.",
         ),
         SlotSpec(
-            name="price_mentioned",
+            name="unit",
+            label="Unité",
+            prompt=(
+                "⚖️ Quelle unité pour cette quantité ?\n"
+                "💡 _Répondez : KG, TONNE, SAC..._"
+            ),
+            aliases=["unit_mentioned"],
+            required=False,
+            business_reason="Pour éviter toute confusion à la livraison.",
+        ),
+        SlotSpec(
+            name="price",
             label="Prix unitaire (FCFA)",
-            prompt="À quel prix unitaire souhaitez-vous vendre ? (en FCFA par kg)",
-            aliases=["price", "unit_price"],
-            coerce=lambda v: float(str(v).replace(",", ".")),
+            prompt=(
+                "💰 À quel prix unitaire souhaitez-vous vendre (en FCFA) ?\n"
+                "💡 _Exemples : 300, 250 FCFA/kg, 1500 le sac..._"
+            ),
+            aliases=["price_mentioned", "unit_price"],
+            coerce=_coerce_number,
             business_reason="Pour positionner votre offre sur le marché.",
         ),
         SlotSpec(
-            name="zone_name",
+            name="zone",
             label="Localisation",
-            prompt="Où se trouve votre produit ? (ville ou zone, ex: Ouagadougou, Bobo Dioulasso)",
-            aliases=["location", "zone", "locality"],
+            prompt=(
+                "📍 Où se trouve votre produit ?\n"
+                "💡 _Exemples : Ouagadougou, Bobo Dioulasso, Koudougou..._"
+            ),
+            aliases=["zone_name", "location", "locality"],
             required=False,
             business_reason="Pour connecter avec les acheteurs locaux.",
         ),
     ],
     confirm_before_submit=False,
-    summary_template="📦 Produit : {product}\n📊 Quantité : {quantity_mentioned} kg\n💰 Prix : {price_mentioned} FCFA/kg",
+    summary_template="📦 Produit : {product}\n📊 Quantité : {quantity} {unit}\n💰 Prix : {price} FCFA",
 )
 
 AUCTION_FORM = FormSpec(
@@ -277,19 +408,19 @@ AUCTION_FORM = FormSpec(
             business_reason="Pour publier sur le bon marché.",
         ),
         SlotSpec(
-            name="price_mentioned",
+            name="price",
             label="Prix de départ minimum (FCFA)",
             prompt="Quel est le prix de départ minimum ? (en FCFA)",
-            aliases=["price", "min_price", "max_price"],
-            coerce=lambda v: float(str(v).replace(",", ".")),
+            aliases=["price_mentioned", "min_price", "max_price"],
+            coerce=_coerce_number,
             business_reason="Les producteurs répondront au-dessus de ce seuil.",
         ),
         SlotSpec(
-            name="quantity_mentioned",
+            name="quantity",
             label="Quantité souhaitée",
             prompt="Quelle quantité recherchez-vous ? (ex: 1000 kg)",
-            aliases=["quantity", "qty"],
-            coerce=lambda v: float(str(v).replace(",", ".")),
+            aliases=["quantity_mentioned", "qty"],
+            coerce=_coerce_quantity,
             business_reason="Pour filtrer les offres adaptées.",
         ),
         SlotSpec(
@@ -304,8 +435,8 @@ AUCTION_FORM = FormSpec(
     confirm_before_submit=True,
     summary_template=(
         "🔨 Enchère : {product}\n"
-        "📊 Quantité : {quantity_mentioned} {unit_mentioned}\n"
-        "💰 Prix min : {price_mentioned} FCFA\n"
+        "📊 Quantité : {quantity}\n"
+        "💰 Prix min : {price} FCFA\n"
         "📅 Date limite : {deadline}"
     ),
 )
@@ -333,7 +464,7 @@ CROP_CYCLE_FORM = FormSpec(
             label="Superficie (hectares)",
             prompt="Quelle est la superficie de cette parcelle ? (ex: 2 ha, 5000 m²)",
             aliases=["surface", "area", "size"],
-            coerce=lambda v: float(str(v).replace(",", ".")),
+            coerce=_coerce_number,
             business_reason="Pour adapter les doses d'intrants et les rendements attendus.",
         ),
         SlotSpec(

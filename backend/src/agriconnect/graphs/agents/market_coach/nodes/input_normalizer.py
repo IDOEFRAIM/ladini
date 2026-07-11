@@ -57,7 +57,26 @@ async def input_normalizer(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
         updates.setdefault("onboarding_internal_step", "__NONE__")
         logger.info("[Normalizer] Profil déjà chargé — onboarding désactivé")
 
-    if not state.get("user_context_loaded") and phone:
+    elif state.get("is_onboarding") and phone:
+        # Orchestrator already detected a new user — skip redundant MCP call.
+        tx_payload = dict(state.get("transaction_payload") or {})
+        tx_payload["phone"] = str(phone).strip()
+        current_step = (
+            state.get("onboarding_internal_step")
+            or state.get("onboarding_step")
+            or "COLLECT_ROLE"
+        )
+        updates.update({
+            "user_context_loaded": False,
+            "is_onboarding": True,
+            "onboarding_step": current_step,
+            "onboarding_internal_step": current_step,
+            "transaction_payload": tx_payload,
+            "user_phone": str(phone).strip(),
+        })
+        logger.info("[Normalizer] Onboarding déjà activé par l'orchestrateur — skip MCP")
+
+    elif not state.get("user_context_loaded") and phone:
         try:
             profile_updates = await load_user_profile(str(phone), mc_runtime)
 

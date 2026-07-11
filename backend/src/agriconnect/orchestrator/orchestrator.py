@@ -15,6 +15,7 @@ import asyncio
 import copy
 import json
 import logging
+import time
 from typing import Any, Dict
 
 from agriconnect.workspace import Workspace, WorkspaceCheckpointer, WorkspaceResolver
@@ -127,32 +128,59 @@ class Orchestrator:
 
         guard = _WorkspaceRunGuard(ws, self._checkpointer, max_steps=_MAX_AGENT_STEPS)
         guard.attach()
+        start_ts = time.monotonic()
         try:
             final = await asyncio.wait_for(
                 self._run_market(ws, user_query, phone, force_role=force_role),
                 timeout=_AGENT_TIMEOUT_SECONDS,
             )
         except AgentCircuitBreaker as exc:
+            elapsed_ms = round((time.monotonic() - start_ts) * 1000, 1)
             logger.error(
-                "Agent circuit breaker triggered | workspace=%s | reason=%s",
+                "AGENT_CIRCUIT_BREAKER | workspace=%s | type=%s | max_steps=%s | duration_ms=%s | error=%s",
                 workspace_id,
+                ws.workspace_type,
+                _MAX_AGENT_STEPS,
+                elapsed_ms,
                 exc,
             )
             await self._flush_workspace(ws, reason="circuit_breaker")
             return self._build_failure_response(ws, workspace_id)
         except asyncio.TimeoutError:
+            elapsed_ms = round((time.monotonic() - start_ts) * 1000, 1)
             logger.error(
-                "Agent timeout | workspace=%s | timeout=%ss",
+                "AGENT_TIMEOUT | workspace=%s | type=%s | timeout=%ss | elapsed_ms=%s | query=%r",
                 workspace_id,
+                ws.workspace_type,
                 _AGENT_TIMEOUT_SECONDS,
+                elapsed_ms,
+                (user_query or "")[:160],
             )
             await self._flush_workspace(ws, reason="timeout")
             return self._build_failure_response(ws, workspace_id)
         except Exception as exc:  # pragma: no cover - safety net
-            logger.error("Agent %s failed for %s: %s", ws.active_agent, workspace_id, exc, exc_info=True)
+            elapsed_ms = round((time.monotonic() - start_ts) * 1000, 1)
+            logger.error(
+                "AGENT_ERROR | agent=%s | workspace=%s | type=%s | duration_ms=%s | error=%s",
+                ws.active_agent,
+                workspace_id,
+                ws.workspace_type,
+                elapsed_ms,
+                exc,
+                exc_info=True,
+            )
             await self._flush_workspace(ws, reason="agent_error")
             return self._build_failure_response(ws, workspace_id)
         else:
+            elapsed_ms = round((time.monotonic() - start_ts) * 1000, 1)
+            logger.info(
+                "AGENT_COMPLETED | workspace=%s | type=%s | duration_ms=%s | goal=%s | status=%s",
+                workspace_id,
+                ws.workspace_type,
+                elapsed_ms,
+                final.get("current_goal"),
+                final.get("status"),
+            )
             langgraph_blob = copy.deepcopy(ws.agent_state) if isinstance(ws.agent_state, dict) else None
             self._sync_workspace(ws, final, langgraph_blob)
             await self._flush_workspace(ws, reason="completed")
@@ -167,6 +195,8 @@ class Orchestrator:
     # ------------------------------------------------------------------
     # Agent execution
     # ------------------------------------------------------------------
+    _ROLE_CHECK_TIMEOUT = 8.0
+
     async def _run_market(
         self,
         ws: Workspace,
@@ -183,12 +213,13 @@ class Orchestrator:
             **agent_metadata,
             "user_query": user_query,
             "user_phone": phone,
-            "current_goal": ws.active_goal,
+            "current_goal": ws.active_goal or None,
             "active_form": ws.active_form,
         }
         runtime = build_runtime()
         async with runtime as live_runtime:
             role = "BUYER" if ws.workspace_type == "buyer" else "PRODUCER"
+            profile_res = None
 
             if not force_role:
                 meta_role = (
@@ -200,7 +231,10 @@ class Orchestrator:
 
                 if role == "PRODUCER" and phone:
                     try:
-                        raw = await live_runtime.call_db("get_user_by_phone", phone=str(phone).strip())
+                        raw = await asyncio.wait_for(
+                            live_runtime.call_db("get_user_by_phone", phone=str(phone).strip()),
+                            timeout=self._ROLE_CHECK_TIMEOUT,
+                        )
                         profile_res = ensure_dict(raw)
                         if str(profile_res.get("status") or "").upper() == "SUCCESS":
                             prof = profile_res.get("data") or {}
@@ -211,8 +245,31 @@ class Orchestrator:
                         pass
 
             role = normalize_role(role)
-
             inputs["user_role"] = role
+
+            # Forward profile result so input_normalizer skips the redundant MCP call.
+            if profile_res is not None:
+                profile_status = str(profile_res.get("status") or "").upper()
+                if profile_status == "SUCCESS":
+                    prof = profile_res.get("data") or {}
+                    inputs.update({
+                        "user_context_loaded": True,
+                        "is_onboarding": False,
+                        "user_name": prof.get("name") or "N/A",
+                        "zone_name": (prof.get("zone") or {}).get("name"),
+                        "zone_id": (prof.get("zone") or {}).get("id"),
+                    })
+                    user_uuid = prof.get("id")
+                    if user_uuid:
+                        inputs["user_id"] = str(user_uuid)
+                elif profile_status == "NEW_USER":
+                    inputs.update({
+                        "user_context_loaded": False,
+                        "is_onboarding": True,
+                        "onboarding_step": "COLLECT_ROLE",
+                        "onboarding_internal_step": "COLLECT_ROLE",
+                    })
+
             logger.info("Orchestrator | phone=%s | resolved role=%s | ws_type=%s", phone, role, ws.workspace_type)
 
             graph = self._graph_factory.get_graph(
@@ -237,7 +294,7 @@ class Orchestrator:
             elif role_up in {"PRODUCER", "PRODUCTEUR", "PRODUCTRICE"}:
                 ws.workspace_type = "producer"
 
-        ws.active_goal = str(final.get("current_goal") or "")
+        ws.active_goal = str(final.get("current_goal") or "") if final.get("current_goal") else ""
         ws.active_form = final.get("active_form")
         checkpoint_blob = langgraph_state or ws.metadata.get(LANGGRAPH_STATE_KEY)
         if isinstance(checkpoint_blob, dict):

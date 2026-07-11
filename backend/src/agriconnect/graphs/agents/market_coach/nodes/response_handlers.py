@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.utils import normalize_slot_keys, slot_has_value
+from agriconnect.graphs.agents.market_coach.utils import normalize_slot_keys
 
 
 def _append_corrections(state: MarketAgentState, response: Dict[str, Any]) -> Dict[str, Any]:
@@ -32,9 +32,15 @@ def _append_corrections(state: MarketAgentState, response: Dict[str, Any]) -> Di
     working = state.get("working_memory") or {}
     corrections_raw = working.get("recent_corrections") or {}
 
+    # Only show user-facing corrections (product, quantity, price, unit, zone).
+    # Internal fields like "intent" and "role" are not meaningful to the user.
+    _USER_FACING_CORRECTIONS = {"product", "quantity", "price", "unit", "zone"}
+
     parts: List[str] = []
     if isinstance(corrections_raw, dict):
         for field, delta in corrections_raw.items():
+            if field not in _USER_FACING_CORRECTIONS:
+                continue
             label = _label_for_field(state.get("current_goal"), field)
             parts.append(f"*{label.title()}* mis à jour : {delta}")
     else:
@@ -42,6 +48,8 @@ def _append_corrections(state: MarketAgentState, response: Dict[str, Any]) -> Di
         for change in corrections:
             if isinstance(change, dict):
                 for field, delta in change.items():
+                    if field not in _USER_FACING_CORRECTIONS:
+                        continue
                     label = _label_for_field(state.get("current_goal"), field)
                     parts.append(f"*{label.title()}* mis à jour : {delta}")
             else:
@@ -150,18 +158,25 @@ async def _generate_llm_question(
         f"Réponds en 1-2 phrases maximum, en français simple et direct."
     )
     try:
-        completion = await asyncio.to_thread(
-            lambda: llm.chat.completions.create(
-                model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.4,
-                max_tokens=120,
-            )
+        # Timeout de sécurité pour éviter de bloquer tout le tour utilisateur sur le LLM.
+        completion = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: llm.chat.completions.create(
+                    model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.4,
+                    max_tokens=120,
+                )
+            ),
+            timeout=10.0,
         )
         result = (completion.choices[0].message.content or "").strip()
         return result if result else fallback
+    except asyncio.TimeoutError:
+        logger.warning("RESPONSE_LLM_TIMEOUT | goal=%s | field=%s", goal, field)
+        return fallback
     except Exception as exc:
-        logger.warning("LLM question generation failed: %s", exc)
+        logger.warning("RESPONSE_LLM_ERROR | goal=%s | field=%s | error=%s", goal, field, exc)
         return fallback
 
 
@@ -231,11 +246,10 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
         prompt = state.get("onboarding_prompt") or (
             f"{salutation}Bienvenue sur AgriConnect ! Quel est votre nom complet ?"
         )
-        return {
+        return _append_corrections(state, {
             "final_response": prompt,
             "ag_ui_component": state.get("ag_ui_component"),
-        }
-        return _append_corrections(state, response)
+        })
 
     # -----------------------------------------------------------------
     # STRATÉGIE 1 : ASK_MISSING_FIELD — Question LLM + FormInputComponent
@@ -428,11 +442,18 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
             "ONBOARDING",
         }
     ):
-        # Toujours recalculer la réponse finale pour refléter les dernières données MCP.
-        # (Les noeuds amont ne doivent plus injecter un texte qui masquerait les résultats frais.)
-
-        # Keep UI metadata consistent even when goal is missing; SUCCESS can render without goal.
         raw_exec_result = state.get("execution_result") or {}
+
+        # Buyer flow nodes (cart_management, negotiation_gate, order_tracking)
+        # set final_response directly without going through mcp_tool_executor.
+        # When execution_result is absent, reuse their pre-computed response.
+        precomputed_success = state.get("final_response")
+        if precomputed_success and not raw_exec_result:
+            response = {
+                "final_response": precomputed_success,
+                "ag_ui_component": state.get("ag_ui_component"),
+            }
+            return _append_corrections(state, response)
         exec_result = _unwrap_execution_result(raw_exec_result)
         tool_msg = exec_result.get("message") or ""
         tool_data = exec_result.get("data")
@@ -817,13 +838,11 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
                 prod_name = payload.get("product") or payload.get("product_name") or "votre demande"
                 qty = _fmt_num(
                     payload.get("quantity")
-                    or payload.get("quantity_mentioned")
                     or payload.get("quantity_desired")
                     or ""
                 )
                 unit = str(
                     payload.get("unit")
-                    or payload.get("unit_mentioned")
                     or payload.get("unit_desired")
                     or ""
                 ).upper()

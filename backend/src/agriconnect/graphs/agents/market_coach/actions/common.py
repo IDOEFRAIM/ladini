@@ -8,7 +8,6 @@ logger = logging.getLogger("Agent.MarketCoach.actions")
 
 from agriconnect.graphs.agents.market_coach.utils import (
     canonical_unit_label,
-    ensure_dict,
     is_success_response,
 )
 
@@ -157,25 +156,25 @@ def _snapshot_to_payload(kind: str, snapshot: Mapping[str, Any]) -> Dict[str, An
         return {
             "product_id": snap.get("product_id") or snap.get("id"),
             "product": snap.get("name") or snap.get("product") or snap.get("product_name"),
-            "price_mentioned": snap.get("price") or snap.get("price_fcfa"),
-            "quantity_mentioned": snap.get("quantity") or snap.get("quantity_for_sale"),
-            "unit_mentioned": snap.get("unit"),
+            "price": snap.get("price") or snap.get("price_fcfa"),
+            "quantity": snap.get("quantity") or snap.get("quantity_for_sale"),
+            "unit": snap.get("unit"),
         }
     if kind_up == "STOCK":
         return {
             "stock_id": snap.get("stock_id") or snap.get("id"),
             "farm_id": snap.get("farm_id"),
             "product": snap.get("item_name") or snap.get("product_name") or snap.get("product"),
-            "quantity_mentioned": snap.get("quantity"),
-            "unit_mentioned": snap.get("unit"),
+            "quantity": snap.get("quantity"),
+            "unit": snap.get("unit"),
         }
     if kind_up == "AUCTION":
         return {
             "auction_id": snap.get("auction_id") or snap.get("id"),
             "product": snap.get("product") or snap.get("product_name"),
-            "quantity_mentioned": snap.get("qty") or snap.get("quantity"),
-            "unit_mentioned": snap.get("unit"),
-            "price_mentioned": snap.get("max_price") or snap.get("max_price_per_unit"),
+            "quantity": snap.get("qty") or snap.get("quantity"),
+            "unit": snap.get("unit"),
+            "price": snap.get("max_price") or snap.get("max_price_per_unit"),
         }
     if kind_up in {"ORDER", "PREORDER"}:
         return {
@@ -222,8 +221,7 @@ async def load_entity_snapshot(
         raise ValueError(f"Unsupported entity_kind: {entity_kind!r}")
 
     logger.info("[StatefulUpdate] loading snapshot tool=%s kind=%s goal=%s", tool_name, kind, goal_up)
-    raw = await mc_runtime.call_db(tool_name, **kwargs)
-    result = ensure_dict(raw)
+    result = await mc_runtime.call_db(tool_name, **kwargs)
     if not is_success_response(result):
         msg = result.get("message") or f"Impossible de charger l'état actuel ({tool_name})."
         return {

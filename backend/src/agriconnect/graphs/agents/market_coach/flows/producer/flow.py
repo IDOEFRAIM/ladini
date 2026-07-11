@@ -23,7 +23,6 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
-    ensure_dict,
     is_success_response,
 )
 from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
@@ -61,8 +60,8 @@ async def _resolve_auction(mc_runtime: MarketRuntime, phone: str, payload: Dict[
     """Appelle `get_auctions` de manière proactive quand le produit est connu
     mais qu'aucun `auction_id` n'est encore résolu.
     """
-    product = payload.get("product") or payload.get("product_name")
-    zone = payload.get("zone_name") or payload.get("zone")
+    product = payload.get("product")
+    zone = payload.get("zone")
 
     kwargs: Dict[str, Any] = {"status": "OPEN", "view_mode": "MARKETPLACE"}
     if phone:

@@ -78,6 +78,17 @@ async def form_node(state: Dict[str, Any], mc_runtime: Any) -> Dict[str, Any]:
     norm = (state.get("normalized_text") or state.get("user_query") or "").strip()
     current_step = state.get("form_step")
 
+    # On first activation, pre-fill from any payload carried into this tunnel
+    # (e.g. entities stashed by semantic_disambiguation or a resumed goal) so the
+    # form skips slots the user already provided instead of re-asking them.
+    if not current_step:
+        carried = state.get("transaction_payload") or {}
+        if isinstance(carried, dict):
+            for key, value in carried.items():
+                if value in (None, "", [], {}):
+                    continue
+                extracted.setdefault(key, value)
+
     # If user is confirming (the form asked for confirmation last turn)
     event = str(state.get("interpreted_event") or "").upper()
     if current_step == "CONFIRMING":
@@ -117,7 +128,7 @@ async def form_node(state: Dict[str, Any], mc_runtime: Any) -> Dict[str, Any]:
             has_explicit_slot_value = any(
                 correction_payload.get(slot.name) not in (None, "", [], {}) for slot in spec.slots
             )
-            inferred_slot = _infer_slot_from_text(norm, spec) if spec else None
+            inferred_slot = _infer_slot_from_text(norm, spec)
 
             if not has_explicit_slot_value and not inferred_slot:
                 return {
@@ -170,6 +181,13 @@ async def form_node(state: Dict[str, Any], mc_runtime: Any) -> Dict[str, Any]:
     result = run_form_step(spec, state, extracted)
 
     patch = dict(result.patch or {})
+    # Ensure the goal stays locked while the form is collecting slots (belt & suspenders).
+    if not result.is_complete and patch.get("form_step") not in (None, "COMPLETE"):
+        goal_locked = _FORM_TO_GOAL.get(form_id)
+        if goal_locked:
+            patch.setdefault("current_goal", goal_locked)
+            patch.setdefault("goal_status", "ACTIVE")
+
     if result.is_complete or patch.get("form_step") == "COMPLETE":
         form_data = dict(patch.get("form_data") or state.get("form_data") or {})
         goal = _FORM_TO_GOAL.get(form_id)

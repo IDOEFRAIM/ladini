@@ -47,8 +47,8 @@ class StockService:
         require_phone(state)
         farm_id = str(require(payload, "farm_id"))
         product = str(require(payload, "product"))
-        qty_raw = float(require(payload, "quantity_mentioned"))
-        qty_kg, unit = normalize_quantity_to_kg(qty_raw, payload.get("unit_mentioned"))
+        qty_raw = float(require(payload, "quantity"))
+        qty_kg, unit = normalize_quantity_to_kg(qty_raw, payload.get("unit"))
         args: Dict[str, Any] = {
             "farm_id": farm_id,
             "item_name": product,
@@ -63,8 +63,8 @@ class StockService:
         phone = require_phone(state)
         stock_id = str(require(payload, "stock_id"))
         movement_type = str(require(payload, "movement_type")).upper().strip()
-        qty_raw = float(require(payload, "quantity_mentioned"))
-        qty_kg, _ = normalize_quantity_to_kg(qty_raw, payload.get("unit_mentioned"))
+        qty_raw = float(require(payload, "quantity"))
+        qty_kg, _ = normalize_quantity_to_kg(qty_raw, payload.get("unit"))
         args: Dict[str, Any] = {
             "producer_id": phone,
             "stock_id": stock_id,
@@ -77,8 +77,8 @@ class StockService:
     def adjust(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
         phone = require_phone(state)
         stock_id = str(require(payload, "stock_id"))
-        qty_raw = float(require(payload, "quantity_mentioned"))
-        qty_kg, _ = normalize_quantity_to_kg(qty_raw, payload.get("unit_mentioned"))
+        qty_raw = float(require(payload, "quantity"))
+        qty_kg, _ = normalize_quantity_to_kg(qty_raw, payload.get("unit"))
         args: Dict[str, Any] = {
             "producer_id": phone,
             "stock_id": stock_id,
@@ -90,8 +90,8 @@ class StockService:
     def remove_partial(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
         phone = require_phone(state)
         stock_id = str(require(payload, "stock_id"))
-        qty_raw = float(require(payload, "quantity_mentioned"))
-        qty_kg, _ = normalize_quantity_to_kg(qty_raw, payload.get("unit_mentioned"))
+        qty_raw = float(require(payload, "quantity"))
+        qty_kg, _ = normalize_quantity_to_kg(qty_raw, payload.get("unit"))
         args: Dict[str, Any] = {
             "producer_id": phone,
             "stock_id": stock_id,

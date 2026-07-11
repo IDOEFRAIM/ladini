@@ -18,7 +18,6 @@ import logging
 from typing import Any, Dict, Optional
 
 from agriconnect.graphs.agents.market_coach.services.domain.buyer_common import (
-    safe_call_tool,
     with_support_footer,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
@@ -28,6 +27,7 @@ from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
 
 from .cart import cart_management
 from .helpers import (
+    AUCTION_TRACKING_GOALS,
     CART_GOALS,
     NEGOTIATION_GOALS,
     ORDER_TRACKING_GOALS,
@@ -142,7 +142,7 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
         return _finalize(phone_missing_error())
 
     # ── Quantity bridge: SEARCH → ADD_TO_CART ─────────────────────────
-    qty_candidate = payload.get("quantity_mentioned")
+    qty_candidate = payload.get("quantity")
     if (
         goal not in CART_GOALS
         and phase == "CART"
@@ -191,6 +191,45 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
         state = dict(state)
         state["current_goal"] = goal
 
+    # ── Vendor selection context: force cart routing ────────────────────
+    # Fires when the user is mid-vendor-selection or has already picked a
+    # vendor and is now supplying the quantity. The presence of vendor_ctx
+    # (with either a selection_index or a chosen_vendor) means the buyer
+    # is inside the cart tunnel — never re-route to buyer_request_resolver.
+    vendor_ctx = state.get("vendor_selection_context")
+    logger.info(
+        "buyer_context_resolver: vendor_ctx=%s, goal=%s, payload_selection=%s",
+        bool(vendor_ctx) if vendor_ctx else None,
+        goal,
+        payload.get("selection_index"),
+    )
+    vendor_ctx_valid = (
+        vendor_ctx
+        and not (isinstance(vendor_ctx, dict) and vendor_ctx.get("__reset__"))
+        and goal not in PREORDER_GOALS
+        and goal not in NEGOTIATION_GOALS
+    )
+    if vendor_ctx_valid and isinstance(vendor_ctx, dict):
+        ctx_product = str(vendor_ctx.get("product") or "").lower().strip()
+        new_product = str(payload.get("product") or "").lower().strip()
+        if new_product and ctx_product and new_product != ctx_product:
+            logger.info(
+                "buyer_context_resolver: stale vendor_ctx (product=%s) vs payload (product=%s) — skipping",
+                ctx_product, new_product,
+            )
+            vendor_ctx_valid = False
+    if vendor_ctx_valid:
+        has_selection = payload.get("selection_index") is not None
+        has_chosen = bool(vendor_ctx.get("chosen_vendor")) if isinstance(vendor_ctx, dict) else False
+        if has_selection or has_chosen:
+            logger.info(
+                "buyer_context_resolver: vendor_ctx active (selection=%s chosen=%s) — forcing cart",
+                has_selection, has_chosen,
+            )
+            synthetic = dict(state)
+            synthetic["current_goal"] = "BUYER_ADD_TO_CART"
+            return _finalize(await cart_management(synthetic, mc_runtime))
+
     # ── Goal-based routing ────────────────────────────────────────────
     if goal in CART_GOALS:
         return _finalize(await cart_management(state, mc_runtime))
@@ -204,7 +243,7 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
     if goal in NEGOTIATION_GOALS:
         return _finalize(await negotiation_gate(state, mc_runtime))
 
-    if goal == "BUYER_REQUEST":
+    if goal in {"BUYER_REQUEST", "SEARCH_PRODUCTS"}:
         return _finalize(await buyer_request_resolver(state, mc_runtime))
 
     if goal == "MARKET_GET_REQUESTS":
@@ -217,6 +256,12 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
         draft = state.get("draft_payload")
         if draft_requires_completion(draft) and not read_only_intent(goal):
             return _finalize(draft_block_response(draft))
+        return _finalize(await order_tracking_resolver(state, mc_runtime))
+
+    if goal in AUCTION_TRACKING_GOALS:
+        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
+            order_tracking_resolver,
+        )
         return _finalize(await order_tracking_resolver(state, mc_runtime))
 
     # ── Auction/bid flows ─────────────────────────────────────────────
@@ -280,5 +325,4 @@ __all__ = [
     "_build_procurement_escalation",
     "_build_preflight_recap",
     "build_product_selection_menu",
-    "safe_call_tool",
 ]

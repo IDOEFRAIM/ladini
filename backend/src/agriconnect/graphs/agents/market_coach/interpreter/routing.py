@@ -247,6 +247,50 @@ _PRODUCER_STATUS_HINTS = (
 )
 
 
+def _strip_accents(s: str) -> str:
+    import unicodedata
+    return "".join(
+        c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn"
+    )
+
+
+# Approximate "yes / go ahead" confirmations a buyer types instead of the exact
+# word we prompt for. Accent-stripped, lowercase.
+_APPROX_CONFIRM = frozenset({
+    "oui", "ouais", "ouai", "ok", "okay", "oke", "okey", "daccord", "d accord",
+    "cest bon", "c est bon", "cbon", "go", "vasy", "vas y", "allons y", "allez",
+    "parfait", "ca marche", "ca roule", "yes", "yep", "yo", "ouep", "bien sur",
+    "je confirme", "confirme", "confirmer", "valide", "valider", "valides",
+    "finalise", "finaliser", "je valide", "top", "nickel", "carrement",
+})
+
+
+def _looks_like_preorder_trigger(clean: str) -> bool:
+    """Typo-tolerant detection of a 'validate my cart / preorder' intent.
+
+    The buyer rarely types the exact word we ask for ("précommander"). They send
+    an approximate confirmation ("precomende", "ok", "valide", "c'est bon"). We
+    accept any short message that either (a) begins with a précommande-like token
+    or (b) is a known approximate confirmation. Kept SHORT-only so a real new
+    request like "je veux commander des tomates" is never captured here.
+    """
+    norm = _strip_accents(clean)
+    # Normalise punctuation the buyer scatters around ("c'est", "vas-y", "ok!").
+    for ch in ("'", "’", "-", "!", ".", ","):
+        norm = norm.replace(ch, " ")
+    norm = " ".join(norm.split())
+    if not norm or len(norm) > 22:
+        return False
+    # (a) précommande word with typo tolerance: any token starting with "precom"
+    #     (precommande, precomende, precomande, precommender…). "prec" alone is
+    #     too loose, so we require the "com" cluster.
+    for w in norm.split():
+        if w.startswith("precom") or w.startswith("precmd") or w.startswith("precon"):
+            return True
+    # (b) approximate confirmation
+    return norm in _APPROX_CONFIRM
+
+
 def _interpret_fast_path(state: Dict[str, Any], text: str) -> Optional[Dict[str, Any]]:
     """Court-circuite le LLM uniquement pour les actions structurelles pures d'AG-UI."""
     expected = state.get("expected_input")
@@ -345,6 +389,41 @@ def _interpret_fast_path(state: Dict[str, Any], text: str) -> Optional[Dict[str,
             "raw_analysis": {"path": "fast_path_cancel_keyword", "expected": expected},
         }
 
+    # Fast-path 0quater : précommande depuis un panier actif — tolérant aux
+    # confirmations approximatives ("precomende", "ok", "valide", "c'est bon").
+    # On ne dépend PAS du LLM qui confond précommande et appel d'offres.
+    expected_up = str(expected or "").upper().strip()
+    if role_up == "BUYER" and not state.get("active_form"):
+        preorder_phase = str(
+            (state.get("preorder_workflow") or {}).get("phase") or ""
+        ).upper().strip()
+        has_cart = bool(state.get("active_cart") or (state.get("working_memory") or {}).get("last_active_cart"))
+
+        # (2) Recap affiché → une confirmation approximative valide la précommande.
+        if preorder_phase == "PREORDER_DRAFTED" and _looks_like_preorder_trigger(clean):
+            return {
+                "interpreted_event": "CONFIRM",
+                "detected_intent": "BUYER_PREORDER_CONFIRM",
+                "interpreter_confidence": 1.0,
+                "extracted_entities": {},
+                "raw_analysis": {"path": "fast_path_buyer_preorder_confirm", "matched": clean[:22]},
+            }
+
+        # (1) Panier actif + intention de valider → on crée le brouillon + récap.
+        if (
+            has_cart
+            and preorder_phase in ("", "CART")
+            and expected_up not in ("CONFIRMATION", "SELECTION", "PRICE", "QUANTITY", "PRODUCT")
+            and _looks_like_preorder_trigger(clean)
+        ):
+            return {
+                "interpreted_event": "NEW_TASK",
+                "detected_intent": "BUYER_PREORDER_INIT",
+                "interpreter_confidence": 1.0,
+                "extracted_entities": {},
+                "raw_analysis": {"path": "fast_path_buyer_preorder_from_cart", "matched": clean[:22]},
+            }
+
     # Fast-path 0ter : escalade explicite "appel" depuis un menu de sélection acheteur.
     if (
         role_up == "BUYER"
@@ -378,7 +457,7 @@ def _interpret_fast_path(state: Dict[str, Any], text: str) -> Optional[Dict[str,
     if role_up == "BUYER" and procurement_track_hit:
         return {
             "interpreted_event": "NEW_TASK",
-            "detected_intent": "MARKET_GET_REQUESTS",
+            "detected_intent": "BUYER_LIST_AUCTIONS",
             "interpreter_confidence": 0.95,
             "extracted_entities": {},
             "raw_analysis": {

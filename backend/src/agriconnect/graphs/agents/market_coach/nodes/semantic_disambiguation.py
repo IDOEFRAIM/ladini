@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
-from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
+from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, normalize_slot_keys
 from agriconnect.graphs.agents.market_coach.interpreter.intent import (
     INTENT_CONFIG,
     INTENT_DISAMBIGUATION,
@@ -92,6 +92,18 @@ async def semantic_disambiguation(
         len(mapping),
     )
 
+    # Stash any entities already extracted from the triggering utterance
+    # (e.g. "J'ai 958 kg de tomates à 375 FCFA") into transaction_payload so
+    # they survive the disambiguation turn. Without this the menu short-circuits
+    # before memory_update promotes them, post_response_cleanup wipes
+    # extracted_entities, and the chosen tunnel restarts its form from scratch.
+    stashed_payload = dict(state.get("transaction_payload") or {})
+    extracted = normalize_slot_keys(dict(state.get("extracted_entities") or {}))
+    for key, value in extracted.items():
+        if value in (None, "", [], {}):
+            continue
+        stashed_payload.setdefault(key, value)
+
     return {
         "status": "WAITING_INPUT",
         "current_goal": "DISAMBIGUATION_PENDING",
@@ -99,6 +111,7 @@ async def semantic_disambiguation(
         "expected_input": "SELECTION",
         "expected_candidates": labels,
         "available_mapping": mapping,
+        "transaction_payload": stashed_payload,
         "working_memory": {
             **(state.get("working_memory") or {}),
             "available_mapping_kind": "intent_disambiguation",

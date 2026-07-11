@@ -8,51 +8,51 @@ INTENT_CONFIG = {
     # =======================================================================
     "STOCK_REGISTER_HARVEST": {
         "tool_name": "add_stock",
-        "required": ["product", "quantity_mentioned", "farm_id"],
+        "required": ["product", "quantity", "farm_id"],
         "action_type": "WRITE",
         "requires_farm": True,
         "label": "Mise en stock / Enregistrement d'une nouvelle récolte",
         "label_map": {
             "product": "produit/culture récolté",
-            "quantity_mentioned": "quantité récoltée",
-            "unit_mentioned": "unité",
+            "quantity": "quantité récoltée",
+            "unit": "unité",
             "farm_id": "exploitation source"
         }
     },
     "STOCK_RECORD_MOVEMENT": {
         "tool_name": "add_stock_movement_by_id",
-        "required": ["stock_id", "movement_type", "quantity_mentioned"],
+        "required": ["stock_id", "movement_type", "quantity"],
         "action_type": "WRITE",
         "requires_farm": False,
         "label": "Enregistrement d'un mouvement de stock entrant/sortant",
         "label_map": {
             "stock_id": "référence stock (numéro)",
             "movement_type": "sens (Entrée/Sortie/Perte)",
-            "quantity_mentioned": "quantité bougée",
+            "quantity": "quantité bougée",
             "reason": "motif"
         }
     },
     "STOCK_ADJUST": {
         "tool_name": "adjust_stock_by_id",
-        "required": ["stock_id", "quantity_mentioned"],
+        "required": ["stock_id", "quantity"],
         "action_type": "WRITE",
         "requires_farm": False,
         "label": "Correction manuelle de l'inventaire physique",
         "label_map": {
             "stock_id": "référence stock (numéro)",
-            "quantity_mentioned": "nouvelle quantité réelle constatée",
+            "quantity": "nouvelle quantité réelle constatée",
             "reason": "motif"
         }
     },
     "STOCK_REMOVE_PARTIAL": {
         "tool_name": "remove_stock_by_id",
-        "required": ["stock_id", "quantity_mentioned"],
+        "required": ["stock_id", "quantity"],
         "action_type": "WRITE",
         "requires_farm": False,
         "label": "Retrait partiel du stock disponible",
         "label_map": {
             "stock_id": "référence stock (numéro)",
-            "quantity_mentioned": "quantité à retirer"
+            "quantity": "quantité à retirer"
         }
     },
     "STOCK_DELETE": {
@@ -65,15 +65,15 @@ INTENT_CONFIG = {
     },
     "STOCK_UPDATE_LEVEL": {
         "tool_name": "adjust_stock_by_id",
-        "required": ["stock_id", "quantity_mentioned"],
+        "required": ["stock_id", "quantity"],
         "action_type": "WRITE",
         "requires_farm": False,
         "lifecycle_mode": "UPDATE",
         "label": "Mise à jour directe du niveau d'un lot",
         "label_map": {
             "stock_id": "identifiant stock",
-            "quantity_mentioned": "nouvelle quantité réelle",
-            "unit_mentioned": "unité (optionnel)",
+            "quantity": "nouvelle quantité réelle",
+            "unit": "unité (optionnel)",
             "reason": "motif"
         }
     },
@@ -83,29 +83,29 @@ INTENT_CONFIG = {
     # =======================================================================
     "SALES_PUBLISH_PRODUCT": {
         "tool_name": "create_product",
-        "required": ["product", "price_mentioned", "quantity_mentioned"],
+        "required": ["product", "price", "quantity"],
         "action_type": "WRITE",
         "requires_farm": True,
         "label": "Mise en vente d'un produit sur le catalogue public",
         "label_map": {
             "product": "nom du produit",
-            "price_mentioned": "prix unitaire proposé",
-            "quantity_mentioned": "quantité disponible",
-            "unit_mentioned": "unité",
+            "price": "prix unitaire proposé",
+            "quantity": "quantité disponible",
+            "unit": "unité",
             "description": "détails"
         }
     },
     "SALES_RECORD_DIRECT": {
         "tool_name": "record_sale",
-        "required": ["product", "quantity_mentioned", "price_mentioned"],
+        "required": ["product", "quantity", "price"],
         "action_type": "WRITE",
         "requires_farm": False,
         "label": "Enregistrement d'une vente directe (Cash / Gré à gré)",
         "label_map": {
             "product": "produit vendu",
-            "quantity_mentioned": "quantité",
-            "price_mentioned": "montant total de la vente",
-            "unit_mentioned": "unité"
+            "quantity": "quantité",
+            "price": "montant total de la vente",
+            "unit": "unité"
         }
     },
     "SALES_LIST_ORDERS": {
@@ -121,14 +121,14 @@ INTENT_CONFIG = {
     },
     "SALES_PLACE_BID": {
         "tool_name": "place_bid",
-        "required": ["auction_id", "price_mentioned"],
+        "required": ["auction_id", "price"],
         "action_type": "WRITE",
         "requires_farm": False,
         "label": "Proposition de vente face à une demande acheteur existante",
         "label_map": {
             "auction_id": "numéro de l'appel d'offres",
-            "price_mentioned": "votre prix proposé",
-            "quantity_mentioned": "quantité proposée",
+            "price": "votre prix proposé",
+            "quantity": "quantité proposée",
             "message": "note"
         }
     },
@@ -149,9 +149,9 @@ INTENT_CONFIG = {
         "label": "Mise à jour du prix ou de la quantité d'un produit publié",
         "label_map": {
             "product_id": "référence produit",
-            "price_mentioned": "nouveau prix unitaire",
-            "quantity_mentioned": "nouvelle quantité disponible",
-            "unit_mentioned": "unité (optionnel)"
+            "price": "nouveau prix unitaire",
+            "quantity": "nouvelle quantité disponible",
+            "unit": "unité (optionnel)"
         }
     },
 
@@ -160,16 +160,16 @@ INTENT_CONFIG = {
     # =======================================================================
     "PROCUREMENT_CREATE_REQUEST": {
         "tool_name": "create_auction",
-        "required": ["product", "quantity_mentioned", "price_mentioned"],
+        "required": ["product", "quantity", "price"],
         "action_type": "WRITE",
         "requires_farm": False,
         "label": "Publication d'une demande d'approvisionnement / appel d'offres",
         "label_map": {
             "product": "produit recherché",
-            "quantity_mentioned": "quantité totale cherchée",
-            "price_mentioned": "prix plafond proposé",
-            "unit_mentioned": "unité",
-            "zone_name": "région de collecte",
+            "quantity": "quantité totale cherchée",
+            "price": "prix plafond proposé",
+            "unit": "unité",
+            "zone": "région de collecte",
             "deadline": "date limite"
         }
     },
@@ -202,8 +202,8 @@ INTENT_CONFIG = {
         "label": "Demande acheteur — recherche catalogue avant appel d'offres",
         "label_map": {
             "product": "produit recherché",
-            "quantity_mentioned": "quantité souhaitée (optionnel)",
-            "unit_mentioned": "unité (optionnel)",
+            "quantity": "quantité souhaitée (optionnel)",
+            "unit": "unité (optionnel)",
         }
     },
 
@@ -214,15 +214,15 @@ INTENT_CONFIG = {
     # =======================================================================
     "BUYER_ADD_TO_CART": {
         "tool_name": "add_to_cart",
-        "required": ["product", "quantity_mentioned", "unit_mentioned"],
+        "required": ["product", "quantity", "unit"],
         "action_type": "WRITE",
         "requires_farm": False,
         "handled_by_flow": True,
         "label": "Ajout d'un produit au panier de précommande",
         "label_map": {
             "product": "produit à ajouter",
-            "quantity_mentioned": "quantité souhaitée",
-            "unit_mentioned": "unité",
+            "quantity": "quantité souhaitée",
+            "unit": "unité",
         }
     },
     "BUYER_VIEW_CART": {
@@ -266,15 +266,15 @@ INTENT_CONFIG = {
     },
     "BUYER_NEGOTIATE_PRICE": {
         "tool_name": "negotiate_price",
-        "required": ["product", "price_mentioned"],
+        "required": ["product", "price"],
         "action_type": "WRITE",
         "requires_farm": False,
         "handled_by_flow": True,
         "label": "Ouverture d'une négociation de prix avec un producteur",
         "label_map": {
             "product": "produit à négocier",
-            "price_mentioned": "prix proposé",
-            "quantity_mentioned": "quantité concernée",
+            "price": "prix proposé",
+            "quantity": "quantité concernée",
         }
     },
 
@@ -311,6 +311,28 @@ INTENT_CONFIG = {
         }
     },
 
+    # --- Suivi conversationnel des enchères (Buyer Auction Tracking) ---
+    "BUYER_LIST_AUCTIONS": {
+        "tool_name": "get_auctions",
+        "required": [],
+        "action_type": "READ",
+        "requires_farm": False,
+        "handled_by_flow": True,
+        "label": "Liste de mes appels d'offres (tous statuts)",
+        "label_map": {}
+    },
+    "BUYER_CHECK_AUCTION_STATUS": {
+        "tool_name": "get_auction_bids",
+        "required": [],
+        "action_type": "READ",
+        "requires_farm": False,
+        "handled_by_flow": True,
+        "label": "Détail d'une enchère et offres reçues",
+        "label_map": {
+            "auction_id": "numéro de l'appel d'offres",
+        }
+    },
+
     # =======================================================================
     # DOMAINE : AGRONOMIE — PILOTAGE DE CULTURE (WRITE)
     # =======================================================================
@@ -329,7 +351,7 @@ INTENT_CONFIG = {
     },
     "DECLARE_CROP_CYCLE": {
         "tool_name": "declare_future_production",
-        "required": ["farm_id", "production_type", "product", "quantity_mentioned", "estimated_available_at", "price_mentioned"],
+        "required": ["farm_id", "production_type", "product", "quantity", "estimated_available_at", "price"],
         "action_type": "WRITE",
         "requires_farm": True,
         "label": "Déclaration d'un lot futur (culture/élevage) pour précommande",
@@ -337,10 +359,10 @@ INTENT_CONFIG = {
             "farm_id": "identifiant exploitation",
             "production_type": "type (CROP ou LIVESTOCK)",
             "product": "culture ou espèce",
-            "quantity_mentioned": "quantité prévue",
-            "unit_mentioned": "unité (KG, HEAD...)",
+            "quantity": "quantité prévue",
+            "unit": "unité (KG, HEAD...)",
             "estimated_available_at": "date de disponibilité",
-            "price_mentioned": "prix unitaire prévu",
+            "price": "prix unitaire prévu",
             "surface": "superficie (si culture)",
             "breed": "race (si élevage)",
             "preorder_enabled": "précommande active (oui/non)",
@@ -357,7 +379,7 @@ INTENT_CONFIG = {
             "cycle_id": "cycle de culture",
             "intervention_type": "type d'action",
             "input_used": "intrant/matériel",
-            "quantity_mentioned": "quantité intrant",
+            "quantity": "quantité intrant",
             "details": "observations"
         }
     },
@@ -402,12 +424,12 @@ INTENT_CONFIG = {
     # =======================================================================
     "FINANCE_LOG_EXPENSE": {
         "tool_name": "add_expense",
-        "required": ["price_mentioned", "farm_id"],
+        "required": ["price", "farm_id"],
         "action_type": "WRITE",
         "requires_farm": True,
         "label": "Enregistrement d'une dépense d'exploitation / charge",
         "label_map": {
-            "price_mentioned": "montant dépense",
+            "price": "montant dépense",
             "product": "nature/libellé charge",
             "category": "catégorie",
             "farm_id": "exploitation concernée"
@@ -544,7 +566,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Liste des appels d'offres / demandes d'approvisionnement du marché",
-        "label_map": {"zone_name": "zone", "product_name": "produit", "status": "statut"}
+        "label_map": {"zone": "zone", "product": "produit", "status": "statut"}
     },
     "MARKET_GET_REQUEST_DETAIL": {
         "tool_name": "get_auctions_bids",
@@ -663,7 +685,7 @@ INTENT_CONFIG = {
         "required": ["product"],
         "action_type": "READ",
         "requires_farm": False,
-        "label": "Recherche par mot-clé dans le catalogue catalogue",
+        "label": "Recherche par mot-clé dans le catalogue",
         "label_map": {"product": "terme recherché"}
     },
     "SEARCH_NEARBY": {
@@ -676,11 +698,11 @@ INTENT_CONFIG = {
     },
     "VALIDATE_PRICE": {
         "tool_name": "check_price_anomaly",
-        "required": ["product", "price_mentioned", "zone"],
+        "required": ["product", "price", "zone"],
         "action_type": "READ",
         "requires_farm": False,
         "label": "Vérification cohérence prix face à la tendance marché",
-        "label_map": {"product": "produit", "price_mentioned": "prix proposé", "zone": "marché référence"}
+        "label_map": {"product": "produit", "price": "prix proposé", "zone": "marché référence"}
     },
     "SYSTEM_GET_PENDING": {
         "tool_name": "get_pending_actions",
@@ -778,6 +800,9 @@ INTENT_ROLE = {
     "BUYER_CHECK_ORDER_STATUS": "BUYER",
     "BUYER_LIST_ORDERS": "BUYER",
     "BUYER_CANCEL_ORDER": "BUYER",
+    # Auction Tracking — buyer only
+    "BUYER_LIST_AUCTIONS": "BUYER",
+    "BUYER_CHECK_AUCTION_STATUS": "BUYER",
     # MARKET / SEARCH — both roles browse
     "MARKET_GET_REQUESTS": "BOTH",
     "MARKET_SNAPSHOT": "BOTH",
@@ -917,6 +942,24 @@ INTENT_DISAMBIGUATION = {
         "lexical_hints": [
             "ma commande", "mes commandes", "où est", "statut", "status",
             "suivi", "suivre", "tracking", "livraison", "annuler commande",
+        ],
+    },
+    "AUCTION_TRACKING_INTENT": {
+        "candidates": ["BUYER_LIST_AUCTIONS", "BUYER_CHECK_AUCTION_STATUS", "MARKET_GET_REQUESTS"],
+        "title": "Que souhaitez-vous faire concernant vos enchères ?",
+        "options": [
+            ("BUYER_LIST_AUCTIONS", "📋 Voir mes appels d'offres (tous statuts)"),
+            ("BUYER_CHECK_AUCTION_STATUS", "🔍 Détail d'une enchère et offres reçues"),
+            ("MARKET_GET_REQUESTS", "🛒 Parcourir les enchères du marché"),
+        ],
+        "roles": ["BUYER"],
+        "lexical_hints": [
+            "mes enchères", "mes encheres", "mon enchère", "mon enchere",
+            "appel d'offres", "appel doffres", "appels d'offres",
+            "mes appels", "mes appel", "mon appel", "suivre mes appel",
+            "suivre mes appels", "suivi de mes appels", "voir mes appels",
+            "mes demandes", "offres reçues", "offres recues",
+            "état enchère", "etat enchere", "statut enchère",
         ],
     },
 }

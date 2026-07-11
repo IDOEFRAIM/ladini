@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import functools
-from contextvars import ContextVar
+import inspect
 from typing import Any, Callable, Optional, Set, Dict
 import uuid
 
@@ -14,10 +15,6 @@ from datetime import datetime, timezone,timedelta
 from agriconnect.services.database.auth import AuthMixin
 from agriconnect.services.database.utils import UtilsMixin
 from agriconnect.services.database.marketplace import MarketplaceMixin
-from agriconnect.services.database.transactions import TransactionsMixin
-from agriconnect.services.database.intelligence import IntelligenceMixin
-from agriconnect.services.database.dashboards import DashboardsMixin
-from agriconnect.services.database.crop import CropMixin
 from agriconnect.services.database.category import PublicProductMixin
 from agriconnect.services.database.buyer import BuyerMixin
 from agriconnect.services.database.buyer_verification import BuyerVerificationMixin
@@ -25,15 +22,15 @@ from agriconnect.services.database.producer import ProducerMgmtMixin
 from agriconnect.services.database.product import ProductMixin
 from agriconnect.services.database.auction import AuctionMixin
 
+# ContextVar unifié + helper rollback : partagés avec BaseService/@transactional.
+# Une session ouverte ici est visible depuis OrderService/UserContextService/ProductService
+# et vice-versa — un seul pool, une seule transaction, pas de deadlock.
+from agriconnect.services.database.base_service import db_session_ctx, _safe_rollback
+
 try:
     import asyncpg  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
     asyncpg = None
-
-
-
-# Déclaration du conteneur de contexte pour isoler la session par tâche asynchrone (Coroutining/Greenlets)
-db_session_ctx: ContextVar[Optional[AsyncSession]] = ContextVar("db_session_ctx", default=None)
 
 
 def _is_connection_lost(exc: Exception) -> bool:
@@ -44,9 +41,8 @@ def _is_connection_lost(exc: Exception) -> bool:
 
 class AgriDatabaseService(
     AuthMixin, UtilsMixin,
-    TransactionsMixin, IntelligenceMixin, DashboardsMixin, CropMixin,
-    PublicProductMixin, BuyerMixin, BuyerVerificationMixin, ProducerMgmtMixin,
-    ProductMixin, AuctionMixin
+    MarketplaceMixin, PublicProductMixin, BuyerMixin, BuyerVerificationMixin,
+    ProducerMgmtMixin, ProductMixin, AuctionMixin
 ):
     _logger = logging.getLogger("AgriConnect.DatabaseService")
 
@@ -66,139 +62,117 @@ class AgriDatabaseService(
     # CONFIGURATION DES MÉTHODES DE LECTURE (READ-ONLY)
     # ==================================================================
     _READ_ONLY_METHODS: Set[str] = {
-        # Auth, Identity & Profiles (Base/Auth)
+        # Auth, Identity & Profiles
         "get_user_by_phone", "get_user_by_id", "get_user_context", "get_trust_score",
         "get_agent_memory", "get_clients", "get_producer_profile", "get_buyer_profile",
         "get_producer_farm",
-        
+
         # Marketplace & Stock
-        "get_farms", "get_stocks", "get_stock_movements", "list_products", 
-        "search_products", "get_orders", "list_market_matches",
-        "get_producer_stocks",
+        "get_farms", "get_stocks", "get_stock_movements", "list_products",
+        "search_products", "get_orders", "get_producer_stocks",
 
         # Auctions / bids (reads)
         "get_auction_bids",
 
-        # Buyer transactional reads (Grade Entreprise)
+        # Buyer transactional reads
         "validate_stock_availability_atomic", "get_transaction_summary",
-        
-        # Transactions & Staging
-        "get_staged_transaction", "get_pending_actions",
-        
-        # Intelligence & Dashboards
-        "normalize_unit", "check_price_anomaly", "guess_category", 
-        "get_active_anomalies", "get_producer_dashboard", "get_zone_market_overview",
-        
-        # Crop Management (Agent Formation / Knowledge Retrieval)
-        "get_crop_profile",
-        "get_cycle_with_context", "get_yield_performance_metrics", 
-        "get_biological_readiness", "get_cycle_economics", 
-        "get_active_sanitary_risks", "get_crop_requirements", 
-        "analyze_thermal_stress", "check_growth_compliance", 
-        "get_instant_resource_needs", "calculate_irrigation_need",
-        "calculate_custom_fertilization", "evaluate_disease_and_climate_risk",
-        "calculate_sowing_density", "check_soil_salinity_hazard",
-        "get_expenses", "get_expense_summary"
+
+        # Marketplace utilities
+        "guess_category",
+
+        # Finance reads
+        "get_expenses", "get_expense_summary",
+
+        # Producer reads
+        "get_producer_orders",
     }
 
-# ==================================================================
-    # LE DISPATCHER AUTOMATIQUE (Version ContextVar - Alignée et Sécurisée)
     # ==================================================================
+    # DISPATCHER AUTOMATIQUE
+    # ==================================================================
+    # Méthodes pour lesquelles on N'intercepte PAS (accès direct).
+    _BYPASS_DISPATCH: Set[str] = {
+        "ensure_performance_indexes", "DatabaseServiceError", "IntegrityError",
+        "session", "_READ_ONLY_METHODS", "_BYPASS_DISPATCH",
+        "_SIG_CACHE", "_logger",
+    }
+    # Cache des signatures inspectées (évite inspect.signature() à chaque appel).
+    _SIG_CACHE: Dict[str, bool] = {}
+
+    @classmethod
+    def _method_takes_session(cls, name: str, attr: Callable[..., Any]) -> bool:
+        cached = cls._SIG_CACHE.get(name)
+        if cached is not None:
+            return cached
+        try:
+            takes = "session" in inspect.signature(attr).parameters
+        except (TypeError, ValueError):
+            takes = False
+        cls._SIG_CACHE[name] = takes
+        return takes
+
     def __getattribute__(self, name: str) -> Any:
-        # 1. Récupération de l'attribut réel via la classe parente (méthode non liée ou propriété)
+        # Fast-path : attributs privés, dunders et bypass → accès direct sans wrap.
+        if name.startswith("_") or name in AgriDatabaseService._BYPASS_DISPATCH:
+            return super().__getattribute__(name)
+
         attr = super().__getattribute__(name)
+        if not callable(attr):
+            return attr
 
-        # 2. Interception exclusive des méthodes publiques exécutables
-        if (
-            callable(attr) 
-            and not name.startswith("_") 
-            and name not in ["ensure_performance_indexes", "DatabaseServiceError", "IntegrityError"]
-        ):
-            @functools.wraps(attr)
-            async def auto_transaction_wrapper(*args, **kwargs):
-                # Détermination du mode transactionnel (Lecture seule vs Écriture)
-                is_read_only = name in self._READ_ONLY_METHODS
-                should_commit = not is_read_only
+        method_name = name  # capture pour la closure
+        method_takes_session = AgriDatabaseService._method_takes_session(method_name, attr)
+        is_read_only = method_name in self._READ_ONLY_METHODS
 
-                # 👀 CAS A : Une session existe déjà dans le contexte de la tâche (Transaction Imbriquée)
-                existing_session = db_session_ctx.get()
-                if existing_session is not None:
+        @functools.wraps(attr)
+        async def auto_transaction_wrapper(*args, **kwargs):
+            # CAS A — transaction imbriquée : on réutilise la session racine.
+            existing_session = db_session_ctx.get()
+            if existing_session is not None:
+                if method_takes_session and "session" not in kwargs:
+                    kwargs["session"] = existing_session
+                return await attr(*args, **kwargs)
+
+            # CAS B — sommet de pile : ouverture de session racine + retry sur perte connexion.
+            session_factory = get_sessionmaker()
+            if session_factory is None:
+                raise RuntimeError("Database sessionmaker unavailable; ensure init_db() ran")
+
+            for attempt in range(2):
+                async with session_factory() as new_session:
+                    token = db_session_ctx.set(new_session)
                     try:
-                        # Injection transparente de la session si le mixin l'attend
-                        import inspect
-                        sig = inspect.signature(attr)
-                        if "session" in sig.parameters and "session" not in kwargs:
-                            kwargs["session"] = existing_session
-                            
-                        # On réutilise la session du contexte actuel sans altérer le self décalé
-                        return await attr(*args, **kwargs)
-                    except TypeError as e:
-                        self._logger.error("❌ Erreur de signature dans le wrapper (Session existante) pour %s: %s", name, e)
-                        raise e
-                    except Exception as e:
-                        self._logger.error("❌ Erreur interceptée dans une transaction imbriquée pour %s: %s", name, e)
+                        if method_takes_session and "session" not in kwargs:
+                            kwargs["session"] = new_session
+                        res = await attr(*args, **kwargs)
+                        if not is_read_only:
+                            await new_session.commit()
+                        return res
+                    except asyncio.CancelledError:
+                        # Timeout/annulation (ex: asyncio.wait_for côté MCP) : rollback
+                        # protégé pour ne pas rendre une connexion avec tx ouverte.
+                        await _safe_rollback(new_session)
                         raise
+                    except Exception as exc:
+                        await _safe_rollback(new_session)
+                        # Retry UNE fois sur perte de connexion (failover DB).
+                        if _is_connection_lost(exc) and attempt == 0:
+                            self._logger.warning("Session DB perdue (%s). Reinit du pool.", exc)
+                            try:
+                                await close_db()  # concurrency-safe (snapshot-and-null)
+                            except Exception:
+                                self._logger.exception("Fermeture du pool en échec")
+                            session_factory = get_sessionmaker()
+                            if session_factory is None:
+                                raise RuntimeError("Sessionmaker indisponible après reinit") from exc
+                            continue
+                        self._logger.error("Erreur SQL dans %s: %s", method_name, exc, exc_info=True)
+                        raise
+                    finally:
+                        # Reset unique par itération (le token est recréé à chaque tour).
+                        db_session_ctx.reset(token)
 
-                # 👀 CAS B : Sommet de la pile d'exécution -> Génération de la Session Racine (Étanche)
-                session_factory = get_sessionmaker()
-                if session_factory is None:
-                    raise RuntimeError("Database sessionmaker unavailable; ensure init_db() ran")
-
-                for attempt in range(2):
-                    async with session_factory() as new_session:
-                        # Fixation de la session dans le stockage local de la coroutine (ContextVar)
-                        token = db_session_ctx.set(new_session)
-                        try:
-                            # Injection transparente de la session si le mixin l'attend
-                            # On utilise inspect pour vérifier si 'session' est dans la signature
-                            import inspect
-                            sig = inspect.signature(attr)
-                            if "session" in sig.parameters and "session" not in kwargs:
-                                kwargs["session"] = new_session
-
-                            # Exécution de la méthode du mixin
-                            res = await attr(*args, **kwargs)
-
-                            # Commit uniquement si la méthode n'est pas enregistrée en READ-ONLY
-                            if should_commit:
-                                await new_session.commit()
-                            return res
-
-                        except TypeError as e:
-                            await new_session.rollback()
-                            self._logger.error("❌ Erreur de signature Python dans le wrapper pour %s: %s", name, e)
-                            raise e
-                        except Exception as e:
-                            await new_session.rollback()
-                            if _is_connection_lost(e) and attempt == 0:
-                                self._logger.warning(
-                                    "🔁 Session DB perdue (%s). Réinitialisation du pool et nouvelle tentative.",
-                                    e,
-                                )
-                                db_session_ctx.reset(token)
-                                try:
-                                    await close_db()
-                                except Exception:
-                                    self._logger.exception("Échec lors de la fermeture du pool après perte de connexion")
-                                session_factory = get_sessionmaker()
-                                if session_factory is None:
-                                    raise RuntimeError("Database sessionmaker unavailable après réinitialisation") from e
-                                continue
-
-                            self._logger.error(
-                                "❌ Erreur SQL critique interceptée et annulée dans %s: %s",
-                                name,
-                                e,
-                                exc_info=True,
-                            )
-                            raise
-                        finally:
-                            # Libération étanche du slot mémoire pour les coroutines concurrentes
-                            db_session_ctx.reset(token)
-
-            return auto_transaction_wrapper
-
-        return attr
+        return auto_transaction_wrapper
 
     # ==================================================================
     # MÉTHODES SPÉCIFIQUES & EXCEPTIONS
@@ -243,7 +217,7 @@ async def te():
         try:
             try:
                 start = time.time()
-                res = await se.get_producer_orders(phone='+212782901759',producer_id=PRODUCER_ID)
+                res = await se.get_zone_by_name(name="Ouagadougou")
                 end = time.time()
                 print(f"Temps:{end-start}")
                 print("✅ Market overview retrieved:", res)

@@ -10,11 +10,8 @@ _FIELD_TO_EXPECTED = {
     "product": "PRODUCT",
     "product_name": "PRODUCT",
     "quantity": "QUANTITY",
-    "quantity_mentioned": "QUANTITY",
     "unit": "UNIT",
-    "unit_mentioned": "UNIT",
     "price": "PRICE",
-    "price_mentioned": "PRICE",
     "order_id": "SELECTION",
     "phone": None,
 }

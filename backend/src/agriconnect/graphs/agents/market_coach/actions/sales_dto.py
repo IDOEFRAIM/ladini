@@ -46,13 +46,13 @@ class SalesUpdateProductPayload(BaseModel):
         price_raw = coalesce_entity_value(
             payload,
             entity,
-            payload_keys=("price_mentioned", "price"),
+            payload_keys=("price",),
             entity_keys=("price", "price_fcfa", "unit_price"),
         )
         quantity_raw = coalesce_entity_value(
             payload,
             entity,
-            payload_keys=("quantity_mentioned", "quantity"),
+            payload_keys=("quantity",),
             entity_keys=("quantity_for_sale", "quantity", "qty"),
         )
 
@@ -101,17 +101,12 @@ class SalesPublishProductPayload(BaseModel):
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "SalesPublishProductPayload":
-        product_raw = (
-            payload.get("product")
-            or payload.get("name")
-            or payload.get("product_name")
-        )
+        product_raw = payload.get("product")
         if product_raw in _EMPTY_SLOT_VALUES:
             raise ValueError("Le nom du produit est requis pour la publication.")
 
         quantity_raw = (
-            payload.get("quantity_mentioned")
-            or payload.get("quantity")
+            payload.get("quantity")
             or payload.get("quantity_for_sale")
         )
         quantity_value = to_float(quantity_raw, field="quantity")
@@ -119,18 +114,14 @@ class SalesPublishProductPayload(BaseModel):
             raise ValueError("La quantité est requise pour la publication du produit.")
 
         price_raw = (
-            payload.get("price_mentioned")
-            or payload.get("price")
+            payload.get("price")
             or payload.get("unit_price")
         )
         price_value = to_float(price_raw, field="price")
         if price_value is None:
             raise ValueError("Le prix est requis pour la publication du produit.")
 
-        unit_value = (
-            payload.get("unit_mentioned")
-            or payload.get("unit")
-        )
+        unit_value = payload.get("unit")
 
         return cls(
             product=str(product_raw),
@@ -171,8 +162,8 @@ class MarketGetRequestsPayload(BaseModel):
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> "MarketGetRequestsPayload":
         status_raw = payload.get("status")
-        product_raw = payload.get("product_name") or payload.get("product")
-        zone_raw = payload.get("zone_name") or payload.get("zone")
+        product_raw = payload.get("product") or payload.get("product_name")
+        zone_raw = payload.get("zone") or payload.get("zone_name")
 
         status = (
             str(status_raw).strip()

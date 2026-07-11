@@ -29,16 +29,15 @@ def _resolve_mass_payload(payload: Mapping[str, Any]) -> Tuple[float, str]:
         payload.get("original_quantity"),
         payload.get("quantity_display"),
         payload.get("quantity"),
-        payload.get("quantity_mentioned"),
     )
     if quantity_raw is None:
-        quantity_raw = require(payload, "quantity_mentioned")
+        quantity_raw = require(payload, "quantity")
 
     unit_raw = _pick_first_value(
         payload.get("original_unit"),
         payload.get("unit_display"),
         payload.get("unit"),
-        payload.get("unit_mentioned"),
+        payload.get("unit"),
     )
 
     try:
@@ -161,7 +160,8 @@ class SalesService:
 
     def search_products(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
         product = str(require(payload, "product"))
-        args: Dict[str, Any] = {"product": product}
+        phone = require_phone(state)
+        args: Dict[str, Any] = {"product": product, "phone": phone}
         zone = payload.get("zone_name") or payload.get("zone")
         if zone:
             args["zone_id"] = str(zone)
@@ -176,7 +176,7 @@ class SalesService:
 
     def validate_price(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
         product = str(require(payload, "product"))
-        price = float(require(payload, "price_mentioned"))
+        price = float(require(payload, "price"))
         zone = str(require(payload, "zone"))
         args = {
             "product_name": product,
@@ -188,8 +188,8 @@ class SalesService:
     def publish_product(self, command: SalesPublishProductCommand) -> DomainResult:
         qty_kg, unit = _resolve_mass_payload(
             {
-                "quantity_mentioned": command.quantity,
-                "unit_mentioned": command.unit,
+                "quantity": command.quantity,
+                "unit": command.unit,
             }
         )
         args: Dict[str, Any] = {
@@ -208,8 +208,8 @@ class SalesService:
     def record_direct_sale(self, command: SalesRecordDirectCommand) -> DomainResult:
         qty_kg, unit = _resolve_mass_payload(
             {
-                "quantity_mentioned": command.quantity,
-                "unit_mentioned": command.unit,
+                "quantity": command.quantity,
+                "unit": command.unit,
             }
         )
         args = {
@@ -224,7 +224,7 @@ class SalesService:
     def place_bid(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
         phone = require_phone(state)
         auction_id = str(require(payload, "auction_id"))
-        price = float(require(payload, "price_mentioned"))
+        price = float(require(payload, "price"))
         args: Dict[str, Any] = {"phone": phone, "auction_id": auction_id, "offered_price": price}
         if payload.get("message"):
             args["message"] = str(payload["message"])

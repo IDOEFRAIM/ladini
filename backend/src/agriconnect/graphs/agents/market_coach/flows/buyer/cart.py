@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from agriconnect.graphs.agents.market_coach.services.domain.buyer_common import safe_call_tool
 from agriconnect.graphs.agents.market_coach.services.domain.cart_service import CartDomainService
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, is_success_response
 
@@ -78,6 +77,20 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
 
     # --- Resolve entities ---
     product_name = resolve_product(payload, stable_entities, state)
+
+    # Recover product name from an active vendor context BEFORE the missing-field
+    # guards. When the buyer already picked a vendor (or a single vendor was
+    # seeded) the product lives in vendor_selection_context, not always in the
+    # payload — without this the flow would wrongly re-ask for the product.
+    if not product_name:
+        _vctx = state.get("vendor_selection_context")
+        if isinstance(_vctx, dict) and not _vctx.get("__reset__"):
+            _chosen = _vctx.get("chosen_vendor")
+            product_name = (
+                (_chosen.get("name") if isinstance(_chosen, dict) else None)
+                or _vctx.get("product")
+            )
+
     if product_name:
         payload.setdefault("product", product_name)
 
@@ -100,9 +113,16 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
 
     # --- Guard: insufficient info for non-view goals ---
     if goal not in {"BUYER_ADD_TO_CART", "BUYER_VIEW_CART"} and not (product_name and quantity not in (None, "", 0)):
+        cart_hint = f" Vous avez {len(cart)} article(s) dans votre panier." if cart else ""
         return _with_base({
             "status": "PLANNING",
-            "final_response": "Comment puis-je vous aider avec votre panier ?",
+            "final_response": (
+                f"🛒 Comment puis-je vous aider ?{cart_hint}\n\n"
+                "💡 _Dites par exemple :_\n"
+                "• *50 kg de maïs* — pour ajouter au panier\n"
+                "• *mon panier* — pour voir votre panier\n"
+                "• *précommander* — pour valider votre commande"
+            ),
             "ag_ui_component": None,
         })
 
@@ -115,7 +135,7 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
                 "product_id": "DRAFT",
                 "name": str(product_name) if product_name else "EN ATTENTE",
                 "quantity": float(quantity) if quantity not in (None, "", 0) else 0.0,
-                "unit": str(payload.get("unit_mentioned") or "KG"),
+                "unit": str(payload.get("unit") or "KG"),
                 "price": 0.0,
                 "line_total": 0.0,
                 "status": "DRAFT",
@@ -123,19 +143,16 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
             cart = [c for c in cart if c.get("status") != "DRAFT" and c.get("product_id") != "DRAFT"]
             cart.append(draft_item)
 
-        missing_field = "PRODUCT" if not product_name else "QUANTITY"
-        prompt = (
-            "Quel produit souhaitez-vous ajouter au panier ?"
-            if not product_name
-            else f"Quelle quantité de {product_name} souhaitez-vous ?"
-        )
+        missing_field_name = "product" if not product_name else "quantity"
+        expected = "PRODUCT" if not product_name else "QUANTITY"
 
         vendor_ctx = state.get("vendor_selection_context")
         return _with_base({
             "status": "WAITING_INPUT",
-            "expected_input": missing_field,
+            "expected_input": expected,
             "response_strategy": "ASK_MISSING_FIELD",
-            "final_response": prompt,
+            "missing_fields": [missing_field_name],
+            "last_missing_field": missing_field_name,
             "transaction_payload": payload,
             "draft_payload": draft_snapshot or state.get("draft_payload") or payload,
             "vendor_selection_context": vendor_ctx if vendor_ctx else state.get("vendor_selection_context"),
@@ -148,11 +165,16 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
     if vendor_ctx_active:
         vendor_ctx_payload: Dict[str, Any] = dict(vendor_ctx or {})
         chosen_vendor = vendor_ctx_payload.get("chosen_vendor")
+        # Robustness: recover product name from the vendor context if it did not
+        # survive in the payload (avoids resolve_product_vendors("None")).
+        if not product_name:
+            product_name = (
+                (chosen_vendor.get("name") if isinstance(chosen_vendor, dict) else None)
+                or vendor_ctx_payload.get("product")
+            )
+            if product_name:
+                payload["product"] = product_name
         selection_idx = payload.get("selection_index")
-        # Fallback: memory_update may have already resolved+cleared selection_index
-        # in a previous step; extracted_entities still carries the raw value.
-        if selection_idx is None:
-            selection_idx = (state.get("extracted_entities") or {}).get("selection_index")
 
         if selection_idx is not None:
             vendors_list = vendor_ctx_payload.get("vendors") or []
@@ -171,10 +193,10 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
                 requested_qty = vendor_ctx_payload.get("requested_quantity")
                 requested_unit = vendor_ctx_payload.get("requested_unit")
                 if quantity in (None, "", 0) and requested_qty not in (None, "", 0):
-                    payload["quantity_mentioned"] = requested_qty
+                    payload["quantity"] = requested_qty
                     quantity = requested_qty
                 if requested_unit:
-                    payload.setdefault("unit_mentioned", requested_unit)
+                    payload.setdefault("unit", requested_unit)
             else:
                 return _with_base({
                     "status": "WAITING_INPUT",
@@ -192,6 +214,26 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
                 )
             )
 
+        # Vendor chosen but no quantity → ask for it, keep vendor context
+        if chosen_vendor is not None and product_name and quantity in (None, "", 0):
+            vendor_label = chosen_vendor.get("vendor_name") or "ce producteur"
+            unit_hint = chosen_vendor.get("unit") or "KG"
+            price_hint = chosen_vendor.get("price")
+            price_info = f" (prix : {price_hint} FCFA/{unit_hint})" if price_hint else ""
+            return _with_base({
+                "status": "WAITING_INPUT",
+                "expected_input": "QUANTITY",
+                "response_strategy": "ASK_MISSING_FIELD",
+                "final_response": (
+                    f"👤 Vous avez choisi *{vendor_label}* pour *{product_name}*{price_info}.\n\n"
+                    f"📦 Quelle quantité souhaitez-vous ?\n"
+                    f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._"
+                ),
+                "transaction_payload": payload,
+                "vendor_selection_context": vendor_ctx_payload,
+                "ag_ui_component": None,
+            })
+
     # --- MULTI-VENDOR RESOLUTION ---
     vendors, has_multiple = await cart_service.resolve_product_vendors(phone, str(product_name))
 
@@ -199,7 +241,13 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
         return _with_base({
             "status": "COMPLETED",
             "response_strategy": "SUCCESS",
-            "final_response": f"Désolé, le produit « {product_name} » n'est pas disponible dans notre catalogue. Souhaitez-vous voir une autre catégorie ?",
+            "final_response": (
+                f"📭 Le produit « *{product_name}* » n'est pas disponible dans notre catalogue actuellement.\n\n"
+                "💡 _Que souhaitez-vous faire ?_\n"
+                "• Tapez un autre nom de produit pour chercher\n"
+                "• Tapez *appel d'offres* pour demander aux producteurs\n"
+                "• Tapez *marketplace* pour voir les produits disponibles"
+            ),
             "transaction_payload": {"__reset__": True},
             "negotiation_context": {"__reset__": True},
             "current_goal": None,
@@ -212,15 +260,42 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
     if has_multiple:
         extra_context = {
             "requested_quantity": quantity,
-            "requested_unit": payload.get("unit_mentioned") or payload.get("unit"),
+            "requested_unit": payload.get("unit"),
         }
         state_patch, _menu = cart_service.build_product_selection_menu(
             str(product_name), vendors, extra_context=extra_context,
         )
         return _with_base(state_patch)
 
-    # Single vendor — add directly
+    # Single vendor — add directly if quantity known, else ask
     ref = vendors[0]
+    if quantity in (None, "", 0):
+        vendor_label = ref.get("vendor_name") or "un producteur"
+        unit_hint = ref.get("unit") or "KG"
+        price_hint = ref.get("price")
+        price_info = f" (prix : {price_hint} FCFA/{unit_hint})" if price_hint else ""
+        vendor_ctx_seed = {
+            "product": product_name,
+            "vendors": [ref],
+            "chosen_vendor": ref,
+            "requested_quantity": None,
+            "requested_unit": None,
+            "available_mapping_kind": "product_vendor",
+        }
+        payload["product"] = product_name
+        return _with_base({
+            "status": "WAITING_INPUT",
+            "expected_input": "QUANTITY",
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": (
+                f"✅ *{product_name}* est disponible chez *{vendor_label}*{price_info}.\n\n"
+                f"📦 Quelle quantité souhaitez-vous ?\n"
+                f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._"
+            ),
+            "transaction_payload": payload,
+            "vendor_selection_context": vendor_ctx_seed,
+            "ag_ui_component": None,
+        })
     return _with_base(
         await cart_service.add_to_cart_with_ref(phone, str(product_name), quantity, ref, cart, state)
     )

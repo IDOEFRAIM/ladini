@@ -55,6 +55,10 @@ BUYER_ORDER_TRACKING_GOALS = frozenset({
     "BUYER_LIST_ORDERS",
     "BUYER_CANCEL_ORDER",
 })
+BUYER_AUCTION_TRACKING_GOALS = frozenset({
+    "BUYER_LIST_AUCTIONS",
+    "BUYER_CHECK_AUCTION_STATUS",
+})
 
 
 # =====================================================================
@@ -138,8 +142,10 @@ class DefaultDomainRouter:
                 if not tunnel_manager.is_negotiation_routeable(status):
                     return "to_strategy"
                 return "to_negotiation"
-            if goal in BUYER_ORDER_TRACKING_GOALS:
+            if goal in BUYER_ORDER_TRACKING_GOALS or goal in BUYER_AUCTION_TRACKING_GOALS:
                 return "to_order_tracking"
+            if goal in BUYER_PREORDER_GOALS:
+                return "to_resolver"
 
         # Règle 1 : Si erreur ou demande d'input, on répond à l'utilisateur.
         # Cela empêche les boucles : quand validator demande un champ manquant,
@@ -202,7 +208,7 @@ def _has_minimum_cart_payload(state: Dict[str, Any]) -> bool:
     if not isinstance(payload, dict):
         return False
     has_product = bool(payload.get("product"))
-    qty = payload.get("quantity_mentioned")
+    qty = payload.get("quantity")
     has_qty = qty not in (None, "", [], {})
     return has_product or has_qty
 
@@ -215,4 +221,5 @@ __all__ = [
     "BUYER_PREORDER_GOALS",
     "BUYER_NEGOTIATION_GOALS",
     "BUYER_ORDER_TRACKING_GOALS",
+    "BUYER_AUCTION_TRACKING_GOALS",
 ]

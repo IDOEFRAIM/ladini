@@ -10,13 +10,11 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuRequest,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.buyer_common import (
-    safe_call_tool,
     with_support_footer,
 )
 from agriconnect.graphs.agents.market_coach.services.mcp.gateway import AuctionGateway
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
-    ensure_dict,
     is_success_response,
 )
 
@@ -33,6 +31,15 @@ from .helpers import (
     resolve_quantity,
     resolve_unit,
 )
+
+def _fmt_num(value: Any) -> str:
+    """Format a numeric value without a trailing ``.0`` (225.0 → '225')."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return str(int(f)) if f == int(f) else str(f)
+
 
 # =====================================================================
 # PROCUREMENT ESCALATION BUILDER
@@ -53,21 +60,20 @@ def build_procurement_escalation(
     next_payload.pop("selection_index", None)
     next_payload.pop("selected_value", None)
     if next_payload.pop("_auto_quantity_fill", False):
-        next_payload.pop("quantity_mentioned", None)
         next_payload.pop("quantity", None)
 
     form_data: Dict[str, Any] = {}
     if next_payload.get("product") not in (None, "", [], {}):
         form_data["product"] = next_payload.get("product")
     if unit not in (None, "", [], {}):
-        form_data["unit_mentioned"] = unit
+        form_data["unit"] = unit
 
     # Prefill default deadline (+30 days) but keep it editable
     if not next_payload.get("deadline") and not next_payload.get("deadline_date"):
         default_deadline = (datetime.utcnow() + timedelta(days=30)).date().isoformat()
         form_data["deadline"] = default_deadline
 
-    required_order = ("product", "price_mentioned", "quantity_mentioned", "deadline")
+    required_order = ("product", "price", "quantity", "deadline")
     missing_fields = [k for k in required_order if form_data.get(k) in (None, "", 0, [], {})]
     last_missing_field = missing_fields[0] if missing_fields else None
     expected_input = last_missing_field.upper() if last_missing_field else "NONE"
@@ -118,6 +124,24 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
 
     vendor_ctx = state.get("vendor_selection_context")
     vendor_ctx_active = bool(vendor_ctx) and not (isinstance(vendor_ctx, dict) and vendor_ctx.get("__reset__"))
+
+    # Invalidate stale vendor_ctx if user is asking for a different product
+    if vendor_ctx_active and isinstance(vendor_ctx, dict):
+        ctx_product = str(vendor_ctx.get("product") or "").lower().strip()
+        new_product = str(payload.get("product") or "").lower().strip()
+        if new_product and ctx_product and new_product != ctx_product:
+            logger.info(
+                "buyer_request_resolver: stale vendor_ctx (product=%s) vs new request (product=%s) — clearing",
+                ctx_product, new_product,
+            )
+            vendor_ctx_active = False
+
+    logger.info(
+        "buyer_request_resolver: vendor_ctx_active=%s, vendor_ctx_type=%s, payload_keys=%s",
+        vendor_ctx_active,
+        type(vendor_ctx).__name__ if vendor_ctx else "None",
+        list((payload or {}).keys()),
+    )
     if vendor_ctx_active:
         raw_selection = payload.get("selection_index")
         if raw_selection is None:
@@ -127,12 +151,26 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
             if raw_text.isdigit():
                 raw_selection = raw_text
 
+        logger.info(
+            "buyer_request_resolver: vendor_ctx has chosen_vendor=%s, raw_selection=%s",
+            bool(vendor_ctx.get("chosen_vendor")) if isinstance(vendor_ctx, dict) else False,
+            raw_selection,
+        )
+
         if raw_selection is not None:
             next_payload = dict(payload)
             next_payload["selection_index"] = raw_selection
             next_state = dict(state)
             next_state["current_goal"] = "BUYER_ADD_TO_CART"
             next_state["transaction_payload"] = next_payload
+            logger.info("buyer_request_resolver: routing to cart_management with selection_index=%s", raw_selection)
+            return await cart_management(next_state, mc_runtime)
+
+        # Vendor ctx active with chosen_vendor but no selection → ask for quantity
+        if isinstance(vendor_ctx, dict) and vendor_ctx.get("chosen_vendor"):
+            next_state = dict(state)
+            next_state["current_goal"] = "BUYER_ADD_TO_CART"
+            logger.info("buyer_request_resolver: vendor already chosen, routing to cart_management for quantity")
             return await cart_management(next_state, mc_runtime)
 
     stable_entities = state.get("stable_entities") or {}
@@ -151,7 +189,6 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
     text_has_digits = any(ch.isdigit() for ch in normalized_text)
     reset_quantity = inferred_from_text and not text_has_digits
     if reset_quantity:
-        payload.pop("quantity_mentioned", None)
         payload.pop("quantity", None)
 
     def _escalate(message: str, unit_hint: Optional[str] = None) -> Dict[str, Any]:
@@ -211,7 +248,66 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
         stable_entities,
         allow_stable_fallback=allow_stable_quantity,
     )
+
+    # If we have product + quantity + it looks like an add-to-cart intent,
+    # delegate directly to cart_management (skips the vendor menu when only
+    # one vendor exists, otherwise cart_management will show the menu).
+    if quantity not in (None, "", 0):
+        logger.info("buyer_request_resolver: bridging to cart_management (product+qty present)")
+        synthetic = dict(state)
+        syn_payload = dict(payload)
+        syn_payload.setdefault("product", product_name)
+        syn_payload.setdefault("quantity", quantity)
+        if unit:
+            syn_payload.setdefault("unit", unit)
+        synthetic["transaction_payload"] = syn_payload
+        synthetic["current_goal"] = "BUYER_ADD_TO_CART"
+        return await cart_management(synthetic, mc_runtime)
+
     vendors, has_multiple = await cart_service.resolve_product_vendors(phone, str(product_name))
+
+    if vendors and not has_multiple:
+        # Single vendor — skip the selection menu and go directly to quantity
+        ref = vendors[0]
+        logger.info(
+            "buyer_request_resolver: single vendor '%s' for '%s' — skipping menu, asking quantity",
+            ref.get("vendor_name"), product_name,
+        )
+        vendor_label = ref.get("vendor_name") or "un producteur"
+        unit_hint = ref.get("unit") or "KG"
+        price_hint = ref.get("price")
+        available_qty = ref.get("available_qty")
+        price_info = f" à *{_fmt_num(price_hint)} FCFA/{unit_hint}*" if price_hint else ""
+        qty_info = f" (disponible : {_fmt_num(available_qty)} {unit_hint})" if available_qty else ""
+        vendor_ctx_seed = {
+            "product": product_name,
+            "vendors": vendors,
+            "chosen_vendor": ref,
+            "requested_quantity": None,
+            "requested_unit": unit,
+            "available_mapping_kind": "product_vendor",
+        }
+        payload["product"] = product_name
+        wm = dict(working_memory)
+        wm.update({
+            "buyer_request_catalog_checked": True,
+            "buyer_request_last_product": product_name,
+        })
+        return {
+            "status": "WAITING_INPUT",
+            "expected_input": "QUANTITY",
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": (
+                f"✅ *{product_name}* est disponible chez *{vendor_label}*{price_info}{qty_info}.\n\n"
+                f"📦 Quelle quantité souhaitez-vous ?\n"
+                f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._"
+            ),
+            "transaction_payload": payload,
+            "vendor_selection_context": vendor_ctx_seed,
+            "current_goal": "BUYER_ADD_TO_CART",
+            "ag_ui_component": None,
+            "working_memory": wm,
+        }
 
     if vendors:
         extra_context = {"requested_quantity": quantity, "requested_unit": unit}
@@ -239,8 +335,10 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
         "buyer_request_last_product": product_name,
     })
     msg = (
-        f"Désolé, aucune offre n'est disponible pour « {product_name} » dans notre catalogue. "
-        "Souhaitez-vous que je demande aux producteurs si quelqu'un peut fournir ? (Oui/Non)"
+        f"📭 Aucune offre disponible pour « *{product_name}* » dans notre catalogue.\n\n"
+        "Souhaitez-vous lancer un *appel d'offres* pour que les producteurs "
+        "vous fassent des propositions ?\n\n"
+        "👉 Répondez *oui* pour lancer, ou *non* pour chercher autre chose."
     )
     return {
         "status": "WAITING_INPUT",
@@ -268,7 +366,7 @@ async def resolve_own_auctions(
         return phone_missing_error()
 
     kwargs: Dict[str, Any] = {"phone": str(phone), "status": "OPEN", "view_mode": "MY_OWN"}
-    product = payload.get("product") or payload.get("product_name")
+    product = payload.get("product")
     if product:
         kwargs["product_name"] = str(product)
 

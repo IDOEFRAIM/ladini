@@ -2,8 +2,11 @@ from __future__ import annotations
 
 """Cart domain service — isolates buyer cart orchestration helpers."""
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("AgriConnect.Market.CartService")
 
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
@@ -11,6 +14,7 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
 )
 from agriconnect.graphs.agents.market_coach.flows.common.menu_text import (
     render_cart_actions_hint,
+    render_selection_prompt,
 )
 from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
     AgentActionGateway,
@@ -19,7 +23,7 @@ from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
 )
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, is_success_response
 
-from .buyer_common import SUPPORT_FOOTER, safe_call_tool, with_support_footer
+from .buyer_common import SUPPORT_FOOTER, with_support_footer
 
 
 @dataclass
@@ -57,7 +61,7 @@ class CartDomainService:
                 {
                     "product_id": pid,
                     "crop_cycle_id": item.get("crop_cycle_id"),
-                    "name": str(item.get("name") or product_name),
+                    "name": _clean_product_name(item.get("name") or product_name),
                     "price": float(item.get("price") or 0.0),
                     "unit": str(item.get("unit") or "KG").upper(),
                     "vendor": item.get("vendor"),
@@ -106,7 +110,7 @@ class CartDomainService:
             lines.append(f"*{i}.* {label}")
             options.append(MenuOption(index=str(i), label=label, value=v.get("producer_id") or str(i)))
 
-        lines.append("\n_Répondez avec le numéro du producteur choisi, ou *annuler* pour quitter._")
+        lines.append(render_selection_prompt(noun="producteur"))
         if post_hint:
             lines.append(post_hint.strip())
         menu_text = "\n".join(lines)
@@ -120,7 +124,7 @@ class CartDomainService:
         )
 
         vendor_context = {
-            "product_name": product_name,
+            "product": product_name,
             "vendors": vendors,
             "available_mapping_kind": "product_vendor",
         }
@@ -147,11 +151,11 @@ class CartDomainService:
     def format_pending_draft(pending: Optional[Dict[str, Any]]) -> Optional[str]:
         if not pending or pending.get("__reset__"):
             return None
-        product = pending.get("product") or pending.get("product_name")
+        product = pending.get("product")
         if not product:
             return None
-        qty = pending.get("quantity_mentioned") or pending.get("quantity")
-        unit = pending.get("unit_mentioned") or pending.get("unit")
+        qty = pending.get("quantity")
+        unit = pending.get("unit")
         details = ""
         if qty is not None and qty not in ("", []):
             details = f" — {qty}"
@@ -172,7 +176,11 @@ class CartDomainService:
     ) -> Dict[str, Any]:
         pending_line = self.format_pending_draft(pending_draft)
         if not cart:
-            base_msg = "🛒 Votre panier est vide. Indiquez un produit et une quantité pour commencer."
+            base_msg = (
+                "🛒 Votre panier est vide.\n\n"
+                "Pour commencer, indiquez un produit et une quantité.\n"
+                "💡 _Exemple : « 50 kg de maïs » ou « je cherche du riz »_"
+            )
             if pending_line:
                 base_msg = "\n".join(["🛒 Votre panier est encore vide.", pending_line])
             return {
@@ -195,13 +203,14 @@ class CartDomainService:
 
             lines.append(
                 f"\n*{i}. {line.get('name')}* ({source_label}){vendor_info}{notification_badge}\n"
-                f"   {line.get('quantity')} {line.get('unit')} × {line.get('price')} = *{line.get('line_total')} FCFA*"
+                f"   {_fmt_num(line.get('quantity'))} {line.get('unit')} × {_fmt_num(line.get('price'))} = "
+                f"*{_fmt_num(line.get('line_total'))} FCFA*"
             )
             options.append({"index": str(i), "label": f"{line.get('name')} (x{line.get('quantity')})"})
             if line.get("is_auction"):
                 has_auction_items = True
 
-        lines.append(f"\n💰 *Total estimé : {meta.get('total_amount')} {meta.get('currency')}*")
+        lines.append(f"\n💰 *Total estimé : {_fmt_num(meta.get('total_amount'))} {meta.get('currency')}*")
         lines.append(render_cart_actions_hint(has_auction_items))
 
         if pending_line:
@@ -233,6 +242,19 @@ class CartDomainService:
         except (TypeError, ValueError):
             qty = 0.0
 
+        if qty <= 0:
+            return {
+                "status": "WAITING_INPUT",
+                "expected_input": "QUANTITY",
+                "response_strategy": "ASK_MISSING_FIELD",
+                "missing_fields": ["quantity"],
+                "final_response": (
+                    f"📦 Quelle quantité de *{product_name}* souhaitez-vous ?\n"
+                    "💡 _Exemples : 50 kg, 2 sacs, 100 kg..._"
+                ),
+                "ag_ui_component": None,
+            }
+
         source_type = str(ref.get("source_type") or "DIRECT").upper()
         if source_type == "FUTURE":
             eta = ref.get("estimated_available_at")
@@ -245,20 +267,34 @@ class CartDomainService:
                     "Cette option est visible pour découverte et choix producteur, mais n'est pas encore commandable en stock immédiat."
                 ),
                 "preorder_workflow": {"phase": "CART"},
-                "vendor_selection_context": {"__reset__": True},
+                "vendor_selection_context": None,
             }
 
+        resolved_pid = ref.get("product_id") or ref.get("id")
         check = await StockGateway(self.mc_runtime).validate_stock_availability(
-            product_id=ref.get("product_id") or ref.get("id"),
+            product_id=resolved_pid,
             quantity=qty,
             unit=ref.get("unit"),
             buyer_phone=phone,
         )
 
-        status = str(check.get("status") or "").upper()
-        if status != "SUCCESS":
+        # Defensive unwrap: some transports wrap the DB dict inside an execution
+        # envelope ({"ok": ..., "data": {...}, "error": ...}). If we don't unwrap,
+        # is_success_response() sees no top-level "status" and no "message",
+        # producing a bogus "Stock insuffisant" with no numbers.
+        check = _unwrap_tool_envelope(check)
+
+        logger.info(
+            "STOCK_CHECK | product_id=%s qty=%s available=%s status=%s reason=%s msg=%s",
+            resolved_pid, qty,
+            check.get("available_quantity"),
+            check.get("status"),
+            check.get("reason"),
+            check.get("message"),
+        )
+
+        if not is_success_response(check):
             fallback = check.get("fallback") or []
-            msg = check.get("message") or "Stock insuffisant pour cette demande."
             recos = [
                 {
                     "type": "alternative_product",
@@ -270,13 +306,57 @@ class CartDomainService:
                 }
                 for alt in fallback
             ]
+
+            reason = str(check.get("reason") or "").lower()
+            available = check.get("available_quantity")
+            display_name = ref.get("name") or product_name
+            unit_lbl = str(ref.get("unit") or check.get("unit") or "KG")
+
+            # Genuine shortage (vendor exists but not enough) OR product vanished →
+            # propose an enchère so producers can commit to supply the demand.
+            if reason == "product_not_found":
+                msg = check.get("message") or f"Le produit « {display_name} » n'existe plus dans le catalogue."
+            elif available is not None:
+                msg = (
+                    f"📉 Stock insuffisant pour « *{display_name}* » : "
+                    f"seulement *{_fmt_num(available)} {unit_lbl}* disponible(s) sur "
+                    f"*{_fmt_num(qty)} {unit_lbl}* demandé(s)."
+                )
+            else:
+                # Envelope/technical error — do not pretend it's a stock shortage.
+                msg = check.get("message") or (
+                    "⚠️ La vérification du stock n'a pas abouti. Veuillez réessayer."
+                )
+
+            escalation = (
+                "\n\n🙋 Souhaitez-vous lancer un *appel d'offres* pour que les producteurs "
+                "s'engagent à fournir cette quantité ?\n"
+                "👉 Répondez *oui* pour lancer, ou *non* pour autre chose."
+            )
+            wm = dict(state.get("working_memory") or {})
+            wm.update({
+                "buyer_request_waiting_choice": True,
+                "buyer_request_catalog_checked": True,
+                "buyer_request_last_product": display_name,
+            })
+            payload_seed = {"product": display_name}
+            if qty:
+                payload_seed["quantity"] = qty
+            if ref.get("unit"):
+                payload_seed["unit"] = ref.get("unit")
+
             return {
-                "status": "COMPLETED",
-                "response_strategy": "SUCCESS",
-                "final_response": msg + ("\n\n💡 Des alternatives sont disponibles." if recos else ""),
+                "status": "WAITING_INPUT",
+                "expected_input": "CONFIRMATION",
+                "response_strategy": "ASK_MISSING_FIELD",
+                "final_response": msg + ("\n\n💡 Des alternatives sont disponibles." if recos else "") + escalation,
                 "fallback_recommendations": recos,
                 "preorder_workflow": {"phase": "CART"},
-                "vendor_selection_context": {"__reset__": True},
+                "vendor_selection_context": None,
+                "current_goal": "BUYER_REQUEST",
+                "goal_status": "ACTIVE",
+                "working_memory": wm,
+                "transaction_payload": payload_seed,
             }
 
         price = float(check.get("unit_price") or ref.get("price") or 0.0)
@@ -333,7 +413,7 @@ class CartDomainService:
             "fallback_recommendations": [],
             "draft_payload": {"__reset__": True},
             "transaction_payload": {"__reset__": True},
-            "vendor_selection_context": {"__reset__": True},
+            "vendor_selection_context": None,
         }
         response.update(render)
         return response
@@ -345,6 +425,59 @@ SOURCE_TYPE_LABELS: Dict[str, str] = {
     "AUCTION": "🏷️ Enchère – prix négociable",
     "PROCUREMENT": "📋 Appel d'offres",
 }
+
+
+_GEO_TAG_RE = __import__("re").compile(r"\s*\((?:🌐|📍)[^)]*\)\s*$")
+
+
+def _clean_product_name(name: Any) -> str:
+    """Strip the geo tag the search bakes into names ('tomates (🌐 National)').
+
+    Without this the cart shows a double tag: 'tomates (🌐 National) (🌐 Catalogue)'.
+    We remove a trailing '(🌐 …)' / '(📍 …)' so the stored name is clean.
+    """
+    s = str(name or "").strip()
+    return _GEO_TAG_RE.sub("", s).strip() or s
+
+
+def _fmt_num(value: Any) -> str:
+    """Format a numeric value without a trailing ``.0`` (225.0 → '225')."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return str(int(f)) if f == int(f) else str(f)
+
+
+def _unwrap_tool_envelope(result: Any) -> Dict[str, Any]:
+    """Return the domain dict from a possibly-enveloped tool response.
+
+    Some transports return the raw DB dict (``{"status": "success", ...}``),
+    others wrap it in an execution envelope (``{"ok": bool, "data": {...},
+    "error": ...}``). Without unwrapping, an ``ok=False`` envelope has no
+    top-level ``status``/``message`` and is silently misread as an empty
+    failure — surfacing a bogus "stock insuffisant" with no numbers.
+    """
+    if not isinstance(result, dict):
+        return {"status": "error", "message": "Réponse outil invalide."}
+    # Already a domain dict.
+    if "status" in result or "message" in result or "available_quantity" in result:
+        return result
+    # Execution envelope shape.
+    if "ok" in result or "data" in result:
+        data = result.get("data")
+        if isinstance(data, dict) and data:
+            merged = dict(data)
+            if result.get("error") and "message" not in merged:
+                merged.setdefault("message", str(result.get("error")))
+            merged.setdefault("status", "success" if result.get("ok") else "error")
+            return merged
+        # Empty data → propagate the envelope error as a domain error.
+        return {
+            "status": "success" if result.get("ok") else "error",
+            "message": str(result.get("error") or "") or None,
+        }
+    return result
 
 
 def _infer_source_type(product_record: Dict[str, Any]) -> str:
@@ -362,6 +495,5 @@ __all__ = [
     "CartDomainService",
     "SUPPORT_FOOTER",
     "with_support_footer",
-    "safe_call_tool",
     "SOURCE_TYPE_LABELS",
 ]

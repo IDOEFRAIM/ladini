@@ -19,7 +19,7 @@ def _fmt_num(value: Any) -> str:
 
 def _resolve_units(payload: Dict[str, Any], default_unit: str = "KG") -> Tuple[str, str]:
     conversion = payload.get("unit_conversion") or {}
-    converted_unit = payload.get("unit_mentioned") or conversion.get("to_unit") or default_unit
+    converted_unit = payload.get("unit") or conversion.get("to_unit") or default_unit
     display_unit = payload.get("unit_display") or conversion.get("from_unit") or converted_unit
     canonical_display = canonical_unit_label(display_unit, canonical_unit_label(default_unit))
     canonical_converted = canonical_unit_label(converted_unit, canonical_unit_label(default_unit))
@@ -27,13 +27,13 @@ def _resolve_units(payload: Dict[str, Any], default_unit: str = "KG") -> Tuple[s
 
 
 def _format_quantity(payload: Dict[str, Any], default_unit: str = "KG") -> Optional[str]:
-    converted_qty = payload.get("quantity_mentioned")
+    converted_qty = payload.get("quantity")
     if converted_qty in (None, "", [], {}):
         return None
 
     display_qty = payload.get("quantity_display")
     if display_qty in (None, "", [], {}):
-        display_qty = payload.get("original_quantity_mentioned")
+        display_qty = payload.get("original_quantity")
 
     display_unit, converted_unit = _resolve_units(payload, default_unit)
 
@@ -50,7 +50,7 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         default_unit = payload.get("unit") or ("KG" if production_type == "CROP" else "HEAD")
         quantity_line = _format_quantity(payload, default_unit)
         display_unit, converted_unit = _resolve_units(payload, default_unit)
-        price = payload.get("price_mentioned") or payload.get("price_per_unit")
+        price = payload.get("price") or payload.get("price_per_unit")
         eta = payload.get("estimated_available_at") or payload.get("expected_harvest_date")
         farm = payload.get("farm_name") or payload.get("farm_id")
 
@@ -71,7 +71,7 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         return f"{summary} :\n{bullet_list}" if bullet_list else summary
 
     product = payload.get("product")
-    price = payload.get("price_mentioned")
+    price = payload.get("price")
     quantity_line = _format_quantity(payload)
     display_unit, converted_unit = _resolve_units(payload)
     price_unit = display_unit or converted_unit
@@ -125,7 +125,7 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
     summary = mapping.get(goal)
     if summary:
         return summary
-    fallback_quantity = quantity_line or payload.get("quantity_display") or payload.get("quantity_mentioned")
+    fallback_quantity = quantity_line or payload.get("quantity_display") or payload.get("quantity")
     if fallback_quantity not in (None, "", [], {}):
         return (
             f"Validation de l'opération : {goal}"

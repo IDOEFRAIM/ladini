@@ -23,20 +23,16 @@ def _compute_progress(goal: Optional[str], payload: Dict[str, Any]) -> Optional[
     required = list(config.get("required") or [])
     if not required:
         return None
-    filled = [
-        f
-        for f in required
-        if f not in _PROGRESS_AUTO_FIELDS and payload.get(f) not in (None, "", [], {})
-    ]
+    user_fields = [f for f in required if f not in _PROGRESS_AUTO_FIELDS]
+    if not user_fields:
+        return None
+    filled = [f for f in user_fields if payload.get(f) not in (None, "", [], {})]
+    remaining = [f for f in user_fields if f not in filled]
     return {
-        "total": len([f for f in required if f not in _PROGRESS_AUTO_FIELDS]),
+        "total": len(user_fields),
         "filled": len(filled),
-        "remaining": [
-            f
-            for f in required
-            if f not in _PROGRESS_AUTO_FIELDS and f not in filled
-        ],
-        "pct": round(len(filled) / max(len(required), 1) * 100),
+        "remaining": remaining,
+        "pct": round(len(filled) / len(user_fields) * 100),
     }
 
 
@@ -71,7 +67,7 @@ def _entity_carry_forward(
     stable = state.get("stable_entities") or {}
     entities = dict(state.get("extracted_entities") or {})
     carried = False
-    for key in ("product", "unit_mentioned", "zone_name"):
+    for key in ("product", "unit", "zone_name"):
         if not entities.get(key) and stable.get(key):
             entities[key] = stable[key]
             carried = True
@@ -100,6 +96,8 @@ async def cognitive_guard(
     retry_count = int(state.get("retry_count") or 0)
     in_tunnel = bool(current_goal and expected_input not in {"NONE", ""})
 
+    user_role = str(state.get("forced_role") or state.get("user_role") or "").upper()
+
     updates: Dict[str, Any] = {}
     decision: Dict[str, Any] = {
         "event": event,
@@ -111,7 +109,7 @@ async def cognitive_guard(
     }
     competition: List[Dict[str, Any]] = []
 
-    entry = _detect_disambiguation_candidates(text_lower)
+    entry = _detect_disambiguation_candidates(text_lower, user_role)
     if entry:
         for intent_key in entry.get("candidates") or []:
             competition.append(

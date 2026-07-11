@@ -23,7 +23,10 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
             "ag_ui_component": None,
         }
 
-    if state.get("waiting_for_confirmation"):
+    awaiting_confirmation = bool(state.get("waiting_for_confirmation")) or (
+        str(state.get("expected_input") or "").upper() == "CONFIRMATION"
+    )
+    if awaiting_confirmation:
         if event == "CONFIRM":
             return {
                 "is_certified": True,

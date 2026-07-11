@@ -14,7 +14,7 @@ from .base import BaseMixin
 from agriconnect.domain.models import (
     BuyerProfile, Order, OrderItem, Delivery, 
     Product, User, BuyerType, Zone, Producer, TrustScore,
-    Auction, Bid, CropCycle, Farm
+    Auction, Bid, MarketOffer, Farm
 )
 
 logger = logging.getLogger("agriconnect.services.database.buyer")
@@ -179,7 +179,7 @@ class BuyerMixin(BaseMixin):
 
         Retourne un schéma homogène pour permettre au flow buyer de distinguer
         clairement les produits disponibles (DIRECT) et les précommandes futures
-        (FUTURE / CropCycle) sans heuristique textuelle.
+        (FUTURE / MarketOffer) sans heuristique textuelle.
         """
         current_session = self.session
         if not current_session:
@@ -235,32 +235,32 @@ class BuyerMixin(BaseMixin):
             future_priority_score = case(*conditions, else_=3).label("priority") if conditions else literal(3).label("priority")
             future_stmt = (
                 select(
-                    CropCycle.id,
-                    CropCycle.crop_type,
-                    CropCycle.species,
-                    CropCycle.production_type,
-                    CropCycle.price_per_unit,
-                    CropCycle.available_quantity,
-                    CropCycle.estimated_available_at,
+                    MarketOffer.id,
+                    MarketOffer.product_label,
+                    MarketOffer.species,
+                    MarketOffer.production_type,
+                    MarketOffer.price_per_unit,
+                    MarketOffer.available_quantity,
+                    MarketOffer.estimated_available_at,
                     Producer.id.label("producer_id"),
                     User.name.label("producer_name"),
                     Zone.name.label("zone_name"),
                     future_priority_score,
                 )
-                .outerjoin(Farm, Farm.id == CropCycle.farm_id)
+                .outerjoin(Farm, Farm.id == MarketOffer.farm_id)
                 .outerjoin(Producer, Producer.id == Farm.producer_id)
                 .outerjoin(User, User.id == Producer.user_id)
                 .outerjoin(Zone, Zone.id == Producer.zone_id)
                 .where(
                     or_(
-                        CropCycle.crop_type.ilike(f"%{clean_product}%"),
-                        CropCycle.species.ilike(f"%{clean_product}%"),
+                        MarketOffer.product_label.ilike(f"%{clean_product}%"),
+                        MarketOffer.species.ilike(f"%{clean_product}%"),
                     ),
-                    CropCycle.is_public.is_(True),
-                    CropCycle.preorder_enabled.is_(True),
-                    CropCycle.available_quantity > 0,
+                    MarketOffer.is_public.is_(True),
+                    MarketOffer.preorder_enabled.is_(True),
+                    MarketOffer.available_quantity > 0,
                 )
-                .order_by("priority", CropCycle.price_per_unit.asc())
+                .order_by("priority", MarketOffer.price_per_unit.asc())
                 .limit(limit)
             )
 
@@ -269,7 +269,7 @@ class BuyerMixin(BaseMixin):
             
             if not catalog_rows and not future_rows:
                 return {
-                    "status": "empty", 
+                    "status": "success", 
                     "message": f"Désolé, aucun produit correspondant à '{clean_product}' n'est disponible."
                 }
 
@@ -301,7 +301,7 @@ class BuyerMixin(BaseMixin):
             for row in future_rows:
                 estimated = row.get("estimated_available_at")
                 estimated_iso = estimated.isoformat() if estimated else None
-                crop_name = row.get("crop_type") or row.get("species") or clean_product
+                crop_name = row.get("product_label") or row.get("species") or clean_product
                 is_local = target_uuid is not None and row.get("priority") and int(row["priority"]) <= 2
                 tag = "📍 Local" if is_local else "🌐 National"
                 display_name = f"{crop_name} ({tag} • ⏳ Future)"
@@ -438,7 +438,7 @@ class BuyerMixin(BaseMixin):
                 select(Delivery).where(Delivery.order_id == o_uuid).options(joinedload(Delivery.agent))
             )
             
-            if not delivery or not delivery.agent_id or not delivery.agent:
+            if not delivery or not delivery.delivery_agent_id or not delivery.agent:
                 return {"status": "error", "message": "Aucun agent de livraison associé à cette commande."}
 
             score_impact = 0.5 if rating >= 4 else (-0.5 if rating <= 2 else 0.0)
@@ -466,26 +466,28 @@ class BuyerMixin(BaseMixin):
             logger.error(f"Erreur lors de la notation de la livraison {order_id}: {e}")
             return {"status": "error", "message": "Erreur technique lors de la sauvegarde de la note."}
 
-    async def list_buyer_types(self) -> List[Dict[str, Any]]:
+    async def list_buyer_types(self) -> Dict[str, Any]:
         """Liste les typologies/segments d'acheteurs de la plateforme."""
         current_session = self.session
         if not current_session:
-            return []
+            return {"status": "error", "message": "Session indisponible."}
         result = await current_session.execute(select(BuyerType).order_by(BuyerType.name))
-        return [{"id": str(bt.id), "name": bt.name} for bt in result.scalars().all()]
+        types = [{"id": str(bt.id), "name": bt.name} for bt in result.scalars().all()]
+        return {"status": "success", "data": types}
 
-    async def set_buyer_type(self, buyer_id: str, type_id: str) -> None:
+    async def set_buyer_type(self, buyer_id: str, type_id: str) -> Dict[str, Any]:
         """Assigne une catégorie de ciblage commercial au profil de l'acheteur."""
         current_session = self.session
         if not current_session:
-            return
+            return {"status": "error", "message": "Session indisponible."}
         b_uuid = uuid.UUID(buyer_id) if isinstance(buyer_id, str) else buyer_id
         t_uuid = uuid.UUID(type_id) if isinstance(type_id, str) else type_id
-        
+
         await current_session.execute(
             update(BuyerProfile).where(BuyerProfile.id == b_uuid).values(buyer_type_id=t_uuid)
         )
         await current_session.flush()
+        return {"status": "success", "data": {"buyer_id": str(b_uuid), "type_id": str(t_uuid)}}
 
     async def get_buyer_orders_dashboard(self, phone: str) -> Dict[str, Any]:
         """Génère un tableau de bord WhatsApp des commandes en cours pour cet acheteur."""
@@ -719,7 +721,7 @@ class BuyerMixin(BaseMixin):
             )
             if not product:
                 return {
-                    "status": "FAILURE",
+                    "status": "error",
                     "reason": "product_not_found",
                     "message": "Ce produit n'existe plus dans le catalogue.",
                     "fallback": [],
@@ -729,7 +731,7 @@ class BuyerMixin(BaseMixin):
             if available >= requested:
                 response_unit = _guess_display_unit(product.name, unit or product.unit)
                 return {
-                    "status": "SUCCESS",
+                    "status": "success",
                     "product_id": str(product.id),
                     "product_name": product.name,
                     "available_quantity": available,
@@ -763,7 +765,7 @@ class BuyerMixin(BaseMixin):
             ]
 
             return {
-                "status": "FAILURE",
+                "status": "error",
                 "reason": "insufficient_stock",
                 "product_id": str(product.id),
                 "product_name": product.name,
@@ -830,13 +832,12 @@ class BuyerMixin(BaseMixin):
                 status="DRAFT",
                 payment_status="PENDING",
                 delivery_status="PENDING",
-                payment_method=self._map_payment_method(str(payment_method).lower())
-                if hasattr(self, "_map_payment_method") else "CASH",
+                payment_method="CASH",
                 source="WHATSAPP",
                 order_type="PREORDER",
                 is_agent_order=True,
                 expected_fulfillment_date=fulfillment_dt,
-                created_at=datetime.utcnow(),
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
             )
             current_session.add(new_order)
             await current_session.flush()
@@ -884,7 +885,7 @@ class BuyerMixin(BaseMixin):
             await current_session.flush()
 
             return {
-                "status": "SUCCESS",
+                "status": "success",
                 "order_id": str(new_order.id),
                 "preorder_id": str(new_order.id),
                 "order_number": str(new_order.id)[:8].upper(),
@@ -901,10 +902,6 @@ class BuyerMixin(BaseMixin):
                 ),
             }
         except Exception as e:
-            try:
-                await current_session.rollback()
-            except Exception:
-                logger.exception("create_preorder_draft(%s): rollback failed", buyer_phone)
             logger.error(f"create_preorder_draft({buyer_phone}): {e}", exc_info=True)
             return {"status": "error", "message": "Erreur technique lors de la création de la précommande."}
 
@@ -943,14 +940,14 @@ class BuyerMixin(BaseMixin):
             product = await current_session.scalar(select(Product).where(Product.id == p_uuid))
             if not product:
                 return {
-                    "status": "FAILURE",
+                    "status": "error",
                     "reason": "product_not_found",
                     "message": "Produit introuvable, impossible d'ouvrir une négociation.",
                     "fallback": [],
                 }
             if not product.sub_category_id:
                 return {
-                    "status": "FAILURE",
+                    "status": "error",
                     "reason": "missing_subcategory",
                     "message": "Ce produit n'est pas catégorisé, négociation impossible pour l'instant.",
                     "fallback": [],
@@ -991,7 +988,8 @@ class BuyerMixin(BaseMixin):
 
             price_gap = round(seller_minimum - offer, 2)
             return {
-                "status": "PENDING",
+                "status": "success",
+                "negotiation_status": "PENDING",
                 "negotiation_id": str(new_auction.id),
                 "auction_id": str(new_auction.id),
                 "product_id": str(product.id),
@@ -1047,7 +1045,7 @@ class BuyerMixin(BaseMixin):
             order = await current_session.scalar(stmt)
             if not order:
                 return {
-                    "status": "empty",
+                    "status": "success",
                     "message": "Aucune transaction trouvée.",
                     "data": None,
                 }
@@ -1078,7 +1076,7 @@ class BuyerMixin(BaseMixin):
                     }
 
             return {
-                "status": "SUCCESS",
+                "status": "success",
                 "data": {
                     "order_id": str(order.id),
                     "order_number": str(order.id)[:8].upper(),
@@ -1134,7 +1132,7 @@ class BuyerMixin(BaseMixin):
 
             if str(order.status or "").upper() != "DRAFT":
                 return {
-                    "status": "FAILURE",
+                    "status": "error",
                     "reason": "not_draft",
                     "message": f"Cette précommande n'est pas en brouillon (statut={order.status}).",
                 }
@@ -1176,14 +1174,14 @@ class BuyerMixin(BaseMixin):
 
             if insufficient:
                 return {
-                    "status": "FAILURE",
+                    "status": "error",
                     "reason": "insufficient_stock",
                     "message": "Stock insuffisant sur un ou plusieurs articles — précommande non confirmée.",
                     "details": insufficient,
                 }
 
             # Postgres column is TIMESTAMP WITHOUT TIME ZONE → store naive UTC
-            order.preorder_converted_at = datetime.utcnow().replace(tzinfo=None)
+            order.preorder_converted_at = datetime.now(timezone.utc).replace(tzinfo=None)
             order.status = "CONFIRMED"
             order.payment_status = order.payment_status or "PENDING"
             order.subtotal = running_total
@@ -1191,7 +1189,7 @@ class BuyerMixin(BaseMixin):
             await current_session.flush()
 
             return {
-                "status": "SUCCESS",
+                "status": "success",
                 "order_id": str(order.id),
                 "order_number": str(order.id)[:8].upper(),
                 "total_amount": float(order.total_amount or 0.0),
@@ -1236,7 +1234,7 @@ class BuyerMixin(BaseMixin):
 
             if str(order.status or "").upper() != "DRAFT":
                 return {
-                    "status": "FAILURE",
+                    "status": "error",
                     "reason": "not_draft",
                     "message": f"Impossible d'annuler une précommande non brouillon (statut={order.status}).",
                 }
@@ -1248,7 +1246,7 @@ class BuyerMixin(BaseMixin):
             await current_session.flush()
 
             return {
-                "status": "SUCCESS",
+                "status": "success",
                 "order_id": str(order.id),
                 "message": f"❌ Précommande #{str(order.id)[:8].upper()} annulée.",
             }
@@ -1291,7 +1289,7 @@ class BuyerMixin(BaseMixin):
 
             if str(auction.status or "").upper() not in {"OPEN"}:
                 return {
-                    "status": "FAILURE",
+                    "status": "error",
                     "reason": "auction_closed",
                     "message": f"Négociation déjà clôturée (statut={auction.status}).",
                 }
@@ -1302,7 +1300,7 @@ class BuyerMixin(BaseMixin):
             await current_session.flush()
 
             return {
-                "status": "SUCCESS",
+                "status": "success",
                 "negotiation_id": str(auction.id),
                 "old_price": old,
                 "new_price": price,
@@ -1341,7 +1339,7 @@ class BuyerMixin(BaseMixin):
 
             if str(auction.status or "").upper() != "OPEN":
                 return {
-                    "status": "FAILURE",
+                    "status": "error",
                     "reason": "already_closed",
                     "message": f"Négociation déjà clôturée (statut={auction.status}).",
                 }
@@ -1353,7 +1351,7 @@ class BuyerMixin(BaseMixin):
             await current_session.flush()
 
             return {
-                "status": "SUCCESS",
+                "status": "success",
                 "negotiation_id": str(auction.id),
                 "message": "❌ Négociation annulée.",
             }

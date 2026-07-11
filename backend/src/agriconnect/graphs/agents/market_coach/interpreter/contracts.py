@@ -9,20 +9,20 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 
 class AddToCartContract(BaseModel):
     product: str = Field(..., min_length=2)
-    quantity_mentioned: float = Field(..., gt=0)
-    unit_mentioned: Optional[str]
+    quantity: float = Field(..., gt=0)
+    unit: Optional[str]
     phone: str = Field(..., min_length=8)
 
     @model_validator(mode="before")
     @classmethod
     def _coerce_product(cls, data: Dict[str, Any]) -> Dict[str, Any]:
-        product = data.get("product") or data.get("product_name")
+        product = data.get("product")
         if product:
             data["product"] = str(product)
-        quantity = data.get("quantity_mentioned") or data.get("quantity")
+        quantity = data.get("quantity")
         if quantity is not None:
             try:
-                data["quantity_mentioned"] = float(quantity)
+                data["quantity"] = float(quantity)
             except (TypeError, ValueError):
                 pass
         return data
@@ -30,16 +30,12 @@ class AddToCartContract(BaseModel):
 
 class NegotiationContract(BaseModel):
     product: str = Field(..., min_length=2)
-    price_mentioned: float = Field(..., gt=0)
+    price: float = Field(..., gt=0)
     phone: str = Field(..., min_length=8)
 
     @model_validator(mode="before")
     @classmethod
     def _coerce(cls, data: Dict[str, Any]) -> Dict[str, Any]:
-        if data.get("price") and not data.get("price_mentioned"):
-            data["price_mentioned"] = data["price"]
-        if data.get("product_name") and not data.get("product"):
-            data["product"] = data["product_name"]
         return data
 
 

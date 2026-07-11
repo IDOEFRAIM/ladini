@@ -12,13 +12,14 @@ Usage
         build_remap_dict,
         build_alias_mirrors,
         build_canonical_field_aliases,
+        compute_slot_status,
         SLOT_REGISTRY,
     )
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -27,23 +28,31 @@ from typing import Dict, FrozenSet, Optional, Tuple
 
 @dataclass(frozen=True)
 class SlotDefinition:
-    """Immutable descriptor for a single conversational slot.
-
-    Attributes:
-        canonical:   The one canonical key name used throughout the codebase.
-        aliases:     All accepted synonyms / legacy names that map to canonical.
-        value_type:  Expected Python type tag: "str" | "float" | "int" | "bool".
-        blocking:    True if the slot MUST be answered before the tunnel can
-                     be interrupted (CONFIRMATION, OTP…). False = soft slot.
-        label_fr:    Human-readable French label used in prompt hints.
-        example_fr:  Short example value shown in prompts to reduce "ok/merci" loops.
-    """
+    """Immutable descriptor for a single conversational slot."""
     canonical: str
     aliases: FrozenSet[str]
     value_type: str
     blocking: bool = False
     label_fr: str = ""
     example_fr: str = ""
+    auto_resolvable: bool = False
+    default_value: Optional[Any] = field(default=None, hash=False, compare=False)
+
+
+# ---------------------------------------------------------------------------
+# Slot Status (runtime, per-turn)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SlotStatus:
+    """Runtime status of a single slot for the current turn."""
+    name: str
+    required: bool
+    value: Any
+    filled: bool
+    valid: bool
+    error: Optional[str] = None
+    source: str = "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +76,6 @@ SLOT_REGISTRY: Tuple[SlotDefinition, ...] = (
         aliases=frozenset({
             "quantity_mentioned", "quantite", "qty", "volume",
             "quantity_kg", "quantity_for_sale", "original_quantity",
-            "original_quantity_mentioned",
         }),
         value_type="float",
         blocking=False,
@@ -77,12 +85,13 @@ SLOT_REGISTRY: Tuple[SlotDefinition, ...] = (
     SlotDefinition(
         canonical="unit",
         aliases=frozenset({
-            "unit_mentioned", "unite", "original_unit", "original_unit_mentioned",
+            "unit_mentioned", "unite", "original_unit",
         }),
         value_type="str",
         blocking=False,
         label_fr="unité",
         example_fr="KG, SAC, TONNE…",
+        default_value="KG",
     ),
     SlotDefinition(
         canonical="price",
@@ -104,6 +113,7 @@ SLOT_REGISTRY: Tuple[SlotDefinition, ...] = (
         blocking=False,
         label_fr="zone géographique",
         example_fr="Bobo-Dioulasso, Ouagadougou…",
+        auto_resolvable=True,
     ),
     SlotDefinition(
         canonical="selection_index",
@@ -137,7 +147,6 @@ SLOT_REGISTRY: Tuple[SlotDefinition, ...] = (
         label_fr="motif",
         example_fr="Vente directe, Perte sèche…",
     ),
-    # Hard-blocking slot (used in OTP / final confirmation contexts only).
     SlotDefinition(
         canonical="otp_code",
         aliases=frozenset({"otp", "code", "code_confirmation"}),
@@ -153,21 +162,44 @@ SLOT_REGISTRY: Tuple[SlotDefinition, ...] = (
 # Derived lookup tables (built once at import time)
 # ---------------------------------------------------------------------------
 
-# alias (lower-stripped) → canonical
 _ALIAS_TO_CANONICAL: Dict[str, str] = {}
 for _slot in SLOT_REGISTRY:
     _ALIAS_TO_CANONICAL[_slot.canonical] = _slot.canonical
     for _alias in _slot.aliases:
         _ALIAS_TO_CANONICAL[_alias.lower().strip()] = _slot.canonical
 
-# canonical → frozenset of aliases
 _CANONICAL_TO_ALIASES: Dict[str, FrozenSet[str]] = {
     _slot.canonical: _slot.aliases for _slot in SLOT_REGISTRY
 }
 
-# canonical → SlotDefinition
 _CANONICAL_TO_DEF: Dict[str, SlotDefinition] = {
     _slot.canonical: _slot for _slot in SLOT_REGISTRY
+}
+
+_FIELD_PRIORITY: Dict[str, int] = {
+    "product": 0,
+    "quantity": 1,
+    "price": 2,
+    "unit": 3,
+    "zone": 4,
+    "farm_id": 5,
+    "stock_id": 5,
+    "auction_id": 5,
+    "bid_id": 5,
+    "cycle_id": 5,
+    "movement_type": 6,
+    "intervention_type": 6,
+}
+
+_EXPECTED_INPUT_MAP: Dict[str, str] = {
+    "product": "PRODUCT",
+    "price": "PRICE",
+    "quantity": "QUANTITY",
+    "unit": "UNIT",
+    "zone": "LOCATION",
+    "surface": "QUANTITY",
+    "production_type": "PRODUCT",
+    "estimated_available_at": "DATE",
 }
 
 
@@ -192,10 +224,8 @@ def get_slot(canonical: str) -> Optional[SlotDefinition]:
 
 def is_blocking_slot(expected_input: str) -> bool:
     """Returns True if the expected_input maps to a hard-blocking slot."""
-    # "CONFIRMATION" is always blocking regardless of slot registry.
     if str(expected_input).upper() == "CONFIRMATION":
         return True
-    # Check via the registry (e.g. OTP_CODE).
     canonical = resolve_canonical(str(expected_input).lower())
     slot = _CANONICAL_TO_DEF.get(canonical)
     return bool(slot and slot.blocking)
@@ -212,20 +242,90 @@ def get_slot_hint(canonical: str) -> str:
     return " ".join(parts)
 
 
-def build_remap_dict() -> Dict[str, str]:
-    """Generates the complete alias→canonical mapping dict.
+def expected_input_for_field(field_name: str) -> str:
+    """Maps a canonical field name to its expected_input token."""
+    return _EXPECTED_INPUT_MAP.get(field_name, "NONE")
 
-    Drop-in replacement for ``_ENTITY_KEY_REMAP`` in ``interpreter/routing.py``.
+
+def field_priority(field_name: str) -> int:
+    """Returns the priority ordering for a field (lower = ask first)."""
+    return _FIELD_PRIORITY.get(field_name, 99)
+
+
+def _slot_value_filled(value: Any) -> bool:
+    return value not in (None, "", [], {}, 0)
+
+
+def compute_slot_status(
+    payload: Dict[str, Any],
+    required_fields: List[str],
+    *,
+    goal: Optional[str] = None,
+) -> Dict[str, SlotStatus]:
+    """Compute SlotStatus for each required field given a payload.
+
+    Returns a dict keyed by canonical field name. Fields are sorted by
+    priority so callers can iterate in ask-order.
     """
+    result: Dict[str, SlotStatus] = {}
+    sorted_fields = sorted(required_fields, key=lambda f: _FIELD_PRIORITY.get(f, 99))
+    for field_name in sorted_fields:
+        slot_def = _CANONICAL_TO_DEF.get(field_name)
+        value = payload.get(field_name)
+        filled = _slot_value_filled(value)
+
+        if not filled and slot_def and slot_def.auto_resolvable:
+            filled = True
+            source = "auto"
+        elif not filled and slot_def and slot_def.default_value is not None:
+            source = "default"
+        elif filled:
+            source = "user"
+        else:
+            source = "missing"
+
+        error = None
+        valid = True
+        if filled and slot_def:
+            if slot_def.value_type == "float" and value is not None:
+                try:
+                    fv = float(value)
+                    if fv <= 0:
+                        valid = False
+                        error = f"{slot_def.label_fr} doit être supérieur(e) à 0."
+                except (TypeError, ValueError):
+                    valid = False
+                    error = f"{slot_def.label_fr} n'est pas un nombre valide."
+
+        result[field_name] = SlotStatus(
+            name=field_name,
+            required=True,
+            value=value,
+            filled=filled,
+            valid=valid,
+            error=error,
+            source=source,
+        )
+    return result
+
+
+def missing_from_status(slot_status: Dict[str, SlotStatus]) -> List[str]:
+    """Returns ordered list of missing field names from a SlotStatus dict."""
+    return [s.name for s in slot_status.values() if not s.filled]
+
+
+def errors_from_status(slot_status: Dict[str, SlotStatus]) -> List[str]:
+    """Returns list of validation error messages from a SlotStatus dict."""
+    return [s.error for s in slot_status.values() if s.error]
+
+
+def build_remap_dict() -> Dict[str, str]:
+    """Generates the complete alias→canonical mapping dict."""
     return dict(_ALIAS_TO_CANONICAL)
 
 
 def build_alias_mirrors() -> Dict[str, Tuple[str, ...]]:
-    """Generates canonical→aliases mapping used by ``memory_update``.
-
-    Drop-in replacement for ``_ALIAS_MIRRORS`` in ``nodes/memory.py``.
-    Only includes entries that have at least one alias.
-    """
+    """Generates canonical→aliases mapping used by ``memory_update``."""
     return {
         canonical: tuple(aliases)
         for canonical, aliases in _CANONICAL_TO_ALIASES.items()
@@ -234,21 +334,24 @@ def build_alias_mirrors() -> Dict[str, Tuple[str, ...]]:
 
 
 def build_canonical_field_aliases() -> Dict[str, str]:
-    """Generates alias→canonical mapping for INTENT_CONFIG canonicalization.
-
-    Drop-in replacement for ``_CANONICAL_FIELD_ALIASES`` in ``interpreter/intent.py``.
-    """
+    """Generates alias→canonical mapping for INTENT_CONFIG canonicalization."""
     return dict(_ALIAS_TO_CANONICAL)
 
 
 __all__ = [
     "SlotDefinition",
+    "SlotStatus",
     "SLOT_REGISTRY",
     "resolve_canonical",
     "get_aliases",
     "get_slot",
     "is_blocking_slot",
     "get_slot_hint",
+    "expected_input_for_field",
+    "field_priority",
+    "compute_slot_status",
+    "missing_from_status",
+    "errors_from_status",
     "build_remap_dict",
     "build_alias_mirrors",
     "build_canonical_field_aliases",

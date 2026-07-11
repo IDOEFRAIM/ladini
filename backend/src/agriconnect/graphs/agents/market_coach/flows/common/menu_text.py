@@ -110,9 +110,43 @@ def render_cart_actions_hint(has_auction_items: bool = False) -> str:
     return hint
 
 
+# =====================================================================
+# HARMONISED UX HELPERS — one consistent voice across every buyer menu
+# =====================================================================
+
+def render_selection_prompt(
+    *,
+    noun: str = "choix",
+    allow_cancel: bool = True,
+) -> str:
+    """Consistent 'reply with a number' prompt used by every selection menu.
+
+    Keeps a single wording everywhere (vendor picker, order list, auction list,
+    bids…) so the buyer always knows exactly how to answer.
+    """
+    tail = ", ou *annuler* pour quitter" if allow_cancel else ""
+    return f"\n_Répondez avec le *numéro* de votre {noun}{tail}._"
+
+
+def render_quick_actions(actions: Sequence[str]) -> str:
+    """Render a compact 'what can I do next' footer from short action phrases.
+
+    Example::
+
+        💡 _Vous pouvez :_ *mon panier* · *précommander* · *mes commandes*
+    """
+    cleaned = [str(a).strip() for a in actions if str(a).strip()]
+    if not cleaned:
+        return ""
+    bullets = " · ".join(f"*{a}*" for a in cleaned)
+    return f"\n💡 _Vous pouvez :_ {bullets}"
+
+
 __all__ = [
     "render_numbered_menu",
     "render_selection_list",
     "build_selection_menu",
     "render_cart_actions_hint",
+    "render_selection_prompt",
+    "render_quick_actions",
 ]

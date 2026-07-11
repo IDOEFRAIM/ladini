@@ -4,6 +4,10 @@ Each gateway encapsulates a single MCP domain (profile, farm, auction, …),
 providing explicit method signatures instead of raw ``call_db(tool_name, **kw)``
 calls scattered across the codebase.
 
+All cross-cutting concerns (None-stripping, ASCII folding, ensure_dict,
+request_id, logging) live in ``MarketRuntime.call_db`` — gateways are thin
+typed pass-throughs that add MCPCallError translation.
+
 Usage::
 
     gw = ProfileGateway(mc_runtime)
@@ -12,20 +16,18 @@ Usage::
 from __future__ import annotations
 
 import logging
-import uuid
 from typing import Any, Dict, List
 
 from agriconnect.graphs.agents.market_coach.services.mcp.error_translation import (
     classify_error,
     translate_mcp_error,
 )
-from agriconnect.graphs.agents.market_coach.utils import ensure_dict
 
 logger = logging.getLogger("AgriConnect.Market.MCPGateway")
 
 
 class MCPCallError(Exception):
-    """Raised when an MCP gateway call fails after ensure_dict."""
+    """Raised when an MCP gateway call fails."""
 
     def __init__(self, tool: str, message: str, error_code: str, request_id: str):
         self.tool = tool
@@ -41,29 +43,18 @@ class _BaseGateway:
         self._rt = mc_runtime
 
     async def _call(self, tool: str, **kwargs: Any) -> Dict[str, Any]:
-        request_id = str(uuid.uuid4())[:8]
-        safe_kwargs = {k: v for k, v in kwargs.items() if v is not None}
-        logger.debug(
-            "GW_CALL | rid=%s | tool=%s | keys=%s",
-            request_id, tool, list(safe_kwargs.keys()),
-        )
         try:
-            raw = await self._rt.call_db(tool, **safe_kwargs)
+            return await self._rt.call_db(tool, **kwargs)
+        except MCPCallError:
+            raise
         except Exception as exc:
             error_code = classify_error(str(exc))
-            logger.error(
-                "GW_FAIL | rid=%s | tool=%s | code=%s | err=%s",
-                request_id, tool, error_code, exc,
-            )
             raise MCPCallError(
                 tool=tool,
                 message=translate_mcp_error(str(exc)),
                 error_code=error_code,
-                request_id=request_id,
+                request_id="n/a",
             ) from exc
-        result = ensure_dict(raw)
-        result["_request_id"] = request_id
-        return result
 
 
 # ── Profile ────────────────────────────────────────────────────────
@@ -100,8 +91,10 @@ class FarmGateway(_BaseGateway):
 # ── Auctions & Bids ───────────────────────────────────────────────
 
 class AuctionGateway(_BaseGateway):
-    async def search_open_auctions(self, **kwargs: Any) -> Dict[str, Any]:
+    async def search_auctions(self, **kwargs: Any) -> Dict[str, Any]:
         return await self._call("get_auctions", **kwargs)
+
+    search_open_auctions = search_auctions
 
     async def get_my_active_bids(self, phone: str) -> Dict[str, Any]:
         return await self._call("get_my_active_bids", phone=phone.strip())
@@ -196,6 +189,12 @@ class OrderTrackingGateway(_BaseGateway):
 
     async def get_buyer_orders_dashboard(self, phone: str) -> Dict[str, Any]:
         return await self._call("get_buyer_orders_dashboard", phone=phone.strip())
+
+    async def cancel_pending_order(self, order_id: str, phone: str, reason: str = "") -> Dict[str, Any]:
+        return await self._call(
+            "cancel_pending_order",
+            order_id=order_id, phone=phone, reason=reason,
+        )
 
 
 # ── Agent Actions ──────────────────────────────────────────────────

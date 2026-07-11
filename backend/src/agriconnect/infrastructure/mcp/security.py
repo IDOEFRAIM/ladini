@@ -83,46 +83,46 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
 }
 
 
+# Préfixes de LECTURE explicites. Tout ce qui ne commence pas par l'un d'eux
+# (et n'est pas déjà mappé) est considéré comme une ÉCRITURE par défaut :
+# fail-safe vers le chemin de contrôle plutôt que d'auto-autoriser un outil
+# inconnu potentiellement destructeur en READ_ONLY.
+_READ_PREFIXES = (
+    "get", "list", "search", "fetch", "read", "guess", "normalize",
+    "check", "validate", "count", "find", "resolve", "db_status",
+)
+
+
 def _guess_scope(tool_name: str) -> PermissionScope:
     name = (tool_name or "").lower()
-    if name.startswith(("migrate", "drop", "alter")):
+    if name.startswith(("migrate", "drop", "alter", "truncate")):
         return PermissionScope.DB_SCHEMA_MODIFY
-    if name.startswith(
-        (
-            "create",
-            "add",
-            "remove",
-            "update",
-            "upsert",
-            "commit",
-            "prepare",
-            "register",
-            "record",
-            "emit",
-            "log",
-            "place",
-            "report",
-            "adjust",
-        )
-    ):
-        return PermissionScope.DB_DATA_WRITE
-    return PermissionScope.DB_READ_ONLY
+    if name.startswith(_READ_PREFIXES):
+        return PermissionScope.DB_READ_ONLY
+    # Défaut fail-safe : écriture (scrutiny), jamais lecture auto-autorisée.
+    return PermissionScope.DB_DATA_WRITE
+
+
+_scopes_filled = False
 
 
 def _autofill_tool_scopes() -> None:
     """Ensure tools exposed by handlers are assigned a scope.
 
-    The MCP runtime is fail-closed if a tool is missing from TOOL_SCOPE_MAP.
-    Since we auto-register tools from `AgriDatabaseService`, we conservatively
-    assign a default scope when a mapping is missing.
+    Called lazily on first use (via ``ensure_scopes_filled``) instead of at
+    import time to avoid cascading imports (h.py → AgriDatabaseService → all
+    mixins) when security.py is merely imported.
     """
+    global _scopes_filled
+    if _scopes_filled:
+        return
+    _scopes_filled = True
 
     handlers = None
     last_error: Exception | None = None
     for module_path in (
         "agriconnect.protocols.mcp.servers.h",
         "agriconnect.protocols.mcp.handlers",
-       
     ):
         try:
             module = importlib.import_module(module_path)
@@ -140,6 +140,13 @@ def _autofill_tool_scopes() -> None:
     for tool in handlers.keys():
         TOOL_SCOPE_MAP.setdefault(tool, _guess_scope(tool))
 
+
+def ensure_scopes_filled() -> None:
+    """Public trigger for lazy scope initialization."""
+    if not _scopes_filled:
+        _autofill_tool_scopes()
+
+
 TOOL_RISK_MAP: dict[str, RiskLevel] = {
     "create_order": RiskLevel.HIGH,
     "prepare_transaction_staging": RiskLevel.HIGH,
@@ -150,9 +157,6 @@ TOOL_RISK_MAP: dict[str, RiskLevel] = {
     "search_agronomy_docs": RiskLevel.LOW,
     "search_past_interactions": RiskLevel.LOW,
 }
-
-
-_autofill_tool_scopes()
 
 SENSITIVE_COLUMNS = frozenset(
     {
@@ -331,7 +335,7 @@ class ToolExecutionPolicy:
                 "TOOL_TIMEOUT|%s",
                 json.dumps(envelope.model_dump(mode="json"), ensure_ascii=False),
             )
-            raise PermissionDenied(tool_name, f"tool_timeout:{timeout:.1f}s") from exc
+            raise ToolExecutionTimeout(tool_name, timeout) from exc
 
     @staticmethod
     def sanitize_arguments(arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -363,6 +367,7 @@ _GLOBAL_EXECUTION_POLICY: Optional[ToolExecutionPolicy] = None
 
 def get_execution_policy() -> ToolExecutionPolicy:
     global _GLOBAL_EXECUTION_POLICY
+    ensure_scopes_filled()
     if _GLOBAL_EXECUTION_POLICY is None:
         default_env = os.getenv("MCP_DEFAULT_TOOL_TIMEOUT")
         try:
@@ -448,6 +453,17 @@ class PermissionDenied(Exception):
         self.tool_name = tool_name
         self.reason = reason
         super().__init__(f"[SHIELD] {tool_name}: {reason}")
+
+
+class ToolExecutionTimeout(Exception):
+    """Un outil a dépassé son délai. Distinct de PermissionDenied : c'est un
+    problème de latence/DB, pas d'autorisation — les appelants ne doivent pas
+    l'afficher comme un refus d'accès."""
+
+    def __init__(self, tool_name: str, timeout_seconds: float) -> None:
+        self.tool_name = tool_name
+        self.timeout_seconds = timeout_seconds
+        super().__init__(f"[TIMEOUT] {tool_name}: dépassé {timeout_seconds:.1f}s")
 
 
 class HostBlockedError(Exception):

@@ -83,7 +83,7 @@ class PublicProductMixin:
                 .order_by(Zone.name)
             )
             result = await current_session.execute(stmt)
-            return [{"id": str(z.id), "name": z.name, "type": z.type} for z in result.scalars().all()]
+            return [{"id": str(z.id), "name": z.name} for z in result.scalars().all()]
         except Exception as e:
             logger.error(f"Erreur dans get_public_zones: {e}", exc_info=True)
             return []
@@ -153,7 +153,7 @@ class PublicProductMixin:
             }
         except Exception as e:
             logger.error(f"Erreur get_public_products: {str(e)}", exc_info=True)
-            return {"items": [], "total": 0, "error": str(e), "status": "error"}
+            return {"items": [], "total": 0, "message": str(e), "status": "error"}
 
     async def get_market_snapshot(self, zone_query: Optional[str] = None) -> Dict[str, Any]:
         """Analyse globale des stocks et des prix moyens du marché par sous-catégorie."""
@@ -249,7 +249,7 @@ class PublicProductMixin:
                 select(Product)
                 .where(
                     Product.sub_category_id == c_uuid,
-                    Product.audio_description_url.isnot(None),
+                    Product.audio_url.isnot(None),
                     Product.quantity_for_sale > 0
                 )
             )

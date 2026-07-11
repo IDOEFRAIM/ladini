@@ -60,8 +60,8 @@ class AgronomyService:
         if production_type not in {"CROP", "LIVESTOCK"}:
             raise ValueError("production_type must be CROP or LIVESTOCK")
 
-        qty_raw = float(require(payload, "quantity_mentioned"))
-        unit_in = payload.get("unit_mentioned")
+        qty_raw = float(require(payload, "quantity"))
+        unit_in = payload.get("unit")
         if production_type == "CROP":
             qty, unit = normalize_quantity_to_kg(qty_raw, unit_in)
         else:
@@ -69,13 +69,13 @@ class AgronomyService:
             unit = str(unit_in or "HEAD").upper().strip()
 
         estimated_available_at = str(require(payload, "estimated_available_at"))
-        price_per_unit = float(require(payload, "price_mentioned"))
+        price_per_unit = float(require(payload, "price"))
 
         production_payload: Dict[str, Any] = {
             "farm_id": farm_id,
             "production_type": production_type,
             "product": product,
-            "quantity_mentioned": qty,
+            "quantity": qty,
             "unit": unit,
             "estimated_available_at": estimated_available_at,
             "price_per_unit": price_per_unit,
@@ -104,8 +104,8 @@ class AgronomyService:
         data: Dict[str, Any] = {"type": intervention_type}
         if payload.get("input_used"):
             data["input_used"] = str(payload["input_used"])
-        if payload.get("quantity_mentioned"):
-            data["quantity"] = float(payload["quantity_mentioned"])
+        if payload.get("quantity"):
+            data["quantity"] = float(payload["quantity"])
         if payload.get("details"):
             data["description"] = str(payload["details"])
         args: Dict[str, Any] = {"cycle_id": cycle_id, "data": data}

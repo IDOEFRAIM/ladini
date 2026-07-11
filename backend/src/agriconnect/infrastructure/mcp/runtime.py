@@ -27,10 +27,56 @@ except Exception:  # pragma: no cover - optional dependency
 
 from agriconnect.core.database import close_db, get_sessionmaker
 from agriconnect.core.settings import settings
+from agriconnect.infrastructure.mcp.context import (
+    FarmerContext,
+    get_mcp_context,
+    mcp_context_scope,
+)
+from agriconnect.infrastructure.mcp.security import (
+    HostBlockedError,
+    MCPPermissionHostApp,
+    PermissionDenied,
+    TOOL_SCOPE_MAP,
+    ensure_scopes_filled,
+    get_execution_policy,
+)
 from agriconnect.infrastructure.mcp.utils import run_coro_blocking
 from agriconnect.services.database import AgriDatabaseService
 
 logger = logging.getLogger(__name__)
+
+
+def _derive_context_identity(payload: dict[str, Any]) -> FarmerContext | None:
+    """Reconstruct a FarmerContext from tool payload when no context is scoped.
+
+    Searches both top-level keys and one level of nested dicts (e.g.
+    ``data.phone``) so tools receiving a ``data={...}`` envelope still
+    resolve an identity.
+    """
+    sources = [payload]
+    for key in ("data", "payload", "args"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            sources.append(nested)
+
+    def _pick(*keys: str) -> str:
+        for src in sources:
+            for key in keys:
+                value = src.get(key)
+                if value not in (None, "", [], {}):
+                    return str(value).strip()
+        return ""
+
+    user_id = _pick("user_id", "producer_id", "buyer_id", "farmer_id")
+    phone = _pick("phone", "user_phone", "phone_number", "buyer_phone", "customer_phone")
+    session_id = _pick("session_id", "request_id")
+    if not user_id and not phone:
+        return None
+    return FarmerContext(
+        user_id=user_id or phone,
+        phone_number=phone or "unknown",
+        session_id=session_id or str(uuid.uuid4()),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +246,12 @@ def _log_call(tool_name: str, params: dict[str, Any], response: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+_PUBLIC_CATALOG_TOOLS: frozenset[str] = frozenset({
+    "get_zone_by_name",
+    "get_available_zones",
+})
+
+
 class AgriDBMCPServer:
     """Lightweight in-process MCP backend — **Fail-Closed** by default."""
 
@@ -237,92 +289,68 @@ class AgriDBMCPServer:
         return tools
         
     async def call_tool(self, name: str, arguments: dict | None = None, **kwargs):
-        """
-        Point d'entrée principal pour l'exécution des outils dans le Backend.
-        Gère la fusion des arguments, la sécurité (Preflight/Permissions) et l'audit.
-        """
-        tool_identity = name
+        """Backend tool execution: context → scope check → preflight → execute → audit."""
         full_args = {**(arguments or {}), **kwargs}
+        logger.info("Backend call_tool: tool=%s, args=%s", name, full_args)
 
-        logger.info("Backend call_tool: tool=%s, args=%s", tool_identity, full_args)
+        # 1. Resolve identity (scoped OR derived from payload)
+        context_identity = get_mcp_context() or _derive_context_identity(full_args)
+        if context_identity is None and name not in _PUBLIC_CATALOG_TOOLS:
+            raise PermissionDenied(name, "missing_context_identity")
 
-        from agriconnect.infrastructure.mcp.context import FarmerContext, get_mcp_context, mcp_context_scope
-        from agriconnect.infrastructure.mcp.security import (
-            HostBlockedError,
-            MCPPermissionHostApp,
-            PermissionDenied,
-            TOOL_SCOPE_MAP,
-            get_execution_policy,
-        )
-
-        def _derive_context_identity(payload: dict[str, Any]) -> FarmerContext | None:
-            def _pick(*keys: str) -> str:
-                for key in keys:
-                    value = payload.get(key)
-                    if value not in (None, "", [], {}):
-                        return str(value).strip()
-                return ""
-
-            user_id = _pick("user_id", "producer_id", "buyer_id", "farmer_id")
-            phone = _pick("phone", "user_phone", "phone_number")
-            session_id = _pick("session_id", "request_id")
-            if not user_id and not phone:
-                return None
-            return FarmerContext(
-                user_id=user_id or phone,
-                phone_number=phone or "unknown",
-                session_id=session_id or str(uuid.uuid4()),
+        if context_identity is None:
+            context_identity = FarmerContext(
+                user_id="catalog",
+                phone_number="catalog",
+                session_id=str(uuid.uuid4()),
             )
 
-        context_identity = get_mcp_context()
-        if context_identity is None:
-            context_identity = _derive_context_identity(full_args)
-        if context_identity is None:
-            raise PermissionDenied(tool_identity, "missing_context_identity")
-
         with mcp_context_scope(context_identity):
-            if tool_identity not in TOOL_SCOPE_MAP:
-                reason = f"L'outil '{tool_identity}' n'est pas autorisé (absent de TOOL_SCOPE_MAP)."
-                logger.error("DENY | tool=%s | reason=not_in_scope", tool_identity)
-                await self._persist_audit(tool_identity, full_args, "DENY", reason)
-                raise PermissionDenied(tool_identity, reason)
+            # 2. Static scope check (fail-closed on unknown tools)
+            ensure_scopes_filled()
+            if name not in TOOL_SCOPE_MAP:
+                reason = f"L'outil '{name}' n'est pas autorisé (absent de TOOL_SCOPE_MAP)."
+                logger.error("DENY | tool=%s | reason=not_in_scope", name)
+                await self._persist_audit(name, full_args, "DENY", reason)
+                raise PermissionDenied(name, reason)
 
             policy = get_execution_policy()
             sanitized_args = policy.sanitize_arguments(full_args)
 
-            try:
-                host = MCPPermissionHostApp(client=None)
-                preflight = host._preflight_scan(tool_identity, sanitized_args)
-                if hasattr(preflight, "allowed") and not preflight.allowed:
-                    reason = getattr(preflight, "reason", "Scan de sécurité échoué")
-                    await self._persist_audit(tool_identity, sanitized_args, "DENY", reason)
-                    raise HostBlockedError(
-                        tool_name=tool_identity,
-                        agent_message=reason,
-                        suggestion=host._suggest_fix(tool_identity, reason),
-                    )
-            except (HostBlockedError, PermissionDenied):
-                raise
-            except Exception as exc:
-                reason = f"Erreur fatale lors du contrôle de sécurité : {exc}"
-                logger.exception("SECURITY_EXCEPTION | tool=%s", tool_identity)
-                await self._persist_audit(tool_identity, sanitized_args, "DENY", reason)
-                raise PermissionDenied(tool_identity, reason)
+            # 3. Preflight security scan
+            await self._run_preflight(name, sanitized_args)
 
-            fn = self._resolve_tool_fn(tool_identity)
+            # 4. Execute under policy (timeout / audit envelope)
+            fn = self._resolve_tool_fn(name)
             envelope = await policy.execute(
-                tool_identity,
+                name,
                 fn,
                 sanitized_args,
                 user_id=context_identity.user_id,
                 request_id=str(uuid.uuid4()),
             )
-            await self._persist_audit(tool_identity, sanitized_args, "ALLOW", None)
+            await self._persist_audit(name, sanitized_args, "ALLOW", None)
             return envelope.get("data", envelope)
 
-    def call_tool_sync(self, name: str, arguments: dict , timeout: float = 10.0) -> dict:
-        result = run_coro_blocking(self.call_tool(name, arguments or {}))
-        return {"ok": True, "data": result}
+    async def _run_preflight(self, tool_name: str, sanitized_args: dict) -> None:
+        try:
+            host = MCPPermissionHostApp(client=None)
+            preflight = host._preflight_scan(tool_name, sanitized_args)
+            if hasattr(preflight, "allowed") and not preflight.allowed:
+                reason = getattr(preflight, "reason", "Scan de sécurité échoué")
+                await self._persist_audit(tool_name, sanitized_args, "DENY", reason)
+                raise HostBlockedError(
+                    tool_name=tool_name,
+                    agent_message=reason,
+                    suggestion=host._suggest_fix(tool_name, reason),
+                )
+        except (HostBlockedError, PermissionDenied):
+            raise
+        except Exception as exc:
+            reason = f"Erreur fatale lors du contrôle de sécurité : {exc}"
+            logger.exception("SECURITY_EXCEPTION | tool=%s", tool_name)
+            await self._persist_audit(tool_name, sanitized_args, "DENY", reason)
+            raise PermissionDenied(tool_name, reason)
 
     def _resolve_tool_fn(self, name: str):
         from agriconnect.protocols.mcp.servers.h import TOOL_HANDLERS

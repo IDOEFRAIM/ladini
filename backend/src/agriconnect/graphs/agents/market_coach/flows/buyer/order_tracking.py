@@ -1,12 +1,12 @@
-"""Order Tracking — Intelligence conversationnelle de suivi de commande.
+"""Order & Auction Tracking — suivi conversationnel pour acheteurs.
 
-Ce module implémente le "suivi de commande conversationnel" pour le BuyerFlow :
-  1. StatusCheck   — Analyse du statut + réponse humaine contextuelle.
-  2. CancelAction  — Annulation conversationnelle directe (par ID ou dernière commande).
-  3. ListOrders    — Dashboard paginé avec mapping dynamique + expiration 30 min.
-  4. Proactivité   — Vérification d'état à l'ouverture de conversation.
-
-Chaque réponse est formatée WhatsApp (emojis, sauts de ligne, messages courts).
+Fonctionnalités :
+  1. list_orders       — Dashboard commandes avec menu interactif.
+  2. check_order_status — Détail conversationnel d'une commande.
+  3. cancel_order      — Annulation conversationnelle directe.
+  4. list_buyer_auctions — Dashboard enchères (toutes statuts).
+  5. check_auction_status — Détail d'une enchère + offres reçues.
+  6. proactive_order_check — Greeting proactif après inactivité.
 """
 from __future__ import annotations
 
@@ -20,14 +20,17 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
 )
-from agriconnect.graphs.agents.market_coach.services.mcp.gateway import OrderTrackingGateway
+from agriconnect.graphs.agents.market_coach.flows.common.menu_text import (
+    render_quick_actions,
+    render_selection_prompt,
+)
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
+    AuctionGateway,
+    OrderTrackingGateway,
+)
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
-    ensure_dict,
     is_success_response,
-)
-from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
-    menu_snapshot_store,
 )
 
 logger = logging.getLogger("AgriConnect.Market.BuyerFlow.OrderTracking")
@@ -37,11 +40,9 @@ logger = logging.getLogger("AgriConnect.Market.BuyerFlow.OrderTracking")
 # CONSTANTS
 # =====================================================================
 
-# Durée de validité d'un menu dynamique (30 minutes)
 MENU_SESSION_TTL_SECONDS = 30 * 60
 
-# Mapping émoji conversationnel par statut
-STATUS_MAP = {
+ORDER_STATUS_MAP = {
     "PENDING": ("⏳", "En attente de validation"),
     "DRAFT": ("📝", "Brouillon (non confirmée)"),
     "CONFIRMED": ("✅", "Confirmée — préparation en cours"),
@@ -54,16 +55,31 @@ STATUS_MAP = {
     "CANCELLED": ("❌", "Annulée"),
 }
 
-# Intents gérés par ce module
+AUCTION_STATUS_MAP = {
+    "OPEN": ("🟢", "Ouverte — en attente d'offres"),
+    "PENDING": ("⏳", "En attente de validation"),
+    "ACTIVE": ("🟢", "Active — offres en cours"),
+    "CLOSED": ("🔒", "Clôturée"),
+    "WON": ("🏆", "Remportée — offre acceptée"),
+    "EXPIRED": ("⌛", "Expirée — délai dépassé"),
+    "CANCELLED": ("❌", "Annulée"),
+    "COMPLETED": ("✅", "Terminée"),
+}
+
 ORDER_TRACKING_GOALS = frozenset({
     "BUYER_CHECK_ORDER_STATUS",
     "BUYER_LIST_ORDERS",
     "BUYER_CANCEL_ORDER",
 })
 
+AUCTION_TRACKING_GOALS = frozenset({
+    "BUYER_LIST_AUCTIONS",
+    "BUYER_CHECK_AUCTION_STATUS",
+})
+
 
 # =====================================================================
-# HELPERS — Parsing & Formatting
+# HELPERS
 # =====================================================================
 
 _ORDER_ID_PATTERN = re.compile(
@@ -73,24 +89,15 @@ _ORDER_ID_PATTERN = re.compile(
 
 
 def extract_order_ref(text: str) -> Optional[str]:
-    """Extrait un identifiant de commande depuis le texte utilisateur.
-
-    Supporte : #ABC123, commande #ABC123, order ABC123, UUID complet.
-    """
     if not text:
         return None
     m = _ORDER_ID_PATTERN.search(text)
     if m:
         return m.group(1).strip()
-    # Fallback: texte brut qui ressemble à un UUID partiel (8+ hex)
-    hex_match = re.search(r"\b([A-Fa-f0-9]{8,36})\b", text)
-    if hex_match:
-        return hex_match.group(1).strip()
     return None
 
 
 def _format_elapsed(dt: Optional[datetime]) -> str:
-    """Retourne une durée humaine depuis `dt` jusqu'à maintenant."""
     if not dt:
         return ""
     now = datetime.now(timezone.utc)
@@ -107,141 +114,217 @@ def _format_elapsed(dt: Optional[datetime]) -> str:
     return f"il y a {days} jour{'s' if days > 1 else ''}"
 
 
-def _status_emoji(status: str) -> str:
-    """Retourne l'émoji correspondant au statut."""
-    entry = STATUS_MAP.get(status.upper(), ("🔄", status))
-    return entry[0]
-
-
-def _status_label(status: str) -> str:
-    """Retourne le label humain du statut."""
-    entry = STATUS_MAP.get(status.upper(), ("🔄", status))
+def _status_label(status: str, status_map: Dict[str, tuple]) -> str:
+    entry = status_map.get(status.upper(), ("🔄", status))
     return f"{entry[0]} {entry[1]}"
 
 
-def _resolve_menu_selection(state: Dict[str, Any], selection: Any) -> Optional[str]:
-    """Résout un index numérique via le menu snapshot stocké côté UI engine."""
-    if selection in (None, "", [], {}):
-        return None
-    session_id = str(state.get("session_id") or state.get("user_phone") or "")
-    if not session_id:
-        return None
-    working = state.get("working_memory") or {}
-    snapshot_id = (
-        working.get("menu_snapshot_id")
-        or state.get("menu_snapshot_id")
+def _resolve_order_id(state: Dict[str, Any]) -> Optional[str]:
+    """Resolve order_id from payload, text, available_mapping, or tracking context."""
+    payload = state.get("transaction_payload") or {}
+    normalized_text = str(state.get("normalized_text") or "")
+
+    order_id = (
+        payload.get("order_id")
+        or payload.get("selected_value")
+        or extract_order_ref(normalized_text)
     )
-    if not snapshot_id:
-        return None
-    return menu_snapshot_store.resolve(session_id, snapshot_id, selection)
+
+    if not order_id:
+        selection_idx = payload.get("selection_index")
+        if selection_idx is not None:
+            mapping = state.get("available_mapping") or {}
+            order_id = mapping.get(str(selection_idx))
+
+    if not order_id:
+        tracking_ctx = state.get("order_tracking_context") or {}
+        order_id = tracking_ctx.get("order_focus")
+
+    return order_id
+
+
+def _tracking_ctx_patch(order_id: Optional[str] = None, **extra: Any) -> Dict[str, Any]:
+    ctx: Dict[str, Any] = {"last_interaction_ts": time.time()}
+    ctx["order_focus"] = order_id
+    ctx.update(extra)
+    return ctx
+
+
+async def _safe_gw_call(mc_runtime: MarketRuntime, method: str, **kwargs: Any) -> Dict[str, Any]:
+    try:
+        gw = OrderTrackingGateway(mc_runtime)
+        fn = getattr(gw, method, None)
+        if fn:
+            return await fn(**kwargs)
+        return await gw._call(method, **kwargs)
+    except Exception as exc:
+        logger.exception("order_tracking | %s | error: %s", method, exc)
+        return {"status": "error", "message": "Service temporairement indisponible."}
 
 
 # =====================================================================
-# 1. CONVERSATIONAL STATUS CHECK
+# 1. LIST ORDERS — Dashboard avec menu interactif
+# =====================================================================
+
+async def list_orders(
+    state: Dict[str, Any],
+    mc_runtime: MarketRuntime,
+) -> Dict[str, Any]:
+    phone = str(state.get("user_phone") or "")
+    if not phone:
+        return _error("Numéro de téléphone introuvable.")
+
+    payload = state.get("transaction_payload") or {}
+    selection_idx = payload.get("selection_index")
+    if selection_idx is not None:
+        mapping = state.get("available_mapping") or {}
+        resolved = mapping.get(str(selection_idx))
+        if resolved:
+            synthetic = dict(state)
+            syn_payload = dict(payload)
+            syn_payload["order_id"] = resolved
+            synthetic["transaction_payload"] = syn_payload
+            return await check_order_status(synthetic, mc_runtime)
+
+    result = await _safe_gw_call(mc_runtime, "get_buyer_orders_dashboard", phone=phone)
+
+    if not is_success_response(result):
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "SUCCESS",
+            "final_response": (
+                "📦 *Vos commandes*\n\n"
+                "Vous n'avez pas encore passé de commande sur AgriConnect."
+                + render_quick_actions(["chercher un produit", "mes enchères"])
+            ),
+            "ag_ui_component": None,
+        }
+
+    menu_text = result.get("formatted_menu") or "Vos commandes."
+    raw_mapping = result.get("mapping") or {}
+    mapping = {
+        str(i): str(oid)
+        for i, oid in enumerate(raw_mapping.values(), start=1)
+        if oid not in (None, "")
+    }
+
+    options = [
+        MenuOption(
+            index=str(idx),
+            label=f"Commande #{str(oid)[:8].upper()}",
+            value=oid,
+        )
+        for idx, oid in mapping.items()
+    ]
+
+    return {
+        "status": "WAITING_INPUT",
+        "expected_input": "SELECTION",
+        "response_strategy": "SELECTION_MENU",
+        "final_response": menu_text + render_selection_prompt(noun="commande"),
+        "available_mapping": mapping,
+        "expected_candidates": [f"Commande #{oid[:8].upper()}" for oid in mapping.values()],
+        "order_tracking_context": _tracking_ctx_patch(menu_generated_at=time.time()),
+        "ag_ui_component": None,
+        "pending_menu": MenuRequest(
+            title="Vos commandes",
+            options=options,
+            kind="order_list",
+            preformatted_text=menu_text,
+        ),
+    }
+
+
+# =====================================================================
+# 2. CHECK ORDER STATUS — Détail conversationnel
 # =====================================================================
 
 def _build_status_response(order_data: Dict[str, Any]) -> str:
-    """Génère une réponse conversationnelle contextuelle selon le statut.
-
-    Au lieu de balancer un JSON, l'agent guide l'acheteur :
-    - PENDING    → Expliquer + proposer modification/annulation.
-    - SHIPPED    → Estimation humaine + rassurer.
-    - DELIVERED  → Confirmer date + demander retour qualité.
-    """
     status = str(order_data.get("status") or "PENDING").upper()
     order_number = order_data.get("order_number") or str(order_data.get("id", ""))[:8].upper()
     total = order_data.get("total_amount") or order_data.get("total") or 0
     currency = order_data.get("currency") or "FCFA"
     created_at = order_data.get("created_at") or order_data.get("date")
-    items_summary = ""
 
     items = order_data.get("items") or []
-    if items:
-        if isinstance(items[0], dict):
-            parts = []
-            for it in items[:3]:
-                name = it.get("name") or it.get("product_name") or "Article"
-                qty = it.get("qty") or it.get("quantity") or 1
-                parts.append(f"{name} (x{qty})")
-            items_summary = ", ".join(parts)
-            if len(items) > 3:
-                items_summary += f" +{len(items) - 3} autres"
+    items_summary = ""
+    if items and isinstance(items[0], dict):
+        parts = []
+        for it in items[:3]:
+            name = it.get("name") or it.get("product_name") or "Article"
+            qty = it.get("qty") or it.get("quantity") or 1
+            parts.append(f"{name} (x{qty})")
+        items_summary = ", ".join(parts)
+        if len(items) > 3:
+            items_summary += f" +{len(items) - 3} autres"
 
     header = f"📋 *Commande #{order_number}*"
     if items_summary:
         header += f"\n🛒 {items_summary}"
     header += f"\n💵 Total : *{total} {currency}*"
 
-    if status == "PENDING":
-        return (
+    responses = {
+        "PENDING": (
             f"{header}\n\n"
             f"⏳ *Statut : En attente de validation*\n\n"
             f"La préparation n'a pas encore commencé. Le producteur va "
             f"bientôt prendre en charge votre commande.\n\n"
             f"💡 _Souhaitez-vous modifier ou annuler cette commande ?_\n"
             f"Répondez *annuler* ou *modifier*."
-        )
-
-    if status == "CONFIRMED":
-        return (
+        ),
+        "CONFIRMED": (
             f"{header}\n\n"
             f"✅ *Statut : Confirmée*\n\n"
             f"Votre commande est en cours de préparation chez le producteur. "
             f"Vous serez notifié dès l'expédition.\n\n"
             f"⏱️ _Estimation : expédition sous 24-48h._"
-        )
-
-    if status in ("SHIPPED", "IN_TRANSIT"):
-        return (
+        ),
+        "DELIVERED": (
             f"{header}\n\n"
-            f"🚛 *Statut : En route vers vous*\n\n"
-            f"Votre commande est en cours de livraison ! "
-            f"Le livreur devrait arriver chez vous dans environ *2 heures*.\n\n"
-            f"📍 _Restez joignable pour la réception._"
-        )
-
-    if status == "PICKED_UP":
-        return (
+            f"📦 *Statut : Livrée* "
+            f"{_format_elapsed(datetime.fromisoformat(created_at) if isinstance(created_at, str) else created_at) if created_at else ''}\n\n"
+            f"Votre commande a été livrée avec succès ! "
+            f"Nous espérons que tout est conforme.\n\n"
+            f"⭐ _Comment était la qualité des produits ?_\n"
+            f"Répondez avec une note de 1 à 5 ou un commentaire."
+        ),
+        "CANCELLED": (
+            f"{header}\n\n"
+            f"❌ *Statut : Annulée*\n\n"
+            f"Cette commande a été annulée. Les stocks ont été restitués.\n\n"
+            f"🔁 _Souhaitez-vous passer une nouvelle commande ?_"
+        ),
+        "PICKED_UP": (
             f"{header}\n\n"
             f"📍 *Statut : Arrivée au point de collecte*\n\n"
             f"Votre commande vous attend au point de retrait. "
             f"Présentez-vous avec votre numéro de commande.\n\n"
             f"🆔 Référence : *#{order_number}*"
-        )
+        ),
+    }
 
-    if status == "DELIVERED":
-        elapsed = _format_elapsed(
-            datetime.fromisoformat(created_at) if isinstance(created_at, str) else created_at
-        ) if created_at else ""
+    if status in responses:
+        return responses[status]
+
+    if status in ("SHIPPED", "IN_TRANSIT"):
         return (
             f"{header}\n\n"
-            f"📦 *Statut : Livrée* {elapsed}\n\n"
-            f"Votre commande a été livrée avec succès ! "
-            f"Nous espérons que tout est conforme.\n\n"
-            f"⭐ _Comment était la qualité des produits ?_\n"
-            f"Répondez avec une note de 1 à 5 ou un commentaire."
-        )
-
-    if status == "CANCELLED":
-        return (
-            f"{header}\n\n"
-            f"❌ *Statut : Annulée*\n\n"
-            f"Cette commande a été annulée. Les stocks ont été restitués.\n\n"
-            f"🔁 _Souhaitez-vous passer une nouvelle commande ?_"
+            f"🚛 *Statut : En route vers vous*\n\n"
+            f"Votre commande est en cours de livraison !\n\n"
+            f"📍 _Restez joignable pour la réception._"
         )
 
     if status in ("PAID", "PROCESSING"):
         return (
             f"{header}\n\n"
-            f"{_status_label(status)}\n\n"
+            f"{_status_label(status, ORDER_STATUS_MAP)}\n\n"
             f"Votre paiement est confirmé. La commande est en préparation.\n\n"
             f"📦 _Vous recevrez une notification à l'expédition._"
         )
 
-    # Fallback générique
     return (
         f"{header}\n\n"
-        f"{_status_label(status)}\n\n"
+        f"{_status_label(status, ORDER_STATUS_MAP)}\n\n"
         f"_Tapez *aide* pour plus d'options._"
     )
 
@@ -250,196 +333,49 @@ async def check_order_status(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
 ) -> Dict[str, Any]:
-    """Node : vérifie le statut d'une commande et répond de façon conversationnelle.
-
-    Résolution de l'order_id :
-    1. Depuis le payload (order_id explicite ou extraction texte).
-    2. Via les snapshots de menus (sélection numérique).
-    3. Depuis l'order_focus (dernière commande consultée).
-    4. Fallback : dernière commande active.
-    """
-    payload: Dict[str, Any] = state.get("transaction_payload") or {}
     phone = str(state.get("user_phone") or "")
-    order_focus = (state.get("order_tracking_context") or {}).get("order_focus")
-    normalized_text = str(state.get("normalized_text") or "")
-
-    # Résolution de l'order_id
-    order_id = (
-        payload.get("order_id")
-        or payload.get("selected_value")
-        or extract_order_ref(normalized_text)
-    )
-
-    # Résolution via sélection numérique (menu snapshots)
-    if not order_id:
-        selection_idx = payload.get("selection_index")
-        if selection_idx is not None:
-            order_id = _resolve_menu_selection(state, selection_idx)
-
-    # Fallback : dernière commande en focus
-    if not order_id:
-        order_id = order_focus
+    order_id = _resolve_order_id(state)
 
     if not order_id and not phone:
-        return {
-            "status": "ERROR",
-            "response_strategy": "ERROR",
-            "final_response": "Je n'ai pas pu identifier votre commande. Quel est votre numéro de commande ?",
-            "ag_ui_component": None,
-        }
+        return _error("Je n'ai pas pu identifier votre commande. Quel est votre numéro de commande ?")
 
-    # Appel DB via MCP
     kwargs: Dict[str, Any] = {}
     if order_id:
         kwargs["order_id"] = str(order_id)
     else:
         kwargs["buyer_phone"] = phone
 
-    result = await _safe_tracking_call(mc_runtime, "get_transaction_summary", **kwargs)
+    result = await _safe_gw_call(mc_runtime, "get_transaction_summary", **kwargs)
 
     if not is_success_response(result):
-        # Commande introuvable → re-engagement
         return _order_not_found_response(order_id, phone)
 
-    data = result.get("data") or {}
-    resolved_order_id = data.get("order_id") or order_id
+    data = result.get("data") or result
+    if isinstance(data, dict) and "status" not in data and "order_id" not in data:
+        data = result
 
-    # Construire la réponse conversationnelle
-    response_text = _build_status_response(data)
+    resolved_order_id = data.get("order_id") or data.get("id") or order_id
 
     return {
         "status": "COMPLETED",
         "response_strategy": "SUCCESS",
-        "final_response": response_text,
-        "order_tracking_context": {
-            "order_focus": resolved_order_id,
-            "last_status": data.get("status"),
-            "last_interaction_ts": time.time(),
-        },
+        "final_response": _build_status_response(data),
+        "order_tracking_context": _tracking_ctx_patch(resolved_order_id, last_status=data.get("status")),
         "ag_ui_component": None,
     }
 
 
 # =====================================================================
-# 2. DYNAMIC MENU — SNAPSHOT-BASED WITH 30-MIN EXPIRATION
-# =====================================================================
-
-async def list_orders(
-    state: Dict[str, Any],
-    mc_runtime: MarketRuntime,
-) -> Dict[str, Any]:
-    """Node : liste les commandes en format texte + snapshot menu éphémère."""
-    phone = str(state.get("user_phone") or "")
-    tracking_ctx = dict(state.get("order_tracking_context") or {})
-
-    if not phone:
-        return {
-            "status": "ERROR",
-            "response_strategy": "ERROR",
-            "final_response": "Numéro de téléphone introuvable.",
-            "ag_ui_component": None,
-        }
-
-    # Vérifier si le snapshot est expiré côté agent (30 min)
-    cache_ts = tracking_ctx.get("menu_generated_at") or 0
-    is_expired = (time.time() - cache_ts) > MENU_SESSION_TTL_SECONDS
-
-    # Si l'utilisateur tape un numéro ET que le snapshot est encore valide
-    payload: Dict[str, Any] = state.get("transaction_payload") or {}
-    selection_idx = payload.get("selection_index")
-    if selection_idx and not is_expired:
-        resolved = _resolve_menu_selection(state, selection_idx)
-        if resolved:
-            # Contextualiser la sélection → status check
-            synthetic_state = dict(state)
-            synthetic_payload = dict(payload)
-            synthetic_payload["order_id"] = resolved
-            synthetic_state["transaction_payload"] = synthetic_payload
-            return await check_order_status(synthetic_state, mc_runtime)
-
-    # Rafraîchir la liste
-    result = await _safe_tracking_call(mc_runtime, "get_buyer_orders_dashboard", phone=phone)
-
-    if not is_success_response(result):
-        return {
-            "status": "COMPLETED",
-            "response_strategy": "SUCCESS",
-            "final_response": (
-                "📦 *Vos Commandes :*\n\n"
-                "Vous n'avez pas encore passé de commande sur AgriConnect.\n"
-                "Tapez *marketplace* pour voir les produits disponibles ! 🛒"
-            ),
-            "ag_ui_component": None,
-        }
-
-    menu_text = result.get("formatted_menu") or "Vos commandes."
-    raw_mapping = result.get("mapping") or {}
-    minimal_mapping = {
-        str(i): str(order_id)
-        for i, order_id in enumerate(raw_mapping.values(), start=1)
-        if order_id not in (None, "")
-    }
-
-    response = {
-        "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
-        "response_strategy": "SELECTION_MENU",
-        "final_response": menu_text + "\n\n_Répondez avec le numéro pour voir les détails._",
-        "available_mapping": {},
-        "expected_candidates": [],
-        "order_tracking_context": {
-            **tracking_ctx,
-            "menu_generated_at": time.time(),
-        },
-        "ag_ui_component": None,
-    }
-
-    working_patch = {
-        "available_mapping_kind": "order_list" if minimal_mapping else None,
-    }
-    response["working_memory"] = working_patch
-
-    if minimal_mapping:
-        response.update(
-            {
-                "available_mapping": minimal_mapping,
-                "expected_candidates": [
-                    f"Commande #{order_id[:8].upper()}"
-                    for order_id in minimal_mapping.values()
-                ],
-            }
-        )
-
-    return response
-
-
-# =====================================================================
-# 3. CANCEL ACTION — Annulation conversationnelle directe
+# 3. CANCEL ORDER
 # =====================================================================
 
 async def cancel_order(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
 ) -> Dict[str, Any]:
-    """Node : annulation conversationnelle d'une commande (ID texte ou menu)."""
-    payload: Dict[str, Any] = state.get("transaction_payload") or {}
+    payload: Dict[str, Any] = dict(state.get("transaction_payload") or {})
     phone = str(state.get("user_phone") or "")
-    normalized_text = str(state.get("normalized_text") or "")
-    tracking_ctx = dict(state.get("order_tracking_context") or {})
-
-    # Résolution order_id
-    order_id = (
-        payload.get("order_id")
-        or extract_order_ref(normalized_text)
-    )
-
-    # Via sélection numérique
-    if not order_id and payload.get("selection_index") is not None:
-        order_id = _resolve_menu_selection(state, payload["selection_index"])
-
-    # Via focus
-    if not order_id:
-        order_id = tracking_ctx.get("order_focus")
+    order_id = _resolve_order_id(state)
 
     if not order_id:
         return {
@@ -464,24 +400,23 @@ async def cancel_order(
             "response_strategy": "ASK_MISSING_FIELD",
             "final_response": (
                 "Pour annuler cette commande, merci d'indiquer la raison.\n"
-                "💡 Expliquez en quelques mots ce qui ne va pas (ex: délai trop long, erreur de produit)."
+                "💡 Expliquez en quelques mots (ex: délai trop long, erreur de produit)."
             ),
             "transaction_payload": payload,
-            "order_tracking_context": {
-                **tracking_ctx,
-                "order_focus": order_id,
-                "last_interaction_ts": time.time(),
-            },
+            "order_tracking_context": _tracking_ctx_patch(order_id),
             "ag_ui_component": None,
         }
 
-    # Appeler cancel_pending_order
-    result = await _safe_tracking_call(
-        mc_runtime, "cancel_pending_order",
-        order_id=str(order_id),
-        phone=phone,
-        reason=str(cancel_reason).strip() or None,
-    )
+    gw = OrderTrackingGateway(mc_runtime)
+    try:
+        result = await gw.cancel_pending_order(
+            order_id=str(order_id),
+            phone=phone,
+            reason=str(cancel_reason).strip(),
+        )
+    except Exception as exc:
+        logger.exception("cancel_order | error: %s", exc)
+        result = {"status": "error", "message": "Service temporairement indisponible."}
 
     status = str(result.get("status") or "").lower()
     msg = result.get("message") or ""
@@ -497,16 +432,11 @@ async def cancel_order(
                 f"🔁 _Souhaitez-vous passer une nouvelle commande ou "
                 f"voir vos commandes actives ?_"
             ),
-            "order_tracking_context": {
-                **tracking_ctx,
-                "order_focus": None,
-                "last_interaction_ts": time.time(),
-            },
+            "order_tracking_context": _tracking_ctx_patch(None),
             "transaction_payload": cleaned_payload,
             "ag_ui_component": None,
         }
 
-    # Erreur métier → réponse de ré-engagement
     if "statut" in msg.lower() or "impossible" in msg.lower():
         return {
             "status": "COMPLETED",
@@ -516,11 +446,7 @@ async def cancel_order(
                 f"Seules les commandes *en attente* (⏳) peuvent être annulées.\n"
                 f"_Souhaitez-vous voir le statut actuel de cette commande ?_"
             ),
-            "order_tracking_context": {
-                **tracking_ctx,
-                "order_focus": order_id,
-                "last_interaction_ts": time.time(),
-            },
+            "order_tracking_context": _tracking_ctx_patch(order_id),
             "ag_ui_component": None,
         }
 
@@ -528,35 +454,215 @@ async def cancel_order(
 
 
 # =====================================================================
-# 4. PROACTIVE GREETING — Vérification à l'ouverture de conversation
+# 4. LIST BUYER AUCTIONS — Dashboard enchères (tous statuts)
+# =====================================================================
+
+async def list_buyer_auctions(
+    state: Dict[str, Any],
+    mc_runtime: MarketRuntime,
+) -> Dict[str, Any]:
+    """Liste toutes les enchères de l'acheteur avec leur statut."""
+    phone = str(state.get("user_phone") or "")
+    if not phone:
+        return _error("Numéro de téléphone introuvable.")
+
+    payload = state.get("transaction_payload") or {}
+    selection_idx = payload.get("selection_index")
+    if selection_idx is not None:
+        mapping = state.get("available_mapping") or {}
+        resolved = mapping.get(str(selection_idx))
+        if resolved:
+            synthetic = dict(state)
+            syn_payload = dict(payload)
+            syn_payload["auction_id"] = resolved
+            synthetic["transaction_payload"] = syn_payload
+            return await check_auction_status(synthetic, mc_runtime)
+
+    gw = AuctionGateway(mc_runtime)
+    result = await gw.search_auctions(phone=phone, view_mode="MY_OWN")
+
+    if not is_success_response(result):
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "SUCCESS",
+            "final_response": (
+                "📋 *Vos appels d'offres*\n\n"
+                "Vous n'avez aucun appel d'offres pour le moment."
+                + render_quick_actions(["lancer un appel d'offres", "chercher un produit"])
+            ),
+            "ag_ui_component": None,
+        }
+
+    data = result.get("data") or []
+    if not data:
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "SUCCESS",
+            "final_response": (
+                "📋 *Vos appels d'offres*\n\n"
+                "Vous n'avez aucun appel d'offres pour le moment."
+                + render_quick_actions(["lancer un appel d'offres", "chercher un produit"])
+            ),
+            "ag_ui_component": None,
+        }
+
+    lines = ["📋 *Vos Appels d'Offres :*\n"]
+    mapping: Dict[str, str] = {}
+    options: List[MenuOption] = []
+
+    for i, auction in enumerate(data, start=1):
+        auction_id = str(auction.get("auction_id") or auction.get("id") or "")
+        product = auction.get("product") or auction.get("product_name") or "Produit"
+        status_raw = str(auction.get("status") or "OPEN").upper()
+        status_label = _status_label(status_raw, AUCTION_STATUS_MAP)
+        qty = auction.get("quantity") or ""
+        unit = auction.get("unit") or ""
+        bid_count = auction.get("bid_count") or auction.get("offers_count") or 0
+        price = auction.get("max_price") or auction.get("budget") or ""
+
+        qty_str = f" — {qty} {unit}" if qty else ""
+        price_str = f" — Budget: {price} FCFA" if price else ""
+        bids_str = f" — 📥 {bid_count} offre{'s' if int(bid_count) > 1 else ''}" if bid_count else ""
+
+        label = f"{product}{qty_str}{price_str}"
+        lines.append(f"*{i}.* {label}\n   {status_label}{bids_str}")
+        mapping[str(i)] = auction_id
+        options.append(MenuOption(index=str(i), label=label, value=auction_id))
+
+    lines.append(render_selection_prompt(noun="enchère"))
+    menu_text = "\n".join(lines)
+
+    return {
+        "status": "WAITING_INPUT",
+        "expected_input": "SELECTION",
+        "response_strategy": "SELECTION_MENU",
+        "final_response": menu_text,
+        "available_mapping": mapping,
+        "expected_candidates": [f"Enchère #{oid[:8]}" for oid in mapping.values() if oid],
+        "ag_ui_component": None,
+        "pending_menu": MenuRequest(
+            title="Vos appels d'offres",
+            options=options,
+            kind="buyer_auction_list",
+            preformatted_text=menu_text,
+        ),
+    }
+
+
+# =====================================================================
+# 5. CHECK AUCTION STATUS — Détail + offres reçues
+# =====================================================================
+
+async def check_auction_status(
+    state: Dict[str, Any],
+    mc_runtime: MarketRuntime,
+) -> Dict[str, Any]:
+    """Affiche le détail d'une enchère + les offres reçues dessus."""
+    payload = state.get("transaction_payload") or {}
+
+    auction_id = (
+        payload.get("auction_id")
+        or payload.get("selected_value")
+    )
+    if not auction_id:
+        selection_idx = payload.get("selection_index")
+        if selection_idx is not None:
+            mapping = state.get("available_mapping") or {}
+            auction_id = mapping.get(str(selection_idx))
+
+    if not auction_id:
+        return {
+            "status": "WAITING_INPUT",
+            "expected_input": "SELECTION",
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": (
+                "Quel appel d'offres souhaitez-vous consulter ?\n"
+                "💡 _Tapez *mes enchères* pour voir la liste._"
+            ),
+            "ag_ui_component": None,
+        }
+
+    gw = AuctionGateway(mc_runtime)
+    bids_result = await gw.get_auction_bids(auction_id=str(auction_id))
+
+    bids = bids_result.get("bids") or bids_result.get("data") or []
+    auction_info = bids_result.get("auction") or {}
+    product = auction_info.get("product") or auction_info.get("product_name") or "Votre produit"
+    status_raw = str(auction_info.get("status") or bids_result.get("auction_status") or "OPEN").upper()
+    status_label = _status_label(status_raw, AUCTION_STATUS_MAP)
+
+    lines = [
+        f"📋 *Enchère — {product}*",
+        f"Statut : {status_label}",
+    ]
+
+    if not bids:
+        lines.append("\n📭 _Aucune offre reçue pour le moment._")
+        if status_raw == "OPEN":
+            lines.append("Les producteurs peuvent encore soumettre des offres.")
+    else:
+        lines.append(f"\n📥 *{len(bids)} offre{'s' if len(bids) > 1 else ''} reçue{'s' if len(bids) > 1 else ''} :*")
+        mapping: Dict[str, str] = {}
+        options: List[MenuOption] = []
+
+        for i, bid in enumerate(bids, start=1):
+            bid_id = str(bid.get("bid_id") or bid.get("id") or "")
+            producer = bid.get("producer") or bid.get("producer_name") or "Producteur"
+            price = bid.get("price") or bid.get("offered_price") or "?"
+            bid_status = str(bid.get("status") or "PENDING").upper()
+            bid_emoji = "🟡" if bid_status == "PENDING" else "✅" if bid_status == "ACCEPTED" else "🔴"
+
+            label = f"{producer} — {price} FCFA"
+            lines.append(f"\n*{i}.* {bid_emoji} {label}")
+            mapping[str(i)] = bid_id
+            options.append(MenuOption(index=str(i), label=label, value=bid_id))
+
+        if status_raw == "OPEN":
+            lines.append("\n_Répondez avec le numéro pour accepter une offre, ou *négocier* pour contre-proposer._")
+
+            return {
+                "status": "WAITING_INPUT",
+                "expected_input": "SELECTION",
+                "response_strategy": "SELECTION_MENU",
+                "final_response": "\n".join(lines),
+                "available_mapping": mapping,
+                "ag_ui_component": None,
+                "pending_menu": MenuRequest(
+                    title=f"Offres — {product}",
+                    options=options,
+                    kind="auction_bids",
+                    metadata={"auction_id": str(auction_id)},
+                    preformatted_text="\n".join(lines),
+                ),
+            }
+
+    lines.append("")
+    return {
+        "status": "COMPLETED",
+        "response_strategy": "SUCCESS",
+        "final_response": "\n".join(lines),
+        "ag_ui_component": None,
+    }
+
+
+# =====================================================================
+# 6. PROACTIVE ORDER CHECK
 # =====================================================================
 
 async def proactive_order_check(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
 ) -> Optional[Dict[str, Any]]:
-    """Vérifie si l'acheteur a une commande en cours après inactivité.
-
-    Retourne None si pas de commande pertinente (le flow continue normalement).
-    Sinon retourne un patch d'état avec le message proactif.
-    """
     phone = str(state.get("user_phone") or "")
     if not phone:
         return None
 
-    # Vérifier l'inactivité (pas d'interaction récente)
     tracking_ctx = state.get("order_tracking_context") or {}
     last_ts = tracking_ctx.get("last_interaction_ts") or 0
-    elapsed_since_last = time.time() - last_ts
-
-    # Seulement si >1h d'inactivité
-    if elapsed_since_last < 3600:
+    if time.time() - last_ts < 3600:
         return None
 
-    result = await _safe_tracking_call(
-        mc_runtime, "get_buyer_orders_dashboard", phone=phone
-    )
-
+    result = await _safe_gw_call(mc_runtime, "get_buyer_orders_dashboard", phone=phone)
     if not is_success_response(result):
         return None
 
@@ -564,68 +670,51 @@ async def proactive_order_check(
     if not mapping:
         return None
 
-    # Prendre la première commande active
-    first_order_id = list(mapping.values())[0] if mapping else None
+    first_order_id = next(iter(mapping.values()), None)
     if not first_order_id:
         return None
 
-    # Récupérer le détail
-    detail = await _safe_tracking_call(
-        mc_runtime, "get_transaction_summary", order_id=first_order_id
-    )
-
+    detail = await _safe_gw_call(mc_runtime, "get_transaction_summary", order_id=first_order_id)
     if not is_success_response(detail):
         return None
 
-    data = detail.get("data") or {}
+    data = detail.get("data") or detail
     status = str(data.get("status") or "").upper()
     order_number = data.get("order_number") or str(first_order_id)[:8].upper()
-    status_label = _status_label(status)
-
-    greeting = (
-        f"👋 Bonjour ! Votre commande *#{order_number}* est actuellement :\n"
-        f"{status_label}\n\n"
-        f"_Souhaitez-vous des détails ? Tapez *oui* ou *statut*._"
-    )
+    label = _status_label(status, ORDER_STATUS_MAP)
 
     return {
         "status": "COMPLETED",
         "response_strategy": "SUCCESS",
-        "final_response": greeting,
-        "order_tracking_context": {
-            "order_focus": first_order_id,
-            "last_interaction_ts": time.time(),
-            "menu_generated_at": time.time(),
-        },
+        "final_response": (
+            f"👋 Bonjour ! Votre commande *#{order_number}* est actuellement :\n"
+            f"{label}\n\n"
+            f"_Souhaitez-vous des détails ? Tapez *oui* ou *statut*._"
+        ),
+        "order_tracking_context": _tracking_ctx_patch(first_order_id),
         "ag_ui_component": None,
     }
 
 
 # =====================================================================
-# 5. ORCHESTRATOR — Point d'entrée unique pour le buyer_context_resolver
+# 7. ORCHESTRATOR
 # =====================================================================
 
 async def order_tracking_resolver(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
 ) -> Dict[str, Any]:
-    """Orchestrateur du suivi de commande. Dispatche selon le goal.
-
-    Goals supportés :
-    - BUYER_CHECK_ORDER_STATUS → check_order_status
-    - BUYER_LIST_ORDERS        → list_orders
-    - BUYER_CANCEL_ORDER       → cancel_order
-    """
     goal = str(state.get("current_goal") or "").upper().strip()
 
     if goal == "BUYER_CHECK_ORDER_STATUS":
         return await check_order_status(state, mc_runtime)
-    elif goal == "BUYER_LIST_ORDERS":
-        return await list_orders(state, mc_runtime)
-    elif goal == "BUYER_CANCEL_ORDER":
+    if goal == "BUYER_CANCEL_ORDER":
         return await cancel_order(state, mc_runtime)
+    if goal == "BUYER_LIST_AUCTIONS":
+        return await list_buyer_auctions(state, mc_runtime)
+    if goal == "BUYER_CHECK_AUCTION_STATUS":
+        return await check_auction_status(state, mc_runtime)
 
-    # Fallback → list_orders (le plus sûr)
     return await list_orders(state, mc_runtime)
 
 
@@ -633,23 +722,16 @@ async def order_tracking_resolver(
 # INTERNAL HELPERS
 # =====================================================================
 
-async def _safe_tracking_call(
-    mc_runtime: MarketRuntime, tool_name: str, **kwargs: Any
-) -> Dict[str, Any]:
-    """Wrapper résilient pour les appels MCP de tracking — delegates to gateway."""
-    try:
-        gw = OrderTrackingGateway(mc_runtime)
-        return await gw._call(tool_name, **kwargs)
-    except Exception as exc:
-        logger.exception("_safe_tracking_call | tool=%s | error: %s", tool_name, exc)
-        return {"status": "error", "message": "Service temporairement indisponible."}
+def _error(message: str) -> Dict[str, Any]:
+    return {
+        "status": "ERROR",
+        "response_strategy": "ERROR",
+        "final_response": message,
+        "ag_ui_component": None,
+    }
 
 
 def _order_not_found_response(order_id: Optional[str], phone: str) -> Dict[str, Any]:
-    """Réponse conversationnelle quand une commande est introuvable.
-
-    Transforme l'erreur en question de ré-engagement (jamais de message technique).
-    """
     ref = f" *#{order_id[:8].upper()}*" if order_id else ""
     return {
         "status": "COMPLETED",
@@ -659,10 +741,7 @@ def _order_not_found_response(order_id: Optional[str], phone: str) -> Dict[str, 
             f"Voulez-vous voir la liste de vos commandes actives ?\n"
             f"👉 Tapez *mes commandes*"
         ),
-        "order_tracking_context": {
-            "order_focus": None,
-            "last_interaction_ts": time.time(),
-        },
+        "order_tracking_context": _tracking_ctx_patch(None),
         "ag_ui_component": None,
         "pending_menu": MenuRequest(
             title="Commande introuvable",
@@ -677,12 +756,15 @@ def _order_not_found_response(order_id: Optional[str], phone: str) -> Dict[str, 
 
 __all__ = [
     "ORDER_TRACKING_GOALS",
-    "MENU_SESSION_TTL_SECONDS",
-    "STATUS_MAP",
+    "AUCTION_TRACKING_GOALS",
+    "AUCTION_STATUS_MAP",
+    "ORDER_STATUS_MAP",
     "extract_order_ref",
     "check_order_status",
     "list_orders",
     "cancel_order",
+    "list_buyer_auctions",
+    "check_auction_status",
     "proactive_order_check",
     "order_tracking_resolver",
 ]

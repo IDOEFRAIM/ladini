@@ -29,7 +29,6 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
 )
 from agriconnect.graphs.agents.market_coach.services.domain.buyer_common import (
     SUPPORT_FOOTER,
-    safe_call_tool,
     with_support_footer,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
@@ -44,7 +43,6 @@ from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
 )
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
-    ensure_dict,
     is_success_response,
 )
 from agriconnect.graphs.agents.market_coach.flows.buyer.helpers import (
@@ -1674,8 +1672,6 @@ __all__ = [
     "_resolve_buyer_bid_pick",
     "buyer_request_resolver",
     "buyer_context_resolver",
-    # Tunnel transactionnel "Grade Entreprise"
-    "safe_call_tool",
     "cart_management",
     "negotiation_gate",
     "_create_preorder",

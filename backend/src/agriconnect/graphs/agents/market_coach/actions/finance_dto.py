@@ -59,8 +59,8 @@ class FinanceLogExpensePayload(BaseModel):
         if farm_id in _EMPTY_SLOT_VALUES:
             raise ValueError("farm_id is required")
 
-        # amount from price_mentioned or amount
-        amount_raw = payload.get("price_mentioned")
+        # amount from price or amount
+        amount_raw = payload.get("price")
         if amount_raw in _EMPTY_SLOT_VALUES:
             amount_raw = payload.get("amount")
         amount = to_float(amount_raw, field="amount")

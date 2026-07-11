@@ -18,21 +18,16 @@ from agriconnect.graphs.agents.market_coach.actions.tool_provider import MCPTool
 from agriconnect.workspace.context_guard import ContextGuard
 from agriconnect.agents.task_handler import TaskHandler, GoalState
 from agriconnect.graphs.agents.market_coach.interpreter.intent import (
-    INTENT_DISAMBIGUATION,
     get_required_fields,
 )
-from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
 from agriconnect.graphs.agents.market_coach.flows.producer.farm_logic import ensure_farm_node
 from agriconnect.graphs.agents.market_coach.core.base import FARM_CRITICAL_GOALS
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
-    ensure_dict,
     is_success_response,
 )
 from agriconnect.graphs.roles import is_tool_allowed, normalize_role
 
-from agriconnect.graphs.agents.market_coach.interpreter.strategy import response_strategy
-from agriconnect.graphs.agents.market_coach.nodes.response_handlers import final_response, _label_for_field
 
 from agriconnect.graphs.agents.market_coach.services.mcp.schema_resolver import (
     get_tool_schema as _get_mcp_tool_schema,
@@ -141,19 +136,16 @@ def _build_task_payload(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     price = _extract_float(
         payload.get("price"),
-        payload.get("price_mentioned"),
-        state.get("price_mentioned"),
+        state.get("price"),
     )
     quantity = _extract_float(
         payload.get("quantity_for_sale"),
         payload.get("quantity"),
-        payload.get("quantity_mentioned"),
-        state.get("quantity_mentioned"),
+        state.get("quantity"),
     )
     unit = (
         payload.get("unit")
-        or payload.get("unit_mentioned")
-        or state.get("unit_mentioned")
+        or state.get("unit")
         or "KG"
     )
 
@@ -237,10 +229,10 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
     retry_count = int(state.get("retry_count") or 0)
 
     if not goal:
-        logger.error("Aucun dispatcher trouvé pour goal=%s", goal)
+        logger.error("Aucun goal défini — exécution impossible")
         return _apply_side_effects({
             "status": "ERROR",
-            "validation_errors": [f"no_dispatcher_for_{goal}"],
+            "validation_errors": ["no_goal_defined"],
             "response_strategy": "ERROR",
             "selected_tool": None,
             "selected_tool_args": {},
@@ -399,9 +391,7 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
         mcp_to_slot = {
             "name": "product",
             "product_name": "product",
-            "quantity_for_sale": "quantity_mentioned",
-            "quantity": "quantity_mentioned",
-            "price": "price_mentioned",
+            "quantity_for_sale": "quantity",
             "producer_id": "phone",
             "user_id": "phone",
         }
@@ -439,8 +429,7 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
 
     for attempt in range(1, _MCP_MAX_TRANSIENT_RETRIES + 1):
         try:
-            raw = await provider.execute(tool_name, resolved_args)
-            result = ensure_dict(raw)
+            result = await provider.execute(tool_name, resolved_args)
             success = is_success_response(result)
 
             history.append({

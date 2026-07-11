@@ -5,6 +5,7 @@ import uuid
 from typing import Any, Dict, Tuple
 
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -41,54 +42,61 @@ class BaseMixin:
     # ==================================================================
     # 1. COEUR INFRASTRUCTURE (Objets SQLAlchemy Bruts & Sérialisation)
     # ==================================================================
-    async def create_user_profile(self, data: Dict[str, Any]) -> str:
-            """
-            CRÉATION POLYMORPHE ATOMIQUE :
-            Persiste un User et son profil lié en une seule transaction asynchrone.
-            Respecte la signature et les patterns de performance des fonctions de lecture.
+    async def create_user_profile(self, data: Dict[str, Any]) -> Dict[str, Any]:
+            """Persiste un User et son profil satellite (idempotent).
+
+            Gère la race condition (IntegrityError sur phone unique) en
+            retournant le profil existant au lieu de crasher.
             """
             current_session = self.session
             if current_session is None:
-                logger.error("Erreur d'infrastructure : Aucune session active pour la création.")
                 raise RuntimeError("Database session is missing or uninitialized.")
 
+            clean_phone = normalize_phone(data.get("phone", ""))
+            if not clean_phone:
+                return {"status": "error", "message": "Numero de telephone invalide."}
+
+            existing = await self._fetch_user_entities(phone=clean_phone)
+            if existing:
+                serialized = self._serialize_user_entities(existing)
+                return {"status": "success", "data": serialized, "message": "already exists"}
+
+            raw_zone = data.get("zone_id")
+            zone_uuid = uuid.UUID(str(raw_zone)) if raw_zone else None
+
             try:
-                # Transaction asynchrone atomique pour garantir l'intégrité des relations
-                async with current_session.begin_nested():
-                    # 1. Création de l'entité User (Racine)
-                    new_user = User(
-                        phone=normalize_phone(data["phone"]),
-                        name=data.get("name", "Producteur"),
-                        role=data.get("role", "PRODUCER"),
-                        zone_id=data.get("zone_id"),
-                        onboarding_completed=True
-                    )
-                    current_session.add(new_user)
-                    await current_session.flush() # Récupération de l'ID généré
+                new_user = User(
+                    phone=clean_phone,
+                    name=data.get("name", "Utilisateur"),
+                    role=data.get("role", "BUYER").upper(),
+                    zone_id=zone_uuid,
+                    onboarding_completed=True,
+                )
+                current_session.add(new_user)
+                await current_session.flush()
 
-                    # 2. Création du profil métier (Polymorphisme)
-                    role = data.get("role", "PRODUCER")
-                    if role == "PRODUCER":
-                        profile = Producer(user_id=new_user.id, status="ACTIVE")
-                    elif role == "BUYER":
-                        profile = BuyerProfile(user_id=new_user.id)
-                    elif role == "DELIVERY":
-                        profile = DeliveryAgent(user_id=new_user.id)
-                    else:
-                        profile = None
-                    
-                    if profile:
-                        current_session.add(profile)
-                    
-                    # Commit explicite de la transaction
-                    await current_session.commit()
-                    return str(new_user.id)
+                role = (data.get("role") or "BUYER").upper()
+                if role == "PRODUCER":
+                    current_session.add(Producer(
+                        user_id=new_user.id,
+                        zone_id=zone_uuid,
+                        status="PENDING",
+                    ))
+                elif role == "BUYER":
+                    current_session.add(BuyerProfile(user_id=new_user.id))
+                elif role == "DELIVERY":
+                    current_session.add(DeliveryAgent(user_id=new_user.id))
 
-            except Exception as exc:
-                # Rollback automatique en cas d'erreur pour éviter les données orphelines
+                await current_session.flush()
+                return {"status": "success", "data": {"id": str(new_user.id), "phone": clean_phone}}
+
+            except IntegrityError:
                 await current_session.rollback()
-                logger.error(f"Erreur critique lors de la création de profil pour {data.get('phone')}: {exc}", exc_info=True)
-                raise RuntimeError(f"Échec de création utilisateur : {str(exc)}") from exc
+                logger.warning("Race condition sur create_user_profile pour %s — retour profil existant.", clean_phone)
+                row = await self._fetch_user_entities(phone=clean_phone)
+                if row:
+                    return {"status": "success", "data": self._serialize_user_entities(row), "message": "already exists"}
+                return {"status": "error", "message": "Creation echouee apres collision."}
         
 
     async def _fetch_user_entities(
@@ -244,7 +252,7 @@ class BaseMixin:
                     "phone": clean_phone,
                 }
             
-            return {"status": "SUCCESS", "data": self._serialize_user_entities(row)}
+            return {"status": "success", "data": self._serialize_user_entities(row)}
 
         except (AttributeError, TypeError, KeyError) as bug:
             logger.critical("Bug de logique interne détecté lors du mapping utilisateur pour %s: %s", phone, bug, exc_info=True)
@@ -380,15 +388,13 @@ class BaseMixin:
                         })
 
                 farms_list.append({
-                    "farm_id": str(farm.id),  
+                    "farm_id": str(farm.id),
                     "name": str(farm.name),
                     "location": str(farm.location) if farm.location else "Non spécifiée",
                     "size": float(farm.size) if farm.size else 0.0,
-                    "soil_type": str(farm.soil_type) if farm.soil_type else "Non spécifié",
-                    "water_source": str(farm.water_source) if farm.water_source else "Non spécifiée",
                     "zone_id": str(farm.zone_id) if farm.zone_id else None,
                     "created_at": farm.created_at.isoformat() if farm.created_at else None,
-                    "stocks": stocks_list  # 🔥 Injecté dans le payload pour le LLM !
+                    "stocks": stocks_list,
                 })
 
             return {
@@ -431,15 +437,15 @@ class BaseMixin:
             
             if zone_obj:
                 return {
-                    "status": "SUCCESS",
+                    "status": "success",
                     "data": {"id": str(zone_obj.id), "name": zone_obj.name}
                 }
-            
-            return {"status": "NOT_FOUND", "message": f"Zone '{name}' introuvable."}
-            
+
+            return {"status": "error", "message": f"Zone '{name}' introuvable."}
+
         except Exception as e:
             logger.error(f"[BaseMixin] Erreur lors de la résolution de zone '{name}': {e}")
-            return {"status": "ERROR", "message": str(e)}
+            return {"status": "error", "message": str(e)}
 
     async def get_available_zones(self) -> list[dict[str, Any]]:
             """
@@ -460,10 +466,10 @@ class BaseMixin:
                 zones = result.scalars().all()
                 
                 return {
-                    "status": "SUCCESS",
+                    "status": "success",
                     "data": [{"id": str(z.id), "label": z.name} for z in zones]
                 }
                 
             except Exception as e:
                 logger.error(f"[BaseMixin] Erreur lors de la récupération des zones: {e}")
-                return {"error": True, "message": str(e)}
+                return {"status": "error", "message": str(e)}

@@ -3,8 +3,6 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from agriconnect.graphs.roles import (
-    get_allowed_goals,
-    get_allowed_tools,
     is_goal_allowed,
     is_tool_allowed,
     normalize_role,
@@ -42,8 +40,6 @@ def _extract_tool_candidates(state: Dict[str, Any]) -> Dict[str, Optional[str]]:
 
 def make_role_guard(role: str):
     role_norm = normalize_role(role)
-    allowed_goals = get_allowed_goals(role_norm)
-    allowed_tools = get_allowed_tools(role_norm)
 
     async def _role_guard(state: Dict[str, Any], _: Any) -> Dict[str, Any]:
         patch: Dict[str, Any] = {}
@@ -59,25 +55,17 @@ def make_role_guard(role: str):
             patch["role"] = role_norm
             patch.setdefault("user_role", role_norm)
 
-        # Ensure user_role is aligned even if provided
         if (state.get("user_role") or "").strip() == "":
             patch["user_role"] = role_norm
 
-        goal_candidates = _extract_goal_candidates(state)
-        for source, goal in goal_candidates.items():
-            if not goal:
-                continue
-            goal_up = str(goal).upper()
-            if goal_up not in allowed_goals and not is_goal_allowed(role_norm, goal_up):
+        for goal in _extract_goal_candidates(state).values():
+            if goal and not is_goal_allowed(role_norm, str(goal).upper()):
                 return _build_error(
                     "Cette action est réservée à un autre rôle utilisateur."
                 )
 
-        tool_candidates = _extract_tool_candidates(state)
-        for _, tool in tool_candidates.items():
-            if not tool:
-                continue
-            if tool not in allowed_tools and not is_tool_allowed(role_norm, tool):
+        for tool in _extract_tool_candidates(state).values():
+            if tool and not is_tool_allowed(role_norm, tool):
                 return _build_error(
                     "Cet outil n'est pas autorisé pour votre profil."
                 )

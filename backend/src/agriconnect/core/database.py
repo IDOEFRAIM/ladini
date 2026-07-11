@@ -5,6 +5,7 @@ Optimisé pour Digital Ocean Managed Databases et les serveurs MCP.
 
 import logging
 import ssl
+import threading
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Tuple
 
@@ -34,13 +35,27 @@ _AsyncSessionLocal = None
 _engine = None
 _SessionLocal = None
 
+# Sérialise la création/destruction du moteur : sous un failover DB, plusieurs
+# coroutines/threads peuvent tenter dispose+rebuild simultanément (thundering
+# herd). Ce verrou garantit un seul moteur vivant à tout instant.
+_engine_lock = threading.Lock()
+
 
 def init_db() -> None:
     """Initialise le moteur asynchrone en nettoyant l'URL DigitalOcean."""
     global _async_engine, _AsyncSessionLocal
-    # Idempotent: avoid re-creating engine if already initialized
+    # Idempotent + thread-safe : double-checked locking pour éviter deux engines.
     if _async_engine is not None:
         return
+    with _engine_lock:
+        if _async_engine is not None:
+            return
+        _init_db_locked()
+
+
+def _init_db_locked() -> None:
+    """Corps réel de l'initialisation, exécuté sous `_engine_lock`."""
+    global _async_engine, _AsyncSessionLocal
 
     if not settings.DATABASE_URL:
         logger.warning("DATABASE_URL non configurée.")
@@ -175,36 +190,46 @@ def get_sessionmaker():
 
 
 async def close_db() -> None:
-    """Ferme proprement le pool de connexions asynchrone."""
+    """Ferme proprement le pool. Sûr sous concurrence (snapshot-and-null).
+
+    On récupère la référence au moteur ET on remet les globals à None de manière
+    atomique (aucun await entre les deux) AVANT de disposer. Les appels
+    concurrents voient alors `None` et n'essaient pas de disposer le même moteur
+    deux fois — évite le thundering herd de dispose lors d'un failover DB.
+    """
     global _async_engine, _AsyncSessionLocal
-    if _async_engine:
-        try:
-            await _async_engine.dispose()
-            logger.info("🔒 Database engine fermé.")
-        except RuntimeError as e:
-            # Happens when loop is already closed -> fallback to sync dispose
-            if "Event loop is closed" in str(e):
-                logger.warning("Event loop closed during async dispose; attempting sync dispose.")
-                try:
-                    sync = getattr(_async_engine, "sync_engine", None)
-                    if sync is not None:
-                        sync.dispose()
-                        logger.info("🔒 Sync engine disposed as fallback.")
-                except Exception:
-                    logger.exception("Fallback sync dispose failed")
-            else:
-                logger.exception("Error disposing async engine: %s", e)
-        finally:
-            _async_engine = None
-            _AsyncSessionLocal = None
+    engine_ref = _async_engine
+    if engine_ref is None:
+        return
+    _async_engine = None
+    _AsyncSessionLocal = None
+
+    try:
+        await engine_ref.dispose()
+        logger.info("🔒 Database engine fermé.")
+    except RuntimeError as e:
+        # Happens when loop is already closed -> fallback to sync dispose
+        if "Event loop is closed" in str(e):
+            logger.warning("Event loop closed during async dispose; attempting sync dispose.")
+            try:
+                sync = getattr(engine_ref, "sync_engine", None)
+                if sync is not None:
+                    sync.dispose()
+                    logger.info("🔒 Sync engine disposed as fallback.")
+            except Exception:
+                logger.exception("Fallback sync dispose failed")
+        else:
+            logger.exception("Error disposing async engine: %s", e)
 
 
 @asynccontextmanager
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """
-    Générateur de session asynchrone utilisable de deux façons :
-    1. FastAPI : async def route(db: AsyncSession = Depends(get_db))
-    2. MCP Servers : async with get_db() as session:
+    """Session context manager — caller must commit explicitly for writes.
+
+    Usage::
+        async with get_db() as session:
+            await session.execute(...)
+            await session.commit()   # required for writes
     """
     if _AsyncSessionLocal is None:
         init_db()
@@ -214,13 +239,10 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with _AsyncSessionLocal() as session:
         try:
             yield session
-            await session.commit()
         except Exception as e:
             await session.rollback()
             logger.error(f"Erreur transactionnelle : {e}")
             raise
-        finally:
-            await session.close()
 
 
 async def check_connection() -> bool:

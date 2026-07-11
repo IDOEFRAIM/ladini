@@ -83,7 +83,7 @@ class VendorSelectionState:
 
     @property
     def product_name(self) -> Optional[str]:
-        return self._raw.get("product_name")
+        return self._raw.get("product")
 
     @property
     def vendors(self) -> List[Dict[str, Any]]:
@@ -154,11 +154,10 @@ class PreorderPhase:
     Phases (ordered):
         CART             → User is adding items to the cart.
         PREORDER_DRAFTED → Brouillon créé, en attente de confirmation.
-        AWAITING_CONFIRM → Confirmation demandée.
         CONFIRMED        → Précommande validée.
     """
 
-    PHASES = ("CART", "PREORDER_DRAFTED", "AWAITING_CONFIRM", "CONFIRMED")
+    PHASES = ("CART", "PREORDER_DRAFTED", "CONFIRMED")
 
     def __init__(self, raw: Dict[str, Any]) -> None:
         self._raw = raw
@@ -187,10 +186,6 @@ class PreorderPhase:
     @property
     def is_drafted(self) -> bool:
         return self.phase == "PREORDER_DRAFTED"
-
-    @property
-    def awaiting_confirm(self) -> bool:
-        return self.phase == "AWAITING_CONFIRM"
 
     @property
     def is_confirmed(self) -> bool:
