@@ -25,7 +25,7 @@ from agriconnect.services.database.base_service import BaseService, transactiona
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.utcnow()
 
 
 class OrderService(BaseService):

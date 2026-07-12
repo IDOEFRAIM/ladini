@@ -4,9 +4,22 @@ from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
 
 logger = get_node_logger("RoutingNodes")
 
+# Tout statut de sécurité bloquant doit court-circuiter vers la stratégie
+# (sinon la réponse de blocage est écrasée par l'interpréteur en aval).
+_SECURITY_BLOCKING = frozenset({
+    "SCAM_DETECTED",
+    "ACCOUNT_BLOCKED",
+    "PROHIBITED_PRODUCT",
+    "PROFILE_UNAVAILABLE",
+})
+
+
 def _route_after_security(state: MarketAgentState) -> str:
-    """Achemine vers le routeur de stratégie si une fraude est détectée."""
-    if state.get("security_status") == "SCAM_DETECTED":
+    """Court-circuite vers la stratégie sur fraude, compte restreint, produit
+    interdit ou profil indisponible ; sinon poursuit vers l'interpréteur."""
+    if state.get("security_status") in _SECURITY_BLOCKING:
+        return "to_strategy"
+    if str(state.get("status") or "").upper() == "BLOCKED" and state.get("final_response"):
         return "to_strategy"
     return "to_interpreter"
 

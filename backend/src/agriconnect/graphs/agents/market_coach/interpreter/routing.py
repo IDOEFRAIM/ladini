@@ -410,10 +410,14 @@ def _interpret_fast_path(state: Dict[str, Any], text: str) -> Optional[Dict[str,
             }
 
         # (1) Panier actif + intention de valider → on crée le brouillon + récap.
+        # NB : le rendu du panier pose expected_input=CONFIRMATION ; dans ce
+        # contexte (panier actif, phase CART) une confirmation approximative
+        # DOIT lancer la précommande. On n'exclut donc que les saisies où "ok"
+        # ne veut pas dire "précommander" (quantité, produit, prix, sélection).
         if (
             has_cart
             and preorder_phase in ("", "CART")
-            and expected_up not in ("CONFIRMATION", "SELECTION", "PRICE", "QUANTITY", "PRODUCT")
+            and expected_up not in ("SELECTION", "PRICE", "QUANTITY", "PRODUCT")
             and _looks_like_preorder_trigger(clean)
         ):
             return {

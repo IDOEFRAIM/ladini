@@ -79,6 +79,10 @@ class User(Base):
     role = Column(String, default="USER", nullable=False)
     identity_verified = Column(Boolean, default=False)
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
+    # Modération / abus : blocage (annulations répétées) & bannissement (produits interdits).
+    account_status = Column(String, default="ACTIVE", nullable=False, server_default=text("'ACTIVE'"), index=True)
+    blocked_reason = Column(Text)
+    blocked_at = Column(DateTime)
     deleted_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -285,6 +289,23 @@ class ZoneSetting(Base):
     value = Column(JSONB, nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ProhibitedTerm(Base):
+    """Liste noire des produits interdits (drogue, armes…) gérée par les admins."""
+
+    __tablename__ = "prohibited_terms"
+    __table_args__ = (
+        Index("prohibited_terms_active_idx", "is_active"),
+        {"schema": "governance"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    term = Column(String, unique=True, nullable=False)
+    category = Column(String, default="ILLICIT", nullable=False, server_default=text("'ILLICIT'"))
+    severity = Column(String, default="HIGH", nullable=False, server_default=text("'HIGH'"))
+    is_active = Column(Boolean, default=True, nullable=False, server_default=text("true"))
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
 class OverlayLayer(Base):
@@ -1065,6 +1086,113 @@ class AIRatingReasoning(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
+class ModerationEvent(Base):
+    """Journal auditable des strikes de modération (produits interdits, scams).
+
+    Le nombre de strikes d'un utilisateur = COUNT sur cette table.
+    """
+
+    __tablename__ = "moderation_events"
+    __table_args__ = (
+        Index("moderation_events_phone_idx", "phone"),
+        Index("moderation_events_user_idx", "user_id"),
+        Index("moderation_events_kind_idx", "kind"),
+        {"schema": "intelligence"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    user_id = Column(PG_UUID(as_uuid=True))
+    phone = Column(Text, nullable=False)
+    kind = Column(String, nullable=False)  # PROHIBITED_PRODUCT | SCAM
+    matched_term = Column(Text)
+    excerpt = Column(Text)
+    action_taken = Column(String)  # WARNED | BANNED
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+
+class DemandSignal(Base):
+    """Demande non satisfaite : produits recherchés en vain, agrégés par terme."""
+
+    __tablename__ = "demand_signals"
+    __table_args__ = (
+        Index("demand_signals_term_unique", "normalized_term", unique=True),
+        Index("demand_signals_occurrences_idx", "occurrences"),
+        {"schema": "intelligence"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    normalized_term = Column(Text, nullable=False)
+    raw_query = Column(Text, nullable=False)
+    phone = Column(Text)
+    user_id = Column(PG_UUID(as_uuid=True))
+    zone_id = Column(PG_UUID(as_uuid=True))
+    occurrences = Column(Integer, default=1, nullable=False, server_default=text("1"))
+    resolved = Column(Boolean, default=False, nullable=False, server_default=text("false"))
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class Solicitation(Base):
+    """Sollicitation proactive (enchère→producteur, nouveau produit→acheteur).
+
+    Porte l'état métier + l'idempotence. Taux de conversion = RESPONDED/NOTIFIED.
+    """
+
+    __tablename__ = "solicitations"
+    __table_args__ = (
+        Index("solicitations_auction_producer_uq", "auction_id", "target_producer_id", unique=True),
+        Index("solicitations_offer_buyer_uq", "market_offer_id", "target_buyer_id", unique=True),
+        Index("solicitations_kind_status_idx", "kind", "status"),
+        Index("solicitations_auction_idx", "auction_id"),
+        {"schema": "intelligence"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    kind = Column(String, nullable=False)  # AUCTION_INVITE | NEW_PRODUCT_ALERT
+    auction_id = Column(PG_UUID(as_uuid=True))
+    market_offer_id = Column(PG_UUID(as_uuid=True))
+    target_producer_id = Column(PG_UUID(as_uuid=True))
+    target_buyer_id = Column(PG_UUID(as_uuid=True))
+    sub_category_id = Column(PG_UUID(as_uuid=True))
+    zone_id = Column(PG_UUID(as_uuid=True))
+    status = Column(String, default="PENDING", nullable=False, server_default=text("'PENDING'"))
+    notified_at = Column(DateTime)
+    responded_at = Column(DateTime)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class NotificationOutbox(Base):
+    """File d'attente durable de messages (Outbox Pattern). Écrite par les crons
+    métier, lue/envoyée par le dispatcher — découplage total de la notification.
+    """
+
+    __tablename__ = "notification_outbox"
+    __table_args__ = (
+        Index("outbox_dedupe_uq", "dedupe_key", unique=True),
+        Index("outbox_due_idx", "status", "next_attempt_at"),
+        Index("outbox_solicitation_idx", "solicitation_id"),
+        {"schema": "intelligence"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    solicitation_id = Column(PG_UUID(as_uuid=True))
+    channel = Column(String, nullable=False)  # WHATSAPP | EMAIL | PUSH | IN_APP
+    recipient_user_id = Column(PG_UUID(as_uuid=True))
+    recipient_phone = Column(Text)
+    template_key = Column(String, nullable=False)
+    payload = Column(JSONB, nullable=False)
+    dedupe_key = Column(Text, nullable=False)
+    status = Column(String, default="PENDING", nullable=False, server_default=text("'PENDING'"))
+    attempts = Column(Integer, default=0, nullable=False, server_default=text("0"))
+    max_attempts = Column(Integer, default=5, nullable=False, server_default=text("5"))
+    next_attempt_at = Column(DateTime, server_default=func.now(), nullable=False)
+    last_error = Column(Text)
+    sent_at = Column(DateTime)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 __all__ = [
     "Base",
     "_uuid4",
@@ -1073,7 +1201,7 @@ __all__ = [
     # governance
     "Organization", "UserOrganization", "RoleDefinition", "ClimaticRegion",
     "Zone", "WorkZone", "ZoneMetric", "Category", "SubCategory",
-    "StandardPrice", "ZoneSetting", "OverlayLayer",
+    "StandardPrice", "ZoneSetting", "OverlayLayer", "ProhibitedTerm",
     # marketplace
     "Warehouse", "Producer", "Client", "BuyerType", "BuyerProfile",
     "DeliveryAgent", "Delivery", "Farm", "MarketOffer", "CropCycle",
@@ -1082,5 +1210,6 @@ __all__ = [
     "OrderDispute", "Auction", "Bid", "MarketplaceRating",
     # intelligence
     "AuditLog", "AgentAction", "Conversation", "AgentContextMemory",
-    "TrustScore", "AIRatingReasoning",
+    "TrustScore", "AIRatingReasoning", "ModerationEvent", "DemandSignal",
+    "Solicitation", "NotificationOutbox",
 ]

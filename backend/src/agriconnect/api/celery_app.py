@@ -2,6 +2,8 @@ from celery import Celery
 import os
 import logging
 
+from agriconnect.workers.beat_schedule import BEAT_SCHEDULE
+
 # Configuration du logging pour Celery
 logger = logging.getLogger(__name__)
 
@@ -13,8 +15,13 @@ celery_app = Celery(
     "agriconnect_worker",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    # Indique où Celery doit chercher les tâches à exécuter
-    include=["agriconnect.api.tasks"]
+    # Indique où Celery doit chercher les tâches à exécuter (agent + crons d'orchestration)
+    include=[
+        "agriconnect.api.tasks",
+        "agriconnect.workers.crons.auction_solicitation",
+        "agriconnect.workers.crons.proximity_matching",
+        "agriconnect.workers.crons.outbox_dispatch",
+    ],
 )
 
 # Configuration détaillée pour la résilience et la performance
@@ -39,6 +46,11 @@ celery_app.conf.update(
     
     # 6. S'assure que les files d'attente sont bien traitées
     task_create_missing_queues=True,
+
+    # 7. Orchestration proactive : planification Celery Beat + fuseau UTC
+    #    (cohérent avec les datetime naïfs UTC stockés en base).
+    beat_schedule=BEAT_SCHEDULE,
+    timezone="UTC",
 )
 
 # Optionnel : configuration du mode "Task Always Eager" pour les tests unitaires

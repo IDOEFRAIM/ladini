@@ -12,7 +12,10 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
 from agriconnect.graphs.agents.market_coach.services.domain.buyer_common import (
     with_support_footer,
 )
-from agriconnect.graphs.agents.market_coach.services.mcp.gateway import AuctionGateway
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
+    AuctionGateway,
+    ModerationGateway,
+)
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     is_success_response,
@@ -327,7 +330,20 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
         menu_patch["current_goal"] = "BUYER_REQUEST"
         return menu_patch
 
-    # --- No stock: propose procurement ---
+    # --- No stock: capter la demande non satisfaite + proposer un appel d'offres ---
+    # Le produit n'existe pas au catalogue : on journalise ce que l'acheteur
+    # cherche (agrégation globale) pour piloter le sourcing / l'ouverture de
+    # nouvelles catégories. Best-effort, jamais bloquant.
+    try:
+        await ModerationGateway(mc_runtime).record_demand_signal(
+            phone=str(phone or ""),
+            raw_query=str(product_name),
+            normalized_term=str(product_name),
+            zone_id=state.get("zone_id"),
+        )
+    except Exception as demand_exc:
+        logger.debug("record_demand_signal failed (non-blocking): %s", demand_exc)
+
     wm = dict(working_memory)
     wm.update({
         "buyer_request_catalog_checked": True,

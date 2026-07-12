@@ -368,7 +368,7 @@ class PublicProductMixin:
             update_values = {
                 "latitude": lat,
                 "longitude": lng,
-                "updated_at": datetime.now(timezone.utc)
+                "updated_at": datetime.utcnow()
             }
             if target_zone_id:
                 update_values["zone_id"] = target_zone_id

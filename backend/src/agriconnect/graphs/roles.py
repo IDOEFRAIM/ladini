@@ -21,6 +21,11 @@ _PRODUCER_BLOCKED_PREFIXES = (
 _COMMON_TOOL_EXTRAS: Set[str] = {
     "create_agent_action",
     "get_user_by_phone",
+    # Moderation / anti-abuse — cross-role (gate d'entrée + captation demande)
+    "get_account_status",
+    "get_prohibited_terms",
+    "record_moderation_strike",
+    "record_demand_signal",
 }
 
 _BUYER_TOOL_EXTRAS: Set[str] = {

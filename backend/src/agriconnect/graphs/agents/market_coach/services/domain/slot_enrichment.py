@@ -95,7 +95,7 @@ def extract_future_datetime_from_text(text: str) -> Optional[str]:
         except ValueError:
             pass
 
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()
     month_match = re.search(r"dans\s+(\d+)\s*mois", text, re.IGNORECASE)
     if month_match:
         months = int(month_match.group(1))

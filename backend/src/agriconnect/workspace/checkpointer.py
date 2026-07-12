@@ -386,22 +386,29 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
 
     async def _persist_state(self, workspace: Workspace, state: Dict[str, Any]) -> None:
         workspace.metadata = dict(workspace.metadata or {})
-        pruned_state, metrics = self._prune_for_persistence(state)
-        workspace.agent_state = pruned_state
 
         if workspace.workspace_id in self._session_workspaces:
+            # ── Chemin session (normal) : staging RAM PEU COÛTEUX ──────────
+            # LangGraph appelle aput après CHAQUE nœud (~7-15×/tour). On garde
+            # ici l'état BRUT sans le pruning lourd (deepcopy + json.dumps +
+            # summary + windows) : ce travail n'est utile qu'à l'écriture DB,
+            # qui n'a lieu qu'UNE fois, au flush (voir finalize_for_persistence).
+            # Le bucket est déjà borné par _trim_bucket (≤ 5 checkpoints).
+            workspace.agent_state = state
             workspace.mark_dirty()
             hook = self._session_hooks.get(workspace.workspace_id)
             if hook:
-                hook(metrics)
-            logger.info(
-                "Workspace state staged in RAM | workspace=%s | bytes=%s | checkpoints=%s | truncated=%s",
+                hook({})  # circuit-breaker : compte les checkpoints par tour
+            logger.debug(
+                "Workspace checkpoint staged in RAM | workspace=%s | namespaces=%s",
                 workspace.workspace_id,
-                metrics.get("payload_bytes"),
-                metrics.get("total_checkpoints"),
-                metrics.get("truncated", False),
+                len(state.get("namespaces", {})) if isinstance(state, dict) else 0,
             )
         else:
+            # ── Chemin direct/legacy (checkpointer non attaché) ────────────
+            # Pas de session RAM : on prune + persiste immédiatement.
+            pruned_state, metrics = self._prune_for_persistence(state)
+            workspace.agent_state = pruned_state
             await self.store.save(workspace)
             logger.info(
                 "Workspace state persisted (legacy flow) | workspace=%s | bytes=%s | checkpoints=%s | truncated=%s",
@@ -410,6 +417,19 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
                 metrics.get("total_checkpoints"),
                 metrics.get("truncated", False),
             )
+
+    def finalize_for_persistence(self, workspace: Workspace) -> Dict[str, Any]:
+        """Applique le pruning lourd UNE fois, juste avant l'écriture DB (flush).
+
+        Déplace hors de la boucle par-nœud le coût de sérialisation/résumé :
+        appelé une seule fois par tour au lieu de ~7-15 fois. Idempotent.
+        """
+        state = workspace.agent_state
+        if not isinstance(state, dict):
+            return {"payload_bytes": 0}
+        pruned_state, metrics = self._prune_for_persistence(state)
+        workspace.agent_state = pruned_state
+        return metrics
 
     def attach_workspace(
         self,

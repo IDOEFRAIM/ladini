@@ -227,10 +227,19 @@ class AuctionMixin(BaseMixin):
             current_session.add(new_auction)
             await current_session.flush()
 
+            qty_txt = f"{float(qty):g}"
+            unit_txt = unit.upper().strip()
+            price_txt = f"{float(max_price):g}"
             return {
                 "status": "success",
                 "auction_id": str(new_auction.id),
-                "summary": f"📢 Appel d'offre publié pour {sub_cat.name}..."
+                "message": (
+                    f"✅ Votre appel d'offres pour *{qty_txt} {unit_txt} de {sub_cat.name}* "
+                    f"a été enregistré (prix max *{price_txt} FCFA/{unit_txt}*).\n\n"
+                    "📢 Dès qu'un producteur propose une offre, je vous recontacte pour valider. "
+                    "Tapez *suivre mes appels* pour suivre l'état des réponses."
+                ),
+                "summary": f"📢 Appel d'offre publié pour {qty_txt} {unit_txt} de {sub_cat.name}.",
             }
 
         except Exception as e:

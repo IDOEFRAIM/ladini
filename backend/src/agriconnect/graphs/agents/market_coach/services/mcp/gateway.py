@@ -197,6 +197,32 @@ class OrderTrackingGateway(_BaseGateway):
         )
 
 
+# ── Moderation / Anti-abuse ────────────────────────────────────────
+
+class ModerationGateway(_BaseGateway):
+    async def get_account_status(self, phone: str) -> Dict[str, Any]:
+        return await self._call("get_account_status", phone=phone.strip())
+
+    async def get_prohibited_terms(self) -> Dict[str, Any]:
+        return await self._call("get_prohibited_terms")
+
+    async def record_moderation_strike(
+        self, phone: str, matched_term: str = "", excerpt: str = "", kind: str = "PROHIBITED_PRODUCT",
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "record_moderation_strike",
+            phone=phone.strip(), matched_term=matched_term, excerpt=excerpt, kind=kind,
+        )
+
+    async def record_demand_signal(
+        self, phone: str = "", raw_query: str = "", normalized_term: str = "", zone_id: Any = None,
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "record_demand_signal",
+            phone=phone, raw_query=raw_query, normalized_term=normalized_term, zone_id=zone_id,
+        )
+
+
 # ── Agent Actions ──────────────────────────────────────────────────
 
 class AgentActionGateway(_BaseGateway):
@@ -219,5 +245,6 @@ __all__ = [
     "NegotiationGateway",
     "PreorderGateway",
     "OrderTrackingGateway",
+    "ModerationGateway",
     "AgentActionGateway",
 ]

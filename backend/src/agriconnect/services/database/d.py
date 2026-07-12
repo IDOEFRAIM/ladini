@@ -21,6 +21,7 @@ from agriconnect.services.database.buyer_verification import BuyerVerificationMi
 from agriconnect.services.database.producer import ProducerMgmtMixin
 from agriconnect.services.database.product import ProductMixin
 from agriconnect.services.database.auction import AuctionMixin
+from agriconnect.services.database.moderation import ModerationMixin
 
 # ContextVar unifié + helper rollback : partagés avec BaseService/@transactional.
 # Une session ouverte ici est visible depuis OrderService/UserContextService/ProductService
@@ -42,7 +43,7 @@ def _is_connection_lost(exc: Exception) -> bool:
 class AgriDatabaseService(
     AuthMixin, UtilsMixin,
     MarketplaceMixin, PublicProductMixin, BuyerMixin, BuyerVerificationMixin,
-    ProducerMgmtMixin, ProductMixin, AuctionMixin
+    ProducerMgmtMixin, ProductMixin, AuctionMixin, ModerationMixin
 ):
     _logger = logging.getLogger("AgriConnect.DatabaseService")
 
@@ -85,6 +86,9 @@ class AgriDatabaseService(
 
         # Producer reads
         "get_producer_orders",
+
+        # Moderation / anti-abuse reads
+        "get_account_status", "get_prohibited_terms",
     }
 
     # ==================================================================

@@ -9,8 +9,48 @@ from agriconnect.graphs.agents.market_coach.services.profile_loader import (
 from agriconnect.graphs.agents.market_coach.services.onboarding import resolve_onboarding_state
 import copy
 import inspect
+import re
 
 logger = get_node_logger("InputNormalizer")
+
+# Durcissement de l'entrée : borne la taille et retire les caractères de
+# contrôle (hors saut de ligne/tab). C'est une défense en profondeur qui
+# protège le prompt LLM ; la couche outil (SQL_INJECTION_PATTERNS +
+# _preflight_scan) et l'ORM paramétré couvrent déjà l'injection SQL.
+_MAX_INPUT_LEN = 1500
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _harden_text(text: str) -> str:
+    if not text:
+        return ""
+    cleaned = _CONTROL_CHARS.sub(" ", str(text))
+    if len(cleaned) > _MAX_INPUT_LEN:
+        cleaned = cleaned[:_MAX_INPUT_LEN]
+    return cleaned
+
+
+def _profile_unavailable_patch() -> Dict[str, Any]:
+    """Réponse claire quand le profil ne peut pas être résolu (échec technique).
+
+    On NE simule jamais un utilisateur fantôme et on NE propose pas de
+    transaction : on informe l'utilisateur au lieu de le laisser perdu.
+    """
+    return {
+        "status": "BLOCKED",
+        "security_status": "PROFILE_UNAVAILABLE",
+        "response_strategy": "ERROR",
+        "final_response": (
+            "😕 Je n'arrive pas à accéder à votre profil pour le moment.\n\n"
+            "Merci de *réessayer dans quelques instants*. "
+            "Si le problème persiste, contactez le *service client*."
+        ),
+        "ag_ui_component": {
+            "lc_type": "constructor",
+            "id": ["ag_ui", "StatusComponent"],
+            "kwargs": {"type": "error", "reason": "Profil indisponible"},
+        },
+    }
 
 
 async def input_normalizer(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
@@ -40,7 +80,8 @@ async def input_normalizer(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
             except Exception as audio_err:
                 logger.error("[Normalizer] Échec de la transcription audio: %s", audio_err, exc_info=True)
 
-    normalized = _normalize_text(raw_text)
+    raw_text = _harden_text(raw_text)
+    normalized = _harden_text(_normalize_text(raw_text))
     updates["normalized_text"] = normalized
     updates["translated_text"] = normalized
     updates["detected_language"] = "fr"
@@ -112,11 +153,19 @@ async def input_normalizer(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
                     "user_phone": str(phone).strip() if phone else state.get("user_phone"),
                 })
             else:
+                # Profil non résolu (échec technique) : message clair, pas de fantôme.
                 updates["user_context_loaded"] = False
+                if profile_updates.get("_profile_unavailable"):
+                    updates["user_phone"] = str(phone).strip()
+                    updates.update(_profile_unavailable_patch())
+                    return updates
 
         except Exception as db_err:
             logger.error("[Normalizer] Erreur de communication critique avec le serveur MCP DB: %s", db_err, exc_info=True)
             updates["user_context_loaded"] = False
+            updates["user_phone"] = str(phone).strip()
+            updates.update(_profile_unavailable_patch())
+            return updates
 
     # Onboarding resolution
     resolve_onboarding_state(state, updates)

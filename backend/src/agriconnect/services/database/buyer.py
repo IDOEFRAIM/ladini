@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, desc, update, case, literal, or_
+from sqlalchemy import select, desc, update, case, literal, or_, func
 from sqlalchemy.orm import selectinload, joinedload
 
 
@@ -366,7 +366,7 @@ class BuyerMixin(BaseMixin):
                 payment_status="PENDING",
                 delivery_status="PENDING",
                 source="WHATSAPP",
-                created_at=datetime.now(timezone.utc)
+                created_at=datetime.utcnow()
             )
             current_session.add(new_order)
             await current_session.flush()
@@ -450,13 +450,13 @@ class BuyerMixin(BaseMixin):
                 
                 if trust_score:
                     trust_score.reliability_index = float(trust_score.reliability_index or 0.0) + score_impact
-                    trust_score.updated_at = datetime.now(timezone.utc)
+                    trust_score.updated_at = datetime.utcnow()
                 else:
                     current_session.add(TrustScore(
                         id=uuid.uuid4(),
                         user_id=delivery.agent.user_id,
                         reliability_index=5.0 + score_impact,
-                        updated_at=datetime.now(timezone.utc)
+                        updated_at=datetime.utcnow()
                     ))
                 
                 await current_session.flush()
@@ -597,20 +597,77 @@ class BuyerMixin(BaseMixin):
                     )
             await current_session.flush()
 
+            # Anti-abus : au-delà de MAX_CANCELLATIONS annulations acheteur, on
+            # bloque le compte (déblocage manuel via service client).
+            blocked_now = await self._enforce_cancellation_limit(
+                current_session, profile_obj.id, user_obj
+            )
+
+            base_msg = (
+                f"❌ La commande #{str(order.id)[:8].upper()} a été annulée. Les stocks ont été restitués aux agriculteurs."
+                + (f"\n📝 Raison : {normalized_reason}" if normalized_reason else "")
+            )
+            if blocked_now:
+                base_msg += (
+                    "\n\n🔒 *Votre compte a été bloqué* suite à des annulations répétées. "
+                    "Contactez le *service client* pour le débloquer."
+                )
             return {
                 "status": "success",
-                "message": (
-                    f"❌ La commande #{str(order.id)[:8].upper()} a été annulée. Les stocks ont été restitués aux agriculteurs."
-                    + (f"\n📝 Raison : {normalized_reason}" if normalized_reason else "")
-                )
+                "account_blocked": bool(blocked_now),
+                "message": base_msg,
             }
         except Exception as e:
             logger.error(f"Erreur annulation commande {order_id} par {phone}: {e}")
             # AJOUT INDISPENSABLE : Toujours retourner un dictionnaire en cas de crash
             return {
-                "status": "error", 
+                "status": "error",
                 "message": "Erreur technique ou utilisateur introuvable lors de l'annulation."
             }
+
+    async def _enforce_cancellation_limit(
+        self, session, buyer_profile_id, user_obj
+    ) -> bool:
+        """Bloque le compte si les annulations acheteur dépassent le seuil.
+
+        Retourne True uniquement si le blocage vient d'être appliqué (pour
+        informer l'acheteur). Best-effort : n'interrompt jamais l'annulation.
+        """
+        try:
+            from agriconnect.services.database.moderation import MAX_CANCELLATIONS
+
+            count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Order)
+                    .where(
+                        Order.buyer_id == buyer_profile_id,
+                        func.upper(Order.status) == "CANCELLED",
+                        func.upper(func.coalesce(Order.cancellation_role, "")) == "BUYER",
+                    )
+                )
+                or 0
+            )
+            if count <= MAX_CANCELLATIONS or user_obj is None:
+                return False
+
+            current = str(getattr(user_obj, "account_status", "") or "").upper()
+            if current in {"BLOCKED", "BANNED"}:
+                return False  # déjà restreint : ne pas re-notifier / ne pas rétrograder
+
+            user_obj.account_status = "BLOCKED"
+            user_obj.blocked_reason = "Annulations répétées de commandes."
+            # Colonne TIMESTAMP WITHOUT TIME ZONE → datetime naïf obligatoire.
+            user_obj.blocked_at = datetime.utcnow()
+            await session.flush()
+            logger.warning(
+                "Compte %s BLOQUÉ : %s annulations (> %s).",
+                getattr(user_obj, "id", "?"), count, MAX_CANCELLATIONS,
+            )
+            return True
+        except Exception:
+            logger.warning("Enforcement du plafond d'annulations échoué", exc_info=True)
+            return False
 
 
     async def estimate_delivery_cost(self, phone: str, product_ids: List[str]) -> Dict[str, Any]:
@@ -837,7 +894,7 @@ class BuyerMixin(BaseMixin):
                 order_type="PREORDER",
                 is_agent_order=True,
                 expected_fulfillment_date=fulfillment_dt,
-                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                created_at=datetime.utcnow().replace(tzinfo=None),
             )
             current_session.add(new_order)
             await current_session.flush()
@@ -967,7 +1024,7 @@ class BuyerMixin(BaseMixin):
                 if zname:
                     zone_name = zname
 
-            deadline = datetime.now(timezone.utc) + timedelta(days=7)
+            deadline = datetime.utcnow() + timedelta(days=7)
             new_auction = Auction(
                 id=uuid.uuid4(),
                 buyer_id=profile_obj.id,
@@ -981,7 +1038,7 @@ class BuyerMixin(BaseMixin):
                 deadline=deadline,
                 target_zone_id=user_obj.zone_id,
                 status="OPEN",
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.utcnow(),
             )
             current_session.add(new_auction)
             await current_session.flush()
@@ -1181,7 +1238,7 @@ class BuyerMixin(BaseMixin):
                 }
 
             # Postgres column is TIMESTAMP WITHOUT TIME ZONE → store naive UTC
-            order.preorder_converted_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            order.preorder_converted_at = datetime.utcnow().replace(tzinfo=None)
             order.status = "CONFIRMED"
             order.payment_status = order.payment_status or "PENDING"
             order.subtotal = running_total
@@ -1345,7 +1402,7 @@ class BuyerMixin(BaseMixin):
                 }
 
             auction.status = "CANCELLED"
-            auction.cancelled_at = datetime.now(timezone.utc)
+            auction.cancelled_at = datetime.utcnow()
             if reason:
                 auction.cancellation_reason = str(reason)
             await current_session.flush()

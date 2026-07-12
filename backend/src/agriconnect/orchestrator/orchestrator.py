@@ -321,10 +321,20 @@ class Orchestrator:
             )
             return
 
+        # Pruning lourd (deepcopy + json + summary/windows) fait ICI, une seule
+        # fois par tour, au lieu d'à chaque nœud (voir checkpointer._persist_state).
+        try:
+            flush_metrics = self._checkpointer.finalize_for_persistence(ws)
+        except Exception:  # pragma: no cover - ne jamais bloquer le flush
+            logger.debug("finalize_for_persistence a échoué (non bloquant)", exc_info=True)
+            flush_metrics = {}
+
         logger.info(
-            "Workspace flush | workspace=%s | reason=%s",
+            "Workspace flush | workspace=%s | reason=%s | bytes=%s | truncated=%s",
             ws.workspace_id,
             reason,
+            flush_metrics.get("payload_bytes"),
+            flush_metrics.get("truncated", False),
         )
         try:
             persisted = await self.resolver.store.save(ws)
