@@ -7,7 +7,7 @@ even if individual state keys are cleared between turns.
 """
 from typing import Any, Dict, Optional
 
-from agriconnect.core.logging import get_logger
+from agriconnect.core.logger import get_logger
 from agriconnect.agents import (
     OnboardingState,
     OnboardingStep,

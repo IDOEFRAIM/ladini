@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Any, Dict, Iterable, Optional
-from agriconnect.core.logging import get_logger
+from agriconnect.core.logger import get_logger
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
 from agriconnect.graphs.agents.market_coach.services.mcp.gateway import FarmGateway
 from agriconnect.graphs.agents.market_coach.core.base import (

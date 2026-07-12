@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
 import unicodedata
-from agriconnect.core.logging import get_logger
+from agriconnect.core.logger import get_logger
 from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
     menu_snapshot_store,
 )

@@ -6,7 +6,7 @@ import time
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 
-from agriconnect.core.logging import get_logger
+from agriconnect.core.logger import get_logger
 
 logger = get_logger("AgriConnect.MarketCoach.Executor")
 

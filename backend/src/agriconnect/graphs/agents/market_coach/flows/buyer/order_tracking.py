@@ -626,12 +626,16 @@ async def check_auction_status(
         if status_raw == "OPEN":
             lines.append("\n_Répondez avec le *numéro* de l'offre pour désigner le gagnant._")
 
+            # kind="bid" → memory_update résout la sélection en payload.bid_id
+            # (et NON auction_id : "auction_bids" est mappé vers auction_id, ce
+            # qui écraserait l'id de l'enchère). On garde l'enchère de contexte
+            # dans working_memory.winner_auction_id.
             wm = dict(state.get("working_memory") or {})
-            wm["available_mapping_kind"] = "auction_bids"
             wm["winner_auction_id"] = str(auction_id)
             payload_out = dict(state.get("transaction_payload") or {})
             payload_out["auction_id"] = str(auction_id)
             payload_out.pop("selection_index", None)
+            payload_out.pop("bid_id", None)
 
             return {
                 "status": "WAITING_INPUT",
@@ -646,7 +650,7 @@ async def check_auction_status(
                 "pending_menu": MenuRequest(
                     title=f"Offres — {product}",
                     options=options,
-                    kind="auction_bids",
+                    kind="bid",
                     metadata={"auction_id": str(auction_id)},
                     preformatted_text="\n".join(lines),
                 ),
@@ -696,11 +700,14 @@ async def confirm_winner_selection(
 ) -> Dict[str, Any]:
     """L'acheteur a choisi une offre : afficher un récap + demander confirmation."""
     working = state.get("working_memory") or {}
-    auction_id = working.get("winner_auction_id") or (state.get("transaction_payload") or {}).get("auction_id")
+    payload = state.get("transaction_payload") or {}
+    auction_id = working.get("winner_auction_id")
     mapping = state.get("available_mapping") or {}
     sel = _selection_index(state)
 
-    bid_id = mapping.get(str(sel)) if sel is not None else None
+    # memory_update (kind="bid") a normalement déjà posé payload.bid_id ; sinon
+    # on retombe sur le mapping index→bid_id.
+    bid_id = payload.get("bid_id") or (mapping.get(str(sel)) if sel is not None else None)
     if not bid_id:
         return {
             "status": "WAITING_INPUT",
@@ -885,15 +892,21 @@ async def order_tracking_resolver(
 ) -> Dict[str, Any]:
     goal = str(state.get("current_goal") or "").upper().strip()
     working = state.get("working_memory") or {}
-    mapping_kind = str(working.get("available_mapping_kind") or "").strip()
+    payload = state.get("transaction_payload") or {}
 
     # --- Machine à états : désignation du gagnant (prioritaire) ---
-    # 1. On attend la confirmation oui/non d'un gagnant déjà choisi.
-    if mapping_kind == "confirm_winner" or working.get("pending_winner_bid"):
+    # NB : memory_update type déjà la sélection (kind="bid"→payload.bid_id,
+    # kind="buyer_auction_list"→payload.auction_id) et retire selection_index.
+    #
+    # 1. Confirmation oui/non d'un gagnant déjà choisi.
+    if working.get("pending_winner_bid"):
         return await finalize_winner(state, mc_runtime)
-    # 2. Un menu d'offres est affiché et l'acheteur sélectionne une offre.
-    if mapping_kind == "auction_bids" and _selection_index(state) is not None:
+    # 2. Une offre vient d'être choisie sur une enchère de l'acheteur → récap.
+    if goal in AUCTION_TRACKING_GOALS and payload.get("bid_id") and working.get("winner_auction_id"):
         return await confirm_winner_selection(state, mc_runtime)
+    # 3. Une enchère vient d'être choisie dans la liste → afficher ses offres.
+    if goal in AUCTION_TRACKING_GOALS and payload.get("auction_id") and not payload.get("bid_id"):
+        return await check_auction_status(state, mc_runtime)
 
     if goal == "BUYER_CHECK_ORDER_STATUS":
         return await check_order_status(state, mc_runtime)

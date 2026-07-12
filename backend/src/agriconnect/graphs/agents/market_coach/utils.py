@@ -12,7 +12,7 @@ import uuid
 from contextlib import nullcontext
 from typing import Any, Awaitable, Callable, Dict, Optional
 
-from agriconnect.core.get_llm import get_llm
+from agriconnect.core.llm import get_llm
 from agriconnect.core.settings import settings
 from agriconnect.graphs.agents.market_coach.security import SecurityService
 from agriconnect.graphs.agents.market_coach.interpreter.intent import (

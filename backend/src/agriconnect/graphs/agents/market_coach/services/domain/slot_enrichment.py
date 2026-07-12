@@ -12,7 +12,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
-from agriconnect.core.logging import get_logger
+from agriconnect.core.logger import get_logger
 from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
     parse_quantity_unit_from_text as _parse_qty_unit,
     extract_unit_only_from_text as _extract_unit_only,

@@ -10,7 +10,7 @@ slot_enrichment.  This node only:
 """
 from typing import Any, Dict, List
 
-from agriconnect.core.logging import get_logger
+from agriconnect.core.logger import get_logger
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     _AUTO_RESOLVABLE_FIELDS,

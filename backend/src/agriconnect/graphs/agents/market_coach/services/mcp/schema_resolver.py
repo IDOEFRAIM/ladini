@@ -13,7 +13,7 @@ import re
 import unicodedata
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from agriconnect.core.logging import get_logger
+from agriconnect.core.logger import get_logger
 
 logger = get_logger("AgriConnect.Market.SchemaResolver")
 
