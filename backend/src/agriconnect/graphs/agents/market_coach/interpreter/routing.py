@@ -378,6 +378,39 @@ def _interpret_fast_path(state: Dict[str, Any], text: str) -> Optional[Dict[str,
             },
         }
 
+    # Fast-path producteur : découverte des appels d'offres + suivi des offres.
+    # On n'intervient PAS pendant un slot-filling actif (prix/quantité/sélection/
+    # confirmation) pour ne pas casser le dépôt d'une offre en cours.
+    if role_up == "PRODUCER" and expected not in {"PRICE", "QUANTITY", "SELECTION", "CONFIRMATION"}:
+        _norm = _strip_accents(clean)
+        _my_bid_tokens = (
+            "mes offres", "mes propositions", "mes bids", "mes enchere", "mes encheres",
+            "suivre mes offres", "statut de mes offres", "etat de mes offres",
+            "mes propositions de prix",
+        )
+        _browse_tokens = (
+            "enchere", "encheres", "appel d'offre", "appel doffre", "appels d'offre",
+            "appels doffre", "appel d offre", "encherir", "participer",
+            "voir les demandes", "demandes du marche", "voir les enchere",
+            "voir enchere", "les enchere", "appels d offre",
+        )
+        if any(tok in _norm for tok in _my_bid_tokens):
+            return {
+                "interpreted_event": "NEW_TASK",
+                "detected_intent": "MARKET_GET_MY_PROPOSALS",
+                "interpreter_confidence": 0.96,
+                "extracted_entities": {},
+                "raw_analysis": {"path": "fast_path_producer_my_bids"},
+            }
+        if any(tok in _norm for tok in _browse_tokens):
+            return {
+                "interpreted_event": "NEW_TASK",
+                "detected_intent": "MARKET_GET_REQUESTS",
+                "interpreter_confidence": 0.95,
+                "extracted_entities": {},
+                "raw_analysis": {"path": "fast_path_producer_browse_auctions"},
+            }
+
     # Fast-path 0bis : annulation explicite sur menus / confirmations
     cancel_tokens = {"annuler", "annule", "annulation", "stop", "cancel", "quitter", "arrete", "arrête"}
     if expected in {"SELECTION", "CONFIRMATION"} and clean in cancel_tokens:

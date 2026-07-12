@@ -550,13 +550,15 @@ async def producer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRun
             return farm_resolution
         payload = farm_resolution.get("transaction_payload") or payload
 
-    # 1. Découverte de marchés : producteur cherche un appel d'offres pour bidder
-    if goal in {"SALES_PLACE_BID", "MARKET_GET_REQUESTS"} and not payload.get("auction_id"):
-        return await _resolve_auction(mc_runtime, str(phone), payload)
-
-    # 2. Consultation des propres propositions du producteur
-    if goal == "MARKET_GET_MY_PROPOSALS":
-        return await _resolve_my_bids(mc_runtime, str(phone), payload)
+    # 1-2. Cycle enchères producteur (découverte par catégorie → bid → suivi).
+    #      Délégué à la machine à états dédiée (flows/producer/auctions.py).
+    if goal in {"SALES_PLACE_BID", "MARKET_GET_REQUESTS", "MARKET_GET_MY_PROPOSALS"}:
+        from agriconnect.graphs.agents.market_coach.flows.producer.auctions import (
+            producer_auction_resolver,
+        )
+        state_for_auction = dict(state)
+        state_for_auction["transaction_payload"] = payload
+        return await producer_auction_resolver(state_for_auction, mc_runtime)
 
     # 3. Validation finale du contrat (cas où le producteur doit désigner un bid précis)
     if goal == "SALES_ACCEPT_CONTRACT" and not payload.get("bid_id"):

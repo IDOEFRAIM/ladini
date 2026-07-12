@@ -48,6 +48,10 @@ _PRODUCER_TOOL_EXTRAS: Set[str] = {
     "get_producer_orders",
     "get_auctions",
     "get_auctions_bids",
+    # Cycle enchères producteur : découverte par catégorie + suivi des offres.
+    "get_producer_auctions",
+    "get_my_active_bids",
+    "place_bid",
 }
 
 _EXTRA_ROLE_TOOLS = {

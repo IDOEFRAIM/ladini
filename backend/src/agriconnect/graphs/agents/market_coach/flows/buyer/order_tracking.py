@@ -532,6 +532,11 @@ async def list_buyer_auctions(
     lines.append(render_selection_prompt(noun="enchère"))
     menu_text = "\n".join(lines)
 
+    wm = dict(state.get("working_memory") or {})
+    wm["available_mapping_kind"] = "buyer_auction_list"
+    wm.pop("winner_auction_id", None)
+    wm.pop("pending_winner_bid", None)
+
     return {
         "status": "WAITING_INPUT",
         "expected_input": "SELECTION",
@@ -539,6 +544,7 @@ async def list_buyer_auctions(
         "final_response": menu_text,
         "available_mapping": mapping,
         "expected_candidates": [f"Enchère #{oid[:8]}" for oid in mapping.values() if oid],
+        "working_memory": wm,
         "ag_ui_component": None,
         "pending_menu": MenuRequest(
             title="Vos appels d'offres",
@@ -618,7 +624,14 @@ async def check_auction_status(
             options.append(MenuOption(index=str(i), label=label, value=bid_id))
 
         if status_raw == "OPEN":
-            lines.append("\n_Répondez avec le numéro pour accepter une offre, ou *négocier* pour contre-proposer._")
+            lines.append("\n_Répondez avec le *numéro* de l'offre pour désigner le gagnant._")
+
+            wm = dict(state.get("working_memory") or {})
+            wm["available_mapping_kind"] = "auction_bids"
+            wm["winner_auction_id"] = str(auction_id)
+            payload_out = dict(state.get("transaction_payload") or {})
+            payload_out["auction_id"] = str(auction_id)
+            payload_out.pop("selection_index", None)
 
             return {
                 "status": "WAITING_INPUT",
@@ -626,6 +639,9 @@ async def check_auction_status(
                 "response_strategy": "SELECTION_MENU",
                 "final_response": "\n".join(lines),
                 "available_mapping": mapping,
+                "current_goal": "BUYER_CHECK_AUCTION_STATUS",
+                "transaction_payload": payload_out,
+                "working_memory": wm,
                 "ag_ui_component": None,
                 "pending_menu": MenuRequest(
                     title=f"Offres — {product}",
@@ -641,6 +657,169 @@ async def check_auction_status(
         "status": "COMPLETED",
         "response_strategy": "SUCCESS",
         "final_response": "\n".join(lines),
+        "ag_ui_component": None,
+    }
+
+
+# =====================================================================
+# 5b. WINNER SELECTION — désigner le gagnant d'une enchère
+# =====================================================================
+
+_YES_TOKENS = frozenset({
+    "oui", "ok", "okay", "daccord", "d'accord", "c'est bon", "cest bon",
+    "confirme", "confirmer", "je confirme", "valide", "valider", "go", "vasy",
+    "parfait", "yes",
+})
+_NO_TOKENS = frozenset({
+    "non", "annuler", "annule", "stop", "cancel", "quitter", "pas maintenant", "retour",
+})
+
+
+def _selection_index(state: Dict[str, Any]) -> Optional[int]:
+    payload = state.get("transaction_payload") or {}
+    raw = payload.get("selection_index")
+    if raw is None:
+        raw = (state.get("extracted_entities") or {}).get("selection_index")
+    if raw is None:
+        txt = str(state.get("normalized_text") or "").strip()
+        if txt.isdigit():
+            raw = txt
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def confirm_winner_selection(
+    state: Dict[str, Any],
+    mc_runtime: MarketRuntime,
+) -> Dict[str, Any]:
+    """L'acheteur a choisi une offre : afficher un récap + demander confirmation."""
+    working = state.get("working_memory") or {}
+    auction_id = working.get("winner_auction_id") or (state.get("transaction_payload") or {}).get("auction_id")
+    mapping = state.get("available_mapping") or {}
+    sel = _selection_index(state)
+
+    bid_id = mapping.get(str(sel)) if sel is not None else None
+    if not bid_id:
+        return {
+            "status": "WAITING_INPUT",
+            "expected_input": "SELECTION",
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": "Indiquez le *numéro* de l'offre à retenir (ex: 1).",
+            "ag_ui_component": None,
+        }
+
+    # Récap : re-fetch des offres pour retrouver producteur + prix de l'offre choisie.
+    producer = "ce producteur"
+    price_txt = ""
+    product = "votre produit"
+    if auction_id:
+        gw = AuctionGateway(mc_runtime)
+        try:
+            detail = await gw.get_auction_bids(auction_id=str(auction_id))
+            product = (detail.get("auction") or {}).get("product") or product
+            for b in detail.get("bids") or []:
+                if str(b.get("bid_id") or b.get("id")) == str(bid_id):
+                    producer = b.get("producer") or b.get("producer_name") or producer
+                    price = b.get("price") or b.get("offered_price")
+                    if price is not None:
+                        price_txt = f" à *{float(price):g} FCFA*"
+                    break
+        except Exception as exc:
+            logger.warning("confirm_winner_selection: refetch failed: %s", exc)
+
+    wm = dict(working)
+    wm["available_mapping_kind"] = "confirm_winner"
+    wm["pending_winner_bid"] = str(bid_id)
+
+    return {
+        "status": "WAITING_INPUT",
+        "expected_input": "CONFIRMATION",
+        "response_strategy": "ASK_MISSING_FIELD",
+        "current_goal": "BUYER_CHECK_AUCTION_STATUS",
+        "final_response": (
+            f"🤝 Vous allez retenir l'offre de *{producer}*{price_txt} pour *{product}*.\n\n"
+            "⚠️ Cette action *clôture l'enchère* et crée la commande.\n"
+            "👉 Répondez *oui* pour confirmer, ou *non* pour annuler."
+        ),
+        "working_memory": wm,
+        "ag_ui_component": None,
+    }
+
+
+async def finalize_winner(
+    state: Dict[str, Any],
+    mc_runtime: MarketRuntime,
+) -> Dict[str, Any]:
+    """Traite la réponse oui/non à la confirmation du gagnant."""
+    working = state.get("working_memory") or {}
+    bid_id = working.get("pending_winner_bid")
+    event = str(state.get("interpreted_event") or "").upper().strip()
+    text = str(state.get("normalized_text") or "").strip().lower()
+
+    def _clear_wm() -> Dict[str, Any]:
+        wm = dict(working)
+        for k in ("available_mapping_kind", "pending_winner_bid", "winner_auction_id"):
+            wm.pop(k, None)
+        return wm
+
+    is_no = event == "REJECT" or text in _NO_TOKENS
+    is_yes = event == "CONFIRM" or text in _YES_TOKENS
+
+    if not bid_id or is_no:
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "SUCCESS",
+            "final_response": (
+                "D'accord, aucune offre n'a été retenue. "
+                "Tapez *mes enchères* pour revoir vos appels d'offres."
+            ),
+            "working_memory": _clear_wm(),
+            "available_mapping": {},
+            "ag_ui_component": None,
+        }
+
+    if not is_yes:
+        # Réponse ambiguë : on redemande explicitement.
+        return {
+            "status": "WAITING_INPUT",
+            "expected_input": "CONFIRMATION",
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": "Répondez *oui* pour confirmer le gagnant, ou *non* pour annuler.",
+            "ag_ui_component": None,
+        }
+
+    gw = AuctionGateway(mc_runtime)
+    try:
+        result = await gw.select_winning_bid(bid_id=str(bid_id))
+    except Exception as exc:
+        logger.exception("finalize_winner: select_winning_bid failed: %s", exc)
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "ERROR",
+            "final_response": "Impossible de valider le gagnant pour le moment. Réessayez dans un instant.",
+            "working_memory": _clear_wm(),
+            "ag_ui_component": None,
+        }
+
+    if not is_success_response(result):
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "ERROR",
+            "final_response": result.get("message") or "Cette offre n'a pas pu être retenue.",
+            "working_memory": _clear_wm(),
+            "ag_ui_component": None,
+        }
+
+    summary = result.get("summary_buyer") or "🤝 Offre retenue ! La commande a été créée et le producteur informé."
+    return {
+        "status": "COMPLETED",
+        "response_strategy": "SUCCESS",
+        "final_response": summary,
+        "working_memory": _clear_wm(),
+        "available_mapping": {},
+        "transaction_payload": {"__reset__": True},
         "ag_ui_component": None,
     }
 
@@ -705,6 +884,16 @@ async def order_tracking_resolver(
     mc_runtime: MarketRuntime,
 ) -> Dict[str, Any]:
     goal = str(state.get("current_goal") or "").upper().strip()
+    working = state.get("working_memory") or {}
+    mapping_kind = str(working.get("available_mapping_kind") or "").strip()
+
+    # --- Machine à états : désignation du gagnant (prioritaire) ---
+    # 1. On attend la confirmation oui/non d'un gagnant déjà choisi.
+    if mapping_kind == "confirm_winner" or working.get("pending_winner_bid"):
+        return await finalize_winner(state, mc_runtime)
+    # 2. Un menu d'offres est affiché et l'acheteur sélectionne une offre.
+    if mapping_kind == "auction_bids" and _selection_index(state) is not None:
+        return await confirm_winner_selection(state, mc_runtime)
 
     if goal == "BUYER_CHECK_ORDER_STATUS":
         return await check_order_status(state, mc_runtime)

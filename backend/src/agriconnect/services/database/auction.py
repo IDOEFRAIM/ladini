@@ -4,12 +4,12 @@ import logging
 import unicodedata
 import uuid
 from rapidfuzz import fuzz, process
-from sqlalchemy import select, and_, func, update
+from sqlalchemy import select, and_, or_, func, update
 from sqlalchemy.orm import aliased
 from .common import normalize_phone
 
 # Importation stricte des modèles requis pour le domaine des enchères
-from agriconnect.domain.models import Auction, Bid, SubCategory, Zone, BuyerProfile, User,Producer, Order
+from agriconnect.domain.models import Auction, Bid, SubCategory, Zone, BuyerProfile, User,Producer, Order, Product, Category
 from .base import BaseMixin
 
 logger = logging.getLogger("agriconnect.services.database.auction")
@@ -345,7 +345,12 @@ class AuctionMixin(BaseMixin):
                 if view_mode == "MY_OWN":
                     stmt = stmt.where(User.phone == clean_phone)
                 else:
-                    stmt = stmt.where(User.phone != clean_phone)
+                    # MARKETPLACE : exclure ses propres enchères SANS éliminer
+                    # celles dont l'acheteur.user est NULL (piège SQL : NULL != x
+                    # vaut NULL, donc la ligne serait injustement filtrée).
+                    stmt = stmt.where(
+                        or_(User.phone.is_(None), User.phone != clean_phone)
+                    )
 
             stmt = stmt.where(Auction.status.ilike(status))
 
@@ -412,21 +417,48 @@ class AuctionMixin(BaseMixin):
         if not current_session:
             return {"status": "error", "message": "Session de base de données indisponible."}
         try:
+            a_uuid = uuid.UUID(auction_id)
+
+            # En-tête : fiche de l'enchère (produit, statut, quantité) — permet à
+            # l'acheteur de contextualiser les offres reçues côté suivi.
+            auction_row = (
+                await current_session.execute(
+                    select(Auction, SubCategory.name.label("product_name"))
+                    .join(SubCategory, Auction.sub_category_id == SubCategory.id)
+                    .where(Auction.id == a_uuid)
+                )
+            ).fetchone()
+            auction_info: Dict[str, Any] = {}
+            if auction_row:
+                auction_obj, product_name = auction_row
+                auction_info = {
+                    "auction_id": str(auction_obj.id),
+                    "product": product_name,
+                    "product_name": product_name,
+                    "status": auction_obj.status,
+                    "quantity": float(auction_obj.quantity) if auction_obj.quantity is not None else None,
+                    "unit": auction_obj.unit,
+                    "max_price": float(auction_obj.max_price_per_unit) if auction_obj.max_price_per_unit is not None else None,
+                }
+
             stmt = (
                 select(Bid, User.name)
                 .join(Producer, Bid.producer_id == Producer.id)
                 .join(User, Producer.user_id == User.id)
-                .where(Bid.auction_id == uuid.UUID(auction_id))
-                .order_by(Bid.offered_price.asc()) 
+                .where(Bid.auction_id == a_uuid)
+                .order_by(Bid.offered_price.asc())
             )
             results = await current_session.execute(stmt)
-            
+
             bids_list = []
             for bid, prod_name in results:
                 bids_list.append({
                     "bid_id": str(bid.id),
                     "producer": prod_name or "Producteur Anonyme",
-                    "price": bid.offered_price,
+                    "producer_name": prod_name or "Producteur Anonyme",
+                    "price": float(bid.offered_price),
+                    "offered_price": float(bid.offered_price),
+                    "status": str(bid.status or "PENDING").upper(),
                     "message": bid.message,
                     "delivery": "Non inclus"
                 })
@@ -434,6 +466,8 @@ class AuctionMixin(BaseMixin):
             return {
                 "status": "success",
                 "count": len(bids_list),
+                "auction": auction_info,
+                "auction_status": auction_info.get("status"),
                 "bids": bids_list
             }
         except Exception as e:
@@ -539,6 +573,29 @@ class AuctionMixin(BaseMixin):
             return {"status": "error", "message": "Impossible de charger vos offres pour le moment."}
 
 
+    @staticmethod
+    def _derive_bid_status(bid_status: str, is_winner: bool, auction_status: str) -> tuple[str, str]:
+        """Statut effectif d'une offre, dérivé du bid ET de l'état de l'enchère.
+
+        Retourne ``(code, libellé_affichable)``. On ne se fie pas au seul
+        ``bid.status`` : une offre non gagnante sur une enchère clôturée est
+        *perdue*, même si le bid est resté PENDING (résilience aux états partiels).
+        """
+        b = str(bid_status or "").upper().strip()
+        a = str(auction_status or "").upper().strip()
+        if is_winner or b in {"WINNING", "WON", "ACCEPTED"}:
+            return "WON", "🤝 Acceptée — Félicitations !"
+        if b == "WITHDRAWN":
+            return "WITHDRAWN", "↩️ Retirée"
+        if b == "LOST":
+            return "LOST", "❌ Non retenue"
+        if a in {"CLOSED", "WON", "COMPLETED"}:
+            # Enchère conclue avec un autre producteur.
+            return "LOST", "❌ Non retenue"
+        if a in {"EXPIRED", "CANCELLED"}:
+            return a, "⌛ Enchère expirée" if a == "EXPIRED" else "❌ Enchère annulée"
+        return "PENDING", "⏳ En attente de décision"
+
     async def get_my_active_bids(self, phone: str) -> Dict[str, Any]:
         """
         Permet à un producteur de voir l'état et l'historique des propositions (bids) qu'il a émises.
@@ -548,13 +605,14 @@ class AuctionMixin(BaseMixin):
             return {"status": "error", "message": "Erreur interne : session de base de données indisponible."}
         try:
             clean_phone = normalize_phone(phone)
-            
+
             stmt = (
                 select(
                     Bid,
                     SubCategory.name.label("product_name"),
                     Auction.quantity,
-                    Auction.unit
+                    Auction.unit,
+                    Auction.status.label("auction_status"),
                 )
                 .join(Producer, Bid.producer_id == Producer.id)
                 .join(User, Producer.user_id == User.id)
@@ -563,40 +621,210 @@ class AuctionMixin(BaseMixin):
                 .where(User.phone == clean_phone)
                 .order_by(Bid.created_at.desc())
             )
-            
+
             results = await current_session.execute(stmt)
             rows = results.all()
-            
+
             if not rows:
-                return {"status": "success", "count": 0, "message": "Vous n'avez fait aucune proposition de prix pour le moment."}
-                
+                return {
+                    "status": "success",
+                    "count": 0,
+                    "data": [],
+                    "message": "Vous n'avez fait aucune proposition de prix pour le moment.",
+                }
+
             menu_lines = ["📋 *Le statut de vos propositions :*"]
-            status_map = {
-                "PENDING": "⏳ En attente",
-                "WINNING": "🤝 Acceptée (Félicitations !)",
-                "LOST": "❌ Non retenue"
-            }
-            
-            for i, (bid, product_name, qty, unit) in enumerate(rows, start=1):
-                friendly_status = status_map.get(str(bid.status).upper(), bid.status)
-                
+            data: List[Dict[str, Any]] = []
+            mapping: Dict[str, str] = {}
+
+            for i, (bid, product_name, qty, unit, auction_status) in enumerate(rows, start=1):
+                status_code, friendly_status = self._derive_bid_status(
+                    bid.status, bool(getattr(bid, "is_winner", False)), auction_status
+                )
+                bid_id = str(bid.id)
+                price_txt = f"{float(bid.offered_price):g}"
+                data.append({
+                    "bid_id": bid_id,
+                    "auction_id": str(bid.auction_id),
+                    "product": product_name,
+                    "product_name": product_name,
+                    "quantity": float(qty) if qty is not None else None,
+                    "unit": unit,
+                    "offered_price": float(bid.offered_price),
+                    "price": float(bid.offered_price),
+                    "status": status_code,
+                    "status_label": friendly_status,
+                })
+                mapping[str(i)] = bid_id
+
                 line = (
                     f"\n*{i}. Demande de {product_name}* ({qty} {unit})\n"
-                    f"💰 Votre prix : *{bid.offered_price} CFA*\n"
+                    f"💰 Votre prix : *{price_txt} CFA*\n"
                     f"📊 Statut : {friendly_status}"
                 )
                 menu_lines.append(line)
-                
+
             return {
                 "status": "success",
                 "count": len(rows),
-                "formatted_menu": "\n".join(menu_lines)
+                "formatted_menu": "\n".join(menu_lines),
+                "mapping": mapping,
+                "data": data,
             }
-            
+
         except Exception as e:
             logger.error(f"❌ Erreur get_my_active_bids: {e}", exc_info=True)
             return {"status": "error", "message": "Impossible de récupérer vos propositions."}
 
+
+    async def get_producer_auctions(
+        self,
+        phone: str,
+        scope: str = "MATCHABLE",
+        product_name: Optional[str] = None,
+        zone_name: Optional[str] = None,
+        status: str = "OPEN",
+    ) -> Dict[str, Any]:
+        """Appels d'offres ouverts, vus côté PRODUCTEUR, groupés par catégorie.
+
+        scope :
+          - ``MATCHABLE`` (défaut) : uniquement les enchères dont la sous-catégorie
+            correspond à ce que le producteur propose déjà au catalogue
+            (``Product.sub_category_id``). S'il n'a aucun produit, on bascule
+            automatiquement sur ``ALL`` (``scope_effective`` renseigne le repli).
+          - ``ALL`` : toutes les enchères ouvertes du marché.
+        """
+        current_session = self.session
+        if not current_session:
+            return {"status": "error", "message": "Session de base de données indisponible."}
+        try:
+            clean_phone = normalize_phone(phone) if phone else None
+            scope_up = str(scope or "MATCHABLE").upper().strip()
+
+            # Sous-catégories que le producteur peut fournir (via son catalogue).
+            supplied_ids: List[Any] = []
+            if clean_phone:
+                supplied_rows = (
+                    await current_session.execute(
+                        select(Product.sub_category_id)
+                        .join(Producer, Product.producer_id == Producer.id)
+                        .join(User, Producer.user_id == User.id)
+                        .where(
+                            User.phone == clean_phone,
+                            Product.sub_category_id.isnot(None),
+                        )
+                        .distinct()
+                    )
+                ).scalars().all()
+                supplied_ids = [sid for sid in supplied_rows if sid is not None]
+
+            has_categories = bool(supplied_ids)
+            scope_effective = scope_up
+            if scope_up == "MATCHABLE" and not has_categories:
+                scope_effective = "ALL"  # repli : sans catalogue, on montre tout.
+
+            stmt = (
+                select(
+                    Auction,
+                    SubCategory.name.label("product_name"),
+                    Category.name.label("category_name"),
+                    Zone.name.label("zone_name"),
+                    BuyerProfile.establishment_name.label("buyer_name"),
+                )
+                .join(SubCategory, Auction.sub_category_id == SubCategory.id)
+                .join(Category, SubCategory.category_id == Category.id)
+                .outerjoin(Zone, Auction.target_zone_id == Zone.id)
+                .outerjoin(BuyerProfile, Auction.buyer_id == BuyerProfile.id)
+                .where(Auction.status.ilike(status))
+                .where(Auction.deadline > datetime.now())
+            )
+
+            if scope_effective == "MATCHABLE" and supplied_ids:
+                stmt = stmt.where(Auction.sub_category_id.in_(supplied_ids))
+            if product_name:
+                stmt = stmt.where(SubCategory.name.ilike(f"%{product_name}%"))
+            if zone_name:
+                stmt = stmt.where(Zone.name.ilike(f"%{zone_name}%"))
+
+            stmt = stmt.order_by(Category.name.asc(), Auction.created_at.desc())
+
+            rows = (await current_session.execute(stmt)).all()
+
+            if not rows:
+                if scope_effective == "MATCHABLE":
+                    msg = (
+                        "Aucun appel d'offres ouvert ne correspond à vos produits "
+                        "pour le moment. Tapez *toutes les enchères* pour voir tout le marché."
+                    )
+                else:
+                    msg = "Aucun appel d'offres ouvert sur le marché actuellement."
+                return {
+                    "status": "success",
+                    "count": 0,
+                    "data": [],
+                    "scope": scope_effective,
+                    "has_categories": has_categories,
+                    "message": msg,
+                }
+
+            data: List[Dict[str, Any]] = []
+            mapping: Dict[str, str] = {}
+            header = (
+                "🎯 *Appels d'offres pour vos produits :*"
+                if scope_effective == "MATCHABLE"
+                else "🛒 *Tous les appels d'offres ouverts :*"
+            )
+            menu_lines = [header]
+
+            current_category: Optional[str] = None
+            idx = 0
+            for auction, p_name, cat_name, z_name, b_name in rows:
+                if cat_name != current_category:
+                    current_category = cat_name
+                    menu_lines.append(f"\n📂 *{cat_name}*")
+
+                idx += 1
+                diff = auction.deadline - datetime.now()
+                time_str = f"{diff.days}j {diff.seconds // 3600}h" if diff.days > 0 else f"{diff.seconds // 3600}h"
+                qty_txt = f"{float(auction.quantity):g}"
+                price_txt = f"{float(auction.max_price_per_unit):g}"
+
+                data.append({
+                    "auction_id": str(auction.id),
+                    "product": p_name,
+                    "product_name": p_name,
+                    "category": cat_name,
+                    "quantity": float(auction.quantity),
+                    "unit": auction.unit,
+                    "max_price": float(auction.max_price_per_unit),
+                    "zone": z_name,
+                    "buyer_name": b_name,
+                })
+                mapping[str(idx)] = str(auction.id)
+
+                menu_lines.append(
+                    f"\n*{idx}. {p_name}* — {qty_txt} {auction.unit}\n"
+                    f"💰 Prix max : *{price_txt} FCFA/{auction.unit}*\n"
+                    f"📍 {z_name or 'Zone non spécifiée'} · ⏳ {time_str}\n"
+                    f"👤 {b_name or 'Acheteur AgriConnect'}"
+                )
+
+            menu_lines.append(
+                "\n_Répondez avec le *numéro* de l'enchère pour proposer votre prix._"
+            )
+
+            return {
+                "status": "success",
+                "count": len(data),
+                "formatted_menu": "\n".join(menu_lines),
+                "mapping": mapping,
+                "data": data,
+                "scope": scope_effective,
+                "has_categories": has_categories,
+            }
+        except Exception as e:
+            logger.error(f"❌ Erreur get_producer_auctions: {e}", exc_info=True)
+            return {"status": "error", "message": "Impossible de charger les appels d'offres."}
 
     # ─── SECTION 5 : CLÔTURE ET CONVERSION EN COMMANDE ───────────────────
 
@@ -635,7 +863,20 @@ class AuctionMixin(BaseMixin):
             bid.status = "WINNING"
             auction.status = "CLOSED"
             auction.winner_bid_id = bid.id
-            
+
+            # 1b. Toutes les autres offres de cette enchère sont désormais perdues.
+            #     Sans cela, un producteur non retenu resterait « En attente » à vie.
+            now_loss = datetime.now()
+            await current_session.execute(
+                update(Bid)
+                .where(
+                    Bid.auction_id == auction.id,
+                    Bid.id != bid.id,
+                    Bid.status.in_(["PENDING", "WINNING"]),
+                )
+                .values(status="LOST", is_winner=False, updated_at=now_loss)
+            )
+
             # 2. Calcul financier & Instanciation de l'accord commercial officiel (Order)
             total = float(bid.offered_price * auction.quantity)
             

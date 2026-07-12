@@ -73,7 +73,7 @@ class AgriDatabaseService(
         "search_products", "get_orders", "get_producer_stocks",
 
         # Auctions / bids (reads)
-        "get_auction_bids",
+        "get_auction_bids", "get_producer_auctions", "get_my_active_bids",
 
         # Buyer transactional reads
         "validate_stock_availability_atomic", "get_transaction_summary",

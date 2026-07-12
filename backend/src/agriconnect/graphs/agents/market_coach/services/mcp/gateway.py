@@ -96,6 +96,35 @@ class AuctionGateway(_BaseGateway):
 
     search_open_auctions = search_auctions
 
+    async def get_producer_auctions(
+        self,
+        phone: str,
+        scope: str = "MATCHABLE",
+        product_name: str | None = None,
+        zone_name: str | None = None,
+    ) -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {"phone": phone.strip(), "scope": scope}
+        if product_name:
+            kwargs["product_name"] = product_name
+        if zone_name:
+            kwargs["zone_name"] = zone_name
+        return await self._call("get_producer_auctions", **kwargs)
+
+    async def place_bid(
+        self,
+        auction_id: str,
+        phone: str,
+        offered_price: Any,
+        message: str | None = None,
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "place_bid",
+            auction_id=auction_id,
+            phone=phone.strip(),
+            offered_price=offered_price,
+            message=message,
+        )
+
     async def get_my_active_bids(self, phone: str) -> Dict[str, Any]:
         return await self._call("get_my_active_bids", phone=phone.strip())
 

@@ -64,13 +64,13 @@ async def _check_account_gate(mc_runtime: MarketRuntime, phone: str) -> Optional
         return _blocked_patch(
             "🚫 Votre compte a été *banni* de la marketplace suite à des mentions "
             "répétées de produits interdits.\n\n"
-            "Pour toute contestation, contactez le *service client*."
+            "Pour toute contestation, contactez le service client au *+226 01 47 98 00*."
         )
     if status == "BLOCKED":
         return _blocked_patch(
             "🔒 Votre compte est temporairement *bloqué* en raison d'annulations "
             "répétées de commandes.\n\n"
-            "Merci de contacter le *service client* pour le débloquer."
+            "Pour débloquer votre compte, contactez le service client au *+226 01 47 98 00*."
         )
     return None
 
@@ -133,7 +133,7 @@ async def _check_prohibited(
         return _blocked_patch(
             "🚫 Votre compte a été *banni* : les produits interdits (drogues, armes, etc.) "
             "n'ont pas leur place sur AgriConnect.\n\n"
-            "Contactez le *service client* pour toute contestation."
+            "Pour toute contestation, contactez le service client au *+226 01 47 98 00*."
         )
 
     # Avertissement transparent : on indique où en est l'utilisateur (N/3) avant
