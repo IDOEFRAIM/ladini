@@ -553,12 +553,12 @@ INTENT_CONFIG = {
         "label_map": {"stock_id": "identifiant stock"}
     },
     "SALES_GET_CATALOG": {
-        "tool_name": "list_products",
-        "required": ["phone"],
+        "tool_name": "get_stocks",
+        "required": ["phone", "farm_id"],
         "action_type": "READ",
-        "requires_farm": False,
+        "requires_farm": True,
         "label": "Consultation de mon catalogue de produits en vente",
-        "label_map": {"phone": "votre téléphone"}
+        "label_map": {"phone": "votre téléphone", "farm_id": "identifiant exploitation"}
     },
     "MARKET_GET_REQUESTS": {
         "tool_name": "get_auctions",

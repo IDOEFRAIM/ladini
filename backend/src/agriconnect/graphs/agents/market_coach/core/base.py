@@ -98,6 +98,7 @@ MARKET_VALIDATION_CONFIG = MarketValidationConfig(
             "STOCK_GET_SUMMARY", "STOCK_GET_DETAIL", "STOCK_GET_MOVEMENTS",
             "FINANCE_GET_SUMMARY",
             "FARM_GET_MY_LIST",
+            "SALES_GET_CATALOG",
         },
     ),
     intents=_build_intent_entries(),
@@ -106,8 +107,14 @@ MARKET_VALIDATION_CONFIG = MarketValidationConfig(
 
 WRITE_REQUIRES_FARM = MARKET_VALIDATION_CONFIG.farm.write_requires_farm
 READ_OPTIONAL_FARM = MARKET_VALIDATION_CONFIG.farm.read_optional_farm
-FARM_CRITICAL_GOALS = MARKET_VALIDATION_CONFIG.farm.farm_critical_goals
 FARM_ID_REQUIRED_GOALS = MARKET_VALIDATION_CONFIG.farm_id_required_goals
+# ROBUSTESSE : tout intent qui exige `farm_id` (via INTENT_CONFIG.required) est
+# AUTOMATIQUEMENT farm-critical, même s'il a été oublié dans read/write_requires_farm.
+# Sans ça, un tel intent (ex: SALES_GET_CATALOG) échoue en réclamant le farm_id à
+# l'utilisateur (un UUID) au lieu de l'auto-provisionner. Dérivé → zéro dérive future.
+FARM_CRITICAL_GOALS = frozenset(
+    MARKET_VALIDATION_CONFIG.farm.farm_critical_goals | FARM_ID_REQUIRED_GOALS
+)
 
 
 def _derive_goal_sets() -> Tuple[FrozenSet[str], FrozenSet[str]]:

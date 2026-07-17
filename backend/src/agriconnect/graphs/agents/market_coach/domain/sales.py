@@ -115,7 +115,16 @@ class SalesService:
 
     def get_catalog(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
         phone = require_phone(state)
-        return DomainResult(tool_id=ToolId.GET_STOCKS, tool_args={"phone": phone})
+        farm_id = (
+            payload.get("farm_id")
+            or (state.get("transaction_payload") or {}).get("farm_id")
+            or (state.get("stable_entities") or {}).get("farm_id")
+        )
+        if not farm_id:
+            raise ValueError("L'identifiant de la ferme est requis pour consulter le catalogue.")
+
+        args: Dict[str, Any] = {"farm_id": str(farm_id)}
+        return DomainResult(tool_id=ToolId.GET_STOCKS, tool_args=args)
 
     def get_market_requests(self, command: MarketGetRequestsCommand) -> DomainResult:
         args: Dict[str, Any] = {

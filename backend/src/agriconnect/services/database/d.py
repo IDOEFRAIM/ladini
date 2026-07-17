@@ -40,6 +40,20 @@ def _is_connection_lost(exc: Exception) -> bool:
     message = str(exc).lower()
     return "connection was closed" in message or "connection does not exist" in message
 
+
+_ERROR_STATUSES = frozenset({"error", "failed", "rejected"})
+
+
+def _is_error_result(res: Any) -> bool:
+    """True si une méthode de service a renvoyé un dict signalant un échec métier.
+
+    Utilisé par le wrapper transactionnel pour rollback au lieu de commit :
+    une méthode qui a intercepté une erreur DB (IntegrityError, etc.) et renvoie
+    un dict d'erreur laisse la transaction dans un état avorté — committer
+    lèverait et masquerait le vrai message.
+    """
+    return isinstance(res, dict) and str(res.get("status") or "").lower() in _ERROR_STATUSES
+
 class AgriDatabaseService(
     AuthMixin, UtilsMixin,
     MarketplaceMixin, PublicProductMixin, BuyerMixin, BuyerVerificationMixin,
@@ -150,7 +164,18 @@ class AgriDatabaseService(
                             kwargs["session"] = new_session
                         res = await attr(*args, **kwargs)
                         if not is_read_only:
-                            await new_session.commit()
+                            # FIX SYSTÉMIQUE : si la méthode a intercepté une erreur DB
+                            # en interne et renvoyé un dict d'erreur (ex: IntegrityError
+                            # sur contrainte unique attrapée par un try/except), la
+                            # transaction est EMPOISONNÉE — un commit() lèverait alors
+                            # (PendingRollbackError) et masquerait le vrai message par un
+                            # « erreur technique » générique. On rollback à la place et on
+                            # renvoie proprement le dict d'erreur d'origine. Protège tous
+                            # les mixins de cette classe de bug.
+                            if _is_error_result(res):
+                                await _safe_rollback(new_session)
+                            else:
+                                await new_session.commit()
                         return res
                     except asyncio.CancelledError:
                         # Timeout/annulation (ex: asyncio.wait_for côté MCP) : rollback

@@ -52,6 +52,7 @@ _PRODUCER_TOOL_EXTRAS: Set[str] = {
     "get_producer_auctions",
     "get_my_active_bids",
     "place_bid",
+    "update_bid_price",
 }
 
 _EXTRA_ROLE_TOOLS = {

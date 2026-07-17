@@ -339,10 +339,12 @@ async def check_order_status(
     if not order_id and not phone:
         return _error("Je n'ai pas pu identifier votre commande. Quel est votre numéro de commande ?")
 
+    # buyer_phone toujours transmis (même quand order_id est connu) : requis
+    # pour l'identité de contexte MCP, sinon PermissionDenied silencieux.
     kwargs: Dict[str, Any] = {}
     if order_id:
         kwargs["order_id"] = str(order_id)
-    else:
+    if phone:
         kwargs["buyer_phone"] = phone
 
     result = await _safe_gw_call(mc_runtime, "get_transaction_summary", **kwargs)
@@ -589,7 +591,7 @@ async def check_auction_status(
         }
 
     gw = AuctionGateway(mc_runtime)
-    bids_result = await gw.get_auction_bids(auction_id=str(auction_id))
+    bids_result = await gw.get_auction_bids(auction_id=str(auction_id), phone=str(state.get("user_phone") or ""))
 
     bids = bids_result.get("bids") or bids_result.get("data") or []
     auction_info = bids_result.get("auction") or {}
@@ -724,7 +726,7 @@ async def confirm_winner_selection(
     if auction_id:
         gw = AuctionGateway(mc_runtime)
         try:
-            detail = await gw.get_auction_bids(auction_id=str(auction_id))
+            detail = await gw.get_auction_bids(auction_id=str(auction_id), phone=str(state.get("user_phone") or ""))
             product = (detail.get("auction") or {}).get("product") or product
             for b in detail.get("bids") or []:
                 if str(b.get("bid_id") or b.get("id")) == str(bid_id):
@@ -799,7 +801,7 @@ async def finalize_winner(
 
     gw = AuctionGateway(mc_runtime)
     try:
-        result = await gw.select_winning_bid(bid_id=str(bid_id))
+        result = await gw.select_winning_bid(bid_id=str(bid_id), phone=str(state.get("user_phone") or ""))
     except Exception as exc:
         logger.exception("finalize_winner: select_winning_bid failed: %s", exc)
         return {

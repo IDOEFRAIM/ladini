@@ -136,12 +136,27 @@ class AfterValidatorPolicy:
 
         return cls(rules=rules, fallback_router=make_route_after_validator("BUYER"))
 
+    # Intents producteur ENTIÈREMENT pris en charge par producer_auction_resolver
+    # (parcours d'enchères, tunnel de bid, suivi/modification d'offres). Ils gèrent
+    # eux-mêmes leur propre confirmation via working_memory.bid_phase et ne doivent
+    # JAMAIS être routés vers confirmation_gate/mcp_tool_executor : sinon un
+    # `price`/`auction_id` résiduel fait croire au pipeline natif à une transaction
+    # complète → récap générique parasite + « erreur technique » à la confirmation.
+    PRODUCER_RESOLVER_GOALS = frozenset({
+        "MARKET_GET_REQUESTS",
+        "MARKET_GET_MY_PROPOSALS",
+        "SALES_PLACE_BID",
+    })
+
     @classmethod
     def for_producer(cls) -> "AfterValidatorPolicy":
         from agriconnect.graphs.agents.market_coach.interpreter.routing import (
             make_route_after_validator,
         )
-        return cls(rules=[], fallback_router=make_route_after_validator("PRODUCER"))
+        rules = [
+            RouteRule(goals=cls.PRODUCER_RESOLVER_GOALS, target="to_resolver"),
+        ]
+        return cls(rules=rules, fallback_router=make_route_after_validator("PRODUCER"))
 
 
 # =====================================================================

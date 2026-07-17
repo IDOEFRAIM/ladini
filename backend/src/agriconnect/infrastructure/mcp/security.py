@@ -68,6 +68,7 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "get_or_create_farm": PermissionScope.DB_DATA_WRITE,
     "add_stock": PermissionScope.DB_DATA_WRITE,
     "remove_stock": PermissionScope.DB_DATA_WRITE,
+    "record_sale": PermissionScope.DB_DATA_WRITE,
     "add_expense": PermissionScope.DB_DATA_WRITE,
     "update_order_status": PermissionScope.DB_DATA_WRITE,
     "update_farm": PermissionScope.DB_DATA_WRITE,

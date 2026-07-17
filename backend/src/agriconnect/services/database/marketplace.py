@@ -74,76 +74,27 @@ class MarketplaceMixin(BaseMixin):
     # CATEGORY RESOLUTION
     # =======================================================================
 
-    async def guess_category(self, product_name: str) -> str:
-        """Guess the product category from its name using fallback mapping."""
-        if not product_name:
-            return "AUTRES"
-
-        name_clean = product_name.strip().upper()
-
-        MAPPING = {
-            "CÉRÉALES": ["MAÏS", "RIZ", "MIL", "SORGHO", "FONIO", "BLÉ"],
-            "LÉGUMES": ["TOMATE", "OIGNON", "PIMENT", "CHOU", "GOMBO", "CAROTTE", "HARICOT"],
-            "FRUITS": ["MANGUE", "ORANGE", "CITRON", "BANANE", "PAPAYE", "ANANAS"],
-            "ANIMAUX": ["POULET", "BOEUF", "MOUTON", "CHÈVRE", "OEUF", "PORC"],
-            "TUBERCULES": ["MANIOC", "IGNAME", "PATATE", "POMME DE TERRE"],
-        }
-
-        for category, keywords in MAPPING.items():
-            if any(kw in name_clean for kw in keywords):
-                return category
-
-        return "AUTRES"
+    # NB : `guess_category` vit désormais UNIQUEMENT dans `ProducerMgmtMixin`
+    # (services/database/producer.py) — résolution DYNAMIQUE via la table
+    # Category/SubCategory en base, avec repli sur mots-clés seulement en dernier
+    # recours. Ce mixin en définissait un doublon STATIQUE (mapping figé, jamais
+    # mis à jour) qui gagnait silencieusement via l'ordre du MRO. Voir
+    # [[farm-autoprovision-critical-goals]] pour le mécanisme général du piège.
 
     # =======================================================================
     # GESTION DE L'EXPLOITATION (FARM)
     # =======================================================================
 
-    async def get_or_create_farm(self, producer_id: str, farm_name: str = "Ma ferme", zone_id: str = None) -> Dict[str, Any]:
-        """Récupère la ferme existante d'un producteur ou en crée une nouvelle."""
-        current_session = self.session
-        resolved_producer_id = await self._resolve_producer_id(producer_id)
-        if isinstance(resolved_producer_id, dict):
-            return resolved_producer_id
-
-        stmt = select(Farm).where(Farm.producer_id == resolved_producer_id)
-        result = await current_session.execute(stmt)
-        farm = result.scalar_one_or_none()
-
-        if farm:
-            return farm.to_dict()
-
-        farm_id = _uuid()
-        farm = Farm(id=farm_id, name=farm_name, producer_id=resolved_producer_id, zone_id=zone_id)
-        current_session.add(farm)
-        await current_session.flush()
-
-        logger.info("Ferme créée: %s pour producer_id=%s", farm_name, resolved_producer_id)
-        return farm.to_dict()
-
-    async def update_farm(self, farm_id: str, **kwargs) -> Optional[Dict[str, Any]]:
-        """Met à jour les attributs d'une ferme via son identifiant."""
-        current_session = self.session
-        try:
-            stmt = select(Farm).where(Farm.id == farm_id)
-            result = await current_session.execute(stmt)
-            farm = result.scalar_one_or_none()
-
-            if not farm:
-                logger.warning("Ferme introuvable: %s", farm_id)
-                return None
-
-            for key, value in kwargs.items():
-                if key not in ("id", "producer_id") and hasattr(farm, key):
-                    setattr(farm, key, value)
-
-            await current_session.flush()
-            await current_session.refresh(farm)
-            return farm.to_dict()
-
-        except Exception as e:
-            logger.error("Erreur critique lors de la mise à jour de la ferme (%s) : %s", farm_id, e)
-            raise
+    # NB : `get_or_create_farm` et `update_farm` vivent désormais UNIQUEMENT dans
+    # `ProducerMgmtMixin` (services/database/producer.py). Ce mixin (`MarketplaceMixin`)
+    # en définissait autrefois des doublons — un piège de MRO silencieux : listé
+    # AVANT `ProducerMgmtMixin` dans `AgriDatabaseService` (services/database/d.py),
+    # ce doublon gagnait la résolution d'attribut et masquait la version phone-aware
+    # qui auto-crée le profil Producer manquant. Symptôme observé : `get_or_create_farm`
+    # rejetait "producer_id is a required property" alors que l'appelant envoyait
+    # `phone` — CETTE version (supprimée) n'acceptait pas `phone` du tout. Voir
+    # [[farm-autoprovision-critical-goals]]. Ne pas réintroduire un mixin dupliqué
+    # sans vérifier `AgriDatabaseService.__mro__` pour la méthode concernée.
 
     # =======================================================================
     # GESTION DES STOCKS
@@ -221,11 +172,13 @@ class MarketplaceMixin(BaseMixin):
         else:
             return await self.remove_stock(farm_id=farm_id, item_name=item_name, quantity=abs(quantity_change), reason=reason)
 
-    async def get_stocks(self, farm_id: str) -> Union[List[Dict[str, Any]], Dict[str, str]]:
-        current_session = self.session
-        stmt = select(Stock).where(Stock.farm_id == farm_id).order_by(Stock.item_name)
-        result = await current_session.execute(stmt)
-        return [s.to_dict() for s in result.scalars()]
+    # NB : `get_stocks` vit désormais UNIQUEMENT dans `ProducerMgmtMixin`
+    # (services/database/producer.py) — vue catalogue complète (Product avec
+    # prix/quantité_en_vente, multi-fermes, cycles à venir), résolue par
+    # phone/producer_id. Ce mixin en définissait un doublon TRIVIAL (un simple
+    # dump `Stock` pour UNE ferme, aucune donnée Product) qui gagnait
+    # silencieusement via le MRO — cause du bug « le producteur ne voit pas
+    # son catalogue » (SALES_GET_CATALOG). Voir [[farm-autoprovision-critical-goals]].
 
     async def get_stock_movements(self, stock_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         current_session = self.session
@@ -237,50 +190,104 @@ class MarketplaceMixin(BaseMixin):
     # PRODUCTS
     # =======================================================================
 
-    async def create_product(self, producer_id: str, name: str, price: float, quantity_for_sale: float, unit: str = "KG", category_label: str = None, sub_category_id: str = None, description: str = None, local_names: dict = None) -> Dict[str, Any]:
-        """Crée un produit pour un producteur."""
-        current_session = self.session
-        producer_id = clean_text(producer_id, "producer_id", required=True)
-        name = clean_text(name, "name", required=True)
-        price = positive_float(price, "price", allow_zero=True)
-        quantity_for_sale = positive_float(quantity_for_sale, "quantity_for_sale", allow_zero=True)
-        unit = clean_text(unit, "unit", required=False, max_length=20) or "KG"
+    # NB : `create_product` vit désormais UNIQUEMENT dans `ProducerMgmtMixin`
+    # (services/database/producer.py) — valide l'existence du profil producteur
+    # (message clair sinon) ET auto-résout `sub_category_id` depuis le nom si
+    # absent. Ce mixin en définissait un doublon qui laissait TOUJOURS
+    # `sub_category_id=NULL` (jamais résolu) — cassait silencieusement le
+    # filtrage MATCHABLE de `get_producer_auctions` (qui filtre sur
+    # `Product.sub_category_id`), forçant un repli permanent sur ALL pour
+    # chaque producteur. Voir [[farm-autoprovision-critical-goals]],
+    # [[auction-bid-lifecycle]].
 
-        resolved_producer_id = await self._resolve_producer_id(producer_id)
+    async def record_sale(
+        self,
+        phone: str,
+        product_name: str,
+        quantity: float,
+        total_price: float,
+        unit: str = "KG",
+        client_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Journalise une vente directe effectuée par un producteur."""
+
+        current_session = self.session
+        resolved_producer_id = await self._resolve_producer_id(phone)
         if isinstance(resolved_producer_id, dict):
             return resolved_producer_id
 
-        product_id = _uuid()
-        short_code = product_id[:8].upper()
+        product_label = clean_text(product_name, "product_name", required=True)
+        unit_clean = clean_text(unit, "unit", required=False, max_length=20) or "KG"
+        quantity_value = positive_float(quantity, "quantity")
+        amount_value = positive_float(total_price, "total_price", allow_zero=True)
 
-        category_label = clean_text(category_label, "category_label", required=False) or await self.guess_category(name)
-
-        product = Product(
-            id=product_id,
-            short_code=short_code,
-            name=name,
-            price=price,
-            unit=unit,
-            quantity_for_sale=quantity_for_sale,
-            producer_id=resolved_producer_id,
-            category_label=category_label,
-            sub_category_id=sub_category_id,
-            description=description,
-            local_names=local_names,
+        stmt_product = (
+            select(Product)
+            .where(
+                Product.producer_id == resolved_producer_id,
+                func.lower(Product.name) == product_label.lower(),
+            )
+            .limit(1)
         )
-        current_session.add(product)
+        product_result = await current_session.execute(stmt_product)
+        product = product_result.scalar_one_or_none()
+
+        if not product:
+            product = Product(
+                id=_uuid(),
+                short_code=_uuid()[:8].upper(),
+                name=product_label,
+                category_label="VENTE_DIRECTE",
+                price=amount_value / quantity_value if quantity_value else amount_value,
+                unit=unit_clean,
+                quantity_for_sale=0,
+                producer_id=resolved_producer_id,
+                is_available=False,
+            )
+            current_session.add(product)
+            await current_session.flush()
+
+        order_id = _uuid()
+        order = Order(
+            id=order_id,
+            customer_name=client_name or "Vente directe",
+            customer_phone=str(phone).strip(),
+            payment_method="CASH",
+            payment_status="PAID",
+            status="COMPLETED",
+            delivery_status="FULFILLED",
+            source="AGENT",
+            order_type="DIRECT_SALE",
+            total_amount=amount_value,
+            subtotal=amount_value,
+            tax_amount=0.0,
+            currency="XOF",
+            delivery_fee=0.0,
+            is_agent_order=True,
+        )
+        current_session.add(order)
+
+        item_price = amount_value / quantity_value if quantity_value else amount_value
+        order_item = OrderItem(
+            id=_uuid(),
+            order_id=order_id,
+            product_id=product.id,
+            quantity=quantity_value,
+            price_at_sale=item_price,
+        )
+        current_session.add(order_item)
+
         await current_session.flush()
 
         return {
             "status": "success",
             "data": {
-                "product_id": product_id,
-                "short_code": short_code,
-                "name": name,
-                "price_fcfa": price,
-                "quantity": quantity_for_sale,
-                "unit": unit,
-                "category_label": category_label,
+                "sale_id": order_id,
+                "product_id": str(product.id),
+                "quantity": quantity_value,
+                "unit": unit_clean,
+                "total_amount": amount_value,
+                "price_per_unit": item_price,
             },
         }
 
@@ -288,18 +295,11 @@ class MarketplaceMixin(BaseMixin):
     # ORDERS
     # =======================================================================
 
-    async def update_order_status(self, order_id: str, new_status: str, payment_status: str = None) -> Optional[Dict[str, Any]]:
-        current_session = self.session
-        stmt = select(Order).where(Order.id == order_id)
-        result = await current_session.execute(stmt)
-        order = result.scalar_one_or_none()
-        if not order:
-            return None
-        order.status = new_status
-        if payment_status:
-            order.payment_status = payment_status
-        await current_session.flush()
-        return order.to_dict()
+    # NB : `update_order_status` vit désormais UNIQUEMENT dans `ProducerMgmtMixin`
+    # (services/database/producer.py) — verrouille la ligne (`with_for_update`)
+    # avant mise à jour, évitant une course entre deux mises à jour concurrentes
+    # du même statut de commande. Ce mixin en définissait un doublon sans
+    # verrou. Voir [[farm-autoprovision-critical-goals]].
 
     # =======================================================================
     # EXPENSES

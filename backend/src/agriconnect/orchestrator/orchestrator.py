@@ -218,6 +218,10 @@ class Orchestrator:
         }
         runtime = build_runtime()
         async with runtime as live_runtime:
+            # Lie le téléphone au runtime AVANT tout appel MCP de ce tour : filet
+            # de sécurité global contre les PermissionDenied silencieux quand un
+            # site d'appel (gateway ou tool direct) oublie de transmettre `phone`.
+            live_runtime.bind_user(phone)
             role = "BUYER" if ws.workspace_type == "buyer" else "PRODUCER"
             profile_res = None
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import contextvars
 import inspect
 import json
 import logging
@@ -10,7 +11,8 @@ import time
 import unicodedata
 import uuid
 from contextlib import nullcontext
-from typing import Any, Awaitable, Callable, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Dict, Optional, Set
 
 from agriconnect.core.llm import get_llm
 from agriconnect.core.settings import settings
@@ -21,8 +23,119 @@ from agriconnect.graphs.agents.market_coach.interpreter.intent import (
 )
 from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
 from agriconnect.infrastructure.mcp.context import FarmerContext, get_mcp_context, mcp_context_scope
+from agriconnect.infrastructure.mcp.security import PermissionScope, TOOL_SCOPE_MAP
 
 logger = logging.getLogger("Agent.MarketCoach")
+
+
+def _ensure_intent_tool_scopes() -> None:
+    missing_tools = []
+    for intent_key, cfg in INTENT_CONFIG.items():
+        tool_name = str((cfg or {}).get("tool_name") or "").strip()
+        if not tool_name or tool_name in TOOL_SCOPE_MAP:
+            continue
+        action_type = str((cfg or {}).get("action_type") or "READ").upper()
+        scope = (
+            PermissionScope.DB_DATA_WRITE
+            if action_type == "WRITE"
+            else PermissionScope.DB_READ_ONLY
+        )
+        TOOL_SCOPE_MAP[tool_name] = scope
+        missing_tools.append((intent_key, tool_name, scope.value))
+
+    if missing_tools:
+        logger.warning(
+            "[ToolScopeWarmup] Enregistré %d outils manquants: %s",
+            len(missing_tools),
+            ", ".join(tool for _, tool, _ in missing_tools),
+        )
+
+
+_ensure_intent_tool_scopes()
+
+
+@dataclass(frozen=True)
+class ToolScope:
+    """ACL definition for a node.
+
+    ``allowed_tools`` being ``None`` keeps backward compatibility (no filtering)
+    while ``allow_direct_db`` governs legacy ``ensure_db()`` usage.
+    """
+
+    name: str
+    allowed_tools: Optional[Set[str]] = None
+    allow_direct_db: bool = False
+
+
+class ToolScopeManager:
+    """Central registry for node→tool ACLs.
+
+    This is a defence-in-depth layer: even if a prompt forces a node to
+    attempt a privileged MCP call, the runtime checks this registry before
+    executing anything dangerous.
+    """
+
+    _scope_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+        "market_tool_scope", default="default"
+    )
+    _scopes: Dict[str, ToolScope] = {
+        "default": ToolScope(name="default", allowed_tools=None, allow_direct_db=True),
+        "llm_only": ToolScope(name="llm_only", allowed_tools=set(), allow_direct_db=False),
+    }
+    _node_to_scope: Dict[str, str] = {
+        # Conversational nodes must never hit MCP/DB even if compromised.
+        "clarification_node": "llm_only",
+        "final_response": "llm_only",
+        "response_strategy": "llm_only",
+    }
+
+    @classmethod
+    def register_scope(cls, scope: ToolScope) -> None:
+        cls._scopes[scope.name] = scope
+
+    @classmethod
+    def register_node_scope(cls, node_name: str, scope_name: str) -> None:
+        cls._node_to_scope[node_name] = scope_name
+
+    @classmethod
+    def activate_for_node(cls, node_name: str):
+        scope_name = cls._node_to_scope.get(node_name, "default")
+        if scope_name not in cls._scopes:
+            scope_name = "default"
+        return cls._scope_var.set(scope_name)
+
+    @classmethod
+    def reset_scope(cls, token) -> None:
+        cls._scope_var.reset(token)
+
+    @classmethod
+    def current_scope(cls) -> ToolScope:
+        scope_name = cls._scope_var.get()
+        return cls._scopes.get(scope_name, cls._scopes["default"])
+
+    @classmethod
+    def can_call_tool(cls, tool_name: str) -> bool:
+        scope = cls.current_scope()
+        allowed = scope.allowed_tools
+        if allowed is None:
+            return True
+        tool = tool_name or ""
+        for pattern in allowed:
+            if cls._match(pattern, tool):
+                return True
+        return False
+
+    @classmethod
+    def can_use_direct_db(cls) -> bool:
+        return cls.current_scope().allow_direct_db
+
+    @staticmethod
+    def _match(pattern: str, tool_name: str) -> bool:
+        if pattern.endswith("*"):
+            return tool_name.startswith(pattern[:-1])
+        return pattern == tool_name
+
+
 
 # ── ASCII folding (Postel's Law — MCP never receives accented strings) ──
 
@@ -196,6 +309,7 @@ def _safe_node(fn: Callable[..., Awaitable[Dict[str, Any]]], name: str) -> Calla
     """Décorateur pour sécuriser les noeuds LangGraph et tracer leur durée."""
 
     async def _wrapped(state: Dict[str, Any], mc_runtime: "MarketRuntime", **_: Any) -> Dict[str, Any]:
+        scope_token = ToolScopeManager.activate_for_node(name)
         goal = str(state.get("current_goal") or "").upper()
         status = str(state.get("status") or "").upper()
         event = str(state.get("interpreted_event") or "").upper()
@@ -234,6 +348,8 @@ def _safe_node(fn: Callable[..., Awaitable[Dict[str, Any]]], name: str) -> Calla
                 "error_message": f"Erreur technique dans le noeud '{name}'.",
                 "technical_details": str(exc),
             }
+        finally:
+            ToolScopeManager.reset_scope(scope_token)
 
     return _wrapped
 
@@ -404,6 +520,23 @@ class MarketRuntime:
         self.security = SecurityService(self.llm)
         self.model_answer = "llama-3.3-70b-versatile"
         self.db_service = db_service
+        # Téléphone de l'utilisateur courant, lié une fois par tour via
+        # `bind_user()` (orchestrator). Filet de sécurité pour la dérivation
+        # d'identité MCP — voir `_build_context_identity`.
+        self._bound_phone: Optional[str] = None
+
+    def bind_user(self, phone: Optional[str]) -> None:
+        """Lie le téléphone de l'utilisateur courant au runtime pour tout le tour.
+
+        À appeler une fois, dès que le téléphone est connu (avant tout appel
+        MCP), typiquement dans l'orchestrateur au début du traitement d'un
+        message. Sert de filet de sécurité : si un site d'appel oublie de
+        transmettre `phone`/`buyer_phone`/etc. à un tool, l'identité de
+        permission retombe quand même sur cet utilisateur au lieu d'échouer
+        en ``PermissionDenied("missing_context_identity")``.
+        """
+        cleaned = str(phone or "").strip()
+        self._bound_phone = cleaned or None
 
     def _load_transport_from_settings(self) -> MCPTransportConfig:
         try:
@@ -444,6 +577,10 @@ class MarketRuntime:
             DeprecationWarning,
             stacklevel=2,
         )
+        if not ToolScopeManager.can_use_direct_db():
+            raise MarketRuntimeError(
+                "Accès DB direct bloqué par la politique de scope courante."
+            )
         if self.db_service is not None:
             return self.db_service
         try:
@@ -461,6 +598,18 @@ class MarketRuntime:
         return self.db_client
 
     def _build_context_identity(self, kwargs: Dict[str, Any]) -> Optional[FarmerContext]:
+        """Dérive l'identité de contexte MCP pour le gate de permission.
+
+        Filet de sécurité GLOBAL (voir ``bind_user``) : si aucun kwarg
+        d'identité n'est présent sur CET appel précis (un gateway qui a oublié
+        de transmettre ``phone``, ou un tool appelé par id métier seul comme
+        ``get_auction_bids(auction_id=...)``), on retombe sur le téléphone lié
+        au runtime pour tout le tour en cours. Ceci n'altère PAS les kwargs
+        envoyés à la méthode DB elle-même (qui reste inchangée) — seule
+        l'identité de permission en bénéficie. Corrige une classe entière de
+        bugs « PermissionDenied silencieux » sans devoir patcher chaque site
+        d'appel individuellement.
+        """
         user_id = str(
             kwargs.get("user_id")
             or kwargs.get("producer_id")
@@ -469,6 +618,7 @@ class MarketRuntime:
             or kwargs.get("user_phone")
             or kwargs.get("buyer_phone")
             or kwargs.get("customer_phone")
+            or self._bound_phone
             or ""
         ).strip()
         phone = str(
@@ -476,6 +626,7 @@ class MarketRuntime:
             or kwargs.get("user_phone")
             or kwargs.get("buyer_phone")
             or kwargs.get("customer_phone")
+            or self._bound_phone
             or ""
         ).strip()
         if not user_id and not phone:
@@ -496,6 +647,11 @@ class MarketRuntime:
         6. Normalise the response via ensure_dict
         7. Log success/failure with request_id
         """
+        if not ToolScopeManager.can_call_tool(tool_name):
+            raise MarketRuntimeError(
+                f"Tool '{tool_name}' interdit dans le scope '{ToolScopeManager.current_scope().name}'."
+            )
+
         if not self.db_client:
             raise MarketRuntimeError("Runtime non connecté. Utilisez ‘async with’.")
 

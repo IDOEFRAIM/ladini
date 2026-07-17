@@ -13,10 +13,6 @@ packages = [
 [tool.poetry.dependencies]
 python = ">=3.11,<3.14"
 numpy = "^2.1"
-pypdf = ">=5.1.0,<7"
-playwright = "^1.45"
-PyMuPDF = "^1.24"
-sentence-transformers = "*"
 tqdm = "^4.66"
 pydantic = "^2.0"
 httpx = "^0.27"
@@ -24,14 +20,8 @@ shapely = "^2.0"
 pillow = "^10.0"
 loguru = "^0.7"
 aiofiles = "^23.1"
-pdfminer-six = "^20221105"
-pdfplumber = "^0.11"
 pytest = "^7.0"
 # Additional dependencies requested for Agri-OS
-gtts = "^2.4"
-openai-whisper = "*"
-pydub = "^0.25"
-langdetect = "^1.0"
 
 # --- Web Framework ---
 fastapi = "^0.115"
@@ -55,18 +45,7 @@ prisma = "^0.11"
 # --- AI/ML ---
 torch = "^2.2"
 
-# --- LlamaIndex et Faiss ---
-llama-index = "^0.13.0"
-llama-index-core = "^0.13.0"
-llama-index-vector-stores-faiss = "^0.5.2"
-llama-index-vector-stores-hnswlib = "*"
-llama-index-embeddings-huggingface = "*"
-llama-index-embeddings-openai = "*"
-faiss-cpu = "^1.8.0"
-pymilvus = "^2.4"
-aioredis = "^2.0"
-srsly = "^2.5.0"
-spacy = "^3.7"
+# --- LangGraph / LangChain (marketplace runtime) ---
 langgraph = ">=0.2"
 langchain = "^0.3"
 langchain-community = "^0.3"
@@ -99,10 +78,7 @@ requests = "^2.32.5"
 pyyaml = "^6.0"
 tenacity = "^9.0"
 ftfy = "^6.2"
-trafilatura = "^2.0"
 apscheduler = "^3.11.2"
-gradio = "^6.3.0"
-beautifulsoup4 = "^4.14.3"
 groq = ">=0.30.0,<1.0.0"
 rapidfuzz = "^3.9"
 fastmcp = ">=0.1"
@@ -113,9 +89,6 @@ geopy = "^2.4"
 pytest-asyncio = "^0.21"
 gunicorn = "^21.2"
 openai = "^1.54"
-unstructured = {extras = ["pdf"], version = "^0.16.4"}
-pdf2image = "^1.17"
-pytesseract = "^0.3.13"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

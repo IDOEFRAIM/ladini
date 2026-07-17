@@ -87,6 +87,21 @@ class FarmGateway(_BaseGateway):
         result = await self._call("create_farm", **kwargs)
         return result.get("data") or result
 
+    async def get_or_create_farm(
+        self, phone: str, farm_name: str | None = None, zone_id: str | None = None,
+    ) -> Dict[str, Any]:
+        """Idempotent : renvoie la ferme existante ou en crée une (crée aussi le
+        profil producteur si absent). Outil role-allowed via l'intent FARM_CREATE
+        (`tool_name=get_or_create_farm`), contrairement à `create_farm`.
+        """
+        kwargs: Dict[str, Any] = {"phone": phone.strip()}
+        if farm_name:
+            kwargs["farm_name"] = farm_name
+        if zone_id:
+            kwargs["zone_id"] = zone_id
+        result = await self._call("get_or_create_farm", **kwargs)
+        return result.get("data") or result
+
 
 # ── Auctions & Bids ───────────────────────────────────────────────
 
@@ -128,14 +143,22 @@ class AuctionGateway(_BaseGateway):
     async def get_my_active_bids(self, phone: str) -> Dict[str, Any]:
         return await self._call("get_my_active_bids", phone=phone.strip())
 
+    async def update_bid_price(self, bid_id: str, phone: str, new_price: Any) -> Dict[str, Any]:
+        return await self._call(
+            "update_bid_price", bid_id=bid_id, phone=phone.strip(), new_price=new_price
+        )
+
     async def get_auctions_bids(self, **kwargs: Any) -> Dict[str, Any]:
         return await self._call("get_auctions_bids", **kwargs)
 
-    async def get_auction_bids(self, auction_id: str) -> Dict[str, Any]:
-        return await self._call("get_auction_bids", auction_id=auction_id)
+    async def get_auction_bids(self, auction_id: str, phone: str | None = None) -> Dict[str, Any]:
+        # phone requis pour l'identité de contexte MCP (sinon PermissionDenied
+        # « missing_context_identity »). _call strip les None automatiquement.
+        return await self._call("get_auction_bids", auction_id=auction_id, phone=phone)
 
-    async def select_winning_bid(self, bid_id: str) -> Dict[str, Any]:
-        return await self._call("select_winning_bid", bid_id=bid_id)
+    async def select_winning_bid(self, bid_id: str, phone: str | None = None) -> Dict[str, Any]:
+        # phone requis pour l'identité de contexte MCP (sinon PermissionDenied).
+        return await self._call("select_winning_bid", bid_id=bid_id, phone=phone)
 
 
 # ── Stock ──────────────────────────────────────────────────────────

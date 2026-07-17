@@ -12,6 +12,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
+from pydantic import BaseModel, Field, ValidationError
+
 from agriconnect.core.logger import get_logger
 from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
     parse_quantity_unit_from_text as _parse_qty_unit,
@@ -20,6 +22,80 @@ from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import
 )
 
 logger = get_logger("AgriConnect.MarketCoach.SlotEnrichment")
+
+
+class SlotValidationError(RuntimeError):
+    """Raised when an LLM payload fails schema validation."""
+
+
+class SlotExtractionPayload(BaseModel):
+    quantity: Optional[float] = Field(default=None, ge=0, le=1_000_000)
+    unit: Optional[str] = Field(default=None)
+    product: Optional[str] = Field(default=None, max_length=80)
+
+    @staticmethod
+    def _clean_product(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        if not cleaned:
+            return None
+        # Block obvious SQL/control characters used during poisoning attempts.
+        if any(token in cleaned for token in ("--", ";", "/*", "*/", "DROP", "ALTER")):
+            raise ValueError("Produit contient des instructions interdites")
+        return cleaned
+
+    @staticmethod
+    def _clean_unit(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = str(value).strip().upper()
+        allowed = {"KG", "TONNE", "SAC", "PANIER", "TETE"}
+        if normalized and normalized not in allowed:
+            raise ValueError(f"Unité non supportée: {value}")
+        return normalized or None
+
+    @staticmethod
+    def _clean_quantity(value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            if not float("inf") > float(value) >= 0:
+                raise ValueError("Quantité hors bornes")
+            return float(value)
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            raise ValueError("Quantité invalide") from None
+        if parsed < 0:
+            raise ValueError("Quantité négative interdite")
+        return parsed
+
+    @property
+    def sanitized(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {}
+        if self.quantity is not None:
+            data["quantity"] = self.quantity
+        if self.unit:
+            data["unit"] = self.unit
+        product = self._clean_product(self.product)
+        if product:
+            data["product"] = product
+        return data
+
+    @classmethod
+    def validate_payload(cls, payload: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            instance = cls(
+                quantity=cls._clean_quantity(payload.get("quantity")),
+                unit=cls._clean_unit(payload.get("unit")),
+                product=payload.get("product"),
+            )
+        except ValueError as exc:
+            raise SlotValidationError(str(exc)) from exc
+        except ValidationError as exc:
+            raise SlotValidationError(str(exc)) from exc
+        return instance.sanitized
 
 _PRODUCTION_TYPE_SYNONYMS = {
     "livestock": "LIVESTOCK",
@@ -153,26 +229,14 @@ async def llm_extract_quantity_unit(
             timeout=10.0,
         )
         parsed = json.loads(completion.choices[0].message.content or "{}")
-        out: Dict[str, Any] = {}
-        quantity = parsed.get("quantity")
-        unit = parsed.get("unit")
-        product = parsed.get("product")
-
-        if quantity not in (None, "", [], {}):
-            try:
-                out["quantity"] = float(quantity)
-            except (TypeError, ValueError):
-                pass
-
-        if unit not in (None, "", [], {}):
-            unit_norm = str(unit).upper().strip()
-            if unit_norm in {"KG", "TONNE", "SAC", "PANIER"}:
-                out["unit"] = unit_norm
-
-        if product not in (None, "", [], {}):
-            out["product"] = str(product).strip()
-
-        return out or None
+        return SlotExtractionPayload.validate_payload(parsed) or None
+    except SlotValidationError as validation_err:
+        logger.warning(
+            "SLOT_ENRICHMENT_VALIDATION_FAILED | reason=%s | snippet=%r",
+            validation_err,
+            (user_text or "")[:120],
+        )
+        raise
     except asyncio.TimeoutError:
         logger.warning("SLOT_ENRICHMENT_LLM_TIMEOUT | user_text=%r", (user_text or "")[:160])
         return None
@@ -209,9 +273,21 @@ async def enrich_payload_from_text(
         )
 
         if _needs_structured_extraction(payload, ("quantity", "unit")) or product_is_dirty:
-            llm_extracted = await llm_extract_quantity_unit(mc_runtime, text)
-            if llm_extracted:
-                payload.update({k: v for k, v in llm_extracted.items() if v not in (None, "", 0, [], {})})
+            try:
+                llm_extracted = await llm_extract_quantity_unit(mc_runtime, text)
+            except SlotValidationError as validation_exc:
+                reasons = list(payload.get("clarification_reasons") or [])
+                reasons.append(str(validation_exc))
+                payload["clarification_reasons"] = reasons
+                payload["slot_enrichment_force_clarification"] = True
+                logger.info(
+                    "SLOT_ENRICHMENT_CLARIFICATION | goal=%s | reason=%s",
+                    goal_upper,
+                    validation_exc,
+                )
+            else:
+                if llm_extracted:
+                    payload.update({k: v for k, v in llm_extracted.items() if v not in (None, "", 0, [], {})})
 
     if payload.get("unit") in (None, "", [], {}) and text:
         unit_from_text = extract_unit_only(text)

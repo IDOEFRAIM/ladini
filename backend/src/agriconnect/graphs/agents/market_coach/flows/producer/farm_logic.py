@@ -70,6 +70,8 @@ async def ensure_farm_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
         updates["user_farms_cache"] = farms_cache
 
     farms_list = farms_cache if isinstance(farms_cache, list) else []
+    no_farms = len(farms_list) == 0
+    auto_provision_allowed = is_write_intent or no_farms
 
     # --- MULTI-FARM AMBIGUITY: always prompt user for explicit choice ---
     if len(farms_list) > 1:
@@ -92,7 +94,7 @@ async def ensure_farm_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
     farm_id = _extract_farm_id(farms_list)
 
     # --- READ intents: block auto-provisioning ---
-    if not farm_id and is_read_intent:
+    if not farm_id and is_read_intent and not no_farms:
         logger.info("[AutoFarm] No farm for READ intent '%s' — prompting creation", goal)
         updates["status"] = "WAITING_INPUT"
         updates["response_strategy"] = "ASK_CLARIFICATION"
@@ -103,8 +105,8 @@ async def ensure_farm_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
         )
         return updates
 
-    # --- WRITE intents: auto-provision if no farm exists ---
-    if not farm_id and not is_write_intent:
+    # --- Auto-provision is allowed for WRITE intents or when no farm exists yet ---
+    if not farm_id and not auto_provision_allowed:
         logger.warning("[AutoFarm] Goal '%s' not authorized for auto-provisioning", goal)
         updates["status"] = "WAITING_INPUT"
         updates["response_strategy"] = "ASK_CLARIFICATION"
@@ -122,22 +124,24 @@ async def ensure_farm_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
             if state.get("user_name")
             else "Ferme principale"
         )
-        create_payload = {
-            "phone": str(phone).strip(),
-            "name": default_name,
-            "zone_id": zone_id,
-        }
-        if zone_name:
-            create_payload["location"] = zone_name
 
         try:
             farm_gw = FarmGateway(mc_runtime)
-            farm_data = await farm_gw.create_farm(**{k: v for k, v in create_payload.items() if v})
+            farm_data = await farm_gw.get_or_create_farm(
+                phone=str(phone).strip(),
+                farm_name=default_name,
+                zone_id=zone_id,
+            )
             farm_id = str(farm_data.get("id") or farm_data.get("farm_id") or "")
             if farm_id:
                 updates["auto_farm_notice"] = _AUTO_FARM_NOTICE
+            if zone_name and not farm_data.get("location"):
+                updates.setdefault("working_memory", {})
+                wm = dict(updates["working_memory"])
+                wm.setdefault("recent_corrections", {})
+                updates["working_memory"] = wm
         except Exception as exc:  # pragma: no cover - log only
-            logger.error("[AutoFarm] create_farm a échoué: %s", exc)
+            logger.error("[AutoFarm] get_or_create_farm a échoué: %s", exc)
             updates["error_creating_farm"] = True
             return updates
 

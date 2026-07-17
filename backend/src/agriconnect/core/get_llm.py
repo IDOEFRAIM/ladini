@@ -6,6 +6,47 @@ logger = logging.getLogger("agriconnect.core.get_llm")
 
 # Module-level singleton cache
 _LLM_SINGLETON: Optional[Any] = None
+_GROQ_SDK_SINGLETON: Optional[Any] = None
+
+
+def get_groq_sdk(force_refresh: bool = False) -> Any:
+    """Construit (et met en cache) le SDK Groq brut — sans dépendance RAG.
+
+    Historiquement délégué à ``futur.rag.components.get_groq_sdk``, ce qui
+    tirait ``faiss`` + ``llama_index`` (imports niveau module, plusieurs
+    secondes) dans le chemin LLM et provoquait le cold start « 1er message
+    échoue, 2ᵉ marche ». Le RAG n'étant plus utilisé, on instancie le client
+    Groq directement ici : l'import devient trivial.
+    """
+    global _GROQ_SDK_SINGLETON
+    if not force_refresh and _GROQ_SDK_SINGLETON is not None:
+        return _GROQ_SDK_SINGLETON
+
+    from agriconnect.core.settings import settings
+
+    provider = (getattr(settings, "LLM_PROVIDER", "groq") or "groq").strip().lower()
+    if provider not in {"groq", "default", "auto"}:
+        raise RuntimeError(
+            "get_groq_sdk() n'est disponible que lorsque LLM_PROVIDER=groq (ou auto)."
+        )
+
+    api_key = settings.llm_api_key
+    if not api_key:
+        raise RuntimeError(
+            "Aucune clé GROQ_API_KEY/AGRICONNECT_APIKEY n'est définie pour initialiser le SDK Groq."
+        )
+
+    try:
+        from groq import Groq
+    except ImportError as exc:
+        raise RuntimeError(
+            "Le package python 'groq' est requis pour instancier le SDK Groq.\n"
+            "Installez-le via `pip install groq`."
+        ) from exc
+
+    _GROQ_SDK_SINGLETON = Groq(api_key=api_key)
+    logger.info("Groq SDK initialisé et mis en cache")
+    return _GROQ_SDK_SINGLETON
 
 
 class _NormalizedChatResponse:
@@ -124,9 +165,6 @@ def get_llm(llm_client: Optional[Any] = None) -> Optional[Any]:
         )
 
     try:
-        # Lazy import of rag components to avoid heavy SDK imports at module import
-        from futur.rag.components import get_groq_sdk
-
         raw = get_groq_sdk()
         if raw is None:
             raise RuntimeError("get_groq_sdk() returned None — Groq SDK not available")

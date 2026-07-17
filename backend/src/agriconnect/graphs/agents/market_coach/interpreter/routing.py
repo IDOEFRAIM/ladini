@@ -487,9 +487,18 @@ def _interpret_fast_path(state: Dict[str, Any], text: str) -> Optional[Dict[str,
         "mes appels d'offres",
         "suivre appel d'offres",
         "suivi appel",
+        # Formulation "enchère" (miroir du fast-path producteur ci-dessus) —
+        # sans ces tokens, "voir mes enchères" ratait le fast-path et tombait
+        # sur la classification LLM complète (round-trip réseau évitable + non
+        # déterministe pour une intention pourtant sans ambiguïté).
+        "mes enchere", "mes encheres", "mes enchères",
+        "voir mes enchere", "voir mes encheres", "voir mes enchères",
+        "suivre mes enchere", "suivre mes encheres",
     )
     procurement_track_hit = any(token in clean for token in procurement_track_tokens)
     if not procurement_track_hit and "appel" in clean and ("suivre" in clean or "voir" in clean) and "commande" not in clean:
+        procurement_track_hit = True
+    if not procurement_track_hit and "enchere" in _strip_accents(clean) and ("suivre" in clean or "voir" in clean or "mes" in clean):
         procurement_track_hit = True
     if role_up == "BUYER" and procurement_track_hit:
         return {

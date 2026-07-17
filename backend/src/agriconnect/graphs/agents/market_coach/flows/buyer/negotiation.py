@@ -73,9 +73,14 @@ async def _fetch_and_show_bids(
     auction_id: str,
     nctx: Dict[str, Any],
     target_phase: str = "VIEWING_OFFERS",
+    phone: str | None = None,
 ) -> Dict[str, Any]:
     """Fetch auction bids and return a menu state patch or fallback to negotiation menu."""
-    bids_res = await AuctionGateway(mc_runtime).get_auction_bids(auction_id=str(auction_id))
+    # phone requis pour l'identité de contexte MCP (sinon PermissionDenied).
+    buyer_phone = phone or nctx.get("buyer_phone") or nctx.get("phone")
+    bids_res = await AuctionGateway(mc_runtime).get_auction_bids(
+        auction_id=str(auction_id), phone=str(buyer_phone) if buyer_phone else None
+    )
     bids = bids_res.get("bids") or []
 
     if str(bids_res.get("status") or "").lower() != "success" or not bids:
@@ -157,7 +162,10 @@ async def _handle_viewing_offers(
     """Process bid selection or re-display bids."""
     bid_id = payload.get("bid_id")
     if bid_id:
-        win = await AuctionGateway(mc_runtime).select_winning_bid(bid_id=str(bid_id))
+        _buyer_phone = nctx.get("buyer_phone") or nctx.get("phone")
+        win = await AuctionGateway(mc_runtime).select_winning_bid(
+            bid_id=str(bid_id), phone=str(_buyer_phone) if _buyer_phone else None
+        )
         if str(win.get("status") or "").lower() != "success":
             return {
                 "status": "COMPLETED",
@@ -220,7 +228,7 @@ async def _handle_negotiation_menu(
         }
 
     if action == "NEGOTIATION_VIEW_OFFERS":
-        return await _fetch_and_show_bids(mc_runtime, auction_id, nctx, "VIEWING_OFFERS")
+        return await _fetch_and_show_bids(mc_runtime, auction_id, nctx, "VIEWING_OFFERS", phone=phone)
 
     if action == "NEGOTIATION_COUNTER":
         return {

@@ -19,9 +19,10 @@ from agriconnect.workspace.context_guard import ContextGuard
 from agriconnect.agents.task_handler import TaskHandler, GoalState
 from agriconnect.graphs.agents.market_coach.interpreter.intent import (
     get_required_fields,
+    intent_requires_farm,
 )
 from agriconnect.graphs.agents.market_coach.flows.producer.farm_logic import ensure_farm_node
-from agriconnect.graphs.agents.market_coach.core.base import FARM_CRITICAL_GOALS
+from agriconnect.graphs.agents.market_coach.core.base import FARM_CRITICAL_GOALS, _AUTO_FARM_NOTICE
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     is_success_response,
@@ -72,17 +73,43 @@ async def _auto_provision_farm_if_needed(
     if not farm_required or not farm_missing:
         return payload, {}
 
-    updates = await ensure_farm_node(state, mc_runtime)
-    if not updates:
-        return payload, {}
+    updates = await ensure_farm_node(state, mc_runtime) or {}
 
     if "transaction_payload" in updates:
         updated_payload = dict(updates["transaction_payload"])
     else:
         updated_payload = dict(payload)
-        updated_payload.update({"farm_id": state.get("stable_entities", {}).get("farm_id")})
+        stable_farm = state.get("stable_entities", {}).get("farm_id")
+        if stable_farm:
+            updated_payload["farm_id"] = stable_farm
 
     status = str(updates.get("status") or "").upper()
+
+    # FILET ULTIME : `ensure_farm_node` peut renvoyer {} (garde `farm_creation_attempted`
+    # déjà posée par son passage en nœud du graphe) ou échouer sans produire de
+    # farm_id. Plutôt que de laisser l'exécuteur réclamer un `farm_id` (UUID) à
+    # l'utilisateur, on garantit une ferme via `get_or_create_farm` (idempotent,
+    # crée producteur+ferme si absent). On NE le fait PAS si ensure_farm_node
+    # demande explicitement une sélection multi-fermes (WAITING_INPUT).
+    if status != "WAITING_INPUT" and updated_payload.get("farm_id") in (None, "", [], {}):
+        phone = state.get("user_phone") or payload.get("phone")
+        if phone:
+            try:
+                from agriconnect.graphs.agents.market_coach.services.mcp.gateway import FarmGateway
+                farm_data = await FarmGateway(mc_runtime).get_or_create_farm(phone=str(phone).strip())
+                fid = str((farm_data or {}).get("id") or (farm_data or {}).get("farm_id") or "")
+                if fid:
+                    updated_payload["farm_id"] = fid
+                    updates = dict(updates)
+                    updates["transaction_payload"] = updated_payload
+                    updates.setdefault("auto_farm_notice", _AUTO_FARM_NOTICE)
+                    logger.info("[Executor] farm garanti via get_or_create_farm: %s", fid)
+            except Exception as exc:
+                logger.warning("[Executor] get_or_create_farm (filet ultime) a échoué: %s", exc)
+
+    if not updates:
+        return payload, {}
+
     if status != "WAITING_INPUT":
         updates.setdefault("available_mapping", {})
         wm_patch = dict(updates.get("working_memory") or {})
@@ -244,6 +271,28 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
         raise RuntimeError("Action non découverte. Migration incomplète.")
 
     _is_read_only = not registration.is_write
+
+    # --- PRE-FLIGHT FARM ENRICHMENT --------------------------------------
+    # TaskHandler valide les champs requis AVANT l'appel MCP. Si farm_id est
+    # requis mais absent, on déclenche l'auto-provisionnement immédiatement
+    # pour éviter de bloquer la FSM en HUMAN_INTERVENTION avant même l'exécution.
+    if intent_requires_farm(goal) and not payload.get("farm_id"):
+        preflight_payload, preflight_updates = await _auto_provision_farm_if_needed(
+            state,
+            mc_runtime,
+            payload,
+            tool_name="preflight_farm",
+            tool_schema={"required": ["farm_id"]},
+        )
+        if preflight_updates:
+            state_side_effects.update(preflight_updates)
+            payload = dict(preflight_payload)
+            waiting = str(preflight_updates.get("status") or "").upper() == "WAITING_INPUT"
+            if waiting:
+                return _apply_side_effects(preflight_updates)
+        else:
+            payload = dict(preflight_payload)
+        state["transaction_payload"] = dict(payload)
 
     if not _is_read_only:
         task_payload = _build_task_payload(state)

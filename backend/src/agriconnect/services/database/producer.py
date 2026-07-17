@@ -569,125 +569,14 @@ class ProducerMgmtMixin(BaseMixin):
 
     # ─── SECTION 3 : LOGIQUE DU STOCK TRANSACTIONNEL ──────────────────────
 
-    async def add_stock(self, phone: str, item_name: str, quantity: float, unit: str = "KG", stock_type: str = "HARVEST", reason: str = "Ajout via agent", warehouse_id: str = None, organization_id: str = None) -> Dict[str, Any]:
-        """
-        Incrémente ou crée une ligne de stock pour l'exploitation via self.session.
-        """
-        phone = clean_text(phone, "phone", required=True)
-        item_name = clean_text(item_name, "item_name", required=True)
-        quantity = positive_float(quantity, "quantity")
-        unit = clean_text(unit, "unit", required=False, max_length=20) or "KG"
-
-        try:
-            farms_payload = await self.get_producer_farm(phone)
-            if isinstance(farms_payload, dict):
-                farms_data = farms_payload.get("data") or []
-            else:
-                farms_data = farms_payload
-
-            if not farms_data:
-                msg = (farms_payload.get("message") if isinstance(farms_payload, dict) else None) or "Aucune exploitation trouvée pour ce producteur."
-                return {"status": "error", "message": msg}
-
-            first_farm = farms_data[0]
-            if isinstance(first_farm, dict):
-                raw_farm_id = first_farm.get("farm_id") or first_farm.get("id")
-            else:
-                raw_farm_id = getattr(first_farm, "id", None)
-            if not raw_farm_id:
-                return {"status": "error", "message": "Impossible de déterminer l'exploitation principale pour ce producteur."}
-
-            farm_uuid = uuid.UUID(str(raw_farm_id))
-
-            stmt = select(Stock).where(Stock.farm_id == farm_uuid, func.lower(Stock.item_name) == item_name.lower()).with_for_update()
-            result = await self.session.execute(stmt)
-            stock = result.scalar_one_or_none()
-
-            if stock:
-                stock.quantity += quantity
-                stock_id = str(stock.id)
-                new_total = stock.quantity
-            else:
-                stock_id = str(uuid.uuid4())
-                stock = Stock(
-                    id=uuid.UUID(stock_id),
-                    farm_id=farm_uuid,
-                    item_name=item_name,
-                    quantity=quantity,
-                    unit=unit,
-                    type=stock_type,
-                    warehouse_id=uuid.UUID(warehouse_id) if warehouse_id else None,
-                    organization_id=uuid.UUID(organization_id) if organization_id else None,
-                )
-                self.session.add(stock)
-                new_total = quantity
-
-            mvt = StockMovement(id=uuid.uuid4(), stock_id=uuid.UUID(stock_id), type="IN", quantity=quantity, reason=reason)
-            self.session.add(mvt)
-            await self.session.flush()
-
-            return {"status": "success", "data": {"stock_id": stock_id, "item_name": item_name, "added": quantity, "new_total": new_total, "unit": unit}}
-        except ValueError as e:
-            return {"status": "error", "message": str(e)}
-
-    async def remove_stock(self, phone: str, item_name: str, quantity: float, reason: str = "Retrait", movement_type: str = "OUT") -> Dict[str, Any]:
-        """
-        Décrémente le stock disponible après validation du solde via self.session.
-        """
-        phone = clean_text(phone, "phone", required=True)
-        item_name = clean_text(item_name, "item_name", required=True)
-        quantity = positive_float(quantity, "quantity")
-
-        try:
-            farms_payload = await self.get_producer_farm(phone)
-            if isinstance(farms_payload, dict):
-                farms_data = farms_payload.get("data") or []
-            else:
-                farms_data = farms_payload
-
-            if not farms_data:
-                msg = (farms_payload.get("message") if isinstance(farms_payload, dict) else None) or "Aucune exploitation trouvée pour ce producteur."
-                return {"status": "error", "message": msg}
-
-            first_farm = farms_data[0]
-            if isinstance(first_farm, dict):
-                raw_farm_id = first_farm.get("farm_id") or first_farm.get("id")
-            else:
-                raw_farm_id = getattr(first_farm, "id", None)
-            if not raw_farm_id:
-                return {"status": "error", "message": "Impossible de déterminer l'exploitation principale pour ce producteur."}
-
-            farm_uuid = uuid.UUID(str(raw_farm_id))
-
-            stmt = select(Stock).where(Stock.farm_id == farm_uuid, func.lower(Stock.item_name) == item_name.lower()).with_for_update()
-            result = await self.session.execute(stmt)
-            stock = result.scalar_one_or_none()
-
-            if not stock:
-                return {"status": "error", "message": f"Aucun stock de '{item_name}' trouvé pour cette exploitation."}
-            if stock.quantity < quantity:
-                return {"status": "error", "message": f"Stock insuffisant : {stock.quantity} {stock.unit} disponibles."}
-
-            stock.quantity -= quantity
-
-            mvt = StockMovement(id=uuid.uuid4(), stock_id=stock.id, type=movement_type, quantity=quantity, reason=reason)
-            self.session.add(mvt)
-            await self.session.flush()
-
-            return {"status": "success", "data": {"stock_id": str(stock.id), "item_name": item_name, "removed": quantity, "remaining": stock.quantity, "unit": stock.unit}}
-        except ValueError as e:
-            return {"status": "error", "message": str(e)}
-
-    async def adjust_stock(self, phone: str, item_name: str, quantity_change: float, reason: str = "Adjustment via MCP", unit: str = "KG", stock_type: str = "HARVEST", warehouse_id: str = None, organization_id: str = None) -> Dict[str, Any]:
-        """
-        Ajuste le stock de manière transparente (positif ou négatif).
-        """
-        if quantity_change >= 0:
-            return await self.add_stock(phone=phone, item_name=item_name, quantity=quantity_change, unit=unit, stock_type=stock_type, reason=reason, warehouse_id=warehouse_id, organization_id=organization_id)
-        else:
-            return await self.remove_stock(phone=phone, item_name=item_name, quantity=abs(quantity_change), reason=reason)
-
-
+    # NB : `add_stock`/`remove_stock`/`adjust_stock` vivent désormais UNIQUEMENT
+    # dans `MarketplaceMixin` (services/database/marketplace.py) — signature
+    # `farm_id` directe, cohérente avec l'architecture d'auto-résolution
+    # `FARM_CRITICAL_GOALS` (le farm_id est déjà résolu avant l'appel du tool).
+    # Ce mixin en définissait des doublons `phone`-based (repli sur la 1ʳᵉ ferme
+    # du producteur) — dead code, jamais atteint via `AgriDatabaseService`
+    # (le MRO liste `MarketplaceMixin` avant `ProducerMgmtMixin`). Voir
+    # [[farm-autoprovision-critical-goals]].
 
     async def get_stocks(self, phone: str | None = None, *, producer_id: str | None = None, **kwargs) -> Dict[str, Any]:
         """Récupère les stocks, le catalogue et les futures récoltes d'un producteur."""
@@ -1341,33 +1230,9 @@ class ProducerMgmtMixin(BaseMixin):
             },
         }
 
-    async def get_stock_movements(self, stock_id: any, limit: int = 5) -> list:
-        """
-        Récupère l'historique des mouvements (IN/OUT) pour un stock donné,
-        trié du plus récent au plus ancien.
-        """
-        from agriconnect.domain.models import StockMovement
-        
-        stmt = (
-            select(StockMovement)
-            .where(StockMovement.stock_id == stock_id)
-            .order_by(StockMovement.created_at.desc())
-            .limit(limit)
-        )
-        
-        res = await self.session.execute(stmt)
-        movements = res.scalars().all()
-        
-        return [
-            {
-                "id": str(m.id),
-                "type": m.type,
-                "quantity": m.quantity,
-                "reason": m.reason,
-                "created_at": m.created_at.isoformat() if m.created_at else None,
-            }
-            for m in movements
-        ]
+    # NB : `get_stock_movements` vit désormais UNIQUEMENT dans `MarketplaceMixin`
+    # (services/database/marketplace.py) — dead code ici (jamais atteint via
+    # AgriDatabaseService). Voir [[farm-autoprovision-critical-goals]].
 
     async def delete_stock(self, phone: str, stock_id: any) -> bool:
         from sqlalchemy.orm import joinedload
@@ -1462,156 +1327,11 @@ class ProducerMgmtMixin(BaseMixin):
             return {"status": "error", "message": str(e)}
 
     # ─── SECTION 5 : FINANCE & SUIVI AGRONOMIQUE (EXPENSES / CROPS / SURPLUS) ───
-    async def add_expense(
-        self, 
-        phone: str, 
-        label: str, 
-        amount: float, 
-        category: str, 
-        date: datetime = None
-    ) -> dict:
-        """
-        Enregistre une nouvelle dépense/charge financière pour la ferme du producteur.
-        Filtre proprement via des jointures SQL et cible la première ferme disponible.
-        """
-        import uuid
-        from datetime import datetime
-        from sqlalchemy import select
-        from sqlalchemy.orm import joinedload
-        from agriconnect.domain.models import Farm, Producer, User, Expense
-
-        # 1. Récupération de la ferme avec des jointures explicites pour éviter le produit cartésien
-        stmt = (
-            select(Farm)
-            .join(Farm.producer)  # Jointure explicite Farm -> Producer
-            .join(Producer.user)  # Jointure explicite Producer -> User
-            .where(User.phone == phone)
-            .options(
-                joinedload(Farm.producer)
-                .joinedload(Producer.user)
-            )
-        )
-        
-        res = await self.session.execute(stmt)
-        # 🚀 On utilise .first() au lieu de .scalar_one_or_none() 
-        # pour éviter de planter si le producteur possède plusieurs fermes en BDD
-        farm_obj = res.scalars().first()
-
-        if not farm_obj:
-            raise ValueError("Ferme introuvable ou droits insuffisants pour ce producteur.")
-
-        # 2. Sécurisation et nettoyage du format de la date pour la BDD (naive timestamp)
-        if date is None:
-            insert_date = datetime.now()
-        else:
-            insert_date = date.replace(tzinfo=None) if date.tzinfo else date
-
-        # 3. Instanciation du modèle d'enregistrement de la dépense
-        expense = Expense(
-            id=uuid.uuid4(),
-            farm_id=farm_obj.id,
-            label=label,
-            amount=amount,
-            category=category,
-            date=insert_date
-        )
-
-        # 4. Sauvegarde persistante en base de données
-        self.session.add(expense)
-        await self.session.flush()
-
-        return {
-            "status": "success",
-            "data": {
-                "id": str(expense.id),
-                "farm_id": str(expense.farm_id),
-                "label": expense.label,
-                "amount": float(expense.amount) if expense.amount is not None else 0.0,
-                "category": expense.category,
-                "date": expense.date.isoformat() if expense.date else None,
-            },
-        }
-
-    async def get_expenses(self, phone: str, category: str = None, limit: int = 50) -> Union[List[Dict[str, Any]], Dict[str, str]]:
-        """
-        Historique comptable linéaire des dépenses via self.session.
-        """
-        try:
-            farms_payload = await self.get_producer_farm(phone)
-            if isinstance(farms_payload, dict):
-                farms_data = farms_payload.get("data") or []
-            else:
-                farms_data = farms_payload
-
-            if not farms_data:
-                msg = (farms_payload.get("message") if isinstance(farms_payload, dict) else None) or "Aucune exploitation trouvée pour ce producteur."
-                return {"status": "error", "message": msg}
-
-            first_farm = farms_data[0]
-            if isinstance(first_farm, dict):
-                raw_farm_id = first_farm.get("farm_id") or first_farm.get("id")
-            else:
-                raw_farm_id = getattr(first_farm, "id", None)
-            if not raw_farm_id:
-                return {"status": "error", "message": "Impossible de déterminer l'exploitation principale pour ce producteur."}
-
-            farm_id = uuid.UUID(str(raw_farm_id))
-
-            stmt = select(Expense).where(Expense.farm_id == farm_id)
-            if category:
-                stmt = stmt.where(Expense.category == category)
-
-            stmt = stmt.order_by(desc(Expense.date)).limit(limit)
-            result = await self.session.execute(stmt)
-            return {"status": "success", "data": [e.to_dict() for e in result.scalars()]}
-        except ValueError as e:
-            return {"status": "error", "message": str(e)}
-
-    async def get_expense_summary(self, phone: str) -> Dict[str, Any]:
-        """
-        Génère une synthèse groupée sécurisée via self.session.
-        """
-        try:
-            farms_payload = await self.get_producer_farm(phone)
-            if isinstance(farms_payload, dict):
-                farms_data = farms_payload.get("data") or []
-            else:
-                farms_data = farms_payload
-
-            if not farms_data:
-                msg = (farms_payload.get("message") if isinstance(farms_payload, dict) else None) or "Aucune exploitation trouvée pour ce producteur."
-                return {"status": "error", "message": msg}
-
-            first_farm = farms_data[0]
-            if isinstance(first_farm, dict):
-                raw_farm_id = first_farm.get("farm_id") or first_farm.get("id")
-            else:
-                raw_farm_id = getattr(first_farm, "id", None)
-            if not raw_farm_id:
-                return {"status": "error", "message": "Impossible de déterminer l'exploitation principale pour ce producteur."}
-
-            farm_id = uuid.UUID(str(raw_farm_id))
-
-            stmt = select(
-                Expense.category,
-                func.sum(Expense.amount).label("total"),
-                func.count(Expense.id).label("count"),
-            ).where(Expense.farm_id == farm_id).group_by(Expense.category)
-
-            result = await self.session.execute(stmt)
-
-            categories = {}
-            grand_total = 0.0
-
-            for row in result:
-                row_dict = dict(row._mapping)
-                total_val = float(row_dict["total"]) if isinstance(row_dict["total"], Decimal) else row_dict["total"]
-                categories[row_dict["category"]] = {"total": total_val, "count": int(row_dict["count"])}
-                grand_total += total_val
-
-            return {"status": "success", "data": {"categories": categories, "grand_total": grand_total}}
-        except ValueError as e:
-            return {"status": "error", "message": str(e)}
+    # NB : `add_expense`/`get_expenses`/`get_expense_summary` vivent désormais
+    # UNIQUEMENT dans `MarketplaceMixin` (services/database/marketplace.py) —
+    # signature `farm_id` directe, cohérente avec l'architecture
+    # `FARM_CRITICAL_GOALS`. Doublons `phone`-based ici — dead code, jamais
+    # atteint via `AgriDatabaseService`. Voir [[farm-autoprovision-critical-goals]].
 
     async def get_market_offers(self, phone: str) -> Union[List[Dict[str, Any]], Dict[str, str]]:
         """Liste les offres de marché (productions futures) de la première ferme du producteur."""

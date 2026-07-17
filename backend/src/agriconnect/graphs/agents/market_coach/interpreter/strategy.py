@@ -27,6 +27,19 @@ async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
     missing_fields = state.get("missing_fields") or []
     last_missing_field = state.get("last_missing_field")
     existing_strategy = str(state.get("response_strategy") or "").upper().strip()
+    if state.get("slot_enrichment_force_clarification"):
+        reasons = state.get("clarification_reasons") or []
+        logger.warning(
+            "[ResponseStrategy] slot enrichment forced clarification | reasons=%s",
+            reasons,
+        )
+        updates: Dict[str, Any] = {
+            "response_strategy": "CLARIFICATION",
+            "status": "WAITING_INPUT",
+            "ag_ui_component": None,
+            "clarification_reasons": reasons,
+        }
+        return updates
     if existing_strategy == "ONBOARDING" or state.get("is_onboarding"):
         return {
             "response_strategy": "ONBOARDING",
