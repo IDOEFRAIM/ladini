@@ -41,6 +41,8 @@ _BUYER_TOOL_EXTRAS: Set[str] = {
     "get_buyer_orders_dashboard",
     "cancel_pending_order",
     "get_transaction_summary",
+    # Réservation de production future (précommande liée à MarketOffer).
+    "reserve_future_offer",
 }
 
 _PRODUCER_TOOL_EXTRAS: Set[str] = {
@@ -53,6 +55,8 @@ _PRODUCER_TOOL_EXTRAS: Set[str] = {
     "get_my_active_bids",
     "place_bid",
     "update_bid_price",
+    # Vue des réservations reçues sur les productions futures.
+    "get_offer_reservations",
 }
 
 _EXTRA_ROLE_TOOLS = {

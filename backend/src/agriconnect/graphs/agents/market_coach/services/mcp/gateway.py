@@ -102,6 +102,13 @@ class FarmGateway(_BaseGateway):
         result = await self._call("get_or_create_farm", **kwargs)
         return result.get("data") or result
 
+    async def get_offer_reservations(self, phone: str, market_offer_id: str | None = None) -> Dict[str, Any]:
+        """Précommandes reçues par le producteur sur ses productions futures."""
+        kwargs: Dict[str, Any] = {"phone": phone.strip()}
+        if market_offer_id:
+            kwargs["market_offer_id"] = market_offer_id
+        return await self._call("get_offer_reservations", **kwargs)
+
 
 # ── Auctions & Bids ───────────────────────────────────────────────
 
@@ -231,6 +238,17 @@ class PreorderGateway(_BaseGateway):
 
     async def confirm_draft(self, buyer_phone: str, preorder_id: str) -> Dict[str, Any]:
         return await self._call("confirm_preorder_draft", buyer_phone=buyer_phone, preorder_id=preorder_id)
+
+    async def reserve_future_offer(
+        self, buyer_phone: str, market_offer_id: str, quantity: Any, desired_price: Any = None,
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "reserve_future_offer",
+            buyer_phone=buyer_phone.strip(),
+            market_offer_id=market_offer_id,
+            quantity=quantity,
+            desired_price=desired_price,
+        )
 
 
 # ── Order Tracking ─────────────────────────────────────────────────

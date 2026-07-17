@@ -18,6 +18,7 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_text import (
 )
 from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
     AgentActionGateway,
+    PreorderGateway,
     ProductGateway,
     StockGateway,
 )
@@ -60,6 +61,9 @@ class CartDomainService:
             vendors.append(
                 {
                     "product_id": pid,
+                    # Pour une PRODUCTION FUTURE, `id` renvoyé par search_products est
+                    # l'id du MarketOffer → requis par reserve_future_offer.
+                    "market_offer_id": pid if source_type == "FUTURE" else None,
                     "crop_cycle_id": item.get("crop_cycle_id"),
                     "name": _clean_product_name(item.get("name") or product_name),
                     "price": float(item.get("price") or 0.0),
@@ -257,17 +261,48 @@ class CartDomainService:
 
         source_type = str(ref.get("source_type") or "DIRECT").upper()
         if source_type == "FUTURE":
-            eta = ref.get("estimated_available_at")
-            eta_hint = f" (disponible vers {eta})" if eta else ""
+            # PRODUCTION FUTURE → vraie RÉSERVATION (précommande) au lieu d'un
+            # simple message informatif. Aucun débit de stock : reserve_future_offer
+            # incrémente MarketOffer.reserved_quantity et crée un Order(PREORDER)
+            # lié via market_offer_id, puis notifie le producteur.
+            offer_id = ref.get("market_offer_id") or ref.get("offer_id") or ref.get("id")
+            if not offer_id:
+                return {
+                    "status": "COMPLETED",
+                    "response_strategy": "SUCCESS",
+                    "final_response": (
+                        f"⏳ *{ref.get('name') or product_name}* est une production future, "
+                        "mais je n'ai pas pu retrouver sa référence pour la réserver. Réessayez la sélection."
+                    ),
+                    "vendor_selection_context": None,
+                }
+
+            reservation = await PreorderGateway(self.mc_runtime).reserve_future_offer(
+                buyer_phone=phone,
+                market_offer_id=str(offer_id),
+                quantity=qty,
+                desired_price=ref.get("price") or ref.get("price_per_unit"),
+            )
+            reservation = _unwrap_tool_envelope(reservation)
+
+            if not is_success_response(reservation):
+                msg = reservation.get("message") or "Cette production n'a pas pu être réservée pour le moment."
+                return {
+                    "status": "COMPLETED",
+                    "response_strategy": "ERROR",
+                    "final_response": msg,
+                    "vendor_selection_context": None,
+                    "preorder_workflow": {"__reset__": True},
+                }
+
             return {
                 "status": "COMPLETED",
                 "response_strategy": "SUCCESS",
-                "final_response": (
-                    f"⏳ *{ref.get('name') or product_name}* est une production future{eta_hint}. "
-                    "Cette option est visible pour découverte et choix producteur, mais n'est pas encore commandable en stock immédiat."
-                ),
-                "preorder_workflow": {"phase": "CART"},
+                "final_response": reservation.get("message")
+                or f"✅ Précommande enregistrée pour *{product_name}*.",
+                "preorder_workflow": {"__reset__": True},
                 "vendor_selection_context": None,
+                "transaction_payload": {"__reset__": True},
             }
 
         resolved_pid = ref.get("product_id") or ref.get("id")

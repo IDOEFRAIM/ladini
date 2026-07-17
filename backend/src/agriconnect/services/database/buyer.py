@@ -19,6 +19,16 @@ from agriconnect.domain.models import (
 
 logger = logging.getLogger("agriconnect.services.database.buyer")
 
+
+def _naive_utc(dt_value: Optional[datetime]) -> Optional[datetime]:
+    """Datetime naïf UTC pour écriture DB (colonnes sans timezone)."""
+    if not isinstance(dt_value, datetime):
+        return None
+    if dt_value.tzinfo is not None:
+        return dt_value.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt_value
+
+
 _LIVESTOCK_KEYWORDS: tuple[str, ...] = (
     "chevre",
     "chevres",
@@ -837,6 +847,183 @@ class BuyerMixin(BaseMixin):
         except Exception as e:
             logger.error(f"validate_stock_availability_atomic({product_id}): {e}", exc_info=True)
             return {"status": "error", "message": "Erreur technique lors de la vérification du stock."}
+
+    async def reserve_future_offer(
+        self,
+        buyer_phone: str,
+        market_offer_id: str,
+        quantity: Any,
+        desired_price: Any = None,
+    ) -> Dict[str, Any]:
+        """Réserve une quantité sur une PRODUCTION FUTURE (MarketOffer précommandable).
+
+        Contrairement à une commande catalogue, on NE débite AUCUN stock produit :
+        une précommande future se contente de RÉSERVER la quantité sur l'offre
+        (``MarketOffer.reserved_quantity``) jusqu'à ce que le producteur valide la
+        récolte. On crée un ``Order`` lié via ``market_offer_id`` (type PREORDER,
+        statut PENDING) et on notifie le producteur (outbox). Idempotence protégée
+        par la capacité disponible (available − reserved).
+        """
+        current_session = self.session
+        if not current_session:
+            return {"status": "error", "message": "Session indisponible."}
+        try:
+            qty = float(quantity)
+        except (TypeError, ValueError):
+            qty = 0.0
+        if qty <= 0:
+            return {"status": "error", "message": "La quantité à réserver doit être supérieure à 0."}
+
+        try:
+            o_uuid = uuid.UUID(str(market_offer_id))
+        except (TypeError, ValueError):
+            return {"status": "error", "message": "Référence d'offre invalide."}
+
+        try:
+            user_obj, profile_obj = await self.get_buyer_profile(phone=buyer_phone)
+
+            # Verrou de ligne : évite deux réservations concurrentes qui
+            # sur-réserveraient au-delà de la capacité disponible.
+            offer = await current_session.scalar(
+                select(MarketOffer).where(MarketOffer.id == o_uuid).with_for_update()
+            )
+            if not offer:
+                return {"status": "error", "message": "Cette production n'est plus disponible."}
+            if not bool(offer.preorder_enabled) or not bool(offer.is_public):
+                return {"status": "error", "message": "Cette production n'accepte pas encore de précommande."}
+            if str(offer.status or "").upper() in {"CLOSED", "CANCELLED", "SOLD_OUT"}:
+                return {"status": "error", "message": f"Cette production n'est plus ouverte (statut : {offer.status})."}
+
+            available = float(offer.available_quantity or 0.0)
+            reserved = float(offer.reserved_quantity or 0.0)
+            remaining = available - reserved
+            if qty > remaining + 1e-9:
+                return {
+                    "status": "error",
+                    "reason": "insufficient_capacity",
+                    "message": (
+                        f"Il ne reste que {remaining:g} {offer.unit or 'unité'} réservable(s) "
+                        f"sur cette production (vous demandez {qty:g})."
+                    ),
+                }
+
+            zone_uuid = user_obj.zone_id
+            unit_price = None
+            try:
+                unit_price = float(desired_price) if desired_price is not None else None
+            except (TypeError, ValueError):
+                unit_price = None
+            if unit_price is None:
+                unit_price = float(offer.price_per_unit) if offer.price_per_unit is not None else 0.0
+            total = round(unit_price * qty, 2)
+
+            eta = offer.estimated_available_at or offer.expected_harvest_date
+
+            new_order = Order(
+                id=uuid.uuid4(),
+                buyer_id=profile_obj.id,
+                market_offer_id=offer.id,
+                zone_id=zone_uuid,
+                customer_name=getattr(profile_obj, "establishment_name", None) or user_obj.name,
+                customer_phone=normalize_phone(buyer_phone, required=False),
+                total_amount=total,
+                subtotal=total,
+                status="PENDING",
+                payment_status="PENDING",
+                delivery_status="PENDING",
+                payment_method="CASH",
+                source="WHATSAPP",
+                order_type="PREORDER",
+                is_agent_order=True,
+                expected_fulfillment_date=_naive_utc(eta),
+                created_at=datetime.utcnow().replace(tzinfo=None),
+            )
+            current_session.add(new_order)
+
+            # Réservation : on incrémente la quantité réservée SANS toucher au stock.
+            offer.reserved_quantity = reserved + qty
+            offer.updated_at = datetime.utcnow().replace(tzinfo=None)
+            await current_session.flush()
+
+            # Notifie le producteur via l'outbox (même transaction que la réservation).
+            notified = await self._notify_producer_reservation(offer, qty, total)
+
+            eta_txt = eta.strftime("%d/%m/%Y") if isinstance(eta, datetime) else "à venir"
+            price_txt = f"{unit_price:g}" if unit_price else "prix à confirmer"
+            return {
+                "status": "success",
+                "order_id": str(new_order.id),
+                "data": {
+                    "order_id": str(new_order.id),
+                    "market_offer_id": str(offer.id),
+                    "product": offer.product_label,
+                    "quantity": qty,
+                    "unit": offer.unit or "KG",
+                    "unit_price": unit_price,
+                    "total": total,
+                    "eta": eta.isoformat() if isinstance(eta, datetime) else None,
+                    "remaining_after": round(remaining - qty, 3),
+                },
+                "message": (
+                    f"✅ *Précommande enregistrée* pour {qty:g} {offer.unit or 'unité'} de "
+                    f"*{offer.product_label}* ({price_txt} FCFA/unité).\n"
+                    f"📅 Disponibilité prévue : *{eta_txt}*.\n"
+                    f"💰 Total estimé : *{total:g} FCFA*.\n\n"
+                    + ("🔔 Le producteur a été notifié de votre réservation."
+                       if notified else
+                       "Le producteur sera informé de votre réservation.")
+                ),
+            }
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.error("❌ Erreur reserve_future_offer: %s", exc, exc_info=True)
+            return {"status": "error", "message": "Impossible d'enregistrer votre précommande pour le moment."}
+
+    async def _notify_producer_reservation(self, offer: MarketOffer, qty: float, total: float) -> bool:
+        """Enfile une notif producteur (« un acheteur a réservé X ») via l'outbox.
+
+        Dans la MÊME transaction que la réservation : si le commit échoue, la
+        notif n'est pas enfilée non plus. dedupe_key = order-agnostique par
+        (offer, quantité cumulée) évité → on autorise plusieurs notifs (une par
+        réservation) via un suffixe temporel.
+        """
+        try:
+            prod_row = (
+                await self.session.execute(
+                    select(User.phone)
+                    .join(Producer, Producer.user_id == User.id)
+                    .where(Producer.id == offer.producer_id)
+                    .limit(1)
+                )
+            ).first()
+            prod_phone = prod_row[0] if prod_row else None
+            if not prod_phone:
+                return False
+
+            from agriconnect.workers.outbox import templates as _tpl
+            from agriconnect.workers.repositories import outbox_repo as _outbox_repo
+
+            eta = offer.estimated_available_at or offer.expected_harvest_date
+            await _outbox_repo.enqueue(self.session, [{
+                "channel": "WHATSAPP",
+                "recipient_phone": prod_phone,
+                "template_key": _tpl.PREORDER_RESERVED_PRODUCER,
+                "payload": {
+                    "product": offer.product_label,
+                    "quantity": float(qty),
+                    "unit": offer.unit or "KG",
+                    "total": float(total),
+                    "reserved_total": float(offer.reserved_quantity or 0.0),
+                    "available": float(offer.available_quantity or 0.0),
+                    "eta": eta.strftime("%d/%m/%Y") if isinstance(eta, datetime) else None,
+                },
+                "dedupe_key": f"PREORDER_RESERVED:{offer.id}:{datetime.utcnow().timestamp()}",
+            }])
+            return True
+        except Exception as exc:  # pragma: no cover - non bloquant
+            logger.warning("[Preorder] notif producteur échouée (non bloquant): %s", exc)
+            return False
 
     async def create_preorder_draft(
         self,

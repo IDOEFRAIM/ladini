@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Literal, Union
 from decimal import Decimal
 
 from sqlalchemy import select, update, delete, and_, or_, desc, func
-from sqlalchemy.orm import selectinload, joinedload, load_only, with_loader_criteria
+from sqlalchemy.orm import selectinload, joinedload, load_only, with_loader_criteria, aliased
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agriconnect.domain.models import (
@@ -24,6 +24,7 @@ from agriconnect.domain.models import (
     Expense,
     SubCategory,
     Category,
+    BuyerProfile,
 )
 from .base import BaseMixin
 from .common import clean_text, positive_float, normalize_phone, clamp_limit
@@ -100,8 +101,20 @@ def _utc_naive(value: Optional[datetime]) -> Optional[datetime]:
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
-def _normalize_offer_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalise un payload de déclaration d'offre marché (MarketOffer)."""
+def _normalize_offer_payload(payload: Dict[str, Any], *, is_future: bool = False) -> Dict[str, Any]:
+    """Normalise un payload de déclaration d'offre marché (MarketOffer).
+
+    ``is_future=True`` (déclaration de production FUTURE / précommandable) impose
+    une sémantique distincte d'un produit catalogue livrable :
+      - une date de disponibilité (``estimated_available_at`` ou
+        ``expected_harvest_date``) est OBLIGATOIRE — une future récolte sans
+        date fiable n'est pas précommandable ;
+      - ``preorder_enabled`` et ``is_public`` par défaut à True (on veut exposer
+        l'offre à la demande) ;
+      - ``current_stock`` forcé à 0 : une production future n'a PAS de stock réel
+        (ne pas recycler ``available_quantity`` comme si c'était du disponible) ;
+      - ``status`` par défaut ``AVAILABLE`` (visible/réservable), pas ``DRAFT``.
+    """
     if not isinstance(payload, dict):
         raise ValueError("Le payload doit être un objet JSON")
 
@@ -137,19 +150,28 @@ def _normalize_offer_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     normalized["available_quantity"] = positive_float(available_qty, "available_quantity", allow_zero=True)
     normalized["reserved_quantity"] = _coerce_float(payload.get("reserved_quantity"), "reserved_quantity", allow_zero=True, positive=True, default=0.0) or 0.0
-    normalized["current_stock"] = _coerce_float(payload.get("current_stock"), "current_stock", allow_zero=True, positive=True, default=normalized["available_quantity"])
+    # Une production FUTURE n'a pas de stock réel : ne pas recopier available_quantity.
+    _stock_default = 0.0 if is_future else normalized["available_quantity"]
+    normalized["current_stock"] = _coerce_float(payload.get("current_stock"), "current_stock", allow_zero=True, positive=True, default=_stock_default)
 
     _raw_price = _coerce_float(payload.get("price_per_unit") or payload.get("price_mentioned"), "price_per_unit", allow_zero=True, positive=True)
     normalized["price_per_unit"] = round(_raw_price, 2) if _raw_price is not None else None
 
-    normalized["preorder_enabled"] = _coerce_bool(payload.get("preorder_enabled"), default=False)
-    normalized["is_public"] = _coerce_bool(payload.get("is_public"), default=False)
-    normalized["status"] = str(payload.get("status") or "DRAFT").strip().upper()
+    normalized["preorder_enabled"] = _coerce_bool(payload.get("preorder_enabled"), default=is_future)
+    normalized["is_public"] = _coerce_bool(payload.get("is_public"), default=is_future)
+    normalized["status"] = str(payload.get("status") or ("AVAILABLE" if is_future else "DRAFT")).strip().upper()
 
     normalized["estimated_available_at"] = _parse_datetime(payload.get("estimated_available_at"), "estimated_available_at")
     normalized["expected_harvest_date"] = _parse_datetime(payload.get("expected_harvest_date"), "expected_harvest_date")
     if normalized["estimated_available_at"] is None:
         normalized["estimated_available_at"] = normalized["expected_harvest_date"]
+
+    # ETA obligatoire pour une production future : sans date fiable, pas de précommande.
+    if is_future and normalized["estimated_available_at"] is None:
+        raise ValueError(
+            "Une date de disponibilité prévue est requise pour une production future "
+            "(estimated_available_at ou expected_harvest_date)."
+        )
 
     normalized["sub_category_id"] = payload.get("sub_category_id")
     return normalized
@@ -839,7 +861,7 @@ class ProducerMgmtMixin(BaseMixin):
         """Déclare une production future (culture ou élevage) prête pour les précommandes."""
 
         resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
-        normalized = _normalize_offer_payload(payload)
+        normalized = _normalize_offer_payload(payload, is_future=True)
 
         farm = await self.session.get(Farm, normalized["farm_id"])
         if not farm:
@@ -885,6 +907,115 @@ class ProducerMgmtMixin(BaseMixin):
             "data": snapshot,
         }
 
+
+    async def get_offer_reservations(
+        self,
+        *,
+        phone: str | None = None,
+        producer_id: str | None = None,
+        market_offer_id: str | None = None,
+    ) -> Dict[str, Any]:
+        """Liste les précommandes (réservations) reçues sur les productions futures.
+
+        Vue producteur de la boucle de réservation : pour chaque offre future
+        précommandable, agrège les Order(type=PREORDER) liés via market_offer_id,
+        avec quantité réservée et acheteurs. Filtrable sur une offre précise.
+        """
+        try:
+            resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc), "data": []}
+
+        profile_res = await self.get_producer_profile(resolved_phone)
+        if not profile_res or not profile_res[1]:
+            return {"status": "error", "message": "Profil producteur introuvable.", "data": []}
+        producer_obj = profile_res[1]
+
+        buyer_user = aliased(User)
+        stmt = (
+            select(
+                MarketOffer.id.label("offer_id"),
+                MarketOffer.product_label,
+                MarketOffer.unit,
+                MarketOffer.available_quantity,
+                MarketOffer.reserved_quantity,
+                MarketOffer.estimated_available_at,
+                Order.id.label("order_id"),
+                Order.total_amount,
+                Order.status.label("order_status"),
+                Order.created_at.label("reserved_at"),
+                buyer_user.name.label("buyer_name"),
+                buyer_user.phone.label("buyer_phone"),
+            )
+            .join(Order, Order.market_offer_id == MarketOffer.id)
+            .outerjoin(BuyerProfile, Order.buyer_id == BuyerProfile.id)
+            .outerjoin(buyer_user, BuyerProfile.user_id == buyer_user.id)
+            .where(
+                MarketOffer.producer_id == producer_obj.id,
+                Order.order_type == "PREORDER",
+            )
+            .order_by(MarketOffer.estimated_available_at.asc(), Order.created_at.desc())
+        )
+        if market_offer_id:
+            try:
+                stmt = stmt.where(MarketOffer.id == uuid.UUID(str(market_offer_id)))
+            except (TypeError, ValueError):
+                return {"status": "error", "message": "Référence d'offre invalide.", "data": []}
+
+        rows = (await self.session.execute(stmt)).all()
+
+        if not rows:
+            return {
+                "status": "success",
+                "count": 0,
+                "data": [],
+                "message": "Aucune précommande sur vos productions futures pour le moment.",
+            }
+
+        offers: Dict[str, Dict[str, Any]] = {}
+        for r in rows:
+            oid = str(r.offer_id)
+            bucket = offers.setdefault(oid, {
+                "market_offer_id": oid,
+                "product": r.product_label,
+                "unit": (r.unit or "KG"),
+                "available_quantity": float(r.available_quantity or 0.0),
+                "reserved_quantity": float(r.reserved_quantity or 0.0),
+                "eta": r.estimated_available_at.isoformat() if isinstance(r.estimated_available_at, datetime) else None,
+                "reservation_count": 0,
+                "reservations": [],
+            })
+            bucket["reservation_count"] += 1
+            bucket["reservations"].append({
+                "order_id": str(r.order_id),
+                "buyer_name": r.buyer_name or "Acheteur",
+                "buyer_phone": r.buyer_phone,
+                "total": float(r.total_amount or 0.0),
+                "status": (r.order_status or "PENDING"),
+                "reserved_at": r.reserved_at.isoformat() if isinstance(r.reserved_at, datetime) else None,
+            })
+
+        data = list(offers.values())
+        lines = ["📊 *Réservations sur vos productions futures :*"]
+        for off in data:
+            eta_txt = ""
+            if off["eta"]:
+                try:
+                    eta_txt = f" · 📅 {datetime.fromisoformat(off['eta']).strftime('%d/%m/%Y')}"
+                except ValueError:
+                    pass
+            lines.append(
+                f"\n🌱 *{off['product']}*{eta_txt}\n"
+                f"🔔 {off['reservation_count']} précommande(s) — "
+                f"*{off['reserved_quantity']:g}/{off['available_quantity']:g} {off['unit']}* réservé(s)"
+            )
+
+        return {
+            "status": "success",
+            "count": len(data),
+            "data": data,
+            "formatted_menu": "\n".join(lines),
+        }
 
     # ─── SECTION 4 : VISION COMMANDES PRODUCTEUR ───────────────────────
     async def get_producer_orders(

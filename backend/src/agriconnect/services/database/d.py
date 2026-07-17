@@ -99,7 +99,7 @@ class AgriDatabaseService(
         "get_expenses", "get_expense_summary",
 
         # Producer reads
-        "get_producer_orders",
+        "get_producer_orders", "get_offer_reservations",
 
         # Moderation / anti-abuse reads
         "get_account_status", "get_prohibited_terms",
