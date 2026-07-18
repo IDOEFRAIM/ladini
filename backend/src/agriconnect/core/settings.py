@@ -68,7 +68,10 @@ class Settings(BaseSettings):
     DB_POOL_MAX_OVERFLOW: int = 20
     DB_POOL_TIMEOUT: float = 60.0
     # --- Redis / Celery ---
-    REDIS_URL: str = "a"
+    # Défaut local pour le dev (docker-compose / redis local) ; en prod,
+    # définir REDIS_URL via variable d'environnement (ex: rediss://... pour
+    # un Redis managé avec TLS).
+    REDIS_URL: str = "redis://localhost:6379/0"
     VALKEY_ENDPOINT: str = ""
     VALKEY_AUTH_TOKEN: str = ""
     VALKEY_USE_TLS: bool = True
@@ -101,6 +104,10 @@ class Settings(BaseSettings):
             "PYTHONPATH": str(Path(__file__).resolve().parent.parent.parent)
         }
     )
+    # Si vide, dérivé de MCP_DB_SERVER_HOST/MCP_DB_SERVER_PORT (voir
+    # infrastructure/mcp/client.py::MCPTransportConfig.from_settings) — évite
+    # de configurer deux fois la même adresse (celle du daemon HTTP MCP et
+    # celle que le client MarketRuntime doit contacter).
     MCP_DB_HTTP_URL: str = ""
     MCP_DB_HTTP_HEADERS: dict[str, str] = Field(default_factory=dict)
     MCP_DB_GRPC_TARGET: str = ""
@@ -115,7 +122,7 @@ class Settings(BaseSettings):
 
     @property
     def celery_backend(self) -> str:
-        return self.CELERY_RESULT_BACKEND or "a"
+        return self.CELERY_RESULT_BACKEND or self.REDIS_URL
 
     # --- Azure Speech (TTS/STT — indépendant du LLM provider) ---
     AZURE_SPEECH_KEY: str = ""

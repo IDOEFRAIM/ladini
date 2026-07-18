@@ -523,7 +523,7 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
     if recent_corrections:
         working["recent_corrections"] = recent_corrections
     else:
-        working.pop("recent_corrections", None)
+        working["recent_corrections"] = None
 
     payload = _normalize_quantity_to_kg(payload)
     _mirror_aliases(payload)

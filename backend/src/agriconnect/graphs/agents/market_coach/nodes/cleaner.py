@@ -70,7 +70,7 @@ async def state_cleaner_node(
     working_patch = False
 
     if working.get("recent_corrections") not in (None, {}):
-        working["recent_corrections"] = {}
+        working["recent_corrections"] = None
         working_patch = True
 
     if working.get("fetched_data_cache") is not None:
@@ -78,7 +78,8 @@ async def state_cleaner_node(
         working_patch = True
 
     for key in _EPHEMERAL_WORKING_KEYS:
-        if working.pop(key, None) is not None:
+        if working.get(key) is not None:
+            working[key] = None
             working_patch = True
 
     if working_patch:
@@ -107,7 +108,7 @@ async def state_cleaner_node(
         for key in ("active_goal", "locked_intent", "pending_goal",
                     "buyer_request_waiting_choice", "buyer_request_catalog_checked",
                     "buyer_request_last_product"):
-            wm_terminal.pop(key, None)
+            wm_terminal[key] = None
         patch["working_memory"] = wm_terminal
     else:
         payload_patch = _sanitize_transaction_payload(state.get("transaction_payload"), state)

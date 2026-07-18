@@ -536,8 +536,8 @@ async def list_buyer_auctions(
 
     wm = dict(state.get("working_memory") or {})
     wm["available_mapping_kind"] = "buyer_auction_list"
-    wm.pop("winner_auction_id", None)
-    wm.pop("pending_winner_bid", None)
+    wm["winner_auction_id"] = None
+    wm["pending_winner_bid"] = None
 
     return {
         "status": "WAITING_INPUT",
@@ -636,8 +636,8 @@ async def check_auction_status(
             wm["winner_auction_id"] = str(auction_id)
             payload_out = dict(state.get("transaction_payload") or {})
             payload_out["auction_id"] = str(auction_id)
-            payload_out.pop("selection_index", None)
-            payload_out.pop("bid_id", None)
+            payload_out["selection_index"] = None
+            payload_out["bid_id"] = None
 
             return {
                 "status": "WAITING_INPUT",
@@ -770,7 +770,7 @@ async def finalize_winner(
     def _clear_wm() -> Dict[str, Any]:
         wm = dict(working)
         for k in ("available_mapping_kind", "pending_winner_bid", "winner_auction_id"):
-            wm.pop(k, None)
+            wm[k] = None
         return wm
 
     is_no = event == "REJECT" or text in _NO_TOKENS
@@ -901,7 +901,29 @@ async def order_tracking_resolver(
     # kind="buyer_auction_list"→payload.auction_id) et retire selection_index.
     #
     # 1. Confirmation oui/non d'un gagnant déjà choisi.
-    if working.get("pending_winner_bid"):
+    # Garde-fou sur interpreted_event EN PLUS du goal : `BUYER_LIST_AUCTIONS`
+    # est lui-même dans AUCTION_TRACKING_GOALS, donc un `goal in
+    # AUCTION_TRACKING_GOALS` seul ne suffit PAS à empêcher un
+    # `pending_winner_bid` fantôme de détourner "lister mes appels d'offres"
+    # vers la confirmation du gagnant (bug vu en prod : sélection du menu
+    # "1. Voir mes appels d'offres" → répond "Répondez oui pour confirmer le
+    # gagnant"). Un `expected_input == "CONFIRMATION"` a été essayé mais
+    # `validator.py` le réinitialise INCONDITIONNELLEMENT à "NONE" dès que le
+    # goal courant n'a aucun required field (le cas de tous les goals
+    # `handled_by_flow` comme BUYER_CHECK_AUCTION_STATUS) — AVANT que ce
+    # resolver ne s'exécute, cassant le VRAI "oui" de confirmation (boucle
+    # infinie observée en prod : "oui" → validator remet expected_input=NONE
+    # → resolver retombe sur check_auction_status au lieu de finalize_winner).
+    # `interpreted_event`, lui, n'est JAMAIS touché par validator.py et vaut
+    # exactement "CONFIRM"/"REJECT" pendant le tour où l'utilisateur répond
+    # réellement oui/non (c'est d'ailleurs ce que `finalize_winner` vérifie en
+    # interne). Coupler flag + event rend le détournement impossible sans
+    # bloquer la vraie confirmation.
+    if (
+        working.get("pending_winner_bid")
+        and goal in AUCTION_TRACKING_GOALS
+        and str(state.get("interpreted_event") or "").upper() in {"CONFIRM", "REJECT"}
+    ):
         return await finalize_winner(state, mc_runtime)
     # 2. Une offre vient d'être choisie sur une enchère de l'acheteur → récap.
     if goal in AUCTION_TRACKING_GOALS and payload.get("bid_id") and working.get("winner_auction_id"):

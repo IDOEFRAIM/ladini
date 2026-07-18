@@ -112,6 +112,8 @@ Ta sortie OBLIGATOIRE est un JSON strict avec EXACTEMENT ces clés :
       "quantity": <float|null>,
       "unit": "<KG|TONNE|SAC|PANIER|null>",
       "price": <float|null>,
+      "estimated_available_at": "<YYYY-MM-DD|null>",
+      "expected_harvest_date": "<YYYY-MM-DD|null>",
       "zone": "<str|null>",
       "selection_index": <int|null>,
       "selected_value": "<str|null>",
@@ -146,25 +148,80 @@ RÈGLES STRICTES DE CLASSIFICATION :
    - `product` ne doit être `null` que si aucun produit explicite n'est présent dans le texte.
 
 3. **detected_intent** identifie l'intention métier PRÉCISE.
+
 4. **ANTI-HALLUCINATION D'IDS** : Tu n'inventes jamais d'ID technique. Si choix de l'IHM :
    - chiffre pur ou ordinal ("le 2ème", "option 1") → `selection_index` (int).
    - nom propre ou texte ("l'offre de Diallo") → `selected_value` (str).
 
-4. Segmentation stricte des quantités :
+5. **Segmentation stricte des quantités** :
    - "product" doit être un libellé pur (ex: "tomates"), SANS chiffres ni unités.
    - "quantity" est un float (ex: 50.0).
    - "unit" doit être explicitement extraite ("KG", "TONNE", "SAC", "PANIER").
    - Si la quantité est donnée sans unité → validation_status = INVALID_MISSING_UNIT.
    - Si l'unité est ambiguë ou contradictoire → validation_status = INVALID_AMBIGUOUS_UNIT.
    - Sinon → validation_status = VALID.
-5. Tu réponds UNIQUEMENT le JSON, sans markdown, sans explication.
+   - **DÉSAMBIGUÏSATION QUANTITÉ vs PRIX (CRITIQUE)** : un message peut contenir
+     PLUSIEURS nombres à la fois (ex: "892 kg de maïs, le prix minimum est 250
+     FCFA par kg"). Ne JAMAIS assigner le nombre suivi d'une unité de poids/volume/
+     comptage ("kg", "tonne", "sac", "panier", "tête", "unité"...) au champ
+     `price`, et ne JAMAIS assigner le nombre suivi d'une devise/mot de prix
+     ("FCFA", "franc", "prix", "par kg", "l'unité"...) au champ `quantity`. Si
+     le message contient les deux, les DEUX champs doivent être mis à jour
+     simultanément — jamais un seul au détriment de l'autre. Exemple : "892 kg
+     de maïs, le prix minimum est 250 FCFA par kg" → quantity=892.0, unit="KG",
+     price=250.0 (jamais price=892.0).
+
+6. **NORMALISATION STRICTE DES DATES (OBLIGATOIRE)** :
+   - L'année de référence est **2026**.
+   - Toute date, estimation de disponibilité ou de récolte formulée en langage naturel (ex: "29 octobre", "fin octobre", "demain", "dans 3 jours") doit être **impérativement convertie au format ISO standard : YYYY-MM-DD**.
+   - `estimated_available_at` : Date de disponibilité estimée pour l'acheteur (ex: "disponible le 29 octobre" ou "prêt le 29 oct" → "2026-10-29").
+   - `expected_harvest_date` : Date prévue pour la récolte physique (ex: "récolte prévue en octobre" → "2026-10-15" (milieu de mois par défaut si imprécis)).
+   - N'envoie JAMAIS de texte libre ou de noms de mois écrits en toutes lettres dans ces champs. Si non spécifié ou impossible à déterminer, mets `null`.
+
+7. Tu réponds UNIQUEMENT le JSON, sans markdown, sans explication.
 
 EXEMPLES OBLIGATOIRES (FORMAT STRICT) :
-Input: "50kg de patates"
-Output: {"product": "patates", "quantity": 50.0, "unit": "KG", "validation_status": "VALID"}
+Input: "50kg de patates pour le 29 octobre"
+Output: {
+  "interpreted_event": "NEW_TASK",
+  "detected_intent": "DECLARE_CROP_CYCLE",
+  "interpreter_confidence": 0.95,
+  "validation_status": "VALID",
+  "extracted_entities": {
+      "product": "patates",
+      "quantity": 50.0,
+      "unit": "KG",
+      "price": null,
+      "estimated_available_at": "2026-10-29",
+      "expected_harvest_date": null,
+      "zone": null,
+      "selection_index": null,
+      "selected_value": null,
+      "movement_type": null,
+      "reason": null
+  }
+}
 
 Input: "20 tomates"
-Output: {"product": "tomates", "quantity": 20.0, "unit": null, "validation_status": "INVALID_MISSING_UNIT"}
+Output: {
+  "interpreted_event": "NEW_TASK",
+  "detected_intent": "DECLARE_CROP_CYCLE",
+  "interpreter_confidence": 0.85,
+  "validation_status": "INVALID_MISSING_UNIT",
+  "extracted_entities": {
+      "product": "tomates",
+      "quantity": 20.0,
+      "unit": null,
+      "price": null,
+      "estimated_available_at": null,
+      "expected_harvest_date": null,
+      "zone": null,
+      "selection_index": null,
+      "selected_value": null,
+      "movement_type": null,
+      "reason": null
+  }
+}
 """)
 
 

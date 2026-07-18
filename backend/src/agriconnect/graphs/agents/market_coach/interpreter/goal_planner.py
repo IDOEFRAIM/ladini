@@ -445,6 +445,24 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
                 **_purge_transaction_state(),
                 "working_memory": _lock(new_goal),
             }, new_goal)
+        if td.allow_interrupt and new_goal and new_goal == current_goal:
+            # Same goal, new entities: user is mid-confirmation for one
+            # instance of this goal (e.g. BUYER_REQUEST "poulets") and just
+            # re-triggered the SAME goal with DIFFERENT entities ("je veux
+            # des poussins"). `new_goal != current_goal` above is False so
+            # this never restarted — the stale payload survived and the
+            # recap kept showing the old product forever. Purge the
+            # transaction so the freshly extracted entities populate a
+            # clean slate instead of merging onto an already-confirmed-
+            # looking recap.
+            return _with_goal_metadata({
+                "status": "PLANNING",
+                "current_goal": new_goal,
+                "goal_status": "ACTIVE",
+                "interruption_detected": True,
+                **_purge_transaction_state(),
+                "working_memory": _lock(new_goal),
+            }, new_goal)
         updates["current_goal"] = current_goal
         updates["response_strategy"] = "CLARIFICATION"
         updates["status"] = "WAITING_INPUT"

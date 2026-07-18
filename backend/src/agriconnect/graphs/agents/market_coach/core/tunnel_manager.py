@@ -61,6 +61,15 @@ HARD_EXPECTED_INPUTS: FrozenSet[str] = frozenset({
     "OTP_CODE",
 })
 
+#: Subset of HARD_EXPECTED_INPUTS that must NEVER be interrupted, under any
+#: circumstance (payment/security codes). CONFIRMATION is deliberately
+#: excluded: a user saying "non, je veux X à la place" mid-recap is normal
+#: conversation, not noise — see ALWAYS_UNBREAKABLE_INPUTS usage below.
+ALWAYS_UNBREAKABLE_INPUTS: FrozenSet[str] = frozenset({
+    "OTP",
+    "OTP_CODE",
+})
+
 
 # ---------------------------------------------------------------------------
 # TunnelDecision — result object
@@ -163,13 +172,19 @@ class TunnelManager:
                 stay_in_tunnel=True, allow_interrupt=False, reason="slot_event"
             )
 
-        # Hard slots cannot be interrupted at all.
-        if is_blocking_slot(exp_upper) or exp_upper in HARD_EXPECTED_INPUTS:
+        # Truly unbreakable slots (payment/security codes) — never
+        # interruptible, not even by a critical intent or high confidence.
+        if exp_upper in ALWAYS_UNBREAKABLE_INPUTS:
             return TunnelDecision(
-                stay_in_tunnel=True, allow_interrupt=False, reason="hard_slot"
+                stay_in_tunnel=True, allow_interrupt=False, reason="always_unbreakable"
             )
 
-        # Critical navigation intents always break through.
+        # Critical navigation intents always break through — including hard
+        # slots like CONFIRMATION. Checked BEFORE the hard-slot gate below:
+        # otherwise a broken/empty confirmation recap traps the user forever,
+        # since CONFIRMATION used to be blocked unconditionally regardless of
+        # intent or confidence (bug fixed 2026-07-17, see
+        # [[market-coach-turn-boundary-state]]).
         if intent_upper in self._critical:
             logger.info(
                 "[TunnelManager] Critical intent '%s' breaks tunnel '%s'",
@@ -178,6 +193,24 @@ class TunnelManager:
             )
             return TunnelDecision(
                 stay_in_tunnel=False, allow_interrupt=True, reason="critical_intent"
+            )
+
+        # Remaining hard slots (CONFIRMATION, or a custom blocking slot):
+        # only a high-confidence INTERRUPTION/NEW_TASK can break through —
+        # never silently, but never unconditionally either.
+        if is_blocking_slot(exp_upper) or exp_upper in HARD_EXPECTED_INPUTS:
+            if event_upper in {"INTERRUPTION", "NEW_TASK"} and confidence >= self._threshold:
+                logger.info(
+                    "[TunnelManager] Hard slot '%s' interrupted: intent=%s conf=%.2f >= %.2f",
+                    exp_upper, intent_upper, confidence, self._threshold,
+                )
+                return TunnelDecision(
+                    stay_in_tunnel=False,
+                    allow_interrupt=True,
+                    reason="hard_slot_high_confidence",
+                )
+            return TunnelDecision(
+                stay_in_tunnel=True, allow_interrupt=False, reason="hard_slot"
             )
 
         # INTERRUPTION event: honour if confidence meets threshold.

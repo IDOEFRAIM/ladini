@@ -6,6 +6,8 @@ from agriconnect.graphs.agents.market_coach.services.mcp.gateway import FarmGate
 from agriconnect.graphs.agents.market_coach.core.base import (
     _AUTO_FARM_NOTICE,
     MARKET_VALIDATION_CONFIG,
+    FARM_CRITICAL_GOALS,
+    FARM_ID_REQUIRED_GOALS,
 )
 
 logger = get_logger("AgriConnect.MarketCoach.AutoFarm")
@@ -33,7 +35,7 @@ async def ensure_farm_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
     """
 
     goal = (state.get("current_goal") or "").upper()
-    if goal not in FARM_RULES.farm_critical_goals:
+    if goal not in FARM_CRITICAL_GOALS:
         return {}
 
     payload = dict(state.get("transaction_payload") or {})
@@ -50,7 +52,7 @@ async def ensure_farm_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
         return {}
 
     is_read_intent = goal in FARM_RULES.read_optional_farm
-    is_write_intent = goal in FARM_RULES.write_requires_farm
+    is_write_intent = goal in FARM_RULES.write_requires_farm or goal in FARM_ID_REQUIRED_GOALS
     updates: Dict[str, Any] = {"farm_creation_attempted": True}
 
     # Short-circuit: check in-memory cache before network call

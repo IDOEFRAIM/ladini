@@ -658,6 +658,25 @@ class MarketRuntime:
         safe_kwargs = {k: v for k, v in kwargs.items() if v is not None}
         safe_kwargs = _ascii_fold_value(safe_kwargs)
 
+        # CORRECTIF TRANSPORT (voir bind_user) : en production, MCP_DB_TRANSPORT
+        #="stdio" — le serveur DB tourne dans un PROCESSUS SÉPARÉ (db_server.py).
+        # Le `mcp_context_scope` posé ci-dessous (contextvar) ne vit que dans CE
+        # processus-ci et ne traverse JAMAIS la frontière stdio : côté serveur,
+        # `AgriDBMCPServer.call_tool` ne voit QUE les clés JSON envoyées dans
+        # `safe_kwargs`. Sans un identifiant DANS ces kwargs, l'identité y est
+        # introuvable même si `bind_user()` a été appelé ici. On injecte donc
+        # `_caller_phone` — un nom sentinelle qui ne collisionne avec AUCUN
+        # paramètre métier réel — pour que l'identité traverse le fil. Le serveur
+        # le retire TOUJOURS avant d'invoquer la méthode DB (jamais un TypeError
+        # pour les tools qui n'acceptent pas `phone`). Voir runtime.py:call_tool.
+        if self._bound_phone and not any(
+            k in safe_kwargs for k in (
+                "phone", "user_phone", "buyer_phone", "customer_phone",
+                "producer_id", "buyer_id", "user_id",
+            )
+        ):
+            safe_kwargs["_caller_phone"] = self._bound_phone
+
         request_id = str(uuid.uuid4())[:8]
         try:
             context_manager = self._context_scope(safe_kwargs)

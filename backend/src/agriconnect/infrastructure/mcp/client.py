@@ -75,6 +75,14 @@ class MCPTransportConfig:
         if transport == "http":
             base_url = getattr(settings, "MCP_DB_HTTP_URL", "")
             if not base_url:
+                # Fallback : dérive l'URL du daemon HTTP MCP depuis
+                # MCP_DB_SERVER_HOST/MCP_DB_SERVER_PORT (les mêmes valeurs que
+                # protocols/mcp/servers/http_server.py utilise pour son bind
+                # par défaut) — évite de dupliquer la config host/port.
+                host = getattr(settings, "MCP_DB_SERVER_HOST", "") or "localhost"
+                port = getattr(settings, "MCP_DB_SERVER_PORT", None) or 8003
+                base_url = f"http://{host}:{port}"
+            if not base_url:
                 raise ValueError("MCP_DB_HTTP_URL must be configured for http transport")
             return cls(
                 kind="http",

@@ -68,7 +68,11 @@ def _derive_context_identity(payload: dict[str, Any]) -> FarmerContext | None:
         return ""
 
     user_id = _pick("user_id", "producer_id", "buyer_id", "farmer_id")
-    phone = _pick("phone", "user_phone", "phone_number", "buyer_phone", "customer_phone")
+    # ``_caller_phone`` : sentinelle injectée par MarketRuntime.call_db côté
+    # orchestrateur pour transporter l'identité À TRAVERS la frontière stdio
+    # (processus séparé — les contextvars ne traversent pas). Jamais un vrai
+    # paramètre métier ; toujours retiré des args avant l'appel réel plus bas.
+    phone = _pick("phone", "user_phone", "phone_number", "buyer_phone", "customer_phone", "_caller_phone")
     session_id = _pick("session_id", "request_id")
     if not user_id and not phone:
         return None
@@ -319,6 +323,10 @@ class AgriDBMCPServer:
 
             policy = get_execution_policy()
             sanitized_args = policy.sanitize_arguments(full_args)
+            # `_caller_phone` n'est JAMAIS un paramètre métier réel — retiré
+            # inconditionnellement pour ne jamais faire planter un tool dont la
+            # signature ne l'accepte pas (ex: add_stock(farm_id, item_name, ...)).
+            sanitized_args.pop("_caller_phone", None)
 
             # 3. Preflight security scan
             await self._run_preflight(name, sanitized_args)

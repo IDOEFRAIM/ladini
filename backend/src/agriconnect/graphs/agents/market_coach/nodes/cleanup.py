@@ -75,7 +75,7 @@ async def post_response_cleanup(state: Dict[str, Any], mc_runtime: Any) -> Dict[
         preserved = set(_VOLATILE_WORKING_KEYS) if keep_selection_channel else set()
         for key in _VOLATILE_WORKING_KEYS:
             if key not in preserved:
-                working.pop(key, None)
+                working[key] = None
         patch["working_memory"] = working
 
     if not keep_selection_channel:

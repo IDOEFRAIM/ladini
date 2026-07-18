@@ -15,16 +15,34 @@ _DISAMBIGUATION_CONFIDENCE_THRESHOLD = 0.85
 
 
 def _detect_disambiguation_candidates(text_lower: str, role_upper: str | None = None) -> Optional[Dict[str, Any]]:
-    """Return the first INTENT_DISAMBIGUATION entry matching lexical hints for the active role."""
+    """Return the INTENT_DISAMBIGUATION entry with the MOST SPECIFIC matching hint.
+
+    Picking the first dict entry with any substring match (declaration order)
+    lets a short generic hint ("suivre") shadow a longer, far more specific
+    hint declared later ("suivre mes appels d'offres") — e.g. "Suivre mes
+    appels d'offre" matched ORDER_TRACKING_INTENT's generic "suivre" before
+    ever reaching AUCTION_TRACKING_INTENT's exact phrase, sending the buyer
+    to the wrong menu (commandes instead of enchères). Scoring by the
+    longest matched hint across ALL entries makes specificity win regardless
+    of declaration order.
+    """
     active_role = (role_upper or "").upper().strip()
+    best_entry: Optional[Dict[str, Any]] = None
+    best_key: Optional[str] = None
+    best_len = 0
     for key, entry in INTENT_DISAMBIGUATION.items():
         hints = entry.get("lexical_hints") or []
         allowed_roles = entry.get("roles") or []
         if allowed_roles and active_role and active_role not in {r.upper() for r in allowed_roles}:
             continue
         for hint in hints:
-            if hint and str(hint).lower() in text_lower:
-                return {"id": key, **entry}
+            hint_lower = str(hint or "").lower()
+            if hint_lower and hint_lower in text_lower and len(hint_lower) > best_len:
+                best_len = len(hint_lower)
+                best_entry = entry
+                best_key = key
+    if best_entry is not None:
+        return {"id": best_key, **best_entry}
     return None
 
 

@@ -549,7 +549,7 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
                 "bids_menu",
                 "generic_menu",
             ):
-                wm_reset.pop(key, None)
+                wm_reset[key] = None
             success_state["working_memory"] = wm_reset
 
             if isinstance(result.get("mapping"), dict):

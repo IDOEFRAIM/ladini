@@ -19,9 +19,12 @@ from agriconnect.core.settings import settings
 router = APIRouter()
 logger = logging.getLogger("AgriConnect.TwilioWebhook")
 
-# 1. Initialisation de Redis (à configurer avec tes variables d'environnement en prod)
-# decode_responses=True permet d'obtenir des strings au lieu de bytes
-redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+# 1. Initialisation de Redis — lit settings.REDIS_URL (env var en prod).
+# Le défaut de settings.REDIS_URL ("redis://localhost:6379/0") préserve le
+# comportement local/dev si la variable n'est pas définie ; en prod, définir
+# REDIS_URL (ou VALKEY_ENDPOINT via un futur ajustement) pointe ce client vers
+# le vrai Redis managé au lieu d'un localhost qui n'existe pas sur ce process.
+redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
 def send_wait_message(phone_number: str):

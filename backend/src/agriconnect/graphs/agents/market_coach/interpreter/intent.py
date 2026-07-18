@@ -875,16 +875,35 @@ INTENT_DOMAIN = {k: ("STOCK"     if k.startswith("STOCK_")       else
 # =======================================================================
 INTENT_DISAMBIGUATION = {
     # "J'ai 300 poussins / 5 sacs / 100kg de mil" → state declaration
+    #
+    # 3ᵉ voie ajoutée (2026-07-17) : un producteur qui déclare des POUSSINS,
+    # veaux, semis, jeunes plants... n'a RIEN de vendable maintenant — c'est
+    # une PRODUCTION FUTURE avec une date de disponibilité. Router ça vers
+    # STOCK_REGISTER_HARVEST (table Stock, aucune date de dispo) empêche tout
+    # acheteur de savoir QUAND ce sera prêt — Stock ne porte pas cette notion,
+    # contrairement à MarketOffer (estimated_available_at/expected_harvest_date,
+    # preorder_enabled). Voir [[future-production-preorder-loop]].
     "STOCK_OR_SALES_DECLARATION": {
-        "candidates": ["STOCK_REGISTER_HARVEST", "SALES_PUBLISH_PRODUCT"],
-        "title": "Comment souhaitez-vous enregistrer ce que vous avez ?",
+        "candidates": ["STOCK_REGISTER_HARVEST", "SALES_PUBLISH_PRODUCT", "DECLARE_CROP_CYCLE"],
+        "title": "Ce que vous avez est-il déjà prêt, ou pas encore ?",
+        "pedagogical_hint": (
+            "💡 Des poussins, jeunes animaux, semis ou plants en cours de croissance "
+            "ne sont PAS encore vendables — choisissez « Production future » pour "
+            "indiquer une date de disponibilité et permettre les précommandes."
+        ),
         "options": [
             ("STOCK_REGISTER_HARVEST",
-             "📦 Suivi privé : ajouter à mon stock interne (pas visible sur le marché)"),
+             "📦 Déjà prêt — suivi privé (ajouter à mon stock interne, pas visible sur le marché)"),
             ("SALES_PUBLISH_PRODUCT",
-             "🛒 Vente publique : publier sur le marché AgriConnect"),
+             "🛒 Déjà prêt — vente publique (publier sur le marché AgriConnect maintenant)"),
+            ("DECLARE_CROP_CYCLE",
+             "⏳ Pas encore prêt — production future (précisez une date de disponibilité, précommandable)"),
         ],
-        "lexical_hints": ["j'ai", "j ai", "récolte", "recolte", "disponible", "en stock", "stocké"],
+        "lexical_hints": [
+            "j'ai", "j ai", "récolte", "recolte", "disponible", "en stock", "stocké",
+            "poussin", "poussins", "veau", "veaux", "agneau", "agneaux", "chevreau",
+            "semis", "jeune plant", "jeunes plants", "en cours de croissance",
+        ],
     },
     # "J'ai vendu 100kg" — already happened
     "STOCK_OR_SALE_RECORDING": {

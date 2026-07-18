@@ -26,7 +26,7 @@ def _append_corrections(state: MarketAgentState, response: Dict[str, Any]) -> Di
         working = state.get("working_memory") or {}
         if working.get("recent_corrections"):
             working = dict(working)
-            working.pop("recent_corrections", None)
+            working["recent_corrections"] = None
             response["working_memory"] = working
         return response
     working = state.get("working_memory") or {}
@@ -59,7 +59,7 @@ def _append_corrections(state: MarketAgentState, response: Dict[str, Any]) -> Di
         acknowledgement = "\n\n" + "\n".join(parts)
         response["final_response"] = f"{response.get('final_response', '')}{acknowledgement}"
         working = dict(working)
-        working.pop("recent_corrections", None)
+        working["recent_corrections"] = None
         response["working_memory"] = working
     return response
 
@@ -497,6 +497,43 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
             except Exception:
                 return text
 
+        def _format_future_cycle_line(cycle: Dict[str, Any]) -> str:
+            """Ligne descriptive pour un MarketOffer futur (culture/élevage).
+
+            Utilise les vraies clés renvoyées par ``get_stocks``
+            (product_label/species/display_label, available_quantity, unit,
+            price_per_unit, expected_harvest_date/estimated_available_at,
+            preorder_enabled) — un simple statut générique n'aide pas le
+            producteur à identifier son lot.
+            """
+            label = (
+                cycle.get("display_label")
+                or cycle.get("product_label")
+                or cycle.get("species")
+                or "Production future"
+            )
+            production_type = str(cycle.get("production_type") or "CROP").upper()
+            emoji = "🐄" if production_type == "LIVESTOCK" else "🌱"
+            status = (cycle.get("status") or "EN PRÉPARATION").upper()
+
+            details: List[str] = []
+            qty = cycle.get("available_quantity")
+            unit = str(cycle.get("unit") or "").upper()
+            if qty not in (None, ""):
+                details.append(f"{_fmt_num(qty)} {unit}".strip())
+            price = cycle.get("price_per_unit")
+            if price not in (None, ""):
+                details.append(f"{_fmt_num(price)} FCFA/{unit}".strip())
+            harvest = _fmt_date(cycle.get("expected_harvest_date") or cycle.get("estimated_available_at"))
+            if harvest:
+                details.append(f"disponible le {harvest}")
+            if cycle.get("preorder_enabled"):
+                details.append("précommande active")
+
+            details_text = " | ".join(details)
+            suffix = f" — {details_text}" if details_text else ""
+            return f"{emoji} {label} — statut {status}{suffix}"
+
         def _build_list_menu_component(title: str, options: List[Dict[str, str]], mode: str, count: int) -> Dict[str, Any]:
             metadata = {"mode": mode, "count": count}
             if goal:
@@ -542,11 +579,15 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
 
                 cycles = farm_info.get("upcoming_cycles") or []
                 for cycle in cycles[:2]:
-                    crop_type = cycle.get("crop_type") or "Culture"
-                    harvest = _fmt_date(cycle.get("expected_harvest_date"))
-                    status = (cycle.get("status") or "EN PRÉPARATION").upper()
-                    harvest_text = f" récolte prévue le {harvest}" if harvest else ""
-                    lines.append(f"    🌱 {crop_type} — statut {status}{harvest_text}")
+                    lines.append(f"  {index_counter}️⃣ {_format_future_cycle_line(cycle)}")
+                    stock_id = cycle.get("offer_id") or cycle.get("market_offer_id") or farm_id
+                    label_item = cycle.get("display_label") or cycle.get("product_label") or cycle.get("species") or "Production future"
+                    options.append({
+                        "index": str(index_counter),
+                        "label": f"{farm_name} - {label_item}",
+                        "value": str(stock_id),
+                    })
+                    index_counter += 1
                 if len(cycles) > 2:
                     lines.append(f"    … +{len(cycles) - 2} autre(s) cycle(s) en préparation")
 
@@ -594,7 +635,7 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
             for raw_cycle in cycles:
                 if not isinstance(raw_cycle, dict):
                     continue
-                cycle_id = str(raw_cycle.get("cycle_id") or raw_cycle.get("id") or len(deduped))
+                cycle_id = str(raw_cycle.get("offer_id") or raw_cycle.get("cycle_id") or raw_cycle.get("id") or len(deduped))
                 if cycle_id in deduped:
                     continue
                 deduped[cycle_id] = raw_cycle
@@ -602,12 +643,8 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
                 return ""
             lines = ["🌱 *Cultures en cours / futures récoltes :*"]
             for cycle in deduped.values():
-                crop_type = cycle.get("crop_type") or "Culture"
                 farm_name = cycle.get("farm_name") or "ferme"
-                status = (cycle.get("status") or "EN PRÉPARATION").upper()
-                harvest = _fmt_date(cycle.get("expected_harvest_date"))
-                harvest_text = f" — récolte prévue le {harvest}" if harvest else ""
-                lines.append(f"• {crop_type} ({farm_name}) — statut {status}{harvest_text}")
+                lines.append(f"• {_format_future_cycle_line(cycle)} ({farm_name})")
             return "\n".join(lines)
 
         def _render_flat_list(items: List[Dict[str, Any]]) -> tuple[str, List[Dict[str, str]]]:
