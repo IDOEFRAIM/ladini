@@ -305,6 +305,19 @@ def _to_float(value: Any) -> Optional[float]:
     except (ValueError, TypeError):
         return None
 
+# Nœuds d'infrastructure (aucun raisonnement métier) — le goal routé vers le
+# LLM_ROUTER pour ces nœuds est leur PROPRE identité de stage, pas le goal
+# métier de `state["current_goal"]` (qui reste le MÊME intent, ex:
+# BUYER_REQUEST, sur TOUS les nœuds d'un tour — l'utiliser ici router ait le
+# même modèle pour security_moderation ET goal_planner, ce qui annulerait
+# tout l'intérêt du routage). Clés alignées sur `settings.ROUTING_MAP`.
+_FAST_PATH_NODE_LABELS: Dict[str, str] = {
+    "input_normalizer": "INPUT_NORMALIZATION",
+    "security_moderation": "SECURITY_MODERATION",
+    "state_cleaner": "STATE_CLEANER",
+}
+
+
 def _safe_node(fn: Callable[..., Awaitable[Dict[str, Any]]], name: str) -> Callable[..., Awaitable[Dict[str, Any]]]:
     """Décorateur pour sécuriser les noeuds LangGraph et tracer leur durée."""
 
@@ -313,6 +326,12 @@ def _safe_node(fn: Callable[..., Awaitable[Dict[str, Any]]], name: str) -> Calla
         goal = str(state.get("current_goal") or "").upper()
         status = str(state.get("status") or "").upper()
         event = str(state.get("interpreted_event") or "").upper()
+        # Met à jour le goal courant du runtime AVANT d'exécuter le nœud —
+        # consommé par `MarketRuntime.model_answer` (llm_router). Zéro
+        # changement requis dans les nœuds eux-mêmes : c'est le SEUL point de
+        # passage commun à tous les nœuds du graphe.
+        fast_label = _FAST_PATH_NODE_LABELS.get(name.strip().lower())
+        mc_runtime.set_current_goal(fast_label or goal)
         start_ts = time.time()
         logger.info(
             "NODE_START | node=%s | goal=%s | status=%s | event=%s",
@@ -509,7 +528,9 @@ class MarketRuntime:
         mcp_session: Any = None,
         db_service: Any = None,
     ):
-        self.llm = llm_client or get_llm()
+        # Override explicite (tests / appelants legacy) — sinon `self.llm`
+        # (property ci-dessous) retombe sur le cache module de `get_llm()`.
+        self._llm_override: Any = llm_client
 
         # If orchestrator already provides a session/client, use it directly.
         self.db_client = mcp_session
@@ -518,12 +539,51 @@ class MarketRuntime:
             self.transport_config = transport_config or self._load_transport_from_settings()
 
         self.security = SecurityService(self.llm)
-        self.model_answer = "llama-3.3-70b-versatile"
         self.db_service = db_service
+        # Goal courant du tour — mis à jour automatiquement par `_safe_node`
+        # (voir plus bas) à chaque nœud du graphe, SANS qu'aucun nœud n'ait à
+        # le faire lui-même. Pilote `model_answer` (routage LLM par goal).
+        self.current_goal: Optional[str] = None
         # Téléphone de l'utilisateur courant, lié une fois par tour via
         # `bind_user()` (orchestrator). Filet de sécurité pour la dérivation
         # d'identité MCP — voir `_build_context_identity`.
         self._bound_phone: Optional[str] = None
+
+    @property
+    def llm(self) -> Any:
+        """Client LLM (Groq), mis en cache au niveau module par `get_llm()`.
+
+        Jamais ré-initialisé, quel que soit le modèle demandé : pour Groq, le
+        modèle est un paramètre PAR APPEL de `chat.completions.create(...)`,
+        pas une propriété du client — inutile (et coûteux) d'instancier un
+        client différent par modèle. Un override explicite passé au
+        constructeur (tests, appelants legacy) reste prioritaire.
+        """
+        if self._llm_override is not None:
+            return self._llm_override
+        return get_llm()
+
+    @property
+    def model_answer(self) -> str:
+        """Modèle Groq à utiliser pour l'appel LLM du tour en cours.
+
+        Résolu dynamiquement selon `self.current_goal` via
+        `llm_router.get_model_for_goal()` — jamais figé au constructeur.
+        Tous les sites d'appel existants font
+        `getattr(mc_runtime, "model_answer", ...)`, donc ce passage en
+        property est totalement transparent (aucun changement de nœud requis).
+        """
+        from agriconnect.graphs.agents.market_coach.llm_router import get_model_for_goal
+        return get_model_for_goal(self.current_goal)
+
+    def set_current_goal(self, goal: Optional[str]) -> None:
+        """Met à jour le goal courant, consommé par `model_answer`.
+
+        Appelé automatiquement par `_safe_node` (wrapper unique de tous les
+        nœuds du graphe) — aucun nœud n'a besoin de l'appeler explicitement.
+        """
+        cleaned = str(goal or "").strip().upper()
+        self.current_goal = cleaned or None
 
     def bind_user(self, phone: Optional[str]) -> None:
         """Lie le téléphone de l'utilisateur courant au runtime pour tout le tour.

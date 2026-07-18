@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import ClassVar
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -36,8 +36,35 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "groq"
     AGRICONNECT_APIKEY: str = ""
     GROQ_API_KEY: str = ""
+    # Modèle rapide/économique — nœuds d'infrastructure (normalisation,
+    # modération, nettoyage d'état) qui n'ont besoin d'aucun raisonnement.
     LLM_MODEL: str = "llama-3.1-8b-instant"
+    # Modèle de raisonnement — tout goal métier complexe (interprétation
+    # d'intent, planification de goal, génération de réponse). Utilisé par
+    # `graphs/agents/market_coach/llm_router.py` via ROUTING_MAP ci-dessous.
+    LLM_MODEL_REASONING: str = "llama-3.3-70b-versatile"
     LLM_TEMPERATURE: float = 0.0
+
+    # Table de routage goal -> modèle Groq, consommée par
+    # `llm_router.get_model_for_goal()`. Clé "__default__" = modèle utilisé
+    # pour tout goal non listé explicitement (raisonnement métier). Ne JAMAIS
+    # coder de nom de modèle en dur ailleurs que LLM_MODEL/LLM_MODEL_REASONING
+    # ci-dessus — cette table s'y réfère, elle ne duplique pas les valeurs.
+    ROUTING_MAP: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _build_routing_map(self) -> "Settings":
+        """Construit ROUTING_MAP depuis LLM_MODEL/LLM_MODEL_REASONING si elle
+        n'a pas été fournie explicitement (ex: override JSON via env var).
+        """
+        if not self.ROUTING_MAP:
+            self.ROUTING_MAP = {
+                "INPUT_NORMALIZATION": self.LLM_MODEL,
+                "SECURITY_MODERATION": self.LLM_MODEL,
+                "STATE_CLEANER": self.LLM_MODEL,
+                "__default__": self.LLM_MODEL_REASONING,
+            }
+        return self
 
     @property
     def llm_api_key(self) -> str:
@@ -48,7 +75,7 @@ class Settings(BaseSettings):
             # allow direct env override for interactive sessions
             key = os.getenv("GROQ_API_KEY") or os.getenv("AGRICONNECT_APIKEY") or ""
         return key
-        
+
     # --- Azure OpenAI (utilisé si LLM_PROVIDER=azure) ---
     AZURE_OPENAI_API_KEY: str = ""
     AZURE_OPENAI_ENDPOINT: str = ""
@@ -95,7 +122,7 @@ class Settings(BaseSettings):
     MCP_DB_STARTUP_RETRY_DELAY_SEC: float = 1.5
     MCP_DB_SERVER_HOST: str = "localhost"
     MCP_DB_SERVER_PORT: int = 8003
-    MCP_DB_TRANSPORT: str = "stdio"
+    MCP_DB_TRANSPORT: str = "http"
     MCP_DB_STDIO_ENTRYPOINT: str = str((Path(__file__).resolve().parent.parent.parent) / "agriconnect" / "protocols" / "mcp" / "servers" / "db_server.py")
     MCP_DB_STDIO_CWD: str = str(Path(__file__).resolve().parent.parent.parent.parent)
     MCP_DB_STDIO_PYTHON: str = ""

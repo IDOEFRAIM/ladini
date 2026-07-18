@@ -16,10 +16,10 @@ from agriconnect.domain.models import (
     OrderReminder,
     Payment,
 )
-from agriconnect.domain.dto.orders import (
-    OrderModel,
-    PaymentModel,
-    OrderReminderModel,
+from agriconnect.domain.orders.dto import (
+    OrderDTO as OrderModel,
+    PaymentDTO as PaymentModel,
+    OrderReminderDTO as OrderReminderModel,
 )
 from agriconnect.services.database.base_service import BaseService, transactional
 

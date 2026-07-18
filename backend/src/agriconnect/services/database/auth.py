@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional
 
 from sqlalchemy import update, func
 from sqlalchemy.exc import IntegrityError
-from agriconnect.domain.models import User, Producer
+from agriconnect.domain.identity.models import User, Producer
 from .common import clean_text, normalize_phone
 
 logger = logging.getLogger("AgriConnect.AuthMixin")

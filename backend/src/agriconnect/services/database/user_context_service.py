@@ -21,7 +21,7 @@ from agriconnect.domain.models import (
     TrustScore,
     AgentContextMemory,
 )
-from agriconnect.domain.dto.identity import UserContextModel, TrustScoreModel
+from agriconnect.domain.identity.dto import UserContextDTO as UserContextModel, TrustScoreDTO as TrustScoreModel
 from agriconnect.services.database.base_service import BaseService, transactional
 from agriconnect.services.database.common import normalize_phone
 

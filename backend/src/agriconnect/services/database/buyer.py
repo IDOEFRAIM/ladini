@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload, joinedload
 
 
 from .common import normalize_phone
+from .search import fuzzy_match
 from .base import BaseMixin
 # Import des modèles alignés sur le schéma
 from agriconnect.domain.models import (
@@ -235,7 +236,9 @@ class BuyerMixin(BaseMixin):
                 .outerjoin(User, User.id == Producer.user_id)
                 .outerjoin(Zone, Zone.id == Producer.zone_id)
                 .where(
-                    Product.name.ilike(f"%{clean_product}%"),
+                    # Recherche floue trigram (« tomte » → « tomate ») au lieu du
+                    # substring strict qui bloquait l'agent sur une faute de frappe.
+                    fuzzy_match(Product.name, clean_product),
                     Product.quantity_for_sale > 0,
                 )
                 .order_by("priority", Product.price.asc())
@@ -263,8 +266,8 @@ class BuyerMixin(BaseMixin):
                 .outerjoin(Zone, Zone.id == Producer.zone_id)
                 .where(
                     or_(
-                        MarketOffer.product_label.ilike(f"%{clean_product}%"),
-                        MarketOffer.species.ilike(f"%{clean_product}%"),
+                        fuzzy_match(MarketOffer.product_label, clean_product),
+                        fuzzy_match(MarketOffer.species, clean_product),
                     ),
                     MarketOffer.is_public.is_(True),
                     MarketOffer.preorder_enabled.is_(True),
@@ -810,14 +813,17 @@ class BuyerMixin(BaseMixin):
                 }
 
             # Stock insuffisant → recherche d'alternatives (résilience).
+            # Recherche floue trigram : ratisse plus large que le substring
+            # strict pour proposer de vraies alternatives (haute sensibilité —
+            # mieux vaut un faux positif que zéro fallback pour l'agent).
             alt_rows = await current_session.execute(
                 select(Product.id, Product.name, Product.price, Product.quantity_for_sale, Product.unit)
                 .where(
-                    Product.name.ilike(f"%{product.name}%"),
+                    fuzzy_match(Product.name, product.name),
                     Product.id != product.id,
                     Product.quantity_for_sale >= requested,
                 )
-                .order_by(Product.price.asc())
+                .order_by(similarity_rank(Product.name, product.name), Product.price.asc())
                 .limit(3)
             )
             fallback = [

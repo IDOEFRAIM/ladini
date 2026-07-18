@@ -9,7 +9,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agriconnect.domain.models import Product, MarketOffer
-from agriconnect.domain.dto.catalog import ProductModel, MarketOfferModel
+from agriconnect.domain.catalog.dto import ProductDTO as ProductModel, MarketOfferDTO as MarketOfferModel
 from agriconnect.services.database.base_service import BaseService, transactional
 
 

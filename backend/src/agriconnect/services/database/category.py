@@ -10,6 +10,7 @@ from decimal import Decimal
 from sqlalchemy import select, and_, or_, func, desc, cast, Numeric, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from agriconnect.domain.models import Product, Category, SubCategory, Producer, User, Zone
+from .search import fuzzy_match, similarity_rank
 
 logger = logging.getLogger("AgriConnect.DatabaseService.Public")
 
@@ -124,12 +125,15 @@ class PublicProductMixin:
                 except ValueError:
                     stmt = stmt.where(Product.category_label.ilike(f"%{clean_cat}%"))
 
-            # Recherche plein texte floue (ILIKE) nettoyée
-            if search and str(search).strip():
-                stmt = stmt.where(Product.name.ilike(f"%{str(search).strip()}%"))
-
-            # Pagination et exécution
-            stmt = stmt.order_by(desc(Product.created_at)).limit(limit).offset(offset)
+            # Recherche floue trigram (tolérante aux fautes : « tomte » → « tomate »).
+            # Remplace l'ancien ILIKE substring strict qui bloquait l'agent sur la
+            # moindre faute de frappe. Tri par pertinence quand un terme est fourni.
+            search_term = str(search).strip() if search else ""
+            if search_term:
+                stmt = stmt.where(fuzzy_match(Product.name, search_term))
+                stmt = stmt.order_by(similarity_rank(Product.name, search_term)).limit(limit).offset(offset)
+            else:
+                stmt = stmt.order_by(desc(Product.created_at)).limit(limit).offset(offset)
             result = await current_session.execute(stmt)
             products = result.scalars().all()
             
@@ -176,10 +180,12 @@ class PublicProductMixin:
             )
 
             if zone_query and zone_query.strip():
+                zone_query_clean = zone_query.strip()
                 stmt = (
                     stmt.join(Producer, Product.producer_id == Producer.id)
                     .join(Zone, Producer.zone_id == Zone.id)
-                    .where(Zone.name.ilike(f"%{zone_query.strip()}%"))
+                    # Référentiel logistique : recherche floue trigram.
+                    .where(fuzzy_match(Zone.name, zone_query_clean))
                 )
 
             stmt = stmt.group_by(SubCategory.name).order_by(SubCategory.name)

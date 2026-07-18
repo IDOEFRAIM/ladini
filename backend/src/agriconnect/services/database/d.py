@@ -27,6 +27,13 @@ from agriconnect.services.database.moderation import ModerationMixin
 # Une session ouverte ici est visible depuis OrderService/UserContextService/ProductService
 # et vice-versa — un seul pool, une seule transaction, pas de deadlock.
 from agriconnect.services.database.base_service import db_session_ctx, _safe_rollback
+# Sanitisation centralisée : neutralise toute fuite d'info technique vers l'agent.
+from agriconnect.services.database.errors import (
+    SafeDatabaseError,
+    is_safe_business_exception,
+    sanitize_error_message,
+    scrub_error_result,
+)
 
 try:
     import asyncpg  # type: ignore
@@ -176,7 +183,11 @@ class AgriDatabaseService(
                                 await _safe_rollback(new_session)
                             else:
                                 await new_session.commit()
-                        return res
+                        # BARRIÈRE ANTI-FUITE : filet unique côté dispatcher — si un
+                        # mixin a renvoyé un `{"message": str(e)}` technique, on le
+                        # neutralise ici avant qu'il n'atteigne l'agent (idempotent
+                        # sur les messages métier sûrs).
+                        return scrub_error_result(res)
                     except asyncio.CancelledError:
                         # Timeout/annulation (ex: asyncio.wait_for côté MCP) : rollback
                         # protégé pour ne pas rendre une connexion avec tx ouverte.
@@ -195,8 +206,32 @@ class AgriDatabaseService(
                             if session_factory is None:
                                 raise RuntimeError("Sessionmaker indisponible après reinit") from exc
                             continue
-                        self._logger.error("Erreur SQL dans %s: %s", method_name, exc, exc_info=True)
-                        raise
+                        # BARRIÈRE ANTI-FUITE — valve étanche à sens unique :
+                        #
+                        # 1. Exception MÉTIER (ValueError, KeyError, quantité
+                        #    négative, prix nul, produit introuvable...) → NE
+                        #    RIEN CHANGER, re-raise BRUT. Type ET message
+                        #    traversent intacts : l'agent doit savoir
+                        #    PRÉCISÉMENT pourquoi l'action de l'agriculteur/
+                        #    acheteur a échoué pour pouvoir le guider sur
+                        #    WhatsApp (cf. `is_safe_business_exception`).
+                        #
+                        # 2. Exception TECHNIQUE (IntegrityError, asyncpg,
+                        #    timeout, erreur de driver/ORM...) → jamais
+                        #    divulguée telle quelle. Cause réelle journalisée
+                        #    ici avec la stack complète (serveur uniquement) ;
+                        #    on lève `SafeDatabaseError` (message générique)
+                        #    à la place.
+                        if is_safe_business_exception(exc):
+                            self._logger.info(
+                                "Exception métier dans %s (transmise intacte à l'agent): %s",
+                                method_name, exc,
+                            )
+                            raise
+                        self._logger.error("Erreur technique dans %s: %s", method_name, exc, exc_info=True)
+                        raise SafeDatabaseError(
+                            sanitize_error_message(exc, context=method_name)
+                        ) from exc
                     finally:
                         # Reset unique par itération (le token est recréé à chaque tour).
                         db_session_ctx.reset(token)
@@ -229,32 +264,3 @@ class AgriDatabaseService(
 
     class DatabaseServiceError(Exception): pass
     class IntegrityError(DatabaseServiceError): pass
-    
-
-async def te():
-    import time
-    se = AgriDatabaseService()
-    PRODUCER_ID = "0669b8b0-8e8b-4838-81de-aaef50538974"
-
-    session_factory = get_sessionmaker()
-    if session_factory is None:
-        print("❌ Error retrieving market overview: sessionmaker unavailable (init_db non exécuté)")
-        return
-
-    async with session_factory() as session:
-        token = db_session_ctx.set(session)
-        try:
-            try:
-                start = time.time()
-                res = await se.get_zone_by_name(name="Ouagadougou")
-                end = time.time()
-                print(f"Temps:{end-start}")
-                print("✅ Market overview retrieved:", res)
-            except Exception as e:
-                print("❌ Error retrieving market overview:", e)
-        finally:
-            db_session_ctx.reset(token)
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(te())

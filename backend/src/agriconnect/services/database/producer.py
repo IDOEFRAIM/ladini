@@ -28,6 +28,7 @@ from agriconnect.domain.models import (
 )
 from .base import BaseMixin
 from .common import clean_text, positive_float, normalize_phone, clamp_limit
+from .search import fuzzy_match, similarity_rank
 
 logger = logging.getLogger("agriconnect.services.producer_mgmt")
 
@@ -223,11 +224,13 @@ class ProducerMgmtMixin(BaseMixin):
         name_clean = product_name.strip()
 
         try:
-            # 1. Résolution dynamique via les sous-catégories existantes en BD
+            # 1. Résolution dynamique via les sous-catégories existantes en BD —
+            # recherche floue trigram (tolère les fautes de frappe agricoles).
             stmt = (
                 select(Category.name)
                 .join(SubCategory, SubCategory.category_id == Category.id)
-                .where(SubCategory.name.ilike(f"%{name_clean}%"))
+                .where(fuzzy_match(SubCategory.name, name_clean))
+                .order_by(similarity_rank(SubCategory.name, name_clean))
                 .limit(1)
             )
             category_name = await self.session.scalar(stmt)
@@ -478,7 +481,15 @@ class ProducerMgmtMixin(BaseMixin):
                 short_code = product_id[:8].upper()
                 
                 if not sub_category_id:
-                    sub_cat_stmt = select(SubCategory.id).where(SubCategory.name.ilike(f"%{name.strip()}%")).limit(1)
+                    name_clean = name.strip()
+                    # Recherche floue trigram (catalogue) : tolère les fautes de
+                    # frappe du producteur sur le nom de son propre produit.
+                    sub_cat_stmt = (
+                        select(SubCategory.id)
+                        .where(fuzzy_match(SubCategory.name, name_clean))
+                        .order_by(similarity_rank(SubCategory.name, name_clean))
+                        .limit(1)
+                    )
                     sub_category_id = await self.session.scalar(sub_cat_stmt)
                 
                 category_label = (

@@ -9,7 +9,7 @@ from __future__ import annotations
 from logging import getLogger
 from typing import Any
 
-from agriconnect.domain.models import _uuid4
+from agriconnect.domain.orm_base import _uuid4
 
 logger = getLogger("agriconnect.services.database")
 
@@ -22,22 +22,53 @@ def _uuid() -> str:
 import re
 from typing import Any, Optional
 
-def clean_text(value: Any, field: str="efraaaaa", *, required: bool = False, max_length: int = 255) -> Optional[str]:
-    """Nettoyage générique pour les chaînes de caractères."""
+# Caractères de contrôle (hors tab/newline) : neutralisés silencieusement pour
+# éviter qu'un payload agent bruité ne pollue les logs ou les colonnes texte.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def clean_text(value: Any, field: str = "champ", *, required: bool = False, max_length: int = 255) -> Optional[str]:
+    """Nettoyage générique pour les chaînes de caractères.
+
+    Note sécurité : ne protège PAS contre l'injection SQL (inutile — toutes les
+    requêtes passent par l'ORM paramétré). Sert à borner la longueur, retirer
+    les caractères de contrôle et normaliser les espaces avant persistance/log.
+    """
     if value is None:
         if required:
             raise ValueError(f"{field} est obligatoire")
         return None
-    
-    # Conversion en string et nettoyage des espaces blancs extrêmes
-    text = str(value).strip()
-    
+
+    # Conversion en string, retrait des caractères de contrôle, trim.
+    text = _CONTROL_CHARS_RE.sub("", str(value)).strip()
+
     if not text:
         if required:
             raise ValueError(f"{field} ne peut pas être vide")
         return None
-        
+
     return text[:max_length]
+
+
+def escape_like(term: str) -> str:
+    """Échappe les métacaractères LIKE/ILIKE (`%`, `_`, `\\`) d'un terme LITTÉRAL.
+
+    Sans ça, `Product.name.ilike(f"%{term}%")` avec `term="%"` matche TOUTE la
+    table (sur-exposition + full scan = DoS applicatif), et `term="a_b"` traite
+    `_` comme un joker. À utiliser sur tout terme de recherche libre injecté
+    dans un pattern LIKE, combiné à `.ilike(pattern, escape="\\")`.
+
+    NB : ce n'est PAS une protection anti-injection SQL (l'ORM paramètre déjà la
+    valeur) mais une protection contre l'injection de MÉTACARACTÈRES LIKE.
+    """
+    if term is None:
+        return ""
+    return (
+        str(term)
+        .replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
 
 def normalize_phone(phone: Any, required: bool = True) -> str:
     """
@@ -86,42 +117,40 @@ def clamp_limit(value: Any, default: int = 20, maximum: int = 100) -> int:
 	return max(1, min(limit, maximum))
 
 
+# CORRECTIF AUDIT : les DDL étaient (a) NON qualifiés par schéma alors que les
+# tables vivent dans auth/marketplace/governance/intelligence → échec silencieux
+# (le try/except du dispatcher masquait l'erreur), et (b) référençaient
+# `anomalies`, table INEXISTANTE. Qualifiés + extension pg_trgm garantie (requise
+# par la recherche floue trigram, cf. search.py).
+#
+# Périmètre EXCLUSIF (chirurgical, cf. audit) — un index GIN trigram UNIQUEMENT
+# sur les champs textuels descriptifs/catalogue à fort impact métier (tolérance
+# aux fautes de frappe agricoles). AUCUN index trigram sur les champs
+# structurels/d'isolation (phone, id, status, email...) : ces champs restent en
+# égalité stricte, portée par leurs index B-tree usuels (déjà déclarés dans les
+# `__table_args__` des modèles ORM, non dupliqués ici).
+#
+# Note : `auctions.title` n'existe PAS dans le schéma (`Auction` n'a pas de
+# colonne de titre libre) — la recherche produit sur les enchères passe par
+# `sub_categories.name` (déjà indexé ci-dessous), qui est le VRAI champ
+# textuel interrogé par `auction.py` (resolve_sub_category, create_auction,
+# get_auctions, get_price_recommendation).
 PERFORMANCE_INDEX_DDL = (
-	# Auth / Users
-	"CREATE INDEX IF NOT EXISTS ix_users_phone ON users (phone)",
+	# Extension requise pour SIMILARITY / opérateur `%` / index GIN trigram.
+	"CREATE EXTENSION IF NOT EXISTS pg_trgm",
 
-	# Producers / Marketplace
-	"CREATE INDEX IF NOT EXISTS ix_producers_user_id ON producers (user_id)",
-	"CREATE INDEX IF NOT EXISTS ix_producers_zone_id ON producers (zone_id)",
-
-	# Farms
-	"CREATE INDEX IF NOT EXISTS ix_farms_producer_id ON farms (producer_id)",
-	"CREATE INDEX IF NOT EXISTS ix_farms_zone_idx ON farms (zone_id)",
-
-	# Warehouses
-	"CREATE INDEX IF NOT EXISTS ix_warehouses_zone_idx ON warehouses (zone_id)",
-
-	# Products
-	"CREATE INDEX IF NOT EXISTS ix_products_producer_idx ON products (producer_id)",
-	"CREATE INDEX IF NOT EXISTS ix_products_category_idx ON products (category_label)",
-	"CREATE INDEX IF NOT EXISTS ix_products_subcategory_idx ON products (sub_category_id)",
-	"CREATE INDEX IF NOT EXISTS ix_products_price_idx ON products (price)",
-	"CREATE INDEX IF NOT EXISTS ix_products_created_idx ON products (created_at)",
-	"CREATE INDEX IF NOT EXISTS ix_products_name_trgm ON products USING gin (name gin_trgm_ops)",
-
-	# Clients
-	"CREATE INDEX IF NOT EXISTS ix_clients_phone_idx ON clients (phone)",
-	"CREATE INDEX IF NOT EXISTS ix_clients_producer_idx ON clients (producer_id)",
-
-	# Conversations / Agent actions / Telemetry
-	"CREATE INDEX IF NOT EXISTS ix_conversations_user_idx ON conversations (user_id)",
-	"CREATE INDEX IF NOT EXISTS ix_conversations_agent_idx ON conversations (agent_type)",
-	"CREATE INDEX IF NOT EXISTS ix_agent_actions_status_idx ON agent_actions (status)",
-	"CREATE INDEX IF NOT EXISTS ix_agent_actions_batch_idx ON agent_actions (batch_id)",
-
-	# Trust & Anomalies
-	"CREATE INDEX IF NOT EXISTS ix_trust_scores_user_id ON trust_scores (user_id)",
-	"CREATE INDEX IF NOT EXISTS ix_anomalies_zone_idx ON anomalies (zone_id)",
+	# products.name — recherche catalogue (get_public_products, search_products).
+	"CREATE INDEX IF NOT EXISTS ix_products_name_trgm "
+	"ON marketplace.products USING gin (name gin_trgm_ops)",
+	# market_offers.product_label — recherche offres/préventes futures.
+	"CREATE INDEX IF NOT EXISTS ix_market_offers_label_trgm "
+	"ON marketplace.market_offers USING gin (product_label gin_trgm_ops)",
+	# sub_categories.name — résolution produit pour enchères/appels d'offres.
+	"CREATE INDEX IF NOT EXISTS ix_subcategories_name_trgm "
+	"ON governance.sub_categories USING gin (name gin_trgm_ops)",
+	# zones.name — résolution de secteur logistique (livraison, marché local).
+	"CREATE INDEX IF NOT EXISTS ix_zones_name_trgm "
+	"ON governance.zones USING gin (name gin_trgm_ops)",
 )
 
 
@@ -129,6 +158,9 @@ __all__ = [
 	"_uuid",
 	"logger",
 	"clean_text",
+	"escape_like",
+	"normalize_phone",
+	"normalize_uuid",
 	"positive_float",
 	"clamp_limit",
 	"PERFORMANCE_INDEX_DDL",

@@ -7,6 +7,7 @@ from rapidfuzz import fuzz, process
 from sqlalchemy import select, and_, or_, func, update
 from sqlalchemy.orm import aliased
 from .common import normalize_phone
+from .search import fuzzy_match, similarity_rank
 
 # Importation stricte des modèles requis pour le domaine des enchères
 from agriconnect.domain.models import Auction, Bid, SubCategory, Zone, BuyerProfile, User,Producer, Order, Product, Category
@@ -91,11 +92,20 @@ class AuctionMixin(BaseMixin):
 
         
     async def resolve_sub_category(self, name: str) -> Optional[uuid.UUID]:
-        """Recherche floue pour récupérer l'ID d'une sous-catégorie de produit."""
+        """Recherche floue (trigram) pour récupérer l'ID d'une sous-catégorie de produit.
+
+        Tolère les fautes de frappe agricoles (« tomte » → « tomate ») — champ
+        catalogue à fort impact métier, cible explicite de la recherche floue.
+        """
         current_session = self.session
         if not current_session:
             return None
-        stmt = select(SubCategory.id).where(SubCategory.name.ilike(f"%{name.strip()}%")).limit(1)
+        stmt = (
+            select(SubCategory.id)
+            .where(fuzzy_match(SubCategory.name, name))
+            .order_by(similarity_rank(SubCategory.name, name))
+            .limit(1)
+        )
         result = await current_session.execute(stmt)
         return result.scalar()
 
@@ -161,11 +171,12 @@ class AuctionMixin(BaseMixin):
 
             product_query_clean = str(product_query or "").strip()
 
-            # 2. Résolution du produit
+            # 2. Résolution du produit — recherche floue trigram (catalogue,
+            # fort impact métier), triée par pertinence décroissante.
             sub_cat_stmt = (
                 select(SubCategory)
-                .where(SubCategory.name.ilike(f"%{product_query_clean}%"))
-                .order_by(func.length(SubCategory.name).asc())
+                .where(fuzzy_match(SubCategory.name, product_query_clean))
+                .order_by(similarity_rank(SubCategory.name, product_query_clean))
                 .limit(1)
             )
             sub_cat = await current_session.scalar(sub_cat_stmt)
@@ -174,10 +185,13 @@ class AuctionMixin(BaseMixin):
             if not sub_cat:
                 return {"status": "error", "message": f"Produit '{product_query}' inconnu."}
 
-            # 3. Résolution zone
+            # 3. Résolution zone — recherche floue trigram (référentiel logistique).
             if zone_query and zone_query.strip():
                 zone_obj = await current_session.scalar(
-                    select(Zone).where(Zone.name.ilike(f"%{zone_query.strip()}%")).limit(1)
+                    select(Zone)
+                    .where(fuzzy_match(Zone.name, zone_query.strip()))
+                    .order_by(similarity_rank(Zone.name, zone_query.strip()))
+                    .limit(1)
                 )
                 if zone_obj:
                     target_zone_id = zone_obj.id
@@ -397,12 +411,16 @@ class AuctionMixin(BaseMixin):
                         or_(User.phone.is_(None), User.phone != clean_phone)
                     )
 
-            stmt = stmt.where(Auction.status.ilike(status))
+            # `status` est un champ ÉNUMÉRÉ (OPEN/AWARDED/CANCELLED/EXPIRED) — égalité
+            # stricte OBLIGATOIRE, jamais de recherche floue sur un champ structurel.
+            stmt = stmt.where(func.upper(Auction.status) == status.strip().upper())
 
+            # Champs catalogue/référentiel : recherche floue trigram tolérante
+            # aux fautes de frappe agricoles.
             if product_name:
-                stmt = stmt.where(SubCategory.name.ilike(f"%{product_name}%"))
+                stmt = stmt.where(fuzzy_match(SubCategory.name, product_name))
             if zone_name:
-                stmt = stmt.where(Zone.name.ilike(f"%{zone_name}%"))
+                stmt = stmt.where(fuzzy_match(Zone.name, zone_name))
 
             stmt = stmt.where(Auction.deadline > datetime.now())
             stmt = stmt.order_by(Auction.created_at.desc())
@@ -797,16 +815,19 @@ class AuctionMixin(BaseMixin):
                 .join(Category, SubCategory.category_id == Category.id)
                 .outerjoin(Zone, Auction.target_zone_id == Zone.id)
                 .outerjoin(BuyerProfile, Auction.buyer_id == BuyerProfile.id)
-                .where(Auction.status.ilike(status))
+                # `status` énuméré → égalité stricte obligatoire (jamais de flou
+                # sur un champ structurel).
+                .where(func.upper(Auction.status) == status.strip().upper())
                 .where(Auction.deadline > datetime.now())
             )
 
             if scope_effective == "MATCHABLE" and supplied_ids:
                 stmt = stmt.where(Auction.sub_category_id.in_(supplied_ids))
+            # Champs catalogue/référentiel : recherche floue trigram.
             if product_name:
-                stmt = stmt.where(SubCategory.name.ilike(f"%{product_name}%"))
+                stmt = stmt.where(fuzzy_match(SubCategory.name, product_name))
             if zone_name:
-                stmt = stmt.where(Zone.name.ilike(f"%{zone_name}%"))
+                stmt = stmt.where(fuzzy_match(Zone.name, zone_name))
 
             stmt = stmt.order_by(Category.name.asc(), Auction.created_at.desc())
 
@@ -1278,10 +1299,12 @@ class AuctionMixin(BaseMixin):
         if not current_session:
             return {"status": "error", "message": "Session indisponible."}
         try:
-            # 1. Résolution floue de la sous-catégorie cible
+            # 1. Résolution floue trigram de la sous-catégorie cible.
+            product_query_clean = product_query.strip()
             sub_cat = await current_session.scalar(
                 select(SubCategory)
-                .where(SubCategory.name.ilike(f"%{product_query.strip()}%"))
+                .where(fuzzy_match(SubCategory.name, product_query_clean))
+                .order_by(similarity_rank(SubCategory.name, product_query_clean))
                 .limit(1)
             )
             if not sub_cat:
@@ -1300,9 +1323,14 @@ class AuctionMixin(BaseMixin):
             )
 
             # Filtrage géographique optionnel pour affiner la recommandation locale
+            # — recherche floue trigram (référentiel logistique).
             if zone_query and zone_query.strip():
+                zone_query_clean = zone_query.strip()
                 zone_obj = await current_session.scalar(
-                    select(Zone).where(Zone.name.ilike(f"%{zone_query.strip()}%")).limit(1)
+                    select(Zone)
+                    .where(fuzzy_match(Zone.name, zone_query_clean))
+                    .order_by(similarity_rank(Zone.name, zone_query_clean))
+                    .limit(1)
                 )
                 if zone_obj:
                     stmt = stmt.where(Auction.target_zone_id == zone_obj.id)
