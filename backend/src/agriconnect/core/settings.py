@@ -189,6 +189,22 @@ class Settings(BaseSettings):
         key = self.LANGCHAIN_API_KEY or self.LANGSMITH_API_KEY
         return bool(self.LANGCHAIN_TRACING_V2 and key)
 
+    # --- OpenTelemetry (traces infra) ---
+    OTEL_ENABLED: bool = False
+    # Endpoint OTLP/gRPC du collector (ex: http://otel-collector:4317).
+    OTEL_EXPORTER_OTLP_ENDPOINT: str = ""
+
+    # --- Prometheus (métriques /metrics) ---
+    PROMETHEUS_ENABLED: bool = True
+
+    # --- Langfuse (LLMOps self-hosted) ---
+    LANGFUSE_ENABLED: bool = False
+    LANGFUSE_PUBLIC_KEY: str = ""
+    LANGFUSE_SECRET_KEY: str = ""
+    # Host du Langfuse auto-hébergé (ex: http://langfuse-web:3000 en réseau
+    # Docker interne, ou https://langfuse.mondomaine.com en externe).
+    LANGFUSE_HOST: str = "http://langfuse-web:3000"
+
     # --- RAG (adaptatif par profil) ---
     # Default RAG embedding model aligned with 768D pgvector schema.
     EMBEDDING_MODEL: str = "BAAI/bge-base-en-v1.5"

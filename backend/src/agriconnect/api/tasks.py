@@ -60,6 +60,15 @@ def init_worker_process(**kwargs):
     # L'orchestrateur est instancié UNE SEULE FOIS par worker et garde ses connexions chaudes
     _orchestrator = Orchestrator()
 
+    # Télémétrie worker : initialise OTel/Prometheus/Langfuse + instrumente Celery
+    # (spans automatiques par tâche). Best-effort, jamais bloquant.
+    try:
+        from agriconnect.core import telemetry
+        telemetry.init_telemetry(service_name="agriconnect-worker")
+        telemetry.instrument_celery()
+    except Exception as exc:
+        logger.warning("Télémétrie worker non initialisée (non bloquant) : %s", exc)
+
     # Amorce le pool DB SUR la boucle persistante du worker pour que la 1ʳᵉ
     # tâche ne paie pas la connexion à froid (cause du bug "1er message échoue").
     try:
@@ -173,16 +182,26 @@ def process_agent_task(
     role: Optional[str] = None,
     force_role: bool = False,
     interactive_id: Optional[str] = None,
+    trace_id: Optional[str] = None,
 ):
     """Point d'entrée worker : exécute la coroutine dans la boucle persistante.
 
     ``interactive_id`` : payload d'un clic WhatsApp (bouton/liste) transmis par
     le webhook. Non vide → l'agent court-circuite l'interprétation LLM.
+    ``trace_id`` : identifiant de trace généré côté API (webhook). Rattache tous
+    les appels LLM de ce tour à la MÊME Trace Langfuse (1 session = 1 Trace).
     """
     global _loop, _orchestrator
 
     if _loop is None or _orchestrator is None:
         raise RuntimeError("Le worker Celery n'a pas été initialisé correctement (boucle/orchestrateur manquant).")
+
+    # Rattache ce tour à la trace infra reçue de l'API (contexte worker).
+    try:
+        from agriconnect.core import telemetry
+        telemetry.set_trace_context(trace_id, user_phone=phone_number)
+    except Exception:
+        telemetry = None  # type: ignore
 
     async def _run():
         try:
@@ -211,7 +230,15 @@ def process_agent_task(
         result = _loop.run_until_complete(_run())
     except Exception as e:
         logger.error("Erreur orchestrateur: %s", e)
+        # Vide le buffer Langfuse même en cas d'échec (les generations émises
+        # avant le crash doivent partir).
+        if telemetry is not None:
+            telemetry.flush()
         raise
+
+    # Le graphe a terminé (toutes les generations LLM sont émises) — flush.
+    if telemetry is not None:
+        telemetry.flush()
 
     final_text = result.get("final_response", "Je n'ai pas pu générer de réponse.")
     account_sid = str(settings.TWILIO_ACCOUNT_SID or "").strip()

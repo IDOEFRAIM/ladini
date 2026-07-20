@@ -86,22 +86,71 @@ class _GroqAdapter:
                 self._parent = parent
 
             def create(self, **kwargs):
+                # ── LLMOps : point d'interception UNIQUE de tous les appels Groq ──
+                # Les 5 sites d'appel de production (routing.py, response_handlers.py,
+                # clarification.py, slot_enrichment.py, utils.py onboarding) passent
+                # TOUS par ici. On y capture modèle / prompt / réponse / latence /
+                # tokens / erreurs pour Langfuse + Prometheus, sans toucher aux sites
+                # d'appel (contrairement à l'idée de patcher cognitive.py, qui ne
+                # fait AUCUN appel LLM). Import local + best-effort : jamais bloquant.
+                import time as _t
+                _model = str(kwargs.get("model") or "unknown")
+                _messages = kwargs.get("messages")
+                _t0 = _t.perf_counter()
+                _err = None
+
+                def _emit(output, usage):
+                    try:
+                        from agriconnect.core.telemetry import record_generation
+                        record_generation(
+                            model=_model, messages=_messages, output=output,
+                            latency_s=_t.perf_counter() - _t0, usage=usage, error=_err,
+                        )
+                    except Exception:
+                        pass
+
+                def _usage_of(resp):
+                    u = getattr(resp, "usage", None)
+                    if u is None:
+                        return None
+                    return {
+                        "prompt_tokens": getattr(u, "prompt_tokens", None),
+                        "completion_tokens": getattr(u, "completion_tokens", None),
+                    }
+
+                def _text_of(resp):
+                    try:
+                        return resp.choices[0].message.content
+                    except Exception:
+                        return None
+
                 # Try to call the underlying SDK with a couple of common shapes.
                 client = self._parent._raw
                 # Best-effort: try `client.chat.completions.create` if present
                 try:
                     chat = getattr(client, "chat", None)
                     if chat and hasattr(chat, "completions") and hasattr(chat.completions, "create"):
-                        resp = chat.completions.create(**kwargs)
+                        try:
+                            resp = chat.completions.create(**kwargs)
+                        except Exception as call_exc:
+                            # Erreur API LLM (rate limit / timeout / …) : on la
+                            # journalise dans la télémétrie AVANT de la propager.
+                            _err = f"{type(call_exc).__name__}: {call_exc}"
+                            _emit(None, None)
+                            raise
                         # If the SDK already returns an object with choices[0].message.content,
                         # return it directly. Otherwise, try to coerce.
                         if hasattr(resp, "choices"):
+                            _emit(_text_of(resp), _usage_of(resp))
                             return resp
                         # Fallback: coerce string-like responses
                         text = str(resp)
+                        _emit(text, None)
                         return _NormalizedChatResponse(text)
 
                 except Exception:
+                    if _err is not None:
+                        raise
                     pass
 
                 # Next fallback: top-level `client.completions.create`

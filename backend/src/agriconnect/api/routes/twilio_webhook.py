@@ -99,6 +99,17 @@ async def twilio_webhook(
         logger.info("TWILIO_INBOUND_INTERACTIVE | phone=%s | id=%s | form_keys=%s",
                     phone, interactive_id, list(form.keys()))
 
+    # --- OBSERVABILITÉ : compteur + trace_id de bout en bout ---
+    # Le middleware a posé request.state.trace_id (format OTel, réutilisé comme
+    # id de Trace Langfuse). On le propage au worker via la tâche Celery pour
+    # relier webhook → worker → graphe → appel LLM sous UNE seule Trace.
+    try:
+        from agriconnect.core import telemetry
+        telemetry.count_webhook("twilio")
+        trace_id = getattr(request.state, "trace_id", None) or telemetry.new_trace_id()
+    except Exception:
+        trace_id = None
+
     store = WorkspaceStore()
     workspace = await store.get(phone)
 
@@ -120,6 +131,7 @@ async def twilio_webhook(
         role=resolved_role,
         force_role=force_role,
         interactive_id=interactive_id,   # ← clic bouton/liste → bypass LLM
+        trace_id=trace_id,               # ← propagation trace infra → LLM
     )
 
     # --- 2. AJOUTER : Message d'attente immédiat via BackgroundTasks ---
