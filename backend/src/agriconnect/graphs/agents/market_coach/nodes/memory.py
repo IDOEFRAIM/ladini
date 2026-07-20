@@ -331,16 +331,46 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
     goal_upper = str(current_goal or "").upper()
 
     if goal_upper == "BUYER_ADD_TO_CART" and draft_payload and not draft_payload.get("__reset__"):
-        payload = merge_payload(draft_payload, payload)
+        # `draft_payload` is in `_DRAFT_SAFE_GOALS` (state_cleaner_node), so it
+        # is NEVER purged between two separate BUYER_ADD_TO_CART attempts as
+        # long as the goal name doesn't change — only on FAILED/COMPLETED
+        # status. If the user abandons adding product A mid-flow (no
+        # FAILED/COMPLETED transition) and later starts adding product B, the
+        # stale draft for A would otherwise resurrect onto B's payload. Guard:
+        # only inherit the persisted draft if it's for the SAME product this
+        # turn is extracting (i.e. a genuine continuation of the same
+        # in-progress add), not a fresh add for a different one.
+        incoming_product = extracted.get("product")
+        draft_product = draft_payload.get("product")
+        if incoming_product and draft_product and not _values_equal(draft_product, incoming_product):
+            logger.info(
+                "[MemoryUpdate] Stale cart draft for '%s' discarded (new product '%s')",
+                draft_product, incoming_product,
+            )
+        else:
+            payload = merge_payload(draft_payload, payload)
 
-    for field in _CANONICAL_SLOT_ORDER:
-        value = extracted.pop(field, None)
-        _apply_slot(field, value)
+    # Un tour CONFIRM/REJECT ne fournit AUCUNE information nouvelle par
+    # définition ("je confirme", "oui", "non") — toute entité que
+    # l'interpréteur a pu extraire pour un message aussi court/ambigu est du
+    # bruit (voire une hallucination du LLM sur un few-shot du prompt
+    # système), jamais une correction volontaire. Sans cette garde,
+    # `_apply_slot("product", ...)` traitait un tel bruit comme un
+    # changement de produit légitime : il écrasait le `product` que
+    # `form_node` venait JUSTE de figer dans `transaction_payload` au moment
+    # de la confirmation, ET videait quantity/unit/price/zone au passage
+    # (cascade de `_apply_slot` sur changement de produit) — cause du bug où
+    # la commande exécutée portait un tout autre produit que celui confirmé
+    # dans le récap.
+    if interpreted_event not in {"CONFIRM", "REJECT"}:
+        for field in _CANONICAL_SLOT_ORDER:
+            value = extracted.pop(field, None)
+            _apply_slot(field, value)
 
-    for key, value in list(extracted.items()):
-        if not slot_has_value(value):
-            continue
-        payload[key] = value
+        for key, value in list(extracted.items()):
+            if not slot_has_value(value):
+                continue
+            payload[key] = value
 
     # --- ENTITY INHERITANCE : stable_entities → payload pour continuité ---
     # Pendant un tunnel, si le payload manque un champ stable, on l'injecte.

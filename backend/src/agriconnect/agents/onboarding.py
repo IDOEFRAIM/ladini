@@ -250,12 +250,16 @@ BulkExtractor = Callable[[str], Coroutine[Any, Any, Dict[str, Optional[str]]]]
 
 
 _WELCOME = (
-    "Bienvenue sur AgriConnect ! Je suis votre assistant agricole.\n"
-    "Je vous aide a acheter ou vendre des produits agricoles, gerer vos stocks, "
-    "et trouver les meilleurs prix dans votre zone.\n\n"
-    "Pour vous inscrire, dites-moi votre nom, votre role (acheteur ou producteur) "
-    "et votre ville. Vous pouvez tout dire d'un coup ou etape par etape, dans l'ordre "
-    "qui vous arrange."
+    "🌾 *Bienvenue sur AgriConnect !* Je suis *LADINI*, votre assistant agricole personnel.\n\n"
+    "Je suis là pour vous simplifier la vie, directement par message :\n"
+    "🧑🏾‍🌾 *Producteur ?* Publiez vos récoltes, gérez vos stocks, recevez des offres "
+    "d'acheteurs et suivez vos ventes.\n"
+    "🛒 *Acheteur ?* Trouvez les meilleurs produits près de chez vous, comparez les prix "
+    "et commandez en quelques mots.\n\n"
+    "Pour bien démarrer, dites-moi simplement : êtes-vous *producteur* (vous vendez) "
+    "ou *acheteur* (vous achetez) ?\n\n"
+    "_Astuce : vous pouvez tout me dire d'un coup — par exemple « Je suis Awa, productrice "
+    "à Bobo » — ou avancer étape par étape, comme vous préférez._"
 )
 
 
@@ -274,7 +278,7 @@ def _ack_line(ob_state: OnboardingState) -> str:
 def _missing_labels(ob_state: OnboardingState) -> List[str]:
     labels: List[str] = []
     if not ob_state.role:
-        labels.append("votre role (acheteur ou producteur)")
+        labels.append("votre rôle (acheteur ou producteur)")
     if not ob_state.name:
         labels.append("votre nom")
     if not ob_state.zone_id:
@@ -282,16 +286,39 @@ def _missing_labels(ob_state: OnboardingState) -> List[str]:
     return labels
 
 
+# Question dédiée et chaleureuse par champ manquant, avec un mini « pourquoi »
+# qui donne du sens à la demande (au lieu d'un « Il me manque X » sec).
+_FIELD_QUESTIONS: Dict[str, str] = {
+    "role": (
+        "Pour commencer, êtes-vous *producteur* (vous vendez vos récoltes) ou "
+        "*acheteur* (vous cherchez à acheter) ?"
+    ),
+    "name": "Comment vous appelez-vous ? _(pour personnaliser nos échanges)_",
+    "zone": (
+        "Dans quelle *ville ou province* êtes-vous ? "
+        "_(pour vous connecter aux bons partenaires près de chez vous)_"
+    ),
+}
+
+
 def _collect_prompt(ob_state: OnboardingState) -> str:
     ack = _ack_line(ob_state)
     missing = _missing_labels(ob_state)
     if not missing:
-        return ack or "Merci."
+        return ack or "Merci !"
+
+    # Un seul champ manquant → question dédiée, chaleureuse et guidante.
     if len(missing) == 1:
-        ask = f"Il me manque {missing[0]}."
-    else:
-        joined = ", ".join(missing[:-1]) + f" et {missing[-1]}"
-        ask = f"Il me manque encore {joined}."
+        key = "role" if not ob_state.role else "name" if not ob_state.name else "zone"
+        question = _FIELD_QUESTIONS.get(key, f"Il me manque {missing[0]}.")
+        return f"{ack} {question}".strip()
+
+    # Plusieurs champs manquants → invitation légère à tout donner d'un coup.
+    joined = ", ".join(missing[:-1]) + f" et {missing[-1]}"
+    ask = (
+        f"Encore un petit détail pour finaliser : {joined}. "
+        "Vous pouvez tout m'écrire en une phrase 🙂"
+    )
     return f"{ack} {ask}".strip()
 
 

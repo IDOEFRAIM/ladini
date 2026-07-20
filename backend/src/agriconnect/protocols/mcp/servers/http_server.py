@@ -60,6 +60,7 @@ from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 
 from agriconnect.core.database import close_db
 from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer, runtime
@@ -178,4 +179,5 @@ async def call_tool(request: Request) -> JSONResponse:
         )
 
     payload = result if isinstance(result, dict) else {"data": result}
-    return JSONResponse(content=payload)
+
+    return JSONResponse(content=jsonable_encoder(payload))

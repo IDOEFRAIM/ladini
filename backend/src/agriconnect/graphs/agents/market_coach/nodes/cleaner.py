@@ -90,20 +90,37 @@ async def state_cleaner_node(
         patch["chat_history"] = trimmed_history
 
     # ── Terminal-goal reset ──────────────────────────────────────────
-    # When a goal finishes this turn (status COMPLETED), the whole
-    # transaction payload and goal-tracking memory must be flushed so the
-    # NEXT message starts from a clean slate. Without this, slots like
+    # When a goal finishes this turn (status COMPLETED/FAILED/ERROR), the
+    # whole transaction payload and goal-tracking memory must be flushed so
+    # the NEXT message starts from a clean slate. Without this, slots like
     # quantity=225 or a locked PROCUREMENT_CREATE_REQUEST intent leak into
     # the following unrelated request (e.g. "je veux commander des tomates"
     # wrongly resumes an auction with a stale quantity). See
     # [[market-coach-turn-boundary-state]].
+    # NB: originally gated on `status == "COMPLETED"` only — a goal that
+    # ends in FAILED/ERROR is just as "over" and left the exact same stale
+    # fields behind, so the gate now covers all three terminal statuses.
     status_flag = str(state.get("status") or "").upper().strip()
-    goal_completed = status_flag == "COMPLETED"
+    goal_completed = status_flag in {"COMPLETED", "FAILED", "ERROR"}
 
     if goal_completed:
         patch["transaction_payload"] = {"__reset__": True}
-        patch["current_goal"] = None
+        # merge_dict fields: must use the reset sentinel, a plain {} is a
+        # no-op under merge_dict semantics (agents/reducers.py) and would
+        # silently leave the old goal's data in place.
+        patch["stable_entities"] = {"__reset__": True}
+        patch["selected_tool_args"] = {"__reset__": True}
+        # NOTE: execution_result is NOT reset here — final_response (which
+        # runs AFTER state_cleaner) needs it to render the tool output.
+        # It is properly reset by post_response_cleanup instead.
+        patch["form_data"] = {"__reset__": True}
+        # NOTE: current_goal is NOT reset here — final_response needs it
+        # for _resolve_goal_for_ui (e.g. distinguish READ vs WRITE goals
+        # for the fallback message). Reset by post_response_cleanup.
         patch["goal_status"] = None
+        patch["retry_count"] = 0
+        patch["active_form"] = None
+        patch["form_step"] = None
         wm_terminal = dict(patch.get("working_memory") or working)
         for key in ("active_goal", "locked_intent", "pending_goal",
                     "buyer_request_waiting_choice", "buyer_request_catalog_checked",

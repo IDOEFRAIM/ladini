@@ -9,6 +9,9 @@ Design rules:
   - Lists are **replaced entirely** (never silently accumulated).
   - Dicts use **deep-merge** (nested dicts merge, lists concat, scalars overwrite).
   - To force a reset on a dict field, the node writes `{"__reset__": True}`.
+  - To reset AND populate in one shot (e.g. restoring a suspended payload
+    without inheriting stale data from what interrupted it), the node
+    writes `{"__reset__": True, **fresh_data}`.
 """
 from __future__ import annotations
 
@@ -61,12 +64,17 @@ def merge_dict(old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
 
     - `new is None` or `new == {}` → preserves `old` (no silent loss).
     - `new == {"__reset__": True}` → explicit reset to `{}`.
+    - `new == {"__reset__": True, **data}` → reset THEN populate with `data`
+      in one shot (e.g. restoring a suspended payload without inheriting
+      whatever the interrupting goal accumulated in the meantime — a single
+      node return can't both wipe `old` and set new content otherwise,
+      since a second write in the same super-step isn't possible).
     - Otherwise: recursive merge (nested dicts = merge, lists = concat, scalars = overwrite).
     """
     if new is None or (isinstance(new, dict) and not new):
         return old if old is not None else {}
     if isinstance(new, dict) and new.get("__reset__"):
-        return {}
+        return {k: v for k, v in new.items() if k != "__reset__"}
     merged = dict(old or {})
     for key, value in new.items():
         existing = merged.get(key)

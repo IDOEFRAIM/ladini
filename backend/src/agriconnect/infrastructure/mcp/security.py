@@ -100,7 +100,7 @@ _READ_PREFIXES = (
 
 
 def _guess_scope(tool_name: str) -> PermissionScope:
-    name = (tool_name or "").lower()
+    name = tool_name.lower()
     if name.startswith(("migrate", "drop", "alter", "truncate")):
         return PermissionScope.DB_SCHEMA_MODIFY
     if name.startswith(_READ_PREFIXES):
@@ -430,7 +430,7 @@ class MCPToolRegistry:
 
     def sync_discovered_tools(self, server: MCPServerKind, discovered: Iterable[dict[str, Any]]) -> None:
         for item in discovered:
-            name = str(item.get("name") or "").strip()
+            name = str(item.get("name")).strip()
             if not name or name in self._tools:
                 continue
             self._tools[name] = MCPToolMeta(
@@ -438,7 +438,7 @@ class MCPToolRegistry:
                 server=server,
                 scope=PermissionScope.DB_DATA_WRITE,
                 risk= RiskLevel.MEDIUM,
-                description=str(item.get("description") or ""),
+                description=str(item.get("description")),
                 timeout_seconds= 30.0,
                 retries=1,
             )

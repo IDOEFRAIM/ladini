@@ -29,6 +29,7 @@ from agriconnect.domain.models import (
 from .base import BaseMixin
 from .common import clean_text, positive_float, normalize_phone, clamp_limit
 from .search import fuzzy_match, similarity_rank
+from .errors import BusinessRuleException
 
 logger = logging.getLogger("agriconnect.services.producer_mgmt")
 
@@ -462,79 +463,73 @@ class ProducerMgmtMixin(BaseMixin):
             quantity_for_sale = positive_float(quantity_for_sale, "quantity_for_sale", allow_zero=True)
             unit = clean_text(unit, "unit", required=False, max_length=20) or "KG"
 
-            try:
-                profile_res = await self.get_producer_profile(phone)
-                
-                if not profile_res or profile_res[0] is None:
-                    logger.warning(f"⚠️ Échec create_product : Le numéro {phone} n'a pas de profil producteur.")
-                    return {
-                        "status": "error",
-                        "message": f"Création impossible : Le numéro {phone} n'est rattaché à aucun compte producteur actif."
-                    }
-                
-                user, producer = profile_res
-                
-                if not producer or not producer.id:
-                    return {'status': 'error', 'message': "Profil producteur invalide ou corrompu. Pas d'id disponible."}
-                    
-                product_id = str(uuid.uuid4())
-                short_code = product_id[:8].upper()
-                
-                if not sub_category_id:
-                    name_clean = name.strip()
-                    # Recherche floue trigram (catalogue) : tolère les fautes de
-                    # frappe du producteur sur le nom de son propre produit.
-                    sub_cat_stmt = (
-                        select(SubCategory.id)
-                        .where(fuzzy_match(SubCategory.name, name_clean))
-                        .order_by(similarity_rank(SubCategory.name, name_clean))
-                        .limit(1)
-                    )
-                    sub_category_id = await self.session.scalar(sub_cat_stmt)
-                
-                category_label = (
-                    clean_text(category_label, "category_label", required=False) 
-                    or await self.guess_category(product_name=name)
-                )
-                
-                product = Product(
-                    id=uuid.UUID(product_id), 
-                    short_code=short_code, 
-                    name=name.strip(), 
-                    price=float(price), 
-                    unit=unit.upper().strip(), 
-                    quantity_for_sale=float(quantity_for_sale), 
-                    producer_id=producer.id,
-                    category_label=category_label, 
-                    sub_category_id=uuid.UUID(str(sub_category_id)) if sub_category_id else None, 
-                    description=description.strip() if description else None, 
-                    local_names=local_names,
-                    created_at=datetime.now(),
-                    updated_at=datetime.now()
-                )
-                
-                self.session.add(product)
-                await self.session.flush()
+            profile_res = await self.get_producer_profile(phone)
 
-                return {
-                    "status": "success",
+            if not profile_res or profile_res[0] is None:
+                logger.warning(f"⚠️ Échec create_product : Le numéro {phone} n'a pas de profil producteur.")
+                raise BusinessRuleException(
+                    f"Création impossible : Le numéro {phone} n'est rattaché à aucun compte producteur actif."
+                )
+
+            user, producer = profile_res
+
+            if not producer or not producer.id:
+                raise BusinessRuleException("Profil producteur invalide ou corrompu. Pas d'id disponible.")
+
+            product_id = str(uuid.uuid4())
+            short_code = product_id[:8].upper()
+
+            if not sub_category_id:
+                name_clean = name.strip()
+                # Recherche floue trigram (catalogue) : tolère les fautes de
+                # frappe du producteur sur le nom de son propre produit.
+                sub_cat_stmt = (
+                    select(SubCategory.id)
+                    .where(fuzzy_match(SubCategory.name, name_clean))
+                    .order_by(similarity_rank(SubCategory.name, name_clean))
+                    .limit(1)
+                )
+                sub_category_id = await self.session.scalar(sub_cat_stmt)
+
+            category_label = (
+                clean_text(category_label, "category_label", required=False)
+                or await self.guess_category(product_name=name)
+            )
+
+            product = Product(
+                id=uuid.UUID(product_id),
+                short_code=short_code,
+                name=name.strip(),
+                price=float(price),
+                unit=unit.upper().strip(),
+                quantity_for_sale=float(quantity_for_sale),
+                producer_id=producer.id,
+                category_label=category_label,
+                sub_category_id=uuid.UUID(str(sub_category_id)) if sub_category_id else None,
+                description=description.strip() if description else None,
+                local_names=local_names,
+                created_at=datetime.now(),
+                updated_at=datetime.now()
+            )
+
+            self.session.add(product)
+            await self.session.flush()
+
+            return {
+                "status": "success",
+                "product_id": product_id,
+                "short_code": short_code,
+                "message": f"🎉 Le produit *{name}* a été ajouté avec succès à votre catalogue de vente !",
+                "data": {
                     "product_id": product_id,
                     "short_code": short_code,
-                    "message": f"🎉 Le produit *{name}* a été ajouté avec succès à votre catalogue de vente !",
-                    "data": {
-                        "product_id": product_id, 
-                        "short_code": short_code, 
-                        "name": name, 
-                        "price_fcfa": price, 
-                        "quantity": quantity_for_sale, 
-                        "unit": unit,
-                        "category_label": category_label
-                    }
+                    "name": name,
+                    "price_fcfa": price,
+                    "quantity": quantity_for_sale,
+                    "unit": unit,
+                    "category_label": category_label
                 }
-                    
-            except Exception as e:
-                logger.error(f"❌ Erreur système dans create_product : {str(e)}")
-                return {"status": "error", "message": f"Erreur technique lors du stockage du produit : {str(e)}"}
+            }
 
     async def list_products(self, producer_id: str | None = None, *, phone: str | None = None) -> Dict[str, Any]:
         """
@@ -637,7 +632,7 @@ class ProducerMgmtMixin(BaseMixin):
             farm_limit = clamp_limit(kwargs.get("farm_limit"), default=20, maximum=50)
             stock_limit = clamp_limit(kwargs.get("stock_limit"), default=500, maximum=5000)
             cycle_limit = clamp_limit(kwargs.get("cycle_limit"), default=150, maximum=2000)
-            date_cutoff = datetime.utcnow() - timedelta(days=1)
+            date_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
             inactive_statuses = ("HARVESTED", "CANCELLED", "ABANDONED")
 
             if producer_uuid:
@@ -1331,13 +1326,13 @@ class ProducerMgmtMixin(BaseMixin):
         
         # 3. Barrière de sécurité et validation des droits d'accès
         if not stock_obj:
-            raise ValueError("Stock introuvable.")
-            
+            raise BusinessRuleException("Stock introuvable.")
+
         if not stock_obj.farm or not stock_obj.farm.producer or not stock_obj.farm.producer.user:
-            raise PermissionError("Structure de propriété du stock incomplète en base de données.")
-            
+            raise BusinessRuleException("Structure de propriété du stock incomplète en base de données.")
+
         if stock_obj.farm.producer.user.phone != phone:
-            raise PermissionError("Accès refusé au stock ciblé.")
+            raise BusinessRuleException("Accès refusé au stock ciblé.", reason="permission_denied")
             
         # 4. Application de la logique métier (Incrémentation ou Décrémentation)
         if mtype == "IN":
@@ -1435,25 +1430,22 @@ class ProducerMgmtMixin(BaseMixin):
         """
         name = clean_text(name, "name", required=True)
         client_phone = clean_text(client_phone, "client_phone", required=True, max_length=40)
-        
-        try:
-            resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
-            _, producer = await self.get_producer_profile(resolved_phone)
 
-            stmt = select(Client).where(Client.producer_id == producer.id, Client.phone == client_phone)
-            result = await self.session.execute(stmt)
-            client = result.scalar_one_or_none()
+        resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        _, producer = await self.get_producer_profile(resolved_phone)
 
-            if client:
-                return {"status": "success", "data": client.to_dict()}
+        stmt = select(Client).where(Client.producer_id == producer.id, Client.phone == client_phone)
+        result = await self.session.execute(stmt)
+        client = result.scalar_one_or_none()
 
-            client = Client(id=uuid.uuid4(), name=name, phone=client_phone, email=email, location=location, producer_id=producer.id)
-            self.session.add(client)
-            await self.session.flush()
-            await self.session.refresh(client)
+        if client:
             return {"status": "success", "data": client.to_dict()}
-        except ValueError as e:
-            return {"status": "error", "message": str(e)}
+
+        client = Client(id=uuid.uuid4(), name=name, phone=client_phone, email=email, location=location, producer_id=producer.id)
+        self.session.add(client)
+        await self.session.flush()
+        await self.session.refresh(client)
+        return {"status": "success", "data": client.to_dict()}
 
     async def get_clients(self, producer_id: str | None = None, *, phone: str | None = None) -> Union[List[Dict[str, Any]], Dict[str, str]]:
         """

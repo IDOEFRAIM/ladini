@@ -27,14 +27,43 @@ _GENERIC_SAFE_MESSAGE = (
     "Veuillez réessayer dans un instant."
 )
 
+class BusinessRuleException(Exception):
+    """Échec métier explicite, levé volontairement par les mixins.
+
+    Remplace le pattern `return {"status": "error", "message": ...}` : au lieu
+    de faire porter au décorateur `@transactional` la connaissance du domaine
+    (parser un dict de retour pour savoir s'il faut rollback), la couche
+    métier lève CETTE exception. `@transactional` n'a besoin de rien savoir
+    d'autre que "une exception a été levée" — rollback automatique via le flux
+    d'exécution Python normal, sans inspection de contenu applicatif.
+
+    `reason` est un code machine optionnel (ex: "insufficient_stock",
+    "not_draft") et `**extra` transporte des données structurées additionnelles
+    (ex: `details=[...]`, `fallback=[...]`) que l'appelant (agent/API) peut
+    exploiter pour enrichir sa réponse, sans que `@transactional` y touche.
+    """
+
+    def __init__(self, message: str, *, reason: str | None = None, **extra) -> None:
+        super().__init__(message)
+        self.message = message
+        self.reason = reason
+        self.extra = extra
+
+
 # Exceptions dont le message est du CONTENU MÉTIER volontaire, sûr à exposer
 # ET dont le TYPE doit traverser intact (l'agent/l'appelant peut vouloir
 # discriminer dessus, ex: `except ValueError` pour une réparation de slot).
+#   - BusinessRuleException : échecs métier explicites levés par les mixins
+#     (stock insuffisant, statut invalide, ressource introuvable...).
 #   - ValueError : validations d'entrée (clean_text, positive_float, contrôles
 #     d'appartenance/quantité négative/prix nul...).
 #   - KeyError   : accès à un champ métier attendu mais absent d'un payload
 #     agent (ex: dict de réponse MCP mal formé côté appelant).
-_SAFE_BUSINESS_EXCEPTIONS: tuple[type[BaseException], ...] = (ValueError, KeyError)
+_SAFE_BUSINESS_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    BusinessRuleException,
+    ValueError,
+    KeyError,
+)
 
 # Fragments techniques qui ne doivent JAMAIS transiter vers l'agent, même
 # nichés dans un message par ailleurs anodin (filet de sécurité défensif).
@@ -136,6 +165,8 @@ def scrub_error_result(result: dict) -> dict:
 
 __all__ = [
     "SafeDatabaseError",
+    "BusinessRuleException",
+    "is_safe_business_exception",
     "sanitize_error_message",
     "safe_error_dict",
     "scrub_error_result",

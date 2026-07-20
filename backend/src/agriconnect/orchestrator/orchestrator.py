@@ -16,7 +16,7 @@ import copy
 import json
 import logging
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from agriconnect.workspace import Workspace, WorkspaceCheckpointer, WorkspaceResolver
 from agriconnect.workspace.metadata import LANGGRAPH_STATE_KEY, build_metadata_from_state
@@ -122,6 +122,7 @@ class Orchestrator:
         user_query: str,
         workspace_type: str | None = None,
         force_role: bool = False,
+        interactive_id: str | None = None,
     ) -> Dict[str, Any]:
         workspace_id = (phone or "anonymous").strip()
         ws = await self.resolver.resolve(workspace_id, workspace_type)
@@ -131,7 +132,11 @@ class Orchestrator:
         start_ts = time.monotonic()
         try:
             final = await asyncio.wait_for(
-                self._run_market(ws, user_query, phone, force_role=force_role),
+                self._run_market(
+                    ws, user_query, phone,
+                    force_role=force_role,
+                    interactive_id=interactive_id,
+                ),
                 timeout=_AGENT_TIMEOUT_SECONDS,
             )
         except AgentCircuitBreaker as exc:
@@ -188,9 +193,33 @@ class Orchestrator:
                 "final_response": final.get("final_response", _FALLBACK_RESPONSE),
                 "agent": ws.active_agent,
                 "workspace_id": workspace_id,
+                # Indice pour la couche d'envoi (tasks.py) : ce tour se termine-t-il
+                # sur une décision qui gagnerait à être rendue en boutons/liste ?
+                "interactive": self._interactive_hint(final),
             }
         finally:
             guard.detach()
+
+    @staticmethod
+    def _interactive_hint(final: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Détecte si la réponse appelle un rendu interactif (bouton/liste).
+
+        Ne construit RIEN de Twilio-spécifique ici (pas de ContentSid) : renvoie
+        juste une intention sémantique que tasks.py mappe vers le bon template
+        selon la config. `None` = texte simple.
+        """
+        if not isinstance(final, dict):
+            return None
+        strategy = str(final.get("response_strategy") or "").upper()
+        status = str(final.get("status") or "").upper()
+        if (
+            final.get("waiting_for_confirmation")
+            or status == "WAITING_CONFIRMATION"
+            or strategy == "CONFIRMATION"
+        ):
+            # Confirmation binaire OUI/NON → boutons quick-reply.
+            return {"kind": "confirm"}
+        return None
 
     # ------------------------------------------------------------------
     # Agent execution
@@ -204,6 +233,7 @@ class Orchestrator:
         phone: str,
         *,
         force_role: bool = False,
+        interactive_id: str | None = None,
     ) -> Dict[str, Any]:
         config = {"configurable": {"thread_id": ws.workspace_id}}
         agent_metadata = {
@@ -215,6 +245,9 @@ class Orchestrator:
             "user_phone": phone,
             "current_goal": ws.active_goal or None,
             "active_form": ws.active_form,
+            # Clic interactif (bouton/liste WhatsApp) : amorce le bypass LLM de
+            # input_interpreter. None pour un message texte classique.
+            "interactive_selection": interactive_id or None,
         }
         runtime = build_runtime()
         async with runtime as live_runtime:

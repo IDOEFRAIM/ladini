@@ -36,6 +36,7 @@ _EPHEMERAL_REPLACE_FIELDS = {
     "interpreter_confidence": None,
     "validation_status": None,
     "pending_goal": None,
+    "current_goal": None,
     "selected_tool": None,
     "retry_count": 0,
     "confirmation_summary": None,
@@ -52,6 +53,10 @@ _EPHEMERAL_REPLACE_FIELDS = {
     "pending_menu": None,
     "reply_audio_url": None,
     "proactive_hint": None,
+    # Payload de clic interactif : strictement mono-tour. Sans reset, un clic
+    # persisté re-court-circuiterait l'interpréteur au tour suivant (texte libre
+    # ignoré). Voir input_interpreter bypass + [[market-coach-turn-boundary-state]].
+    "interactive_selection": None,
 }
 
 

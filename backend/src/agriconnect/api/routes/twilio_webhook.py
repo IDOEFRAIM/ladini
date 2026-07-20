@@ -4,9 +4,11 @@ Le webhook ne route plus : il transmet (phone, text) à l'Orchestrator via
 Celery. C'est le WorkspaceResolver qui décide l'agent, de façon collante.
 """
 import logging
+from typing import Optional
+
 import redis # ◄ N'oublie pas : pip install redis
 
-from fastapi import APIRouter, Form, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, Form, HTTPException, Depends, BackgroundTasks, Request
 from twilio.rest import Client
 
 from agriconnect.api.tasks import process_agent_task
@@ -44,11 +46,31 @@ def send_wait_message(phone_number: str):
         logger.error("Impossible d'envoyer l'accusé de réception : %s", e)
 
 
+def _extract_interactive_id(form: dict) -> Optional[str]:
+    """Extrait le payload d'un clic WhatsApp (bouton quick-reply / ligne de liste).
+
+    Les noms de champs Twilio pour les réponses interactives varient selon la
+    configuration du compte/sender. On tente les plus courants dans l'ordre :
+      - `ButtonPayload` : payload défini sur un bouton quick-reply (le plus fiable)
+      - `ListId` / `SelectedId` : id de la ligne de liste choisie
+    On NE retombe PAS sur `Body` ici : un `Body` de texte libre doit rester du
+    texte libre (interprété par le LLM), seul un vrai payload de clic déclenche
+    le bypass. Le log `TWILIO_INBOUND_FORM` ci-dessous permet de confirmer les
+    noms EXACTS des champs sur VOTRE compte (à ajuster si besoin).
+    """
+    for key in ("ButtonPayload", "ListId", "SelectedId", "ListReplyId"):
+        val = form.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return None
+
+
 @router.post("/webhook/twilio")
 async def twilio_webhook(
+    request: Request,
     background_tasks: BackgroundTasks, # ◄ FastAPI gère ça automatiquement
     From: str = Form(...),
-    Body: str = Form(...),
+    Body: str = Form(""),
     MessageSid: str = Form(...),       # ◄ Identifiant unique du message Twilio
 ):
     # --- 1. MODIFIER : ANTI-DOUBLON (Idempotence avec Redis) ---
@@ -56,17 +78,26 @@ async def twilio_webhook(
     if redis_client.get(redis_key):
         logger.warning("Message dupliqué détecté : %s. Ignoré.", MessageSid)
         return {"status": "already_processed"}
-    
+
     # On marque le message comme "en cours" pendant 1 heure (3600 secondes)
     redis_client.setex(redis_key, 3600, "processing")
     # -----------------------------------------------------------
 
-    raw_sender = From 
+    raw_sender = From
     phone = raw_sender.replace("whatsapp:", "").strip()
     if not phone:
         raise HTTPException(status_code=400, detail="Numéro d'expéditeur invalide.")
 
     text = Body.strip()
+
+    # --- DÉTECTION DU CLIC INTERACTIF (bouton / liste) ---
+    # Lit le form complet pour repérer un payload de clic. Loggé UNE fois en
+    # entier pour confirmer les noms de champs exacts de votre compte Twilio.
+    form = dict(await request.form())
+    interactive_id = _extract_interactive_id(form)
+    if interactive_id:
+        logger.info("TWILIO_INBOUND_INTERACTIVE | phone=%s | id=%s | form_keys=%s",
+                    phone, interactive_id, list(form.keys()))
 
     store = WorkspaceStore()
     workspace = await store.get(phone)
@@ -88,6 +119,7 @@ async def twilio_webhook(
         workspace_type=ws_type,
         role=resolved_role,
         force_role=force_role,
+        interactive_id=interactive_id,   # ← clic bouton/liste → bypass LLM
     )
 
     # --- 2. AJOUTER : Message d'attente immédiat via BackgroundTasks ---

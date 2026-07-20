@@ -154,8 +154,16 @@ async def cognitive_guard(
                     "current_goal": None,
                     "goal_status": "IDLE",
                     "status": "WAITING_INPUT",
-                    "transaction_payload": {},
-                    "stable_entities": {},
+                    # merge_dict-reduced fields: a plain {} is a NO-OP under
+                    # merge_dict (agents/reducers.py) — it PRESERVES the old
+                    # value instead of clearing it. Only {"__reset__": True}
+                    # actually empties the field. Writing plain {} here was
+                    # the root cause of quantity/product/price from an
+                    # abandoned goal silently surviving into the next goal's
+                    # transaction_payload (current_goal was correctly reset
+                    # to None, but the stale data underneath it was not).
+                    "transaction_payload": {"__reset__": True},
+                    "stable_entities": {"__reset__": True},
                     "missing_fields": [],
                     "completed_fields": [],
                     "last_missing_field": None,
@@ -166,8 +174,8 @@ async def cognitive_guard(
                     "waiting_for_confirmation": False,
                     "confirmation_summary": None,
                     "selected_tool": None,
-                    "selected_tool_args": {},
-                    "execution_result": {},
+                    "selected_tool_args": {"__reset__": True},
+                    "execution_result": {"__reset__": True},
                     "ag_ui_component": None,
                     "response_strategy": "CLARIFICATION",
                     "intent_competition": competition,

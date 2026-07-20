@@ -55,8 +55,19 @@ def build_procurement_escalation(
     product_name: Optional[str],
     unit: Optional[str],
     message: str,
+    existing_form_data: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Build state patch that escalates to the AUCTION_CREATE form."""
+    """Build state patch that escalates to the AUCTION_CREATE form.
+
+    `existing_form_data` : progrès déjà collecté par `form_node`/`run_form_step`
+    (ex: prix et quantité déjà répondus) quand cette fonction est appelée pour
+    RÉ-ENTRER dans un formulaire AUCTION_CREATE déjà actif, plutôt que pour en
+    démarrer un nouveau. Sans ça, `buyer_request_resolver` (qui ré-escalade à
+    chaque tour tant que `current_goal==PROCUREMENT_CREATE_REQUEST` et
+    `active_form==AUCTION_CREATE`, voir l'appelant) reconstruisait `form_data`
+    quasiment à vide à chaque fois, effaçant prix/quantité déjà fournis et
+    faisant paraître "date limite" comme la seule info manquante en boucle.
+    """
     next_payload = dict(payload)
     if product_name:
         next_payload.setdefault("product", product_name)
@@ -65,14 +76,20 @@ def build_procurement_escalation(
     if next_payload.pop("_auto_quantity_fill", False):
         next_payload.pop("quantity", None)
 
-    form_data: Dict[str, Any] = {}
+    form_data: Dict[str, Any] = dict(existing_form_data or {})
     if next_payload.get("product") not in (None, "", [], {}):
-        form_data["product"] = next_payload.get("product")
+        form_data.setdefault("product", next_payload.get("product"))
     if unit not in (None, "", [], {}):
-        form_data["unit"] = unit
+        form_data.setdefault("unit", unit)
 
-    # Prefill default deadline (+30 days) but keep it editable
-    if not next_payload.get("deadline") and not next_payload.get("deadline_date"):
+    # Prefill default deadline (+30 days) but keep it editable — uniquement
+    # s'il n'y a VRAIMENT rien (ni dans le payload, ni déjà collecté par le
+    # formulaire en cours).
+    if (
+        not next_payload.get("deadline")
+        and not next_payload.get("deadline_date")
+        and not form_data.get("deadline")
+    ):
         default_deadline = (datetime.utcnow() + timedelta(days=30)).date().isoformat()
         form_data["deadline"] = default_deadline
 
@@ -194,8 +211,15 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
     if reset_quantity:
         payload.pop("quantity", None)
 
-    def _escalate(message: str, unit_hint: Optional[str] = None) -> Dict[str, Any]:
-        return build_procurement_escalation(payload, working_memory, product_name, unit_hint or unit, message)
+    def _escalate(
+        message: str,
+        unit_hint: Optional[str] = None,
+        existing_form_data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return build_procurement_escalation(
+            payload, working_memory, product_name, unit_hint or unit, message,
+            existing_form_data=existing_form_data,
+        )
 
     _ESCALATION_MSG = (
         "Très bien, lançons un appel d'offres. "
@@ -207,7 +231,10 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
         return _escalate(_ESCALATION_MSG)
 
     if current_goal == "PROCUREMENT_CREATE_REQUEST" and state.get("active_form") == "AUCTION_CREATE":
-        return _escalate(_ESCALATION_MSG)
+        # Ré-entrée dans un formulaire déjà actif : préserver le progrès déjà
+        # collecté (prix/quantité/date déjà répondus par form_node) au lieu de
+        # repartir d'un form_data quasi vide à chaque tour.
+        return _escalate(_ESCALATION_MSG, existing_form_data=state.get("form_data"))
 
     # --- Waiting-choice state (no catalog stock, user asked if they want procurement) ---
     waiting_choice = bool(working_memory.get("buyer_request_waiting_choice"))

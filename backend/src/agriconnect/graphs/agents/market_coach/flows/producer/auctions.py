@@ -711,6 +711,41 @@ async def producer_auction_resolver(
     pending_price = working.get("pending_bid_price")
     bids_brief = working.get("my_bids_brief") or {}
 
+    # (0) INTERRUPTION LÉGITIME DU TUNNEL DE BID.
+    # Ce resolver a sa PROPRE mini machine à états (bid_phase), indépendante de
+    # confirmation_gate/TunnelManager (voir docstring du module — c'est le but
+    # du "confirmation maison"). Problème : par le temps qu'un message arrive
+    # ici, TunnelManager.evaluate() + goal_planner ont DÉJÀ décidé si ce message
+    # a le droit de casser une confirmation (confiance suffisante, ou intent
+    # critique) et ont posé `interpreted_event = "INTERRUPTION"` en conséquence.
+    # Sans ce garde, les branches (A)/(B) ci-dessous ne savent reconnaître que
+    # REJECT / un prix / CONFIRM — tout le reste (y compris cette interruption
+    # DÉJÀ AUTORISÉE) retombait dans la branche "réponse ambiguë" et ré-affichait
+    # indéfiniment le récap périmé, quel que soit ce que l'utilisateur demandait
+    # réellement (ex: "je veux voir les enchères" pendant qu'un bid Tomate/150
+    # FCFA attendait confirmation). Purge le tunnel de bid et laisse tomber vers
+    # le routage normal (C/D/E/F), qui gère déjà correctement MARKET_GET_MY_PROPOSALS
+    # / une sélection fraîche / le browse par défaut.
+    if phase in {"CONFIRM", "ASK_PRICE", "CONFIRM_MODIFY", "ASK_PRICE_MODIFY"} and event == "INTERRUPTION":
+        logger.info(
+            "[ProducerAuctionResolver] Interruption autorisée casse le tunnel de bid "
+            "(phase=%s) — purge et redirection vers le routage normal.",
+            phase,
+        )
+        state = {
+            **state,
+            "working_memory": _clear_bid_wm(state),
+            "transaction_payload": {**payload, **_clear_bid_payload()},
+        }
+        working = state["working_memory"]
+        payload = state["transaction_payload"]
+        mapping_kind = str(working.get("available_mapping_kind") or "").lower().strip()
+        phase = ""
+        pending_auction = None
+        pending_modify_bid = None
+        pending_price = None
+        bids_brief = working.get("my_bids_brief") or {}
+
     # (A) Tunnel MODIFICATION de prix en cours (priorité : plus spécifique).
     if phase == "CONFIRM_MODIFY" and pending_modify_bid and pending_price is not None:
         if event == "REJECT" or text in _NO_TOKENS:

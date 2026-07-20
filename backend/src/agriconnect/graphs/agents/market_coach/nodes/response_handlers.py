@@ -194,6 +194,7 @@ def _resolve_goal_for_ui(state: MarketAgentState) -> str | None:
         working.get("active_goal"),
         working.get("locked_intent"),
         state.get("suspended_goal"),
+        state.get("detected_intent"),
     ]
     for cand in candidates:
         if cand in (None, ""):
@@ -216,6 +217,24 @@ def _unwrap_execution_result(exec_result: Dict[str, Any]) -> Dict[str, Any]:
         nested = current.get("data")
         if not isinstance(nested, dict):
             break
+        # Enveloppe `{"data": {"raw_result": "<json string>"}}` : certains
+        # transports MCP renvoient le vrai payload sérialisé sous `raw_result`.
+        # `ensure_dict` (utils.py) sait le déplier, mais si le résultat arrive
+        # ici encore enveloppé, le renderer ne voyait qu'un dict sans
+        # status/message/formatted_menu → il tombait sur le message générique.
+        raw = nested.get("raw_result")
+        if isinstance(raw, str) and raw.strip():
+            try:
+                from agriconnect.graphs.agents.market_coach.utils import ensure_dict
+                parsed = ensure_dict(raw)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict) and parsed:
+                outer_message = current.get("message")
+                current = dict(parsed)
+                if outer_message and not current.get("message"):
+                    current["message"] = outer_message
+                continue
         has_wrapper_shape = any(k in nested for k in ("status", "data", "message", "error"))
         if not has_wrapper_shape:
             break
@@ -780,7 +799,20 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
         structured_sections_handled = False
         allow_structured_render = not has_formatted_menu
 
-        if allow_structured_render and any([farms_payload, catalog_payload, cycles_payload]):
+        # Détecte la FORME get_stocks (clés farms/catalog/upcoming_cycles
+        # présentes) même quand tout est vide — {} et [] sont falsy en Python,
+        # donc `any([farms_payload, catalog_payload, cycles_payload])` seul ne
+        # suffit pas à distinguer "ce n'est pas cette forme de réponse" de "cette
+        # forme de réponse, mais rien à afficher" (ex: producteur sans ferme ni
+        # produit). On veut rendre un message dédié dans le 2ᵉ cas, pas laisser
+        # tomber sur le générique CAS 3.
+        is_catalog_shape = isinstance(tool_data, dict) and any(
+            k in tool_data for k in ("farms", "catalog", "upcoming_cycles")
+        )
+
+        if allow_structured_render and (
+            any([farms_payload, catalog_payload, cycles_payload]) or is_catalog_shape
+        ):
             sections: List[str] = []
             if farms_payload:
                 farm_text, farm_options = _render_farm_sections(farms_payload)
@@ -813,6 +845,20 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
 
             if sections:
                 text_output = "\n\n".join([section for section in sections if section]).strip()
+                structured_sections_handled = True
+            elif not tool_msg:
+                # Forme reconnue (farms/catalog/upcoming_cycles) mais TOUT est
+                # vide (ex: producteur sans ferme ni produit publié) ET aucun
+                # message n'accompagne la réponse — cas réel observé où
+                # `get_stocks` renvoie `{farms:{}, catalog:[], upcoming_cycles:[]}`
+                # sans `message`. Sans ce guard, on retombait sur le message
+                # générique plat "Je n'ai rien trouvé à afficher" (CAS 3), qui
+                # ne guide pas l'utilisateur vers une action concrète.
+                text_output = (
+                    f"{salutation}Vous n'avez encore aucun produit ni exploitation "
+                    "enregistrés. Tapez *ajouter un produit* pour commencer à vendre, "
+                    "ou *créer une ferme* pour configurer votre exploitation."
+                )
                 structured_sections_handled = True
 
         selected_tool_name = str(state.get("selected_tool") or "").lower().strip()
@@ -871,7 +917,16 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
 
         # 🔍 CAS 3 : Fallback transactionnel unitaire (si l'outil ne renvoie pas de collection)
         if not ag_component:
-            if not tool_msg:
+            # GUARD : ne JAMAIS écraser un menu déjà rendu (`formatted_menu`),
+            # une section structurée déjà construite (CAS 1 —
+            # `structured_sections_handled`), ni un message d'outil, par le
+            # gabarit générique d'écriture. `not tool_msg and not
+            # has_formatted_menu` seul ne suffisait pas : le CAS 1 peut avoir
+            # déjà posé un `text_output` dédié (ex: "vous n'avez encore aucun
+            # produit...") sans jamais toucher `tool_msg`/`has_formatted_menu`
+            # — ce bloc l'écrasait quand même par « L'opération concernant
+            # votre demande a été validée avec succès » / « rien trouvé ».
+            if not tool_msg and not has_formatted_menu and not structured_sections_handled:
                 prod_name = payload.get("product") or payload.get("product_name") or "votre demande"
                 qty = _fmt_num(
                     payload.get("quantity")
@@ -904,8 +959,22 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
                     price_bid = _fmt_num(payload.get("price"))
                     p_info = f" à {price_bid} FCFA" if price_bid else ""
                     text_output = f"✅ {salutation}Votre proposition de prix{p_info} pour *{prod_name}* a bien été transmise."
+                elif any(tok in g for tok in ("LIST", "GET", "CHECK", "SEARCH", "VIEW", "DASHBOARD", "SNAPSHOT")):
+                    # Goal de LECTURE sans contenu renvoyé : rester neutre et
+                    # honnête — ne pas prétendre qu'une opération a été
+                    # « validée » alors que l'utilisateur voulait juste consulter.
+                    text_output = (
+                        f"{salutation}Je n'ai rien trouvé à afficher pour cette demande "
+                        "pour le moment."
+                    )
                 else:
-                    text_output = f"✅ {salutation}L'opération concernant *{prod_name}* a été validée avec succès."
+                    # Goal inconnu / vide (ex: nettoyé après une interruption) et
+                    # aucun contenu d'outil : message neutre plutôt qu'une fausse
+                    # confirmation d'écriture.
+                    text_output = (
+                        f"{salutation}C'est noté. Dites-moi ce que vous souhaitez faire "
+                        "(voir vos commandes, publier un produit, lancer un appel d'offres…)."
+                    )
 
             ag_component = {
                 "lc_type": "constructor",

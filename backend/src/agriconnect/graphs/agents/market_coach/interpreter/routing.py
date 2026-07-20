@@ -659,6 +659,51 @@ def make_input_interpreter(role: str = "PRODUCER"):
         working = state.get("working_memory") or {}
         locked_goal = state.get("current_goal") or working.get("active_goal") or working.get("locked_intent")
 
+        # ── 0. BYPASS INTERACTIF (zéro token) ──────────────────────────
+        # Un message interactif WhatsApp (bouton quick-reply / ligne de liste)
+        # a déjà été désambiguïsé côté client : le clic porte un id/valeur
+        # sans équivoque. On résout DIRECTEMENT en événement structuré sans
+        # jamais appeler Groq — c'est le cœur de l'optimisation de coût. La
+        # boucle LLM d'interprétation n'a de sens que pour du texte libre.
+        interactive = str(state.get("interactive_selection") or "").strip()
+        if interactive and not onboarding_active:
+            up = interactive.upper()
+            if up in {"CONFIRM", "OUI", "YES", "VALIDER", "CONFIRMER"}:
+                logger.info("[Interpreter InteractiveBypass] CONFIRM (payload=%s)", interactive)
+                return {
+                    "interpreted_event": "CONFIRM",
+                    "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+                    "interpreter_confidence": 1.0,
+                    "extracted_entities": {},
+                    "raw_analysis": {"path": "interactive_bypass_confirm"},
+                }
+            if up in {"REJECT", "NON", "NO", "ANNULER", "CANCEL"}:
+                logger.info("[Interpreter InteractiveBypass] REJECT (payload=%s)", interactive)
+                return {
+                    "interpreted_event": "REJECT",
+                    "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+                    "interpreter_confidence": 1.0,
+                    "extracted_entities": {},
+                    "raw_analysis": {"path": "interactive_bypass_reject"},
+                }
+            # Sélection dans une liste : chiffre pur → selection_index,
+            # sinon la valeur métier (UUID / slug / goal) → selected_value.
+            # La machinerie SELECTION existante (memory_update + resolvers)
+            # résout ensuite via `available_mapping`.
+            entities = (
+                {"selection_index": int(interactive)}
+                if interactive.isdigit()
+                else {"selected_value": interactive}
+            )
+            logger.info("[Interpreter InteractiveBypass] SELECTION (%s)", entities)
+            return {
+                "interpreted_event": "SELECTION",
+                "detected_intent": "UNKNOWN",
+                "interpreter_confidence": 1.0,
+                "extracted_entities": entities,
+                "raw_analysis": {"path": "interactive_bypass_selection"},
+            }
+
         def _emit_onboarding(extracted: Dict[str, Any], source: str) -> Dict[str, Any]:
             return {
                 "interpreted_event": "ONBOARDING_INPUT",

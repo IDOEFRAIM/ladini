@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ast
 import json
 import logging
 import os
@@ -495,7 +496,29 @@ class AgriMCPClient:
             raw_output = "\n".join([c.text for c in result.content if hasattr(c, "text")])
             try:
                 return json.loads(raw_output)
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError) as exc:
+                # Filet de sécurité AVANT de renvoyer le texte brut : certains
+                # tools DB sérialisent leur réponse via `str(dict)`/f-string
+                # plutôt que `json.dumps` (littéral Python — guillemets
+                # simples, None/True/False) plutôt que du JSON strict. Sans ce
+                # filet, le texte brut atterrissait dans `ensure_dict()`
+                # (utils.py) dont l'heuristique de repli fait un naïf
+                # `.replace("'", '"')` — DESTRUCTEUR sur tout texte français
+                # contenant une apostrophe interne ("d'offres", "l'exploitation",
+                # "n'ai pas trouvé"...), qui corrompt la structure JSON et fait
+                # disparaître silencieusement `message`/`data` de la réponse.
+                # `ast.literal_eval` gère les littéraux Python sans jamais
+                # toucher au contenu des chaînes.
+                try:
+                    parsed = ast.literal_eval(raw_output)
+                    if isinstance(parsed, (dict, list)):
+                        return parsed
+                except (ValueError, SyntaxError, TypeError):
+                    pass
+                logger.warning(
+                    "MCP_NON_JSON_RESPONSE | tool=%s | error=%s | raw_output[:300]=%s",
+                    tool_name, exc, raw_output[:300],
+                )
                 return raw_output
 
         return result

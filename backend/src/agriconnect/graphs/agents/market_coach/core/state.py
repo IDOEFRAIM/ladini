@@ -75,6 +75,14 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
 
     user_query: Annotated[str, replace_value]
 
+    # Payload d'un message interactif WhatsApp (bouton quick-reply / ligne de
+    # liste) reçu ce tour-ci : id/valeur du clic, ou "CONFIRM"/"REJECT" pour
+    # une confirmation binaire. Amorcé par l'orchestrateur depuis le webhook.
+    # Sa présence fait court-circuiter l'appel LLM de `input_interpreter`
+    # (résolution directe en SELECTION/CONFIRM/REJECT — zéro token). Éphémère :
+    # remis à None en fin de tour par post_response_cleanup.
+    interactive_selection: Annotated[Optional[str], replace_value]
+
     normalized_text: Annotated[str, replace_value]
 
     detected_language: Annotated[str, replace_value]

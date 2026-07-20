@@ -8,6 +8,7 @@ from sqlalchemy import select, and_, or_, func, update
 from sqlalchemy.orm import aliased
 from .common import normalize_phone
 from .search import fuzzy_match, similarity_rank
+from .errors import BusinessRuleException
 
 # Importation stricte des modèles requis pour le domaine des enchères
 from agriconnect.domain.models import Auction, Bid, SubCategory, Zone, BuyerProfile, User,Producer, Order, Product, Category
@@ -154,111 +155,105 @@ class AuctionMixin(BaseMixin):
         """Crée un appel d'offre (Auction) avec les contraintes logistiques respectées."""
         current_session = self.session
         if not current_session:
-            logger.error("❌ Aucune session active trouvée")
-            return {"status": "error", "message": "Session indisponible."}
+            raise BusinessRuleException("Session indisponible.")
 
+        # 1. Résolution de l'acheteur
         try:
-            # 1. Résolution de l'acheteur
-            try:
-                user_obj, buyer_profile = await self.get_buyer_profile(phone=str(phone))
-            except ValueError as e:
-                logger.warning(f"⚠️ Échec résolution acheteur : {str(e)}")
-                return {"status": "error", "message": "Profil acheteur manquant."}
-            
-            buyer_id = buyer_profile.id
-            target_zone_id = user_obj.zone_id
-            final_zone_name = "Zone non spécifiée"
+            user_obj, buyer_profile = await self.get_buyer_profile(phone=str(phone))
+        except ValueError as e:
+            logger.warning(f"⚠️ Échec résolution acheteur : {str(e)}")
+            raise BusinessRuleException("Profil acheteur manquant.") from e
 
-            product_query_clean = str(product_query or "").strip()
+        buyer_id = buyer_profile.id
+        target_zone_id = user_obj.zone_id
+        final_zone_name = "Zone non spécifiée"
 
-            # 2. Résolution du produit — recherche floue trigram (catalogue,
-            # fort impact métier), triée par pertinence décroissante.
-            sub_cat_stmt = (
-                select(SubCategory)
-                .where(fuzzy_match(SubCategory.name, product_query_clean))
-                .order_by(similarity_rank(SubCategory.name, product_query_clean))
+        product_query_clean = str(product_query or "").strip()
+
+        # 2. Résolution du produit — recherche floue trigram (catalogue,
+        # fort impact métier), triée par pertinence décroissante.
+        sub_cat_stmt = (
+            select(SubCategory)
+            .where(fuzzy_match(SubCategory.name, product_query_clean))
+            .order_by(similarity_rank(SubCategory.name, product_query_clean))
+            .limit(1)
+        )
+        sub_cat = await current_session.scalar(sub_cat_stmt)
+        if not sub_cat:
+            sub_cat = await self._fuzzy_match_sub_category(product_query_clean)
+        if not sub_cat:
+            raise BusinessRuleException(f"Produit '{product_query}' inconnu.", reason="product_not_found")
+
+        # 3. Résolution zone — recherche floue trigram (référentiel logistique).
+        if zone_query and zone_query.strip():
+            zone_obj = await current_session.scalar(
+                select(Zone)
+                .where(fuzzy_match(Zone.name, zone_query.strip()))
+                .order_by(similarity_rank(Zone.name, zone_query.strip()))
                 .limit(1)
             )
-            sub_cat = await current_session.scalar(sub_cat_stmt)
-            if not sub_cat:
-                sub_cat = await self._fuzzy_match_sub_category(product_query_clean)
-            if not sub_cat:
-                return {"status": "error", "message": f"Produit '{product_query}' inconnu."}
+            if zone_obj:
+                target_zone_id = zone_obj.id
+                final_zone_name = zone_obj.name
 
-            # 3. Résolution zone — recherche floue trigram (référentiel logistique).
-            if zone_query and zone_query.strip():
-                zone_obj = await current_session.scalar(
-                    select(Zone)
-                    .where(fuzzy_match(Zone.name, zone_query.strip()))
-                    .order_by(similarity_rank(Zone.name, zone_query.strip()))
-                    .limit(1)
-                )
-                if zone_obj:
-                    target_zone_id = zone_obj.id
-                    final_zone_name = zone_obj.name
+        # 4. Validation dates
+        if isinstance(deadline, str):
+            deadline = datetime.fromisoformat(deadline.replace(" ", "T"))
 
-            # 4. Validation dates
-            if isinstance(deadline, str):
-                deadline = datetime.fromisoformat(deadline.replace(" ", "T"))
-            
-            now = datetime.now()
-            if deadline <= now:
-                return {"status": "error", "message": "Date limite invalide."}
-                
-            delivery_deadline_dt = delivery_deadline
-            if isinstance(delivery_deadline_dt, str):
-                try:
-                    delivery_deadline_dt = datetime.fromisoformat(delivery_deadline_dt.replace(" ", "T"))
-                except ValueError:
-                    delivery_deadline_dt = None
-            if not isinstance(delivery_deadline_dt, datetime):
-                delivery_deadline_dt = deadline + timedelta(days=3)
+        now = datetime.now()
+        if deadline <= now:
+            raise BusinessRuleException("Date limite invalide.")
 
-            # 5. Instanciation avec tous les champs requis par le modèle SQLAlchemy
-            new_auction = Auction(
-                id=uuid.uuid4(),
-                buyer_id=buyer_id,
-                sub_category_id=sub_cat.id,
-                description=description.strip() if description else None,
-                quantity=float(qty),
-                unit=unit.upper().strip(),
-                max_price_per_unit=float(max_price),
-                deadline=deadline,
-                # Champs logistiques qui causaient le NotNullViolationError
-                incoterm=incoterm.upper().strip(),
-                delivery_location=delivery_location.strip(),
-                delivery_deadline=delivery_deadline_dt,
-                # États par défaut
-                auto_extend=auto_extend,
-                status="OPEN",
-                escrow_status="NONE",
-                target_zone_id=target_zone_id,
-                version=0,
-                created_at=now,
-                updated_at=now
-            )
-            
-            current_session.add(new_auction)
-            await current_session.flush()
+        delivery_deadline_dt = delivery_deadline
+        if isinstance(delivery_deadline_dt, str):
+            try:
+                delivery_deadline_dt = datetime.fromisoformat(delivery_deadline_dt.replace(" ", "T"))
+            except ValueError:
+                delivery_deadline_dt = None
+        if not isinstance(delivery_deadline_dt, datetime):
+            delivery_deadline_dt = deadline + timedelta(days=3)
 
-            qty_txt = f"{float(qty):g}"
-            unit_txt = unit.upper().strip()
-            price_txt = f"{float(max_price):g}"
-            return {
-                "status": "success",
-                "auction_id": str(new_auction.id),
-                "message": (
-                    f"✅ Votre appel d'offres pour *{qty_txt} {unit_txt} de {sub_cat.name}* "
-                    f"a été enregistré (prix max *{price_txt} FCFA/{unit_txt}*).\n\n"
-                    "📢 Dès qu'un producteur propose une offre, je vous recontacte pour valider. "
-                    "Tapez *suivre mes appels* pour suivre l'état des réponses."
-                ),
-                "summary": f"📢 Appel d'offre publié pour {qty_txt} {unit_txt} de {sub_cat.name}.",
-            }
+        # 5. Instanciation avec tous les champs requis par le modèle SQLAlchemy
+        new_auction = Auction(
+            id=uuid.uuid4(),
+            buyer_id=buyer_id,
+            sub_category_id=sub_cat.id,
+            description=description.strip() if description else None,
+            quantity=float(qty),
+            unit=unit.upper().strip(),
+            max_price_per_unit=float(max_price),
+            deadline=deadline,
+            # Champs logistiques qui causaient le NotNullViolationError
+            incoterm=incoterm.upper().strip(),
+            delivery_location=delivery_location.strip(),
+            delivery_deadline=delivery_deadline_dt,
+            # États par défaut
+            auto_extend=auto_extend,
+            status="OPEN",
+            escrow_status="NONE",
+            target_zone_id=target_zone_id,
+            version=0,
+            created_at=now,
+            updated_at=now
+        )
 
-        except Exception as e:
-            logger.error(f"Erreur critique create_auction: {str(e)}", exc_info=True)
-            return {"status": "error", "message": f"Erreur lors de la création de l'enchère : {str(e)}"}
+        current_session.add(new_auction)
+        await current_session.flush()
+
+        qty_txt = f"{float(qty):g}"
+        unit_txt = unit.upper().strip()
+        price_txt = f"{float(max_price):g}"
+        return {
+            "status": "success",
+            "auction_id": str(new_auction.id),
+            "message": (
+                f"✅ Votre appel d'offres pour *{qty_txt} {unit_txt} de {sub_cat.name}* "
+                f"a été enregistré (prix max *{price_txt} FCFA/{unit_txt}*).\n\n"
+                "📢 Dès qu'un producteur propose une offre, je vous recontacte pour valider. "
+                "Tapez *suivre mes appels* pour suivre l'état des réponses."
+            ),
+            "summary": f"📢 Appel d'offre publié pour {qty_txt} {unit_txt} de {sub_cat.name}.",
+        }
         
 
 
@@ -273,88 +268,85 @@ class AuctionMixin(BaseMixin):
         """Permet à un producteur d'émettre un prix (Bid) sur un marché ouvert."""
         current_session = self.session
         if not current_session:
-            return {"status": "error", "message": "Session de base de données indisponible."}
+            raise BusinessRuleException("Session de base de données indisponible.")
+
+        # 1. Résolution via le nouveau BaseMixin (Retourne un Tuple d'objets SQL)
         try:
-            # 1. Résolution via le nouveau BaseMixin (Retourne un Tuple d'objets SQL)
-            try:
-                _, producer_obj = await self.get_producer_profile(phone=str(phone))
-            except ValueError as e:
-                logger.warning(f"⚠️ Échec de résolution producteur pour {phone} : {str(e)}")
-                return {"status": "error", "message": "Votre compte producteur n'est pas encore identifié."}
-            
-            producer_id = producer_obj.id
+            _, producer_obj = await self.get_producer_profile(phone=str(phone))
+        except ValueError as e:
+            logger.warning(f"⚠️ Échec de résolution producteur pour {phone} : {str(e)}")
+            raise BusinessRuleException("Votre compte producteur n'est pas encore identifié.") from e
 
-            # 2. Validation de la cible
-            a_uuid = uuid.UUID(auction_id)
-            auction = await current_session.get(Auction, a_uuid)
-            
-            if not auction:
-                return {"status": "error", "message": "Cette opportunité de marché n'existe plus."}
-                
-            if auction.status.upper() != "OPEN":
-                return {"status": "error", "message": f"Désolé, cette enchère est fermée (Statut : {auction.status})."}
+        producer_id = producer_obj.id
 
-            if float(offered_price) <= 0:
-                return {"status": "error", "message": "Le prix proposé doit être supérieur à 0 CFA."}
+        # 2. Validation de la cible
+        a_uuid = uuid.UUID(auction_id)
+        auction = await current_session.get(Auction, a_uuid)
 
-            # 3. UPSERT — un producteur ne peut avoir qu'UNE offre par enchère
-            #    (contrainte unique `bids_auction_producer_unique`). Si une offre
-            #    existe déjà, on MET À JOUR son prix au lieu de tenter un INSERT
-            #    qui lèverait IntegrityError (→ transaction empoisonnée → « erreur
-            #    technique »). UX naturelle : « participer » 2× = corriger son prix.
-            now = datetime.now()
-            existing_bid = await current_session.scalar(
-                select(Bid).where(
-                    Bid.auction_id == a_uuid,
-                    Bid.producer_id == producer_id,
+        if not auction:
+            raise BusinessRuleException("Cette opportunité de marché n'existe plus.")
+
+        if auction.status.upper() != "OPEN":
+            raise BusinessRuleException(f"Désolé, cette enchère est fermée (Statut : {auction.status}).")
+
+        if float(offered_price) <= 0:
+            raise BusinessRuleException("Le prix proposé doit être supérieur à 0 CFA.")
+
+        # 3. UPSERT — un producteur ne peut avoir qu'UNE offre par enchère
+        #    (contrainte unique `bids_auction_producer_unique`). Si une offre
+        #    existe déjà, on MET À JOUR son prix au lieu de tenter un INSERT
+        #    qui lèverait IntegrityError (→ transaction empoisonnée → « erreur
+        #    technique »). UX naturelle : « participer » 2× = corriger son prix.
+        now = datetime.now()
+        existing_bid = await current_session.scalar(
+            select(Bid).where(
+                Bid.auction_id == a_uuid,
+                Bid.producer_id == producer_id,
+            )
+        )
+
+        if existing_bid is not None:
+            if str(existing_bid.status or "").upper() != "PENDING":
+                raise BusinessRuleException(
+                    "Vous avez déjà une offre traitée sur cette enchère, elle ne peut plus être modifiée.",
+                    reason="bid_already_processed",
                 )
-            )
-
-            if existing_bid is not None:
-                if str(existing_bid.status or "").upper() != "PENDING":
-                    return {
-                        "status": "error",
-                        "message": "Vous avez déjà une offre traitée sur cette enchère, elle ne peut plus être modifiée.",
-                    }
-                old_price = existing_bid.offered_price
-                existing_bid.offered_price = float(offered_price)
-                if message:
-                    existing_bid.message = message.strip()
-                existing_bid.updated_at = now
-                await current_session.flush()
-                return {
-                    "status": "success",
-                    "bid_id": str(existing_bid.id),
-                    "updated": True,
-                    "message": (
-                        f"✅ Vous aviez déjà une offre ({old_price:g} CFA) sur cette enchère — "
-                        f"elle a été mise à jour à *{float(offered_price):g} CFA*."
-                    ),
-                }
-
-            new_bid = Bid(
-                id=uuid.uuid4(),
-                auction_id=a_uuid,
-                producer_id=producer_id,
-                offered_price=float(offered_price),
-                is_winner=False,
-                status="PENDING",
-                message=message.strip() if message else None,
-                created_at=now,
-                updated_at=now
-            )
-
-            current_session.add(new_bid)
+            old_price = existing_bid.offered_price
+            existing_bid.offered_price = float(offered_price)
+            if message:
+                existing_bid.message = message.strip()
+            existing_bid.updated_at = now
             await current_session.flush()
-
             return {
                 "status": "success",
-                "bid_id": str(new_bid.id),
-                "message": f"✅ Votre offre de *{float(offered_price):g} CFA* a été transmise à l'acheteur avec succès."
+                "bid_id": str(existing_bid.id),
+                "updated": True,
+                "message": (
+                    f"✅ Vous aviez déjà une offre ({old_price:g} CFA) sur cette enchère — "
+                    f"elle a été mise à jour à *{float(offered_price):g} CFA*."
+                ),
             }
-        except Exception as e:
-            logger.error(f"❌ Erreur critique place_bid: {str(e)}", exc_info=True)
-            return {"status": "error", "message": "Impossible d'enregistrer votre offre."}
+
+        new_bid = Bid(
+            id=uuid.uuid4(),
+            auction_id=a_uuid,
+            producer_id=producer_id,
+            offered_price=float(offered_price),
+            is_winner=False,
+            status="PENDING",
+            message=message.strip() if message else None,
+            created_at=now,
+            updated_at=now
+        )
+
+        current_session.add(new_bid)
+        await current_session.flush()
+
+        return {
+            "status": "success",
+            "bid_id": str(new_bid.id),
+            "message": f"✅ Votre offre de *{float(offered_price):g} CFA* a été transmise à l'acheteur avec succès."
+        }
 
     # ─── SECTION 3 : CONSULTATIONS ET MARCHÉ (READS) ─────────────────────
 
@@ -922,119 +914,115 @@ class AuctionMixin(BaseMixin):
         """
         current_session = self.session
         if not current_session:
-            return {"status": "error", "message": "Erreur interne : session de base de données indisponible."}
-        try:
-            b_id = uuid.UUID(bid_id)
+            raise BusinessRuleException("Erreur interne : session de base de données indisponible.")
 
-            # OUTER JOIN Producer/User : un bid gagnant dont le producteur a un
-            # lien User cassé ne doit PAS déclencher « Offre introuvable » (le
-            # nom retombe sur « Producteur Anonyme »). Cohérent avec get_auction_bids.
-            stmt = (
-                select(Bid, Auction, User.name.label("producer_name"), User.phone.label("producer_phone"), SubCategory)
-                .join(Auction, Bid.auction_id == Auction.id)
-                .outerjoin(Producer, Bid.producer_id == Producer.id)
-                .outerjoin(User, Producer.user_id == User.id)
-                .join(SubCategory, Auction.sub_category_id == SubCategory.id)
-                .where(Bid.id == b_id)
+        b_id = uuid.UUID(bid_id)
+
+        # OUTER JOIN Producer/User : un bid gagnant dont le producteur a un
+        # lien User cassé ne doit PAS déclencher « Offre introuvable » (le
+        # nom retombe sur « Producteur Anonyme »). Cohérent avec get_auction_bids.
+        stmt = (
+            select(Bid, Auction, User.name.label("producer_name"), User.phone.label("producer_phone"), SubCategory)
+            .join(Auction, Bid.auction_id == Auction.id)
+            .outerjoin(Producer, Bid.producer_id == Producer.id)
+            .outerjoin(User, Producer.user_id == User.id)
+            .join(SubCategory, Auction.sub_category_id == SubCategory.id)
+            .where(Bid.id == b_id)
+        )
+        res = await current_session.execute(stmt)
+        record = res.fetchone()
+
+        if not record:
+            raise BusinessRuleException("Offre introuvable ou retirée par le producteur.")
+
+        bid, auction, prod_name, prod_phone, sub_cat = record
+
+        if auction.status == "CLOSED":
+            raise BusinessRuleException("Cette enchère a déjà été clôturée avec un autre partenaire.")
+
+        # 1. Mises à jour atomiques des états du Marché
+        bid.is_winner = True
+        bid.status = "WINNING"
+        auction.status = "CLOSED"
+        auction.winner_bid_id = bid.id
+
+        # 1b. Toutes les autres offres de cette enchère sont désormais perdues.
+        #     Sans cela, un producteur non retenu resterait « En attente » à vie.
+        now_loss = datetime.now()
+        await current_session.execute(
+            update(Bid)
+            .where(
+                Bid.auction_id == auction.id,
+                Bid.id != bid.id,
+                Bid.status.in_(["PENDING", "WINNING"]),
             )
-            res = await current_session.execute(stmt)
-            record = res.fetchone()
+            .values(status="LOST", is_winner=False, updated_at=now_loss)
+        )
 
-            if not record:
-                return {"status": "error", "message": "Offre introuvable ou retirée par le producteur."}
+        # 2. Calcul financier & Instanciation de l'accord commercial officiel (Order)
+        total = float(bid.offered_price * auction.quantity)
 
-            bid, auction, prod_name, prod_phone, sub_cat = record
+        new_order = Order(
+            id=uuid.uuid4(),
+            buyer_id=auction.buyer_id,
+            auction_id=auction.id,
+            winning_bid_id=bid.id,
+            total_amount=total,
+            status="CONFIRMED",
+            zone_id=auction.target_zone_id,
+            created_at=datetime.now()
+        )
 
-            if auction.status == "CLOSED":
-                return {"status": "error", "message": "Cette enchère a déjà été clôturée avec un autre partenaire."}
+        current_session.add(new_order)
+        await current_session.flush()
 
-            # 1. Mises à jour atomiques des états du Marché
-            bid.is_winner = True
-            bid.status = "WINNING"
-            auction.status = "CLOSED"
-            auction.winner_bid_id = bid.id
+        # Notifie le producteur gagnant via l'outbox (même transaction que la
+        # commande : si le commit échoue, la notif n'est pas non plus enfilée).
+        # Dispatché en ~30s (cron outbox-dispatch) — pas synchrone mais quasi
+        # temps réel. dedupe_key sur new_order.id : jamais deux fois pour le
+        # même deal même si select_winning_bid est rejoué.
+        notified = False
+        if prod_phone:
+            from agriconnect.workers.outbox import templates as _outbox_templates
+            from agriconnect.workers.repositories import outbox_repo as _outbox_repo
 
-            # 1b. Toutes les autres offres de cette enchère sont désormais perdues.
-            #     Sans cela, un producteur non retenu resterait « En attente » à vie.
-            now_loss = datetime.now()
-            await current_session.execute(
-                update(Bid)
-                .where(
-                    Bid.auction_id == auction.id,
-                    Bid.id != bid.id,
-                    Bid.status.in_(["PENDING", "WINNING"]),
-                )
-                .values(status="LOST", is_winner=False, updated_at=now_loss)
+            await _outbox_repo.enqueue(current_session, [{
+                "channel": "WHATSAPP",
+                "recipient_phone": prod_phone,
+                "template_key": _outbox_templates.AUCTION_WON_PRODUCER,
+                "payload": {
+                    "product": sub_cat.name,
+                    "quantity": float(auction.quantity),
+                    "unit": auction.unit,
+                    "total": total,
+                },
+                "dedupe_key": f"AUCTION_WON:{new_order.id}",
+            }])
+            notified = True
+
+        clean_prod_name = prod_name or "Producteur Anonyme"
+        producer_status_line = (
+            "Le producteur a été informé et prépare la livraison."
+            if notified
+            else "Pensez à contacter directement le producteur : son numéro n'est pas encore renseigné."
+        )
+        return {
+            "status": "success",
+            "order_id": str(new_order.id),
+            "summary_buyer": (
+                f"🤝 *Félicitations ! Deal conclu.*\n\n"
+                f"Vous avez choisi l'offre de *{clean_prod_name}*.\n"
+                f"📦 Produit : {sub_cat.name}\n"
+                f"💰 Total à payer : *{total} CFA*\n\n"
+                f"{producer_status_line}"
+            ),
+            "summary_producer": (
+                f"🎉 *Bonne nouvelle !*\n\n"
+                f"Votre offre pour {auction.quantity} {auction.unit} de {sub_cat.name} a été retenue !\n"
+                f"💵 Montant du marché : *{total} CFA*\n\n"
+                f"Veuillez contacter l'acheteur pour coordonner les détails de la livraison."
             )
-
-            # 2. Calcul financier & Instanciation de l'accord commercial officiel (Order)
-            total = float(bid.offered_price * auction.quantity)
-            
-            new_order = Order(
-                id=uuid.uuid4(),
-                buyer_id=auction.buyer_id,
-                auction_id=auction.id,
-                winning_bid_id=bid.id,
-                total_amount=total,
-                status="CONFIRMED",
-                zone_id=auction.target_zone_id,
-                created_at=datetime.now()
-            )
-            
-            current_session.add(new_order)
-            await current_session.flush()
-
-            # Notifie le producteur gagnant via l'outbox (même transaction que la
-            # commande : si le commit échoue, la notif n'est pas non plus enfilée).
-            # Dispatché en ~30s (cron outbox-dispatch) — pas synchrone mais quasi
-            # temps réel. dedupe_key sur new_order.id : jamais deux fois pour le
-            # même deal même si select_winning_bid est rejoué.
-            notified = False
-            if prod_phone:
-                from agriconnect.workers.outbox import templates as _outbox_templates
-                from agriconnect.workers.repositories import outbox_repo as _outbox_repo
-
-                await _outbox_repo.enqueue(current_session, [{
-                    "channel": "WHATSAPP",
-                    "recipient_phone": prod_phone,
-                    "template_key": _outbox_templates.AUCTION_WON_PRODUCER,
-                    "payload": {
-                        "product": sub_cat.name,
-                        "quantity": float(auction.quantity),
-                        "unit": auction.unit,
-                        "total": total,
-                    },
-                    "dedupe_key": f"AUCTION_WON:{new_order.id}",
-                }])
-                notified = True
-
-            clean_prod_name = prod_name or "Producteur Anonyme"
-            producer_status_line = (
-                "Le producteur a été informé et prépare la livraison."
-                if notified
-                else "Pensez à contacter directement le producteur : son numéro n'est pas encore renseigné."
-            )
-            return {
-                "status": "success",
-                "order_id": str(new_order.id),
-                "summary_buyer": (
-                    f"🤝 *Félicitations ! Deal conclu.*\n\n"
-                    f"Vous avez choisi l'offre de *{clean_prod_name}*.\n"
-                    f"📦 Produit : {sub_cat.name}\n"
-                    f"💰 Total à payer : *{total} CFA*\n\n"
-                    f"{producer_status_line}"
-                ),
-                "summary_producer": (
-                    f"🎉 *Bonne nouvelle !*\n\n"
-                    f"Votre offre pour {auction.quantity} {auction.unit} de {sub_cat.name} a été retenue !\n"
-                    f"💵 Montant du marché : *{total} CFA*\n\n"
-                    f"Veuillez contacter l'acheteur pour coordonner les détails de la livraison."
-                )
-            }
-
-        except Exception as e:
-            logger.error(f"❌ Erreur critique select_winning_bid: {e}", exc_info=True)
-            return {"status": "error", "message": f"Échec technique lors du traitement de validation : {str(e)}"}
+        }
 
 
 
@@ -1045,138 +1033,126 @@ class AuctionMixin(BaseMixin):
         """Annule un appel d'offre ouvert. Sécurisé par le numéro de téléphone de l'acheteur."""
         current_session = self.session
         if not current_session:
-            return {"status": "error", "message": "Session de base de données indisponible."}
-        try:
-            clean_phone = normalize_phone(phone)
-            a_uuid = uuid.UUID(auction_id)
+            raise BusinessRuleException("Session de base de données indisponible.")
 
-            # Recherche de l'enchère en s'assurant qu'elle appartient bien à l'utilisateur via son profil
-            stmt = (
-                select(Auction)
-                .join(BuyerProfile, Auction.buyer_id == BuyerProfile.id)
-                .join(User, BuyerProfile.user_id == User.id)
-                .where(Auction.id == a_uuid, User.phone == clean_phone)
-            )
-            auction = await current_session.scalar(stmt)
+        clean_phone = normalize_phone(phone)
+        a_uuid = uuid.UUID(auction_id)
 
-            if not auction:
-                return {"status": "error", "message": "Action non autorisée ou marché introuvable."}
+        # Recherche de l'enchère en s'assurant qu'elle appartient bien à l'utilisateur via son profil
+        stmt = (
+            select(Auction)
+            .join(BuyerProfile, Auction.buyer_id == BuyerProfile.id)
+            .join(User, BuyerProfile.user_id == User.id)
+            .where(Auction.id == a_uuid, User.phone == clean_phone)
+        )
+        auction = await current_session.scalar(stmt)
 
-            if auction.status.upper() != "OPEN":
-                return {"status": "error", "message": f"Impossible d'annuler un marché avec le statut : {auction.status}."}
+        if not auction:
+            raise BusinessRuleException("Action non autorisée ou marché introuvable.")
 
-            # Passage à l'état annulé
-            auction.status = "CANCELLED"
-            auction.updated_at = datetime.now()
-            await current_session.flush()
+        if auction.status.upper() != "OPEN":
+            raise BusinessRuleException(f"Impossible d'annuler un marché avec le statut : {auction.status}.")
 
-            return {
-                "status": "success",
-                "message": "🗑️ Votre appel d'offre a été retiré du marché avec succès."
-            }
-        except Exception as e:
-            logger.error(f"❌ Erreur cancel_auction: {e}", exc_info=True)
-            return {"status": "error", "message": "Échec technique lors de l'annulation."}
+        # Passage à l'état annulé
+        auction.status = "CANCELLED"
+        auction.updated_at = datetime.now()
+        await current_session.flush()
+
+        return {
+            "status": "success",
+            "message": "🗑️ Votre appel d'offre a été retiré du marché avec succès."
+        }
 
     async def update_bid_price(self, bid_id: str, phone: str, new_price: float) -> Dict[str, Any]:
         """Permet à un producteur de corriger le prix d'une offre encore PENDING."""
         current_session = self.session
         if not current_session:
-            return {"status": "error", "message": "Session de base de données indisponible."}
-        try:
-            clean_phone = normalize_phone(phone)
-            b_uuid = uuid.UUID(bid_id)
+            raise BusinessRuleException("Session de base de données indisponible.")
 
-            stmt = (
-                select(Bid)
-                .join(Producer, Bid.producer_id == Producer.id)
-                .join(User, Producer.user_id == User.id)
-                .where(Bid.id == b_uuid, User.phone == clean_phone)
-            )
-            bid = await current_session.scalar(stmt)
+        clean_phone = normalize_phone(phone)
+        b_uuid = uuid.UUID(bid_id)
 
-            if not bid:
-                return {"status": "error", "message": "Offre introuvable ou action non autorisée."}
+        stmt = (
+            select(Bid)
+            .join(Producer, Bid.producer_id == Producer.id)
+            .join(User, Producer.user_id == User.id)
+            .where(Bid.id == b_uuid, User.phone == clean_phone)
+        )
+        bid = await current_session.scalar(stmt)
 
-            if bid.status.upper() != "PENDING":
-                return {"status": "error", "message": "Impossible de modifier une offre déjà traitée."}
+        if not bid:
+            raise BusinessRuleException("Offre introuvable ou action non autorisée.")
 
-            if float(new_price) <= 0:
-                return {"status": "error", "message": "Le prix proposé doit être supérieur à 0 CFA."}
+        if bid.status.upper() != "PENDING":
+            raise BusinessRuleException("Impossible de modifier une offre déjà traitée.")
 
-            bid.offered_price = float(new_price)
-            bid.updated_at = datetime.now()
-            await current_session.flush()
+        if float(new_price) <= 0:
+            raise BusinessRuleException("Le prix proposé doit être supérieur à 0 CFA.")
 
-            price_txt = f"{float(new_price):g}"
-            return {
-                "status": "success",
-                "bid_id": str(bid.id),
-                "message": f"✅ Votre offre a été mise à jour à *{price_txt} CFA*.",
-            }
-        except Exception as e:
-            logger.error(f"❌ Erreur update_bid_price: {e}", exc_info=True)
-            return {"status": "error", "message": "Impossible de modifier votre offre."}
+        bid.offered_price = float(new_price)
+        bid.updated_at = datetime.now()
+        await current_session.flush()
+
+        price_txt = f"{float(new_price):g}"
+        return {
+            "status": "success",
+            "bid_id": str(bid.id),
+            "message": f"✅ Votre offre a été mise à jour à *{price_txt} CFA*.",
+        }
 
     async def withdraw_bid(self, bid_id: str, phone: str) -> Dict[str, Any]:
         """Permet à un producteur de retirer sa proposition de prix (Bid)."""
         current_session = self.session
         if not current_session:
-            return {"status": "error", "message": "Session de base de données indisponible."}
-        try:
-            clean_phone = normalize_phone(phone)
-            b_uuid = uuid.UUID(bid_id)
+            raise BusinessRuleException("Session de base de données indisponible.")
 
-            # Sécurisation : Le bid doit appartenir au producteur lié au numéro de téléphone
-            stmt = (
-                select(Bid)
-                .join(Producer, Bid.producer_id == Producer.id)
-                .join(User, Producer.user_id == User.id)
-                .where(Bid.id == b_uuid, User.phone == clean_phone)
-            )
-            bid = await current_session.scalar(stmt)
+        clean_phone = normalize_phone(phone)
+        b_uuid = uuid.UUID(bid_id)
 
-            if not bid:
-                return {"status": "error", "message": "Proposition introuvable ou action non autorisée."}
+        # Sécurisation : Le bid doit appartenir au producteur lié au numéro de téléphone
+        stmt = (
+            select(Bid)
+            .join(Producer, Bid.producer_id == Producer.id)
+            .join(User, Producer.user_id == User.id)
+            .where(Bid.id == b_uuid, User.phone == clean_phone)
+        )
+        bid = await current_session.scalar(stmt)
 
-            if bid.status.upper() != "PENDING":
-                return {"status": "error", "message": "Impossible de retirer une offre déjà traitée."}
+        if not bid:
+            raise BusinessRuleException("Proposition introuvable ou action non autorisée.")
 
-            bid.status = "WITHDRAWN"
-            bid.updated_at = datetime.now()
-            await current_session.flush()
+        if bid.status.upper() != "PENDING":
+            raise BusinessRuleException("Impossible de retirer une offre déjà traitée.")
 
-            return {
-                "status": "success",
-                "message": "👋 Votre proposition de prix a été retirée avec succès."
-            }
-        except Exception as e:
-            logger.error(f"❌ Erreur withdraw_bid: {e}", exc_info=True)
-            return {"status": "error", "message": "Impossible de retirer votre offre."}
+        bid.status = "WITHDRAWN"
+        bid.updated_at = datetime.now()
+        await current_session.flush()
+
+        return {
+            "status": "success",
+            "message": "👋 Votre proposition de prix a été retirée avec succès."
+        }
 
     async def check_and_expire_auctions(self) -> Dict[str, Any]:
         """Passe le statut des enchères expirées de 'OPEN' à 'EXPIRED'."""
         current_session = self.session
         if not current_session:
-            return {"status": "error", "message": "Session indisponible."}
-        try:
-            now = datetime.now()
-            stmt = (
-                update(Auction)
-                .where(Auction.status == "OPEN", Auction.deadline <= now)
-                .values(status="EXPIRED", updated_at=now)
-            )
-            result = await current_session.execute(stmt)
-            await current_session.flush()
+            raise BusinessRuleException("Session indisponible.")
 
-            return {
-                "status": "success",
-                "expired_count": result.rowcount,
-                "message": f"🤖 Nettoyage effectué : {result.rowcount} marché(s) expiré(s)."
-            }
-        except Exception as e:
-            logger.error(f"❌ Erreur check_and_expire_auctions: {e}", exc_info=True)
-            return {"status": "error", "message": "Erreur lors de la mise à jour des expirations."}
+        now = datetime.now()
+        stmt = (
+            update(Auction)
+            .where(Auction.status == "OPEN", Auction.deadline <= now)
+            .values(status="EXPIRED", updated_at=now)
+        )
+        result = await current_session.execute(stmt)
+        await current_session.flush()
+
+        return {
+            "status": "success",
+            "expired_count": result.rowcount,
+            "message": f"🤖 Nettoyage effectué : {result.rowcount} marché(s) expiré(s)."
+        }
 
     async def get_my_active_auctions(self, phone: str) -> Dict[str, Any]:
         """Affiche le tableau de bord de l'acheteur avec ses marchés ouverts et le nombre d'offres reçues."""

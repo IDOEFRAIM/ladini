@@ -163,6 +163,19 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_WHATSAPP_NUMBER: str = ""
 
+    # --- Twilio Messages Interactifs (boutons / listes) ---
+    # Les boutons/listes WhatsApp passent par la Content API Twilio (ContentSid
+    # pré-créé), et NE s'affichent PAS sur le sandbox — requièrent un Sender
+    # WhatsApp de production approuvé. Tant que ce flag est False (ou qu'aucun
+    # ContentSid n'est fourni), l'envoi retombe automatiquement sur du texte
+    # simple (comportement actuel, universel). À activer une fois le sender prod
+    # en place et les templates créés (voir Twilio Console → Content Template
+    # Builder : type "Quick Reply" pour la confirmation OUI/NON).
+    TWILIO_INTERACTIVE_ENABLED: bool = False
+    # ContentSid du template Quick Reply de confirmation binaire (2 boutons :
+    # payload "CONFIRM" et "REJECT"). Une variable {{1}} porte le corps du récap.
+    TWILIO_CONFIRM_CONTENT_SID: str = ""
+
     # --- LangSmith / Observabilité ---
     LANGCHAIN_TRACING_V2: bool = False
     LANGCHAIN_API_KEY: str = ""

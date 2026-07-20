@@ -5,6 +5,7 @@ from datetime import datetime
 import uuid
 from .common import clean_text, positive_float
 from .base import BaseMixin
+from .errors import BusinessRuleException
 from agriconnect.domain.models import (
     Client,
     Expense,
@@ -108,35 +109,31 @@ class MarketplaceMixin(BaseMixin):
         quantity = positive_float(quantity, "quantity")
         unit = clean_text(unit, "unit", required=False, max_length=20) or "KG"
 
-        try:
-            farm_stmt = select(Farm).where(Farm.id == farm_id)
-            farm_result = await current_session.execute(farm_stmt)
-            farm = farm_result.scalar_one_or_none()
-            if not farm:
-                return {"status": "error", "message": f"Ferme introuvable: {farm_id}"}
+        farm_stmt = select(Farm).where(Farm.id == farm_id)
+        farm_result = await current_session.execute(farm_stmt)
+        farm = farm_result.scalar_one_or_none()
+        if not farm:
+            raise BusinessRuleException(f"Ferme introuvable: {farm_id}")
 
-            stmt = select(Stock).where(Stock.farm_id == farm_id, func.lower(Stock.item_name) == item_name.lower()).with_for_update()
-            result = await current_session.execute(stmt)
-            stock = result.scalar_one_or_none()
+        stmt = select(Stock).where(Stock.farm_id == farm_id, func.lower(Stock.item_name) == item_name.lower()).with_for_update()
+        result = await current_session.execute(stmt)
+        stock = result.scalar_one_or_none()
 
-            if stock:
-                stock.quantity += quantity
-                stock_id = str(stock.id)
-                new_total = stock.quantity
-            else:
-                stock_id = _uuid()
-                stock = Stock(id=stock_id, farm_id=farm_id, item_name=item_name, quantity=quantity, unit=unit, type=stock_type, warehouse_id=warehouse_id, organization_id=organization_id)
-                current_session.add(stock)
-                new_total = quantity
+        if stock:
+            stock.quantity += quantity
+            stock_id = str(stock.id)
+            new_total = stock.quantity
+        else:
+            stock_id = _uuid()
+            stock = Stock(id=stock_id, farm_id=farm_id, item_name=item_name, quantity=quantity, unit=unit, type=stock_type, warehouse_id=warehouse_id, organization_id=organization_id)
+            current_session.add(stock)
+            new_total = quantity
 
-            mvt = StockMovement(id=_uuid(), stock_id=stock_id, type="IN", quantity=quantity, reason=reason)
-            current_session.add(mvt)
-            await current_session.flush()
+        mvt = StockMovement(id=_uuid(), stock_id=stock_id, type="IN", quantity=quantity, reason=reason)
+        current_session.add(mvt)
+        await current_session.flush()
 
-            return {"status": "success", "data": {"stock_id": stock_id, "item_name": item_name, "added": quantity, "new_total": new_total, "unit": unit}}
-
-        except ValueError as e:
-            return {"status": "error", "message": str(e)}
+        return {"status": "success", "data": {"stock_id": stock_id, "item_name": item_name, "added": quantity, "new_total": new_total, "unit": unit}}
 
     async def remove_stock(self, farm_id: str, item_name: str, quantity: float, reason: str = "Retrait", movement_type: str = "OUT") -> Dict[str, Any]:
         """Décrémente le stock d'un produit après vérification des disponibilités."""
@@ -145,26 +142,25 @@ class MarketplaceMixin(BaseMixin):
         item_name = clean_text(item_name, "item_name", required=True)
         quantity = positive_float(quantity, "quantity")
 
-        try:
-            stmt = select(Stock).where(Stock.farm_id == farm_id, func.lower(Stock.item_name) == item_name.lower()).with_for_update()
-            result = await current_session.execute(stmt)
-            stock = result.scalar_one_or_none()
+        stmt = select(Stock).where(Stock.farm_id == farm_id, func.lower(Stock.item_name) == item_name.lower()).with_for_update()
+        result = await current_session.execute(stmt)
+        stock = result.scalar_one_or_none()
 
-            if not stock:
-                return {"status": "error", "message": f"Aucun stock de '{item_name}' trouvé pour cette exploitation."}
-            if stock.quantity < quantity:
-                return {"status": "error", "message": f"Stock insuffisant : {stock.quantity} {stock.unit} disponibles, retrait de {quantity} {stock.unit} demandé."}
+        if not stock:
+            raise BusinessRuleException(f"Aucun stock de '{item_name}' trouvé pour cette exploitation.")
+        if stock.quantity < quantity:
+            raise BusinessRuleException(
+                f"Stock insuffisant : {stock.quantity} {stock.unit} disponibles, retrait de {quantity} {stock.unit} demandé.",
+                reason="insufficient_stock",
+            )
 
-            stock.quantity -= quantity
+        stock.quantity -= quantity
 
-            mvt = StockMovement(id=_uuid(), stock_id=str(stock.id), type=movement_type, quantity=quantity, reason=reason)
-            current_session.add(mvt)
-            await current_session.flush()
+        mvt = StockMovement(id=_uuid(), stock_id=str(stock.id), type=movement_type, quantity=quantity, reason=reason)
+        current_session.add(mvt)
+        await current_session.flush()
 
-            return {"status": "success", "data": {"stock_id": str(stock.id), "item_name": item_name, "removed": quantity, "remaining": stock.quantity, "unit": stock.unit}}
-
-        except ValueError as e:
-            return {"status": "error", "message": str(e)}
+        return {"status": "success", "data": {"stock_id": str(stock.id), "item_name": item_name, "removed": quantity, "remaining": stock.quantity, "unit": stock.unit}}
 
     async def adjust_stock(self, farm_id: str, item_name: str, quantity_change: float, reason: str = "Adjustment via MCP", unit: str = "KG", stock_type: str = "HARVEST", warehouse_id: str = None, organization_id: str = None) -> Dict[str, Any]:
         if quantity_change >= 0:
@@ -214,7 +210,16 @@ class MarketplaceMixin(BaseMixin):
         current_session = self.session
         resolved_producer_id = await self._resolve_producer_id(phone)
         if isinstance(resolved_producer_id, dict):
-            return resolved_producer_id
+            # `_resolve_producer_id` est un helper privé qui retourne un dict
+            # d'échec par convention interne (non exposé au dispatcher). Le
+            # point d'entrée public (`record_sale`, méthode d'écriture wrappée
+            # par @transactional) DOIT lever une exception plutôt que
+            # retourner ce dict tel quel, pour rester 100% pilotée par le flux
+            # d'exécution.
+            raise BusinessRuleException(
+                resolved_producer_id.get("message", "Profil producteur introuvable."),
+                reason="producer_not_found",
+            )
 
         product_label = clean_text(product_name, "product_name", required=True)
         unit_clean = clean_text(unit, "unit", required=False, max_length=20) or "KG"

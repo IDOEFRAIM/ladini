@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
@@ -46,6 +47,84 @@ def _coerce_number(v: Any) -> float:
         raise ValueError(f"no number in '{text}'")
     raw = match.group(1).replace(" ", "").replace(",", ".")
     return float(raw)
+
+
+_FRENCH_MONTHS = {
+    "janvier": 1, "fevrier": 2, "février": 2, "mars": 3, "avril": 4, "mai": 5,
+    "juin": 6, "juillet": 7, "aout": 8, "août": 8, "septembre": 9,
+    "octobre": 10, "novembre": 11, "decembre": 12, "décembre": 12,
+}
+_RELATIVE_DEADLINE_RE = re.compile(
+    r"dans\s+(\d+)\s*(jour|jours|semaine|semaines|mois)", re.IGNORECASE
+)
+_ABSOLUTE_DEADLINE_RE = re.compile(
+    r"(\d{1,2})\s*(?:er)?\s+([a-zéû]+)", re.IGNORECASE
+)
+
+
+def _coerce_deadline(v: Any) -> str:
+    """Convertit une date-limite en ISO (YYYY-MM-DD), langage naturel inclus.
+
+    Contrairement à `estimated_available_at`/`expected_harvest_date`, `deadline`
+    n'est PAS dans le schéma JSON de l'interpréteur (voir interpreter/routing.py)
+    — le LLM n'a donc aucune consigne de normalisation ISO pour ce champ, et
+    `form_node.py` injecte le texte utilisateur BRUT pour ce slot. Sans cette
+    coercition, une réponse comme "ça sera disponible le 12 novembre" finissait
+    stockée telle quelle et affichée verbatim dans le récap de confirmation.
+    Lève ValueError si rien n'est reconnu (le slot reste alors "manquant" et
+    l'utilisateur est re-sollicité, plutôt que d'accepter un texte inexploitable).
+    """
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    if isinstance(v, date):
+        return v.isoformat()
+    text = str(v).strip()
+    if not text:
+        raise ValueError("empty")
+
+    # 1. Déjà au format ISO (ou proche).
+    try:
+        return datetime.fromisoformat(text.replace(" ", "T")).date().isoformat()
+    except ValueError:
+        pass
+
+    # 2. Relatif : "dans 7 jours", "dans 2 semaines", "dans 1 mois".
+    m = _RELATIVE_DEADLINE_RE.search(text.lower())
+    if m:
+        amount = int(m.group(1))
+        unit = m.group(2)
+        if unit.startswith("jour"):
+            delta = timedelta(days=amount)
+        elif unit.startswith("semaine"):
+            delta = timedelta(weeks=amount)
+        else:  # mois — approximation à 30 jours, suffisant pour une échéance.
+            delta = timedelta(days=amount * 30)
+        return (datetime.now() + delta).date().isoformat()
+
+    # 3. Absolu en langage naturel : "12 novembre", "1er septembre".
+    # `finditer` (et non `search`) : un message de correction multi-champs
+    # comme "prix 49750 date 30 juillet" contient de faux candidats ("50 date"
+    # — 'date' n'est pas un mois). On parcourt TOUTES les correspondances et on
+    # retient la première dont le mois ET le jour sont valides, au lieu de
+    # lever sur le premier faux positif.
+    for m in _ABSOLUTE_DEADLINE_RE.finditer(text.lower()):
+        month = _FRENCH_MONTHS.get(m.group(2).strip())
+        if not month:
+            continue
+        day = int(m.group(1))
+        if not (1 <= day <= 31):
+            continue
+        now = datetime.now()
+        try:
+            candidate = date(now.year, month, day)
+        except ValueError:
+            continue
+        # Une date déjà passée cette année est presque toujours l'année suivante.
+        if candidate < now.date():
+            candidate = date(now.year + 1, month, day)
+        return candidate.isoformat()
+
+    raise ValueError(f"unrecognized deadline expression: '{text}'")
 
 
 def _coerce_quantity(v: Any) -> float:
@@ -428,6 +507,7 @@ AUCTION_FORM = FormSpec(
             label="Date de fin",
             prompt="Jusqu'à quand l'enchère est-elle ouverte ? (ex: dans 7 jours, 2025-07-01)",
             aliases=["end_date", "expiry"],
+            coerce=_coerce_deadline,
             required=True,
             business_reason="Les producteurs doivent savoir quand répondre.",
         ),

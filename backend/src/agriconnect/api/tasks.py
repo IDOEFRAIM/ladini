@@ -1,6 +1,7 @@
 ﻿import asyncio
+import json
 import logging
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from twilio.rest import Client
 from celery.signals import worker_process_init, worker_process_shutdown
@@ -110,6 +111,51 @@ def _chunk_whatsapp_body(body: str, limit: int = _TWILIO_SOFT_LIMIT) -> List[str
     return chunks
 
 
+def send_whatsapp_message(
+    client: Client,
+    from_: str,
+    to: str,
+    body: str,
+    *,
+    content_sid: Optional[str] = None,
+    content_vars: Optional[Dict[str, Any]] = None,
+):
+    """Envoi WhatsApp unifié : Content API (boutons/listes) OU texte simple.
+
+    - ``content_sid`` fourni ET ``TWILIO_INTERACTIVE_ENABLED`` vrai → envoi
+      interactif via la Content API Twilio (quick-reply / list-picker
+      pré-créés). ``content_vars`` remplit les variables {{n}} du template.
+    - Sinon → repli universel sur ``body`` texte (fonctionne partout, sandbox
+      inclus). C'est le comportement historique, jamais cassé.
+
+    Rappels Twilio (≠ Meta Cloud API) :
+      * pas de JSON `interactive` inline — tout passe par un ContentSid ;
+      * quick-reply = 3 boutons max ; list-picker = 10 lignes max, STRUCTURE
+        FIGÉE dans le template (on ne paramètre que les valeurs, pas le nombre
+        de lignes → convient aux tunnels binaires/fixes, pas aux catalogues
+        dynamiques, qui restent en texte numéroté + bypass LLM).
+    """
+    interactive = bool(
+        content_sid
+        and getattr(settings, "TWILIO_INTERACTIVE_ENABLED", False)
+    )
+    if interactive:
+        try:
+            return client.messages.create(
+                from_=from_,
+                to=to,
+                content_sid=content_sid,
+                content_variables=json.dumps(content_vars or {}, ensure_ascii=False),
+            )
+        except Exception as exc:
+            # Repli gracieux : un échec d'envoi interactif (template invalide,
+            # sender non prod…) ne doit JAMAIS priver l'utilisateur de la
+            # réponse — on renvoie le texte.
+            logger.warning("Envoi interactif Twilio échoué (%s) → repli texte.", exc)
+
+    return client.messages.create(from_=from_, to=to, body=body)
+
+
 # --- Tâche Celery ---
 
 @celery_app.task(
@@ -126,8 +172,13 @@ def process_agent_task(
     workspace_type: Optional[str] = None,
     role: Optional[str] = None,
     force_role: bool = False,
+    interactive_id: Optional[str] = None,
 ):
-    """Point d'entrée worker : exécute la coroutine dans la boucle persistante."""
+    """Point d'entrée worker : exécute la coroutine dans la boucle persistante.
+
+    ``interactive_id`` : payload d'un clic WhatsApp (bouton/liste) transmis par
+    le webhook. Non vide → l'agent court-circuite l'interprétation LLM.
+    """
     global _loop, _orchestrator
 
     if _loop is None or _orchestrator is None:
@@ -140,13 +191,14 @@ def process_agent_task(
             if not resolved_type and role:
                 resolved_type = "buyer" if role.upper() == "BUYER" else "producer"
                 forced = True
-            
+
             # Utilisation de l'instance d'orchestrateur partagée
             return await _orchestrator.handle(
                 phone_number,
                 user_query,
                 workspace_type=resolved_type,
                 force_role=forced,
+                interactive_id=interactive_id,
             )
         finally:
             # NE PAS fermer le pool DB ici : le worker garde ses connexions
@@ -170,16 +222,33 @@ def process_agent_task(
         raise RuntimeError("Twilio configuration incomplete")
 
     client = Client(account_sid, auth_token)
-    chunks = _chunk_whatsapp_body(str(final_text))
+    to_addr = f"whatsapp:{phone_number}"
 
     try:
+        # --- Rendu interactif (boutons de confirmation) si activé + template ---
+        interactive = result.get("interactive") or {}
+        confirm_sid = str(getattr(settings, "TWILIO_CONFIRM_CONTENT_SID", "") or "").strip()
+        if (
+            interactive.get("kind") == "confirm"
+            and getattr(settings, "TWILIO_INTERACTIVE_ENABLED", False)
+            and confirm_sid
+        ):
+            # Confirmation binaire → 2 boutons quick-reply (payloads CONFIRM /
+            # REJECT côté template). Le récap passe en variable {{1}}. Un clic
+            # revient via le webhook et court-circuite le LLM (voir étape A).
+            message = send_whatsapp_message(
+                client, from_number, to_addr,
+                body=str(final_text),
+                content_sid=confirm_sid,
+                content_vars={"1": str(final_text)[:1500]},
+            )
+            return {"status": "message_sent", "sid": message.sid, "interactive": "confirm"}
+
+        # --- Sinon : texte (chunké si long), via le même point d'envoi ---
+        chunks = _chunk_whatsapp_body(str(final_text))
         last_sid = None
         for chunk in chunks:
-            message = client.messages.create(
-                from_=from_number,
-                to=f"whatsapp:{phone_number}",
-                body=chunk,
-            )
+            message = send_whatsapp_message(client, from_number, to_addr, body=chunk)
             last_sid = message.sid
         return {"status": "message_sent", "sid": last_sid, "chunks": len(chunks)}
     except Exception as e:

@@ -394,25 +394,36 @@ def ensure_dict(obj: Any) -> Dict[str, Any]:
             return json.loads(obj)
         except json.JSONDecodeError:
             try:
-                # Tentative 2 : Nettoyage des guillemets simples (fréquent avec MCP)
+                # Tentative 2 : Littéral Python (ex: "{'status': 'error', ...}").
+                # PRIORITAIRE sur le nettoyage naïf de guillemets ci-dessous :
+                # `ast.literal_eval` ne touche JAMAIS au contenu des chaînes —
+                # contrairement à `.replace("'", '"')`, qui corrompt silencieusement
+                # toute valeur contenant une apostrophe française interne
+                # ("d'offres", "l'exploitation", "n'ai pas trouvé"...) en la
+                # transformant en guillemet de délimitation JSON, cassant la
+                # structure et faisant disparaître `message`/`data` de la
+                # réponse sans lever d'erreur explicite.
+                parsed = ast.literal_eval(obj)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+
+            try:
+                # Tentative 3 : Nettoyage des guillemets simples — dernier
+                # recours seulement, car destructeur sur le texte français.
                 cleaned = obj.replace("'", '"')
                 return json.loads(cleaned)
-            except:
-                try:
-                    # Tentative 3 : Littéral Python (ex: "{'status': 'error', ...}")
-                    parsed = ast.literal_eval(obj)
-                    if isinstance(parsed, dict):
-                        return parsed
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
-                # String brute non interprétable => traiter comme une erreur.
-                logger.warning(f"Réponse brute non-JSON reçue du MCP : {obj[:50]}...")
-                return {
-                    "status": "error",
-                    "data": {"raw_result": obj},
-                    "message": "Non-JSON response from MCP"
-                }
+            # String brute non interprétable => traiter comme une erreur.
+            logger.warning(f"Réponse brute non-JSON reçue du MCP : {obj[:50]}...")
+            return {
+                "status": "error",
+                "data": {"raw_result": obj},
+                "message": "Non-JSON response from MCP"
+            }
     
     # Si c'est un objet (ex: Result de MCP)
     if hasattr(obj, "content"): # Format spécifique à certains clients MCP

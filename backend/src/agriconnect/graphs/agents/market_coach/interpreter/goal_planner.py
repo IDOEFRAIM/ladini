@@ -199,6 +199,13 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
             "vendor_selection_context": {"__reset__": True},
             "negotiation_context": {"__reset__": True},
             "preorder_workflow": {"__reset__": True},
+            # A form belongs to exactly one goal instance — leaving it set
+            # while switching to an unrelated goal can misroute the NEXT
+            # turn straight back into form_node and leaks the abandoned
+            # form's slots via `form_data` (merge_dict).
+            "active_form": None,
+            "form_step": None,
+            "form_data": {"__reset__": True},
         }
 
     def _with_goal_metadata(payload: Dict[str, Any], goal_hint: Optional[str] = None) -> Dict[str, Any]:
@@ -474,6 +481,7 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
     if event == "RESUME":
         if goal_stack:
             resumed = goal_stack.pop()
+            restored_payload = dict(state.get("suspended_payload") or {})
             return _with_goal_metadata({
                 "status": "PLANNING",
                 "current_goal": resumed,
@@ -481,17 +489,23 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
                 "goal_status": "ACTIVE",
                 "interruption_detected": False,
                 "suspended_goal": None,
-                "transaction_payload": state.get("suspended_payload") or {},
-                "suspended_payload": {},
-                "stable_entities": {},
-                "missing_fields": [],
-                "completed_fields": [],
-                "last_missing_field": None,
-                "expected_input": "NONE",
-                "expected_candidates": [],
-                "available_mapping": {},
-                "waiting_for_confirmation": False,
-                "confirmation_summary": None,
+                "suspended_payload": {"__reset__": True},
+                # Full canonical purge FIRST — clears whatever the
+                # interrupting goal accumulated in its own
+                # transaction_payload/vendor_selection_context/
+                # negotiation_context/preorder_workflow/selected_tool_args/
+                # execution_result/draft_payload/form_data (previously this
+                # branch hand-rolled a shorter reset list and missed all of
+                # these, letting the interrupting goal's fields leak into
+                # the resumed one) — THEN restore the resumed goal's own
+                # payload via the combined reset+populate sentinel: a plain
+                # merge of `restored_payload` onto the just-purged (but not
+                # yet actually empty, since it's one reducer call) old value
+                # would let any key present in the interrupting goal's
+                # payload but absent from `restored_payload` survive the
+                # merge — this sentinel guarantees a true replace instead.
+                **_purge_transaction_state(),
+                "transaction_payload": {"__reset__": True, **restored_payload},
                 "working_memory": _lock(resumed),
             }, resumed)
         # Aucun goal suspendu — traiter comme clarification
@@ -509,7 +523,16 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
             updates["current_goal"] = new_goal
             updates["goal_status"] = "ACTIVE"
             updates["working_memory"] = _lock(new_goal)
-            if current_goal and new_goal != current_goal:
+            # NB: previously `if current_goal and new_goal != current_goal`.
+            # After a goal is abandoned (e.g. cognitive_guard's max-retries
+            # branch), `current_goal` is already None, so that guard was
+            # falsy and skipped the purge even though transaction_payload
+            # may still hold the abandoned goal's stale data — the payload
+            # then flowed untouched into this brand-new goal. Purge
+            # whenever the effective goal is changing (None counts as
+            # "changing" too); a no-op purge on an already-empty payload is
+            # harmless.
+            if new_goal != current_goal:
                 updates.update(_purge_transaction_state())
             logger.info("[GoalPlanner OUT] new_goal=%s", new_goal)
             logger.debug("[GoalPlanner OUT] new_goal=%s", new_goal)
