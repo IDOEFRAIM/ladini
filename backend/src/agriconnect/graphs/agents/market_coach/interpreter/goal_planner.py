@@ -23,13 +23,11 @@ logger = logging.getLogger("AgriConnect.Market.GoalPlanner")
 
 INTENT_TO_GOAL_MAP: Dict[str, str] = {}
 
-_NAVIGATION_INTENTS: frozenset = frozenset({
-    "BUYER_VIEW_CART",
-    "BUYER_LIST_ORDERS",
-    "BUYER_CHECK_ORDER_STATUS",
-    "BUYER_CANCEL_ORDER",
-    "MARKET_GET_REQUESTS",
-})
+# Alias de compat — source canonique : core/goals.py (flag `breakout`
+# d'INTENT_CONFIG). Même ensemble que TunnelManager.CRITICAL_BREAKOUT_INTENTS.
+from agriconnect.graphs.agents.market_coach.core.goals import (  # noqa: E402
+    NAVIGATION_BREAKOUT_GOALS as _NAVIGATION_INTENTS,
+)
 
 
 def _init_intent_to_goal_map(producer_intents: frozenset, buyer_intents: frozenset, common_intents: frozenset) -> None:

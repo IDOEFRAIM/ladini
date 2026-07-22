@@ -40,18 +40,9 @@ from agriconnect.graphs.agents.market_coach.utils import (
 from agriconnect.graphs.agents.market_coach.nodes.role_guard import make_role_guard
 from agriconnect.graphs.roles import normalize_role
 
-from agriconnect.graphs.agents.market_coach.core.router import (
-    DefaultDomainRouter,
-    BUYER_CART_GOALS,
-    BUYER_NEGOTIATION_GOALS,
-    BUYER_PREORDER_GOALS,
-    BUYER_ORDER_TRACKING_GOALS,
-    BUYER_AUCTION_TRACKING_GOALS,
-)
-from agriconnect.graphs.agents.market_coach.core.policies import (
-    get_after_validator_policy,
-    get_fast_path_policy,
-)
+from agriconnect.graphs.agents.market_coach.core.router import get_domain_router
+from agriconnect.graphs.agents.market_coach.core.goals import BUYER_CART_GOALS
+from agriconnect.graphs.agents.market_coach.core.policies import get_fast_path_policy
 from agriconnect.graphs.agents.market_coach.flows.buyer.flow import (
     cart_management,
     negotiation_gate,
@@ -97,8 +88,8 @@ _FORM_GOALS = {
     "PROCUREMENT_CREATE_REQUEST": "AUCTION_CREATE",
 }
 
-# Buyer transactional tunnel goals — centralisés dans core/router.py
-# Importés ici uniquement pour la construction des edges LangGraph.
+# Buyer transactional tunnel goals — centralisés dans core/goals.py
+# (dérivés d'INTENT_CONFIG). Importés ici uniquement pour les edges.
 
 
 def _route_after_planner(state: MarketAgentState) -> str:
@@ -234,7 +225,7 @@ def build_graph(
 
     # Nœuds et routes spécialisés AG-UI
     input_interpreter = make_input_interpreter(role_up)
-    domain_router = DefaultDomainRouter(role_up)
+    domain_router = get_domain_router(role_up)
 
     # Le context_resolver est un wrapper autour du DomainRouter
     async def context_resolver(state, mc_runtime=None):
@@ -335,10 +326,9 @@ def build_graph(
 
     workflow.add_edge("memory_update", "validator")
 
-    # Routage post-validateur : délégué à AfterValidatorPolicy (configurable).
-    # Nouveaux tunnels s'ajoutent dans core/policies.py, pas ici.
-    validator_policy = get_after_validator_policy(role_up)
-    route_after_validator = validator_policy.decide
+    # Routage post-validateur : délégué au DomainRouter (règles par rôle).
+    # Nouveaux tunnels s'ajoutent dans core/goals.py + core/router.py, pas ici.
+    route_after_validator = domain_router.decide
 
     if role_up == "BUYER":
         validator_targets = {
@@ -473,6 +463,33 @@ class DemoRuntime:
             return {
                 "status": "success",
                 "summary_buyer": "✅ Offre acceptée pour Maïs blanc.",
+            }
+        # ── Producteur : création de produit / déclaration de production future ──
+        if tool_name == "get_producer_farm":
+            # Une seule ferme -> auto-résolution silencieuse par ensure_farm_node
+            # et producer_context_resolver._resolve_default_farm (0 appel réseau
+            # supplémentaire, farm_id injecté directement dans transaction_payload).
+            return {
+                "status": "success",
+                "data": [{"id": "farm-demo-01", "name": "Ferme Démo", "location": "Bobo-Dioulasso"}],
+            }
+        if tool_name == "get_or_create_farm":
+            return {"status": "success", "id": "farm-demo-01", "name": "Ferme Démo"}
+        if tool_name == "create_product":
+            return {
+                "status": "success",
+                "message": f"✅ {kwargs.get('name') or kwargs.get('product_name')} publié sur le marché.",
+                "data": {"id": "prod-demo-01", "name": kwargs.get("name") or kwargs.get("product_name")},
+            }
+        if tool_name == "declare_future_production":
+            return {
+                "status": "success",
+                "message": "✅ Production future déclarée.",
+                "data": {
+                    "id": "cycle-demo-01",
+                    "product": kwargs.get("product"),
+                    "estimated_available_at": kwargs.get("estimated_available_at"),
+                },
             }
         return {"status": "success", "message": f"{tool_name} stubbed"}
 
@@ -713,6 +730,310 @@ async def run_command_logic_test_suite() -> None:
 async def run_manual_smoke_tests() -> None:
     await demo_buyer_purchase_flow()
     await run_command_logic_test_suite()
+    await run_producer_creation_test_suite()
+    await demo_producer_future_production_conversation()
+
+
+# =====================================================================
+# PRODUCTEUR — création de produit / déclaration de production future
+# =====================================================================
+#
+# Ces tests exercent la MÊME séquence de nœuds que le graphe compilé pour un
+# goal WRITE farm-critical (validator → producer_context_resolver →
+# ensure_farm_node → confirmation_gate → mcp_tool_executor → final_response),
+# sans passer par `ainvoke`/le LLM de l'interpréteur (non déterministe,
+# coûteux) : la même approche que `demo_buyer_purchase_flow` ci-dessus,
+# étendue côté producteur. Couvre en un seul passage : validation +
+# contrats Pydantic (Phase 2), auto-provisioning de ferme, confirmation
+# explicite, dispatch registry → domain service → outil MCP, et rendu
+# SUCCESS (Phase 3, `nodes/rendering/`).
+
+async def _run_producer_write_flow(
+    runtime: "DemoRuntime",
+    *,
+    goal: str,
+    payload: Dict[str, Any],
+    phone: str = COMMAND_TEST_PHONE,
+) -> Dict[str, Any]:
+    """Rejoue le chemin WRITE du graphe producteur pour `goal`, sans LLM.
+
+    Retourne l'état final accumulé (après confirmation + exécution +
+    composition de la réponse) pour assertion par l'appelant.
+    """
+    from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        producer_context_resolver,
+    )
+
+    state: Dict[str, Any] = {
+        "user_phone": phone,
+        "user_role": "PRODUCER",
+        "current_goal": goal,
+        "interpreted_event": "NEW_TASK",
+        "transaction_payload": dict(payload),
+        "working_memory": {},
+    }
+
+    # 1. validator — complétude INTENT_CONFIG.required + contrats Phase 2.
+    v = await validator(state, runtime)
+    state.update(v)
+    if state.get("status") == "WAITING_INPUT":
+        return state  # champ manquant/invalide — l'appelant fait l'assertion
+
+    # 2. context_resolver (producer) — auto-résolution farm_id / IDs différés.
+    r = await producer_context_resolver(state, runtime)
+    state.update(r)
+    if str(state.get("status") or "").upper() in {"WAITING_INPUT", "ERROR", "COMPLETED"}:
+        return state
+
+    # 3. ensure_farm_node — filet WRITE (no-op si farm_id déjà résolu à l'étape 2).
+    f = await ensure_farm_node(state, runtime)
+    state.update(f)
+    if str(state.get("status") or "").upper() == "WAITING_INPUT":
+        return state
+
+    # 4. confirmation_gate — 1er passage : pose le récapitulatif, attend CONFIRM.
+    c1 = await confirmation_gate(state, runtime)
+    state.update(c1)
+    assert state.get("status") == "WAITING_CONFIRMATION", (
+        f"confirmation_gate attendu en attente, obtenu: {state.get('status')}"
+    )
+
+    # 5. Simule la réponse utilisateur "oui" → 2e passage : autorise l'exécution.
+    state["interpreted_event"] = "CONFIRM"
+    c2 = await confirmation_gate(state, runtime)
+    state.update(c2)
+    assert state.get("status") == "EXECUTING", (
+        f"confirmation_gate attendu EXECUTING après CONFIRM, obtenu: {state.get('status')}"
+    )
+
+    # 6. mcp_tool_executor — dispatch registry → domain service → outil MCP.
+    e = await mcp_tool_executor(state, runtime)
+    state.update(e)
+
+    # 7. final_response — rendu (Phase 3, nodes/rendering/).
+    resp = await final_response(state, runtime)
+    state.update(resp)
+    return state
+
+
+async def demo_producer_publish_product_flow() -> Dict[str, Any]:
+    """SALES_PUBLISH_PRODUCT : publication d'un produit déjà en stock."""
+    runtime = DemoRuntime()
+    return await _run_producer_write_flow(
+        runtime,
+        goal="SALES_PUBLISH_PRODUCT",
+        payload={"product": "Maïs blanc", "quantity": 50, "unit": "KG", "price": 250},
+    )
+
+
+async def demo_producer_declare_future_production_flow() -> Dict[str, Any]:
+    """DECLARE_CROP_CYCLE : déclaration d'une récolte future (préco-commande)."""
+    runtime = DemoRuntime()
+    return await _run_producer_write_flow(
+        runtime,
+        goal="DECLARE_CROP_CYCLE",
+        payload={
+            "product": "Sésame",
+            "production_type": "CROP",
+            "quantity": 200,
+            "unit": "KG",
+            "price": 300,
+            "estimated_available_at": "2026-09-01",
+        },
+    )
+
+
+async def run_producer_creation_test_suite() -> None:
+    """Valide bout-en-bout la création de produit et de production future."""
+    print("\n=== TEST PRODUCTEUR — création produit / production future ===")
+
+    publish_state = await demo_producer_publish_product_flow()
+    assert publish_state.get("status") == "COMPLETED", (
+        f"SALES_PUBLISH_PRODUCT: status={publish_state.get('status')} "
+        f"errors={publish_state.get('validation_errors')}"
+    )
+    assert publish_state.get("response_strategy") == "SUCCESS"
+    assert publish_state.get("selected_tool") == "create_product"
+    assert publish_state.get("transaction_payload") == {}, "payload doit être purgé après succès"
+    print(f"[SALES_PUBLISH_PRODUCT] ✅ tool={publish_state.get('selected_tool')} "
+          f"réponse={publish_state.get('final_response')!r}")
+
+    future_state = await demo_producer_declare_future_production_flow()
+    assert future_state.get("status") == "COMPLETED", (
+        f"DECLARE_CROP_CYCLE: status={future_state.get('status')} "
+        f"errors={future_state.get('validation_errors')}"
+    )
+    assert future_state.get("response_strategy") == "SUCCESS"
+    assert future_state.get("selected_tool") == "declare_future_production"
+    # `declare_future_production` prend un `payload` imbriqué (voir domain/agro.py
+    # ::AgronomyService.declare_crop_cycle) — farm_id y est injecté par
+    # producer_context_resolver._resolve_default_farm, PAS au 1er niveau des args.
+    future_tool_payload = (future_state.get("selected_tool_args") or {}).get("payload") or {}
+    assert future_tool_payload.get("farm_id") == "farm-demo-01", (
+        "farm_id doit être auto-résolu (1 seule ferme) sans intervention utilisateur, "
+        f"obtenu tool_args={future_state.get('selected_tool_args')}"
+    )
+    print(f"[DECLARE_CROP_CYCLE] ✅ tool={future_state.get('selected_tool')} "
+          f"réponse={future_state.get('final_response')!r}")
+
+    # ── Garde-fou négatif : le contrat Pydantic (Phase 2) doit rejeter un
+    # prix nul AVANT tout appel réseau — filet anti-hallucination LLM.
+    runtime = DemoRuntime()
+    invalid_state = await _run_producer_write_flow(
+        runtime,
+        goal="SALES_PUBLISH_PRODUCT",
+        payload={"product": "Maïs blanc", "quantity": 50, "unit": "KG", "price": 0},
+    )
+    assert invalid_state.get("status") == "WAITING_INPUT", (
+        f"prix=0 doit être rejeté par le contrat, obtenu: {invalid_state.get('status')}"
+    )
+    assert "price" in (invalid_state.get("missing_fields") or []), invalid_state.get("missing_fields")
+    print(f"[SALES_PUBLISH_PRODUCT/prix invalide] ✅ rejeté par le contrat Pydantic "
+          f"(re-demande: {invalid_state.get('missing_fields')})")
+
+    print("✅ Logique de création produit + production future validée bout-en-bout.")
+
+
+# =====================================================================
+# TRANSCRIPT LISIBLE — déclaration de production future (revue UX)
+# =====================================================================
+#
+# Contrairement à `run_producer_creation_test_suite` (assertions, payload
+# complet dès le départ), cette fonction simule un VRAI dialogue tour par
+# tour et IMPRIME chaque message généré par l'agent — questions de coaching
+# (LLM réel si `GROQ_API_KEY` est disponible dans l'environnement, sinon
+# fallback statique visible tel quel), récapitulatif de confirmation, et
+# message de succès. Objectif : relecture humaine de l'UX (ton, concision,
+# français Burkina Faso), pas une assertion automatique.
+
+class _LiveLLMDemoRuntime(DemoRuntime):
+    """DemoRuntime + accès au VRAI client LLM (Groq) pour voir les questions
+    de coaching réellement générées, tout en gardant `call_db` stubbé (aucun
+    appel réseau vers MCP/DB)."""
+
+    def __init__(self) -> None:
+        self._llm_cache: Any = None
+        self._llm_tried = False
+
+    @property
+    def llm(self) -> Any:
+        if not self._llm_tried:
+            self._llm_tried = True
+            try:
+                from agriconnect.core.get_llm import get_llm
+                self._llm_cache = get_llm()
+            except Exception as exc:
+                print(f"⚠️  LLM indisponible ({exc}) — bascule sur les réponses de secours statiques.")
+                self._llm_cache = None
+        return self._llm_cache
+
+    @property
+    def model_answer(self) -> str:
+        return "llama-3.1-8b-instant"
+
+
+# (texte utilisateur, champs qu'il vient de fournir) — ordre volontairement
+# naturel (pas l'ordre `field_priority` du validator) pour vérifier que
+# l'agent redemande bien SEULEMENT ce qui manque, dans un ordre cohérent.
+_FUTURE_PRODUCTION_TURNS = [
+    ("Bonjour, je vais avoir une récolte de sésame dans quelques mois", {"product": "Sésame"}),
+    ("Environ 200 kg je pense", {"quantity": 200, "unit": "KG"}),
+    ("Je compte vendre ça à 300 FCFA le kilo", {"price": 300}),
+    ("C'est une culture, pas de l'élevage", {"production_type": "CROP"}),
+    ("Ce sera prêt début septembre 2026", {"estimated_available_at": "2026-09-01"}),
+]
+
+
+async def _turn_boundary(state: Dict[str, Any], runtime: Any) -> Dict[str, Any]:
+    """Rejoue la fin de tour réelle du graphe : state_cleaner → final_response
+    → post_response_cleanup (edges `response_strategy → state_cleaner →
+    final_response → post_response_cleanup → END`).
+
+    Indispensable entre deux tours simulés : `final_response`/`ag_ui_component`
+    sont des champs EPHEMERAL (`core/state_profile.py`) remis à None par
+    `post_response_cleanup` — sans cet appel, le message du tour précédent
+    reste dans le state et `render_ask_missing_field` le réutilise tel quel
+    au tour suivant (branche "reuse precomputed final_response"), produisant
+    une question qui semble figée/répétée alors que le payload a bien avancé.
+    """
+    sc = await state_cleaner_node(state, runtime)
+    state.update(sc)
+    resp = await final_response(state, runtime)
+    state.update(resp)
+    print(f"🤖 Agent      : {state.get('final_response')}")
+    prc = await post_response_cleanup(state, runtime)
+    state.update(prc)
+    return state
+
+
+async def demo_producer_future_production_conversation() -> None:
+    """Transcript tour par tour de DECLARE_CROP_CYCLE — pour revue UX humaine."""
+    print("\n" + "=" * 70)
+    print("=== TRANSCRIPT — Déclaration d'une production future (culture) ===")
+    print("=" * 70)
+
+    from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        producer_context_resolver,
+    )
+
+    runtime = _LiveLLMDemoRuntime()
+    state: Dict[str, Any] = {
+        "user_phone": COMMAND_TEST_PHONE,
+        "user_role": "PRODUCER",
+        "user_name": "Adama",
+        "current_goal": "DECLARE_CROP_CYCLE",
+        "interpreted_event": "NEW_TASK",
+        "transaction_payload": {},
+        "working_memory": {},
+    }
+    accumulated: Dict[str, Any] = {}
+
+    for user_text, new_fields in _FUTURE_PRODUCTION_TURNS:
+        accumulated.update(new_fields)
+        state["transaction_payload"] = dict(accumulated)
+        # current_goal est DURABLE mais reste tout de même réaffirmé ici :
+        # dans le vrai graphe c'est goal_planner qui le maintient verrouillé
+        # pendant le tunnel (voir [[market-coach-turn-boundary-state]]).
+        state["current_goal"] = "DECLARE_CROP_CYCLE"
+        print(f"\n🧑 Producteur : {user_text}")
+
+        v = await validator(state, runtime)
+        state.update(v)
+
+        if state.get("status") != "WAITING_INPUT":
+            # Tous les champs sont réunis — sortir de la boucle de collecte.
+            break
+
+        state["response_strategy"] = "ASK_MISSING_FIELD"
+        await _turn_boundary(state, runtime)
+
+    # ── Récapitulatif de confirmation ──────────────────────────────────
+    r = await producer_context_resolver(state, runtime)
+    state.update(r)
+    f = await ensure_farm_node(state, runtime)
+    state.update(f)
+    c1 = await confirmation_gate(state, runtime)
+    state.update(c1)
+    await _turn_boundary(state, runtime)
+
+    # ── Confirmation utilisateur + exécution ───────────────────────────
+    print("\n🧑 Producteur : Oui c'est bon, confirme")
+    # post_response_cleanup a effacé current_goal (EPHEMERAL — normalement
+    # restauré par goal_planner depuis working_memory.locked_intent en début
+    # de tour réel ; ce harnais court-circuite goal_planner, donc on le
+    # rétablit ici à la main).
+    state["current_goal"] = "DECLARE_CROP_CYCLE"
+    state["interpreted_event"] = "CONFIRM"
+    c2 = await confirmation_gate(state, runtime)
+    state.update(c2)
+    e = await mcp_tool_executor(state, runtime)
+    state.update(e)
+    await _turn_boundary(state, runtime)
+
+    print("\n" + "-" * 70)
+    print(f"Statut final : {state.get('status')} | stratégie : {state.get('response_strategy')} "
+          f"| outil exécuté : {state.get('selected_tool')}")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

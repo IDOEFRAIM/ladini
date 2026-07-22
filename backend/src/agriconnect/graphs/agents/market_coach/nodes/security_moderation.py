@@ -1,7 +1,8 @@
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import asyncio
 import inspect
 import re
+import time
 import unicodedata
 
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
@@ -93,17 +94,39 @@ def _match_prohibited(text: str, terms: list[str]) -> Optional[str]:
     return None
 
 
-async def _check_prohibited(
-    mc_runtime: MarketRuntime, phone: str, text: str
-) -> Optional[Dict[str, Any]]:
-    """Détecte un produit interdit ; journalise un strike et bannit au-delà du seuil."""
+# Cache client des termes interdits (Phase 4) : la liste est globale et quasi
+# statique (le serveur la cache déjà 300s côté DB) — sans ce cache, CHAQUE
+# message payait un aller-retour MCP complet (stdio inter-processus en prod).
+# NB : le gate compte (`get_account_status`) reste volontairement NON caché —
+# un blocage/bannissement doit s'appliquer au message suivant.
+_TERMS_CACHE_TTL_SECONDS = 300.0
+_terms_cache: Dict[str, Any] = {"at": 0.0, "terms": None}
+
+
+async def _get_prohibited_terms_cached(mc_runtime: MarketRuntime) -> Optional[List[Any]]:
+    now = time.monotonic()
+    cached = _terms_cache["terms"]
+    if cached is not None and (now - _terms_cache["at"]) < _TERMS_CACHE_TTL_SECONDS:
+        return cached
     try:
         terms_res = _unwrap(await ModerationGateway(mc_runtime).get_prohibited_terms())
     except Exception as exc:
         logger.warning("[SecurityModeration] prohibited terms fetch failed: %s", exc)
-        return None
-
+        # Secours : un cache périmé vaut mieux qu'aucun filtre du tout.
+        return cached
     terms = terms_res.get("terms") or []
+    if isinstance(terms, list) and terms:
+        _terms_cache["terms"] = terms
+        _terms_cache["at"] = now
+        return terms
+    return cached
+
+
+async def _check_prohibited(
+    mc_runtime: MarketRuntime, phone: str, text: str
+) -> Optional[Dict[str, Any]]:
+    """Détecte un produit interdit ; journalise un strike et bannit au-delà du seuil."""
+    terms = await _get_prohibited_terms_cached(mc_runtime)
     if not isinstance(terms, list) or not terms:
         return None
 

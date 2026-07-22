@@ -88,13 +88,16 @@ async def clarification_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -
     )
 
     try:
-        completion = await asyncio.to_thread(
-            lambda: llm.chat.completions.create(
-                model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.4,
-                max_tokens=150,
-            )
+        completion = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: llm.chat.completions.create(
+                    model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.4,
+                    max_tokens=150,
+                )
+            ),
+            timeout=8.0,
         )
         result = (completion.choices[0].message.content or "").strip()
         if result:

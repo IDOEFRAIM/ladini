@@ -35,13 +35,10 @@ logger = logging.getLogger("AgriConnect.Market.TunnelManager")
 INTERRUPTION_CONFIDENCE_THRESHOLD: float = 0.60
 
 #: Intents that always break through any tunnel regardless of confidence.
-CRITICAL_BREAKOUT_INTENTS: FrozenSet[str] = frozenset({
-    "BUYER_LIST_ORDERS",
-    "BUYER_CHECK_ORDER_STATUS",
-    "BUYER_CANCEL_ORDER",
-    "BUYER_VIEW_CART",
-    "MARKET_GET_REQUESTS",
-})
+#: Dérivé du flag `breakout` d'INTENT_CONFIG — source : core/goals.py.
+from agriconnect.graphs.agents.market_coach.core.goals import (  # noqa: E402
+    NAVIGATION_BREAKOUT_GOALS as CRITICAL_BREAKOUT_INTENTS,
+)
 
 #: expected_input values where NEW_TASK can break the tunnel (soft slots).
 SOFT_EXPECTED_INPUTS: FrozenSet[str] = frozenset({

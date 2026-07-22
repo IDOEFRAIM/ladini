@@ -320,6 +320,12 @@ async def enrich_payload_from_text(
         extracted_type = extract_production_type_from_text(text)
         if extracted_type:
             payload["production_type"] = extracted_type
+    # Le nom du produit ("mouton", "vache", "poulet"...) est un signal plus
+    # fiable que le texte libre : réutilise la même liste d'animaux que le
+    # défaut d'unité (TETE) pour éviter de redemander à l'utilisateur culture
+    # vs élevage quand le produit le dit déjà sans ambiguïté.
+    if payload.get("production_type") in (None, "", [], {}) and _is_livestock_product(payload.get("product")):
+        payload["production_type"] = "LIVESTOCK"
 
     return payload
 

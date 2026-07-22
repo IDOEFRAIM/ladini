@@ -8,7 +8,9 @@ from typing import Optional
 
 import redis # ◄ N'oublie pas : pip install redis
 
-from fastapi import APIRouter, Form, HTTPException, Depends, BackgroundTasks, Request
+from fastapi import (
+  APIRouter, Form, HTTPException, Depends, BackgroundTasks, Request,Response
+)
 from twilio.rest import Client
 
 from agriconnect.api.tasks import process_agent_task
@@ -75,9 +77,9 @@ async def twilio_webhook(
 ):
     # --- 1. MODIFIER : ANTI-DOUBLON (Idempotence avec Redis) ---
     redis_key = f"msg:{MessageSid}"
-    if redis_client.get(redis_key):
-        logger.warning("Message dupliqué détecté : %s. Ignoré.", MessageSid)
-        return {"status": "already_processed"}
+    is_new_message = redis_client.set(redis_key, "processing", ex=600, nx=True)
+
+    
 
     # On marque le message comme "en cours" pendant 1 heure (3600 secondes)
     redis_client.setex(redis_key, 3600, "processing")

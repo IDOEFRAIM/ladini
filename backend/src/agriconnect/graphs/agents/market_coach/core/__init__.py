@@ -12,8 +12,9 @@ from agriconnect.graphs.agents.market_coach.core.slots import (  # noqa: F401
     build_alias_mirrors,
     build_canonical_field_aliases,
 )
-from agriconnect.graphs.agents.market_coach.core.tunnel_manager import (  # noqa: F401
-    TunnelDecision,
-    TunnelManager,
-    tunnel_manager,
-)
+# NOTE : pas d'import eager de tunnel_manager ici — il importe core.goals,
+# qui dérive ses ensembles d'INTENT_CONFIG (interpreter/intent.py), lequel
+# importe core.slots et déclenche donc ce __init__ : l'eager créerait un
+# cycle intent → core/__init__ → tunnel_manager → goals → intent.
+# Importer directement `agriconnect...core.tunnel_manager` (aucun appelant
+# ne passe par le package).

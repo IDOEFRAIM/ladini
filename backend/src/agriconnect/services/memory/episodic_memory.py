@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import Column, DateTime, String, Text, Float, JSON, Integer
 from sqlalchemy.sql import func
 
-from agriconnect.services.database.model import Base
+from agriconnect.domain.orm_base import Base
 
 logger = logging.getLogger("Memory.Episodic")
 

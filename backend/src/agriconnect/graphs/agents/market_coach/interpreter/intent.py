@@ -357,7 +357,7 @@ INTENT_CONFIG = {
         "label": "Déclaration d'un lot futur (culture/élevage) pour précommande",
         "label_map": {
             "farm_id": "identifiant exploitation",
-            "production_type": "type (CROP ou LIVESTOCK)",
+            "production_type": "culture (plante) ou élevage (animal)",
             "product": "culture ou espèce",
             "quantity": "quantité prévue",
             "unit": "unité (KG, HEAD...)",
@@ -560,12 +560,29 @@ INTENT_CONFIG = {
         "label": "Consultation de mon catalogue de produits en vente",
         "label_map": {"phone": "votre téléphone", "farm_id": "identifiant exploitation"}
     },
-    "MARKET_GET_REQUESTS": {
+    # SPLIT (2026-07-20, UX + bug de routage) : l'ancien goal unique
+    # "MARKET_GET_REQUESTS" avait un sens OPPOSÉ selon le rôle — parcourir le
+    # marché pour un PRODUCTEUR (browse_auctions), voir SES PROPRES appels
+    # d'offres pour un ACHETEUR (list_buyer_auctions). Même nom, deux
+    # comportements incompatibles → confusion utilisateur ET risque de
+    # maintenance. Remplacé par deux goals explicites, chacun mono-rôle.
+    # MARKET_MY_REQUESTS est depuis fusionné (2026-07-21) dans
+    # list_buyer_auctions/order_tracking.py — voir AUCTION_TRACKING_GOALS.
+    "MARKET_BROWSE_REQUESTS": {
         "tool_name": "get_auctions",
         "required": [],
         "action_type": "READ",
         "requires_farm": False,
-        "label": "Liste des appels d'offres / demandes d'approvisionnement du marché",
+        "label": "Parcours des appels d'offres du marché (producteur cherche à répondre)",
+        "label_map": {"zone": "zone", "product": "produit", "status": "statut"}
+    },
+    "MARKET_MY_REQUESTS": {
+        "tool_name": "get_auctions",
+        "required": [],
+        "action_type": "READ",
+        "requires_farm": False,
+        "handled_by_flow": True,
+        "label": "Consultation de mes propres appels d'offres publiés (acheteur)",
         "label_map": {"zone": "zone", "product": "produit", "status": "statut"}
     },
     "MARKET_GET_REQUEST_DETAIL": {
@@ -758,6 +775,58 @@ _canonicalize_intent_config()
 
 
 # =======================================================================
+# TUNNEL / BREAKOUT — marquage de routage porté par le catalogue.
+# `tunnel` : nom du tunnel transactionnel qui prend en charge l'intent
+#            (routage post-validator). Les frozensets de goals sont DÉRIVÉS
+#            de ce champ dans `core/goals.py` — ne jamais les redéfinir à la
+#            main ailleurs (même pattern anti-drift que GOALS_NEEDING_FARM_ID).
+# `breakout` : intent de navigation autorisé à interrompre un tunnel actif
+#              (TunnelManager.CRITICAL_BREAKOUT_INTENTS + goal_planner
+#              _NAVIGATION_INTENTS sont dérivés de ce flag).
+# L'assignation via boucle échoue fort (KeyError) si un intent disparaît du
+# catalogue — c'est voulu : la dérive est détectée à l'import, pas en prod.
+# =======================================================================
+
+_TUNNEL_ASSIGNMENTS = {
+    # BUYER — tunnels transactionnels (handled_by_flow)
+    "BUYER_ADD_TO_CART": "cart",
+    "BUYER_VIEW_CART": "cart",
+    "BUYER_CREATE_PREORDER": "preorder",
+    "BUYER_PREORDER_INIT": "preorder",
+    "BUYER_PREORDER_CONFIRM": "preorder",
+    "BUYER_NEGOTIATE_PRICE": "negotiation",
+    "BUYER_CHECK_ORDER_STATUS": "order_tracking",
+    "BUYER_LIST_ORDERS": "order_tracking",
+    "BUYER_CANCEL_ORDER": "order_tracking",
+    "BUYER_LIST_AUCTIONS": "auction_tracking",
+    "BUYER_CHECK_AUCTION_STATUS": "auction_tracking",
+    "MARKET_MY_REQUESTS": "auction_tracking",
+    # PRODUCER — intents entièrement pris en charge par
+    # producer_auction_resolver (jamais confirmation_gate/mcp_tool_executor).
+    "MARKET_BROWSE_REQUESTS": "producer_auction",
+    "MARKET_GET_MY_PROPOSALS": "producer_auction",
+    "SALES_PLACE_BID": "producer_auction",
+}
+
+_BREAKOUT_INTENTS = (
+    "BUYER_VIEW_CART",
+    "BUYER_LIST_ORDERS",
+    "BUYER_CHECK_ORDER_STATUS",
+    "BUYER_CANCEL_ORDER",
+    # Ex-"MARKET_GET_REQUESTS" (split 2026-07-20) : les deux moitiés
+    # conservent le même privilège de sortie de tunnel qu'avant le split.
+    "MARKET_BROWSE_REQUESTS",
+    "MARKET_MY_REQUESTS",
+)
+
+for _goal, _tunnel in _TUNNEL_ASSIGNMENTS.items():
+    INTENT_CONFIG[_goal]["tunnel"] = _tunnel
+for _goal in _BREAKOUT_INTENTS:
+    INTENT_CONFIG[_goal]["breakout"] = True
+del _goal, _tunnel
+
+
+# =======================================================================
 # INTENT_ROLE — Single Source of Truth for role-based intent filtering.
 # Values: "PRODUCER" (vendor/farmer only), "BUYER" (buyer only), "BOTH".
 # Derived sets PRODUCER_INTENTS / BUYER_INTENTS / COMMON_INTENTS in
@@ -804,7 +873,8 @@ INTENT_ROLE = {
     "BUYER_LIST_AUCTIONS": "BUYER",
     "BUYER_CHECK_AUCTION_STATUS": "BUYER",
     # MARKET / SEARCH — both roles browse
-    "MARKET_GET_REQUESTS": "BOTH",
+    "MARKET_BROWSE_REQUESTS": "PRODUCER",
+    "MARKET_MY_REQUESTS": "BUYER",
     "MARKET_SNAPSHOT": "BOTH",
     "MARKET_SNAPSHOT_ZONAL": "BOTH",
     "SEARCH_PRODUCTS": "BOTH",
@@ -876,33 +946,73 @@ INTENT_DOMAIN = {k: ("STOCK"     if k.startswith("STOCK_")       else
 INTENT_DISAMBIGUATION = {
     # "J'ai 300 poussins / 5 sacs / 100kg de mil" → state declaration
     #
-    # 3ᵉ voie ajoutée (2026-07-17) : un producteur qui déclare des POUSSINS,
-    # veaux, semis, jeunes plants... n'a RIEN de vendable maintenant — c'est
-    # une PRODUCTION FUTURE avec une date de disponibilité. Router ça vers
+    # RÉDUIT À 2 VOIES (2026-07-20, UX) : l'option "stock privé" (suivi interne,
+    # invisible du marché) créait un 3ᵉ choix sans rapport avec la vente et
+    # perdait le producteur — retirée de CE menu (le goal STOCK_REGISTER_HARVEST
+    # reste utilisable via une commande explicite type "ajouter à mon stock",
+    # juste plus proposé ici). Les 2 options restantes couvrent exactement la
+    # vraie question qu'un producteur se pose : "c'est prêt à vendre maintenant,
+    # ou pas encore ?" — langage produit, aucun jargon de plateforme.
+    #
+    # 3ᵉ voie ajoutée le 2026-07-17 (historique) : un producteur qui déclare des
+    # POUSSINS, veaux, semis, jeunes plants... n'a RIEN de vendable maintenant —
+    # c'est une PRODUCTION FUTURE avec une date de disponibilité. Router ça vers
     # STOCK_REGISTER_HARVEST (table Stock, aucune date de dispo) empêche tout
     # acheteur de savoir QUAND ce sera prêt — Stock ne porte pas cette notion,
     # contrairement à MarketOffer (estimated_available_at/expected_harvest_date,
     # preorder_enabled). Voir [[future-production-preorder-loop]].
     "STOCK_OR_SALES_DECLARATION": {
-        "candidates": ["STOCK_REGISTER_HARVEST", "SALES_PUBLISH_PRODUCT", "DECLARE_CROP_CYCLE"],
-        "title": "Ce que vous avez est-il déjà prêt, ou pas encore ?",
+        "candidates": ["SALES_PUBLISH_PRODUCT", "DECLARE_CROP_CYCLE"],
+        "title": "C'est prêt à vendre maintenant, ou pas encore ?",
         "pedagogical_hint": (
             "💡 Des poussins, jeunes animaux, semis ou plants en cours de croissance "
-            "ne sont PAS encore vendables — choisissez « Production future » pour "
+            "ne sont PAS encore vendables — choisissez « Prêt plus tard » pour "
             "indiquer une date de disponibilité et permettre les précommandes."
         ),
         "options": [
-            ("STOCK_REGISTER_HARVEST",
-             "📦 Déjà prêt — suivi privé (ajouter à mon stock interne, pas visible sur le marché)"),
             ("SALES_PUBLISH_PRODUCT",
-             "🛒 Déjà prêt — vente publique (publier sur le marché AgriConnect maintenant)"),
+             "📦 Prêt maintenant (disponible immédiatement, publié sur le marché)"),
             ("DECLARE_CROP_CYCLE",
-             "⏳ Pas encore prêt — production future (précisez une date de disponibilité, précommandable)"),
+             "⏳ Prêt plus tard (récolte ou production à venir, avec une date)"),
         ],
         "lexical_hints": [
             "j'ai", "j ai", "récolte", "recolte", "disponible", "en stock", "stocké",
             "poussin", "poussins", "veau", "veaux", "agneau", "agneaux", "chevreau",
             "semis", "jeune plant", "jeunes plants", "en cours de croissance",
+        ],
+    },
+    # "Je veux vendre" / "espace vendeur" — le producteur exprime une intention
+    # de VENTE générique, sans produit/quantité/statut déjà précisé. Menu
+    # consolidé "Espace Vendeur" (3 voies, création UX 2026-07-21) qui
+    # regroupe les 3 vraies portes d'entrée de la vente producteur, chacune
+    # déjà existante ailleurs mais jamais présentée ensemble comme point
+    # d'entrée unique : publier maintenant, déclarer une future récolte, ou
+    # répondre à un appel d'offres déjà ouvert par un acheteur. Hints choisis
+    # volontairement multi-mots (jamais le seul mot "vendre") pour ne pas
+    # détourner un message déjà précis ("j'ai 300 poussins à vendre") vers ce
+    # menu générique — la sélection par hint le plus long (voir
+    # semantic_disambiguation._detect_disambiguation_candidates) laisserait
+    # sinon STOCK_OR_SALES_DECLARATION perdre face à un "vendre" trop court.
+    "SELLER_HUB": {
+        "candidates": ["SALES_PUBLISH_PRODUCT", "DECLARE_CROP_CYCLE", "MARKET_BROWSE_REQUESTS"],
+        "title": "🧑‍🌾 Espace Vendeur — que souhaitez-vous faire ?",
+        "options": [
+            ("SALES_PUBLISH_PRODUCT",
+             "📦 Publier un produit disponible maintenant"),
+            ("DECLARE_CROP_CYCLE",
+             "⏳ Déclarer une récolte ou production à venir"),
+            ("MARKET_BROWSE_REQUESTS",
+             "📢 Répondre à un appel d'offres d'un acheteur"),
+        ],
+        "roles": ["PRODUCER"],
+        # Volontairement SANS "je veux vendre" / "vendre mes produits" : ces
+        # préfixes matchent aussi un message déjà complet ("je veux vendre
+        # 100kg de tomates à 300f maintenant"), qui doit être traité
+        # directement plutôt que ré-interrompu par ce menu générique.
+        "lexical_hints": [
+            "comment vendre", "aide pour vendre", "aide à la vente",
+            "espace vendeur", "menu vendeur", "options de vente",
+            "que puis-je vendre", "comment vendre mes produits",
         ],
     },
     # "J'ai vendu 100kg" — already happened
@@ -923,9 +1033,9 @@ INTENT_DISAMBIGUATION = {
         "title": "Voulez-vous consulter le catalogue ou lancer un appel d'offres ?",
         "options": [
             ("BUYER_REQUEST",
-             "� Catalogue : voir ce qui est disponible immédiatement"),
+             "🛒 Catalogue : voir ce qui est disponible immédiatement"),
             ("PROCUREMENT_CREATE_REQUEST",
-             "� Appel d'offres : demander à nos producteurs de répondre (gros volumes, rupture de stock)"),
+             "📢 Appel d'offres : demander à nos producteurs de répondre (gros volumes, rupture de stock)"),
         ],
         "lexical_hints": ["je cherche", "j'aimerais acheter", "il me faut", "besoin de"],
     },
@@ -963,13 +1073,18 @@ INTENT_DISAMBIGUATION = {
             "suivi", "suivre", "tracking", "livraison", "annuler commande",
         ],
     },
+    # RÉDUIT À 2 VOIES (2026-07-20, UX + bug) : la 3ᵉ option "Parcourir les
+    # enchères du marché" pointait vers MARKET_GET_REQUESTS qui, côté ACHETEUR,
+    # ne "parcourt" rien — elle montre les appels d'offres du buyer LUI-MÊME
+    # (resolve_own_auctions, view_mode="MY_OWN"), donc un doublon trompeur de
+    # l'option 1. Vocabulaire harmonisé : "appel d'offres" partout, plus jamais
+    # "enchère" (terme réservé en interne, jamais montré à l'utilisateur).
     "AUCTION_TRACKING_INTENT": {
-        "candidates": ["BUYER_LIST_AUCTIONS", "BUYER_CHECK_AUCTION_STATUS", "MARKET_GET_REQUESTS"],
-        "title": "Que souhaitez-vous faire concernant vos enchères ?",
+        "candidates": ["BUYER_LIST_AUCTIONS", "BUYER_CHECK_AUCTION_STATUS"],
+        "title": "Que souhaitez-vous faire concernant vos appels d'offres ?",
         "options": [
             ("BUYER_LIST_AUCTIONS", "📋 Voir mes appels d'offres (tous statuts)"),
-            ("BUYER_CHECK_AUCTION_STATUS", "🔍 Détail d'une enchère et offres reçues"),
-            ("MARKET_GET_REQUESTS", "🛒 Parcourir les enchères du marché"),
+            ("BUYER_CHECK_AUCTION_STATUS", "🔍 Détail d'un appel d'offres et propositions reçues"),
         ],
         "roles": ["BUYER"],
         "lexical_hints": [

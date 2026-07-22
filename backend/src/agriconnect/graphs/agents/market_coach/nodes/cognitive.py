@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
-from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
+from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, _compute_progress
 from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import (
     _DISAMBIGUATION_CONFIDENCE_THRESHOLD,
     _detect_disambiguation_candidates,
@@ -12,29 +12,6 @@ from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import
 from agriconnect.graphs.agents.market_coach.nodes.response_handlers import _label_for_field
 
 logger = get_node_logger("CognitiveNode")
-
-_PROGRESS_AUTO_FIELDS = frozenset({"farm_id", "phone"})
-
-
-def _compute_progress(goal: Optional[str], payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    if not goal:
-        return None
-    config = INTENT_CONFIG.get(goal) or {}
-    required = list(config.get("required") or [])
-    if not required:
-        return None
-    user_fields = [f for f in required if f not in _PROGRESS_AUTO_FIELDS]
-    if not user_fields:
-        return None
-    filled = [f for f in user_fields if payload.get(f) not in (None, "", [], {})]
-    remaining = [f for f in user_fields if f not in filled]
-    return {
-        "total": len(user_fields),
-        "filled": len(filled),
-        "remaining": remaining,
-        "pct": round(len(filled) / len(user_fields) * 100),
-    }
-
 
 def _build_proactive_hint(
     goal: Optional[str],
@@ -297,5 +274,4 @@ async def cognitive_orchestrator(
 __all__ = [
     "cognitive_guard",
     "cognitive_orchestrator",
-    "_compute_progress",
 ]

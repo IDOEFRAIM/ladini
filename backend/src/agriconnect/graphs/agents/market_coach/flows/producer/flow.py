@@ -552,7 +552,7 @@ async def producer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRun
 
     # 1-2. Cycle enchères producteur (découverte par catégorie → bid → suivi).
     #      Délégué à la machine à états dédiée (flows/producer/auctions.py).
-    if goal in {"SALES_PLACE_BID", "MARKET_GET_REQUESTS", "MARKET_GET_MY_PROPOSALS"}:
+    if goal in {"SALES_PLACE_BID", "MARKET_BROWSE_REQUESTS", "MARKET_GET_MY_PROPOSALS"}:
         from agriconnect.graphs.agents.market_coach.flows.producer.auctions import (
             producer_auction_resolver,
         )

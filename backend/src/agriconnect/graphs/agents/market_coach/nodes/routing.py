@@ -24,14 +24,6 @@ def _route_after_security(state: MarketAgentState) -> str:
     return "to_interpreter"
 
 
-def _route_after_planner(state: MarketAgentState) -> str:
-    """Achemine vers le routeur si des informations critiques manquent."""
-    status = str(state.get("status") or "").upper()
-    if status == "WAITING_INPUT":
-        return "to_strategy"
-    return "to_memory"
-
-
 def _route_after_resolver(state: MarketAgentState) -> str:
     """Redirige si l'état nécessite une interaction ou s'il est prêt pour confirmation."""
     # If a DRY form was activated by the resolver (e.g., procurement escalation),

@@ -75,13 +75,7 @@ def _init_db_locked() -> None:
         import agriconnect.domain.models as _domain_models  # noqa: F401
     except Exception:
         logger.debug("Could not import agriconnect.domain.models at init time (will try fallback)")
-    try:
-        # Ensure our canonical shim is imported so all services see the same models
-        import agriconnect.services.database.model as _svc_models  # noqa: F401
-    except Exception:
-        logger.debug("Could not import agriconnect.services.database.model at init time")
 
-  
     clean_url = settings.DATABASE_URL.split("?")[0]
 
     # TRANSFORMATION : On force le driver asynchrone

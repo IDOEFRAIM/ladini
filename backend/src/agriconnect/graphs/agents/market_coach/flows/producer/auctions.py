@@ -14,12 +14,12 @@ tourne AVANT nous (``goal_planner → memory_update → validator → context_re
 et, pour un menu ``kind="auction"``, il pose ``payload["auction_id"]`` et retire
 ``selection_index``. On lit donc ``payload.auction_id``, jamais ``selection_index``.
 
-On reste volontairement sur le goal ``MARKET_GET_REQUESTS`` (aucun champ requis)
+On reste volontairement sur le goal ``MARKET_BROWSE_REQUESTS`` (aucun champ requis)
 pendant tout le tunnel de bid : cela évite que le validator réclame lui-même le
 prix (``SALES_PLACE_BID`` exige ``price``) et court-circuite notre récap.
 
 Goals pris en charge :
-  - ``MARKET_GET_REQUESTS`` / ``SALES_PLACE_BID`` : découverte + dépôt d'offre.
+  - ``MARKET_BROWSE_REQUESTS`` / ``SALES_PLACE_BID`` : découverte + dépôt d'offre.
   - ``MARKET_GET_MY_PROPOSALS``                   : suivi de l'état de mes offres.
 """
 from __future__ import annotations
@@ -298,7 +298,7 @@ async def ask_bid_price(
     if reask:
         msg = f"💬 Indiquez un *prix* valide en FCFA (ex: 300) pour *{product}*."
     else:
-        lines = [f"📦 *Enchère sélectionnée : {product}*"]
+        lines = [f"📦 *Appel d'offres sélectionné : {product}*"]
         qty = brief.get("quantity")
         if qty is not None:
             try:
@@ -323,7 +323,7 @@ async def ask_bid_price(
         "status": "WAITING_INPUT",
         "expected_input": "PRICE",
         "response_strategy": "ASK_MISSING_FIELD",
-        "current_goal": "MARKET_GET_REQUESTS",
+        "current_goal": "MARKET_BROWSE_REQUESTS",
         "final_response": msg,
         "transaction_payload": payload,
         "available_mapping": {},
@@ -357,7 +357,7 @@ async def recap_bid(
 
     prefix = "🤔 " if reask else "📝 "
     msg = (
-        f"{prefix}*Récapitulatif de votre offre*\n"
+        f"{prefix}*Récapitulatif de votre proposition*\n"
         f"Produit : *{product}*\n"
         f"Votre prix : *{price_txt} FCFA/{unit}*{warn}\n\n"
         "👉 Répondez *oui* pour confirmer, envoyez un *autre montant* pour corriger, "
@@ -375,7 +375,7 @@ async def recap_bid(
         "status": "WAITING_INPUT",
         "expected_input": "CONFIRMATION",
         "response_strategy": "ASK_MISSING_FIELD",
-        "current_goal": "MARKET_GET_REQUESTS",
+        "current_goal": "MARKET_BROWSE_REQUESTS",
         "final_response": msg,
         "transaction_payload": payload,
         "available_mapping": {},
@@ -390,10 +390,10 @@ async def submit_bid(
     auction_id: str,
     price: float,
 ) -> Dict[str, Any]:
-    """Dépose l'offre (place_bid) APRÈS confirmation, puis confirme au producteur."""
+    """Dépose la proposition (place_bid) APRÈS confirmation, puis confirme au producteur."""
     phone = str(state.get("user_phone") or "")
     if not phone:
-        return _error("Numéro de téléphone introuvable, impossible d'enregistrer votre offre.")
+        return _error("Numéro de téléphone introuvable, impossible d'enregistrer votre proposition.")
 
     gw = AuctionGateway(mc_runtime)
     try:
@@ -403,7 +403,7 @@ async def submit_bid(
         return {
             "status": "COMPLETED",
             "response_strategy": "ERROR",
-            "final_response": "Impossible d'enregistrer votre offre pour le moment. Réessayez dans un instant.",
+            "final_response": "Impossible d'enregistrer votre proposition pour le moment. Réessayez dans un instant.",
             "working_memory": _clear_bid_wm(state),
             "transaction_payload": {"__reset__": True},
             "ag_ui_component": None,
@@ -413,7 +413,7 @@ async def submit_bid(
         return {
             "status": "COMPLETED",
             "response_strategy": "ERROR",
-            "final_response": result.get("message") or "Votre offre n'a pas pu être enregistrée.",
+            "final_response": result.get("message") or "Votre proposition n'a pas pu être enregistrée.",
             "working_memory": _clear_bid_wm(state),
             "transaction_payload": {"__reset__": True},
             "ag_ui_component": None,
@@ -421,13 +421,13 @@ async def submit_bid(
 
     price_txt = f"{float(price):g}"
     # Message du DB (distingue « transmise » d'une « mise à jour » via l'upsert).
-    db_msg = result.get("message") or f"✅ Votre offre de *{price_txt} FCFA* a été transmise à l'acheteur."
+    db_msg = result.get("message") or f"✅ Votre proposition de *{price_txt} FCFA* a été transmise à l'acheteur."
     return {
         "status": "COMPLETED",
         "response_strategy": "SUCCESS",
         "final_response": (
             f"{db_msg}\n\n"
-            "📊 Tapez *mes offres* pour suivre son état (acceptée / en attente)."
+            "📊 Tapez *mes propositions* pour suivre son état (acceptée / en attente)."
         ),
         "working_memory": _clear_bid_wm(state),
         "transaction_payload": {"__reset__": True},
@@ -440,8 +440,8 @@ def _cancel_bid(state: Dict[str, Any]) -> Dict[str, Any]:
         "status": "COMPLETED",
         "response_strategy": "SUCCESS",
         "final_response": (
-            "❌ Offre annulée. Rien n'a été envoyé à l'acheteur.\n\n"
-            "🛒 Tapez *voir les enchères* pour recommencer."
+            "❌ Proposition annulée. Rien n'a été envoyé à l'acheteur.\n\n"
+            "🛒 Tapez *voir les appels d'offres* pour recommencer."
         ),
         "working_memory": _clear_bid_wm(state),
         "transaction_payload": {"__reset__": True},
@@ -455,14 +455,14 @@ def _cancel_bid(state: Dict[str, Any]) -> Dict[str, Any]:
 # =====================================================================
 
 async def track_my_bids(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
-    """Liste les offres du producteur ET permet d'agir dessus :
-    sélectionner une offre *en attente* ouvre le tunnel de correction de prix
+    """Liste les propositions du producteur ET permet d'agir dessus :
+    sélectionner une proposition *en attente* ouvre le tunnel de correction de prix
     (voir ``ask_modify_price``/``recap_modify_price``/``submit_modify_price``).
-    Une offre déjà tranchée (acceptée/refusée) reste affichée mais non actionnable.
+    Une proposition déjà tranchée (acceptée/refusée) reste affichée mais non actionnable.
     """
     phone = str(state.get("user_phone") or "")
     if not phone:
-        return _error("Numéro de téléphone introuvable, impossible de charger vos offres.")
+        return _error("Numéro de téléphone introuvable, impossible de charger vos propositions.")
 
     gw = AuctionGateway(mc_runtime)
     result = await gw.get_my_active_bids(phone)
@@ -471,7 +471,7 @@ async def track_my_bids(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         return {
             "status": "COMPLETED",
             "response_strategy": "SUCCESS",
-            "final_response": result.get("message") or "Impossible de charger vos offres en cours.",
+            "final_response": result.get("message") or "Impossible de charger vos propositions en cours.",
             "working_memory": _clear_bid_wm(state),
             "ag_ui_component": None,
         }
@@ -483,7 +483,7 @@ async def track_my_bids(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
             "response_strategy": "SUCCESS",
             "final_response": (
                 "Vous n'avez encore fait aucune proposition.\n\n"
-                "🛒 Tapez *voir les enchères* pour trouver des acheteurs."
+                "🛒 Tapez *voir les appels d'offres* pour trouver des acheteurs."
             ),
             "working_memory": _clear_bid_wm(state),
             "ag_ui_component": None,
@@ -512,9 +512,9 @@ async def track_my_bids(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         }
 
     menu_text = (
-        (result.get("formatted_menu") or "Vos offres.")
-        + "\n\n_Répondez avec le numéro d'une offre *en attente* pour en modifier le prix, "
-        "ou tapez *voir les enchères* pour en proposer une nouvelle._"
+        (result.get("formatted_menu") or "Vos propositions.")
+        + "\n\n_Répondez avec le numéro d'une proposition *en attente* pour en modifier le prix, "
+        "ou tapez *voir les appels d'offres* pour en proposer une nouvelle._"
     )
 
     wm = _clear_bid_wm(state)
@@ -532,7 +532,7 @@ async def track_my_bids(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         "transaction_payload": _clear_bid_payload(),
         "ag_ui_component": None,
         "pending_menu": MenuRequest(
-            title="Vos offres",
+            title="Vos propositions",
             options=options,
             kind="bid",
             preformatted_text=menu_text,
@@ -561,7 +561,7 @@ async def ask_modify_price(
     else:
         cur_txt = f"{float(current_price):g}" if current_price is not None else "?"
         msg = (
-            f"✏️ *Modifier votre offre : {product}*\n"
+            f"✏️ *Modifier votre proposition : {product}*\n"
             f"Prix actuel : *{cur_txt} FCFA/{unit}*\n\n"
             "💬 *Quel nouveau prix proposez-vous ?*"
         )
@@ -637,7 +637,7 @@ async def submit_modify_price(
 ) -> Dict[str, Any]:
     phone = str(state.get("user_phone") or "")
     if not phone:
-        return _error("Numéro de téléphone introuvable, impossible de modifier votre offre.")
+        return _error("Numéro de téléphone introuvable, impossible de modifier votre proposition.")
 
     gw = AuctionGateway(mc_runtime)
     try:
@@ -647,7 +647,7 @@ async def submit_modify_price(
         return {
             "status": "COMPLETED",
             "response_strategy": "ERROR",
-            "final_response": "Impossible de mettre à jour votre offre pour le moment. Réessayez dans un instant.",
+            "final_response": "Impossible de mettre à jour votre proposition pour le moment. Réessayez dans un instant.",
             "working_memory": _clear_bid_wm(state),
             "transaction_payload": {"__reset__": True},
             "ag_ui_component": None,
@@ -657,7 +657,7 @@ async def submit_modify_price(
         return {
             "status": "COMPLETED",
             "response_strategy": "ERROR",
-            "final_response": result.get("message") or "Votre offre n'a pas pu être mise à jour.",
+            "final_response": result.get("message") or "Votre proposition n'a pas pu être mise à jour.",
             "working_memory": _clear_bid_wm(state),
             "transaction_payload": {"__reset__": True},
             "ag_ui_component": None,
@@ -668,8 +668,8 @@ async def submit_modify_price(
         "status": "COMPLETED",
         "response_strategy": "SUCCESS",
         "final_response": (
-            f"✅ Votre offre a été mise à jour à *{price_txt} FCFA*.\n\n"
-            "📊 Tapez *mes offres* pour suivre son état."
+            f"✅ Votre proposition a été mise à jour à *{price_txt} FCFA*.\n\n"
+            "📊 Tapez *mes propositions* pour suivre son état."
         ),
         "working_memory": _clear_bid_wm(state),
         "transaction_payload": {"__reset__": True},
@@ -681,7 +681,7 @@ def _cancel_modify(state: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "status": "COMPLETED",
         "response_strategy": "SUCCESS",
-        "final_response": "❌ Modification annulée, votre offre reste inchangée.\n\n📊 Tapez *mes offres* pour revoir la liste.",
+        "final_response": "❌ Modification annulée, votre proposition reste inchangée.\n\n📊 Tapez *mes propositions* pour revoir la liste.",
         "working_memory": _clear_bid_wm(state),
         "transaction_payload": {"__reset__": True},
         "available_mapping": {},
@@ -798,8 +798,8 @@ async def producer_auction_resolver(
                     "status": "COMPLETED",
                     "response_strategy": "SUCCESS",
                     "final_response": (
-                        "Cette offre a déjà été traitée, elle n'est plus modifiable.\n\n"
-                        "📊 Tapez *mes offres* pour revoir la liste."
+                        "Cette proposition a déjà été traitée, elle n'est plus modifiable.\n\n"
+                        "📊 Tapez *mes propositions* pour revoir la liste."
                     ),
                     "working_memory": _clear_bid_wm(state),
                     "ag_ui_component": None,

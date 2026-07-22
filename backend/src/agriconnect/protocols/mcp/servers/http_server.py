@@ -1,4 +1,4 @@
-"""MCP HTTP daemon — transport persistant pour AgriDBMCPServer.
+"""MCP HTTP daemon — transport persistant pour AgriDBMCPServer.j
 
 Élimine le cold-start du transport stdio (diagnostiqué à ~6-9s/tour : spawn
 process + import lourd + pool DB recréé à froid) en gardant un SEUL process

@@ -22,7 +22,11 @@ from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
     ProductGateway,
     StockGateway,
 )
-from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, is_success_response
+from agriconnect.graphs.agents.market_coach.utils import (
+    MarketRuntime,
+    is_success_response,
+    unwrap_tool_envelope,
+)
 
 from .buyer_common import SUPPORT_FOOTER, with_support_footer
 
@@ -485,34 +489,11 @@ def _fmt_num(value: Any) -> str:
 
 
 def _unwrap_tool_envelope(result: Any) -> Dict[str, Any]:
-    """Return the domain dict from a possibly-enveloped tool response.
-
-    Some transports return the raw DB dict (``{"status": "success", ...}``),
-    others wrap it in an execution envelope (``{"ok": bool, "data": {...},
-    "error": ...}``). Without unwrapping, an ``ok=False`` envelope has no
-    top-level ``status``/``message`` and is silently misread as an empty
-    failure — surfacing a bogus "stock insuffisant" with no numbers.
-    """
+    """Filet local — l'unwrap canonique vit dans utils.unwrap_tool_envelope
+    et s'applique déjà au chokepoint MarketRuntime.call_db (idempotent)."""
     if not isinstance(result, dict):
         return {"status": "error", "message": "Réponse outil invalide."}
-    # Already a domain dict.
-    if "status" in result or "message" in result or "available_quantity" in result:
-        return result
-    # Execution envelope shape.
-    if "ok" in result or "data" in result:
-        data = result.get("data")
-        if isinstance(data, dict) and data:
-            merged = dict(data)
-            if result.get("error") and "message" not in merged:
-                merged.setdefault("message", str(result.get("error")))
-            merged.setdefault("status", "success" if result.get("ok") else "error")
-            return merged
-        # Empty data → propagate the envelope error as a domain error.
-        return {
-            "status": "success" if result.get("ok") else "error",
-            "message": str(result.get("error") or "") or None,
-        }
-    return result
+    return unwrap_tool_envelope(result)
 
 
 def _infer_source_type(product_record: Dict[str, Any]) -> str:

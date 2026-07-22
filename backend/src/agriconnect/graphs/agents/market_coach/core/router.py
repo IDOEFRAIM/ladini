@@ -1,24 +1,38 @@
-"""Domain Router — Point d'aiguillage rôle-agnostique pour le graphe MarketCoach.
+"""Domain Router — aiguillage rôle-agnostique du graphe MarketCoach.
 
-Le ``graph_builder`` ne contient plus de conditions métier ``if role == BUYER``.
-Il instancie un ``DefaultDomainRouter(role)`` et branche un unique nœud
-``domain_router_node`` qui délègue au bon flow (buyer ou producer) via cet
-objet.
+Fusion (Phase 1) de l'ex-``DefaultDomainRouter`` (résolution de contexte) et
+de l'ex-``AfterValidatorPolicy`` (routage post-validator, ``policies.py``) :
+UNE seule classe porte désormais les deux décisions de routage métier.
+
+    router = get_domain_router(role)
+    workflow.add_conditional_edges("validator", router.decide, targets)
+    patch = await router.resolve(state, mc_runtime)   # context_resolver
+
+Les ensembles de goals viennent de ``core/goals.py`` (dérivés d'INTENT_CONFIG,
+anti-drift) — plus aucune définition locale ici.
 
 Architecture anti-circularité :
   ``core/router.py`` importe ``flows.common.menu_contracts`` (feuille pure).
   Les flows ``buyer/flow`` et ``producer/flow`` sont importés LOCALEMENT
-  dans ``DefaultDomainRouter.resolve()`` pour casser le cycle
-  ``core → flows → core``.
+  dans ``resolve()`` pour casser le cycle ``core → flows → core``.
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, FrozenSet, Optional, Protocol, Sequence, runtime_checkable
 
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     DomainResult,
     MenuRequest,
+)
+from agriconnect.graphs.agents.market_coach.core.goals import (
+    BUYER_CART_GOALS,
+    BUYER_NEGOTIATION_GOALS,
+    BUYER_ORDER_TRACKING_GOALS,
+    BUYER_AUCTION_TRACKING_GOALS,
+    BUYER_PREORDER_GOALS,
+    PRODUCER_RESOLVER_GOALS,
 )
 from agriconnect.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
 
@@ -42,40 +56,93 @@ class DomainResolver(Protocol):
 
 
 # =====================================================================
-# BUYER TRANSACTIONAL GOALS — les goals du tunnel transactionnel
-# acheteur qui requièrent un aiguillage spécifique vers les sous-nodes
-# cart_management / negotiation_gate AVANT le context_resolver.
+# ROUTE RULE — une décision de routage post-validator
 # =====================================================================
 
-BUYER_CART_GOALS = frozenset({"BUYER_ADD_TO_CART", "BUYER_VIEW_CART"})
-BUYER_PREORDER_GOALS = frozenset({"BUYER_PREORDER_INIT", "BUYER_PREORDER_CONFIRM", "BUYER_CART_RESET"})
-BUYER_NEGOTIATION_GOALS = frozenset({"BUYER_NEGOTIATE_PRICE"})
-BUYER_ORDER_TRACKING_GOALS = frozenset({
-    "BUYER_CHECK_ORDER_STATUS",
-    "BUYER_LIST_ORDERS",
-    "BUYER_CANCEL_ORDER",
-})
-BUYER_AUCTION_TRACKING_GOALS = frozenset({
-    "BUYER_LIST_AUCTIONS",
-    "BUYER_CHECK_AUCTION_STATUS",
-})
+@dataclass(frozen=True)
+class RouteRule:
+    """Si le goal courant appartient à ``goals``, router vers ``target``.
+
+    ``guard`` optionnel : si fourni et qu'il retourne False, la règle est
+    bloquée et la décision retombe sur ``to_strategy`` (réponse utilisateur).
+    """
+    goals: FrozenSet[str]
+    target: str
+    guard: Optional[Callable[[Dict[str, Any]], bool]] = None
+
+
+def _cart_guard(state: Dict[str, Any]) -> bool:
+    status = str(state.get("status") or "").upper()
+    missing = list(state.get("missing_fields") or [])
+    return tunnel_manager.is_cart_routeable(status, missing)
+
+
+def _negotiation_guard(state: Dict[str, Any]) -> bool:
+    status = str(state.get("status") or "").upper()
+    return tunnel_manager.is_negotiation_routeable(status)
 
 
 # =====================================================================
-# DEFAULT DOMAIN ROUTER
+# DOMAIN ROUTER — resolve() + decide() fusionnés
 # =====================================================================
 
-class DefaultDomainRouter:
-    """Implémentation concrète du routeur de domaine."""
+class DomainRouter:
+    """Routeur de domaine unifié : contexte + post-validator."""
 
-    __slots__ = ("_role",)
+    __slots__ = ("_role", "_rules", "_fallback_router")
 
-    def __init__(self, role: str ) -> None:
+    def __init__(
+        self,
+        role: str,
+        rules: Sequence[RouteRule] = (),
+        fallback_router: Optional[Callable[[Dict[str, Any]], str]] = None,
+    ) -> None:
         self._role = str(role).upper().strip()
+        self._rules = tuple(rules)
+        self._fallback_router = fallback_router
 
     @property
     def role(self) -> str:
         return self._role
+
+    # ----------------------------------------------------------------
+    # DECIDE : routage déterministe post-validator (ex-AfterValidatorPolicy)
+    # ----------------------------------------------------------------
+
+    def decide(self, state: Dict[str, Any]) -> str:
+        working_memory = state.get("working_memory") or {}
+        goal = str(
+            state.get("current_goal")
+            or working_memory.get("active_goal")
+            or working_memory.get("locked_intent")
+            or state.get("detected_intent")
+            or ""
+        ).upper()
+
+        status = str(state.get("status") or "").upper()
+
+        for rule in self._rules:
+            if goal not in rule.goals:
+                continue
+            if rule.guard is not None and not rule.guard(state):
+                logger.info(
+                    "[Router] Rule %s blocked by guard (goal=%s, status=%s) → to_strategy",
+                    rule.target, goal, status,
+                )
+                return "to_strategy"
+            logger.info(
+                "[Router] Routing to %s (goal=%s, status=%s)",
+                rule.target, goal, status,
+            )
+            return rule.target
+
+        if status in {"ERROR", "WAITING_INPUT"}:
+            return "to_strategy"
+
+        if self._fallback_router is not None:
+            return self._fallback_router(state)
+
+        return "to_resolver"
 
     # ----------------------------------------------------------------
     # RESOLVE : délègue au bon flow via import local (anti-cycle)
@@ -92,77 +159,6 @@ class DefaultDomainRouter:
         if self._role == "BUYER":
             return await self._resolve_buyer(state, mc_runtime)
         return await self._resolve_producer(state, mc_runtime)
-
-    # ----------------------------------------------------------------
-    # ROUTE AFTER VALIDATOR : routage déterministe post-validateur
-    # ----------------------------------------------------------------
-
-    def route_after_validator(self, state: Dict[str, Any]) -> str:
-        """Routage enrichi post-validateur — injecte les branches
-        transactionnelles buyer si le rôle est BUYER.
-
-        Règles :
-        1. ERROR / WAITING_INPUT → to_strategy (réponse directe à l'utilisateur)
-        2. BUYER + cart goal + PROCESSING → to_cart
-        3. BUYER + negotiation goal → to_negotiation
-        4. BUYER + order tracking goal → to_order_tracking
-        5. Sinon : base router (confirmation / resolver / strategy)
-        """
-        status = str(state.get("status") or "").upper()
-
-        if self._role == "BUYER":
-            working_memory = state.get("working_memory") or {}
-            goal = str(
-                state.get("current_goal")
-                or working_memory.get("active_goal")
-                or working_memory.get("locked_intent")
-                or state.get("detected_intent")
-                or ""
-            ).upper()
-
-            # Règle 2 : Cart goals → cart_management SEULEMENT si aucun champ
-            # requis ne manque encore (TunnelManager).  Quand le validateur est
-            # en WAITING_INPUT avec des champs manquants, response_strategy doit
-            # demander l'info — on ne force PAS le passage vers cart_management.
-            if goal in BUYER_CART_GOALS:
-                missing = list(state.get("missing_fields") or [])
-                if not tunnel_manager.is_cart_routeable(status, missing):
-                    logger.info(
-                        "[DomainRouter] Cart routing blocked by TunnelManager "
-                        "(status=%s, missing=%s) → to_strategy",
-                        status, missing,
-                    )
-                    return "to_strategy"
-                logger.info(
-                    "[DomainRouter] Routing cart intent to cart node (goal=%s, status=%s)",
-                    goal, status,
-                )
-                return "to_cart"
-            if goal in BUYER_NEGOTIATION_GOALS:
-                if not tunnel_manager.is_negotiation_routeable(status):
-                    return "to_strategy"
-                return "to_negotiation"
-            if goal in BUYER_ORDER_TRACKING_GOALS or goal in BUYER_AUCTION_TRACKING_GOALS:
-                return "to_order_tracking"
-            if goal in BUYER_PREORDER_GOALS:
-                return "to_resolver"
-
-        # Règle 1 : Si erreur ou demande d'input, on répond à l'utilisateur.
-        # Cela empêche les boucles : quand validator demande un champ manquant,
-        # on ne renvoie PAS vers un node transactionnel (hors forcing cart ci-dessus).
-        if status in {"ERROR", "WAITING_INPUT"}:
-            return "to_strategy"
-
-        from agriconnect.graphs.agents.market_coach.interpreter.routing import (
-            make_route_after_validator,
-        )
-
-        base_router = make_route_after_validator(self._role)
-        return base_router(state)
-
-    # ----------------------------------------------------------------
-    # PRIVATE — résolutions par domaine (imports locaux)
-    # ----------------------------------------------------------------
 
     async def _resolve_buyer(
         self,
@@ -186,6 +182,38 @@ class DefaultDomainRouter:
         raw = await producer_context_resolver(state, mc_runtime)
         return _wrap_raw_result(raw)
 
+    # ── Factories par rôle ───────────────────────────────────────────
+
+    @classmethod
+    def for_buyer(cls) -> "DomainRouter":
+        from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+            make_route_after_validator,
+        )
+        rules = [
+            RouteRule(goals=BUYER_CART_GOALS, target="to_cart", guard=_cart_guard),
+            RouteRule(goals=BUYER_NEGOTIATION_GOALS, target="to_negotiation", guard=_negotiation_guard),
+            RouteRule(goals=BUYER_ORDER_TRACKING_GOALS | BUYER_AUCTION_TRACKING_GOALS, target="to_order_tracking"),
+            RouteRule(goals=BUYER_PREORDER_GOALS, target="to_resolver"),
+        ]
+        return cls("BUYER", rules=rules, fallback_router=make_route_after_validator("BUYER"))
+
+    @classmethod
+    def for_producer(cls) -> "DomainRouter":
+        from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+            make_route_after_validator,
+        )
+        rules = [
+            RouteRule(goals=PRODUCER_RESOLVER_GOALS, target="to_resolver"),
+        ]
+        return cls("PRODUCER", rules=rules, fallback_router=make_route_after_validator("PRODUCER"))
+
+
+def get_domain_router(role: str) -> DomainRouter:
+    """Factory unique — point d'entrée du graph_builder."""
+    if str(role).upper().strip() == "BUYER":
+        return DomainRouter.for_buyer()
+    return DomainRouter.for_producer()
+
 
 # =====================================================================
 # HELPERS
@@ -203,20 +231,13 @@ def _wrap_raw_result(raw: Dict[str, Any]) -> DomainResult:
     return DomainResult(state_patch=raw, pending_menu=menu)
 
 
-def _has_minimum_cart_payload(state: Dict[str, Any]) -> bool:
-    payload = state.get("transaction_payload") or {}
-    if not isinstance(payload, dict):
-        return False
-    has_product = bool(payload.get("product"))
-    qty = payload.get("quantity")
-    has_qty = qty not in (None, "", [], {})
-    return has_product or has_qty
-
-
 __all__ = [
     "DomainResolver",
-    "DefaultDomainRouter",
+    "DomainRouter",
+    "RouteRule",
+    "get_domain_router",
     "DomainResult",
+    # Re-exports compat (source canonique : core/goals.py)
     "BUYER_CART_GOALS",
     "BUYER_PREORDER_GOALS",
     "BUYER_NEGOTIATION_GOALS",

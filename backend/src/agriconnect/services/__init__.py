@@ -1,5 +1,14 @@
-from typing import Any
+"""Services package facade.
 
-__all__ = ["AgriDatabase", "AgriDatabaseService"]
+Import lazy pour éviter de charger la couche DB (et ses 10 mixins)
+au simple import du package.
+"""
 
-                                                                                                                                                             
+__all__ = ["AgriDatabaseService"]
+
+
+def __getattr__(name):
+    if name == "AgriDatabaseService":
+        from agriconnect.services.database import AgriDatabaseService
+        return AgriDatabaseService
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

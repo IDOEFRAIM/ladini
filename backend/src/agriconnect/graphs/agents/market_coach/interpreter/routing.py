@@ -462,7 +462,7 @@ def _interpret_fast_path(state: Dict[str, Any], text: str) -> Optional[Dict[str,
         if any(tok in _norm for tok in _browse_tokens):
             return {
                 "interpreted_event": "NEW_TASK",
-                "detected_intent": "MARKET_GET_REQUESTS",
+                "detected_intent": "MARKET_BROWSE_REQUESTS",
                 "interpreter_confidence": 0.95,
                 "extracted_entities": {},
                 "raw_analysis": {"path": "fast_path_producer_browse_auctions"},
@@ -761,21 +761,41 @@ def make_input_interpreter(role: str = "PRODUCER"):
         )
 
         # 4. Appel LLM d'analyse sémantique et contextuelle
+        # Timeout de sécurité (Phase 4) : un appel Groq suspendu ici gelait le
+        # tour ENTIER jusqu'au timeout global orchestrateur (45s). TimeoutError
+        # est capturé par le except ci-dessous → fallback UNKNOWN propre.
         try:
-            completion = await asyncio.to_thread(
-                lambda: llm.chat.completions.create(
-                    model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.0,
-                )
+            completion = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: llm.chat.completions.create(
+                        model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.0,
+                    )
+                ),
+                timeout=15.0,
             )
             parsed = json.loads(completion.choices[0].message.content or "{}")
         except Exception as exc:
-            logger.error("Interpreter LLM CRASH : %s — forcing UNKNOWN", exc, exc_info=True)
+            # Dégradation attendue (timeout, 429/5xx Groq) : WARNING, pas de
+            # traceback — bruit de log inutile pour un cas déjà géré par le
+            # fallback UNKNOWN ci-dessous. Réserver ERROR+exc_info aux échecs
+            # non anticipés (bug de parsing JSON, etc.).
+            is_expected = isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+            if not is_expected:
+                try:
+                    from groq import APIStatusError, APITimeoutError
+                    is_expected = isinstance(exc, (APIStatusError, APITimeoutError))
+                except ImportError:
+                    pass
+            if is_expected:
+                logger.warning("Interpreter LLM indisponible (%s) — forcing UNKNOWN", exc)
+            else:
+                logger.error("Interpreter LLM CRASH : %s — forcing UNKNOWN", exc, exc_info=True)
             if onboarding_active:
                 return _emit_onboarding({}, "onboarding_llm_crash")
             return {

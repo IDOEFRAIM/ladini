@@ -5,8 +5,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../src'
 import pytest
 import asyncio
 from unittest.mock import MagicMock, AsyncMock
-from agriconnect.graphs.agents.market_coach.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.waste.graph import get_agent_graph as MarketCoach
+from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
+from agriconnect.graphs.agents.market_coach.adapter import get_agent_graph as MarketCoach
 
 
 def _merge_non_null(target: dict, updates: dict) -> None:

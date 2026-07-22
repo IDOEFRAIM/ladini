@@ -21,6 +21,11 @@ from agriconnect.graphs.agents.market_coach.utils import (
     slot_has_value,
 )
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
+from agriconnect.graphs.agents.market_coach.interpreter.contracts import (
+    CONTRACTS,
+    enforce_contract,
+)
+from agriconnect.graphs.agents.market_coach.core.goals import BUYER_CART_GOALS
 from agriconnect.graphs.agents.market_coach.nodes.response_handlers import _label_for_field
 from agriconnect.graphs.agents.market_coach.core.state_compaction import (
     build_compaction_patch,
@@ -141,7 +146,8 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
 
     # Pass-through to context resolver for goals that resolve IDs dynamically
     _RESOLVER_PASSTHROUGH = {
-        "MARKET_GET_REQUESTS": ("auction_id", ["product"]),
+        "MARKET_BROWSE_REQUESTS": ("auction_id", ["product"]),
+        "MARKET_MY_REQUESTS": ("auction_id", ["product"]),
         "SALES_PLACE_BID": ("auction_id", ["product"]),
         "MARKET_GET_MY_PROPOSALS": ("bid_id", []),
         "SALES_ACCEPT_CONTRACT": ("bid_id", []),
@@ -215,6 +221,33 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
         except (TypeError, ValueError):
             pass
 
+    # -----------------------------------------------------------------
+    # CONTRATS PYDANTIC (défense en profondeur post-LLM, Phase 2)
+    # Valident uniquement les VALEURS présentes — la présence reste le
+    # travail d'INTENT_CONFIG.required (enforce_contract ignore `missing`).
+    # -----------------------------------------------------------------
+    if goal_upper in CONTRACTS:
+        contract_payload = dict(payload)
+        contract_payload.setdefault(
+            "phone", state.get("user_phone") or state.get("phone") or ""
+        )
+        contract_ok, contract_msg, contract_field = enforce_contract(
+            goal_upper, contract_payload
+        )
+        if not contract_ok:
+            label = _label_for_field(goal, contract_field) if contract_field else None
+            errors.append(
+                f"{label} : valeur invalide." if label else (contract_msg or "Entrée invalide.")
+            )
+            if contract_field and contract_field != "phone" and contract_field not in missing:
+                # Re-demander le champ fautif comme s'il manquait.
+                payload.pop(contract_field, None)
+                missing.insert(0, contract_field)
+            logger.info(
+                "[Validator] Contrat %s rejeté (champ=%s): %s",
+                goal_upper, contract_field, contract_msg,
+            )
+
     progress = _compute_progress(goal, payload)
 
     if missing or errors:
@@ -248,7 +281,7 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
             },
         )
 
-    is_cart_goal = goal_upper in {"BUYER_ADD_TO_CART", "BUYER_VIEW_CART"}
+    is_cart_goal = goal_upper in BUYER_CART_GOALS
 
     result: Dict[str, Any] = {
         "status": "PROCESSING" if is_cart_goal else "PLANNING",

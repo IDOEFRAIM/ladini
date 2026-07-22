@@ -36,7 +36,7 @@ def prep_sales_get_catalog(state: Mapping[str, Any], payload: Mapping[str, Any])
     return tool_name, dict(result.tool_args)
 
 
-@register_action("MARKET_GET_REQUESTS", mode="READ")
+@register_action("MARKET_BROWSE_REQUESTS", mode="READ")
 def prep_market_get_requests(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
     """Prépare la liste des appels d'offres du marché."""
     context = DomainContext.from_state(state)

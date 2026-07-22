@@ -44,8 +44,20 @@ def get_groq_sdk(force_refresh: bool = False) -> Any:
             "Installez-le via `pip install groq`."
         ) from exc
 
-    _GROQ_SDK_SINGLETON = Groq(api_key=api_key)
-    logger.info("Groq SDK initialisé et mis en cache")
+    # max_retries=0 (Phase 4) : le SDK Groq retry par défaut (2×) en honorant
+    # le header Retry-After d'un 429 — vu en prod : 13s d'attente SDK à
+    # l'INTÉRIEUR d'un seul essai, invisible pour asyncio.to_thread (le thread
+    # bloquant ne peut pas être annulé une fois lancé). Avec 2 retries, le
+    # pire cas dépasse 40s — bien au-delà des `asyncio.wait_for` (8-15s) posés
+    # aux sites d'appel (routing.py, clarification.py, utils.py) : le timeout
+    # abandonnait la coroutine pendant que le thread continuait à tourner
+    # pour rien, ET convertissait un appel qui aurait fini par réussir en
+    # UNKNOWN forcé. Un 429/5xx doit remonter IMMÉDIATEMENT comme exception —
+    # les `except` de chaque site gèrent déjà le fallback proprement (log +
+    # dégradation), plus vite et plus prévisible qu'un retry masqué.
+    # `timeout=20.0` : filet réseau (connexion pendue) indépendant du retry.
+    _GROQ_SDK_SINGLETON = Groq(api_key=api_key, max_retries=0, timeout=20.0)
+    logger.info("Groq SDK initialisé et mis en cache (max_retries=0, timeout=20s)")
     return _GROQ_SDK_SINGLETON
 
 

@@ -57,13 +57,17 @@ exprime un besoin produit. Les étapes clés et leurs implémentations sont :
    (`initiate_negotiation_session`), les relances (`update_negotiation_offer`) et
    la sélection gagnante (`select_winning_bid`). Chaque phase alimente
    `negotiation_context` pour reprendre la session avec menus dynamiques.
-5. **Gestion des enchères existantes** — `_resolve_own_auctions`,
-   `_resolve_received_bids` et `_resolve_buyer_bid_pick` offrent une navigation
-   dans les appels d’offres créés par l’acheteur ainsi que dans les offres reçues.
-6. **Suivi de commandes** — `order_tracking_resolver` (fichier dédié) couvre les
-   intents `BUYER_LIST_ORDERS`, `BUYER_CHECK_ORDER_STATUS` et `BUYER_CANCEL_ORDER`
-   avec menus expirables et résumés humains (`last_order_summary`,
-   `order_tracking_context`).
+5. **Gestion des enchères existantes** — `_resolve_received_bids` et
+   `_resolve_buyer_bid_pick` (procurement.py) offrent une navigation dans les
+   offres reçues sur les appels d'offres de l'acheteur. La liste des appels
+   d'offres eux-mêmes (`BUYER_LIST_AUCTIONS` / `MARKET_MY_REQUESTS` — même
+   fonctionnalité, fusionnée le 2026-07-21) est servie par
+   `list_buyer_auctions` dans `order_tracking.py` (voir point 6).
+6. **Suivi de commandes & appels d'offres** — `order_tracking_resolver` (fichier
+   dédié) couvre les intents `BUYER_LIST_ORDERS`, `BUYER_CHECK_ORDER_STATUS`,
+   `BUYER_CANCEL_ORDER`, `BUYER_LIST_AUCTIONS`, `BUYER_CHECK_AUCTION_STATUS` et
+   `MARKET_MY_REQUESTS`, avec menus expirables et résumés humains
+   (`last_order_summary`, `order_tracking_context`).
 
 L’ensemble de ces étapes est orchestré par `buyer_context_resolver`, qui ne se
 base que sur l’état (jamais sur des heuristiques LLM) pour router vers le bon

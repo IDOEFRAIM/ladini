@@ -85,7 +85,7 @@ class SalesRecordDirectCommand:
 
 @dataclass(frozen=True)
 class MarketGetRequestsCommand:
-    """Typed command for MARKET_GET_REQUESTS read intent."""
+    """Typed command for MARKET_BROWSE_REQUESTS/MARKET_MY_REQUESTS read intent."""
 
     phone: str
     status: str = "OPEN"

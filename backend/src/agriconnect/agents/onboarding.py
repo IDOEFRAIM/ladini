@@ -138,16 +138,24 @@ def _role_capabilities_message(role: Optional[str]) -> str:
     role_norm = str(role or "").upper()
     if role_norm == "BUYER":
         return (
-            "Je peux t’aider à trouver des produits par zone, comparer les producteurs, "
-            "passer des commandes ou précommandes et suivre leur statut. Dis-moi ce que tu recherches."
+            "🛒 Patron, maintenant tu peux me demander :\n"
+            "• *Chercher un produit* — je fouille les offres autour de toi\n"
+            "• *Commander* ou *précommander* — en quelques mots\n"
+            "• *Suivre tes commandes* — je te tiens au courant\n\n"
+            "Dis-moi ce que tu cherches, je m’en occupe ! 💪"
         )
     if role_norm == "PRODUCER":
         return (
-            "Je peux t’aider à publier tes offres, gérer ton stock, contacter des acheteurs "
-            "ou lancer des appels d’offres. Quel produit veux-tu mettre en avant ?"
+            "🧑🏾‍🌾 Patron, voici ce que je peux faire pour toi :\n"
+            "• *Publier un produit* — tes récoltes visibles par les acheteurs\n"
+            "• *Gérer ton stock* — entrées, sorties, tout est suivi\n"
+            "• *Déclarer une future récolte* — les acheteurs peuvent précommander\n"
+            "• *Voir tes commandes* — tout ce qui arrive\n\n"
+            "Quel produit veux-tu mettre en avant ? 🌾"
         )
     return (
-        "Je suis prêt à t’accompagner pour acheter ou vendre sur AgriConnect : précise-moi ton besoin et on démarre."
+        "Patron, je suis prêt à t’accompagner ! "
+        "Dis-moi si tu veux acheter ou vendre et on démarre ensemble. 💪"
     )
 
 
@@ -250,39 +258,43 @@ BulkExtractor = Callable[[str], Coroutine[Any, Any, Dict[str, Optional[str]]]]
 
 
 _WELCOME = (
-    "🌾 *Bienvenue sur AgriConnect !* Je suis *LADINI*, votre assistant agricole personnel.\n\n"
-    "Je suis là pour vous simplifier la vie, directement par message :\n"
-    "🧑🏾‍🌾 *Producteur ?* Publiez vos récoltes, gérez vos stocks, recevez des offres "
-    "d'acheteurs et suivez vos ventes.\n"
-    "🛒 *Acheteur ?* Trouvez les meilleurs produits près de chez vous, comparez les prix "
-    "et commandez en quelques mots.\n\n"
-    "Pour bien démarrer, dites-moi simplement : êtes-vous *producteur* (vous vendez) "
-    "ou *acheteur* (vous achetez) ?\n\n"
-    "_Astuce : vous pouvez tout me dire d'un coup — par exemple « Je suis Awa, productrice "
-    "à Bobo » — ou avancer étape par étape, comme vous préférez._"
+    "🌾 *Bienvenue patron !* Je suis *LADINI*, ton assistant personnel sur *AgriConnect*.\n\n"
+    "*AgriConnect*, c'est quoi ?* C'est ta plateforme agricole qui te connecte "
+    "directement aux bons partenaires — acheteurs et producteurs — près de chez toi, "
+    "par simple message WhatsApp. Pas de déplacement inutile, pas d'intermédiaire.\n\n"
+    "🧑🏾‍🌾 *Tu produis ?* Publie tes récoltes, gère ton stock, reçois des commandes "
+    "et fais connaître tes produits aux acheteurs de ta région.\n"
+    "🛒 *Tu achètes ?* Trouve les meilleurs produits frais autour de toi, compare "
+    "les prix et commande en quelques mots.\n\n"
+    "Pour qu'on démarre ensemble, dis-moi : tu es *producteur* (tu vends) "
+    "ou *acheteur* (tu achètes) ?\n\n"
+    "_💡 Tu peux tout me dire d'un coup — par exemple « Je suis Awa, productrice "
+    "à Bobo » — ou avancer étape par étape, comme tu préfères !_"
 )
 
 
 def _ack_line(ob_state: OnboardingState) -> str:
     parts: List[str] = []
     if ob_state._filled_slots.get("name") and ob_state.name:
-        parts.append(f"Enchante {ob_state.name}.")
+        parts.append(f"Enchanté patron *{ob_state.name}* ! 🤝")
     if ob_state._filled_slots.get("role") and ob_state.role:
-        label = "acheteur" if ob_state.role == "BUYER" else "producteur"
-        parts.append(f"Compris, vous etes {label}.")
+        if ob_state.role == "BUYER":
+            parts.append("Parfait, tu cherches de bons produits — je suis là pour ça !")
+        else:
+            parts.append("Super, un producteur qui veut vendre plus — on va faire du bon travail ensemble !")
     if ob_state._filled_slots.get("zone") and ob_state.zone_name:
-        parts.append(f"Zone notee : {ob_state.zone_name}.")
+        parts.append(f"Zone notée : *{ob_state.zone_name}* ✅")
     return " ".join(parts)
 
 
 def _missing_labels(ob_state: OnboardingState) -> List[str]:
     labels: List[str] = []
     if not ob_state.role:
-        labels.append("votre rôle (acheteur ou producteur)")
+        labels.append("si tu achètes ou tu produis")
     if not ob_state.name:
-        labels.append("votre nom")
+        labels.append("ton nom")
     if not ob_state.zone_id:
-        labels.append("votre ville ou province")
+        labels.append("ta ville ou province")
     return labels
 
 
@@ -290,13 +302,16 @@ def _missing_labels(ob_state: OnboardingState) -> List[str]:
 # qui donne du sens à la demande (au lieu d'un « Il me manque X » sec).
 _FIELD_QUESTIONS: Dict[str, str] = {
     "role": (
-        "Pour commencer, êtes-vous *producteur* (vous vendez vos récoltes) ou "
-        "*acheteur* (vous cherchez à acheter) ?"
+        "Patron, dis-moi : tu es *producteur* (tu vends tes récoltes) "
+        "ou *acheteur* (tu cherches à acheter) ? 🌾"
     ),
-    "name": "Comment vous appelez-vous ? _(pour personnaliser nos échanges)_",
+    "name": (
+        "Comment tu t'appelles patron ? "
+        "_(comme ça je te reconnais à chaque fois !)_"
+    ),
     "zone": (
-        "Dans quelle *ville ou province* êtes-vous ? "
-        "_(pour vous connecter aux bons partenaires près de chez vous)_"
+        "Tu es dans quelle *ville ou province* ? "
+        "_(pour te connecter avec les meilleurs partenaires près de chez toi)_ 📍"
     ),
 }
 
@@ -316,8 +331,8 @@ def _collect_prompt(ob_state: OnboardingState) -> str:
     # Plusieurs champs manquants → invitation légère à tout donner d'un coup.
     joined = ", ".join(missing[:-1]) + f" et {missing[-1]}"
     ask = (
-        f"Encore un petit détail pour finaliser : {joined}. "
-        "Vous pouvez tout m'écrire en une phrase 🙂"
+        f"Patron, il me faut encore : {joined}. "
+        "Tu peux tout m'écrire en une phrase, c'est facile ! 🙂"
     )
     return f"{ack} {ask}".strip()
 
@@ -355,10 +370,10 @@ async def run_onboarding_step(
             ag_ui_component={
                 "type": "ChoiceComponent",
                 "props": {
-                    "title": "Vous etes",
+                    "title": "Tu es...",
                     "options": [
-                        {"label": "Acheteur", "value": "BUYER"},
-                        {"label": "Producteur", "value": "PRODUCER"},
+                        {"label": "🛒 Acheteur — je cherche des produits", "value": "BUYER"},
+                        {"label": "🧑🏾‍🌾 Producteur — je vends mes récoltes", "value": "PRODUCER"},
                     ],
                 },
             },
@@ -489,23 +504,26 @@ def _confirmation_component() -> Dict[str, Any]:
     return {
         "type": "ChoiceComponent",
         "props": {
-            "title": "Confirmez vos informations",
+            "title": "On confirme patron ?",
             "options": [
-                {"label": "Oui, tout est correct", "value": "OUI"},
-                {"label": "Non, corriger", "value": "NON"},
+                {"label": "✅ Oui, c'est bon !", "value": "OUI"},
+                {"label": "✏️ Non, je corrige", "value": "NON"},
             ],
         },
     }
 
 
 def _build_confirmation_prompt(ob_state: OnboardingState) -> str:
-    name = ob_state.name or "(non renseigne)"
-    role = ob_state.role or "(non renseigne)"
+    name = ob_state.name or "(non renseigné)"
+    role = ob_state.role or "(non renseigné)"
     role_label = "Acheteur" if role == "BUYER" else "Producteur" if role == "PRODUCER" else role
-    zone = ob_state.zone_name or "(non renseignee)"
+    zone = ob_state.zone_name or "(non renseignée)"
     return (
-        f"Recapitulatif : Nom = {name}, Role = {role_label}, Zone = {zone}. "
-        "Est-ce correct ?"
+        f"Patron, voici ton récapitulatif :\n"
+        f"👤 *Nom :* {name}\n"
+        f"🏷️ *Rôle :* {role_label}\n"
+        f"📍 *Zone :* {zone}\n\n"
+        "Tout est bon ? Confirme et on est partis ! 🚀"
     )
 
 
@@ -566,7 +584,8 @@ async def _step_create_profile(
             return OnboardingResult(
                 state=ob_state,
                 response_text=(
-                    f"✅ Bienvenue {ob_state.name} ! Ton profil est prêt. "
+                    f"✅ *Bienvenue patron {ob_state.name} !* Ton profil est prêt, "
+                    f"tu fais maintenant partie de la communauté AgriConnect ! 🎉\n\n"
                     f"{_role_capabilities_message(ob_state.role)}"
                 ),
                 status="SUCCESS",
@@ -582,7 +601,8 @@ async def _step_create_profile(
             return OnboardingResult(
                 state=ob_state,
                 response_text=(
-                    f"Content de te revoir, {ob_state.name} ! Ton compte est déjà actif. "
+                    f"Content de te revoir patron *{ob_state.name}* ! 😊 "
+                    f"Ton compte est déjà actif, on continue !\n\n"
                     f"{_role_capabilities_message(ob_state.role)}"
                 ),
                 status="SUCCESS",

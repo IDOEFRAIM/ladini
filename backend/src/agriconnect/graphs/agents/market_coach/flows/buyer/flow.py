@@ -50,7 +50,6 @@ from .procurement import (
     build_procurement_escalation,
     buyer_request_resolver,
     resolve_buyer_bid_pick,
-    resolve_own_auctions,
     resolve_received_bids,
 )
 
@@ -58,7 +57,6 @@ from .procurement import (
 # Backward-compat aliases (old private names → new public names)
 # =====================================================================
 _build_procurement_escalation = build_procurement_escalation
-_resolve_own_auctions = resolve_own_auctions
 _resolve_received_bids = resolve_received_bids
 _resolve_buyer_bid_pick = resolve_buyer_bid_pick
 _create_preorder = create_preorder
@@ -246,9 +244,6 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
     if goal in {"BUYER_REQUEST", "SEARCH_PRODUCTS"}:
         return _finalize(await buyer_request_resolver(state, mc_runtime))
 
-    if goal == "MARKET_GET_REQUESTS":
-        return _finalize(await resolve_own_auctions(mc_runtime, str(phone), payload))
-
     if goal in ORDER_TRACKING_GOALS:
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
             order_tracking_resolver,
@@ -313,13 +308,11 @@ __all__ = [
     "buyer_request_resolver",
     "create_preorder",
     "build_preflight_recap",
-    "resolve_own_auctions",
     "resolve_received_bids",
     "resolve_buyer_bid_pick",
     "build_procurement_escalation",
     # Backward-compat aliases
     "_create_preorder",
-    "_resolve_own_auctions",
     "_resolve_received_bids",
     "_resolve_buyer_bid_pick",
     "_build_procurement_escalation",

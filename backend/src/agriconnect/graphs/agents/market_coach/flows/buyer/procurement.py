@@ -345,7 +345,7 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
             str(product_name),
             vendors,
             extra_context=extra_context,
-            post_hint="💡 Si aucune offre ne vous convient, répondez *appel* pour lancer une demande spéciale aux producteurs.",
+            post_hint="💡 Si aucun produit ne vous convient, répondez *appel* pour lancer une demande spéciale aux producteurs.",
         )
         menu_patch["transaction_payload"] = payload
         wm = dict(working_memory)
@@ -378,7 +378,7 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
         "buyer_request_last_product": product_name,
     })
     msg = (
-        f"📭 Aucune offre disponible pour « *{product_name}* » dans notre catalogue.\n\n"
+        f"📭 Aucun produit disponible pour « *{product_name}* » dans notre catalogue.\n\n"
         "Souhaitez-vous lancer un *appel d'offres* pour que les producteurs "
         "vous fassent des propositions ?\n\n"
         "👉 Répondez *oui* pour lancer, ou *non* pour chercher autre chose."
@@ -391,61 +391,6 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
         "ag_ui_component": None,
         "transaction_payload": payload,
         "working_memory": wm,
-    }
-
-
-# =====================================================================
-# OWN AUCTIONS — list buyer's open procurement requests
-# =====================================================================
-
-
-async def resolve_own_auctions(
-    mc_runtime: MarketRuntime,
-    phone: str,
-    payload: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Retrieve open auctions created by the buyer."""
-    if not phone:
-        return phone_missing_error()
-
-    kwargs: Dict[str, Any] = {"phone": str(phone), "status": "OPEN", "view_mode": "MY_OWN"}
-    product = payload.get("product")
-    if product:
-        kwargs["product_name"] = str(product)
-
-    logger.info("resolve_own_auctions: calling get_auctions with %s", kwargs)
-    auction_gw = AuctionGateway(mc_runtime)
-    result = await auction_gw.search_open_auctions(**kwargs)
-
-    if not is_success_response(result) or int(result.get("count") or 0) == 0:
-        msg = result.get("message") or "Vous n'avez aucun appel d'offres ouvert pour l'instant. Si vous pensez que c'est une erreur, veuillez réessayer."
-        return {
-            "status": "COMPLETED",
-            "response_strategy": "SUCCESS",
-            "final_response": msg,
-            "ag_ui_component": None,
-        }
-
-    mapping = result.get("mapping") or {}
-    menu = result.get("formatted_menu") or "Vos appels d'offres ouverts ont été trouvés."
-    candidates = [str(d.get("product")) for d in (result.get("data") or [])]
-
-    return {
-        "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
-        "working_memory": {"auction_menu": menu},
-        "response_strategy": "SELECTION_MENU",
-        "final_response": menu,
-        "ag_ui_component": None,
-        "pending_menu": MenuRequest(
-            title="Vos appels d'offres",
-            options=[
-                MenuOption(index=str(i), label=c, value=mapping.get(str(i)))
-                for i, c in enumerate(candidates, start=1)
-            ],
-            kind="auction",
-            preformatted_text=menu,
-        ),
     }
 
 
@@ -469,7 +414,7 @@ async def resolve_received_bids(
     result = await auction_gw.get_auctions_bids(**kwargs)
 
     if not is_success_response(result):
-        msg = result.get("message") or "Impossible de charger les offres reçues."
+        msg = result.get("message") or "Impossible de charger les propositions reçues."
         return {
             "status": "COMPLETED",
             "response_strategy": "SUCCESS",
@@ -482,12 +427,12 @@ async def resolve_received_bids(
         return {
             "status": "COMPLETED",
             "response_strategy": "SUCCESS",
-            "final_response": "Aucune offre n'a encore été déposée sur vos enchères.",
+            "final_response": "Aucune proposition n'a encore été déposée sur vos appels d'offres.",
             "ag_ui_component": None,
         }
 
     mapping: Dict[str, str] = {}
-    lines = ["📥 *Offres reçues sur vos enchères :*"]
+    lines = ["📥 *Propositions reçues sur vos appels d'offres :*"]
     for i, bid in enumerate(data, start=1):
         bid_id = str(bid.get("bid_id") or bid.get("id") or "")
         producer_name = bid.get("producer_name") or bid.get("seller_name") or "Producteur"
@@ -547,7 +492,7 @@ async def resolve_buyer_bid_pick(
             "status": "ERROR",
             "validation_errors": ["no_open_bids"],
             "response_strategy": "ERROR",
-            "final_response": "Aucune offre disponible à accepter.",
+            "final_response": "Aucune proposition disponible à accepter.",
             "ag_ui_component": None,
         }
 
@@ -574,7 +519,7 @@ async def resolve_buyer_bid_pick(
                 "status": "ERROR",
                 "validation_errors": ["bid_not_resolved"],
                 "response_strategy": "ERROR",
-                "final_response": "Identifiant de l'offre introuvable sur l'élément sélectionné.",
+                "final_response": "Identifiant de la proposition introuvable sur l'élément sélectionné.",
                 "ag_ui_component": None,
             }
         new_payload = dict(payload)
@@ -590,7 +535,6 @@ async def resolve_buyer_bid_pick(
 __all__ = [
     "build_procurement_escalation",
     "buyer_request_resolver",
-    "resolve_own_auctions",
     "resolve_received_bids",
     "resolve_buyer_bid_pick",
 ]

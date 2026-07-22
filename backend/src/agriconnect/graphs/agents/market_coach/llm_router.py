@@ -25,7 +25,7 @@ def get_model_for_goal(goal: Optional[str]) -> str:
        (par défaut : INPUT_NORMALIZATION, SECURITY_MODERATION, STATE_CLEANER
        -> modèle rapide `settings.LLM_MODEL`).
     2. Sinon `settings.ROUTING_MAP["__default__"]` — modèle de raisonnement,
-       pour tout goal métier complexe (MARKET_GET_REQUESTS, GOAL_PLANNING,
+       pour tout goal métier complexe (MARKET_BROWSE_REQUESTS, GOAL_PLANNING,
        et tout autre intent non listé explicitement).
     3. Filet de sécurité ultime si `ROUTING_MAP` est vide/mal configuré :
        `settings.LLM_MODEL`.

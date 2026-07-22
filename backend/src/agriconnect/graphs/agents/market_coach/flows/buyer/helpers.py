@@ -24,21 +24,17 @@ from agriconnect.graphs.agents.market_coach.services.domain.cart_service import 
 logger = logging.getLogger("AgriConnect.Market.BuyerFlow")
 
 # =====================================================================
-# GOAL SETS — deterministic routing constants
+# GOAL SETS — aliases de compat ; source canonique : core/goals.py
+# (dérivés d'INTENT_CONFIG, anti-drift). Ne jamais redéfinir localement.
 # =====================================================================
 
-CART_GOALS = frozenset({"BUYER_ADD_TO_CART", "BUYER_VIEW_CART"})
-PREORDER_GOALS = frozenset({
-    "BUYER_CREATE_PREORDER", "BUYER_PREORDER_INIT",
-    "BUYER_PREORDER_CONFIRM", "BUYER_CART_RESET",
-})
-NEGOTIATION_GOALS = frozenset({"BUYER_NEGOTIATE_PRICE"})
-ORDER_TRACKING_GOALS = frozenset({
-    "BUYER_CHECK_ORDER_STATUS", "BUYER_LIST_ORDERS", "BUYER_CANCEL_ORDER",
-})
-AUCTION_TRACKING_GOALS = frozenset({
-    "BUYER_LIST_AUCTIONS", "BUYER_CHECK_AUCTION_STATUS",
-})
+from agriconnect.graphs.agents.market_coach.core.goals import (  # noqa: E402
+    BUYER_CART_GOALS as CART_GOALS,
+    BUYER_PREORDER_GOALS as PREORDER_GOALS,
+    BUYER_NEGOTIATION_GOALS as NEGOTIATION_GOALS,
+    BUYER_ORDER_TRACKING_GOALS as ORDER_TRACKING_GOALS,
+    BUYER_AUCTION_TRACKING_GOALS as AUCTION_TRACKING_GOALS,
+)
 
 READ_ONLY_INTENTS = frozenset({
     "BUYER_VIEW_CART", "BUYER_LIST_ORDERS", "BUYER_CHECK_ORDER_STATUS",

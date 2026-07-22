@@ -17,10 +17,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Set
 from agriconnect.core.llm import get_llm
 from agriconnect.core.settings import settings
 from agriconnect.graphs.agents.market_coach.security import SecurityService
-from agriconnect.graphs.agents.market_coach.interpreter.intent import (
-    INTENT_CONFIG,
-    INTENT_DISAMBIGUATION,
-)
+from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
 from agriconnect.infrastructure.mcp.context import FarmerContext, get_mcp_context, mcp_context_scope
 from agriconnect.infrastructure.mcp.security import PermissionScope, TOOL_SCOPE_MAP
@@ -432,9 +429,49 @@ def ensure_dict(obj: Any) -> Dict[str, Any]:
     return {"status": "ok", "data": str(obj)}
 
 
+def unwrap_tool_envelope(result: Any) -> Any:
+    """Déballe une enveloppe d'exécution MCP (``ToolExecutionEnvelope``).
+
+    Deux formes circulent selon le transport : le dict domaine brut
+    (``{"status": "success", ...}``) OU l'enveloppe ``{"ok": bool, "data":
+    {...}, "error": str, "meta": {...}}`` produite par
+    ``ToolExecutionPolicy.execute`` (infrastructure/mcp/security.py). Une
+    enveloppe ``ok=False`` qui atteint ``is_success_response`` sans être
+    déballée n'a ni ``status`` ni ``message`` → faux négatif silencieux
+    (bug historique « Stock insuffisant » sans chiffres).
+
+    Détection STRICTE : clé ``ok`` booléenne présente ET pas de ``status``.
+    Les dicts domaine portent souvent leur propre clé ``data`` (listes) —
+    on ne touche jamais à un dict qui a déjà un ``status``.
+    """
+    if not isinstance(result, dict):
+        return result
+    if "status" in result or not isinstance(result.get("ok"), bool):
+        return result
+    ok = result["ok"]
+    data = result.get("data")
+    error = result.get("error")
+    if isinstance(data, dict) and data:
+        merged = dict(data)
+        if error and "message" not in merged:
+            merged["message"] = str(error)
+        merged.setdefault("status", "success" if ok else "error")
+        return merged
+    if isinstance(data, list) and data:
+        return {"status": "success" if ok else "error", "data": data,
+                "message": (str(error) or None) if error else None}
+    # data vide → propager le verdict de l'enveloppe comme erreur/succès domaine.
+    return {"status": "success" if ok else "error",
+            "message": (str(error) or None) if error else None}
+
+
 def is_success_response(res: Dict[str, Any]) -> bool:
     if not res:
         return False
+    # Filet enveloppe : si un ToolExecutionEnvelope non déballé arrive ici,
+    # son verdict `ok` fait foi (jamais de faux positif "data présent").
+    if "status" not in res and isinstance(res.get("ok"), bool):
+        return res["ok"]
     status = str(res.get("status") or "").lower()
     if status in {"ok", "success", "completed"}:
         return True
@@ -444,6 +481,9 @@ def is_success_response(res: Dict[str, Any]) -> bool:
         return False
     if "status" not in res:
         return bool(res.get("data"))
+    # Statut inconnu (ex: "pending") : ni succès confirmé, ni erreur — False
+    # explicite (comportement historique : fallthrough None, même falsiness).
+    return False
 
 
 def norm_intent(intent: Any) -> str:
@@ -500,35 +540,6 @@ def merge_payload(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, An
         merged[key] = value
 
     return merged
-
-
-def friendly_missing(intent: str, missing: list[str], intent_config: Dict[str, Any]) -> list[str]:
-    cfg = (intent_config or {}).get(intent, {})
-    label_map = cfg.get("label_map", {}) if isinstance(cfg, dict) else {}
-    return [label_map.get(field, field) for field in missing]
-
-
-def build_confirmation_summary(intent: str, payload: Dict[str, Any], intent_config: Dict[str, Any]) -> str:
-    cfg = (intent_config or {}).get(intent, {}) if isinstance(intent_config, dict) else {}
-    label = cfg.get("label", intent)
-
-    product = (payload or {}).get("product")
-    qty = (payload or {}).get("quantity")
-    unit = (payload or {}).get("unit")
-    price = (payload or {}).get("price")
-    currency = (payload or {}).get("currency") or "FCFA"
-
-    lines = [f"✅ {label}"]
-    if product:
-        lines.append(f"- Produit: {product}")
-    if qty is not None:
-        lines.append(f"- Quantité: {qty} {unit or ''}".strip())
-    if price is not None:
-        lines.append(f"- Prix: {price} {currency}")
-
-    lines.append("\nSi c'est correct, répondez juste: OK")
-    return "\n".join(lines)
-
 
 
 class MarketRuntime:
@@ -763,8 +774,9 @@ class MarketRuntime:
             )
             raise
 
-        result = ensure_dict(raw)
-        result["_request_id"] = request_id
+        result = unwrap_tool_envelope(ensure_dict(raw))
+        if isinstance(result, dict):
+            result["_request_id"] = request_id
         return result
 
     def ensure_ready(self):
@@ -805,74 +817,30 @@ def build_runtime_from_session(llm_client: Any = None, mcp_session: Any = None) 
     return MarketRuntime(llm_client=llm_client, mcp_session=mcp_session)
 
 
-# S'intercale après input_interpreter quand le LLM est peu confiant ET que
-# le texte contient un déclencheur lexical présent dans `INTENT_DISAMBIGUATION`.
-# Si déclenchée, propose un AG-UI ListMenu et court-circuite goal_planner pour
-# l'envoyer directement vers response_strategy. La sélection N de l'utilisateur
-# au tour suivant est résolue par memory_update via mapping_kind="intent_disambiguation",
-# puis exploitée par goal_planner (RÈGLE 0bis) comme un NEW_TASK propre.
-
-# Seuil de confiance LLM en-dessous duquel on autorise la désambiguïsation.
-_DISAMBIGUATION_CONFIDENCE_THRESHOLD = 0.85
-_RECOVERY_MAX_RETRIES = 2
-
-
-def _detect_disambiguation_candidates(text_lower: str) -> Optional[Dict[str, Any]]:
-    """Cherche dans INTENT_DISAMBIGUATION l'entrée la PLUS SPÉCIFIQUE dont un
-    `lexical_hint` matche le texte.
-
-    INTENT_DISAMBIGUATION est un dict {trigger_key: {candidates, title, options,
-    lexical_hints}}. On ne retourne plus la première entrée trouvée (l'ordre du
-    dict décidait arbitrairement du gagnant — ex: "suivre mes appels" matchait
-    ORDER_TRACKING via "suivre" au lieu d'AUCTION_TRACKING). On retient l'entrée
-    dont le hint matché est le plus long (signal le plus spécifique), ce qui
-    fait gagner "mes appel(s)" sur le générique "suivre".
-    """
-    best: Optional[Dict[str, Any]] = None
-    best_len = 0
-    for key, entry in INTENT_DISAMBIGUATION.items():
-        for hint in entry.get("lexical_hints") or []:
-            h = str(hint).lower().strip()
-            if h and h in text_lower and len(h) > best_len:
-                best = {"id": key, **entry}
-                best_len = len(h)
-    return best
-
-
 def _compute_progress(goal: Optional[str], payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Calcule la progression de remplissage du formulaire pour le but courant."""
+    """Progression de remplissage des champs requis du but courant.
+
+    Les champs auto-résolus (`_AUTO_RESOLVABLE_FIELDS`) sont exclus du calcul :
+    `total`, `filled`, `remaining` et `pct` portent tous sur le même ensemble
+    de champs demandés à l'utilisateur.
+    """
     if not goal:
         return None
     config = INTENT_CONFIG.get(goal) or {}
     required = list(config.get("required") or [])
     if not required:
         return None
-    filled = [f for f in required if f not in _AUTO_RESOLVABLE_FIELDS and payload.get(f) not in (None, "", [], {})]
-    return {
-        "total": len([f for f in required if f not in _AUTO_RESOLVABLE_FIELDS]),
-        "filled": len(filled),
-        "remaining": [f for f in required if f not in _AUTO_RESOLVABLE_FIELDS and f not in [x for x in filled]],
-        "pct": round(len(filled) / max(len(required), 1) * 100),
-    }
-
-
-def _build_proactive_hint(goal: Optional[str], progress: Optional[Dict[str, Any]], payload: Dict[str, Any]) -> Optional[str]:
-    """Génère un indice proactif contextuel pour guider l'utilisateur."""
-    if not goal or not progress:
+    user_fields = [f for f in required if f not in _AUTO_RESOLVABLE_FIELDS]
+    if not user_fields:
         return None
-    pct = progress.get("pct", 0)
-    remaining = progress.get("remaining") or []
-    goal_label = (INTENT_CONFIG.get(goal) or {}).get("label", goal)
-
-    if pct == 0:
-        return f"Nouvelle opération : {goal_label}"
-    if pct >= 100:
-        return "Toutes les informations sont réunies, prêt pour confirmation."
-    if len(remaining) == 1:
-        field_label = _label_for_field(goal, remaining[0])
-        return f"Plus qu'une info : {field_label}."
-    return f"Progression : {pct}% — encore {len(remaining)} infos nécessaires."
-
+    filled = [f for f in user_fields if payload.get(f) not in (None, "", [], {})]
+    remaining = [f for f in user_fields if f not in filled]
+    return {
+        "total": len(user_fields),
+        "filled": len(filled),
+        "remaining": remaining,
+        "pct": round(len(filled) / len(user_fields) * 100),
+    }
 
 
 # =====================================================================
@@ -992,17 +960,20 @@ async def _llm_extract_onboarding_all(
         "Sinon null (ne devine pas depuis un simple bonjour ou une info non liee)."
     )
     try:
-        completion = await asyncio.to_thread(
-            lambda: llm.chat.completions.create(
-                model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text.strip()},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.0,
-                max_tokens=200,
-            )
+        completion = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: llm.chat.completions.create(
+                    model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_text.strip()},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.0,
+                    max_tokens=200,
+                )
+            ),
+            timeout=10.0,
         )
         payload = json.loads(completion.choices[0].message.content or "{}")
     except Exception as exc:
@@ -1063,12 +1034,11 @@ __all__ = [
     "_maybe_await",
     "_safe_node",
     "ensure_dict",
+    "unwrap_tool_envelope",
     "is_success_response",
     "norm_intent",
     "extract_first_int",
     "merge_payload",
-    "friendly_missing",
-    "build_confirmation_summary",
     "build_runtime",
     "build_runtime_from_session",
     # Text / quantity helpers
@@ -1081,16 +1051,11 @@ __all__ = [
     "_llm_extract_onboarding_all",
     # Compute / reset
     "_compute_progress",
-    "_build_proactive_hint",
-    "_detect_disambiguation_candidates",
     "reset_error_status",
     # Constants
     "_AUTO_RESOLVABLE_FIELDS",
     "_GENERIC_TECHNICAL_ERROR",
-    "_DISAMBIGUATION_CONFIDENCE_THRESHOLD",
-    "_RECOVERY_MAX_RETRIES",
     "INTENT_CONFIG",
-    "INTENT_DISAMBIGUATION",
 ]
 
 

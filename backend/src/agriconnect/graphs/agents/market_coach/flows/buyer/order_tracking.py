@@ -66,16 +66,15 @@ AUCTION_STATUS_MAP = {
     "COMPLETED": ("✅", "Terminée"),
 }
 
-ORDER_TRACKING_GOALS = frozenset({
-    "BUYER_CHECK_ORDER_STATUS",
-    "BUYER_LIST_ORDERS",
-    "BUYER_CANCEL_ORDER",
-})
-
-AUCTION_TRACKING_GOALS = frozenset({
-    "BUYER_LIST_AUCTIONS",
-    "BUYER_CHECK_AUCTION_STATUS",
-})
+# Aliases de compat — source canonique : core/goals.py (dérivés d'INTENT_CONFIG).
+# NOTE : MARKET_MY_REQUESTS ∈ AUCTION_TRACKING_GOALS depuis la fusion du
+# 2026-07-21 (resolve_own_auctions absorbé par list_buyer_auctions, strict
+# superset : tous statuts + compte d'offres + sélection → check_auction_status
+# /finalize_winner). Voir [[market-coach-turn-boundary-state]].
+from agriconnect.graphs.agents.market_coach.core.goals import (  # noqa: E402
+    BUYER_ORDER_TRACKING_GOALS as ORDER_TRACKING_GOALS,
+    BUYER_AUCTION_TRACKING_GOALS as AUCTION_TRACKING_GOALS,
+)
 
 
 # =====================================================================
@@ -195,7 +194,7 @@ async def list_orders(
             "final_response": (
                 "📦 *Vos commandes*\n\n"
                 "Vous n'avez pas encore passé de commande sur AgriConnect."
-                + render_quick_actions(["chercher un produit", "mes enchères"])
+                + render_quick_actions(["chercher un produit", "mes appels d'offres"])
             ),
             "ag_ui_component": None,
         }
@@ -524,14 +523,14 @@ async def list_buyer_auctions(
 
         qty_str = f" — {qty} {unit}" if qty else ""
         price_str = f" — Budget: {price} FCFA" if price else ""
-        bids_str = f" — 📥 {bid_count} offre{'s' if int(bid_count) > 1 else ''}" if bid_count else ""
+        bids_str = f" — 📥 {bid_count} proposition{'s' if int(bid_count) > 1 else ''}" if bid_count else ""
 
         label = f"{product}{qty_str}{price_str}"
         lines.append(f"*{i}.* {label}\n   {status_label}{bids_str}")
         mapping[str(i)] = auction_id
         options.append(MenuOption(index=str(i), label=label, value=auction_id))
 
-    lines.append(render_selection_prompt(noun="enchère"))
+    lines.append(render_selection_prompt(noun="appel d'offres"))
     menu_text = "\n".join(lines)
 
     wm = dict(state.get("working_memory") or {})
@@ -545,7 +544,7 @@ async def list_buyer_auctions(
         "response_strategy": "SELECTION_MENU",
         "final_response": menu_text,
         "available_mapping": mapping,
-        "expected_candidates": [f"Enchère #{oid[:8]}" for oid in mapping.values() if oid],
+        "expected_candidates": [f"Appel d'offres #{oid[:8]}" for oid in mapping.values() if oid],
         "working_memory": wm,
         "ag_ui_component": None,
         "pending_menu": MenuRequest(
@@ -565,7 +564,7 @@ async def check_auction_status(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
 ) -> Dict[str, Any]:
-    """Affiche le détail d'une enchère + les offres reçues dessus."""
+    """Affiche le détail d'un appel d'offres + les propositions reçues dessus."""
     payload = state.get("transaction_payload") or {}
 
     auction_id = (
@@ -585,7 +584,7 @@ async def check_auction_status(
             "response_strategy": "ASK_MISSING_FIELD",
             "final_response": (
                 "Quel appel d'offres souhaitez-vous consulter ?\n"
-                "💡 _Tapez *mes enchères* pour voir la liste._"
+                "💡 _Tapez *mes appels d'offres* pour voir la liste._"
             ),
             "ag_ui_component": None,
         }
@@ -600,16 +599,16 @@ async def check_auction_status(
     status_label = _status_label(status_raw, AUCTION_STATUS_MAP)
 
     lines = [
-        f"📋 *Enchère — {product}*",
+        f"📋 *Appel d'offres — {product}*",
         f"Statut : {status_label}",
     ]
 
     if not bids:
-        lines.append("\n📭 _Aucune offre reçue pour le moment._")
+        lines.append("\n📭 _Aucune proposition reçue pour le moment._")
         if status_raw == "OPEN":
-            lines.append("Les producteurs peuvent encore soumettre des offres.")
+            lines.append("Les producteurs peuvent encore soumettre des propositions.")
     else:
-        lines.append(f"\n📥 *{len(bids)} offre{'s' if len(bids) > 1 else ''} reçue{'s' if len(bids) > 1 else ''} :*")
+        lines.append(f"\n📥 *{len(bids)} proposition{'s' if len(bids) > 1 else ''} reçue{'s' if len(bids) > 1 else ''} :*")
         mapping: Dict[str, str] = {}
         options: List[MenuOption] = []
 
@@ -626,7 +625,7 @@ async def check_auction_status(
             options.append(MenuOption(index=str(i), label=label, value=bid_id))
 
         if status_raw == "OPEN":
-            lines.append("\n_Répondez avec le *numéro* de l'offre pour désigner le gagnant._")
+            lines.append("\n_Répondez avec le *numéro* de la proposition pour désigner le gagnant._")
 
             # kind="bid" → memory_update résout la sélection en payload.bid_id
             # (et NON auction_id : "auction_bids" est mappé vers auction_id, ce
@@ -650,7 +649,7 @@ async def check_auction_status(
                 "working_memory": wm,
                 "ag_ui_component": None,
                 "pending_menu": MenuRequest(
-                    title=f"Offres — {product}",
+                    title=f"Propositions — {product}",
                     options=options,
                     kind="bid",
                     metadata={"auction_id": str(auction_id)},
@@ -715,7 +714,7 @@ async def confirm_winner_selection(
             "status": "WAITING_INPUT",
             "expected_input": "SELECTION",
             "response_strategy": "ASK_MISSING_FIELD",
-            "final_response": "Indiquez le *numéro* de l'offre à retenir (ex: 1).",
+            "final_response": "Indiquez le *numéro* de la proposition à retenir (ex: 1).",
             "ag_ui_component": None,
         }
 
@@ -748,8 +747,8 @@ async def confirm_winner_selection(
         "response_strategy": "ASK_MISSING_FIELD",
         "current_goal": "BUYER_CHECK_AUCTION_STATUS",
         "final_response": (
-            f"🤝 Vous allez retenir l'offre de *{producer}*{price_txt} pour *{product}*.\n\n"
-            "⚠️ Cette action *clôture l'enchère* et crée la commande.\n"
+            f"🤝 Vous allez retenir la proposition de *{producer}*{price_txt} pour *{product}*.\n\n"
+            "⚠️ Cette action *clôture l'appel d'offres* et crée la commande.\n"
             "👉 Répondez *oui* pour confirmer, ou *non* pour annuler."
         ),
         "working_memory": wm,
@@ -781,8 +780,8 @@ async def finalize_winner(
             "status": "COMPLETED",
             "response_strategy": "SUCCESS",
             "final_response": (
-                "D'accord, aucune offre n'a été retenue. "
-                "Tapez *mes enchères* pour revoir vos appels d'offres."
+                "D'accord, aucune proposition n'a été retenue. "
+                "Tapez *mes appels d'offres* pour les revoir."
             ),
             "working_memory": _clear_wm(),
             "available_mapping": {},
@@ -816,12 +815,12 @@ async def finalize_winner(
         return {
             "status": "COMPLETED",
             "response_strategy": "ERROR",
-            "final_response": result.get("message") or "Cette offre n'a pas pu être retenue.",
+            "final_response": result.get("message") or "Cette proposition n'a pas pu être retenue.",
             "working_memory": _clear_wm(),
             "ag_ui_component": None,
         }
 
-    summary = result.get("summary_buyer") or "🤝 Offre retenue ! La commande a été créée et le producteur informé."
+    summary = result.get("summary_buyer") or "🤝 Proposition retenue ! La commande a été créée et le producteur informé."
     return {
         "status": "COMPLETED",
         "response_strategy": "SUCCESS",
@@ -936,7 +935,7 @@ async def order_tracking_resolver(
         return await check_order_status(state, mc_runtime)
     if goal == "BUYER_CANCEL_ORDER":
         return await cancel_order(state, mc_runtime)
-    if goal == "BUYER_LIST_AUCTIONS":
+    if goal in ("BUYER_LIST_AUCTIONS", "MARKET_MY_REQUESTS"):
         return await list_buyer_auctions(state, mc_runtime)
     if goal == "BUYER_CHECK_AUCTION_STATUS":
         return await check_auction_status(state, mc_runtime)
