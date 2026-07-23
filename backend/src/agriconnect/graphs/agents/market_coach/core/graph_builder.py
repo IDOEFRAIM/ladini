@@ -995,6 +995,12 @@ async def demo_producer_future_production_conversation() -> None:
         # dans le vrai graphe c'est goal_planner qui le maintient verrouillé
         # pendant le tunnel (voir [[market-coach-turn-boundary-state]]).
         state["current_goal"] = "DECLARE_CROP_CYCLE"
+        # NOTE : plus besoin de reset manuel de final_response/ag_ui_component/
+        # response_strategy ici — post_response_cleanup (appelé par
+        # _turn_boundary à la fin du tour précédent) s'en charge maintenant
+        # lui-même (voir nodes/cleanup.py::CLEANABLE_AFTER_RESPONSE), en plus
+        # du reset de secours fait par input_normalizer en tout début de vrai
+        # tour. Les deux filets sont désormais alignés.
         print(f"\n🧑 Producteur : {user_text}")
 
         v = await validator(state, runtime)
@@ -1028,11 +1034,18 @@ async def demo_producer_future_production_conversation() -> None:
     state.update(c2)
     e = await mcp_tool_executor(state, runtime)
     state.update(e)
+    # Capturé AVANT _turn_boundary : `selected_tool` est EPHEMERAL, remis à
+    # None par post_response_cleanup à la fin de CE tour (comportement normal
+    # — ce champ n'est utile qu'à mcp_tool_executor/final_response du tour où
+    # l'exécution a eu lieu).
+    executed_tool = state.get("selected_tool")
+    executed_status = state.get("status")
+    executed_strategy = state.get("response_strategy")
     await _turn_boundary(state, runtime)
 
     print("\n" + "-" * 70)
-    print(f"Statut final : {state.get('status')} | stratégie : {state.get('response_strategy')} "
-          f"| outil exécuté : {state.get('selected_tool')}")
+    print(f"Statut final : {executed_status} | stratégie : {executed_strategy} "
+          f"| outil exécuté : {executed_tool}")
     print("=" * 70)
 
 

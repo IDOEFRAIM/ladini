@@ -26,4 +26,6 @@ dist/
 .cache/
 *.pytest_cache/
 
+bin
+backend/src/agriconnect/futur
 backend/src/agriconnect/.venv

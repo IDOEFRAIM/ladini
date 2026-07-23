@@ -60,6 +60,20 @@ class SalesUpdateProductCommand:
 
 
 @dataclass(frozen=True)
+class SalesUpdateProductionCommand:
+    """Typed command for SALES_UPDATE_PRODUCTION (mise à jour d'un lot futur / MarketOffer)."""
+
+    producer_id: str          # en pratique le téléphone (convention DB : arg `phone`)
+    cycle_id: str
+    price: Optional[float] = None
+    quantity: Optional[float] = None
+    product_label: Optional[str] = None
+    unit: Optional[str] = None
+    estimated_available_at: Optional[str] = None
+    production_type: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class SalesPublishProductCommand:
     """Strongly-typed command for SALES_PUBLISH_PRODUCT domain logic."""
 
@@ -263,6 +277,28 @@ class SalesService:
             args["quantity"] = command.quantity
 
         return DomainResult(tool_id=ToolId.UPDATE_PRODUCT_PRICE_AND_QTY, tool_args=args)
+
+    def update_production(self, command: SalesUpdateProductionCommand) -> DomainResult:
+        """Domain logic : mise à jour partielle d'un lot futur (MarketOffer)."""
+        optional = {
+            "price": command.price,
+            "quantity": command.quantity,
+            "product_label": command.product_label,
+            "unit": command.unit,
+            "estimated_available_at": command.estimated_available_at,
+            "production_type": command.production_type,
+        }
+        provided = {k: v for k, v in optional.items() if v is not None}
+        if not provided:
+            raise ValueError(
+                "Indiquez au moins un champ à modifier (prix, quantité, nom, unité, date ou type)."
+            )
+        args: Dict[str, Any] = {
+            "phone": command.producer_id,
+            "cycle_id": command.cycle_id,
+            **provided,
+        }
+        return DomainResult(tool_id=ToolId.UPDATE_PRODUCTION_FIELDS, tool_args=args)
 
     def list_orders(self, command: SalesListOrdersCommand) -> DomainResult:
         args: Dict[str, Any] = {"phone": command.phone}

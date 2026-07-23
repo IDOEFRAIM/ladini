@@ -154,6 +154,28 @@ INTENT_CONFIG = {
             "unit": "unité (optionnel)"
         }
     },
+    # Mise à jour d'une PRODUCTION FUTURE / lot (MarketOffer), distincte du
+    # produit catalogue ci-dessus. Permet de corriger prix, quantité, NOM
+    # (product), unité, date de disponibilité ou type (culture/élevage) d'un lot
+    # déjà déclaré — y compris renommer un lot mal nommé "culture". cycle_id est
+    # résolu par la sélection du numéro dans la liste des cultures/futures récoltes.
+    "SALES_UPDATE_PRODUCTION": {
+        "tool_name": "update_production_fields",
+        "required": ["cycle_id"],
+        "action_type": "WRITE",
+        "requires_farm": False,
+        "lifecycle_mode": "UPDATE",
+        "label": "Mise à jour d'un lot / production future (prix, quantité, nom, date…)",
+        "label_map": {
+            "cycle_id": "référence de la production",
+            "price": "nouveau prix unitaire",
+            "quantity": "nouvelle quantité prévue",
+            "product": "nouveau nom du produit",
+            "unit": "unité (optionnel)",
+            "estimated_available_at": "nouvelle date de disponibilité",
+            "production_type": "type (culture ou élevage)"
+        }
+    },
 
     # =======================================================================
     # DOMAINE : MARCHÉ ACHETEUR — APPROVISIONNEMENT (WRITE — BUYER)
@@ -851,6 +873,7 @@ INTENT_ROLE = {
     "SALES_ACCEPT_CONTRACT": "PRODUCER",
     "SALES_GET_CATALOG": "PRODUCER",
     "SALES_UPDATE_PRODUCT": "PRODUCER",
+    "SALES_UPDATE_PRODUCTION": "PRODUCER",
     "MARKET_GET_MY_PROPOSALS": "PRODUCER",
     # PROCUREMENT — buyer
     "PROCUREMENT_CREATE_REQUEST": "BUYER",

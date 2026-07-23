@@ -28,6 +28,21 @@ class SlotValidationError(RuntimeError):
     """Raised when an LLM payload fails schema validation."""
 
 
+# Mots désignant le TYPE de production (culture/élevage), jamais un produit.
+# Restreint aux mots GÉNÉRIQUES : surtout PAS "poulet"/"poussins"/"mais" qui
+# sont de vrais produits. Empêche qu'une réponse à « culture ou élevage ? »
+# (« c'est une culture ») soit enregistrée comme nom de produit "culture".
+_PRODUCT_TYPE_ONLY_WORDS = frozenset({
+    "culture", "cultures", "elevage", "élevage", "elevages", "élevages",
+    "betail", "bétail", "animal", "animaux", "plante", "plantes",
+    "vegetal", "végétal", "crop", "livestock",
+})
+_PRODUCT_TYPE_FILLER = frozenset({
+    "cest", "une", "un", "de", "du", "des", "la", "le", "les",
+    "ceci", "ca", "ça", "juste", "plutot", "plutôt", "genre", "type",
+})
+
+
 class SlotExtractionPayload(BaseModel):
     quantity: Optional[float] = Field(default=None, ge=0, le=1_000_000)
     unit: Optional[str] = Field(default=None)
@@ -43,6 +58,14 @@ class SlotExtractionPayload(BaseModel):
         # Block obvious SQL/control characters used during poisoning attempts.
         if any(token in cleaned for token in ("--", ";", "/*", "*/", "DROP", "ALTER")):
             raise ValueError("Produit contient des instructions interdites")
+        # Rejet des mots de type de production (culture/élevage/…) — pas un produit.
+        meaningful = [
+            t.replace("'", "").replace("’", "")
+            for t in cleaned.lower().split()
+        ]
+        meaningful = [t for t in meaningful if t and t not in _PRODUCT_TYPE_FILLER]
+        if meaningful and all(t in _PRODUCT_TYPE_ONLY_WORDS for t in meaningful):
+            return None
         return cleaned
 
     @staticmethod

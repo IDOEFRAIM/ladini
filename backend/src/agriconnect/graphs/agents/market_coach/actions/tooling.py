@@ -40,6 +40,7 @@ class ToolId(str, Enum):
     RECORD_SALE = "record_sale"
     PLACE_BID = "place_bid"
     UPDATE_PRODUCT_PRICE_AND_QTY = "update_product_price_and_qty"
+    UPDATE_PRODUCTION_FIELDS = "update_production_fields"
     GET_FARM_STOCKS = "get_farm_stocks"
     GET_STOCK_MOVEMENTS = "get_stock_movements"
     ADD_STOCK = "add_stock"

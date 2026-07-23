@@ -24,6 +24,7 @@ from agriconnect.graphs.agents.market_coach.domain.sales import (
     SalesRecordDirectCommand,
     SalesService,
     SalesUpdateProductCommand,
+    SalesUpdateProductionCommand,
 )
 
 @register_action("SALES_GET_CATALOG", mode="READ")
@@ -225,6 +226,52 @@ def prep_sales_update_product(state: Mapping[str, Any], payload: Mapping[str, An
     service = SalesService(context=context)
     result = service.update_product(command)
     tool_name = ToolResolver.resolve_name(result.tool_id or "update_product_price_and_qty")
+    return tool_name, dict(result.tool_args)
+
+
+def _coerce_opt_float(value: Any) -> Any:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).replace(",", ".").replace(" ", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+@register_action("SALES_UPDATE_PRODUCTION", mode="WRITE")
+def prep_sales_update_production(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+    """Mise à jour d'un lot futur (MarketOffer) : prix/quantité/nom/unité/date/type."""
+    context = DomainContext.from_state(state)
+    if not context.phone:
+        raise ValueError("Le numéro de téléphone du producteur est requis pour mettre à jour la production.")
+
+    # cycle_id : posé par la sélection (memory.py mappe la ligne choisie), avec
+    # plusieurs alias possibles selon le canal de sélection.
+    cycle_id = (
+        payload.get("cycle_id")
+        or payload.get("market_offer_id")
+        or payload.get("offer_id")
+        or payload.get("selected_value")
+    )
+    if not cycle_id:
+        raise ValueError("Sélectionnez d'abord la production à modifier (numéro dans la liste).")
+
+    # Nouveau nom éventuel : `product` (slot canonique). Rejeté s'il vaut un mot
+    # de type (culture/élevage) — déjà filtré en amont par _sanitize_product_candidate.
+    command = SalesUpdateProductionCommand(
+        producer_id=context.phone,
+        cycle_id=str(cycle_id),
+        price=_coerce_opt_float(payload.get("price")),
+        quantity=_coerce_opt_float(payload.get("quantity")),
+        product_label=(str(payload["product"]).strip() if payload.get("product") else None),
+        unit=(str(payload["unit"]).strip() if payload.get("unit") else None),
+        estimated_available_at=(payload.get("estimated_available_at") or None),
+        production_type=(payload.get("production_type") or None),
+    )
+
+    service = SalesService(context=context)
+    result = service.update_production(command)
+    tool_name = ToolResolver.resolve_name(result.tool_id or "update_production_fields")
     return tool_name, dict(result.tool_args)
 
 

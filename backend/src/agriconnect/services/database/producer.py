@@ -1241,6 +1241,89 @@ class ProducerMgmtMixin(BaseMixin):
             "data": snapshot,
         }
 
+    async def update_production_fields(
+        self,
+        cycle_id: str,
+        *,
+        phone: str | None = None,
+        producer_id: str | None = None,
+        price: float | None = None,
+        quantity: float | None = None,
+        product_label: str | None = None,
+        unit: str | None = None,
+        estimated_available_at: Any = None,
+        production_type: str | None = None,
+    ) -> Dict[str, Any]:
+        """Met à jour les champs modifiables d'une production future (MarketOffer).
+
+        Seuls les champs fournis (non ``None``) sont modifiés — mise à jour
+        partielle. Permet notamment de CORRIGER le nom d'un lot mal nommé
+        (ex: enregistré "culture" par erreur) via ``product_label``.
+        Sécurisé : vérifie que le producteur appelant possède bien le lot
+        (row-lock via with_for_update).
+        """
+        resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        cycle_uuid = _as_uuid(cycle_id, "cycle_id")
+
+        stmt = (
+            select(MarketOffer, Farm)
+            .join(Farm, Farm.id == MarketOffer.farm_id)
+            .where(MarketOffer.id == cycle_uuid)
+            .with_for_update(of=MarketOffer)
+        )
+        result = await self.session.execute(stmt)
+        row = result.first()
+        if not row:
+            return {"status": "error", "message": "Production introuvable pour l'identifiant fourni."}
+        cycle, farm = row
+
+        user_row = await self._fetch_user_entities(resolved_phone)
+        if not user_row or not user_row[1]:
+            return {"status": "error", "message": "Profil producteur introuvable."}
+        if farm.producer_id != user_row[1].id:
+            return {"status": "error", "message": "Vous n'êtes pas autorisé à modifier cette production."}
+
+        changed: List[str] = []
+        try:
+            if price is not None:
+                cycle.price_per_unit = positive_float(price, "price", allow_zero=True)
+                changed.append("prix")
+            if quantity is not None:
+                cycle.available_quantity = positive_float(quantity, "quantity", allow_zero=True)
+                changed.append("quantité")
+            if product_label is not None:
+                label = clean_text(product_label, "product_label", required=True, max_length=120)
+                cycle.product_label = label
+                changed.append("nom")
+            if unit is not None:
+                unit_clean = clean_text(unit, "unit", max_length=16)
+                if unit_clean:
+                    cycle.unit = unit_clean.upper()
+                    changed.append("unité")
+            if estimated_available_at is not None:
+                dt = _parse_datetime(estimated_available_at, "estimated_available_at")
+                cycle.estimated_available_at = _utc_naive(dt)
+                changed.append("date de disponibilité")
+            if production_type is not None:
+                ptype = str(production_type).strip().upper()
+                if ptype not in {"CROP", "LIVESTOCK"}:
+                    return {"status": "error", "message": "Le type doit être une culture (CROP) ou un élevage (LIVESTOCK)."}
+                cycle.production_type = ptype
+                changed.append("type")
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+
+        if not changed:
+            return {"status": "error", "message": "Aucun champ à modifier n'a été fourni."}
+
+        await self.session.flush()
+        snapshot = _offer_to_payload(cycle, farm)
+        logger.info("PRODUCTION_UPDATED: cycle=%s par %s (champs: %s)", cycle_id, resolved_phone, ", ".join(changed))
+        return {
+            "status": "success",
+            "message": f"Production mise à jour ({', '.join(changed)}).",
+            "data": snapshot,
+        }
 
 
     async def get_producer_stocks(

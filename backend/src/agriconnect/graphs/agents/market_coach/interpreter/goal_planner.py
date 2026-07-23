@@ -116,6 +116,17 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
     detected_intent = str(state.get("detected_intent") or "UNKNOWN").upper()
     working = state.get("working_memory") or {}
     current_goal = state.get("current_goal") or working.get("active_goal") or working.get("locked_intent")
+    # Restauration du pseudo-goal DISAMBIGUATION_PENDING entre deux tours.
+    # `_lock` (plus bas) refuse volontairement de verrouiller ce pseudo-goal dans
+    # working_memory.active_goal, et post_response_cleanup remet current_goal à
+    # None. Résultat : la réponse de l'utilisateur au menu ("2") arrivait avec
+    # current_goal=None → la RÈGLE 0bis ne se déclenchait pas → menu ré-affiché en
+    # boucle ("Que souhaitez-vous choisir ?"). Le flag working_memory
+    # .disambiguation_pending, lui, SURVIT (keep_selection_channel dans cleanup) :
+    # on s'en sert pour reconstituer le pseudo-goal et laisser la RÈGLE 0bis
+    # résoudre la sélection.
+    if not current_goal and working.get("disambiguation_pending"):
+        current_goal = "DISAMBIGUATION_PENDING"
     expected_input = state.get("expected_input")
     goal_stack = list(state.get("goal_stack") or [])
     in_tunnel = bool(current_goal and expected_input and expected_input != "NONE")

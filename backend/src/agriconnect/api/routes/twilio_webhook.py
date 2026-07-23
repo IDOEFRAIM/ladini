@@ -9,7 +9,7 @@ from typing import Optional
 import redis # ◄ N'oublie pas : pip install redis
 
 from fastapi import (
-  APIRouter, Form, HTTPException, Depends, BackgroundTasks, Request,Response
+  APIRouter, Form, BackgroundTasks, Request, Response
 )
 from twilio.rest import Client
 
@@ -23,6 +23,24 @@ from agriconnect.core.settings import settings
 router = APIRouter()
 logger = logging.getLogger("AgriConnect.TwilioWebhook")
 
+# Twilio attend soit un corps vide, soit du TwiML valide (Content-Type text/xml ou
+# application/xml) en réponse à un webhook de message entrant. Renvoyer un dict
+# JSON (Content-Type: application/json, comportement par défaut de FastAPI) fait
+# échouer Twilio avec l'erreur 12300 "Invalid Content-Type" — le message est bien
+# reçu par notre webhook (200 OK dans les logs) mais Twilio considère l'échange
+# en erreur et n'achemine pas la suite normalement.
+def _empty_twiml() -> Response:
+    return Response(content="<Response></Response>", media_type="application/xml")
+
+
+# Valeurs de `MessageStatus`/`SmsStatus` correspondant à des ACCUSÉS DE LIVRAISON
+# (à ignorer). On y met SEULEMENT les statuts sortants — surtout PAS `received`,
+# qui est la valeur portée par un vrai message ENTRANT (à traiter normalement).
+_DELIVERY_STATUSES = frozenset({
+    "accepted", "queued", "sending", "sent",
+    "delivered", "read", "undelivered", "failed", "canceled",
+})
+
 # 1. Initialisation de Redis — lit settings.REDIS_URL (env var en prod).
 # Le défaut de settings.REDIS_URL ("redis://localhost:6379/0") préserve le
 # comportement local/dev si la variable n'est pas définie ; en prod, définir
@@ -35,9 +53,18 @@ def send_wait_message(phone_number: str):
     """Fonction exécutée en arrière-plan pour envoyer l'accusé de réception."""
     try:
         # Vérification de sécurité pour éviter de crasher si les variables sont vides
-        if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
+        if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN or not settings.TWILIO_WHATSAPP_NUMBER:
             return
             
+        # Nettoyage des numéros pour comparer proprement (retrait de 'whatsapp:', espaces, etc.)
+        from_cleaned = settings.TWILIO_WHATSAPP_NUMBER.replace("whatsapp:", "").strip()
+        to_cleaned = phone_number.replace("whatsapp:", "").strip()
+
+        # Évite l'erreur 400 si l'expéditeur et le destinataire sont identiques (test local)
+        if from_cleaned == to_cleaned:
+            logger.warning("Impossible d'envoyer le message d'attente : Le numéro expéditeur et destinataire sont identiques (%s)", to_cleaned)
+            return
+
         client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
         client.messages.create(
             from_=settings.TWILIO_WHATSAPP_NUMBER,
@@ -75,6 +102,23 @@ async def twilio_webhook(
     Body: str = Form(""),
     MessageSid: str = Form(...),       # ◄ Identifiant unique du message Twilio
 ):
+    try:
+        return await _handle_twilio_webhook(request, background_tasks, From, Body, MessageSid)
+    except Exception:
+        # Filet de sécurité : toute exception non prévue ne doit JAMAIS s'échapper
+        # sous forme de réponse JSON (Content-Type par défaut de FastAPI) — Twilio
+        # rejette ça avec l'erreur 12300 "Invalid Content-Type" et n'achemine rien.
+        logger.exception("TWILIO_WEBHOOK_UNHANDLED_ERROR")
+        return _empty_twiml()
+
+
+async def _handle_twilio_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    From: str,
+    Body: str,
+    MessageSid: str,
+):
     # --- 1. MODIFIER : ANTI-DOUBLON (Idempotence avec Redis) ---
     redis_key = f"msg:{MessageSid}"
     is_new_message = redis_client.set(redis_key, "processing", ex=600, nx=True)
@@ -88,7 +132,8 @@ async def twilio_webhook(
     raw_sender = From
     phone = raw_sender.replace("whatsapp:", "").strip()
     if not phone:
-        raise HTTPException(status_code=400, detail="Numéro d'expéditeur invalide.")
+        logger.warning("TWILIO_WEBHOOK_INVALID_SENDER | From=%r", From)
+        return _empty_twiml()
 
     text = Body.strip()
 
@@ -96,6 +141,29 @@ async def twilio_webhook(
     # Lit le form complet pour repérer un payload de clic. Loggé UNE fois en
     # entier pour confirmer les noms de champs exacts de votre compte Twilio.
     form = dict(await request.form())
+
+    # --- CALLBACK DE STATUT (delivered/read/failed), PAS UN MESSAGE ---
+    # Si l'URL de status callback Twilio est configurée sur cette même route
+    # (webhook de messagerie et de statut confondus — cas fréquent en sandbox),
+    # chaque message ENVOYÉ par le bot déclenche ICI un accusé de livraison :
+    # `From` porte alors le numéro DU BOT (ex : +14155238886, sandbox) et
+    # `MessageStatus`/`SmsStatus` porte une valeur de LIVRAISON.
+    #
+    # PIÈGE CRITIQUE (corrigé) : un VRAI message entrant Twilio WhatsApp porte
+    # LUI AUSSI le champ `SmsStatus`, avec la valeur `received`. L'ancien garde
+    # `if form.get("SmsStatus")` attrapait donc TOUS les vrais messages entrants
+    # et les jetait comme de faux accusés de statut → webhook 200 OK mais tâche
+    # Celery jamais déclenchée (bug : "ça marche avec curl mais pas via WhatsApp",
+    # car curl n'envoyait pas de SmsStatus). On ne saute QUE sur les vraies
+    # valeurs de livraison, jamais sur `received` (= message entrant à traiter).
+    status_value = (form.get("MessageStatus") or form.get("SmsStatus") or "").strip().lower()
+    if status_value in _DELIVERY_STATUSES:
+        logger.info(
+            "TWILIO_STATUS_CALLBACK ignoré | sid=%s | status=%s",
+            MessageSid, status_value,
+        )
+        return _empty_twiml()
+
     interactive_id = _extract_interactive_id(form)
     if interactive_id:
         logger.info("TWILIO_INBOUND_INTERACTIVE | phone=%s | id=%s | form_keys=%s",
@@ -141,4 +209,4 @@ async def twilio_webhook(
     # L'agriculteur reçoit le SMS sans que le webhook ne soit ralenti.
     background_tasks.add_task(send_wait_message, phone)
 
-    return {"status": "accepted"}
+    return _empty_twiml()

@@ -487,6 +487,10 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
                 payload["bid_id"] = resolved_str
             elif mapping_kind == "stock":
                 payload["stock_id"] = resolved_str
+            elif mapping_kind == "cycle":
+                # Sélection d'une production future (MarketOffer) dans la liste
+                # des stocks → cible de SALES_UPDATE_PRODUCTION (mise à jour de lot).
+                payload["cycle_id"] = resolved_str
             elif mapping_kind == "farm":
                 payload["farm_id"] = resolved_str
             elif mapping_kind in _ORDER_MAPPING_KINDS:

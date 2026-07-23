@@ -99,6 +99,26 @@ _SUSPICIOUS_PRODUCT_TOKENS = {
     "urgent",
 }
 
+# Mots qui désignent le TYPE de production (culture/élevage), PAS un produit.
+# Quand l'agent demande « une culture (plante) ou un élevage (animal) ? » et que
+# l'utilisateur répond « c'est une culture », le LLM extrayait "culture" comme
+# nom de produit → le lot était enregistré sous le nom "culture" au lieu du vrai
+# nom (mil, tomate…). Ces mots ne doivent JAMAIS être acceptés comme produit ;
+# la déduction production_type=CROP/LIVESTOCK se fait séparément sur le texte
+# (services/domain/slot_enrichment.extract_production_type_from_text).
+_PRODUCTION_TYPE_WORDS = {
+    "culture", "cultures", "elevage", "élevage", "elevages", "élevages",
+    "betail", "bétail", "animal", "animaux", "plante", "plantes",
+    "vegetal", "végétal", "crop", "livestock",
+}
+
+# Mots de liaison ignorés pour décider si une réponse ne contient QUE des mots
+# de type ("c'est une culture" → "culture" après retrait de ces fillers).
+_PRODUCT_FILLER_WORDS = {
+    "cest", "c'est", "une", "un", "de", "du", "des", "la", "le", "les",
+    "ceci", "ca", "ça", "juste", "plutot", "plutôt", "genre", "type",
+}
+
 
 def _sanitize_product_candidate(value: Any) -> Optional[str]:
     candidate = _clean_candidate_text(str(value)) if isinstance(value, str) else None
@@ -106,6 +126,18 @@ def _sanitize_product_candidate(value: Any) -> Optional[str]:
         return None
     lowered = candidate.lower()
     if lowered in _GENERIC_PRODUCT_STOPWORDS:
+        return None
+    # Rejet des mots de TYPE de production (culture/élevage/animal/plante…) :
+    # une réponse qui ne contient que ces mots (+ liaisons) n'est pas un produit.
+    # On retire l'apostrophe de chaque token AVANT comparaison ("c'est" → "cest")
+    # pour ne pas éclater les mots de liaison.
+    _meaningful = []
+    for _raw_tok in lowered.split():
+        _tok = _raw_tok.replace("'", "").replace("’", "")
+        if not _tok or _tok in _PRODUCT_FILLER_WORDS:
+            continue
+        _meaningful.append(_tok)
+    if _meaningful and all(t in _PRODUCTION_TYPE_WORDS for t in _meaningful):
         return None
     if any(tok in lowered for tok in _KNOWN_PRODUCT_KEYWORDS):
         return candidate

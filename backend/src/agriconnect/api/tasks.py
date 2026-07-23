@@ -143,7 +143,22 @@ def send_whatsapp_message(
         FIGÉE dans le template (on ne paramètre que les valeurs, pas le nombre
         de lignes → convient aux tunnels binaires/fixes, pas aux catalogues
         dynamiques, qui restent en texte numéroté + bypass LLM).
+
+    Retourne ``None`` (sans appeler Twilio) si ``from_`` == ``to`` une fois
+    les préfixes ``whatsapp:`` normalisés — Twilio rejette ces envois en
+    HTTP 400 ("Message cannot have the same To and From"), une erreur
+    STRUCTURELLE (jamais transitoire) que le retry Celery de l'appelant
+    (``autoretry_for=(Exception,)``) retenterait 3 fois pour rien.
     """
+    from_clean = str(from_ or "").removeprefix("whatsapp:").strip()
+    to_clean = str(to or "").removeprefix("whatsapp:").strip()
+    if from_clean and from_clean == to_clean:
+        logger.warning(
+            "Envoi WhatsApp ignoré : expéditeur et destinataire identiques (%s)",
+            to_clean,
+        )
+        return None
+
     interactive = bool(
         content_sid
         and getattr(settings, "TWILIO_INTERACTIVE_ENABLED", False)
@@ -240,7 +255,10 @@ def process_agent_task(
     if telemetry is not None:
         telemetry.flush()
 
-    final_text = result.get("final_response", "Je n'ai pas pu générer de réponse.")
+    # `.get(..., default)` ne suffit PAS : si la clé existe avec la valeur None
+    # (ou une chaîne vide), on enverrait littéralement "None"/"" à l'utilisateur.
+    # Le `or` bascule sur le repli pour None, "" et toute autre valeur falsy.
+    final_text = result.get("final_response") or "Je n'ai pas pu générer de réponse."
     account_sid = str(settings.TWILIO_ACCOUNT_SID or "").strip()
     auth_token = str(settings.TWILIO_AUTH_TOKEN or "").strip()
     from_number = str(settings.TWILIO_WHATSAPP_NUMBER or "").strip()
@@ -250,6 +268,15 @@ def process_agent_task(
 
     client = Client(account_sid, auth_token)
     to_addr = f"whatsapp:{phone_number}"
+
+    # Diagnostic : trace EXACTE de l'envoi (compte, expéditeur, destinataire,
+    # longueur + aperçu du corps). Permet de distinguer sans ambiguïté un
+    # problème de génération (corps vide/None) d'un problème de LIVRAISON
+    # (corps correct mais message jamais reçu → session/opt-in/sender Twilio).
+    logger.info(
+        "TWILIO_SEND | account=%s | from=%s | to=%s | body_len=%d | body_preview=%r",
+        account_sid[:10], from_number, to_addr, len(str(final_text)), str(final_text)[:120],
+    )
 
     try:
         # --- Rendu interactif (boutons de confirmation) si activé + template ---
@@ -269,6 +296,8 @@ def process_agent_task(
                 content_sid=confirm_sid,
                 content_vars={"1": str(final_text)[:1500]},
             )
+            if message is None:
+                return {"status": "message_skipped", "reason": "same_from_to"}
             return {"status": "message_sent", "sid": message.sid, "interactive": "confirm"}
 
         # --- Sinon : texte (chunké si long), via le même point d'envoi ---
@@ -276,6 +305,8 @@ def process_agent_task(
         last_sid = None
         for chunk in chunks:
             message = send_whatsapp_message(client, from_number, to_addr, body=chunk)
+            if message is None:
+                return {"status": "message_skipped", "reason": "same_from_to"}
             last_sid = message.sid
         return {"status": "message_sent", "sid": last_sid, "chunks": len(chunks)}
     except Exception as e:

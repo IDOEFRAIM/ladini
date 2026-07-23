@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+# NB : on N'IMPORTE PLUS `CLEANABLE_AFTER_RESPONSE`/`build_reset_patch` ici.
+# Ce nœud est le DERNIER du graphe : l'état qu'il retourne EST celui que
+# l'orchestrateur lit pour envoyer la réponse (final.get("final_response"),
+# response_strategy, ag_ui_component). Réinitialiser ces champs de réponse
+# ICI les remettait à None AVANT la lecture de l'orchestrateur → le bot
+# envoyait littéralement "None" sur WhatsApp. Le nettoyage de ces champs est
+# assuré au tour SUIVANT par input_normalizer (mécanisme historique).
+
 
 _VOLATILE_WORKING_KEYS = (
     "available_mapping_kind",
@@ -106,5 +114,12 @@ async def post_response_cleanup(state: Dict[str, Any], mc_runtime: Any) -> Dict[
         current = state.get(field)
         if current is not None and current != default:
             patch[field] = default
+
+    # IMPORTANT : NE PAS réinitialiser ici les champs de génération de réponse
+    # (final_response, ag_ui_component, response_strategy, onboarding_prompt,
+    # reply_audio_url). Ce nœud tourne en DERNIER : l'orchestrateur lit ces
+    # champs sur l'état qu'on retourne pour ENVOYER la réponse. Les vider ici
+    # ferait envoyer "None" à l'utilisateur. Ils sont nettoyés au tour suivant
+    # par input_normalizer.
 
     return patch
