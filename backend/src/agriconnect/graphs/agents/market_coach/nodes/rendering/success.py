@@ -137,7 +137,7 @@ def _render_catalog_section(catalog: List[Dict[str, Any]]) -> Tuple[str, List[Di
             "label": f"{name} ({fmt_num(qty or 0)} {unit})",
             "value": str(product.get("product_id") or product.get("id") or product.get("short_code") or i),
         })
-    lines.append("👉 *Mentionnez un numéro pour ouvrir ce produit ou ajuster prix/quantité.*")
+    lines.append("✏️ _Pour changer le prix, la quantité, le nom ou l'unité d'un produit, tapez *modifier un produit*._")
     return "\n".join(lines).strip(), options
 
 
@@ -158,6 +158,7 @@ def _render_cycles_section(cycles: List[Dict[str, Any]]) -> str:
     for cycle in deduped.values():
         farm_name = cycle.get("farm_name") or "ferme"
         lines.append(f"• {_format_future_cycle_line(cycle)} ({farm_name})")
+    lines.append("\n✏️ _Pour changer le prix, la quantité, le nom ou la date d'un lot, tapez *modifier une production*._")
     return "\n".join(lines)
 
 

@@ -17,6 +17,8 @@ class SalesUpdateProductPayload(BaseModel):
     product_id: str
     price: Optional[float] = None
     quantity: Optional[float] = None
+    name: Optional[str] = None
+    unit: Optional[str] = None
 
     model_config = ConfigDict(extra="ignore")
 
@@ -66,11 +68,23 @@ class SalesUpdateProductPayload(BaseModel):
             if quantity_raw not in _EMPTY_SLOT_VALUES
             else None
         )
+        name_raw = coalesce_entity_value(
+            payload, entity,
+            payload_keys=("product", "name"),
+            entity_keys=("name",),
+        )
+        unit_raw = coalesce_entity_value(
+            payload, entity,
+            payload_keys=("unit",),
+            entity_keys=("unit",),
+        )
 
         return cls(
             product_id=str(product_id),
             price=price_value,
             quantity=quantity_value,
+            name=(str(name_raw).strip() if name_raw not in _EMPTY_SLOT_VALUES else None),
+            unit=(str(unit_raw).strip() if unit_raw not in _EMPTY_SLOT_VALUES else None),
         )
 
 

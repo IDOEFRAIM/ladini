@@ -12,6 +12,7 @@ from agriconnect.domain.models import (
     Product, Producer, User, _uuid4
 )
 from .base import BaseMixin
+from .common import haversine_distance_km
 
 logger = logging.getLogger("agriconnect.services.delivery")
 
@@ -31,16 +32,13 @@ class DeliveryMixin(BaseMixin):
         return str(random.randint(100000, 999999))
 
     def calculate_distance_km(self, lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-        """Calcule la distance de Haversine entre deux points géographiques GPS."""
-        if not all([lat1, lon1, lat2, lon2]):
-            return 0.0
-        R = 6371.0
-        dlat = math.radians(lat2 - lat1)
-        dlon = math.radians(lon2 - lon1)
-        a = (math.sin(dlat / 2)**2 + 
-             math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2)
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-        return round(R * c, 2)
+        """Calcule la distance de Haversine entre deux points géographiques GPS.
+
+        Délègue à l'utilitaire partagé (services/database/common.py) — même
+        formule réutilisable par tout futur filtre de proximité, sans
+        dépendre d'une instance de mixin.
+        """
+        return haversine_distance_km(lat1, lon1, lat2, lon2)
 
     # ─── PROFIL TRANSPORT COMPTE livreur ────────────────────────────────
 

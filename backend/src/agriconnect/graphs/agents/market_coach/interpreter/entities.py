@@ -179,6 +179,16 @@ def _remap_entities(raw_entities: Dict[str, Any]) -> Dict[str, Any]:
             sanitized = _sanitize_product_candidate(value)
             if sanitized:
                 normalized[key] = sanitized
+        elif key in {"unit", "price_unit"}:
+            # Le LLM doit renvoyer UNIQUEMENT le token d'unité (ex: "KG"), mais
+            # ne suit pas toujours cette consigne à la lettre — il peut recopier
+            # du contexte ("FCFA/UNITE" au lieu de "UNITE"), ce qui produisait
+            # un récapitulatif "FCFA/FCFA/UNITE" (voir confirmation_summary.py).
+            # On rejette toute valeur contaminée par une devise/un séparateur
+            # dès l'extraction plutôt que de la laisser se propager.
+            candidate = str(value).strip().upper()
+            if candidate and "FCFA" not in candidate and "CFA" not in candidate and "/" not in candidate:
+                normalized[key] = candidate
         else:
             normalized[key] = str(value).strip() if isinstance(value, str) else value
     return normalized
@@ -194,7 +204,6 @@ __all__ = [
     "_ENTITY_KEY_REMAP",
     "_UNIT_SYNONYMS",
     "_normalize_unit_token",
-    "_QUANTITY_UNIT_PATTERN",
     "_GENERIC_PRODUCT_STOPWORDS",
     "_KNOWN_PRODUCT_KEYWORDS",
     "_SUSPICIOUS_PRODUCT_TOKENS",

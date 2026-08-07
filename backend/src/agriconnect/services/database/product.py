@@ -51,9 +51,18 @@ class ProductMixin(BaseMixin):
 
     # ─── SECTION 2 : ÉDITION ET VISIBILITÉ ──────────────────────────────────
 
-    async def update_product_price_and_qty(self, phone: str, product_id: str, price: Optional[float] = None, quantity: Optional[float] = None) -> Dict[str, Any]:
+    async def update_product_price_and_qty(
+        self,
+        phone: str,
+        product_id: str,
+        price: Optional[float] = None,
+        quantity: Optional[float] = None,
+        name: Optional[str] = None,
+        unit: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
-        Met à jour le prix et/ou la quantité disponible d'un produit.
+        Met à jour partiellement un produit du catalogue : prix, quantité, nom
+        et/ou unité (seuls les champs fournis sont modifiés).
         Sécurisé par un verrou d'écriture (Row-Level Locking) via self.session.
         """
         try:
@@ -72,21 +81,40 @@ class ProductMixin(BaseMixin):
             if not product:
                 return {"status": "error", "message": "Produit introuvable ou non autorisé."}
 
+            changed: List[str] = []
             if price is not None:
                 product.price = positive_float(price, "price", allow_zero=True)
+                changed.append("prix")
             if quantity is not None:
                 product.quantity_for_sale = positive_float(quantity, "quantity", allow_zero=True)
+                changed.append("quantité")
+            if name is not None:
+                clean_name = clean_text(name, "name", required=True, max_length=120)
+                product.name = clean_name
+                changed.append("nom")
+            if unit is not None:
+                clean_unit = clean_text(unit, "unit", max_length=16)
+                if clean_unit:
+                    product.unit = clean_unit.upper()
+                    changed.append("unité")
+
+            if not changed:
+                return {"status": "error", "message": "Aucun champ à modifier n'a été fourni."}
 
             await self.session.flush()
             await self.session.refresh(product)
 
-            logger.info("PRODUCT_UPDATED: ID %s par %s (Prix: %s, Qty: %s)", product_id, phone, price, quantity)
+            logger.info("PRODUCT_UPDATED: ID %s par %s (champs: %s)", product_id, phone, ", ".join(changed))
 
             product_dict = product.to_dict()
             if isinstance(product_dict.get("price"), Decimal):
                 product_dict["price"] = float(product_dict["price"])
 
-            return {"status": "success", "data": product_dict}
+            return {
+                "status": "success",
+                "message": f"Produit mis à jour ({', '.join(changed)}).",
+                "data": product_dict,
+            }
 
         except ValueError as e:
             return {"status": "error", "message": str(e)}

@@ -24,17 +24,18 @@ from agriconnect.graphs.agents.market_coach.interpreter.intent import (
 )
 from agriconnect.graphs.agents.market_coach.interpreter.prompts import INTERPRETER_USER_PROMPT
 from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.core.slots import get_slot_hint
+from agriconnect.graphs.agents.market_coach.core.slots import get_slot_hint, SLOT_FILLING_INPUTS
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     canonical_unit_label,
 )
 
 from agriconnect.graphs.agents.market_coach.interpreter.entities import (
-    _UNIT_SYNONYMS,
-    _normalize_unit_token,
     _remap_entities,
     _fallback_quantity_unit_from_text,
+)
+from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+    scan_number_candidates,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.product_validation import (
     _validate_and_sanitize_product,
@@ -44,7 +45,16 @@ from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
     _NAVIGATION_INTENTS,
     _init_intent_to_goal_map,
     _looks_like_buyer_product_request,
+    _extract_buyer_product,
     goal_planner,
+)
+# Source UNIQUE du seuil de confiance de rupture d'intention. L'interpréteur
+# (ici) et tunnel_manager (goal_planner) DOIVENT utiliser exactement le même :
+# sinon l'interpréteur promeut un message en INTERRUPTION à un seuil que
+# tunnel_manager refuse ensuite → zone morte produisant un "je n'ai pas compris"
+# confus au lieu d'une bascule propre OU d'une continuation propre.
+from agriconnect.graphs.agents.market_coach.core.tunnel_manager import (
+    INTERRUPTION_CONFIDENCE_THRESHOLD,
 )
 
 logger = logging.getLogger("AgriConnect.Market.InterpreterRouting")
@@ -70,21 +80,35 @@ _init_intent_to_goal_map(PRODUCER_INTENTS, BUYER_INTENTS, COMMON_INTENTS)
 
 
 def allowed_intents_for_role(role: str) -> frozenset:
-    """Retourne l'ensemble des intentions autorisées pour un rôle utilisateur.
+    """Retourne l'ensemble des intentions reconnaissables par l'interpréteur.
 
-    `role` ∈ {"PRODUCER", "BUYER"}. Les "BOTH" sont toujours inclus.
-    Toute intention présente dans `intent.INTENT_CONFIG` mais absente d'`INTENT_ROLE`
-    est traitée comme PRODUCER par défaut (compat asc.) et logguée en warning.
+    Refonte double-rôle : tout utilisateur peut vendre ET acheter, message par
+    message — l'interpréteur doit donc TOUJOURS voir le catalogue complet
+    (PRODUCER ∪ BUYER ∪ BOTH), quel que soit le paramètre `role` reçu (conservé
+    pour compat de signature / logs uniquement). Le filtrage par rôle n'existe
+    plus en amont de la classification LLM ; la sécurité se fait désormais en
+    aval, au niveau de l'action (voir `nodes/role_guard.py`).
     """
-    role_up = str(role).upper().strip()
     missing = set(INTENT_CONFIG) - set(INTENT_ROLE)
     if missing:
         logger.warning(
             "Intents missing INTENT_ROLE entry (defaulting to PRODUCER): %s",
             sorted(missing),
         )
-    base = BUYER_INTENTS if role_up == "BUYER" else PRODUCER_INTENTS
-    return base | COMMON_INTENTS | frozenset(missing)
+    return PRODUCER_INTENTS | BUYER_INTENTS | COMMON_INTENTS | frozenset(missing)
+
+
+# Goal de CRÉATION (pas encore persisté, en attente de CONFIRMATION) → intent
+# "jumeau" décrit dans le catalogue comme une mise à jour d'une entité déjà
+# EXISTANTE. Une correction en langage libre pendant la confirmation ("non
+# c'est 200 tonnes") ressemble structurellement à ce jumeau pour le LLM — voir
+# le garde-fou dans `make_input_interpreter` juste avant le forçage
+# INTERRUPTION sur CONFIRMATION.
+_PENDING_CREATE_UPDATE_SIBLINGS: Dict[str, str] = {
+    "SALES_PUBLISH_PRODUCT": "SALES_UPDATE_PRODUCT",
+    "DECLARE_CROP_CYCLE": "SALES_UPDATE_PRODUCTION",
+    "FARM_CREATE": "FARM_UPDATE",
+}
 
 
 # =====================================================================
@@ -114,7 +138,10 @@ Ta sortie OBLIGATOIRE est un JSON strict avec EXACTEMENT ces clés :
       "price": <float|null>,
       "estimated_available_at": "<YYYY-MM-DD|null>",
       "expected_harvest_date": "<YYYY-MM-DD|null>",
+      "deadline": "<YYYY-MM-DD|null>",
       "zone": "<str|null>",
+      "farm_name": "<str|null>",
+      "price_unit": "<KG|TONNE|SAC|PANIER|null>",
       "selection_index": <int|null>,
       "selected_value": "<str|null>",
       "movement_type": "<IN|OUT|null>",
@@ -141,11 +168,24 @@ RÈGLES STRICTES DE CLASSIFICATION :
    - OUT_OF_SCOPE : message hors-domaine (politique, sport, religion, salutations vides sans but).
    - UNKNOWN      : impossible de comprendre ou message totalement incohérent.
 
+1bis. **PANIER EN ATTENTE DE VALIDATION** : si le contexte agent indique
+   `panier_en_attente = OUI`, l'utilisateur vient de voir son panier et on lui a
+   proposé de le valider (précommander). Interprète alors son message en langage
+   LIBRE, sans exiger un mot précis :
+   - Tout accord / envie d'aller au bout (« oui », « je suis d'accord », « ok
+     vas-y », « c'est bon », « valide », « on y va », « parfait ») →
+     interpreted_event = CONFIRM.
+   - Tout refus / abandon (« non », « annule », « laisse tomber », « pas
+     maintenant ») → interpreted_event = REJECT.
+   - S'il ajoute un nouveau produit (« ajoute 10 kg de riz ») → NEW_TASK.
+   Ne renvoie JAMAIS UNKNOWN pour un simple accord/refus dans ce contexte.
+
 2. **Extraction des entités (OBLIGATOIRE)** :
    - Tu dois copier TOUT nom de culture/produit détecté (tomates, maïs, riz, oignons...) dans `extracted_entities.product`.
    - Si un mot suit "de", "du", "des", "d'" après une quantité ou une unité, considère-le comme un candidat produit et renseigne `product`.
    - N'utilise PAS d'autres clés (« product_name », « item_name »...) dans la sortie JSON : seule la clé `product` est contractuelle.
    - `product` ne doit être `null` que si aucun produit explicite n'est présent dans le texte.
+   - **Nom de domaine/exploitation** : si `expected_input` vaut `FARM_NAME`, ou si `last_agent_question` demande le nom de la ferme/exploitation/domaine, tout texte libre fourni (même un seul mot, ex: "Matata", "Ferme du Soleil") EST ce nom — copie-le TEL QUEL dans `extracted_entities.farm_name` et mets `interpreted_event = ANSWER`. Ne renvoie JAMAIS OUT_OF_SCOPE/UNKNOWN dans ce contexte pour un mot ou une courte phrase qui ne correspond à aucune autre intention du catalogue : c'est un nom propre, pas un message hors-sujet.
 
 3. **detected_intent** identifie l'intention métier PRÉCISE.
 
@@ -170,12 +210,23 @@ RÈGLES STRICTES DE CLASSIFICATION :
      simultanément — jamais un seul au détriment de l'autre. Exemple : "892 kg
      de maïs, le prix minimum est 250 FCFA par kg" → quantity=892.0, unit="KG",
      price=250.0 (jamais price=892.0).
+   - **UNITÉ DU PRIX DIFFÉRENTE DE CELLE DE LA QUANTITÉ** : la quantité TOTALE
+     et le prix UNITAIRE peuvent légitimement porter des unités différentes
+     (ex: vente de 200 TONNES au total, mais prix fixé à 10000 FCFA par KG).
+     Si le message précise une unité pour le prix qui diffère de celle de la
+     quantité, renseigne `unit` avec l'unité de la QUANTITÉ et `price_unit`
+     avec l'unité du PRIX — ne fusionne JAMAIS les deux dans un seul champ
+     `unit`. Si le prix ne précise aucune unité propre, laisse `price_unit`
+     à `null` (il sera supposé identique à `unit`). Exemple : "je vends 200
+     tonnes de produit au prix de 10000 FCFA/kg" → quantity=200.0, unit=
+     "TONNE", price=10000.0, price_unit="KG".
 
 6. **NORMALISATION STRICTE DES DATES (OBLIGATOIRE)** :
    - L'année de référence est **2026**.
    - Toute date, estimation de disponibilité ou de récolte formulée en langage naturel (ex: "29 octobre", "fin octobre", "demain", "dans 3 jours") doit être **impérativement convertie au format ISO standard : YYYY-MM-DD**.
    - `estimated_available_at` : Date de disponibilité estimée pour l'acheteur (ex: "disponible le 29 octobre" ou "prêt le 29 oct" → "2026-10-29").
    - `expected_harvest_date` : Date prévue pour la récolte physique (ex: "récolte prévue en octobre" → "2026-10-15" (milieu de mois par défaut si imprécis)).
+   - `deadline` : Date LIMITE d'un appel d'offres (jusqu'à quand les producteurs peuvent répondre, ex: "avant le 30 septembre", "réponses jusqu'au 15 oct" → "2026-09-30"/"2026-10-15").
    - N'envoie JAMAIS de texte libre ou de noms de mois écrits en toutes lettres dans ces champs. Si non spécifié ou impossible à déterminer, mets `null`.
 
 7. Tu réponds UNIQUEMENT le JSON, sans markdown, sans explication.
@@ -225,11 +276,19 @@ Output: {
 """)
 
 
+_UNIFIED_PROMPT_CACHE_KEY = "UNIFIED"
+
+
 def _build_dynamic_interpreter_prompt(role: str = "PRODUCER") -> str:
-    """Construit le prompt système avec UNIQUEMENT les intentions du rôle actif."""
-    cache_key = (role or "PRODUCER").upper()
-    if cache_key in _PROMPT_CACHE:
-        return _PROMPT_CACHE[cache_key]
+    """Construit le prompt système avec le catalogue COMPLET des intentions.
+
+    Refonte double-rôle : le paramètre `role` n'a plus d'effet sur le contenu
+    (conservé pour compat de signature) — chaque utilisateur peut vendre ET
+    acheter, donc l'interpréteur doit reconnaître les deux familles d'intents
+    dans le même message, sans filtrage préalable.
+    """
+    if _UNIFIED_PROMPT_CACHE_KEY in _PROMPT_CACHE:
+        return _PROMPT_CACHE[_UNIFIED_PROMPT_CACHE_KEY]
 
     allowed = allowed_intents_for_role(role)
     intent_lines: List[str] = []
@@ -242,15 +301,13 @@ def _build_dynamic_interpreter_prompt(role: str = "PRODUCER") -> str:
         intent_lines.append(f"  - {intent_key} : {label} [requis: {req_str}]")
 
     intent_catalog = "\n".join(intent_lines)
-    role_label = "ACHETEUR" if cache_key == "BUYER" else "PRODUCTEUR"
-    role_label_plural = "ACHETEURS" if cache_key == "BUYER" else "PRODUCTEURS"
 
     prompt = _SYSTEM_PROMPT_TEMPLATE.substitute(
-        role_label=role_label,
-        role_label_plural=role_label_plural,
+        role_label="PRODUCTEUR OU ACHETEUR",
+        role_label_plural="PRODUCTEURS ET ACHETEURS",
         intent_catalog=intent_catalog,
     )
-    _PROMPT_CACHE[cache_key] = prompt
+    _PROMPT_CACHE[_UNIFIED_PROMPT_CACHE_KEY] = prompt
     return prompt
 
 
@@ -258,133 +315,170 @@ def _build_dynamic_interpreter_prompt(role: str = "PRODUCER") -> str:
 # FAST-PATH SÉCURISÉ (Zéro Heuristique de Token Floue)
 # =====================================================================
 
-# Patterns déterministes pour RESUME ("reprendre la tâche suspendue").
-# Activés uniquement quand `state.suspended_goal` est non vide.
-_RESUME_PATTERNS = (
-    "continue", "continuer", "continué",
-    "reprends", "reprendre", "reprend",
-    "on reprend", "on continue",
-    "oui continue", "ok continue", "vasy", "vas-y",
-    "finis", "finir", "termine", "on termine",
-    "reviens", "retourà",
-    "comme avant",
-)
+def _interpret_fast_path(
+    state: Dict[str, Any], text: str, *, skip_numeric_shortcut: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Court-circuite le LLM uniquement pour les actions structurelles pures d'AG-UI.
 
-_PRODUCER_ORDER_TOKENS: tuple[str, ...] = (
-    "mes commandes",
-    "mes commande",
-    "ma commande",
-    "mes précommandes",
-    "mes precommandes",
-    "mes ventes",
-    "mes ventes en cours",
-    "commande client",
-    "commandes client",
-    "commande acheteur",
-    "commandes acheteurs",
-    "commandes des acheteurs",
-    "suivi commande",
-    "suivi de commande",
-    "statut commande",
-    "mes ordres",
-    "mes deals",
-)
-
-_PRODUCER_STATUS_HINTS = (
-    ("attente", "PENDING"),
-    ("en attente", "PENDING"),
-    ("confirm", "CONFIRMED"),
-    ("confirme", "CONFIRMED"),
-    ("livré", "DELIVERED"),
-    ("livree", "DELIVERED"),
-    ("livrée", "DELIVERED"),
-    ("annul", "CANCELLED"),
-    ("préparation", "IN_PROGRESS"),
-    ("expédi", "SHIPPED"),
-)
-
-
-def _strip_accents(s: str) -> str:
-    import unicodedata
-    return "".join(
-        c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn"
-    )
-
-
-# Approximate "yes / go ahead" confirmations a buyer types instead of the exact
-# word we prompt for. Accent-stripped, lowercase.
-_APPROX_CONFIRM = frozenset({
-    "oui", "ouais", "ouai", "ok", "okay", "oke", "okey", "daccord", "d accord",
-    "cest bon", "c est bon", "cbon", "go", "vasy", "vas y", "allons y", "allez",
-    "parfait", "ca marche", "ca roule", "yes", "yep", "yo", "ouep", "bien sur",
-    "je confirme", "confirme", "confirmer", "valide", "valider", "valides",
-    "finalise", "finaliser", "je valide", "top", "nickel", "carrement",
-})
-
-
-def _looks_like_preorder_trigger(clean: str) -> bool:
-    """Typo-tolerant detection of a 'validate my cart / preorder' intent.
-
-    The buyer rarely types the exact word we ask for ("précommander"). They send
-    an approximate confirmation ("precomende", "ok", "valide", "c'est bon"). We
-    accept any short message that either (a) begins with a précommande-like token
-    or (b) is a known approximate confirmation. Kept SHORT-only so a real new
-    request like "je veux commander des tomates" is never captured here.
+    `skip_numeric_shortcut` désactive le raccourci regex PRICE/QUANTITY quand
+    un LLM est disponible sur le runtime : celui-ci est la source prioritaire
+    pour extraire quantity+unit et price+price_unit ENSEMBLE (il voit tout le
+    message en contexte) ; ce raccourci ne doit plus servir que de repli
+    quand le LLM est indisponible.
     """
-    norm = _strip_accents(clean)
-    # Normalise punctuation the buyer scatters around ("c'est", "vas-y", "ok!").
-    for ch in ("'", "’", "-", "!", ".", ","):
-        norm = norm.replace(ch, " ")
-    norm = " ".join(norm.split())
-    if not norm or len(norm) > 22:
-        return False
-    # (a) précommande word with typo tolerance: any token starting with "precom"
-    #     (precommande, precomende, precomande, precommender…). "prec" alone is
-    #     too loose, so we require the "com" cluster.
-    for w in norm.split():
-        if w.startswith("precom") or w.startswith("precmd") or w.startswith("precon"):
-            return True
-    # (b) approximate confirmation
-    return norm in _APPROX_CONFIRM
-
-
-def _interpret_fast_path(state: Dict[str, Any], text: str) -> Optional[Dict[str, Any]]:
-    """Court-circuite le LLM uniquement pour les actions structurelles pures d'AG-UI."""
     expected = state.get("expected_input")
     clean = text.strip().lower()
     working = state.get("working_memory") or {}
     locked_goal = state.get("current_goal") or working.get("active_goal") or working.get("locked_intent")
-    role_up = str(state.get("forced_role") or state.get("user_role") or "").upper().strip()
-    mapping_kind = str(working.get("available_mapping_kind") or "").lower().strip()
 
     if not clean:
         return None
 
+    # Correction chiffrée pendant la CONFIRMATION ("j'ai plutôt 795 kg", "non
+    # j'ai 795 kg" sur un récap déjà affiché) : un nombre typé sans ambiguïté
+    # (unité de poids/comptage OU devise à proximité) est une correction
+    # directe du brouillon, pas une nouvelle tâche — à traiter ici en
+    # UPDATE, avant même de risquer une reclassification LLM (le LLM a
+    # laissé cette correction sans effet en prod : le récap restait figé sur
+    # l'ancienne quantité malgré 2 corrections explicites successives).
+    _confirmation_correction = expected == "CONFIRMATION" and bool(_re.search(r"\d", clean))
+
     # Priorité slot-filling : en attente de quantité/prix, un nombre doit rester une ANSWER
-    if expected in ("PRICE", "QUANTITY"):
-        number_match = _re.search(r"\b(\d+[\d\s,.]*)\b", clean)
-        if number_match:
-            raw_number = (number_match.group(1) or "").replace(" ", "").replace(",", ".")
-            try:
-                numeric_value = float(raw_number)
-            except (TypeError, ValueError):
-                numeric_value = None
+    if expected in ("PRICE", "QUANTITY") or _confirmation_correction:
+        # Balaye CHAQUE nombre du message et le type par son voisinage immédiat
+        # (unité de poids/comptage ⇒ quantité ; devise fcfa/cfa à proximité ⇒
+        # prix). Primitive déterministe currency-aware PARTAGÉE :
+        # services/domain/quantity_unit.scan_number_candidates — même logique
+        # exacte qu'avant (fenêtre 18 chars, pas de `\b` en tête pour capter
+        # "60kg"/"10000fcfa", unité TOUJOURS conservée même près d'une devise
+        # pour que "10000fcfa/kg" garde son price_unit). Un message composé
+        # ("775 kg ... 175 fcfa") est ainsi désambiguïsé nombre par nombre. La
+        # regex d'extraction ne vit plus qu'à UN endroit (voir tests de
+        # caractérisation). Les branches ci-dessous décident quantité vs prix
+        # vs compound à partir de `near_currency`/`unit`.
+        candidates: List[Dict[str, Any]] = [
+            {"value": c.value, "near_currency": c.near_currency, "unit": c.unit}
+            for c in scan_number_candidates(clean)
+        ]
 
-            if numeric_value is not None:
-                entities: Dict[str, Any] = {
-                    "price" if expected == "PRICE" else "quantity": numeric_value
+        # Réponse composée non-ambiguë ("775 kg d'oignon et le kg coûte 175
+        # fcfa") : un nombre porte une unité de poids/comptage SANS devise à
+        # proximité (quantité), un AUTRE porte une devise à proximité (prix) —
+        # c'est de l'extraction structurée par correspondance exacte de
+        # tokens, pas une supposition floue. On remplit les DEUX slots
+        # d'un coup, TOUJOURS (même LLM disponible) : router un cas aussi
+        # net vers le LLM ne fait que l'exposer à une mauvaise classification
+        # d'intention (vécu en prod — un message quantité+prix composé s'est
+        # fait détourner vers DECLARE_CROP_CYCLE alors que le tunnel actif
+        # était SALES_PUBLISH_PRODUCT). Le LLM garde la priorité uniquement
+        # pour le cas ambigu (un seul nombre, rôle incertain) juste en dessous.
+        _event_type = "UPDATE" if expected == "CONFIRMATION" else "ANSWER"
+        _qty_candidate = next((c for c in candidates if c["unit"] and not c["near_currency"]), None)
+        _price_candidate = next((c for c in candidates if c["near_currency"]), None)
+        if _qty_candidate is not None and _price_candidate is not None and _qty_candidate is not _price_candidate:
+            compound_entities: Dict[str, Any] = {
+                "quantity": _qty_candidate["value"],
+                "unit": _qty_candidate["unit"],
+                "price": _price_candidate["value"],
+            }
+            if _price_candidate["unit"]:
+                compound_entities["price_unit"] = _price_candidate["unit"]
+            return {
+                "interpreted_event": _event_type,
+                "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+                "interpreter_confidence": 0.98,
+                "extracted_entities": compound_entities,
+                "raw_analysis": {"path": "fast_path_slot_numeric_compound_answer"},
+            }
+
+        if _confirmation_correction:
+            # Une seule valeur typée sans ambiguïté (quantité OU prix, pas les
+            # deux) : correction ciblée d'un seul champ du brouillon. Si le
+            # nombre n'est PAS typé (aucune unité/devise détectée), on ne
+            # devine pas — on laisse la main au LLM (`return None` plus bas)
+            # plutôt que de risquer d'écraser le mauvais champ.
+            if _qty_candidate is not None and _price_candidate is None:
+                return {
+                    "interpreted_event": _event_type,
+                    "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+                    "interpreter_confidence": 0.98,
+                    "extracted_entities": {"quantity": _qty_candidate["value"], "unit": _qty_candidate["unit"]},
+                    "raw_analysis": {"path": "fast_path_confirmation_correction", "slot": "quantity"},
                 }
+            if _price_candidate is not None and _qty_candidate is None:
+                price_entities: Dict[str, Any] = {"price": _price_candidate["value"]}
+                if _price_candidate["unit"]:
+                    price_entities["price_unit"] = _price_candidate["unit"]
+                return {
+                    "interpreted_event": _event_type,
+                    "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+                    "interpreter_confidence": 0.98,
+                    "extracted_entities": price_entities,
+                    "raw_analysis": {"path": "fast_path_confirmation_correction", "slot": "price"},
+                }
+            return None
 
-                unit_match = _re.search(
-                    r"\b(k|kg|kgs|kilo|kilogramme|kilogrammes|ton|tons|tone|tones|tonne|tonnes|t|sac|sacs|sachet|sachets|panier|paniers|tete|têtes|tetes|unite|unité|unites|unités)\b",
-                    clean,
-                )
-                if unit_match:
-                    unit_raw = _normalize_unit_token(unit_match.group(1) or "")
-                    mapped_unit = _UNIT_SYNONYMS.get(unit_raw)
+        # Cas simple non-ambigu restant (un seul nombre, mais typé sans
+        # équivoque : "775 kg" pour une QUANTITY, "175 fcfa" pour un PRICE) :
+        # même sans second nombre pour former une paire composée, ce nombre
+        # porte déjà sa réponse au slot en cours — le résoudre ici (jamais
+        # via le LLM) ferme la MÊME faille que le cas composé ci-dessus :
+        # tant qu'une réponse répond sans ambiguïté au slot demandé, elle ne
+        # doit JAMAIS pouvoir déclencher une reclassification d'intention
+        # (le LLM ne voit même pas le message). Seul un nombre GENUINEMENT
+        # ambigu (aucune unité, aucune devise détectée à proximité — on ne
+        # sait pas s'il répond au slot ou introduit autre chose) est laissé
+        # au LLM quand celui-ci est disponible.
+        if expected == "QUANTITY":
+            _unambiguous_single = next((c for c in candidates if c["unit"] and not c["near_currency"]), None)
+        else:
+            _unambiguous_single = next((c for c in candidates if c["near_currency"]), None)
+
+        if skip_numeric_shortcut and _unambiguous_single is None:
+            candidates = []
+
+        if candidates:
+            if expected == "QUANTITY":
+                chosen = next((c for c in candidates if c["unit"] and not c["near_currency"]), None)
+                if chosen is None:
+                    chosen = next((c for c in candidates if not c["near_currency"]), None)
+            else:
+                chosen = next((c for c in candidates if c["near_currency"]), None)
+                if chosen is None:
+                    chosen = next((c for c in candidates if not c["unit"]), None)
+            if chosen is None:
+                chosen = candidates[0]
+            numeric_value = chosen["value"]
+            mapped_unit = chosen["unit"]
+            has_currency = chosen["near_currency"]
+            number_match = True  # sentinel: garde le bloc ci-dessous actif
+        else:
+            numeric_value = None
+            number_match = None
+
+        if number_match:
+            if numeric_value is not None:
+                # Désambiguïsation par unité (extraction structurée déterministe,
+                # PAS de la classification d'intention) : on classe le nombre
+                # selon son UNITÉ réelle, pas selon ce que l'agent attendait.
+                # Un nombre suivi d'une devise ("250 fcfa") = PRIX ; suivi d'une
+                # unité de poids/comptage ("234 kg") = QUANTITÉ — même si on
+                # demandait l'autre (l'utilisateur donne souvent la quantité
+                # quand on attend le prix). Sans ça, "234 kg" en réponse à une
+                # question de budget devenait price=234 (payload corrompu → perte
+                # du tour puis fuite de 234 dans la demande suivante).
+                if has_currency:
+                    slot = "price"
+                elif mapped_unit:
+                    slot = "quantity"
+                else:
+                    slot = "price" if expected == "PRICE" else "quantity"
+
+                entities: Dict[str, Any] = {slot: numeric_value}
+                if slot == "quantity":
                     if mapped_unit:
                         entities["unit"] = mapped_unit
-                    elif expected == "QUANTITY":
+                    else:
                         payload = state.get("transaction_payload") or {}
                         fallback_unit = (
                             payload.get("unit_display")
@@ -393,195 +487,58 @@ def _interpret_fast_path(state: Dict[str, Any], text: str) -> Optional[Dict[str,
                         )
                         if fallback_unit not in (None, "", [], {}):
                             entities["unit"] = canonical_unit_label(fallback_unit)
+                elif slot == "price" and mapped_unit:
+                    # Le prix a sa PROPRE base ("10000 FCFA/kg") qui peut différer
+                    # de l'unité de la quantité totale ("200 tonnes") — les deux
+                    # sont légitimement indépendants (ex: vente de 200 tonnes au
+                    # prix de 10000 FCFA/kg). Ne JAMAIS écraser `unit` (celui de
+                    # la quantité) avec l'unité du prix : ça renommait
+                    # silencieusement "200 tonnes" en "200 kg" au tour suivant.
+                    # `price_unit` est un champ dédié, lu par confirmation_summary
+                    # pour afficher le prix avec SA vraie unité au lieu de
+                    # toujours réutiliser celle de la quantité.
+                    entities["price_unit"] = mapped_unit
 
                 return {
                     "interpreted_event": "ANSWER",
                     "detected_intent": str(locked_goal or "UNKNOWN").upper(),
                     "interpreter_confidence": 0.98,
                     "extracted_entities": entities,
-                    "raw_analysis": {"path": "fast_path_slot_numeric_answer"},
+                    "raw_analysis": {"path": "fast_path_slot_numeric_answer", "slot": slot},
                 }
 
-    if role_up == "PRODUCER" and any(tok in clean for tok in _PRODUCER_ORDER_TOKENS):
-        status_hint = None
-        for needle, mapped in _PRODUCER_STATUS_HINTS:
-            if needle in clean:
-                status_hint = mapped
-                break
+    # Ex-fast-paths producteur (mes commandes / mes offres / appels d'offres /
+    # modifier une production / modifier un produit) SUPPRIMÉS : listes de
+    # tokens figées qui échouaient sur toute formulation non prévue. Le LLM
+    # est déjà instruit dynamiquement (catalogue INTENT_CONFIG par rôle,
+    # voir _build_dynamic_interpreter_prompt) pour classer ces intentions —
+    # il n'y a plus besoin d'un pré-filtrage par mots-clés en amont.
 
-        limit_hint = None
-        limit_match = _re.search(r"(\d+)[^\d]{0,6}(?:derniere|dernières|dernieres|derniers|commandes?|ventes?)", clean)
-        if limit_match:
-            try:
-                limit_hint = max(1, int(limit_match.group(1)))
-            except ValueError:
-                limit_hint = None
+    # Ex-Fast-path 0bis (annulation explicite) SUPPRIMÉ : couvert par la
+    # règle "SELECTION + refus en langage libre → REJECT" du prompt LLM
+    # (interpreter/prompts.py), qui ne se limite plus à une liste fixe.
 
-        entities: Dict[str, Any] = {}
-        if status_hint:
-            entities["status"] = status_hint
-        if limit_hint:
-            entities["limit"] = limit_hint
+    # Ex-Fast-path 0quater (précommande depuis un panier actif) SUPPRIMÉ : un
+    # whitelist de tokens approximatifs ("ok", "vasy", "cbon"...) échouait sur
+    # toute formulation libre non listée (ex: "Oui je veux") et forçait un
+    # retour au début du tunnel — exactement ce qu'on veut éviter. Le LLM
+    # (interpreter/prompts.py) est désormais explicitement instruit à
+    # reconnaître une confirmation/annulation en langage libre face à un menu
+    # d'action précommande, et flows/buyer/flow.py's "Natural confirm" +
+    # "Phase-locked routing" (PREORDER_DRAFTED) absorbent le reste : même un
+    # goal mal classé reste forcé dans le tunnel précommande tant qu'aucune
+    # confirmation/rejet explicite n'a été résolu. Plus aucune énumération de
+    # formulations à maintenir ici.
 
-        return {
-            "interpreted_event": "NEW_TASK",
-            "detected_intent": "SALES_LIST_ORDERS",
-            "interpreter_confidence": 1.0,
-            "extracted_entities": entities,
-            "raw_analysis": {
-                "path": "fast_path_producer_orders",
-                "status_hint": status_hint,
-                "limit_hint": limit_hint,
-            },
-        }
+    # Ex-fast-path 0ter (escalade "appel" depuis un menu SELECTION) et
+    # ex-fast-path buyer procurement tracking ("suivre mes appels d'offres"
+    # / "voir mes enchères") SUPPRIMÉS : listes de tokens figées, redondantes
+    # avec la classification LLM déjà instruite par le catalogue INTENT_CONFIG
+    # (BUYER_REQUEST, BUYER_LIST_AUCTIONS y sont déjà déclarés).
 
-    # Fast-path producteur : découverte des appels d'offres + suivi des offres.
-    # On n'intervient PAS pendant un slot-filling actif (prix/quantité/sélection/
-    # confirmation) pour ne pas casser le dépôt d'une offre en cours.
-    if role_up == "PRODUCER" and expected not in {"PRICE", "QUANTITY", "SELECTION", "CONFIRMATION"}:
-        _norm = _strip_accents(clean)
-        _my_bid_tokens = (
-            "mes offres", "mes propositions", "mes bids", "mes enchere", "mes encheres",
-            "suivre mes offres", "statut de mes offres", "etat de mes offres",
-            "mes propositions de prix",
-        )
-        _browse_tokens = (
-            "enchere", "encheres", "appel d'offre", "appel doffre", "appels d'offre",
-            "appels doffre", "appel d offre", "encherir", "participer",
-            "voir les demandes", "demandes du marche", "voir les enchere",
-            "voir enchere", "les enchere", "appels d offre",
-        )
-        if any(tok in _norm for tok in _my_bid_tokens):
-            return {
-                "interpreted_event": "NEW_TASK",
-                "detected_intent": "MARKET_GET_MY_PROPOSALS",
-                "interpreter_confidence": 0.96,
-                "extracted_entities": {},
-                "raw_analysis": {"path": "fast_path_producer_my_bids"},
-            }
-        if any(tok in _norm for tok in _browse_tokens):
-            return {
-                "interpreted_event": "NEW_TASK",
-                "detected_intent": "MARKET_BROWSE_REQUESTS",
-                "interpreter_confidence": 0.95,
-                "extracted_entities": {},
-                "raw_analysis": {"path": "fast_path_producer_browse_auctions"},
-            }
-
-    # Fast-path 0bis : annulation explicite sur menus / confirmations
-    cancel_tokens = {"annuler", "annule", "annulation", "stop", "cancel", "quitter", "arrete", "arrête"}
-    if expected in {"SELECTION", "CONFIRMATION"} and clean in cancel_tokens:
-        return {
-            "interpreted_event": "REJECT",
-            "detected_intent": str(locked_goal or "UNKNOWN").upper(),
-            "interpreter_confidence": 0.95,
-            "extracted_entities": {},
-            "raw_analysis": {"path": "fast_path_cancel_keyword", "expected": expected},
-        }
-
-    # Fast-path 0quater : précommande depuis un panier actif — tolérant aux
-    # confirmations approximatives ("precomende", "ok", "valide", "c'est bon").
-    # On ne dépend PAS du LLM qui confond précommande et appel d'offres.
-    expected_up = str(expected or "").upper().strip()
-    if role_up == "BUYER" and not state.get("active_form"):
-        preorder_phase = str(
-            (state.get("preorder_workflow") or {}).get("phase") or ""
-        ).upper().strip()
-        has_cart = bool(state.get("active_cart") or (state.get("working_memory") or {}).get("last_active_cart"))
-
-        # (2) Recap affiché → une confirmation approximative valide la précommande.
-        if preorder_phase == "PREORDER_DRAFTED" and _looks_like_preorder_trigger(clean):
-            return {
-                "interpreted_event": "CONFIRM",
-                "detected_intent": "BUYER_PREORDER_CONFIRM",
-                "interpreter_confidence": 1.0,
-                "extracted_entities": {},
-                "raw_analysis": {"path": "fast_path_buyer_preorder_confirm", "matched": clean[:22]},
-            }
-
-        # (1) Panier actif + intention de valider → on crée le brouillon + récap.
-        # NB : le rendu du panier pose expected_input=CONFIRMATION ; dans ce
-        # contexte (panier actif, phase CART) une confirmation approximative
-        # DOIT lancer la précommande. On n'exclut donc que les saisies où "ok"
-        # ne veut pas dire "précommander" (quantité, produit, prix, sélection).
-        if (
-            has_cart
-            and preorder_phase in ("", "CART")
-            and expected_up not in ("SELECTION", "PRICE", "QUANTITY", "PRODUCT")
-            and _looks_like_preorder_trigger(clean)
-        ):
-            return {
-                "interpreted_event": "NEW_TASK",
-                "detected_intent": "BUYER_PREORDER_INIT",
-                "interpreter_confidence": 1.0,
-                "extracted_entities": {},
-                "raw_analysis": {"path": "fast_path_buyer_preorder_from_cart", "matched": clean[:22]},
-            }
-
-    # Fast-path 0ter : escalade explicite "appel" depuis un menu de sélection acheteur.
-    if (
-        role_up == "BUYER"
-        and str(locked_goal or "").upper() == "BUYER_REQUEST"
-        and expected == "SELECTION"
-        and clean in {"appel", "appels", "appel d'offres", "appel doffres", "appel d offre", "lancer appel"}
-    ):
-        return {
-            "interpreted_event": "ANSWER",
-            "detected_intent": "BUYER_REQUEST",
-            "interpreter_confidence": 1.0,
-            "extracted_entities": {},
-            "raw_analysis": {
-                "path": "fast_path_buyer_request_escalate_call",
-                "mapping_kind": mapping_kind,
-            },
-        }
-
-    procurement_track_tokens = (
-        "suivre mes appels",
-        "suivre mes appels d'offres",
-        "suivi de mes appels",
-        "voir mes appels",
-        "mes appels d'offres",
-        "suivre appel d'offres",
-        "suivi appel",
-        # Formulation "enchère" (miroir du fast-path producteur ci-dessus) —
-        # sans ces tokens, "voir mes enchères" ratait le fast-path et tombait
-        # sur la classification LLM complète (round-trip réseau évitable + non
-        # déterministe pour une intention pourtant sans ambiguïté).
-        "mes enchere", "mes encheres", "mes enchères",
-        "voir mes enchere", "voir mes encheres", "voir mes enchères",
-        "suivre mes enchere", "suivre mes encheres",
-    )
-    procurement_track_hit = any(token in clean for token in procurement_track_tokens)
-    if not procurement_track_hit and "appel" in clean and ("suivre" in clean or "voir" in clean) and "commande" not in clean:
-        procurement_track_hit = True
-    if not procurement_track_hit and "enchere" in _strip_accents(clean) and ("suivre" in clean or "voir" in clean or "mes" in clean):
-        procurement_track_hit = True
-    if role_up == "BUYER" and procurement_track_hit:
-        return {
-            "interpreted_event": "NEW_TASK",
-            "detected_intent": "BUYER_LIST_AUCTIONS",
-            "interpreter_confidence": 0.95,
-            "extracted_entities": {},
-            "raw_analysis": {
-                "path": "fast_path_buyer_procurement_tracking",
-                "matched": next((token for token in procurement_track_tokens if token in clean), "keyword"),
-            },
-        }
-
-    # Fast-path 0 : RESUME explicite si une tâche est suspendue dans la pile
-    suspended = state.get("suspended_goal")
-    goal_stack = state.get("goal_stack") or []
-    if (suspended or goal_stack):
-        for pat in _RESUME_PATTERNS:
-            if pat in clean and len(clean) <= 40:
-                return {
-                    "interpreted_event": "RESUME",
-                    "detected_intent": "UNKNOWN",
-                    "interpreter_confidence": 1.0,
-                    "extracted_entities": {},
-                    "raw_analysis": {"path": "fast_path_resume", "matched": pat},
-                }
+    # Ex-Fast-path 0 (RESUME par mot-clé figé) SUPPRIMÉ : le LLM reçoit
+    # désormais `suspended_task` dans son contexte (interpreter/prompts.py) et
+    # est instruit à reconnaître une intention de reprise en langage libre.
 
     # Fast-path 1 : Choix d'un index numérique pur sur un composant Menu / Liste AG-UI
     if clean.isdigit():
@@ -599,35 +556,48 @@ def _interpret_fast_path(state: Dict[str, Any], text: str) -> Optional[Dict[str,
                 "raw_analysis": {"path": "fast_path_selection_index"},
             }
 
-    # Fast-path 2 : Saisie de valeur numérique directe lors du slot-filling actif
-    if expected in ("PRICE", "QUANTITY"):
-        num_match = _re.match(
-            r"^[\s]*(\d+[\s,.]?\d*)\s*(k|kg|kgs?|kilo|kilogramme|ton|tonne|tonnes|t|sac|sacs|sachet|sachets|panier|paniers|fcfa|f|cfa)?[\s]*$",
-            clean,
-        )
-        if num_match:
-            try:
-                val = float(num_match.group(1).replace(",", ".").replace(" ", ""))
-            except ValueError:
-                pass
-            else:
-                entity_key = "price" if expected == "PRICE" else "quantity"
-                entities: Dict[str, Any] = {entity_key: val}
-                unit_raw = num_match.group(2)
-                if unit_raw:
-                    normalized_unit = _normalize_unit_token(unit_raw)
-                    mapped_unit = _UNIT_SYNONYMS.get(normalized_unit)
-                    if mapped_unit:
-                        entities["unit"] = mapped_unit
-                return {
-                    "interpreted_event": "ANSWER",
-                    "detected_intent": "UNKNOWN",
-                    "interpreter_confidence": 0.95,
-                    "extracted_entities": entities,
-                    "raw_analysis": {"path": "fast_path_numeric_answer"},
-                }
+    # Ex-Fast-path 2 (extraction numérique PRICE/QUANTITY) SUPPRIMÉ : c'était un
+    # DOUBLON, moins capable, du bloc numérique EN TÊTE de cette fonction (qui
+    # gère déjà compound quantité+prix, valeur unique non ambiguë, correction
+    # pendant CONFIRMATION, et l'unité collée au nombre). Surtout, il IGNORAIT
+    # `skip_numeric_shortcut` : quand le LLM est disponible et qu'un nombre nu
+    # AMBIGU ("300", sans unité ni devise) doit lui être délégué, le premier
+    # bloc se retirait proprement (candidates vidées) mais l'exécution
+    # retombait ICI, qui ré-attrapait le nombre en ANSWER — annulant
+    # silencieusement la priorité LLM que le premier bloc venait d'établir. Un
+    # SEUL chemin d'extraction numérique existe désormais (le bloc en tête).
 
     return None
+
+
+# =====================================================================
+# REPLI DÉTERMINISTE — LLM INDISPONIBLE
+# =====================================================================
+
+def _degraded_fallback(role_up: str, text: str) -> Optional[Dict[str, Any]]:
+    """Classification minimale de secours quand le LLM est HORS-SERVICE.
+
+    N'est PAS le chemin nominal : appelée uniquement quand Groq renvoie une
+    erreur (429 quota / timeout) ou est absent. Sans elle, une demande d'achat
+    évidente ("je veux des tomates") retombe sur UNKNOWN → récap vide ou menu
+    de commandes hors-sujet. On ne couvre QUE le cas d'achat acheteur le plus
+    fréquent — le reste reste UNKNOWN (clarification propre), jamais un état
+    cassé. Dès que le LLM répond, ce repli n'est plus sollicité.
+    """
+    if role_up != "BUYER":
+        return None
+    clean = (text or "").strip().lower()
+    if not _looks_like_buyer_product_request(clean):
+        return None
+    product = _extract_buyer_product(clean)
+    entities: Dict[str, Any] = {"product": product} if product else {}
+    return {
+        "interpreted_event": "NEW_TASK",
+        "detected_intent": "BUYER_REQUEST",
+        "interpreter_confidence": 0.6,
+        "extracted_entities": entities,
+        "raw_analysis": {"path": "degraded_buyer_product_fallback"},
+    }
 
 
 # =====================================================================
@@ -714,7 +684,20 @@ def make_input_interpreter(role: str = "PRODUCER"):
             }
 
         # 1. Traitement prioritaire par Fast-path structurel rigide
-        fast = None if onboarding_active else _interpret_fast_path({**state, "forced_role": role_up}, text)
+        # Le LLM reste la source PRIORITAIRE pour extraire quantity+unit ET
+        # price+price_unit ensemble (schéma JSON déjà instruit, voir
+        # `_SYSTEM_PROMPT_TEMPLATE` plus haut) — il voit tout le message en
+        # contexte, alors que le fast-path regex ci-dessous ne fait que
+        # deviner une unité à partir d'une fenêtre de caractères voisins et se
+        # trompe sur toute formulation non prévue. Le fast-path numérique
+        # (PRICE/QUANTITY) ne doit donc s'exécuter QUE si le LLM est
+        # indisponible sur ce runtime — sinon on laisse tomber jusqu'à l'appel
+        # LLM (étape 4 ci-dessous), qui a la vraie priorité.
+        llm = getattr(mc_runtime, "llm", None)
+        _skip_numeric_shortcut = expected_input in ("PRICE", "QUANTITY") and llm is not None
+        fast = None if onboarding_active else _interpret_fast_path(
+            {**state, "forced_role": role_up}, text, skip_numeric_shortcut=_skip_numeric_shortcut,
+        )
         if fast is not None:
             logger.info(
                 "[Interpreter FastPath] event=%s intent=%s expected=%s role=%s",
@@ -733,11 +716,14 @@ def make_input_interpreter(role: str = "PRODUCER"):
             return fast
 
         # 2. Sécurité d'exécution de l'infrastructure
-        llm = getattr(mc_runtime, "llm", None)
         if llm is None:
             logger.warning("No LLM on runtime — interpreter returns UNKNOWN")
             if onboarding_active:
                 return _emit_onboarding({}, "onboarding_no_llm")
+            degraded = _degraded_fallback(role_up, text)
+            if degraded is not None:
+                logger.info("[Interpreter] LLM absent — repli déterministe %s", degraded["detected_intent"])
+                return degraded
             return {
                 "interpreted_event": "UNKNOWN",
                 "detected_intent": "UNKNOWN",
@@ -751,12 +737,22 @@ def make_input_interpreter(role: str = "PRODUCER"):
         _exp_input = expected_input or "NONE"
         _slot_hint = get_slot_hint(_exp_input.lower()) if _exp_input not in ("NONE", "CONFIRMATION", "SELECTION") else ""
         _slot_hint_line = f" → {_slot_hint}" if _slot_hint and _slot_hint != _exp_input.lower() else ""
+        _suspended_goal = state.get("suspended_goal")
+        _goal_stack = state.get("goal_stack") or []
+        _suspended_task = str(_suspended_goal or (_goal_stack[-1] if _goal_stack else "")) or "aucune"
+        # Panier prêt à valider : signal d'état (phase CART + panier non vide),
+        # PAS un mot-clé du texte. Le LLM s'en sert pour comprendre un accord
+        # libre ("je suis d'accord") comme une validation de précommande.
+        _cart_phase = str((state.get("preorder_workflow") or {}).get("phase") or "").upper()
+        cart_pending = role_up == "BUYER" and _cart_phase == "CART" and bool(state.get("active_cart"))
         user_prompt = INTERPRETER_USER_PROMPT.format(
             current_goal=state.get("current_goal") or "AUCUN",
             expected_input=_exp_input,
             slot_hint_line=_slot_hint_line,
             last_agent_question=state.get("last_agent_question") or "—",
             expected_candidates=", ".join(state.get("expected_candidates") or []) or "—",
+            suspended_task=_suspended_task,
+            cart_pending="OUI" if cart_pending else "non",
             normalized_text=text,
         )
 
@@ -798,6 +794,14 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 logger.error("Interpreter LLM CRASH : %s — forcing UNKNOWN", exc, exc_info=True)
             if onboarding_active:
                 return _emit_onboarding({}, "onboarding_llm_crash")
+            # Repli déterministe AVANT d'abandonner en UNKNOWN : une demande
+            # d'achat évidente reste servie même si Groq est en panne/quota
+            # épuisé (cause racine des récaps vides observés en prod).
+            degraded = _degraded_fallback(role_up, text)
+            if degraded is not None:
+                logger.info("[Interpreter] LLM en panne — repli déterministe %s (produit=%s)",
+                            degraded["detected_intent"], degraded["extracted_entities"].get("product"))
+                return degraded
             return {
                 "interpreted_event": "UNKNOWN",
                 "detected_intent": "UNKNOWN",
@@ -832,11 +836,92 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 raw_intent = "BUYER_REQUEST"
                 confidence = max(confidence, 0.85)
 
-        if expected_input in {"PRODUCT", "PRICE", "QUANTITY", "UNIT", "LOCATION", "DATE"} and raw_event == "NEW_TASK":
-            raw_event = "ANSWER"
+        # ATTENTION — cause racine des blocages persistants ("ça marche sur un
+        # numéro neuf, jamais sur celui qui a déjà bugué") : cette règle
+        # rabaissait AVEUGLÉMENT tout NEW_TASK en ANSWER dès qu'un slot était
+        # attendu, sans vérifier que le message répondait VRAIMENT à ce slot.
+        # Un numéro resté coincé en plein slot-filling (ex: expected=PRICE
+        # après une 1ère demande) voyait donc TOUTE nouvelle demande produit
+        # ("je veux acheter des tomates") rabaissée en ANSWER, absorbée par
+        # RÈGLE 1bis (goal_planner) qui ne fait QUE re-verrouiller l'ancien
+        # goal SANS jamais purger — le nouveau produit se retrouvait mélangé
+        # à l'ancienne quantité/prix, indéfiniment (event jamais NEW_TASK →
+        # la purge de RÈGLE 5/1quater n'était jamais atteinte). Un numéro
+        # frais (expected_input=NONE au 1er message) ne passait jamais par ce
+        # rabaissement, donc semblait « corrigé » alors que le vrai bug
+        # persistait pour quiconque était déjà en plein slot-filling.
+        # Fix : ne rabaisser que si le produit extrait est ABSENT ou IDENTIQUE
+        # au produit déjà suivi — une vraie réponse au slot ne change jamais
+        # de produit. Un produit DIFFÉRENT est un signal structurel sans
+        # ambiguïté qu'il s'agit d'une nouvelle demande, pas d'une réponse.
+        _raw_entities_preview = parsed.get("extracted_entities") or {}
+        _fresh_product_preview = str(_raw_entities_preview.get("product") or "").strip().lower()
+        _cur_product_preview = str((state.get("transaction_payload") or {}).get("product") or "").strip().lower()
+        _is_different_product = bool(_fresh_product_preview) and _fresh_product_preview != _cur_product_preview
 
-        if expected_input in {"SELECTION", "CONFIRMATION"} and raw_event not in {"SELECTION", "CONFIRM", "REJECT"}:
-            if raw_intent != "UNKNOWN" and confidence >= 0.55:
+        # Refonte double-rôle — 2e signal de nouveauté, indépendant du produit :
+        # beaucoup d'intentions n'ont structurellement PAS de champ `product`
+        # (BUYER_CHECK_ORDER_STATUS, SALES_LIST_ORDERS, PROFILE_SWITCH_ROLE...).
+        # Le catalogue fusionné (interpréteur voit désormais TOUTES les
+        # intentions, pas seulement celles du rôle courant) fait que le LLM les
+        # reconnaît bien plus souvent en plein tunnel — sans ce garde-fou,
+        # elles étaient ravalées en ANSWER par la seule règle "produit
+        # identique/absent" et englouties dans le tunnel actif au lieu de
+        # déclencher une interruption ("l'agent est perdu" quand l'intention
+        # change brusquement). Un intent DIFFÉRENT du goal verrouillé, classé
+        # avec une confiance suffisante, est un signal structurel de nouvelle
+        # tâche tout aussi fort qu'un produit différent.
+        _locked_goal_upper = str(locked_goal or "").upper().strip()
+        _is_different_goal = (
+            raw_intent not in {"UNKNOWN", _locked_goal_upper}
+            and confidence >= INTERRUPTION_CONFIDENCE_THRESHOLD
+        )
+        if (
+            expected_input in SLOT_FILLING_INPUTS
+            and raw_event == "NEW_TASK"
+            and not _is_different_product
+            and not _is_different_goal
+        ):
+            raw_event = "ANSWER"
+        elif _is_different_product or _is_different_goal:
+            # Preuve structurelle forte (produit différent OU intention
+            # différente et confiante) : on garantit que tunnel_manager (seuil
+            # de confiance) laissera passer le switch, plutôt que de dépendre
+            # uniquement du score auto-déclaré du LLM.
+            confidence = max(confidence, 0.9)
+
+        # Correction d'un brouillon PAS ENCORE PERSISTÉ (attente de CONFIRMATION
+        # sur SALES_PUBLISH_PRODUCT/DECLARE_CROP_CYCLE/FARM_CREATE) : "non c'est
+        # 200 tonnes" ressemble fortement, pour le LLM, à l'intent catalogue
+        # SALES_UPDATE_PRODUCT/SALES_UPDATE_PRODUCTION/FARM_UPDATE — mais ces
+        # intents "mettent à jour un produit EXISTANT au catalogue", qui n'existe
+        # pas encore puisque rien n'a été confirmé/publié. Sans ce garde-fou, le
+        # bloc d'interruption ci-dessous abandonnait le brouillon en cours pour
+        # basculer vers un lookup catalogue qui ne trouve rien ("Votre catalogue
+        # de produits est actuellement vide.") — le brouillon (quantité, prix...)
+        # est perdu. Une intention-jumelle "update" détectée ici doit rester une
+        # correction DU MÊME goal en attente, pas une interruption vers un autre.
+        _locked_goal_for_confirmation = str(locked_goal or "").upper().strip()
+        _pending_create_update_sibling = _PENDING_CREATE_UPDATE_SIBLINGS.get(_locked_goal_for_confirmation)
+        if (
+            expected_input == "CONFIRMATION"
+            and _pending_create_update_sibling
+            and raw_intent == _pending_create_update_sibling
+        ):
+            logger.info(
+                "[Interpreter] Correction de brouillon non persisté (%s) pendant CONFIRMATION "
+                "— intent-jumeau %s absorbé comme UPDATE du même goal, pas une interruption.",
+                _locked_goal_for_confirmation, raw_intent,
+            )
+            raw_event = "UPDATE"
+            raw_intent = _locked_goal_for_confirmation
+
+        if expected_input in {"SELECTION", "CONFIRMATION"} and raw_event not in {"SELECTION", "CONFIRM", "REJECT", "UPDATE"}:
+            # Seuil ALIGNÉ sur tunnel_manager (INTERRUPTION_CONFIDENCE_THRESHOLD) :
+            # sous ce seuil, on reste proprement dans la confirmation/sélection
+            # (RÈGLE 2 du goal_planner re-verrouille le goal) ; au-dessus, la
+            # bascule est acceptée par tunnel_manager aussi — plus de zone morte.
+            if raw_intent != "UNKNOWN" and confidence >= INTERRUPTION_CONFIDENCE_THRESHOLD:
                 logger.info(
                     "Interruption détectée pendant %s → intent=%s (confidence=%.2f)",
                     expected_input,
@@ -853,6 +938,17 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 )
                 raw_event = "UNKNOWN"
 
+        # Panier en attente de validation : un accord jugé par le LLM (CONFIRM)
+        # déclenche la précommande. On émet le MÊME signal que l'ancien
+        # fast-path supprimé (NEW_TASK → BUYER_PREORDER_INIT), mais c'est le
+        # LLM qui a jugé l'accord en langage libre, pas une liste de mots. Un
+        # refus (REJECT) reste un refus (l'annulation est gérée en aval).
+        if cart_pending and raw_event == "CONFIRM":
+            logger.info("[Interpreter] Panier validé en langage libre → BUYER_PREORDER_INIT")
+            raw_event = "NEW_TASK"
+            raw_intent = "BUYER_PREORDER_INIT"
+            confidence = max(confidence, 0.9)
+
         if raw_event not in {"NEW_TASK", "ANSWER", "CONFIRM", "REJECT", "SELECTION", "UPDATE", "INTERRUPTION", "RESUME", "OUT_OF_SCOPE", "UNKNOWN", "ONBOARDING_INPUT"}:
             raw_event = "UNKNOWN"
 
@@ -863,6 +959,27 @@ def make_input_interpreter(role: str = "PRODUCER"):
             for key, value in fallback_entities.items():
                 if key not in remapped_entities and value not in (None, "", [], {}):
                     remapped_entities[key] = value
+                    fallback_applied = True
+                elif (
+                    key == "unit"
+                    and value not in (None, "", [], {})
+                    and remapped_entities.get("unit") not in (None, "", [], {})
+                    and remapped_entities["unit"] != value
+                ):
+                    # Le LLM a renvoyé une unité qui CONTREDIT celle réellement
+                    # écrite dans le message ("200kg" → LLM renvoie parfois
+                    # "TONNE", un biais d'ancrage sur une unité mentionnée plus
+                    # tôt dans la conversation — observé en prod : un producteur
+                    # reste "bloqué" sur TONNE malgré des corrections explicites
+                    # en kg). L'extraction déterministe (regex sur le texte
+                    # littéral) fait foi : jamais laisser le LLM contredire une
+                    # unité sans ambiguïté présente dans le message lui-même.
+                    logger.warning(
+                        "[Interpreter] Unité LLM '%s' contredit le texte ('%s' détecté par regex) — "
+                        "unité déterministe retenue.",
+                        remapped_entities["unit"], value,
+                    )
+                    remapped_entities["unit"] = value
                     fallback_applied = True
         if "product" in remapped_entities:
             validated_product = await _validate_and_sanitize_product(

@@ -5,7 +5,9 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from agriconnect.api.routes.market import router as market_router
-from agriconnect.api.routes.twilio_webhook import router as twilio_router  # 1. Import
+from agriconnect.api.routes.twilio_webhook import router as twilio_router  # repli (MESSAGING_PROVIDER=twilio)
+from agriconnect.api.routes.whatsapp_webhook import router as whatsapp_router  # provider par défaut
+from agriconnect.api.routes.paydunya_webhook import router as paydunya_router
 from agriconnect.core import telemetry
 
 logger = logging.getLogger("AgriConnect.API")
@@ -66,7 +68,13 @@ async def trace_and_metrics_middleware(request: Request, call_next):
 
 # 2. Inclus tes routers
 app.include_router(market_router, prefix="/api")
-app.include_router(twilio_router, prefix="/api")  # endpoint réel : /api/webhook/twilio
+# Les deux webhooks WhatsApp restent enregistrés en parallèle : seul
+# MESSAGING_PROVIDER (core/settings.py) décide lequel le worker utilise pour
+# ENVOYER — recevoir sur les deux endpoints ne coûte rien et permet de
+# basculer Meta/Twilio côté configuration webhook sans redéployer l'API.
+app.include_router(whatsapp_router, prefix="/api")  # endpoint réel : /api/webhook/whatsapp
+app.include_router(twilio_router, prefix="/api")  # endpoint réel : /api/webhook/twilio (repli)
+app.include_router(paydunya_router, prefix="/api")  # endpoint réel : /api/webhooks/paydunya-ipn
 
 
 @app.get("/health")

@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Set
 from agriconnect.core.llm import get_llm
 from agriconnect.core.settings import settings
 from agriconnect.graphs.agents.market_coach.security import SecurityService
+from agriconnect.graphs.agents.market_coach.core.slots import build_canonical_field_aliases
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
 from agriconnect.infrastructure.mcp.context import FarmerContext, get_mcp_context, mcp_context_scope
@@ -163,29 +164,18 @@ _AUTO_RESOLVABLE_FIELDS = frozenset({"farm_id", "phone"})
 
 _EMPTY_SLOT_VALUES = (None, "", [], {})
 
-_CANONICAL_FIELD_ALIASES: Dict[str, str] = {
-    "product_name": "product",
-    "produit": "product",
-    "item_name": "product",
-    "commodity": "product",
-    "quantity_mentioned": "quantity",
-    "quantity_for_sale": "quantity",
-    "quantite": "quantity",
-    "qty": "quantity",
-    "volume": "quantity",
-    "unit_mentioned": "unit",
-    "unite": "unit",
-    "unit_label": "unit",
-    "price_mentioned": "price",
-    "prix": "price",
-    "prix_unitaire": "price",
-    "max_price": "price",
-    "montant": "price",
-    "zone_name": "zone",
-    "zone_label": "zone",
-    "location": "zone",
-    "localite": "zone",
-}
+# Source UNIQUE de vérité : le registre central des slots (core/slots.py).
+# Ce module maintenait auparavant sa PROPRE table alias→canonique codée à la
+# main, qui avait divergé du registre (il lui manquait culture, original_unit,
+# original_quantity, quantity_kg, offered_price, montant_enchere, region,
+# target_zone… tous déjà canonicalisés ailleurs via slots.py). Conséquence :
+# `normalize_slot_keys` — utilisé par validation.py, response_handlers.py,
+# semantic_disambiguation.py, entities.py — canonicalisait un SOUS-ENSEMBLE
+# différent de memory.py/routing.py (qui, eux, consomment déjà slots.py). Un
+# champ mappé dans un nœud mais pas dans l'autre = exactement la « petite
+# erreur » récurrente due au doublon. On dérive désormais du registre, comme
+# le fait déjà interpreter/intent.py (`build_canonical_field_aliases()`).
+_CANONICAL_FIELD_ALIASES: Dict[str, str] = build_canonical_field_aliases()
 
 CANONICAL_TRANSACTION_FIELDS = frozenset(
     {

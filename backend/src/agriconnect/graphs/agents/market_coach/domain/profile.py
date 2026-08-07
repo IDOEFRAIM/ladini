@@ -60,7 +60,9 @@ class ProfileService:
         return DomainResult(tool_id=ToolId.GET_USER_CONTEXT, tool_args=args)
 
     def set_geo(self, command: ProfileSetGeoCommand) -> DomainResult:
-        args: Dict[str, Any] = {"user_id": str(command.phone), "lat": float(command.latitude), "lon": float(command.longitude)}
+        # `phone`, pas `user_id` : update_geo_location résout l'UUID en interne
+        # (l'appelant conversationnel ne connaît que le numéro de téléphone).
+        args: Dict[str, Any] = {"phone": str(command.phone), "lat": float(command.latitude), "lon": float(command.longitude)}
         return DomainResult(tool_id=ToolId.UPDATE_GEO_LOCATION, tool_args=args)
 
     def set_prefs(self, command: ProfileSetPrefsCommand) -> DomainResult:

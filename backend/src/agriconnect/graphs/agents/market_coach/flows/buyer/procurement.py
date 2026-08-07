@@ -450,7 +450,7 @@ async def resolve_received_bids(
     return {
         "status": "WAITING_INPUT",
         "expected_input": "SELECTION",
-        "working_memory": {"bids_menu": menu, "bids_cache": data},
+        "working_memory": {"bids_menu": menu},
         "response_strategy": "SELECTION_MENU",
         "final_response": menu,
         "ag_ui_component": None,

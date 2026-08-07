@@ -6,6 +6,7 @@ import uuid
 from rapidfuzz import fuzz, process
 from sqlalchemy import select, and_, or_, func, update
 from sqlalchemy.orm import aliased
+from agriconnect.core.formatting import fmt_num as _fmt_num
 from .common import normalize_phone
 from .search import fuzzy_match, similarity_rank
 from .errors import BusinessRuleException
@@ -240,9 +241,9 @@ class AuctionMixin(BaseMixin):
         current_session.add(new_auction)
         await current_session.flush()
 
-        qty_txt = f"{float(qty):g}"
+        qty_txt = _fmt_num(qty)
         unit_txt = unit.upper().strip()
-        price_txt = f"{float(max_price):g}"
+        price_txt = _fmt_num(max_price)
         return {
             "status": "success",
             "auction_id": str(new_auction.id),
@@ -322,8 +323,8 @@ class AuctionMixin(BaseMixin):
                 "bid_id": str(existing_bid.id),
                 "updated": True,
                 "message": (
-                    f"✅ Vous aviez déjà une offre ({old_price:g} CFA) sur cette enchère — "
-                    f"elle a été mise à jour à *{float(offered_price):g} CFA*."
+                    f"✅ Vous aviez déjà une offre ({_fmt_num(old_price)} CFA) sur cette enchère — "
+                    f"elle a été mise à jour à *{_fmt_num(offered_price)} CFA*."
                 ),
             }
 
@@ -345,7 +346,7 @@ class AuctionMixin(BaseMixin):
         return {
             "status": "success",
             "bid_id": str(new_bid.id),
-            "message": f"✅ Votre offre de *{float(offered_price):g} CFA* a été transmise à l'acheteur avec succès."
+            "message": f"✅ Votre offre de *{_fmt_num(offered_price)} CFA* a été transmise à l'acheteur avec succès."
         }
 
     # ─── SECTION 3 : CONSULTATIONS ET MARCHÉ (READS) ─────────────────────
@@ -714,7 +715,7 @@ class AuctionMixin(BaseMixin):
                     bid.status, bool(getattr(bid, "is_winner", False)), auction_status
                 )
                 bid_id = str(bid.id)
-                price_txt = f"{float(bid.offered_price):g}"
+                price_txt = _fmt_num(bid.offered_price)
                 data.append({
                     "bid_id": bid_id,
                     "auction_id": str(bid.auction_id),
@@ -861,8 +862,8 @@ class AuctionMixin(BaseMixin):
                 idx += 1
                 diff = auction.deadline - datetime.now()
                 time_str = f"{diff.days}j {diff.seconds // 3600}h" if diff.days > 0 else f"{diff.seconds // 3600}h"
-                qty_txt = f"{float(auction.quantity):g}"
-                price_txt = f"{float(auction.max_price_per_unit):g}"
+                qty_txt = _fmt_num(auction.quantity)
+                price_txt = _fmt_num(auction.max_price_per_unit)
 
                 data.append({
                     "auction_id": str(auction.id),
@@ -1093,7 +1094,7 @@ class AuctionMixin(BaseMixin):
         bid.updated_at = datetime.now()
         await current_session.flush()
 
-        price_txt = f"{float(new_price):g}"
+        price_txt = _fmt_num(new_price)
         return {
             "status": "success",
             "bid_id": str(bid.id),

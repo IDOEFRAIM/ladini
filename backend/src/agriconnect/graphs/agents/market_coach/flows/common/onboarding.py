@@ -66,6 +66,7 @@ async def onboarding_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
 
     user_text = (state.get("normalized_text") or state.get("user_query") or "").strip()
     extracted_entities = state.get("extracted_entities") or {}
+    location_shared = bool(state.get("location_shared"))
 
     result = await run_onboarding_step(
         ob_state,
@@ -73,6 +74,7 @@ async def onboarding_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
         mc_runtime,
         extracted_entities=extracted_entities,
         llm_extract_all=_llm_bulk,
+        location_shared=location_shared,
     )
 
     updates = result.to_state_updates()

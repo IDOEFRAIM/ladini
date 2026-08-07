@@ -3,7 +3,7 @@
 Stable import surface:
 	`from agriconnect.services.database import AgriDatabaseService, get_db`
 
-L'import de `d.py` (et de ses 10 mixins) reste LAZY par défaut : le package
+L'import de `d.py` (et de ses 11 mixins) reste LAZY par défaut : le package
 peut être importé sans charger toute la couche DB. Contrepartie (§5.19) : un
 mixin cassé n'était détecté qu'au premier accès à l'attribut — en prod.
 Poser `AGRICONNECT_EAGER_IMPORTS=1` (CI, tests, smoke de démarrage) force

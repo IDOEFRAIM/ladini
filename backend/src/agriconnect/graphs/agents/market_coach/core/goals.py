@@ -52,6 +52,16 @@ ALL_BUYER_TUNNEL_GOALS: FrozenSet[str] = (
 # doivent JAMAIS être routés vers confirmation_gate/mcp_tool_executor.
 PRODUCER_RESOLVER_GOALS: FrozenSet[str] = _goals_for_tunnel("producer_auction")
 
+# Mise à jour catalogue/production : gèrent leur propre confirmation (voir
+# _resolve_product_for_update / _resolve_cycle_for_update), jamais
+# confirmation_gate/mcp_tool_executor génériques.
+PRODUCER_UPDATE_GOALS: FrozenSet[str] = _goals_for_tunnel("producer_update")
+
+# Escrow (Paydunya) : le producteur transmet le code de livraison à 4
+# chiffres pour débloquer ses fonds — voir _resolve_delivery_otp, extraction
+# déterministe du code, jamais de classification LLM du code lui-même.
+PRODUCER_ESCROW_GOALS: FrozenSet[str] = _goals_for_tunnel("producer_escrow")
+
 # ── NAVIGATION / BREAKOUT ────────────────────────────────────────────
 # Intents de navigation autorisés à interrompre un tunnel actif.
 # Consommé par TunnelManager (breakout) et goal_planner/routing (navigation).
@@ -62,7 +72,8 @@ NAVIGATION_BREAKOUT_GOALS: FrozenSet[str] = frozenset(
 
 _KNOWN_TUNNELS = frozenset({
     "cart", "preorder", "negotiation", "order_tracking",
-    "auction_tracking", "producer_auction",
+    "auction_tracking", "producer_auction", "producer_update",
+    "producer_escrow",
 })
 
 # Intents handled_by_flow sans tunnel de routage post-validator (résolus
@@ -96,6 +107,12 @@ def _validate_goal_drift() -> None:
     for goal in PRODUCER_RESOLVER_GOALS:
         if INTENT_ROLE.get(goal) not in {"PRODUCER", "BOTH"}:
             problems.append(f"{goal}: tunnel producer mais rôle {INTENT_ROLE.get(goal)!r}")
+    for goal in PRODUCER_UPDATE_GOALS:
+        if INTENT_ROLE.get(goal) not in {"PRODUCER", "BOTH"}:
+            problems.append(f"{goal}: tunnel producer_update mais rôle {INTENT_ROLE.get(goal)!r}")
+    for goal in PRODUCER_ESCROW_GOALS:
+        if INTENT_ROLE.get(goal) not in {"PRODUCER", "BOTH"}:
+            problems.append(f"{goal}: tunnel producer_escrow mais rôle {INTENT_ROLE.get(goal)!r}")
 
     if problems:
         raise RuntimeError(
@@ -114,5 +131,7 @@ __all__ = [
     "BUYER_AUCTION_TRACKING_GOALS",
     "ALL_BUYER_TUNNEL_GOALS",
     "PRODUCER_RESOLVER_GOALS",
+    "PRODUCER_UPDATE_GOALS",
+    "PRODUCER_ESCROW_GOALS",
     "NAVIGATION_BREAKOUT_GOALS",
 ]

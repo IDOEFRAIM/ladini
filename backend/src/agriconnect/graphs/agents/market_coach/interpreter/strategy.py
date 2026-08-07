@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
+from agriconnect.graphs.agents.market_coach.core.slots import SLOT_FILLING_INPUTS
+
 logger = logging.getLogger("AgriConnect.Market.IntentRouter")
 
 
@@ -86,7 +88,7 @@ async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
     if interpreted_event in {"UNKNOWN", "OUT_OF_SCOPE"}:
         if expected_input == "SELECTION" and state.get("expected_candidates"):
             return {"response_strategy": "SELECTION_MENU", "status": "WAITING_INPUT", "ag_ui_component": None}
-        if expected_input in {"PRODUCT", "PRICE", "QUANTITY", "UNIT", "LOCATION"}:
+        if expected_input in SLOT_FILLING_INPUTS:
             return {"response_strategy": "ASK_MISSING_FIELD", "status": "WAITING_INPUT", "ag_ui_component": None}
         if expected_input == "CONFIRMATION":
             return {"response_strategy": "CONFIRMATION", "status": "WAITING_CONFIRMATION", "ag_ui_component": None}

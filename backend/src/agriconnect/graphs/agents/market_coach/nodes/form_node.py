@@ -18,6 +18,7 @@ from agriconnect.agents.forms import (
     SlotSpec,
     FORM_REGISTRY,
     run_form_step,
+    _QUANTITY_SLOT_NAMES,
 )
 
 logger = logging.getLogger("AgriConnect.Market.FormNode")
@@ -196,7 +197,15 @@ async def form_node(state: Dict[str, Any], mc_runtime: Any) -> Dict[str, Any]:
                 "execution_authorized": False,
                 "missing_fields": [],
             }
-        elif event == "REJECT":
+        elif event == "REJECT" and not _infer_slots_from_text(norm, spec):
+            # "non" / "annule" SEUL (aucun champ identifiable dans le texte) :
+            # une vraie annulation, comportement inchangé. Si le refus porte
+            # une correction explicite ("non c'est 200 tonnes", "non je vends
+            # X au prix de Y"), on tombe dans la branche de correction
+            # ci-dessous au lieu d'annuler tout le brouillon — même principe
+            # que le fix appliqué à `nodes/memory.py` pour le chemin non-form
+            # (un REJECT accompagné d'une valeur réelle n'est pas un "non"
+            # sans contenu, c'est une correction).
             logger.info("[FormNode] Form %s cancelled by user.", form_id)
             return {
                 "active_form": None,
@@ -210,7 +219,8 @@ async def form_node(state: Dict[str, Any], mc_runtime: Any) -> Dict[str, Any]:
                 "ag_ui_component": None,
             }
         else:
-            # User wants to correct one or more fields instead of confirming.
+            # User wants to correct one or more fields instead of confirming
+            # (y compris un REJECT porteur d'une correction — voir ci-dessus).
             correction_payload = dict(extracted)
             inferred_slots = _infer_slots_from_text(norm, spec)
 
@@ -250,6 +260,17 @@ async def form_node(state: Dict[str, Any], mc_runtime: Any) -> Dict[str, Any]:
                 correction_data.pop(slot.name, None)  # invalide l'ancienne valeur
                 allowed_keys.add(slot.name)
                 allowed_keys.update(slot.aliases)
+                # Le slot "quantité" est presque toujours reformulé avec son
+                # unité dans LA MÊME correction ("non c'est 200 tonnes") —
+                # l'interpréteur extrait légitimement `unit`/`unit_mentioned`
+                # en même temps que `quantity`. Sans cette exception, ce
+                # narrowing (pensé pour isoler une correction de prix seul de
+                # la quantité) jetait aussi l'unité fraîchement corrigée,
+                # laissant l'ANCIENNE unité (potentiellement fausse) en place
+                # à côté du nouveau nombre — même bug que dans
+                # `agents/forms.py::run_form_step`, ici côté correction.
+                if slot.name in _QUANTITY_SLOT_NAMES:
+                    allowed_keys.update({"unit", "unit_mentioned"})
                 # Si l'interpréteur n'a produit AUCUNE valeur pour ce slot
                 # (typiquement `deadline`, absent de son schéma JSON), on lui
                 # injecte le texte brut : la coercition du slot (ex.

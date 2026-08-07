@@ -157,7 +157,16 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
             synthetic["current_goal"] = "BUYER_ADD_TO_CART"
             return _finalize(await cart_management(synthetic, mc_runtime))
 
-    # ── Natural confirm (PREORDER_DRAFTED + confirm signal) ──────────
+    # ── Natural confirm / menu reply (PREORDER_DRAFTED action menu) ───
+    # `create_preorder` (preorder.py) sait déjà résoudre resolved_id à partir
+    # de selection_index (1→CONFIRM, 2→CANCEL, 3→ADD_MORE) OU d'un accord
+    # libre — mais rien ne l'appelait pour un événement SELECTION : seul
+    # interpreted_event=="CONFIRM" déclenchait ce bloc. Une réponse chiffrée
+    # ("1") au menu à 3 options n'était donc JAMAIS transmise à create_preorder
+    # et retombait sur la logique panier générique ("quel produit veux-tu
+    # ajouter ?"), même pour un choix explicite et sans ambiguïté. On élargit
+    # donc le déclencheur à SELECTION également, sans présupposer la réponse :
+    # on laisse `create_preorder` résoudre lui-même selection_index/resolved_id.
     if (
         phase == "PREORDER_DRAFTED"
         and preorder_flow.get("preorder_id")
@@ -165,15 +174,20 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
         and (
             goal == "BUYER_PREORDER_CONFIRM"
             or detected_intent == "CONFIRMATION_EXPLICITE"
-            or interpreted_event == "CONFIRM"
+            or interpreted_event in {"CONFIRM", "SELECTION"}
         )
     ):
-        logger.info("buyer_context_resolver: auto-confirm preorder")
+        logger.info("buyer_context_resolver: routing preorder menu reply to create_preorder (event=%s)", interpreted_event)
         next_state = dict(state)
         next_payload = dict(next_state.get("transaction_payload") or {})
-        next_payload["resolved_id"] = "PREORDER_CONFIRM"
-        next_payload.pop("selection_index", None)
-        next_payload.pop("selected_value", None)
+        # Un CONFIRM en langage libre (sans passer par le menu numéroté) n'a
+        # pas de selection_index — on force alors directement l'action ;
+        # une SELECTION garde son selection_index/selected_value, résolu par
+        # create_preorder lui-même (preorder_choice_from_index).
+        if interpreted_event == "CONFIRM" and not next_payload.get("selection_index"):
+            next_payload["resolved_id"] = "PREORDER_CONFIRM"
+            next_payload.pop("selection_index", None)
+            next_payload.pop("selected_value", None)
         next_state["transaction_payload"] = next_payload
         return _finalize(await create_preorder(next_state, mc_runtime))
 

@@ -152,6 +152,11 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
         "MARKET_GET_MY_PROPOSALS": ("bid_id", []),
         "SALES_ACCEPT_CONTRACT": ("bid_id", []),
         "PROCUREMENT_ACCEPT_OFFER": ("bid_id", []),
+        # cycle_id / product_id sont résolus par le flux de sélection dédié
+        # (_resolve_cycle_for_update / _resolve_product_for_update), jamais
+        # demandés comme UUID brut à l'utilisateur.
+        "SALES_UPDATE_PRODUCTION": ("cycle_id", []),
+        "SALES_UPDATE_PRODUCT": ("product_id", []),
     }
     passthrough = _RESOLVER_PASSTHROUGH.get(goal_upper)
     if passthrough:

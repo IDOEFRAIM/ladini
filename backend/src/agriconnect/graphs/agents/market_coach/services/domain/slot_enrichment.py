@@ -286,9 +286,19 @@ async def enrich_payload_from_text(
     goal_upper = str(goal or "").upper()
 
     if goal_upper == "BUYER_ADD_TO_CART":
+        # LLM-PRIMARY : l'interpréteur (routing.py) a déjà extrait quantity/unit
+        # dans `extracted_entities`, appliqués au payload par memory_update AVANT
+        # cet enrichissement. La regex ne fait que COMBLER les trous — jamais
+        # écraser ce que le LLM a déjà décidé (sinon un parse regex approximatif
+        # remplaçait silencieusement une extraction LLM correcte). C'est aussi le
+        # comportement « fill-if-missing » déjà appliqué à tous les autres champs
+        # de cette fonction (unit/surface/date/production_type) — ici on
+        # l'alignait pour BUYER_ADD_TO_CART qui écrasait, seul cas incohérent.
         extracted = extract_quantity_unit_from_text(text)
         if extracted:
-            payload.update({k: v for k, v in extracted.items() if v not in (None, "", 0, [], {})})
+            for k, v in extracted.items():
+                if v not in (None, "", 0, [], {}) and payload.get(k) in (None, "", 0, [], {}):
+                    payload[k] = v
 
         product_str = str(payload.get("product") or "")
         product_is_dirty = _contains_quantitative_hint(product_str) or any(

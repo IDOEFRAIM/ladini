@@ -158,7 +158,14 @@ class Settings(BaseSettings):
     AZURE_SPEECH_ENDPOINT: str = "a"
     USE_AZURE_SPEECH: bool = False
 
-    # --- Twilio / WhatsApp ---
+    # --- Fournisseur de messagerie WhatsApp ---
+    # "whatsapp_cloud" (API Meta directe, moins chère) ou "twilio" (repli —
+    # tout le code Twilio reste en place pour un rollback instantané en cas de
+    # souci avec l'intégration directe). Bascule un seul flag, aucune
+    # réécriture nécessaire dans les deux sens.
+    MESSAGING_PROVIDER: str = "whatsapp_cloud"
+
+    # --- Twilio / WhatsApp (repli — voir MESSAGING_PROVIDER) ---
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_WHATSAPP_NUMBER: str = ""
@@ -175,6 +182,50 @@ class Settings(BaseSettings):
     # ContentSid du template Quick Reply de confirmation binaire (2 boutons :
     # payload "CONFIRM" et "REJECT"). Une variable {{1}} porte le corps du récap.
     TWILIO_CONFIRM_CONTENT_SID: str = ""
+
+    # --- WhatsApp Cloud API (Meta directe — provider par défaut) ---
+    # Récupérés dans Meta for Developers → votre app → WhatsApp → API Setup.
+    WHATSAPP_CLOUD_API_TOKEN: str = ""          # Access token permanent (System User)
+    WHATSAPP_PHONE_NUMBER_ID: str = ""          # ID du numéro expéditeur (pas le numéro lui-même)
+    WHATSAPP_BUSINESS_ACCOUNT_ID: str = ""      # WABA ID (pour la gestion des templates, optionnel ici)
+    # Chaîne arbitraire que VOUS choisissez et déclarez dans Meta lors de la
+    # configuration du webhook — sert uniquement à la vérification GET
+    # initiale (hub.verify_token), jamais utilisée après.
+    WHATSAPP_WEBHOOK_VERIFY_TOKEN: str = ""
+    # Secret de l'app Meta — sert à vérifier la signature HMAC (header
+    # X-Hub-Signature-256) de chaque webhook entrant. Sans lui, N'IMPORTE QUI
+    # peut poster un faux message sur l'endpoint webhook.
+    WHATSAPP_APP_SECRET: str = ""
+    # Version de l'API Graph — à faire évoluer périodiquement (Meta déprécie
+    # les anciennes versions après ~2 ans).
+    WHATSAPP_GRAPH_API_VERSION: str = "v21.0"
+    # Boutons interactifs natifs (max 3, sans template pré-approuvé — contrairement
+    # à Twilio Content API). Activé par défaut : c'est justement l'un des
+    # avantages de l'API directe. Désactiver retombe sur le texte brut
+    # "Répondez oui/non" (comportement Twilio historique).
+    WHATSAPP_NATIVE_INTERACTIVE_ENABLED: bool = True
+
+    # --- Paydunya (Escrow paiement séquestre) ---
+    # Coupe-circuit : notre fournisseur (Paydunya) bloque temporairement les
+    # paiements (KYC marchand non validé côté Paydunya). Tant que False, la
+    # précommande se confirme directement (paiement à la livraison, comme
+    # avant l'intégration escrow) — voir flows/buyer/preorder.py. Le code
+    # escrow reste intact et se réactive en repassant ce flag à True une fois
+    # Paydunya débloqué, sans rien réécrire.
+    ESCROW_PAYMENT_ENABLED: bool = False
+    # URL publique de l'API (sans slash final) — sert à construire le
+    # callback_url transmis à Paydunya (`/api/webhooks/paydunya-ipn`).
+    PUBLIC_API_BASE_URL: str = ""
+    PAYDUNYA_MASTER_KEY: str = ""
+    PAYDUNYA_PRIVATE_KEY: str = ""
+    PAYDUNYA_PUBLIC_KEY: str = ""
+    PAYDUNYA_TOKEN: str = ""
+    # "test" (sandbox Paydunya) ou "live". Ne détermine PAS la confiance
+    # accordée à l'IPN : dans les deux modes, le montant/statut est toujours
+    # re-confirmé serveur-à-serveur auprès de Paydunya avant toute écriture DB.
+    PAYDUNYA_MODE: str = "test"
+    # Fenêtre de réservation avant expiration automatique du paiement (heures).
+    PAYDUNYA_PAYMENT_TTL_HOURS: int = 24
 
     # --- LangSmith / Observabilité ---
     LANGCHAIN_TRACING_V2: bool = False

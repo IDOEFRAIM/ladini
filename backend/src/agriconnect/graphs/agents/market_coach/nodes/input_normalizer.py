@@ -84,6 +84,17 @@ async def input_normalizer(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
         "response_strategy": None,
     }
 
+    # Filet "formulaire fantôme" : le moteur formulaire DRY (form_node) a été
+    # retiré du graphe. Un checkpoint persisté AVANT le déploiement peut encore
+    # porter `active_form`/`form_step` (utilisateur au milieu d'un ancien
+    # formulaire) — sans reset, `_route_after_planner` n'a plus de branche vers
+    # form_node de toute façon, mais on nettoie explicitement ces champs morts
+    # au tout début du tour pour éviter toute logique résiduelle (policies.py,
+    # etc.) qui les consulterait encore.
+    if state.get("active_form") is not None or state.get("form_step") is not None:
+        updates["active_form"] = None
+        updates["form_step"] = None
+
     # Audio transcription
     audio_path = state.get("audio_file_path")
     if audio_path and not state.get("transcribed_audio"):

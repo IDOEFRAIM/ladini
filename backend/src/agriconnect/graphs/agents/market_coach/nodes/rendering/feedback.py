@@ -131,35 +131,24 @@ async def render_interruption(ctx: RenderContext) -> Dict[str, Any]:
 
 
 async def render_clarification(ctx: RenderContext) -> Dict[str, Any]:
-    """Fallback : coach proactif role-aware."""
+    """Fallback : coach proactif — refonte double-rôle (vendre ET acheter)."""
     state, salutation = ctx.state, ctx.salutation
-    user_role = str(state.get("user_role") or "PRODUCER").upper()
     turn = int(state.get("turn_count") or 0)
 
     if turn <= 1:
-        if user_role == "BUYER":
-            fallback_text = (
-                f"👋 {salutation}Bienvenue ! Je suis votre assistant d'achat AgriConnect.\n"
-                "Je peux vous aider à :\n"
-                "• Trouver des produits agricoles\n"
-                "• Lancer un appel d'offres\n"
-                "• Suivre vos commandes\n\n"
-                "Dites-moi ce que vous cherchez !"
-            )
-        else:
-            fallback_text = (
-                f"👋 {salutation}Bienvenue ! Je suis votre coach commercial AgriConnect.\n"
-                "Je peux vous aider à :\n"
-                "• Mettre vos produits en vente\n"
-                "• Gérer votre stock\n"
-                "• Répondre aux demandes d'acheteurs\n\n"
-                "Que souhaitez-vous faire ?"
-            )
+        fallback_text = (
+            f"👋 {salutation}Bienvenue ! Je suis votre assistant AgriConnect.\n"
+            "Je peux vous aider à :\n"
+            "• Mettre vos produits en vente / gérer votre stock\n"
+            "• Trouver des produits agricoles / lancer un appel d'offres\n"
+            "• Suivre vos commandes ou celles reçues\n\n"
+            "Que souhaitez-vous faire ?"
+        )
     else:
-        if user_role == "BUYER":
-            examples = "chercher un produit, lancer un appel d'offres, ou voir vos commandes"
-        else:
-            examples = "vendre un produit, gérer votre stock, ou répondre à une enchère"
+        examples = (
+            "vendre un produit, gérer votre stock, chercher un produit, "
+            "lancer un appel d'offres, ou suivre une commande"
+        )
         fallback_text = (
             f"{salutation}Je n'ai pas bien saisi. Vous pouvez par exemple {examples}. "
             "Dites-moi en quelques mots ce dont vous avez besoin."

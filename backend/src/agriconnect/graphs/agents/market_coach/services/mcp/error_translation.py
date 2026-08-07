@@ -23,6 +23,18 @@ _MCP_ERROR_TRANSLATIONS: Dict[str, str] = {
     "unavailable": "Le service est temporairement indisponible. Veuillez réessayer.",
 }
 
+# Produit absent du catalogue (ex: "Produit 'antilope' inconnu.") — ce n'est
+# PAS une erreur technique, c'est un cas métier normal : LADINI n'a pas encore
+# ce produit. Le message générique ("erreur technique, réessayez") était
+# trompeur (rien ne change en réessayant). Clé composée ("produit" + "inconnu")
+# pour ne jamais matcher "zone inconnue" / "statut inconnu" (autres messages
+# sans rapport avec le catalogue produit).
+_UNKNOWN_PRODUCT_MESSAGE = (
+    "Ce produit n'est pas encore disponible sur LADINI — nous n'acceptons pas "
+    "ce type de produit pour le moment. Si vous souhaitez qu'il soit ajouté au "
+    "catalogue, contactez notre service client."
+)
+
 INFRA_ERROR_CODE = "infrastructure_unavailable"
 BUSINESS_ERROR_CODE = "business_error"
 
@@ -41,6 +53,8 @@ def classify_error(raw_error: str) -> str:
 
 def translate_mcp_error(raw_error: str) -> str:
     lower = (raw_error or "").lower()
+    if "produit" in lower and "inconnu" in lower:
+        return _UNKNOWN_PRODUCT_MESSAGE
     for key, msg in _MCP_ERROR_TRANSLATIONS.items():
         if key in lower:
             return msg

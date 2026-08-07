@@ -21,6 +21,7 @@ from agriconnect.services.database.producer import ProducerMgmtMixin
 from agriconnect.services.database.product import ProductMixin
 from agriconnect.services.database.auction import AuctionMixin
 from agriconnect.services.database.moderation import ModerationMixin
+from agriconnect.services.database.escrow import EscrowMixin
 
 # ContextVar unifié : partagé avec BaseService/@transactional.
 # Une session ouverte ici est visible depuis OrderService/UserContextService/ProductService
@@ -30,7 +31,7 @@ from agriconnect.services.database.base_service import db_session_ctx, transacti
 class AgriDatabaseService(
     AuthMixin, UtilsMixin,
     MarketplaceMixin, PublicProductMixin, BuyerMixin, BuyerVerificationMixin,
-    ProducerMgmtMixin, ProductMixin, AuctionMixin, ModerationMixin
+    ProducerMgmtMixin, ProductMixin, AuctionMixin, ModerationMixin, EscrowMixin
 ):
     _logger = logging.getLogger("AgriConnect.DatabaseService")
 
@@ -72,6 +73,9 @@ class AgriDatabaseService(
 
         # Moderation / anti-abuse reads
         "get_account_status", "get_prohibited_terms",
+
+        # Escrow reads
+        "list_producer_escrowed_orders",
     }
 
     # ==================================================================
@@ -136,14 +140,14 @@ class AgriDatabaseService(
     
     async def ensure_performance_indexes(self, session: Optional[AsyncSession] = None):
         """Méthode de maintenance des index SQL exécutée de manière isolée."""
-        from agriconnect.services.database.common import PERFORMANCE_INDEX_DDL
-        
+        from agriconnect.services.database.common import PERFORMANCE_INDEX_DDL, SCHEMA_COLUMN_DDL
+
         async def _logic(sess: AsyncSession):
-            for ddl in PERFORMANCE_INDEX_DDL:
+            for ddl in (*PERFORMANCE_INDEX_DDL, *SCHEMA_COLUMN_DDL):
                 try:
                     async with sess.begin_nested():
                         await sess.execute(text(ddl))
-                except Exception: 
+                except Exception:
                     continue
             return {"status": "indexes_checked"}
         

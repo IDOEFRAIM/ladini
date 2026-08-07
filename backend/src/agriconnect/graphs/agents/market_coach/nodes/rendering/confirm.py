@@ -2,47 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from agriconnect.graphs.agents.market_coach.nodes.rendering.common import (
     RenderContext,
     apply_corrections,
 )
-
-
-def _build_summary(goal: str, payload: Dict[str, Any], state: Dict[str, Any]) -> str:
-    prod = payload.get("product")
-    qty = payload.get("quantity")
-    unit = payload.get("unit", "KG")
-    price = payload.get("price")
-    budget = payload.get("max_budget") or payload.get("target_price")
-    zone = payload.get("zone") or state.get("zone")
-    parts: List[str] = []
-
-    if "PUBLISH" in goal or "SELL" in goal:
-        parts.append(f"Vente de {prod or '—'}")
-        if qty:
-            parts.append(f"Quantité : {qty} {unit}")
-        if price:
-            parts.append(f"Prix : {price} FCFA")
-    elif "AUCTION" in goal or "SEARCH" in goal or "BUY" in goal:
-        parts.append(f"Achat de {prod or '—'}")
-        if qty:
-            parts.append(f"Quantité : {qty} {unit}")
-        if budget or price:
-            parts.append(f"Prix plafond : {budget or price} FCFA")
-    elif "BID" in goal:
-        parts.append("Soumission d'enchère")
-        if price:
-            parts.append(f"Proposition : {price} FCFA")
-    else:
-        for k, v in payload.items():
-            if v and not k.endswith("_id") and k != "phone":
-                parts.append(f"{k.replace('_', ' ').title()} : {v}")
-
-    if zone:
-        parts.append(f"Zone : {zone}")
-    return "\n".join(parts) if parts else f"Opération : {goal}"
+from agriconnect.graphs.agents.market_coach.services.ui.confirmation_summary import (
+    build_confirmation_summary,
+)
 
 
 async def render_confirmation(ctx: RenderContext) -> Dict[str, Any]:
@@ -53,9 +21,16 @@ async def render_confirmation(ctx: RenderContext) -> Dict[str, Any]:
             "ag_ui_component": None,
         })
 
+    # `confirmation_summary` est normalement posé par `confirmation_gate`
+    # (source unique du récap). Le repli ci-dessous ne sert que si un chemin
+    # atteint ce rendu sans passer par la gate ; il délègue au MÊME
+    # constructeur (`build_confirmation_summary`) au lieu d'un format maison
+    # divergent — l'ancien `_build_summary` local produisait un récap
+    # différent ("Vente de X\nQuantité : Y") qui contournait toute la logique
+    # d'unités (prix par KG vs quantité en tonnes, avertissement de mismatch).
     summary = state.get("confirmation_summary")
     if not summary and ctx.payload:
-        summary = _build_summary(ctx.goal, ctx.payload, state)
+        summary = build_confirmation_summary(ctx.goal, ctx.payload)
 
     text_output = f"{ctx.salutation}Voici le récapitulatif :\n{summary}\n\nConfirmez-vous ?"
 

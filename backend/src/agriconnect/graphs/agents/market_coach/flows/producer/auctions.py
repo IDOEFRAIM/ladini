@@ -32,6 +32,7 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
 )
+from agriconnect.core.formatting import fmt_num as _fmt_num
 from agriconnect.graphs.agents.market_coach.services.mcp.gateway import AuctionGateway
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
@@ -302,11 +303,11 @@ async def ask_bid_price(
         qty = brief.get("quantity")
         if qty is not None:
             try:
-                lines.append(f"⚖️ Quantité demandée : {float(qty):g} {unit}")
+                lines.append(f"⚖️ Quantité demandée : {_fmt_num(qty)} {unit}")
             except (TypeError, ValueError):
                 pass
         if max_price is not None:
-            lines.append(f"💰 Prix plafond acheteur : *{max_price:g} FCFA/{unit}*")
+            lines.append(f"💰 Prix plafond acheteur : *{_fmt_num(max_price)} FCFA/{unit}*")
         lines.append("\n💬 *Quel prix proposez-vous ?* (par unité, en FCFA)")
         msg = "\n".join(lines)
 
@@ -346,12 +347,12 @@ async def recap_bid(
 ) -> Dict[str, Any]:
     brief = ((state.get("working_memory") or {}).get("auction_brief") or {}).get(str(auction_id)) or {}
     product, unit, max_price = _auction_label(brief)
-    price_txt = f"{float(price):g}"
+    price_txt = _fmt_num(price)
 
     warn = ""
     if max_price is not None and price > max_price:
         warn = (
-            f"\n⚠️ Votre prix dépasse le plafond acheteur ({max_price:g} FCFA) — "
+            f"\n⚠️ Votre prix dépasse le plafond acheteur ({_fmt_num(max_price)} FCFA) — "
             "l'acheteur risque de ne pas le retenir."
         )
 
@@ -419,7 +420,7 @@ async def submit_bid(
             "ag_ui_component": None,
         }
 
-    price_txt = f"{float(price):g}"
+    price_txt = _fmt_num(price)
     # Message du DB (distingue « transmise » d'une « mise à jour » via l'upsert).
     db_msg = result.get("message") or f"✅ Votre proposition de *{price_txt} FCFA* a été transmise à l'acheteur."
     return {
@@ -559,7 +560,7 @@ async def ask_modify_price(
     if reask:
         msg = f"💬 Indiquez le *nouveau prix* en FCFA (ex: 300) pour *{product}*."
     else:
-        cur_txt = f"{float(current_price):g}" if current_price is not None else "?"
+        cur_txt = _fmt_num(current_price) if current_price is not None else "?"
         msg = (
             f"✏️ *Modifier votre proposition : {product}*\n"
             f"Prix actuel : *{cur_txt} FCFA/{unit}*\n\n"
@@ -599,7 +600,7 @@ async def recap_modify_price(
     brief = ((state.get("working_memory") or {}).get("my_bids_brief") or {}).get(str(bid_id)) or {}
     product = brief.get("product") or "ce produit"
     unit = brief.get("unit") or "unité"
-    price_txt = f"{float(new_price):g}"
+    price_txt = _fmt_num(new_price)
 
     prefix = "🤔 " if reask else "📝 "
     msg = (
@@ -663,7 +664,7 @@ async def submit_modify_price(
             "ag_ui_component": None,
         }
 
-    price_txt = f"{float(new_price):g}"
+    price_txt = _fmt_num(new_price)
     return {
         "status": "COMPLETED",
         "response_strategy": "SUCCESS",

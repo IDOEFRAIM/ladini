@@ -146,11 +146,12 @@ INTENT_CONFIG = {
         "action_type": "WRITE",
         "requires_farm": False,
         "lifecycle_mode": "UPDATE",
-        "label": "Mise à jour du prix ou de la quantité d'un produit publié",
+        "label": "Mise à jour d'un produit du catalogue (prix, quantité, nom, unité)",
         "label_map": {
             "product_id": "référence produit",
             "price": "nouveau prix unitaire",
             "quantity": "nouvelle quantité disponible",
+            "product": "nouveau nom du produit",
             "unit": "unité (optionnel)"
         }
     },
@@ -175,6 +176,24 @@ INTENT_CONFIG = {
             "estimated_available_at": "nouvelle date de disponibilité",
             "production_type": "type (culture ou élevage)"
         }
+    },
+
+    # Escrow (Paydunya) : le producteur transmet le code de livraison à 4
+    # chiffres reçu de l'acheteur pour débloquer ses fonds bloqués. Tunnel
+    # auto-suffisant "producer_escrow" (extraction déterministe du code,
+    # jamais de classification LLM sur le code lui-même) — voir
+    # flows/producer/flow.py::_resolve_delivery_otp.
+    "PRODUCER_CONFIRM_DELIVERY_OTP": {
+        "tool_name": "verify_delivery_otp",
+        "required": ["otp_code"],
+        "action_type": "WRITE",
+        "requires_farm": False,
+        "lifecycle_mode": "UPDATE",
+        "handled_by_flow": True,
+        "label": "Confirmation de livraison par code secret (débloque le paiement séquestré)",
+        "label_map": {
+            "otp_code": "code de livraison à 4 chiffres",
+        },
     },
 
     # =======================================================================
@@ -828,6 +847,17 @@ _TUNNEL_ASSIGNMENTS = {
     "MARKET_BROWSE_REQUESTS": "producer_auction",
     "MARKET_GET_MY_PROPOSALS": "producer_auction",
     "SALES_PLACE_BID": "producer_auction",
+    # Mise à jour (catalogue / production future) : gèrent leur PROPRE
+    # confirmation en interne (corrections vs annulation vs validation),
+    # jamais confirmation_gate/mcp_tool_executor génériques — voir
+    # flows/producer/flow.py::_resolve_product_for_update /
+    # _resolve_cycle_for_update.
+    "SALES_UPDATE_PRODUCT": "producer_update",
+    "SALES_UPDATE_PRODUCTION": "producer_update",
+    # Escrow (Paydunya) : gère sa propre extraction/validation de code, jamais
+    # confirmation_gate/mcp_tool_executor génériques — voir
+    # flows/producer/flow.py::_resolve_delivery_otp.
+    "PRODUCER_CONFIRM_DELIVERY_OTP": "producer_escrow",
 }
 
 _BREAKOUT_INTENTS = (
@@ -874,6 +904,7 @@ INTENT_ROLE = {
     "SALES_GET_CATALOG": "PRODUCER",
     "SALES_UPDATE_PRODUCT": "PRODUCER",
     "SALES_UPDATE_PRODUCTION": "PRODUCER",
+    "PRODUCER_CONFIRM_DELIVERY_OTP": "PRODUCER",
     "MARKET_GET_MY_PROPOSALS": "PRODUCER",
     # PROCUREMENT — buyer
     "PROCUREMENT_CREATE_REQUEST": "BUYER",
@@ -1002,6 +1033,18 @@ INTENT_DISAMBIGUATION = {
             "j'ai", "j ai", "récolte", "recolte", "disponible", "en stock", "stocké",
             "poussin", "poussins", "veau", "veaux", "agneau", "agneaux", "chevreau",
             "semis", "jeune plant", "jeunes plants", "en cours de croissance",
+            # Verbes de vente/publication BRUTS (sans info de disponibilité) :
+            # "je veux publier des chèvres", "vendre des tomates"... doivent
+            # TOUJOURS demander "prêt maintenant ou plus tard ?" plutôt que de
+            # laisser le LLM router seul (il biaise les ANIMAUX vers la
+            # production future / précommande — voir DECLARE_CROP_CYCLE, label
+            # "élevage... précommande"). Décision produit 2026-08-05 : toujours
+            # désambiguïser ce cas. Les entités déjà extraites (quantité/prix)
+            # sont sauvegardées par semantic_disambiguation avant le menu, donc
+            # aucun tour perdu — juste un choix explicite en 2 boutons.
+            "publier", "publie", "publiez", "mettre en vente", "mets en vente",
+            "mise en vente", "vendre", "proposer", "propose",
+            "mettre sur le marché", "mettre sur le marche",
         ],
     },
     # "Je veux vendre" / "espace vendeur" — le producteur exprime une intention
@@ -1083,14 +1126,24 @@ INTENT_DISAMBIGUATION = {
         "lexical_hints": ["reprendre", "reprends", "reprenons", "continuer", "continue", "continuer ma commande", "retour"],
     },
     "ORDER_TRACKING_INTENT": {
-        "candidates": ["BUYER_CHECK_ORDER_STATUS", "BUYER_LIST_ORDERS", "BUYER_CANCEL_ORDER"],
+        # Refonte double-rôle : "mes commandes" est structurellement ambigu
+        # pour un utilisateur qui peut être acheteur ET producteur — sans la
+        # 4ᵉ option (commandes REÇUES sur ses produits), un producteur qui
+        # tape "mes commandes" se voyait proposer un menu 100% acheteur
+        # (statut / liste / annulation d'une commande PASSÉE), sans aucune
+        # issue vers ce qu'il cherchait réellement. Voir SALES_LIST_ORDERS
+        # (`tool_name=get_producer_orders`, PRODUCER, intent.py).
+        "candidates": [
+            "BUYER_CHECK_ORDER_STATUS", "BUYER_LIST_ORDERS", "BUYER_CANCEL_ORDER",
+            "SALES_LIST_ORDERS",
+        ],
         "title": "Que souhaitez-vous faire concernant vos commandes ?",
         "options": [
-            ("BUYER_CHECK_ORDER_STATUS", "📋 Voir le statut d'une commande"),
-            ("BUYER_LIST_ORDERS", "📦 Lister toutes mes commandes"),
-            ("BUYER_CANCEL_ORDER", "❌ Annuler une commande"),
+            ("BUYER_CHECK_ORDER_STATUS", "📋 Voir le statut d'une commande que j'ai passée"),
+            ("BUYER_LIST_ORDERS", "📦 Lister toutes les commandes que j'ai passées"),
+            ("BUYER_CANCEL_ORDER", "❌ Annuler une commande que j'ai passée"),
+            ("SALES_LIST_ORDERS", "🧾 Voir les commandes reçues sur mes produits"),
         ],
-        "roles": ["BUYER"],
         "lexical_hints": [
             "ma commande", "mes commandes", "où est", "statut", "status",
             "suivi", "suivre", "tracking", "livraison", "annuler commande",

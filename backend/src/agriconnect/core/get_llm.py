@@ -61,6 +61,30 @@ def get_groq_sdk(force_refresh: bool = False) -> Any:
     return _GROQ_SDK_SINGLETON
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    try:
+        from groq import RateLimitError
+        if isinstance(exc, RateLimitError):
+            return True
+    except ImportError:
+        pass
+    status_code = getattr(exc, "status_code", None)
+    return status_code == 429
+
+
+def _fallback_model_for(requested_model: str) -> Optional[str]:
+    """Modèle de repli à quota TPD séparé, ou None si aucun repli pertinent
+    (déjà sur le modèle rapide, ou modèle demandé inconnu)."""
+    try:
+        from agriconnect.core.settings import settings
+        fast_model = str(getattr(settings, "LLM_MODEL", "") or "")
+    except Exception:
+        fast_model = ""
+    if not fast_model or requested_model == fast_model:
+        return None
+    return fast_model
+
+
 class _NormalizedChatResponse:
     """Minimal wrapper to expose `.choices[0].message.content` as expected
     by the callers in the codebase.
@@ -145,11 +169,38 @@ class _GroqAdapter:
                         try:
                             resp = chat.completions.create(**kwargs)
                         except Exception as call_exc:
-                            # Erreur API LLM (rate limit / timeout / …) : on la
-                            # journalise dans la télémétrie AVANT de la propager.
-                            _err = f"{type(call_exc).__name__}: {call_exc}"
-                            _emit(None, None)
-                            raise
+                            # Repli automatique : un 429 (quota journalier épuisé
+                            # côté Groq) sur le modèle de raisonnement ne doit PAS
+                            # bloquer tout le pipeline (onboarding, interprétation
+                            # d'intent) — chaque modèle Groq a son propre quota
+                            # TPD séparé, donc un essai unique sur le modèle
+                            # rapide (settings.LLM_MODEL) reste une dégradation
+                            # fonctionnelle (moins fin, mais opérationnel) plutôt
+                            # qu'un blocage total. On ne retente QUE sur
+                            # RateLimitError, et seulement si un modèle
+                            # différent est disponible — jamais sur les autres
+                            # erreurs (auth, 5xx, timeout…) pour ne pas masquer
+                            # un vrai incident ni doubler la latence pour rien.
+                            is_rate_limit = _is_rate_limit_error(call_exc)
+                            fallback_model = _fallback_model_for(_model)
+                            if is_rate_limit and fallback_model:
+                                logger.warning(
+                                    "GROQ_RATE_LIMIT_FALLBACK | model=%s -> %s | %s",
+                                    _model, fallback_model, call_exc,
+                                )
+                                fallback_kwargs = dict(kwargs)
+                                fallback_kwargs["model"] = fallback_model
+                                try:
+                                    resp = chat.completions.create(**fallback_kwargs)
+                                    _model = fallback_model
+                                except Exception as fallback_exc:
+                                    _err = f"{type(fallback_exc).__name__}: {fallback_exc}"
+                                    _emit(None, None)
+                                    raise fallback_exc
+                            else:
+                                _err = f"{type(call_exc).__name__}: {call_exc}"
+                                _emit(None, None)
+                                raise
                         # If the SDK already returns an object with choices[0].message.content,
                         # return it directly. Otherwise, try to coerce.
                         if hasattr(resp, "choices"):

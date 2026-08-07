@@ -123,6 +123,7 @@ class Orchestrator:
         workspace_type: str | None = None,
         force_role: bool = False,
         interactive_id: str | None = None,
+        location_shared: bool = False,
     ) -> Dict[str, Any]:
         workspace_id = (phone or "anonymous").strip()
         ws = await self.resolver.resolve(workspace_id, workspace_type)
@@ -136,6 +137,7 @@ class Orchestrator:
                     ws, user_query, phone,
                     force_role=force_role,
                     interactive_id=interactive_id,
+                    location_shared=location_shared,
                 ),
                 timeout=_AGENT_TIMEOUT_SECONDS,
             )
@@ -234,6 +236,7 @@ class Orchestrator:
         *,
         force_role: bool = False,
         interactive_id: str | None = None,
+        location_shared: bool = False,
     ) -> Dict[str, Any]:
         config = {"configurable": {"thread_id": ws.workspace_id}}
         agent_metadata = {
@@ -248,6 +251,10 @@ class Orchestrator:
             # Clic interactif (bouton/liste WhatsApp) : amorce le bypass LLM de
             # input_interpreter. None pour un message texte classique.
             "interactive_selection": interactive_id or None,
+            # Position GPS reçue et DÉJÀ persistée ce tour (webhook, en tâche
+            # de fond) — signal purement conversationnel pour l'étape finale
+            # de l'onboarding (agents/onboarding.py::_step_collect_location).
+            "location_shared": bool(location_shared),
         }
         runtime = build_runtime()
         async with runtime as live_runtime:

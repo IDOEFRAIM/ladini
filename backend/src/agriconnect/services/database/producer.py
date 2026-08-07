@@ -26,6 +26,7 @@ from agriconnect.domain.models import (
     Category,
     BuyerProfile,
 )
+from agriconnect.core.formatting import fmt_num as _fmt_num
 from .base import BaseMixin
 from .common import clean_text, positive_float, normalize_phone, clamp_limit
 from .search import fuzzy_match, similarity_rank
@@ -1013,7 +1014,7 @@ class ProducerMgmtMixin(BaseMixin):
             lines.append(
                 f"\n🌱 *{off['product']}*{eta_txt}\n"
                 f"🔔 {off['reservation_count']} précommande(s) — "
-                f"*{off['reserved_quantity']:g}/{off['available_quantity']:g} {off['unit']}* réservé(s)"
+                f"*{_fmt_num(off['reserved_quantity'])}/{_fmt_num(off['available_quantity'])} {off['unit']}* réservé(s)"
             )
 
         return {
@@ -1374,6 +1375,55 @@ class ProducerMgmtMixin(BaseMixin):
             "count": len(flattened),
             "data": flattened,
         }
+
+    async def list_producer_productions(
+        self,
+        phone: Optional[str] = None,
+        producer_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Liste APLATIE des productions futures / lots (MarketOffer) du producteur.
+
+        Source dédiée pour la sélection « modifier une production » : réutilise
+        get_stocks (logique éprouvée) et aplati les `upcoming_cycles` de chaque
+        exploitation en une liste simple {cycle_id, product_label, quantity,
+        unit, price, estimated_available_at, production_type, farm_name}.
+        """
+        try:
+            lookup_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        except ValueError:
+            return {"status": "error", "message": "Identité producteur introuvable.", "data": []}
+
+        base_res = await self.get_stocks(phone=lookup_phone)
+        if (base_res or {}).get("status") != "success":
+            return base_res
+
+        raw_data = base_res.get("data") or {}
+        farms = raw_data.get("farms", {}) if isinstance(raw_data, dict) else {}
+        if not isinstance(farms, dict):
+            return {"status": "success", "count": 0, "data": []}
+
+        flattened: List[Dict[str, Any]] = []
+        for farm_id, metadata in farms.items():
+            cycles = metadata.get("upcoming_cycles") or []
+            if not isinstance(cycles, list):
+                continue
+            for cycle in cycles:
+                cid = cycle.get("offer_id") or cycle.get("market_offer_id") or cycle.get("id")
+                if not cid:
+                    continue
+                flattened.append({
+                    "cycle_id": str(cid),
+                    "product_label": cycle.get("product_label") or cycle.get("display_label") or cycle.get("species"),
+                    "quantity": cycle.get("available_quantity") or cycle.get("quantity"),
+                    "unit": cycle.get("unit", "KG"),
+                    "price": cycle.get("price_per_unit") or cycle.get("price"),
+                    "estimated_available_at": cycle.get("estimated_available_at") or cycle.get("expected_harvest_date"),
+                    "production_type": cycle.get("production_type"),
+                    "farm_id": farm_id,
+                    "farm_name": metadata.get("farm_name"),
+                })
+
+        return {"status": "success", "count": len(flattened), "data": flattened}
 
     async def add_stock_movement(
         self, 

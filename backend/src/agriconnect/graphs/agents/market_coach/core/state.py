@@ -83,6 +83,12 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # remis à None en fin de tour par post_response_cleanup.
     interactive_selection: Annotated[Optional[str], replace_value]
 
+    # Position GPS reçue et DÉJÀ persistée ce tour (webhook Twilio, en tâche
+    # de fond, découplé de ce pipeline) — signal purement conversationnel pour
+    # l'étape finale de l'onboarding. Amorcé par l'orchestrateur. Éphémère :
+    # remis à False en fin de tour par post_response_cleanup.
+    location_shared: Annotated[bool, replace_value]
+
     normalized_text: Annotated[str, replace_value]
 
     detected_language: Annotated[str, replace_value]
@@ -375,6 +381,17 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
 
     confirmation_summary: Annotated[
         Optional[str],
+        replace_value
+    ]
+
+    # Horodatage (epoch seconds) auquel confirmation_gate a levé cette
+    # confirmation en attente. Sert de garde-fou de péremption : si trop de
+    # temps s'écoule sans réponse claire (oui/non), la confirmation est
+    # abandonnée silencieusement plutôt que ré-affichée indéfiniment sur un
+    # message sans rapport (ex: partage GPS reçu bien après coup). Voir
+    # confirmation_gate.py::_CONFIRMATION_TTL_SECONDS.
+    confirmation_raised_at: Annotated[
+        Optional[float],
         replace_value
     ]
 

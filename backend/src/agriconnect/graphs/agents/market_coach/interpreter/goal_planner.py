@@ -15,8 +15,21 @@ from agriconnect.graphs.agents.market_coach.interpreter.intent import (
 )
 from agriconnect.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
+# Source UNIQUE des clés de menu/sélection volatiles (nodes/cleanup.py) : le
+# purge de verrou sur REJECT DOIT vider exactement le même univers de clés que
+# le nettoyage de fin de tour, sinon un menu périmé survit à une annulation
+# d'intention. Importer d'ici évite une 2e liste qui dériverait.
+from agriconnect.graphs.agents.market_coach.nodes.cleanup import (
+    _GENERIC_SELECTION_KEYS as _MENU_SELECTION_KEYS,
+    _MENU_CACHE_KEYS,
+)
 
 logger = logging.getLogger("AgriConnect.Market.GoalPlanner")
+
+# Verrous de tunnel propres au goal_planner (≠ clés de menu). L'union purgée
+# sur REJECT = ces verrous + tout l'état de menu/sélection (importé ci-dessus).
+_TUNNEL_LOCK_KEYS = ("active_goal", "locked_intent", "step_index")
+_GOAL_LOCK_CLEAR_KEYS = (*_TUNNEL_LOCK_KEYS, *_MENU_SELECTION_KEYS, *_MENU_CACHE_KEYS)
 
 
 # ── Shared constants (also used by routing.py interpreter) ──────────
@@ -54,6 +67,11 @@ _BUYER_PRODUCT_HINTS = (
     "j'ai besoin",
     "cherche",
 )
+# Marqueurs de SUIVI/gestion d'une commande existante (≠ acte d'achat). Ils
+# désactivent le repli "demande produit". IMPORTANT : ces marqueurs sont
+# comparés au MOT ENTIER (borne \b), pas en sous-chaîne — sinon "commander"
+# (= acheter) était capté par "commande" (= ma commande à suivre) et l'achat
+# retombait à tort sur le suivi de commandes.
 _BUYER_PRODUCT_EXCLUDES = (
     "commande",
     "commandes",
@@ -61,8 +79,6 @@ _BUYER_PRODUCT_EXCLUDES = (
     "statut",
     "paiement",
     "appels",
-    "appel d'offres",
-    "appel d offres",
     "appel",
     "prix",
 )
@@ -93,6 +109,10 @@ _BUYER_FILLER_WORDS = frozenset({
     "ai",
     "pour",
     "acheter",
+    # "commander"/"commandez" = verbe d'achat, jamais un produit : filtré de
+    # l'extraction pour que "je veux commander des tomates" donne "tomates".
+    "commander",
+    "commandez",
 })
 
 
@@ -101,11 +121,26 @@ def _looks_like_buyer_product_request(clean_text: str) -> bool:
         return False
     if not any(hint in clean_text for hint in _BUYER_PRODUCT_HINTS):
         return False
-    if any(ex in clean_text for ex in _BUYER_PRODUCT_EXCLUDES):
+    if any(_re.search(rf"\b{_re.escape(ex)}\b", clean_text) for ex in _BUYER_PRODUCT_EXCLUDES):
         return False
     tokens = _re.findall(r"[a-zàâçéèêëîïôûùüÿñæœ']+", clean_text)
     meaningful = [t for t in tokens if t not in _BUYER_FILLER_WORDS]
     return bool(meaningful)
+
+
+def _extract_buyer_product(clean_text: str) -> Optional[str]:
+    """Extraction déterministe du produit d'une demande d'achat.
+
+    Utilisée UNIQUEMENT en repli quand le LLM est indisponible (429/timeout) :
+    retire les mots de remplissage et les verbes d'achat, garde les tokens
+    porteurs de sens. Ce n'est PAS le chemin nominal — dès que le LLM répond,
+    c'est lui qui extrait le produit.
+    """
+    if not clean_text:
+        return None
+    tokens = _re.findall(r"[a-zàâçéèêëîïôûùüÿñæœ']+", clean_text)
+    meaningful = [t for t in tokens if t not in _BUYER_FILLER_WORDS]
+    return " ".join(meaningful) if meaningful else None
 
 
 # ── Goal planner node ──────────────────────────────────────────────
@@ -170,20 +205,12 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         return wm
 
     def _clear_goal_lock() -> Dict[str, Any]:
-        """Conserve les caches, supprime uniquement les verrous de tunnel/UI."""
+        """Sur REJECT/annulation : supprime les verrous de tunnel ET tout
+        l'état de menu/sélection (univers de clés partagé avec nodes/cleanup.py,
+        source unique — cf. `_GOAL_LOCK_CLEAR_KEYS`), pour ne pas laisser un
+        menu périmé actif après l'abandon de l'intention en cours."""
         wm = dict(working)
-        for k in (
-            "active_goal",
-            "locked_intent",
-            "step_index",
-            "available_mapping_kind",
-            "auction_menu",
-            "bids_menu",
-            "stocks_menu",
-            "generic_menu",
-            "disambiguation_pending",
-            "disambiguation_trigger_id",
-        ):
+        for k in _GOAL_LOCK_CLEAR_KEYS:
             wm.pop(k, None)
         return wm
 
@@ -447,7 +474,14 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
             confidence=confidence,
         )
         new_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
-        if td.allow_interrupt and new_goal and new_goal != current_goal:
+        # `allow_interrupt` protège un tunnel ACTIF d'un déraillement. S'il n'y
+        # a PAS de tunnel actif (`current_goal` vide — ex: un menu orphelin
+        # affiché sans goal de rattachement, comme une liste de commandes
+        # restée à l'écran), il n'y a rien à protéger : une « interruption » de
+        # rien = une nouvelle tâche → on bascule directement. Sans ce
+        # `or not current_goal`, l'utilisateur restait piégé dans le menu, sa
+        # nouvelle demande (« je veux des tomates ») ignorée en boucle.
+        if new_goal and new_goal != current_goal and (td.allow_interrupt or not current_goal):
             if current_goal:
                 goal_stack.append(current_goal)
             return _with_goal_metadata({
@@ -532,17 +566,21 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
             updates["current_goal"] = new_goal
             updates["goal_status"] = "ACTIVE"
             updates["working_memory"] = _lock(new_goal)
-            # NB: previously `if current_goal and new_goal != current_goal`.
-            # After a goal is abandoned (e.g. cognitive_guard's max-retries
-            # branch), `current_goal` is already None, so that guard was
-            # falsy and skipped the purge even though transaction_payload
-            # may still hold the abandoned goal's stale data — the payload
-            # then flowed untouched into this brand-new goal. Purge
-            # whenever the effective goal is changing (None counts as
-            # "changing" too); a no-op purge on an already-empty payload is
-            # harmless.
-            if new_goal != current_goal:
-                updates.update(_purge_transaction_state())
+            # Une NOUVELLE tâche repart TOUJOURS d'un état transactionnel PROPRE.
+            # Les slots de la tâche précédente (produit, quantité, prix...) ne
+            # doivent JAMAIS fuiter dans la nouvelle — les entités du message
+            # courant sont ré-appliquées juste après par memory_update
+            # (extracted_entities), donc rien de légitime n'est perdu.
+            #
+            # Auparavant on ne purgeait que si le goal changeait, ou si le
+            # produit différait. Deux failles : (1) deux demandes d'achat de
+            # suite = même goal BUYER_REQUEST → pas de purge ; (2) une fois
+            # "234 kg" fuité dans le payload sauvegardé AVEC le produit tomates,
+            # la comparaison produit==produit ne purgeait plus jamais → fuite
+            # auto-entretenue dans l'état persistant. Purge inconditionnelle =
+            # résilience : impossible qu'un slot mort survive à une nouvelle
+            # tâche. Une purge sur un payload déjà vide est sans effet.
+            updates.update(_purge_transaction_state())
             logger.info("[GoalPlanner OUT] new_goal=%s", new_goal)
             logger.debug("[GoalPlanner OUT] new_goal=%s", new_goal)
             return _with_goal_metadata(updates)
@@ -563,6 +601,7 @@ __all__ = [
     "_NAVIGATION_INTENTS",
     "_init_intent_to_goal_map",
     "_looks_like_buyer_product_request",
+    "_extract_buyer_product",
     "_BUYER_PRODUCT_HINTS",
     "_BUYER_PRODUCT_EXCLUDES",
     "_BUYER_FILLER_WORDS",

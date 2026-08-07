@@ -108,6 +108,17 @@ class Order(Base):
     delivery_fee = Column(Numeric(14, 2), default=0, nullable=False)
     cancellation_role = Column(String)
     escrow_wallet_id = Column(PG_UUID(as_uuid=True), nullable=True)
+    # --- Escrow Paydunya ---
+    # `payment_status` (ci-dessus) porte désormais aussi : ESCROWED (payé,
+    # fonds bloqués), PAID_OUT (livraison confirmée par OTP, fonds débloqués),
+    # REFUNDED — en plus des valeurs existantes PENDING/PAID/CANCELLED.
+    # Colonnes ajoutées après coup — voir services/database/common.py::
+    # SCHEMA_COLUMN_DDL pour l'ALTER TABLE idempotent correspondant (pas
+    # d'Alembic dans ce repo).
+    paydunya_invoice_token = Column(String, nullable=True)
+    delivery_otp = Column(String, nullable=True)
+    payment_expires_at = Column(DateTime, nullable=True)
+    locked_amount = Column(Numeric(14, 2), nullable=True)
     market_offer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.market_offers.id"))
     expected_fulfillment_date = Column(DateTime)
     preorder_converted_at = Column(DateTime)

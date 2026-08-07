@@ -221,6 +221,8 @@ def prep_sales_update_product(state: Mapping[str, Any], payload: Mapping[str, An
         product_id=dto.product_id,
         price=dto.price,
         quantity=dto.quantity,
+        name=dto.name,
+        unit=dto.unit,
     )
 
     service = SalesService(context=context)

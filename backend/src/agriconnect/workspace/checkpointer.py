@@ -472,8 +472,19 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
            never receives the full transcript.
         4. Attach a synthetic ``summary`` block describing the retained data so
            orchestration/monitoring layers can introspect without inflating size.
-        5. If the resulting payload still exceeds ``_MAX_PERSISTED_BYTES``, fall
-           back to a summary-only payload (namespaces wiped) to protect Postgres.
+        5. If STILL too big, drop known-safe, non-essential CHANNELS from
+           inside the remaining checkpoint itself (see ``_shrink_channel_values``)
+           — debug/ephemeral fields, never the live-tunnel ones (``active_cart``,
+           ``preorder_workflow``, ``transaction_payload``, ``current_goal``...).
+        6. Only as an absolute last resort, if the payload is STILL too big even
+           after (5), fall back to a summary-only payload (namespaces wiped).
+           ⚠️ This is intentionally a LAST resort, not a first response: wiping
+           `namespaces` means the NEXT turn's `aget_tuple` finds no checkpoint at
+           all, so LangGraph restarts every channel at its type default — this is
+           what silently emptied `active_cart` mid-precommande (buyer selection
+           "1" was then read as "cart_items=0", branching into "add a product"
+           instead of "confirm order"). Step (5) exists specifically to avoid
+           reaching this branch in the common case.
         """
 
         if not isinstance(state, dict):
@@ -516,12 +527,71 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
             "total_namespaces": len(namespaces),
             "total_checkpoints": summary.get("total_checkpoints", 0),
         }
+
+        if payload_bytes > _MAX_PERSISTED_BYTES:
+            shrunk_channels = self._shrink_oversized_checkpoints(namespaces)
+            if shrunk_channels:
+                payload_bytes = len(json.dumps(trimmed, ensure_ascii=False).encode("utf-8"))
+                metrics["payload_bytes"] = payload_bytes
+                metrics["shrunk_channels"] = shrunk_channels
+                logger.warning(
+                    "WorkspaceCheckpointer payload exceeded %s bytes — dropped ephemeral "
+                    "channels %s to avoid a full wipe (new size %s)",
+                    _MAX_PERSISTED_BYTES, sorted(shrunk_channels), payload_bytes,
+                )
+
+        # Tier 2 : les canaux PROTÉGÉS (working_memory en tête — jamais
+        # candidats à `_shrink_oversized_checkpoints`, qui ne touche que les
+        # canaux éphémères) ne devraient JAMAIS porter une valeur individuelle
+        # énorme : ce sont des flags, des libellés de menu, des ids courts.
+        # Un incident vécu en prod (585-6-cb...) : deux flows y stockaient
+        # sans le savoir des dumps bruts de réponse MCP (`bids_cache`/
+        # `stocks_cache`) jamais lus nulle part, jamais nettoyés par aucun des
+        # 3 mécanismes de cleanup existants (nodes/cleaner.py, nodes/
+        # cleanup.py, goal_planner._clear_goal_lock) — 600 Ko à eux seuls,
+        # assez pour déclencher le wipe total ci-dessous. La source a été
+        # corrigée, mais compter uniquement sur "chaque flow pense à
+        # nettoyer sa propre clé" a déjà échoué deux fois (voir aussi
+        # `fetched_data_cache`, jamais écrit mais toujours "nettoyé"). Ce
+        # filet de sécurité générique élague toute clé individuelle
+        # anormalement grosse dans un canal protégé AVANT le wipe complet —
+        # il protège contre la PROCHAINE fuite de ce type, pas seulement
+        # celle déjà connue.
+        if payload_bytes > _MAX_PERSISTED_BYTES:
+            shrunk_subkeys = self._shrink_oversized_protected_subkeys(namespaces)
+            if shrunk_subkeys:
+                payload_bytes = len(json.dumps(trimmed, ensure_ascii=False).encode("utf-8"))
+                metrics["payload_bytes"] = payload_bytes
+                metrics["shrunk_subkeys"] = shrunk_subkeys
+                logger.warning(
+                    "WorkspaceCheckpointer payload still exceeded %s bytes — dropped "
+                    "oversized individual keys %s inside protected channels to avoid a "
+                    "full wipe (new size %s)",
+                    _MAX_PERSISTED_BYTES, sorted(shrunk_subkeys), payload_bytes,
+                )
+
         if payload_bytes > _MAX_PERSISTED_BYTES:
             logger.warning(
-                "WorkspaceCheckpointer payload exceeded %s bytes (%s) — persisting summary only",
+                "WorkspaceCheckpointer payload STILL exceeds %s bytes (%s) after channel "
+                "shrink — persisting summary only (last resort: this wipes the live "
+                "tunnel state — active_cart/current_goal/transaction_payload — for the "
+                "NEXT turn, since aget_tuple() will find no checkpoint to resume from)",
                 _MAX_PERSISTED_BYTES,
                 payload_bytes,
             )
+            # Diagnostic uniquement (aucun effet sur le payload persisté) : le
+            # shrink des canaux "sûrs" (_SHRINKABLE_CHANNELS) n'a pas suffi, ce
+            # qui veut dire que le vrai gonflement vient d'un canal PROTÉGÉ
+            # (active_cart/working_memory/transaction_payload/stable_entities/
+            # ...) — sans savoir LEQUEL, on ne peut pas corriger sans risquer
+            # de supprimer un champ dont le tunnel a réellement besoin. On
+            # journalise donc la taille de chaque canal pour que la PROCHAINE
+            # occurrence en prod désigne le coupable exact.
+            try:
+                for _line in self._describe_channel_sizes(namespaces):
+                    logger.warning("WorkspaceCheckpointer channel size breakdown | %s", _line)
+            except Exception:
+                logger.debug("Channel size breakdown failed (non-blocking)", exc_info=True)
             trimmed = {
                 "version": _STATE_VERSION,
                 "namespaces": {},
@@ -535,6 +605,168 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
 
         metrics["summary_ts"] = summary.get("ts")
         return trimmed, metrics
+
+    # Channels whose loss is safe / low-impact — all are recomputed from
+    # scratch on the next turn that needs them, and NONE of them carry
+    # cross-turn tunnel continuity. NEVER add active_cart, preorder_workflow,
+    # transaction_payload, current_goal, working_memory, stable_entities, or
+    # anything else a resumed conversation depends on to this list.
+    _SHRINKABLE_CHANNELS = frozenset({
+        "tool_execution_history",
+        "execution_result",
+        "raw_analysis",
+        "cognitive_decision",
+        "intent_competition",
+        "fallback_recommendations",
+        "chat_history",
+        "conversation_history",
+        "messages",
+        "turn_history",
+        "events",
+    })
+
+    # No legitimate value inside a protected dict-shaped channel (flags,
+    # goal names, short ids, rendered menu TEXT) should ever approach this —
+    # anything bigger is leaked/misplaced raw data (a full MCP response, a
+    # product catalog...), not conversational bookkeeping.
+    _MAX_PROTECTED_SUBKEY_BYTES = 10_000  # 10 KB
+    _PROTECTED_DICT_CHANNELS = frozenset({
+        "working_memory",
+        "stable_entities",
+        "volatile_entities",
+    })
+
+    def _shrink_oversized_protected_subkeys(self, namespaces: Dict[str, Any]) -> set:
+        """Tier-2 defense: prune individual oversized keys inside protected
+        dict-shaped channels (``_PROTECTED_DICT_CHANNELS``) — these channels
+        themselves are never wiped wholesale (needed for tunnel continuity),
+        but no single key inside them should legitimately be this large.
+        Runs only when dropping whole ``_SHRINKABLE_CHANNELS`` wasn't enough.
+
+        Returns the set of ``"<channel>.<key>"`` labels actually dropped.
+        """
+        dropped: set = set()
+        for bucket in namespaces.values():
+            if not isinstance(bucket, dict):
+                continue
+            checkpoints = bucket.get("checkpoints")
+            if not isinstance(checkpoints, dict):
+                continue
+            for checkpoint_id, entry in checkpoints.items():
+                encoded = entry.get("checkpoint")
+                if not isinstance(encoded, dict):
+                    continue
+                try:
+                    checkpoint = _SerializedValue(**encoded).decode(self.serde)
+                    channel_values = checkpoint.get("channel_values")
+                    if not isinstance(channel_values, dict):
+                        continue
+                    local_dropped = False
+                    for channel_name in self._PROTECTED_DICT_CHANNELS:
+                        sub = channel_values.get(channel_name)
+                        if not isinstance(sub, dict):
+                            continue
+                        for key, value in list(sub.items()):
+                            try:
+                                size = len(
+                                    json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
+                                )
+                            except Exception:
+                                continue
+                            if size > self._MAX_PROTECTED_SUBKEY_BYTES:
+                                sub[key] = None
+                                dropped.add(f"{channel_name}.{key}")
+                                local_dropped = True
+                    if local_dropped:
+                        entry["checkpoint"] = asdict(
+                            _SerializedValue.encode(self.serde, checkpoint)
+                        )
+                except Exception:
+                    logger.debug(
+                        "Protected sub-key shrink failed for checkpoint %s (non-blocking)",
+                        checkpoint_id, exc_info=True,
+                    )
+                    continue
+        return dropped
+
+    def _shrink_oversized_checkpoints(self, namespaces: Dict[str, Any]) -> set:
+        """Drop known-safe, high-volume channels from the checkpoint(s) still
+        held after steps 1-4, in place, to avoid the destructive full-wipe
+        fallback. Decodes/re-encodes via ``self.serde`` since the checkpoint is
+        stored as an opaque base64 blob (``_SerializedValue``), not raw JSON.
+
+        Returns the set of channel names actually dropped (empty if nothing
+        could be shrunk, e.g. unexpected checkpoint shape — caller then falls
+        through to the last-resort wipe).
+        """
+        dropped: set = set()
+        for bucket in namespaces.values():
+            if not isinstance(bucket, dict):
+                continue
+            checkpoints = bucket.get("checkpoints")
+            if not isinstance(checkpoints, dict):
+                continue
+            for checkpoint_id, entry in checkpoints.items():
+                encoded = entry.get("checkpoint")
+                if not isinstance(encoded, dict):
+                    continue
+                try:
+                    checkpoint = _SerializedValue(**encoded).decode(self.serde)
+                    channel_values = checkpoint.get("channel_values")
+                    if not isinstance(channel_values, dict):
+                        continue
+                    local_dropped = False
+                    for channel in self._SHRINKABLE_CHANNELS:
+                        if channel in channel_values:
+                            del channel_values[channel]
+                            dropped.add(channel)
+                            local_dropped = True
+                    if local_dropped:
+                        entry["checkpoint"] = asdict(
+                            _SerializedValue.encode(self.serde, checkpoint)
+                        )
+                except Exception:
+                    # Never let a shrink attempt break persistence — worst case
+                    # the caller falls through to the last-resort full wipe.
+                    logger.debug(
+                        "Channel shrink failed for checkpoint %s (non-blocking)",
+                        checkpoint_id, exc_info=True,
+                    )
+                    continue
+        return dropped
+
+    def _describe_channel_sizes(self, namespaces: Dict[str, Any], top_n: int = 12) -> list:
+        """Decode the retained checkpoint(s) and return '<channel>: <bytes>'
+        lines sorted largest-first — diagnostic-only, called right before the
+        last-resort full wipe to identify which PROTECTED channel (one that
+        `_shrink_oversized_checkpoints` never touches) is actually oversized.
+        """
+        lines: list = []
+        for bucket in namespaces.values():
+            if not isinstance(bucket, dict):
+                continue
+            checkpoints = bucket.get("checkpoints")
+            if not isinstance(checkpoints, dict):
+                continue
+            for checkpoint_id, entry in checkpoints.items():
+                encoded = entry.get("checkpoint")
+                if not isinstance(encoded, dict):
+                    continue
+                checkpoint = _SerializedValue(**encoded).decode(self.serde)
+                channel_values = checkpoint.get("channel_values")
+                if not isinstance(channel_values, dict):
+                    continue
+                sizes = []
+                for channel, value in channel_values.items():
+                    try:
+                        size = len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
+                    except Exception:
+                        size = -1
+                    sizes.append((channel, size))
+                sizes.sort(key=lambda pair: pair[1], reverse=True)
+                for channel, size in sizes[:top_n]:
+                    lines.append(f"checkpoint={checkpoint_id} channel={channel} bytes={size}")
+        return lines
 
     def _apply_message_windows(
         self,

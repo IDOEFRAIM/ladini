@@ -26,10 +26,8 @@ def _route_after_security(state: MarketAgentState) -> str:
 
 def _route_after_resolver(state: MarketAgentState) -> str:
     """Redirige si l'état nécessite une interaction ou s'il est prêt pour confirmation."""
-    # If a DRY form was activated by the resolver (e.g., procurement escalation),
-    # jump directly to form_node to collect the next slot within the same turn.
-    if state.get("active_form"):
-        return "to_form"
+    # NB : le moteur formulaire DRY (form_node) a été retiré — plus aucun
+    # resolver n'active `active_form`, donc plus de branche `to_form` ici.
     status = str(state.get("status") or "").upper()
     if status in {"WAITING_INPUT", "ERROR", "COMPLETED"}:
         return "to_strategy"

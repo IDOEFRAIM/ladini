@@ -11,15 +11,50 @@ from typing import Any, Dict
 # assuré au tour SUIVANT par input_normalizer (mécanisme historique).
 
 
-_VOLATILE_WORKING_KEYS = (
+# Bookkeeping keys the generic SELECTION-resolution machinery needs
+# regardless of which specific menu is on screen — always safe/cheap to keep
+# while a selection is pending.
+_GENERIC_SELECTION_KEYS = (
     "available_mapping_kind",
+    "disambiguation_pending",
+    "disambiguation_trigger_id",
+)
+
+# Per-flow rendered-menu TEXT caches. Each one can only legitimately be
+# "the menu currently awaiting a reply" for the specific goal(s) that write
+# it — see `_MENU_CACHE_OWNERS` below.
+_MENU_CACHE_KEYS = (
     "auction_menu",
     "bids_menu",
     "stocks_menu",
     "generic_menu",
-    "disambiguation_pending",
-    "disambiguation_trigger_id",
 )
+
+_VOLATILE_WORKING_KEYS = _GENERIC_SELECTION_KEYS + _MENU_CACHE_KEYS
+
+# Goal(s) that legitimately own each menu-cache key. Previously ALL FOUR
+# keys were blanket-preserved whenever ANY selection menu was pending
+# (`keep_selection_channel`), regardless of which one was actually shown
+# this turn — so a stale menu cache set by an unrelated flow earlier in a
+# long conversation (e.g. `bids_menu` from viewing offers) never got
+# cleared as long as *some* selection menu kept coming up later (a cart
+# menu, a disambiguation menu...). Combined with the raw-data caches that
+# used to ride alongside these text menus (`bids_cache`/`stocks_cache`,
+# removed at the source — see procurement.py/flow.py), this single-turn
+# checkpoint state ballooned to 665KB and blew the WorkspaceCheckpointer's
+# 480KB limit, wiping the whole tunnel (cart/goal/draft) for the next turn.
+# Scoping preservation to the goal that actually owns the key closes the
+# general leak, not just the one instance that happened to be raw data.
+_MENU_CACHE_OWNERS: Dict[str, frozenset] = {
+    "bids_menu": frozenset({"MARKET_GET_REQUEST_DETAIL", "SALES_ACCEPT_CONTRACT"}),
+    "stocks_menu": frozenset({
+        "STOCK_ADJUST", "STOCK_REMOVE_PARTIAL", "STOCK_RECORD_MOVEMENT", "STOCK_DELETE",
+    }),
+    # auction_menu / generic_menu: no reachable code path currently writes
+    # them with real content (dead references kept only for backward
+    # compatibility with any checkpoint that still carries them) — never
+    # preserved.
+}
 
 _MERGE_DICT_RESET = {"__reset__": True}
 
@@ -48,6 +83,7 @@ _EPHEMERAL_REPLACE_FIELDS = {
     "selected_tool": None,
     "retry_count": 0,
     "confirmation_summary": None,
+    "confirmation_raised_at": None,
     "execution_authorized": False,
     "waiting_for_confirmation": False,
     "is_certified": False,
@@ -65,6 +101,11 @@ _EPHEMERAL_REPLACE_FIELDS = {
     # persisté re-court-circuiterait l'interpréteur au tour suivant (texte libre
     # ignoré). Voir input_interpreter bypass + [[market-coach-turn-boundary-state]].
     "interactive_selection": None,
+    # Position GPS reçue ce tour (webhook) : strictement mono-tour, même
+    # principe que interactive_selection — sans reset, un True persisté
+    # ferait croire à l'onboarding qu'une position vient d'arriver à un tour
+    # ultérieur sans rapport.
+    "location_shared": False,
 }
 
 
@@ -85,7 +126,13 @@ async def post_response_cleanup(state: Dict[str, Any], mc_runtime: Any) -> Dict[
 
     working = dict(state.get("working_memory") or {})
     if working:
-        preserved = set(_VOLATILE_WORKING_KEYS) if keep_selection_channel else set()
+        current_goal = str(state.get("current_goal") or "").upper().strip()
+        preserved: set = set()
+        if keep_selection_channel:
+            preserved.update(_GENERIC_SELECTION_KEYS)
+            for key, owner_goals in _MENU_CACHE_OWNERS.items():
+                if current_goal in owner_goals:
+                    preserved.add(key)
         for key in _VOLATILE_WORKING_KEYS:
             if key not in preserved:
                 working[key] = None
@@ -107,9 +154,27 @@ async def post_response_cleanup(state: Dict[str, Any], mc_runtime: Any) -> Dict[
             patch[field] = _MERGE_DICT_RESET
 
     # Reset replace_value ephemeral fields
-    _confirmation_preserved = {"waiting_for_confirmation", "confirmation_summary"}
+    # NB : `current_goal` DOIT survivre tant qu'une confirmation générique OU
+    # un tunnel auto-géré basé sur un menu (SELECTION — ex: précommande
+    # panier) est légitimement en attente — sans ça, le tour suivant repart
+    # avec goal="" : confirmation_gate reconstruit un récap vide ("Validation
+    # de l'opération : (quantité : 973 KG...)"), ou un tunnel SELECTION comme
+    # la précommande n'est plus reconnu par le DomainRouter (goal absent des
+    # règles) et tombe dans confirmation_gate avec un goal vide — même bug,
+    # deux portes d'entrée. `confirmation_raised_at` doit survivre pour le
+    # garde-fou de péremption (voir confirmation_gate.py).
+    _confirmation_preserved = {
+        "waiting_for_confirmation",
+        "confirmation_summary",
+        "current_goal",
+        "confirmation_raised_at",
+    }
+    _keep_goal_channel = keep_confirmation_channel or keep_selection_channel
     for field, default in _EPHEMERAL_REPLACE_FIELDS.items():
-        if keep_confirmation_channel and field in _confirmation_preserved:
+        if field == "current_goal":
+            if _keep_goal_channel:
+                continue
+        elif keep_confirmation_channel and field in _confirmation_preserved:
             continue
         current = state.get(field)
         if current is not None and current != default:

@@ -63,7 +63,6 @@ from agriconnect.graphs.agents.market_coach.nodes.clarification import clarifica
 from agriconnect.graphs.agents.market_coach.nodes.cognitive import cognitive_guard, cognitive_orchestrator
 from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import confirmation_gate
 from agriconnect.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
-from agriconnect.graphs.agents.market_coach.nodes.form_node import form_node
 from agriconnect.graphs.agents.market_coach.nodes.input_normalizer import input_normalizer
 from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
 from agriconnect.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
@@ -82,54 +81,30 @@ from agriconnect.graphs.agents.market_coach.nodes.validation import validator
 
 logger = logging.getLogger("AgriConnect.Market.GraphBuilder")
 
-# Goals that are handled by the DRY form engine instead of direct slot-filling
-_FORM_GOALS = {
-    "SALES_PUBLISH_PRODUCT": "PRODUCT_CREATE",
-    "PROCUREMENT_CREATE_REQUEST": "AUCTION_CREATE",
-}
+# Moteur de collecte de slots UNIFIÉ : tous les intents WRITE passent par le
+# pipeline générique (validator + memory_update + rendering/ask). Le moteur
+# formulaire DRY (`form_node` + `agents/forms.py`) a été retiré côté MarketCoach
+# (dette architecturale éliminée) — `agents/forms.py` reste utilisé par
+# `src/futur/formation`, on ne le touche pas.
 
 # Buyer transactional tunnel goals — centralisés dans core/goals.py
 # (dérivés d'INTENT_CONFIG). Importés ici uniquement pour les edges.
 
 
 def _route_after_planner(state: MarketAgentState) -> str:
-    """Route after goal_planner: form-eligible goals go to form_node."""
+    """Route after goal_planner. Moteur de collecte unifié : TOUT passe par le
+    pipeline générique (memory_update → validator → ...). Plus aucun goal ne
+    route vers form_node (retiré — voir dette moteur formulaire éliminée)."""
     goal = str(state.get("current_goal") or "").upper()
 
     if goal in BUYER_CART_GOALS:
         return "to_memory"
-
-    # If a form is already active, route to form_node
-    if state.get("active_form"):
-        return "to_form"
-
-    # If the planner just set a form-eligible goal, activate the form
-    if goal in _FORM_GOALS:
-        return "to_form"
 
     status = str(state.get("status") or "").upper()
     if status == "WAITING_INPUT":
         return "to_strategy"
 
     return "to_memory"
-
-
-def _route_after_form(state: MarketAgentState) -> str:
-    """Route after form_node.
-
-    - If form is still collecting (WAITING_INPUT) → response_strategy
-    - If form is asking for confirmation → response_strategy
-    - If form completed → memory_update → validator pipeline
-    """
-    form_step = state.get("form_step")
-    status = str(state.get("status") or "").upper()
-
-    if form_step == "COMPLETE":
-        return "to_memory"
-    if status in {"WAITING_INPUT", "WAITING_CONFIRMATION"}:
-        return "to_strategy"
-    # Default: form is still collecting
-    return "to_strategy"
 
 
 def _route_after_clarification(state: MarketAgentState) -> str:
@@ -174,12 +149,15 @@ def _route_after_cognitive(state: MarketAgentState) -> str:
 
 
 def _make_route_after_interpreter(role: str):
-    """Role-aware conditional router after input_interpreter.
+    """Conditional router after input_interpreter.
 
     Delegates to FastPathPolicy — new tunnel goals are added to the policy
-    registry in core/policies.py, not here.
+    registry in core/policies.py, not here. Refonte double-rôle : le graphe
+    est désormais unique (tunnels acheteur toujours présents), donc la
+    politique la plus permissive (`for_buyer`, superset strict de
+    `for_producer`) s'applique quel que soit le paramètre `role` reçu.
     """
-    policy = get_fast_path_policy(role)
+    policy = get_fast_path_policy("BUYER")
     return policy.route
 
 
@@ -260,15 +238,15 @@ def build_graph(
         ("final_response", final_response),
         ("post_response_cleanup", post_response_cleanup),
         ("onboarding_node", onboarding_node),
-        ("form_node", form_node),
     ]
-    # Nœuds dédiés au tunnel transactionnel Acheteur (sous-graphe buyer_flow).
-    if role_up == "BUYER":
-        node_specs.extend([
-            ("cart_management", cart_management),
-            ("negotiation_gate", negotiation_gate),
-            ("order_tracking_node", order_tracking_resolver),
-        ])
+    # Nœuds du tunnel transactionnel Acheteur — désormais TOUJOURS présents :
+    # refonte double-rôle, tout utilisateur peut acheter ET vendre au sein de
+    # la même conversation (plus de topologie de graphe conditionnée au rôle).
+    node_specs.extend([
+        ("cart_management", cart_management),
+        ("negotiation_gate", negotiation_gate),
+        ("order_tracking_node", order_tracking_resolver),
+    ])
 
     for name, fn in node_specs:
         workflow.add_node(name, partial(_safe_node(fn, name), mc_runtime=mc_runtime))
@@ -315,12 +293,6 @@ def build_graph(
     workflow.add_conditional_edges(
         "goal_planner",
         _route_after_planner,
-        {"to_memory": "memory_update", "to_form": "form_node", "to_strategy": "response_strategy"},
-    )
-
-    workflow.add_conditional_edges(
-        "form_node",
-        _route_after_form,
         {"to_memory": "memory_update", "to_strategy": "response_strategy"},
     )
 
@@ -330,35 +302,29 @@ def build_graph(
     # Nouveaux tunnels s'ajoutent dans core/goals.py + core/router.py, pas ici.
     route_after_validator = domain_router.decide
 
-    if role_up == "BUYER":
-        validator_targets = {
-            "to_resolver": "context_resolver",
-            "to_confirmation": "confirmation_gate",
-            "to_strategy": "response_strategy",
-            "to_cart": "cart_management",
-            "to_negotiation": "negotiation_gate",
-            "to_order_tracking": "order_tracking_node",
-        }
-    else:
-        validator_targets = {
-            "to_resolver": "context_resolver",
-            "to_confirmation": "confirmation_gate",
-            "to_strategy": "response_strategy",
-        }
+    # Cibles toujours complètes (union producteur+acheteur) — un même
+    # utilisateur peut déclencher n'importe quel tunnel selon le goal classé.
+    validator_targets = {
+        "to_resolver": "context_resolver",
+        "to_confirmation": "confirmation_gate",
+        "to_strategy": "response_strategy",
+        "to_cart": "cart_management",
+        "to_negotiation": "negotiation_gate",
+        "to_order_tracking": "order_tracking_node",
+    }
 
     workflow.add_conditional_edges("validator", route_after_validator, validator_targets)
 
-    if role_up == "BUYER":
-        # Tous les nœuds buyer doivent passer par ui_engine pour convertir
-        # pending_menu → ag_ui_component (sinon pas de mapping/candidats).
-        workflow.add_edge("cart_management", "ui_engine")
-        workflow.add_edge("negotiation_gate", "ui_engine")
-        workflow.add_edge("order_tracking_node", "ui_engine")
+    # Tous les nœuds buyer doivent passer par ui_engine pour convertir
+    # pending_menu → ag_ui_component (sinon pas de mapping/candidats).
+    workflow.add_edge("cart_management", "ui_engine")
+    workflow.add_edge("negotiation_gate", "ui_engine")
+    workflow.add_edge("order_tracking_node", "ui_engine")
 
     workflow.add_conditional_edges(
         "context_resolver",
         _route_after_resolver,
-        {"to_confirmation": "confirmation_gate", "to_strategy": "ui_engine", "to_farm_guard": "ensure_farm_node", "to_form": "form_node"},
+        {"to_confirmation": "confirmation_gate", "to_strategy": "ui_engine", "to_farm_guard": "ensure_farm_node"},
     )
 
     # ui_engine transforme pending_menu → ag_ui_component puis passe à response_strategy

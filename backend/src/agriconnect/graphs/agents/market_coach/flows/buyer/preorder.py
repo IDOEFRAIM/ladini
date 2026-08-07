@@ -240,7 +240,17 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
             buyer_phone=phone,
             cart_items=items_payload,
             payment_method=state.get("preferred_payment_method") or "CASH",
-            delivery_zone_id=(state.get("buyer_profile") or {}).get("zone_id"),
+            # `state["buyer_profile"]` n'existe nulle part dans le schéma d'état
+            # (aucun nœud ne l'écrit jamais) — c'était un lookup mort qui
+            # renvoyait toujours None. La zone du profil est chargée par
+            # profile_loader.py au niveau racine de l'état sous `zone_id`
+            # (voir core/state.py). Sans ce fix, `delivery_zone_id` était
+            # TOUJOURS None → create_preorder_draft se rabattait sur
+            # `user_obj.zone_id` en base, et échouait dès que cette valeur
+            # était absente, avec "Veuillez configurer votre zone de
+            # livraison" — même pour un acheteur dont la zone était bien
+            # connue de l'agent (juste jamais transmise).
+            delivery_zone_id=state.get("zone_id"),
         )
 
         preorder_id = draft_res.get("preorder_id") or draft_res.get("id") or "DRAFT"
@@ -294,7 +304,67 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
                 "active_cart": cart,
             }
 
-        # Confirm via MCP
+        from agriconnect.core.settings import settings
+
+        if settings.ESCROW_PAYMENT_ENABLED:
+            # Escrow (Paydunya) : on ne confirme plus directement — on génère
+            # la facture de paiement et on réserve la commande. La
+            # confirmation réelle (débit stock + statut CONFIRMED) n'arrive
+            # qu'à la réception de l'IPN, re-confirmée serveur-à-serveur
+            # auprès de Paydunya (voir EscrowMixin.mark_escrow_paid).
+            from agriconnect.graphs.agents.market_coach.services.mcp.gateway import EscrowGateway
+
+            escrow_res = await EscrowGateway(mc_runtime).initiate_escrow_payment(
+                buyer_phone=phone,
+                preorder_id=str(preorder_id),
+            )
+
+            if not is_success_response(escrow_res) and str(escrow_res.get("status") or "").lower() == "error":
+                return {
+                    "status": "ERROR",
+                    "response_strategy": "ERROR",
+                    "final_response": escrow_res.get("message") or "Impossible de générer le lien de paiement.",
+                    "preorder_workflow": {"phase": "PREORDER_DRAFTED", "preorder_id": preorder_id},
+                    "ag_ui_component": None,
+                }
+
+            order_id = escrow_res.get("order_id") or preorder_id
+            order_number = escrow_res.get("order_number") or f"#CMD-{str(order_id)[:8]}"
+
+            return {
+                "status": "COMPLETED",
+                "response_strategy": "SUCCESS",
+                "final_response": escrow_res.get("message") or (
+                    f"Votre commande #{order_number} est réservée pendant "
+                    f"{escrow_res.get('ttl_hours', 24)}h. Payez via ce lien sécurisé : "
+                    f"{escrow_res.get('checkout_url')}"
+                ),
+                "preorder_workflow": {
+                    "phase": "AWAITING_PAYMENT",
+                    "preorder_id": str(order_id),
+                    "order_number": order_number,
+                },
+                "last_order_summary": {
+                    "order_id": str(order_id),
+                    "order_number": order_number,
+                    "total_amount": escrow_res.get("amount"),
+                    "currency": escrow_res.get("currency"),
+                    "items": cart,
+                },
+                "current_goal": None,
+                "goal_status": "COMPLETED",
+                "active_form": None,
+                "active_cart": [],
+                "transaction_payload": {"__reset__": True},
+                "draft_payload": {"__reset__": True},
+                "working_memory": clear_active_goal(state, clear_cart_snapshot=True),
+                "ag_ui_component": None,
+            }
+
+        # Paiement escrow désactivé (fournisseur Paydunya bloqué côté KYC) :
+        # confirmation directe, paiement à la livraison — comportement
+        # d'avant l'intégration escrow. Débite le stock immédiatement (voir
+        # confirm_preorder_draft), pas d'attente de webhook/IPN.
         confirm_res = await PreorderGateway(mc_runtime).confirm_draft(
             buyer_phone=phone,
             preorder_id=str(preorder_id),
@@ -320,7 +390,8 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
                 f"✅ *Précommande confirmée !*\n\n"
                 f"📦 Référence : *{order_number}*\n"
                 f"💰 Total : {meta.get('total_amount')} {meta.get('currency')}\n"
-                f"📋 {len(cart)} article(s)\n\n"
+                f"📋 {len(cart)} article(s)\n"
+                f"💵 *Paiement à la livraison.*\n\n"
                 f"Les producteurs concernés ont été notifiés. "
                 f"Vous recevrez une confirmation de disponibilité sous peu.\n\n"
                 f"_Tapez *mes commandes* pour suivre votre commande._"

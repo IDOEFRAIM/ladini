@@ -86,6 +86,13 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "get_prohibited_terms": PermissionScope.DB_READ_ONLY,
     "record_moderation_strike": PermissionScope.DB_DATA_WRITE,
     "record_demand_signal": PermissionScope.DB_DATA_WRITE,
+    # Escrow (Paydunya) — explicite plutôt que de laisser le guess automatique
+    # décider, vu la sensibilité (argent bloqué / débloqué).
+    "initiate_escrow_payment": PermissionScope.DB_DATA_WRITE,
+    "mark_escrow_paid": PermissionScope.DB_DATA_WRITE,
+    "verify_delivery_otp": PermissionScope.DB_DATA_WRITE,
+    "expire_pending_payments": PermissionScope.DB_DATA_WRITE,
+    "list_producer_escrowed_orders": PermissionScope.DB_READ_ONLY,
 }
 
 
@@ -162,6 +169,11 @@ TOOL_RISK_MAP: dict[str, RiskLevel] = {
     "alter_table": RiskLevel.CRITICAL,
     "search_agronomy_docs": RiskLevel.LOW,
     "search_past_interactions": RiskLevel.LOW,
+    # Escrow (Paydunya) — argent bloqué/débloqué, mérite le même niveau de
+    # vigilance que la création de commande / staging transactionnel.
+    "initiate_escrow_payment": RiskLevel.HIGH,
+    "verify_delivery_otp": RiskLevel.HIGH,
+    "mark_escrow_paid": RiskLevel.HIGH,
 }
 
 SENSITIVE_COLUMNS = frozenset(

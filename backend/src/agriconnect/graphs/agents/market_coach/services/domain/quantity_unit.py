@@ -157,6 +157,73 @@ def extract_unit_only_from_text(text: str) -> Optional[str]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Currency-aware number scanning (slot-answer classification)
+# ---------------------------------------------------------------------------
+# Used by the interpreter fast-path to classify EACH number in a slot answer
+# as a quantity (unit nearby) or a price (currency nearby). Different from
+# `parse_quantity_unit_from_text` (which only pulls the FIRST adjacent
+# number+unit pair and has no currency notion) — this one scans every number
+# and tags it by its LOCAL neighbourhood so a single message carrying both a
+# quantity and a price ("775 kg ... 175 fcfa") is disambiguated correctly.
+
+#: How many chars around a number to inspect for a unit/currency token.
+#: Covers "234000 fcfa/kg" or "coute 34500 fcfa".
+_SCAN_WINDOW = 18
+
+# ATTENTION — pas de `\b` en TÊTE du nombre : un chiffre et une lettre sont
+# tous deux des caractères \w, donc "60kg"/"10000fcfa" n'ont PAS de frontière
+# de mot entre eux. Seule la frontière de FIN d'unité/devise reste requise
+# (éviter de matcher "cfaXYZ"/"kgXYZ"). Le lookbehind négatif empêche de capter
+# une unité collée À GAUCHE d'une lettre (ex: pas de match dans "packg").
+_SCAN_UNIT_RE = re.compile(
+    r"(?<![a-zàâäéèêëïîôöùûüÿçA-ZÀÂÄÉÈÊËÏÎÔÖÙÛÜŸÇ])"
+    r"(k|kg|kgs|kilo|kilogramme|kilogrammes|ton|tons|tone|tones|tonne|tonnes|t|"
+    r"sac|sacs|sachet|sachets|panier|paniers|tete|têtes|tetes|unite|unité|unites|unités)\b"
+)
+_SCAN_CURRENCY_RE = re.compile(
+    r"(?<![a-zàâäéèêëïîôöùûüÿçA-ZÀÂÄÉÈÊËÏÎÔÖÙÛÜŸÇ])(fcfa|cfa|francs?|balles?)\b"
+)
+_SCAN_NUMBER_RE = re.compile(r"(\d+[\d\s,.]*)")
+
+
+@dataclass(frozen=True)
+class NumberCandidate:
+    """A number found in a slot answer, tagged by its local neighbourhood."""
+    value: float
+    unit: Optional[str]        # canonical unit token near the number, else None
+    near_currency: bool        # a currency word within ``_SCAN_WINDOW`` chars
+
+
+def scan_number_candidates(text: str) -> "list[NumberCandidate]":
+    """Scan every number in *text*, tagging each with its nearby unit / currency.
+
+    Deterministic, currency-aware primitive shared by the interpreter
+    fast-path. `unit` is ALWAYS the mapped unit token found nearby (even when a
+    currency is also near) — the caller decides how to weigh unit vs currency.
+    """
+    clean = (text or "").strip().lower()
+    out: list[NumberCandidate] = []
+    for m in _SCAN_NUMBER_RE.finditer(clean):
+        raw = (m.group(1) or "").replace(" ", "").replace(",", ".")
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        after = clean[m.end():m.end() + _SCAN_WINDOW]
+        before = clean[max(0, m.start() - _SCAN_WINDOW):m.start()]
+        near_currency = bool(_SCAN_CURRENCY_RE.search(after)) or bool(
+            _SCAN_CURRENCY_RE.search(before)
+        )
+        unit_match = _SCAN_UNIT_RE.search(after) or _SCAN_UNIT_RE.search(before)
+        mapped_unit = (
+            UNIT_SYNONYMS.get(normalize_unit_token(unit_match.group(1) or ""))
+            if unit_match else None
+        )
+        out.append(NumberCandidate(value=val, unit=mapped_unit, near_currency=near_currency))
+    return out
+
+
 # Livestock / poultry products are counted per head (TÊTE), never weighed in KG.
 # Defaulting their unit to KG (e.g. "300 poussins" → "300 KG") is a recurring
 # production bug. Keep singular + plural forms; matching is accent-folded.
@@ -203,6 +270,8 @@ __all__ = [
     "parse_quantity_unit_from_text",
     "parse_compound_quantity",
     "extract_unit_only_from_text",
+    "NumberCandidate",
+    "scan_number_candidates",
     "LIVESTOCK_PRODUCT_KEYWORDS",
     "is_livestock_product",
     "default_unit_for_product",

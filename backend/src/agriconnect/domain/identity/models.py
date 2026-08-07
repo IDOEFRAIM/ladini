@@ -44,6 +44,11 @@ class User(Base):
     onboarding_completed = Column(Boolean, nullable=False, server_default=text("false"))
     latitude = Column(Float)
     longitude = Column(Float)
+    # Horodatage de la dernière mise à jour GPS (nullable — l'absence de
+    # position ne doit jamais bloquer un profil). Alimenté par l'ingestion
+    # native Twilio (message de localisation WhatsApp) ou par mise à jour
+    # manuelle ultérieure (menu dédié).
+    location_updated_at = Column(DateTime, nullable=True)
     cnib_number = Column(String, unique=True)
     role = Column(String, default="USER", nullable=False)
     identity_verified = Column(Boolean, default=False)

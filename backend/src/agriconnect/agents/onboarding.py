@@ -28,6 +28,10 @@ class OnboardingStep(str, Enum):
     COLLECT_ZONE = "COLLECT_ZONE"
     CONFIRM_DETAILS = "CONFIRM_DETAILS"
     CREATE_PROFILE = "CREATE_PROFILE"
+    # Dernière étape, STRICTEMENT APRÈS création du profil (jamais bloquante) :
+    # une seule invite GPS, puis l'onboarding se termine quoi qu'il arrive au
+    # tour suivant — voir _step_collect_location.
+    COLLECT_LOCATION = "COLLECT_LOCATION"
     DONE = "DONE"
 
 
@@ -273,6 +277,29 @@ _WELCOME = (
 )
 
 
+# Invite GPS — dernière étape de l'onboarding, jamais bloquante (voir
+# _step_collect_location). Pédagogie explicite car beaucoup d'utilisateurs ne
+# savent pas partager une position WhatsApp du premier coup.
+_LOCATION_PROMPT = (
+    "📍 Pour terminer, partage ta position GPS : clique sur le trombone 📎 de "
+    "WhatsApp puis sur *Localisation* (Position actuelle). Ça nous aide à te "
+    "connecter avec des partenaires proches de chez toi !\n\n"
+    "_Tu peux aussi passer cette étape — tu pourras toujours partager ta "
+    "position plus tard._"
+)
+
+_LOCATION_THANKS = (
+    "📍 Position enregistrée, merci patron ! Tu es maintenant connecté aux "
+    "meilleures opportunités près de chez toi. 🎉"
+)
+
+_LOCATION_SKIPPED = (
+    "Pas de souci, on continue sans ! Tu pourras toujours partager ta "
+    "position plus tard — il te suffira de renvoyer ta localisation à tout "
+    "moment. 😊"
+)
+
+
 def _ack_line(ob_state: OnboardingState) -> str:
     parts: List[str] = []
     if ob_state._filled_slots.get("name") and ob_state.name:
@@ -344,6 +371,7 @@ async def run_onboarding_step(
     *,
     extracted_entities: Optional[Dict[str, Any]] = None,
     llm_extract_all: Optional[BulkExtractor] = None,
+    location_shared: bool = False,
 ) -> OnboardingResult:
     """One-shot slot-filling with free ordering and mid-flow corrections.
 
@@ -354,12 +382,20 @@ async def run_onboarding_step(
       invalidates the confirmation and re-asks it with the new summary.
     - The state machine is data-driven : ``step`` is derived from what is filled,
       not from a rigid sequence.
+    - ``COLLECT_LOCATION`` is the sole EXCEPTION to free ordering : one single
+      shot, always resolved to DONE on the very next turn regardless of
+      content (fail-safe UX — see ``_step_collect_location``).
     """
     ob_state._filled_slots = {}
     text = (user_text or "").strip()
 
     if not isinstance(ob_state.step, OnboardingStep):
         ob_state.step = OnboardingStep.COLLECT_ROLE
+
+    # Étape finale GPS : toujours résolue en un tour, quel que soit le
+    # contenu du message (position partagée ou non) — jamais bloquante.
+    if ob_state.step == OnboardingStep.COLLECT_LOCATION:
+        return _step_collect_location(ob_state, location_shared=location_shared)
 
     # Welcome : cold start (no text yet, no data collected).
     if not text and not ob_state.role and not ob_state.name and not ob_state.zone_name:
@@ -527,6 +563,17 @@ def _build_confirmation_prompt(ob_state: OnboardingState) -> str:
     )
 
 
+def _step_collect_location(ob_state: OnboardingState, location_shared: bool) -> OnboardingResult:
+    """Étape finale, non-bloquante : la position GPS (si envoyée) a déjà été
+    persistée par le webhook Twilio en tâche de fond — cette fonction ne fait
+    que conclure l'onboarding et phraser l'accusé de réception, quel que soit
+    le contenu du message reçu à ce tour."""
+    ob_state.completed = True
+    ob_state.step = OnboardingStep.DONE
+    message = _LOCATION_THANKS if location_shared else _LOCATION_SKIPPED
+    return OnboardingResult(state=ob_state, response_text=message, status="SUCCESS")
+
+
 async def _step_create_profile(
     ob_state: OnboardingState,
     mcp_runtime: Any,
@@ -578,32 +625,33 @@ async def _step_create_profile(
         if result_dict.get("status") == "success" or "data" in result_dict:
             profile = await _reload_profile(mcp_runtime, ob_state.phone)
             ob_state.created_profile = profile
-            ob_state.completed = True
-            ob_state.step = OnboardingStep.DONE
+            # Ne pas conclure ici : dernière étape non-bloquante GPS avant DONE.
+            ob_state.step = OnboardingStep.COLLECT_LOCATION
             ob_state.error = None
             return OnboardingResult(
                 state=ob_state,
                 response_text=(
                     f"✅ *Bienvenue patron {ob_state.name} !* Ton profil est prêt, "
                     f"tu fais maintenant partie de la communauté AgriConnect ! 🎉\n\n"
-                    f"{_role_capabilities_message(ob_state.role)}"
+                    f"{_role_capabilities_message(ob_state.role)}\n\n"
+                    f"{_LOCATION_PROMPT}"
                 ),
                 status="SUCCESS",
             )
-        
+
         # 2. Cas Conflit (Téléphone déjà utilisé)
         error_msg = str(result_dict.get("message", "")).lower()
         if "already exists" in error_msg or "unique" in error_msg:
             profile = await _reload_profile(mcp_runtime, ob_state.phone)
             ob_state.created_profile = profile
-            ob_state.completed = True
-            ob_state.step = OnboardingStep.DONE
+            ob_state.step = OnboardingStep.COLLECT_LOCATION
             return OnboardingResult(
                 state=ob_state,
                 response_text=(
                     f"Content de te revoir patron *{ob_state.name}* ! 😊 "
                     f"Ton compte est déjà actif, on continue !\n\n"
-                    f"{_role_capabilities_message(ob_state.role)}"
+                    f"{_role_capabilities_message(ob_state.role)}\n\n"
+                    f"{_LOCATION_PROMPT}"
                 ),
                 status="SUCCESS",
             )

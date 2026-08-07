@@ -33,8 +33,11 @@ from agriconnect.graphs.agents.market_coach.core.goals import (
     BUYER_AUCTION_TRACKING_GOALS,
     BUYER_PREORDER_GOALS,
     PRODUCER_RESOLVER_GOALS,
+    PRODUCER_UPDATE_GOALS,
+    PRODUCER_ESCROW_GOALS,
 )
 from agriconnect.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
+from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_ROLE
 
 logger = logging.getLogger("AgriConnect.Market.DomainRouter")
 
@@ -80,6 +83,26 @@ def _cart_guard(state: Dict[str, Any]) -> bool:
 def _negotiation_guard(state: Dict[str, Any]) -> bool:
     status = str(state.get("status") or "").upper()
     return tunnel_manager.is_negotiation_routeable(status)
+
+
+def _goal_domain(state: Dict[str, Any]) -> str:
+    """Détermine le domaine (BUYER/PRODUCER) du goal EN COURS, pas de la session.
+
+    Refonte double-rôle : il n'existe plus de "rôle de graphe" — chaque tour
+    peut porter un goal acheteur ou producteur selon ce que l'interpréteur a
+    classé. `INTENT_ROLE` (source unique, `interpreter/intent.py`) reste la
+    référence ; un goal "BOTH" (profil, utilitaires) ou inconnu retombe sur
+    PRODUCER, comme le faisait `graphs.roles.normalize_role` (fail-open).
+    """
+    working_memory = state.get("working_memory") or {}
+    goal = str(
+        state.get("current_goal")
+        or working_memory.get("active_goal")
+        or working_memory.get("locked_intent")
+        or state.get("detected_intent")
+        or ""
+    ).upper()
+    return "BUYER" if INTENT_ROLE.get(goal) == "BUYER" else "PRODUCER"
 
 
 # =====================================================================
@@ -154,9 +177,10 @@ class DomainRouter:
         mc_runtime: Any,
     ) -> DomainResult:
         """Appelle ``buyer_context_resolver`` ou ``producer_context_resolver``
-        selon le rôle, et encapsule le résultat dans un ``DomainResult``.
+        selon le DOMAINE DU GOAL COURANT (pas un rôle de session figé — voir
+        `_goal_domain`), et encapsule le résultat dans un ``DomainResult``.
         """
-        if self._role == "BUYER":
+        if _goal_domain(state) == "BUYER":
             return await self._resolve_buyer(state, mc_runtime)
         return await self._resolve_producer(state, mc_runtime)
 
@@ -182,10 +206,14 @@ class DomainRouter:
         raw = await producer_context_resolver(state, mc_runtime)
         return _wrap_raw_result(raw)
 
-    # ── Factories par rôle ───────────────────────────────────────────
+    # ── Factory unifiée ──────────────────────────────────────────────
+    # Refonte double-rôle : un seul jeu de règles (union producteur+acheteur,
+    # goals disjoints par construction — voir `graphs/roles.py` préfixes), le
+    # domaine effectif étant décidé PAR GOAL dans `resolve()` (`_goal_domain`),
+    # jamais par une instance de rôle figée pour toute la session.
 
     @classmethod
-    def for_buyer(cls) -> "DomainRouter":
+    def build(cls) -> "DomainRouter":
         from agriconnect.graphs.agents.market_coach.interpreter.routing import (
             make_route_after_validator,
         )
@@ -194,25 +222,26 @@ class DomainRouter:
             RouteRule(goals=BUYER_NEGOTIATION_GOALS, target="to_negotiation", guard=_negotiation_guard),
             RouteRule(goals=BUYER_ORDER_TRACKING_GOALS | BUYER_AUCTION_TRACKING_GOALS, target="to_order_tracking"),
             RouteRule(goals=BUYER_PREORDER_GOALS, target="to_resolver"),
+            RouteRule(goals=PRODUCER_RESOLVER_GOALS, target="to_resolver"),
+            RouteRule(goals=PRODUCER_UPDATE_GOALS, target="to_resolver"),
+            RouteRule(goals=PRODUCER_ESCROW_GOALS, target="to_resolver"),
         ]
-        return cls("BUYER", rules=rules, fallback_router=make_route_after_validator("BUYER"))
+        return cls("UNIFIED", rules=rules, fallback_router=make_route_after_validator("UNIFIED"))
+
+    # Compat : anciens points d'appel — renvoient désormais le même routeur
+    # unifié (il n'y a plus de graphe/routeur séparé par rôle).
+    @classmethod
+    def for_buyer(cls) -> "DomainRouter":
+        return cls.build()
 
     @classmethod
     def for_producer(cls) -> "DomainRouter":
-        from agriconnect.graphs.agents.market_coach.interpreter.routing import (
-            make_route_after_validator,
-        )
-        rules = [
-            RouteRule(goals=PRODUCER_RESOLVER_GOALS, target="to_resolver"),
-        ]
-        return cls("PRODUCER", rules=rules, fallback_router=make_route_after_validator("PRODUCER"))
+        return cls.build()
 
 
-def get_domain_router(role: str) -> DomainRouter:
-    """Factory unique — point d'entrée du graph_builder."""
-    if str(role).upper().strip() == "BUYER":
-        return DomainRouter.for_buyer()
-    return DomainRouter.for_producer()
+def get_domain_router(role: str | None = None) -> DomainRouter:
+    """Factory unique — point d'entrée du graph_builder (rôle sans effet)."""
+    return DomainRouter.build()
 
 
 # =====================================================================

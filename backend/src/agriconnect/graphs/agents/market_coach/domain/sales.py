@@ -57,6 +57,8 @@ class SalesUpdateProductCommand:
     product_id: str
     price: Optional[float] = None
     quantity: Optional[float] = None
+    name: Optional[str] = None
+    unit: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -262,9 +264,9 @@ class SalesService:
     def update_product(self, command: SalesUpdateProductCommand) -> DomainResult:
         """Domain logic for updating a published product from a typed command."""
 
-        if command.price is None and command.quantity is None:
+        if command.price is None and command.quantity is None and command.name is None and command.unit is None:
             raise ValueError(
-                "Aucune nouvelle valeur (prix ou quantité) n'a été fournie pour la mise à jour du produit."
+                "Indiquez au moins un champ à modifier (prix, quantité, nom ou unité)."
             )
 
         args: Dict[str, Any] = {
@@ -275,6 +277,10 @@ class SalesService:
             args["price"] = command.price
         if command.quantity is not None:
             args["quantity"] = command.quantity
+        if command.name is not None:
+            args["name"] = command.name
+        if command.unit is not None:
+            args["unit"] = command.unit
 
         return DomainResult(tool_id=ToolId.UPDATE_PRODUCT_PRICE_AND_QTY, tool_args=args)
 

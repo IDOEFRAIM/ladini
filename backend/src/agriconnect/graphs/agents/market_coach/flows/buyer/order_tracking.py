@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from agriconnect.core.formatting import fmt_num as _fmt_num
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
@@ -732,7 +733,7 @@ async def confirm_winner_selection(
                     producer = b.get("producer") or b.get("producer_name") or producer
                     price = b.get("price") or b.get("offered_price")
                     if price is not None:
-                        price_txt = f" à *{float(price):g} FCFA*"
+                        price_txt = f" à *{_fmt_num(price)} FCFA*"
                     break
         except Exception as exc:
             logger.warning("confirm_winner_selection: refetch failed: %s", exc)

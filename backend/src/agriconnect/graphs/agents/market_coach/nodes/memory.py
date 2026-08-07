@@ -37,6 +37,19 @@ _ADD_TO_CART_DRAFT_FIELDS = {
 
 _PRIMARY_CANONICAL_UNITS = {"KG", "TONNE", "SAC", "UNITE", "PANIER", "TETE"}
 
+# expected_input (slot précis en cours) → champs canoniques qu'une réponse
+# ANSWER à ce slot a le droit de modifier. Tout le reste est du bruit/une
+# hallucination LLM et doit être ignoré — voir le garde-fou dans `memory_update`.
+_EXPECTED_INPUT_ALLOWED_FIELDS: Dict[str, frozenset] = {
+    "PRODUCT": frozenset({"product", "product_id"}),
+    "QUANTITY": frozenset({"quantity", "unit"}),
+    "PRICE": frozenset({"price", "price_unit"}),
+    "UNIT": frozenset({"unit"}),
+    "LOCATION": frozenset({"zone"}),
+    "DATE": frozenset({"estimated_available_at", "expected_harvest_date"}),
+    "FARM_NAME": frozenset({"farm_name"}),
+}
+
 # _ALIAS_MIRRORS is now derived from core/slots.py (single source of truth).
 _ALIAS_MIRRORS = build_alias_mirrors()
 
@@ -350,19 +363,89 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         else:
             payload = merge_payload(draft_payload, payload)
 
-    # Un tour CONFIRM/REJECT ne fournit AUCUNE information nouvelle par
-    # définition ("je confirme", "oui", "non") — toute entité que
-    # l'interpréteur a pu extraire pour un message aussi court/ambigu est du
-    # bruit (voire une hallucination du LLM sur un few-shot du prompt
-    # système), jamais une correction volontaire. Sans cette garde,
-    # `_apply_slot("product", ...)` traitait un tel bruit comme un
-    # changement de produit légitime : il écrasait le `product` que
-    # `form_node` venait JUSTE de figer dans `transaction_payload` au moment
-    # de la confirmation, ET videait quantity/unit/price/zone au passage
-    # (cascade de `_apply_slot` sur changement de produit) — cause du bug où
-    # la commande exécutée portait un tout autre produit que celui confirmé
-    # dans le récap.
-    if interpreted_event not in {"CONFIRM", "REJECT"}:
+    # Un tour CONFIRM ne fournit AUCUNE information nouvelle par définition
+    # ("je confirme", "oui") — toute entité que l'interpréteur a pu extraire
+    # pour un message aussi court/ambigu est du bruit (voire une
+    # hallucination du LLM sur un few-shot du prompt système), jamais une
+    # correction volontaire. Sans cette garde, `_apply_slot("product", ...)`
+    # traitait un tel bruit comme un changement de produit légitime : il
+    # écrasait le `product` que `form_node` venait JUSTE de figer dans
+    # `transaction_payload` au moment de la confirmation, ET videait
+    # quantity/unit/price/zone au passage (cascade de `_apply_slot` sur
+    # changement de produit) — cause du bug où la commande exécutée portait
+    # un tout autre produit que celui confirmé dans le récap.
+    #
+    # REJECT est différent : "non" seul ne porte en effet aucune info, mais
+    # "non c'est 200 tonnes" / "non je vends X au prix de Y" est un refus AVEC
+    # correction explicite — un pattern conversationnel très courant. Bloquer
+    # inconditionnellement REJECT ici faisait perdre silencieusement toute
+    # correction accompagnant un refus (le récap restait identique malgré une
+    # reformulation limpide de l'utilisateur). On ne bloque donc REJECT que
+    # si l'interpréteur n'a RÉELLEMENT rien extrait (cas du "non" bref) —
+    # sinon les valeurs explicitement redonnées sont appliquées normalement.
+    _extracted_has_real_values = any(slot_has_value(v) for v in extracted.values())
+    _skip_merge = interpreted_event == "CONFIRM" or (
+        interpreted_event == "REJECT" and not _extracted_has_real_values
+    )
+
+    # Garde-fou anti-hallucination pendant la collecte d'un slot PRÉCIS
+    # (expected_input ∈ {DATE, PRICE, QUANTITY, UNIT, LOCATION, PRODUCT,
+    # FARM_NAME}) : une réponse OU une correction visant ce slot ne doit jamais
+    # pouvoir réécrire silencieusement des champs SANS RAPPORT déjà validés
+    # (product/quantity/price...). Un LLM en repli dégradé (ex: llama-3.1-8b
+    # après un 429 sur le modèle principal) hallucine des valeurs plausibles
+    # pour TOUT le schéma JSON même quand une seule info a été donnée — observé
+    # en prod DEUX fois :
+    #   1) réponse à la DATE ("d'ici le 21 décembre") → "78 boeufs à 425000"
+    #      remplacé par "5900 poussins allemand à 2400" ;
+    #   2) correction de PRIX ("l'unité coûte plutôt 36500") pendant la DATE →
+    #      "14 chèvres" remplacé par "36500 poussins allemands".
+    # Le cas (2) passait par `event=UPDATE`, NON couvert par la 1re version de
+    # ce garde (ANSWER seul) — d'où l'extension à UPDATE ici.
+    #
+    # IMPORTANT — pourquoi CONFIRMATION reste libre : `_EXPECTED_INPUT_ALLOWED_
+    # FIELDS` n'a PAS de clé "CONFIRMATION"/"SELECTION"/"NONE" → `allowed_for_
+    # slot` vaut None → ce bloc est un no-op. Une correction au moment de la
+    # confirmation ("non c'est 200 tonnes", récap complet sous les yeux) peut
+    # donc toujours toucher n'importe quel champ, comme voulu. Le narrowing ne
+    # mord QUE pendant la collecte d'un slot isolé. INTERRUPTION est
+    # volontairement exclu : il porte les entités d'un NOUVEAU goal, pas une
+    # correction du goal courant.
+    #
+    # Même principe que le narrowing déjà appliqué par `agents/forms.py` et
+    # `nodes/form_node.py` pour les formulaires DRY — ici pour le chemin
+    # générique (validator/context_resolver) qui n'en bénéficiait pas.
+    # Extraction composée du fast-path déterministe (routing.py) : un message
+    # comme "775 kg d'oignon et le kg coûte 175 fcfa" répond au slot QUANTITY
+    # en cours ET fournit price/price_unit — par correspondance exacte de
+    # tokens (unité/devise), pas une supposition du LLM. Contrairement au LLM
+    # en repli dégradé (source du garde-fou ci-dessous), cette extraction ne
+    # peut PAS halluciner un champ sans rapport : elle ne remplit jamais que
+    # quantity/unit/price/price_unit, les 4 champs qu'elle sait reconnaître
+    # explicitement dans le texte. Sans cette exception, price/price_unit
+    # étaient silencieusement rejetés comme "hors-scope" pendant la collecte
+    # de QUANTITY — l'agent redemandait alors le prix au tour suivant alors
+    # que l'utilisateur venait de le donner.
+    _trusted_compound_path = (
+        str((state.get("raw_analysis") or {}).get("path") or "")
+        == "fast_path_slot_numeric_compound_answer"
+    )
+
+    if interpreted_event in {"ANSWER", "UPDATE"} and not _skip_merge and not _trusted_compound_path:
+        allowed_for_slot = _EXPECTED_INPUT_ALLOWED_FIELDS.get(expected_input)
+        if allowed_for_slot is not None:
+            for key in list(extracted.keys()):
+                if key in allowed_for_slot:
+                    continue
+                dropped = extracted.pop(key, None)
+                if slot_has_value(dropped):
+                    logger.warning(
+                        "[MemoryUpdate] %s attendu=%s : champ hors-sujet '%s'=%r ignoré "
+                        "(hors-scope du slot en cours — probable bruit/hallucination LLM)",
+                        interpreted_event, expected_input, key, dropped,
+                    )
+
+    if not _skip_merge:
         for field in _CANONICAL_SLOT_ORDER:
             value = extracted.pop(field, None)
             _apply_slot(field, value)
@@ -491,6 +574,9 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
                 # Sélection d'une production future (MarketOffer) dans la liste
                 # des stocks → cible de SALES_UPDATE_PRODUCTION (mise à jour de lot).
                 payload["cycle_id"] = resolved_str
+            elif mapping_kind == "catalog_product":
+                # Sélection d'un produit du catalogue → cible de SALES_UPDATE_PRODUCT.
+                payload["product_id"] = resolved_str
             elif mapping_kind == "farm":
                 payload["farm_id"] = resolved_str
             elif mapping_kind in _ORDER_MAPPING_KINDS:

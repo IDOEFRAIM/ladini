@@ -8,6 +8,7 @@ from sqlalchemy import select, desc, update, case, literal, or_, func
 from sqlalchemy.orm import selectinload, joinedload
 
 
+from agriconnect.core.formatting import fmt_num as _fmt_num
 from .common import normalize_phone
 from .search import fuzzy_match, similarity_rank
 from .base import BaseMixin
@@ -921,8 +922,8 @@ class BuyerMixin(BaseMixin):
         remaining = available - reserved
         if qty > remaining + 1e-9:
             raise BusinessRuleException(
-                f"Il ne reste que {remaining:g} {offer.unit or 'unité'} réservable(s) "
-                f"sur cette production (vous demandez {qty:g}).",
+                f"Il ne reste que {_fmt_num(remaining)} {offer.unit or 'unité'} réservable(s) "
+                f"sur cette production (vous demandez {_fmt_num(qty)}).",
                 reason="insufficient_capacity",
             )
 
@@ -968,7 +969,7 @@ class BuyerMixin(BaseMixin):
         notified = await self._notify_producer_reservation(offer, qty, total)
 
         eta_txt = eta.strftime("%d/%m/%Y") if isinstance(eta, datetime) else "à venir"
-        price_txt = f"{unit_price:g}" if unit_price else "prix à confirmer"
+        price_txt = _fmt_num(unit_price) if unit_price else "prix à confirmer"
         return {
             "status": "success",
             "order_id": str(new_order.id),
@@ -984,10 +985,10 @@ class BuyerMixin(BaseMixin):
                 "remaining_after": round(remaining - qty, 3),
             },
             "message": (
-                f"✅ *Précommande enregistrée* pour {qty:g} {offer.unit or 'unité'} de "
+                f"✅ *Précommande enregistrée* pour {_fmt_num(qty)} {offer.unit or 'unité'} de "
                 f"*{offer.product_label}* ({price_txt} FCFA/unité).\n"
                 f"📅 Disponibilité prévue : *{eta_txt}*.\n"
-                f"💰 Total estimé : *{total:g} FCFA*.\n\n"
+                f"💰 Total estimé : *{_fmt_num(total)} FCFA*.\n\n"
                 + ("🔔 Le producteur a été notifié de votre réservation."
                    if notified else
                    "Le producteur sera informé de votre réservation.")
@@ -1061,12 +1062,14 @@ class BuyerMixin(BaseMixin):
 
         user_obj, profile_obj = await self.get_buyer_profile(phone=buyer_phone)
 
+        # `Order.zone_id` est nullable en base (orders/models.py) — bloquer
+        # toute la précommande faute de zone est une décision métier, pas une
+        # contrainte technique. Ça transformait un détail logistique
+        # (affinable plus tard, à la livraison) en cul-de-sac complet pour
+        # l'acheteur : la précommande entière échouait sans jamais proposer
+        # d'issue. On dégrade gracieusement — zone absente = zone_uuid=None,
+        # la précommande se crée quand même.
         zone_uuid = self._to_uuid(delivery_zone_id) or user_obj.zone_id
-        if not zone_uuid:
-            raise BusinessRuleException(
-                "Veuillez configurer votre zone de livraison avant de précommander.",
-                reason="missing_zone",
-            )
 
         fulfillment_dt = None
         if expected_fulfillment_date:

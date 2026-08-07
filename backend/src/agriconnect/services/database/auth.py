@@ -2,7 +2,7 @@ import logging
 import uuid
 from typing import Dict, Any, Optional
 
-from sqlalchemy import update, func
+from sqlalchemy import select, update, func
 from sqlalchemy.exc import IntegrityError
 from agriconnect.domain.identity.models import User, Producer
 from .common import clean_text, normalize_phone
@@ -93,26 +93,60 @@ class AuthMixin:
     # 2. VALIDATIONS ET SÉCURISATION DES PROFILS CORES
     # ==================================================================
 
-    async def update_geo_location(self, user_id: str, lat: float, lon: float) -> Dict[str, str]:
-        """Met à jour les coordonnées géographiques noyau pour la météo et la logistique locale."""
+    async def update_geo_location(
+        self,
+        user_id: Optional[str] = None,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
+        *,
+        phone: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Met à jour les coordonnées géographiques (météo, proximité, logistique).
+
+        Accepte soit `user_id` (UUID déjà résolu), soit `phone` (résolu en
+        interne) — l'ingestion webhook natif WhatsApp ne connaît que le
+        numéro de téléphone, jamais l'UUID interne. Met aussi à jour
+        `location_updated_at`, jamais bloquant en cas d'absence de coordonnées
+        (l'appelant ne devrait simplement pas invoquer cette méthode dans ce cas).
+        """
         current_session = self.session
         if current_session is None:
             raise RuntimeError("Database session is missing on the current context.")
+
+        if lat is None or lon is None:
+            return {"status": "error", "message": "Latitude et longitude sont requises."}
 
         # Validation rapide des plages géographiques (Anti-corruption de données)
         if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
             return {"status": "error", "message": "Coordonnées géographiques hors limites mathématiques."}
 
+        resolved_id: Optional[uuid.UUID] = None
+        if user_id:
+            try:
+                resolved_id = uuid.UUID(str(user_id))
+            except (TypeError, ValueError):
+                resolved_id = None
+
+        if resolved_id is None and phone:
+            clean_phone = normalize_phone(phone)
+            row = await current_session.execute(
+                select(User.id).where(User.phone == clean_phone)
+            )
+            resolved_id = row.scalar_one_or_none()
+
+        if resolved_id is None:
+            return {"status": "error", "message": "Utilisateur introuvable pour la mise à jour de la position."}
+
         try:
             stmt = (
                 update(User)
-                .where(User.id == uuid.UUID(user_id))
-                .values(latitude=lat, longitude=lon, updated_at=func.now())
+                .where(User.id == resolved_id)
+                .values(latitude=lat, longitude=lon, location_updated_at=func.now(), updated_at=func.now())
             )
             await current_session.execute(stmt)
             return {"status": "success", "message": "Géolocalisation mise à jour avec succès."}
         except Exception as e:
-            logger.error("Erreur update_geo_location pour l'utilisateur %s: %s", user_id, e)
+            logger.error("Erreur update_geo_location pour l'utilisateur %s: %s", resolved_id, e)
             return {"status": "error", "message": "Erreur d'infrastructure lors de la mise à jour géographique."}
 
     async def verify_user_identity(self, user_id: str, cnib_number: str) -> bool:

@@ -58,16 +58,15 @@ async def clarification_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -
     if llm is None:
         return {}  # fallback handled by final_response CLARIFICATION
 
-    if user_role == "BUYER":
-        capabilities = (
-            "chercher des produits agricoles, lancer un appel d'offres, "
-            "voir les offres en cours, ou suivre vos commandes"
-        )
-    else:
-        capabilities = (
-            "enregistrer une récolte, mettre en vente un produit, "
-            "gérer votre stock, ou répondre aux demandes d'acheteurs"
-        )
+    # Refonte double-rôle : tout utilisateur peut vendre ET acheter — la
+    # description des capacités ne doit plus être restreinte au rôle de
+    # session par défaut (sous peine de suggérer que l'autre moitié des
+    # actions est indisponible).
+    capabilities = (
+        "enregistrer une récolte, mettre en vente un produit, gérer votre "
+        "stock, répondre aux demandes d'acheteurs, chercher des produits "
+        "agricoles, lancer un appel d'offres, ou suivre vos commandes"
+    )
 
     context_parts = []
     if cognitive_action == "abandon_tunnel_max_retries":

@@ -7,14 +7,25 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 
+from agriconnect.core.formatting import fmt_num as _fmt_num
 from agriconnect.graphs.agents.market_coach.utils import canonical_unit_label
 
 
-def _fmt_num(value: Any) -> str:
-    try:
-        return f"{float(value):g}"
-    except (TypeError, ValueError):
-        return str(value)
+def _safe_price_unit(raw: Any, fallback: str) -> str:
+    """Nettoie `payload["price_unit"]` avant affichage dans "FCFA/{unit}".
+
+    `price_unit` est un champ libre rempli par le LLM (voir interpreter/
+    routing.py) — un LLM ne respecte pas toujours à 100% la consigne "renvoie
+    UNIQUEMENT le token d'unité" et peut recopier tout ou partie du contexte
+    ("FCFA/UNITE" au lieu de "UNITE"). Sans ce garde-fou, ça produisait un
+    récapitulatif "FCFA/FCFA/UNITE" bien visible pour l'utilisateur. On rejette
+    toute valeur contenant déjà "FCFA"/"CFA"/"/" — signe de contamination —
+    et on retombe sur l'unité de la quantité plutôt que d'afficher du bruit.
+    """
+    text = str(raw or "").strip().upper()
+    if not text or "FCFA" in text or "CFA" in text or "/" in text:
+        return fallback
+    return canonical_unit_label(text, fallback)
 
 
 def _resolve_units(payload: Dict[str, Any], default_unit: str = "KG") -> Tuple[str, str]:
@@ -53,13 +64,18 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         price = payload.get("price") or payload.get("price_per_unit")
         eta = payload.get("estimated_available_at") or payload.get("expected_harvest_date")
         farm = payload.get("farm_name") or payload.get("farm_id")
+        # Le prix a sa propre base (ex: "10000 FCFA/kg" alors que la quantité
+        # totale est en tonnes) — ne jamais réutiliser aveuglément l'unité de
+        # la quantité pour l'affichage du prix si l'utilisateur en a donné une
+        # explicitement (voir `price_unit`, interpreter/routing.py).
+        price_display_unit = _safe_price_unit(payload.get("price_unit"), canonical_unit_label(display_unit or converted_unit))
 
         lines = [
             f"Type : {production_type}",
             f"Produit : {product}",
             f"Quantité prévue : {quantity_line}" if quantity_line else None,
             (
-                f"Prix unitaire : {_fmt_num(price)} FCFA/{display_unit or converted_unit}"
+                f"Prix unitaire : {_fmt_num(price)} FCFA/{price_display_unit}"
                 if price not in (None, "", [], {})
                 else None
             ),
@@ -70,18 +86,87 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         summary = "Déclaration d'un lot futur"
         return f"{summary} :\n{bullet_list}" if bullet_list else summary
 
+    if goal == "SALES_UPDATE_PRODUCTION":
+        # Récap dynamique : n'affiche QUE les champs réellement fournis (mise à
+        # jour partielle) — sans ça le générique ne montrait que quantité/unité
+        # et omettait silencieusement un changement de nom (bug vécu : "le nom
+        # c'est maïs" confirmé mais absent du récap).
+        lines = []
+        if payload.get("product") not in (None, "", [], {}):
+            lines.append(f"Nouveau nom : {payload.get('product')}")
+        if payload.get("price") not in (None, "", [], {}):
+            unit_for_price = _safe_price_unit(payload.get("price_unit"), canonical_unit_label(payload.get("unit") or "KG"))
+            lines.append(f"Nouveau prix : {_fmt_num(payload.get('price'))} FCFA/{unit_for_price}")
+        if payload.get("quantity") not in (None, "", [], {}):
+            unit_for_qty = canonical_unit_label(payload.get("unit") or "KG")
+            lines.append(f"Nouvelle quantité : {_fmt_num(payload.get('quantity'))} {unit_for_qty}")
+        if payload.get("unit") not in (None, "", [], {}) and payload.get("price") in (None, "", [], {}) and payload.get("quantity") in (None, "", [], {}):
+            lines.append(f"Nouvelle unité : {canonical_unit_label(payload.get('unit'))}")
+        if payload.get("estimated_available_at") not in (None, "", [], {}):
+            lines.append(f"Nouvelle date de disponibilité : {payload.get('estimated_available_at')}")
+        if payload.get("production_type") not in (None, "", [], {}):
+            lines.append(f"Nouveau type : {payload.get('production_type')}")
+        bullet_list = "\n".join(f"- {line}" for line in lines)
+        summary = "Mise à jour de la production"
+        return f"{summary} :\n{bullet_list}" if bullet_list else summary
+
+    if goal == "SALES_UPDATE_PRODUCT":
+        # Même logique que SALES_UPDATE_PRODUCTION : n'afficher QUE les champs
+        # réellement fournis (mise à jour partielle du catalogue).
+        lines = []
+        if payload.get("product") not in (None, "", [], {}):
+            lines.append(f"Nouveau nom : {payload.get('product')}")
+        if payload.get("price") not in (None, "", [], {}):
+            unit_for_price = _safe_price_unit(payload.get("price_unit"), canonical_unit_label(payload.get("unit") or "KG"))
+            lines.append(f"Nouveau prix : {_fmt_num(payload.get('price'))} FCFA/{unit_for_price}")
+        if payload.get("quantity") not in (None, "", [], {}):
+            unit_for_qty = canonical_unit_label(payload.get("unit") or "KG")
+            lines.append(f"Nouvelle quantité : {_fmt_num(payload.get('quantity'))} {unit_for_qty}")
+        if payload.get("unit") not in (None, "", [], {}) and payload.get("price") in (None, "", [], {}) and payload.get("quantity") in (None, "", [], {}):
+            lines.append(f"Nouvelle unité : {canonical_unit_label(payload.get('unit'))}")
+        bullet_list = "\n".join(f"- {line}" for line in lines)
+        summary = "Mise à jour du produit"
+        return f"{summary} :\n{bullet_list}" if bullet_list else summary
+
     product = payload.get("product")
     price = payload.get("price")
     quantity_line = _format_quantity(payload)
     display_unit, converted_unit = _resolve_units(payload)
-    price_unit = display_unit or converted_unit
-    price_unit = canonical_unit_label(price_unit)
+    # Le prix a sa propre base si l'utilisateur en a donné une explicitement
+    # (ex: "10000 FCFA/kg" sur une quantité totale exprimée en tonnes) — voir
+    # `price_unit` (interpreter/routing.py) ; sinon on retombe sur l'unité de
+    # la quantité, comportement inchangé pour le cas courant (même unité).
+    price_unit = _safe_price_unit(payload.get("price_unit"), canonical_unit_label(converted_unit))
     price_fmt = _fmt_num(price) if price not in (None, "", [], {}) else None
+
+    # `payload["quantity"]`/`payload["unit"]` (= `converted_unit` ici) sont
+    # DÉJÀ normalisés en KG par `_normalize_quantity_to_kg` (nodes/
+    # validation.py) quand l'utilisateur a donné une quantité en tonnes —
+    # c'est l'unité RÉELLEMENT utilisée à l'exécution (create_product...).
+    # `display_unit` ne sert qu'à réafficher le mot de l'utilisateur ("200
+    # TONNE") sans jamais toucher au stockage — l'utiliser ici pour décider
+    # d'un "mismatch" comparait donc le prix à l'unité D'AFFICHAGE au lieu de
+    # l'unité RÉELLEMENT appliquée, et déclenchait un faux avertissement
+    # ("le prix sera appliqué par TONNE") alors que la quantité avait déjà
+    # été convertie en KG et que le prix (FCFA/KG) correspondait exactement.
+    quantity_unit_for_price = canonical_unit_label(converted_unit)
+    price_unit_mismatch = (
+        bool(payload.get("price_unit"))
+        and price_fmt is not None
+        and price_unit != quantity_unit_for_price
+    )
+    mismatch_note = (
+        f"\n⚠️ Le prix sera appliqué par {quantity_unit_for_price} (unité de l'offre), "
+        f"pas par {price_unit} — dites *modifier prix* si ce n'est pas ce que vous vouliez."
+        if price_unit_mismatch else ""
+    )
 
     mapping = {
         "SALES_PUBLISH_PRODUCT": (
-            f"Vente de {quantity_line} de {product}"
-            f" à {price_fmt} FCFA/{price_unit}." if price_fmt else f"Vente de {quantity_line} de {product}."
+            (
+                f"Vente de {quantity_line} de {product}"
+                f" à {price_fmt} FCFA/{price_unit}." if price_fmt else f"Vente de {quantity_line} de {product}."
+            ) + mismatch_note
         ) if quantity_line else None,
         "SALES_RECORD_DIRECT": (
             f"Enregistrement d'une vente directe : {quantity_line} de {product}"

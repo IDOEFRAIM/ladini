@@ -284,6 +284,16 @@ def run_form_step(
         step_slot = next((slot for slot in spec.slots if slot.name == current_step), None)
         if step_slot:
             allowed_keys.update(str(alias) for alias in step_slot.aliases)
+        # Le slot "quantité" est presque toujours répondu avec son unité dans
+        # LE MÊME message ("2 tonnes") — l'interpréteur extrait légitimement
+        # `unit`/`unit_mentioned` en même temps que `quantity`. Sans cette
+        # exception, ce narrowing (pensé pour isoler les corrections
+        # mono-champ) jetait l'unité fraîchement fournie AVANT même qu'elle
+        # soit absorbée (étape 1 ci-dessous), et l'inférence de secours
+        # (étape 1b) retombait alors sur KG par défaut — un producteur disant
+        # "2 tonnes" se retrouvait avec "2 KG" dans le récapitulatif.
+        if current_step in _QUANTITY_SLOT_NAMES:
+            allowed_keys.update({"unit", "unit_mentioned"})
         for key in list(extracted.keys()):
             if key not in allowed_keys:
                 extracted.pop(key, None)

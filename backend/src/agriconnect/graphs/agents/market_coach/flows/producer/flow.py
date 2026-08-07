@@ -13,21 +13,31 @@ Tous les helpers filtrent défensivement les `None` avant d'appeler FastMCP.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+import re as _re
+from typing import Any, Dict, List, Optional
 
+from agriconnect.core.formatting import fmt_num as _fmt_num
 from agriconnect.graphs.agents.market_coach.actions.common import load_entity_snapshot
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
 )
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
+from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+    parse_quantity_unit_from_text as _parse_qty_unit,
+)
+from agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment import (
+    extract_production_type_from_text as _extract_production_type,
+)
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     is_success_response,
 )
 from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
     AuctionGateway,
+    EscrowGateway,
     FarmGateway,
+    ProductGateway,
     StockGateway,
 )
 
@@ -247,7 +257,7 @@ async def _resolve_bid(mc_runtime: MarketRuntime, phone: str, payload: Dict[str,
     return {
         "status": "WAITING_INPUT",
         "expected_input": "SELECTION",
-        "working_memory": {"bids_menu": menu, "bids_cache": data},
+        "working_memory": {"bids_menu": menu},
         "response_strategy": "SELECTION_MENU",
         "final_response": menu,
         "ag_ui_component": None,
@@ -453,7 +463,7 @@ async def _resolve_stock(mc_runtime: MarketRuntime, phone: str, payload: Dict[st
     return {
         "status": "WAITING_INPUT",
         "expected_input": "SELECTION",
-        "working_memory": {"stocks_menu": menu, "stocks_cache": matches},
+        "working_memory": {"stocks_menu": menu},
         "response_strategy": "SELECTION_MENU",
         "final_response": menu,
         "ag_ui_component": None,
@@ -466,6 +476,703 @@ async def _resolve_stock(mc_runtime: MarketRuntime, phone: str, payload: Dict[st
             kind="stock",
             preformatted_text=menu,
         ),
+    }
+
+
+# =====================================================================
+# PARSING DÉTERMINISTE DES CORRECTIONS (mise à jour catalogue/production)
+# =====================================================================
+# Ne JAMAIS réutiliser le slot générique `product` (rempli par le pipeline
+# d'entités pour IDENTIFIER de quoi on parle, pas pour le RENOMMER) — sans
+# ça "le kg d'oignon coûte 225 fcfa" faisait passer "oignon" comme NOUVEAU
+# nom (bug vécu). On exige un signal explicite de renommage ("nom X",
+# "renomme en X", "s'appelle X") avant d'accepter un changement de nom, et on
+# parse tout le reste (prix/quantité/date/type) depuis le TEXTE BRUT, pas
+# depuis les entités génériques du pipeline (qui avaient aussi halluciné une
+# quantité=1 pour "le kg d'oignon...").
+
+# Oui/non/annuler ne sont PAS détectés par mots-clés ici : les utilisateurs
+# tapent des variantes infinies, avec fautes de frappe, tournures locales,
+# politesse... Impossible à énumérer de façon fiable. On réutilise
+# `interpreted_event` (CONFIRM/REJECT), déjà calculé en amont par
+# `input_interpreter` via le LLM — c'est le SEUL endroit du pipeline dont le
+# rôle est justement de classifier ce type de réponse, quelle que soit sa
+# formulation. Seule l'extraction de champs (prix/quantité/nom/date) reste
+# déterministe ici : c'est de l'extraction de données structurées (formats
+# connus), pas de la classification de sentiment.
+
+_PRICE_RE = _re.compile(
+    r"(?:prix|co[uû]te?|coute|vaut)\D{0,12}?(\d+(?:[.,]\d+)?)"
+    r"|(\d+(?:[.,]\d+)?)\s*(?:fcfa|f\s*cfa|francs?)\b",
+    _re.IGNORECASE,
+)
+# Fallback pour "quantité 500" (nombre nu, sans mot d'unité reconnu qui suit —
+# _parse_qty_unit exige une vraie unité et renvoie None sinon).
+_BARE_QUANTITY_RE = _re.compile(r"quantit\w*\D{0,10}?(\d+(?:[.,]\d+)?)", _re.IGNORECASE)
+_DATE_RE = _re.compile(r"(\d{4}-\d{2}-\d{2})")
+# Complète _DATE_RE (ISO strict) pour une date en français ("13 décembre
+# 2026", "13/12/2026") — sinon une correction de date en langage naturel était
+# silencieusement ignorée (aucun champ extrait, l'utilisateur croyait avoir
+# fourni la date alors qu'elle n'était jamais retenue).
+_MONTHS_FR = {
+    "janvier": 1, "février": 2, "fevrier": 2, "mars": 3, "avril": 4, "mai": 5,
+    "juin": 6, "juillet": 7, "août": 8, "aout": 8, "septembre": 9,
+    "octobre": 10, "novembre": 11, "décembre": 12, "decembre": 12,
+}
+_DATE_FR_RE = _re.compile(
+    r"\b(\d{1,2})\s+(" + "|".join(_MONTHS_FR) + r")\s+(\d{4})\b",
+    _re.IGNORECASE,
+)
+_DATE_SLASH_RE = _re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b")
+# Déclencheur de renommage EXPLICITE uniquement — jamais une simple mention du
+# produit dans la phrase. Capture au plus 2 mots après le déclencheur, en
+# s'arrêtant au premier mot de liaison/champ (ex: "et", "quantité", "prix") —
+# empêche "le nom c'est mais et la quantité est 3632 kg" de capturer
+# "c est mais et" au lieu de "mais".
+_NAME_TRIGGER_RE = _re.compile(r"\bnom\b\s*(?:c'?est|c\s+est|est|:)?\s*", _re.IGNORECASE)
+_NAME_STOPWORDS = frozenset({
+    "et", "la", "le", "les", "un", "une", "des", "de", "du",
+    "quantite", "quantité", "prix", "date", "unite", "unité", "type",
+})
+
+
+def _extract_price_correction(text: str) -> Optional[float]:
+    m = _PRICE_RE.search(text)
+    if not m:
+        return None
+    raw = m.group(1) or m.group(2)
+    try:
+        val = float(raw.replace(",", "."))
+        return val if val > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_quantity_correction(text: str) -> tuple[Optional[float], Optional[str]]:
+    """Retourne (quantity, unit). N'accepte la quantité QUE si une vraie unité
+    a été reconnue par _parse_qty_unit — sinon "225 fcfa" (prix) serait
+    confondu avec une quantité=225 (le parseur générique ne rejette pas un mot
+    de fin non reconnu comme unité, il ignore juste l'unité)."""
+    qty_result = _parse_qty_unit(text)
+    if qty_result and qty_result.quantity is not None and qty_result.unit:
+        return qty_result.quantity, qty_result.unit
+    m = _BARE_QUANTITY_RE.search(text)
+    if m:
+        try:
+            val = float(m.group(1).replace(",", "."))
+            if val > 0:
+                return val, None
+        except (TypeError, ValueError):
+            pass
+    return None, None
+
+
+def _extract_name_correction(text: str) -> Optional[str]:
+    m = _NAME_TRIGGER_RE.search(text)
+    if not m:
+        return None
+    tokens = _re.findall(r"[a-zàâçéèêëîïôûùüÿñæœ'\-]+", text[m.end():], _re.IGNORECASE)
+    picked: List[str] = []
+    for tok in tokens:
+        if tok.lower() in _NAME_STOPWORDS:
+            break
+        picked.append(tok)
+        if len(picked) >= 2:
+            break
+    return " ".join(picked) if picked else None
+
+
+def _extract_date_correction(text: str) -> Optional[str]:
+    m = _DATE_RE.search(text)
+    if m:
+        return m.group(1)
+    m = _DATE_FR_RE.search(text)
+    if m:
+        day, month_name, year = m.groups()
+        month = _MONTHS_FR.get(month_name.lower())
+        if month:
+            return f"{int(year):04d}-{month:02d}-{int(day):02d}"
+    m = _DATE_SLASH_RE.search(text)
+    if m:
+        day, month, year = m.groups()
+        try:
+            if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
+                return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+        except ValueError:
+            pass
+    return None
+
+
+# Code de livraison escrow (Paydunya) : 4 chiffres exactement. Priorité au
+# mot déclencheur "code" pour ne pas confondre avec un autre nombre à 4
+# chiffres présent par hasard dans le message (ex: une quantité, une année) ;
+# on retombe sur un nombre nu à 4 chiffres seulement si aucun mot-clé n'est
+# trouvé — ce tunnel n'a aucun autre champ numérique avec lequel collisionner.
+_OTP_CODE_RE = _re.compile(r"\bcode\D{0,8}?(\d{4})\b", _re.IGNORECASE)
+_BARE_OTP_RE = _re.compile(r"\b(\d{4})\b")
+
+
+def _extract_otp_code(text: str) -> Optional[str]:
+    m = _OTP_CODE_RE.search(text)
+    if m:
+        return m.group(1)
+    m = _BARE_OTP_RE.search(text)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _parse_update_correction(text: str, *, allow_type_date: bool) -> Dict[str, Any]:
+    """Extrait déterministiquement les champs mentionnés dans *text*.
+
+    Utilisé à la fois en phase COLLECT (première saisie) et en phase CONFIRM
+    (pour distinguer une VRAIE correction d'un simple "non" d'annulation).
+    """
+    fields: Dict[str, Any] = {}
+    quantity, unit = _extract_quantity_correction(text)
+    if quantity is not None:
+        fields["quantity"] = quantity
+        if unit:
+            fields["unit"] = unit
+    price = _extract_price_correction(text)
+    if price is not None:
+        fields["price"] = price
+    name = _extract_name_correction(text)
+    if name:
+        fields["product"] = name
+    if allow_type_date:
+        date = _extract_date_correction(text)
+        if date:
+            fields["estimated_available_at"] = date
+        ptype = _extract_production_type(text)
+        if ptype:
+            fields["production_type"] = ptype
+    return fields
+
+
+# =====================================================================
+# RÉCAP GÉNÉRIQUE — utilisé par les deux flux de mise à jour (cycle/produit)
+# =====================================================================
+
+def _format_pending_recap(pending: Dict[str, Any], *, noun: str) -> str:
+    lines = [f"📝 *Récapitulatif de la modification ({noun})*"]
+    if pending.get("product"):
+        lines.append(f"- Nouveau nom : {pending['product']}")
+    unit_disp = str(pending.get("unit") or "KG").upper()
+    if pending.get("price") is not None:
+        lines.append(f"- Nouveau prix : {_fmt_num(pending['price'])} FCFA/{unit_disp}")
+    if pending.get("quantity") is not None:
+        lines.append(f"- Nouvelle quantité : {_fmt_num(pending['quantity'])} {unit_disp}")
+    if pending.get("unit") and pending.get("price") is None and pending.get("quantity") is None:
+        lines.append(f"- Nouvelle unité : {unit_disp}")
+    if pending.get("estimated_available_at"):
+        lines.append(f"- Nouvelle date de disponibilité : {pending['estimated_available_at']}")
+    if pending.get("production_type"):
+        lines.append(f"- Nouveau type : {pending['production_type']}")
+    lines.append(
+        "\n👉 Répondez *oui* pour confirmer, envoyez une *correction* "
+        "(ex: « prix 300 », « nom mil »), ou *non* pour annuler."
+    )
+    return "\n".join(lines)
+
+
+# =====================================================================
+# MISE À JOUR D'UNE PRODUCTION FUTURE (MarketOffer) — flux dédié isolé,
+# auto-suffisant (SELECT → COLLECT → CONFIRM → ÉCRITURE), résilient aux
+# corrections/rejets — cf. producer_auction_resolver (auctions.py) pour le
+# même principe éprouvé côté enchères. Bypasse confirmation_gate/executor
+# (goal câblé sur le tunnel "producer_update", voir core/goals.py) car ceux-ci
+# font un reset générique total sur REJECT, incapables de distinguer une
+# annulation d'une correction ("non, en fait c'est 973 kg").
+# =====================================================================
+
+async def _resolve_cycle_for_update(
+    mc_runtime: MarketRuntime,
+    phone: str,
+    payload: Dict[str, Any],
+    working: Dict[str, Any],
+    text: str,
+    event: str,
+) -> Dict[str, Any]:
+    if not phone:
+        return {
+            "status": "ERROR", "response_strategy": "ERROR",
+            "final_response": "Numéro de téléphone introuvable, impossible de modifier une production.",
+            "ag_ui_component": None,
+        }
+
+    phase = str(working.get("update_phase") or "").upper()
+    cycle_id = payload.get("cycle_id") or working.get("update_cycle_id")
+    pending: Dict[str, Any] = dict(working.get("update_pending") or {})
+
+    def _clear_wm() -> Dict[str, Any]:
+        return {**working, "update_cycle_id": None, "update_phase": None,
+                "update_pending": None, "active_goal": None, "locked_intent": None,
+                "available_mapping_kind": None}
+
+    # ── CONFIRM : recap déjà affiché, on attend oui/correction/non ────
+    if phase == "CONFIRM" and cycle_id and pending:
+        correction = _parse_update_correction(text, allow_type_date=True)
+        if correction:
+            pending.update(correction)
+            return {
+                "status": "WAITING_INPUT", "expected_input": "CONFIRMATION",
+                "response_strategy": "ASK_MISSING_FIELD",
+                "current_goal": "SALES_UPDATE_PRODUCTION",
+                "final_response": _format_pending_recap(pending, noun="lot"),
+                "working_memory": {**working, "update_cycle_id": str(cycle_id),
+                                   "update_phase": "CONFIRM", "update_pending": pending,
+                                   "active_goal": "SALES_UPDATE_PRODUCTION",
+                                   "locked_intent": "SALES_UPDATE_PRODUCTION"},
+                "ag_ui_component": None,
+            }
+        # Oui/non : classification déjà faite en amont par le LLM
+        # (input_interpreter), pas de liste de mots-clés à maintenir ici.
+        if event == "CONFIRM":
+            gw_fields = dict(pending)
+            gw_fields.pop("product", None)
+            if "product" in pending:
+                gw_fields["product_label"] = pending["product"]
+            try:
+                result = await StockGateway(mc_runtime).update_production(str(phone), str(cycle_id), **gw_fields)
+            except Exception as exc:
+                logger.error("SALES_UPDATE_PRODUCTION: update_production a échoué: %s", exc)
+                return {
+                    "status": "COMPLETED", "response_strategy": "ERROR",
+                    "final_response": "Impossible d'enregistrer la modification pour le moment. Réessayez dans un instant.",
+                    "working_memory": _clear_wm(), "ag_ui_component": None,
+                }
+            if not is_success_response(result):
+                return {
+                    "status": "COMPLETED", "response_strategy": "ERROR",
+                    "final_response": (result or {}).get("message") or "La modification n'a pas pu être enregistrée.",
+                    "working_memory": _clear_wm(), "ag_ui_component": None,
+                }
+            return {
+                "status": "COMPLETED", "response_strategy": "SUCCESS",
+                "final_response": (result or {}).get("message") or "✅ Production mise à jour.",
+                "working_memory": _clear_wm(), "transaction_payload": {"__reset__": True},
+                "ag_ui_component": None,
+            }
+        if event == "REJECT":
+            return {
+                "status": "COMPLETED", "response_strategy": "SUCCESS",
+                "final_response": "❌ Modification annulée. Rien n'a été changé.",
+                "working_memory": _clear_wm(), "ag_ui_component": None,
+            }
+        # Ni correction, ni CONFIRM, ni REJECT clair : on ré-affiche le récap
+        # sans rien perdre, plutôt que de deviner via des mots-clés.
+        return {
+            "status": "WAITING_INPUT", "expected_input": "CONFIRMATION",
+            "response_strategy": "ASK_MISSING_FIELD",
+            "current_goal": "SALES_UPDATE_PRODUCTION",
+            "final_response": _format_pending_recap(pending, noun="lot"),
+            "working_memory": {**working, "update_cycle_id": str(cycle_id),
+                               "update_phase": "CONFIRM", "update_pending": pending,
+                               "active_goal": "SALES_UPDATE_PRODUCTION",
+                               "locked_intent": "SALES_UPDATE_PRODUCTION"},
+            "ag_ui_component": None,
+        }
+
+    # ── COLLECT : lot choisi, on attend au moins un champ à modifier ──
+    if cycle_id:
+        correction = _parse_update_correction(text, allow_type_date=True)
+        if not correction:
+            return {
+                # "PRODUCT" est un slot SOFT (tunnel_manager.py) : n'importe
+                # quel NEW_TASK à confiance suffisante (ex: une correction
+                # riche qui ressemble à une déclaration — "le nom c'est mil et
+                # la quantité est 2243 kg, dispo le 13 décembre" — se lit
+                # facilement comme DECLARE_CROP_CYCLE) pouvait faire dérailler
+                # ce tunnel auto-suffisant vers un tout autre goal, perdant la
+                # correction que _parse_update_correction sait pourtant bien
+                # traiter. "UPDATE_FIELD" n'est reconnu par aucun slot
+                # SOFT/HARD → tunnel_manager verrouille par défaut ; seuls les
+                # goals de navigation critiques (mes commandes, etc.) peuvent
+                # encore s'échapper.
+                "status": "WAITING_INPUT", "expected_input": "UPDATE_FIELD",
+                "response_strategy": "ASK_MISSING_FIELD",
+                "current_goal": "SALES_UPDATE_PRODUCTION",
+                "working_memory": {**working, "update_cycle_id": str(cycle_id), "update_phase": "COLLECT",
+                                   "active_goal": "SALES_UPDATE_PRODUCTION",
+                                   "locked_intent": "SALES_UPDATE_PRODUCTION",
+                                   "available_mapping_kind": None},
+                "final_response": (
+                    "✏️ Que souhaitez-vous modifier sur ce lot ?\n"
+                    "Ex : « prix 400 », « nom maïs », « quantité 500 », « date 2026-12-31 »."
+                ),
+                "ag_ui_component": None,
+            }
+        pending.update(correction)
+        return {
+            "status": "WAITING_INPUT", "expected_input": "CONFIRMATION",
+            "response_strategy": "ASK_MISSING_FIELD",
+            "current_goal": "SALES_UPDATE_PRODUCTION",
+            "final_response": _format_pending_recap(pending, noun="lot"),
+            "working_memory": {**working, "update_cycle_id": str(cycle_id), "update_phase": "CONFIRM",
+                               "update_pending": pending, "active_goal": "SALES_UPDATE_PRODUCTION",
+                               "locked_intent": "SALES_UPDATE_PRODUCTION",
+                               "available_mapping_kind": None},
+            "ag_ui_component": None,
+        }
+
+    # ── SELECT : aucun lot choisi → liste des productions ─────────────
+    # NE JAMAIS confondre une erreur technique (outil MCP indisponible, panne
+    # transitoire) avec une liste réellement vide — sinon l'utilisateur reçoit
+    # "aucune production" alors que le vrai problème est une erreur backend
+    # (bug vécu : le service MCP HTTP tournait sur un code plus ancien que le
+    # nouvel outil list_producer_productions → refus silencieux interprété à
+    # tort comme "liste vide").
+    try:
+        result = await StockGateway(mc_runtime).list_productions(str(phone))
+    except Exception as exc:
+        logger.error("SALES_UPDATE_PRODUCTION: list_productions a échoué: %s", exc)
+        return {
+            "status": "ERROR", "response_strategy": "ERROR",
+            "final_response": "Impossible de charger vos productions pour le moment. Réessayez dans un instant.",
+            "working_memory": _clear_wm(),
+            "ag_ui_component": None,
+        }
+    if str((result or {}).get("status") or "").lower() not in ("success", "ok"):
+        logger.error(
+            "SALES_UPDATE_PRODUCTION: list_productions status=%s message=%s",
+            (result or {}).get("status"), (result or {}).get("message"),
+        )
+        return {
+            "status": "ERROR", "response_strategy": "ERROR",
+            "final_response": "Impossible de charger vos productions pour le moment. Réessayez dans un instant.",
+            "working_memory": _clear_wm(),
+            "ag_ui_component": None,
+        }
+    items = (result or {}).get("data") or []
+    if not isinstance(items, list) or not items:
+        return {
+            "status": "COMPLETED", "response_strategy": "SUCCESS",
+            "final_response": "Vous n'avez aucune production future à modifier pour le moment.",
+            "working_memory": _clear_wm(),
+            "ag_ui_component": None,
+        }
+
+    mapping: Dict[str, str] = {}
+    options: List[MenuOption] = []
+    lines = ["✏️ *Quel lot souhaitez-vous modifier ? Indiquez le numéro :*"]
+    for i, it in enumerate(items, start=1):
+        cid = str(it.get("cycle_id") or "")
+        if not cid:
+            continue
+        name = it.get("product_label") or "Production"
+        qty = it.get("quantity")
+        unit = str(it.get("unit") or "KG").upper()
+        price = it.get("price")
+        qty_str = f" — {qty} {unit}" if qty not in (None, "") else ""
+        price_str = f" — {price} FCFA/{unit}" if price not in (None, "") else ""
+        lines.append(f"{i}. *{name}*{qty_str}{price_str}")
+        mapping[str(i)] = cid
+        options.append(MenuOption(index=str(i), label=f"{name}{qty_str}", value=cid))
+
+    menu = "\n".join(lines)
+    return {
+        "status": "WAITING_INPUT",
+        "expected_input": "SELECTION",
+        "response_strategy": "SELECTION_MENU",
+        "current_goal": "SALES_UPDATE_PRODUCTION",
+        "final_response": menu,
+        "available_mapping": mapping,
+        "working_memory": {**working, "active_goal": "SALES_UPDATE_PRODUCTION",
+                           "locked_intent": "SALES_UPDATE_PRODUCTION",
+                           "available_mapping_kind": "cycle", "update_phase": "SELECT",
+                           "update_pending": None},
+        "ag_ui_component": None,
+        "pending_menu": MenuRequest(
+            title="Productions à modifier",
+            options=options,
+            kind="cycle",
+            preformatted_text=menu,
+        ),
+    }
+
+
+# =====================================================================
+# MISE À JOUR D'UN PRODUIT CATALOGUE — flux dédié isolé, symétrique au
+# flux cycles ci-dessus. Même principe auto-suffisant (SELECT → COLLECT →
+# CONFIRM → ÉCRITURE), résilient aux corrections/rejets.
+# =====================================================================
+
+async def _resolve_product_for_update(
+    mc_runtime: MarketRuntime,
+    phone: str,
+    payload: Dict[str, Any],
+    working: Dict[str, Any],
+    text: str,
+    event: str,
+) -> Dict[str, Any]:
+    """Mini-machine à états pour SALES_UPDATE_PRODUCT (produit catalogue).
+
+    Miroir de ``_resolve_cycle_for_update`` mais pour la table Product
+    (oignon, tomates…) au lieu de MarketOffer (productions futures).
+    """
+    if not phone:
+        return {
+            "status": "ERROR", "response_strategy": "ERROR",
+            "final_response": "Numéro de téléphone introuvable, impossible de modifier un produit.",
+            "ag_ui_component": None,
+        }
+
+    phase = str(working.get("update_phase") or "").upper()
+    product_id = payload.get("product_id") or working.get("update_product_id")
+    pending: Dict[str, Any] = dict(working.get("update_pending") or {})
+
+    def _clear_wm() -> Dict[str, Any]:
+        return {**working, "update_product_id": None, "update_phase": None,
+                "update_pending": None, "active_goal": None, "locked_intent": None,
+                "available_mapping_kind": None}
+
+    # ── CONFIRM : recap déjà affiché, on attend oui/correction/non ────
+    if phase == "CONFIRM" and product_id and pending:
+        correction = _parse_update_correction(text, allow_type_date=False)
+        if correction:
+            pending.update(correction)
+            return {
+                "status": "WAITING_INPUT", "expected_input": "CONFIRMATION",
+                "response_strategy": "ASK_MISSING_FIELD",
+                "current_goal": "SALES_UPDATE_PRODUCT",
+                "final_response": _format_pending_recap(pending, noun="produit"),
+                "working_memory": {**working, "update_product_id": str(product_id),
+                                   "update_phase": "CONFIRM", "update_pending": pending,
+                                   "active_goal": "SALES_UPDATE_PRODUCT",
+                                   "locked_intent": "SALES_UPDATE_PRODUCT"},
+                "ag_ui_component": None,
+            }
+        # Oui/non : classification déjà faite en amont par le LLM
+        # (input_interpreter), pas de liste de mots-clés à maintenir ici.
+        if event == "CONFIRM":
+            gw_fields = dict(pending)
+            if "product" in pending:
+                gw_fields["name"] = gw_fields.pop("product")
+            try:
+                result = await ProductGateway(mc_runtime).update_product(str(phone), str(product_id), **gw_fields)
+            except Exception as exc:
+                logger.error("SALES_UPDATE_PRODUCT: update_product a échoué: %s", exc)
+                return {
+                    "status": "COMPLETED", "response_strategy": "ERROR",
+                    "final_response": "Impossible d'enregistrer la modification pour le moment. Réessayez dans un instant.",
+                    "working_memory": _clear_wm(), "ag_ui_component": None,
+                }
+            if not is_success_response(result):
+                return {
+                    "status": "COMPLETED", "response_strategy": "ERROR",
+                    "final_response": (result or {}).get("message") or "La modification n'a pas pu être enregistrée.",
+                    "working_memory": _clear_wm(), "ag_ui_component": None,
+                }
+            return {
+                "status": "COMPLETED", "response_strategy": "SUCCESS",
+                "final_response": (result or {}).get("message") or "✅ Produit mis à jour.",
+                "working_memory": _clear_wm(), "transaction_payload": {"__reset__": True},
+                "ag_ui_component": None,
+            }
+        if event == "REJECT":
+            return {
+                "status": "COMPLETED", "response_strategy": "SUCCESS",
+                "final_response": "❌ Modification annulée. Rien n'a été changé.",
+                "working_memory": _clear_wm(), "ag_ui_component": None,
+            }
+        # Ni correction, ni CONFIRM, ni REJECT clair : on ré-affiche le récap.
+        return {
+            "status": "WAITING_INPUT", "expected_input": "CONFIRMATION",
+            "response_strategy": "ASK_MISSING_FIELD",
+            "current_goal": "SALES_UPDATE_PRODUCT",
+            "final_response": _format_pending_recap(pending, noun="produit"),
+            "working_memory": {**working, "update_product_id": str(product_id),
+                               "update_phase": "CONFIRM", "update_pending": pending,
+                               "active_goal": "SALES_UPDATE_PRODUCT",
+                               "locked_intent": "SALES_UPDATE_PRODUCT"},
+            "ag_ui_component": None,
+        }
+
+    # ── COLLECT : produit choisi, on attend au moins un champ à modifier ──
+    if product_id:
+        correction = _parse_update_correction(text, allow_type_date=False)
+        if not correction:
+            return {
+                # Voir le commentaire miroir dans _resolve_cycle_for_update :
+                # "PRODUCT" est interruptible (slot SOFT), ce qui laissait une
+                # correction riche dérailler ce tunnel vers un autre goal.
+                "status": "WAITING_INPUT", "expected_input": "UPDATE_FIELD",
+                "response_strategy": "ASK_MISSING_FIELD",
+                "current_goal": "SALES_UPDATE_PRODUCT",
+                "working_memory": {**working, "update_product_id": str(product_id), "update_phase": "COLLECT",
+                                   "active_goal": "SALES_UPDATE_PRODUCT",
+                                   "locked_intent": "SALES_UPDATE_PRODUCT",
+                                   "available_mapping_kind": None},
+                "final_response": (
+                    "✏️ Que souhaitez-vous modifier sur ce produit ?\n"
+                    "Ex : « prix 400 », « nom maïs », « quantité 500 »."
+                ),
+                "ag_ui_component": None,
+            }
+        pending.update(correction)
+        return {
+            "status": "WAITING_INPUT", "expected_input": "CONFIRMATION",
+            "response_strategy": "ASK_MISSING_FIELD",
+            "current_goal": "SALES_UPDATE_PRODUCT",
+            "final_response": _format_pending_recap(pending, noun="produit"),
+            "working_memory": {**working, "update_product_id": str(product_id), "update_phase": "CONFIRM",
+                               "update_pending": pending, "active_goal": "SALES_UPDATE_PRODUCT",
+                               "locked_intent": "SALES_UPDATE_PRODUCT",
+                               "available_mapping_kind": None},
+            "ag_ui_component": None,
+        }
+
+    # ── SELECT : aucun produit choisi → liste du catalogue ────────────
+    try:
+        result = await ProductGateway(mc_runtime).get_my_products(str(phone))
+    except Exception as exc:
+        logger.error("SALES_UPDATE_PRODUCT: get_my_products a échoué: %s", exc)
+        return {
+            "status": "ERROR", "response_strategy": "ERROR",
+            "final_response": "Impossible de charger votre catalogue pour le moment. Réessayez dans un instant.",
+            "working_memory": _clear_wm(),
+            "ag_ui_component": None,
+        }
+    if str((result or {}).get("status") or "").lower() not in ("success", "ok"):
+        logger.error(
+            "SALES_UPDATE_PRODUCT: get_my_products status=%s message=%s",
+            (result or {}).get("status"), (result or {}).get("message"),
+        )
+        return {
+            "status": "ERROR", "response_strategy": "ERROR",
+            "final_response": "Impossible de charger votre catalogue pour le moment. Réessayez dans un instant.",
+            "working_memory": _clear_wm(),
+            "ag_ui_component": None,
+        }
+    items = (result or {}).get("data") or []
+    if not isinstance(items, list) or not items:
+        return {
+            "status": "COMPLETED", "response_strategy": "SUCCESS",
+            "final_response": "Votre catalogue de produits est actuellement vide.",
+            "working_memory": _clear_wm(),
+            "ag_ui_component": None,
+        }
+
+    mapping: Dict[str, str] = {}
+    options: List[MenuOption] = []
+    lines = ["✏️ *Quel produit souhaitez-vous modifier ? Indiquez le numéro :*"]
+    for i, it in enumerate(items, start=1):
+        pid = str(it.get("id") or it.get("product_id") or "")
+        if not pid:
+            continue
+        name = it.get("name") or "Produit"
+        qty = it.get("quantity_for_sale") or it.get("quantity")
+        unit = str(it.get("unit") or "KG").upper()
+        price = it.get("price")
+        qty_str = f" — {qty} {unit}" if qty not in (None, "") else ""
+        price_str = f" — {price} FCFA/{unit}" if price not in (None, "") else ""
+        lines.append(f"{i}. *{name}*{qty_str}{price_str}")
+        mapping[str(i)] = pid
+        options.append(MenuOption(index=str(i), label=f"{name}{qty_str}", value=pid))
+
+    menu = "\n".join(lines)
+    return {
+        "status": "WAITING_INPUT",
+        "expected_input": "SELECTION",
+        "response_strategy": "SELECTION_MENU",
+        "current_goal": "SALES_UPDATE_PRODUCT",
+        "final_response": menu,
+        "available_mapping": mapping,
+        "working_memory": {**working, "active_goal": "SALES_UPDATE_PRODUCT",
+                           "locked_intent": "SALES_UPDATE_PRODUCT",
+                           "available_mapping_kind": "catalog_product", "update_phase": "SELECT",
+                           "update_pending": None},
+        "ag_ui_component": None,
+        "pending_menu": MenuRequest(
+            title="Produits à modifier",
+            options=options,
+            kind="catalog_product",
+            preformatted_text=menu,
+        ),
+    }
+
+
+# =====================================================================
+# ESCROW (Paydunya) — confirmation de livraison par code producteur
+# =====================================================================
+# Flux auto-suffisant à UN SEUL échange : contrairement aux tunnels de mise
+# à jour ci-dessus, pas besoin de SELECT/COLLECT/CONFIRM — le code à 4
+# chiffres lui-même sert de sélecteur (verify_delivery_otp cherche parmi les
+# commandes ESCROWED de CE producteur), donc un seul message suffit ("livré,
+# code 1234"). "OTP_CODE" est un slot HARD (tunnel_manager.py) — seul un
+# NEW_TASK/INTERRUPTION à confiance suffisante peut en sortir, comme pour du
+# CONFIRMATION classique, ce qui est le bon niveau de protection pour un flux
+# qui débloque de l'argent.
+
+async def _resolve_delivery_otp(
+    mc_runtime: MarketRuntime,
+    phone: str,
+    payload: Dict[str, Any],
+    working: Dict[str, Any],
+    text: str,
+    event: str,
+) -> Dict[str, Any]:
+    if not phone:
+        return {
+            "status": "ERROR", "response_strategy": "ERROR",
+            "final_response": "Numéro de téléphone introuvable, impossible de confirmer la livraison.",
+            "ag_ui_component": None,
+        }
+
+    code = payload.get("otp_code") or _extract_otp_code(text)
+    if not code:
+        return {
+            "status": "WAITING_INPUT", "expected_input": "OTP_CODE",
+            "response_strategy": "ASK_MISSING_FIELD",
+            "current_goal": "PRODUCER_CONFIRM_DELIVERY_OTP",
+            "working_memory": {
+                **working,
+                "active_goal": "PRODUCER_CONFIRM_DELIVERY_OTP",
+                "locked_intent": "PRODUCER_CONFIRM_DELIVERY_OTP",
+            },
+            "final_response": (
+                "📦 Quel est le code de livraison à 4 chiffres transmis par l'acheteur ?\n"
+                "Ex : « code 1234 » ou juste « 1234 »."
+            ),
+            "ag_ui_component": None,
+        }
+
+    try:
+        result = await EscrowGateway(mc_runtime).verify_delivery_otp(phone, str(code))
+    except Exception as exc:
+        logger.error("PRODUCER_CONFIRM_DELIVERY_OTP: verify_delivery_otp a échoué: %s", exc)
+        return {
+            "status": "COMPLETED", "response_strategy": "ERROR",
+            "final_response": "Impossible de vérifier le code pour le moment. Réessayez dans un instant.",
+            "working_memory": {**working, "active_goal": None, "locked_intent": None},
+            "ag_ui_component": None,
+        }
+
+    if not is_success_response(result):
+        # Code invalide : on ré-explique et on reste dans le tunnel plutôt que
+        # d'abandonner — le producteur a probablement fait une faute de frappe.
+        return {
+            "status": "WAITING_INPUT", "expected_input": "OTP_CODE",
+            "response_strategy": "ASK_MISSING_FIELD",
+            "current_goal": "PRODUCER_CONFIRM_DELIVERY_OTP",
+            "final_response": (result or {}).get("message")
+                or "Code invalide. Vérifiez le code à 4 chiffres transmis par l'acheteur.",
+            "working_memory": {
+                **working,
+                "active_goal": "PRODUCER_CONFIRM_DELIVERY_OTP",
+                "locked_intent": "PRODUCER_CONFIRM_DELIVERY_OTP",
+            },
+            "ag_ui_component": None,
+        }
+
+    return {
+        "status": "COMPLETED", "response_strategy": "SUCCESS",
+        "final_response": (result or {}).get("message")
+            or "✅ Code valide ! Livraison confirmée. Vos fonds sont débloqués.",
+        "working_memory": {**working, "active_goal": None, "locked_intent": None},
+        "transaction_payload": {"__reset__": True},
+        "ag_ui_component": None,
     }
 
 
@@ -559,6 +1266,28 @@ async def producer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRun
         state_for_auction = dict(state)
         state_for_auction["transaction_payload"] = payload
         return await producer_auction_resolver(state_for_auction, mc_runtime)
+
+    # 2b. Mise à jour d'une production future (MarketOffer) : flux auto-suffisant
+    #     (sélection → collecte → confirmation → écriture directe).
+    if goal == "SALES_UPDATE_PRODUCTION":
+        working = state.get("working_memory") or {}
+        raw_text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+        return await _resolve_cycle_for_update(mc_runtime, str(phone), payload, working, raw_text, event)
+
+    # 2c. Mise à jour d'un produit du catalogue : même UX que ci-dessus, sur
+    #     la table Product (oignon, tomates…) au lieu de MarketOffer.
+    if goal == "SALES_UPDATE_PRODUCT":
+        working = state.get("working_memory") or {}
+        raw_text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+        return await _resolve_product_for_update(mc_runtime, str(phone), payload, working, raw_text, event)
+
+    # 2d. Escrow (Paydunya) : le producteur transmet le code de livraison à
+    #     4 chiffres pour débloquer ses fonds — flux auto-suffisant à un
+    #     seul échange (voir _resolve_delivery_otp).
+    if goal == "PRODUCER_CONFIRM_DELIVERY_OTP":
+        working = state.get("working_memory") or {}
+        raw_text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+        return await _resolve_delivery_otp(mc_runtime, str(phone), payload, working, raw_text, event)
 
     # 3. Validation finale du contrat (cas où le producteur doit désigner un bid précis)
     if goal == "SALES_ACCEPT_CONTRACT" and not payload.get("bid_id"):

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from agriconnect.core.formatting import fmt_num as _shared_fmt_num
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 
 logger = logging.getLogger("AgriConnect.Market.Rendering")
@@ -131,12 +132,10 @@ def unwrap_execution_result(exec_result: Dict[str, Any]) -> Dict[str, Any]:
 # =====================================================================
 
 def fmt_num(val: Any) -> str:
-    """50.0 -> '50', 12.5 -> '12.5'."""
-    try:
-        f_val = float(val)
-        return f"{f_val:g}"
-    except (ValueError, TypeError):
-        return str(val) if val else "0"
+    """50.0 -> '50', 12.5 -> '12.5'. Voir core/formatting.py — jamais de
+    notation scientifique (un paysan ne comprend pas "1.5e+06 FCFA")."""
+    formatted = _shared_fmt_num(val)
+    return formatted or "0"
 
 
 def fmt_date(date_val: Any) -> Optional[str]:

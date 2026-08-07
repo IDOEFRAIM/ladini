@@ -23,11 +23,11 @@ from agriconnect.graphs.agents.market_coach.interpreter.intent import (
 )
 from agriconnect.graphs.agents.market_coach.flows.producer.farm_logic import ensure_farm_node
 from agriconnect.graphs.agents.market_coach.core.base import FARM_CRITICAL_GOALS, _AUTO_FARM_NOTICE
+from agriconnect.graphs.agents.market_coach.core.slots import resolve_canonical
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     is_success_response,
 )
-from agriconnect.graphs.roles import is_tool_allowed, normalize_role
 
 
 from agriconnect.graphs.agents.market_coach.services.mcp.schema_resolver import (
@@ -249,8 +249,6 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
             "ag_ui_component": None,
         })
 
-    role_norm = normalize_role(state.get("role") or state.get("user_role"))
-
     goal = (state.get("current_goal") or "").upper()
     phone = state.get("user_phone")
     retry_count = int(state.get("retry_count") or 0)
@@ -397,21 +395,13 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
             "ag_ui_component": None,
         })
 
-    if not is_tool_allowed(role_norm, tool_name):
-        logger.warning(
-            "Role guard blocked tool execution | role=%s | tool=%s",
-            role_norm,
-            tool_name,
-        )
-        return _apply_side_effects({
-            "status": "ERROR",
-            "response_strategy": "ERROR",
-            "final_response": "Cette action n'est pas autorisée pour votre profil.",
-            "selected_tool": tool_name,
-            "selected_tool_args": {},
-            "validation_errors": ["role_violation"],
-            "ag_ui_component": None,
-        })
+    # NOTE (refonte double-rôle) : le blocage par "rôle de session" a été
+    # retiré ici — tout utilisateur peut déclencher un outil producteur OU
+    # acheteur selon le goal classé pour CE tour (voir `core/router.py`
+    # `_goal_domain`). La sécurité sur les actions sensibles (paiement, OTP
+    # de livraison...) se fait désormais par ownership au niveau de la
+    # méthode DB elle-même (vérifie que l'appelant est la partie prenante de
+    # LA COMMANDE ciblée), pas par un rôle global figé.
 
     tool_schema = await _get_mcp_tool_schema(mc_runtime, tool_name)
     payload, farm_updates = await _auto_provision_farm_if_needed(
@@ -437,14 +427,16 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
     except MissingRequiredMCPArgs as exc:
         logger.warning("[Executor] %s", str(exc))
 
-        mcp_to_slot = {
-            "name": "product",
-            "product_name": "product",
-            "quantity_for_sale": "quantity",
-            "producer_id": "phone",
-            "user_id": "phone",
-        }
-        missing_slots = [mcp_to_slot.get(m, m) for m in (exc.missing_args or [])]
+        # MCP arg → slot conversationnel à redemander. Les alias de SLOT
+        # (name/product_name → product, quantity_for_sale → quantity…) sont
+        # résolus par le registre central (core/slots.py) — ne pas les
+        # redupliquer ici. Seule la résolution d'IDENTITÉ (producer_id/user_id
+        # → phone), qui n'est PAS un alias de slot, reste un overlay local.
+        _MCP_IDENTITY_TO_SLOT = {"producer_id": "phone", "user_id": "phone"}
+        missing_slots = [
+            _MCP_IDENTITY_TO_SLOT.get(m) or resolve_canonical(m)
+            for m in (exc.missing_args or [])
+        ]
         missing_slots = [m for m in missing_slots if m]
 
         first_missing = missing_slots[0] if missing_slots else None

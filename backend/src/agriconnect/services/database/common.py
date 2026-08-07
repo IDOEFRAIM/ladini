@@ -153,6 +153,52 @@ PERFORMANCE_INDEX_DDL = (
 	"ON governance.zones USING gin (name gin_trgm_ops)",
 )
 
+# Colonnes ajoutées après la création initiale du schéma — ALTER TABLE
+# idempotents (mêmes garanties que PERFORMANCE_INDEX_DDL : rejouables sans
+# erreur, exécutés au même endroit — voir AgriDatabaseService.ensure_performance_indexes).
+SCHEMA_COLUMN_DDL = (
+	# Géolocalisation utilisateur (GPS WhatsApp natif) : nullable, ne bloque
+	# jamais un profil sans position — voir services/database/auth.py::update_geo_location.
+	"ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMP",
+	# Escrow Paydunya — voir services/database/escrow.py. Toutes nullable :
+	# une commande CASH classique n'a jamais ces champs renseignés.
+	"ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS paydunya_invoice_token VARCHAR",
+	"ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS delivery_otp VARCHAR",
+	"ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS payment_expires_at TIMESTAMP",
+	"ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS locked_amount NUMERIC(14,2)",
+	# Unicité du token (index partiel : la colonne est nullable et la
+	# contrainte ne doit s'appliquer qu'aux commandes qui en ont réellement un).
+	"CREATE UNIQUE INDEX IF NOT EXISTS ix_orders_paydunya_token "
+	"ON marketplace.orders (paydunya_invoice_token) WHERE paydunya_invoice_token IS NOT NULL",
+	# Repérage rapide des commandes en attente de paiement à expirer (cron).
+	"CREATE INDEX IF NOT EXISTS ix_orders_payment_expires_at "
+	"ON marketplace.orders (payment_expires_at) WHERE payment_status = 'PENDING'",
+)
+
+
+import math
+
+
+def haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+	"""Distance orthodromique (grand cercle) entre deux points GPS, en kilomètres.
+
+	Utilitaire partagé pour tout filtre de proximité (produits, appels
+	d'offres, mise en relation producteur/acheteur). Retourne 0.0 si une
+	coordonnée est manquante/nulle plutôt que de lever une erreur — cohérent
+	avec le principe "l'absence de GPS ne bloque jamais" du reste du module.
+	"""
+	if not all([lat1, lon1, lat2, lon2]):
+		return 0.0
+	R = 6371.0  # Rayon moyen de la Terre en km
+	dlat = math.radians(lat2 - lat1)
+	dlon = math.radians(lon2 - lon1)
+	a = (
+		math.sin(dlat / 2) ** 2
+		+ math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+	)
+	c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+	return round(R * c, 2)
+
 
 __all__ = [
 	"_uuid",
@@ -164,4 +210,6 @@ __all__ = [
 	"positive_float",
 	"clamp_limit",
 	"PERFORMANCE_INDEX_DDL",
+	"SCHEMA_COLUMN_DDL",
+	"haversine_distance_km",
 ]

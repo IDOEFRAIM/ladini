@@ -1,11 +1,19 @@
 # ═════════════════════════════════════════════════════════════════════
-# AgriConnect — docker-compose.prod.yml
+# Ladini — docker-compose.prod.yml
 #
 # Deux blocs sur le MÊME réseau `agri_net` :
-#   1. APPLICATIF : api (FastAPI), worker (Celery), redis (broker),
-#      postgres (DB), pgbouncer (pooling), flower (monitoring Celery).
+#   1. APPLICATIF : api (FastAPI), worker (Celery), mcp (daemon HTTP
+#      AgriDBMCPServer — transport persistant, pool DB chaud, voir
+#      protocols/mcp/servers/http_server.py), redis (broker), postgres
+#      (DB), pgbouncer (pooling), flower (monitoring Celery).
 #   2. LANGFUSE v3 (LLMOps self-hosted) : langfuse-web, langfuse-worker,
 #      clickhouse, minio, langfuse-postgres.
+#
+# ⚠️  Le service `mcp` DOIT rester à 1 seule réplique/process (voir la
+#     docstring de http_server.py) : AgriDBMCPServer/runtime sont des
+#     singletons process-local. Pour plus de débit, dupliquer le SERVICE
+#     (plusieurs conteneurs `mcp` sur des ports différents + load
+#     balancer), jamais via plusieurs workers/replicas du même service.
 #
 # ⚠️  IMPORTANT — Langfuse v3 : contrairement à v2 (postgres seul), le
 #     self-host v3 EXIGE ClickHouse + un stockage S3 (MinIO) + Redis. Le bloc
@@ -25,6 +33,11 @@ x-app-env: &app-env
   DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:6432/${POSTGRES_DB}"
   DB_SSL_MODE: "disable"              # réseau interne Docker → pas de SSL
   REDIS_URL: "redis://redis:6379/0"
+  # MCP — daemon HTTP persistant (remplace le spawn stdio par tour, voir
+  # protocols/mcp/servers/http_server.py). api/worker s'y connectent tous les
+  # deux ; settings.py défaut déjà MCP_DB_TRANSPORT=http, explicité ici.
+  MCP_DB_TRANSPORT: "http"
+  MCP_DB_HTTP_URL: "http://mcp:8003"
   # LLM
   LLM_PROVIDER: "groq"
   GROQ_API_KEY: "${GROQ_API_KEY}"
@@ -56,8 +69,31 @@ volumes:
 
 services:
   # ── 1. APPLICATIF ──────────────────────────────────────────────────
+  mcp:
+    image: ladini-mcp:latest
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.mcp
+      args:
+        API_IMAGE: ladini-api:latest
+    environment: *app-env
+    depends_on:
+      pgbouncer: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8003/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 768m }
+        reservations: { cpus: "0.25", memory: 256m }
+    restart: unless-stopped
+    networks: [agri_net]
+
   api:
-    image: agriconnect-api:latest
+    image: ladini-api:latest
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.api
@@ -67,6 +103,7 @@ services:
     depends_on:
       pgbouncer: { condition: service_healthy }
       redis: { condition: service_healthy }
+      mcp: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 15s
@@ -81,17 +118,18 @@ services:
     networks: [agri_net]
 
   worker:
-    image: agriconnect-worker:latest
+    image: ladini-worker:latest
     build:
       context: .
       dockerfile: infra/docker/Dockerfile.worker
       args:
-        API_IMAGE: agriconnect-api:latest
+        API_IMAGE: ladini-api:latest
     environment: *app-env
     depends_on:
       api: { condition: service_started }
       pgbouncer: { condition: service_healthy }
       redis: { condition: service_healthy }
+      mcp: { condition: service_healthy }
     healthcheck:
       test: ["CMD-SHELL", "celery -A agriconnect.api.celery_app inspect ping || exit 1"]
       interval: 30s
@@ -102,6 +140,35 @@ services:
       resources:
         limits: { cpus: "2.0", memory: 2g }
         reservations: { cpus: "0.5", memory: 512m }
+    restart: unless-stopped
+    networks: [agri_net]
+
+  # Planificateur Celery Beat — publie les 4 tâches périodiques
+  # (workers/beat_schedule.py : auction-solicitation, outbox-dispatch,
+  # proximity-matching, order-payment-expiry) sur le broker Redis à leur
+  # cadence. SANS ce service, `celery_app.conf.beat_schedule` est un
+  # config mort : `worker` ne fait qu'exécuter des tâches déjà en file,
+  # rien ne les y publie jamais — les sollicitations proactives, la
+  # livraison de l'outbox (notifs) et l'expiration des paiements escrow ne
+  # tournent jamais. Process SÉPARÉ et UNIQUE (jamais `--scale beat=N` :
+  # plusieurs beat dupliqueraient chaque tâche N fois sur le broker).
+  beat:
+    image: ladini-worker:latest
+    command: ["celery", "-A", "agriconnect.api.celery_app", "beat",
+              "--loglevel=info", "--pidfile=/tmp/celerybeat.pid"]
+    environment: *app-env
+    depends_on:
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/celerybeat.pid && kill -0 $(cat /tmp/celerybeat.pid)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 256m }
+        reservations: { cpus: "0.1", memory: 128m }
     restart: unless-stopped
     networks: [agri_net]
 
@@ -166,7 +233,7 @@ services:
     networks: [agri_net]
 
   flower:
-    image: agriconnect-api:latest   # même image (flower est dans pyproject)
+    image: ladini-api:latest   # même image (flower est dans pyproject)
     command: ["celery", "-A", "agriconnect.api.celery_app", "flower",
               "--port=5555", "--basic_auth=${FLOWER_USER}:${FLOWER_PASSWORD}"]
     environment: *app-env

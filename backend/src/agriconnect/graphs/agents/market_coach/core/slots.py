@@ -12,14 +12,14 @@ Usage
         build_remap_dict,
         build_alias_mirrors,
         build_canonical_field_aliases,
-        compute_slot_status,
+        SLOT_FILLING_INPUTS,
         SLOT_REGISTRY,
     )
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -37,22 +37,6 @@ class SlotDefinition:
     example_fr: str = ""
     auto_resolvable: bool = False
     default_value: Optional[Any] = field(default=None, hash=False, compare=False)
-
-
-# ---------------------------------------------------------------------------
-# Slot Status (runtime, per-turn)
-# ---------------------------------------------------------------------------
-
-@dataclass
-class SlotStatus:
-    """Runtime status of a single slot for the current turn."""
-    name: str
-    required: bool
-    value: Any
-    filled: bool
-    valid: bool
-    error: Optional[str] = None
-    source: str = "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +139,26 @@ SLOT_REGISTRY: Tuple[SlotDefinition, ...] = (
         label_fr="code de confirmation",
         example_fr="123456",
     ),
+    SlotDefinition(
+        canonical="farm_name",
+        aliases=frozenset({"domain_name", "nom_domaine", "farm", "exploitation"}),
+        value_type="str",
+        blocking=False,
+        label_fr="nom du domaine agricole",
+        example_fr="Ferme du Soleil, Jardin d'Abondance…",
+    ),
+    # Date limite d'un appel d'offres (PROCUREMENT_CREATE_REQUEST). OPTIONNEL :
+    # non listé dans INTENT_CONFIG.required et `procure_dto.deadline` est
+    # Optional (le domaine applique un défaut/auto_extend si absent). Enregistré
+    # ici uniquement pour être capté/normalisé s'il est mentionné, jamais forcé.
+    SlotDefinition(
+        canonical="deadline",
+        aliases=frozenset({"end_date", "expiry", "echeance", "date_limite"}),
+        value_type="str",
+        blocking=False,
+        label_fr="date limite",
+        example_fr="30 septembre, dans 2 semaines…",
+    ),
 )
 
 
@@ -200,7 +204,21 @@ _EXPECTED_INPUT_MAP: Dict[str, str] = {
     "surface": "QUANTITY",
     "production_type": "PRODUCT",
     "estimated_available_at": "DATE",
+    "farm_name": "FARM_NAME",
+    "deadline": "DATE",
 }
+
+# Ensemble CANONIQUE des `expected_input` qui représentent un CHAMP MÉTIER à
+# collecter auprès de l'utilisateur (« soft slots » : on peut y re-demander le
+# champ, et une nouvelle intention suffisamment confiante peut les interrompre).
+# Dérivé automatiquement de `_EXPECTED_INPUT_MAP` : ajouter un slot au registre
+# l'inclut PARTOUT sans édition manuelle. Historiquement, ce set était recopié
+# à la main dans tunnel_manager (SOFT_EXPECTED_INPUTS), interpreter/routing.py
+# (garde NEW_TASK→ANSWER) et interpreter/strategy.py (re-demande de slot) — les
+# 3 copies avaient DÉRIVÉ (FARM_NAME absent des 3, DATE absent de strategy),
+# donc la gestion de changement d'intention était incohérente selon le slot en
+# cours. Source unique désormais.
+SLOT_FILLING_INPUTS: FrozenSet[str] = frozenset(_EXPECTED_INPUT_MAP.values())
 
 
 # ---------------------------------------------------------------------------
@@ -252,73 +270,6 @@ def field_priority(field_name: str) -> int:
     return _FIELD_PRIORITY.get(field_name, 99)
 
 
-def _slot_value_filled(value: Any) -> bool:
-    return value not in (None, "", [], {}, 0)
-
-
-def compute_slot_status(
-    payload: Dict[str, Any],
-    required_fields: List[str],
-    *,
-    goal: Optional[str] = None,
-) -> Dict[str, SlotStatus]:
-    """Compute SlotStatus for each required field given a payload.
-
-    Returns a dict keyed by canonical field name. Fields are sorted by
-    priority so callers can iterate in ask-order.
-    """
-    result: Dict[str, SlotStatus] = {}
-    sorted_fields = sorted(required_fields, key=lambda f: _FIELD_PRIORITY.get(f, 99))
-    for field_name in sorted_fields:
-        slot_def = _CANONICAL_TO_DEF.get(field_name)
-        value = payload.get(field_name)
-        filled = _slot_value_filled(value)
-
-        if not filled and slot_def and slot_def.auto_resolvable:
-            filled = True
-            source = "auto"
-        elif not filled and slot_def and slot_def.default_value is not None:
-            source = "default"
-        elif filled:
-            source = "user"
-        else:
-            source = "missing"
-
-        error = None
-        valid = True
-        if filled and slot_def:
-            if slot_def.value_type == "float" and value is not None:
-                try:
-                    fv = float(value)
-                    if fv <= 0:
-                        valid = False
-                        error = f"{slot_def.label_fr} doit être supérieur(e) à 0."
-                except (TypeError, ValueError):
-                    valid = False
-                    error = f"{slot_def.label_fr} n'est pas un nombre valide."
-
-        result[field_name] = SlotStatus(
-            name=field_name,
-            required=True,
-            value=value,
-            filled=filled,
-            valid=valid,
-            error=error,
-            source=source,
-        )
-    return result
-
-
-def missing_from_status(slot_status: Dict[str, SlotStatus]) -> List[str]:
-    """Returns ordered list of missing field names from a SlotStatus dict."""
-    return [s.name for s in slot_status.values() if not s.filled]
-
-
-def errors_from_status(slot_status: Dict[str, SlotStatus]) -> List[str]:
-    """Returns list of validation error messages from a SlotStatus dict."""
-    return [s.error for s in slot_status.values() if s.error]
-
-
 def build_remap_dict() -> Dict[str, str]:
     """Generates the complete alias→canonical mapping dict."""
     return dict(_ALIAS_TO_CANONICAL)
@@ -340,8 +291,8 @@ def build_canonical_field_aliases() -> Dict[str, str]:
 
 __all__ = [
     "SlotDefinition",
-    "SlotStatus",
     "SLOT_REGISTRY",
+    "SLOT_FILLING_INPUTS",
     "resolve_canonical",
     "get_aliases",
     "get_slot",
@@ -349,9 +300,6 @@ __all__ = [
     "get_slot_hint",
     "expected_input_for_field",
     "field_priority",
-    "compute_slot_status",
-    "missing_from_status",
-    "errors_from_status",
     "build_remap_dict",
     "build_alias_mirrors",
     "build_canonical_field_aliases",

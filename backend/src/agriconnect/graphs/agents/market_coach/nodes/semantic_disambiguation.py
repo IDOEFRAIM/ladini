@@ -26,15 +26,16 @@ def _detect_disambiguation_candidates(text_lower: str, role_upper: str | None = 
     longest matched hint across ALL entries makes specificity win regardless
     of declaration order.
     """
-    active_role = (role_upper or "").upper().strip()
+    # NOTE (refonte double-rôle) : `role_upper` n'est plus utilisé pour EXCLURE
+    # des entrées — un même utilisateur peut déclencher un menu de
+    # désambiguïsation producteur OU acheteur selon le texte, quel que soit
+    # son rôle de session par défaut. Le paramètre est conservé pour compat
+    # de signature (appelants existants) mais n'a plus d'effet filtrant.
     best_entry: Optional[Dict[str, Any]] = None
     best_key: Optional[str] = None
     best_len = 0
     for key, entry in INTENT_DISAMBIGUATION.items():
         hints = entry.get("lexical_hints") or []
-        allowed_roles = entry.get("roles") or []
-        if allowed_roles and active_role and active_role not in {r.upper() for r in allowed_roles}:
-            continue
         for hint in hints:
             hint_lower = str(hint or "").lower()
             if hint_lower and hint_lower in text_lower and len(hint_lower) > best_len:

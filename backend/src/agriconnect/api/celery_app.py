@@ -21,6 +21,8 @@ celery_app = Celery(
         "agriconnect.workers.crons.auction_solicitation",
         "agriconnect.workers.crons.proximity_matching",
         "agriconnect.workers.crons.outbox_dispatch",
+        "agriconnect.workers.crons.order_expiry",
+        "agriconnect.workers.payments.paydunya_ipn_task",
     ],
 )
 

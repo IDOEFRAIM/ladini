@@ -174,6 +174,16 @@ class StockGateway(_BaseGateway):
     async def get_producer_stocks(self, phone: str) -> Dict[str, Any]:
         return await self._call("get_producer_stocks", phone=phone.strip())
 
+    async def list_productions(self, phone: str) -> Dict[str, Any]:
+        """Liste aplatie des productions futures / lots (MarketOffer) du producteur."""
+        return await self._call("list_producer_productions", phone=phone.strip())
+
+    async def update_production(self, phone: str, cycle_id: str, **fields: Any) -> Dict[str, Any]:
+        """Mise à jour partielle d'un lot (prix/quantité/nom/unité/date/type)."""
+        return await self._call(
+            "update_production_fields", phone=phone.strip(), cycle_id=cycle_id, **fields
+        )
+
     async def validate_stock_availability(
         self, product_id: str, quantity: float, unit: str, buyer_phone: str,
     ) -> Dict[str, Any]:
@@ -191,6 +201,15 @@ class StockGateway(_BaseGateway):
 class ProductGateway(_BaseGateway):
     async def search_products(self, product: str, phone: str) -> Dict[str, Any]:
         return await self._call("search_products", product=product, phone=phone)
+
+    async def get_my_products(self, phone: str) -> Dict[str, Any]:
+        return await self._call("get_my_products", phone=phone.strip())
+
+    async def update_product(self, phone: str, product_id: str, **fields: Any) -> Dict[str, Any]:
+        """Mise à jour partielle d'un produit catalogue (prix/quantité/nom/unité)."""
+        return await self._call(
+            "update_product_price_and_qty", phone=phone.strip(), product_id=product_id, **fields
+        )
 
 
 # ── Negotiation ────────────────────────────────────────────────────
@@ -305,6 +324,23 @@ class AgentActionGateway(_BaseGateway):
         )
 
 
+# ── Escrow (Paydunya) ──────────────────────────────────────────────
+
+class EscrowGateway(_BaseGateway):
+    async def initiate_escrow_payment(self, buyer_phone: str, preorder_id: str) -> Dict[str, Any]:
+        return await self._call(
+            "initiate_escrow_payment", buyer_phone=buyer_phone.strip(), preorder_id=preorder_id,
+        )
+
+    async def verify_delivery_otp(self, producer_phone: str, otp_code: str) -> Dict[str, Any]:
+        return await self._call(
+            "verify_delivery_otp", producer_phone=producer_phone.strip(), otp_code=otp_code,
+        )
+
+    async def list_escrowed_orders(self, producer_phone: str) -> Dict[str, Any]:
+        return await self._call("list_producer_escrowed_orders", producer_phone=producer_phone.strip())
+
+
 __all__ = [
     "MCPCallError",
     "ProfileGateway",
@@ -317,4 +353,5 @@ __all__ = [
     "OrderTrackingGateway",
     "ModerationGateway",
     "AgentActionGateway",
+    "EscrowGateway",
 ]

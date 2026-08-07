@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import logging
 import os
 from typing import Dict
@@ -5,6 +7,25 @@ from fastapi import HTTPException, Request
 from twilio.request_validator import RequestValidator
 
 logger = logging.getLogger("AgriConnect.API.TwilioSecurity")
+
+
+def verify_whatsapp_cloud_signature(app_secret: str, raw_body: bytes, signature_header: str) -> bool:
+    """Vérifie la signature HMAC-SHA256 d'un webhook WhatsApp Cloud API (Meta).
+
+    Le corps brut (AVANT tout parsing JSON) est signé avec le secret de l'app
+    Meta ; l'en-tête ``X-Hub-Signature-256`` porte ``sha256=<hex>``. Sans
+    cette vérification, n'importe qui peut poster un faux message sur
+    l'endpoint webhook — c'est l'équivalent Meta de ``verify_twilio_signature``
+    ci-dessus, mais HMAC sur le corps plutôt que sur l'URL+paramètres.
+    """
+    if not app_secret or not signature_header:
+        return False
+    prefix = "sha256="
+    if not signature_header.startswith(prefix):
+        return False
+    expected = hmac.new(app_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    received = signature_header[len(prefix):]
+    return hmac.compare_digest(expected, received)
 
 async def verify_twilio_signature(request: Request) -> None:
     """

@@ -22,7 +22,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, FrozenSet, List, Optional
 
-from agriconnect.graphs.agents.market_coach.core.slots import is_blocking_slot
+from agriconnect.graphs.agents.market_coach.core.slots import (
+    is_blocking_slot,
+    SLOT_FILLING_INPUTS,
+)
 
 logger = logging.getLogger("AgriConnect.Market.TunnelManager")
 
@@ -41,15 +44,12 @@ from agriconnect.graphs.agents.market_coach.core.goals import (  # noqa: E402
 )
 
 #: expected_input values where NEW_TASK can break the tunnel (soft slots).
-SOFT_EXPECTED_INPUTS: FrozenSet[str] = frozenset({
-    "PRODUCT",
-    "PRICE",
-    "QUANTITY",
-    "UNIT",
-    "LOCATION",
-    "DATE",
-    "SELECTION",
-})
+#: Les slots-champs (PRODUCT/PRICE/QUANTITY/UNIT/LOCATION/DATE/FARM_NAME)
+#: viennent du registre central (core/slots.py::SLOT_FILLING_INPUTS) —
+#: source unique, plus de liste recopiée à la main qui dérive. SELECTION est
+#: soft pour l'interruption mais n'est pas un « champ » à re-demander, donc
+#: ajouté explicitement ici seulement.
+SOFT_EXPECTED_INPUTS: FrozenSet[str] = SLOT_FILLING_INPUTS | frozenset({"SELECTION"})
 
 #: expected_input values that are never interruptible (hard slots).
 HARD_EXPECTED_INPUTS: FrozenSet[str] = frozenset({
