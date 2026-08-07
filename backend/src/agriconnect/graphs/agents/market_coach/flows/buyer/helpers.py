@@ -227,7 +227,13 @@ def clear_active_goal(state: Dict[str, Any], *, clear_cart_snapshot: bool = Fals
     working["active_goal"] = None
     working["locked_intent"] = None
     if clear_cart_snapshot:
-        working.pop("last_active_cart", None)
+        # None-overwrite OBLIGATOIRE : `working_memory` est réduit par
+        # `merge_dict`, donc RETIRER (pop) une clé du patch retourné ne la
+        # supprime PAS de l'état — l'ancienne valeur est conservée au merge.
+        # Avec le pop, l'instantané de panier survivait à l'annulation/
+        # validation d'une précommande et pouvait RESSUSCITER un panier
+        # abandonné (lu par flows/buyer/preorder.py via `last_active_cart`).
+        working["last_active_cart"] = None
     return working
 
 
@@ -322,12 +328,25 @@ def negotiation_action_menu(auction_id: str, **extra_meta: Any) -> MenuRequest:
 
 
 def detect_cart_action(state: Dict[str, Any]) -> Optional[str]:
-    """Detect free-text cart actions from user input."""
-    text = str(state.get("normalized_text") or state.get("user_query") or "").lower()
-    if not text.strip():
-        return None
+    """Détecte une action panier à partir du VERDICT DU LLM (pas de mots-clés).
+
+    Avant : balayage par SOUS-CHAÎNE d'une liste figée de mots français
+    (`CART_ACTION_KEYWORDS`) — « je ne veux pas annuler » et « surtout ne pas
+    valider » déclenchaient donc ANNULER / VALIDER, la négation étant tout
+    simplement ignorée. Rallonger la liste ne corrige rien : il faudrait
+    modéliser la négation, les fautes de frappe et toutes les tournures.
+
+    Le LLM produit déjà exactement ce signal (`interpreted_event` = CONFIRM /
+    REJECT, en tenant compte de la négation et des formulations libres) : on
+    s'appuie dessus. Le contexte (panier non vide, menu panier affiché) reste
+    vérifié, lui, de façon déterministe.
+    """
     expected = str(state.get("expected_input") or "").upper().strip() or "SELECTION"
     if expected not in {"SELECTION", "NONE", ""}:
+        return None
+
+    event = str(state.get("interpreted_event") or "").upper().strip()
+    if event not in {"CONFIRM", "REJECT"}:
         return None
 
     cart = state.get("active_cart") or []
@@ -335,14 +354,15 @@ def detect_cart_action(state: Dict[str, Any]) -> Optional[str]:
     mapping_kind = str(
         working.get("available_mapping_kind") or working.get("available_mapping_meta") or ""
     ).lower().strip()
+    in_cart_context = mapping_kind in {"cart", "preorder_action"}
 
-    for keyword, action in CART_ACTION_KEYWORDS.items():
-        if keyword in text:
-            if action == "PREORDER" and cart:
-                return action
-            if mapping_kind in {"cart", "preorder_action"}:
-                return action
-    return None
+    if event == "REJECT":
+        return "CANCEL" if in_cart_context else None
+
+    # CONFIRM : valider le panier (précommander) si un panier existe.
+    if cart:
+        return "PREORDER"
+    return "PREORDER" if in_cart_context else None
 
 
 def read_only_intent(intent: Optional[str]) -> bool:

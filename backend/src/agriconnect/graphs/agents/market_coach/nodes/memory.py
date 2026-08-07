@@ -48,6 +48,7 @@ _EXPECTED_INPUT_ALLOWED_FIELDS: Dict[str, frozenset] = {
     "LOCATION": frozenset({"zone"}),
     "DATE": frozenset({"estimated_available_at", "expected_harvest_date"}),
     "FARM_NAME": frozenset({"farm_name"}),
+    "MOVEMENT_TYPE": frozenset({"movement_type"}),
 }
 
 # _ALIAS_MIRRORS is now derived from core/slots.py (single source of truth).
@@ -56,7 +57,16 @@ _ALIAS_MIRRORS = build_alias_mirrors()
 _CORRECTION_HISTORY_LIMIT = 5
 _ORDER_MAPPING_KINDS = frozenset({"order", "order_list", "buyer_orders"})
 _AUCTION_MAPPING_KINDS = frozenset({"auction", "buyer_auction_list", "auction_bids"})
-_EPHEMERAL_WORKING_KEYS = frozenset({"payload_richness", "last_confidence", "step_index"})
+# SOURCE UNIQUE : `nodes/cleaner.py` (le nœud qui les remet à None en fin de
+# tour). memory.py les EXCLUT de la mémoire de travail reprise au tour suivant —
+# les deux doivent porter exactement le même ensemble, sinon une clé « nettoyée »
+# d'un côté est réhydratée de l'autre (et inversement). Elles étaient
+# auparavant déclarées deux fois à l'identique.
+from agriconnect.graphs.agents.market_coach.nodes.cleaner import (
+    _EPHEMERAL_WORKING_KEYS as _EPHEMERAL_WORKING_KEYS_TUPLE,
+)
+
+_EPHEMERAL_WORKING_KEYS = frozenset(_EPHEMERAL_WORKING_KEYS_TUPLE)
 _PRODUCT_CASCADE_FIELDS = (
     "quantity",
     "unit",

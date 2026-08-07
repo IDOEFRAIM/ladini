@@ -17,6 +17,10 @@ from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import
     normalize_unit_token as _normalize_unit_token_impl,
     parse_quantity_unit_from_text,
 )
+from agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment import (
+    PRODUCTION_TYPE_WORDS as _PRODUCTION_TYPE_WORDS_CANON,
+    PRODUCTION_TYPE_FILLER as _PRODUCTION_TYPE_FILLER_CANON,
+)
 from agriconnect.graphs.agents.market_coach.utils import (
     canonical_unit_label,
     normalize_slot_keys,
@@ -103,21 +107,14 @@ _SUSPICIOUS_PRODUCT_TOKENS = {
 # Quand l'agent demande « une culture (plante) ou un élevage (animal) ? » et que
 # l'utilisateur répond « c'est une culture », le LLM extrayait "culture" comme
 # nom de produit → le lot était enregistré sous le nom "culture" au lieu du vrai
-# nom (mil, tomate…). Ces mots ne doivent JAMAIS être acceptés comme produit ;
-# la déduction production_type=CROP/LIVESTOCK se fait séparément sur le texte
-# (services/domain/slot_enrichment.extract_production_type_from_text).
-_PRODUCTION_TYPE_WORDS = {
-    "culture", "cultures", "elevage", "élevage", "elevages", "élevages",
-    "betail", "bétail", "animal", "animaux", "plante", "plantes",
-    "vegetal", "végétal", "crop", "livestock",
-}
-
-# Mots de liaison ignorés pour décider si une réponse ne contient QUE des mots
-# de type ("c'est une culture" → "culture" après retrait de ces fillers).
-_PRODUCT_FILLER_WORDS = {
-    "cest", "c'est", "une", "un", "de", "du", "des", "la", "le", "les",
-    "ceci", "ca", "ça", "juste", "plutot", "plutôt", "genre", "type",
-}
+# nom (mil, tomate…). Ces mots ne doivent JAMAIS être acceptés comme produit.
+#
+# Importés depuis `services/domain/slot_enrichment.py` — SOURCE UNIQUE (ce
+# module y possède déjà la logique de type de production). Ils étaient
+# auparavant recopiés ici à l'identique : deux listes à maintenir en parallèle,
+# donc vouées à diverger silencieusement.
+_PRODUCTION_TYPE_WORDS = _PRODUCTION_TYPE_WORDS_CANON
+_PRODUCT_FILLER_WORDS = _PRODUCTION_TYPE_FILLER_CANON
 
 
 def _sanitize_product_candidate(value: Any) -> Optional[str]:

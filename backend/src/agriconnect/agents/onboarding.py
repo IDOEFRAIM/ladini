@@ -616,7 +616,10 @@ async def _step_create_profile(
             try:
                 import ast
                 result_dict = ast.literal_eval(raw_result)
-            except:
+            except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+                # `except:` NU auparavant : il interceptait AUSSI KeyboardInterrupt
+                # et SystemExit, rendant le worker non-interruptible sur ce chemin.
+                # On ne capte que ce que `literal_eval` peut réellement lever.
                 result_dict = {}
         else:
             result_dict = raw_result if isinstance(raw_result, dict) else {}

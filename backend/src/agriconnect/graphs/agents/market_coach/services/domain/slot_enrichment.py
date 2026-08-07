@@ -32,15 +32,28 @@ class SlotValidationError(RuntimeError):
 # Restreint aux mots GÉNÉRIQUES : surtout PAS "poulet"/"poussins"/"mais" qui
 # sont de vrais produits. Empêche qu'une réponse à « culture ou élevage ? »
 # (« c'est une culture ») soit enregistrée comme nom de produit "culture".
-_PRODUCT_TYPE_ONLY_WORDS = frozenset({
+#
+# SOURCE UNIQUE de ce vocabulaire métier : ce module possède déjà la logique
+# de type de production (`extract_production_type_from_text`,
+# `_PRODUCTION_TYPE_SYNONYMS`). `interpreter/entities.py` importe d'ici au
+# lieu de maintenir sa propre copie — les deux listes étaient auparavant
+# identiques mais séparées, donc vouées à diverger (un mot ajouté ici mais
+# pas là-bas = produit nommé « culture » de nouveau accepté d'un côté).
+PRODUCTION_TYPE_WORDS = frozenset({
     "culture", "cultures", "elevage", "élevage", "elevages", "élevages",
     "betail", "bétail", "animal", "animaux", "plante", "plantes",
     "vegetal", "végétal", "crop", "livestock",
 })
-_PRODUCT_TYPE_FILLER = frozenset({
-    "cest", "une", "un", "de", "du", "des", "la", "le", "les",
+#: Mots de liaison ignorés pour décider si une réponse ne contient QUE des
+#: mots de type ("c'est une culture" → "culture" après retrait des fillers).
+PRODUCTION_TYPE_FILLER = frozenset({
+    "cest", "c'est", "une", "un", "de", "du", "des", "la", "le", "les",
     "ceci", "ca", "ça", "juste", "plutot", "plutôt", "genre", "type",
 })
+
+# Alias internes (compat des usages existants dans ce module).
+_PRODUCT_TYPE_ONLY_WORDS = PRODUCTION_TYPE_WORDS
+_PRODUCT_TYPE_FILLER = PRODUCTION_TYPE_FILLER
 
 
 class SlotExtractionPayload(BaseModel):

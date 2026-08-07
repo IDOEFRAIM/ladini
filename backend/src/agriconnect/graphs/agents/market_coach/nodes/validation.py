@@ -62,6 +62,20 @@ def _finalize_validator_response(state: Dict[str, Any], response: Dict[str, Any]
     return response
 
 
+#: Champs porteurs d'un identifiant TECHNIQUE (UUID/clé interne). Ils sont
+#: résolus par un menu de sélection ou un résolveur dédié — jamais saisis par
+#: l'utilisateur. `farm_id` est exclu : il est auto-provisionné en amont
+#: (ensure_farm_node), donc jamais réclamé non plus.
+_TECHNICAL_ID_SUFFIXES = ("_id",)
+
+
+def _is_technical_id_field(field: str) -> bool:
+    name = str(field or "").strip().lower()
+    if not name or name in _AUTO_RESOLVABLE_FIELDS:
+        return False
+    return name.endswith(_TECHNICAL_ID_SUFFIXES)
+
+
 def _missing_fields_for_goal(payload: Dict[str, Any], required_fields: List[str]) -> List[str]:
     missing = [
         f for f in required_fields
@@ -152,6 +166,14 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
         "MARKET_GET_MY_PROPOSALS": ("bid_id", []),
         "SALES_ACCEPT_CONTRACT": ("bid_id", []),
         "PROCUREMENT_ACCEPT_OFFER": ("bid_id", []),
+        # Ces deux-là ONT un résolveur dédié côté acheteur (flows/buyer/flow.py :
+        # `resolve_received_bids` et `resolve_buyer_bid_pick`, qui affichent un
+        # menu de sélection) mais n'étaient PAS déclarés ici : le validateur
+        # bloquait donc AVANT, en réclamant `auction_id`/`bid_id` — un UUID que
+        # l'utilisateur ne peut pas connaître, avec expected_input=NONE (donc
+        # aucune réponse n'était interprétable). Impasse conversationnelle.
+        "MARKET_GET_REQUEST_DETAIL": ("auction_id", []),
+        "PROCUREMENT_SELECT_WINNER": ("bid_id", []),
         # cycle_id / product_id sont résolus par le flux de sélection dédié
         # (_resolve_cycle_for_update / _resolve_product_for_update), jamais
         # demandés comme UUID brut à l'utilisateur.
@@ -257,6 +279,54 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
 
     if missing or errors:
         first_missing = missing[0] if missing else None
+
+        # ── FILET : NE JAMAIS RÉCLAMER UN IDENTIFIANT TECHNIQUE ──────────
+        # Un champ `*_id` est résolu par un menu de sélection ou un résolveur
+        # dédié, JAMAIS saisi par l'utilisateur (personne ne connaît un UUID).
+        # Si un tel champ reste manquant ici, c'est qu'aucun résolveur ne
+        # couvre ce goal : demander l'ID produisait une IMPASSE — l'agent
+        # affichait « Étape 1/1 : identifiant enchère » avec
+        # expected_input=NONE, donc même une réponse correcte de l'utilisateur
+        # ne pouvait être rattachée au champ. On termine proprement le tour
+        # avec un message actionnable plutôt que de piéger la conversation.
+        # On inspecte TOUS les champs manquants, pas seulement le premier :
+        # `STOCK_UPDATE_LEVEL` exige ['stock_id', 'quantity'] et `quantity` est
+        # prioritaire — l'agent demandait donc la quantité d'abord et ne butait
+        # sur l'UUID qu'AU TOUR SUIVANT. Collecter des slots qui mènent à une
+        # impasse est inutile : si un identifiant non résoluble manque, on
+        # clarifie TOUT DE SUITE.
+        blocking_id = next((f for f in missing if _is_technical_id_field(f)), None)
+        if blocking_id:
+            logger.warning(
+                "[Validator] %s : champ technique '%s' manquant sans résolveur — "
+                "clarification au lieu de réclamer un identifiant à l'utilisateur.",
+                goal_upper, blocking_id,
+            )
+            return _finalize_validator_response(
+                state,
+                {
+                    "status": "COMPLETED",
+                    "goal_status": "COMPLETED",
+                    "missing_fields": [],
+                    "last_missing_field": None,
+                    "expected_input": "NONE",
+                    "validation_errors": [],
+                    "response_strategy": "CLARIFICATION",
+                    "final_response": (
+                        "Je n'ai pas assez d'éléments pour identifier l'élément concerné. "
+                        "Dites-moi de quoi il s'agit en toutes lettres (par exemple "
+                        "*voir mon stock*, *mes commandes* ou *mes appels d'offres*), "
+                        "puis choisissez dans la liste."
+                    ),
+                    "transaction_payload": payload,
+                    "waiting_for_confirmation": False,
+                    "is_certified": False,
+                    "confirmation_summary": None,
+                    "execution_authorized": False,
+                    "ag_ui_component": None,
+                },
+            )
+
         hint = None
         if progress and first_missing:
             total = progress.get("total", 0)

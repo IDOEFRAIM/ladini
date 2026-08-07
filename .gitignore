@@ -158,10 +158,7 @@ backend/_legacy/
 backend/_pycache__/
 backend/_.pytest_cache__/
 backend/.venv
-backend/tests
 backend/src/agriconnect/graphs/agent_test/
-backend/src/agriconnect/utils
-backend/src/agriconnect/workers
 backend/src/agriconnect/worker.py
 backend/src/agriconnect/services/memory/
 

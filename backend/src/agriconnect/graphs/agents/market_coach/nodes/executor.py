@@ -299,8 +299,32 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
                 storage=_RuntimeStorageAdapter(mc_runtime),
                 executor=_NoopExecutor(),
             )
-            handler_state = await handler.handle(task_payload, retry_seed=retry_count)
-            if handler_state.goal_state == GoalState.WAITING_INPUT:
+            # La pré-étape du TaskHandler touche l'infrastructure
+            # (`ensure_profile` -> identify_or_create_user via MCP). Si MCP ou
+            # Postgres est injoignable, elle LÈVE — et l'exception traversait le
+            # nœud LangGraph, terminant le tour sur un CRASH au lieu d'un état
+            # exploitable.
+            #
+            # On NE court-circuite PAS pour autant : cette étape n'est qu'une
+            # VALIDATION préalable. En cas de panne d'infra, on journalise et on
+            # poursuit vers l'appel outil principal, qui possède déjà la
+            # machinerie complète (détection d'erreur transitoire, retries avec
+            # backoff non bloquant, traduction du message utilisateur). Couper
+            # ici priverait l'utilisateur de ces retries pour une panne
+            # passagère.
+            handler_state = None
+            try:
+                handler_state = await handler.handle(task_payload, retry_seed=retry_count)
+            except Exception as exc:
+                logger.warning(
+                    "[Executor] Pré-validation TaskHandler indisponible pour %s (%s) — "
+                    "poursuite vers l'appel outil qui gère retries/traduction.",
+                    goal, exc,
+                )
+
+            # `handler_state is None` = pré-validation indisponible : on saute
+            # ses verdicts et on laisse l'appel outil principal trancher.
+            if handler_state is not None and handler_state.goal_state == GoalState.WAITING_INPUT:
                 missing = handler_state.metadata.get("missing_fields", [])
                 logger.info("[Executor] TaskHandler INCOMPLETE for %s — missing: %s", goal, missing)
                 return _apply_side_effects({
@@ -311,7 +335,7 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
                     "execution_authorized": False,
                     "ag_ui_component": None,
                 })
-            if handler_state.goal_state == GoalState.ERROR_RECOVERY:
+            if handler_state is not None and handler_state.goal_state == GoalState.ERROR_RECOVERY:
                 prompt = handler_state.metadata.get("clarification_prompt") or "Merci de préciser les informations manquantes."
                 return _apply_side_effects({
                     "status": "ERROR",
@@ -321,7 +345,7 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
                     "validation_errors": ["payload_invalid"],
                     "ag_ui_component": None,
                 })
-            if handler_state.goal_state == GoalState.HUMAN_INTERVENTION:
+            if handler_state is not None and handler_state.goal_state == GoalState.HUMAN_INTERVENTION:
                 return _apply_side_effects({
                     "status": "HUMAN_INTERVENTION",
                     "response_strategy": "ESCALATE",

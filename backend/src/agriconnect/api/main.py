@@ -9,6 +9,7 @@ from agriconnect.api.routes.twilio_webhook import router as twilio_router  # rep
 from agriconnect.api.routes.whatsapp_webhook import router as whatsapp_router  # provider par défaut
 from agriconnect.api.routes.paydunya_webhook import router as paydunya_router
 from agriconnect.core import telemetry
+from agriconnect.core.settings import settings
 
 logger = logging.getLogger("AgriConnect.API")
 
@@ -17,10 +18,32 @@ app = FastAPI(
     version="1.1.0",
 )
 
+# CORS — piloté par `settings.ALLOWED_ORIGINS` (la valeur était auparavant
+# codée en dur à ["*"] ici, ignorant purement et simplement le réglage qui
+# existait déjà dans core/settings.py).
+#
+# SÉCURITÉ : `allow_origins=["*"]` + `allow_credentials=True` est une
+# combinaison dangereuse. Starlette, quand un cookie est présent, ne renvoie
+# PAS `*` mais RÉFLÉCHIT l'Origin de la requête — n'importe quel site tiers
+# peut alors émettre des requêtes AUTHENTIFIÉES cross-origin au nom de
+# l'utilisateur. On n'active donc les credentials que si une liste blanche
+# EXPLICITE d'origines est configurée. (L'API ne pose aujourd'hui aucun
+# cookie de session — les webhooks Twilio/Paydunya sont serveur-à-serveur et
+# ne dépendent pas du CORS —, donc ce durcissement ne retire aucune
+# fonctionnalité utilisée.)
+_allowed_origins = list(settings.ALLOWED_ORIGINS or ["*"])
+_allow_all_origins = "*" in _allowed_origins
+if _allow_all_origins:
+    logger.warning(
+        "CORS ouvert à toutes les origines (ALLOWED_ORIGINS=['*']) — credentials "
+        "désactivés. Configurez une liste blanche pour autoriser les requêtes "
+        "authentifiées cross-origin."
+    )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_allowed_origins,
+    allow_credentials=not _allow_all_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

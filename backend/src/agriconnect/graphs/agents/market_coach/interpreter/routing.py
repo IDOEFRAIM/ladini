@@ -36,6 +36,7 @@ from agriconnect.graphs.agents.market_coach.interpreter.entities import (
 )
 from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
     scan_number_candidates,
+    extract_unit_only_from_text,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.product_validation import (
     _validate_and_sanitize_product,
@@ -196,10 +197,17 @@ RÈGLES STRICTES DE CLASSIFICATION :
 5. **Segmentation stricte des quantités** :
    - "product" doit être un libellé pur (ex: "tomates"), SANS chiffres ni unités.
    - "quantity" est un float (ex: 50.0).
-   - "unit" doit être explicitement extraite ("KG", "TONNE", "SAC", "PANIER").
-   - Si la quantité est donnée sans unité → validation_status = INVALID_MISSING_UNIT.
+   - **RÈGLE D'OR DE L'UNITÉ (LECTURE LITTÉRALE, JAMAIS DE DEVINETTE)** :
+     `unit` ne peut valoir que ce qui est ÉCRIT LITTÉRALEMENT dans CE message
+     ("kg", "kilo", "tonne", "sac", "panier", "tête", "unité"). Tu n'as PAS le
+     droit de DÉDUIRE, DEVINER, ni de REPRENDRE une unité mentionnée à un tour
+     PRÉCÉDENT. Exemple : si un tour précédent parlait de tonnes mais que CE
+     message dit "200 kg", alors unit="KG" — jamais "TONNE". Si "200" apparaît
+     SANS aucun mot d'unité dans ce message, alors `unit` = null OBLIGATOIREMENT
+     (ne mets jamais "KG"/"TONNE" par défaut — c'est le rôle du système, pas le
+     tien) ET validation_status = INVALID_MISSING_UNIT.
    - Si l'unité est ambiguë ou contradictoire → validation_status = INVALID_AMBIGUOUS_UNIT.
-   - Sinon → validation_status = VALID.
+   - Sinon (unité littéralement présente) → validation_status = VALID.
    - **DÉSAMBIGUÏSATION QUANTITÉ vs PRIX (CRITIQUE)** : un message peut contenir
      PLUSIEURS nombres à la fois (ex: "892 kg de maïs, le prix minimum est 250
      FCFA par kg"). Ne JAMAIS assigner le nombre suivi d'une unité de poids/volume/
@@ -829,12 +837,20 @@ def make_input_interpreter(role: str = "PRODUCER"):
         except (TypeError, ValueError):
             confidence = 0.0
 
-        if role_up == "BUYER" and _looks_like_buyer_product_request(text.strip().lower()):
-            if raw_event == "UNKNOWN":
-                raw_event = "NEW_TASK"
-            if raw_intent not in {"BUYER_REQUEST", "BUYER_ADD_TO_CART", "PROCUREMENT_CREATE_REQUEST"}:
-                raw_intent = "BUYER_REQUEST"
-                confidence = max(confidence, 0.85)
+        # Ex-OVERRIDE LEXICAL ACHETEUR SUPPRIMÉ (dette dangereuse) : un test
+        # `_looks_like_buyer_product_request()` sur une liste FIGÉE de tournures
+        # ("je veux", "je cherche", "il me faut"…) FORÇAIT ici
+        # `detected_intent = BUYER_REQUEST` (confiance relevée à 0.85), écrasant
+        # la classification du LLM. Dégâts prouvés : « je veux voir mon panier »
+        # (BUYER_VIEW_CART), « je veux payer maintenant », « il me faut de
+        # l'aide », « je cherche à joindre le service client » étaient TOUS
+        # détournés vers une recherche produit. Chaque nouveau contre-exemple
+        # obligeait à rallonger la liste d'exclusions — course sans fin contre
+        # les fautes de frappe et les tournures non prévues.
+        # Le LLM classe déjà ces intentions (catalogue INTENT_CONFIG complet
+        # dans son prompt) : c'est LUI qui décide. La même heuristique reste
+        # utilisée UNIQUEMENT dans `_degraded_fallback` (LLM en panne/quota),
+        # où deviner vaut mieux que ne rien comprendre.
 
         # ATTENTION — cause racine des blocages persistants ("ça marche sur un
         # numéro neuf, jamais sur celui qui a déjà bugué") : cette règle
@@ -952,35 +968,77 @@ def make_input_interpreter(role: str = "PRODUCER"):
         if raw_event not in {"NEW_TASK", "ANSWER", "CONFIRM", "REJECT", "SELECTION", "UPDATE", "INTERRUPTION", "RESUME", "OUT_OF_SCOPE", "UNKNOWN", "ONBOARDING_INPUT"}:
             raw_event = "UNKNOWN"
 
+        # ══════════════════════════════════════════════════════════════════
+        # FINALISATION DES ENTITÉS — le LLM est la source PRIMAIRE.
+        # On part de SON extraction et de SON verdict qualité (validation_status),
+        # puis les couches déterministes n'interviennent QUE :
+        #   • en FALLBACK (le LLM a sous-extrait un champ) ;
+        #   • en GARDE ciblée contre un échec LLM PROUVÉ (ancrage d'unité).
+        # ══════════════════════════════════════════════════════════════════
         remapped_entities = _remap_entities(parsed.get("extracted_entities") or {})
-        fallback_entities = _fallback_quantity_unit_from_text(text)
+
+        # validation_status = signal de QUALITÉ produit PAR LE LLM lui-même : il
+        # nous dit s'il a su lire l'unité. On le CONSOMME (avant, il était
+        # write-only). C'est la voie primaire pour savoir « unité fiable ou non ».
+        raw_validation = parsed.get("validation_status")
+        validation_status = str(raw_validation).upper().strip() if raw_validation else None
+        if validation_status not in {"VALID", "INVALID_MISSING_UNIT", "INVALID_AMBIGUOUS_UNIT"}:
+            validation_status = None
+
+        # FALLBACK numérique : si le LLM a manqué la quantité, la regex la comble
+        # (jamais l'inverse — on n'écrase pas une valeur que le LLM a fournie).
+        _adjacent = _fallback_quantity_unit_from_text(text) or {}
         fallback_applied = False
-        if fallback_entities:
-            for key, value in fallback_entities.items():
-                if key not in remapped_entities and value not in (None, "", [], {}):
-                    remapped_entities[key] = value
-                    fallback_applied = True
-                elif (
-                    key == "unit"
-                    and value not in (None, "", [], {})
-                    and remapped_entities.get("unit") not in (None, "", [], {})
-                    and remapped_entities["unit"] != value
-                ):
-                    # Le LLM a renvoyé une unité qui CONTREDIT celle réellement
-                    # écrite dans le message ("200kg" → LLM renvoie parfois
-                    # "TONNE", un biais d'ancrage sur une unité mentionnée plus
-                    # tôt dans la conversation — observé en prod : un producteur
-                    # reste "bloqué" sur TONNE malgré des corrections explicites
-                    # en kg). L'extraction déterministe (regex sur le texte
-                    # littéral) fait foi : jamais laisser le LLM contredire une
-                    # unité sans ambiguïté présente dans le message lui-même.
+        for key, value in _adjacent.items():
+            if key not in remapped_entities and value not in (None, "", [], {}):
+                remapped_entities[key] = value
+                fallback_applied = True
+
+        # ── UNITÉ (le point sensible : biais d'ancrage TONNE vécu en prod) ──
+        # Unité LITTÉRALEMENT écrite dans le message : adjacente au nombre
+        # ("200kg", captée par le parseur) OU ailleurs ("200, en sacs", captée
+        # par le scan de tokens). None si le message ne porte AUCUNE unité.
+        _text_unit = _adjacent.get("unit") or extract_unit_only_from_text(text)
+        _has_quantity = remapped_entities.get("quantity") is not None
+
+        if _has_quantity:
+            if _text_unit:
+                # Une unité écrite noir sur blanc fait TOUJOURS foi contre le LLM :
+                # c'est la garde anti-ancrage (le LLM dit parfois TONNE alors que
+                # l'utilisateur a tapé "kg"). Ce n'est pas « la regex prime sur le
+                # LLM » — c'est « le TEXTE de l'utilisateur prime sur une
+                # supposition du LLM », ce qui est la bonne priorité.
+                if remapped_entities.get("unit") != _text_unit:
                     logger.warning(
-                        "[Interpreter] Unité LLM '%s' contredit le texte ('%s' détecté par regex) — "
-                        "unité déterministe retenue.",
-                        remapped_entities["unit"], value,
+                        "[Interpreter] Unité : texte='%s' retenu contre LLM='%s' (anti-ancrage).",
+                        _text_unit, remapped_entities.get("unit"),
                     )
-                    remapped_entities["unit"] = value
+                    remapped_entities["unit"] = _text_unit
                     fallback_applied = True
+            elif remapped_entities.get("unit") and validation_status in {
+                "INVALID_MISSING_UNIT", "INVALID_AMBIGUOUS_UNIT",
+            }:
+                # Le message ne porte AUCUNE unité ET le LLM signale LUI-MÊME
+                # qu'elle est manquante/ambiguë : on suit son verdict et on
+                # écarte l'unité (contradictoire) qu'il aurait tout de même
+                # posée — défaut registre (KG) / élevage (TETE) appliqué en aval.
+                logger.info(
+                    "[Interpreter] LLM signale %s + texte sans unité — unité '%s' écartée.",
+                    validation_status, remapped_entities.get("unit"),
+                )
+                remapped_entities.pop("unit", None)
+            elif remapped_entities.get("unit"):
+                # Message sans unité, mais le LLM en renvoie une en se déclarant
+                # VALID : il n'a aucun appui textuel — c'est une supposition
+                # (ancrage). Dernier filet de sécurité : on l'écarte plutôt que
+                # de risquer un "200 TONNE" fantôme. (Le prompt interdit désormais
+                # d'inventer une unité — ce cas doit devenir rarissime.)
+                logger.warning(
+                    "[Interpreter] Unité LLM '%s' sans appui dans le texte — écartée (filet anti-ancrage).",
+                    remapped_entities.get("unit"),
+                )
+                remapped_entities.pop("unit", None)
+
         if "product" in remapped_entities:
             validated_product = await _validate_and_sanitize_product(
                 remapped_entities.get("product"), mc_runtime
@@ -988,11 +1046,6 @@ def make_input_interpreter(role: str = "PRODUCER"):
             remapped_entities["product"] = validated_product
         if onboarding_active:
             return _emit_onboarding(remapped_entities, "onboarding_override")
-
-        raw_validation = parsed.get("validation_status")
-        validation_status = str(raw_validation).upper().strip() if raw_validation else None
-        if validation_status not in {"VALID", "INVALID_MISSING_UNIT", "INVALID_AMBIGUOUS_UNIT"}:
-            validation_status = None
 
         if fallback_applied:
             if not validation_status:

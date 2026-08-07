@@ -132,11 +132,30 @@ _WRITE_GOALS, _READ_GOALS = _derive_goal_sets()
 
 
 def validate_config_drift() -> None:
-    """Ensure INTENT_CONFIG and the action registry stay in sync."""
+    """Ensure INTENT_CONFIG and the action registry stay in sync.
+
+    Une intention est exécutable de DEUX façons, exclusives :
+      * via une ACTION ENREGISTRÉE (dispatch MCP générique) ;
+      * via un FLOW dédié (`handled_by_flow=True` — tunnels panier/précommande/
+        négociation/suivi, escrow producteur…), qui gère lui-même l'appel outil.
+
+    Les intentions `handled_by_flow` n'ont donc légitimement AUCUNE action
+    enregistrée. L'invariant historique les exigeait quand même et signalait
+    14 fausses « dérives » (tous les tunnels acheteur + l'escrow producteur) —
+    il datait d'avant le passage aux flows. On ne contrôle désormais que ce qui
+    est réellement une dérive :
+      * une intention NI outillée NI portée par un flow (inexécutable) ;
+      * une action enregistrée pour une intention absente du catalogue.
+    """
     registry_keys = frozenset(intent for intent, _ in iter_actions())
     intent_keys = frozenset(MARKET_VALIDATION_CONFIG.intents.keys())
 
-    missing = intent_keys - registry_keys
+    flow_handled = frozenset(
+        intent for intent, cfg in INTENT_CONFIG.items()
+        if (cfg or {}).get("handled_by_flow")
+    )
+
+    missing = intent_keys - registry_keys - flow_handled
     extras = registry_keys - intent_keys
 
     if missing or extras:

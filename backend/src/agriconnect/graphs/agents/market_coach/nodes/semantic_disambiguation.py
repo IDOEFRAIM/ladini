@@ -64,10 +64,32 @@ async def semantic_disambiguation(
 
     role_upper = str(state.get("forced_role") or state.get("user_role") or "").upper().strip()
 
+    # LE LLM DÉCIDE EN PREMIER. S'il a classé l'intention de façon SPÉCIFIQUE et
+    # CONFIANTE, on ne lui superpose PAS un menu de désambiguïsation : il a déjà
+    # répondu à la question que ce menu poserait.
+    #
+    # Le garde précédent était INOPÉRANT : `confidence >= seuil AND
+    # len(candidates) < 2` — or TOUTE entrée de INTENT_DISAMBIGUATION a ≥ 2
+    # candidats (c'est la définition d'un menu), donc la seconde condition était
+    # toujours fausse et la sortie anticipée ne se déclenchait JAMAIS. Résultat :
+    # des indices lexicaux FIGÉS et très larges ("j'ai", "combien", "statut",
+    # "besoin de"…) détournaient systématiquement une classification LLM sûre
+    # vers un menu — observé en prod avec `conf=0.90 trigger=
+    # STOCK_OR_SALES_DECLARATION` : le producteur savait ce qu'il voulait, le
+    # LLM l'avait compris, et on lui demandait quand même de choisir.
+    #
+    # On ne désambiguïse donc plus que dans le cas où c'est LÉGITIME : le LLM
+    # n'a pas su trancher (UNKNOWN) ou n'est pas assez sûr de lui.
+    detected_intent = str(state.get("detected_intent") or "").upper().strip()
+    if detected_intent not in ("", "UNKNOWN") and confidence >= _DISAMBIGUATION_CONFIDENCE_THRESHOLD:
+        logger.info(
+            "[Disambiguation] SKIP — le LLM a tranché (intent=%s conf=%.2f ≥ %.2f)",
+            detected_intent, confidence, _DISAMBIGUATION_CONFIDENCE_THRESHOLD,
+        )
+        return {}
+
     entry = _detect_disambiguation_candidates(text_lower, role_upper)
     if not entry:
-        return {}
-    if confidence >= _DISAMBIGUATION_CONFIDENCE_THRESHOLD and len(entry.get("candidates") or []) < 2:
         return {}
 
     options = entry.get("options") or []

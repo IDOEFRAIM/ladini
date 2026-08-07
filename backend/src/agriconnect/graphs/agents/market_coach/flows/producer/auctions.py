@@ -42,9 +42,13 @@ from agriconnect.graphs.agents.market_coach.utils import (
 logger = logging.getLogger("AgriConnect.Market.ProducerFlow.Auctions")
 
 
-# Mots-clés qui demandent la vue « tout le marché » plutôt que « mes catégories ».
+# Mots demandant la vue « tout le marché » plutôt que « mes catégories ».
+# Volontairement restreint aux termes NON AMBIGUS. "marche"/"marché" en ont été
+# retirés : « ça marche », « démarche », « le marché » sont indiscernables ici,
+# et « tout le marché » reste capté par "tout". Mieux vaut ne PAS élargir le
+# périmètre que l'élargir à tort sur un « ça marche » d'acquiescement.
 _ALL_SCOPE_TOKENS = (
-    "toutes", "tout", "tous", "marche", "marché", "autres", "autre", "elargir", "élargir",
+    "toutes", "tout", "tous", "autres", "autre", "elargir", "élargir",
 )
 
 _YES_TOKENS = frozenset({
@@ -71,9 +75,21 @@ def _text_of(state: Dict[str, Any]) -> str:
     return str(state.get("normalized_text") or state.get("user_query") or "").strip()
 
 
+_ALL_SCOPE_RE = re.compile(
+    r"(?<![a-zàâäéèêëïîôöùûüÿç])(" + "|".join(_ALL_SCOPE_TOKENS) + r")(?![a-zàâäéèêëïîôöùûüÿç])"
+)
+
+
 def _wants_all_scope(state: Dict[str, Any]) -> bool:
-    low = _text_of(state).lower()
-    return any(tok in low for tok in _ALL_SCOPE_TOKENS)
+    """Le producteur demande-t-il la vue « tout le marché » plutôt que ses catégories ?
+
+    Correspondance sur MOT ENTIER. Auparavant en sous-chaîne : « surtout »,
+    « partout », « atout », « ça marche » et « démarche » déclenchaient tous à
+    tort l'élargissement du périmètre (« tout » / « marche » sont contenus
+    dedans). Simple préférence d'affichage, donc on garde une détection
+    déterministe — mais sans les faux positifs.
+    """
+    return bool(_ALL_SCOPE_RE.search(_text_of(state).lower()))
 
 
 def _first_number(text: str) -> Optional[float]:
@@ -313,9 +329,14 @@ async def ask_bid_price(
 
     payload = dict(state.get("transaction_payload") or {})
     payload["auction_id"] = str(auction_id)
-    payload.pop("selection_index", None)
-    payload.pop("selected_value", None)
-    payload.pop("price", None)
+    # None-overwrite OBLIGATOIRE : `transaction_payload` est réduit par
+    # `merge_dict` — un pop sur le patch retourné ne supprime RIEN. Avec le pop,
+    # l'ANCIEN `price` survivait alors qu'on s'apprête justement à redemander le
+    # prix de l'enchère (expected_input=PRICE ci-dessous) : le pipeline pouvait
+    # considérer le prix déjà rempli et sauter la question.
+    payload["selection_index"] = None
+    payload["selected_value"] = None
+    payload["price"] = None
 
     wm = _bid_wm(state, bid_phase="ASK_PRICE", pending_bid_auction=str(auction_id),
                  pending_bid_price=None)

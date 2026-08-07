@@ -71,10 +71,14 @@ def build_procurement_escalation(
     next_payload = dict(payload)
     if product_name:
         next_payload.setdefault("product", product_name)
-    next_payload.pop("selection_index", None)
-    next_payload.pop("selected_value", None)
+    # None-overwrite (merge_dict) : un pop sur le patch retourné ne supprime
+    # rien — une sélection périmée pouvait être ré-appliquée au tour suivant.
+    next_payload["selection_index"] = None
+    next_payload["selected_value"] = None
     if next_payload.pop("_auto_quantity_fill", False):
-        next_payload.pop("quantity", None)
+        # `_auto_quantity_fill` est un drapeau LOCAL (jamais persisté), le pop
+        # est correct ici ; `quantity` en revanche est un vrai slot persisté.
+        next_payload["quantity"] = None
 
     form_data: Dict[str, Any] = dict(existing_form_data or {})
     if next_payload.get("product") not in (None, "", [], {}):
@@ -101,8 +105,12 @@ def build_procurement_escalation(
     wm = dict(working_memory)
     wm["active_goal"] = "PROCUREMENT_CREATE_REQUEST"
     wm["locked_intent"] = "PROCUREMENT_CREATE_REQUEST"
+    # None-overwrite : `working_memory` est réduit par `merge_dict` — un pop
+    # sur le patch retourné ne supprime RIEN (l'ancienne valeur est conservée).
+    # `buyer_request_waiting_choice` resté à True piégeait l'acheteur dans
+    # l'état « en attente de choix » aux tours suivants (lu ligne ~240).
     for key in ("buyer_request_waiting_choice", "buyer_request_catalog_checked", "buyer_request_last_product"):
-        wm.pop(key, None)
+        wm[key] = None
 
     return {
         "status": "PLANNING",
@@ -248,8 +256,10 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
             return _escalate(_ESCALATION_MSG)
         if reject_signal:
             wm = dict(working_memory)
+            # None-overwrite (merge_dict) — voir explication plus haut : un pop
+            # ici laissait `buyer_request_waiting_choice` actif après un refus.
             for key in ("buyer_request_waiting_choice", "buyer_request_catalog_checked", "buyer_request_last_product"):
-                wm.pop(key, None)
+                wm[key] = None
             return {
                 "status": "COMPLETED",
                 "response_strategy": "SUCCESS",

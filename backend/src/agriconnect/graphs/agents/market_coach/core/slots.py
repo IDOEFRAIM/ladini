@@ -206,6 +206,11 @@ _EXPECTED_INPUT_MAP: Dict[str, str] = {
     "estimated_available_at": "DATE",
     "farm_name": "FARM_NAME",
     "deadline": "DATE",
+    # `movement_type` (IN/OUT) est un vrai slot du registre, requis par
+    # STOCK_RECORD_MOVEMENT — il manquait ici, donc l'agent le demandait avec
+    # `expected_input=NONE` : aucun indice de slot pour l'interpréteur et slot
+    # non ré-interrogeable. Détecté par tests/architecture.
+    "movement_type": "MOVEMENT_TYPE",
 }
 
 # Ensemble CANONIQUE des `expected_input` qui représentent un CHAMP MÉTIER à
