@@ -229,9 +229,16 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
             existing_form_data=existing_form_data,
         )
 
+    # "prix plafond" (jamais "prix minimum") : c'est le prix MAXIMUM que
+    # l'acheteur accepte de payer — les producteurs doivent proposer À ou EN
+    # DESSOUS de ce plafond (enchère inversée). Le récap (confirmation_summary.py,
+    # goal PROCUREMENT_CREATE_REQUEST) et le label de champ
+    # (interpreter/intent.py "price": "prix plafond proposé") utilisent déjà ce
+    # terme — dire "prix minimum" ici contredisait le récap affiché juste après
+    # avec le MÊME chiffre, ce qui semait la confusion (bug vécu en prod).
     _ESCALATION_MSG = (
         "Très bien, lançons un appel d'offres. "
-        "J'aurai besoin du prix minimum, de la quantité souhaitée et d'une date limite."
+        "J'aurai besoin du prix plafond que vous êtes prêt à payer, de la quantité souhaitée et d'une date limite."
     )
 
     # --- Direct escalation triggers ---

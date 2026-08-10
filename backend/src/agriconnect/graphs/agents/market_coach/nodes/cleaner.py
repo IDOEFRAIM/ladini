@@ -104,6 +104,12 @@ async def state_cleaner_node(
     goal_completed = status_flag in {"COMPLETED", "FAILED", "ERROR"}
 
     if goal_completed:
+        if status_flag in {"ERROR", "FAILED"} and state.get("current_goal"):
+            # Consommé une seule fois par render_clarification (nodes/rendering/
+            # feedback.py) si le tour suivant retombe sur le fallback générique
+            # — évite un message "je ne sais pas ce que vous faites" juste
+            # après un goal qui vient d'échouer sous les yeux de l'utilisateur.
+            patch["last_terminated_goal"] = state.get("current_goal")
         patch["transaction_payload"] = {"__reset__": True}
         # merge_dict fields: must use the reset sentinel, a plain {} is a
         # no-op under merge_dict semantics (agents/reducers.py) and would

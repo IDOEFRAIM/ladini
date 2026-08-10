@@ -69,7 +69,19 @@ def test_confirm_event_authorizes_exactly_once(goal):
     assert out["status"] == "EXECUTING" and out["execution_authorized"] is True, goal
 
 
-@pytest.mark.parametrize("goal", _write_goals())
+# PROCUREMENT_CREATE_REQUEST (2026-08) : exception délibérée et scopée à
+# l'invariant "purge totale sur REJECT" ci-dessous. Bug production : refuser
+# le récap d'un appel d'offres perdait tout le brouillon (produit/quantité/
+# prix), rendant impossible la moindre correction ("non" puis "plafond 400"
+# atterrissait sans contexte). Le brouillon est désormais préservé pour ce
+# goal — voir `_DRAFT_PRESERVING_REJECT_GOALS` dans confirmation_gate.py et
+# `tests/nodes/test_confirmation_gate_reject.py` pour la couverture dédiée.
+# I1/I2 (aucune écriture non autorisée) restent garantis : seul I3 (aucun
+# résidu) est volontairement assoupli, et UNIQUEMENT pour ce goal.
+_DRAFT_PRESERVING_REJECT_GOALS = frozenset({"PROCUREMENT_CREATE_REQUEST"})
+
+
+@pytest.mark.parametrize("goal", [g for g in _write_goals() if g not in _DRAFT_PRESERVING_REJECT_GOALS])
 def test_reject_cancels_and_purges_payload(goal):
     """Rupture prévenue : l'utilisateur dit « non » mais le payload survit et
     ré-alimente la transaction suivante (fuite inter-tunnel, source n°1 des
@@ -88,6 +100,28 @@ def test_reject_cancels_and_purges_payload(goal):
     assert out["execution_authorized"] is False
     assert out["transaction_payload"] == {"__reset__": True}, f"{goal}: payload non purgé"
     assert out["current_goal"] is None, f"{goal}: goal non déverrouillé après refus"
+
+
+@pytest.mark.parametrize("goal", sorted(_DRAFT_PRESERVING_REJECT_GOALS))
+def test_reject_preserves_the_draft_but_still_blocks_execution(goal):
+    """Exception scopée à l'invariant ci-dessus : le payload survit
+    intentionnellement (pour permettre une correction), mais I1/I2 restent
+    absolus — jamais d'exécution/autorisation sur un REJECT, préservé ou non."""
+    from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+        confirmation_gate,
+    )
+
+    state = {
+        "current_goal": goal,
+        "transaction_payload": {"product": "carottes", "quantity": 500, "price": 300},
+        "interpreted_event": "REJECT",
+        "waiting_for_confirmation": True,
+    }
+    out = run(confirmation_gate(state, None))
+    assert out["execution_authorized"] is False, f"{goal}: REJECT ne doit jamais autoriser l'exécution"
+    assert out["is_certified"] is False
+    assert "transaction_payload" not in out, f"{goal}: le brouillon doit survivre intact (pas de clé = préservé par merge_dict)"
+    assert "current_goal" not in out, f"{goal}: le goal doit survivre pour permettre la correction au tour suivant"
 
 
 @pytest.mark.parametrize("goal", _read_goals())
@@ -205,6 +239,32 @@ def test_terminal_goal_flushes_transaction_state():
         assert patch.get("transaction_payload") == {"__reset__": True}, terminal
         wm = patch.get("working_memory") or {}
         assert wm.get("active_goal") is None and wm.get("locked_intent") is None, terminal
+
+
+def test_error_or_failed_goal_leaves_a_one_turn_hint_for_the_clarification_fallback():
+    """Rupture prévenue : après un goal en échec, le fallback générique
+    (render_clarification) répondait comme si l'utilisateur était un
+    inconnu — voir [[market-coach-turn-boundary-state]]. ERROR/FAILED
+    laissent `last_terminated_goal` ; COMPLETED (succès, rien à excuser) ne
+    le fait pas."""
+    from agriconnect.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
+
+    for terminal in ("ERROR", "FAILED"):
+        patch = run(state_cleaner_node({
+            "status": terminal,
+            "current_goal": "PROCUREMENT_CREATE_REQUEST",
+            "transaction_payload": {},
+            "working_memory": {},
+        }, None))
+        assert patch.get("last_terminated_goal") == "PROCUREMENT_CREATE_REQUEST", terminal
+
+    patch = run(state_cleaner_node({
+        "status": "COMPLETED",
+        "current_goal": "PROCUREMENT_CREATE_REQUEST",
+        "transaction_payload": {},
+        "working_memory": {},
+    }, None))
+    assert "last_terminated_goal" not in patch
 
 
 # =====================================================================

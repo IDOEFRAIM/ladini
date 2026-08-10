@@ -8,6 +8,22 @@ from agriconnect.graphs.agents.market_coach.services.ui.confirmation_summary imp
 
 logger = get_node_logger("ConfirmationGateNode")
 
+# Goals où un REJECT pendant la confirmation ne doit PAS effacer le brouillon
+# (produit/quantité/prix déjà saisis) — l'utilisateur doit pouvoir corriger un
+# champ (ex: "non" puis "plafond 400") sans tout reprendre depuis zéro. Bug
+# vécu en prod : un producteur voulait juste corriger le prix plafond d'un
+# appel d'offres, a répondu "non" au récap, s'est retrouvé traité comme un
+# inconnu (goal effacé, plus aucun contexte) dès le message suivant.
+#
+# Contrairement aux tunnels `producer_update` (flows/producer/flow.py), qui
+# contournent ENTIÈREMENT ce nœud pour gérer leur propre cycle CONFIRM/REJECT/
+# correction — y compris l'écriture en base, appelée directement par le flow —
+# cette liste ne touche QUE le REJECT : le chemin CONFIRM (et donc l'écriture
+# réelle, ex. `create_auction`) continue de passer par ce nœud puis l'exécuteur
+# générique, inchangé. Sûr par construction : aucune logique d'écriture n'est
+# dupliquée ici.
+_DRAFT_PRESERVING_REJECT_GOALS = frozenset({"PROCUREMENT_CREATE_REQUEST"})
+
 # Au-delà de ce délai sans réponse claire (oui/non), une confirmation en
 # attente est considérée abandonnée plutôt que ré-affichée indéfiniment sur
 # un message sans rapport arrivé bien plus tard (ex: un partage de position
@@ -62,6 +78,39 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
                 "ag_ui_component": None,
             }
         if event == "REJECT":
+            if goal in _DRAFT_PRESERVING_REJECT_GOALS:
+                # Repli DOUX : n'efface QUE l'état de confirmation (résumé,
+                # drapeau d'attente) — `current_goal`/`transaction_payload`/
+                # `active_form`/`form_data` survivent intacts. Le tour suivant
+                # retombe naturellement sur le flow dédié (ex:
+                # `buyer_request_resolver`, ré-entrée déjà existante sur
+                # `active_form == "AUCTION_CREATE"`), qui ré-affichera un récap
+                # à jour si l'utilisateur fournit une correction — ou, si
+                # l'utilisateur répond "non"/"annuler" une SECONDE fois sans
+                # rien d'autre, `goal_planner` applique déjà son repli
+                # générique complet (RÈGLE 1, hors confirmation) : rien à
+                # dupliquer ici pour ce cas.
+                logger.info(
+                    "[ConfirmationGate] REJECT sur %s — brouillon préservé (correction possible au tour suivant)",
+                    goal,
+                )
+                return {
+                    "is_certified": False,
+                    "execution_authorized": False,
+                    "waiting_for_confirmation": False,
+                    "confirmation_raised_at": None,
+                    "confirmation_summary": None,
+                    "expected_input": "NONE",
+                    "goal_status": "ACTIVE",
+                    "status": "PLANNING",
+                    "response_strategy": "SUCCESS",
+                    "final_response": (
+                        "D'accord, ce n'est pas encore confirmé. Dites-moi ce que "
+                        "vous voulez modifier (prix, quantité, date), ou répondez "
+                        "*annuler* pour abandonner."
+                    ),
+                    "ag_ui_component": None,
+                }
             return {
                 "is_certified": False,
                 "execution_authorized": False,

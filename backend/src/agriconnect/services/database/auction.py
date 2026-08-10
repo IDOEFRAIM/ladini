@@ -1,15 +1,18 @@
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 import logging
+import re
 import unicodedata
 import uuid
 from rapidfuzz import fuzz, process
 from sqlalchemy import select, and_, or_, func, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 from agriconnect.core.formatting import fmt_num as _fmt_num
 from .common import normalize_phone
 from .search import fuzzy_match, similarity_rank
 from .errors import BusinessRuleException
+from .moderation import _fold as _fold_for_moderation
 
 # Importation stricte des modèles requis pour le domaine des enchères
 from agriconnect.domain.models import Auction, Bid, SubCategory, Zone, BuyerProfile, User,Producer, Order, Product, Category
@@ -92,7 +95,68 @@ class AuctionMixin(BaseMixin):
 
         return None
 
-        
+    async def _get_or_create_sub_category_for_rfq(self, product_query_clean: str) -> SubCategory:
+        """Auto-provisionne une sous-catégorie catalogue pour un appel d'offres.
+
+        Un appel d'offres (Auction) exprime un besoin acheteur, pas un article
+        d'un catalogue déjà stabilisé — contrairement à `create_product`, il
+        n'y a pas de raison métier de refuser un produit simplement parce
+        qu'aucun producteur ne l'a encore déclaré. La modération anti-abus
+        (termes interdits) tourne déjà en amont sur le texte brut du message
+        (nodes/security_moderation.py) ; elle est revérifiée ici en défense en
+        profondeur car cette méthode est aussi un outil MCP appelable
+        directement (hors du flux conversationnel WhatsApp).
+        """
+        current_session = self.session
+
+        terms_res = await self.get_prohibited_terms()
+        terms = (terms_res or {}).get("terms") or []
+        if terms:
+            folded = _fold_for_moderation(product_query_clean)
+            words = set(re.findall(r"[a-z0-9]+", folded))
+            for term in terms:
+                t = _fold_for_moderation(term)
+                if not t:
+                    continue
+                matched = (t in folded) if " " in t else (t in words)
+                if matched:
+                    raise BusinessRuleException(
+                        f"Produit '{product_query_clean}' non autorisé.",
+                        reason="prohibited_product",
+                    )
+
+        category_name = (await self.guess_category(product_query_clean) or "AUTRES").strip().upper()
+        category = await current_session.scalar(
+            select(Category).where(func.upper(Category.name) == category_name)
+        )
+        if category is None:
+            category = Category(name=category_name)
+            current_session.add(category)
+            await current_session.flush()
+
+        new_sub_cat = SubCategory(category_id=category.id, name=product_query_clean.strip().title())
+        current_session.add(new_sub_cat)
+        try:
+            await current_session.flush()
+        except IntegrityError:
+            # Concurrence : une autre requête a créé la même sous-catégorie au
+            # même millième de seconde — on récupère celle qui a gagné.
+            await current_session.rollback()
+            existing = await current_session.scalar(
+                select(SubCategory).where(
+                    SubCategory.category_id == category.id,
+                    func.lower(SubCategory.name) == product_query_clean.strip().lower(),
+                )
+            )
+            if existing is not None:
+                return existing
+            raise
+        logger.info(
+            "[Auction] Sous-catégorie auto-provisionnée pour un appel d'offres : '%s' (catégorie=%s)",
+            new_sub_cat.name, category.name,
+        )
+        return new_sub_cat
+
     async def resolve_sub_category(self, name: str) -> Optional[uuid.UUID]:
         """Recherche floue (trigram) pour récupérer l'ID d'une sous-catégorie de produit.
 
@@ -183,7 +247,13 @@ class AuctionMixin(BaseMixin):
         if not sub_cat:
             sub_cat = await self._fuzzy_match_sub_category(product_query_clean)
         if not sub_cat:
-            raise BusinessRuleException(f"Produit '{product_query}' inconnu.", reason="product_not_found")
+            # Un appel d'offres exprime un BESOIN acheteur, pas la publication
+            # d'un article d'un catalogue déjà stabilisé (contrairement à
+            # create_product) — LADINI ne doit pas refuser de relayer une
+            # demande simplement parce qu'aucun producteur n'a encore déclaré
+            # ce produit précis. On auto-provisionne la sous-catégorie au lieu
+            # de rejeter, tant que le produit n'est pas interdit.
+            sub_cat = await self._get_or_create_sub_category_for_rfq(product_query_clean)
 
         # 3. Résolution zone — recherche floue trigram (référentiel logistique).
         if zone_query and zone_query.strip():

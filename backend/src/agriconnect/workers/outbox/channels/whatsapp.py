@@ -15,6 +15,9 @@ from agriconnect.workers.outbox.channels.base import SendResult
 logger = logging.getLogger("AgriConnect.Workers.Channel.WhatsApp")
 
 _TWILIO_SOFT_LIMIT = 1500
+# Aligné sur les autres clients externes (paydunya_client, cloud_api_client,
+# twilio_sender) — voir la justification dans `_send_sync_twilio`.
+_TWILIO_TIMEOUT_S = 15.0
 
 
 def _chunk(body: str, limit: int = _TWILIO_SOFT_LIMIT) -> List[str]:
@@ -81,11 +84,18 @@ class WhatsAppChannel:
             return SendResult.failure(str(exc))
 
     def _send_sync_twilio(self, phone: str, body: str) -> SendResult:
+        from twilio.http.http_client import TwilioHttpClient
         from twilio.rest import Client
 
+        # Timeout explicite : le SDK Twilio n'en pose AUCUN par défaut
+        # (`TwilioHttpClient(timeout=None)`). Ici l'appel tourne dans un thread
+        # via `asyncio.to_thread` depuis le cron outbox — sans timeout, une
+        # connexion suspendue immobilise un thread du pool ET fige le
+        # dispatcher, bloquant toute la file de notifications derrière lui.
         client = Client(
             str(settings.TWILIO_ACCOUNT_SID).strip(),
             str(settings.TWILIO_AUTH_TOKEN).strip(),
+            http_client=TwilioHttpClient(timeout=_TWILIO_TIMEOUT_S),
         )
         from_number = str(settings.TWILIO_WHATSAPP_NUMBER).strip()
         last_sid: Optional[str] = None

@@ -54,18 +54,59 @@ process persistant" tout en augmentant le débit total.
 """
 from __future__ import annotations
 
+import hmac
+import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 
 from agriconnect.core.database import close_db
+from agriconnect.core.settings import settings
 from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer, runtime
+from agriconnect.services.database.errors import sanitize_error_message
 
 logger = logging.getLogger("AgriConnect.MCP.HttpServer")
+
+# Taille maximale du corps JSON accepté sur /call. Les arguments d'outils sont
+# de petits objets (identifiants, quantités, texte court) ; au-delà, c'est du
+# bruit ou un abus — refuser tôt évite de désérialiser un payload arbitraire
+# dans un process partagé par TOUS les tours en cours.
+_MAX_BODY_BYTES = 256 * 1024  # 256 Ko
+
+
+def require_auth(request: Request) -> None:
+    """Authentifie l'appelant via le secret partagé (si configuré).
+
+    Le daemon exécute des outils qui écrivent en base et débloquent de
+    l'argent, en dérivant l'identité de l'appelant depuis le payload — il ne
+    doit donc JAMAIS être joignable sans preuve d'appartenance à
+    l'infrastructure. Comparaison en temps constant (`hmac.compare_digest`)
+    pour ne pas exposer le secret à une attaque temporelle.
+
+    Secret absent : on n'interrompt pas un déploiement existant, mais le
+    démarrage a déjà journalisé un CRITICAL (voir `lifespan`).
+    """
+    expected = str(getattr(settings, "MCP_HTTP_AUTH_TOKEN", "") or "").strip()
+    if not expected:
+        return
+
+    header = str(request.headers.get("authorization") or "")
+    prefix = "bearer "
+    provided = header[len(prefix):].strip() if header.lower().startswith(prefix) else ""
+    if not provided:
+        provided = str(request.headers.get("x-mcp-token") or "").strip()
+
+    if not provided or not hmac.compare_digest(provided, expected):
+        # Ne jamais préciser si c'est le jeton ou son absence qui pose problème.
+        logger.warning(
+            "MCP_HTTP_AUTH_DENIED | client=%s | path=%s",
+            getattr(request.client, "host", "?"), request.url.path,
+        )
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 # ---------------------------------------------------------------------------
 # Singleton — instancié UNE SEULE FOIS au chargement du module, comme
@@ -101,6 +142,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from agriconnect.core.database import get_engine
 
     logger.info("🚀 MCP HTTP daemon starting — warming DB pool...")
+    if not str(getattr(settings, "MCP_HTTP_AUTH_TOKEN", "") or "").strip():
+        logger.critical(
+            "MCP HTTP daemon NON AUTHENTIFIÉ (MCP_HTTP_AUTH_TOKEN vide) : "
+            "POST /call exécute n'importe quel outil DB et dérive l'identité "
+            "de l'appelant depuis le payload. N'exposez ce port QUE sur la "
+            "boucle locale (--host 127.0.0.1) tant que le secret n'est pas "
+            "défini côté daemon ET côté client."
+        )
     async with runtime.lifespan():
         try:
             engine = get_engine()
@@ -144,13 +193,17 @@ async def health() -> dict[str, Any]:
     return {"status": "ok" if runtime.is_ready else "degraded", "ready": runtime.is_ready}
 
 
-@app.get("/tools")
+@app.get("/tools", dependencies=[Depends(require_auth)])
 async def list_tools() -> list[dict[str, Any]]:
-    """Catalogue des tools — identique à `AgriDBMCPServer.list_tools()` côté stdio."""
+    """Catalogue des tools — identique à `AgriDBMCPServer.list_tools()` côté stdio.
+
+    Authentifié au même titre que /call : le catalogue révèle l'intégralité de
+    la surface d'attaque (noms d'outils + schémas d'arguments).
+    """
     return backend.list_tools()
 
 
-@app.post("/call")
+@app.post("/call", dependencies=[Depends(require_auth)])
 async def call_tool(request: Request) -> JSONResponse:
     """Exécute un tool — même point d'entrée métier que le handler stdio de
     `db_server.py` (`self.backend.call_tool(name=name, arguments=arguments)`),
@@ -159,12 +212,32 @@ async def call_tool(request: Request) -> JSONResponse:
     (infrastructure/mcp/client.py) appelle déjà `resp.json()` quand
     Content-Type est application/json.
     """
-    body = await request.json()
-    name = body.get("name")
-    arguments = body.get("arguments") or {}
+    raw_body = await request.body()
+    if len(raw_body) > _MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail="Corps de requête trop volumineux.")
 
-    if not name:
-        raise HTTPException(status_code=400, detail="Champ 'name' manquant.")
+    # Un JSON malformé ne doit pas produire une 500 avec traceback : ce daemon
+    # est partagé par tous les tours en cours et sa surface d'erreur ne doit
+    # rien révéler de son implémentation.
+    try:
+        body = json.loads(raw_body or b"{}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="Corps JSON invalide.")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Le corps doit être un objet JSON.")
+
+    name = body.get("name")
+    if not name or not isinstance(name, str):
+        raise HTTPException(status_code=400, detail="Champ 'name' manquant ou invalide.")
+
+    # `arguments` est déballé en **kwargs plus bas dans la chaîne : une valeur
+    # non-dict (liste, chaîne...) provoquerait un TypeError opaque au lieu
+    # d'un refus net et traçable.
+    arguments = body.get("arguments")
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        raise HTTPException(status_code=400, detail="Champ 'arguments' doit être un objet JSON.")
 
     try:
         result = await backend.call_tool(name=name, arguments=arguments)
@@ -172,10 +245,21 @@ async def call_tool(request: Request) -> JSONResponse:
         # Même garde-fou que db_server.py : ne jamais laisser une exception
         # de tool faire tomber le process — ce daemon est PARTAGÉ par tous
         # les tours en cours, contrairement au stdio (1 process par tour).
+        #
+        # `str(exc)` renvoyait la trace technique BRUTE (contrainte SQL, nom de
+        # table, dialecte...) au client HTTP, contournant complètement la
+        # barrière anti-fuite de `services/database/errors.py`. On applique
+        # désormais la MÊME sanitisation que le reste du backend : les erreurs
+        # métier passent intactes, les erreurs techniques deviennent génériques
+        # (la cause réelle restant dans le log serveur ci-dessus).
         logger.exception("Tool failure via HTTP: %s", name)
         return JSONResponse(
             status_code=200,
-            content={"ok": False, "error": str(exc), "tool": name},
+            content={
+                "ok": False,
+                "error": sanitize_error_message(exc, context=f"mcp_http:{name}"),
+                "tool": name,
+            },
         )
 
     payload = result if isinstance(result, dict) else {"data": result}

@@ -211,3 +211,50 @@ class TestNoFrozenListHijack:
         st = make_state(normalized_text="je veux vendre du mais", expected_input="NONE", user_role="BUYER")
         r = run(interp(st, rt))
         assert r["detected_intent"] == "SALES_PUBLISH_PRODUCT"
+
+
+# =====================================================================
+# DÉTECTION DU MODÈLE DÉGRADÉ — signale à nodes/memory.py qu'un repli
+# Groq (429 sur le modèle principal) a répondu ce tour-ci.
+# =====================================================================
+
+class TestDegradedModelDetection:
+    """`raw_analysis.degraded_model` est le SEUL moyen après-coup de savoir
+    si `get_llm.py::GROQ_RATE_LIMIT_FALLBACK` a substitué un modèle plus
+    faible à l'appel courant — `nodes/memory.py` s'en sert pour ne durcir son
+    garde anti-hallucination que dans ce cas précis (voir
+    `tests/nodes/test_nodes_behaviour.py::TestPrimaryModelMultiSlotFilling`)."""
+
+    PAYLOAD = {
+        "interpreted_event": "ANSWER",
+        "detected_intent": "SALES_PUBLISH_PRODUCT",
+        "interpreter_confidence": 0.9,
+        "extracted_entities": {"product": "tomates"},
+    }
+
+    def test_model_matching_the_request_is_not_flagged_as_degraded(self):
+        interp = make_input_interpreter("PRODUCER")
+        rt = StubRuntime(llm=ScriptedLLM(self.PAYLOAD))  # échoue le modèle demandé par défaut
+        st = make_state(normalized_text="tomates", expected_input="PRODUCT", user_role="PRODUCER")
+        r = run(interp(st, rt))
+        assert r["raw_analysis"]["degraded_model"] is False
+        assert r["raw_analysis"]["model_used"] == rt.model_answer
+
+    def test_model_different_from_the_request_is_flagged_as_degraded(self):
+        interp = make_input_interpreter("PRODUCER")
+        rt = StubRuntime(llm=ScriptedLLM(self.PAYLOAD, respond_as_model="llama-3.1-8b-instant"))
+        st = make_state(normalized_text="tomates", expected_input="PRODUCT", user_role="PRODUCER")
+        r = run(interp(st, rt))
+        assert r["raw_analysis"]["degraded_model"] is True
+        assert r["raw_analysis"]["model_used"] == "llama-3.1-8b-instant"
+
+    def test_unresolvable_model_field_on_the_response_defaults_to_degraded(self):
+        """Filet de sécurité : si `.model` ne correspond pas clairement au
+        modèle demandé (vide, inattendu...), on ne peut PAS prouver que le
+        modèle principal a répondu — on reste prudent plutôt que de
+        désactiver le garde-fou."""
+        interp = make_input_interpreter("PRODUCER")
+        rt = StubRuntime(llm=ScriptedLLM(self.PAYLOAD, respond_as_model=""))
+        st = make_state(normalized_text="tomates", expected_input="PRODUCT", user_role="PRODUCER")
+        r = run(interp(st, rt))
+        assert r["raw_analysis"]["degraded_model"] is True

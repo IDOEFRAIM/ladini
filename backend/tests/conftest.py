@@ -45,8 +45,9 @@ class _Choice:
 
 
 class _Completion:
-    def __init__(self, content: str) -> None:
+    def __init__(self, content: str, model: Optional[str] = None) -> None:
         self.choices = [_Choice(content)]
+        self.model = model
 
 
 class ScriptedLLM:
@@ -54,11 +55,18 @@ class ScriptedLLM:
 
     Sert à prouver le comportement du pipeline FACE À une sortie LLM donnée
     (y compris une sortie FAUSSE — cf. l'ancrage d'unité).
+
+    Par défaut, `completion.model` fait écho au `model=` demandé par
+    l'appelant (simule "le modèle principal a répondu", comme en prod hors
+    repli Groq) — passer `respond_as_model=` pour simuler un repli dégradé
+    (`interpreter/routing.py` compare `completion.model` au modèle demandé
+    pour détecter ce cas — voir `nodes/memory.py::_degraded_model_response`).
     """
 
-    def __init__(self, payload: Dict[str, Any]) -> None:
+    def __init__(self, payload: Dict[str, Any], respond_as_model: Optional[str] = None) -> None:
         self.payload = payload
         self.calls = 0
+        self._respond_as_model = respond_as_model
 
     @property
     def chat(self):
@@ -70,7 +78,8 @@ class ScriptedLLM:
 
     def create(self, **kwargs):
         self.calls += 1
-        return _Completion(json.dumps(self.payload))
+        model = self._respond_as_model if self._respond_as_model is not None else kwargs.get("model")
+        return _Completion(json.dumps(self.payload), model=model)
 
 
 class ForbiddenLLM:

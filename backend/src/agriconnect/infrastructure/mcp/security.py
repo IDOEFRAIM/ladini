@@ -93,6 +93,52 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "verify_delivery_otp": PermissionScope.DB_DATA_WRITE,
     "expire_pending_payments": PermissionScope.DB_DATA_WRITE,
     "list_producer_escrowed_orders": PermissionScope.DB_READ_ONLY,
+    # --- Audit 2026-08 : outils exposés (auto-découverts via
+    # `h.py::_compute_exposed_methods`) mais jusqu'ici absents d'ici, donc
+    # entièrement dépendants du guess heuristique de `_autofill_tool_scopes`.
+    # Vérifiés un par un comme réellement appelés ailleurs dans le code
+    # (gateway MCP, INTENT_CONFIG, flows) avant d'être déclarés ici. Deux
+    # étaient mal classés par le guess : `get_or_create_client` (préfixe
+    # "get" → deviné READ_ONLY alors qu'il écrit si le client n'existe pas)
+    # et `ensure_performance_indexes` (deviné WRITE alors que c'est un
+    # DDL — création d'index).
+    "get_auction_bids": PermissionScope.DB_READ_ONLY,
+    "get_auctions": PermissionScope.DB_READ_ONLY,
+    "get_auctions_bids": PermissionScope.DB_READ_ONLY,
+    "get_available_zones": PermissionScope.DB_READ_ONLY,
+    "get_buyer_orders_dashboard": PermissionScope.DB_READ_ONLY,
+    "get_market_snapshot": PermissionScope.DB_READ_ONLY,
+    "get_my_active_bids": PermissionScope.DB_READ_ONLY,
+    "get_my_products": PermissionScope.DB_READ_ONLY,
+    "get_offer_reservations": PermissionScope.DB_READ_ONLY,
+    "get_producer_auctions": PermissionScope.DB_READ_ONLY,
+    "get_producer_farm": PermissionScope.DB_READ_ONLY,
+    "get_producer_orders": PermissionScope.DB_READ_ONLY,
+    "get_producer_stocks": PermissionScope.DB_READ_ONLY,
+    "get_transaction_summary": PermissionScope.DB_READ_ONLY,
+    "get_zone_by_name": PermissionScope.DB_READ_ONLY,
+    "list_producer_productions": PermissionScope.DB_READ_ONLY,
+    "check_price_anomaly": PermissionScope.DB_READ_ONLY,
+    "validate_stock_availability_atomic": PermissionScope.DB_READ_ONLY,
+    "get_or_create_client": PermissionScope.DB_DATA_WRITE,
+    "ensure_performance_indexes": PermissionScope.DB_SCHEMA_MODIFY,
+    "adjust_stock": PermissionScope.DB_DATA_WRITE,
+    "cancel_pending_order": PermissionScope.DB_DATA_WRITE,
+    "close_negotiation_session": PermissionScope.DB_DATA_WRITE,
+    "confirm_preorder_draft": PermissionScope.DB_DATA_WRITE,
+    "create_farm": PermissionScope.DB_DATA_WRITE,
+    "create_preorder_draft": PermissionScope.DB_DATA_WRITE,
+    "create_user_profile": PermissionScope.DB_DATA_WRITE,
+    "declare_future_production": PermissionScope.DB_DATA_WRITE,
+    "initiate_negotiation_session": PermissionScope.DB_DATA_WRITE,
+    "reserve_future_offer": PermissionScope.DB_DATA_WRITE,
+    "select_winning_bid": PermissionScope.DB_DATA_WRITE,
+    "update_bid_price": PermissionScope.DB_DATA_WRITE,
+    "update_communication_prefs": PermissionScope.DB_DATA_WRITE,
+    "update_geo_location": PermissionScope.DB_DATA_WRITE,
+    "update_negotiation_offer": PermissionScope.DB_DATA_WRITE,
+    "update_product_price_and_qty": PermissionScope.DB_DATA_WRITE,
+    "update_production_fields": PermissionScope.DB_DATA_WRITE,
 }
 
 
@@ -120,7 +166,25 @@ _scopes_filled = False
 
 
 def _autofill_tool_scopes() -> None:
-    """Ensure tools exposed by handlers are assigned a scope.
+    """Audit tools exposed by handlers against declared scopes — no longer fills.
+
+    Historically this did ``TOOL_SCOPE_MAP.setdefault(tool, _guess_scope(tool))``
+    for every tool exposed by ``h.py`` (auto-discovered via introspection of
+    every public async method on ``AgriDatabaseService``). Because that
+    discovery is exhaustive, EVERY exposed tool ended up present in
+    ``TOOL_SCOPE_MAP`` — which meant the fail-closed guard in
+    ``runtime.py::call_tool`` (``if name not in TOOL_SCOPE_MAP: raise
+    PermissionDenied``) could never fire for any of them: it was decorative.
+    The heuristic also mis-scored real tools (``get_or_create_client`` guessed
+    READ_ONLY off its "get" prefix despite writing; ``ensure_performance_indexes``
+    guessed WRITE despite being schema DDL) — see the 2026-08 audit entries
+    added to ``TOOL_SCOPE_MAP`` above.
+
+    Now this only LOGS undeclared tools loudly (a visible drift signal — a new
+    async method added to ``AgriDatabaseService`` without an explicit scope is
+    exactly the gap that produced the two bugs above) instead of silently
+    authorizing them. Anything still undeclared correctly falls through to the
+    fail-closed ``PermissionDenied`` path.
 
     Called lazily on first use (via ``ensure_scopes_filled``) instead of at
     import time to avoid cascading imports (h.py → AgriDatabaseService → all
@@ -147,11 +211,17 @@ def _autofill_tool_scopes() -> None:
             break
 
     if not handlers:
-        logger.debug("TOOL_HANDLERS import failed; cannot autofill scopes: %s", last_error)
+        logger.debug("TOOL_HANDLERS import failed; cannot audit scopes: %s", last_error)
         return
 
-    for tool in handlers.keys():
-        TOOL_SCOPE_MAP.setdefault(tool, _guess_scope(tool))
+    undeclared = sorted(set(handlers.keys()) - set(TOOL_SCOPE_MAP.keys()))
+    if undeclared:
+        logger.warning(
+            "MCP_SCOPE_GAP | %d outil(s) exposé(s) sans PermissionScope déclaré "
+            "— désormais refusés (fail-closed) tant qu'ils ne sont pas ajoutés "
+            "à TOOL_SCOPE_MAP : %s",
+            len(undeclared), ", ".join(undeclared),
+        )
 
 
 def ensure_scopes_filled() -> None:
@@ -196,17 +266,17 @@ SENSITIVE_COLUMNS = frozenset(
 )
 
 SQL_INJECTION_PATTERNS = [
-    r"(?i)\\bDROP\\s+TABLE\\b",
-    r"(?i)\\bDELETE\\s+FROM\\b",
-    r"(?i)\\bTRUNCATE\\b",
-    r"(?i)\\bALTER\\s+TABLE\\b",
-    r"(?i)\\bOR\\s+1\\s*=\\s*1",
-    r"(?i)\\bUNION\\s+(ALL\\s+)?SELECT\\b",
+    r"(?i)\bDROP\s+TABLE\b",
+    r"(?i)\bDELETE\s+FROM\b",
+    r"(?i)\bTRUNCATE\b",
+    r"(?i)\bALTER\s+TABLE\b",
+    r"(?i)\bOR\s+1\s*=\s*1",
+    r"(?i)\bUNION\s+(ALL\s+)?SELECT\b",
 ]
 
 SQL_INJECTION_REGEX = [re.compile(pattern) for pattern in SQL_INJECTION_PATTERNS]
 
-SENSITIVE_FILE_PATTERNS = [r"\\.env", r"id_rsa", r"\\.pem$", r"\\.key$", r"credentials"]
+SENSITIVE_FILE_PATTERNS = [r"\.env", r"id_rsa", r"\.pem$", r"\.key$", r"credentials"]
 
 
 class MCPServerKind(str, Enum):

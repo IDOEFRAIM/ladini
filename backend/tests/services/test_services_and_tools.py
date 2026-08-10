@@ -65,6 +65,25 @@ class TestConfirmationSummary:
     def test_unknown_goal_never_crashes(self):
         assert build_confirmation_summary("GOAL_INEXISTANT", {}).strip()
 
+    def test_procurement_create_request_shows_the_price_unit(self):
+        """Régression production (2026-08) : le récap d'un appel d'offres
+        affichait « 300 FCFA » sans unité — ambigu (par kg ? par tonne ?),
+        alors que la quantité était en TONNE et le prix saisi par KG."""
+        payload = _normalize_quantity_to_kg(
+            {"product": "carottes", "quantity": 500, "unit": "TONNE",
+             "price": 300, "price_unit": "KG"}
+        )
+        s = build_confirmation_summary("PROCUREMENT_CREATE_REQUEST", payload)
+        assert "FCFA/KG" in s
+
+    def test_procurement_create_request_warns_on_genuine_price_unit_mismatch(self):
+        payload = _normalize_quantity_to_kg(
+            {"product": "carottes", "quantity": 50, "unit": "KG",
+             "price": 5000, "price_unit": "SAC"}
+        )
+        s = build_confirmation_summary("PROCUREMENT_CREATE_REQUEST", payload)
+        assert "⚠️" in s and "SAC" in s
+
 
 # =====================================================================
 # CONVERSION D'UNITÉS — stockage canonique

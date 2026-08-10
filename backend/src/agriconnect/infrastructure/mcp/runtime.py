@@ -40,7 +40,7 @@ from agriconnect.infrastructure.mcp.security import (
     ensure_scopes_filled,
     get_execution_policy,
 )
-from agriconnect.infrastructure.mcp.utils import run_coro_blocking
+from agriconnect.infrastructure.mcp.utils import mask_log_args, run_coro_blocking
 from agriconnect.services.database import AgriDatabaseService
 
 logger = logging.getLogger(__name__)
@@ -240,7 +240,10 @@ def _log_call(tool_name: str, params: dict[str, Any], response: str) -> None:
     """Centralise le logging des appels de tools pour le debugging et l'audit."""
     try:
         res_preview = (response[:250] + "...") if len(response) > 250 else response
-        logger.info("MCP_CALL [%s] | PARAMS: %s | RES: %s", tool_name, params, res_preview)
+        logger.info(
+            "MCP_CALL [%s] | PARAMS: %s | RES: %s",
+            tool_name, mask_log_args(params), res_preview,
+        )
     except Exception as exc:
         logger.warning("Erreur lors du logging de l'appel %s: %s", tool_name, exc)
 
@@ -298,7 +301,10 @@ class AgriDBMCPServer:
     async def call_tool(self, name: str, arguments: dict | None = None, **kwargs):
         """Backend tool execution: context → scope check → preflight → execute → audit."""
         full_args = {**(arguments or {}), **kwargs}
-        logger.info("Backend call_tool: tool=%s, args=%s", name, full_args)
+        # Masquage AVANT écriture en log : `verify_delivery_otp` transporte le
+        # code à 4 chiffres qui débloque les fonds escrow, et presque tous les
+        # outils transportent un numéro de téléphone (PII). Cf. `mask_log_args`.
+        logger.info("Backend call_tool: tool=%s, args=%s", name, mask_log_args(full_args))
 
         # 1. Resolve identity (scoped OR derived from payload)
         context_identity = get_mcp_context() or _derive_context_identity(full_args)
@@ -347,8 +353,30 @@ class AgriDBMCPServer:
         try:
             host = MCPPermissionHostApp(client=None)
             preflight = host._preflight_scan(tool_name, sanitized_args)
-            if hasattr(preflight, "allowed") and not preflight.allowed:
+            # `PreflightResult` expose `passed` (+ `__bool__`), JAMAIS `allowed`.
+            # L'ancien test `hasattr(preflight, "allowed") and not preflight.allowed`
+            # était donc TOUJOURS faux : le verdict du scan (injection SQL, SQL
+            # brut, chemins de fichiers sensibles) était calculé puis
+            # silencieusement jeté — la porte de sécurité pré-exécution ne
+            # bloquait rien depuis sa création. Vérifié empiriquement :
+            # `_preflight_scan("create_order", {"q": "DROP TABLE users"})`
+            # renvoie `passed=False` mais l'appel partait quand même en
+            # exécution. On teste désormais `passed` explicitement (plutôt que
+            # la truthiness implicite) pour que la panne soit impossible à
+            # reproduire silencieusement si la classe évolue.
+            if not preflight.passed:
                 reason = getattr(preflight, "reason", "Scan de sécurité échoué")
+                # WARNING explicite (et pas seulement la ligne AUDIT|... en INFO) :
+                # ce garde-fou était inopérant depuis sa création, donc AUCUN
+                # blocage n'a jamais été observé en production. Le ré-activer
+                # peut faire apparaître des faux positifs sur du texte libre
+                # utilisateur transitant par un argument d'outil (ex: l'extrait
+                # stocké par `record_moderation_strike`). Un WARNING nommant
+                # l'outil ET le motif rend ces cas immédiatement diagnosticables
+                # au lieu d'un échec opaque côté utilisateur.
+                logger.warning(
+                    "PREFLIGHT_BLOCK | tool=%s | reason=%s", tool_name, reason,
+                )
                 await self._persist_audit(tool_name, sanitized_args, "DENY", reason)
                 raise HostBlockedError(
                     tool_name=tool_name,

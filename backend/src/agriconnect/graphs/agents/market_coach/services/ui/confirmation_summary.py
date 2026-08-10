@@ -173,8 +173,10 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
             f" à {price_fmt} FCFA." if price_fmt else f"Enregistrement d'une vente directe : {quantity_line} de {product}."
         ) if quantity_line else None,
         "PROCUREMENT_CREATE_REQUEST": (
-            f"Lancement d'un appel d'offres pour {quantity_line} de {product}"
-            f" au prix plafond de {price_fmt} FCFA." if price_fmt else f"Lancement d'un appel d'offres pour {quantity_line} de {product}."
+            (
+                f"Lancement d'un appel d'offres pour {quantity_line} de {product}"
+                f" au prix plafond de {price_fmt} FCFA/{price_unit}." if price_fmt else f"Lancement d'un appel d'offres pour {quantity_line} de {product}."
+            ) + mismatch_note
         ) if quantity_line else None,
         "SALES_PLACE_BID": (
             f"Soumission d'une offre de {price_fmt} FCFA sur cette enchère."

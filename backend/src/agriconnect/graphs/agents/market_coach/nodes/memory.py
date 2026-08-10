@@ -441,7 +441,29 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         == "fast_path_slot_numeric_compound_answer"
     )
 
-    if interpreted_event in {"ANSWER", "UPDATE"} and not _skip_merge and not _trusted_compound_path:
+    # Le garde-fou ci-dessous ne visait QUE le modèle Groq de repli dégradé
+    # (llama-3.1-8b après un 429 sur le modèle principal, voir le récit des 2
+    # incidents ci-dessus) — jamais le modèle principal, qui suit déjà
+    # l'instruction du prompt d'extraire PLUSIEURS champs à la fois quand le
+    # message les donne ensemble ("500 tonnes, prix 300 FCFA/kg" → quantity ET
+    # price). Avant ce fix, il s'appliquait à TOUTE réponse ANSWER/UPDATE, quel
+    # que soit le modèle — un utilisateur qui répondait au tout premier slot
+    # (PRODUCT, jamais couvert par le carve-out fast-path) avec plusieurs
+    # infos à la fois ("tomates, 500kg à 200fcfa/kg") se faisait amputer de
+    # tout sauf `product`, et l'agent redemandait la quantité/le prix au tour
+    # suivant — l'agent restait "linéaire" malgré une extraction LLM correcte
+    # en amont (bug remonté par l'utilisateur). `raw_analysis.degraded_model`
+    # (interpreter/routing.py, lu depuis `completion.model` de la réponse
+    # Groq) est le seul signal fiable pour savoir APRÈS COUP si le repli a été
+    # utilisé pour CE tour précis.
+    _degraded_model_response = bool((state.get("raw_analysis") or {}).get("degraded_model"))
+
+    if (
+        interpreted_event in {"ANSWER", "UPDATE"}
+        and not _skip_merge
+        and not _trusted_compound_path
+        and _degraded_model_response
+    ):
         allowed_for_slot = _EXPECTED_INPUT_ALLOWED_FIELDS.get(expected_input)
         if allowed_for_slot is not None:
             for key in list(extracted.keys()):

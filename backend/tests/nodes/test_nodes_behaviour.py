@@ -102,9 +102,14 @@ class TestMemoryUpdate:
         p = run(memory_update(st, StubRuntime()))["transaction_payload"]
         assert p["quantity"] == 775.0 and p["price"] == 175.0
 
-    def test_off_topic_field_is_dropped_during_slot_filling(self):
-        """Un LLM dégradé hallucine tout le schéma : pendant la collecte d'un
-        slot précis, les champs hors-sujet sont ignorés."""
+    def test_off_topic_field_is_dropped_when_the_degraded_model_answered(self):
+        """Le LLM de repli dégradé (Groq 429 → llama-3.1-8b, voir
+        `interpreter/routing.py::_degraded_model_used`) hallucine tout le
+        schéma : pendant la collecte d'un slot précis, ses champs hors-sujet
+        sont ignorés. Ce garde ne mord QUE quand `raw_analysis.degraded_model`
+        est vrai — voir la classe `TestPrimaryModelMultiSlotFilling`
+        ci-dessous pour le chemin normal (modèle principal), qui ne doit
+        JAMAIS être amputé de la même façon."""
         st = make_state(
             interpreted_event="ANSWER",
             expected_input="DATE",
@@ -113,10 +118,83 @@ class TestMemoryUpdate:
             normalized_text="d ici le 21 decembre",
             transaction_payload={"product": "boeufs", "quantity": 78, "price": 425000},
             extracted_entities={"product": "poussins allemand", "quantity": 5900, "price": 2400},
+            raw_analysis={"path": "llm", "degraded_model": True, "model_used": "llama-3.1-8b-instant"},
         )
         p = run(memory_update(st, StubRuntime()))["transaction_payload"]
         assert p["product"] == "boeufs", "un champ hors-sujet a écrasé le produit validé"
         assert p["quantity"] == 78
+
+
+# =====================================================================
+# REMPLISSAGE MULTI-SLOTS — le modèle PRINCIPAL ne doit jamais être bridé
+# =====================================================================
+
+class TestPrimaryModelMultiSlotFilling:
+    """Régression production (2026-08) : le garde anti-hallucination
+    s'appliquait à TOUTE réponse ANSWER/UPDATE, quel que soit le modèle Groq
+    ayant répondu — pas seulement le repli dégradé pour lequel il avait été
+    conçu (voir les 2 incidents documentés dans `nodes/memory.py`). Un
+    utilisateur qui répondait au tout premier slot (PRODUCT — jamais couvert
+    par le carve-out `fast_path_slot_numeric_compound_answer`, qui ne
+    reconnaît que quantité+prix) avec plusieurs infos à la fois se faisait
+    amputer de tout sauf `product`, forçant l'agent à redemander la
+    quantité/le prix au tour suivant — l'agent restait "linéaire" malgré une
+    extraction LLM correcte en amont."""
+
+    def test_primary_model_multi_field_answer_to_the_first_slot_is_preserved(self):
+        st = make_state(
+            interpreted_event="ANSWER",
+            expected_input="PRODUCT",
+            current_goal="SALES_PUBLISH_PRODUCT",
+            detected_intent="SALES_PUBLISH_PRODUCT",
+            normalized_text="tomates, 500kg a 200fcfa/kg",
+            transaction_payload={},
+            extracted_entities={"product": "tomates", "quantity": 500, "unit": "KG", "price": 200, "price_unit": "KG"},
+            raw_analysis={"path": "llm", "degraded_model": False, "model_used": "llama-3.3-70b-versatile"},
+        )
+        p = run(memory_update(st, StubRuntime()))["transaction_payload"]
+        assert p["product"] == "tomates"
+        assert p["quantity"] == 500
+        assert p["price"] == 200
+
+    def test_missing_degraded_model_flag_means_a_non_llm_path_so_no_narrowing(self):
+        """`degraded_model` n'est posé QUE par le chemin LLM complet
+        (`interpreter/routing.py`, `raw_analysis.path == "llm"`) — les
+        chemins déterministes (fast-path, repli sans LLM, bypass interactif)
+        n'ont pas ce risque d'hallucination et n'ont donc pas besoin du
+        garde : son absence signifie "pas de risque connu", pas "modèle
+        principal supposé". Ici, un chemin sans LLM (`path == "no_llm"`) ne
+        doit pas être bridé."""
+        st = make_state(
+            interpreted_event="ANSWER",
+            expected_input="DATE",
+            current_goal="DECLARE_CROP_CYCLE",
+            detected_intent="DECLARE_CROP_CYCLE",
+            normalized_text="d ici le 21 decembre, 78 boeufs",
+            transaction_payload={"product": "boeufs"},
+            extracted_entities={"estimated_available_at": "2026-12-21", "quantity": 78},
+            raw_analysis={"path": "no_llm"},  # pas de clé degraded_model
+        )
+        p = run(memory_update(st, StubRuntime()))["transaction_payload"]
+        assert p["quantity"] == 78, "un champ légitime issu d'un chemin déterministe ne doit pas être bridé"
+
+    def test_locked_off_topic_field_is_still_dropped_from_the_primary_model_too(self):
+        """Le fix élargit ce que le modèle PRINCIPAL peut remplir en une
+        fois ; il ne supprime pas la protection pour autant quand le flag
+        `degraded_model` est explicitement vrai, même sur un slot autre que
+        PRICE/QUANTITY (ex: DATE, comme dans l'incident réel)."""
+        st = make_state(
+            interpreted_event="UPDATE",
+            expected_input="DATE",
+            current_goal="DECLARE_CROP_CYCLE",
+            detected_intent="DECLARE_CROP_CYCLE",
+            normalized_text="l unite coute plutot 36500",
+            transaction_payload={"product": "chevres", "quantity": 14},
+            extracted_entities={"product": "poussins allemands", "price": 36500},
+            raw_analysis={"path": "llm", "degraded_model": True},
+        )
+        p = run(memory_update(st, StubRuntime()))["transaction_payload"]
+        assert p["product"] == "chevres", "correction de PRIX pendant DATE : le produit ne doit pas être écrasé"
 
 
 # =====================================================================

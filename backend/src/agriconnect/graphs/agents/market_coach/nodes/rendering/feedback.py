@@ -145,13 +145,32 @@ async def render_clarification(ctx: RenderContext) -> Dict[str, Any]:
             "Que souhaitez-vous faire ?"
         )
     else:
-        examples = (
-            "vendre un produit, gérer votre stock, chercher un produit, "
-            "lancer un appel d'offres, ou suivre une commande"
-        )
-        fallback_text = (
-            f"{salutation}Je n'ai pas bien saisi. Vous pouvez par exemple {examples}. "
-            "Dites-moi en quelques mots ce dont vous avez besoin."
-        )
+        # Un goal qui vient de se terminer en ERROR/FAILED laisse une trace
+        # d'un tour (nodes/cleaner.py::state_cleaner_node) — si l'utilisateur
+        # répond ensuite par quelque chose d'incompréhensible (ex: "annuler"
+        # après un "Produit inconnu"), le fallback doit le reconnaître au
+        # lieu de faire comme si la conversation venait de commencer. Voir
+        # [[market-coach-turn-boundary-state]].
+        terminated_goal = str(state.get("last_terminated_goal") or "").upper().strip()
+        terminated_label = (INTENT_CONFIG.get(terminated_goal) or {}).get("label") if terminated_goal else ""
 
-    return {"final_response": fallback_text, "ag_ui_component": None}
+        if terminated_label:
+            fallback_text = (
+                f"{salutation}Pas de souci, on reprend : *{terminated_label}* n'a pas abouti. "
+                "Vous pouvez réessayer avec d'autres informations, ou dites-moi ce que vous "
+                "voulez faire à la place."
+            )
+        else:
+            examples = (
+                "vendre un produit, gérer votre stock, chercher un produit, "
+                "lancer un appel d'offres, ou suivre une commande"
+            )
+            fallback_text = (
+                f"{salutation}Je n'ai pas bien saisi. Vous pouvez par exemple {examples}. "
+                "Dites-moi en quelques mots ce dont vous avez besoin."
+            )
+
+    patch: Dict[str, Any] = {"final_response": fallback_text, "ag_ui_component": None}
+    if state.get("last_terminated_goal"):
+        patch["last_terminated_goal"] = None  # hint consommée en un coup
+    return patch

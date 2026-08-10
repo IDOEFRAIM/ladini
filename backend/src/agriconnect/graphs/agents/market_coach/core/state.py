@@ -198,6 +198,17 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
 
     current_goal: Annotated[Optional[str], replace_value]
 
+    # Hint pour render_clarification uniquement — PAS un ownership de
+    # current_goal/goal_stack/suspended_goal (réservé au Goal Planner, voir
+    # docstring module). Écrit par state_cleaner_node quand un goal se
+    # termine en ERROR/FAILED (avant que current_goal soit lui-même remis à
+    # None par post_response_cleanup), consommé et effacé en un coup par
+    # render_clarification au tour suivant si l'utilisateur répond par
+    # quelque chose d'incompréhensible (ex: "annuler" après une erreur) —
+    # évite que le fallback générique ignore ce que l'utilisateur venait de
+    # faire. Voir [[market-coach-turn-boundary-state]].
+    last_terminated_goal: Annotated[Optional[str], replace_value]
+
     pending_goal: Annotated[
         Optional[str],
         replace_value

@@ -9,6 +9,7 @@ import types as _types
 from typing import Any, Callable, Dict, Union, get_args, get_origin, get_type_hints
 
 from agriconnect.services.database.d import AgriDatabaseService as DatabaseService
+from agriconnect.services.database.errors import sanitize_error_message
 
 logger = logging.getLogger("AgriConnect.MCP.Introspection")
 
@@ -26,12 +27,25 @@ def _safe(tool_name: str):
                 return {"status": "success", "data": result}
             except Exception as exc:
                 # Log full details server-side, return safe message to the client.
+                #
+                # `f"... : {exc}"` interpolait l'exception BRUTE — c'est
+                # exactement la 2e surface de fuite décrite dans
+                # `services/database/errors.py` (« exceptions RE-LEVÉES par le
+                # dispatcher puis interpolées par le wrapper MCP »). En pratique
+                # `@transactional` convertit déjà la plupart des erreurs
+                # techniques en `SafeDatabaseError`, mais toute exception levée
+                # HORS de son périmètre (résolution d'outil, sérialisation,
+                # shield) arrivait ici telle quelle et repartait vers l'agent —
+                # donc vers l'utilisateur WhatsApp. `sanitize_error_message`
+                # laisse passer le métier intact et neutralise le technique.
                 logger.exception("Tool failure: %s", tool_name)
                 return {
                     "status": "error",
                     "tool": tool_name,
-                    "error_type": type(exc).__name__,
-                    "message": f"L'opération '{tool_name}' a échoué : {exc}",
+                    # `error_type` exposait le nom de classe interne
+                    # (IntegrityError, ProgrammingError...) : indice gratuit sur
+                    # la stack pour un attaquant, sans valeur pour l'agent.
+                    "message": sanitize_error_message(exc, context=tool_name),
                 }
 
         return wrapper

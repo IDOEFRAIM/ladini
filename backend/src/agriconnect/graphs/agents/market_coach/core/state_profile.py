@@ -86,6 +86,7 @@ _FIELDS: Tuple[FieldSpec, ...] = (
 
     # ── 5. GOAL MANAGEMENT ────────────────────────────────────────
     FieldSpec("current_goal",    FieldLifecycle.DURABLE),
+    FieldSpec("last_terminated_goal", FieldLifecycle.DURABLE),
     FieldSpec("pending_goal",    FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec("goal_stack",      FieldLifecycle.DURABLE),
     FieldSpec("goal_status",     FieldLifecycle.DURABLE),

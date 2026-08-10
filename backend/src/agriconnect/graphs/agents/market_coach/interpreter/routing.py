@@ -768,11 +768,12 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # Timeout de sécurité (Phase 4) : un appel Groq suspendu ici gelait le
         # tour ENTIER jusqu'au timeout global orchestrateur (45s). TimeoutError
         # est capturé par le except ci-dessous → fallback UNKNOWN propre.
+        _requested_model = getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile")
         try:
             completion = await asyncio.wait_for(
                 asyncio.to_thread(
                     lambda: llm.chat.completions.create(
-                        model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
+                        model=_requested_model,
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt},
@@ -784,6 +785,19 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 timeout=15.0,
             )
             parsed = json.loads(completion.choices[0].message.content or "{}")
+            # Repli transparent (get_llm.py, GROQ_RATE_LIMIT_FALLBACK) : sur un
+            # 429 le wrapper HTTP réessaie avec un modèle plus faible SANS que
+            # l'appelant ici ne le sache — `completion.model` (champ standard de
+            # la réponse) est le SEUL moyen de le détecter après coup. Utilisé
+            # plus bas pour ne durcir le garde-fou anti-hallucination
+            # (`nodes/memory.py::_EXPECTED_INPUT_ALLOWED_FIELDS`) QUE quand ce
+            # modèle dégradé a effectivement répondu — le modèle principal, lui,
+            # suit déjà l'instruction du prompt d'extraire plusieurs champs à la
+            # fois sans halluciner (voir RÈGLE 5 du prompt système).
+            _actual_model = getattr(completion, "model", None)
+            # Inconnu (attribut absent) : on ne peut pas prouver que le modèle
+            # principal a répondu — on reste prudent (comme avant ce fix).
+            _degraded_model_used = (_actual_model is None) or (_actual_model != _requested_model)
         except Exception as exc:
             # Dégradation attendue (timeout, 429/5xx Groq) : WARNING, pas de
             # traceback — bruit de log inutile pour un cas déjà géré par le
@@ -1061,7 +1075,10 @@ def make_input_interpreter(role: str = "PRODUCER"):
             "interpreter_confidence": confidence,
             "validation_status": validation_status,
             "extracted_entities": remapped_entities,
-            "raw_analysis": {"path": "llm", "role": role_up},
+            "raw_analysis": {
+                "path": "llm", "role": role_up,
+                "model_used": _actual_model, "degraded_model": _degraded_model_used,
+            },
         }
 
     return input_interpreter

@@ -85,10 +85,20 @@ class MCPTransportConfig:
                 base_url = f"http://{host}:{port}"
             if not base_url:
                 raise ValueError("MCP_DB_HTTP_URL must be configured for http transport")
+            headers = dict(getattr(settings, "MCP_DB_HTTP_HEADERS", {}) or {})
+            # Secret partagé avec le daemon (protocols/mcp/servers/http_server.py).
+            # Injecté ici plutôt que dans MCP_DB_HTTP_HEADERS pour que la même
+            # variable d'environnement configure les DEUX côtés d'un coup — un
+            # secret posé côté daemon seul rendrait tous les appels 401.
+            # Un en-tête explicitement fourni dans MCP_DB_HTTP_HEADERS reste
+            # prioritaire (échappatoire pour un proxy/gateway qui l'injecte).
+            token = str(getattr(settings, "MCP_HTTP_AUTH_TOKEN", "") or "").strip()
+            if token and not any(k.lower() == "authorization" for k in headers):
+                headers["Authorization"] = f"Bearer {token}"
             return cls(
                 kind="http",
                 http_base_url=base_url,
-                http_headers=getattr(settings, "MCP_DB_HTTP_HEADERS", {}) or {},
+                http_headers=headers,
             )
         if transport == "grpc":
             target = getattr(settings, "MCP_DB_GRPC_TARGET", "")
@@ -139,7 +149,7 @@ class FastMCPProcessAdapter(MCPTransportAdapter):
     async def connect(self) -> None:
         if not Client:
             raise ImportError("fastmcp est requis pour le transport stdio")
-        from fastmcp.client.transports.stdio import PythonStdioTransport
+        from fastmcp.client.transports import PythonStdioTransport
 
         script_path = Path(str(self.config.stdio_script)).resolve()
         if not script_path.exists():

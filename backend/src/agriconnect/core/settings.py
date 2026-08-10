@@ -137,6 +137,20 @@ class Settings(BaseSettings):
     # celle que le client MarketRuntime doit contacter).
     MCP_DB_HTTP_URL: str = ""
     MCP_DB_HTTP_HEADERS: dict[str, str] = Field(default_factory=dict)
+    # Secret partagé entre le daemon MCP HTTP (protocols/mcp/servers/http_server.py)
+    # et son client (infrastructure/mcp/client.py::HttpMCPAdapter).
+    #
+    # ⚠️ SÉCURITÉ — le daemon expose `POST /call`, qui exécute N'IMPORTE QUEL
+    # outil DB (création de commande, déblocage de fonds escrow, suppression de
+    # stock...) ET dérive l'identité de l'appelant depuis le PAYLOAD
+    # (`_derive_context_identity`, runtime.py) : sans authentification,
+    # quiconque atteint ce port agit comme n'importe quel utilisateur.
+    # Renseigner ce secret active la vérification `Authorization: Bearer ...`
+    # côté daemon et son envoi automatique côté client. Laissé vide, le daemon
+    # démarre quand même (aucune rupture de déploiement existant) mais journalise
+    # un CRITICAL au démarrage : il ne doit alors JAMAIS écouter ailleurs que
+    # sur la boucle locale.
+    MCP_HTTP_AUTH_TOKEN: str = ""
     MCP_DB_GRPC_TARGET: str = ""
     MCP_DB_GRPC_TLS: bool = False
     MCP_DB_GRPC_METADATA: dict[str, str] = Field(default_factory=dict)

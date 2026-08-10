@@ -1,6 +1,7 @@
 # agriconnect/services/twilio_sender.py (ou dans vos tasks Celery)
 
 import logging
+from twilio.http.http_client import TwilioHttpClient
 from twilio.rest import Client
 from agriconnect.core.settings import settings
 
@@ -8,13 +9,32 @@ logger = logging.getLogger("AgriConnect.TwilioSender")
 
 MAX_WHATSAPP_BODY_LENGTH = 1200  # Seuil de sécurité pour éviter le blocage Meta/WhatsApp
 
+# ⚠️ RÉSILIENCE — le SDK Twilio construit par défaut un `TwilioHttpClient(
+# timeout=None)`, c'est-à-dire AUCUN timeout : une connexion suspendue côté
+# Twilio bloquait le thread appelant indéfiniment. Ce sender est invoqué
+# depuis les tâches Celery : un seul appel figé immobilisait un worker pour
+# toujours, et les messages suivants s'empilaient sans jamais partir.
+# Même valeur que les autres clients externes du projet
+# (`services/payments/paydunya_client.py`, `services/whatsapp/cloud_api_client.py`).
+_TIMEOUT_S = 15.0
+
+
+def _mask_phone(phone: str) -> str:
+    """Numéro tronqué pour les logs (PII) — 4 derniers chiffres conservés."""
+    raw = str(phone or "")
+    return f"***{raw[-4:]}" if len(raw) >= 4 else "***"
+
 
 def send_whatsapp_message(to_phone: str, body_text: str):
     """Envoie un message WhatsApp via Twilio en découpant le texte si nécessaire."""
     if not body_text:
         return
 
-    client = Client(settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+    client = Client(
+        settings.TWILIO_ACCOUNT_SID,
+        settings.TWILIO_AUTH_TOKEN,
+        http_client=TwilioHttpClient(timeout=_TIMEOUT_S),
+    )
     
     # Formatage propre des numéros
     clean_from = settings.TWILIO_WHATSAPP_NUMBER.replace("whatsapp:", "").strip()
@@ -43,12 +63,12 @@ def send_whatsapp_message(to_phone: str, body_text: str):
             responses.append(res)
             logger.info(
                 "TWILIO_SEND_CHUNK_SUCCESS | chunk=%d/%d | sid=%s | to=%s",
-                index + 1, len(chunks), res.sid, to_formatted
+                index + 1, len(chunks), res.sid, _mask_phone(clean_to)
             )
         except Exception as e:
             logger.error(
                 "TWILIO_SEND_CHUNK_FAILED | chunk=%d/%d | to=%s | error=%s",
-                index + 1, len(chunks), to_formatted, e
+                index + 1, len(chunks), _mask_phone(clean_to), e
             )
             
     return responses
