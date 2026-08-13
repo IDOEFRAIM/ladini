@@ -1,0 +1,2 @@
+sent_calls: [('+22670000001', '✅ 1 photo ajoutée à *mais*.')]
+add_calls: [('+22670000001', '1', 'https://x/legacy.jpg')]

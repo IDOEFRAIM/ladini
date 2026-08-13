@@ -229,6 +229,7 @@ class BuyerMixin(BaseMixin):
                     Product.price,
                     Product.quantity_for_sale,
                     Product.unit,
+                    Product.images,
                     Producer.id.label("producer_id"),
                     User.name.label("producer_name"),
                     Zone.name.label("zone_name"),
@@ -311,6 +312,9 @@ class BuyerMixin(BaseMixin):
                     "source_type": "DIRECT",
                     "availability_kind": "CATALOG",
                     "available_quantity": float(row.get("quantity_for_sale") or 0.0),
+                    # Voir services/search_results_cache.py — permet à l'acheteur
+                    # de demander "photos <numéro>" pour un résultat de recherche.
+                    "images": list(row.get("images") or []),
                 })
 
             for row in future_rows:
@@ -338,6 +342,7 @@ class BuyerMixin(BaseMixin):
                     "estimated_available_at": estimated_iso,
                     "available_quantity": float(row.get("available_quantity") or 0.0),
                     "crop_cycle_id": str(row["id"]),
+                    "images": [],  # productions futures : pas de photo avant récolte
                 })
 
             combined_results.sort(key=lambda r: (int(r.get("priority") or 3), 0 if r.get("source_type") == "DIRECT" else 1, float(r.get("price") or 0.0)))

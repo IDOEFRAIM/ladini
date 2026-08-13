@@ -354,6 +354,72 @@ class TestListBuyerAuctions:
         assert "proposition" in result["final_response"]
         assert result["available_mapping"] == {"1": "a1", "2": "a2"}
 
+    def test_a_reference_photo_on_an_auction_adds_the_view_hint_and_is_cached(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking as ot_mod
+        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import list_buyer_auctions
+
+        captured = {}
+        monkeypatch.setattr(
+            ot_mod, "_store_search_photo_results",
+            lambda phone, entries: captured.update(phone=phone, entries=entries),
+        )
+        state = make_state(user_phone="+2260")
+        runtime = rt({"get_auctions": {"status": "success", "data": [
+            {"auction_id": "a1", "product": "mais", "status": "OPEN", "images": ["https://x/ref.jpg"]},
+        ]}})
+        result = run(list_buyer_auctions(state, runtime))
+
+        assert "photos <numéro>" in result["final_response"]
+        assert captured["entries"]["1"]["id"] == "a1"
+        assert captured["entries"]["1"]["images"] == ["https://x/ref.jpg"]
+
+    def test_bid_photos_without_a_reference_photo_still_get_a_hint(self, monkeypatch):
+        """Rupture prévenue : une enchère sans photo de référence PROPRE mais
+        dont une offre reçue en a une doit quand même signaler qu'il y a une
+        photo à voir — bug réel signalé le 2026-08-13 ("suivre mes appels"
+        ne mentionnait jamais les photos alors qu'une offre en avait une)."""
+        import agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking as ot_mod
+        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import list_buyer_auctions
+
+        monkeypatch.setattr(ot_mod, "_store_search_photo_results", lambda phone, entries: None)
+        state = make_state(user_phone="+2260")
+        runtime = rt({"get_auctions": {"status": "success", "data": [
+            {
+                "auction_id": "a1", "product": "antilope", "status": "OPEN",
+                "images": [], "bid_count": 1, "has_bid_photos": True,
+            },
+        ]}})
+        result = run(list_buyer_auctions(state, runtime))
+
+        assert "photo" in result["final_response"].lower()
+        assert "sélectionnez le numéro" in result["final_response"]
+
+    def test_no_reference_and_no_bid_photos_means_no_hint_at_all(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking as ot_mod
+        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import list_buyer_auctions
+
+        monkeypatch.setattr(ot_mod, "_store_search_photo_results", lambda phone, entries: None)
+        state = make_state(user_phone="+2260")
+        runtime = rt({"get_auctions": {"status": "success", "data": [
+            {"auction_id": "a1", "product": "mais", "status": "OPEN", "images": [], "has_bid_photos": False},
+        ]}})
+        result = run(list_buyer_auctions(state, runtime))
+
+        assert "📸" not in result["final_response"]
+
+    def test_no_reference_photos_means_no_hint(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking as ot_mod
+        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import list_buyer_auctions
+
+        monkeypatch.setattr(ot_mod, "_store_search_photo_results", lambda phone, entries: None)
+        state = make_state(user_phone="+2260")
+        runtime = rt({"get_auctions": {"status": "success", "data": [
+            {"auction_id": "a1", "product": "mais", "status": "OPEN", "images": []},
+        ]}})
+        result = run(list_buyer_auctions(state, runtime))
+
+        assert "photos <numéro>" not in result["final_response"]
+
 
 # =====================================================================
 # check_auction_status
@@ -400,6 +466,44 @@ class TestCheckAuctionStatus:
         assert result["working_memory"]["winner_auction_id"] == "a1"
         assert result["transaction_payload"]["auction_id"] == "a1"
         assert result["available_mapping"] == {"1": "b1", "2": "b2"}
+
+    def test_a_bid_photo_adds_the_view_hint_and_is_cached(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking as ot_mod
+        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import check_auction_status
+
+        captured = {}
+        monkeypatch.setattr(
+            ot_mod, "_store_search_photo_results",
+            lambda phone, entries: captured.update(phone=phone, entries=entries),
+        )
+        state = make_state(transaction_payload={"auction_id": "a1"}, user_phone="+2260")
+        runtime = rt({"get_auction_bids": {
+            "bids": [
+                {"bid_id": "b1", "producer": "Awa", "price": 200, "status": "PENDING", "images": ["https://x/lot.jpg"]},
+                {"bid_id": "b2", "producer": "Ali", "price": 220, "status": "PENDING", "images": []},
+            ],
+            "auction": {"product": "mais", "status": "OPEN"},
+        }})
+        result = run(check_auction_status(state, runtime))
+
+        assert "photos <numéro>" in result["final_response"]
+        assert captured["phone"] == "+2260"
+        assert captured["entries"]["1"]["images"] == ["https://x/lot.jpg"]
+        assert captured["entries"]["2"]["images"] == []
+
+    def test_no_bid_photos_means_no_hint(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking as ot_mod
+        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import check_auction_status
+
+        monkeypatch.setattr(ot_mod, "_store_search_photo_results", lambda phone, entries: None)
+        state = make_state(transaction_payload={"auction_id": "a1"}, user_phone="+2260")
+        runtime = rt({"get_auction_bids": {
+            "bids": [{"bid_id": "b1", "producer": "Awa", "price": 200, "status": "PENDING", "images": []}],
+            "auction": {"product": "mais", "status": "OPEN"},
+        }})
+        result = run(check_auction_status(state, runtime))
+
+        assert "photos <numéro>" not in result["final_response"]
 
     def test_bids_present_but_auction_closed_returns_a_summary_only(self):
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import check_auction_status

@@ -270,6 +270,59 @@ class TestRenderSuccess:
         result = run(render_success(c))
         assert "disponibles immédiatement" in result["final_response"]
 
+    def test_search_results_with_photos_get_a_view_hint_and_are_cached(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+
+        captured = {}
+        monkeypatch.setattr(
+            success_mod, "_store_search_photo_results",
+            lambda phone, entries: captured.update(phone=phone, entries=entries),
+        )
+        c = ctx(
+            user_phone="+22670000001",
+            selected_tool="search_products",
+            execution_result={"status": "success", "data": [
+                {"id": "p1", "name": "mais", "price": 250, "source_type": "DIRECT", "images": ["https://x/a.jpg"]},
+            ]},
+        )
+        result = run(render_success(c))
+
+        assert "photos <numéro>" in result["final_response"]
+        assert captured["phone"] == "+22670000001"
+        assert captured["entries"] == {"1": {"id": "p1", "name": "mais", "images": ["https://x/a.jpg"]}}
+
+    def test_search_results_without_any_photo_get_no_hint(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+
+        monkeypatch.setattr(success_mod, "_store_search_photo_results", lambda phone, entries: None)
+        c = ctx(
+            selected_tool="search_products",
+            execution_result={"status": "success", "data": [
+                {"id": "p1", "name": "mais", "price": 250, "source_type": "DIRECT", "images": []},
+            ]},
+        )
+        result = run(render_success(c))
+
+        assert "photos <numéro>" not in result["final_response"]
+
+    def test_future_only_results_are_not_cached(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+
+        called = {"count": 0}
+        monkeypatch.setattr(
+            success_mod, "_store_search_photo_results",
+            lambda phone, entries: called.__setitem__("count", called["count"] + 1),
+        )
+        c = ctx(
+            selected_tool="search_products",
+            execution_result={"status": "success", "data": [
+                {"name": "riz", "source_type": "FUTURE", "estimated_available_at": "2026-12-31"},
+            ]},
+        )
+        run(render_success(c))
+
+        assert called["count"] == 0
+
     def test_flat_list_renders_a_selection_menu(self):
         c = ctx(execution_result={"status": "success", "data": [
             {"name": "mais", "quantity": 100, "unit": "kg", "stock_id": "s1"},
@@ -318,3 +371,138 @@ class TestRenderSuccess:
         })
         result = run(render_success(c))
         assert result["final_response"] == "message interne"
+
+
+# =====================================================================
+# Photos côté enchères/appels d'offres (producteur ET acheteur)
+# =====================================================================
+
+class TestAuctionAndBidPhotoHooks:
+    """Voir mémoire projet "auction-bid-photos"."""
+
+    def test_placing_a_bid_sets_a_pending_photo_target_and_adds_a_hint(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+
+        captured = {}
+        monkeypatch.setattr(
+            success_mod, "_set_pending_bid_photo",
+            lambda phone, bid_id: captured.update(phone=phone, bid_id=bid_id),
+        )
+        c = ctx(
+            user_phone="+22670000001",
+            selected_tool="place_bid",
+            execution_result={"status": "success", "bid_id": "b1", "message": "✅ Offre transmise."},
+        )
+        result = run(render_success(c))
+
+        assert captured == {"phone": "+22670000001", "bid_id": "b1"}
+        assert "✅ Offre transmise." in result["final_response"]
+        assert "photo" in result["final_response"].lower()
+
+    def test_creating_an_auction_sets_a_pending_photo_target_and_adds_a_hint(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+
+        captured = {}
+        monkeypatch.setattr(
+            success_mod, "_set_pending_auction_photo",
+            lambda phone, auction_id: captured.update(phone=phone, auction_id=auction_id),
+        )
+        c = ctx(
+            user_phone="+22670000001",
+            selected_tool="create_auction",
+            execution_result={"status": "success", "auction_id": "a1", "message": "✅ Appel d'offres enregistré."},
+        )
+        result = run(render_success(c))
+
+        assert captured == {"phone": "+22670000001", "auction_id": "a1"}
+        assert "✅ Appel d'offres enregistré." in result["final_response"]
+        assert "photo" in result["final_response"].lower()
+
+    def test_a_bid_list_with_photos_is_cached_and_gets_a_hint(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+
+        captured = {}
+        monkeypatch.setattr(
+            success_mod, "_store_search_photo_results",
+            lambda phone, entries: captured.update(phone=phone, entries=entries),
+        )
+        c = ctx(
+            user_phone="+22670000001",
+            selected_tool="get_auctions_bids",
+            execution_result={
+                "status": "success",
+                "formatted_menu": "📋 *Propositions reçues...*\n*1. Lot maïs*...",
+                "data": [
+                    {"bid_id": "b1", "product": "maïs", "producer": "Ferme Koné", "images": ["https://x/a.jpg"]},
+                    {"bid_id": "b2", "product": "maïs", "producer": "Ferme Diallo", "images": []},
+                ],
+            },
+        )
+        result = run(render_success(c))
+
+        assert "photos <numéro>" in result["final_response"]
+        assert captured["entries"]["1"]["images"] == ["https://x/a.jpg"]
+        assert captured["entries"]["2"]["images"] == []
+
+    def test_a_bid_list_without_any_photo_gets_no_hint(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+        monkeypatch.setattr(success_mod, "_store_search_photo_results", lambda phone, entries: None)
+
+        c = ctx(
+            user_phone="+22670000001",
+            selected_tool="get_auctions_bids",
+            execution_result={
+                "status": "success",
+                "formatted_menu": "📋 *Propositions reçues...*",
+                "data": [{"bid_id": "b1", "product": "maïs", "producer": "Ferme Koné", "images": []}],
+            },
+        )
+        result = run(render_success(c))
+
+        assert "photos <numéro>" not in result["final_response"]
+
+    def test_producer_auctions_listing_with_reference_photos_is_cached(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+
+        captured = {}
+        monkeypatch.setattr(
+            success_mod, "_store_search_photo_results",
+            lambda phone, entries: captured.update(phone=phone, entries=entries),
+        )
+        c = ctx(
+            user_phone="+22670000001",
+            selected_tool="get_producer_auctions",
+            execution_result={
+                "status": "success",
+                "formatted_menu": "🎯 *Appels d'offres pour vos produits...*",
+                "data": [
+                    {"auction_id": "a1", "product": "maïs", "buyer_name": "Acheteur X", "images": ["https://x/ref.jpg"]},
+                ],
+            },
+        )
+        result = run(render_success(c))
+
+        assert "photos <numéro>" in result["final_response"]
+        assert captured["entries"]["1"]["id"] == "a1"
+
+    def test_own_bids_listing_with_photos_is_cached(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+
+        captured = {}
+        monkeypatch.setattr(
+            success_mod, "_store_search_photo_results",
+            lambda phone, entries: captured.update(phone=phone, entries=entries),
+        )
+        c = ctx(
+            user_phone="+22670000001",
+            selected_tool="get_my_active_bids",
+            execution_result={
+                "status": "success",
+                "formatted_menu": "📋 *Le statut de vos propositions...*",
+                "data": [{"bid_id": "b1", "product": "maïs", "status_label": "En attente", "images": ["https://x/a.jpg"]}],
+            },
+        )
+        result = run(render_success(c))
+
+        assert "photos <numéro>" in result["final_response"]
+        assert captured["entries"]["1"]["id"] == "b1"

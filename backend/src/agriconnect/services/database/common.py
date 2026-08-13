@@ -173,6 +173,11 @@ SCHEMA_COLUMN_DDL = (
 	# Repérage rapide des commandes en attente de paiement à expirer (cron).
 	"CREATE INDEX IF NOT EXISTS ix_orders_payment_expires_at "
 	"ON marketplace.orders (payment_expires_at) WHERE payment_status = 'PENDING'",
+	# Photos enchères/offres — voir services/database/auction.py
+	# (add_auction_photo / add_bid_photo). Toujours NOT NULL avec un défaut
+	# tableau vide, même pattern que Product.images.
+	"ALTER TABLE marketplace.auctions ADD COLUMN IF NOT EXISTS images TEXT[] NOT NULL DEFAULT '{}'",
+	"ALTER TABLE marketplace.bids ADD COLUMN IF NOT EXISTS images TEXT[] NOT NULL DEFAULT '{}'",
 )
 
 

@@ -34,6 +34,7 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
 )
 from agriconnect.core.formatting import fmt_num as _fmt_num
 from agriconnect.graphs.agents.market_coach.services.mcp.gateway import AuctionGateway
+from agriconnect.services.pending_photo_target import set_pending_bid_photo
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     is_success_response,
@@ -444,12 +445,30 @@ async def submit_bid(
     price_txt = _fmt_num(price)
     # Message du DB (distingue « transmise » d'une « mise à jour » via l'upsert).
     db_msg = result.get("message") or f"✅ Votre proposition de *{price_txt} FCFA* a été transmise à l'acheteur."
+
+    # Photo du lot proposé — même hint que le chemin générique
+    # (nodes/rendering/success.py), posé ICI aussi : ce flow construit son
+    # propre `final_response` directement (bypass du rendu générique, voir
+    # son commentaire "les nœuds negotiation posent final_response
+    # directement"), donc le hook générique ne s'exécute jamais pour ce
+    # chemin — constaté en usage réel (le hint n'apparaissait pas après une
+    # offre placée via ce tunnel de confirmation producteur).
+    photo_hint = ""
+    bid_id = result.get("bid_id")
+    if bid_id and phone:
+        set_pending_bid_photo(phone, str(bid_id))
+        photo_hint = (
+            "\n\n📸 Envoyez une photo de ce lot pour rassurer l'acheteur — "
+            "elle sera automatiquement liée à cette offre."
+        )
+
     return {
         "status": "COMPLETED",
         "response_strategy": "SUCCESS",
         "final_response": (
             f"{db_msg}\n\n"
             "📊 Tapez *mes propositions* pour suivre son état (acceptée / en attente)."
+            f"{photo_hint}"
         ),
         "working_memory": _clear_bid_wm(state),
         "transaction_payload": {"__reset__": True},

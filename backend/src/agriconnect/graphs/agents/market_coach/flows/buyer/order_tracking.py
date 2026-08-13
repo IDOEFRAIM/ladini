@@ -14,7 +14,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from agriconnect.core.formatting import fmt_num as _fmt_num
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
@@ -33,8 +33,35 @@ from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     is_success_response,
 )
+from agriconnect.services.search_results_cache import store_results as _store_search_photo_results
 
 logger = logging.getLogger("AgriConnect.Market.BuyerFlow.OrderTracking")
+
+
+def _cache_photo_menu(
+    phone: str,
+    items: List[Dict[str, Any]],
+    id_key: str,
+    label_fn: Callable[[Dict[str, Any]], str],
+) -> bool:
+    """Met en cache un menu numéroté (enchères/offres) pour "photos <numéro>"
+    — voir services/search_results_cache.py et
+    nodes/rendering/success.py::_cache_numbered_items_with_photos (même
+    principe, dupliqué ici car ces flows construisent leur `final_response`
+    directement et ne passent jamais par le rendu générique). Renvoie True
+    si au moins un élément a une photo."""
+    if not phone or not items:
+        return False
+    entries: Dict[str, Dict[str, Any]] = {}
+    has_photos = False
+    for idx, item in enumerate(items, start=1):
+        images = item.get("images") or []
+        if images:
+            has_photos = True
+        entries[str(idx)] = {"id": item.get(id_key), "name": label_fn(item), "images": images}
+    if entries:
+        _store_search_photo_results(phone, entries)
+    return has_photos
 
 
 # =====================================================================
@@ -531,6 +558,27 @@ async def list_buyer_auctions(
         mapping[str(i)] = auction_id
         options.append(MenuOption(index=str(i), label=label, value=auction_id))
 
+    # Deux sources de photo bien distinctes, jamais mélangées : la photo de
+    # RÉFÉRENCE de l'enchère elle-même (add_auction_photo, optionnelle) VS
+    # une photo jointe par un PRODUCTEUR à SON offre (add_bid_photo). "photos
+    # <numéro>" à ce niveau liste ne connaît QUE la première (c'est ce qui
+    # est mis en cache ci-dessous) — sans ce distinguo, une enchère sans
+    # photo de référence mais dont l'unique offre reçue en a une paraissait
+    # "sans photo" alors qu'il y en a bien une à voir en sélectionnant le
+    # numéro (check_auction_status, déjà câblé). Bug réel signalé le
+    # 2026-08-13 : le hint n'apparaissait jamais dans ce cas précis.
+    has_reference_photos = _cache_photo_menu(
+        phone, data, "auction_id",
+        lambda a: a.get("product") or a.get("product_name") or "Appel d'offres",
+    )
+    if has_reference_photos:
+        lines.append("\n📸 Tapez *photos <numéro>* pour voir la photo de référence d'un appel d'offres.")
+    elif any(a.get("has_bid_photos") for a in data):
+        lines.append(
+            "\n📸 Une ou plusieurs offres reçues ont des photos — "
+            "sélectionnez le numéro de l'appel d'offres pour les voir."
+        )
+
     lines.append(render_selection_prompt(noun="appel d'offres"))
     menu_text = "\n".join(lines)
 
@@ -624,6 +672,15 @@ async def check_auction_status(
             lines.append(f"\n*{i}.* {bid_emoji} {label}")
             mapping[str(i)] = bid_id
             options.append(MenuOption(index=str(i), label=label, value=bid_id))
+
+        # Photo du lot proposé (add_bid_photo côté producteur) — le moment de
+        # confiance clé avant de désigner un gagnant. Voir
+        # [[auction-bid-photos-2026-08]].
+        if _cache_photo_menu(
+            str(state.get("user_phone") or ""), bids, "bid_id",
+            lambda b: f"{b.get('producer') or b.get('producer_name') or 'Producteur'} — {product}",
+        ):
+            lines.append("\n📸 Tapez *photos <numéro>* pour voir la photo d'un lot proposé.")
 
         if status_raw == "OPEN":
             lines.append("\n_Répondez avec le *numéro* de la proposition pour désigner le gagnant._")

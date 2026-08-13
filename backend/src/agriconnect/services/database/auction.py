@@ -5,11 +5,11 @@ import re
 import unicodedata
 import uuid
 from rapidfuzz import fuzz, process
-from sqlalchemy import select, and_, or_, func, update
+from sqlalchemy import select, and_, or_, func, update, exists
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 from agriconnect.core.formatting import fmt_num as _fmt_num
-from .common import normalize_phone
+from .common import clean_text, normalize_phone
 from .search import fuzzy_match, similarity_rank
 from .errors import BusinessRuleException
 from .moderation import _fold as _fold_for_moderation
@@ -21,6 +21,7 @@ from .base import BaseMixin
 logger = logging.getLogger("agriconnect.services.database.auction")
 
 _FUZZY_SUBCATEGORY_THRESHOLD = 78
+_MAX_PHOTOS_PER_LOT = 8  # même plafond que Product.images (product.py::_MAX_PHOTOS_PER_PRODUCT)
 
 
 def _normalize_product_label(value: str) -> str:
@@ -325,7 +326,69 @@ class AuctionMixin(BaseMixin):
             ),
             "summary": f"📢 Appel d'offre publié pour {qty_txt} {unit_txt} de {sub_cat.name}.",
         }
-        
+
+    async def add_auction_photo(
+        self,
+        phone: str,
+        auction_id: str,
+        image_url: str,
+        replace: bool = False,
+    ) -> Dict[str, Any]:
+        """Lie une photo de référence (déjà uploadée sur Supabase Storage) à
+        un appel d'offres (Auction) de l'acheteur appelant — même pattern
+        exact que `add_bid_photo`/`ProductMixin.add_product_photo`. Aide les
+        producteurs à comprendre précisément ce qui est demandé avant de
+        proposer un prix.
+        """
+        try:
+            phone = clean_text(phone, "phone", required=True)
+            auction_id = clean_text(auction_id, "auction_id", required=True)
+            image_url = clean_text(image_url, "image_url", required=True, max_length=2048)
+            _, buyer_profile = await self.get_buyer_profile(phone)
+
+            stmt = (
+                select(Auction)
+                .where(and_(Auction.id == uuid.UUID(auction_id), Auction.buyer_id == buyer_profile.id))
+                .with_for_update()
+            )
+            res = await self.session.execute(stmt)
+            auction = res.scalar_one_or_none()
+
+            if not auction:
+                return {"status": "error", "message": "Appel d'offres introuvable ou non autorisé."}
+
+            if replace:
+                current_images = [image_url]
+            else:
+                current_images = list(auction.images or [])
+                if image_url in current_images:
+                    return {
+                        "status": "success",
+                        "message": "Photo déjà associée à cet appel d'offres.",
+                        "data": {"auction_id": str(auction.id), "images": current_images},
+                    }
+                current_images.append(image_url)
+                if len(current_images) > _MAX_PHOTOS_PER_LOT:
+                    current_images = current_images[-_MAX_PHOTOS_PER_LOT:]
+
+            auction.images = current_images
+            await self.session.flush()
+            await self.session.refresh(auction)
+
+            logger.info(
+                "AUCTION_PHOTO_ADDED: ID %s par %s (total photos: %d, replace=%s)",
+                auction_id, phone, len(current_images), replace,
+            )
+
+            return {
+                "status": "success",
+                "message": "Photo ajoutée à votre appel d'offres avec succès.",
+                "data": {"auction_id": str(auction.id), "images": current_images},
+            }
+
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
+
 
 
 
@@ -419,6 +482,68 @@ class AuctionMixin(BaseMixin):
             "message": f"✅ Votre offre de *{_fmt_num(offered_price)} CFA* a été transmise à l'acheteur avec succès."
         }
 
+    async def add_bid_photo(
+        self,
+        phone: str,
+        bid_id: str,
+        image_url: str,
+        replace: bool = False,
+    ) -> Dict[str, Any]:
+        """Lie une photo du lot proposé (déjà uploadée sur Supabase Storage) à
+        une offre (Bid) du producteur appelant — même pattern exact que
+        `ProductMixin.add_product_photo` (row lock, ownership intégrée à la
+        requête, dédoublonnage sur l'URL, plafond FIFO). Donne à l'acheteur
+        une preuve visuelle du lot AVANT de choisir le gagnant.
+        """
+        try:
+            phone = clean_text(phone, "phone", required=True)
+            bid_id = clean_text(bid_id, "bid_id", required=True)
+            image_url = clean_text(image_url, "image_url", required=True, max_length=2048)
+            _, producer = await self.get_producer_profile(phone)
+
+            stmt = (
+                select(Bid)
+                .where(and_(Bid.id == uuid.UUID(bid_id), Bid.producer_id == producer.id))
+                .with_for_update()
+            )
+            res = await self.session.execute(stmt)
+            bid = res.scalar_one_or_none()
+
+            if not bid:
+                return {"status": "error", "message": "Offre introuvable ou non autorisée."}
+
+            if replace:
+                current_images = [image_url]
+            else:
+                current_images = list(bid.images or [])
+                if image_url in current_images:
+                    return {
+                        "status": "success",
+                        "message": "Photo déjà associée à cette offre.",
+                        "data": {"bid_id": str(bid.id), "images": current_images},
+                    }
+                current_images.append(image_url)
+                if len(current_images) > _MAX_PHOTOS_PER_LOT:
+                    current_images = current_images[-_MAX_PHOTOS_PER_LOT:]
+
+            bid.images = current_images
+            await self.session.flush()
+            await self.session.refresh(bid)
+
+            logger.info(
+                "BID_PHOTO_ADDED: ID %s par %s (total photos: %d, replace=%s)",
+                bid_id, phone, len(current_images), replace,
+            )
+
+            return {
+                "status": "success",
+                "message": "Photo ajoutée à votre offre avec succès.",
+                "data": {"bid_id": str(bid.id), "images": current_images},
+            }
+
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
+
     # ─── SECTION 3 : CONSULTATIONS ET MARCHÉ (READS) ─────────────────────
 
     async def get_auctions(
@@ -446,6 +571,21 @@ class AuctionMixin(BaseMixin):
                 .scalar_subquery()
                 .label("bid_count")
             )
+            # A minima UNE offre reçue porte une photo de lot — signal utile
+            # côté acheteur MÊME quand l'enchère elle-même n'a pas de photo
+            # de référence (add_auction_photo, optionnelle). Voir
+            # [[auction-bid-photos-2026-08]] : sans ce flag, la liste
+            # "suivre mes appels" ne pouvait jamais indiquer la présence
+            # d'une photo d'offre, seulement celle de l'enchère.
+            has_bid_photos_sq = (
+                exists(
+                    select(Bid.id).where(
+                        Bid.auction_id == Auction.id,
+                        func.cardinality(Bid.images) > 0,
+                    )
+                )
+                .label("has_bid_photos")
+            )
 
             stmt = (
                 select(
@@ -454,6 +594,7 @@ class AuctionMixin(BaseMixin):
                     Zone.name.label("zone_name"),
                     BuyerProfile.establishment_name.label("buyer_name"),
                     bid_count_sq,
+                    has_bid_photos_sq,
                 )
                 .join(SubCategory, Auction.sub_category_id == SubCategory.id)
                 .outerjoin(Zone, Auction.target_zone_id == Zone.id)
@@ -502,7 +643,7 @@ class AuctionMixin(BaseMixin):
             menu_lines = [f"🔎 *Marchés disponibles ({status}) :*"]
             mapping_cache = {}
 
-            for i, (auction, p_name, z_name, b_name, bid_count) in enumerate(rows, start=1):
+            for i, (auction, p_name, z_name, b_name, bid_count, has_bid_photos) in enumerate(rows, start=1):
                 diff = auction.deadline - datetime.now()
                 time_str = f"{diff.days}j {diff.seconds // 3600}h" if diff.days > 0 else f"{diff.seconds // 3600}h"
                 n_bids = int(bid_count or 0)
@@ -516,6 +657,8 @@ class AuctionMixin(BaseMixin):
                     "status": auction.status,
                     "max_price": auction.max_price_per_unit,
                     "bid_count": n_bids,
+                    "images": list(auction.images or []),
+                    "has_bid_photos": bool(has_bid_photos),
                 })
 
                 bids_badge = f"\n📥 Offres reçues : *{n_bids}*" if n_bids else ""
@@ -578,6 +721,7 @@ class AuctionMixin(BaseMixin):
                     "quantity": float(auction_obj.quantity) if auction_obj.quantity is not None else None,
                     "unit": auction_obj.unit,
                     "max_price": float(auction_obj.max_price_per_unit) if auction_obj.max_price_per_unit is not None else None,
+                    "images": list(auction_obj.images or []),
                 }
 
             # LEFT OUTER JOIN Producer/User : un bid dont le lien producteur→user
@@ -603,7 +747,8 @@ class AuctionMixin(BaseMixin):
                     "offered_price": float(bid.offered_price),
                     "status": str(bid.status or "PENDING").upper(),
                     "message": bid.message,
-                    "delivery": "Non inclus"
+                    "delivery": "Non inclus",
+                    "images": list(bid.images or []),
                 })
 
             return {
@@ -690,7 +835,8 @@ class AuctionMixin(BaseMixin):
                     "bid_id": str(bid.id),
                     "product": product_name,
                     "price": bid.offered_price,
-                    "producer": clean_prod_name
+                    "producer": clean_prod_name,
+                    "images": list(bid.images or []),
                 })
 
                 line = (
@@ -797,6 +943,7 @@ class AuctionMixin(BaseMixin):
                     "price": float(bid.offered_price),
                     "status": status_code,
                     "status_label": friendly_status,
+                    "images": list(bid.images or []),
                 })
                 mapping[str(i)] = bid_id
 
@@ -945,6 +1092,7 @@ class AuctionMixin(BaseMixin):
                     "max_price": float(auction.max_price_per_unit),
                     "zone": z_name,
                     "buyer_name": b_name,
+                    "images": list(auction.images or []),
                 })
                 mapping[str(idx)] = str(auction.id)
 

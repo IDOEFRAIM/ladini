@@ -73,6 +73,40 @@ class TestPreflightGateIsEnforced:
 
 
 # =====================================================================
+# 1bis. OUTIL MCP "PHOTO PRODUIT" — déclaration + résolution
+# =====================================================================
+
+class TestProductPhotoTool:
+    """Feature "photo produit par WhatsApp" — le nouvel outil `add_product_photo`
+    doit être exposé, avoir un scope EXPLICITE (pas deviné) et se résoudre/
+    s'exécuter sans jamais être bloqué par la porte de sécurité."""
+
+    def test_add_product_photo_is_exposed_as_an_mcp_tool(self):
+        from agriconnect.protocols.mcp.servers.h import TOOL_HANDLERS
+        assert "add_product_photo" in TOOL_HANDLERS
+
+    def test_add_product_photo_has_an_explicit_write_scope(self):
+        from agriconnect.infrastructure.mcp.security import TOOL_SCOPE_MAP, PermissionScope
+        assert TOOL_SCOPE_MAP.get("add_product_photo") == PermissionScope.DB_DATA_WRITE
+
+    def test_add_product_photo_resolves_and_dispatches_without_being_blocked(self):
+        from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer
+        from agriconnect.infrastructure.mcp.security import HostBlockedError, PermissionDenied
+
+        srv = AgriDBMCPServer()
+        try:
+            run(srv.call_tool("add_product_photo", {
+                "phone": "+22668815299",
+                "product_id": "00000000-0000-0000-0000-000000000000",
+                "image_url": "https://example.supabase.co/storage/v1/object/public/product-photos/x.jpg",
+            }))
+        except (HostBlockedError, PermissionDenied) as exc:
+            pytest.fail(f"le nouvel outil add_product_photo est bloqué par la porte de sécurité : {exc}")
+        except Exception:
+            pass  # échec DB/infra (pas de produit réel) : hors sujet pour ce test
+
+
+# =====================================================================
 # 2. MASQUAGE DES SECRETS DANS LES LOGS
 # =====================================================================
 

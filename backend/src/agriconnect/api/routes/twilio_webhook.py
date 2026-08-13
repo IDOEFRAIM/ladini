@@ -14,6 +14,15 @@ from agriconnect.api.tasks import process_agent_task
 from agriconnect.graphs.roles import normalize_role
 from agriconnect.workspace.store import WorkspaceStore
 from agriconnect.core.settings import settings
+from agriconnect.workers.media.product_photo_task import (
+    pending_photo_key,
+    pending_view_key,
+    process_product_photo_task,
+    resolve_pending_product_photo_task,
+    resolve_pending_view_photos_task,
+    send_product_photos_task,
+    send_search_result_photos_task,
+)
 
 router = APIRouter()
 logger = logging.getLogger("AgriConnect.TwilioWebhook")
@@ -40,6 +49,51 @@ def _extract_interactive_id(form: dict) -> Optional[str]:
         val = form.get(key)
         if val is not None and str(val).strip():
             return str(val).strip()
+    return None
+
+
+def _extract_media(form: dict) -> Optional[tuple[str, str]]:
+    """Extrait une image entrante WhatsApp (`MediaUrl0`/`MediaContentType0`).
+
+    Renvoie ``(media_url, media_content_type)`` uniquement pour un média de
+    type image (`NumMedia` > 0, `MediaUrl0` présent, `MediaContentType0`
+    commençant par ``image/``) ; ``None`` sinon — audio/vidéo/document ou
+    message texte classique. Fonction pure et déterministe : aucun accès
+    réseau/DB, ne déclenche jamais rien elle-même — ne fait qu'extraire.
+
+    NB : le champ Twilio réel est `MediaContentType{N}` (PAS `MimeType{N}`,
+    qui est la convention Meta Cloud API — confusion corrigée après un bug
+    en prod où une photo tombait silencieusement dans le pipeline texte).
+    `MimeType0` reste lu en repli au cas où un intermédiaire le réécrirait.
+    """
+    num_media_raw = str(form.get("NumMedia") or "")
+    num_media = int(num_media_raw) if num_media_raw.isdigit() else 0
+    media_url = form.get("MediaUrl0")
+    media_content_type = str(
+        form.get("MediaContentType0") or form.get("MimeType0") or ""
+    ).strip().lower()
+    if num_media > 0 and media_url and media_content_type.startswith("image/"):
+        return str(media_url), media_content_type
+    return None
+
+
+_VIEW_PHOTOS_PREFIXES = ("photos ", "photo ")
+
+
+def _extract_view_photos_query(text: str) -> Optional[str]:
+    """Commande déterministe « photos <nom> » / « photo <nom> » — renvoie le
+    nom de produit demandé, ou ``None`` si le texte ne matche pas ce format.
+
+    Volontairement un mot-clé simple (pas une intention LLM) : « photo(s) »
+    n'est utilisé nulle part ailleurs dans l'interpréteur market_coach
+    (vérifié), donc aucun risque de collision avec le pipeline texte normal.
+    """
+    stripped = text.strip()
+    lowered = stripped.lower()
+    for prefix in _VIEW_PHOTOS_PREFIXES:
+        if lowered.startswith(prefix):
+            query = stripped[len(prefix):].strip()
+            return query or None
     return None
 
 
@@ -152,6 +206,16 @@ async def _handle_twilio_webhook(
     text = Body.strip()
     form = dict(await request.form())
 
+    # Diagnostic média — volontairement TOUJOURS logué (pas seulement quand
+    # une image est détectée) : c'est justement l'absence/la forme inattendue
+    # de ces 3 champs qui doit se voir si `_extract_media` ne matche pas alors
+    # qu'une photo a bien été envoyée. Champs non sensibles (métadonnées
+    # Twilio, pas de contenu utilisateur).
+    logger.info(
+        "TWILIO_WEBHOOK_MEDIA_FIELDS | NumMedia=%r | MediaUrl0=%r | MediaContentType0=%r | MimeType0=%r",
+        form.get("NumMedia"), form.get("MediaUrl0"), form.get("MediaContentType0"), form.get("MimeType0"),
+    )
+
     # --- 3. FILTRAGE DES CALLBACKS DE STATUT ---
     status_value = (form.get("MessageStatus") or form.get("SmsStatus") or "").strip().lower()
     if status_value in _DELIVERY_STATUSES:
@@ -191,6 +255,75 @@ async def _handle_twilio_webhook(
         trace_id = getattr(request.state, "trace_id", None) or telemetry.new_trace_id()
     except Exception:
         trace_id = None
+
+    # --- 4ter. PHOTO PRODUIT (MEDIA) ---
+    # Une photo n'est pas un texte à interpréter par le LLM — routée vers une
+    # tâche Celery dédiée, complètement DÉCOUPLÉE du pipeline agent existant :
+    # ce bloc ne s'exécute QUE si `MediaUrl0` est présent, donc zéro impact
+    # sur le flux texte habituel. Voir workers/media/product_photo_task.py.
+    media = _extract_media(form)
+    if media:
+        media_url, media_content_type = media
+        logger.info(
+            "TWILIO_INBOUND_MEDIA | phone=%s | content_type=%s", phone, media_content_type,
+        )
+        process_product_photo_task.delay(
+            phone_number=phone,
+            media_url=media_url,
+            media_content_type=media_content_type,
+            trace_id=trace_id,
+        )
+        return _empty_twiml()
+
+    # --- 4quater. RÉPONSE À UN MENU "QUEL PRODUIT ?" EN ATTENTE ---
+    # Court-circuite le pipeline agent UNIQUEMENT si (a) une photo est en
+    # attente de sélection pour ce numéro ET (b) le texte est un simple
+    # chiffre — sinon le flux texte normal continue sans aucun changement.
+    # Compromis assumé : si l'utilisateur a AUSSI un autre menu numéroté
+    # ouvert par ailleurs (cas rare), "1" sera pris pour la photo — la
+    # fenêtre est courte (10 min) et ce cas suppose deux conversations
+    # numérotées strictement simultanées.
+    if text.isdigit():
+        try:
+            has_pending_photo = bool(redis_client.exists(pending_photo_key(phone)))
+        except Exception:
+            has_pending_photo = False
+        if has_pending_photo:
+            resolve_pending_product_photo_task.delay(phone_number=phone, selection_text=text)
+            return _empty_twiml()
+
+        # Même principe pour la désambiguïsation côté CONSULTATION (plusieurs
+        # lots du même nom, ex: "maïs" publié 3 fois avec des quantités
+        # différentes) — clé Redis distincte, donc pas de collision avec le
+        # menu d'upload ci-dessus (celui-ci est vérifié en premier par
+        # construction : un numéro ne peut résoudre qu'UN SEUL des deux).
+        try:
+            has_pending_view = bool(redis_client.exists(pending_view_key(phone)))
+        except Exception:
+            has_pending_view = False
+        if has_pending_view:
+            resolve_pending_view_photos_task.delay(phone_number=phone, selection_text=text)
+            return _empty_twiml()
+
+    # --- 4quinquies. CONSULTATION "PHOTOS <NOM>" / "PHOTOS <NUMÉRO>" ---
+    # Commande déterministe (mot-clé, pas une intention LLM) — voir
+    # `_extract_view_photos_query`. Découplée du pipeline agent au même titre
+    # que l'upload : c'est une consultation, pas une conversation.
+    #
+    # Deux cibles possibles, distinguées par la FORME de ce qui suit
+    # "photos " — jamais d'ambiguïté puisqu'un nom de produit n'est jamais un
+    # chiffre pur :
+    #   - "photos <numéro>" -> résultat de recherche ACHETEUR (le numéro
+    #     affiché par search_products, voir services/search_results_cache.py) ;
+    #   - "photos <nom>"    -> catalogue PRODUCTEUR (ses propres produits).
+    view_query = _extract_view_photos_query(text)
+    if view_query:
+        logger.info("TWILIO_INBOUND_VIEW_PHOTOS | phone=%s | query=%r", phone, view_query)
+        if view_query.isdigit():
+            send_search_result_photos_task.delay(phone_number=phone, index_text=view_query)
+        else:
+            send_product_photos_task.delay(phone_number=phone, product_query=view_query)
+        return _empty_twiml()
 
     # --- 5. RÉSOLUTION DU WORKSPACE & RÔLE ---
     store = WorkspaceStore()

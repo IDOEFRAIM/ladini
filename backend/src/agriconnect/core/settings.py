@@ -219,6 +219,15 @@ class Settings(BaseSettings):
     # "Répondez oui/non" (comportement Twilio historique).
     WHATSAPP_NATIVE_INTERACTIVE_ENABLED: bool = True
 
+    # --- Supabase Storage (photos produits envoyées par WhatsApp) ---
+    # Même compte/projet Supabase que la plateforme web (bucket dédié côté
+    # backend pour ne jamais mélanger avec d'éventuels buckets front-end).
+    # Clé de SERVICE ROLE (pas la clé anon publique) — l'upload se fait
+    # serveur à serveur depuis Celery, jamais exposée au client.
+    SUPABASE_URL: str = ""
+    SUPABASE_SERVICE_ROLE_KEY: str = ""
+    SUPABASE_PRODUCT_BUCKET: str = "ladini"
+
     # --- Paydunya (Escrow paiement séquestre) ---
     # Coupe-circuit : notre fournisseur (Paydunya) bloque temporairement les
     # paiements (KYC marchand non validé côté Paydunya). Tant que False, la

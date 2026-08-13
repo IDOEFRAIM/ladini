@@ -251,6 +251,17 @@ def process_agent_task(
         raise
 
 
+async def send_confirmation_text(phone_number: str, text: str) -> Dict[str, Any]:
+    """Envoi d'un texte simple hors pipeline agent (même dispatch provider que
+    ``process_agent_task``) — utilisé par les tâches Celery qui n'ont pas de
+    tour de conversation LangGraph à leur origine (ex: confirmation d'ajout
+    de photo produit, voir workers/media/product_photo_task.py)."""
+    provider = str(getattr(settings, "MESSAGING_PROVIDER", "") or "whatsapp_cloud").strip().lower()
+    if provider == "twilio":
+        return _send_via_twilio(phone_number, text, {})
+    return await _send_via_whatsapp_cloud(phone_number, text, {})
+
+
 async def _send_via_whatsapp_cloud(
     phone_number: str,
     final_text: str,

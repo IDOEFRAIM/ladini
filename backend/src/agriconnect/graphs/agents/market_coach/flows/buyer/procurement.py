@@ -363,6 +363,7 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
             vendors,
             extra_context=extra_context,
             post_hint="💡 Si aucun produit ne vous convient, répondez *appel* pour lancer une demande spéciale aux producteurs.",
+            phone=phone,
         )
         menu_patch["transaction_payload"] = payload
         wm = dict(working_memory)

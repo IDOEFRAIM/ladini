@@ -12,6 +12,8 @@ from .common import clean_text, positive_float
 
 logger = logging.getLogger("agriconnect.services.catalog")
 
+_MAX_PHOTOS_PER_PRODUCT = 8
+
 
 class ProductMixin(BaseMixin):
     """
@@ -113,6 +115,78 @@ class ProductMixin(BaseMixin):
             return {
                 "status": "success",
                 "message": f"Produit mis à jour ({', '.join(changed)}).",
+                "data": product_dict,
+            }
+
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
+
+    async def add_product_photo(
+        self,
+        phone: str,
+        product_id: str,
+        image_url: str,
+        replace: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Lie une photo (déjà uploadée sur Supabase Storage) à un produit du
+        catalogue — ``replace=True`` remplace toutes les photos existantes
+        (cas "mettre à jour"), sinon l'URL est ajoutée à la liste
+        (idempotent : une même URL n'est jamais dupliquée).
+        Sécurisé par un verrou d'écriture (Row-Level Locking), même pattern
+        que `update_product_price_and_qty`.
+        """
+        try:
+            phone = clean_text(phone, "phone", required=True)
+            product_id = clean_text(product_id, "product_id", required=True)
+            image_url = clean_text(image_url, "image_url", required=True, max_length=2048)
+            _, producer = await self.get_producer_profile(phone)
+
+            stmt = (
+                select(Product)
+                .where(and_(Product.id == uuid.UUID(product_id), Product.producer_id == producer.id))
+                .with_for_update()
+            )
+            res = await self.session.execute(stmt)
+            product = res.scalar_one_or_none()
+
+            if not product:
+                return {"status": "error", "message": "Produit introuvable ou non autorisé."}
+
+            if replace:
+                current_images = [image_url]
+            else:
+                current_images = list(product.images or [])
+                if image_url in current_images:
+                    product_dict = product.to_dict()
+                    if isinstance(product_dict.get("price"), Decimal):
+                        product_dict["price"] = float(product_dict["price"])
+                    return {
+                        "status": "success",
+                        "message": "Photo déjà associée à ce produit.",
+                        "data": product_dict,
+                    }
+                current_images.append(image_url)
+                if len(current_images) > _MAX_PHOTOS_PER_PRODUCT:
+                    current_images = current_images[-_MAX_PHOTOS_PER_PRODUCT:]
+
+            product.images = current_images
+
+            await self.session.flush()
+            await self.session.refresh(product)
+
+            logger.info(
+                "PRODUCT_PHOTO_ADDED: ID %s par %s (total photos: %d, replace=%s)",
+                product_id, phone, len(current_images), replace,
+            )
+
+            product_dict = product.to_dict()
+            if isinstance(product_dict.get("price"), Decimal):
+                product_dict["price"] = float(product_dict["price"])
+
+            return {
+                "status": "success",
+                "message": "Photo ajoutée avec succès.",
                 "data": product_dict,
             }
 

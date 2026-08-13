@@ -284,6 +284,9 @@ class Auction(Base):
     quality_grading = Column(String)
     required_certifications = Column(PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]"))
     preferred_packaging = Column(String)
+    # Photos de référence jointes par l'acheteur (ce qu'il recherche) — voir
+    # services/database/auction.py::add_auction_photo.
+    images = Column(PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]"))
     deadline = Column(DateTime, nullable=False)
     auto_extend = Column(Boolean, default=True, nullable=False)
     escrow_wallet_id = Column(PG_UUID(as_uuid=True), nullable=True)
@@ -320,6 +323,11 @@ class Bid(Base):
     notified_at = Column(DateTime)
     valid_until = Column(DateTime)
     estimated_delivery_date = Column(DateTime)
+    # Photos du lot proposé par le producteur — voir
+    # services/database/auction.py::add_bid_photo. Indépendant de
+    # `linked_stock_id` (jamais renseigné par `place_bid` en pratique) : le
+    # `Stock` référencé n'a lui-même aucune colonne image.
+    images = Column(PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 

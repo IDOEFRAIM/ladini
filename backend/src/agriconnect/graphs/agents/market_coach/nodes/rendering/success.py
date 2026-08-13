@@ -11,7 +11,7 @@ Ordre de rendu (préservé du monolithe historique) :
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agriconnect.graphs.agents.market_coach.nodes.rendering.common import (
     RenderContext,
@@ -22,6 +22,41 @@ from agriconnect.graphs.agents.market_coach.nodes.rendering.common import (
     status_component,
     unwrap_execution_result,
 )
+from agriconnect.services.search_results_cache import store_results as _store_search_photo_results
+from agriconnect.services.pending_photo_target import (
+    set_pending_bid_photo as _set_pending_bid_photo,
+    set_pending_auction_photo as _set_pending_auction_photo,
+)
+
+
+def _cache_numbered_items_with_photos(
+    phone: str,
+    items: List[Dict[str, Any]],
+    id_key: str,
+    label_fn: Callable[[Dict[str, Any]], str],
+) -> bool:
+    """Met en cache un menu numéroté (bids/enchères) pour la commande
+    "photos <numéro>" — même mécanisme que le catalogue de recherche
+    (services/search_results_cache.py). Renvoie True si au moins un élément
+    a des photos (pour savoir s'il faut afficher le hint)."""
+    if not phone or not items:
+        return False
+    entries: Dict[str, Dict[str, Any]] = {}
+    has_photos = False
+    for idx, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        images = item.get("images") or []
+        if images:
+            has_photos = True
+        entries[str(idx)] = {
+            "id": item.get(id_key),
+            "name": label_fn(item),
+            "images": images,
+        }
+    if entries:
+        _store_search_photo_results(phone, entries)
+    return has_photos
 
 
 # =====================================================================
@@ -334,12 +369,57 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
 
     text_output = str(tool_msg) or "🌾 Opération réussie."
     ag_component: Optional[Dict[str, Any]] = None
+    selected_tool_name = str(state.get("selected_tool") or "").lower().strip()
+    user_phone = str(state.get("user_phone") or "").strip()
+
+    # ── Enchères/appels d'offres : proposer d'ajouter une photo juste après
+    # l'action (photo liée automatiquement à CE bid/CETTE auction dès qu'une
+    # image arrive — voir services/pending_photo_target.py +
+    # workers/media/product_photo_task.py). Le producteur/l'acheteur peut
+    # bien sûr ignorer la proposition, rien n'est bloquant.
+    if selected_tool_name == "place_bid" and user_phone and exec_result.get("bid_id"):
+        _set_pending_bid_photo(user_phone, str(exec_result["bid_id"]))
+        text_output += (
+            "\n\n📸 Envoyez une photo de ce lot pour rassurer l'acheteur — "
+            "elle sera automatiquement liée à cette offre."
+        )
+    elif selected_tool_name == "create_auction" and user_phone and exec_result.get("auction_id"):
+        _set_pending_auction_photo(user_phone, str(exec_result["auction_id"]))
+        text_output += (
+            "\n\n📸 Vous pouvez aussi envoyer une photo de référence pour cet appel d'offres."
+        )
 
     formatted_menu_raw = exec_result.get("formatted_menu")
     formatted_menu_text = formatted_menu_raw.strip() if isinstance(formatted_menu_raw, str) else ""
     has_formatted_menu = bool(formatted_menu_text)
     if has_formatted_menu:
         text_output = formatted_menu_text
+
+        # ── Menus enchères/offres numérotés : "photos <numéro>" ────────
+        # Même mécanisme que le catalogue de recherche et le menu "choix
+        # producteur" (services/search_results_cache.py) — la numérotation du
+        # menu WHATSAPP (menu_lines) et celle de `data` sont construites dans
+        # la MÊME boucle côté DB (services/database/auction.py), donc
+        # strictement alignées.
+        _AUCTION_MENU_TOOLS: Dict[str, tuple[str, Callable[[Dict[str, Any]], str]]] = {
+            "get_auctions_bids": (
+                "bid_id",
+                lambda it: f"{it.get('product') or 'Lot'} — {it.get('producer') or 'Producteur'}",
+            ),
+            "get_producer_auctions": (
+                "auction_id",
+                lambda it: f"{it.get('product') or 'Lot'} — {it.get('buyer_name') or 'Acheteur'}",
+            ),
+            "get_my_active_bids": (
+                "bid_id",
+                lambda it: f"{it.get('product') or 'Lot'} (votre offre)",
+            ),
+        }
+        menu_tool_spec = _AUCTION_MENU_TOOLS.get(selected_tool_name)
+        if menu_tool_spec and isinstance(tool_data, list) and user_phone:
+            id_key, label_fn = menu_tool_spec
+            if _cache_numbered_items_with_photos(user_phone, tool_data, id_key, label_fn):
+                text_output += "\n\n📸 Tapez *photos <numéro>* pour voir les photos d'une ligne."
 
     def _menu(title: str, options: List[Dict[str, str]], mode: str) -> Dict[str, Any]:
         metadata: Dict[str, Any] = {"mode": mode, "count": len(options)}
@@ -430,6 +510,32 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
         if buyer_sections:
             text_output = buyer_sections
             structured_sections_handled = True
+
+            # Cache les résultats DIRECT (numéro affiché -> id/photos) pour
+            # que la commande WhatsApp « photos <numéro> » retrouve quel
+            # produit un numéro désignait (workers/media/product_photo_task.py).
+            # Même filtre DIRECT/FUTURE que `_render_buyer_catalog_sections`
+            # ci-dessus, dupliqué ici à dessein pour ne pas changer le contrat
+            # de retour (string) de cette fonction pure, verrouillé par
+            # tests/nodes/test_rendering_success.py::TestRenderBuyerCatalogSections.
+            direct_items = [
+                item for item in results_payload_list
+                if isinstance(item, dict)
+                and str(item.get("source_type") or item.get("availability_kind") or "").upper() == "DIRECT"
+            ]
+            if direct_items:
+                phone = str(state.get("user_phone") or "").strip()
+                entries = {
+                    str(idx): {
+                        "id": item.get("id"),
+                        "name": item.get("name"),
+                        "images": item.get("images") or [],
+                    }
+                    for idx, item in enumerate(direct_items, start=1)
+                }
+                _store_search_photo_results(phone, entries)
+                if any(item.get("images") for item in direct_items):
+                    text_output += "\n\n📸 Tapez *photos <numéro>* pour voir des photos d'un résultat."
 
     # ── CAS 2 : liste plate ───────────────────────────────────────────
     if isinstance(tool_data, list) and tool_data:

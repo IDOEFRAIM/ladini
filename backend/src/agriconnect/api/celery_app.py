@@ -23,6 +23,7 @@ celery_app = Celery(
         "agriconnect.workers.crons.outbox_dispatch",
         "agriconnect.workers.crons.order_expiry",
         "agriconnect.workers.payments.paydunya_ipn_task",
+        "agriconnect.workers.media.product_photo_task",
     ],
 )
 

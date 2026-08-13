@@ -27,6 +27,7 @@ from agriconnect.graphs.agents.market_coach.utils import (
     is_success_response,
     unwrap_tool_envelope,
 )
+from agriconnect.services.search_results_cache import store_results as _store_search_photo_results
 
 from .buyer_common import SUPPORT_FOOTER, with_support_footer
 
@@ -84,6 +85,9 @@ class CartDomainService:
                     "available_qty": item.get("available_quantity")
                     or item.get("quantity_for_sale"),
                     "estimated_available_at": item.get("estimated_available_at"),
+                    # Voir services/search_results_cache.py — permet à l'acheteur
+                    # de demander "photos <numéro>" pour un producteur du menu.
+                    "images": item.get("images") or [],
                 }
             )
         return vendors, len(vendors) > 1
@@ -95,9 +99,11 @@ class CartDomainService:
         *,
         extra_context: Optional[Dict[str, Any]] = None,
         post_hint: Optional[str] = None,
+        phone: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], MenuRequest]:
         lines = [f"🔍 *Producteurs disponibles pour « {product_name} » :*\n"]
         options: List[MenuOption] = []
+        photo_entries: Dict[str, Dict[str, Any]] = {}
 
         for i, v in enumerate(vendors, start=1):
             source_tag = ""
@@ -117,8 +123,22 @@ class CartDomainService:
             )
             lines.append(f"*{i}.* {label}")
             options.append(MenuOption(index=str(i), label=label, value=v.get("producer_id") or str(i)))
+            photo_entries[str(i)] = {
+                "id": v.get("product_id"),
+                "name": f"{product_name} — {v.get('vendor_name') or 'Producteur'}",
+                "images": v.get("images") or [],
+            }
 
         lines.append(render_selection_prompt(noun="producteur"))
+        # Même mécanisme que le catalogue de recherche brut
+        # (nodes/rendering/success.py) — voir services/search_results_cache.py.
+        # Numérotation PARTAGÉE avec la sélection de producteur ci-dessus
+        # (memory.py::mapping_kind "product_vendor") : aucune collision
+        # possible, "photos <numéro>" exige toujours le préfixe "photos ",
+        # jamais un chiffre seul.
+        if phone and any(entry["images"] for entry in photo_entries.values()):
+            _store_search_photo_results(str(phone), photo_entries)
+            lines.append("📸 Tapez *photos <numéro>* pour voir des photos d'un producteur.")
         if post_hint:
             lines.append(post_hint.strip())
         menu_text = "\n".join(lines)

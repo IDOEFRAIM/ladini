@@ -263,7 +263,7 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
             "requested_unit": payload.get("unit"),
         }
         state_patch, _menu = cart_service.build_product_selection_menu(
-            str(product_name), vendors, extra_context=extra_context,
+            str(product_name), vendors, extra_context=extra_context, phone=phone,
         )
         return _with_base(state_patch)
 
