@@ -5,6 +5,7 @@ from typing import Dict, Any, Optional
 from sqlalchemy import select, update, func
 from sqlalchemy.exc import IntegrityError
 from agriconnect.domain.identity.models import User, Producer
+from agriconnect.core.geofencing import is_within_burkina_faso, OUT_OF_COUNTRY_MESSAGE
 from .common import clean_text, normalize_phone
 
 logger = logging.getLogger("AgriConnect.AuthMixin")
@@ -119,6 +120,19 @@ class AuthMixin:
         # Validation rapide des plages géographiques (Anti-corruption de données)
         if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
             return {"status": "error", "message": "Coordonnées géographiques hors limites mathématiques."}
+
+        # Geofencing Burkina Faso — défense en profondeur : cette méthode est
+        # aussi un outil MCP appelable hors du webhook Twilio (qui fait déjà
+        # sa propre vérification côté `_persist_location_background`), donc
+        # ne JAMAIS supposer que l'appelant a déjà validé le pays.
+        # `reason` distingue ce cas précis pour l'appelant (message dédié
+        # côté webhook) plutôt qu'un texte générique.
+        if not is_within_burkina_faso(lat, lon):
+            return {
+                "status": "error",
+                "message": OUT_OF_COUNTRY_MESSAGE,
+                "reason": "out_of_country",
+            }
 
         resolved_id: Optional[uuid.UUID] = None
         if user_id:

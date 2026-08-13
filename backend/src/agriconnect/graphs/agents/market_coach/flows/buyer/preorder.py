@@ -17,9 +17,20 @@ from .helpers import (
     PREORDER_GOALS,
     clear_active_goal,
     logger,
-    preorder_action_menu,
     preorder_choice_from_index,
     render_interactive_menu,
+)
+
+# =====================================================================
+# GPS DELIVERY GATE (partagé avec le flux gagnant d'enchère — voir
+# [[gps-delivery-burkina-faso-2026-08]])
+# =====================================================================
+
+from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
+    _GPS_FIRST_TIME_PROMPT,
+    _GPS_HABITUAL_PROMPT,
+    _GPS_TEXT_REMINDER,
+    _get_stored_location,
 )
 
 # =====================================================================
@@ -66,6 +77,17 @@ def build_preflight_recap(cart: List[Dict[str, Any]], meta: Dict[str, Any]) -> s
     lines.append(render_interactive_menu(PREORDER_ACTION_OPTIONS))
     lines.append("\n👉 Répondez avec le *numéro* (1, 2 ou 3) ou tapez *confirmer* / *annuler*.")
     return "\n".join(lines)
+
+
+def _preorder_confirm_prompt(items_count: int, meta: Dict[str, Any]) -> str:
+    """Écran de confirmation unique — remplace le doublon panier+récap :
+    le panier a déjà affiché items et total, inutile de tout réafficher ici."""
+    return (
+        f"✅ *Précommande prête* — {items_count} article(s), "
+        f"total *{meta.get('total_amount')} {meta.get('currency')}*.\n\n"
+        "_Répondez *OUI* pour confirmer, *NON* pour annuler, "
+        "ou ajoutez un autre produit._"
+    )
 
 
 # =====================================================================
@@ -263,13 +285,11 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
                 "ag_ui_component": None,
             }
 
-        recap = build_preflight_recap(cart, meta)
-        po_menu = preorder_action_menu(str(preorder_id))
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "SELECTION",
-            "response_strategy": "SELECTION_MENU",
-            "final_response": recap,
+            "expected_input": "CONFIRMATION",
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": _preorder_confirm_prompt(len(items_payload), meta),
             "preorder_workflow": {
                 "phase": "PREORDER_DRAFTED",
                 "preorder_id": str(preorder_id),
@@ -279,140 +299,86 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
             "transaction_payload": {"resolved_id": None},
             "current_goal": "BUYER_PREORDER_INIT",
             "ag_ui_component": None,
-            "pending_menu": po_menu,
             "active_cart": cart,
         }
 
-    # --- PHASE 2: PREORDER_DRAFTED → CONFIRMED ---
+    # --- PHASE 2: PREORDER_DRAFTED → confirmation puis point GPS → CONFIRMED ---
     if phase == "PREORDER_DRAFTED":
         preorder_id = preorder_flow.get("preorder_id")
+        is_confirm = str(resolved_id).upper() == "PREORDER_CONFIRM"
+        location_shared = bool(state.get("location_shared"))
+        gps_stage = bool(preorder_flow.get("gps_stage"))
 
-        if str(resolved_id).upper() != "PREORDER_CONFIRM":
-            # Re-show recap
-            meta = CartDomainService.recompute_cart_meta(cart)
-            recap = build_preflight_recap(cart, meta)
-            po_menu = preorder_action_menu(str(preorder_id or "DRAFT"))
+        # --- Étape 2a : confirmer la précommande elle-même ---
+        if not gps_stage:
+            if not is_confirm:
+                meta = CartDomainService.recompute_cart_meta(cart)
+                return {
+                    "status": "WAITING_INPUT",
+                    "expected_input": "CONFIRMATION",
+                    "response_strategy": "ASK_MISSING_FIELD",
+                    "final_response": _preorder_confirm_prompt(len(cart), meta),
+                    "transaction_payload": {"resolved_id": None},
+                    "current_goal": "BUYER_PREORDER_INIT",
+                    "ag_ui_component": None,
+                    "active_cart": cart,
+                }
+
+            stored_lat, stored_lon = await _get_stored_location(mc_runtime, phone)
+            new_flow = dict(preorder_flow)
+            new_flow["gps_stage"] = True
+            if stored_lat is not None and stored_lon is not None:
+                new_flow["gps_default"] = {"lat": stored_lat, "lon": stored_lon}
+                gps_prompt = _GPS_HABITUAL_PROMPT
+            else:
+                new_flow["gps_default"] = None
+                gps_prompt = _GPS_FIRST_TIME_PROMPT
             return {
                 "status": "WAITING_INPUT",
-                "expected_input": "SELECTION",
-                "response_strategy": "SELECTION_MENU",
-                "final_response": recap,
+                "expected_input": "CONFIRMATION",
+                "response_strategy": "ASK_MISSING_FIELD",
+                "final_response": gps_prompt,
+                "preorder_workflow": new_flow,
                 "transaction_payload": {"resolved_id": None},
                 "current_goal": "BUYER_PREORDER_INIT",
                 "ag_ui_component": None,
-                "pending_menu": po_menu,
                 "active_cart": cart,
             }
 
-        from agriconnect.core.settings import settings
-
-        if settings.ESCROW_PAYMENT_ENABLED:
-            # Escrow (Paydunya) : on ne confirme plus directement — on génère
-            # la facture de paiement et on réserve la commande. La
-            # confirmation réelle (débit stock + statut CONFIRMED) n'arrive
-            # qu'à la réception de l'IPN, re-confirmée serveur-à-serveur
-            # auprès de Paydunya (voir EscrowMixin.mark_escrow_paid).
-            from agriconnect.graphs.agents.market_coach.services.mcp.gateway import EscrowGateway
-
-            escrow_res = await EscrowGateway(mc_runtime).initiate_escrow_payment(
-                buyer_phone=phone,
-                preorder_id=str(preorder_id),
-            )
-
-            if not is_success_response(escrow_res) and str(escrow_res.get("status") or "").lower() == "error":
+        # --- Étape 2b : point GPS de livraison ---
+        if location_shared:
+            lat, lon = await _get_stored_location(mc_runtime, phone)
+            if lat is None or lon is None:
                 return {
-                    "status": "ERROR",
-                    "response_strategy": "ERROR",
-                    "final_response": escrow_res.get("message") or "Impossible de générer le lien de paiement.",
-                    "preorder_workflow": {"phase": "PREORDER_DRAFTED", "preorder_id": preorder_id},
+                    "status": "WAITING_INPUT",
+                    "expected_input": "CONFIRMATION",
+                    "response_strategy": "ASK_MISSING_FIELD",
+                    "final_response": "Je n'ai pas pu récupérer ce point GPS, merci de le repartager.",
                     "ag_ui_component": None,
                 }
+            return await _execute_confirm(state, mc_runtime, preorder_id, cart, lat, lon)
 
-            order_id = escrow_res.get("order_id") or preorder_id
-            order_number = escrow_res.get("order_number") or f"#CMD-{str(order_id)[:8]}"
-
-            return {
-                "status": "COMPLETED",
-                "response_strategy": "SUCCESS",
-                "final_response": escrow_res.get("message") or (
-                    f"Votre commande #{order_number} est réservée pendant "
-                    f"{escrow_res.get('ttl_hours', 24)}h. Payez via ce lien sécurisé : "
-                    f"{escrow_res.get('checkout_url')}"
-                ),
-                "preorder_workflow": {
-                    "phase": "AWAITING_PAYMENT",
-                    "preorder_id": str(order_id),
-                    "order_number": order_number,
-                },
-                "last_order_summary": {
-                    "order_id": str(order_id),
-                    "order_number": order_number,
-                    "total_amount": escrow_res.get("amount"),
-                    "currency": escrow_res.get("currency"),
-                    "items": cart,
-                },
-                "current_goal": None,
-                "goal_status": "COMPLETED",
-                "active_form": None,
-                "active_cart": [],
-                "transaction_payload": {"__reset__": True},
-                "draft_payload": {"__reset__": True},
-                "working_memory": clear_active_goal(state, clear_cart_snapshot=True),
-                "ag_ui_component": None,
-            }
-
-        # Paiement escrow désactivé (fournisseur Paydunya bloqué côté KYC) :
-        # confirmation directe, paiement à la livraison — comportement
-        # d'avant l'intégration escrow. Débite le stock immédiatement (voir
-        # confirm_preorder_draft), pas d'attente de webhook/IPN.
-        confirm_res = await PreorderGateway(mc_runtime).confirm_draft(
-            buyer_phone=phone,
-            preorder_id=str(preorder_id),
-        )
-
-        if not is_success_response(confirm_res) and str(confirm_res.get("status") or "").lower() == "error":
-            return {
-                "status": "ERROR",
-                "response_strategy": "ERROR",
-                "final_response": confirm_res.get("message") or "Impossible de confirmer la précommande.",
-                "preorder_workflow": {"phase": "PREORDER_DRAFTED", "preorder_id": preorder_id},
-                "ag_ui_component": None,
-            }
-
-        order_id = confirm_res.get("order_id") or confirm_res.get("id") or preorder_id
-        order_number = confirm_res.get("order_number") or f"#CMD-{str(order_id)[:8]}"
-        meta = CartDomainService.recompute_cart_meta(cart)
+        if is_confirm:
+            default = preorder_flow.get("gps_default") or {}
+            lat, lon = default.get("lat"), default.get("lon")
+            if lat is None or lon is None:
+                return {
+                    "status": "WAITING_INPUT",
+                    "expected_input": "CONFIRMATION",
+                    "response_strategy": "ASK_MISSING_FIELD",
+                    "final_response": _GPS_FIRST_TIME_PROMPT,
+                    "ag_ui_component": None,
+                }
+            return await _execute_confirm(state, mc_runtime, preorder_id, cart, lat, lon)
 
         return {
-            "status": "COMPLETED",
-            "response_strategy": "SUCCESS",
-            "final_response": (
-                f"✅ *Précommande confirmée !*\n\n"
-                f"📦 Référence : *{order_number}*\n"
-                f"💰 Total : {meta.get('total_amount')} {meta.get('currency')}\n"
-                f"📋 {len(cart)} article(s)\n"
-                f"💵 *Paiement à la livraison.*\n\n"
-                f"Les producteurs concernés ont été notifiés. "
-                f"Vous recevrez une confirmation de disponibilité sous peu.\n\n"
-                f"_Tapez *mes commandes* pour suivre votre commande._"
-            ),
-            "preorder_workflow": {"phase": "CONFIRMED", "preorder_id": str(order_id), "order_number": order_number},
-            "last_order_summary": {
-                "order_id": str(order_id),
-                "order_number": order_number,
-                "total_amount": meta.get("total_amount"),
-                "currency": meta.get("currency"),
-                "items": cart,
-            },
-            "current_goal": None,
-            "goal_status": "COMPLETED",
-            "active_form": None,
-            "active_cart": [],
-            "transaction_payload": {"__reset__": True},
-            "draft_payload": {"__reset__": True},
-            "working_memory": clear_active_goal(state, clear_cart_snapshot=True),
+            "status": "WAITING_INPUT",
+            "expected_input": "CONFIRMATION",
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": _GPS_TEXT_REMINDER,
             "ag_ui_component": None,
         }
+
 
     # --- PHASE 3: Already CONFIRMED ---
     if phase == "CONFIRMED":
@@ -426,6 +392,133 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
 
     # Fallback
     return {"status": "PLANNING", "ag_ui_component": None}
+
+
+async def _execute_confirm(
+    state: Dict[str, Any],
+    mc_runtime: MarketRuntime,
+    preorder_id: Any,
+    cart: List[Dict[str, Any]],
+    delivery_lat: Optional[float],
+    delivery_lon: Optional[float],
+) -> Dict[str, Any]:
+    """Confirme réellement la précommande (débit stock, statut CONFIRMED),
+    avec le point GPS de livraison résolu par le gate ci-dessus."""
+    phone = str(state.get("user_phone") or "")
+
+    from agriconnect.core.settings import settings
+
+    if settings.ESCROW_PAYMENT_ENABLED:
+        # Escrow (Paydunya) : on ne confirme plus directement — on génère
+        # la facture de paiement et on réserve la commande. La
+        # confirmation réelle (débit stock + statut CONFIRMED) n'arrive
+        # qu'à la réception de l'IPN, re-confirmée serveur-à-serveur
+        # auprès de Paydunya (voir EscrowMixin.mark_escrow_paid). Le point
+        # GPS n'est pas encore threadé jusqu'ici — l'escrow est désactivé
+        # en production (voir plus bas), pas prioritaire tant qu'il l'est.
+        from agriconnect.graphs.agents.market_coach.services.mcp.gateway import EscrowGateway
+
+        escrow_res = await EscrowGateway(mc_runtime).initiate_escrow_payment(
+            buyer_phone=phone,
+            preorder_id=str(preorder_id),
+        )
+
+        if not is_success_response(escrow_res) and str(escrow_res.get("status") or "").lower() == "error":
+            return {
+                "status": "ERROR",
+                "response_strategy": "ERROR",
+                "final_response": escrow_res.get("message") or "Impossible de générer le lien de paiement.",
+                "preorder_workflow": {"phase": "PREORDER_DRAFTED", "preorder_id": preorder_id},
+                "ag_ui_component": None,
+            }
+
+        order_id = escrow_res.get("order_id") or preorder_id
+        order_number = escrow_res.get("order_number") or f"#CMD-{str(order_id)[:8]}"
+
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "SUCCESS",
+            "final_response": escrow_res.get("message") or (
+                f"Votre commande #{order_number} est réservée pendant "
+                f"{escrow_res.get('ttl_hours', 24)}h. Payez via ce lien sécurisé : "
+                f"{escrow_res.get('checkout_url')}"
+            ),
+            "preorder_workflow": {
+                "phase": "AWAITING_PAYMENT",
+                "preorder_id": str(order_id),
+                "order_number": order_number,
+            },
+            "last_order_summary": {
+                "order_id": str(order_id),
+                "order_number": order_number,
+                "total_amount": escrow_res.get("amount"),
+                "currency": escrow_res.get("currency"),
+                "items": cart,
+            },
+            "current_goal": None,
+            "goal_status": "COMPLETED",
+            "active_form": None,
+            "active_cart": [],
+            "transaction_payload": {"__reset__": True},
+            "draft_payload": {"__reset__": True},
+            "working_memory": clear_active_goal(state, clear_cart_snapshot=True),
+            "ag_ui_component": None,
+        }
+
+    # Paiement escrow désactivé (fournisseur Paydunya bloqué côté KYC) :
+    # confirmation directe, paiement à la livraison — comportement
+    # d'avant l'intégration escrow. Débite le stock immédiatement (voir
+    # confirm_preorder_draft), pas d'attente de webhook/IPN.
+    confirm_res = await PreorderGateway(mc_runtime).confirm_draft(
+        buyer_phone=phone,
+        preorder_id=str(preorder_id),
+        delivery_lat=delivery_lat,
+        delivery_lon=delivery_lon,
+    )
+
+    if not is_success_response(confirm_res) and str(confirm_res.get("status") or "").lower() == "error":
+        return {
+            "status": "ERROR",
+            "response_strategy": "ERROR",
+            "final_response": confirm_res.get("message") or "Impossible de confirmer la précommande.",
+            "preorder_workflow": {"phase": "PREORDER_DRAFTED", "preorder_id": preorder_id},
+            "ag_ui_component": None,
+        }
+
+    order_id = confirm_res.get("order_id") or confirm_res.get("id") or preorder_id
+    order_number = confirm_res.get("order_number") or f"#CMD-{str(order_id)[:8]}"
+    meta = CartDomainService.recompute_cart_meta(cart)
+
+    return {
+        "status": "COMPLETED",
+        "response_strategy": "SUCCESS",
+        "final_response": (
+            f"✅ *Précommande confirmée !*\n\n"
+            f"📦 Référence : *{order_number}*\n"
+            f"💰 Total : {meta.get('total_amount')} {meta.get('currency')}\n"
+            f"📋 {len(cart)} article(s)\n"
+            f"💵 *Paiement à la livraison.*\n\n"
+            f"Les producteurs concernés ont été notifiés. "
+            f"Vous recevrez une confirmation de disponibilité sous peu.\n\n"
+            f"_Tapez *mes commandes* pour suivre votre commande._"
+        ),
+        "preorder_workflow": {"phase": "CONFIRMED", "preorder_id": str(order_id), "order_number": order_number},
+        "last_order_summary": {
+            "order_id": str(order_id),
+            "order_number": order_number,
+            "total_amount": meta.get("total_amount"),
+            "currency": meta.get("currency"),
+            "items": cart,
+        },
+        "current_goal": None,
+        "goal_status": "COMPLETED",
+        "active_form": None,
+        "active_cart": [],
+        "transaction_payload": {"__reset__": True},
+        "draft_payload": {"__reset__": True},
+        "working_memory": clear_active_goal(state, clear_cart_snapshot=True),
+        "ag_ui_component": None,
+    }
 
 
 __all__ = [

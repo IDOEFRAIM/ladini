@@ -1122,7 +1122,13 @@ class AuctionMixin(BaseMixin):
 
     # ─── SECTION 5 : CLÔTURE ET CONVERSION EN COMMANDE ───────────────────
 
-    async def select_winning_bid(self, bid_id: str, phone: str | None = None) -> Dict[str, Any]:
+    async def select_winning_bid(
+        self,
+        bid_id: str,
+        phone: str | None = None,
+        delivery_lat: float | None = None,
+        delivery_lon: float | None = None,
+    ) -> Dict[str, Any]:
         """
         Désigne l'offre gagnante, passe l'appel d'offre à l'état 'CLOSED'
         et instancie la commande officielle (Order) au sein de la transaction courante.
@@ -1130,10 +1136,27 @@ class AuctionMixin(BaseMixin):
         ``phone`` (optionnel) : numéro de l'acheteur appelant. REQUIS pour que le
         runtime MCP dérive une identité de contexte — sans lui, ``call_tool``
         refuse l'appel (``missing_context_identity``) → « erreur technique ».
+
+        ``delivery_lat``/``delivery_lon`` (optionnels) : point GPS de livraison
+        — copié FIGÉ sur la commande (``Order.gps_lat``/``gps_lng``), distinct
+        du point GPS PAR DÉFAUT du profil (``User.latitude``/``longitude``,
+        voir ``AuthMixin.update_geo_location``) qui peut changer après coup
+        sans jamais altérer une commande déjà passée. Geofencing Burkina Faso
+        revérifié ici en défense en profondeur (la couche conversationnelle
+        l'a déjà fait avant de proposer "oui" — voir
+        [[gps-delivery-burkina-faso-2026-08]]) : ce tool est aussi appelable
+        directement hors du flow WhatsApp.
         """
         current_session = self.session
         if not current_session:
             raise BusinessRuleException("Erreur interne : session de base de données indisponible.")
+
+        if delivery_lat is not None and delivery_lon is not None:
+            from agriconnect.core.geofencing import is_within_burkina_faso
+            if not is_within_burkina_faso(delivery_lat, delivery_lon):
+                raise BusinessRuleException(
+                    "Le point de livraison est hors du Burkina Faso.", reason="out_of_country",
+                )
 
         b_id = uuid.UUID(bid_id)
 
@@ -1189,6 +1212,8 @@ class AuctionMixin(BaseMixin):
             total_amount=total,
             status="CONFIRMED",
             zone_id=auction.target_zone_id,
+            gps_lat=delivery_lat,
+            gps_lng=delivery_lon,
             created_at=datetime.now()
         )
 

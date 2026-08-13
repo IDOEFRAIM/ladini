@@ -163,9 +163,18 @@ class AuctionGateway(_BaseGateway):
         # « missing_context_identity »). _call strip les None automatiquement.
         return await self._call("get_auction_bids", auction_id=auction_id, phone=phone)
 
-    async def select_winning_bid(self, bid_id: str, phone: str | None = None) -> Dict[str, Any]:
+    async def select_winning_bid(
+        self,
+        bid_id: str,
+        phone: str | None = None,
+        delivery_lat: float | None = None,
+        delivery_lon: float | None = None,
+    ) -> Dict[str, Any]:
         # phone requis pour l'identité de contexte MCP (sinon PermissionDenied).
-        return await self._call("select_winning_bid", bid_id=bid_id, phone=phone)
+        return await self._call(
+            "select_winning_bid", bid_id=bid_id, phone=phone,
+            delivery_lat=delivery_lat, delivery_lon=delivery_lon,
+        )
 
 
 # ── Stock ──────────────────────────────────────────────────────────
@@ -255,8 +264,20 @@ class PreorderGateway(_BaseGateway):
             delivery_zone_id=delivery_zone_id,
         )
 
-    async def confirm_draft(self, buyer_phone: str, preorder_id: str) -> Dict[str, Any]:
-        return await self._call("confirm_preorder_draft", buyer_phone=buyer_phone, preorder_id=preorder_id)
+    async def confirm_draft(
+        self,
+        buyer_phone: str,
+        preorder_id: str,
+        delivery_lat: Any = None,
+        delivery_lon: Any = None,
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "confirm_preorder_draft",
+            buyer_phone=buyer_phone,
+            preorder_id=preorder_id,
+            delivery_lat=delivery_lat,
+            delivery_lon=delivery_lon,
+        )
 
     async def reserve_future_offer(
         self, buyer_phone: str, market_offer_id: str, quantity: Any, desired_price: Any = None,

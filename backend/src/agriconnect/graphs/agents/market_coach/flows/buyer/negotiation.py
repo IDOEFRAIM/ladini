@@ -163,8 +163,28 @@ async def _handle_viewing_offers(
     bid_id = payload.get("bid_id")
     if bid_id:
         _buyer_phone = nctx.get("buyer_phone") or nctx.get("phone")
+        # Point GPS de livraison — best-effort, contrairement au tunnel
+        # dédié `flows/buyer/order_tracking.py::finalize_winner` (qui
+        # redemande explicitement/confirme le point avant de créer la
+        # commande). Ici, la machine à états négociation n'a pas de slot
+        # multi-tour naturel pour insérer cette confirmation sans une
+        # réécriture plus large — on réutilise silencieusement le point PAR
+        # DÉFAUT du profil s'il existe, sinon la commande est créée sans
+        # (comportement historique, non-régression). Voir
+        # [[gps-delivery-burkina-faso-2026-08]] pour le suivi de cet écart.
+        _delivery_lat: Optional[float] = None
+        _delivery_lon: Optional[float] = None
+        if _buyer_phone:
+            try:
+                from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
+                    _get_stored_location,
+                )
+                _delivery_lat, _delivery_lon = await _get_stored_location(mc_runtime, str(_buyer_phone))
+            except Exception:
+                logger.warning("_handle_viewing_offers: échec de lecture du point GPS par défaut")
         win = await AuctionGateway(mc_runtime).select_winning_bid(
-            bid_id=str(bid_id), phone=str(_buyer_phone) if _buyer_phone else None
+            bid_id=str(bid_id), phone=str(_buyer_phone) if _buyer_phone else None,
+            delivery_lat=_delivery_lat, delivery_lon=_delivery_lon,
         )
         if str(win.get("status") or "").lower() != "success":
             return {

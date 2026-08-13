@@ -14,6 +14,7 @@ from agriconnect.api.tasks import process_agent_task
 from agriconnect.graphs.roles import normalize_role
 from agriconnect.workspace.store import WorkspaceStore
 from agriconnect.core.settings import settings
+from agriconnect.core.geofencing import OUT_OF_COUNTRY_MESSAGE
 from agriconnect.workers.media.product_photo_task import (
     pending_photo_key,
     pending_view_key,
@@ -157,6 +158,20 @@ async def _persist_location_background(phone: str, lat: float, lon: float) -> No
                     "TWILIO_WEBHOOK_LOCATION_NOT_SAVED | phone=***%s | reason=%s",
                     phone[-4:], result.get("message"),
                 )
+                # Cas précis "hors Burkina Faso" : l'utilisateur doit être
+                # informé (un point GPS jamais persisté silencieusement ne
+                # doit jamais donner l'impression d'avoir marché — voir
+                # core/geofencing.py). Les autres erreurs (compte introuvable,
+                # etc.) restent silencieuses comme avant : best-effort, jamais
+                # bloquant pour Twilio.
+                if str(result.get("reason") or "") == "out_of_country":
+                    try:
+                        from agriconnect.api.tasks import send_confirmation_text
+                        await send_confirmation_text(phone, OUT_OF_COUNTRY_MESSAGE)
+                    except Exception:
+                        logger.exception(
+                            "TWILIO_WEBHOOK_LOCATION_OUT_OF_COUNTRY_NOTICE_FAILED | phone=***%s", phone[-4:],
+                        )
     except Exception:
         logger.exception("TWILIO_WEBHOOK_LOCATION_PERSIST_ERROR | phone=***%s", phone[-4:])
 

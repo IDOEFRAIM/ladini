@@ -175,6 +175,7 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
             goal == "BUYER_PREORDER_CONFIRM"
             or detected_intent == "CONFIRMATION_EXPLICITE"
             or interpreted_event in {"CONFIRM", "SELECTION"}
+            or bool(state.get("location_shared"))
         )
     ):
         logger.info("buyer_context_resolver: routing preorder menu reply to create_preorder (event=%s)", interpreted_event)

@@ -152,7 +152,6 @@ pdf_queue.json
 *.tmp
 tmp/
 
-infra/
 backend/_legacy/
 
 backend/_pycache__/

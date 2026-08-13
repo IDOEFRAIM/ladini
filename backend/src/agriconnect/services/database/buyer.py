@@ -1356,16 +1356,32 @@ class BuyerMixin(BaseMixin):
             return {"status": "error", "message": "Erreur technique lors de la récupération de la transaction."}
 
 
-    async def confirm_preorder_draft(self, buyer_phone: str, preorder_id: str) -> Dict[str, Any]:
+    async def confirm_preorder_draft(
+        self,
+        buyer_phone: str,
+        preorder_id: str,
+        delivery_lat: Optional[float] = None,
+        delivery_lon: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Convertit une précommande brouillon (Order.status=DRAFT) en commande ferme.
 
         - Verrouille la commande et les produits (FOR UPDATE) pour éviter la survente.
         - Débite `Product.quantity_for_sale`.
         - Marque `preorder_converted_at` et passe le statut en `CONFIRMED`.
+        - `delivery_lat`/`delivery_lon` (optionnels) figent le point GPS de
+          livraison sur la commande — voir [[gps-delivery-burkina-faso-2026-08]].
         """
         current_session = self.session
         if not current_session:
             raise BusinessRuleException("Session indisponible.")
+
+        if delivery_lat is not None and delivery_lon is not None:
+            from agriconnect.core.geofencing import is_within_burkina_faso
+
+            if not is_within_burkina_faso(delivery_lat, delivery_lon):
+                raise BusinessRuleException(
+                    "Le point de livraison est hors du Burkina Faso.", reason="out_of_country",
+                )
 
         o_uuid = self._to_uuid(preorder_id)
         if o_uuid is None:
@@ -1437,6 +1453,9 @@ class BuyerMixin(BaseMixin):
         order.payment_status = order.payment_status or "PENDING"
         order.subtotal = running_total
         order.total_amount = running_total
+        if delivery_lat is not None and delivery_lon is not None:
+            order.gps_lat = delivery_lat
+            order.gps_lng = delivery_lon
         await current_session.flush()
 
         return {

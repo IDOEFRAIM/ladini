@@ -623,6 +623,9 @@ class TestFinalizeWinner:
         assert result["expected_input"] == "CONFIRMATION"
 
     def test_confirm_event_but_gateway_exception_returns_error(self, monkeypatch):
+        # Étape GPS déjà atteinte (winner_gps_stage=True + un point par défaut
+        # connu) — sinon "oui" ne fait qu'avancer vers cette étape, voir
+        # TestFinalizeWinnerGpsStage.
         from agriconnect.graphs.agents.market_coach.flows.buyer import order_tracking as mod
 
         class _BoomGateway:
@@ -633,33 +636,159 @@ class TestFinalizeWinner:
                 raise RuntimeError("boom")
 
         monkeypatch.setattr(mod, "AuctionGateway", _BoomGateway)
-        state = make_state(working_memory={"pending_winner_bid": "b1"}, interpreted_event="CONFIRM")
+        state = make_state(
+            working_memory={
+                "pending_winner_bid": "b1", "winner_gps_stage": True,
+                "winner_gps_default": {"lat": 12.35, "lon": -1.5},
+            },
+            interpreted_event="CONFIRM",
+        )
         result = run(mod.finalize_winner(state, rt()))
         assert result["response_strategy"] == "ERROR"
 
     def test_gateway_failure_response_returns_error_message(self):
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import finalize_winner
-        state = make_state(working_memory={"pending_winner_bid": "b1"}, interpreted_event="CONFIRM")
+        state = make_state(
+            working_memory={
+                "pending_winner_bid": "b1", "winner_gps_stage": True,
+                "winner_gps_default": {"lat": 12.35, "lon": -1.5},
+            },
+            interpreted_event="CONFIRM",
+        )
         runtime = rt({"select_winning_bid": {"status": "error", "message": "Offre expirée"}})
         result = run(finalize_winner(state, runtime))
         assert result["final_response"] == "Offre expirée"
 
     def test_success_clears_state_and_returns_summary(self):
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import finalize_winner
-        state = make_state(working_memory={"pending_winner_bid": "b1"}, interpreted_event="CONFIRM")
+        state = make_state(
+            working_memory={
+                "pending_winner_bid": "b1", "winner_gps_stage": True,
+                "winner_gps_default": {"lat": 12.35, "lon": -1.5},
+            },
+            interpreted_event="CONFIRM",
+        )
         runtime = rt({"select_winning_bid": {"status": "success", "summary_buyer": "🤝 C'est fait !"}})
         result = run(finalize_winner(state, runtime))
         assert result["final_response"] == "🤝 C'est fait !"
         assert result["working_memory"]["pending_winner_bid"] is None
+        assert result["working_memory"]["winner_gps_stage"] is None
         assert result["transaction_payload"] == {"__reset__": True}
 
-    def test_yes_token_text_also_confirms(self):
+    def test_yes_token_text_confirms_the_winner_and_moves_to_the_gps_stage(self):
+        """Renommé mentalement : "oui" ne finalise plus directement la
+        commande — il ne fait qu'avancer vers l'étape GPS obligatoire (voir
+        [[gps-delivery-burkina-faso-2026-08]])."""
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import finalize_winner
         state = make_state(working_memory={"pending_winner_bid": "b1"}, normalized_text="oui")
-        runtime = rt({"select_winning_bid": {"status": "success", "summary_buyer": "ok"}})
+        runtime = rt({"get_user_by_phone": {"status": "success", "data": {}}})
         result = run(finalize_winner(state, runtime))
+        assert result["status"] == "WAITING_INPUT"
+        assert result["working_memory"]["winner_gps_stage"] is True
+        assert "GPS" in result["final_response"]
+
+
+# =====================================================================
+# finalize_winner — étape GPS (livraison Burkina Faso)
+# =====================================================================
+
+class TestFinalizeWinnerGpsStage:
+    def test_confirming_the_winner_with_a_stored_location_offers_to_reuse_it(self):
+        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import finalize_winner
+        state = make_state(
+            working_memory={"pending_winner_bid": "b1"}, interpreted_event="CONFIRM", user_phone="+2260",
+        )
+        runtime = rt({"get_user_by_phone": {"status": "success", "data": {"latitude": 12.35, "longitude": -1.5}}})
+        result = run(finalize_winner(state, runtime))
+        assert result["status"] == "WAITING_INPUT"
+        assert "habituel" in result["final_response"]
+        assert result["working_memory"]["winner_gps_default"] == {"lat": 12.35, "lon": -1.5}
+        # Le gagnant n'est pas encore exécuté à ce tour.
+        assert "select_winning_bid" not in runtime.calls
+
+    def test_confirming_the_winner_without_a_stored_location_asks_to_share_gps(self):
+        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import finalize_winner
+        state = make_state(
+            working_memory={"pending_winner_bid": "b1"}, interpreted_event="CONFIRM", user_phone="+2260",
+        )
+        runtime = rt({"get_user_by_phone": {"status": "success", "data": {}}})
+        result = run(finalize_winner(state, runtime))
+        assert result["status"] == "WAITING_INPUT"
+        assert "trombone" in result["final_response"]
+        assert "select_winning_bid" not in runtime.calls
+
+    def test_confirming_the_habitual_point_executes_the_order_with_its_coordinates(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking as mod
+
+        seen: Dict[str, Any] = {}
+
+        class _CapturingGateway:
+            def __init__(self, rt):
+                pass
+
+            async def select_winning_bid(self, **kwargs):
+                seen.update(kwargs)
+                return {"status": "success", "summary_buyer": "🤝 C'est fait !"}
+
+        monkeypatch.setattr(mod, "AuctionGateway", _CapturingGateway)
+        state = make_state(
+            working_memory={
+                "pending_winner_bid": "b1", "winner_gps_stage": True,
+                "winner_gps_default": {"lat": 12.35, "lon": -1.5},
+            },
+            interpreted_event="CONFIRM",
+        )
+        result = run(mod.finalize_winner(state, rt()))
+
+        assert result["final_response"] == "🤝 C'est fait !"
+        assert seen["delivery_lat"] == 12.35
+        assert seen["delivery_lon"] == -1.5
+
+    def test_sharing_a_new_location_at_the_gps_stage_re_reads_it_and_executes(self, monkeypatch):
+        import agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking as mod
+
+        seen: Dict[str, Any] = {}
+
+        class _CapturingGateway:
+            def __init__(self, rt):
+                pass
+
+            async def select_winning_bid(self, **kwargs):
+                seen.update(kwargs)
+                return {"status": "success", "summary_buyer": "ok"}
+
+        monkeypatch.setattr(mod, "AuctionGateway", _CapturingGateway)
+        state = make_state(
+            working_memory={"pending_winner_bid": "b1", "winner_gps_stage": True},
+            location_shared=True,
+            user_phone="+2260",
+        )
+        runtime = rt({"get_user_by_phone": {"status": "success", "data": {"latitude": 13.0, "longitude": -2.0}}})
+        result = run(mod.finalize_winner(state, runtime))
+
         assert result["status"] == "COMPLETED"
-        assert result["response_strategy"] == "SUCCESS"
+        assert seen["delivery_lat"] == 13.0
+        assert seen["delivery_lon"] == -2.0
+
+    def test_free_text_at_the_gps_stage_reminds_to_use_the_gps_button(self):
+        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import finalize_winner
+        state = make_state(
+            working_memory={"pending_winner_bid": "b1", "winner_gps_stage": True},
+            normalized_text="rue 12 secteur 5",
+        )
+        result = run(finalize_winner(state, rt()))
+        assert result["status"] == "WAITING_INPUT"
+        assert "📎" in result["final_response"]
+
+    def test_reject_at_the_gps_stage_still_cancels_the_whole_flow(self):
+        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import finalize_winner
+        state = make_state(
+            working_memory={"pending_winner_bid": "b1", "winner_gps_stage": True},
+            interpreted_event="REJECT",
+        )
+        result = run(finalize_winner(state, rt()))
+        assert "aucune proposition" in result["final_response"]
+        assert result["working_memory"]["winner_gps_stage"] is None
 
 
 # =====================================================================
@@ -715,15 +844,19 @@ class TestProactiveOrderCheck:
 
 class TestOrderTrackingResolver:
     def test_pending_winner_bid_with_confirm_event_routes_to_finalize_winner(self):
+        # `finalize_winner` gère maintenant 2 étapes (gagnant, puis GPS de
+        # livraison — voir TestFinalizeWinnerGpsStage) : un premier CONFIRM
+        # avec `pending_winner_bid` doit atterrir dans cette machine à états
+        # (routage), pas nécessairement finaliser la commande au même tour.
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import order_tracking_resolver
         state = make_state(
             current_goal="BUYER_LIST_AUCTIONS",
             working_memory={"pending_winner_bid": "b1"},
             interpreted_event="CONFIRM",
         )
-        runtime = rt({"select_winning_bid": {"status": "success", "summary_buyer": "ok"}})
+        runtime = rt({"get_user_by_phone": {"status": "success", "data": {}}})
         result = run(order_tracking_resolver(state, runtime))
-        assert result["final_response"] == "ok"
+        assert result["working_memory"]["winner_gps_stage"] is True
 
     def test_pending_winner_bid_without_confirm_reject_event_does_not_hijack(self):
         """Garde-fou documenté dans le code source : un `pending_winner_bid`

@@ -814,19 +814,106 @@ async def confirm_winner_selection(
     }
 
 
+async def _get_stored_location(mc_runtime: MarketRuntime, phone: str) -> "tuple[Optional[float], Optional[float]]":
+    """Point GPS PAR DÉFAUT du profil (`User.latitude`/`longitude`), ou
+    `(None, None)` si absent/introuvable. Jamais levé — best-effort."""
+    if not phone:
+        return None, None
+    try:
+        from agriconnect.graphs.agents.market_coach.services.mcp.gateway import ProfileGateway
+        result = await ProfileGateway(mc_runtime).get_user_by_phone(phone)
+        data = result.get("data") or {}
+        lat, lon = data.get("latitude"), data.get("longitude")
+        if lat is None or lon is None:
+            return None, None
+        return float(lat), float(lon)
+    except Exception:
+        logger.warning("_get_stored_location: échec de lecture du profil pour %s", phone[-4:] if len(phone) >= 4 else phone)
+        return None, None
+
+
+async def _execute_winner_selection(
+    state: Dict[str, Any],
+    mc_runtime: MarketRuntime,
+    bid_id: str,
+    clear_wm: "Callable[[], Dict[str, Any]]",
+    delivery_lat: Optional[float] = None,
+    delivery_lon: Optional[float] = None,
+) -> Dict[str, Any]:
+    gw = AuctionGateway(mc_runtime)
+    try:
+        result = await gw.select_winning_bid(
+            bid_id=str(bid_id), phone=str(state.get("user_phone") or ""),
+            delivery_lat=delivery_lat, delivery_lon=delivery_lon,
+        )
+    except Exception as exc:
+        logger.exception("finalize_winner: select_winning_bid failed: %s", exc)
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "ERROR",
+            "final_response": "Impossible de valider le gagnant pour le moment. Réessayez dans un instant.",
+            "working_memory": clear_wm(),
+            "ag_ui_component": None,
+        }
+
+    if not is_success_response(result):
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "ERROR",
+            "final_response": result.get("message") or "Cette proposition n'a pas pu être retenue.",
+            "working_memory": clear_wm(),
+            "ag_ui_component": None,
+        }
+
+    summary = result.get("summary_buyer") or "🤝 Proposition retenue ! La commande a été créée et le producteur informé."
+    return {
+        "status": "COMPLETED",
+        "response_strategy": "SUCCESS",
+        "final_response": summary,
+        "working_memory": clear_wm(),
+        "available_mapping": {},
+        "transaction_payload": {"__reset__": True},
+        "ag_ui_component": None,
+    }
+
+
+_GPS_HABITUAL_PROMPT = (
+    "📍 Livraison à ton point GPS habituel ? Réponds *OUI* pour valider, "
+    "ou clique sur le trombone 📎 puis *Localisation* pour m'envoyer un nouveau point."
+)
+_GPS_FIRST_TIME_PROMPT = (
+    "📍 Envoie-moi ton point GPS exact en cliquant sur le trombone 📎 puis "
+    "*Localisation* sur WhatsApp pour finaliser la livraison."
+)
+_GPS_TEXT_REMINDER = (
+    "Pour garantir la livraison, j'ai besoin de ta position GPS exacte. "
+    "Clique sur le bouton 📎 de WhatsApp puis sur *Localisation* pour me la partager."
+)
+
+
 async def finalize_winner(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
 ) -> Dict[str, Any]:
-    """Traite la réponse oui/non à la confirmation du gagnant."""
+    """Traite la réponse oui/non à la confirmation du gagnant, PUIS (une fois
+    le gagnant confirmé) le point GPS de livraison — voir
+    [[gps-delivery-burkina-faso-2026-08]]. Deux étapes distinctes partageant
+    le même `expected_input == "CONFIRMATION"` et le même marqueur
+    `pending_winner_bid` (voir order_tracking_resolver), différenciées par
+    `working_memory.winner_gps_stage`.
+    """
     working = state.get("working_memory") or {}
     bid_id = working.get("pending_winner_bid")
     event = str(state.get("interpreted_event") or "").upper().strip()
     text = str(state.get("normalized_text") or "").strip().lower()
+    location_shared = bool(state.get("location_shared"))
 
     def _clear_wm() -> Dict[str, Any]:
         wm = dict(working)
-        for k in ("available_mapping_kind", "pending_winner_bid", "winner_auction_id"):
+        for k in (
+            "available_mapping_kind", "pending_winner_bid", "winner_auction_id",
+            "winner_gps_stage", "winner_gps_default",
+        ):
             wm[k] = None
         return wm
 
@@ -846,46 +933,81 @@ async def finalize_winner(
             "ag_ui_component": None,
         }
 
-    if not is_yes:
-        # Réponse ambiguë : on redemande explicitement.
+    gps_stage = bool(working.get("winner_gps_stage"))
+
+    # ── Étape 1 : confirmer le GAGNANT lui-même (comportement historique) ──
+    if not gps_stage:
+        if not is_yes:
+            # Réponse ambiguë : on redemande explicitement.
+            return {
+                "status": "WAITING_INPUT",
+                "expected_input": "CONFIRMATION",
+                "response_strategy": "ASK_MISSING_FIELD",
+                "final_response": "Répondez *oui* pour confirmer le gagnant, ou *non* pour annuler.",
+                "ag_ui_component": None,
+            }
+
+        # "oui" reçu pour le gagnant → étape GPS AVANT d'exécuter la commande
+        # (jamais de commande sans point de livraison connu — Burkina Faso
+        # uniquement, adresses textuelles trop imprécises).
+        stored_lat, stored_lon = await _get_stored_location(mc_runtime, str(state.get("user_phone") or ""))
+        wm = dict(working)
+        wm["winner_gps_stage"] = True
+        if stored_lat is not None and stored_lon is not None:
+            wm["winner_gps_default"] = {"lat": stored_lat, "lon": stored_lon}
+            prompt = _GPS_HABITUAL_PROMPT
+        else:
+            wm["winner_gps_default"] = None
+            prompt = _GPS_FIRST_TIME_PROMPT
         return {
             "status": "WAITING_INPUT",
             "expected_input": "CONFIRMATION",
             "response_strategy": "ASK_MISSING_FIELD",
-            "final_response": "Répondez *oui* pour confirmer le gagnant, ou *non* pour annuler.",
+            "final_response": prompt,
+            "working_memory": wm,
             "ag_ui_component": None,
         }
 
-    gw = AuctionGateway(mc_runtime)
-    try:
-        result = await gw.select_winning_bid(bid_id=str(bid_id), phone=str(state.get("user_phone") or ""))
-    except Exception as exc:
-        logger.exception("finalize_winner: select_winning_bid failed: %s", exc)
-        return {
-            "status": "COMPLETED",
-            "response_strategy": "ERROR",
-            "final_response": "Impossible de valider le gagnant pour le moment. Réessayez dans un instant.",
-            "working_memory": _clear_wm(),
-            "ag_ui_component": None,
-        }
+    # ── Étape 2 : point GPS de livraison ────────────────────────────────
+    if location_shared:
+        # Le webhook a déjà persisté ce point (best-effort, en tâche de fond,
+        # voir api/routes/twilio_webhook.py::_persist_location_background) —
+        # on relit la position COURANTE du profil pour l'utiliser comme point
+        # de livraison plutôt que de faire transiter lat/lon dans le state.
+        lat, lon = await _get_stored_location(mc_runtime, str(state.get("user_phone") or ""))
+        if lat is None or lon is None:
+            # Filet de sécurité : improbable (le webhook vient de l'écrire),
+            # mais ne doit jamais planter la commande.
+            return {
+                "status": "WAITING_INPUT",
+                "expected_input": "CONFIRMATION",
+                "response_strategy": "ASK_MISSING_FIELD",
+                "final_response": "Je n'ai pas pu récupérer ce point GPS, merci de le repartager.",
+                "ag_ui_component": None,
+            }
+        return await _execute_winner_selection(state, mc_runtime, bid_id, _clear_wm, lat, lon)
 
-    if not is_success_response(result):
-        return {
-            "status": "COMPLETED",
-            "response_strategy": "ERROR",
-            "final_response": result.get("message") or "Cette proposition n'a pas pu être retenue.",
-            "working_memory": _clear_wm(),
-            "ag_ui_component": None,
-        }
+    if is_yes:
+        default = working.get("winner_gps_default") or {}
+        lat, lon = default.get("lat"), default.get("lon")
+        if lat is None or lon is None:
+            # "oui" sans point par défaut connu (ne devrait survenir qu'en cas
+            # de désynchro d'état) → redemander explicitement le partage.
+            return {
+                "status": "WAITING_INPUT",
+                "expected_input": "CONFIRMATION",
+                "response_strategy": "ASK_MISSING_FIELD",
+                "final_response": _GPS_FIRST_TIME_PROMPT,
+                "ag_ui_component": None,
+            }
+        return await _execute_winner_selection(state, mc_runtime, bid_id, _clear_wm, lat, lon)
 
-    summary = result.get("summary_buyer") or "🤝 Proposition retenue ! La commande a été créée et le producteur informé."
+    # Texte libre (ni "oui", ni position partagée) → rappel poli du bouton GPS.
     return {
-        "status": "COMPLETED",
-        "response_strategy": "SUCCESS",
-        "final_response": summary,
-        "working_memory": _clear_wm(),
-        "available_mapping": {},
-        "transaction_payload": {"__reset__": True},
+        "status": "WAITING_INPUT",
+        "expected_input": "CONFIRMATION",
+        "response_strategy": "ASK_MISSING_FIELD",
+        "final_response": _GPS_TEXT_REMINDER,
         "ag_ui_component": None,
     }
 
@@ -976,10 +1098,20 @@ async def order_tracking_resolver(
     # réellement oui/non (c'est d'ailleurs ce que `finalize_winner` vérifie en
     # interne). Coupler flag + event rend le détournement impossible sans
     # bloquer la vraie confirmation.
+    # `or location_shared` : une fois le gagnant confirmé ("oui"), finalize_winner
+    # entre dans une 2e étape (confirmer/partager le point GPS de livraison,
+    # voir [[gps-delivery-burkina-faso-2026-08]]) — un partage de position
+    # natif WhatsApp n'a pas de texte à classifier CONFIRM/REJECT, donc sans
+    # ce OR ce tour ne route JAMAIS vers finalize_winner et la position
+    # partagée est ignorée par cette machine à états (elle reste quand même
+    # persistée en tâche de fond côté webhook, juste pas utilisée ICI).
     if (
         working.get("pending_winner_bid")
         and goal in AUCTION_TRACKING_GOALS
-        and str(state.get("interpreted_event") or "").upper() in {"CONFIRM", "REJECT"}
+        and (
+            str(state.get("interpreted_event") or "").upper() in {"CONFIRM", "REJECT"}
+            or bool(state.get("location_shared"))
+        )
     ):
         return await finalize_winner(state, mc_runtime)
     # 2. Une offre vient d'être choisie sur une enchère de l'acheteur → récap.
