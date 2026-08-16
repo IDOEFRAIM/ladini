@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1.7
+# ─────────────────────────────────────────────────────────────────────
+# Image du daemon MCP HTTP (AgriDBMCPServer, transport persistant).
+# Réutilise EXACTEMENT le même build que l'API (Dockerfile.api builder,
+# mêmes deps) — seule la commande de lancement change. Voir la docstring
+# de protocols/mcp/servers/http_server.py pour le contrat HTTP exposé
+# (GET /tools, POST /call) et pourquoi --workers doit rester à 1 (pool DB
+# singleton process-local ; scaler horizontalement via plusieurs services
+# `mcp` sur des ports différents derrière un load balancer, pas via
+# --workers > 1 dans le même process).
+# ─────────────────────────────────────────────────────────────────────
+ARG API_IMAGE=ladini-api:latest
+FROM ${API_IMAGE} AS runtime
+
+USER appuser
+WORKDIR /app/backend/src
+
+EXPOSE 8003
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -fsS http://localhost:8003/health || exit 1
+
+CMD ["uvicorn", "agriconnect.protocols.mcp.servers.http_server:app", \
+     "--host", "0.0.0.0", "--port", "8003", "--workers", "1"]

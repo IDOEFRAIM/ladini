@@ -167,6 +167,5 @@ backend/SYSTEM_COMPONENTS.md
 
 backend/.env
 backend/.env.example
-infra/
 frontend/
 

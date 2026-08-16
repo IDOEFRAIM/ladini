@@ -1,0 +1,63 @@
+# syntax=docker/dockerfile:1.7
+# ─────────────────────────────────────────────────────────────────────
+# Image FastAPI (API / Webhook) — build multi-stage Poetry.
+# Sert aussi de base au worker Celery (même code, commande différente).
+# ─────────────────────────────────────────────────────────────────────
+FROM python:3.11-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    POETRY_VERSION=1.8.3 \
+    POETRY_VIRTUALENVS_CREATE=false \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential curl libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install "poetry==${POETRY_VERSION}"
+
+WORKDIR /app/backend
+# Copie SEULEMENT le manifeste d'abord → cache Docker sur les deps.
+COPY backend/pyproject.toml backend/poetry.toml* ./
+# Deps de prod uniquement + les extras d'observabilité (voir pyproject).
+RUN poetry install --no-root --only main \
+    && pip install \
+        "opentelemetry-sdk>=1.27" \
+        "opentelemetry-exporter-otlp-proto-grpc>=1.27" \
+        "opentelemetry-instrumentation-fastapi>=0.48b0" \
+        "opentelemetry-instrumentation-celery>=0.48b0" \
+        "prometheus-client>=0.21" \
+        "langfuse>=2.53,<3"
+
+# ── Runtime ──────────────────────────────────────────────────────────
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/backend/src
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpq5 curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 10001 appuser
+
+# Copie l'environnement Python installé + le code applicatif.
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+COPY backend /app/backend
+
+WORKDIR /app/backend/src
+USER appuser
+EXPOSE 8000
+
+# Healthcheck natif de l'image (double du healthcheck compose, utile hors compose).
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -fsS http://localhost:8000/health || exit 1
+
+# Production : gunicorn + workers uvicorn (voir docstring api/server.py).
+CMD ["gunicorn", "agriconnect.api.main:app", \
+     "-k", "uvicorn.workers.UvicornWorker", \
+     "-w", "4", "--bind", "0.0.0.0:8000", \
+     "--timeout", "120", "--graceful-timeout", "30", \
+     "--access-logfile", "-", "--error-logfile", "-"]
+ 

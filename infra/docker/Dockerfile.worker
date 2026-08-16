@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1.7
+# ─────────────────────────────────────────────────────────────────────
+# Image Worker Celery. Réutilise EXACTEMENT le même build que l'API
+# (Dockerfile.api builder) — seule la commande de lancement change.
+# On repart de l'image API construite pour éviter de recompiler les deps.
+# ─────────────────────────────────────────────────────────────────────
+ARG API_IMAGE=ladini-api:latest
+FROM ${API_IMAGE} AS runtime
+
+USER appuser
+WORKDIR /app/backend/src
+
+# Pas de port exposé (le worker ne sert pas de HTTP).
+# Healthcheck : ping applicatif Celery (le worker répond au broker).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD celery -A agriconnect.api.celery_app inspect ping -d "celery@$(hostname)" || exit 1
+
+# --pool=solo/threads selon la charge ; concurrency piloté par l'orchestrateur
+# (l'orchestrateur garde ses connexions DB chaudes par process — cf. tasks.py).
+# On lance 1 process worker par conteneur → scaling horizontal via `--scale`.
+CMD ["celery", "-A", "agriconnect.api.celery_app", "worker", \
+     "--loglevel=info", "--concurrency=4", "--pool=prefork", \
+     "--max-tasks-per-child=200"]
