@@ -15,6 +15,7 @@ from agriconnect.graphs.agents.market_coach.nodes.rendering.common import (
     label_for_field,
     list_menu_component,
 )
+from agriconnect.graphs.agents.market_coach.utils import llm_deviation_reply
 
 logger = logging.getLogger("AgriConnect.Market.Rendering")
 
@@ -121,6 +122,23 @@ async def render_ask_missing_field(ctx: RenderContext) -> Dict[str, Any]:
         filled = progress.get("filled", 0)
         if total > 1:
             question = f"[{filled + 1}/{total}] {question}"
+
+    # L'utilisateur a dit quelque chose que l'interprète n'a pas classé comme
+    # une réponse exploitable (question, hésitation, remarque du type "vous
+    # me tiendrez informé ?") — SANS ce garde-fou, ce nœud générique (utilisé
+    # par TOUS les goals à collecte de champs : appel d'offres, vente, stock,
+    # cycle de culture...) rejoue juste la question suivante du formulaire,
+    # ignorant complètement ce qui vient d'être dit. Même défaut
+    # d'adaptivité déjà corrigé dans l'onboarding, `confirmation_gate` et la
+    # précommande — corrigé ici au niveau le PLUS générique, pour couvrir
+    # tous les goals d'un coup plutôt que d'attendre le prochain rapport de
+    # bug par goal. Voir [[precommande-architecture-consolidation-2026-08]].
+    event = str(state.get("interpreted_event") or "").upper()
+    user_text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+    if event in {"UNKNOWN", "OUT_OF_SCOPE"} and user_text:
+        note = await llm_deviation_reply(ctx.mc_runtime, user_text, f"répondre à : {label}")
+        if note:
+            question = f"{note}\n\n{question}"
 
     if candidates:
         ag_component = list_menu_component(

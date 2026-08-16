@@ -134,6 +134,7 @@ Ta sortie OBLIGATOIRE est un JSON strict avec EXACTEMENT ces clés :
   "validation_status": "<VALID|INVALID_MISSING_UNIT|INVALID_AMBIGUOUS_UNIT>",
   "extracted_entities": {
       "product": "<str|null>",
+      "additional_products": ["<str>", ...],
       "quantity": <float|null>,
       "unit": "<KG|TONNE|SAC|PANIER|null>",
       "price": <float|null>,
@@ -186,6 +187,24 @@ RÈGLES STRICTES DE CLASSIFICATION :
    - Si un mot suit "de", "du", "des", "d'" après une quantité ou une unité, considère-le comme un candidat produit et renseigne `product`.
    - N'utilise PAS d'autres clés (« product_name », « item_name »...) dans la sortie JSON : seule la clé `product` est contractuelle.
    - `product` ne doit être `null` que si aucun produit explicite n'est présent dans le texte.
+   - **TERMES D'ADRESSE — jamais un produit (CRITIQUE)** : "patron", "boss",
+     "chef", "monsieur", "madame" et autres formules pour s'adresser à
+     quelqu'un ne sont JAMAIS des noms de produit, même juste après "vendre
+     des produits" ou "je vends". Exemple : "vendre des produits boss" ->
+     l'utilisateur t'appelle "boss", il ne vend PAS un produit qui s'appelle
+     "boss" -> `product`: null (redemande le nom du produit). Idem si un nom
+     de produit déjà donné est ensuite mal recopié comme "boss"/"patron" par
+     erreur — ne le réutilise jamais comme candidat produit.
+   - **PLUSIEURS PRODUITS DANS LE MÊME MESSAGE (CRITIQUE — jamais de fusion)** :
+     si l'utilisateur mentionne PLUSIEURS produits distincts (ex: "j'ai besoin
+     d'œufs et de laitue", "50kg de maïs et 30kg d'oignons"), `product` ne
+     contient QUE le PREMIER produit mentionné, comme un nom UNIQUE et
+     PROPRE (jamais une liste, jamais séparé par une virgule ou "et" —
+     interdiction absolue d'écrire "laitue, œufs" ou "maïs et oignons" dans
+     `product`). Mets chaque produit SUPPLÉMENTAIRE (nom seul, sans
+     quantité/unité) dans le tableau `extracted_entities.additional_products`
+     — vide (`[]`) s'il n'y en a qu'un seul ou aucun. Le système traite les
+     produits UN PAR UN ; jamais simultanément dans une seule recherche.
    - **Nom de domaine/exploitation** : si `expected_input` vaut `FARM_NAME`, ou si `last_agent_question` demande le nom de la ferme/exploitation/domaine, tout texte libre fourni (même un seul mot, ex: "Matata", "Ferme du Soleil") EST ce nom — copie-le TEL QUEL dans `extracted_entities.farm_name` et mets `interpreted_event = ANSWER`. Ne renvoie JAMAIS OUT_OF_SCOPE/UNKNOWN dans ce contexte pour un mot ou une courte phrase qui ne correspond à aucune autre intention du catalogue : c'est un nom propre, pas un message hors-sujet.
 
 3. **detected_intent** identifie l'intention métier PRÉCISE.
@@ -248,6 +267,7 @@ Output: {
   "validation_status": "VALID",
   "extracted_entities": {
       "product": "patates",
+      "additional_products": [],
       "quantity": 50.0,
       "unit": "KG",
       "price": null,
@@ -269,7 +289,30 @@ Output: {
   "validation_status": "INVALID_MISSING_UNIT",
   "extracted_entities": {
       "product": "tomates",
+      "additional_products": [],
       "quantity": 20.0,
+      "unit": null,
+      "price": null,
+      "estimated_available_at": null,
+      "expected_harvest_date": null,
+      "zone": null,
+      "selection_index": null,
+      "selected_value": null,
+      "movement_type": null,
+      "reason": null
+  }
+}
+
+Input: "je cherche des œufs et de la laitue dans ma région"
+Output: {
+  "interpreted_event": "NEW_TASK",
+  "detected_intent": "BUYER_REQUEST",
+  "interpreter_confidence": 0.9,
+  "validation_status": "VALID",
+  "extracted_entities": {
+      "product": "œufs",
+      "additional_products": ["laitue"],
+      "quantity": null,
       "unit": null,
       "price": null,
       "estimated_available_at": null,

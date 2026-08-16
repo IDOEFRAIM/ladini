@@ -43,9 +43,19 @@ async def clarification_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -
     user_name = state.get("user_name","") 
     text = state.get("normalized_text") or state.get("user_query") or ""
 
-    # Only intervene on specific conditions
+    # Only intervene on specific conditions. `not current_goal` is
+    # deliberate for OUT_OF_SCOPE/UNKNOWN/REJECT : when a goal IS active,
+    # the tunnel-specific renderers (nodes/rendering/ask.py::render_ask_missing_field,
+    # feedback.py::render_recovery) already generate their own adaptive
+    # reply for the same deviation — this node only needs to cover the
+    # "nothing active" case, which response_strategy.py routes to
+    # CLARIFICATION for OUT_OF_SCOPE/UNKNOWN, REJECT, and tunnel abandonment
+    # alike. REJECT was added after finding it fell through to the generic
+    # "Je n'ai pas bien saisi" fallback with no chance at an adaptive reply
+    # (a stray "non" with nothing pending). See
+    # [[precommande-architecture-consolidation-2026-08]].
     needs_clarification = (
-        (event in {"OUT_OF_SCOPE", "UNKNOWN"} and expected_input == "NONE" and not current_goal)
+        (event in {"OUT_OF_SCOPE", "UNKNOWN", "REJECT"} and expected_input == "NONE" and not current_goal)
         or cognitive_action == "abandon_tunnel_max_retries"
     )
     if not needs_clarification:

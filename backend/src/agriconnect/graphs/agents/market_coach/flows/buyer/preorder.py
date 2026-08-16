@@ -10,7 +10,11 @@ from agriconnect.graphs.agents.market_coach.services.domain.cart_service import 
     SOURCE_TYPE_LABELS,
 )
 from agriconnect.graphs.agents.market_coach.services.mcp.gateway import PreorderGateway
-from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, is_success_response
+from agriconnect.graphs.agents.market_coach.utils import (
+    MarketRuntime,
+    is_success_response,
+    llm_deviation_reply,
+)
 
 from .helpers import (
     PREORDER_ACTION_OPTIONS,
@@ -22,15 +26,15 @@ from .helpers import (
 )
 
 # =====================================================================
-# GPS DELIVERY GATE (partagé avec le flux gagnant d'enchère — voir
-# [[gps-delivery-burkina-faso-2026-08]])
+# GPS DELIVERY GATE — implémentation partagée avec le flux gagnant
+# d'enchère (order_tracking.py::finalize_winner). Voir
+# [[precommande-architecture-consolidation-2026-08]] et
+# [[gps-delivery-burkina-faso-2026-08]].
 # =====================================================================
 
-from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
-    _GPS_FIRST_TIME_PROMPT,
-    _GPS_HABITUAL_PROMPT,
-    _GPS_TEXT_REMINDER,
-    _get_stored_location,
+from agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate import (
+    enter_gps_stage,
+    resolve_gps_stage,
 )
 
 # =====================================================================
@@ -313,31 +317,35 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
         if not gps_stage:
             if not is_confirm:
                 meta = CartDomainService.recompute_cart_meta(cart)
+                prompt = _preorder_confirm_prompt(len(cart), meta)
+                # Un écart (question, hésitation, remarque) plutôt qu'un
+                # oui/non clair : reconnaître ce qui a été dit au lieu de
+                # rejouer le même écran mot pour mot — voir
+                # [[precommande-architecture-consolidation-2026-08]].
+                note = await llm_deviation_reply(
+                    mc_runtime, str(state.get("normalized_text") or ""),
+                    "confirmer la précommande en cours (oui/non)",
+                )
                 return {
                     "status": "WAITING_INPUT",
                     "expected_input": "CONFIRMATION",
                     "response_strategy": "ASK_MISSING_FIELD",
-                    "final_response": _preorder_confirm_prompt(len(cart), meta),
+                    "final_response": f"{note}\n\n{prompt}" if note else prompt,
                     "transaction_payload": {"resolved_id": None},
                     "current_goal": "BUYER_PREORDER_INIT",
                     "ag_ui_component": None,
                     "active_cart": cart,
                 }
 
-            stored_lat, stored_lon = await _get_stored_location(mc_runtime, phone)
+            gate = await enter_gps_stage(mc_runtime, phone)
             new_flow = dict(preorder_flow)
             new_flow["gps_stage"] = True
-            if stored_lat is not None and stored_lon is not None:
-                new_flow["gps_default"] = {"lat": stored_lat, "lon": stored_lon}
-                gps_prompt = _GPS_HABITUAL_PROMPT
-            else:
-                new_flow["gps_default"] = None
-                gps_prompt = _GPS_FIRST_TIME_PROMPT
+            new_flow["gps_default"] = gate["gps_default"]
             return {
                 "status": "WAITING_INPUT",
                 "expected_input": "CONFIRMATION",
                 "response_strategy": "ASK_MISSING_FIELD",
-                "final_response": gps_prompt,
+                "final_response": gate["prompt"],
                 "preorder_workflow": new_flow,
                 "transaction_payload": {"resolved_id": None},
                 "current_goal": "BUYER_PREORDER_INIT",
@@ -346,39 +354,21 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
             }
 
         # --- Étape 2b : point GPS de livraison ---
-        if location_shared:
-            lat, lon = await _get_stored_location(mc_runtime, phone)
-            if lat is None or lon is None:
-                return {
-                    "status": "WAITING_INPUT",
-                    "expected_input": "CONFIRMATION",
-                    "response_strategy": "ASK_MISSING_FIELD",
-                    "final_response": "Je n'ai pas pu récupérer ce point GPS, merci de le repartager.",
-                    "ag_ui_component": None,
-                }
-            return await _execute_confirm(state, mc_runtime, preorder_id, cart, lat, lon)
-
-        if is_confirm:
-            default = preorder_flow.get("gps_default") or {}
-            lat, lon = default.get("lat"), default.get("lon")
-            if lat is None or lon is None:
-                return {
-                    "status": "WAITING_INPUT",
-                    "expected_input": "CONFIRMATION",
-                    "response_strategy": "ASK_MISSING_FIELD",
-                    "final_response": _GPS_FIRST_TIME_PROMPT,
-                    "ag_ui_component": None,
-                }
-            return await _execute_confirm(state, mc_runtime, preorder_id, cart, lat, lon)
-
+        resolution = await resolve_gps_stage(
+            mc_runtime, phone,
+            location_shared=location_shared, is_yes=is_confirm,
+            gps_default=preorder_flow.get("gps_default"),
+            user_text=str(state.get("normalized_text") or ""),
+        )
+        if resolution.resolved:
+            return await _execute_confirm(state, mc_runtime, preorder_id, cart, resolution.lat, resolution.lon)
         return {
             "status": "WAITING_INPUT",
             "expected_input": "CONFIRMATION",
             "response_strategy": "ASK_MISSING_FIELD",
-            "final_response": _GPS_TEXT_REMINDER,
+            "final_response": resolution.message,
             "ag_ui_component": None,
         }
-
 
     # --- PHASE 3: Already CONFIRMED ---
     if phase == "CONFIRMED":

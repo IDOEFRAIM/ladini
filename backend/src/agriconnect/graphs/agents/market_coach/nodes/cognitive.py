@@ -120,7 +120,14 @@ async def cognitive_guard(
         )
         return updates
 
-    if event == "UNKNOWN" and in_tunnel:
+    # Un partage de position WhatsApp natif n'a pas de texte à classifier —
+    # l'interprète LLM renvoie donc systématiquement event=UNKNOWN pour ces
+    # tours. Sans cette exclusion, tout gate GPS en cours de tunnel (ex.
+    # finalize_winner / create_preorder, voir [[gps-delivery-burkina-faso-2026-08]])
+    # tombait dans la récupération/abandon de tunnel ci-dessous au lieu de
+    # jamais atteindre le resolver qui sait gérer location_shared.
+    location_shared = bool(state.get("location_shared"))
+    if event == "UNKNOWN" and in_tunnel and not location_shared:
         if retry_count >= 2:
             logger.warning(
                 "[CognitiveGuard] Max retries reached for goal=%s — abandoning tunnel",
@@ -247,7 +254,10 @@ async def cognitive_orchestrator(
         phase = "think"
         next_step = "clarify"
         reason = "intent_competition"
-    elif in_tunnel and event in {"ANSWER", "UPDATE", "SELECTION", "CONFIRM", "REJECT"}:
+    elif in_tunnel and (
+        event in {"ANSWER", "UPDATE", "SELECTION", "CONFIRM", "REJECT"}
+        or bool(state.get("location_shared"))
+    ):
         phase = "act"
         next_step = "continue_tunnel"
         reason = "active_goal"

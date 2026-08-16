@@ -73,6 +73,85 @@ class TestRenderAskMissingField:
         result = run(render_ask_missing_field(c))
         assert result["final_response"] == "Déjà calculé"
 
+    def test_an_unknown_event_gets_an_adaptive_note_before_the_question(self):
+        """Bug réel (2026-08-14) : ce nœud générique rend TOUT champ manquant
+        pour TOUS les goals (appel d'offres, vente, stock...) — "Quels sont
+        les prix disponibles ?" pendant une collecte de prix rejouait juste
+        la question du champ suivant, en ignorant complètement la question
+        posée. Voir [[precommande-architecture-consolidation-2026-08]]."""
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.ask import render_ask_missing_field
+
+        class _Msg:
+            content = "Les prix varient selon la saison, je n'ai pas de liste fixe à te donner."
+
+        class _Choice:
+            message = _Msg()
+
+        class _Completion:
+            choices = [_Choice()]
+
+        class _LLM:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**kwargs):
+                        return _Completion()
+
+        state = make_state(
+            current_goal="PROCUREMENT_CREATE_REQUEST", final_response=None,
+            missing_fields=["price"], interpreted_event="OUT_OF_SCOPE",
+            normalized_text="Quels sont les prix disponibles?",
+        )
+        runtime = type("RT", (), {"llm": _LLM(), "model_answer": "test-model"})()
+        c = RenderContext(
+            state=state, mc_runtime=runtime,
+            strategy="ASK_MISSING_FIELD", status="", goal="PROCUREMENT_CREATE_REQUEST",
+            salutation="", payload={},
+        )
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.ask import render_ask_missing_field as _r
+        result = run(_r(c))
+        assert result["final_response"].startswith("Les prix varient selon la saison")
+
+    def test_a_clean_answer_event_does_not_trigger_a_second_llm_call(self):
+        """Non-régression : le chemin normal (event=ANSWER) appelle le LLM
+        UNE seule fois (génération de la question du champ suivant) — pas
+        d'appel supplémentaire de reconnaissance d'écart."""
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.ask import render_ask_missing_field
+
+        calls = {"n": 0}
+
+        class _Msg:
+            content = "Quelle quantité ?"
+
+        class _Choice:
+            message = _Msg()
+
+        class _Completion:
+            choices = [_Choice()]
+
+        class _CountingLLM:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**kwargs):
+                        calls["n"] += 1
+                        return _Completion()
+
+        state = make_state(
+            current_goal="SALES_PUBLISH_PRODUCT", final_response=None,
+            missing_fields=["price"], interpreted_event="ANSWER",
+            normalized_text="200 kg",
+        )
+        runtime = type("RT", (), {"llm": _CountingLLM(), "model_answer": "test-model"})()
+        c = RenderContext(
+            state=state, mc_runtime=runtime,
+            strategy="ASK_MISSING_FIELD", status="", goal="SALES_PUBLISH_PRODUCT",
+            salutation="", payload={},
+        )
+        result = run(render_ask_missing_field(c))
+        assert result["final_response"]
+        assert calls["n"] == 1
+
 
 class TestGenerateLlmQuestion:
     def test_no_llm_on_runtime_returns_the_fallback(self):

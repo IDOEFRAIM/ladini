@@ -920,15 +920,30 @@ def _clean_candidate_text(value: Optional[str]) -> Optional[str]:
 async def _llm_extract_onboarding_all(
     mc_runtime: "MarketRuntime",
     user_text: str,
+    context_hint: str = "",
 ) -> Dict[str, Optional[str]]:
-    """Extract every onboarding field from a single utterance in ONE LLM call.
+    """Extract every onboarding field from a single utterance in ONE LLM call —
+    and, when the message carries no usable registration data, ALSO generate
+    the reply text in the same call (key ``reply``).
 
-    Returns a dict with keys role / name / zone / confirm. Each is either the
-    extracted value or None. This replaces per-field sequential extraction so
-    onboarding stays sub-second even when the user says everything at once
-    (or corrects several fields mid-flow).
+    Why generate rather than pick from a fixed set of canned strings: any
+    hardcoded response to "the user asked something / seemed confused /
+    was hostile" only covers the specific cases someone thought to write —
+    the next real conversation always finds a new one. The LLM gets grounding
+    hints (what AgriConnect is, what's already known, what's still missing,
+    how many times this user has already been answered this session) via
+    *context_hint* instead, and composes an answer that actually fits what
+    was said. See [[onboarding-adaptive-questions-2026-08]].
+
+    Returns a dict with keys role / name / zone / confirm / is_question /
+    reply. This replaces per-field sequential extraction so onboarding stays
+    sub-second even when the user says everything at once (or corrects
+    several fields mid-flow).
     """
-    empty: Dict[str, Optional[str]] = {"role": None, "name": None, "zone": None, "confirm": None}
+    empty: Dict[str, Optional[str]] = {
+        "role": None, "name": None, "zone": None, "confirm": None,
+        "is_question": False, "reply": None,
+    }
     if not user_text or not user_text.strip():
         return empty
     llm = getattr(mc_runtime, "llm", None)
@@ -936,18 +951,40 @@ async def _llm_extract_onboarding_all(
         return empty
 
     system_prompt = (
-        "Tu extrais des informations d'inscription AgriConnect a partir d'un message utilisateur. "
+        "Tu extrais des informations d'inscription AgriConnect a partir d'un message utilisateur, "
+        "ET tu generes une reponse adaptee quand le message ne fournit aucune info exploitable.\n\n"
+        "Contexte AgriConnect (base-toi dessus pour repondre, ne le recopie JAMAIS mot pour mot) : "
+        "plateforme qui connecte producteurs et acheteurs agricoles directement par WhatsApp, sans "
+        "intermediaire ni deplacement ; inscription gratuite et rapide ; on peut inscrire un compte "
+        "pour quelqu'un d'autre (ex: un parent) en repondant a sa place ; les producteurs publient "
+        "leurs recoltes et gerent leur stock, les acheteurs cherchent des produits et commandent.\n\n"
+        f"Etat actuel de cette inscription : {context_hint or 'debut de la conversation.'}\n\n"
         "L'utilisateur peut donner plusieurs informations dans n'importe quel ordre, ou juste une, "
         "ou corriger une valeur precedente. Ne devine JAMAIS a partir d'une salutation ou d'une politesse.\n\n"
-        "Reponds STRICTEMENT en JSON avec exactement ces 4 cles (mets null si l'info n'est pas explicite) :\n"
-        '{\"role\": \"BUYER\"|\"PRODUCER\"|null, \"name\": string|null, \"zone\": string|null, \"confirm\": \"YES\"|\"NO\"|null}\n\n'
+        "Reponds STRICTEMENT en JSON avec exactement ces 6 cles (mets null si non applicable) :\n"
+        '{\"role\": \"BUYER\"|\"PRODUCER\"|null, \"name\": string|null, \"zone\": string|null, '
+        '\"confirm\": \"YES\"|\"NO\"|null, \"is_question\": true|false, \"reply\": string|null}\n\n'
         "Regles :\n"
         "- role : 'PRODUCER' pour agriculteur, eleveur, producteur, fournisseur d'engrais/intrants/semences. "
         "'BUYER' pour acheteur, commercant, grossiste, client, revendeur. Sinon null.\n"
-        "- name : uniquement un nom de personne (prenom, nom complet). Jamais un role, une ville, une salutation, une profession generique.\n"
+        "- name : uniquement un vrai nom de personne (prenom, nom complet). Jamais un role, une ville, une "
+        "salutation, une profession generique. Jamais non plus un terme de lien familial employe SEUL "
+        "('papa', 'pere', 'daron', 'vieux', 'maman', 'mere', 'tonton', 'shao') meme dans 'je cree un compte "
+        "pour mon daron/papa' — c'est une DESCRIPTION de la personne, pas son nom ; renvoie null dans ce cas "
+        "(exemple : 'je veux creer un compte pour mon daron' -> name: null). "
+        "Seule exception : le terme est suivi d'un vrai prenom ('mon pere Ibrahim' -> name: 'Ibrahim').\n"
         "- zone : uniquement une localite (ville, province, region, quartier). Jamais un nom de personne.\n"
         "- confirm : 'YES' si l'utilisateur valide/accepte/confirme explicitement. 'NO' s'il refuse, corrige ou dit que c'est faux. "
-        "Sinon null (ne devine pas depuis un simple bonjour ou une info non liee)."
+        "Sinon null (ne devine pas depuis un simple bonjour ou une info non liee).\n"
+        "- is_question : true si le message ne fournit AUCUNE info d'inscription exploitable — question, "
+        "doute, hesitation, remarque hostile/insultante, situation inhabituelle, message hors-sujet. Sinon false.\n"
+        "- reply : SEULEMENT si is_question=true. Redige une reponse COURTE (2-3 phrases max), chaleureuse, "
+        "en francais simple, adaptee precisement a CE message (pas un texte generique). Base-toi sur le "
+        "contexte AgriConnect et sur l'etat actuel ci-dessus. Si l'utilisateur a deja ete relance plusieurs "
+        "fois dans cette session, NE REPETE PAS le meme pitch : sois plus bref, ou rassure-le s'il doute de "
+        "la legitimite du service, sans jamais etre agressif meme si le message est hostile — reste calme et "
+        "professionnel. Termine si naturel en invitant a donner ce qui manque, sans forcer. "
+        "Si is_question=false, mets reply a null."
     )
     try:
         completion = await asyncio.wait_for(
@@ -959,8 +996,8 @@ async def _llm_extract_onboarding_all(
                         {"role": "user", "content": user_text.strip()},
                     ],
                     response_format={"type": "json_object"},
-                    temperature=0.0,
-                    max_tokens=200,
+                    temperature=0.3,
+                    max_tokens=350,
                 )
             ),
             timeout=10.0,
@@ -999,7 +1036,73 @@ async def _llm_extract_onboarding_all(
         "name": _norm(payload.get("name")),
         "zone": _norm(payload.get("zone")),
         "confirm": raw_confirm,
+        "is_question": bool(payload.get("is_question")),
+        "reply": _norm(payload.get("reply")),
     }
+
+
+# =====================================================================
+# LLM DEVIATION REPLY — un seul point d'implémentation pour "l'utilisateur
+# a dit autre chose que ce qu'on attendait à cette étape". Réutilisé par
+# nodes/confirmation_gate.py ET flows/buyer/gps_delivery_gate.py, qui
+# avaient chacun leur propre copie légèrement différente avant cette
+# consolidation — exactement le genre de duplication qui rendait la
+# précommande fragile à chaque nouvelle exigence (adaptivité, GPS...).
+# Voir [[precommande-architecture-consolidation-2026-08]].
+# =====================================================================
+
+async def llm_deviation_reply(
+    mc_runtime: "MarketRuntime",
+    user_text: str,
+    context: str,
+    *,
+    extra_instructions: str = "",
+) -> Optional[str]:
+    """Réponse COURTE générée par le LLM quand l'utilisateur dévie de ce
+    qu'une étape à choix contraint attend (confirmation oui/non, partage
+    GPS...) — question, correction, remarque, hésitation, message hostile.
+    Sans ceci, le texte figé de l'étape se répétait mot pour mot en boucle
+    quoi que dise l'utilisateur (bug réel observé dans l'onboarding, dans
+    `confirmation_gate` ET dans la précommande — la même classe de bug
+    corrigée une seule fois ici plutôt que réinventée à chaque endroit).
+
+    `context` décrit ce qui est en attente (le récap, ou "un point GPS de
+    livraison"...) — le LLM s'en sert pour rester pertinent SANS jamais le
+    recopier mot pour mot (l'appelant réaffiche ce contexte juste après).
+    Retombe sur `None` si le LLM échoue ou n'est pas disponible : l'appelant
+    garde alors son texte de repli habituel — jamais de crash, jamais de
+    réponse vide."""
+    llm = getattr(mc_runtime, "llm", None)
+    if llm is None or not user_text:
+        return None
+    prompt = (
+        "Un utilisateur AgriConnect (WhatsApp, Burkina Faso) devait répondre "
+        "quelque chose de précis à cette étape et a dit autre chose.\n\n"
+        f"Ce qui est attendu à cette étape : {context}\n\n"
+        f"Message de l'utilisateur : \"{user_text}\"\n\n"
+        "Réponds en 1-2 phrases courtes, chaleureuses, en français simple : "
+        "reconnais ce qu'il a dit (question, correction, hésitation, remarque "
+        "hostile — reste calme et professionnel même si le message est hostile) "
+        "SANS jamais répéter mot pour mot ce qui est attendu (ce sera rappelé "
+        f"juste après ta réponse). {extra_instructions}"
+    ).strip()
+    try:
+        completion = await asyncio.wait_for(
+            asyncio.to_thread(
+                lambda: llm.chat.completions.create(
+                    model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.4,
+                    max_tokens=150,
+                )
+            ),
+            timeout=8.0,
+        )
+        text = (completion.choices[0].message.content or "").strip()
+        return text or None
+    except Exception as exc:
+        logger.warning("llm_deviation_reply: LLM call failed: %s", exc)
+        return None
 
 
 # =====================================================================
@@ -1039,6 +1142,7 @@ __all__ = [
     "canonical_unit_label",
     # LLM helpers
     "_llm_extract_onboarding_all",
+    "llm_deviation_reply",
     # Compute / reset
     "_compute_progress",
     "reset_error_status",

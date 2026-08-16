@@ -197,6 +197,102 @@ def _render_cycles_section(cycles: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _render_market_snapshot(exec_result: Dict[str, Any]) -> str:
+    """Rendu dédié pour `get_market_snapshot` — remplace le rendu générique
+    CAS 2 (liste plate) qui affichait des lignes vides ("Élément 1"/
+    "Élément 2") pour cette forme de données, faute de savoir lire la clé
+    `product`. Trois cas, dans l'ordre de priorité de
+    `services/database/category.py::get_market_snapshot` :
+
+    1. Produit demandé absent du catalogue → le dire clairement + lister
+       les vraies catégories disponibles (demande explicite utilisateur,
+       2026-08-15 : "l'agent doit signaler que les produits qui ne sont pas
+       dans le catalogue ne peuvent pas être vendus sur la plateforme").
+    2. Produit reconnu, prix résolu (admin `StandardPrice` en priorité,
+       sinon moyenne des annonces réelles) → réponse ciblée à "quel est le
+       prix de X ?".
+    3. Vue d'ensemble multi-produits (pas de filtre produit) → un prix par
+       sous-catégorie, comportement historique.
+
+    Voir [[precommande-architecture-consolidation-2026-08]]."""
+    if exec_result.get("product_in_catalog") is False:
+        products = exec_result.get("available_products") or []
+        categories = exec_result.get("available_categories") or []
+        lines = [f"📭 {exec_result.get('message') or 'Ce produit n’est pas encore disponible sur notre plateforme.'}"]
+        if products:
+            # Produits concrets + prix — plus actionnable qu'une simple
+            # catégorie ("Céréales") : demande explicite utilisateur, voir
+            # `get_available_products` (services/database/category.py).
+            lines.append("")
+            for item in products:
+                if not isinstance(item, dict) or not item.get("name"):
+                    continue
+                price = item.get("price")
+                if price is not None:
+                    unit = str(item.get("unit") or "KG").upper()
+                    tag = " (prix standard)" if item.get("price_source") == "admin" else " (prix moyen)"
+                    lines.append(f"🌾 *{item['name']}* — {fmt_num(price)} FCFA/{unit}{tag}")
+                else:
+                    lines.append(f"🌾 *{item['name']}*")
+        elif categories:
+            lines.append("\n🗂️ *Catégories disponibles sur AgriConnect :*")
+            for cat in categories:
+                icon = cat.get("icon") or "📦" if isinstance(cat, dict) else "📦"
+                name = cat.get("name") if isinstance(cat, dict) else str(cat)
+                if name:
+                    lines.append(f"{icon} {name}")
+        return "\n".join(lines)
+
+    data = exec_result.get("data") or []
+    if not data:
+        return exec_result.get("message") or "Aucune donnée de prix disponible pour le moment."
+
+    if len(data) == 1 and exec_result.get("product_in_catalog"):
+        row = data[0]
+        product_name = row.get("product") or "ce produit"
+        lines = [f"📊 *Prix de référence — {product_name} :*\n"]
+        if row.get("price_source") == "admin":
+            unit = row.get("standard_unit") or "KG"
+            zone_txt = f" à {row['standard_price_zone']}" if row.get("standard_price_zone") else ""
+            lines.append(f"💰 Prix standard{zone_txt} : *{fmt_num(row.get('standard_price'))} FCFA/{unit}*")
+        elif row.get("avg_price") is not None:
+            lines.append(f"💰 Prix moyen constaté chez les producteurs : *{fmt_num(row.get('avg_price'))} FCFA*")
+            if row.get("min_price") is not None:
+                lines.append(f"   (à partir de {fmt_num(row.get('min_price'))} FCFA)")
+        total_stock = row.get("total_stock")
+        if total_stock:
+            lines.append(f"📦 Stock total disponible : {fmt_num(total_stock)}")
+        return "\n".join(lines)
+
+    lines = ["📊 *Aperçu des prix du marché :*\n"]
+    for row in data:
+        name = row.get("product") or "Produit"
+        avg = row.get("avg_price")
+        min_p = row.get("min_price")
+        if avg is not None:
+            lines.append(f"• *{name}* — moy. {fmt_num(avg)} FCFA (min {fmt_num(min_p)} FCFA)")
+        else:
+            lines.append(f"• *{name}*")
+    return "\n".join(lines)
+
+
+def _render_price_check(exec_result: Dict[str, Any]) -> str:
+    """Rendu dédié pour `check_price_anomaly` (VALIDATE_PRICE) — sans lui,
+    ce résultat (ni `message` ni `data`, juste `is_anomaly`/`reason`/
+    `reference_price`) tombait dans le gabarit transactionnel générique et
+    pouvait afficher un texte totalement sans rapport (bug réel 2026-08-15,
+    voir `_transactional_fallback_text`)."""
+    is_anomaly = bool(exec_result.get("is_anomaly"))
+    ref_price = exec_result.get("reference_price")
+    reason = str(exec_result.get("reason") or "").strip()
+
+    if is_anomaly:
+        return f"⚠️ {reason}" if reason else "⚠️ Ce prix semble inhabituel par rapport au marché."
+    if ref_price is not None:
+        return f"✅ Ce prix est cohérent avec le marché (référence : {fmt_num(ref_price)} FCFA)."
+    return f"✅ {reason}" if reason else "✅ Prix noté."
+
+
 def _render_flat_list(items: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, str]]]:
     lines = ["📋 *Voici les éléments trouvés correspondant à votre demande :*\n"]
     options_ui: List[Dict[str, str]] = []
@@ -208,6 +304,7 @@ def _render_flat_list(items: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, 
             item.get("name")
             or item.get("item_name")
             or item.get("product_name")
+            or item.get("product")
             or f"Élément {i}"
         )
         details_parts: List[str] = []
@@ -307,29 +404,71 @@ def _render_buyer_catalog_sections(items: List[Dict[str, Any]]) -> str:
     return "\n\n".join([section for section in sections if section]).strip()
 
 
-def _transactional_fallback_text(goal: str, salutation: str, payload: Dict[str, Any]) -> str:
-    """Gabarits par goal quand l'outil ne renvoie ni message ni collection."""
+# Pour chaque gabarit transactionnel à fort impact ci-dessous, l'outil MCP
+# qui a RÉELLEMENT dû s'exécuter pour que ce texte soit vrai. `selected_tool`
+# (posé frais CHAQUE tour par `mcp_tool_executor`, jamais périmé) sert de
+# garde-fou : si un outil différent (ou aucun outil connu) vient de tourner,
+# le gabarit est refusé même si `goal` semble correspondre — voir le bug
+# réel documenté dans la docstring de `_transactional_fallback_text`.
+_FALLBACK_GOAL_REQUIRES_TOOL: Dict[str, Tuple[str, ...]] = {
+    "BUYER_ADD_TO_CART": ("add_to_cart",),
+    "BUYER_PREORDER": ("create_preorder",),
+    "PROCUREMENT_OR_AUCTION": ("create_auction",),
+    "PUBLISH_OR_SELL": ("create_product", "record_sale"),
+    "BID": ("place_bid",),
+}
+
+
+def _transactional_fallback_text(
+    goal: str, salutation: str, payload: Dict[str, Any], selected_tool: str = "",
+) -> str:
+    """Gabarits par goal quand l'outil ne renvoie ni message ni collection.
+
+    Bug réel (2026-08-15) : un prix vérifié via VALIDATE_PRICE
+    (`check_price_anomaly`, un outil READ qui ne renvoie ni `message` ni
+    `data`) a été annoncé "✅ Votre appel d'offres... a été enregistré avec
+    succès" — `goal` ici vient de `resolve_goal_for_ui`
+    (`nodes/rendering/common.py`), une résolution TOLÉRANTE conçue pour un
+    badge d'UI ("jamais UNKNOWN"), qui retombe en cascade sur
+    `working_memory.active_goal`/`locked_intent`/`suspended_goal`/
+    `detected_intent` dès que `current_goal` est vidé (ce que
+    `mcp_tool_executor` fait systématiquement à la complétion) — l'un de ces
+    champs peut porter un goal PÉRIMÉ d'une tentative précédente abandonnée
+    dans la même conversation (ici : un appel d'offres pour "riz" rejeté
+    juste avant par le nouveau garde-fou catalogue de `create_auction`, voir
+    Round 4 dans [[precommande-architecture-consolidation-2026-08]]).
+    `selected_tool` — posé frais CE tour par `mcp_tool_executor`, jamais
+    périmé — est la seule source fiable de "quel outil vient RÉELLEMENT de
+    s'exécuter" ; les gabarits à fort impact ci-dessous ne s'appliquent que
+    s'ils correspondent à l'outil réellement appelé (`selected_tool==""`
+    reste toléré pour la compatibilité des appels directs/tests qui ne le
+    renseignent pas).
+    """
     prod_name = payload.get("product") or payload.get("product_name") or "votre demande"
     qty = fmt_num(payload.get("quantity") or payload.get("quantity_desired") or "")
     unit = str(payload.get("unit") or payload.get("unit_desired") or "").upper()
     q_info = f" pour {qty} {unit}" if qty else ""
 
+    def _tool_matches(key: str) -> bool:
+        allowed = _FALLBACK_GOAL_REQUIRES_TOOL[key]
+        return not selected_tool or selected_tool in allowed
+
     g = (goal or "").upper()
-    if g == "BUYER_ADD_TO_CART":
+    if g == "BUYER_ADD_TO_CART" and _tool_matches("BUYER_ADD_TO_CART"):
         return (
             f"🛒 {salutation}*{prod_name}*{q_info} a été ajouté à votre panier. "
             "Tapez *précommander* pour valider ou ajoutez un autre produit."
         )
-    if g.startswith("BUYER_PREORDER"):
+    if g.startswith("BUYER_PREORDER") and _tool_matches("BUYER_PREORDER"):
         return (
             f"✅ {salutation}Votre précommande{q_info} pour *{prod_name}* est enregistrée. "
             "Vous recevrez le récapitulatif complet dans un instant."
         )
-    if g.startswith("PROCUREMENT_") or "AUCTION" in g:
+    if (g.startswith("PROCUREMENT_") or "AUCTION" in g) and _tool_matches("PROCUREMENT_OR_AUCTION"):
         return f"✅ {salutation}Votre appel d'offres{q_info} de *{prod_name}* a été enregistré avec succès."
-    if "PUBLISH" in g or "SELL" in g:
+    if ("PUBLISH" in g or "SELL" in g) and _tool_matches("PUBLISH_OR_SELL"):
         return f"✅ {salutation}Votre offre de vente{q_info} de *{prod_name}* a bien été publiée sur le marché."
-    if "BID" in g:
+    if "BID" in g and _tool_matches("BID"):
         price_bid = fmt_num(payload.get("price"))
         p_info = f" à {price_bid} FCFA" if price_bid else ""
         return f"✅ {salutation}Votre proposition de prix{p_info} pour *{prod_name}* a bien été transmise."
@@ -493,8 +632,29 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
             )
             structured_sections_handled = True
 
+    # ── Prix du marché / prix de référence (get_market_snapshot) ────────
+    if (
+        allow_structured_render
+        and not structured_sections_handled
+        and selected_tool_name == "get_market_snapshot"
+    ):
+        text_output = _render_market_snapshot(exec_result)
+        structured_sections_handled = True
+
+    # ── Validation de prix (check_price_anomaly / VALIDATE_PRICE) ──────
+    # Outil READ qui ne renvoie ni `message` ni `data` (juste is_anomaly/
+    # reason/reference_price) — sans ce rendu dédié, il tombait dans le
+    # gabarit transactionnel générique CAS 3, cf. bug documenté dans
+    # `_transactional_fallback_text`.
+    if (
+        allow_structured_render
+        and not structured_sections_handled
+        and selected_tool_name == "check_price_anomaly"
+    ):
+        text_output = _render_price_check(exec_result)
+        structured_sections_handled = True
+
     # ── Catalogue acheteur (search_products) ──────────────────────────
-    selected_tool_name = str(state.get("selected_tool") or "").lower().strip()
     if (
         allow_structured_render
         and not structured_sections_handled
@@ -538,7 +698,15 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
                     text_output += "\n\n📸 Tapez *photos <numéro>* pour voir des photos d'un résultat."
 
     # ── CAS 2 : liste plate ───────────────────────────────────────────
-    if isinstance(tool_data, list) and tool_data:
+    # NB : exclut get_market_snapshot — ses lignes sont des prix de référence,
+    # pas des éléments sélectionnables. Sans cette exclusion, _render_flat_list
+    # construit quand même un `options_ui` (append inconditionnel par ligne,
+    # voir la boucle ci-dessus) et écrase `ag_component` avec un faux menu
+    # « Faites votre choix » par-dessus le rendu correct de
+    # _render_market_snapshot, même si `structured_sections_handled` est déjà
+    # True (cette branche ne teste pas ce flag — volontaire pour search_products,
+    # qui veut un menu de sélection en plus de son texte dédié).
+    if isinstance(tool_data, list) and tool_data and selected_tool_name != "get_market_snapshot":
         flat_text, options_ui = _render_flat_list(tool_data)
         if allow_structured_render and not structured_sections_handled:
             text_output = flat_text
@@ -568,7 +736,23 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
         # une section structurée (CAS 1) ni un message d'outil par le gabarit
         # générique — voir historique du bug « validée avec succès » parasite.
         if not tool_msg and not has_formatted_menu and not structured_sections_handled:
-            text_output = _transactional_fallback_text(goal or "", salutation, payload)
+            # Bug réel (2026-08-14) : "Votre appel d'offres pour 0 de *votre
+            # demande* a été enregistré avec succès" — pour les goals à
+            # formulaire (ex: PROCUREMENT_CREATE_REQUEST/appel d'offres),
+            # produit/quantité/prix sont capturés dans `form_data` (voir
+            # `build_procurement_escalation`), PAS dans `transaction_payload`
+            # qui peut être quasi vide à ce stade (juste `resolved_id`/
+            # `confirm` du dernier tour). Le payload passé au gabarit doit
+            # d'abord se rabattre sur form_data, avec les valeurs non-vides
+            # de `payload` en priorité (le plus récent des deux).
+            form_data = state.get("form_data") or {}
+            effective_payload = {
+                **form_data,
+                **{k: v for k, v in payload.items() if v not in (None, "", [], {})},
+            }
+            text_output = _transactional_fallback_text(
+                goal or "", salutation, effective_payload, selected_tool_name,
+            )
         ag_component = status_component("success", message=text_output)
 
     auto_notice = state.get("auto_farm_notice")

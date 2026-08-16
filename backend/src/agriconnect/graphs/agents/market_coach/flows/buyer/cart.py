@@ -8,6 +8,7 @@ from agriconnect.graphs.agents.market_coach.services.domain.cart_service import 
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, is_success_response
 
 from .helpers import (
+    additional_products_hint,
     capture_cart_draft,
     detect_cart_action,
     infer_product_from_text,
@@ -95,6 +96,21 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
         payload.setdefault("product", product_name)
 
     quantity = resolve_quantity(payload, stable_entities)
+
+    # Même logique que ci-dessus, pour la quantité : un "oui" confirmant un
+    # match incertain (voir needs_confirmation plus bas) n'a pas de quantité
+    # dans CE tour — elle a été donnée dans le message précédent et vit dans
+    # `requested_quantity`. Sans ce garde-fou, le "Missing product or
+    # quantity" ci-dessous redemandait la quantité AVANT même d'atteindre la
+    # logique de confirmation, qui ne s'exécute que plus bas. Voir
+    # [[buyer-search-fuzzy-match-safety-2026-08]].
+    if quantity in (None, "", 0):
+        _vctx_qty = state.get("vendor_selection_context")
+        if isinstance(_vctx_qty, dict) and not _vctx_qty.get("__reset__"):
+            _requested_qty = _vctx_qty.get("requested_quantity")
+            if _requested_qty not in (None, "", 0):
+                quantity = _requested_qty
+                payload["quantity"] = _requested_qty
 
     # --- VIEW CART ---
     if goal == "BUYER_VIEW_CART":
@@ -237,6 +253,22 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
     # --- MULTI-VENDOR RESOLUTION ---
     vendors, has_multiple = await cart_service.resolve_product_vendors(phone, str(product_name))
 
+    # Un match qui n'est QUE trigram (pas de sous-texte réel entre le terme
+    # cherché et le nom trouvé — voir _is_confident_product_match) n'est pas
+    # un "peut-être" à faire confirmer : c'est du bruit. Incident réel
+    # (2026-08-14) : "oeufs" fuzzy-matchait "Bœuf" alors que ni œufs ni
+    # laitue n'existent en base — on écarte ces matches et on retombe sur le
+    # flux "produit introuvable" existant plutôt que d'inventer une
+    # suggestion. Voir [[buyer-search-fuzzy-match-safety-2026-08]].
+    confident_vendors = [v for v in vendors if v.get("match_confident", True)]
+    if len(confident_vendors) != len(vendors):
+        logger.warning(
+            "cart_management: dropped %d low-confidence match(es) for '%s' — treating as not found",
+            len(vendors) - len(confident_vendors), product_name,
+        )
+    vendors = confident_vendors
+    has_multiple = len(vendors) > 1
+
     if not vendors:
         return _with_base({
             "status": "COMPLETED",
@@ -269,11 +301,14 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
 
     # Single vendor — add directly if quantity known, else ask
     ref = vendors[0]
+    vendor_label = ref.get("vendor_name") or "un producteur"
+    unit_hint = ref.get("unit") or "KG"
+    price_hint = ref.get("price")
+    price_info = f" (prix : {price_hint} FCFA/{unit_hint})" if price_hint else ""
+    payload["product"] = product_name
+    extras_hint = additional_products_hint(payload, state)
+
     if quantity in (None, "", 0):
-        vendor_label = ref.get("vendor_name") or "un producteur"
-        unit_hint = ref.get("unit") or "KG"
-        price_hint = ref.get("price")
-        price_info = f" (prix : {price_hint} FCFA/{unit_hint})" if price_hint else ""
         vendor_ctx_seed = {
             "product": product_name,
             "vendors": [ref],
@@ -282,7 +317,6 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
             "requested_unit": None,
             "available_mapping_kind": "product_vendor",
         }
-        payload["product"] = product_name
         return _with_base({
             "status": "WAITING_INPUT",
             "expected_input": "QUANTITY",
@@ -290,7 +324,7 @@ async def cart_management(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
             "final_response": (
                 f"✅ *{product_name}* est disponible chez *{vendor_label}*{price_info}.\n\n"
                 f"📦 Quelle quantité souhaitez-vous ?\n"
-                f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._"
+                f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._" + extras_hint
             ),
             "transaction_payload": payload,
             "vendor_selection_context": vendor_ctx_seed,

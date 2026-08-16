@@ -48,6 +48,12 @@ class OnboardingState:
     completed: bool = False
     created_profile: Dict[str, Any] = field(default_factory=dict)
     _filled_slots: Dict[str, bool] = field(default_factory=dict, repr=False)
+    # Nombre de fois où on a déjà répondu à une question hors-sujet dans CETTE
+    # session d'onboarding — voir [[onboarding-adaptive-questions-2026-08]].
+    # Sans ce compteur, une explication IDENTIQUE au mot près se répétait à
+    # chaque relance/insulte de l'utilisateur, ce qui a fini par l'agacer
+    # ("arrête de m'envoyer ce même texte") plutôt que de le rassurer.
+    explain_count: int = 0
 
     def missing_slots(self) -> List[str]:
         missing: List[str] = []
@@ -258,7 +264,25 @@ def _extract_zone_labels(raw: Any) -> List[str]:
     _walk(raw)
     return list(dict.fromkeys(labels))
 
-BulkExtractor = Callable[[str], Coroutine[Any, Any, Dict[str, Optional[str]]]]
+BulkExtractor = Callable[[str, str], Coroutine[Any, Any, Dict[str, Optional[str]]]]
+
+
+def _context_hint_for_llm(ob_state: OnboardingState) -> str:
+    """Grounding hints for the LLM's dynamic reply — what's already known,
+    what's missing, how many times this user has already been answered.
+    Deliberately NOT canned response text: see [[onboarding-adaptive-questions-2026-08]]."""
+    known: List[str] = []
+    if ob_state.role:
+        known.append(f"role={ob_state.role}")
+    if ob_state.name:
+        known.append(f"nom={ob_state.name}")
+    if ob_state.zone_name or ob_state.zone_id:
+        known.append(f"zone={ob_state.zone_name or ob_state.zone_id}")
+    missing = ", ".join(ob_state.missing_slots()) or "aucun"
+    return (
+        f"Deja connu : {', '.join(known) or 'rien'}. Encore manquant : {missing}. "
+        f"Nombre de fois deja repondu a une question hors-sujet dans cette session : {ob_state.explain_count}."
+    )
 
 
 _WELCOME = (
@@ -297,6 +321,36 @@ _LOCATION_SKIPPED = (
     "Pas de souci, on continue sans ! Tu pourras toujours partager ta "
     "position plus tard — il te suffira de renvoyer ta localisation à tout "
     "moment. 😊"
+)
+
+# Réponse courte à une question posée EN COURS d'onboarding ("c'est quoi ce
+# truc", "comment ça marche", "je crée un compte pour mon père, comment ça se
+# passe"). Sans ceci, `run_onboarding_step` répondait toujours par la MÊME
+# question de collecte de champ, quel que soit le message reçu — l'agent
+# ignorait purement et simplement la question posée (retour utilisateur
+# 2026-08-13 : "grand problème d'adaptivité... l'agent ne doit pas être trop
+# figé"). Volontairement plus court que `_WELCOME` : ce n'est pas un cold
+# start, juste une clarification avant de reprendre la collecte.
+_EXPLAIN_AGAIN = (
+    "Bien sûr patron, je t'explique ! 😊 *AgriConnect*, c'est une plateforme "
+    "qui connecte directement producteurs et acheteurs agricoles par simple "
+    "message WhatsApp — pas d'intermédiaire, pas de déplacement inutile. "
+    "Tu peux vendre tes récoltes ou trouver de bons produits selon ton "
+    "besoin, et oui, tu peux créer un compte pour quelqu'un d'autre (ex: "
+    "ton père) tant que tu réponds pour lui. C'est gratuit et ça prend une "
+    "minute pour démarrer !"
+)
+
+# 2e question (ou plus) dans la MÊME session d'onboarding : ne PAS répéter
+# `_EXPLAIN_AGAIN` mot pour mot — l'utilisateur l'a déjà lu. On raccourcit et
+# on répond directement à l'inquiétude la plus fréquente à ce stade (est-ce
+# une arnaque ?) plutôt que de re-dérouler le pitch produit.
+_EXPLAIN_AGAIN_SHORT = (
+    "Je comprends ta prudence patron, c'est normal de vérifier ! 🙏 "
+    "AgriConnect est un vrai service gratuit, sans engagement — déjà "
+    "utilisé par des producteurs et acheteurs près de chez toi. Donne-moi "
+    "juste ton nom et ta ville pour avancer, tu peux toujours changer "
+    "d'avis après."
 )
 
 
@@ -427,14 +481,18 @@ async def run_onboarding_step(
             or entities.get("location")
         )
 
+    is_question = False
+    llm_reply: Optional[str] = None
     if text and llm_extract_all:
         try:
-            llm_out = await llm_extract_all(text)
+            llm_out = await llm_extract_all(text, _context_hint_for_llm(ob_state))
         except Exception:
             llm_out = {}
         for key in ("role", "name", "zone", "confirm"):
             if not extracted.get(key) and llm_out.get(key):
                 extracted[key] = llm_out.get(key)
+        is_question = bool(llm_out.get("is_question"))
+        llm_reply = llm_out.get("reply") or None
 
     changed = _merge_extracted(ob_state, extracted)
 
@@ -488,7 +546,18 @@ async def run_onboarding_step(
 
     # Still collecting : ask for whichever slot(s) remain, in a friendly free-order tone.
     ob_state.step = OnboardingStep.COLLECT_ROLE
-    return OnboardingResult(state=ob_state, response_text=_collect_prompt(ob_state))
+    prompt = _collect_prompt(ob_state)
+    if is_question:
+        ob_state.explain_count += 1
+        # Le LLM génère la réponse adaptée à CE message précis (voir
+        # `_llm_extract_onboarding_all` / [[onboarding-adaptive-questions-2026-08]]) —
+        # les textes canned ne sont qu'un filet de sécurité si l'appel LLM a
+        # échoué (timeout, erreur, pas de client LLM injecté en test).
+        explanation = llm_reply or (
+            _EXPLAIN_AGAIN if ob_state.explain_count <= 1 else _EXPLAIN_AGAIN_SHORT
+        )
+        prompt = f"{explanation}\n\n{prompt}"
+    return OnboardingResult(state=ob_state, response_text=prompt)
 
 
 async def _resolve_zone_id(ob_state: OnboardingState, mcp_runtime: Any) -> bool:

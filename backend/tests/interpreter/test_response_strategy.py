@@ -143,6 +143,33 @@ class TestUnknownOutOfScope:
         assert result["response_strategy"] == "CLARIFICATION"
 
 
+class TestLocationSharedBypassesUnknownEvent:
+    """Bug réel (2026-08-13) : un partage de position WhatsApp natif n'a pas
+    de texte à classifier, donc interpreted_event vaut TOUJOURS UNKNOWN pour
+    ces tours — y compris quand le resolver vient de RÉUSSIR (ex.
+    confirm_preorder_draft/select_winning_bid après le gate GPS). Le bloc
+    UNKNOWN ci-dessus tournait ce SUCCESS en CONFIRMATION/CLARIFICATION à
+    partir d'un `expected_input` désormais périmé : la commande était
+    confirmée en base mais l'utilisateur recevait "Je n'ai pas bien saisi".
+    Voir [[gps-delivery-burkina-faso-2026-08]]."""
+
+    def test_a_shared_location_does_not_override_an_upstream_success(self):
+        result = rs(
+            interpreted_event="UNKNOWN",
+            expected_input="CONFIRMATION",
+            response_strategy="SUCCESS",
+            status="COMPLETED",
+            location_shared=True,
+        )
+        assert result["response_strategy"] == "SUCCESS"
+
+    def test_a_shared_location_still_clarifies_when_nothing_else_resolved_it(self):
+        """Le bypass ne doit pas créer un faux SUCCESS : sans stratégie
+        upstream ni statut résolu, ça retombe sur le comportement par défaut."""
+        result = rs(interpreted_event="UNKNOWN", location_shared=True)
+        assert result["response_strategy"] == "CLARIFICATION"
+
+
 # =====================================================================
 # SLOT-FILLING (missing_fields)
 # =====================================================================

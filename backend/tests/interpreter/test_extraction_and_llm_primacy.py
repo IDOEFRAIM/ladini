@@ -258,3 +258,43 @@ class TestDegradedModelDetection:
         st = make_state(normalized_text="tomates", expected_input="PRODUCT", user_role="PRODUCER")
         r = run(interp(st, rt))
         assert r["raw_analysis"]["degraded_model"] is True
+
+
+# =====================================================================
+# PLUSIEURS PRODUITS DANS LE MÊME MESSAGE — jamais fusionnés en une seule
+# chaîne de recherche (incident réel 2026-08-14, voir
+# [[buyer-search-fuzzy-match-safety-2026-08]] : "laitue, oeufs" fusionné en
+# un seul terme a fuzzy-matché "Bœuf" au lieu des œufs demandés).
+# =====================================================================
+
+class TestMultipleProductsAreNeverMerged:
+    def test_additional_products_from_the_llm_survive_extraction(self):
+        interp = make_input_interpreter("BUYER")
+        rt = StubRuntime(llm=ScriptedLLM({
+            "interpreted_event": "NEW_TASK",
+            "detected_intent": "BUYER_REQUEST",
+            "interpreter_confidence": 0.9,
+            "extracted_entities": {
+                "product": "œufs",
+                "additional_products": ["laitue"],
+            },
+        }))
+        st = make_state(
+            normalized_text="je cherche des œufs et de la laitue",
+            expected_input="NONE", user_role="BUYER",
+        )
+        r = run(interp(st, rt))
+        assert r["extracted_entities"]["product"] == "œufs"
+        assert r["extracted_entities"]["additional_products"] == ["laitue"]
+
+    def test_a_single_product_yields_no_additional_products_key(self):
+        interp = make_input_interpreter("BUYER")
+        rt = StubRuntime(llm=ScriptedLLM({
+            "interpreted_event": "NEW_TASK",
+            "detected_intent": "BUYER_REQUEST",
+            "interpreter_confidence": 0.9,
+            "extracted_entities": {"product": "tomates", "additional_products": []},
+        }))
+        st = make_state(normalized_text="je cherche des tomates", expected_input="NONE", user_role="BUYER")
+        r = run(interp(st, rt))
+        assert r["extracted_entities"].get("additional_products") in (None, [])

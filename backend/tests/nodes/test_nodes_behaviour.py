@@ -283,6 +283,62 @@ class TestPostResponseCleanup:
         assert wm["stocks_menu"] is None
 
 
+class TestPostResponseCleanupPreservesCurrentGoal:
+    """Bug réel, confirmé par logs serveur (2026-08-15) : ce garde-fou ne
+    couvrait QUE les canaux SELECTION et CONFIRMATION — pas le cas, bien
+    plus courant, d'un formulaire générique en attente d'UN CHAMP précis
+    (ASK_MISSING_FIELD : expected_input="PRICE"/"QUANTITY"/"DEADLINE"/etc.,
+    status="WAITING_INPUT"). `current_goal` était effacé après CHAQUE tour
+    d'appel d'offres/vente/déclaration de culture — le tour suivant
+    démarrait avec `current_goal=None` en pleine opération, empêchant
+    goal_planner de jamais la faire progresser jusqu'à l'exécution (boucle
+    infinie entre les mêmes questions). Voir
+    [[precommande-architecture-consolidation-2026-08]]."""
+
+    def test_a_field_specific_wait_now_preserves_current_goal(self):
+        st = make_state(
+            status="WAITING_INPUT", expected_input="PRICE",
+            current_goal="PROCUREMENT_CREATE_REQUEST",
+        )
+        result = run(post_response_cleanup(st, None))
+        assert "current_goal" not in result, "ne doit pas être touché — préservé"
+
+    @pytest.mark.parametrize("expected_input", ["PRICE", "QUANTITY", "DEADLINE", "UNIT", "PRODUCT"])
+    def test_preserved_for_every_generic_field_type(self, expected_input):
+        st = make_state(
+            status="WAITING_INPUT", expected_input=expected_input,
+            current_goal="SALES_PUBLISH_PRODUCT",
+        )
+        result = run(post_response_cleanup(st, None))
+        assert "current_goal" not in result
+
+    def test_selection_and_confirmation_channels_still_work_as_before(self):
+        """Non-régression : les deux canaux déjà couverts avant ce fix."""
+        st_selection = make_state(
+            status="WAITING_INPUT", expected_input="SELECTION", current_goal="BUYER_LIST_AUCTIONS",
+        )
+        st_confirmation = make_state(
+            status="WAITING_CONFIRMATION", expected_input="CONFIRMATION", current_goal="SALES_PUBLISH_PRODUCT",
+        )
+        assert "current_goal" not in run(post_response_cleanup(st_selection, None))
+        assert "current_goal" not in run(post_response_cleanup(st_confirmation, None))
+
+    def test_a_genuinely_completed_operation_still_clears_current_goal(self):
+        """Non-régression : une opération VRAIMENT terminée (rien en
+        attente) doit toujours repartir de zéro au tour suivant."""
+        st = make_state(status="COMPLETED", expected_input="NONE", current_goal="SALES_PUBLISH_PRODUCT")
+        result = run(post_response_cleanup(st, None))
+        assert result["current_goal"] is None
+
+    def test_no_expected_input_still_clears_current_goal_even_if_waiting_input(self):
+        """Un status WAITING_INPUT sans expected_input concret (NONE) reste
+        un canal générique, pas un formulaire actif — ne doit pas préserver
+        le goal indéfiniment."""
+        st = make_state(status="WAITING_INPUT", expected_input="NONE", current_goal="SALES_PUBLISH_PRODUCT")
+        result = run(post_response_cleanup(st, None))
+        assert result["current_goal"] is None
+
+
 # =====================================================================
 # ACTION PANIER — pilotée par le verdict LLM, pas par mots-clés
 # =====================================================================

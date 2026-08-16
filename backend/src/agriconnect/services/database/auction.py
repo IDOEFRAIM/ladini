@@ -12,6 +12,7 @@ from agriconnect.core.formatting import fmt_num as _fmt_num
 from .common import clean_text, normalize_phone
 from .search import fuzzy_match, similarity_rank
 from .errors import BusinessRuleException
+from .category import _is_confident_category_match
 from .moderation import _fold as _fold_for_moderation
 
 # Importation stricte des modèles requis pour le domaine des enchères
@@ -99,14 +100,29 @@ class AuctionMixin(BaseMixin):
     async def _get_or_create_sub_category_for_rfq(self, product_query_clean: str) -> SubCategory:
         """Auto-provisionne une sous-catégorie catalogue pour un appel d'offres.
 
-        Un appel d'offres (Auction) exprime un besoin acheteur, pas un article
-        d'un catalogue déjà stabilisé — contrairement à `create_product`, il
-        n'y a pas de raison métier de refuser un produit simplement parce
-        qu'aucun producteur ne l'a encore déclaré. La modération anti-abus
-        (termes interdits) tourne déjà en amont sur le texte brut du message
-        (nodes/security_moderation.py) ; elle est revérifiée ici en défense en
-        profondeur car cette méthode est aussi un outil MCP appelable
-        directement (hors du flux conversationnel WhatsApp).
+        Restaurée (2026-08-15) après un incident réel en production :
+        rejeter systématiquement `create_auction` quand aucune sous-catégorie
+        EXISTANTE ne matchait a bloqué TOUT appel d'offres, y compris pour
+        des produits agricoles parfaitement légitimes ("riz") — parce que
+        `get_public_categories()` (utilisée pour lister les "vraies
+        catégories" dans le message de rejet) ne renvoie QUE les catégories
+        ayant du stock ACTIF (`Product.quantity_for_sale > 0`) : dès qu'aucun
+        producteur n'a de stock en ce moment, la liste est vide et le rejet
+        devient absolu, même légitime. Un appel d'offres (Auction) exprime un
+        BESOIN acheteur, PAS un article d'un catalogue déjà stabilisé
+        (contrairement à `create_product`) — il n'y a pas de raison métier de
+        refuser un produit simplement parce qu'aucun producteur ne l'a encore
+        déclaré. Voir [[precommande-architecture-consolidation-2026-08]]
+        Round 6 : le garde-fou de confiance ajouté au Round 4
+        (`_is_confident_category_match`, contre les faux positifs type
+        bœuf/œufs) reste en place et est le VRAI correctif utile ; le rejet
+        pur, lui, était une sur-correction.
+
+        La modération anti-abus (termes interdits) tourne déjà en amont sur
+        le texte brut du message (`nodes/security_moderation.py`) ; elle est
+        revérifiée ici en défense en profondeur car cette méthode est aussi
+        un outil MCP appelable directement (hors du flux conversationnel
+        WhatsApp).
         """
         current_session = self.session
 
@@ -238,6 +254,25 @@ class AuctionMixin(BaseMixin):
 
         # 2. Résolution du produit — recherche floue trigram (catalogue,
         # fort impact métier), triée par pertinence décroissante.
+        #
+        # REVERTED (2026-08-15, incident réel en production) : une version
+        # antérieure de ce code REJETAIT l'appel d'offres (avec la liste des
+        # "vraies catégories" dans le message) quand aucune sous-catégorie
+        # EXISTANTE ne matchait. Ça a bloqué l'appel d'offres pour "riz" —
+        # un produit agricole parfaitement légitime — parce que
+        # `get_public_categories()` ne renvoie que les catégories ayant du
+        # stock ACTIF : sans producteur ayant du stock à cet instant, la
+        # liste (et donc le message d'erreur) était VIDE et le rejet devenait
+        # absolu. Un appel d'offres exprime un BESOIN acheteur, pas un
+        # article d'un catalogue déjà stabilisé — contrairement à
+        # `create_product`, il n'y a pas de raison métier de refuser un
+        # produit simplement parce qu'aucun producteur ne l'a encore déclaré.
+        # `_get_or_create_sub_category_for_rfq` (auto-provisioning, avec
+        # re-vérification des termes interdits) est restaurée comme dernier
+        # recours. Le VRAI correctif utile de cette période — le garde-fou de
+        # confiance ci-dessous contre les faux positifs trigram type
+        # bœuf/œufs — reste en place, lui. Voir
+        # [[precommande-architecture-consolidation-2026-08]] Round 6.
         sub_cat_stmt = (
             select(SubCategory)
             .where(fuzzy_match(SubCategory.name, product_query_clean))
@@ -245,15 +280,22 @@ class AuctionMixin(BaseMixin):
             .limit(1)
         )
         sub_cat = await current_session.scalar(sub_cat_stmt)
+        if sub_cat and not _is_confident_category_match(product_query_clean, sub_cat.name):
+            sub_cat = None
         if not sub_cat:
-            sub_cat = await self._fuzzy_match_sub_category(product_query_clean)
+            # Bug réel confirmé (2026-08-16) : "champignons" a été accepté
+            # comme correspondance de "oignons" ici — `fuzz.WRatio` seul
+            # (score >= 78) N'EST PAS fiable, contrairement à ce que
+            # supposait le commentaire précédent : WRatio('champignons',
+            # 'oignons') = 83.1 (partial_ratio détecte "ignons" en commun),
+            # même classe de faux positif que l'incident bœuf/œufs — le seuil
+            # élevé rassure sur la SIMILARITÉ, pas sur le fait qu'il s'agisse
+            # du MÊME produit. Le garde-fou de confiance (substring) doit
+            # s'appliquer ICI AUSSI, pas seulement au premier candidat SQL.
+            candidate = await self._fuzzy_match_sub_category(product_query_clean)
+            if candidate and _is_confident_category_match(product_query_clean, candidate.name):
+                sub_cat = candidate
         if not sub_cat:
-            # Un appel d'offres exprime un BESOIN acheteur, pas la publication
-            # d'un article d'un catalogue déjà stabilisé (contrairement à
-            # create_product) — LADINI ne doit pas refuser de relayer une
-            # demande simplement parce qu'aucun producteur n'a encore déclaré
-            # ce produit précis. On auto-provisionne la sous-catégorie au lieu
-            # de rejeter, tant que le produit n'est pas interdit.
             sub_cat = await self._get_or_create_sub_category_for_rfq(product_query_clean)
 
         # 3. Résolution zone — recherche floue trigram (référentiel logistique).

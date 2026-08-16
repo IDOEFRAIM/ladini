@@ -85,7 +85,16 @@ async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
     if cognitive_action == "abandon_tunnel_max_retries":
         return {"response_strategy": "CLARIFICATION", "ag_ui_component": None}
 
-    if interpreted_event in {"UNKNOWN", "OUT_OF_SCOPE"}:
+    # Un partage de position WhatsApp natif n'a pas de texte à classifier —
+    # interpreted_event vaut donc TOUJOURS UNKNOWN pour ces tours, y compris
+    # quand le resolver vient de conclure avec succès (ex: confirm_preorder_draft/
+    # select_winning_bid après le gate GPS — voir
+    # [[gps-delivery-burkina-faso-2026-08]]). Sans cette exclusion, ce bloc
+    # écrasait un response_strategy=SUCCESS déjà posé par le resolver avec
+    # CONFIRMATION/CLARIFICATION à partir d'un expected_input désormais
+    # périmé — la commande était confirmée en base mais l'utilisateur
+    # recevait "Je n'ai pas bien saisi".
+    if interpreted_event in {"UNKNOWN", "OUT_OF_SCOPE"} and not state.get("location_shared"):
         if expected_input == "SELECTION" and state.get("expected_candidates"):
             return {"response_strategy": "SELECTION_MENU", "status": "WAITING_INPUT", "ag_ui_component": None}
         if expected_input in SLOT_FILLING_INPUTS:

@@ -167,6 +167,40 @@ class TestCognitiveGuardUnknownInTunnel:
         result = run(cognitive_guard(state, None))
         assert result["cognitive_decision"]["action"] == "continue"
 
+    def test_a_shared_location_in_tunnel_is_not_treated_as_an_unknown_event(self):
+        """Bug réel (2026-08-13) : un partage de position WhatsApp natif n'a
+        pas de texte à classifier — l'interprète renvoie event=UNKNOWN pour
+        ces tours. Avant ce fix, ÇA incrémentait retry_count et forçait
+        response_strategy=RECOVERY, qui court-circuite tout le graphe
+        directement vers la réponse (nodes/routing `_route_after_clarification`)
+        SANS jamais atteindre le resolver — un point GPS valide au stade
+        `finalize_winner`/`create_preorder` tombait donc systématiquement sur
+        le message générique "Je n'ai pas bien saisi", même après N tentatives.
+        Voir [[gps-delivery-burkina-faso-2026-08]]."""
+        state = make_state(
+            current_goal="BUYER_PREORDER_INIT",
+            interpreted_event="UNKNOWN",
+            expected_input="CONFIRMATION",
+            retry_count=0,
+            location_shared=True,
+        )
+        result = run(cognitive_guard(state, None))
+        assert result["cognitive_decision"]["action"] == "continue"
+        assert result.get("response_strategy") != "RECOVERY"
+        assert "current_goal" not in result, "le tunnel ne doit pas être touché"
+
+    def test_a_shared_location_never_triggers_tunnel_abandonment_even_at_max_retries(self):
+        state = make_state(
+            current_goal="BUYER_PREORDER_INIT",
+            interpreted_event="UNKNOWN",
+            expected_input="CONFIRMATION",
+            retry_count=5,
+            location_shared=True,
+        )
+        result = run(cognitive_guard(state, None))
+        assert result["cognitive_decision"]["action"] == "continue"
+        assert result.get("response_strategy") != "CLARIFICATION"
+
 
 class TestCognitiveGuardEntityCarryAndProgress:
     def test_carried_entities_are_reflected_in_updates_and_decision(self):
@@ -253,6 +287,20 @@ class TestCognitiveOrchestrator:
         state = make_state(current_goal="SALES_PUBLISH_PRODUCT", expected_input="QUANTITY", interpreted_event=event)
         result = run(cognitive_orchestrator(state, None))
         assert result["cognitive_decision"]["next_step"] == "continue_tunnel"
+
+    def test_a_shared_location_in_tunnel_continues_the_tunnel_even_with_event_unknown(self):
+        """Un partage de position n'a pas d'event classifiable (event=UNKNOWN)
+        mais doit quand même atteindre le resolver — voir
+        [[gps-delivery-burkina-faso-2026-08]]."""
+        state = make_state(
+            current_goal="BUYER_PREORDER_INIT",
+            expected_input="CONFIRMATION",
+            interpreted_event="UNKNOWN",
+            location_shared=True,
+        )
+        result = run(cognitive_orchestrator(state, None))
+        assert result["cognitive_decision"]["next_step"] == "continue_tunnel"
+        assert result["cognitive_decision"]["reason"] == "active_goal"
 
     @pytest.mark.parametrize("event", ["UNKNOWN", "OUT_OF_SCOPE"])
     def test_unknown_intent_without_a_tunnel_clarifies(self, event):

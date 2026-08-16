@@ -3,6 +3,7 @@ from __future__ import annotations
 """Cart domain service — isolates buyer cart orchestration helpers."""
 
 import logging
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,6 +31,43 @@ from agriconnect.graphs.agents.market_coach.utils import (
 from agriconnect.services.search_results_cache import store_results as _store_search_photo_results
 
 from .buyer_common import SUPPORT_FOOTER, with_support_footer
+
+
+def _normalize_for_match(text: Any) -> str:
+    text = str(text or "").lower().strip()
+    text = text.replace("œ", "oe").replace("æ", "ae")
+    text = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in text if not unicodedata.combining(ch))
+
+
+def _is_confident_product_match(search_term: Any, matched_name: Any) -> bool:
+    """True when the matched product plausibly IS what was searched for —
+    an exact/substring relationship between the (accent/case-normalized)
+    search term and the matched product name.
+
+    `search_products` (services/database/buyer.py) uses trigram fuzzy
+    matching with a deliberately low threshold (0.22) to tolerate typos
+    ("tomte" → "tomate") — a documented, intentional recall-over-precision
+    tradeoff. But trigram similarity on short words can't distinguish a typo
+    from a genuinely different word: a real incident (2026-08-13) had
+    "oeufs" (eggs) fuzzy-match "Bœuf" (a live cattle listing at
+    486 000 FCFA/head) — the buyer asked for a dozen eggs and ended up with
+    a ~4.86M FCFA cattle reservation auto-confirmed, because the single-vendor
+    "skip the menu, go straight to quantity/checkout" shortcut trusted ANY
+    fuzzy match unconditionally.
+
+    This is NOT a threshold problem — raising it doesn't reliably separate
+    "oeufs"/"Bœuf" from "tomte"/"tomate" (both are short words with heavy
+    trigram overlap purely from letter reuse). Instead: any match that is
+    NOT a textual substring of the other is treated as low-confidence and
+    routed through an explicit confirmation step before it's ever added to
+    a cart or reserved — see [[buyer-search-fuzzy-match-safety-2026-08]].
+    """
+    term = _normalize_for_match(search_term)
+    name = _normalize_for_match(matched_name)
+    if not term or not name:
+        return False
+    return term in name or name in term
 
 
 @dataclass
@@ -63,6 +101,7 @@ class CartDomainService:
                 continue
             seen_ids.add(key)
             source_type = _infer_source_type(item)
+            matched_name = _clean_product_name(item.get("name") or product_name)
             vendors.append(
                 {
                     "product_id": pid,
@@ -70,7 +109,13 @@ class CartDomainService:
                     # l'id du MarketOffer → requis par reserve_future_offer.
                     "market_offer_id": pid if source_type == "FUTURE" else None,
                     "crop_cycle_id": item.get("crop_cycle_id"),
-                    "name": _clean_product_name(item.get("name") or product_name),
+                    "name": matched_name,
+                    # Voir _is_confident_product_match — un match qui n'est PAS un
+                    # sous-texte du terme cherché (ou l'inverse) n'a une similarité
+                    # trigram que par coïncidence de lettres (ex: "oeufs"/"Bœuf") et
+                    # doit passer par une confirmation avant d'être traité comme
+                    # résolu. Voir [[buyer-search-fuzzy-match-safety-2026-08]].
+                    "match_confident": _is_confident_product_match(product_name, matched_name),
                     "price": float(item.get("price") or 0.0),
                     "unit": str(item.get("unit") or "KG").upper(),
                     "vendor": item.get("vendor"),

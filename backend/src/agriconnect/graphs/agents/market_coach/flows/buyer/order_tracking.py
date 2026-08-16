@@ -35,6 +35,20 @@ from agriconnect.graphs.agents.market_coach.utils import (
 )
 from agriconnect.services.search_results_cache import store_results as _store_search_photo_results
 
+# Gate GPS partagé avec preorder.py — voir
+# [[precommande-architecture-consolidation-2026-08]]. Ré-exporté sous ces
+# mêmes noms pour ne pas casser les imports existants
+# (`from .order_tracking import _get_stored_location`, utilisés par
+# negotiation.py et preorder.py).
+from agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate import (
+    _GPS_FIRST_TIME_PROMPT,
+    _GPS_HABITUAL_PROMPT,
+    _GPS_TEXT_REMINDER,
+    _get_stored_location,
+    enter_gps_stage,
+    resolve_gps_stage,
+)
+
 logger = logging.getLogger("AgriConnect.Market.BuyerFlow.OrderTracking")
 
 
@@ -377,6 +391,16 @@ async def check_order_status(
     result = await _safe_gw_call(mc_runtime, "get_transaction_summary", **kwargs)
 
     if not is_success_response(result):
+        return _order_not_found_response(order_id, phone)
+
+    # `get_transaction_summary` renvoie status="success" + data=None quand
+    # AUCUNE commande n'existe (voir services/database/buyer.py) — un
+    # "succès sans résultat", pas une erreur. Sans ce garde-fou, `data`
+    # retombait sur l'enveloppe elle-même (`result`) et le rendu affichait
+    # l'enveloppe comme si c'était une commande : "Commande #" vide,
+    # "Total : 0 FCFA", et le statut HTTP "success" affiché tel quel comme
+    # statut de commande ("🔄 SUCCESS").
+    if result.get("data") is None:
         return _order_not_found_response(order_id, phone)
 
     data = result.get("data") or result
@@ -814,24 +838,6 @@ async def confirm_winner_selection(
     }
 
 
-async def _get_stored_location(mc_runtime: MarketRuntime, phone: str) -> "tuple[Optional[float], Optional[float]]":
-    """Point GPS PAR DÉFAUT du profil (`User.latitude`/`longitude`), ou
-    `(None, None)` si absent/introuvable. Jamais levé — best-effort."""
-    if not phone:
-        return None, None
-    try:
-        from agriconnect.graphs.agents.market_coach.services.mcp.gateway import ProfileGateway
-        result = await ProfileGateway(mc_runtime).get_user_by_phone(phone)
-        data = result.get("data") or {}
-        lat, lon = data.get("latitude"), data.get("longitude")
-        if lat is None or lon is None:
-            return None, None
-        return float(lat), float(lon)
-    except Exception:
-        logger.warning("_get_stored_location: échec de lecture du profil pour %s", phone[-4:] if len(phone) >= 4 else phone)
-        return None, None
-
-
 async def _execute_winner_selection(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
@@ -877,36 +883,24 @@ async def _execute_winner_selection(
     }
 
 
-_GPS_HABITUAL_PROMPT = (
-    "📍 Livraison à ton point GPS habituel ? Réponds *OUI* pour valider, "
-    "ou clique sur le trombone 📎 puis *Localisation* pour m'envoyer un nouveau point."
-)
-_GPS_FIRST_TIME_PROMPT = (
-    "📍 Envoie-moi ton point GPS exact en cliquant sur le trombone 📎 puis "
-    "*Localisation* sur WhatsApp pour finaliser la livraison."
-)
-_GPS_TEXT_REMINDER = (
-    "Pour garantir la livraison, j'ai besoin de ta position GPS exacte. "
-    "Clique sur le bouton 📎 de WhatsApp puis sur *Localisation* pour me la partager."
-)
-
-
 async def finalize_winner(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
 ) -> Dict[str, Any]:
     """Traite la réponse oui/non à la confirmation du gagnant, PUIS (une fois
-    le gagnant confirmé) le point GPS de livraison — voir
-    [[gps-delivery-burkina-faso-2026-08]]. Deux étapes distinctes partageant
-    le même `expected_input == "CONFIRMATION"` et le même marqueur
-    `pending_winner_bid` (voir order_tracking_resolver), différenciées par
-    `working_memory.winner_gps_stage`.
+    le gagnant confirmé) le point GPS de livraison via le gate partagé
+    `gps_delivery_gate.py` (voir [[precommande-architecture-consolidation-2026-08]]
+    et [[gps-delivery-burkina-faso-2026-08]]). Deux étapes distinctes
+    partageant le même `expected_input == "CONFIRMATION"` et le même
+    marqueur `pending_winner_bid` (voir order_tracking_resolver),
+    différenciées par `working_memory.winner_gps_stage`.
     """
     working = state.get("working_memory") or {}
     bid_id = working.get("pending_winner_bid")
     event = str(state.get("interpreted_event") or "").upper().strip()
     text = str(state.get("normalized_text") or "").strip().lower()
     location_shared = bool(state.get("location_shared"))
+    phone = str(state.get("user_phone") or "")
 
     def _clear_wm() -> Dict[str, Any]:
         wm = dict(working)
@@ -938,76 +932,52 @@ async def finalize_winner(
     # ── Étape 1 : confirmer le GAGNANT lui-même (comportement historique) ──
     if not gps_stage:
         if not is_yes:
-            # Réponse ambiguë : on redemande explicitement.
+            from agriconnect.graphs.agents.market_coach.utils import llm_deviation_reply
+            note = await llm_deviation_reply(
+                mc_runtime, str(state.get("normalized_text") or ""),
+                "confirmer le gagnant retenu pour cet appel d'offres (oui/non)",
+            )
+            prompt = "Répondez *oui* pour confirmer le gagnant, ou *non* pour annuler."
             return {
                 "status": "WAITING_INPUT",
                 "expected_input": "CONFIRMATION",
                 "response_strategy": "ASK_MISSING_FIELD",
-                "final_response": "Répondez *oui* pour confirmer le gagnant, ou *non* pour annuler.",
+                "final_response": f"{note}\n\n{prompt}" if note else prompt,
                 "ag_ui_component": None,
             }
 
         # "oui" reçu pour le gagnant → étape GPS AVANT d'exécuter la commande
         # (jamais de commande sans point de livraison connu — Burkina Faso
         # uniquement, adresses textuelles trop imprécises).
-        stored_lat, stored_lon = await _get_stored_location(mc_runtime, str(state.get("user_phone") or ""))
+        gate = await enter_gps_stage(mc_runtime, phone)
         wm = dict(working)
         wm["winner_gps_stage"] = True
-        if stored_lat is not None and stored_lon is not None:
-            wm["winner_gps_default"] = {"lat": stored_lat, "lon": stored_lon}
-            prompt = _GPS_HABITUAL_PROMPT
-        else:
-            wm["winner_gps_default"] = None
-            prompt = _GPS_FIRST_TIME_PROMPT
+        wm["winner_gps_default"] = gate["gps_default"]
         return {
             "status": "WAITING_INPUT",
             "expected_input": "CONFIRMATION",
             "response_strategy": "ASK_MISSING_FIELD",
-            "final_response": prompt,
+            "final_response": gate["prompt"],
             "working_memory": wm,
             "ag_ui_component": None,
         }
 
     # ── Étape 2 : point GPS de livraison ────────────────────────────────
-    if location_shared:
-        # Le webhook a déjà persisté ce point (best-effort, en tâche de fond,
-        # voir api/routes/twilio_webhook.py::_persist_location_background) —
-        # on relit la position COURANTE du profil pour l'utiliser comme point
-        # de livraison plutôt que de faire transiter lat/lon dans le state.
-        lat, lon = await _get_stored_location(mc_runtime, str(state.get("user_phone") or ""))
-        if lat is None or lon is None:
-            # Filet de sécurité : improbable (le webhook vient de l'écrire),
-            # mais ne doit jamais planter la commande.
-            return {
-                "status": "WAITING_INPUT",
-                "expected_input": "CONFIRMATION",
-                "response_strategy": "ASK_MISSING_FIELD",
-                "final_response": "Je n'ai pas pu récupérer ce point GPS, merci de le repartager.",
-                "ag_ui_component": None,
-            }
-        return await _execute_winner_selection(state, mc_runtime, bid_id, _clear_wm, lat, lon)
-
-    if is_yes:
-        default = working.get("winner_gps_default") or {}
-        lat, lon = default.get("lat"), default.get("lon")
-        if lat is None or lon is None:
-            # "oui" sans point par défaut connu (ne devrait survenir qu'en cas
-            # de désynchro d'état) → redemander explicitement le partage.
-            return {
-                "status": "WAITING_INPUT",
-                "expected_input": "CONFIRMATION",
-                "response_strategy": "ASK_MISSING_FIELD",
-                "final_response": _GPS_FIRST_TIME_PROMPT,
-                "ag_ui_component": None,
-            }
-        return await _execute_winner_selection(state, mc_runtime, bid_id, _clear_wm, lat, lon)
-
-    # Texte libre (ni "oui", ni position partagée) → rappel poli du bouton GPS.
+    resolution = await resolve_gps_stage(
+        mc_runtime, phone,
+        location_shared=location_shared, is_yes=is_yes,
+        gps_default=working.get("winner_gps_default"),
+        user_text=str(state.get("normalized_text") or ""),
+    )
+    if resolution.resolved:
+        return await _execute_winner_selection(
+            state, mc_runtime, bid_id, _clear_wm, resolution.lat, resolution.lon,
+        )
     return {
         "status": "WAITING_INPUT",
         "expected_input": "CONFIRMATION",
         "response_strategy": "ASK_MISSING_FIELD",
-        "final_response": _GPS_TEXT_REMINDER,
+        "final_response": resolution.message,
         "ag_ui_component": None,
     }
 

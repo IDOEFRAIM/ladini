@@ -270,6 +270,49 @@ class TestBuyerRequestResolverCatalogFlow:
         assert result["current_goal"] == "BUYER_REQUEST"
         assert result["working_memory"]["buyer_request_catalog_checked"] is True
 
+    def test_low_confidence_match_is_treated_as_not_found(self):
+        """Incident réel (2026-08-14) : "oeufs" faisait correspondre "Bœuf"
+        (486 000 FCFA/tête) via la recherche floue trigram, alors que ni
+        œufs ni laitue n'existent en base. Suggérer "Bœuf, c'est bien ça ?"
+        pour une recherche d'œufs est trompeur — le match est écarté et
+        traité comme "produit introuvable" (propose un appel d'offres),
+        pas comme une suggestion à confirmer. Voir
+        [[buyer-search-fuzzy-match-safety-2026-08]]."""
+        from agriconnect.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        state = make_state(user_phone="+2260", transaction_payload={"product": "oeufs"})
+        runtime = rt({
+            "search_products": {
+                "status": "success",
+                "results": [{
+                    "id": "offer1", "vendor_name": "jojo", "unit": "TETE",
+                    "price": 486000, "name": "Bœuf (🌐 National)", "source_type": "FUTURE",
+                }],
+            },
+            "record_demand_signal": {"status": "success"},
+        })
+        result = run(buyer_request_resolver(state, runtime))
+        assert "Bœuf" not in result["final_response"]
+        assert "introuvable" in result["final_response"].lower() or "Aucun produit" in result["final_response"]
+        assert result["expected_input"] == "CONFIRMATION"
+        assert result["working_memory"]["buyer_request_waiting_choice"] is True
+
+    def test_a_second_product_mentioned_in_the_same_message_is_surfaced_not_lost(self):
+        """L'interprète met le 1er produit dans `product` et le reste dans
+        `additional_products` (jamais fusionnés en une chaîne — voir
+        [[buyer-search-fuzzy-match-safety-2026-08]]). L'utilisateur doit être
+        informé que "laitue" a été mis de côté, pas le voir disparaître."""
+        from agriconnect.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        state = make_state(
+            user_phone="+2260",
+            transaction_payload={"product": "oeufs", "additional_products": ["laitue"]},
+        )
+        runtime = rt({"search_products": {
+            "status": "success",
+            "results": [{"vendor_name": "jojo", "unit": "KG", "price": 500, "name": "Oeufs"}],
+        }})
+        result = run(buyer_request_resolver(state, runtime))
+        assert "laitue" in result["final_response"]
+
     def test_no_vendors_offers_procurement_and_logs_demand(self):
         from agriconnect.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
         state = make_state(user_phone="+2260", transaction_payload={"product": "produit_rare"})

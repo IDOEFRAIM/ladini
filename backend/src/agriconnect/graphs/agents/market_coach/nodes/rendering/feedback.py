@@ -11,6 +11,7 @@ from agriconnect.graphs.agents.market_coach.nodes.rendering.common import (
     label_for_field,
     status_component,
 )
+from agriconnect.graphs.agents.market_coach.utils import llm_deviation_reply
 
 _RECOVERY_MAX_RETRIES = 2
 
@@ -81,6 +82,16 @@ async def render_recovery(ctx: RenderContext) -> Dict[str, Any]:
             f"J'ai juste besoin de {label}{reason_part}.\n"
             f"Exemple : tapez simplement la valeur, ou dites « annuler » si vous changez d'avis."
         )
+        # Ce nœud rend TOUT écart classé UNKNOWN pendant un tunnel actif, quel
+        # que soit le goal (cognitive_guard::recover_active_tunnel) — même
+        # défaut d'adaptivité que render_ask_missing_field.py, corrigé de la
+        # même façon : reconnaître ce que l'utilisateur a dit avant de
+        # rejouer la question, plutôt que le même texte figé en boucle. Voir
+        # [[precommande-architecture-consolidation-2026-08]].
+        user_text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+        note = await llm_deviation_reply(ctx.mc_runtime, user_text, f"répondre à : {label}")
+        if note:
+            text_output = f"{note}\n\n{text_output}"
     return {
         "final_response": text_output,
         "retry_count": retry_next,
@@ -131,8 +142,28 @@ async def render_interruption(ctx: RenderContext) -> Dict[str, Any]:
 
 
 async def render_clarification(ctx: RenderContext) -> Dict[str, Any]:
-    """Fallback : coach proactif — refonte double-rôle (vendre ET acheter)."""
+    """Fallback : coach proactif — refonte double-rôle (vendre ET acheter).
+
+    Bug réel, systémique (2026-08-14) : `nodes/clarification.py` fait déjà
+    un appel LLM pour générer une réponse CONTEXTUELLE (`needs_clarification`)
+    et pose `final_response` + `response_strategy="CLARIFICATION"` quand il
+    réussit. Mais CE renderer — le seul de tout `nodes/rendering/` à ne PAS
+    réutiliser un `final_response` précalculé (voir `ask.py`, `menus.py`,
+    `confirm.py`) — recalculait TOUJOURS son propre texte générique depuis
+    zéro, écrasant silencieusement la réponse LLM à chaque fois. C'est
+    `render_clarification` qui est choisi par défaut pour TOUTE stratégie
+    non reconnue (`response_handlers.py::_select_handler`), y compris
+    littéralement "CLARIFICATION" (absente des deux dictionnaires de
+    routage) — donc ce bug touchait 100% des tours passant par
+    `clarification_node`, expliquant l'omniprésence du même texte figé
+    "Je n'ai pas bien saisi..." à travers des dizaines de messages
+    utilisateur pourtant très différents. Voir
+    [[precommande-architecture-consolidation-2026-08]].
+    """
     state, salutation = ctx.state, ctx.salutation
+    precomputed = state.get("final_response")
+    if precomputed:
+        return {"final_response": precomputed, "ag_ui_component": state.get("ag_ui_component")}
     turn = int(state.get("turn_count") or 0)
 
     if turn <= 1:

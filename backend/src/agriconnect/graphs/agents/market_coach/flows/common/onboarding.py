@@ -59,10 +59,11 @@ async def onboarding_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
         zone_name=_pick("zone_name", ob_profile, tx_payload) or state.get("zone_name"),
         zone_id=_pick("zone_id", ob_profile, tx_payload) or state.get("zone_id"),
         prompt=str(state.get("onboarding_mode") or ""),
+        explain_count=int(ob_profile.get("explain_count") or 0),
     )
 
-    async def _llm_bulk(text: str) -> Dict[str, Optional[str]]:
-        return await _llm_extract_onboarding_all(mc_runtime, text)
+    async def _llm_bulk(text: str, context_hint: str) -> Dict[str, Optional[str]]:
+        return await _llm_extract_onboarding_all(mc_runtime, text, context_hint=context_hint)
 
     user_text = (state.get("normalized_text") or state.get("user_query") or "").strip()
     extracted_entities = state.get("extracted_entities") or {}
@@ -116,6 +117,7 @@ async def onboarding_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
         "role": resolved.role or ob_state.role,
         "zone_name": resolved.zone_name or ob_state.zone_name,
         "zone_id": resolved.zone_id or ob_state.zone_id,
+        "explain_count": resolved.explain_count,
     }
     updates["transaction_payload"] = dict(updates["onboarding_profile"])
 

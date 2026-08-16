@@ -34,6 +34,16 @@ async def render_confirmation(ctx: RenderContext) -> Dict[str, Any]:
 
     text_output = f"{ctx.salutation}Voici le récapitulatif :\n{summary}\n\nConfirmez-vous ?"
 
+    # Un écart (question/correction/remarque) pendant l'attente de
+    # confirmation a produit une réponse adaptée générée par le LLM
+    # (`confirmation_gate.py::_llm_deviation_reply`) — on la place AVANT le
+    # récap plutôt que de simplement le répéter mot pour mot. Voir
+    # [[onboarding-adaptive-questions-2026-08]] (même principe, appliqué ici
+    # à l'étape de confirmation).
+    deviation_note = state.get("confirmation_deviation_note")
+    if deviation_note:
+        text_output = f"{deviation_note}\n\n{text_output}"
+
     return apply_corrections(state, {
         "final_response": text_output,
         "ag_ui_component": {

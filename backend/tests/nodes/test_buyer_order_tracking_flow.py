@@ -188,6 +188,24 @@ class TestCheckOrderStatus:
         result = run(check_order_status(state, runtime))
         assert "pas trouvé" in result["final_response"]
 
+    def test_success_with_no_data_returns_not_found_instead_of_rendering_the_envelope(self):
+        """Bug réel (2026-08-13) : `get_transaction_summary` renvoie
+        status="success" + data=None quand l'acheteur n'a AUCUNE commande —
+        un "succès sans résultat", pas une erreur. Sans le garde-fou,
+        `check_order_status` retombait sur l'enveloppe elle-même comme si
+        c'était la commande, produisant "Commande #" vide, "Total : 0 FCFA"
+        et le statut HTTP "success" affiché tel quel comme statut de
+        commande ("🔄 SUCCESS")."""
+        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import check_order_status
+        state = make_state(user_phone="+2260")
+        runtime = rt({"get_transaction_summary": {
+            "status": "success", "message": "Aucune transaction trouvée.", "data": None,
+        }})
+        result = run(check_order_status(state, runtime))
+        assert "pas trouvé" in result["final_response"]
+        assert "SUCCESS" not in result["final_response"]
+        assert "0 FCFA" not in result["final_response"]
+
     @pytest.mark.parametrize("status,expected_fragment", [
         ("PENDING", "En attente de validation"),
         ("CONFIRMED", "Confirmée"),
@@ -621,6 +639,43 @@ class TestFinalizeWinner:
         state = make_state(working_memory={"pending_winner_bid": "b1"}, normalized_text="peut-etre")
         result = run(finalize_winner(state, rt()))
         assert result["expected_input"] == "CONFIRMATION"
+
+    def test_ambiguous_reply_with_an_llm_available_gets_an_adaptive_note(self):
+        """Bug réel (2026-08-14) : une réponse ambiguë au "confirmez-vous le
+        gagnant ?" ne faisait que rejouer le même texte figé, quoi que dise
+        l'utilisateur — même défaut corrigé côté confirmation_gate/onboarding,
+        appliqué ici. Voir [[precommande-architecture-consolidation-2026-08]]."""
+        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import finalize_winner
+
+        class _Msg:
+            content = "Je comprends ta question, laisse-moi t'expliquer."
+
+        class _Choice:
+            message = _Msg()
+
+        class _Completion:
+            choices = [_Choice()]
+
+        class _StubLLM:
+            @property
+            def chat(self):
+                return self
+
+            @property
+            def completions(self):
+                return self
+
+            def create(self, **kwargs):
+                return _Completion()
+
+        runtime = StubRuntime(llm=_StubLLM())
+        state = make_state(
+            working_memory={"pending_winner_bid": "b1"},
+            normalized_text="comment ça clôture l'appel d'offres ?",
+        )
+        result = run(finalize_winner(state, runtime))
+        assert result["final_response"].startswith("Je comprends ta question")
+        assert "Répondez *oui*" in result["final_response"]
 
     def test_confirm_event_but_gateway_exception_returns_error(self, monkeypatch):
         # Étape GPS déjà atteinte (winner_gps_stage=True + un point par défaut

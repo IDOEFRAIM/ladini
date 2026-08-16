@@ -63,6 +63,46 @@ class TestRenderSelectionMenu:
         result = run(render_selection_menu(c))
         assert result["final_response"].lower().count("répondez") == 1
 
+    def test_an_unknown_event_gets_an_adaptive_note_before_the_menu(self):
+        """Bug réel (2026-08-14, même famille) : une question posée pendant
+        un choix de menu ("c'est quoi l'option 2 ?") rejouait juste le même
+        menu, sans jamais y répondre. Voir
+        [[precommande-architecture-consolidation-2026-08]]."""
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.menus import render_selection_menu
+
+        class _Msg:
+            content = "L'option 2, c'est l'offre de Awa à 250 FCFA/kg."
+
+        class _Choice:
+            message = _Msg()
+
+        class _Completion:
+            choices = [_Choice()]
+
+        class _LLM:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(**kwargs):
+                        return _Completion()
+
+        state_overrides = dict(
+            current_goal="BUYER_LIST_AUCTIONS",
+            expected_candidates=["Awa — 250 FCFA/kg", "Ali — 230 FCFA/kg"],
+            interpreted_event="OUT_OF_SCOPE",
+            normalized_text="c'est quoi l'option 2 ?",
+        )
+        from tests.conftest import make_state
+        state = make_state(**state_overrides)
+        runtime = type("RT", (), {"llm": _LLM(), "model_answer": "test-model"})()
+        c = RenderContext(
+            state=state, mc_runtime=runtime,
+            strategy="SELECTION_MENU", status="", goal="BUYER_LIST_AUCTIONS",
+            salutation="", payload={},
+        )
+        result = run(render_selection_menu(c))
+        assert result["final_response"].startswith("L'option 2, c'est l'offre de Awa")
+
 
 # =====================================================================
 # render_error
@@ -142,6 +182,52 @@ class TestRenderRecovery:
         c = ctx(current_goal=None, retry_count=0)
         result = run(render_recovery(c))
         assert "votre opération" in result["final_response"]
+
+    def test_with_an_llm_available_a_deviation_gets_an_adaptive_note(self):
+        """Bug réel (2026-08-14) : ce nœud rend TOUT écart classé UNKNOWN
+        pendant un tunnel actif (cognitive_guard::recover_active_tunnel),
+        quel que soit le goal — il rejouait le même texte figé quoi que dise
+        l'utilisateur ("vous me tiendrez informé ?" ignoré). Voir
+        [[precommande-architecture-consolidation-2026-08]]."""
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import RenderContext
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.feedback import render_recovery
+
+        class _Msg:
+            content = "Bien sûr, je te tiendrai informé dès qu'il y a du nouveau !"
+
+        class _Choice:
+            message = _Msg()
+
+        class _Completion:
+            choices = [_Choice()]
+
+        class _StubLLM:
+            @property
+            def chat(self):
+                return self
+
+            @property
+            def completions(self):
+                return self
+
+            def create(self, **kwargs):
+                return _Completion()
+
+        from tests.conftest import make_state
+        state = make_state(
+            current_goal="PROCUREMENT_CREATE_REQUEST", retry_count=0,
+            last_missing_field="deadline",
+            normalized_text="Vous me tiendrez informés de l'évolution?",
+        )
+        runtime = type("RT", (), {"llm": _StubLLM(), "model_answer": "test-model"})()
+        c = RenderContext(
+            state=state, mc_runtime=runtime,
+            strategy="RECOVERY", status="", goal="PROCUREMENT_CREATE_REQUEST",
+            salutation="", payload={},
+        )
+        result = run(render_recovery(c))
+        assert result["final_response"].startswith("Bien sûr, je te tiendrai informé")
+        assert "On continue" in result["final_response"]
 
 
 # =====================================================================
@@ -224,6 +310,27 @@ class TestRenderClarification:
         result = run(render_clarification(c))
         assert "bien saisi" in result["final_response"]
         assert "last_terminated_goal" not in result
+
+    def test_a_precomputed_llm_response_from_clarification_node_is_reused_verbatim(self):
+        """Bug réel systémique (2026-08-14) : `nodes/clarification.py` génère
+        déjà une réponse contextuelle via LLM et pose `final_response` —
+        mais ce renderer, choisi par défaut pour toute stratégie CLARIFICATION
+        (`response_handlers.py::_select_handler`), recalculait TOUJOURS son
+        propre texte générique par-dessus, l'écrasant silencieusement à
+        chaque tour. C'est la raison la plus probable de l'omniprésence du
+        même "Je n'ai pas bien saisi..." observée dans des dizaines de
+        transcriptions très différentes tout au long de cette session. Voir
+        [[precommande-architecture-consolidation-2026-08]]."""
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.feedback import render_clarification
+        c = ctx(
+            turn_count=5,
+            final_response="Bien sûr, je peux t'aider avec ça — dis-m'en un peu plus.",
+            ag_ui_component={"custom": True},
+        )
+        result = run(render_clarification(c))
+        assert result["final_response"] == "Bien sûr, je peux t'aider avec ça — dis-m'en un peu plus."
+        assert result["ag_ui_component"] == {"custom": True}
+        assert "bien saisi" not in result["final_response"]
 
 
 # =====================================================================

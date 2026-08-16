@@ -17,6 +17,8 @@ from typing import Any, Dict
 
 from tests.conftest import make_state, run
 
+_GATE_MODULE = "agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate"
+
 CART = [{
     "product_id": "p1", "name": "tomates", "quantity": 55,
     "unit": "KG", "price": 225, "producer_id": "prod1", "status": "ACTIVE",
@@ -55,6 +57,54 @@ class TestPreorderConfirmScreenIsNotRedundant:
         assert "pending_menu" not in result
 
 
+class TestPreorderConfirmDeviationIsAdaptive:
+    def test_a_deviation_at_the_confirm_stage_gets_an_llm_generated_note(self):
+        """Bug réel (2026-08-14) : un écart au "confirmez-vous ?" de la
+        précommande rejouait le même écran mot pour mot, quoi que dise
+        l'utilisateur. Voir [[precommande-architecture-consolidation-2026-08]]."""
+        mod = _mod()
+
+        class _Msg:
+            content = "Je comprends, laisse-moi t'expliquer avant de continuer."
+
+        class _Choice:
+            message = _Msg()
+
+        class _Completion:
+            choices = [_Choice()]
+
+        class _StubLLM:
+            @property
+            def chat(self):
+                return self
+
+            @property
+            def completions(self):
+                return self
+
+            def create(self, **kwargs):
+                return _Completion()
+
+        from tests.conftest import StubRuntime
+        runtime = StubRuntime(llm=_StubLLM())
+        state = make_state(
+            # `BUYER_PREORDER_INIT` (pas `_CONFIRM`) : sinon `create_preorder`
+            # force resolved_id="PREORDER_CONFIRM" quel que soit le texte
+            # (voir le goal-based short-circuit en tête de la fonction) et le
+            # test ne testerait plus du tout la branche d'écart.
+            current_goal="BUYER_PREORDER_INIT",
+            active_cart=CART,
+            preorder_workflow={"phase": "PREORDER_DRAFTED", "preorder_id": "abc123"},
+            transaction_payload={},
+            normalized_text="je vends seulement des intrants patron",
+        )
+
+        result = run(mod.create_preorder(state, runtime))
+
+        assert result["final_response"].startswith("Je comprends, laisse-moi t'expliquer")
+        assert "OUI" in result["final_response"]
+
+
 class TestPreorderGpsGate:
     def _drafted_state(self, **extra_flow: Any) -> Dict[str, Any]:
         flow = {"phase": "PREORDER_DRAFTED", "preorder_id": "abc123", **extra_flow}
@@ -71,7 +121,7 @@ class TestPreorderGpsGate:
         async def _fake_get_stored_location(mc_runtime, phone):
             return 12.35, -1.5
 
-        monkeypatch.setattr(mod, "_get_stored_location", _fake_get_stored_location)
+        monkeypatch.setattr(f"{_GATE_MODULE}._get_stored_location", _fake_get_stored_location)
         runtime = stub_runtime()
 
         result = run(mod.create_preorder(self._drafted_state(), runtime))
@@ -88,7 +138,7 @@ class TestPreorderGpsGate:
         async def _fake_get_stored_location(mc_runtime, phone):
             return None, None
 
-        monkeypatch.setattr(mod, "_get_stored_location", _fake_get_stored_location)
+        monkeypatch.setattr(f"{_GATE_MODULE}._get_stored_location", _fake_get_stored_location)
         runtime = stub_runtime()
 
         result = run(mod.create_preorder(self._drafted_state(), runtime))
@@ -135,7 +185,7 @@ class TestPreorderGpsGate:
             return 13.0, -1.0
 
         monkeypatch.setattr(mod, "PreorderGateway", _CapturingGateway)
-        monkeypatch.setattr(mod, "_get_stored_location", _fake_get_stored_location)
+        monkeypatch.setattr(f"{_GATE_MODULE}._get_stored_location", _fake_get_stored_location)
 
         state = self._drafted_state(gps_stage=True, gps_default=None)
         state["location_shared"] = True

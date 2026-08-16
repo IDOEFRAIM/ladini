@@ -1,12 +1,31 @@
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger, _READ_GOALS
 from agriconnect.graphs.agents.market_coach.services.ui.confirmation_summary import (
     build_confirmation_summary as _build_confirmation_summary,
 )
+from agriconnect.graphs.agents.market_coach.utils import llm_deviation_reply as _llm_deviation_reply_impl
 
 logger = get_node_logger("ConfirmationGateNode")
+
+
+async def _llm_deviation_reply(mc_runtime: Any, user_text: str, summary: str) -> Optional[str]:
+    """Réponse COURTE générée par le LLM quand l'utilisateur dit autre chose
+    qu'un oui/non pendant une confirmation en attente — voir
+    `utils.py::llm_deviation_reply` (implémentation partagée avec
+    `flows/buyer/gps_delivery_gate.py`, voir
+    [[precommande-architecture-consolidation-2026-08]])."""
+    return await _llm_deviation_reply_impl(
+        mc_runtime, user_text, f"un récapitulatif à confirmer :\n{summary}",
+        extra_instructions=(
+            "Le récapitulatif ci-dessus reflète DÉJÀ les valeurs les plus "
+            "récentes fournies par l'utilisateur (une correction éventuelle a "
+            "déjà été appliquée) — accuse juste réception brièvement (ex: "
+            "\"Noté, c'est corrigé.\"), ne demande PAS de reformuler et ne "
+            "redemande PAS oui/non toi-même."
+        ),
+    )
 
 # Goals où un REJECT pendant la confirmation ne doit PAS effacer le brouillon
 # (produit/quantité/prix déjà saisis) — l'utilisateur doit pouvoir corriger un
@@ -63,6 +82,8 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
             "status": "EXECUTING",
             "ag_ui_component": None,
         }
+
+    deviation_note: Optional[str] = None
 
     awaiting_confirmation = bool(state.get("waiting_for_confirmation")) or (
         str(state.get("expected_input") or "").upper() == "CONFIRMATION"
@@ -145,6 +166,29 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
             )
             return dict(_ABANDON_PATCH)
 
+        # Ni stale ni orphelin : un vrai écart (question, correction, remarque)
+        # pendant une confirmation en attente. Sans ceci, le récap se
+        # répétait mot pour mot en boucle, quoi que dise l'utilisateur — bug
+        # réel (2026-08-14), même défaut que l'onboarding avant
+        # [[onboarding-adaptive-questions-2026-08]].
+        #
+        # Bug réel confirmé (2026-08-16) : quand la correction ("non non c'est
+        # 35 unité") est déjà appliquée par les nœuds amont AVANT ce nœud
+        # (`transaction_payload` mis à jour), le récap final (`summary`
+        # ci-dessous, calculé APRÈS ce bloc) reflétait bien la correction —
+        # mais la note LLM, elle, était générée à partir de l'ANCIEN résumé
+        # (`state.get("confirmation_summary")`, celui du tour PRÉCÉDENT), donc
+        # le LLM ne "voyait" pas la correction déjà appliquée et répondait
+        # "pouvez-vous reformuler ?" juste avant d'afficher un récap DÉJÀ
+        # corrigé — contradictoire et déroutant. Fix : construire le résumé
+        # FRAIS une seule fois ici (à partir du `payload` courant) et le
+        # réutiliser pour la note LLM ET le récap final, au lieu de deux
+        # sources désynchronisées. Voir
+        # [[precommande-architecture-consolidation-2026-08]].
+        user_text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+        fresh_summary = _build_confirmation_summary(goal, payload)
+        deviation_note = await _llm_deviation_reply(mc_runtime, user_text, fresh_summary)
+
     # Garde-fou symétrique à celui du ré-affichage ci-dessus : ne JAMAIS lever
     # une confirmation sans goal ni payload — ça ne peut produire qu'un récap
     # vide/incompréhensible ("Validation de l'opération : " sans rien après).
@@ -163,6 +207,7 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
         "is_certified": False,
         "execution_authorized": False,
         "confirmation_summary": summary,
+        "confirmation_deviation_note": deviation_note,
         "confirmation_raised_at": state.get("confirmation_raised_at") or time.time(),
         "expected_input": "CONFIRMATION",
         "last_agent_question": summary,

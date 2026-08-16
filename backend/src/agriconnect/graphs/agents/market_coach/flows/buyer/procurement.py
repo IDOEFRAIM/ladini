@@ -27,6 +27,7 @@ from .helpers import (
     CONFIRM_KEYWORDS,
     DECLINE_KEYWORDS,
     ESCALATE_KEYWORDS,
+    additional_products_hint,
     infer_product_from_text,
     logger,
     phone_missing_error,
@@ -313,19 +314,45 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
 
     vendors, has_multiple = await cart_service.resolve_product_vendors(phone, str(product_name))
 
+    # Un match qui n'est QUE trigram (pas de sous-texte réel entre le terme
+    # cherché et le nom trouvé — voir _is_confident_product_match) n'est pas
+    # un "peut-être" à faire confirmer : c'est du bruit. Incident réel
+    # (2026-08-14) : "oeufs" fuzzy-matchait "Bœuf" alors que ni œufs ni
+    # laitue n'existent en base — proposer "Bœuf, c'est bien ça ?" pour une
+    # recherche d'œufs est aussi trompeur qu'y répondre directement. On
+    # écarte ces matches et on retombe sur le flux "produit introuvable"
+    # existant (propose un appel d'offres) plutôt que d'inventer une
+    # suggestion. Voir [[buyer-search-fuzzy-match-safety-2026-08]].
+    confident_vendors = [v for v in vendors if v.get("match_confident", True)]
+    if len(confident_vendors) != len(vendors):
+        logger.warning(
+            "buyer_request_resolver: dropped %d low-confidence match(es) for '%s' — treating as not found",
+            len(vendors) - len(confident_vendors), product_name,
+        )
+    vendors = confident_vendors
+    has_multiple = len(vendors) > 1
+
     if vendors and not has_multiple:
         # Single vendor — skip the selection menu and go directly to quantity
         ref = vendors[0]
-        logger.info(
-            "buyer_request_resolver: single vendor '%s' for '%s' — skipping menu, asking quantity",
-            ref.get("vendor_name"), product_name,
-        )
         vendor_label = ref.get("vendor_name") or "un producteur"
         unit_hint = ref.get("unit") or "KG"
         price_hint = ref.get("price")
         available_qty = ref.get("available_qty")
         price_info = f" à *{_fmt_num(price_hint)} FCFA/{unit_hint}*" if price_hint else ""
         qty_info = f" (disponible : {_fmt_num(available_qty)} {unit_hint})" if available_qty else ""
+        payload["product"] = product_name
+        wm = dict(working_memory)
+        wm.update({
+            "buyer_request_catalog_checked": True,
+            "buyer_request_last_product": product_name,
+        })
+        extras_hint = additional_products_hint(payload, state)
+
+        logger.info(
+            "buyer_request_resolver: single vendor '%s' for '%s' — skipping menu, asking quantity",
+            ref.get("vendor_name"), product_name,
+        )
         vendor_ctx_seed = {
             "product": product_name,
             "vendors": vendors,
@@ -334,12 +361,6 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
             "requested_unit": unit,
             "available_mapping_kind": "product_vendor",
         }
-        payload["product"] = product_name
-        wm = dict(working_memory)
-        wm.update({
-            "buyer_request_catalog_checked": True,
-            "buyer_request_last_product": product_name,
-        })
         return {
             "status": "WAITING_INPUT",
             "expected_input": "QUANTITY",
@@ -347,7 +368,7 @@ async def buyer_request_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
             "final_response": (
                 f"✅ *{product_name}* est disponible chez *{vendor_label}*{price_info}{qty_info}.\n\n"
                 f"📦 Quelle quantité souhaitez-vous ?\n"
-                f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._"
+                f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._" + extras_hint
             ),
             "transaction_payload": payload,
             "vendor_selection_context": vendor_ctx_seed,

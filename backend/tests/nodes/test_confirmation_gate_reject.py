@@ -20,6 +20,67 @@ def gate(**overrides):
     return run(confirmation_gate(make_state(**overrides), None))
 
 
+class _Msg:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _Choice:
+    def __init__(self, content: str) -> None:
+        self.message = _Msg(content)
+
+
+class _Completion:
+    def __init__(self, content: str) -> None:
+        self.choices = [_Choice(content)]
+
+
+class _StubLLM:
+    """Minimal LLM double matching the `llm.chat.completions.create(...)`
+    shape `_llm_deviation_reply` expects (see tests/conftest.py::ScriptedLLM
+    for the JSON-mode variant — this one just returns free text)."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    @property
+    def chat(self):
+        return self
+
+    @property
+    def completions(self):
+        return self
+
+    def create(self, **kwargs):
+        return _Completion(self._text)
+
+
+class _StubRuntimeWithLLM:
+    def __init__(self, text: str) -> None:
+        self.llm = _StubLLM(text)
+        self.model_answer = "test-model"
+
+
+class _CapturingStubLLM(_StubLLM):
+    """Comme `_StubLLM`, mais garde le dernier `messages=` reçu — pour
+    vérifier CE QUE le prompt contenait réellement (pas seulement ce que le
+    LLM a renvoyé)."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.last_kwargs = None
+
+    def create(self, **kwargs):
+        self.last_kwargs = kwargs
+        return super().create(**kwargs)
+
+
+class _CapturingStubRuntimeWithLLM:
+    def __init__(self, text: str) -> None:
+        self.llm = _CapturingStubLLM(text)
+        self.model_answer = "test-model"
+
+
 # =====================================================================
 # REJECT — comportement générique (goals NON dans l'allowlist)
 # =====================================================================
@@ -188,3 +249,92 @@ class TestPostRejectRoutingRoundTrip:
         result = run(buyer_request_resolver(state, StubRuntime()))
         assert result["active_form"] == "AUCTION_CREATE"
         assert result["transaction_payload"]["product"] == "carottes"
+
+
+# =====================================================================
+# NI CONFIRM NI REJECT — un écart (question/correction/remarque) ne doit
+# plus faire répéter le même récap mot pour mot en boucle (bug réel
+# 2026-08-14, même défaut d'adaptivité que l'onboarding avant
+# [[onboarding-adaptive-questions-2026-08]]).
+# =====================================================================
+
+class TestDeviationDuringConfirmationGetsAnAdaptiveReply:
+    def test_a_question_during_confirmation_gets_an_llm_generated_note(self):
+        state = make_state(
+            current_goal="SALES_PUBLISH_PRODUCT",
+            transaction_payload={"product": "mais", "price": 250, "quantity": 100},
+            expected_input="CONFIRMATION",
+            waiting_for_confirmation=True,
+            confirmation_summary="Vente de mais — 100 kg à 250 FCFA/kg",
+            interpreted_event="UNKNOWN",
+            normalized_text="comment ça une nouvelle exploitation",
+        )
+        runtime = _StubRuntimeWithLLM("Ce récap concerne juste ta déclaration de vente, pas une nouvelle exploitation.")
+        result = run(confirmation_gate(state, runtime))
+        assert result["confirmation_deviation_note"] == (
+            "Ce récap concerne juste ta déclaration de vente, pas une nouvelle exploitation."
+        )
+        # Le récap lui-même doit rester présent (pas remplacé) — l'écart
+        # s'affiche EN PLUS, pas à la place.
+        assert "mais" in result["confirmation_summary"]
+        assert result["response_strategy"] == "CONFIRMATION"
+
+    def test_no_llm_available_falls_back_to_the_historical_silent_repeat(self):
+        """Filet de sécurité : sans client LLM (mc_runtime=None, comme dans
+        tout le reste de ce fichier), on retombe sur le comportement
+        historique — pas de note, juste le récap réaffiché."""
+        state = make_state(
+            current_goal="SALES_PUBLISH_PRODUCT",
+            transaction_payload={"product": "mais", "price": 250, "quantity": 100},
+            expected_input="CONFIRMATION",
+            waiting_for_confirmation=True,
+            interpreted_event="UNKNOWN",
+            normalized_text="comment ça",
+        )
+        result = run(confirmation_gate(state, None))
+        assert result.get("confirmation_deviation_note") is None
+        assert result["response_strategy"] == "CONFIRMATION"
+
+    def test_the_llm_prompt_uses_the_fresh_payload_not_the_stale_stored_summary(self):
+        """Bug réel confirmé (2026-08-16) : une correction ("non non c'est 35
+        unité") était déjà appliquée à `transaction_payload` par les nœuds
+        amont avant ce nœud, donc le récap final affiché à l'utilisateur
+        reflétait bien la correction — mais la note LLM était construite à
+        partir de `state["confirmation_summary"]` (le résumé STOCKÉ du tour
+        PRÉCÉDENT, donc encore "35 KG"), pas du payload à jour. Le LLM
+        répondait alors "pouvez-vous reformuler ?" juste avant d'afficher un
+        récap DÉJÀ corrigé. Voir
+        [[precommande-architecture-consolidation-2026-08]] Round 8."""
+        state = make_state(
+            current_goal="PROCUREMENT_CREATE_REQUEST",
+            transaction_payload={"product": "champignons", "quantity": 35, "unit": "UNITE", "price": 950},
+            expected_input="CONFIRMATION",
+            waiting_for_confirmation=True,
+            # Résumé STOCKÉ du tour précédent — volontairement PAS à jour,
+            # pour prouver que le prompt LLM n'en dépend plus.
+            confirmation_summary="Lancement d'un appel d'offres pour 35 KG de champignons au prix plafond de 950 FCFA/KG.",
+            interpreted_event="UNKNOWN",
+            normalized_text="non non c est 35 unite",
+        )
+        runtime = _CapturingStubRuntimeWithLLM("Noté, c'est corrigé.")
+        run(confirmation_gate(state, runtime))
+
+        prompt_text = str(runtime.llm.last_kwargs)
+        assert "UNITE" in prompt_text
+        assert "35 KG" not in prompt_text
+
+    def test_render_confirmation_places_the_note_before_the_recap(self):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import RenderContext
+
+        state = {
+            "confirmation_summary": "Vente de mais — 100 kg à 250 FCFA/kg",
+            "confirmation_deviation_note": "Je comprends ta question, laisse-moi t'expliquer.",
+        }
+        ctx = RenderContext(
+            state=state, mc_runtime=None, strategy="CONFIRMATION", status="WAITING_CONFIRMATION",
+            goal="SALES_PUBLISH_PRODUCT", payload={}, salutation="",
+        )
+        result = run(render_confirmation(ctx))
+        text = result["final_response"]
+        assert text.index("Je comprends") < text.index("Voici le récapitulatif")

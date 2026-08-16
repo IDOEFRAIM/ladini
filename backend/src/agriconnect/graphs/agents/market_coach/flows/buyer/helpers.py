@@ -112,6 +112,26 @@ def resolve_product(
     return product
 
 
+def additional_products_hint(payload: Dict[str, Any], state: Dict[str, Any]) -> str:
+    """Message à ajouter quand l'utilisateur a mentionné plusieurs produits
+    dans le même message (ex: "œufs et laitue").
+
+    L'interprète (`interpreter/routing.py`) ne met QUE le premier produit
+    dans `product` — jamais fusionné en une seule chaîne — et liste le reste
+    dans `additional_products`. Le système traite les produits UN PAR UN
+    (jamais de recherche simultanée sur un terme composite) : sans cet
+    avertissement, les produits supplémentaires disparaîtraient silencieusement.
+    Voir [[buyer-search-fuzzy-match-safety-2026-08]]."""
+    extras = payload.get("additional_products") or (state.get("extracted_entities") or {}).get("additional_products")
+    if not extras or not isinstance(extras, (list, tuple)):
+        return ""
+    names = [str(p).strip() for p in extras if str(p or "").strip()]
+    if not names:
+        return ""
+    joined = ", ".join(f"*{n}*" for n in names)
+    return f"\n\n📝 _J'ai aussi noté {joined} — redites son nom une fois qu'on aura fini ici pour le chercher aussi._"
+
+
 def resolve_quantity(
     payload: Dict[str, Any],
     stable_entities: Dict[str, Any],
@@ -373,7 +393,7 @@ __all__ = [
     "CART_GOALS", "PREORDER_GOALS", "NEGOTIATION_GOALS",
     "ORDER_TRACKING_GOALS", "AUCTION_TRACKING_GOALS", "READ_ONLY_INTENTS",
     "ESCALATE_KEYWORDS", "CONFIRM_KEYWORDS", "DECLINE_KEYWORDS",
-    "infer_product_from_text", "resolve_product", "resolve_quantity", "resolve_unit",
+    "infer_product_from_text", "resolve_product", "additional_products_hint", "resolve_quantity", "resolve_unit",
     "missing_draft_field", "draft_requires_completion", "draft_expected_input",
     "draft_block_response", "capture_cart_draft",
     "clear_active_goal", "error_response", "phone_missing_error",

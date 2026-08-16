@@ -38,11 +38,11 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     # Modèle rapide/économique — nœuds d'infrastructure (normalisation,
     # modération, nettoyage d'état) qui n'ont besoin d'aucun raisonnement.
-    LLM_MODEL: str = "llama-3.1-8b-instant"
+    LLM_MODEL: str = "openai/gpt-oss-20b"
     # Modèle de raisonnement — tout goal métier complexe (interprétation
     # d'intent, planification de goal, génération de réponse). Utilisé par
     # `graphs/agents/market_coach/llm_router.py` via ROUTING_MAP ci-dessous.
-    LLM_MODEL_REASONING: str = "llama-3.3-70b-versatile"
+    LLM_MODEL_REASONING: str = "openai/gpt-oss-120b"
     LLM_TEMPERATURE: float = 0.0
 
     # Table de routage goal -> modèle Groq, consommée par

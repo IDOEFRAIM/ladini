@@ -13,6 +13,8 @@ from agriconnect.graphs.agents.market_coach.nodes.rendering.success import (
     _render_cycles_section,
     _render_farm_sections,
     _render_flat_list,
+    _render_market_snapshot,
+    _render_price_check,
     _transactional_fallback_text,
     render_success,
 )
@@ -216,6 +218,30 @@ class TestTransactionalFallbackText:
         text = _transactional_fallback_text("SOMETHING_ELSE", "", {})
         assert "C'est noté" in text
 
+    def test_a_stale_goal_from_an_unrelated_tool_is_not_honored(self):
+        """Bug réel (2026-08-15) : un prix vérifié via VALIDATE_PRICE
+        (`check_price_anomaly`) a été annoncé "Votre appel d'offres... a été
+        enregistré avec succès" — `goal` (résolu par `resolve_goal_for_ui`,
+        tolérant, "jamais UNKNOWN") portait un goal PÉRIMÉ d'une tentative
+        d'appel d'offres précédente abandonnée dans la même conversation.
+        `selected_tool` (toujours frais, posé par `mcp_tool_executor` CE
+        tour) doit invalider le gabarit "appel d'offres" quand l'outil qui a
+        réellement tourné n'est PAS `create_auction`. Voir
+        [[precommande-architecture-consolidation-2026-08]]."""
+        text = _transactional_fallback_text(
+            "PROCUREMENT_CREATE_REQUEST", "", {"product": "riz"},
+            selected_tool="check_price_anomaly",
+        )
+        assert "enregistré avec succès" not in text
+        assert "C'est noté" in text
+
+    def test_a_matching_tool_still_honors_the_procurement_template(self):
+        text = _transactional_fallback_text(
+            "PROCUREMENT_CREATE_REQUEST", "", {"product": "riz"},
+            selected_tool="create_auction",
+        )
+        assert "appel d'offres" in text
+
 
 # =====================================================================
 # render_success — le handler principal
@@ -269,6 +295,38 @@ class TestRenderSuccess:
         )
         result = run(render_success(c))
         assert "disponibles immédiatement" in result["final_response"]
+
+    def test_the_transactional_fallback_uses_form_data_when_payload_is_empty(self):
+        """Bug réel (2026-08-14) : "Votre appel d'offres pour 0 de *votre
+        demande* a été enregistré avec succès" — pour les goals à formulaire
+        (ex: appel d'offres), produit/quantité vivent dans `form_data`
+        (voir `build_procurement_escalation`), pas dans `transaction_payload`
+        qui est quasi vide au moment de la confirmation finale. Voir
+        [[precommande-architecture-consolidation-2026-08]]."""
+        c = ctx(
+            current_goal="PROCUREMENT_CREATE_REQUEST",
+            execution_result={"status": "success"},
+            transaction_payload={"resolved_id": "AUCTION_CONFIRM"},
+            form_data={"product": "riz", "quantity": 10, "unit": "SAC"},
+        )
+        result = run(render_success(c))
+        assert "riz" in result["final_response"]
+        assert "10" in result["final_response"]
+        assert "votre demande" not in result["final_response"]
+        assert "pour 0" not in result["final_response"]
+
+    def test_non_empty_payload_values_still_win_over_form_data(self):
+        """`transaction_payload` reste prioritaire quand il a une valeur
+        (le tour le plus récent) — `form_data` ne comble QUE les trous."""
+        c = ctx(
+            current_goal="PROCUREMENT_CREATE_REQUEST",
+            execution_result={"status": "success"},
+            transaction_payload={"product": "maïs"},
+            form_data={"product": "riz", "quantity": 10, "unit": "SAC"},
+        )
+        result = run(render_success(c))
+        assert "maïs" in result["final_response"]
+        assert "riz" not in result["final_response"]
 
     def test_search_results_with_photos_get_a_view_hint_and_are_cached(self, monkeypatch):
         import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
@@ -371,6 +429,200 @@ class TestRenderSuccess:
         })
         result = run(render_success(c))
         assert result["final_response"] == "message interne"
+
+
+# =====================================================================
+# _render_market_snapshot / get_market_snapshot rendering
+# =====================================================================
+
+class TestRenderMarketSnapshot:
+    """Voir [[precommande-architecture-consolidation-2026-08]] — demande
+    utilisateur : un produit hors catalogue doit être signalé clairement
+    avec la liste des vraies catégories, et un produit du catalogue doit
+    afficher un prix de référence (admin en priorité, sinon moyenne)."""
+
+    def test_product_not_in_catalog_lists_available_categories(self):
+        text = _render_market_snapshot({
+            "status": "success",
+            "product_in_catalog": False,
+            "message": "« riz » n'est pas encore disponible sur notre plateforme.",
+            "available_categories": [
+                {"id": "c1", "name": "Céréales", "icon": "🌾"},
+                {"id": "c2", "name": "Légumes", "icon": "🥕"},
+            ],
+        })
+        assert "riz" in text
+        assert "Céréales" in text
+        assert "🌾" in text
+        assert "Légumes" in text
+
+    def test_product_not_in_catalog_prefers_citing_concrete_products_with_prices(self):
+        """Demande explicite utilisateur (2026-08-15) : "l'agent doit pouvoir
+        citer les produits qui sont permis dans le catalogue et présenter les
+        prix standard" — un nom de produit + son prix est plus actionnable
+        qu'un simple nom de catégorie ("Céréales")."""
+        text = _render_market_snapshot({
+            "status": "success",
+            "product_in_catalog": False,
+            "message": "« coumba » n'est pas encore disponible sur notre plateforme.",
+            "available_products": [
+                {"name": "Tomate", "price": 300, "unit": "KG", "price_source": "admin"},
+                {"name": "Maïs", "price": 250, "unit": "KG", "price_source": "market_average"},
+                {"name": "Igname"},
+            ],
+            "available_categories": [{"id": "c1", "name": "Légumes", "icon": "🥕"}],
+        })
+        assert "Tomate" in text
+        assert "300" in text
+        assert "prix standard" in text
+        assert "Maïs" in text
+        assert "prix moyen" in text
+        assert "Igname" in text
+        # Les catégories ne doivent pas doublonner quand des produits concrets existent.
+        assert "Catégories disponibles" not in text
+
+    def test_product_not_in_catalog_falls_back_to_categories_when_no_products_available(self):
+        text = _render_market_snapshot({
+            "status": "success",
+            "product_in_catalog": False,
+            "message": "« riz » n'est pas encore disponible.",
+            "available_products": [],
+            "available_categories": [{"id": "c1", "name": "Céréales", "icon": "🌾"}],
+        })
+        assert "Céréales" in text
+
+    def test_admin_standard_price_is_preferred_over_market_average(self):
+        text = _render_market_snapshot({
+            "status": "success",
+            "product_in_catalog": True,
+            "data": [{
+                "product": "Tomate",
+                "total_stock": 0,
+                "standard_price": 300,
+                "standard_unit": "KG",
+                "standard_price_zone": "Ouagadougou",
+                "price_source": "admin",
+            }],
+        })
+        assert "Tomate" in text
+        assert "Prix standard" in text
+        assert "300" in text
+        assert "Ouagadougou" in text
+
+    def test_falls_back_to_market_average_when_no_standard_price(self):
+        text = _render_market_snapshot({
+            "status": "success",
+            "product_in_catalog": True,
+            "data": [{
+                "product": "Tomate",
+                "total_stock": 120,
+                "min_price": 200,
+                "avg_price": 250,
+                "price_source": "market_average",
+            }],
+        })
+        assert "moyen constaté" in text
+        assert "250" in text
+        assert "200" in text
+
+    def test_matched_product_with_no_stock_and_no_standard_price_shows_the_message(self):
+        text = _render_market_snapshot({
+            "status": "success",
+            "product_in_catalog": True,
+            "data": [],
+            "message": "« Tomate » est un produit reconnu, mais aucun producteur n'a de stock.",
+        })
+        assert "produit reconnu" in text
+
+    def test_render_success_dispatches_to_market_snapshot_and_does_not_build_a_selection_menu(self):
+        """Régression : `_render_flat_list` construit `options_ui` pour
+        CHAQUE ligne (append inconditionnel), et CAS 2 (liste plate)
+        écrase `ag_component` avec un menu « Faites votre choix » dès que
+        `tool_data` est une liste — sans regarder `structured_sections_handled`.
+        Sans l'exclusion dédiée à get_market_snapshot, un prix de référence se
+        retrouvait transformé en faux menu de sélection."""
+        c = ctx(
+            selected_tool="get_market_snapshot",
+            execution_result={
+                "status": "success",
+                "product_in_catalog": True,
+                "data": [{
+                    "product": "Tomate",
+                    "total_stock": 120,
+                    "min_price": 200,
+                    "avg_price": 250,
+                    "price_source": "market_average",
+                }],
+            },
+        )
+        result = run(render_success(c))
+        assert "Tomate" in result["final_response"]
+        assert "moyen constaté" in result["final_response"]
+        ag_component = result.get("ag_ui_component")
+        if ag_component:
+            metadata = ag_component.get("kwargs", {}).get("metadata", {})
+            assert metadata.get("mode") != "flat_list"
+
+    def test_render_success_not_in_catalog_lists_categories_and_no_menu(self):
+        c = ctx(
+            selected_tool="get_market_snapshot",
+            execution_result={
+                "status": "success",
+                "product_in_catalog": False,
+                "message": "« riz » n'est pas encore disponible sur notre plateforme.",
+                "available_categories": [{"id": "c1", "name": "Céréales", "icon": "🌾"}],
+            },
+        )
+        result = run(render_success(c))
+        assert "riz" in result["final_response"]
+        assert "Céréales" in result["final_response"]
+        ag_component = result.get("ag_ui_component")
+        if ag_component:
+            metadata = ag_component.get("kwargs", {}).get("metadata", {})
+            assert metadata.get("mode") != "flat_list"
+
+
+# =====================================================================
+# _render_price_check / check_price_anomaly rendering
+# =====================================================================
+
+class TestRenderPriceCheck:
+    """Voir [[precommande-architecture-consolidation-2026-08]] Round 5 —
+    `check_price_anomaly` (VALIDATE_PRICE) ne renvoyait ni `message` ni
+    `data`, tombant dans le gabarit transactionnel générique et affichant un
+    texte sans rapport avec la vérification de prix demandée."""
+
+    def test_high_anomaly_shows_the_warning_reason(self):
+        text = _render_price_check({
+            "is_anomaly": True, "level": "HIGH",
+            "reason": "Prix proposé (2000 FCFA) est 4.0x le prix référence (500 FCFA).",
+            "reference_price": 500,
+        })
+        assert "⚠️" in text
+        assert "4.0x" in text
+
+    def test_no_anomaly_with_a_reference_price_confirms_it(self):
+        text = _render_price_check({"is_anomaly": False, "reference_price": 480})
+        assert "cohérent" in text
+        assert "480" in text
+
+    def test_no_reference_price_at_all_still_gives_a_clean_message(self):
+        text = _render_price_check({"is_anomaly": False, "reason": "Pas de prix de référence disponible."})
+        assert "Pas de prix de référence" in text
+
+    def test_render_success_dispatches_to_price_check_not_the_generic_template(self):
+        """Régression bout-en-bout du bug réel : même si `goal` résolu pour
+        l'UI porte encore un vestige "PROCUREMENT_CREATE_REQUEST" d'une
+        tentative précédente, le dispatch par `selected_tool` doit rendre le
+        texte prix, jamais "Votre appel d'offres..."."""
+        c = ctx(
+            current_goal="PROCUREMENT_CREATE_REQUEST",
+            selected_tool="check_price_anomaly",
+            execution_result={"is_anomaly": False, "reference_price": 480},
+        )
+        result = run(render_success(c))
+        assert "appel d'offres" not in result["final_response"]
+        assert "cohérent" in result["final_response"]
 
 
 # =====================================================================

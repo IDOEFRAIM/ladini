@@ -395,6 +395,17 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
         replace_value
     ]
 
+    # Réponse COURTE générée par le LLM quand l'utilisateur dit autre chose
+    # qu'un oui/non pendant une confirmation en attente (question,
+    # correction, remarque) — affichée AVANT le récap par
+    # nodes/rendering/confirm.py au lieu de le répéter mot pour mot. Voir
+    # confirmation_gate.py::_llm_deviation_reply et
+    # [[onboarding-adaptive-questions-2026-08]] (même principe).
+    confirmation_deviation_note: Annotated[
+        Optional[str],
+        replace_value
+    ]
+
     # Horodatage (epoch seconds) auquel confirmation_gate a levé cette
     # confirmation en attente. Sert de garde-fou de péremption : si trop de
     # temps s'écoule sans réponse claire (oui/non), la confirmation est

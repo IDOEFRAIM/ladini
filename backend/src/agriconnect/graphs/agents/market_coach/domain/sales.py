@@ -172,7 +172,14 @@ class SalesService:
         args: Dict[str, Any] = {}
         zone = payload.get("zone") or payload.get("zone_name")
         if zone:
-            args["zone"] = str(zone)
+            args["zone_query"] = str(zone)
+        # Filtre produit : "quel est le prix du riz ?" ne doit renvoyer QUE
+        # le riz, pas tout le catalogue — voir get_market_snapshot pour la
+        # validation catalogue + prix standard qui en découlent. Voir
+        # [[precommande-architecture-consolidation-2026-08]].
+        product = payload.get("product")
+        if product:
+            args["product_query"] = str(product)
         return DomainResult(tool_id=ToolId.GET_MARKET_SNAPSHOT, tool_args=args)
 
     def market_snapshot_zonal(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:

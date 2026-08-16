@@ -84,6 +84,11 @@ _EPHEMERAL_REPLACE_FIELDS = {
     "retry_count": 0,
     "confirmation_summary": None,
     "confirmation_raised_at": None,
+    # Note d'écart LLM (voir confirmation_gate.py::_llm_deviation_reply) —
+    # strictement mono-tour, JAMAIS préservée même quand la confirmation elle-
+    # même continue : sinon la même remarque reviendrait collée devant le
+    # récap à chaque tour suivant.
+    "confirmation_deviation_note": None,
     "execution_authorized": False,
     "waiting_for_confirmation": False,
     "is_certified": False,
@@ -123,6 +128,22 @@ async def post_response_cleanup(state: Dict[str, Any], mc_runtime: Any) -> Dict[
     # survive to the next turn — otherwise confirmation_gate re-asks forever and
     # the user's "Oui" never triggers execution.
     keep_confirmation_channel = status == "WAITING_CONFIRMATION"
+
+    # BUG RÉEL, CONFIRMÉ PAR LOGS (2026-08-15) : ce garde-fou ne couvrait QUE
+    # les canaux SELECTION et CONFIRMATION — pas le cas, bien plus courant,
+    # d'un formulaire générique en attente d'UN CHAMP précis (prix, quantité,
+    # date limite...) via ASK_MISSING_FIELD (`expected_input` = "PRICE" /
+    # "QUANTITY" / "DEADLINE" / etc., status="WAITING_INPUT"). Sans ce
+    # troisième canal, `current_goal` ci-dessous était effacé après CHAQUE
+    # tour d'appel d'offres/vente/déclaration de culture — le tour suivant
+    # démarrait avec goal_planner voyant `current_goal=None`, alors même que
+    # l'opération était en plein milieu. Le formulaire semblait limper (une
+    # question suivante cohérente pouvait quand même s'afficher via d'autres
+    # champs survivants) mais ne pouvait jamais réellement s'exécuter, et
+    # tournait en boucle entre les mêmes questions. Même famille de bug que
+    # [[market-coach-turn-boundary-state]], nouvelle instance jamais corrigée
+    # jusqu'ici. Voir [[precommande-architecture-consolidation-2026-08]].
+    keep_field_channel = status == "WAITING_INPUT" and expected_input not in ("", "NONE")
 
     working = dict(state.get("working_memory") or {})
     if working:
@@ -169,7 +190,7 @@ async def post_response_cleanup(state: Dict[str, Any], mc_runtime: Any) -> Dict[
         "current_goal",
         "confirmation_raised_at",
     }
-    _keep_goal_channel = keep_confirmation_channel or keep_selection_channel
+    _keep_goal_channel = keep_confirmation_channel or keep_selection_channel or keep_field_channel
     for field, default in _EPHEMERAL_REPLACE_FIELDS.items():
         if field == "current_goal":
             if _keep_goal_channel:

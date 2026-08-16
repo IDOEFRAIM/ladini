@@ -10,6 +10,7 @@ from agriconnect.graphs.agents.market_coach.nodes.rendering.common import (
     indexed_options,
     list_menu_component,
 )
+from agriconnect.graphs.agents.market_coach.utils import llm_deviation_reply
 
 
 async def render_selection_menu(ctx: RenderContext) -> Dict[str, Any]:
@@ -37,6 +38,16 @@ async def render_selection_menu(ctx: RenderContext) -> Dict[str, Any]:
         text_output = "Veuillez choisir une option :\n" + base_menu
         if "répondez" not in text_output.lower():
             text_output += "\n\n👉 Répondez uniquement par le numéro de votre choix (ex: '2')."
+
+    # Un écart (question, remarque) au lieu d'un numéro clair — reconnaître
+    # ce qui a été dit avant de rejouer le même menu, même principe que
+    # ask.py/feedback.py. Voir [[precommande-architecture-consolidation-2026-08]].
+    event = str(state.get("interpreted_event") or "").upper()
+    user_text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+    if event in {"UNKNOWN", "OUT_OF_SCOPE"} and user_text:
+        note = await llm_deviation_reply(ctx.mc_runtime, user_text, "choisir une option dans le menu ci-dessous")
+        if note:
+            text_output = f"{note}\n\n{text_output}"
 
     return apply_corrections(state, {
         "final_response": text_output,
