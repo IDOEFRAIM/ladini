@@ -1,0 +1,42 @@
+scenario_id: P1-PROC-007
+version: "1.1"
+priority: P1
+domain: producer_auction
+tags: [happy_path, auction, two_sided]
+grounding:
+  status: PROVEN_BY_CODE
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/intent.py — PROCUREMENT_CREATE_REQUEST non-tunnel, tool_name='create_auction'"
+    - "backend/src/agriconnect/graphs/agents/market_coach/actions/sales.py:223-231 — SALES_PLACE_BID -> place_bid, PROVEN"
+
+participants:
+  - {id: BUYER1, role: BUYER, phone: "+22670000025", workspace_type: buyer}
+  - {id: PROD1, role: PRODUCER, phone: "+22670000026", workspace_type: producer}
+initial_state: {}
+
+conversation:
+  - turn: 1
+    participant: BUYER1
+    user_message: "Je cherche 2 tonnes de mil, max 140 FCFA le kilo, zone Ouaga"
+    expected_behavior:
+      intent: PROCUREMENT_CREATE_REQUEST
+      slots: {product: "mil", quantity: 2000, price: 140, zone: "Ouaga"}
+      confirmation_expected: true
+  - turn: 2
+    participant: BUYER1
+    user_message: "Oui"
+    channel_event: CONFIRM
+    expected_behavior:
+      tool_calls: {calls: [create_auction], ordered: false}
+  - turn: 3
+    participant: PROD1
+    user_message: "Je propose 135 FCFA le kilo pour 1 tonne"
+    expected_behavior:
+      intent: SALES_PLACE_BID
+      tool_calls: {calls: [place_bid], ordered: false, arguments: {place_bid: {price: 135, quantity: 1000}}}
+
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [tool_selection_accuracy, node_workflow_routing]
+runner_requirement: "sequential replay, alternating participant (uses the participants schema, but no cross-workspace isolation assertion — this scenario is a cooperative two-sided flow, not a security test)"

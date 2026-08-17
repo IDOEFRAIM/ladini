@@ -1,0 +1,42 @@
+scenario_id: P1-DISAMB-032
+version: "1.1"
+priority: P1
+domain: buyer_auction_tracking
+tags: [pending_winner_bid, finalize_winner, state_machine]
+grounding:
+  status: PROVEN_BY_CODE
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/order_tracking.py:975 (finalize_winner), 1183-1191 (dispatch gate: working_memory.pending_winner_bid + goal in AUCTION_TRACKING_GOALS + CONFIRM/REJECT/GPS-share)"
+  note: "Higher-value replacement for the original RESUME_TUNNEL stub — exercises the exact mechanism P0-GEO-008/P1-PROC-008 depend on, from a clean (non-adversarial) angle: a bid selected via the numbered menu, then explicitly REJECTED (not confirmed)."
+
+persona: {role: BUYER, description: "Acheteur, sélectionne une offre via le menu puis se ravise", phone: "+22670000041"}
+workspace_type: buyer
+initial_state:
+  db_fixtures:
+    - {table: auctions, auction_id: "AUC-4473", owner_phone: "+22670000041", status: "OPEN"}
+    - {table: bids, bid_id: "BID-1003", auction_id: "AUC-4473"}
+  active_goal: "BUYER_CHECK_AUCTION_STATUS"
+
+conversation:
+  - turn: 1
+    user_message: "1"   # numbered-menu selection of BID-1003 from a prior list rendering
+    expected_behavior:
+      tool_calls: {calls: [], ordered: false}
+      state_assertion: {workspace: self, working_memory.pending_winner_bid: {auction_id: "AUC-4473", bid_id: "BID-1003"}}
+      response_claims: ["response asks the user to confirm this bid as the winner (oui/non)"]
+  - turn: 2
+    user_message: "Non, pas celle-là"
+    channel_event: REJECT
+    expected_behavior:
+      # per order_tracking.py:1183-1191, interpreted_event==REJECT also satisfies
+      # the dispatch condition -> finalize_winner fires, but must NOT call
+      # select_winning_bid on a REJECT.
+      tool_calls: {calls: [], ordered: false}
+      must_not_execute_this_turn: [select_winning_bid]
+      state_assertion: {workspace: self, working_memory.pending_winner_bid: null}
+
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: false}
+metric_applicability: [state_context_accuracy, trajectory_flow_correctness, tool_argument_accuracy]
+runner_requirement: "sequential replay (2 turns; assumes a prior numbered-menu rendering context, which itself is not re-verified this pass — treat the exact menu-selection mechanics as PATTERN_CONSISTENT with the rest of the numbered-menu convention used elsewhere in the codebase, not independently re-traced here)"

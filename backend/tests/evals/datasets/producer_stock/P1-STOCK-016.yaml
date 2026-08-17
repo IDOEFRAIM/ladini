@@ -1,0 +1,37 @@
+scenario_id: P1-STOCK-016
+version: "1.1"
+priority: P1
+domain: producer_stock
+tags: [happy_path, harvest_registration]
+grounding:
+  status: PATTERN_CONSISTENT
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/intent.py — STOCK_REGISTER_HARVEST tool_name='add_stock', required=[product, quantity, farm_id], requires_farm=True, non-tunnel"
+    - "Dispatch pattern (non-tunnel -> registry -> tool matches INTENT_CONFIG label) PROVEN for other non-tunnel intents this session; actions/stock.py's STOCK_REGISTER_HARVEST handler not individually re-traced."
+
+persona: {role: PRODUCER, description: "Producteur, nouvelle récolte", phone: "+22670000035"}
+workspace_type: producer
+initial_state:
+  db_fixtures:
+    - {table: farms, farm_id: "F-12", owner_phone: "+22670000035"}
+
+conversation:
+  - turn: 1
+    user_message: "J'ai récolté 300kg de mil sur la ferme F-12"
+    expected_behavior:
+      intent: STOCK_REGISTER_HARVEST
+      slots: {product: "mil", quantity: 300, unit: "KG", farm_id: "F-12"}
+      confirmation_expected: true
+  - turn: 2
+    user_message: "Oui"
+    channel_event: CONFIRM
+    expected_behavior:
+      tool_calls: {calls: [add_stock], ordered: false, arguments: {add_stock: {product: "mil", quantity: 300, unit: "KG", farm_id: "F-12"}}}
+
+business_outcome_assertions:
+  - {table: stocks, condition: "stock row created for farm F-12, product='mil', quantity=300", workspace_scope: own}
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [intent_accuracy, tool_argument_accuracy, business_outcome_correctness]
+runner_requirement: "sequential replay"

@@ -1,0 +1,44 @@
+scenario_id: P1-SALES-002
+version: "1.1"
+priority: P1
+domain: producer_sales
+tags: [happy_path, disambiguation, multi_turn]
+grounding:
+  status: PROVEN_BY_CODE
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/intent.py — INTENT_DISAMBIGUATION['STOCK_OR_SALES_DECLARATION']: candidates=[SALES_PUBLISH_PRODUCT, DECLARE_CROP_CYCLE], lexical_hints include 'j'ai', 'publier', 'mettre en vente'"
+    - "actions/sales.py:193 — SALES_PUBLISH_PRODUCT tool binding, create_product PROVEN"
+
+persona: {role: PRODUCER, description: "Producteur maraîcher", phone: "+22670000021"}
+workspace_type: producer
+initial_state: {}
+
+conversation:
+  - turn: 1
+    user_message: "Je veux vendre des tomates"
+    expected_behavior:
+      checkpoints: [{semantic_disambiguation: "STOCK_OR_SALES_DECLARATION menu shown"}]
+      tool_calls: {calls: [], ordered: false}
+  - turn: 2
+    user_message: "Prêt maintenant"
+    expected_behavior:
+      intent: SALES_PUBLISH_PRODUCT
+      confirmation_expected: false   # fields still incomplete
+  - turn: 3
+    user_message: "50kg à 250 le kilo"
+    expected_behavior:
+      slots: {product: "tomates", quantity: 50, unit: "KG", price: 250}
+      confirmation_expected: true
+  - turn: 4
+    user_message: "Oui"
+    channel_event: CONFIRM
+    expected_behavior:
+      tool_calls: {calls: [create_product], ordered: false, arguments: {create_product: {product: "tomates", quantity: 50, unit: "KG", price: 250}}}
+
+business_outcome_assertions:
+  - {table: products, condition: "product 'tomates' created, is_public=true, quantity=50, price=250", workspace_scope: own}
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [intent_accuracy, node_workflow_routing, tool_argument_accuracy, business_outcome_correctness]
+runner_requirement: "sequential replay"

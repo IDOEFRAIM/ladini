@@ -1,0 +1,32 @@
+scenario_id: P1-BUYER-004
+version: "1.1"
+priority: P1
+domain: buyer_cart
+tags: [happy_path, search_then_add]
+grounding:
+  status: PROVEN_BY_CODE
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py:234-236 — ProductGateway.search_products() -> MCP tool 'search_products'"
+    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/cart.py:280-330 — cart add is local state (state['active_cart']); NO MCP tool exists for it"
+  correction_note: "Original Wave 1 version asserted tool_calls: [search_products, add_to_cart] — add_to_cart is not a real MCP tool. Removed, replaced with state_assertion."
+
+persona: {role: BUYER, description: "Acheteur", phone: "+22670000023"}
+workspace_type: buyer
+initial_state: {}
+
+conversation:
+  - turn: 1
+    user_message: "Je veux acheter 50 kg de tomates"
+    expected_behavior:
+      intent: BUYER_REQUEST
+      entities: {product: "tomates", quantity: 50, unit: "KG"}
+      tool_calls: {calls: [search_products], ordered: false, arguments: {search_products: {product: "tomates"}}}
+      state_assertion:
+        workspace: self
+        active_cart: [{product: "tomates", quantity: 50, unit: "KG"}]
+
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [tool_selection_accuracy, trajectory_flow_correctness, state_mutation_correctness]
+runner_requirement: "sequential replay"

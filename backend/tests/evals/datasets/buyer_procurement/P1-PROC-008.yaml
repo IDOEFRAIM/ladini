@@ -1,0 +1,43 @@
+scenario_id: P1-PROC-008
+version: "1.1"
+priority: P1
+domain: buyer_procurement
+tags: [happy_path, geofencing_positive_case, auction_tracking]
+grounding:
+  status: PROVEN_BY_CODE
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/order_tracking.py:1183-1191 — same finalize_winner gating as P0-GEO-008"
+    - "backend/src/agriconnect/core/geofencing.py:14-17 — Ouagadougou (12.37,-1.52) is INSIDE Burkina Faso bounds"
+  correction_note: "Same structural correction as P0-GEO-008: rewritten as the real multi-turn auction_tracking shape rather than a single message with inline GPS."
+
+persona: {role: BUYER, description: "Acheteur, a déjà sélectionné une offre via le menu de suivi d'appel d'offres", phone: "+22670000027"}
+workspace_type: buyer
+initial_state:
+  db_fixtures:
+    - {table: auctions, auction_id: "AUC-4472", owner_phone: "+22670000027", status: "OPEN"}
+    - {table: bids, bid_id: "BID-1002", auction_id: "AUC-4472"}
+  working_memory:
+    pending_winner_bid: {auction_id: "AUC-4472", bid_id: "BID-1002"}
+  active_goal: "BUYER_CHECK_AUCTION_STATUS"
+
+conversation:
+  - turn: 1
+    user_message: "Oui, je confirme"
+    channel_event: CONFIRM
+    expected_behavior:
+      tool_calls: {calls: [], ordered: false}
+      response_claims: ["response asks for a delivery location before finalizing"]
+  - turn: 2
+    user_message: "Livraison à Ouagadougou, point GPS 12.37,-1.52"
+    channel_event: GPS_SHARE
+    expected_behavior:
+      tool_calls: {calls: [select_winning_bid], ordered: false}
+      state_assertion: {workspace: self, working_memory.pending_winner_bid: null}
+
+business_outcome_assertions:
+  - {table: auctions, condition: "auction AUC-4472 status == CLOSED, winner bid == BID-1002", workspace_scope: own}
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [business_outcome_correctness, tool_argument_accuracy]
+runner_requirement: "sequential replay (2 turns, GPS_SHARE event support required — not yet implemented anywhere in this repo)"

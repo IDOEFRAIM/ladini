@@ -1,0 +1,28 @@
+scenario_id: P1-INV-013
+version: "1.1"
+priority: P1
+domain: buyer_order_tracking
+tags: [invalid_input, invalid_id, contract_validation]
+grounding:
+  status: PROVEN_BY_CODE
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/contracts.py:60-65 — OrderStatusContract(ListOrdersContract): order_id: str = Field(..., min_length=6)"
+
+persona: {role: BUYER, description: "Acheteur", phone: "+22670000032"}
+workspace_type: buyer
+initial_state: {}
+
+conversation:
+  - turn: 1
+    user_message: "Statut de ma commande 42"
+    expected_behavior:
+      intent: BUYER_CHECK_ORDER_STATUS
+      tool_calls: {calls: [], ordered: false}
+      should_clarify: true   # legitimate clarification — order_id too short to be valid, not a false-positive
+      response_claims: ["response asks for the full order reference/number"]
+
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: false}
+metric_applicability: [tool_argument_accuracy, unnecessary_clarification]
+runner_requirement: "sequential replay"

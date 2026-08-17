@@ -1,0 +1,47 @@
+scenario_id: P0-RETRY-009
+version: "1.1"
+priority: P0
+domain: buyer_preorder
+tags: [retry, idempotency, critical_operational]
+grounding:
+  status: PROVEN_BY_CODE
+  evidence:
+    - "backend/src/agriconnect/services/mcp/gateway.py:296-325 — PreorderGateway.create_draft() -> MCP tool 'create_preorder_draft'; PreorderGateway.confirm_draft() -> MCP tool 'confirm_preorder_draft'"
+    - "backend/src/agriconnect/api/tasks.py — process_agent_task: @celery_app.task(bind=True, max_retries=3, autoretry_for=(Exception,), retry_backoff=5, retry_jitter=True)"
+  note: >
+    Tool names are proven. Whether a retried task actually produces a SECOND
+    preorder row (the idempotency property itself) is NOT proven — that is
+    exactly what this scenario exists to test, and it requires fault injection
+    the current repository has no runner for. Do not treat this scenario as
+    replayable.
+
+persona: {role: BUYER, description: "Acheteur, panier prêt à commander", phone: "+22670000009"}
+workspace_type: buyer
+initial_state:
+  working_memory:
+    active_cart: [{product: "oignons", quantity: 30, unit: "KG"}]
+
+conversation:
+  - turn: 1
+    user_message: "Je valide ma commande"
+    channel_event: CONFIRM
+    expected_behavior:
+      tool_calls: {calls: [create_preorder_draft], ordered: false}
+    # RUNNER NOTE (unimplemented): this scenario must be executed twice under
+    # fault injection — once normally, once with a simulated Celery redelivery
+    # of the SAME task (task_acks_late=True path, api/tasks.py) after
+    # create_preorder_draft (or confirm_preorder_draft, depending on which
+    # attempt phase is targeted) already succeeded once.
+
+business_outcome_assertions:
+  - {table: orders, condition: "exactly ONE preorder/draft row exists for this cart, even after simulated task redelivery", workspace_scope: own}
+
+must_not_execute: []
+security_expectations:
+  gate: null
+  attack_class: retry_double_execution
+  attack_vector: "retried write must not double-execute — financial-integrity equivalent of a fabricated transaction. Not one of the 7 named Contract gates."
+
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [mcp_execution_success, business_outcome_correctness, state_mutation_correctness]
+runner_requirement: "FAULT INJECTION REQUIRED — task redelivery simulation. No runner exists in this repository. NOT achievable by sequential conversational replay. Do not mark this scenario executable until such a runner is built."

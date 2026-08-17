@@ -1,0 +1,38 @@
+scenario_id: P1-SALES-021
+version: "1.1"
+priority: P1
+domain: producer_sales
+tags: [wrong_tool_temptation, tool_selection_precision]
+grounding:
+  status: PROVEN_BY_CODE
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py:241-250 — ProductGateway.update_product() -> MCP tool 'update_product_price_and_qty' (catalog product)"
+    - "backend/src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py:207-213 — StockGateway.update_production() -> MCP tool 'update_production_fields' (future production lot)"
+    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/intent.py:157-178 — explicit code comments distinguishing SALES_UPDATE_PRODUCT (catalogue) from SALES_UPDATE_PRODUCTION (future lot / MarketOffer)"
+
+persona: {role: PRODUCER, description: "Producteur, deux entités actives : un produit catalogue ET une production future", phone: "+22670000037"}
+workspace_type: producer
+initial_state:
+  db_fixtures:
+    - {table: products, product_id: "PRD-100", owner_phone: "+22670000037", product: "tomates"}
+    - {table: crop_cycles, cycle_id: "CYC-200", owner_phone: "+22670000037", product: "maïs (production future)"}
+
+conversation:
+  - turn: 1
+    user_message: "Change le prix de mes tomates en catalogue à 350 FCFA"
+    expected_behavior:
+      intent: SALES_UPDATE_PRODUCT
+      slots: {product_id: "PRD-100", price: 350}
+      tool_calls: {calls: [update_product_price_and_qty], ordered: false}
+  - turn: 2
+    user_message: "Et le prix prévu de ma future récolte de maïs, mets-le à 180 FCFA"
+    expected_behavior:
+      intent: SALES_UPDATE_PRODUCTION
+      slots: {cycle_id: "CYC-200", price: 180}
+      tool_calls: {calls: [update_production_fields], ordered: false}
+
+must_not_execute: []   # the risk being tested is CROSS-CONTAMINATION: turn 1 must not call update_production_fields, turn 2 must not call update_product_price_and_qty
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [tool_selection_precision, intent_accuracy]
+runner_requirement: "sequential replay"

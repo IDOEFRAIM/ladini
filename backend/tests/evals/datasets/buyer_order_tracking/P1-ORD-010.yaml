@@ -1,0 +1,37 @@
+scenario_id: P1-ORD-010
+version: "1.1"
+priority: P1
+domain: buyer_order_tracking
+tags: [happy_path, cancellation]
+grounding:
+  status: PROVEN_BY_CODE
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/order_tracking.py:481-483 — gw.cancel_pending_order(order_id, phone, reason), not cancel_order (INTENT_CONFIG label)"
+  correction_note: "Original Wave 1 version asserted tool_calls: [cancel_order] — not a real tool name."
+
+persona: {role: BUYER, description: "Acheteur", phone: "+22670000029"}
+workspace_type: buyer
+initial_state:
+  db_fixtures:
+    - {table: orders, order_id: "ORD-3321", workspace_owner_phone: "+22670000029", status: "PENDING"}
+
+conversation:
+  - turn: 1
+    user_message: "Annule ma commande ORD-3321"
+    expected_behavior:
+      intent: BUYER_CANCEL_ORDER
+      slots: {order_id: "ORD-3321"}
+      confirmation_expected: true
+  - turn: 2
+    user_message: "Oui"
+    channel_event: CONFIRM
+    expected_behavior:
+      tool_calls: {calls: [cancel_pending_order], ordered: false, arguments: {cancel_pending_order: {order_id: "ORD-3321", phone: "+22670000029"}}}
+
+business_outcome_assertions:
+  - {table: orders, condition: "order ORD-3321 status == CANCELLED", workspace_scope: own}
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [confirmation_safety, business_outcome_correctness]
+runner_requirement: "sequential replay"

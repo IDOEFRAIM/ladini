@@ -1,0 +1,31 @@
+scenario_id: P2-EDGE-042
+version: "1.1"
+priority: P2
+domain: market_read
+tags: [empty_result, edge_case]
+grounding:
+  status: PROVEN_BY_CODE
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/cart.py:309-329 — the 'if not vendors' branch (true zero-match, reached when the raw search returns nothing at all — distinct from P0-BIZ-007's case, where results existed but were filtered out by the confidence check)"
+
+persona: {role: BUYER, description: "Acheteur", phone: "+22670000043"}
+workspace_type: buyer
+initial_state: {}
+
+conversation:
+  - turn: 1
+    user_message: "Je cherche du caviar"
+    expected_behavior:
+      intent: BUYER_REQUEST
+      entities: {product: "caviar"}
+      tool_calls: {calls: [search_products], ordered: false, arguments: {search_products: {product: "caviar"}}}
+      response_claims:
+        - "response uses the not-found template (produit non disponible)"
+        - "response does not fabricate a substitute product"
+      state_assertion: {workspace: self, active_cart: []}
+
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [groundedness, final_answer_correctness]
+runner_requirement: "sequential replay"

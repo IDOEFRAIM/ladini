@@ -1,0 +1,42 @@
+scenario_id: P1-DISAMB-030
+version: "1.1"
+priority: P1
+domain: buyer_order_tracking
+tags: [disambiguation, dual_role]
+grounding:
+  status: PROVEN_BY_CODE
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/intent.py — INTENT_DISAMBIGUATION['ORDER_TRACKING_INTENT']: candidates=[BUYER_CHECK_ORDER_STATUS, BUYER_LIST_ORDERS, BUYER_CANCEL_ORDER, SALES_LIST_ORDERS], lexical_hints include 'ma commande', 'mes commandes', 'où est', 'statut'"
+    - "Tool bindings: get_transaction_summary (order_tracking.py:406), get_buyer_orders_dashboard (order_tracking.py:238), cancel_pending_order (order_tracking.py:481-483) — all PROVEN this session"
+  note: >
+    Per P0-SEC-004's finding, the BUYER_CHECK_ORDER_STATUS branch of this
+    scenario does NOT assert leak-proof behavior for a mismatched order_id —
+    this scenario only exercises the DISAMBIGUATION menu + the OWN-order happy
+    path, not a cross-user attack (that's P0-SEC-004's job).
+
+persona: {role: BUYER, description: "Acheteur, message ambigu sur ses commandes", phone: "+22670000039"}
+workspace_type: buyer
+initial_state:
+  db_fixtures:
+    - {table: orders, order_id: "ORD-4001", workspace_owner_phone: "+22670000039", status: "SHIPPED"}
+
+conversation:
+  - turn: 1
+    user_message: "Mes commandes"
+    expected_behavior:
+      checkpoints: [{semantic_disambiguation: "ORDER_TRACKING_INTENT 4-way menu shown"}]
+      tool_calls: {calls: [], ordered: false}
+      response_claims: ["response offers to check a specific order's status, list all orders, cancel an order, or (if producer-eligible) view received orders"]
+  - turn: 2
+    user_message: "Voir le statut de ORD-4001"
+    expected_behavior:
+      intent: BUYER_CHECK_ORDER_STATUS
+      tool_calls: {calls: [get_transaction_summary], ordered: false, arguments: {get_transaction_summary: {order_id: "ORD-4001", buyer_phone: "+22670000039"}}}
+      response_claims: ["response states order status is SHIPPED"]
+      # NOT asserted: any leak-proofing claim for a mismatched phone — see P0-SEC-004.
+
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [intent_accuracy, node_workflow_routing]
+runner_requirement: "sequential replay"

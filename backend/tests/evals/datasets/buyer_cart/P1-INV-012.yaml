@@ -1,0 +1,28 @@
+scenario_id: P1-INV-012
+version: "1.1"
+priority: P1
+domain: buyer_cart
+tags: [invalid_input, invalid_quantity, contract_validation]
+grounding:
+  status: PROVEN_BY_CODE
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/contracts.py:32-45 — AddToCartContract: quantity: float = Field(..., gt=0)"
+
+persona: {role: BUYER, description: "Acheteur", phone: "+22670000031"}
+workspace_type: buyer
+initial_state: {}
+
+conversation:
+  - turn: 1
+    user_message: "Ajoute 0 kg de tomates à mon panier"
+    expected_behavior:
+      intent: BUYER_ADD_TO_CART
+      tool_calls: {calls: [], ordered: false}
+      state_assertion: {workspace: self, active_cart: []}
+      response_claims: ["response asks for a valid, non-zero quantity"]
+
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: false}
+metric_applicability: [tool_argument_accuracy, state_mutation_correctness]
+runner_requirement: "sequential replay"

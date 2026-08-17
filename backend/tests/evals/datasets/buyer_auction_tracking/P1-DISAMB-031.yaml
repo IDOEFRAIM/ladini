@@ -1,0 +1,33 @@
+scenario_id: P1-DISAMB-031
+version: "1.1"
+priority: P1
+domain: buyer_auction_tracking
+tags: [disambiguation]
+grounding:
+  status: PROVEN_BY_CODE
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/intent.py — INTENT_DISAMBIGUATION['AUCTION_TRACKING_INTENT']: candidates=[BUYER_LIST_AUCTIONS, BUYER_CHECK_AUCTION_STATUS], roles=['BUYER'], lexical_hints include 'mes appels d'offres', 'mes enchères'"
+    - "backend/src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py:124-126 — get_auctions PROVEN"
+
+persona: {role: BUYER, description: "Acheteur", phone: "+22670000040"}
+workspace_type: buyer
+initial_state: {}
+
+conversation:
+  - turn: 1
+    user_message: "Mes appels d'offres"
+    expected_behavior:
+      checkpoints: [{semantic_disambiguation: "AUCTION_TRACKING_INTENT menu shown"}]
+      tool_calls: {calls: [], ordered: false}
+      response_claims: ["response offers to list all auctions or view a specific auction's bids"]
+  - turn: 2
+    user_message: "Voir mes appels d'offres"
+    expected_behavior:
+      intent: BUYER_LIST_AUCTIONS
+      tool_calls: {calls: [get_auctions], ordered: false}
+
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [intent_accuracy, node_workflow_routing]
+runner_requirement: "sequential replay"

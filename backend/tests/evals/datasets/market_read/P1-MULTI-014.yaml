@@ -1,0 +1,29 @@
+scenario_id: P1-MULTI-014
+version: "1.1"
+priority: P1
+domain: market_read
+tags: [multi_intent, entity_decomposition]
+grounding:
+  status: PROVEN_BY_REGRESSION
+  evidence:
+    - "backend/tests/unit/test_additional_products_hint.py — flows/buyer/helpers.py::additional_products_hint: when a message mentions multiple products, the interpreter puts only the FIRST in 'product' and lists the rest in 'additional_products'; the user is informed of what was set aside."
+    - "backend/src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py:234-236 — ProductGateway.search_products, PROVEN"
+
+persona: {role: BUYER, description: "Acheteur", phone: "+22670000033"}
+workspace_type: buyer
+initial_state: {}
+
+conversation:
+  - turn: 1
+    user_message: "Je cherche des œufs et de la laitue"
+    expected_behavior:
+      intent: BUYER_REQUEST
+      entities: {product: "œufs", additional_products: ["laitue"]}
+      tool_calls: {calls: [search_products], ordered: false, arguments: {search_products: {product: "œufs"}}}
+      response_claims: ["response mentions laitue was set aside and will need a separate search"]
+
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [entity_extraction_accuracy, final_answer_correctness]
+runner_requirement: "sequential replay"

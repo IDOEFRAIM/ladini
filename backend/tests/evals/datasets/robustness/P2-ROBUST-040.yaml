@@ -1,0 +1,29 @@
+scenario_id: P2-ROBUST-040
+version: "1.1"
+priority: P2
+domain: robustness
+tags: [typo, fuzzy_match]
+grounding:
+  status: PROVEN_BY_REGRESSION
+  evidence:
+    - "backend/tests/unit/test_buyer_fuzzy_match_safety.py:33-39 — test_a_genuine_typo_correction_is_treated_as_uncertain_too: _is_confident_product_match('tomte','Tomate') is False. Product decision (2026-08-14): 'garder tolérant mais avertir' — the typo IS still matched (low threshold, 0.22) but surfaced as low-confidence, routed through the same confidence filter as P0-BIZ-007 (cart.py:299-306), not silently auto-applied."
+
+persona: {role: BUYER, description: "Acheteur", phone: "+22670000042"}
+workspace_type: buyer
+initial_state: {}
+
+conversation:
+  - turn: 1
+    user_message: "jvoudrai 2kg de tomte stp"
+    expected_behavior:
+      intent: BUYER_REQUEST
+      entities: {product: "tomte", quantity: 2, unit: "KG"}
+      tool_calls: {calls: [search_products], ordered: false, arguments: {search_products: {product: "NORMALIZED:tomte"}}}
+      should_clarify: true   # per test_buyer_fuzzy_match_safety.py — a typo match is low-confidence, not auto-applied
+      response_claims: ["response asks for confirmation that 'tomate' is the intended product, rather than silently substituting it"]
+
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [entity_extraction_accuracy, unnecessary_clarification]
+runner_requirement: "sequential replay"

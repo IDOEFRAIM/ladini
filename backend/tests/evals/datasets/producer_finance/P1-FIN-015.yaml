@@ -1,0 +1,35 @@
+scenario_id: P1-FIN-015
+version: "1.1"
+priority: P1
+domain: producer_finance
+tags: [happy_path, expense_logging]
+grounding:
+  status: PATTERN_CONSISTENT
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/intent.py — FINANCE_LOG_EXPENSE non-tunnel, tool_name='add_expense', required=[price, farm_id]"
+    - "Dispatch pattern for non-tunnel intents PROVEN elsewhere (see P1-STOCK-001); actions/finance.py's own handler not individually re-traced."
+
+persona: {role: PRODUCER, description: "Producteur", phone: "+22670000034"}
+workspace_type: producer
+initial_state: {}
+
+conversation:
+  - turn: 1
+    user_message: "J'ai dépensé 15000 FCFA en engrais pour la ferme F-12"
+    expected_behavior:
+      intent: FINANCE_LOG_EXPENSE
+      slots: {price: 15000, product: "engrais", farm_id: "F-12"}
+      confirmation_expected: true
+  - turn: 2
+    user_message: "Oui"
+    channel_event: CONFIRM
+    expected_behavior:
+      tool_calls: {calls: [add_expense], ordered: false, arguments: {add_expense: {price: 15000, product: "engrais", farm_id: "F-12"}}}
+
+business_outcome_assertions:
+  - {table: expenses, condition: "expense row created, price=15000, farm_id='F-12'", workspace_scope: own}
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [tool_argument_accuracy, business_outcome_correctness]
+runner_requirement: "sequential replay"
