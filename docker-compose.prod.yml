@@ -4,8 +4,13 @@
 # Deux blocs sur le MÊME réseau `agri_net` :
 #   1. APPLICATIF : api (FastAPI), worker (Celery), mcp (daemon HTTP
 #      AgriDBMCPServer — transport persistant, pool DB chaud, voir
-#      protocols/mcp/servers/http_server.py), redis (broker), postgres
-#      (DB), pgbouncer (pooling), flower (monitoring Celery).
+#      protocols/mcp/servers/http_server.py), redis (broker), flower
+#      (monitoring Celery).
+#      DB applicative = Postgres managé DigitalOcean EXTERNE, via
+#      DATABASE_URL/DB_SSL_MODE (voir x-app-env + .env) — PAS les services
+#      `postgres`/`pgbouncer` ci-dessous, qui ne contiennent aucune des
+#      tables de l'app et restent définis uniquement pour un usage
+#      local/dev optionnel (rien n'en dépend en prod).
 #   2. LANGFUSE v3 (LLMOps self-hosted) : langfuse-web, langfuse-worker,
 #      clickhouse, minio, langfuse-postgres.
 #
@@ -27,11 +32,20 @@
 # ═════════════════════════════════════════════════════════════════════
 
 x-app-env: &app-env
-  # DB passe par PgBouncer (pool partagé, protège la DB de la saturation par
-  # les N workers). asyncpg + PgBouncer transaction-mode : OK ici car le repo
-  # désactive déjà le statement cache asyncpg (core/database.py).
-  DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@pgbouncer:6432/${POSTGRES_DB}"
-  DB_SSL_MODE: "disable"              # réseau interne Docker → pas de SSL
+  # DB : Postgres managé externe (DigitalOcean), PAS le conteneur local
+  # `postgres`/`pgbouncer` — celui-ci ne contient aucune des tables de
+  # l'app (voir agri_workspaces, intelligence.notification_outbox, etc.),
+  # qui vivent uniquement sur le cluster DO. Renseignez DATABASE_URL (ou
+  # DO_DATABASE_URL, prioritaire — voir core/settings.py) dans `.env` avec
+  # la chaîne fournie par DigitalOcean (hôte *.db.ondigitalocean.com).
+  # Passthrough tel quel : router à nouveau vers pgbouncer:6432 ici casse
+  # tout, PgBouncer local n'a jamais les tables applicatives.
+  DATABASE_URL: "${DATABASE_URL:-}"
+  DO_DATABASE_URL: "${DO_DATABASE_URL:-}"
+  # require = TLS sans vérification du certificat — c'est le mode attendu
+  # par les DB managées DigitalOcean (asyncpg refuse une connexion en clair
+  # côté DO). "disable" n'a de sens que pour un Postgres 100% local.
+  DB_SSL_MODE: "${DB_SSL_MODE:-require}"
   REDIS_URL: "redis://redis:6379/0"
   # MCP — daemon HTTP persistant (remplace le spawn stdio par tour, voir
   # protocols/mcp/servers/http_server.py). api/worker s'y connectent tous les
@@ -41,12 +55,24 @@ x-app-env: &app-env
   # LLM
   LLM_PROVIDER: "groq"
   GROQ_API_KEY: "${GROQ_API_KEY}"
+  # Fournisseur de messagerie WhatsApp — non transmis ici auparavant, donc
+  # toujours retombé sur le défaut Pydantic "whatsapp_cloud" en conteneur
+  # même quand .env vaut "twilio" (cause des erreurs d'envoi en prod).
+  MESSAGING_PROVIDER: "${MESSAGING_PROVIDER:-whatsapp_cloud}"
   # Twilio
   TWILIO_ACCOUNT_SID: "${TWILIO_ACCOUNT_SID}"
   TWILIO_AUTH_TOKEN: "${TWILIO_AUTH_TOKEN}"
   TWILIO_WHATSAPP_NUMBER: "${TWILIO_WHATSAPP_NUMBER}"
   TWILIO_INTERACTIVE_ENABLED: "${TWILIO_INTERACTIVE_ENABLED:-false}"
   TWILIO_CONFIRM_CONTENT_SID: "${TWILIO_CONFIRM_CONTENT_SID:-}"
+  # WhatsApp Cloud API (Meta directe)
+  WHATSAPP_CLOUD_API_TOKEN: "${WHATSAPP_CLOUD_API_TOKEN:-}"
+  WHATSAPP_PHONE_NUMBER_ID: "${WHATSAPP_PHONE_NUMBER_ID:-}"
+  WHATSAPP_BUSINESS_ACCOUNT_ID: "${WHATSAPP_BUSINESS_ACCOUNT_ID:-}"
+  WHATSAPP_WEBHOOK_VERIFY_TOKEN: "${WHATSAPP_WEBHOOK_VERIFY_TOKEN:-}"
+  WHATSAPP_APP_SECRET: "${WHATSAPP_APP_SECRET:-}"
+  WHATSAPP_GRAPH_API_VERSION: "${WHATSAPP_GRAPH_API_VERSION:-v21.0}"
+  WHATSAPP_NATIVE_INTERACTIVE_ENABLED: "${WHATSAPP_NATIVE_INTERACTIVE_ENABLED:-true}"
   # Observabilité infra
   OTEL_ENABLED: "${OTEL_ENABLED:-true}"
   OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
@@ -77,8 +103,6 @@ services:
       args:
         API_IMAGE: ladini-api:latest
     environment: *app-env
-    depends_on:
-      pgbouncer: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8003/health"]
       interval: 15s
@@ -101,7 +125,6 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      pgbouncer: { condition: service_healthy }
       redis: { condition: service_healthy }
       mcp: { condition: service_healthy }
     healthcheck:
@@ -127,7 +150,6 @@ services:
     environment: *app-env
     depends_on:
       api: { condition: service_started }
-      pgbouncer: { condition: service_healthy }
       redis: { condition: service_healthy }
       mcp: { condition: service_healthy }
     healthcheck:
@@ -154,8 +176,13 @@ services:
   # plusieurs beat dupliqueraient chaque tâche N fois sur le broker).
   beat:
     image: ladini-worker:latest
+    # --schedule pointe vers /tmp (writable par l'utilisateur non-root
+    # `appuser` — voir infra/docker/Dockerfile.worker) : le défaut Celery
+    # écrit `celerybeat-schedule` dans le CWD de l'image, appartenant à
+    # root, d'où un "Permission denied" systématique au démarrage.
     command: ["celery", "-A", "agriconnect.api.celery_app", "beat",
-              "--loglevel=info", "--pidfile=/tmp/celerybeat.pid"]
+              "--loglevel=info", "--pidfile=/tmp/celerybeat.pid",
+              "--schedule=/tmp/celerybeat-schedule"]
     environment: *app-env
     depends_on:
       redis: { condition: service_healthy }
@@ -208,6 +235,11 @@ services:
   pgbouncer:
     image: edoburu/pgbouncer:latest
     environment:
+      # L'image edoburu/pgbouncer écoute par défaut sur 5432 (son propre
+      # défaut LISTEN_PORT) — sans cette variable elle IGNORE la convention
+      # "pgbouncer:6432" utilisée par DATABASE_URL (x-app-env) et tout le
+      # reste de la stack se voit refuser la connexion sur 6432.
+      LISTEN_PORT: "6432"
       DB_HOST: postgres
       DB_PORT: "5432"
       DB_USER: "${POSTGRES_USER}"
@@ -222,10 +254,15 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U ${POSTGRES_USER} || exit 1"]
-      interval: 15s
-      timeout: 5s
+      # pgbouncer écoute en local sur 6432 (5432 est le port de `postgres`,
+      # injoignable depuis CE conteneur) — un check sur le mauvais port ne
+      # passe jamais healthy, ce qui bloque tous les services en aval
+      # (`depends_on: condition: service_healthy`).
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6432 || exit 1"]
+      interval: 5s
+      timeout: 3s
       retries: 5
+      start_period: 5s
     deploy:
       resources:
         limits: { cpus: "0.5", memory: 256m }

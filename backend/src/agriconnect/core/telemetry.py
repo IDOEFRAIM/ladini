@@ -170,8 +170,18 @@ def init_telemetry(service_name: str = "agriconnect") -> None:
             logger.warning("[telemetry] Langfuse indisponible (%s) — désactivé.", exc)
 
 
+def _otel_enabled() -> bool:
+    try:
+        from agriconnect.core.settings import settings
+        return bool(getattr(settings, "OTEL_ENABLED", False))
+    except Exception:
+        return False
+
+
 def instrument_fastapi(app: Any) -> None:
     """Instrumente automatiquement FastAPI via OTel si disponible (best-effort)."""
+    if not _otel_enabled():
+        return
     try:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         FastAPIInstrumentor.instrument_app(app)
@@ -181,7 +191,17 @@ def instrument_fastapi(app: Any) -> None:
 
 
 def instrument_celery() -> None:
-    """Instrumente Celery via OTel si disponible (best-effort)."""
+    """Instrumente Celery via OTel si disponible (best-effort).
+
+    Gardé derrière OTEL_ENABLED : sans TracerProvider actif (voir
+    init_telemetry), le CeleryInstrumentor pousse/pop quand même un
+    contexte OTel à chaque tâche — avec les retries (`autoretry_for`), les
+    signaux start/retry/failure se désynchronisent et un detach sans
+    attach correspondant lève `TypeError: expected an instance of Token,
+    got None` dans le worker.
+    """
+    if not _otel_enabled():
+        return
     try:
         from opentelemetry.instrumentation.celery import CeleryInstrumentor
         CeleryInstrumentor().instrument()
