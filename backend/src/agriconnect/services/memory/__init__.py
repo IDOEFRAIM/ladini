@@ -9,10 +9,10 @@ Niveaux :
 Gains attendus : -50% tokens/message, qualité supérieure (data structurée).
 """
 
-from .user_profile import UserFarmProfile
-from .profile_extractor import ProfileExtractor
-from .episodic_memory import EpisodicMemory
 from .context_optimizer import ContextOptimizer
+from .episodic_memory import EpisodicMemory
+from .profile_extractor import ProfileExtractor
+from .user_profile import UserFarmProfile
 
 __all__ = [
     "UserFarmProfile",

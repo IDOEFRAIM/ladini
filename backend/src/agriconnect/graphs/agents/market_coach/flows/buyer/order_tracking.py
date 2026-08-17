@@ -37,7 +37,6 @@ from agriconnect.graphs.agents.market_coach.core.goals import (
 # (`from .order_tracking import _get_stored_location`, utilisés par
 # negotiation.py et preorder.py).
 from agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate import (
-    _get_stored_location,
     enter_gps_stage,
     resolve_gps_stage,
 )

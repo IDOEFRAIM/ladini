@@ -17,13 +17,12 @@ DÉCLENCHEUR : Appelé par l'orchestrateur à la fin de persist(),
 uniquement si l'interaction est "significative" (pas les salutations).
 """
 
-import json
 import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import Column, DateTime, String, Text, Float, JSON, Integer
+from sqlalchemy import Column, DateTime, Float, Integer, String, Text
 from sqlalchemy.sql import func
 
 from agriconnect.domain.orm_base import Base

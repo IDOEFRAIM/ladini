@@ -18,7 +18,7 @@ Il fournit le contexte complet optimisé en un seul appel.
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Optional
 
 logger = logging.getLogger("Memory.ContextOptimizer")
 

@@ -14,13 +14,12 @@ Le profil est INCRÉMENTAL : chaque interaction peut l'enrichir
 sans jamais le réécrire entièrement (MERGE, pas REPLACE).
 """
 
-import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
-from sqlalchemy import Column, DateTime, String, Text, Float, JSON
+from sqlalchemy import JSON, Column, DateTime, String
 from sqlalchemy.sql import func
 
 from agriconnect.domain.orm_base import Base
