@@ -163,17 +163,32 @@ class TestGetProhibitedTermsCached:
         assert "get_prohibited_terms" not in runtime.calls
 
     def test_expired_cache_refetches(self):
+        import time
         import agriconnect.graphs.agents.market_coach.nodes.security_moderation as mod
         mod._terms_cache["terms"] = ["stale_term"]
-        mod._terms_cache["at"] = 0.0  # bien avant maintenant -> expiré
+        # Bug réel confirmé (CI, reproductible) : `at = 0.0` supposait que
+        # `time.monotonic()` vaut TOUJOURS bien plus que le TTL (300s) —
+        # faux par construction : la doc Python dit explicitement que le
+        # point de référence de `time.monotonic()` est NON SPÉCIFIÉ (souvent
+        # l'uptime système). Sur un runner CI fraîchement démarré,
+        # `time.monotonic()` peut valoir < 300 au moment du test — `0.0`
+        # n'est alors PAS détecté comme périmé, le cache-hit renvoie
+        # silencieusement `stale_term` au lieu de refetch. Seul CE test
+        # révèle le bug (ses voisins ci-dessous acceptent la même valeur de
+        # repli, qu'il y ait eu refetch ou pas — l'ambiguïté masquait le
+        # problème). Fix : calculer un timestamp GARANTI périmé PAR RAPPORT
+        # au `time.monotonic()` réel de ce process, jamais une valeur
+        # absolue supposée.
+        mod._terms_cache["at"] = time.monotonic() - mod._TERMS_CACHE_TTL_SECONDS - 1
         runtime = rt({"get_prohibited_terms": {"terms": ["fresh_term"]}})
         result = run(mod._get_prohibited_terms_cached(runtime))
         assert result == ["fresh_term"]
 
     def test_gateway_exception_falls_back_to_stale_cache(self):
+        import time
         import agriconnect.graphs.agents.market_coach.nodes.security_moderation as mod
         mod._terms_cache["terms"] = ["stale_but_usable"]
-        mod._terms_cache["at"] = 0.0
+        mod._terms_cache["at"] = time.monotonic() - mod._TERMS_CACHE_TTL_SECONDS - 1
 
         class _BoomRuntime:
             llm = None
@@ -185,9 +200,10 @@ class TestGetProhibitedTermsCached:
         assert result == ["stale_but_usable"]
 
     def test_empty_terms_response_falls_back_to_previous_cache(self):
+        import time
         import agriconnect.graphs.agents.market_coach.nodes.security_moderation as mod
         mod._terms_cache["terms"] = ["previous"]
-        mod._terms_cache["at"] = 0.0
+        mod._terms_cache["at"] = time.monotonic() - mod._TERMS_CACHE_TTL_SECONDS - 1
         runtime = rt({"get_prohibited_terms": {"terms": []}})
         result = run(mod._get_prohibited_terms_cached(runtime))
         assert result == ["previous"]
