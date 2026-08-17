@@ -156,6 +156,24 @@ def parse_compound_quantity(text: str) -> QuantityUnitResult:
     return parse_quantity_unit_from_text(text)
 
 
+def convert_quantity(quantity: float, from_unit: str, to_unit: str) -> Optional[float]:
+    """Convert *quantity* from one canonical unit to another.
+
+    Only safe for units with a FIXED, universal factor (weight units in
+    `_UNIT_TO_KG`: KG, TONNE). Returns ``None`` when no safe conversion
+    exists (e.g. SAC/PANIER/TETE have no universal kg-equivalent) — callers
+    must not guess in that case, only ask the user to restate the quantity
+    in the target unit.
+    """
+    if from_unit == to_unit:
+        return quantity
+    from_kg = _UNIT_TO_KG.get(from_unit or "")
+    to_kg = _UNIT_TO_KG.get(to_unit or "")
+    if from_kg is None or to_kg is None:
+        return None
+    return quantity * from_kg / to_kg
+
+
 def extract_unit_only_from_text(text: str) -> Optional[str]:
     """Try to find a standalone unit token in *text* (no quantity required)."""
     if not text:
@@ -363,6 +381,7 @@ __all__ = [
     "QuantityUnitResult",
     "parse_quantity_unit_from_text",
     "parse_compound_quantity",
+    "convert_quantity",
     "extract_unit_only_from_text",
     "NumberCandidate",
     "scan_number_candidates",

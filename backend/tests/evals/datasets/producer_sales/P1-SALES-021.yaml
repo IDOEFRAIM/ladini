@@ -1,38 +1,75 @@
 scenario_id: P1-SALES-021
-version: "1.1"
+version: "1.2"
 priority: P1
 domain: producer_sales
-tags: [wrong_tool_temptation, tool_selection_precision]
+tags: [wrong_tool_temptation, tool_selection_precision, multi_turn_state_machine, proven_by_execution]
 grounding:
-  status: PROVEN_BY_CODE
+  status: PROVEN_BY_EXECUTION
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py:241-250 — ProductGateway.update_product() -> MCP tool 'update_product_price_and_qty' (catalog product)"
-    - "backend/src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py:207-213 — StockGateway.update_production() -> MCP tool 'update_production_fields' (future production lot)"
-    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/intent.py:157-178 — explicit code comments distinguishing SALES_UPDATE_PRODUCT (catalogue) from SALES_UPDATE_PRODUCTION (future lot / MarketOffer)"
+    - "backend/src/agriconnect/graphs/agents/market_coach/flows/producer/flow.py:1483-1490 — producer_context_resolver dispatches SALES_UPDATE_PRODUCT to _resolve_product_for_update(mc_runtime, phone, payload, working_memory, normalized_text, interpreted_event)"
+    - "backend/src/agriconnect/graphs/agents/market_coach/flows/producer/flow.py:1039-1263 — _resolve_product_for_update: 4-phase state machine (SELECT -> COLLECT -> CONFIRM -> execute), keyed on working_memory.update_phase"
+    - "backend/src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py:241-250 — ProductGateway.update_product() -> MCP tool 'update_product_price_and_qty'"
+    - "THIS SESSION: all 4 turns below executed for real against producer_context_resolver with a RecordingRuntime — every tool name, argument, and working_memory value shown is the ACTUAL observed output, not derived from reading alone."
+  correction_note: >
+    Previous version (v1.1) assumed a single CONFIRM turn reaches the tool
+    call directly — WRONG, confirmed by real execution: turn 2 (bare
+    selection, no correction text) lands in COLLECT phase with ZERO tool
+    calls; the tool only fires on turn 4. Rewritten as the real 4-turn flow.
+  sales_update_production_note: >
+    SALES_UPDATE_PRODUCTION (_resolve_cycle_for_update, flow.py:776+) is
+    structurally identical by direct code read (same phase machine, same
+    working_memory keys under different names: update_cycle_id instead of
+    update_product_id) and calls StockGateway.update_production() ->
+    'update_production_fields' (services/mcp/gateway.py:207-213). This is
+    PROVEN_BY_CODE (direct read of the mirror function), NOT independently
+    re-executed turn-by-turn the way the PRODUCT half was — do not upgrade
+    to PROVEN_BY_EXECUTION without actually running it.
 
-persona: {role: PRODUCER, description: "Producteur, deux entités actives : un produit catalogue ET une production future", phone: "+22670000037"}
+persona: {role: PRODUCER, description: "Producteur, un seul produit au catalogue", phone: "+22670000037"}
 workspace_type: producer
 initial_state:
   db_fixtures:
-    - {table: products, product_id: "PRD-100", owner_phone: "+22670000037", product: "tomates"}
-    - {table: crop_cycles, cycle_id: "CYC-200", owner_phone: "+22670000037", product: "maïs (production future)"}
+    - {table: products, product_id: "PRD-100", owner_phone: "+22670000037", product: "Tomates", quantity: 50, unit: "KG", price: 300}
 
 conversation:
   - turn: 1
-    user_message: "Change le prix de mes tomates en catalogue à 350 FCFA"
+    user_message: "Je veux modifier un produit de mon catalogue"
     expected_behavior:
       intent: SALES_UPDATE_PRODUCT
-      slots: {product_id: "PRD-100", price: 350}
-      tool_calls: {calls: [update_product_price_and_qty], ordered: false}
+      tool_calls: {calls: [get_my_products], ordered: false, arguments: {get_my_products: {phone: "+22670000037"}}}
+      response_claims: ["response shows a numbered menu of the producer's own catalog products"]
+      state_assertion: {workspace: self, available_mapping: {"1": "PRD-100"}}
   - turn: 2
-    user_message: "Et le prix prévu de ma future récolte de maïs, mets-le à 180 FCFA"
+    user_message: "1"
     expected_behavior:
-      intent: SALES_UPDATE_PRODUCTION
-      slots: {cycle_id: "CYC-200", price: 180}
-      tool_calls: {calls: [update_production_fields], ordered: false}
+      # bare selection, no field-correction text in the same message
+      tool_calls: {calls: [], ordered: false}
+      response_claims: ["response asks what field to change (prix / nom / quantité)"]
+      state_assertion:
+        workspace: self
+        working_memory.update_phase: "COLLECT"
+        working_memory.update_product_id: "PRD-100"
+  - turn: 3
+    user_message: "prix 400"
+    expected_behavior:
+      tool_calls: {calls: [], ordered: false}
+      response_claims: ["response shows a recap: new price 400 FCFA/KG, asks oui/non/correction"]
+      state_assertion:
+        workspace: self
+        working_memory.update_phase: "CONFIRM"
+        working_memory.update_pending: {price: 400.0}
+  - turn: 4
+    user_message: "Oui"
+    channel_event: CONFIRM
+    expected_behavior:
+      tool_calls:
+        calls: [update_product_price_and_qty]
+        ordered: false
+        arguments: {update_product_price_and_qty: {phone: "+22670000037", product_id: "PRD-100", price: 400.0}}
+      response_claims: ["response confirms the product was updated"]
 
-must_not_execute: []   # the risk being tested is CROSS-CONTAMINATION: turn 1 must not call update_production_fields, turn 2 must not call update_product_price_and_qty
+must_not_execute: [update_production_fields]   # cross-contamination check: this turn sequence is entirely about the CATALOG product, never the future-production table
 security_expectations: {gate: null, attack_class: null, attack_vector: null}
-expected_final_outcome: {end_to_end_success: true}
-metric_applicability: [tool_selection_precision, intent_accuracy]
-runner_requirement: "sequential replay"
+expected_final_outcome: {end_to_end_success: true, phase_transitions: ["SELECT", "COLLECT", "CONFIRM", "COMPLETED"]}
+metric_applicability: [tool_selection_precision, intent_accuracy, tool_argument_accuracy, trajectory_flow_correctness, state_context_accuracy]
+runner_requirement: "sequential replay (4 turns)"

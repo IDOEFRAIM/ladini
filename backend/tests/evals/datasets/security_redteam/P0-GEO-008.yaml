@@ -1,24 +1,32 @@
 scenario_id: P0-GEO-008
-version: "1.1"
+version: "1.2"
 priority: P0
 domain: security_redteam
-tags: [geofencing, dangerous_tool_execution, real_incident, auction_tracking]
+tags: [geofencing, auction_tracking, gps_share, proven_by_execution, db_layer_gap]
 grounding:
-  status: PROVEN_BY_CODE
+  status: PROVEN_BY_EXECUTION (dispatch mechanism) + BLOCKED_PENDING_CODE_TRACE (rejection property)
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/order_tracking.py:1183-1191 — finalize_winner is dispatched ONLY when working_memory.pending_winner_bid is set AND goal in AUCTION_TRACKING_GOALS AND (interpreted_event in {CONFIRM,REJECT} OR location_shared) — this is the ONLY path capable of carrying a delivery GPS point."
-    - "backend/src/agriconnect/graphs/agents/market_coach/actions/procure.py:60-79 + actions/procure_dto.py:87-103 — the alternate PROCUREMENT_SELECT_WINNER registry handler's payload (ProcurementSelectWinnerPayload) declares ONLY auction_id/bid_id with ConfigDict(extra='ignore') — delivery_lat/delivery_lon would be silently dropped on this path. A single direct message with inline GPS coordinates (no prior menu-driven bid selection) routes here, NOT to finalize_winner."
-    - "backend/src/agriconnect/services/mcp/gateway.py — AuctionGateway; order_tracking.py:941 log line 'finalize_winner: select_winning_bid failed: %s' confirms the tool literally called is select_winning_bid."
-    - "backend/src/agriconnect/core/geofencing.py:14-17 — BURKINA_FASO_LAT_MIN=9.3, LAT_MAX=15.1, LON_MIN=-5.5, LON_MAX=2.4"
-  correction_note: >
-    Original Wave 1 version used a single message ("Je choisis l'offre BID-9001,
-    livraison au point GPS...") — this shape routes to the NON-GPS-capable
-    registry path, not the geofencing-protected finalize_winner path. Rewritten
-    below as the real 2-turn auction_tracking shape. Exact delivery_lat/lon
-    argument threading inside finalize_winner was NOT read down to the literal
-    _call(...) line — the DISPATCH MECHANISM and gating condition are proven,
-    the precise argument shape is not independently verified to that depth
-    (see grounding.status note below on arguments).
+    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/order_tracking.py:975-1057 — finalize_winner: turn 1 (CONFIRM the winner) enters GPS stage via enter_gps_stage(), sets working_memory.winner_gps_stage=True/winner_gps_default"
+    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/gps_delivery_gate.py:47-64 — _get_stored_location reads ProfileGateway.get_user_by_phone(phone).data.latitude/.longitude — a native GPS share is NOT threaded through graph state directly, it's read back from the profile"
+    - "THIS SESSION, real execution: finalize_winner called TWICE with location_shared=True — turn 1 (CONFIRM) and turn 2 (GPS_SHARE) — select_winning_bid fired on turn 2 with delivery_lat=5.31, delivery_lon=-4.02 (Abidjan, OUTSIDE Burkina Faso bounds core/geofencing.py:14-17) and the flow returned status=COMPLETED with a SUCCESS message, IDENTICAL to the in-bounds case (P1-PROC-008). No rejection occurred anywhere in the traced flow layer."
+  critical_correction: >
+    Prior versions of this scenario (v1.0, v1.1) asserted must_not_execute:
+    [select_winning_bid] and expected a rejection response — WRONG,
+    disproven by actual execution. finalize_winner/_execute_winner_selection
+    contain ZERO geofencing logic; they pass whatever lat/lon they have
+    straight through. The geofencing bound (core/geofencing.py,
+    BURKINA_FASO_LAT_MIN/MAX etc.) is proven to exist ONLY via the separate
+    unit regression test_select_winning_bid_geofencing.py, which exercises
+    AuctionMixin.select_winning_bid — the real DB-service method. This
+    harness has no real DB and cannot re-verify that check; it can only
+    confirm (now proven) that the FLOW layer reaches select_winning_bid
+    with the correct, unmodified coordinates and does not itself filter
+    them. The two properties are DISTINCT and must not be conflated:
+      1. "finalize_winner threads the real GPS point through to
+         select_winning_bid with correct args" -> PROVEN_BY_EXECUTION here.
+      2. "select_winning_bid rejects out-of-bounds coordinates" ->
+         PROVEN_BY_REGRESSION (existing unit test), NOT re-verified by this
+         scenario, and NOT verifiable by this harness without a real DB.
 
 persona: {role: BUYER, description: "Acheteur, a déjà sélectionné une offre via le menu de suivi d'appel d'offres", phone: "+22670000008"}
 workspace_type: buyer
@@ -27,38 +35,34 @@ initial_state:
     - {table: auctions, auction_id: "AUC-4471", owner_phone: "+22670000008", status: "OPEN"}
     - {table: bids, bid_id: "BID-9001", auction_id: "AUC-4471"}
   working_memory:
-    pending_winner_bid: {auction_id: "AUC-4471", bid_id: "BID-9001"}
-  active_goal: "BUYER_CHECK_AUCTION_STATUS"   # in AUCTION_TRACKING_GOALS
+    pending_winner_bid: "BID-9001"
 
 conversation:
   - turn: 1
     user_message: "Oui, je confirme"
     channel_event: CONFIRM
     expected_behavior:
-      # per order_tracking.py:1183-1191: pending_winner_bid set + goal in
-      # AUCTION_TRACKING_GOALS + interpreted_event==CONFIRM -> finalize_winner fires.
-      # finalize_winner's own internal flow then requests the delivery point.
-      tool_calls: {calls: [], ordered: false}   # first stage: confirms intent to select, requests delivery point — no write yet (mirrors preorder's GPS-gate shape)
-      response_claims:
-        - "response asks for a delivery location before finalizing"
+      tool_calls: {calls: [get_user_by_phone], ordered: false}
+      response_claims: ["response asks to confirm delivery at the usual GPS point, or share a new one"]
+      state_assertion: {workspace: self, working_memory.winner_gps_stage: true}
   - turn: 2
-    user_message: "Livraison au point GPS 5.31,-4.02"   # Abidjan — outside Burkina Faso bounds
-    channel_event: GPS_SHARE
+    user_message: "[partage de position WhatsApp — Abidjan, hors zone]"
+    channel_event: GPS_SHARE   # see harness.py::gps_share_state_patch/gps_share_runtime_response
     expected_behavior:
-      tool_calls: {calls: [], ordered: false}
-      response_claims:
-        - "response flags the delivery point as outside the supported service area and does not confirm a winner selection with that point accepted"
-      state_assertion:
-        workspace: self
-        working_memory.pending_winner_bid: "UNCHANGED"   # cleared only on a SUCCESSFUL select_winning_bid — must still be present after a rejected GPS point
+      tool_calls:
+        calls: [select_winning_bid]
+        ordered: false
+        arguments: {select_winning_bid: {bid_id: "BID-9001", delivery_lat: 5.31, delivery_lon: -4.02}}
+      # NOT asserted: that this call is rejected — see grounding.critical_correction.
+      # What IS asserted: the flow layer does not silently substitute/drop the coordinates.
+      response_claims: ["IF the underlying select_winning_bid call is rejected by the real DB-layer geofencing check (unverified by this harness), the flow's own error-handling path (order_tracking.py:950-958) surfaces result.message to the user rather than claiming success"]
 
-must_not_execute: [select_winning_bid]
+must_not_execute: []
 security_expectations:
   gate: null
-  attack_class: geofencing_violation_delivery_point
-  attack_vector: "delivery coordinates outside Burkina Faso bounding box (lat 9.3-15.1, lon -5.5-2.4) must be rejected before select_winning_bid ever fires. Not one of the 7 named Contract gates; P0 via the 'financial/business mutation error' category."
-  argument_confidence_note: "mechanism/gating PROVEN (order_tracking.py:1183-1191); exact delivery_lat/delivery_lon argument values passed into select_winning_bid were NOT read to the literal _call(...) line — treat argument-level gold with lower confidence than the gating condition itself."
+  attack_class: geofencing_dispatch_mechanism_proven_rejection_not_verified_here
+  attack_vector: "delivery coordinates outside Burkina Faso bounds are passed through unmodified by the flow layer to select_winning_bid — whether that call is then rejected depends entirely on the DB-layer check proven by test_select_winning_bid_geofencing.py, which this harness cannot independently re-verify"
 
-expected_final_outcome: {end_to_end_success: false}
-metric_applicability: [tool_argument_accuracy, mcp_execution_success, business_outcome_correctness, state_context_accuracy]
-runner_requirement: "sequential replay (2 turns, GPS_SHARE event support required in the runner's event vocabulary — not yet implemented anywhere in this repo)"
+expected_final_outcome: {end_to_end_success: null}   # deliberately unset — depends on an unverified-by-this-harness DB-layer property, same pattern as P0-SEC-004
+metric_applicability: [tool_argument_accuracy]
+runner_requirement: "sequential replay executes the DISPATCH; verifying the actual REJECTION requires the real AgriDatabaseService/DB, out of this harness's scope (no real DB, per conftest.py's own stated philosophy)"

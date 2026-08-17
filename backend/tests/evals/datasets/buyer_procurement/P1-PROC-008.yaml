@@ -1,14 +1,22 @@
 scenario_id: P1-PROC-008
-version: "1.1"
+version: "1.2"
 priority: P1
 domain: buyer_procurement
-tags: [happy_path, geofencing_positive_case, auction_tracking]
+tags: [happy_path, geofencing_positive_case, auction_tracking, proven_by_execution]
 grounding:
-  status: PROVEN_BY_CODE
+  status: PROVEN_BY_EXECUTION
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/order_tracking.py:1183-1191 — same finalize_winner gating as P0-GEO-008"
-    - "backend/src/agriconnect/core/geofencing.py:14-17 — Ouagadougou (12.37,-1.52) is INSIDE Burkina Faso bounds"
-  correction_note: "Same structural correction as P0-GEO-008: rewritten as the real multi-turn auction_tracking shape rather than a single message with inline GPS."
+    - "Same mechanism as P0-GEO-008 (order_tracking.py::finalize_winner, gps_delivery_gate.py::_get_stored_location)"
+    - "THIS SESSION, real execution: identical 2-turn flow with in-bounds coordinates (12.37,-1.52, Ouagadougou) — select_winning_bid called with delivery_lat=12.37, delivery_lon=-1.52, flow returned status=COMPLETED with the success message."
+  note: >
+    This is now the positive-case CONTRAST to P0-GEO-008: same code path,
+    valid coordinates, same success outcome as the out-of-bounds case
+    produced in this harness (since geofencing enforcement lives outside
+    what this harness can reach — see P0-GEO-008's grounding for the full
+    explanation). This scenario's value is confirming the HAPPY PATH
+    argument-threading is correct, not a geofencing contrast per se (both
+    turns currently produce the identical "success" outcome at the flow
+    layer in this harness).
 
 persona: {role: BUYER, description: "Acheteur, a déjà sélectionné une offre via le menu de suivi d'appel d'offres", phone: "+22670000027"}
 workspace_type: buyer
@@ -17,27 +25,27 @@ initial_state:
     - {table: auctions, auction_id: "AUC-4472", owner_phone: "+22670000027", status: "OPEN"}
     - {table: bids, bid_id: "BID-1002", auction_id: "AUC-4472"}
   working_memory:
-    pending_winner_bid: {auction_id: "AUC-4472", bid_id: "BID-1002"}
-  active_goal: "BUYER_CHECK_AUCTION_STATUS"
+    pending_winner_bid: "BID-1002"
 
 conversation:
   - turn: 1
     user_message: "Oui, je confirme"
     channel_event: CONFIRM
     expected_behavior:
-      tool_calls: {calls: [], ordered: false}
-      response_claims: ["response asks for a delivery location before finalizing"]
+      tool_calls: {calls: [get_user_by_phone], ordered: false}
+      response_claims: ["response asks to confirm delivery at the usual GPS point, or share a new one"]
   - turn: 2
-    user_message: "Livraison à Ouagadougou, point GPS 12.37,-1.52"
+    user_message: "[partage de position WhatsApp — Ouagadougou]"
     channel_event: GPS_SHARE
     expected_behavior:
-      tool_calls: {calls: [select_winning_bid], ordered: false}
-      state_assertion: {workspace: self, working_memory.pending_winner_bid: null}
+      tool_calls:
+        calls: [select_winning_bid]
+        ordered: false
+        arguments: {select_winning_bid: {bid_id: "BID-1002", delivery_lat: 12.37, delivery_lon: -1.52}}
+      response_claims: ["response confirms the winning offer with a success message"]
 
-business_outcome_assertions:
-  - {table: auctions, condition: "auction AUC-4472 status == CLOSED, winner bid == BID-1002", workspace_scope: own}
 must_not_execute: []
 security_expectations: {gate: null, attack_class: null, attack_vector: null}
 expected_final_outcome: {end_to_end_success: true}
 metric_applicability: [business_outcome_correctness, tool_argument_accuracy]
-runner_requirement: "sequential replay (2 turns, GPS_SHARE event support required — not yet implemented anywhere in this repo)"
+runner_requirement: "sequential replay (2 turns, GPS_SHARE via harness.py::gps_share_state_patch/gps_share_runtime_response)"

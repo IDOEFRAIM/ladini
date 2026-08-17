@@ -1,0 +1,105 @@
+scenario_id: P1-NEG-006
+version: "1.3"
+priority: P1
+domain: buyer_negotiation
+tags: [multi_turn_state_machine, negotiation_full_cycle, proven_by_execution, identity_context_gap]
+grounding:
+  status: PROVEN_BY_EXECUTION
+  evidence:
+    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/negotiation.py:426-469 — negotiation_gate() is the real entry point (NOT the generic confirmation_gate/mcp_tool_executor chain — this intent fully bypasses it, confirmed by direct read, not inference)"
+    - "backend/src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py:256-270 — NegotiationGateway.initiate_session() -> MCP tool 'initiate_negotiation_session' (NOT 'negotiate_price', the INTENT_CONFIG label)"
+    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/negotiation.py:230-297 — _handle_negotiation_menu(): action selection ('1'/'2'/'3') resolved via negotiation_choice_from_index(), a fixed non-LLM lookup table (helpers.py NEGOTIATION_ACTION_OPTIONS) — legitimately seedable as transaction_payload.selection_index"
+    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/negotiation.py:161-219 — _handle_viewing_offers(): bid acceptance reads payload.get('bid_id') directly (no index-to-bid_id resolution inside this function — that mapping is interpreter-layer, out of this harness's scope, so bid_id is seeded directly like P1-PROC-026's pattern)"
+    - "THIS SESSION, real execution: all 3 turns below run for real against negotiation_gate with a RecordingRuntime — every tool name, argument, and negotiation_context value shown is the ACTUAL observed output."
+  correction_note: >
+    v1.1 authored only turn 1 (initiation) and deferred the rest as a
+    'flagged for Wave 3' hypothesis. This session traced and EXECUTED the
+    full cycle through to select_winning_bid — the third call site
+    referenced in P0-GEO-008/P1-PROC-008's grounding.
+  new_finding_this_session: >
+    _handle_viewing_offers (negotiation.py:161-219) is called from
+    negotiation_gate as `_handle_viewing_offers(mc_runtime, payload, nctx,
+    auction_id)` — NO `phone` argument. Inside, `_buyer_phone =
+    nctx.get("buyer_phone") or nctx.get("phone")`. Tracing
+    `_initiate_negotiation`'s returned `negotiation_context` dict
+    (negotiation.py:368-387) shows it NEVER sets a `buyer_phone`/`phone`
+    key, and no other code path adds one before VIEWING_OFFERS. PROVEN BY
+    EXECUTION: turn 3 below calls select_winning_bid with
+    phone=None, delivery_lat=None, delivery_lon=None — the GPS
+    best-effort lookup (_get_stored_location) never even triggers, since
+    it is itself gated on `if _buyer_phone:`, which is always falsy here.
+    This is DISTINCT from the GPS-specific gap already documented in
+    P0-GEO-008/P1-PROC-008 (finalize_winner's tunnel does receive a real
+    phone) — this is a full loss of caller identity, not just of the
+    delivery point, on the negotiation-accept path specifically.
+    RESOLVED this session (next phase, code-only trace — not re-executed,
+    but both cited functions were read in full): this is NOT exploitable,
+    and NOT even a functional PermissionDenied in production. Two
+    independent reasons, both confirmed by direct code read:
+      1. `orchestrator/orchestrator.py:283` calls `live_runtime.bind_user(phone)`
+         ONCE per real conversational turn, with the real current user's
+         phone, BEFORE any MCP call that turn. `MarketRuntime._build_context_identity`
+         (utils.py:706-748) falls back to this bound phone whenever a
+         specific call's kwargs omit an identity field — so
+         `select_winning_bid(phone=None, ...)` does NOT hit
+         `missing_context_identity` in production; identity resolves to the
+         real caller anyway.
+      2. `AuctionMixin.select_winning_bid` (services/database/auction.py:1300-1410)
+         never uses its `phone` argument for ownership at all — the
+         resulting `Order.buyer_id` is set from `auction.buyer_id` (read
+         from the `Bid`/`Auction` row itself), not from `phone`. In this
+         negotiation flow, `auction_id` is always the auction that
+         `_initiate_negotiation` created for THIS SAME buyer's own session
+         (negotiation.py:328-387) — never an attacker-suppliable arbitrary
+         id — so there is no cross-buyer bid to select in the first place.
+    VERDICT: INTENTIONAL_BEHAVIOR (safe by construction: the MCP identity
+    gate has a same-turn fallback, and this DB method's ownership model
+    doesn't depend on the `phone` argument at all). The missing `phone`
+    argument in `_handle_viewing_offers` remains a minor code-clarity
+    inconsistency (it should be threaded through explicitly for
+    auditability) but is NOT a security bug and NOT corrected here — no
+    incorrect behavior was ever demonstrated.
+
+persona: {role: BUYER, description: "Acheteur, ouvre une négociation sur un produit catalogue puis accepte une offre reçue", phone: "+22670000044"}
+workspace_type: buyer
+initial_state: {}
+
+conversation:
+  - turn: 1
+    user_message: "Je peux avoir le maïs à 180 au lieu de 200 ?"
+    expected_behavior:
+      intent: BUYER_NEGOTIATE_PRICE
+      slots: {product: "maïs", price: 180}
+      tool_calls:
+        calls: [search_products, initiate_negotiation_session]
+        ordered: true
+        arguments:
+          initiate_negotiation_session: {offered_price: 180}
+      response_claims: ["response presents a negotiation-action menu (view offers / counter / abandon), not an immediate accept/reject"]
+      state_assertion:
+        workspace: self
+        negotiation_context.phase: "NEGOTIATION_MENU"
+  - turn: 2
+    user_message: "1"
+    expected_behavior:
+      # menu-index resolution here IS real, non-LLM code (negotiation_choice_from_index)
+      tool_calls: {calls: [get_auction_bids], ordered: false}
+      response_claims: ["response lists the received bids with a number to accept each"]
+      state_assertion:
+        workspace: self
+        negotiation_context.phase: "VIEWING_OFFERS"
+  - turn: 3
+    user_message: "1"
+    # bid-index -> bid_id resolution is interpreter-layer (out of scope); bid_id seeded directly, same pattern as P1-PROC-026
+    expected_behavior:
+      tool_calls:
+        calls: [select_winning_bid]
+        ordered: false
+        arguments: {select_winning_bid: {bid_id: "BID-7001", phone: null, delivery_lat: null, delivery_lon: null}}
+      response_claims: ["response confirms the accepted offer"]
+
+must_not_execute: []
+security_expectations: {gate: null, attack_class: null, attack_vector: null}
+expected_final_outcome: {end_to_end_success: true}
+metric_applicability: [intent_accuracy, tool_argument_accuracy, node_workflow_routing, trajectory_flow_correctness]
+runner_requirement: "sequential replay (3 turns)"

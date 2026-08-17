@@ -1508,6 +1508,18 @@ class BuyerMixin(BaseMixin):
                 }
 
             order = await current_session.scalar(stmt)
+
+            # Ownership check (P0-SEC-004) : la branche order_id ci-dessus ne
+            # filtre QUE sur Order.id — un buyer_phone fourni en plus (comme
+            # le fait TOUJOURS check_order_status) doit être vérifié
+            # explicitement contre l'acheteur réel de la commande, sinon
+            # n'importe quel order_id connu (numéroté séquentiellement,
+            # devinable) expose la commande d'un autre acheteur.
+            if order is not None and o_uuid is not None and buyer_phone:
+                _, requester_profile = await self.get_buyer_profile(phone=buyer_phone)
+                if order.buyer_id != requester_profile.id:
+                    order = None
+
             if not order:
                 return {
                     "status": "success",

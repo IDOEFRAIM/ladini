@@ -30,6 +30,7 @@ from agriconnect.services.search_results_cache import (
 )
 
 from .buyer_common import SUPPORT_FOOTER, with_support_footer
+from .quantity_unit import convert_quantity, normalize_unit
 
 logger = logging.getLogger("AgriConnect.Market.CartService")
 
@@ -337,6 +338,7 @@ class CartDomainService:
         ref: Dict[str, Any],
         cart: List[Dict[str, Any]],
         state: Dict[str, Any],
+        buyer_unit: Optional[str] = None,
     ) -> Dict[str, Any]:
         try:
             qty = float(quantity)
@@ -355,6 +357,34 @@ class CartDomainService:
                 ),
                 "ag_ui_component": None,
             }
+
+        # Bug réel (2026-08-17) : cette listing est vendue dans SON unité
+        # (`ref["unit"]`, ex: TONNE), mais l'acheteur peut avoir donné une
+        # unité DIFFÉRENTE dans son message (ex: "45 kg"). Sans conversion,
+        # `qty` (45) était appliqué tel quel contre le prix/unité TONNE du
+        # producteur → panier affichant "45 TONNE" pour une demande de 45 kg
+        # (risque de sur-tarification ~1000x). On convertit UNIQUEMENT quand
+        # une équivalence universelle existe (KG<->TONNE) ; sinon on ne
+        # devine jamais — on redemande explicitement dans l'unité vendue.
+        ref_unit = normalize_unit(ref.get("unit")) or str(ref.get("unit") or "KG").upper()
+        requested_unit = normalize_unit(buyer_unit) if buyer_unit else None
+        if requested_unit and requested_unit != ref_unit:
+            converted = convert_quantity(qty, requested_unit, ref_unit)
+            if converted is None:
+                vendor_label = ref.get("vendor_name") or "ce producteur"
+                return {
+                    "status": "WAITING_INPUT",
+                    "expected_input": "QUANTITY",
+                    "response_strategy": "ASK_MISSING_FIELD",
+                    "final_response": (
+                        f"⚠️ *{ref.get('name') or product_name}* chez *{vendor_label}* est vendu "
+                        f"en *{ref_unit}*, pas en {requested_unit.lower()}. "
+                        f"Merci d'indiquer la quantité directement en {ref_unit.lower()} "
+                        f"(ex : 50 {ref_unit.lower()})."
+                    ),
+                    "ag_ui_component": None,
+                }
+            qty = converted
 
         source_type = str(ref.get("source_type") or "DIRECT").upper()
         if source_type == "FUTURE":

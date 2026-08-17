@@ -154,6 +154,152 @@ async def cart_management(
             }
         )
 
+    # --- VENDOR SELECTION: check if returning from vendor menu ---
+    #
+    # Bug réel (2026-08-17) : ce bloc vivait APRÈS le garde "Missing product
+    # or quantity" ci-dessous. Tant que la quantité n'était pas encore
+    # donnée (le cas NORMAL juste après l'affichage du menu producteurs),
+    # ce garde renvoyait TOUJOURS en premier, empêchant selection_index de
+    # jamais être résolu en chosen_vendor sur le tour où l'acheteur répond
+    # réellement au menu (ou tente d'en choisir un autre). selection_index
+    # restait "collant" (voir nodes/memory.py::mapping_kind=="product_vendor")
+    # et n'était consommé que plus tard, sur le tour où la quantité arrivait
+    # enfin — appliquant alors une sélection potentiellement PÉRIMÉE (un
+    # changement d'avis entre-temps écrasait silencieusement le choix
+    # précédent, sans jamais être confirmé à l'acheteur). Déplacé AVANT le
+    # garde de quantité pour que la sélection/le changement de producteur
+    # soit résolu et confirmé sur le MÊME tour où il est demandé — exactement
+    # le comportement que le commentaire de memory.py suppose déjà
+    # ("cart_management pops it itself once it has successfully located the
+    # vendor").
+    vendor_ctx = state.get("vendor_selection_context")
+    vendor_ctx_active = bool(vendor_ctx) and not (
+        isinstance(vendor_ctx, dict) and vendor_ctx.get("__reset__")
+    )
+    if vendor_ctx_active:
+        vendor_ctx_payload: Dict[str, Any] = dict(vendor_ctx or {})
+        chosen_vendor = vendor_ctx_payload.get("chosen_vendor")
+        previous_vendor = chosen_vendor
+        # Robustness: recover product name from the vendor context if it did not
+        # survive in the payload (avoids resolve_product_vendors("None")).
+        if not product_name:
+            product_name = (
+                chosen_vendor.get("name") if isinstance(chosen_vendor, dict) else None
+            ) or vendor_ctx_payload.get("product")
+            if product_name:
+                payload["product"] = product_name
+        selection_idx = payload.get("selection_index")
+        vendor_switched = False
+
+        if selection_idx is not None:
+            vendors_list = vendor_ctx_payload.get("vendors") or []
+            try:
+                idx = int(selection_idx) - 1
+            except (TypeError, ValueError):
+                idx = -1
+            if 0 <= idx < len(vendors_list):
+                chosen_vendor = vendors_list[idx]
+                vendor_ctx_payload["chosen_vendor"] = chosen_vendor
+                payload.pop("selection_index", None)
+                if chosen_vendor:
+                    payload["product"] = chosen_vendor.get("name") or product_name
+                    product_name = payload["product"]
+
+                # Un changement RÉEL de producteur (pas la toute première
+                # sélection après le menu) doit être confirmé explicitement —
+                # sans quoi l'acheteur n'a AUCUN moyen de savoir que sa
+                # demande ("je choisis le deuxième") a bien été prise en
+                # compte, ni lequel a été retenu (bug réel 2026-08-17).
+                if (
+                    isinstance(previous_vendor, dict)
+                    and isinstance(chosen_vendor, dict)
+                    and (
+                        previous_vendor.get("producer_id"),
+                        previous_vendor.get("product_id"),
+                        previous_vendor.get("unit"),
+                    )
+                    != (
+                        chosen_vendor.get("producer_id"),
+                        chosen_vendor.get("product_id"),
+                        chosen_vendor.get("unit"),
+                    )
+                ):
+                    vendor_switched = True
+
+                requested_qty = vendor_ctx_payload.get("requested_quantity")
+                requested_unit = vendor_ctx_payload.get("requested_unit")
+                if quantity in (None, "", 0) and requested_qty not in (None, "", 0):
+                    payload["quantity"] = requested_qty
+                    quantity = requested_qty
+                if requested_unit:
+                    payload.setdefault("unit", requested_unit)
+            else:
+                return _with_base(
+                    {
+                        "status": "WAITING_INPUT",
+                        "expected_input": "SELECTION",
+                        "response_strategy": "ASK_MISSING_FIELD",
+                        "final_response": "Numéro invalide. Choisissez un producteur dans la liste ci-dessus, ou tapez *annuler*.",
+                        "ag_ui_component": None,
+                    }
+                )
+
+        switch_ack = ""
+        if vendor_switched and isinstance(chosen_vendor, dict):
+            switch_ack = (
+                f"🔁 Changement pris en compte : vous avez maintenant choisi "
+                f"*{chosen_vendor.get('vendor_name') or 'ce producteur'}* "
+                f"(*{chosen_vendor.get('price')} FCFA/{chosen_vendor.get('unit') or 'KG'}*).\n\n"
+            )
+
+        # Vendor chosen + quantity available → add to cart directly
+        if chosen_vendor is not None and product_name and quantity not in (None, "", 0):
+            add_patch = await cart_service.add_to_cart_with_ref(
+                phone,
+                str(product_name),
+                quantity,
+                chosen_vendor,
+                cart,
+                state,
+                buyer_unit=payload.get("unit"),
+            )
+            if switch_ack and add_patch.get("final_response"):
+                add_patch["final_response"] = switch_ack + str(add_patch["final_response"])
+            return _with_base(add_patch)
+
+        # Vendor chosen but no quantity → ask for it, keep vendor context
+        if chosen_vendor is not None and product_name and quantity in (None, "", 0):
+            vendor_label = chosen_vendor.get("vendor_name") or "ce producteur"
+            unit_hint = chosen_vendor.get("unit") or "KG"
+            price_hint = chosen_vendor.get("price")
+            price_info = (
+                f" (prix : {price_hint} FCFA/{unit_hint})" if price_hint else ""
+            )
+            n_vendors = len(vendor_ctx_payload.get("vendors") or [])
+            switch_hint = (
+                f"🔁 _Pour changer de producteur, répondez avec le numéro correspondant "
+                f"(1 à {n_vendors} dans la liste ci-dessus)._\n"
+                if n_vendors > 1
+                else ""
+            )
+            return _with_base(
+                {
+                    "status": "WAITING_INPUT",
+                    "expected_input": "QUANTITY",
+                    "response_strategy": "ASK_MISSING_FIELD",
+                    "final_response": (
+                        f"{switch_ack}"
+                        f"👤 Vous avez choisi *{vendor_label}* pour *{product_name}*{price_info}.\n\n"
+                        f"📦 Quelle quantité souhaitez-vous ?\n"
+                        f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._\n"
+                        f"{switch_hint}"
+                    ),
+                    "transaction_payload": payload,
+                    "vendor_selection_context": vendor_ctx_payload,
+                    "ag_ui_component": None,
+                }
+            )
+
     # --- Missing product or quantity ---
     if not product_name or quantity in (None, "", 0):
         draft_snapshot = capture_cart_draft(state, payload)
@@ -196,93 +342,6 @@ async def cart_management(
                 "ag_ui_component": None,
             }
         )
-
-    # --- VENDOR SELECTION: check if returning from vendor menu ---
-    vendor_ctx = state.get("vendor_selection_context")
-    vendor_ctx_active = bool(vendor_ctx) and not (
-        isinstance(vendor_ctx, dict) and vendor_ctx.get("__reset__")
-    )
-    if vendor_ctx_active:
-        vendor_ctx_payload: Dict[str, Any] = dict(vendor_ctx or {})
-        chosen_vendor = vendor_ctx_payload.get("chosen_vendor")
-        # Robustness: recover product name from the vendor context if it did not
-        # survive in the payload (avoids resolve_product_vendors("None")).
-        if not product_name:
-            product_name = (
-                chosen_vendor.get("name") if isinstance(chosen_vendor, dict) else None
-            ) or vendor_ctx_payload.get("product")
-            if product_name:
-                payload["product"] = product_name
-        selection_idx = payload.get("selection_index")
-
-        if selection_idx is not None:
-            vendors_list = vendor_ctx_payload.get("vendors") or []
-            try:
-                idx = int(selection_idx) - 1
-            except (TypeError, ValueError):
-                idx = -1
-            if 0 <= idx < len(vendors_list):
-                chosen_vendor = vendors_list[idx]
-                vendor_ctx_payload["chosen_vendor"] = chosen_vendor
-                payload.pop("selection_index", None)
-                if chosen_vendor:
-                    payload["product"] = chosen_vendor.get("name") or product_name
-                    product_name = payload["product"]
-
-                requested_qty = vendor_ctx_payload.get("requested_quantity")
-                requested_unit = vendor_ctx_payload.get("requested_unit")
-                if quantity in (None, "", 0) and requested_qty not in (None, "", 0):
-                    payload["quantity"] = requested_qty
-                    quantity = requested_qty
-                if requested_unit:
-                    payload.setdefault("unit", requested_unit)
-            else:
-                return _with_base(
-                    {
-                        "status": "WAITING_INPUT",
-                        "expected_input": "SELECTION",
-                        "response_strategy": "ASK_MISSING_FIELD",
-                        "final_response": "Numéro invalide. Choisissez un producteur dans la liste ci-dessus, ou tapez *annuler*.",
-                        "ag_ui_component": None,
-                    }
-                )
-
-        # Vendor chosen + quantity available → add to cart directly
-        if chosen_vendor is not None and product_name and quantity not in (None, "", 0):
-            return _with_base(
-                await cart_service.add_to_cart_with_ref(
-                    phone,
-                    str(product_name),
-                    quantity,
-                    chosen_vendor,
-                    cart,
-                    state,
-                )
-            )
-
-        # Vendor chosen but no quantity → ask for it, keep vendor context
-        if chosen_vendor is not None and product_name and quantity in (None, "", 0):
-            vendor_label = chosen_vendor.get("vendor_name") or "ce producteur"
-            unit_hint = chosen_vendor.get("unit") or "KG"
-            price_hint = chosen_vendor.get("price")
-            price_info = (
-                f" (prix : {price_hint} FCFA/{unit_hint})" if price_hint else ""
-            )
-            return _with_base(
-                {
-                    "status": "WAITING_INPUT",
-                    "expected_input": "QUANTITY",
-                    "response_strategy": "ASK_MISSING_FIELD",
-                    "final_response": (
-                        f"👤 Vous avez choisi *{vendor_label}* pour *{product_name}*{price_info}.\n\n"
-                        f"📦 Quelle quantité souhaitez-vous ?\n"
-                        f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._"
-                    ),
-                    "transaction_payload": payload,
-                    "vendor_selection_context": vendor_ctx_payload,
-                    "ag_ui_component": None,
-                }
-            )
 
     # --- MULTI-VENDOR RESOLUTION ---
     vendors, has_multiple = await cart_service.resolve_product_vendors(
@@ -377,7 +436,8 @@ async def cart_management(
         )
     return _with_base(
         await cart_service.add_to_cart_with_ref(
-            phone, str(product_name), quantity, ref, cart, state
+            phone, str(product_name), quantity, ref, cart, state,
+            buyer_unit=payload.get("unit"),
         )
     )
 

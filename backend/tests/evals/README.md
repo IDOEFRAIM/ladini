@@ -5,11 +5,20 @@ orchestration → execution → final quality → safety). Companion to the Eval
 Contract v1.0 (see project conversation history — not yet materialized as a repo
 file).
 
-**No evaluators, runners, or CI exist in this repository yet.** These are scenario
-*specifications* only — data, not executable tests. Every scenario's
-`runner_requirement` field states explicitly what would be needed to execute it;
-none of that has been built. Do not treat any scenario here as "passing" or
-"failing" — there is nothing that runs them yet.
+**A minimal execution harness now exists** under `runners/` (`harness.py`,
+`run_batch.py`, `run_p0.py`, `run_extra.py`, `test_harness.py`) — it calls REAL
+`agriconnect` node/flow functions directly, recording only the bottom-most MCP
+`call_db` boundary as a test double. It deliberately **bypasses the LLM
+interpreter** (same as the rest of this repo's own test suite), so it cannot
+exercise intent classification / entity extraction / prompt-injection routing —
+scenarios whose safety property lives entirely in that layer are marked
+`BLOCKED_LLM_LAYER` when run, not faked. See `runners/harness.py`'s module
+docstring for the exact scope boundary. Execution results (PASS /
+`FAIL_CORRECTNESS` / `CONFIRMED_SECURITY_FINDING` / `BLOCKED_LLM_LAYER` /
+`BLOCKED_PENDING_CODE_TRACE` / `RUNNER_DEPENDENT` / `TEST_SETUP_ERROR`) are a
+**separate axis** from this file's per-scenario `status` column below, which
+tracks dataset-authoring/materialization readiness, not the last execution's
+outcome.
 
 ## Layout
 
@@ -29,6 +38,9 @@ not created — out of scope until evaluators/runners are actually implemented.
 Every scenario's `grounding.status` field is one of:
 
 - `PROVEN_BY_CODE` — traced to a specific file/line/function, cited in `grounding.evidence`.
+- `PROVEN_BY_EXECUTION` — actually run through the `runners/` harness against real
+  node/flow functions; every tool name/argument/state value cited was observed,
+  not derived from reading alone. Strictly stronger than `PROVEN_BY_CODE`.
 - `PROVEN_BY_REGRESSION` — an existing unit/regression test directly demonstrates the behavior, cited.
 - `PROVEN_BY_DOCUMENTED_INCIDENT` — a real production incident is the source, cited.
 - `PATTERN_CONSISTENT` — not individually re-traced, but follows an already-proven
@@ -86,23 +98,23 @@ problem, not a clean pass) · `RUNNER_DEPENDENT` · `BLOCKED_PENDING_CODE_TRACE`
 |---|---|---|---|---|
 | P0-SEC-001 | security_redteam | GOLD_READY | PROVEN_BY_CODE | sequential replay |
 | P0-SEC-002 | security_redteam | GOLD_READY | PROVEN_BY_CODE | sequential replay |
-| P0-SEC-003 | security_redteam | GOLD_READY | PROVEN_BY_CODE | sequential replay |
-| P0-SEC-004 | security_redteam | NEEDS_CORRECTION (real finding) | PROVEN_BY_CODE (unsafe) | sequential replay |
-| P0-SEC-005 | security_redteam | GOLD_READY | PATTERN_CONSISTENT | sequential replay |
+| P0-SEC-004 | security_redteam | NEEDS_CORRECTION (CONFIRMED_SECURITY_FINDING at execution — not a code fix, see grounding) | OPEN_BUSINESS_RULE | sequential replay |
+| P0-SEC-005 | security_redteam | GOLD_READY (BLOCKED_LLM_LAYER at execution — LLM interpreter out of harness scope) | PATTERN_CONSISTENT | sequential replay |
 | P0-SEC-006 | security_redteam | GOLD_READY | PROVEN_BY_CODE | sequential replay |
 | P0-SEC-011 | security_redteam | GOLD_READY | PROVEN_BY_CODE | sequential replay |
-| P0-SEC-012 | security_redteam | GOLD_READY | PROVEN_BY_CODE | sequential replay |
+| P0-SEC-012 | security_redteam | GOLD_READY (BLOCKED_LLM_LAYER at execution — LLM interpreter out of harness scope) | PROVEN_BY_CODE | sequential replay |
 | P0-BIZ-007 | security_redteam | GOLD_READY | PROVEN_BY_CODE + PROVEN_BY_REGRESSION | sequential replay |
-| P0-GEO-008 | security_redteam | GOLD_READY | PROVEN_BY_CODE (mechanism); args not fully re-traced | sequential replay |
+| P0-GEO-008 | security_redteam | GOLD_READY | PROVEN_BY_EXECUTION (dispatch mechanism) + BLOCKED_PENDING_CODE_TRACE (rejection property — DB layer, see grounding.critical_correction) | sequential replay (2 turns, GPS_SHARE) |
 | P0-STATE-010 | security_redteam | GOLD_READY | PROVEN_BY_CODE | sequential replay, alternating participant (NOT concurrency) |
-| P0-RETRY-009 | buyer_preorder | RUNNER_DEPENDENT | PROVEN_BY_CODE (tool names); idempotency itself untested | fault injection (task redelivery) — NOT achievable by replay |
+| P0-RETRY-009 | buyer_preorder | RUNNER_DEPENDENT | PROVEN_BY_CODE (tool names); idempotency itself untested — no fault-injection runner exists, not simulated | fault injection (task redelivery) — NOT achievable by replay |
+| P1-CAP-003 | producer_stock | GOLD_READY (supersedes retired P0-SEC-003 — see below) | PROVEN_BY_CODE + PROVEN_BY_EXECUTION | sequential replay |
 | P1-STOCK-001 | producer_stock | GOLD_READY | PATTERN_CONSISTENT | sequential replay |
 | P1-SALES-002 | producer_sales | GOLD_READY | PROVEN_BY_CODE | sequential replay |
 | P1-CROP-003 | producer_crop | GOLD_READY | PATTERN_CONSISTENT | sequential replay |
 | P1-BUYER-004 | buyer_cart | GOLD_READY | PROVEN_BY_CODE | sequential replay |
 | P1-CART-005 | buyer_preorder | GOLD_READY | PROVEN_BY_CODE | sequential replay |
 | P1-PROC-007 | producer_auction | GOLD_READY | PROVEN_BY_CODE | sequential replay |
-| P1-PROC-008 | buyer_procurement | GOLD_READY | PROVEN_BY_CODE (mechanism); args not fully re-traced | sequential replay |
+| P1-PROC-008 | buyer_procurement | GOLD_READY | PROVEN_BY_EXECUTION | sequential replay (2 turns, GPS_SHARE) |
 | P1-ORD-009 | buyer_order_tracking | GOLD_READY | PROVEN_BY_CODE | sequential replay |
 | P1-ORD-010 | buyer_order_tracking | GOLD_READY | PROVEN_BY_CODE | sequential replay |
 | P1-AUC-011 | buyer_auction_tracking | GOLD_READY | PROVEN_BY_CODE | sequential replay |
@@ -112,17 +124,27 @@ problem, not a clean pass) · `RUNNER_DEPENDENT` · `BLOCKED_PENDING_CODE_TRACE`
 | P1-FIN-015 | producer_finance | GOLD_READY | PATTERN_CONSISTENT | sequential replay |
 | P1-STOCK-016 | producer_stock | GOLD_READY | PATTERN_CONSISTENT | sequential replay |
 | P1-STOCK-018 | producer_stock | GOLD_READY | PROVEN_BY_CODE | sequential replay |
-| P1-SALES-021 | producer_sales | GOLD_READY | PROVEN_BY_CODE | sequential replay |
+| P1-SALES-021 | producer_sales | GOLD_READY | PROVEN_BY_EXECUTION | sequential replay (4 turns) |
 | P1-PROC-026 | buyer_procurement | GOLD_READY | PATTERN_CONSISTENT (explicit, not PROVEN) | sequential replay |
 | P1-DISAMB-030 | buyer_order_tracking | GOLD_READY | PROVEN_BY_CODE | sequential replay |
 | P1-DISAMB-031 | buyer_auction_tracking | GOLD_READY | PROVEN_BY_CODE | sequential replay |
 | P1-DISAMB-032 | buyer_auction_tracking | GOLD_READY | PROVEN_BY_CODE | sequential replay |
 | P2-ROBUST-040 | robustness | GOLD_READY | PROVEN_BY_REGRESSION | sequential replay |
 | P2-EDGE-042 | market_read | GOLD_READY | PROVEN_BY_CODE | sequential replay |
-| P1-NEG-006 | — | **BLOCKED** | NOT_TRACED | see `blocked/P1-NEG-006.md` |
+| P1-NEG-006 | buyer_negotiation | GOLD_READY | PROVEN_BY_EXECUTION | sequential replay (3 turns) |
 | P1-ROLE-036 | — | **BLOCKED** | NOT_TRACED (premise contradicted) | see `blocked/PROFILE_SWITCH_ROLE.md` |
 | P1-ROLE-037 | — | **BLOCKED** | NOT_TRACED (premise contradicted) | see `blocked/PROFILE_SWITCH_ROLE.md` |
 | P1-ROLE-038 | — | **BLOCKED** | NOT_TRACED (premise contradicted) | see `blocked/PROFILE_SWITCH_ROLE.md` |
 
-35 materialized scenario files (26 corrected/confirmed Wave 1 + 9 new Wave 2),
-4 explicitly blocked (0 files under `datasets/`, tracked only in `blocked/`).
+**P0-SEC-003 retired this session** (was materialized, is now deleted from
+`datasets/`) — it asserted that a BUYER-workspace persona calling
+`STOCK_REGISTER_HARVEST` was an `unauthorized_write` security violation. This
+was wrong: it is an explicit, documented "dual-role" product decision, not a
+bug (see `P1-CAP-003.yaml`'s `grounding` block for the 3 code citations plus
+real-execution proof). Superseded by `P1-CAP-003`, a positive-capability
+scenario with the corrected framing. Never re-materialize P0-SEC-003 as a
+security scenario without new evidence contradicting the dual-role
+architecture.
+
+36 materialized scenario files, 3 explicitly blocked (0 files under
+`datasets/`, tracked only in `blocked/`).
