@@ -1,248 +1,67 @@
-# GitHub Actions CI/CD - Cloud Native Deployment
-# Build, Test, Push to Registry, Deploy to Kubernetes
+# GitHub Actions CI — Lint & Tests
+#
+# Portée volontairement réduite : monolith Poetry sous `backend/` (`agriconnect`),
+# déployé via `docker-compose.prod.yml` + `deploy-prod.sh` sur hôte Docker.
+#
+# Le déploiement reste manuel/SSH via `deploy-prod.sh` — rien ici ne pousse en prod.
 
-name: CI/CD Pipeline
+name: CI
 
 on:
   push:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch:  # Manual trigger
-
-env:
-  REGISTRY: ghcr.io  # GitHub Container Registry (ou ECR/ACR/GCR)
-  IMAGE_PREFIX: ${{ github.repository_owner }}/agribot
+  workflow_dispatch:
 
 jobs:
-  # Job 1: Tests et Qualité
   test:
     name: Tests & Code Quality
     runs-on: ubuntu-latest
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.13'
-    
-    - name: Cache dependencies
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-    
-    - name: Install dependencies
-      run: |
-        pip install pytest pytest-cov ruff mypy
-        pip install -r services/database/requirements.txt
-        pip install -r services/gateway/requirements.txt
-        pip install -r services/voice/requirements.txt
-    
-    - name: Run linter (Ruff)
-      run: ruff check services/
-    
-    - name: Run type checker (mypy)
-      run: mypy services/ --ignore-missing-imports
-      continue-on-error: true
-    
-    - name: Run tests
-      run: pytest tests/ --cov=services --cov-report=xml
-    
-    - name: Upload coverage
-      uses: codecov/codecov-action@v4
-      with:
-        file: ./coverage.xml
-        fail_ci_if_error: false
+    defaults:
+      run:
+        working-directory: backend
 
-  # Job 2: Build et Push Docker Images
-  build:
-    name: Build & Push Docker Images
-    runs-on: ubuntu-latest
-    needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    strategy:
-      matrix:
-        service: [gateway, database, voice]
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-    
-    - name: Log in to Container Registry
-      uses: docker/login-action@v3
-      with:
-        registry: ${{ env.REGISTRY }}
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    
-    - name: Extract metadata
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
-        tags: |
-          type=ref,event=branch
-          type=ref,event=pr
-          type=semver,pattern={{version}}
-          type=sha,prefix={{branch}}-
-          type=raw,value=latest,enable={{is_default_branch}}
-    
-    - name: Build and push
-      uses: docker/build-push-action@v5
-      with:
-        context: ./services/${{ matrix.service }}
-        file: ./services/${{ matrix.service }}/Dockerfile
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:buildcache
-        cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:buildcache,mode=max
-        platforms: linux/amd64,linux/arm64
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-  # Job 3: Security Scan
-  security:
-    name: Security Scanning
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    strategy:
-      matrix:
-        service: [gateway, database, voice]
-    
-    steps:
-    - name: Run Trivy vulnerability scanner
-      uses: aquasecurity/trivy-action@master
-      with:
-        image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}:latest
-        format: 'sarif'
-        output: 'trivy-results.sarif'
-    
-    - name: Upload Trivy results to GitHub Security
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: 'trivy-results.sarif'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-  # Job 4: Deploy to Kubernetes (AWS EKS / Azure AKS / GCP GKE)
-  deploy:
-    name: Deploy to Kubernetes
-    runs-on: ubuntu-latest
-    needs: [build, security]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    environment:
-      name: production
-      url: https://api.agribot-ai.com
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    # Option AWS EKS
-    - name: Configure AWS credentials
-      if: ${{ vars.CLOUD_PROVIDER == 'aws' }}
-      uses: aws-actions/configure-aws-credentials@v4
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ vars.AWS_REGION }}
-    
-    - name: Update kubeconfig for EKS
-      if: ${{ vars.CLOUD_PROVIDER == 'aws' }}
-      run: |
-        aws eks update-kubeconfig --name ${{ vars.EKS_CLUSTER_NAME }} --region ${{ vars.AWS_REGION }}
-    
-    # Option Azure AKS
-    - name: Azure Login
-      if: ${{ vars.CLOUD_PROVIDER == 'azure' }}
-      uses: azure/login@v2
-      with:
-        creds: ${{ secrets.AZURE_CREDENTIALS }}
-    
-    - name: Set AKS context
-      if: ${{ vars.CLOUD_PROVIDER == 'azure' }}
-      uses: azure/aks-set-context@v4
-      with:
-        resource-group: ${{ vars.AZURE_RESOURCE_GROUP }}
-        cluster-name: ${{ vars.AKS_CLUSTER_NAME }}
-    
-    # Option GCP GKE
-    - name: Authenticate to Google Cloud
-      if: ${{ vars.CLOUD_PROVIDER == 'gcp' }}
-      uses: google-github-actions/auth@v2
-      with:
-        credentials_json: ${{ secrets.GCP_CREDENTIALS }}
-    
-    - name: Get GKE credentials
-      if: ${{ vars.CLOUD_PROVIDER == 'gcp' }}
-      uses: google-github-actions/get-gke-credentials@v2
-      with:
-        cluster_name: ${{ vars.GKE_CLUSTER_NAME }}
-        location: ${{ vars.GCP_REGION }}
-    
-    # Deploy to Kubernetes
-    - name: Install kubectl
-      uses: azure/setup-kubectl@v4
-    
-    - name: Deploy to Kubernetes
-      run: |
-        # Update image tags with latest SHA
-        export IMAGE_TAG=${{ github.sha }}
-        
-        # Apply Kubernetes manifests
-        kubectl apply -f k8s/config-secrets.yaml
-        kubectl apply -f k8s/redis-deployment.yaml
-        kubectl apply -f k8s/database-deployment.yaml
-        kubectl apply -f k8s/voice-deployment.yaml
-        kubectl apply -f k8s/gateway-deployment.yaml
-        kubectl apply -f k8s/ingress.yaml
-        
-        # Wait for rollout
-        kubectl rollout status deployment/gateway -n default --timeout=5m
-        kubectl rollout status deployment/database-service -n default --timeout=5m
-        kubectl rollout status deployment/voice-service -n default --timeout=5m
-    
-    - name: Verify deployment
-      run: |
-        kubectl get pods -n default
-        kubectl get services -n default
-        kubectl get ingress -n default
-    
-    - name: Run smoke tests
-      run: |
-        # Wait for services to be ready
-        sleep 30
-        
-        # Test health endpoints
-        GATEWAY_URL=$(kubectl get ingress agribot-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-        curl -f http://${GATEWAY_URL}/health || exit 1
-        curl -f http://${GATEWAY_URL}/health/ready || exit 1
+      - name: Install Poetry
+        run: pipx install poetry
 
-  # Job 5: Rollback on failure
-  rollback:
-    name: Rollback on Failure
-    runs-on: ubuntu-latest
-    needs: deploy
-    if: failure()
-    
-    steps:
-    - name: Rollback Kubernetes deployment
-      run: |
-        kubectl rollout undo deployment/gateway -n default
-        kubectl rollout undo deployment/database-service -n default
-        kubectl rollout undo deployment/voice-service -n default
-    
-    - name: Notify team
-      uses: 8398a7/action-slack@v3
-      with:
-        status: failure
-        text: 'Deployment failed! Rollback initiated.'
-        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+      - name: Cache Poetry packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry
+          # Utilisation de poetry.lock pour figer le cache de manière déterministe
+          key: ${{ runner.os }}-poetry-${{ hashFiles('backend/poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-poetry-
+
+      - name: Install dependencies
+        # Réinstalle l'environnement exact défini dans pyproject.toml / poetry.lock
+        run: poetry install --no-root
+
+      - name: Run linter (Ruff)
+        # Exécute ruff à travers poetry (si configuré dans pyproject.toml)
+        run: poetry run ruff check src
+        continue-on-error: true
+
+      - name: Run type checker (mypy)
+        # Exécute mypy à travers poetry (lit la section [tool.mypy] de pyproject.toml)
+        run: poetry run mypy src
+        continue-on-error: true
+
+      - name: Run tests
+        run: poetry run pytest tests --cov=src --cov-report=xml
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: backend/coverage.xml
+          fail_ci_if_error: false

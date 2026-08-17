@@ -96,7 +96,7 @@ coverage.xml
 # ============================
 # Poetry
 # ============================
-poetry.lock
+#poetry.lock
 
 # ============================
 # Credentials & Secrets
