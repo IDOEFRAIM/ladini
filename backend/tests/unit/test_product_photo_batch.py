@@ -40,6 +40,31 @@ PHONE = "+22670000001"
 CANDIDATES = [{"id": "1", "name": "maïs"}, {"id": "2", "name": "tomates"}]
 
 
+def _patch_worker_session(monkeypatch):
+    """`_resolve_pending`/`_resolve_pending_view` ouvrent leur propre
+    `worker_session()` (`workers/runtime.py`) avant même de toucher
+    `AgriDatabaseService` — sans DATABASE_URL configurée (le cas en CI/test),
+    ça lève "Sessionmaker indisponible". Même technique que
+    `test_workers_runtime_and_repos.py::TestWorkerSession._fake_sessionmaker`
+    : un faux sessionmaker qui publie une session factice dans
+    `db_session_ctx`, ce qui fait aussi passer les appels @transactional
+    imbriqués (`AgriDatabaseService...`, déjà mockés séparément) par le
+    chemin "session existante" sans re-vérifier le sessionmaker."""
+    import agriconnect.workers.runtime as runtime_module
+
+    fake_session = AsyncMock()
+
+    class _CM:
+        async def __aenter__(self_inner):
+            return fake_session
+
+        async def __aexit__(self_inner, *exc):
+            return False
+
+    monkeypatch.setattr(runtime_module, "get_sessionmaker", lambda: (lambda: _CM()))
+    return fake_session
+
+
 def _patch_add_product_photo(monkeypatch, **mock_kwargs) -> AsyncMock:
     """`AgriDatabaseService.__getattribute__` (d.py) mémorise le wrapper
     @transactional dans un cache DE CLASSE (`_DISPATCH_CACHE`, clé
@@ -119,6 +144,7 @@ class TestResolvePendingLinksTheWholeBatch:
         add_photo = _patch_add_product_photo(
             monkeypatch, return_value={"status": "success", "data": {"name": "maïs"}},
         )
+        _patch_worker_session(monkeypatch)
 
         run(mod._resolve_pending(PHONE, "1"))
 
@@ -141,6 +167,7 @@ class TestResolvePendingLinksTheWholeBatch:
         _patch_add_product_photo(
             monkeypatch, return_value={"status": "success", "data": {"name": "maïs"}},
         )
+        _patch_worker_session(monkeypatch)
 
         run(mod._resolve_pending(PHONE, "1"))
 
@@ -161,6 +188,7 @@ class TestResolvePendingLinksTheWholeBatch:
         add_photo = _patch_add_product_photo(
             monkeypatch, return_value={"status": "success", "data": {"name": "maïs"}},
         )
+        _patch_worker_session(monkeypatch)
 
         run(mod._resolve_pending(PHONE, "1"))
 
@@ -250,6 +278,7 @@ class TestResolvePendingView:
         monkeypatch.setattr(
             "agriconnect.services.twilio_sender.send_whatsapp_media", _fake_send_media,
         )
+        _patch_worker_session(monkeypatch)
 
         run(mod._resolve_pending_view(PHONE, "1"))
 

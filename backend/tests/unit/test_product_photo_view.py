@@ -95,6 +95,24 @@ class TestFindProductByName:
             AgriDatabaseService, "get_my_products",
             AsyncMock(return_value={"status": "success", "data": products}),
         )
+        # `AgriDatabaseService().get_my_products(...)` passe par le wrapper
+        # `@transactional` de `base_service.py`, qui appelle SA PROPRE
+        # référence importée de `get_sessionmaker` (pas celle de
+        # `workers/runtime.py` — deux noms liés séparément, même origine)
+        # pour ouvrir la session "racine". Sans DATABASE_URL configurée (le
+        # cas en CI/test), ça lève "Database sessionmaker unavailable". Même
+        # technique que `test_workers_runtime_and_repos.py::TestWorkerSession
+        # ._fake_sessionmaker`, ciblée sur le bon module.
+        import agriconnect.services.database.base_service as base_service_module
+
+        class _CM:
+            async def __aenter__(self_inner):
+                return AsyncMock()
+
+            async def __aexit__(self_inner, *exc):
+                return False
+
+        monkeypatch.setattr(base_service_module, "get_sessionmaker", lambda: (lambda: _CM()))
 
     def test_no_products_at_all(self, monkeypatch):
         from agriconnect.workers.media.product_photo_task import _find_product_by_name

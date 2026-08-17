@@ -116,8 +116,11 @@ class TestGraphWiring:
 
     @pytest.fixture(scope="class")
     def compiled(self):
+        # `mc_runtime=object()` évite `build_runtime()` -> `get_llm()` (exige
+        # un vrai GROQ_API_KEY) : ce test inspecte la TOPOLOGIE compilée,
+        # jamais l'exécution du graphe.
         from agriconnect.graphs.agents.market_coach.core.graph_builder import build_graph
-        return build_graph(role="PRODUCER").get_graph()
+        return build_graph(role="PRODUCER", mc_runtime=object()).get_graph()
 
     def _edges(self, g):
         out, inc = {}, {}

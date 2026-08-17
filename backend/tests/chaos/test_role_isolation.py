@@ -164,10 +164,13 @@ class TestUnifiedGraphTopology:
     pour N'IMPORTE QUEL rôle, plutôt que de le re-suspecter comme une fuite."""
 
     def test_producer_and_buyer_graphs_share_the_same_node_set(self):
+        # `mc_runtime=object()` évite `build_runtime()` -> `get_llm()` (exige
+        # un vrai GROQ_API_KEY) : ces tests inspectent la TOPOLOGIE compilée,
+        # jamais l'exécution du graphe.
         from agriconnect.graphs.agents.market_coach.core.graph_builder import build_graph
 
         def node_ids(role):
-            g = build_graph(role=role).get_graph()
+            g = build_graph(role=role, mc_runtime=object()).get_graph()
             return {n.id if hasattr(n, "id") else str(n) for n in g.nodes.values()}
 
         producer_nodes = node_ids("PRODUCER")
@@ -182,7 +185,7 @@ class TestUnifiedGraphTopology:
         required_tunnel_nodes = {"cart_management", "negotiation_gate", "order_tracking_node"}
         for role in ("PRODUCER", "BUYER"):
             nodes = {n.id if hasattr(n, "id") else str(n)
-                     for n in build_graph(role=role).get_graph().nodes.values()}
+                     for n in build_graph(role=role, mc_runtime=object()).get_graph().nodes.values()}
             missing = required_tunnel_nodes - nodes
             assert not missing, f"rôle {role} : nœuds tunnel absents {missing} (KeyError potentielle)"
 

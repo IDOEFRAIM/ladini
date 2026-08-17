@@ -30,6 +30,24 @@ def _patch_download_and_upload(monkeypatch):
     )
 
 
+def _patch_worker_session(monkeypatch):
+    """`_process` ouvre son propre `worker_session()` (`workers/runtime.py`)
+    avant même de résoudre le produit cible — sans DATABASE_URL configurée
+    (le cas en CI/test), ça lève "Sessionmaker indisponible". Même technique
+    que `test_workers_runtime_and_repos.py::TestWorkerSession
+    ._fake_sessionmaker`."""
+    import agriconnect.workers.runtime as runtime_module
+
+    class _CM:
+        async def __aenter__(self_inner):
+            return AsyncMock()
+
+        async def __aexit__(self_inner, *exc):
+            return False
+
+    monkeypatch.setattr(runtime_module, "get_sessionmaker", lambda: (lambda: _CM()))
+
+
 class TestPendingBidPhotoTakesPriority:
     def test_a_pending_bid_photo_is_linked_instead_of_the_product_catalog(self, monkeypatch):
         import agriconnect.workers.media.product_photo_task as mod
@@ -125,6 +143,7 @@ class TestNoPendingTargetFallsBackToProductCatalog:
         monkeypatch.setattr(mod, "_resolve_target_product", resolve)
         sent = AsyncMock()
         monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        _patch_worker_session(monkeypatch)
 
         run(mod._process(PHONE, "https://twilio/media", "image/jpeg"))
 

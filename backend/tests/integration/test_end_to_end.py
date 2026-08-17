@@ -35,13 +35,17 @@ class TestEndToEndFlows:
         assert "❌" not in out, "un scénario a échoué"
 
     def test_graph_compiles_for_both_roles(self):
+        # `mc_runtime` fourni directement (comme `test_state_machine_invariants.py`)
+        # pour éviter `build_runtime()` -> `get_llm()`, qui exige un vrai
+        # GROQ_API_KEY : ce test vérifie juste que le graphe COMPILE, pas
+        # qu'il s'exécute — la doc du module promet "toujours sans réseau".
         from agriconnect.graphs.agents.market_coach.core.graph_builder import build_graph
         for role in ("PRODUCER", "BUYER"):
-            assert build_graph(role=role) is not None
+            assert build_graph(role=role, mc_runtime=object()) is not None
 
     def test_unknown_role_falls_back_instead_of_crashing(self):
         from agriconnect.graphs.agents.market_coach.core.graph_builder import build_graph
-        assert build_graph(role="MARTIEN") is not None
+        assert build_graph(role="MARTIEN", mc_runtime=object()) is not None
 
 
 # =====================================================================
