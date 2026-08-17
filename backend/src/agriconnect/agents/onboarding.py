@@ -1,6 +1,3 @@
-
-from __future__ import annotations
-
 """Unified onboarding — data-driven slot-filling with free ordering.
 
 Design
@@ -11,6 +8,7 @@ Design
   prompt — a change re-triggers confirmation with the new summary.
 - ``step`` is derived from what is filled, not from a rigid sequence.
 """
+from __future__ import annotations
 
 import ast
 import json
@@ -110,7 +108,9 @@ def _normalize_role(value: Optional[str]) -> Optional[str]:
     return None
 
 
-def _merge_extracted(ob_state: OnboardingState, extracted: Dict[str, Optional[str]]) -> bool:
+def _merge_extracted(
+    ob_state: OnboardingState, extracted: Dict[str, Optional[str]]
+) -> bool:
     """Apply extracted values onto *ob_state*. Return True if any slot changed.
 
     A change ALWAYS invalidates a prior confirmation — the caller uses this to
@@ -169,7 +169,6 @@ def _role_capabilities_message(role: Optional[str]) -> str:
     )
 
 
-
 def _unwrap_tool_payload(raw: Any, *, _depth: int = 0) -> Optional[Dict[str, Any]]:
     if raw is None or _depth > 6:
         return None
@@ -207,7 +206,9 @@ def _unwrap_tool_payload(raw: Any, *, _depth: int = 0) -> Optional[Dict[str, Any
                 return _unwrap_tool_payload(json.loads(stripped), _depth=_depth + 1)
             except Exception:
                 try:
-                    return _unwrap_tool_payload(ast.literal_eval(stripped), _depth=_depth + 1)
+                    return _unwrap_tool_payload(
+                        ast.literal_eval(stripped), _depth=_depth + 1
+                    )
                 except Exception:
                     return None
         return None
@@ -216,6 +217,7 @@ def _unwrap_tool_payload(raw: Any, *, _depth: int = 0) -> Optional[Dict[str, Any
 
 def _extract_zone_labels(raw: Any) -> List[str]:
     labels: List[str] = []
+
     def _handle_entry(entry: Any) -> None:
         if isinstance(entry, dict):
             label = entry.get("label") or entry.get("name")
@@ -263,6 +265,7 @@ def _extract_zone_labels(raw: Any) -> List[str]:
 
     _walk(raw)
     return list(dict.fromkeys(labels))
+
 
 BulkExtractor = Callable[[str, str], Coroutine[Any, Any, Dict[str, Optional[str]]]]
 
@@ -362,7 +365,9 @@ def _ack_line(ob_state: OnboardingState) -> str:
         if ob_state.role == "BUYER":
             parts.append("Parfait, tu cherches de bons produits — je suis là pour ça !")
         else:
-            parts.append("Super, un producteur qui veut vendre plus — on va faire du bon travail ensemble !")
+            parts.append(
+                "Super, un producteur qui veut vendre plus — on va faire du bon travail ensemble !"
+            )
     if ob_state._filled_slots.get("zone") and ob_state.zone_name:
         parts.append(f"Zone notée : *{ob_state.zone_name}* ✅")
     return " ".join(parts)
@@ -387,8 +392,7 @@ _FIELD_QUESTIONS: Dict[str, str] = {
         "ou *acheteur* (tu cherches à acheter) ? 🌾"
     ),
     "name": (
-        "Comment tu t'appelles patron ? "
-        "_(comme ça je te reconnais à chaque fois !)_"
+        "Comment tu t'appelles patron ? _(comme ça je te reconnais à chaque fois !)_"
     ),
     "zone": (
         "Tu es dans quelle *ville ou province* ? "
@@ -462,15 +466,26 @@ async def run_onboarding_step(
                 "props": {
                     "title": "Tu es...",
                     "options": [
-                        {"label": "🛒 Acheteur — je cherche des produits", "value": "BUYER"},
-                        {"label": "🧑🏾‍🌾 Producteur — je vends mes récoltes", "value": "PRODUCER"},
+                        {
+                            "label": "🛒 Acheteur — je cherche des produits",
+                            "value": "BUYER",
+                        },
+                        {
+                            "label": "🧑🏾‍🌾 Producteur — je vends mes récoltes",
+                            "value": "PRODUCER",
+                        },
                     ],
                 },
             },
         )
 
     # Bulk extract : one shot, everything the LLM can pull from this turn.
-    extracted: Dict[str, Optional[str]] = {"role": None, "name": None, "zone": None, "confirm": None}
+    extracted: Dict[str, Optional[str]] = {
+        "role": None,
+        "name": None,
+        "zone": None,
+        "confirm": None,
+    }
     entities = extracted_entities or {}
     if entities:
         extracted["role"] = entities.get("role")
@@ -518,7 +533,9 @@ async def run_onboarding_step(
             return OnboardingResult(state=ob_state, response_text=msg)
 
     confirm = extracted.get("confirm")
-    all_present = bool(ob_state.role and ob_state.name and ob_state.zone_id and ob_state.phone)
+    all_present = bool(
+        ob_state.role and ob_state.name and ob_state.zone_id and ob_state.phone
+    )
 
     # Create : all slots filled, explicit YES, nothing modified this turn.
     if all_present and confirm == "YES" and not changed:
@@ -565,23 +582,36 @@ async def _resolve_zone_id(ob_state: OnboardingState, mcp_runtime: Any) -> bool:
         return bool(ob_state.zone_id)
 
     try:
-        zone_response = await mcp_runtime.call_db("get_zone_by_name", name=ob_state.zone_name)
+        zone_response = await mcp_runtime.call_db(
+            "get_zone_by_name", name=ob_state.zone_name
+        )
         logger.debug("[_resolve_zone_id] raw response: %s", zone_response)
         payload = _unwrap_tool_payload(zone_response)
 
         if isinstance(payload, dict):
             if payload.get("ok") is False or payload.get("status") == "error":
-                logger.warning("[_resolve_zone_id] MCP error for '%s': %s", ob_state.zone_name, payload.get("error") or payload.get("message"))
+                logger.warning(
+                    "[_resolve_zone_id] MCP error for '%s': %s",
+                    ob_state.zone_name,
+                    payload.get("error") or payload.get("message"),
+                )
                 return False
             zone_id = payload.get("zone_id") or payload.get("id")
-            zone_label = payload.get("zone_name") or payload.get("name") or payload.get("label")
+            zone_label = (
+                payload.get("zone_name") or payload.get("name") or payload.get("label")
+            )
 
             if zone_id:
                 ob_state.zone_id = str(zone_id)
             if zone_label:
                 ob_state.zone_name = str(zone_label)
     except Exception as exc:
-        logger.error("[_resolve_zone_id] Exception for '%s': %s", ob_state.zone_name, exc, exc_info=True)
+        logger.error(
+            "[_resolve_zone_id] Exception for '%s': %s",
+            ob_state.zone_name,
+            exc,
+            exc_info=True,
+        )
         return False
 
     return bool(ob_state.zone_id)
@@ -621,7 +651,9 @@ def _confirmation_component() -> Dict[str, Any]:
 def _build_confirmation_prompt(ob_state: OnboardingState) -> str:
     name = ob_state.name or "(non renseigné)"
     role = ob_state.role or "(non renseigné)"
-    role_label = "Acheteur" if role == "BUYER" else "Producteur" if role == "PRODUCER" else role
+    role_label = (
+        "Acheteur" if role == "BUYER" else "Producteur" if role == "PRODUCER" else role
+    )
     zone = ob_state.zone_name or "(non renseignée)"
     return (
         f"Patron, voici ton récapitulatif :\n"
@@ -632,7 +664,9 @@ def _build_confirmation_prompt(ob_state: OnboardingState) -> str:
     )
 
 
-def _step_collect_location(ob_state: OnboardingState, location_shared: bool) -> OnboardingResult:
+def _step_collect_location(
+    ob_state: OnboardingState, location_shared: bool
+) -> OnboardingResult:
     """Étape finale, non-bloquante : la position GPS (si envoyée) a déjà été
     persistée par le webhook Twilio en tâche de fond — cette fonction ne fait
     que conclure l'onboarding et phraser l'accusé de réception, quel que soit
@@ -651,7 +685,7 @@ async def _step_create_profile(
         return OnboardingResult(
             state=ob_state,
             response_text="Service indisponible. Veuillez reessayer dans quelques instants.",
-            status="ERROR"
+            status="ERROR",
         )
 
     if not ob_state.phone:
@@ -678,12 +712,15 @@ async def _step_create_profile(
     }
 
     try:
-        raw_result = await mcp_runtime.call_db("create_user_profile", data=create_payload)
-        
+        raw_result = await mcp_runtime.call_db(
+            "create_user_profile", data=create_payload
+        )
+
         # Parsing robuste (dict ou JSON string)
         if isinstance(raw_result, str):
             try:
                 import ast
+
                 result_dict = ast.literal_eval(raw_result)
             except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
                 # `except:` NU auparavant : il interceptait AUSSI KeyboardInterrupt
@@ -727,7 +764,7 @@ async def _step_create_profile(
                 ),
                 status="SUCCESS",
             )
-            
+
         # 3. Cas Erreur métier
         ob_state.step = OnboardingStep.CONFIRM_DETAILS
         return OnboardingResult(
@@ -736,15 +773,13 @@ async def _step_create_profile(
             status="ERROR",
         )
 
-    except Exception as exc:
+    except Exception:
         ob_state.step = OnboardingStep.CONFIRM_DETAILS
         return OnboardingResult(
             state=ob_state,
             response_text="Une erreur technique est survenue. Veuillez réessayer plus tard.",
             status="ERROR",
         )
-    
-
 
 
 async def _reload_profile(mcp_runtime: Any, phone: Optional[str]) -> Dict[str, Any]:

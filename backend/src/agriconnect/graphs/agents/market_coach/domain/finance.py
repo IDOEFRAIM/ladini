@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from .model import DomainContext, DomainResult
 from agriconnect.graphs.agents.market_coach.actions.tooling import ToolId
+
+from .model import DomainContext, DomainResult
 
 
 @dataclass(frozen=True)

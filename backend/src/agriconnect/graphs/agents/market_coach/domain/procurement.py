@@ -4,11 +4,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
-from .model import DomainContext, DomainResult
-from agriconnect.graphs.agents.market_coach.actions.tooling import ToolId
 from agriconnect.graphs.agents.market_coach.actions.common import (
     normalize_quantity_to_kg,
 )
+from agriconnect.graphs.agents.market_coach.actions.tooling import ToolId
+
+from .model import DomainContext, DomainResult
 
 
 @dataclass(frozen=True)
@@ -105,7 +106,9 @@ class ProcurementService:
 
     def select_winner(self, command: ProcurementSelectWinnerCommand) -> DomainResult:
         bid_id = str(command.bid_id)
-        return DomainResult(tool_id=ToolId.SELECT_WINNING_BID, tool_args={"bid_id": bid_id})
+        return DomainResult(
+            tool_id=ToolId.SELECT_WINNING_BID, tool_args={"bid_id": bid_id}
+        )
 
     def accept_offer(self, command: ProcurementAcceptOfferCommand) -> DomainResult:
         bid_id = str(command.bid_id)

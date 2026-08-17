@@ -15,23 +15,29 @@ GAIN : Un seul backend sert TOUS les canaux sans coder de variante.
 """
 
 from .components import (
-    ComponentType,
-    Severity,
-    ActionType,
-    AGUIComponent,
-    TextBlock,
-    Card,
     ActionButton,
-    ListPicker,
-    FormField,
-    ChartData,
-    AlertBanner,
-    UserApproval,
-    ContextRequest,
+    ActionType,
     AgriResponse,
+    AGUIComponent,
+    AlertBanner,
+    Card,
+    ChartData,
+    ComponentType,
+    ContextRequest,
+    FormField,
+    ListPicker,
+    Severity,
+    TextBlock,
+    UserApproval,
 )
-from .renderer import AGUIRenderer, WhatsAppRenderer, WebRenderer, SMSRenderer, prune_components
 from .formatter import UIFormatter
+from .renderer import (
+    AGUIRenderer,
+    SMSRenderer,
+    WebRenderer,
+    WhatsAppRenderer,
+    prune_components,
+)
 
 # Alias rétro-compatible (ancien nom utilisé dans les agents)
 AgriComponent = AGUIComponent

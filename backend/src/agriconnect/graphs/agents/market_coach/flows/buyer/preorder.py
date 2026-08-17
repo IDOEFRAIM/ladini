@@ -1,13 +1,22 @@
 """Buyer preorder workflow — draft → preflight recap → confirmation."""
+
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, List, Optional
 
-from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import MenuRequest
+# =====================================================================
+# GPS DELIVERY GATE — implémentation partagée avec le flux gagnant
+# d'enchère (order_tracking.py::finalize_winner). Voir
+# [[precommande-architecture-consolidation-2026-08]] et
+# [[gps-delivery-burkina-faso-2026-08]].
+# =====================================================================
+from agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate import (
+    enter_gps_stage,
+    resolve_gps_stage,
+)
 from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
-    CartDomainService,
     SOURCE_TYPE_LABELS,
+    CartDomainService,
 )
 from agriconnect.graphs.agents.market_coach.services.mcp.gateway import PreorderGateway
 from agriconnect.graphs.agents.market_coach.utils import (
@@ -18,23 +27,10 @@ from agriconnect.graphs.agents.market_coach.utils import (
 
 from .helpers import (
     PREORDER_ACTION_OPTIONS,
-    PREORDER_GOALS,
     clear_active_goal,
     logger,
     preorder_choice_from_index,
     render_interactive_menu,
-)
-
-# =====================================================================
-# GPS DELIVERY GATE — implémentation partagée avec le flux gagnant
-# d'enchère (order_tracking.py::finalize_winner). Voir
-# [[precommande-architecture-consolidation-2026-08]] et
-# [[gps-delivery-burkina-faso-2026-08]].
-# =====================================================================
-
-from agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate import (
-    enter_gps_stage,
-    resolve_gps_stage,
 )
 
 # =====================================================================
@@ -79,7 +75,9 @@ def build_preflight_recap(cart: List[Dict[str, Any]], meta: Dict[str, Any]) -> s
     lines.append(f"\n💰 *TOTAL : {meta.get('total_amount')} {meta.get('currency')}*")
     lines.append("\n_Que souhaitez-vous faire ?_")
     lines.append(render_interactive_menu(PREORDER_ACTION_OPTIONS))
-    lines.append("\n👉 Répondez avec le *numéro* (1, 2 ou 3) ou tapez *confirmer* / *annuler*.")
+    lines.append(
+        "\n👉 Répondez avec le *numéro* (1, 2 ou 3) ou tapez *confirmer* / *annuler*."
+    )
     return "\n".join(lines)
 
 
@@ -99,7 +97,9 @@ def _preorder_confirm_prompt(items_count: int, meta: Dict[str, Any]) -> str:
 # =====================================================================
 
 
-async def update_preorder_phase(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Optional[Dict[str, Any]]:
+async def update_preorder_phase(
+    state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Optional[Dict[str, Any]]:
     """Force deterministic preorder phase transitions.
 
     Ensures CART ↔ PREORDER_DRAFTED ↔ CONFIRMED stay synchronized with goals.
@@ -113,7 +113,9 @@ async def update_preorder_phase(state: Dict[str, Any], mc_runtime: MarketRuntime
     working_snapshot = (state.get("working_memory") or {}).get("last_active_cart")
     cart_has_items = bool(state.get("active_cart") or working_snapshot)
 
-    def _phase_patch(new_phase: str, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _phase_patch(
+        new_phase: str, extra: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         p: Dict[str, Any] = {"phase": new_phase}
         if preorder_flow.get("preorder_id"):
             p["preorder_id"] = preorder_flow.get("preorder_id")
@@ -131,7 +133,9 @@ async def update_preorder_phase(state: Dict[str, Any], mc_runtime: MarketRuntime
 
     if goal == "BUYER_PREORDER_CONFIRM":
         if phase == "CART" and cart_has_items:
-            logger.info("update_preorder_phase: CONFIRM requested while CART — auto-drafting first")
+            logger.info(
+                "update_preorder_phase: CONFIRM requested while CART — auto-drafting first"
+            )
             draft_updates = await create_preorder(state, mc_runtime)
             draft_flow = dict(draft_updates.get("preorder_workflow") or {})
             draft_phase = str(draft_flow.get("phase") or "").upper()
@@ -141,13 +145,17 @@ async def update_preorder_phase(state: Dict[str, Any], mc_runtime: MarketRuntime
             synthetic_state = dict(state)
             synthetic_state["preorder_workflow"] = draft_flow
             synthetic_payload = dict(
-                draft_updates.get("transaction_payload") or state.get("transaction_payload") or {}
+                draft_updates.get("transaction_payload")
+                or state.get("transaction_payload")
+                or {}
             )
             synthetic_payload["resolved_id"] = "PREORDER_CONFIRM"
             synthetic_payload.pop("selection_index", None)
             synthetic_payload.pop("selected_value", None)
             synthetic_state["transaction_payload"] = synthetic_payload
-            synthetic_state["active_cart"] = draft_updates.get("active_cart", state.get("active_cart"))
+            synthetic_state["active_cart"] = draft_updates.get(
+                "active_cart", state.get("active_cart")
+            )
 
             confirm_updates = await create_preorder(synthetic_state, mc_runtime)
             if "preorder_workflow" not in confirm_updates:
@@ -155,7 +163,9 @@ async def update_preorder_phase(state: Dict[str, Any], mc_runtime: MarketRuntime
             return confirm_updates
 
         if phase == "PREORDER_DRAFTED":
-            logger.info("update_preorder_phase: CONFIRM from PREORDER_DRAFTED -> confirm")
+            logger.info(
+                "update_preorder_phase: CONFIRM from PREORDER_DRAFTED -> confirm"
+            )
             next_state = dict(state)
             next_payload = dict(next_state.get("transaction_payload") or {})
             next_payload["resolved_id"] = "PREORDER_CONFIRM"
@@ -172,7 +182,9 @@ async def update_preorder_phase(state: Dict[str, Any], mc_runtime: MarketRuntime
 # =====================================================================
 
 
-async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+async def create_preorder(
+    state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Dict[str, Any]:
     """Preorder workflow:
     1. CART → PREORDER_DRAFTED : create MCP draft + show preflight recap.
     2. PREORDER_DRAFTED + CONFIRM → CONFIRMED : confirm the preorder.
@@ -280,11 +292,15 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
         )
 
         preorder_id = draft_res.get("preorder_id") or draft_res.get("id") or "DRAFT"
-        if not is_success_response(draft_res) and str(draft_res.get("status") or "").lower() == "error":
+        if (
+            not is_success_response(draft_res)
+            and str(draft_res.get("status") or "").lower() == "error"
+        ):
             return {
                 "status": "ERROR",
                 "response_strategy": "ERROR",
-                "final_response": draft_res.get("message") or "Impossible de créer le brouillon de précommande.",
+                "final_response": draft_res.get("message")
+                or "Impossible de créer le brouillon de précommande.",
                 "preorder_workflow": {"phase": "CART"},
                 "ag_ui_component": None,
             }
@@ -323,7 +339,8 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
                 # rejouer le même écran mot pour mot — voir
                 # [[precommande-architecture-consolidation-2026-08]].
                 note = await llm_deviation_reply(
-                    mc_runtime, str(state.get("normalized_text") or ""),
+                    mc_runtime,
+                    str(state.get("normalized_text") or ""),
                     "confirmer la précommande en cours (oui/non)",
                 )
                 return {
@@ -355,13 +372,17 @@ async def create_preorder(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
 
         # --- Étape 2b : point GPS de livraison ---
         resolution = await resolve_gps_stage(
-            mc_runtime, phone,
-            location_shared=location_shared, is_yes=is_confirm,
+            mc_runtime,
+            phone,
+            location_shared=location_shared,
+            is_yes=is_confirm,
             gps_default=preorder_flow.get("gps_default"),
             user_text=str(state.get("normalized_text") or ""),
         )
         if resolution.resolved:
-            return await _execute_confirm(state, mc_runtime, preorder_id, cart, resolution.lat, resolution.lon)
+            return await _execute_confirm(
+                state, mc_runtime, preorder_id, cart, resolution.lat, resolution.lon
+            )
         return {
             "status": "WAITING_INPUT",
             "expected_input": "CONFIRMATION",
@@ -406,19 +427,28 @@ async def _execute_confirm(
         # auprès de Paydunya (voir EscrowMixin.mark_escrow_paid). Le point
         # GPS n'est pas encore threadé jusqu'ici — l'escrow est désactivé
         # en production (voir plus bas), pas prioritaire tant qu'il l'est.
-        from agriconnect.graphs.agents.market_coach.services.mcp.gateway import EscrowGateway
+        from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
+            EscrowGateway,
+        )
 
         escrow_res = await EscrowGateway(mc_runtime).initiate_escrow_payment(
             buyer_phone=phone,
             preorder_id=str(preorder_id),
         )
 
-        if not is_success_response(escrow_res) and str(escrow_res.get("status") or "").lower() == "error":
+        if (
+            not is_success_response(escrow_res)
+            and str(escrow_res.get("status") or "").lower() == "error"
+        ):
             return {
                 "status": "ERROR",
                 "response_strategy": "ERROR",
-                "final_response": escrow_res.get("message") or "Impossible de générer le lien de paiement.",
-                "preorder_workflow": {"phase": "PREORDER_DRAFTED", "preorder_id": preorder_id},
+                "final_response": escrow_res.get("message")
+                or "Impossible de générer le lien de paiement.",
+                "preorder_workflow": {
+                    "phase": "PREORDER_DRAFTED",
+                    "preorder_id": preorder_id,
+                },
                 "ag_ui_component": None,
             }
 
@@ -428,7 +458,8 @@ async def _execute_confirm(
         return {
             "status": "COMPLETED",
             "response_strategy": "SUCCESS",
-            "final_response": escrow_res.get("message") or (
+            "final_response": escrow_res.get("message")
+            or (
                 f"Votre commande #{order_number} est réservée pendant "
                 f"{escrow_res.get('ttl_hours', 24)}h. Payez via ce lien sécurisé : "
                 f"{escrow_res.get('checkout_url')}"
@@ -466,12 +497,19 @@ async def _execute_confirm(
         delivery_lon=delivery_lon,
     )
 
-    if not is_success_response(confirm_res) and str(confirm_res.get("status") or "").lower() == "error":
+    if (
+        not is_success_response(confirm_res)
+        and str(confirm_res.get("status") or "").lower() == "error"
+    ):
         return {
             "status": "ERROR",
             "response_strategy": "ERROR",
-            "final_response": confirm_res.get("message") or "Impossible de confirmer la précommande.",
-            "preorder_workflow": {"phase": "PREORDER_DRAFTED", "preorder_id": preorder_id},
+            "final_response": confirm_res.get("message")
+            or "Impossible de confirmer la précommande.",
+            "preorder_workflow": {
+                "phase": "PREORDER_DRAFTED",
+                "preorder_id": preorder_id,
+            },
             "ag_ui_component": None,
         }
 
@@ -492,7 +530,11 @@ async def _execute_confirm(
             f"Vous recevrez une confirmation de disponibilité sous peu.\n\n"
             f"_Tapez *mes commandes* pour suivre votre commande._"
         ),
-        "preorder_workflow": {"phase": "CONFIRMED", "preorder_id": str(order_id), "order_number": order_number},
+        "preorder_workflow": {
+            "phase": "CONFIRMED",
+            "preorder_id": str(order_id),
+            "order_number": order_number,
+        },
         "last_order_summary": {
             "order_id": str(order_id),
             "order_number": order_number,

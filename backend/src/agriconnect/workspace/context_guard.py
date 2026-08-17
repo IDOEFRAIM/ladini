@@ -1,4 +1,5 @@
 """ContextGuard — empêche l'exécution d'outils hors agent actif."""
+
 from __future__ import annotations
 
 import logging
@@ -26,7 +27,11 @@ class ContextGuard:
         # Depuis la migration mono-agent, il n'existe plus qu'un seul agent
         # (MarketCoach). On conserve le hook pour compatibilité mais il
         # n'empêche plus aucune exécution.
-        active = state.get("locked_agent") or state.get("workspace_agent") or state.get("active_agent")
+        active = (
+            state.get("locked_agent")
+            or state.get("workspace_agent")
+            or state.get("active_agent")
+        )
         logger.debug(
             "ContextGuard.ensure_agent noop: active=%r expected='market' workspace=%s",
             active or "market",

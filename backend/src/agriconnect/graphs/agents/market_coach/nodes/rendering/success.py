@@ -22,10 +22,14 @@ from agriconnect.graphs.agents.market_coach.nodes.rendering.common import (
     status_component,
     unwrap_execution_result,
 )
-from agriconnect.services.search_results_cache import store_results as _store_search_photo_results
+from agriconnect.services.pending_photo_target import (
+    set_pending_auction_photo as _set_pending_auction_photo,
+)
 from agriconnect.services.pending_photo_target import (
     set_pending_bid_photo as _set_pending_bid_photo,
-    set_pending_auction_photo as _set_pending_auction_photo,
+)
+from agriconnect.services.search_results_cache import (
+    store_results as _store_search_photo_results,
 )
 
 
@@ -63,6 +67,7 @@ def _cache_numbered_items_with_photos(
 # SECTION RENDERERS
 # =====================================================================
 
+
 def _format_future_cycle_line(cycle: Dict[str, Any]) -> str:
     """Ligne descriptive pour un MarketOffer futur (culture/élevage)."""
     label = (
@@ -83,7 +88,9 @@ def _format_future_cycle_line(cycle: Dict[str, Any]) -> str:
     price = cycle.get("price_per_unit")
     if price not in (None, ""):
         details.append(f"{fmt_num(price)} FCFA/{unit}".strip())
-    harvest = fmt_date(cycle.get("expected_harvest_date") or cycle.get("estimated_available_at"))
+    harvest = fmt_date(
+        cycle.get("expected_harvest_date") or cycle.get("estimated_available_at")
+    )
     if harvest:
         details.append(f"disponible le {harvest}")
     if cycle.get("preorder_enabled"):
@@ -94,7 +101,9 @@ def _format_future_cycle_line(cycle: Dict[str, Any]) -> str:
     return f"{emoji} {label} — statut {status}{suffix}"
 
 
-def _render_farm_sections(farms_dict: Dict[str, Any]) -> Tuple[str, List[Dict[str, str]]]:
+def _render_farm_sections(
+    farms_dict: Dict[str, Any],
+) -> Tuple[str, List[Dict[str, str]]]:
     if not farms_dict:
         return "", []
     lines = ["📋 *Voici l'état de vos stocks par exploitation :*\n"]
@@ -103,12 +112,18 @@ def _render_farm_sections(farms_dict: Dict[str, Any]) -> Tuple[str, List[Dict[st
     for farm_id, farm_info in farms_dict.items():
         if not isinstance(farm_info, dict):
             continue
-        farm_name = farm_info.get("farm_name") or farm_info.get("name") or "Exploitation sans nom"
+        farm_name = (
+            farm_info.get("farm_name")
+            or farm_info.get("name")
+            or "Exploitation sans nom"
+        )
         location = farm_info.get("location") or "Zone non spécifiée"
         lines.append(f"🏡 *{farm_name}* ({location})")
         stocks = farm_info.get("stocks") or []
         if not stocks:
-            lines.append("  _Aucun produit stocké actuellement dans cette exploitation._")
+            lines.append(
+                "  _Aucun produit stocké actuellement dans cette exploitation._"
+            )
         for stock in stocks:
             item_name = stock.get("item_name") or stock.get("product_name") or "Produit"
             qty = fmt_num(stock.get("quantity", 0))
@@ -116,23 +131,32 @@ def _render_farm_sections(farms_dict: Dict[str, Any]) -> Tuple[str, List[Dict[st
             stock_id = stock.get("stock_id") or stock.get("id") or farm_id
             label_item = f"{item_name} : {qty} {unit}"
             lines.append(f"  {index_counter}️⃣ {label_item}")
-            options.append({
-                "index": str(index_counter),
-                "label": f"{farm_name} - {label_item}",
-                "value": str(stock_id),
-            })
+            options.append(
+                {
+                    "index": str(index_counter),
+                    "label": f"{farm_name} - {label_item}",
+                    "value": str(stock_id),
+                }
+            )
             index_counter += 1
 
         cycles = farm_info.get("upcoming_cycles") or []
         for cycle in cycles[:2]:
             lines.append(f"  {index_counter}️⃣ {_format_future_cycle_line(cycle)}")
             stock_id = cycle.get("offer_id") or cycle.get("market_offer_id") or farm_id
-            label_item = cycle.get("display_label") or cycle.get("product_label") or cycle.get("species") or "Production future"
-            options.append({
-                "index": str(index_counter),
-                "label": f"{farm_name} - {label_item}",
-                "value": str(stock_id),
-            })
+            label_item = (
+                cycle.get("display_label")
+                or cycle.get("product_label")
+                or cycle.get("species")
+                or "Production future"
+            )
+            options.append(
+                {
+                    "index": str(index_counter),
+                    "label": f"{farm_name} - {label_item}",
+                    "value": str(stock_id),
+                }
+            )
             index_counter += 1
         if len(cycles) > 2:
             lines.append(f"    … +{len(cycles) - 2} autre(s) cycle(s) en préparation")
@@ -140,11 +164,15 @@ def _render_farm_sections(farms_dict: Dict[str, Any]) -> Tuple[str, List[Dict[st
         lines.append("")
 
     if options:
-        lines.append("❓ *Que souhaitez-vous faire ?* Indiquez le numéro d'un lot pour le mettre en vente ou le modifier.")
+        lines.append(
+            "❓ *Que souhaitez-vous faire ?* Indiquez le numéro d'un lot pour le mettre en vente ou le modifier."
+        )
     return "\n".join(lines).strip(), options
 
 
-def _render_catalog_section(catalog: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, str]]]:
+def _render_catalog_section(
+    catalog: List[Dict[str, Any]],
+) -> Tuple[str, List[Dict[str, str]]]:
     if not catalog:
         return "", []
     lines = ["📦 *Produits listés dans votre catalogue :*\n"]
@@ -167,12 +195,21 @@ def _render_catalog_section(catalog: List[Dict[str, Any]]) -> Tuple[str, List[Di
             details.append(f"⚖️ {fmt_num(qty)} {unit} dispo")
         details.append(f"Statut : {status}")
         lines.append("  " + " | ".join(details))
-        options.append({
-            "index": str(i),
-            "label": f"{name} ({fmt_num(qty or 0)} {unit})",
-            "value": str(product.get("product_id") or product.get("id") or product.get("short_code") or i),
-        })
-    lines.append("✏️ _Pour changer le prix, la quantité, le nom ou l'unité d'un produit, tapez *modifier un produit*._")
+        options.append(
+            {
+                "index": str(i),
+                "label": f"{name} ({fmt_num(qty or 0)} {unit})",
+                "value": str(
+                    product.get("product_id")
+                    or product.get("id")
+                    or product.get("short_code")
+                    or i
+                ),
+            }
+        )
+    lines.append(
+        "✏️ _Pour changer le prix, la quantité, le nom ou l'unité d'un produit, tapez *modifier un produit*._"
+    )
     return "\n".join(lines).strip(), options
 
 
@@ -183,7 +220,12 @@ def _render_cycles_section(cycles: List[Dict[str, Any]]) -> str:
     for raw_cycle in cycles:
         if not isinstance(raw_cycle, dict):
             continue
-        cycle_id = str(raw_cycle.get("offer_id") or raw_cycle.get("cycle_id") or raw_cycle.get("id") or len(deduped))
+        cycle_id = str(
+            raw_cycle.get("offer_id")
+            or raw_cycle.get("cycle_id")
+            or raw_cycle.get("id")
+            or len(deduped)
+        )
         if cycle_id in deduped:
             continue
         deduped[cycle_id] = raw_cycle
@@ -193,7 +235,9 @@ def _render_cycles_section(cycles: List[Dict[str, Any]]) -> str:
     for cycle in deduped.values():
         farm_name = cycle.get("farm_name") or "ferme"
         lines.append(f"• {_format_future_cycle_line(cycle)} ({farm_name})")
-    lines.append("\n✏️ _Pour changer le prix, la quantité, le nom ou la date d'un lot, tapez *modifier une production*._")
+    lines.append(
+        "\n✏️ _Pour changer le prix, la quantité, le nom ou la date d'un lot, tapez *modifier une production*._"
+    )
     return "\n".join(lines)
 
 
@@ -218,7 +262,9 @@ def _render_market_snapshot(exec_result: Dict[str, Any]) -> str:
     if exec_result.get("product_in_catalog") is False:
         products = exec_result.get("available_products") or []
         categories = exec_result.get("available_categories") or []
-        lines = [f"📭 {exec_result.get('message') or 'Ce produit n’est pas encore disponible sur notre plateforme.'}"]
+        lines = [
+            f"📭 {exec_result.get('message') or 'Ce produit n’est pas encore disponible sur notre plateforme.'}"
+        ]
         if products:
             # Produits concrets + prix — plus actionnable qu'une simple
             # catégorie ("Céréales") : demande explicite utilisateur, voir
@@ -230,8 +276,14 @@ def _render_market_snapshot(exec_result: Dict[str, Any]) -> str:
                 price = item.get("price")
                 if price is not None:
                     unit = str(item.get("unit") or "KG").upper()
-                    tag = " (prix standard)" if item.get("price_source") == "admin" else " (prix moyen)"
-                    lines.append(f"🌾 *{item['name']}* — {fmt_num(price)} FCFA/{unit}{tag}")
+                    tag = (
+                        " (prix standard)"
+                        if item.get("price_source") == "admin"
+                        else " (prix moyen)"
+                    )
+                    lines.append(
+                        f"🌾 *{item['name']}* — {fmt_num(price)} FCFA/{unit}{tag}"
+                    )
                 else:
                     lines.append(f"🌾 *{item['name']}*")
         elif categories:
@@ -245,7 +297,10 @@ def _render_market_snapshot(exec_result: Dict[str, Any]) -> str:
 
     data = exec_result.get("data") or []
     if not data:
-        return exec_result.get("message") or "Aucune donnée de prix disponible pour le moment."
+        return (
+            exec_result.get("message")
+            or "Aucune donnée de prix disponible pour le moment."
+        )
 
     if len(data) == 1 and exec_result.get("product_in_catalog"):
         row = data[0]
@@ -253,10 +308,18 @@ def _render_market_snapshot(exec_result: Dict[str, Any]) -> str:
         lines = [f"📊 *Prix de référence — {product_name} :*\n"]
         if row.get("price_source") == "admin":
             unit = row.get("standard_unit") or "KG"
-            zone_txt = f" à {row['standard_price_zone']}" if row.get("standard_price_zone") else ""
-            lines.append(f"💰 Prix standard{zone_txt} : *{fmt_num(row.get('standard_price'))} FCFA/{unit}*")
+            zone_txt = (
+                f" à {row['standard_price_zone']}"
+                if row.get("standard_price_zone")
+                else ""
+            )
+            lines.append(
+                f"💰 Prix standard{zone_txt} : *{fmt_num(row.get('standard_price'))} FCFA/{unit}*"
+            )
         elif row.get("avg_price") is not None:
-            lines.append(f"💰 Prix moyen constaté chez les producteurs : *{fmt_num(row.get('avg_price'))} FCFA*")
+            lines.append(
+                f"💰 Prix moyen constaté chez les producteurs : *{fmt_num(row.get('avg_price'))} FCFA*"
+            )
             if row.get("min_price") is not None:
                 lines.append(f"   (à partir de {fmt_num(row.get('min_price'))} FCFA)")
         total_stock = row.get("total_stock")
@@ -270,7 +333,9 @@ def _render_market_snapshot(exec_result: Dict[str, Any]) -> str:
         avg = row.get("avg_price")
         min_p = row.get("min_price")
         if avg is not None:
-            lines.append(f"• *{name}* — moy. {fmt_num(avg)} FCFA (min {fmt_num(min_p)} FCFA)")
+            lines.append(
+                f"• *{name}* — moy. {fmt_num(avg)} FCFA (min {fmt_num(min_p)} FCFA)"
+            )
         else:
             lines.append(f"• *{name}*")
     return "\n".join(lines)
@@ -287,7 +352,11 @@ def _render_price_check(exec_result: Dict[str, Any]) -> str:
     reason = str(exec_result.get("reason") or "").strip()
 
     if is_anomaly:
-        return f"⚠️ {reason}" if reason else "⚠️ Ce prix semble inhabituel par rapport au marché."
+        return (
+            f"⚠️ {reason}"
+            if reason
+            else "⚠️ Ce prix semble inhabituel par rapport au marché."
+        )
     if ref_price is not None:
         return f"✅ Ce prix est cohérent avec le marché (référence : {fmt_num(ref_price)} FCFA)."
     return f"✅ {reason}" if reason else "✅ Prix noté."
@@ -343,11 +412,13 @@ def _render_flat_list(items: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, 
         details_str = f" ({', '.join(details_parts)})" if details_parts else ""
         label_complet = f"{name}{details_str}"
         lines.append(f"{i}️⃣ {label_complet}")
-        options_ui.append({
-            "index": str(i),
-            "label": label_complet,
-            "value": entity_id,
-        })
+        options_ui.append(
+            {
+                "index": str(i),
+                "label": label_complet,
+                "value": entity_id,
+            }
+        )
 
     lines.append("\n👉 *Faites votre choix en tapant le numéro correspondant.*")
     return "\n".join(lines), options_ui
@@ -363,7 +434,9 @@ def _render_buyer_catalog_sections(items: List[Dict[str, Any]]) -> str:
     for item in items:
         if not isinstance(item, dict):
             continue
-        source = str(item.get("source_type") or item.get("availability_kind") or "").upper()
+        source = str(
+            item.get("source_type") or item.get("availability_kind") or ""
+        ).upper()
         if not source and item.get("estimated_available_at"):
             source = "FUTURE"
         bucket = future_items if source == "FUTURE" else direct_items
@@ -374,12 +447,20 @@ def _render_buyer_catalog_sections(items: List[Dict[str, Any]]) -> str:
     if direct_items:
         lines = ["🌐 *Produits disponibles immédiatement :*"]
         for idx, product in enumerate(direct_items, start=1):
-            name = product.get("name") or product.get("product_name") or f"Produit {idx}"
+            name = (
+                product.get("name") or product.get("product_name") or f"Produit {idx}"
+            )
             price = product.get("price")
             unit = str(product.get("unit") or "KG").upper()
-            vendor = product.get("vendor") or product.get("producer_name") or "Producteur"
+            vendor = (
+                product.get("vendor") or product.get("producer_name") or "Producteur"
+            )
             zone = product.get("zone_name") or product.get("zone")
-            price_label = f"{fmt_num(price)} FCFA/{unit}" if price not in (None, "") else "Prix communiqué par le producteur"
+            price_label = (
+                f"{fmt_num(price)} FCFA/{unit}"
+                if price not in (None, "")
+                else "Prix communiqué par le producteur"
+            )
             line = f"{idx}️⃣ *{name}* — {price_label} — {vendor}"
             if zone:
                 line += f" ({zone})"
@@ -392,12 +473,26 @@ def _render_buyer_catalog_sections(items: List[Dict[str, Any]]) -> str:
     if future_items:
         lines = ["⏳ *Productions futures (précommandes ouvertes) :*"]
         for product in future_items:
-            name = product.get("name") or product.get("product_name") or "Production future"
+            name = (
+                product.get("name")
+                or product.get("product_name")
+                or "Production future"
+            )
             price = product.get("price") or product.get("price_per_unit")
             unit = str(product.get("unit") or "KG").upper()
-            eta = fmt_date(product.get("estimated_available_at")) or product.get("estimated_available_at") or "date à confirmer"
-            vendor = product.get("vendor") or product.get("producer_name") or "Producteur"
-            price_label = f"{fmt_num(price)} FCFA/{unit}" if price not in (None, "") else "Prix communiqué lors de la confirmation"
+            eta = (
+                fmt_date(product.get("estimated_available_at"))
+                or product.get("estimated_available_at")
+                or "date à confirmer"
+            )
+            vendor = (
+                product.get("vendor") or product.get("producer_name") or "Producteur"
+            )
+            price_label = (
+                f"{fmt_num(price)} FCFA/{unit}"
+                if price not in (None, "")
+                else "Prix communiqué lors de la confirmation"
+            )
             lines.append(f"• *{name}* — {price_label} — livré vers {eta} ({vendor})")
         sections.append("\n".join(lines))
 
@@ -420,7 +515,10 @@ _FALLBACK_GOAL_REQUIRES_TOOL: Dict[str, Tuple[str, ...]] = {
 
 
 def _transactional_fallback_text(
-    goal: str, salutation: str, payload: Dict[str, Any], selected_tool: str = "",
+    goal: str,
+    salutation: str,
+    payload: Dict[str, Any],
+    selected_tool: str = "",
 ) -> str:
     """Gabarits par goal quand l'outil ne renvoie ni message ni collection.
 
@@ -464,7 +562,9 @@ def _transactional_fallback_text(
             f"✅ {salutation}Votre précommande{q_info} pour *{prod_name}* est enregistrée. "
             "Vous recevrez le récapitulatif complet dans un instant."
         )
-    if (g.startswith("PROCUREMENT_") or "AUCTION" in g) and _tool_matches("PROCUREMENT_OR_AUCTION"):
+    if (g.startswith("PROCUREMENT_") or "AUCTION" in g) and _tool_matches(
+        "PROCUREMENT_OR_AUCTION"
+    ):
         return f"✅ {salutation}Votre appel d'offres{q_info} de *{prod_name}* a été enregistré avec succès."
     if ("PUBLISH" in g or "SELL" in g) and _tool_matches("PUBLISH_OR_SELL"):
         return f"✅ {salutation}Votre offre de vente{q_info} de *{prod_name}* a bien été publiée sur le marché."
@@ -472,7 +572,10 @@ def _transactional_fallback_text(
         price_bid = fmt_num(payload.get("price"))
         p_info = f" à {price_bid} FCFA" if price_bid else ""
         return f"✅ {salutation}Votre proposition de prix{p_info} pour *{prod_name}* a bien été transmise."
-    if any(tok in g for tok in ("LIST", "GET", "CHECK", "SEARCH", "VIEW", "DASHBOARD", "SNAPSHOT")):
+    if any(
+        tok in g
+        for tok in ("LIST", "GET", "CHECK", "SEARCH", "VIEW", "DASHBOARD", "SNAPSHOT")
+    ):
         # Goal de LECTURE sans contenu : rester neutre et honnête.
         return f"{salutation}Je n'ai rien trouvé à afficher pour cette demande pour le moment."
     return (
@@ -485,6 +588,7 @@ def _transactional_fallback_text(
 # HANDLER PRINCIPAL
 # =====================================================================
 
+
 async def render_success(ctx: RenderContext) -> Dict[str, Any]:
     state, goal, salutation, payload = ctx.state, ctx.goal, ctx.salutation, ctx.payload
     raw_exec_result = state.get("execution_result") or {}
@@ -493,10 +597,13 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
     # directement sans passer par mcp_tool_executor.
     precomputed_success = state.get("final_response")
     if precomputed_success and not raw_exec_result:
-        return apply_corrections(state, {
-            "final_response": precomputed_success,
-            "ag_ui_component": state.get("ag_ui_component"),
-        })
+        return apply_corrections(
+            state,
+            {
+                "final_response": precomputed_success,
+                "ag_ui_component": state.get("ag_ui_component"),
+            },
+        )
 
     exec_result = unwrap_execution_result(raw_exec_result)
     tool_msg = exec_result.get("message") or ""
@@ -522,14 +629,18 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
             "\n\n📸 Envoyez une photo de ce lot pour rassurer l'acheteur — "
             "elle sera automatiquement liée à cette offre."
         )
-    elif selected_tool_name == "create_auction" and user_phone and exec_result.get("auction_id"):
+    elif (
+        selected_tool_name == "create_auction"
+        and user_phone
+        and exec_result.get("auction_id")
+    ):
         _set_pending_auction_photo(user_phone, str(exec_result["auction_id"]))
-        text_output += (
-            "\n\n📸 Vous pouvez aussi envoyer une photo de référence pour cet appel d'offres."
-        )
+        text_output += "\n\n📸 Vous pouvez aussi envoyer une photo de référence pour cet appel d'offres."
 
     formatted_menu_raw = exec_result.get("formatted_menu")
-    formatted_menu_text = formatted_menu_raw.strip() if isinstance(formatted_menu_raw, str) else ""
+    formatted_menu_text = (
+        formatted_menu_raw.strip() if isinstance(formatted_menu_raw, str) else ""
+    )
     has_formatted_menu = bool(formatted_menu_text)
     if has_formatted_menu:
         text_output = formatted_menu_text
@@ -543,11 +654,15 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
         _AUCTION_MENU_TOOLS: Dict[str, tuple[str, Callable[[Dict[str, Any]], str]]] = {
             "get_auctions_bids": (
                 "bid_id",
-                lambda it: f"{it.get('product') or 'Lot'} — {it.get('producer') or 'Producteur'}",
+                lambda it: (
+                    f"{it.get('product') or 'Lot'} — {it.get('producer') or 'Producteur'}"
+                ),
             ),
             "get_producer_auctions": (
                 "auction_id",
-                lambda it: f"{it.get('product') or 'Lot'} — {it.get('buyer_name') or 'Acheteur'}",
+                lambda it: (
+                    f"{it.get('product') or 'Lot'} — {it.get('buyer_name') or 'Acheteur'}"
+                ),
             ),
             "get_my_active_bids": (
                 "bid_id",
@@ -557,8 +672,12 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
         menu_tool_spec = _AUCTION_MENU_TOOLS.get(selected_tool_name)
         if menu_tool_spec and isinstance(tool_data, list) and user_phone:
             id_key, label_fn = menu_tool_spec
-            if _cache_numbered_items_with_photos(user_phone, tool_data, id_key, label_fn):
-                text_output += "\n\n📸 Tapez *photos <numéro>* pour voir les photos d'une ligne."
+            if _cache_numbered_items_with_photos(
+                user_phone, tool_data, id_key, label_fn
+            ):
+                text_output += (
+                    "\n\n📸 Tapez *photos <numéro>* pour voir les photos d'une ligne."
+                )
 
     def _menu(title: str, options: List[Dict[str, str]], mode: str) -> Dict[str, Any]:
         metadata: Dict[str, Any] = {"mode": mode, "count": len(options)}
@@ -614,7 +733,9 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
             if catalog_text:
                 sections.append(catalog_text)
             if catalog_options and ag_component is None:
-                ag_component = _menu("Catalogue produits", catalog_options, mode="catalog")
+                ag_component = _menu(
+                    "Catalogue produits", catalog_options, mode="catalog"
+                )
 
         if cycles_payload:
             cycles_text = _render_cycles_section(cycles_payload)
@@ -622,7 +743,9 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
                 sections.append(cycles_text)
 
         if sections:
-            text_output = "\n\n".join([section for section in sections if section]).strip()
+            text_output = "\n\n".join(
+                [section for section in sections if section]
+            ).strip()
             structured_sections_handled = True
         elif not tool_msg:
             text_output = (
@@ -679,9 +802,13 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
             # de retour (string) de cette fonction pure, verrouillé par
             # tests/nodes/test_rendering_success.py::TestRenderBuyerCatalogSections.
             direct_items = [
-                item for item in results_payload_list
+                item
+                for item in results_payload_list
                 if isinstance(item, dict)
-                and str(item.get("source_type") or item.get("availability_kind") or "").upper() == "DIRECT"
+                and str(
+                    item.get("source_type") or item.get("availability_kind") or ""
+                ).upper()
+                == "DIRECT"
             ]
             if direct_items:
                 phone = str(state.get("user_phone") or "").strip()
@@ -706,7 +833,11 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
     # _render_market_snapshot, même si `structured_sections_handled` est déjà
     # True (cette branche ne teste pas ce flag — volontaire pour search_products,
     # qui veut un menu de sélection en plus de son texte dédié).
-    if isinstance(tool_data, list) and tool_data and selected_tool_name != "get_market_snapshot":
+    if (
+        isinstance(tool_data, list)
+        and tool_data
+        and selected_tool_name != "get_market_snapshot"
+    ):
         flat_text, options_ui = _render_flat_list(tool_data)
         if allow_structured_render and not structured_sections_handled:
             text_output = flat_text
@@ -715,14 +846,24 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
             if ag_component is None:
                 ag_component = _menu("Faites votre choix", options_ui, mode="flat_list")
             else:
-                kwargs = ag_component.get("kwargs") if isinstance(ag_component, dict) else None
+                kwargs = (
+                    ag_component.get("kwargs")
+                    if isinstance(ag_component, dict)
+                    else None
+                )
                 if isinstance(kwargs, dict) and "metadata" in kwargs:
                     kwargs["metadata"].setdefault("count", len(options_ui))
 
     # ── CAS 2B : dict simple {farm_name, stocks} ──────────────────────
-    elif not structured_sections_handled and isinstance(tool_data, dict) and "stocks" in tool_data:
+    elif (
+        not structured_sections_handled
+        and isinstance(tool_data, dict)
+        and "stocks" in tool_data
+    ):
         stocks_list = tool_data.get("stocks") or []
-        farm_label = tool_data.get("farm_name") or tool_data.get("name") or "cette exploitation"
+        farm_label = (
+            tool_data.get("farm_name") or tool_data.get("name") or "cette exploitation"
+        )
         if not stocks_list:
             text_output = (
                 f"Aucun produit n'est actuellement enregistré en stock pour {farm_label}. "
@@ -751,7 +892,10 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
                 **{k: v for k, v in payload.items() if v not in (None, "", [], {})},
             }
             text_output = _transactional_fallback_text(
-                goal or "", salutation, effective_payload, selected_tool_name,
+                goal or "",
+                salutation,
+                effective_payload,
+                selected_tool_name,
             )
         ag_component = status_component("success", message=text_output)
 
@@ -770,7 +914,10 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
     if proactive:
         text_output = f"{text_output}\n\n💡 *Conseil :* {proactive}"
 
-    return apply_corrections(state, {
-        "final_response": text_output,
-        "ag_ui_component": ag_component,
-    })
+    return apply_corrections(
+        state,
+        {
+            "final_response": text_output,
+            "ag_ui_component": ag_component,
+        },
+    )

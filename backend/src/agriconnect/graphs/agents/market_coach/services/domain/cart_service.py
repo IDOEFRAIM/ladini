@@ -1,13 +1,10 @@
-from __future__ import annotations
-
 """Cart domain service — isolates buyer cart orchestration helpers."""
+from __future__ import annotations
 
 import logging
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
-
-logger = logging.getLogger("AgriConnect.Market.CartService")
 
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
@@ -28,9 +25,13 @@ from agriconnect.graphs.agents.market_coach.utils import (
     is_success_response,
     unwrap_tool_envelope,
 )
-from agriconnect.services.search_results_cache import store_results as _store_search_photo_results
+from agriconnect.services.search_results_cache import (
+    store_results as _store_search_photo_results,
+)
 
 from .buyer_common import SUPPORT_FOOTER, with_support_footer
+
+logger = logging.getLogger("AgriConnect.Market.CartService")
 
 
 def _normalize_for_match(text: Any) -> str:
@@ -115,7 +116,9 @@ class CartDomainService:
                     # trigram que par coïncidence de lettres (ex: "oeufs"/"Bœuf") et
                     # doit passer par une confirmation avant d'être traité comme
                     # résolu. Voir [[buyer-search-fuzzy-match-safety-2026-08]].
-                    "match_confident": _is_confident_product_match(product_name, matched_name),
+                    "match_confident": _is_confident_product_match(
+                        product_name, matched_name
+                    ),
                     "price": float(item.get("price") or 0.0),
                     "unit": str(item.get("unit") or "KG").upper(),
                     "vendor": item.get("vendor"),
@@ -161,13 +164,19 @@ class CartDomainService:
                 source_tag = " 🏷️ Enchère"
 
             zone_info = f" ({v['zone']})" if v.get("zone") else ""
-            qty_info = f" — Dispo: {v['available_qty']}" if v.get("available_qty") else ""
+            qty_info = (
+                f" — Dispo: {v['available_qty']}" if v.get("available_qty") else ""
+            )
             label = (
                 f"{v['vendor_name']}{zone_info} — {v['price']} FCFA/{v['unit']}"
                 f"{qty_info}{source_tag}"
             )
             lines.append(f"*{i}.* {label}")
-            options.append(MenuOption(index=str(i), label=label, value=v.get("producer_id") or str(i)))
+            options.append(
+                MenuOption(
+                    index=str(i), label=label, value=v.get("producer_id") or str(i)
+                )
+            )
             photo_entries[str(i)] = {
                 "id": v.get("product_id"),
                 "name": f"{product_name} — {v.get('vendor_name') or 'Producteur'}",
@@ -183,7 +192,9 @@ class CartDomainService:
         # jamais un chiffre seul.
         if phone and any(entry["images"] for entry in photo_entries.values()):
             _store_search_photo_results(str(phone), photo_entries)
-            lines.append("📸 Tapez *photos <numéro>* pour voir des photos d'un producteur.")
+            lines.append(
+                "📸 Tapez *photos <numéro>* pour voir des photos d'un producteur."
+            )
         if post_hint:
             lines.append(post_hint.strip())
         menu_text = "\n".join(lines)
@@ -218,7 +229,11 @@ class CartDomainService:
     @staticmethod
     def recompute_cart_meta(cart: List[Dict[str, Any]]) -> Dict[str, Any]:
         total = sum(float(line.get("line_total") or 0.0) for line in cart)
-        return {"total_amount": round(total, 2), "currency": "XOF", "items_count": len(cart)}
+        return {
+            "total_amount": round(total, 2),
+            "currency": "XOF",
+            "items_count": len(cart),
+        }
 
     @staticmethod
     def format_pending_draft(pending: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -267,7 +282,9 @@ class CartDomainService:
         for i, line in enumerate(cart, start=1):
             source_type = str(line.get("source_type") or "DIRECT").upper()
             source_label = SOURCE_TYPE_LABELS.get(source_type, "🌐 Catalogue")
-            vendor_info = f" — _{line.get('vendor_name')}_" if line.get("vendor_name") else ""
+            vendor_info = (
+                f" — _{line.get('vendor_name')}_" if line.get("vendor_name") else ""
+            )
             notification_badge = ""
             if line.get("notification_status") == "PENDING_RESPONSE":
                 notification_badge = " ⏳"
@@ -279,11 +296,18 @@ class CartDomainService:
                 f"   {_fmt_num(line.get('quantity'))} {line.get('unit')} × {_fmt_num(line.get('price'))} = "
                 f"*{_fmt_num(line.get('line_total'))} FCFA*"
             )
-            options.append({"index": str(i), "label": f"{line.get('name')} (x{line.get('quantity')})"})
+            options.append(
+                {
+                    "index": str(i),
+                    "label": f"{line.get('name')} (x{line.get('quantity')})",
+                }
+            )
             if line.get("is_auction"):
                 has_auction_items = True
 
-        lines.append(f"\n💰 *Total estimé : {_fmt_num(meta.get('total_amount'))} {meta.get('currency')}*")
+        lines.append(
+            f"\n💰 *Total estimé : {_fmt_num(meta.get('total_amount'))} {meta.get('currency')}*"
+        )
         lines.append(render_cart_actions_hint(has_auction_items))
 
         if pending_line:
@@ -294,9 +318,13 @@ class CartDomainService:
             "ag_ui_component": None,
             "pending_menu": MenuRequest(
                 title="Votre panier",
-                options=[MenuOption(index=o["index"], label=o["label"]) for o in options],
+                options=[
+                    MenuOption(index=o["index"], label=o["label"]) for o in options
+                ],
                 kind="cart",
-                metadata={"actions": ["precommander", "ajouter", "négocier", "annuler"]},
+                metadata={
+                    "actions": ["precommander", "ajouter", "négocier", "annuler"]
+                },
                 preformatted_text=cart_text,
             ),
         }
@@ -334,7 +362,9 @@ class CartDomainService:
             # simple message informatif. Aucun débit de stock : reserve_future_offer
             # incrémente MarketOffer.reserved_quantity et crée un Order(PREORDER)
             # lié via market_offer_id, puis notifie le producteur.
-            offer_id = ref.get("market_offer_id") or ref.get("offer_id") or ref.get("id")
+            offer_id = (
+                ref.get("market_offer_id") or ref.get("offer_id") or ref.get("id")
+            )
             if not offer_id:
                 return {
                     "status": "COMPLETED",
@@ -355,7 +385,10 @@ class CartDomainService:
             reservation = _unwrap_tool_envelope(reservation)
 
             if not is_success_response(reservation):
-                msg = reservation.get("message") or "Cette production n'a pas pu être réservée pour le moment."
+                msg = (
+                    reservation.get("message")
+                    or "Cette production n'a pas pu être réservée pour le moment."
+                )
                 return {
                     "status": "COMPLETED",
                     "response_strategy": "ERROR",
@@ -390,7 +423,8 @@ class CartDomainService:
 
         logger.info(
             "STOCK_CHECK | product_id=%s qty=%s available=%s status=%s reason=%s msg=%s",
-            resolved_pid, qty,
+            resolved_pid,
+            qty,
             check.get("available_quantity"),
             check.get("status"),
             check.get("reason"),
@@ -419,7 +453,10 @@ class CartDomainService:
             # Genuine shortage (vendor exists but not enough) OR product vanished →
             # propose an enchère so producers can commit to supply the demand.
             if reason == "product_not_found":
-                msg = check.get("message") or f"Le produit « {display_name} » n'existe plus dans le catalogue."
+                msg = (
+                    check.get("message")
+                    or f"Le produit « {display_name} » n'existe plus dans le catalogue."
+                )
             elif available is not None:
                 msg = (
                     f"📉 Stock insuffisant pour « *{display_name}* » : "
@@ -438,11 +475,13 @@ class CartDomainService:
                 "👉 Répondez *oui* pour lancer, ou *non* pour autre chose."
             )
             wm = dict(state.get("working_memory") or {})
-            wm.update({
-                "buyer_request_waiting_choice": True,
-                "buyer_request_catalog_checked": True,
-                "buyer_request_last_product": display_name,
-            })
+            wm.update(
+                {
+                    "buyer_request_waiting_choice": True,
+                    "buyer_request_catalog_checked": True,
+                    "buyer_request_last_product": display_name,
+                }
+            )
             payload_seed = {"product": display_name}
             if qty:
                 payload_seed["quantity"] = qty
@@ -453,7 +492,9 @@ class CartDomainService:
                 "status": "WAITING_INPUT",
                 "expected_input": "CONFIRMATION",
                 "response_strategy": "ASK_MISSING_FIELD",
-                "final_response": msg + ("\n\n💡 Des alternatives sont disponibles." if recos else "") + escalation,
+                "final_response": msg
+                + ("\n\n💡 Des alternatives sont disponibles." if recos else "")
+                + escalation,
                 "fallback_recommendations": recos,
                 "preorder_workflow": {"phase": "CART"},
                 "vendor_selection_context": None,
@@ -496,13 +537,16 @@ class CartDomainService:
             payload=notification_payload,
         )
         if is_success_response(notification_result):
-            line["notification_id"] = notification_result.get("action_id") or notification_result.get("id")
+            line["notification_id"] = notification_result.get(
+                "action_id"
+            ) or notification_result.get("id")
             line["notification_status"] = "PENDING_RESPONSE"
 
         cart = [
             c
             for c in cart
-            if c.get("status") != "DRAFT" and c.get("product_id") not in ("DRAFT", line["product_id"])
+            if c.get("status") != "DRAFT"
+            and c.get("product_id") not in ("DRAFT", line["product_id"])
         ]
         cart.append(line)
         meta = self.recompute_cart_meta(cart)
@@ -562,7 +606,9 @@ def _unwrap_tool_envelope(result: Any) -> Dict[str, Any]:
 
 
 def _infer_source_type(product_record: Dict[str, Any]) -> str:
-    src = str(product_record.get("source_type") or product_record.get("type") or "").upper()
+    src = str(
+        product_record.get("source_type") or product_record.get("type") or ""
+    ).upper()
     if src in ("AUCTION", "PROCUREMENT", "FUTURE"):
         return src
     if product_record.get("crop_cycle_id"):

@@ -17,7 +17,9 @@ import uuid
 from typing import Any, Dict
 
 from agriconnect.graphs.agents.common.output import AgriAgentOutput, ExpertMetadata
-from agriconnect.graphs.agents.market_coach.core.graph_builder import build_graph as build
+from agriconnect.graphs.agents.market_coach.core.graph_builder import (
+    build_graph as build,
+)
 from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
 
 logger = logging.getLogger("Agent.MarketCoach.adapter")
@@ -25,7 +27,9 @@ logger = logging.getLogger("Agent.MarketCoach.adapter")
 _cache: Dict[str, Any] = {}
 
 
-def get_agent_graph(llm_client: Any = None, mcp_session: Any = None, checkpointer: Any = None):
+def get_agent_graph(
+    llm_client: Any = None, mcp_session: Any = None, checkpointer: Any = None
+):
     """Retourne une application LangGraph compilée et mise en cache."""
 
     if mcp_session is None:
@@ -45,7 +49,7 @@ def get_agent_graph(llm_client: Any = None, mcp_session: Any = None, checkpointe
 def _build_initial_state(query: str, context: Dict[str, Any]) -> MarketAgentState:
     """Construit l'état initial conforme au contrat MarketAgentState."""
     profile_ids = context.get("profile_ids") or {}
-    user_id = context.get("user_id") or context.get("id") or "anonymous"
+    context.get("user_id") or context.get("id") or "anonymous"
     user_phone = (
         context.get("user_phone")
         or context.get("phone")
@@ -53,9 +57,7 @@ def _build_initial_state(query: str, context: Dict[str, Any]) -> MarketAgentStat
         or ""
     )
     session_id = (
-        context.get("session_id")
-        or context.get("thread_id")
-        or str(uuid.uuid4())
+        context.get("session_id") or context.get("thread_id") or str(uuid.uuid4())
     )
 
     state: MarketAgentState = {
@@ -155,9 +157,7 @@ class MarketCoach:
         # Compatibilité ascendante : on accepte les anciennes clés `market_data`,
         # `confidence`, `sources` si elles existent encore en aval.
         structured = (
-            final_state.get("execution_result")
-            or final_state.get("market_data")
-            or {}
+            final_state.get("execution_result") or final_state.get("market_data") or {}
         )
         confidence = float(
             final_state.get("interpreter_confidence")
@@ -206,7 +206,9 @@ class MarketCoach:
         config = {"configurable": {"thread_id": user_id}}
         initial_state = _build_initial_state(query, context)
 
-        final = self._run_sync(app.ainvoke(initial_state, config=config), "MarketCoach.handle()")
+        final = self._run_sync(
+            app.ainvoke(initial_state, config=config), "MarketCoach.handle()"
+        )
         return self._prepare_output(final)
 
 

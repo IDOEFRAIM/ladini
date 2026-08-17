@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import asyncio
 import ast
+import asyncio
 import json
 import logging
 import os
 import sys
+import tempfile
 import time
 from abc import ABC, abstractmethod
 from contextlib import AsyncExitStack
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional
@@ -24,9 +24,9 @@ except ImportError:
     Client = None
     ElicitResult = None
 
-from agriconnect.infrastructure.mcp.security import ShieldHub
 
 logger = logging.getLogger(__name__)
+
 
 @dataclass
 class MCPTransportConfig:
@@ -52,7 +52,9 @@ class MCPTransportConfig:
         if transport == "stdio":
             script = getattr(settings, "MCP_DB_STDIO_ENTRYPOINT", "")
             if not script:
-                raise ValueError("MCP_DB_STDIO_ENTRYPOINT must be configured for stdio transport")
+                raise ValueError(
+                    "MCP_DB_STDIO_ENTRYPOINT must be configured for stdio transport"
+                )
             env = dict(getattr(settings, "MCP_DB_STDIO_ENV", {}) or {})
             if "PYTHONPATH" not in env and getattr(settings, "BASE_DIR", None):
                 env["PYTHONPATH"] = str(settings.BASE_DIR)
@@ -62,15 +64,19 @@ class MCPTransportConfig:
                 if base_logs:
                     log_path = str(Path(base_logs) / "mcp-db-stdio.log")
                 else:
-                    default_root = getattr(settings, "BASE_DIR", None) or tempfile.gettempdir()
+                    default_root = (
+                        getattr(settings, "BASE_DIR", None) or tempfile.gettempdir()
+                    )
                     log_path = str(Path(default_root) / "logs" / "mcp-db-stdio.log")
 
             return cls(
                 kind="stdio",
                 stdio_script=script,
-                stdio_cwd=getattr(settings, "MCP_DB_STDIO_CWD", None) or str(Path(script).resolve().parent),
+                stdio_cwd=getattr(settings, "MCP_DB_STDIO_CWD", None)
+                or str(Path(script).resolve().parent),
                 stdio_env=env,
-                stdio_python=getattr(settings, "MCP_DB_STDIO_PYTHON", None) or sys.executable,
+                stdio_python=getattr(settings, "MCP_DB_STDIO_PYTHON", None)
+                or sys.executable,
                 stdio_log_path=log_path,
             )
         if transport == "http":
@@ -84,7 +90,9 @@ class MCPTransportConfig:
                 port = getattr(settings, "MCP_DB_SERVER_PORT", None) or 8003
                 base_url = f"http://{host}:{port}"
             if not base_url:
-                raise ValueError("MCP_DB_HTTP_URL must be configured for http transport")
+                raise ValueError(
+                    "MCP_DB_HTTP_URL must be configured for http transport"
+                )
             headers = dict(getattr(settings, "MCP_DB_HTTP_HEADERS", {}) or {})
             # Secret partagé avec le daemon (protocols/mcp/servers/http_server.py).
             # Injecté ici plutôt que dans MCP_DB_HTTP_HEADERS pour que la même
@@ -103,14 +111,24 @@ class MCPTransportConfig:
         if transport == "grpc":
             target = getattr(settings, "MCP_DB_GRPC_TARGET", "")
             if not target:
-                raise ValueError("MCP_DB_GRPC_TARGET must be configured for grpc transport")
+                raise ValueError(
+                    "MCP_DB_GRPC_TARGET must be configured for grpc transport"
+                )
             return cls(
                 kind="grpc",
                 grpc_target=target,
                 grpc_tls=bool(getattr(settings, "MCP_DB_GRPC_TLS", False)),
                 grpc_metadata=getattr(settings, "MCP_DB_GRPC_METADATA", {}) or {},
-                grpc_list_tools_method=getattr(settings, "MCP_DB_GRPC_LIST_TOOLS_METHOD", "/agriconnect.mcp.MCP/ListTools"),
-                grpc_call_tool_method=getattr(settings, "MCP_DB_GRPC_CALL_TOOL_METHOD", "/agriconnect.mcp.MCP/CallTool"),
+                grpc_list_tools_method=getattr(
+                    settings,
+                    "MCP_DB_GRPC_LIST_TOOLS_METHOD",
+                    "/agriconnect.mcp.MCP/ListTools",
+                ),
+                grpc_call_tool_method=getattr(
+                    settings,
+                    "MCP_DB_GRPC_CALL_TOOL_METHOD",
+                    "/agriconnect.mcp.MCP/CallTool",
+                ),
             )
         raise ValueError(f"Unsupported MCP transport: {transport}")
 
@@ -129,6 +147,7 @@ class MCPTransportAdapter(ABC):
 
     @abstractmethod
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any: ...
+
 
 class FastMCPProcessAdapter(MCPTransportAdapter):
     def __init__(
@@ -158,7 +177,9 @@ class FastMCPProcessAdapter(MCPTransportAdapter):
         env = dict(os.environ)
         env.update(self.config.stdio_env or {})
 
-        log_file_path = self.config.stdio_log_path or str(Path(tempfile.gettempdir()) / "mcp-db-stdio.log")
+        log_file_path = self.config.stdio_log_path or str(
+            Path(tempfile.gettempdir()) / "mcp-db-stdio.log"
+        )
         log_file = Path(log_file_path).expanduser()
         log_file.parent.mkdir(parents=True, exist_ok=True)
         self._log_handle = open(log_file, "ab", buffering=0)
@@ -212,9 +233,6 @@ class HttpMCPAdapter(MCPTransportAdapter):
         timeout = aiohttp.ClientTimeout(total=30)
         self._session = aiohttp.ClientSession(timeout=timeout)
 
-
-
-
     async def close(self) -> None:
         if self._session:
             await self._session.close()
@@ -232,7 +250,9 @@ class HttpMCPAdapter(MCPTransportAdapter):
     async def list_tools(self) -> List[Any]:
         if not self._session:
             raise RuntimeError("Session HTTP non initialisée")
-        async with self._session.get(self._endpoint("tools"), headers=self._headers()) as resp:
+        async with self._session.get(
+            self._endpoint("tools"), headers=self._headers()
+        ) as resp:
             resp.raise_for_status()
             return await resp.json()
 
@@ -273,7 +293,9 @@ class GrpcMCPAdapter(MCPTransportAdapter):
 
         if self.config.grpc_tls:
             credentials = self._grpc.ssl_channel_credentials()
-            self._channel = self._grpc.aio.secure_channel(self.config.grpc_target, credentials)
+            self._channel = self._grpc.aio.secure_channel(
+                self.config.grpc_target, credentials
+            )
         else:
             self._channel = self._grpc.aio.insecure_channel(self.config.grpc_target)
 
@@ -293,7 +315,9 @@ class GrpcMCPAdapter(MCPTransportAdapter):
 
     async def list_tools(self) -> List[Any]:
         call = self._stub(self.config.grpc_list_tools_method)
-        response = await call({}, metadata=list((self.config.grpc_metadata or {}).items()))
+        response = await call(
+            {}, metadata=list((self.config.grpc_metadata or {}).items())
+        )
         tools = response.get("tools", response)
         if isinstance(tools, list):
             return tools
@@ -302,7 +326,10 @@ class GrpcMCPAdapter(MCPTransportAdapter):
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         call = self._stub(self.config.grpc_call_tool_method)
         payload = {"name": tool_name, "arguments": arguments}
-        return await call(payload, metadata=list((self.config.grpc_metadata or {}).items()))
+        return await call(
+            payload, metadata=list((self.config.grpc_metadata or {}).items())
+        )
+
 
 class AgriMCPClient:
     """Client MCP supportant plusieurs transports (stdio, HTTP, gRPC)."""
@@ -383,7 +410,9 @@ class AgriMCPClient:
                         try:
                             await self.reconnect()
                         except Exception as re_exc:
-                            logger.exception("MCP watchdog reconnect failed: %s", re_exc)
+                            logger.exception(
+                                "MCP watchdog reconnect failed: %s", re_exc
+                            )
             except asyncio.CancelledError:
                 pass
             except Exception:
@@ -419,12 +448,25 @@ class AgriMCPClient:
 
         name = getattr(tool, "name", None)
         description = getattr(tool, "description", "")
-        schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None)
+        schema = getattr(tool, "input_schema", None) or getattr(
+            tool, "inputSchema", None
+        )
         if isinstance(tool, dict):
-            fn = tool.get("function") if isinstance(tool.get("function"), dict) else None
+            fn = (
+                tool.get("function") if isinstance(tool.get("function"), dict) else None
+            )
             name = name or tool.get("name") or (fn or {}).get("name")
-            description = description or tool.get("description") or (fn or {}).get("description", "")
-            schema = schema or tool.get("inputSchema") or tool.get("input_schema") or (fn or {}).get("parameters")
+            description = (
+                description
+                or tool.get("description")
+                or (fn or {}).get("description", "")
+            )
+            schema = (
+                schema
+                or tool.get("inputSchema")
+                or tool.get("input_schema")
+                or (fn or {}).get("parameters")
+            )
         if not schema:
             schema = {"type": "object", "properties": {}}
         return {
@@ -442,7 +484,9 @@ class AgriMCPClient:
 
         tools_response = await self._adapter.list_tools()
         self._raw_tools_cache = list(tools_response or [])
-        self._tools_cache = [self._normalize_tool_descriptor(tool) for tool in self._raw_tools_cache]
+        self._tools_cache = [
+            self._normalize_tool_descriptor(tool) for tool in self._raw_tools_cache
+        ]
         return self._tools_cache
 
     async def list_tools(self) -> List[Dict[str, Any]]:
@@ -479,16 +523,19 @@ class AgriMCPClient:
             json.dumps(safe_args, default=str, ensure_ascii=False),
         )
 
-        last_exc: Optional[Exception] = None
         for attempt in range(1, self._MAX_RECONNECT_ATTEMPTS + 1):
             try:
-                result = await self._with_lock(self._adapter.call_tool, tool_name, safe_args)
+                result = await self._with_lock(
+                    self._adapter.call_tool, tool_name, safe_args
+                )
                 break
             except (ConnectionError, OSError, RuntimeError, aiohttp.ClientError) as exc:
-                last_exc = exc
                 logger.warning(
                     "MCP call_tool attempt %d/%d failed (%s): %s",
-                    attempt, self._MAX_RECONNECT_ATTEMPTS, tool_name, exc,
+                    attempt,
+                    self._MAX_RECONNECT_ATTEMPTS,
+                    tool_name,
+                    exc,
                 )
                 if attempt < self._MAX_RECONNECT_ATTEMPTS:
                     try:
@@ -496,14 +543,18 @@ class AgriMCPClient:
                     except Exception as re_exc:
                         logger.error("MCP reconnect failed: %s", re_exc)
                 else:
-                    raise last_exc  # type: ignore[misc]
+                    raise
             except Exception:
                 raise
         else:
-            raise RuntimeError(f"MCP call_tool {tool_name} failed after {self._MAX_RECONNECT_ATTEMPTS} attempts")
+            raise RuntimeError(
+                f"MCP call_tool {tool_name} failed after {self._MAX_RECONNECT_ATTEMPTS} attempts"
+            )
 
         if hasattr(result, "content") and isinstance(result.content, list):
-            raw_output = "\n".join([c.text for c in result.content if hasattr(c, "text")])
+            raw_output = "\n".join(
+                [c.text for c in result.content if hasattr(c, "text")]
+            )
             try:
                 return json.loads(raw_output)
             except (json.JSONDecodeError, TypeError) as exc:
@@ -527,7 +578,9 @@ class AgriMCPClient:
                     pass
                 logger.warning(
                     "MCP_NON_JSON_RESPONSE | tool=%s | error=%s | raw_output[:300]=%s",
-                    tool_name, exc, raw_output[:300],
+                    tool_name,
+                    exc,
+                    raw_output[:300],
                 )
                 return raw_output
 
@@ -539,13 +592,19 @@ class AgriMCPClient:
             return ElicitResult(action="decline")
         return None
 
-    async def _handle_progress(self, progress: float, total: Optional[float], message: Optional[str]) -> None:
+    async def _handle_progress(
+        self, progress: float, total: Optional[float], message: Optional[str]
+    ) -> None:
         log_msg = f"MCP Progress: {progress}/{total if total else '?'} - {message}"
         logger.debug(log_msg)
 
     async def _handle_message(self, message):
-        if hasattr(message, "method") and message.method == "notifications/tools/list_changed":
+        if (
+            hasattr(message, "method")
+            and message.method == "notifications/tools/list_changed"
+        ):
             await self.refresh_tools()
+
 
 # NOTE: `UnifiedMCPClient` is defined once in `security.py` (canonical location,
 # closest to ShieldHub). Import it from there:
@@ -570,15 +629,17 @@ async def main():
     try:
         async with AgriMCPClient(transport) as client:
             logger.info("\n--- Liste des outils disponibles ---")
-            tools = await client.refresh_tools()
+            await client.refresh_tools()
 
             logger.info("\n--- Test d'appel d'outil ---")
-            norm = await client.call_tool("get_producer_dashboard", {"producer_id": "3cadb350-59e5-4ad8-ae95-5ff7cc1350bd"})
+            norm = await client.call_tool(
+                "get_producer_dashboard",
+                {"producer_id": "3cadb350-59e5-4ad8-ae95-5ff7cc1350bd"},
+            )
             logger.info(f"Normalisation (5 tonnes) : {norm}")
 
     except Exception as e:
         logger.info(f"Erreur : {e}")
-
 
 
 if __name__ == "__main__":

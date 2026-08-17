@@ -4,13 +4,13 @@ All unit synonym resolution, quantity-from-text extraction, and unit
 validation lives here. Consumers (validator, entities, helpers) import
 from this module instead of maintaining their own copies.
 """
+
 from __future__ import annotations
 
 import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
-
 
 UNIT_SYNONYMS: Dict[str, str] = {
     "k": "KG",
@@ -98,7 +98,12 @@ def parse_quantity_unit_from_text(text: str) -> QuantityUnitResult:
     if not match:
         return QuantityUnitResult()
 
-    qty_raw = (match.group("qty") or "").replace(" ", "").replace("\xa0", "").replace(",", ".")
+    qty_raw = (
+        (match.group("qty") or "")
+        .replace(" ", "")
+        .replace("\xa0", "")
+        .replace(",", ".")
+    )
     try:
         qty_val = float(qty_raw)
     except (ValueError, TypeError):
@@ -128,7 +133,12 @@ def parse_compound_quantity(text: str) -> QuantityUnitResult:
     total_kg = 0.0
     all_convertible = True
     for m in matches:
-        qty_raw = (m.group("qty") or "").replace(" ", "").replace("\xa0", "").replace(",", ".")
+        qty_raw = (
+            (m.group("qty") or "")
+            .replace(" ", "")
+            .replace("\xa0", "")
+            .replace(",", ".")
+        )
         try:
             qty_val = float(qty_raw)
         except (ValueError, TypeError):
@@ -190,9 +200,10 @@ _SCAN_NUMBER_RE = re.compile(r"(\d+[\d\s,.]*)")
 @dataclass(frozen=True)
 class NumberCandidate:
     """A number found in a slot answer, tagged by its local neighbourhood."""
+
     value: float
-    unit: Optional[str]        # canonical unit token near the number, else None
-    near_currency: bool        # a currency word within ``_SCAN_WINDOW`` chars
+    unit: Optional[str]  # canonical unit token near the number, else None
+    near_currency: bool  # a currency word within ``_SCAN_WINDOW`` chars
 
 
 def scan_number_candidates(text: str) -> "list[NumberCandidate]":
@@ -210,38 +221,121 @@ def scan_number_candidates(text: str) -> "list[NumberCandidate]":
             val = float(raw)
         except (TypeError, ValueError):
             continue
-        after = clean[m.end():m.end() + _SCAN_WINDOW]
-        before = clean[max(0, m.start() - _SCAN_WINDOW):m.start()]
+        after = clean[m.end() : m.end() + _SCAN_WINDOW]
+        before = clean[max(0, m.start() - _SCAN_WINDOW) : m.start()]
         near_currency = bool(_SCAN_CURRENCY_RE.search(after)) or bool(
             _SCAN_CURRENCY_RE.search(before)
         )
         unit_match = _SCAN_UNIT_RE.search(after) or _SCAN_UNIT_RE.search(before)
         mapped_unit = (
             UNIT_SYNONYMS.get(normalize_unit_token(unit_match.group(1) or ""))
-            if unit_match else None
+            if unit_match
+            else None
         )
-        out.append(NumberCandidate(value=val, unit=mapped_unit, near_currency=near_currency))
+        out.append(
+            NumberCandidate(value=val, unit=mapped_unit, near_currency=near_currency)
+        )
     return out
 
 
 # Livestock / poultry products are counted per head (TÊTE), never weighed in KG.
 # Defaulting their unit to KG (e.g. "300 poussins" → "300 KG") is a recurring
 # production bug. Keep singular + plural forms; matching is accent-folded.
-LIVESTOCK_PRODUCT_KEYWORDS = frozenset({
-    "poussin", "poussins", "poule", "poules", "poulet", "poulets", "poulaille",
-    "coq", "coqs", "volaille", "volailles", "pintade", "pintades",
-    "canard", "canards", "canette", "canettes", "oie", "oies",
-    "dindon", "dindons", "dinde", "dindes",
-    "lapin", "lapins", "lapine", "lapines", "clapier",
-    "mouton", "moutons", "brebis", "belier", "beliers", "agneau", "agneaux", "ovin", "ovins",
-    "chevre", "chevres", "chevreau", "chevreaux", "cabri", "cabris", "bouc", "boucs", "caprin", "caprins",
-    "boeuf", "boeufs", "vache", "vaches", "taureau", "taureaux", "veau", "veaux",
-    "genisse", "genisses", "bovin", "bovins", "zebu", "zebus", "taurillon", "taurillons",
-    "porc", "porcs", "cochon", "cochons", "porcelet", "porcelets", "truie", "truies", "porcin", "porcins",
-    "ane", "anes", "anesse", "cheval", "chevaux", "jument", "juments", "poulain", "poulains",
-    "dromadaire", "dromadaires", "chameau", "chameaux",
-    "bete", "betes", "betail", "tete", "tetes",
-})
+LIVESTOCK_PRODUCT_KEYWORDS = frozenset(
+    {
+        "poussin",
+        "poussins",
+        "poule",
+        "poules",
+        "poulet",
+        "poulets",
+        "poulaille",
+        "coq",
+        "coqs",
+        "volaille",
+        "volailles",
+        "pintade",
+        "pintades",
+        "canard",
+        "canards",
+        "canette",
+        "canettes",
+        "oie",
+        "oies",
+        "dindon",
+        "dindons",
+        "dinde",
+        "dindes",
+        "lapin",
+        "lapins",
+        "lapine",
+        "lapines",
+        "clapier",
+        "mouton",
+        "moutons",
+        "brebis",
+        "belier",
+        "beliers",
+        "agneau",
+        "agneaux",
+        "ovin",
+        "ovins",
+        "chevre",
+        "chevres",
+        "chevreau",
+        "chevreaux",
+        "cabri",
+        "cabris",
+        "bouc",
+        "boucs",
+        "caprin",
+        "caprins",
+        "boeuf",
+        "boeufs",
+        "vache",
+        "vaches",
+        "taureau",
+        "taureaux",
+        "veau",
+        "veaux",
+        "genisse",
+        "genisses",
+        "bovin",
+        "bovins",
+        "zebu",
+        "zebus",
+        "taurillon",
+        "taurillons",
+        "porc",
+        "porcs",
+        "cochon",
+        "cochons",
+        "porcelet",
+        "porcelets",
+        "truie",
+        "truies",
+        "porcin",
+        "porcins",
+        "ane",
+        "anes",
+        "anesse",
+        "cheval",
+        "chevaux",
+        "jument",
+        "juments",
+        "poulain",
+        "poulains",
+        "dromadaire",
+        "dromadaires",
+        "chameau",
+        "chameaux",
+        "bete",
+        "betes",
+        "betail",
+        "tete",
+        "tetes",
+    }
+)
 
 _WORD_RE = re.compile(r"[a-z]+")
 

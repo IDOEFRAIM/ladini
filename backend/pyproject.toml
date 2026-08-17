@@ -23,33 +23,6 @@ aiofiles = "^23.1"
 pytest = "^7.0"
 # Additional dependencies requested for Agri-OS
 
-
-
-# ==========================================
-# Configuration Ruff
-# ==========================================
-[tool.ruff]
-line-length = 88
-target-version = "py311"
-
-[tool.ruff.lint]
-# E: Syntax/pycodestyle, F: Pyflakes (variables non définies), I: Import sorting, B: Bugbear (pièges Python)
-select = ["E", "F", "I", "B"]
-ignore = ["E501"] # Ignore la longueur de ligne stricte si formatée par ailleurs
-
-[tool.ruff.lint.isort]
-known-first-party = ["src", "agriconnect"]
-
-# ==========================================
-# Configuration Mypy
-# ==========================================
-[tool.mypy]
-python_version = "3.11"
-warn_return_any = true
-warn_unused_configs = true
-ignore_missing_imports = true 
-disallow_untyped_defs = false 
-
 # --- Web Framework ---
 fastapi = "^0.115"
 uvicorn = {extras = ["standard"], version = "^0.30"}
@@ -135,3 +108,28 @@ dev = [
     "mypy (>=2.3.1,<3.0.0)",
     "pytest-cov (>=7.1.0,<8.0.0)"
 ]
+
+# ==========================================
+# Configuration Ruff
+# ==========================================
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+# E: Syntax/pycodestyle, F: Pyflakes (variables non définies), I: Import sorting, B: Bugbear (pièges Python)
+select = ["E", "F", "I", "B"]
+ignore = ["E501"] # Ignore la longueur de ligne stricte si formatée par ailleurs
+
+[tool.ruff.lint.isort]
+known-first-party = ["src", "agriconnect"]
+
+# ==========================================
+# Configuration Mypy
+# ==========================================
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+disallow_untyped_defs = false

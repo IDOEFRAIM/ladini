@@ -10,13 +10,17 @@ a fix applied to one copy silently didn't apply to the other. See
 [[precommande-architecture-consolidation-2026-08]] and
 [[gps-delivery-burkina-faso-2026-08]] for the original feature history.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
-from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, llm_deviation_reply
+from agriconnect.graphs.agents.market_coach.utils import (
+    MarketRuntime,
+    llm_deviation_reply,
+)
 
 logger = get_node_logger("GpsDeliveryGate")
 
@@ -40,13 +44,18 @@ _GPS_STAGE_CONTEXT = (
 )
 
 
-async def _get_stored_location(mc_runtime: MarketRuntime, phone: str) -> "tuple[Optional[float], Optional[float]]":
+async def _get_stored_location(
+    mc_runtime: MarketRuntime, phone: str
+) -> "tuple[Optional[float], Optional[float]]":
     """Point GPS PAR DÉFAUT du profil (`User.latitude`/`longitude`), ou
     `(None, None)` si absent/introuvable. Jamais levé — best-effort."""
     if not phone:
         return None, None
     try:
-        from agriconnect.graphs.agents.market_coach.services.mcp.gateway import ProfileGateway
+        from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
+            ProfileGateway,
+        )
+
         result = await ProfileGateway(mc_runtime).get_user_by_phone(phone)
         data = result.get("data") or {}
         lat, lon = data.get("latitude"), data.get("longitude")
@@ -54,7 +63,10 @@ async def _get_stored_location(mc_runtime: MarketRuntime, phone: str) -> "tuple[
             return None, None
         return float(lat), float(lon)
     except Exception:
-        logger.warning("_get_stored_location: échec de lecture du profil pour %s", phone[-4:] if len(phone) >= 4 else phone)
+        logger.warning(
+            "_get_stored_location: échec de lecture du profil pour %s",
+            phone[-4:] if len(phone) >= 4 else phone,
+        )
         return None, None
 
 
@@ -76,6 +88,7 @@ async def enter_gps_stage(mc_runtime: MarketRuntime, phone: str) -> Dict[str, An
 class GpsResolution:
     """Résultat d'un tour pendant l'étape GPS : soit un point résolu (prêt à
     exécuter l'opération), soit un message à afficher en attendant mieux."""
+
     resolved: bool
     lat: Optional[float] = None
     lon: Optional[float] = None
@@ -105,7 +118,10 @@ async def resolve_gps_stage(
         if lat is None or lon is None:
             # Filet de sécurité : improbable (le webhook vient de l'écrire),
             # mais ne doit jamais planter l'opération.
-            return GpsResolution(resolved=False, message="Je n'ai pas pu récupérer ce point GPS, merci de le repartager.")
+            return GpsResolution(
+                resolved=False,
+                message="Je n'ai pas pu récupérer ce point GPS, merci de le repartager.",
+            )
         return GpsResolution(resolved=True, lat=lat, lon=lon)
 
     if is_yes:

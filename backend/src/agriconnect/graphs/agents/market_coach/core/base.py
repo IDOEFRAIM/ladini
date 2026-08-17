@@ -1,4 +1,5 @@
 """MarketCoach — Base shared constants & validation schema."""
+
 from __future__ import annotations
 
 import logging
@@ -6,12 +7,11 @@ from typing import Dict, FrozenSet, Tuple
 
 from pydantic import BaseModel, Field, field_validator
 
+from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from agriconnect.graphs.agents.market_coach.registry import (
     iter_actions,
     load_all_actions,
 )
-from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
-
 
 # ── Logger ───────────────────────────────────────────────────────────
 logger = logging.getLogger("AgriConnect.Market")
@@ -49,7 +49,9 @@ class IntentConfigEntry(BaseModel):
 
 
 class MarketValidationConfig(BaseModel):
-    auto_farm_notice: str = Field(default="J'ai configuré votre ferme par défaut pour accéder à votre stock.")
+    auto_farm_notice: str = Field(
+        default="J'ai configuré votre ferme par défaut pour accéder à votre stock."
+    )
     farm: FarmRuleConfig
     intents: Dict[str, IntentConfigEntry] = Field(default_factory=dict)
 
@@ -86,16 +88,26 @@ MARKET_VALIDATION_CONFIG = MarketValidationConfig(
     auto_farm_notice=_AUTO_FARM_NOTICE,
     farm=FarmRuleConfig(
         write_requires_farm={
-            "STOCK_REGISTER_HARVEST", "STOCK_RECORD_MOVEMENT", "STOCK_ADJUST",
-            "STOCK_REMOVE_PARTIAL", "STOCK_DELETE",
-            "CROP_START_CYCLE", "CROP_RECORD_INTERVENTION", "CROP_RECORD_OBSERVATION",
-            "CROP_UPDATE_STAGE", "CROP_UPDATE_SOIL",
+            "STOCK_REGISTER_HARVEST",
+            "STOCK_RECORD_MOVEMENT",
+            "STOCK_ADJUST",
+            "STOCK_REMOVE_PARTIAL",
+            "STOCK_DELETE",
+            "CROP_START_CYCLE",
+            "CROP_RECORD_INTERVENTION",
+            "CROP_RECORD_OBSERVATION",
+            "CROP_UPDATE_STAGE",
+            "CROP_UPDATE_SOIL",
             "FINANCE_LOG_EXPENSE",
-            "FARM_CREATE", "FARM_UPDATE",
-            "SALES_PUBLISH_PRODUCT", "SALES_RECORD_DIRECT",
+            "FARM_CREATE",
+            "FARM_UPDATE",
+            "SALES_PUBLISH_PRODUCT",
+            "SALES_RECORD_DIRECT",
         },
         read_optional_farm={
-            "STOCK_GET_SUMMARY", "STOCK_GET_DETAIL", "STOCK_GET_MOVEMENTS",
+            "STOCK_GET_SUMMARY",
+            "STOCK_GET_DETAIL",
+            "STOCK_GET_MOVEMENTS",
             "FINANCE_GET_SUMMARY",
             "FARM_GET_MY_LIST",
             "SALES_GET_CATALOG",
@@ -151,7 +163,8 @@ def validate_config_drift() -> None:
     intent_keys = frozenset(MARKET_VALIDATION_CONFIG.intents.keys())
 
     flow_handled = frozenset(
-        intent for intent, cfg in INTENT_CONFIG.items()
+        intent
+        for intent, cfg in INTENT_CONFIG.items()
         if (cfg or {}).get("handled_by_flow")
     )
 

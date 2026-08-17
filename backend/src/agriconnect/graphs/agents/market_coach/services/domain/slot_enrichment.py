@@ -4,6 +4,7 @@ Centralises all heuristic and LLM-based extraction that was previously
 scattered across validator.py.  Called by the SlotResolver (memory_update)
 as the single enrichment pass before validation.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -16,9 +17,13 @@ from pydantic import BaseModel, Field, ValidationError
 
 from agriconnect.core.logger import get_logger
 from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
-    parse_quantity_unit_from_text as _parse_qty_unit,
     extract_unit_only_from_text as _extract_unit_only,
+)
+from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
     is_livestock_product as _is_livestock_product,
+)
+from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+    parse_quantity_unit_from_text as _parse_qty_unit,
 )
 
 logger = get_logger("AgriConnect.MarketCoach.SlotEnrichment")
@@ -39,17 +44,50 @@ class SlotValidationError(RuntimeError):
 # lieu de maintenir sa propre copie — les deux listes étaient auparavant
 # identiques mais séparées, donc vouées à diverger (un mot ajouté ici mais
 # pas là-bas = produit nommé « culture » de nouveau accepté d'un côté).
-PRODUCTION_TYPE_WORDS = frozenset({
-    "culture", "cultures", "elevage", "élevage", "elevages", "élevages",
-    "betail", "bétail", "animal", "animaux", "plante", "plantes",
-    "vegetal", "végétal", "crop", "livestock",
-})
+PRODUCTION_TYPE_WORDS = frozenset(
+    {
+        "culture",
+        "cultures",
+        "elevage",
+        "élevage",
+        "elevages",
+        "élevages",
+        "betail",
+        "bétail",
+        "animal",
+        "animaux",
+        "plante",
+        "plantes",
+        "vegetal",
+        "végétal",
+        "crop",
+        "livestock",
+    }
+)
 #: Mots de liaison ignorés pour décider si une réponse ne contient QUE des
 #: mots de type ("c'est une culture" → "culture" après retrait des fillers).
-PRODUCTION_TYPE_FILLER = frozenset({
-    "cest", "c'est", "une", "un", "de", "du", "des", "la", "le", "les",
-    "ceci", "ca", "ça", "juste", "plutot", "plutôt", "genre", "type",
-})
+PRODUCTION_TYPE_FILLER = frozenset(
+    {
+        "cest",
+        "c'est",
+        "une",
+        "un",
+        "de",
+        "du",
+        "des",
+        "la",
+        "le",
+        "les",
+        "ceci",
+        "ca",
+        "ça",
+        "juste",
+        "plutot",
+        "plutôt",
+        "genre",
+        "type",
+    }
+)
 
 # Alias internes (compat des usages existants dans ce module).
 _PRODUCT_TYPE_ONLY_WORDS = PRODUCTION_TYPE_WORDS
@@ -73,8 +111,7 @@ class SlotExtractionPayload(BaseModel):
             raise ValueError("Produit contient des instructions interdites")
         # Rejet des mots de type de production (culture/élevage/…) — pas un produit.
         meaningful = [
-            t.replace("'", "").replace("’", "")
-            for t in cleaned.lower().split()
+            t.replace("'", "").replace("’", "") for t in cleaned.lower().split()
         ]
         meaningful = [t for t in meaningful if t and t not in _PRODUCT_TYPE_FILLER]
         if meaningful and all(t in _PRODUCT_TYPE_ONLY_WORDS for t in meaningful):
@@ -133,6 +170,7 @@ class SlotExtractionPayload(BaseModel):
             raise SlotValidationError(str(exc)) from exc
         return instance.sanitized
 
+
 _PRODUCTION_TYPE_SYNONYMS = {
     "livestock": "LIVESTOCK",
     "elevage": "LIVESTOCK",
@@ -178,7 +216,9 @@ def extract_production_type_from_text(text: str) -> Optional[str]:
 def extract_surface_from_text(text: str) -> Optional[float]:
     if not text:
         return None
-    match = re.search(r"(\d+[\d\s,.]*)\s*(ha|hectare|hectares|m2|m²)", text, re.IGNORECASE)
+    match = re.search(
+        r"(\d+[\d\s,.]*)\s*(ha|hectare|hectares|m2|m²)", text, re.IGNORECASE
+    )
     if not match:
         return None
     raw_value = match.group(1).replace(" ", "").replace(",", ".")
@@ -252,7 +292,9 @@ async def llm_extract_quantity_unit(
         completion = await asyncio.wait_for(
             asyncio.to_thread(
                 lambda: llm.chat.completions.create(
-                    model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
+                    model=getattr(
+                        mc_runtime, "model_answer", "llama-3.3-70b-versatile"
+                    ),
                     messages=[
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": user_text},
@@ -274,7 +316,9 @@ async def llm_extract_quantity_unit(
         )
         raise
     except asyncio.TimeoutError:
-        logger.warning("SLOT_ENRICHMENT_LLM_TIMEOUT | user_text=%r", (user_text or "")[:160])
+        logger.warning(
+            "SLOT_ENRICHMENT_LLM_TIMEOUT | user_text=%r", (user_text or "")[:160]
+        )
         return None
     except Exception as exc:
         logger.warning("SLOT_ENRICHMENT_LLM_ERROR | error=%s", exc)
@@ -310,7 +354,13 @@ async def enrich_payload_from_text(
         extracted = extract_quantity_unit_from_text(text)
         if extracted:
             for k, v in extracted.items():
-                if v not in (None, "", 0, [], {}) and payload.get(k) in (None, "", 0, [], {}):
+                if v not in (None, "", 0, [], {}) and payload.get(k) in (
+                    None,
+                    "",
+                    0,
+                    [],
+                    {},
+                ):
                     payload[k] = v
 
         product_str = str(payload.get("product") or "")
@@ -318,7 +368,10 @@ async def enrich_payload_from_text(
             u in product_str.lower() for u in ["kg", "tonne", "sac", "panier"]
         )
 
-        if _needs_structured_extraction(payload, ("quantity", "unit")) or product_is_dirty:
+        if (
+            _needs_structured_extraction(payload, ("quantity", "unit"))
+            or product_is_dirty
+        ):
             try:
                 llm_extracted = await llm_extract_quantity_unit(mc_runtime, text)
             except SlotValidationError as validation_exc:
@@ -333,7 +386,13 @@ async def enrich_payload_from_text(
                 )
             else:
                 if llm_extracted:
-                    payload.update({k: v for k, v in llm_extracted.items() if v not in (None, "", 0, [], {})})
+                    payload.update(
+                        {
+                            k: v
+                            for k, v in llm_extracted.items()
+                            if v not in (None, "", 0, [], {})
+                        }
+                    )
 
     if payload.get("unit") in (None, "", [], {}) and text:
         unit_from_text = extract_unit_only(text)
@@ -342,7 +401,9 @@ async def enrich_payload_from_text(
 
     # Livestock (poussins, moutons, bœufs…) are counted per head, never weighed.
     # Default their unit to TÊTE so it isn't silently coerced to KG downstream.
-    if payload.get("unit") in (None, "", [], {}) and _is_livestock_product(payload.get("product")):
+    if payload.get("unit") in (None, "", [], {}) and _is_livestock_product(
+        payload.get("product")
+    ):
         payload["unit"] = "TETE"
 
     if payload.get("surface") in (None, "", [], {}) and text:
@@ -370,7 +431,9 @@ async def enrich_payload_from_text(
     # fiable que le texte libre : réutilise la même liste d'animaux que le
     # défaut d'unité (TETE) pour éviter de redemander à l'utilisateur culture
     # vs élevage quand le produit le dit déjà sans ambiguïté.
-    if payload.get("production_type") in (None, "", [], {}) and _is_livestock_product(payload.get("product")):
+    if payload.get("production_type") in (None, "", [], {}) and _is_livestock_product(
+        payload.get("product")
+    ):
         payload["production_type"] = "LIVESTOCK"
 
     return payload

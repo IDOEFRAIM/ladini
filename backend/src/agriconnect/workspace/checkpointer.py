@@ -5,9 +5,18 @@ import base64
 import copy
 import json
 import logging
-from dataclasses import asdict, dataclass
 import time
-from typing import Any, AsyncIterator, Callable, Dict, Iterable, Mapping, MutableMapping, Sequence
+from dataclasses import asdict, dataclass
+from typing import (
+    Any,
+    AsyncIterator,
+    Callable,
+    Dict,
+    Iterable,
+    Mapping,
+    MutableMapping,
+    Sequence,
+)
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -57,7 +66,9 @@ class _SerializedValue:
         return cls(type_tag, base64.b64encode(raw).decode("ascii"))
 
     def decode(self, serializer) -> Any:
-        return serializer.loads_typed((self.type_tag, base64.b64decode(self.payload_b64.encode("ascii"))))
+        return serializer.loads_typed(
+            (self.type_tag, base64.b64decode(self.payload_b64.encode("ascii")))
+        )
 
 
 class WorkspaceCheckpointer(BaseCheckpointSaver):
@@ -113,7 +124,9 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
         if not bucket or not bucket["checkpoints"]:
             return None
 
-        checkpoint_id = self._resolve_checkpoint_id(config, bucket["checkpoints"].keys())
+        checkpoint_id = self._resolve_checkpoint_id(
+            config, bucket["checkpoints"].keys()
+        )
         if not checkpoint_id:
             return None
 
@@ -189,7 +202,9 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
         cache_key = (thread_id, namespace, checkpoint_id)
         cached_writes = self._write_cache.pop(cache_key, {})
         if cached_writes:
-            bucket.setdefault("writes", {}).setdefault(checkpoint_id, {}).update(cached_writes)
+            bucket.setdefault("writes", {}).setdefault(checkpoint_id, {}).update(
+                cached_writes
+            )
         else:
             bucket.setdefault("writes", {}).setdefault(checkpoint_id, {})
 
@@ -266,7 +281,9 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
         before: RunnableConfig | None = None,
         limit: int | None = None,
     ) -> Iterable[CheckpointTuple]:  # type: ignore[override]
-        return self._run_sync(self._collect_list(config, filter=filter, before=before, limit=limit))
+        return self._run_sync(
+            self._collect_list(config, filter=filter, before=before, limit=limit)
+        )
 
     def put(
         self,
@@ -313,13 +330,17 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
         except RuntimeError:
             loop = None
         if loop and loop.is_running():
-            raise RuntimeError("WorkspaceCheckpointer sync API used inside running event loop")
+            raise RuntimeError(
+                "WorkspaceCheckpointer sync API used inside running event loop"
+            )
         return asyncio.run(coro)
 
     def _thread_id(self, config: RunnableConfig | None) -> str | None:
         if not config:
             return None
-        return str(config.get("configurable", {}).get("thread_id") or "").strip() or None
+        return (
+            str(config.get("configurable", {}).get("thread_id") or "").strip() or None
+        )
 
     def _require_thread_id(self, config: RunnableConfig) -> str:
         thread_id = self._thread_id(config)
@@ -447,7 +468,9 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
         self._session_workspaces.pop(workspace_id, None)
         self._session_hooks.pop(workspace_id, None)
 
-    def _resolve_checkpoint_id(self, config: RunnableConfig, ids: Iterable[str]) -> str | None:
+    def _resolve_checkpoint_id(
+        self, config: RunnableConfig, ids: Iterable[str]
+    ) -> str | None:
         if checkpoint_id := get_checkpoint_id(config):
             return checkpoint_id if checkpoint_id in ids else None
         try:
@@ -455,13 +478,17 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
         except ValueError:
             return None
 
-    def _match_metadata(self, metadata: Mapping[str, Any], query: Mapping[str, Any]) -> bool:
+    def _match_metadata(
+        self, metadata: Mapping[str, Any], query: Mapping[str, Any]
+    ) -> bool:
         for key, expected in query.items():
             if metadata.get(key) != expected:
                 return False
         return True
 
-    def _prune_for_persistence(self, state: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    def _prune_for_persistence(
+        self, state: Dict[str, Any]
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
         """Produce a minimal snapshot safe to store in Postgres.
 
         Strategy (in order):
@@ -508,7 +535,10 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
             if not isinstance(checkpoints, dict):
                 continue
 
-            if _MAX_PERSISTED_CHECKPOINTS and len(checkpoints) > _MAX_PERSISTED_CHECKPOINTS:
+            if (
+                _MAX_PERSISTED_CHECKPOINTS
+                and len(checkpoints) > _MAX_PERSISTED_CHECKPOINTS
+            ):
                 keep = set(list(checkpoints.keys())[-_MAX_PERSISTED_CHECKPOINTS:])
                 for key in list(checkpoints.keys()):
                     if key not in keep:
@@ -531,13 +561,17 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
         if payload_bytes > _MAX_PERSISTED_BYTES:
             shrunk_channels = self._shrink_oversized_checkpoints(namespaces)
             if shrunk_channels:
-                payload_bytes = len(json.dumps(trimmed, ensure_ascii=False).encode("utf-8"))
+                payload_bytes = len(
+                    json.dumps(trimmed, ensure_ascii=False).encode("utf-8")
+                )
                 metrics["payload_bytes"] = payload_bytes
                 metrics["shrunk_channels"] = shrunk_channels
                 logger.warning(
                     "WorkspaceCheckpointer payload exceeded %s bytes — dropped ephemeral "
                     "channels %s to avoid a full wipe (new size %s)",
-                    _MAX_PERSISTED_BYTES, sorted(shrunk_channels), payload_bytes,
+                    _MAX_PERSISTED_BYTES,
+                    sorted(shrunk_channels),
+                    payload_bytes,
                 )
 
         # Tier 2 : les canaux PROTÉGÉS (working_memory en tête — jamais
@@ -560,14 +594,18 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
         if payload_bytes > _MAX_PERSISTED_BYTES:
             shrunk_subkeys = self._shrink_oversized_protected_subkeys(namespaces)
             if shrunk_subkeys:
-                payload_bytes = len(json.dumps(trimmed, ensure_ascii=False).encode("utf-8"))
+                payload_bytes = len(
+                    json.dumps(trimmed, ensure_ascii=False).encode("utf-8")
+                )
                 metrics["payload_bytes"] = payload_bytes
                 metrics["shrunk_subkeys"] = shrunk_subkeys
                 logger.warning(
                     "WorkspaceCheckpointer payload still exceeded %s bytes — dropped "
                     "oversized individual keys %s inside protected channels to avoid a "
                     "full wipe (new size %s)",
-                    _MAX_PERSISTED_BYTES, sorted(shrunk_subkeys), payload_bytes,
+                    _MAX_PERSISTED_BYTES,
+                    sorted(shrunk_subkeys),
+                    payload_bytes,
                 )
 
         if payload_bytes > _MAX_PERSISTED_BYTES:
@@ -589,9 +627,13 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
             # occurrence en prod désigne le coupable exact.
             try:
                 for _line in self._describe_channel_sizes(namespaces):
-                    logger.warning("WorkspaceCheckpointer channel size breakdown | %s", _line)
+                    logger.warning(
+                        "WorkspaceCheckpointer channel size breakdown | %s", _line
+                    )
             except Exception:
-                logger.debug("Channel size breakdown failed (non-blocking)", exc_info=True)
+                logger.debug(
+                    "Channel size breakdown failed (non-blocking)", exc_info=True
+                )
             trimmed = {
                 "version": _STATE_VERSION,
                 "namespaces": {},
@@ -611,30 +653,34 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
     # cross-turn tunnel continuity. NEVER add active_cart, preorder_workflow,
     # transaction_payload, current_goal, working_memory, stable_entities, or
     # anything else a resumed conversation depends on to this list.
-    _SHRINKABLE_CHANNELS = frozenset({
-        "tool_execution_history",
-        "execution_result",
-        "raw_analysis",
-        "cognitive_decision",
-        "intent_competition",
-        "fallback_recommendations",
-        "chat_history",
-        "conversation_history",
-        "messages",
-        "turn_history",
-        "events",
-    })
+    _SHRINKABLE_CHANNELS = frozenset(
+        {
+            "tool_execution_history",
+            "execution_result",
+            "raw_analysis",
+            "cognitive_decision",
+            "intent_competition",
+            "fallback_recommendations",
+            "chat_history",
+            "conversation_history",
+            "messages",
+            "turn_history",
+            "events",
+        }
+    )
 
     # No legitimate value inside a protected dict-shaped channel (flags,
     # goal names, short ids, rendered menu TEXT) should ever approach this —
     # anything bigger is leaked/misplaced raw data (a full MCP response, a
     # product catalog...), not conversational bookkeeping.
     _MAX_PROTECTED_SUBKEY_BYTES = 10_000  # 10 KB
-    _PROTECTED_DICT_CHANNELS = frozenset({
-        "working_memory",
-        "stable_entities",
-        "volatile_entities",
-    })
+    _PROTECTED_DICT_CHANNELS = frozenset(
+        {
+            "working_memory",
+            "stable_entities",
+            "volatile_entities",
+        }
+    )
 
     def _shrink_oversized_protected_subkeys(self, namespaces: Dict[str, Any]) -> set:
         """Tier-2 defense: prune individual oversized keys inside protected
@@ -669,7 +715,9 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
                         for key, value in list(sub.items()):
                             try:
                                 size = len(
-                                    json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")
+                                    json.dumps(
+                                        value, ensure_ascii=False, default=str
+                                    ).encode("utf-8")
                                 )
                             except Exception:
                                 continue
@@ -684,7 +732,8 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
                 except Exception:
                     logger.debug(
                         "Protected sub-key shrink failed for checkpoint %s (non-blocking)",
-                        checkpoint_id, exc_info=True,
+                        checkpoint_id,
+                        exc_info=True,
                     )
                     continue
         return dropped
@@ -730,12 +779,15 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
                     # the caller falls through to the last-resort full wipe.
                     logger.debug(
                         "Channel shrink failed for checkpoint %s (non-blocking)",
-                        checkpoint_id, exc_info=True,
+                        checkpoint_id,
+                        exc_info=True,
                     )
                     continue
         return dropped
 
-    def _describe_channel_sizes(self, namespaces: Dict[str, Any], top_n: int = 12) -> list:
+    def _describe_channel_sizes(
+        self, namespaces: Dict[str, Any], top_n: int = 12
+    ) -> list:
         """Decode the retained checkpoint(s) and return '<channel>: <bytes>'
         lines sorted largest-first — diagnostic-only, called right before the
         last-resort full wipe to identify which PROTECTED channel (one that
@@ -759,13 +811,19 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
                 sizes = []
                 for channel, value in channel_values.items():
                     try:
-                        size = len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
+                        size = len(
+                            json.dumps(value, ensure_ascii=False, default=str).encode(
+                                "utf-8"
+                            )
+                        )
                     except Exception:
                         size = -1
                     sizes.append((channel, size))
                 sizes.sort(key=lambda pair: pair[1], reverse=True)
                 for channel, size in sizes[:top_n]:
-                    lines.append(f"checkpoint={checkpoint_id} channel={channel} bytes={size}")
+                    lines.append(
+                        f"checkpoint={checkpoint_id} channel={channel} bytes={size}"
+                    )
         return lines
 
     def _apply_message_windows(
@@ -782,7 +840,11 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
             source = original.get(key) if isinstance(original, Mapping) else None
             target = trimmed.get(key)
 
-            data = source if isinstance(source, list) else (target if isinstance(target, list) else None)
+            data = (
+                source
+                if isinstance(source, list)
+                else (target if isinstance(target, list) else None)
+            )
             if not data:
                 continue
 
@@ -850,7 +912,9 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
                 payload["channel"],
                 _SerializedValue(**payload["value"]).decode(self.serde),
             )
-            for _, payload in sorted(writes_bucket.items(), key=lambda item: item[1].get("index", 0))
+            for _, payload in sorted(
+                writes_bucket.items(), key=lambda item: item[1].get("index", 0)
+            )
         ] or None
 
         parent_config = (

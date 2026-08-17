@@ -12,14 +12,18 @@ from sqlalchemy.orm import selectinload
 from agriconnect.domain.models import (
     Order,
     OrderItem,
-    OrderStatusHistory,
     OrderReminder,
+    OrderStatusHistory,
     Payment,
 )
 from agriconnect.domain.orders.dto import (
     OrderDTO as OrderModel,
-    PaymentDTO as PaymentModel,
+)
+from agriconnect.domain.orders.dto import (
     OrderReminderDTO as OrderReminderModel,
+)
+from agriconnect.domain.orders.dto import (
+    PaymentDTO as PaymentModel,
 )
 from agriconnect.services.database.base_service import BaseService, transactional
 
@@ -29,11 +33,14 @@ def _now() -> datetime:
 
 
 class OrderService(BaseService):
-
     # ── Lecture ─────────────────────────────────────────────────────────────
     @transactional(write=False)
-    async def get_order(self, session: AsyncSession, order_id: str) -> Optional[OrderModel]:
-        stmt = select(Order).where(Order.id == order_id).options(selectinload(Order.items))
+    async def get_order(
+        self, session: AsyncSession, order_id: str
+    ) -> Optional[OrderModel]:
+        stmt = (
+            select(Order).where(Order.id == order_id).options(selectinload(Order.items))
+        )
         obj = (await session.execute(stmt)).scalar_one_or_none()
         return OrderModel.model_validate(obj) if obj else None
 
@@ -62,7 +69,9 @@ class OrderService(BaseService):
             session.add(OrderItem(order_id=obj.id, **it))
 
         session.add(
-            OrderStatusHistory(order_id=obj.id, status_type="ORDER", to_status=obj.status)
+            OrderStatusHistory(
+                order_id=obj.id, status_type="ORDER", to_status=obj.status
+            )
         )
         await session.flush()
         return str(obj.id)
@@ -94,15 +103,25 @@ class OrderService(BaseService):
 
     @transactional(write=True)
     async def advance_order_status(
-        self, session: AsyncSession, order_id: str, to_status: str,
-        *, actor_id: Optional[str] = None, note: Optional[str] = None,
+        self,
+        session: AsyncSession,
+        order_id: str,
+        to_status: str,
+        *,
+        actor_id: Optional[str] = None,
+        note: Optional[str] = None,
     ) -> bool:
         order = await session.get(Order, order_id)
         if order is None:
             return False
         await self._transition(
-            session, order, status_type="ORDER", field="status",
-            to_status=to_status, actor_id=actor_id, note=note,
+            session,
+            order,
+            status_type="ORDER",
+            field="status",
+            to_status=to_status,
+            actor_id=actor_id,
+            note=note,
         )
         if to_status == "CONFIRMED":
             order.confirmed_at = _now()
@@ -110,15 +129,23 @@ class OrderService(BaseService):
 
     @transactional(write=True)
     async def advance_delivery_status(
-        self, session: AsyncSession, order_id: str, to_status: str,
-        *, actor_id: Optional[str] = None,
+        self,
+        session: AsyncSession,
+        order_id: str,
+        to_status: str,
+        *,
+        actor_id: Optional[str] = None,
     ) -> bool:
         order = await session.get(Order, order_id)
         if order is None:
             return False
         await self._transition(
-            session, order, status_type="DELIVERY", field="delivery_status",
-            to_status=to_status, actor_id=actor_id,
+            session,
+            order,
+            status_type="DELIVERY",
+            field="delivery_status",
+            to_status=to_status,
+            actor_id=actor_id,
         )
         return True
 
@@ -132,21 +159,29 @@ class OrderService(BaseService):
         order = await session.get(Order, obj.order_id)
         if order is not None and obj.status == "CAPTURED":
             await self._transition(
-                session, order, status_type="PAYMENT", field="payment_status",
-                to_status="PAID", note=f"payment:{obj.id}",
+                session,
+                order,
+                status_type="PAYMENT",
+                field="payment_status",
+                to_status="PAID",
+                note=f"payment:{obj.id}",
             )
         return str(obj.id)
 
     # ── Relances automatiques ───────────────────────────────────────────────
     @transactional(write=True)
-    async def schedule_reminder(self, session: AsyncSession, reminder: OrderReminderModel) -> str:
+    async def schedule_reminder(
+        self, session: AsyncSession, reminder: OrderReminderModel
+    ) -> str:
         obj = OrderReminder(**reminder.to_db())
         session.add(obj)
         await session.flush()
         return str(obj.id)
 
     @transactional(write=False)
-    async def due_reminders(self, session: AsyncSession, *, limit: int = 100) -> list[dict]:
+    async def due_reminders(
+        self, session: AsyncSession, *, limit: int = 100
+    ) -> list[dict]:
         stmt = (
             select(OrderReminder)
             .where(OrderReminder.status == "SCHEDULED")

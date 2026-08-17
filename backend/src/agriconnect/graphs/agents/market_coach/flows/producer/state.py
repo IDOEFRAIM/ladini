@@ -5,6 +5,7 @@ fermes du producteur, etc.). Hérité par `MarketAgentState` via composition de
 `TypedDict` : les clés restent à plat dans l'état runtime, aucune réécriture
 des accès `state.get(...)` n'est nécessaire.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional

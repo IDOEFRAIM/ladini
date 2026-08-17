@@ -1,11 +1,12 @@
 import json
-from dataclasses import dataclass, field, asdict, replace
-from typing import Any, Dict, List, Optional, Union
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
+from typing import Any, Dict, List, Optional
 
 # ═══════════════════════════════════════════════════════════
 # ENUMS (Standardisés en MAJUSCULES pour les types d'action)
 # ═══════════════════════════════════════════════════════════
+
 
 class ComponentType(str, Enum):
     TEXT = "text"
@@ -18,11 +19,13 @@ class ComponentType(str, Enum):
     USER_APPROVAL = "user_approval"
     CONTEXT_REQUEST = "context_request"
 
+
 class Severity(str, Enum):
     INFO = "info"
     WARNING = "warning"
     HIGH = "high"
     CRITICAL = "critical"
+
 
 class ActionType(str, Enum):
     SELL = "SELL"
@@ -34,13 +37,16 @@ class ActionType(str, Enum):
     CALL_EXPERT = "CALL_EXPERT"
     VIEW_DETAIL = "VIEW_DETAIL"
 
+
 # ═══════════════════════════════════════════════════════════
 # BASE COMPONENT
 # ═══════════════════════════════════════════════════════════
 
+
 @dataclass
 class AGUIComponent:
     """Base class avec gestion sécurisée de la sérialisation."""
+
     type: ComponentType
     id: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -62,9 +68,11 @@ class AGUIComponent:
         """Version sécurisée de la copie (évite les bugs asdict/Enum)."""
         return replace(self, **changes)
 
+
 # ═══════════════════════════════════════════════════════════
 # UI COMPONENTS
 # ═══════════════════════════════════════════════════════════
+
 
 @dataclass
 class TextBlock(AGUIComponent):
@@ -77,6 +85,7 @@ class TextBlock(AGUIComponent):
         if not self.voice_text:
             self.voice_text = self.content
 
+
 @dataclass
 class ActionButton(AGUIComponent):
     type: ComponentType = ComponentType.ACTION
@@ -84,6 +93,7 @@ class ActionButton(AGUIComponent):
     action_type: ActionType = ActionType.NAVIGATE
     payload: Dict[str, Any] = field(default_factory=dict)
     confirm_required: bool = False
+
 
 @dataclass
 class Card(AGUIComponent):
@@ -96,12 +106,14 @@ class Card(AGUIComponent):
     actions: List[ActionButton] = field(default_factory=list)
     severity: Optional[Severity] = None
 
+
 @dataclass
 class ListPicker(AGUIComponent):
     type: ComponentType = ComponentType.LIST_PICKER
     title: str = ""
     items: List[Dict[str, str]] = field(default_factory=list)
     multi_select: bool = False
+
 
 @dataclass
 class FormField(AGUIComponent):
@@ -113,6 +125,7 @@ class FormField(AGUIComponent):
     validation: Dict[str, Any] = field(default_factory=dict)
     options: List[str] = field(default_factory=list)
 
+
 @dataclass
 class ChartData(AGUIComponent):
     type: ComponentType = ComponentType.CHART
@@ -120,6 +133,7 @@ class ChartData(AGUIComponent):
     title: str = ""
     labels: List[str] = field(default_factory=list)
     datasets: List[Dict[str, Any]] = field(default_factory=list)
+
 
 @dataclass
 class AlertBanner(AGUIComponent):
@@ -134,13 +148,16 @@ class AlertBanner(AGUIComponent):
     def __post_init__(self):
         self.zone = self.zone.lower()
 
+
 # ═══════════════════════════════════════════════════════════
 # HITL & CONTEXT
 # ═══════════════════════════════════════════════════════════
 
+
 @dataclass
 class UserApproval(AGUIComponent):
     """Composant HITL (Human-In-The-Loop)."""
+
     type: ComponentType = ComponentType.USER_APPROVAL
     action_id: str = ""
     action_summary: str = ""
@@ -150,16 +167,20 @@ class UserApproval(AGUIComponent):
     timeout_seconds: int = 300
     callback_url: str = ""
 
+
 @dataclass
 class ContextRequest(AGUIComponent):
     """Context Elicitation (Anti-hallucination)."""
+
     type: ComponentType = ComponentType.CONTEXT_REQUEST
     missing_fields: List[Dict[str, str]] = field(default_factory=list)
     message: str = ""
 
+
 # ═══════════════════════════════════════════════════════════
 # AGRI RESPONSE WRAPPER
 # ═══════════════════════════════════════════════════════════
+
 
 class AgriResponse:
     def __init__(self, agent_name: str = ""):
@@ -182,7 +203,9 @@ class AgriResponse:
     def add_approval(self, action_id: str, summary: str, **kwargs) -> "AgriResponse":
         self.metadata["requires_validation"] = True
         self.metadata["pending_action_id"] = action_id
-        return self.add(UserApproval(action_id=action_id, action_summary=summary, **kwargs))
+        return self.add(
+            UserApproval(action_id=action_id, action_summary=summary, **kwargs)
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -190,7 +213,7 @@ class AgriResponse:
             "components": [c.to_dict() for c in self.components],
             "voice_summary": self.voice_summary,
             "raw_text": self.raw_text,
-            "metadata": self.metadata
+            "metadata": self.metadata,
         }
 
     def to_json(self) -> str:

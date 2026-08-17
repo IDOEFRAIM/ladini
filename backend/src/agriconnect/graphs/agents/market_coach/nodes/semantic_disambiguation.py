@@ -3,10 +3,13 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
-from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, normalize_slot_keys
 from agriconnect.graphs.agents.market_coach.interpreter.intent import (
     INTENT_CONFIG,
     INTENT_DISAMBIGUATION,
+)
+from agriconnect.graphs.agents.market_coach.utils import (
+    MarketRuntime,
+    normalize_slot_keys,
 )
 
 logger = get_node_logger("SemanticDisambiguationNode")
@@ -14,7 +17,9 @@ logger = get_node_logger("SemanticDisambiguationNode")
 _DISAMBIGUATION_CONFIDENCE_THRESHOLD = 0.85
 
 
-def _detect_disambiguation_candidates(text_lower: str, role_upper: str | None = None) -> Optional[Dict[str, Any]]:
+def _detect_disambiguation_candidates(
+    text_lower: str, role_upper: str | None = None
+) -> Optional[Dict[str, Any]]:
     """Return the INTENT_DISAMBIGUATION entry with the MOST SPECIFIC matching hint.
 
     Picking the first dict entry with any substring match (declaration order)
@@ -62,7 +67,9 @@ async def semantic_disambiguation(
     if expected_input != "NONE" or not text_lower:
         return {}
 
-    role_upper = str(state.get("forced_role") or state.get("user_role") or "").upper().strip()
+    role_upper = (
+        str(state.get("forced_role") or state.get("user_role") or "").upper().strip()
+    )
 
     # LE LLM DÉCIDE EN PREMIER. S'il a classé l'intention de façon SPÉCIFIQUE et
     # CONFIANTE, on ne lui superpose PAS un menu de désambiguïsation : il a déjà
@@ -81,10 +88,15 @@ async def semantic_disambiguation(
     # On ne désambiguïse donc plus que dans le cas où c'est LÉGITIME : le LLM
     # n'a pas su trancher (UNKNOWN) ou n'est pas assez sûr de lui.
     detected_intent = str(state.get("detected_intent") or "").upper().strip()
-    if detected_intent not in ("", "UNKNOWN") and confidence >= _DISAMBIGUATION_CONFIDENCE_THRESHOLD:
+    if (
+        detected_intent not in ("", "UNKNOWN")
+        and confidence >= _DISAMBIGUATION_CONFIDENCE_THRESHOLD
+    ):
         logger.info(
             "[Disambiguation] SKIP — le LLM a tranché (intent=%s conf=%.2f ≥ %.2f)",
-            detected_intent, confidence, _DISAMBIGUATION_CONFIDENCE_THRESHOLD,
+            detected_intent,
+            confidence,
+            _DISAMBIGUATION_CONFIDENCE_THRESHOLD,
         )
         return {}
 

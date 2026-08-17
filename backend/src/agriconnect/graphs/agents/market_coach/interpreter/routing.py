@@ -9,6 +9,7 @@ Entity normalisation lives in ``interpreter/entities.py``.
 Product validation lives in ``services/domain/product_validation.py``.
 The goal planner state machine lives in ``interpreter/goal_planner.py``.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -18,37 +19,12 @@ import re as _re
 from string import Template
 from typing import Any, Dict, List, Optional
 
-from agriconnect.graphs.agents.market_coach.interpreter.intent import (
-    INTENT_CONFIG,
-    INTENT_ROLE,
+from agriconnect.graphs.agents.market_coach.core.slots import (
+    SLOT_FILLING_INPUTS,
+    get_slot_hint,
 )
-from agriconnect.graphs.agents.market_coach.interpreter.prompts import INTERPRETER_USER_PROMPT
 from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.core.slots import get_slot_hint, SLOT_FILLING_INPUTS
-from agriconnect.graphs.agents.market_coach.utils import (
-    MarketRuntime,
-    canonical_unit_label,
-)
 
-from agriconnect.graphs.agents.market_coach.interpreter.entities import (
-    _remap_entities,
-    _fallback_quantity_unit_from_text,
-)
-from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
-    scan_number_candidates,
-    extract_unit_only_from_text,
-)
-from agriconnect.graphs.agents.market_coach.services.domain.product_validation import (
-    _validate_and_sanitize_product,
-)
-from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
-    INTENT_TO_GOAL_MAP,
-    _NAVIGATION_INTENTS,
-    _init_intent_to_goal_map,
-    _looks_like_buyer_product_request,
-    _extract_buyer_product,
-    goal_planner,
-)
 # Source UNIQUE du seuil de confiance de rupture d'intention. L'interpréteur
 # (ici) et tunnel_manager (goal_planner) DOIVENT utiliser exactement le même :
 # sinon l'interpréteur promeut un message en INTERRUPTION à un seuil que
@@ -56,6 +32,36 @@ from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
 # confus au lieu d'une bascule propre OU d'une continuation propre.
 from agriconnect.graphs.agents.market_coach.core.tunnel_manager import (
     INTERRUPTION_CONFIDENCE_THRESHOLD,
+)
+from agriconnect.graphs.agents.market_coach.interpreter.entities import (
+    _fallback_quantity_unit_from_text,
+    _remap_entities,
+)
+from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
+    _NAVIGATION_INTENTS,
+    INTENT_TO_GOAL_MAP,
+    _extract_buyer_product,
+    _init_intent_to_goal_map,
+    _looks_like_buyer_product_request,
+    goal_planner,
+)
+from agriconnect.graphs.agents.market_coach.interpreter.intent import (
+    INTENT_CONFIG,
+    INTENT_ROLE,
+)
+from agriconnect.graphs.agents.market_coach.interpreter.prompts import (
+    INTERPRETER_USER_PROMPT,
+)
+from agriconnect.graphs.agents.market_coach.services.domain.product_validation import (
+    _validate_and_sanitize_product,
+)
+from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+    extract_unit_only_from_text,
+    scan_number_candidates,
+)
+from agriconnect.graphs.agents.market_coach.utils import (
+    MarketRuntime,
+    canonical_unit_label,
 )
 
 logger = logging.getLogger("AgriConnect.Market.InterpreterRouting")
@@ -366,8 +372,12 @@ def _build_dynamic_interpreter_prompt(role: str = "PRODUCER") -> str:
 # FAST-PATH SÉCURISÉ (Zéro Heuristique de Token Floue)
 # =====================================================================
 
+
 def _interpret_fast_path(
-    state: Dict[str, Any], text: str, *, skip_numeric_shortcut: bool = False,
+    state: Dict[str, Any],
+    text: str,
+    *,
+    skip_numeric_shortcut: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Court-circuite le LLM uniquement pour les actions structurelles pures d'AG-UI.
 
@@ -380,7 +390,11 @@ def _interpret_fast_path(
     expected = state.get("expected_input")
     clean = text.strip().lower()
     working = state.get("working_memory") or {}
-    locked_goal = state.get("current_goal") or working.get("active_goal") or working.get("locked_intent")
+    locked_goal = (
+        state.get("current_goal")
+        or working.get("active_goal")
+        or working.get("locked_intent")
+    )
 
     if not clean:
         return None
@@ -392,7 +406,9 @@ def _interpret_fast_path(
     # UPDATE, avant même de risquer une reclassification LLM (le LLM a
     # laissé cette correction sans effet en prod : le récap restait figé sur
     # l'ancienne quantité malgré 2 corrections explicites successives).
-    _confirmation_correction = expected == "CONFIRMATION" and bool(_re.search(r"\d", clean))
+    _confirmation_correction = expected == "CONFIRMATION" and bool(
+        _re.search(r"\d", clean)
+    )
 
     # Priorité slot-filling : en attente de quantité/prix, un nombre doit rester une ANSWER
     if expected in ("PRICE", "QUANTITY") or _confirmation_correction:
@@ -424,9 +440,15 @@ def _interpret_fast_path(
         # était SALES_PUBLISH_PRODUCT). Le LLM garde la priorité uniquement
         # pour le cas ambigu (un seul nombre, rôle incertain) juste en dessous.
         _event_type = "UPDATE" if expected == "CONFIRMATION" else "ANSWER"
-        _qty_candidate = next((c for c in candidates if c["unit"] and not c["near_currency"]), None)
+        _qty_candidate = next(
+            (c for c in candidates if c["unit"] and not c["near_currency"]), None
+        )
         _price_candidate = next((c for c in candidates if c["near_currency"]), None)
-        if _qty_candidate is not None and _price_candidate is not None and _qty_candidate is not _price_candidate:
+        if (
+            _qty_candidate is not None
+            and _price_candidate is not None
+            and _qty_candidate is not _price_candidate
+        ):
             compound_entities: Dict[str, Any] = {
                 "quantity": _qty_candidate["value"],
                 "unit": _qty_candidate["unit"],
@@ -453,8 +475,14 @@ def _interpret_fast_path(
                     "interpreted_event": _event_type,
                     "detected_intent": str(locked_goal or "UNKNOWN").upper(),
                     "interpreter_confidence": 0.98,
-                    "extracted_entities": {"quantity": _qty_candidate["value"], "unit": _qty_candidate["unit"]},
-                    "raw_analysis": {"path": "fast_path_confirmation_correction", "slot": "quantity"},
+                    "extracted_entities": {
+                        "quantity": _qty_candidate["value"],
+                        "unit": _qty_candidate["unit"],
+                    },
+                    "raw_analysis": {
+                        "path": "fast_path_confirmation_correction",
+                        "slot": "quantity",
+                    },
                 }
             if _price_candidate is not None and _qty_candidate is None:
                 price_entities: Dict[str, Any] = {"price": _price_candidate["value"]}
@@ -465,7 +493,10 @@ def _interpret_fast_path(
                     "detected_intent": str(locked_goal or "UNKNOWN").upper(),
                     "interpreter_confidence": 0.98,
                     "extracted_entities": price_entities,
-                    "raw_analysis": {"path": "fast_path_confirmation_correction", "slot": "price"},
+                    "raw_analysis": {
+                        "path": "fast_path_confirmation_correction",
+                        "slot": "price",
+                    },
                 }
             return None
 
@@ -481,18 +512,27 @@ def _interpret_fast_path(
         # sait pas s'il répond au slot ou introduit autre chose) est laissé
         # au LLM quand celui-ci est disponible.
         if expected == "QUANTITY":
-            _unambiguous_single = next((c for c in candidates if c["unit"] and not c["near_currency"]), None)
+            _unambiguous_single = next(
+                (c for c in candidates if c["unit"] and not c["near_currency"]), None
+            )
         else:
-            _unambiguous_single = next((c for c in candidates if c["near_currency"]), None)
+            _unambiguous_single = next(
+                (c for c in candidates if c["near_currency"]), None
+            )
 
         if skip_numeric_shortcut and _unambiguous_single is None:
             candidates = []
 
         if candidates:
             if expected == "QUANTITY":
-                chosen = next((c for c in candidates if c["unit"] and not c["near_currency"]), None)
+                chosen = next(
+                    (c for c in candidates if c["unit"] and not c["near_currency"]),
+                    None,
+                )
                 if chosen is None:
-                    chosen = next((c for c in candidates if not c["near_currency"]), None)
+                    chosen = next(
+                        (c for c in candidates if not c["near_currency"]), None
+                    )
             else:
                 chosen = next((c for c in candidates if c["near_currency"]), None)
                 if chosen is None:
@@ -555,7 +595,10 @@ def _interpret_fast_path(
                     "detected_intent": str(locked_goal or "UNKNOWN").upper(),
                     "interpreter_confidence": 0.98,
                     "extracted_entities": entities,
-                    "raw_analysis": {"path": "fast_path_slot_numeric_answer", "slot": slot},
+                    "raw_analysis": {
+                        "path": "fast_path_slot_numeric_answer",
+                        "slot": slot,
+                    },
                 }
 
     # Ex-fast-paths producteur (mes commandes / mes offres / appels d'offres /
@@ -595,7 +638,9 @@ def _interpret_fast_path(
     if clean.isdigit():
         candidates = state.get("expected_candidates") or []
         has_active_mapping = bool(state.get("available_mapping")) or (
-            str((state.get("working_memory") or {}).get("available_mapping_kind") or "").lower()
+            str(
+                (state.get("working_memory") or {}).get("available_mapping_kind") or ""
+            ).lower()
             in {"intent_disambiguation", "order_list", "selection_menu"}
         )
         if expected == "SELECTION" or len(candidates) > 0 or has_active_mapping:
@@ -624,6 +669,7 @@ def _interpret_fast_path(
 # =====================================================================
 # REPLI DÉTERMINISTE — LLM INDISPONIBLE
 # =====================================================================
+
 
 def _degraded_fallback(role_up: str, text: str) -> Optional[Dict[str, Any]]:
     """Classification minimale de secours quand le LLM est HORS-SERVICE.
@@ -655,12 +701,15 @@ def _degraded_fallback(role_up: str, text: str) -> Optional[Dict[str, Any]]:
 # NODE 3 — INPUT INTERPRETER (Factory by role)
 # =====================================================================
 
+
 def make_input_interpreter(role: str = "PRODUCER"):
     """Crée un nœud `input_interpreter` configuré pour un rôle donné (AG-UI)."""
     role_up = str(role or "PRODUCER").upper().strip()
     allowed = allowed_intents_for_role(role_up)
 
-    async def input_interpreter(state: MarketAgentState, mc_runtime: MarketRuntime) -> Dict[str, Any]:
+    async def input_interpreter(
+        state: MarketAgentState, mc_runtime: MarketRuntime
+    ) -> Dict[str, Any]:
         text = state.get("normalized_text") or state.get("user_query") or ""
         if not text:
             messages = state.get("messages") or []
@@ -678,7 +727,11 @@ def make_input_interpreter(role: str = "PRODUCER"):
         expected_input = state.get("expected_input")
         onboarding_active = bool(state.get("is_onboarding"))
         working = state.get("working_memory") or {}
-        locked_goal = state.get("current_goal") or working.get("active_goal") or working.get("locked_intent")
+        locked_goal = (
+            state.get("current_goal")
+            or working.get("active_goal")
+            or working.get("locked_intent")
+        )
 
         # ── 0. BYPASS INTERACTIF (zéro token) ──────────────────────────
         # Un message interactif WhatsApp (bouton quick-reply / ligne de liste)
@@ -690,7 +743,9 @@ def make_input_interpreter(role: str = "PRODUCER"):
         if interactive and not onboarding_active:
             up = interactive.upper()
             if up in {"CONFIRM", "OUI", "YES", "VALIDER", "CONFIRMER"}:
-                logger.info("[Interpreter InteractiveBypass] CONFIRM (payload=%s)", interactive)
+                logger.info(
+                    "[Interpreter InteractiveBypass] CONFIRM (payload=%s)", interactive
+                )
                 return {
                     "interpreted_event": "CONFIRM",
                     "detected_intent": str(locked_goal or "UNKNOWN").upper(),
@@ -699,7 +754,9 @@ def make_input_interpreter(role: str = "PRODUCER"):
                     "raw_analysis": {"path": "interactive_bypass_confirm"},
                 }
             if up in {"REJECT", "NON", "NO", "ANNULER", "CANCEL"}:
-                logger.info("[Interpreter InteractiveBypass] REJECT (payload=%s)", interactive)
+                logger.info(
+                    "[Interpreter InteractiveBypass] REJECT (payload=%s)", interactive
+                )
                 return {
                     "interpreted_event": "REJECT",
                     "detected_intent": str(locked_goal or "UNKNOWN").upper(),
@@ -745,9 +802,17 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # indisponible sur ce runtime — sinon on laisse tomber jusqu'à l'appel
         # LLM (étape 4 ci-dessous), qui a la vraie priorité.
         llm = getattr(mc_runtime, "llm", None)
-        _skip_numeric_shortcut = expected_input in ("PRICE", "QUANTITY") and llm is not None
-        fast = None if onboarding_active else _interpret_fast_path(
-            {**state, "forced_role": role_up}, text, skip_numeric_shortcut=_skip_numeric_shortcut,
+        _skip_numeric_shortcut = (
+            expected_input in ("PRICE", "QUANTITY") and llm is not None
+        )
+        fast = (
+            None
+            if onboarding_active
+            else _interpret_fast_path(
+                {**state, "forced_role": role_up},
+                text,
+                skip_numeric_shortcut=_skip_numeric_shortcut,
+            )
         )
         if fast is not None:
             logger.info(
@@ -773,7 +838,10 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 return _emit_onboarding({}, "onboarding_no_llm")
             degraded = _degraded_fallback(role_up, text)
             if degraded is not None:
-                logger.info("[Interpreter] LLM absent — repli déterministe %s", degraded["detected_intent"])
+                logger.info(
+                    "[Interpreter] LLM absent — repli déterministe %s",
+                    degraded["detected_intent"],
+                )
                 return degraded
             return {
                 "interpreted_event": "UNKNOWN",
@@ -786,22 +854,39 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # 3. Résolution dynamique des contextes de prompts
         system_prompt = _build_dynamic_interpreter_prompt(role_up)
         _exp_input = expected_input or "NONE"
-        _slot_hint = get_slot_hint(_exp_input.lower()) if _exp_input not in ("NONE", "CONFIRMATION", "SELECTION") else ""
-        _slot_hint_line = f" → {_slot_hint}" if _slot_hint and _slot_hint != _exp_input.lower() else ""
+        _slot_hint = (
+            get_slot_hint(_exp_input.lower())
+            if _exp_input not in ("NONE", "CONFIRMATION", "SELECTION")
+            else ""
+        )
+        _slot_hint_line = (
+            f" → {_slot_hint}"
+            if _slot_hint and _slot_hint != _exp_input.lower()
+            else ""
+        )
         _suspended_goal = state.get("suspended_goal")
         _goal_stack = state.get("goal_stack") or []
-        _suspended_task = str(_suspended_goal or (_goal_stack[-1] if _goal_stack else "")) or "aucune"
+        _suspended_task = (
+            str(_suspended_goal or (_goal_stack[-1] if _goal_stack else "")) or "aucune"
+        )
         # Panier prêt à valider : signal d'état (phase CART + panier non vide),
         # PAS un mot-clé du texte. Le LLM s'en sert pour comprendre un accord
         # libre ("je suis d'accord") comme une validation de précommande.
-        _cart_phase = str((state.get("preorder_workflow") or {}).get("phase") or "").upper()
-        cart_pending = role_up == "BUYER" and _cart_phase == "CART" and bool(state.get("active_cart"))
+        _cart_phase = str(
+            (state.get("preorder_workflow") or {}).get("phase") or ""
+        ).upper()
+        cart_pending = (
+            role_up == "BUYER"
+            and _cart_phase == "CART"
+            and bool(state.get("active_cart"))
+        )
         user_prompt = INTERPRETER_USER_PROMPT.format(
             current_goal=state.get("current_goal") or "AUCUN",
             expected_input=_exp_input,
             slot_hint_line=_slot_hint_line,
             last_agent_question=state.get("last_agent_question") or "—",
-            expected_candidates=", ".join(state.get("expected_candidates") or []) or "—",
+            expected_candidates=", ".join(state.get("expected_candidates") or [])
+            or "—",
             suspended_task=_suspended_task,
             cart_pending="OUI" if cart_pending else "non",
             normalized_text=text,
@@ -811,7 +896,9 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # Timeout de sécurité (Phase 4) : un appel Groq suspendu ici gelait le
         # tour ENTIER jusqu'au timeout global orchestrateur (45s). TimeoutError
         # est capturé par le except ci-dessous → fallback UNKNOWN propre.
-        _requested_model = getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile")
+        _requested_model = getattr(
+            mc_runtime, "model_answer", "llama-3.3-70b-versatile"
+        )
         try:
             completion = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -840,7 +927,9 @@ def make_input_interpreter(role: str = "PRODUCER"):
             _actual_model = getattr(completion, "model", None)
             # Inconnu (attribut absent) : on ne peut pas prouver que le modèle
             # principal a répondu — on reste prudent (comme avant ce fix).
-            _degraded_model_used = (_actual_model is None) or (_actual_model != _requested_model)
+            _degraded_model_used = (_actual_model is None) or (
+                _actual_model != _requested_model
+            )
         except Exception as exc:
             # Dégradation attendue (timeout, 429/5xx Groq) : WARNING, pas de
             # traceback — bruit de log inutile pour un cas déjà géré par le
@@ -850,13 +939,18 @@ def make_input_interpreter(role: str = "PRODUCER"):
             if not is_expected:
                 try:
                     from groq import APIStatusError, APITimeoutError
+
                     is_expected = isinstance(exc, (APIStatusError, APITimeoutError))
                 except ImportError:
                     pass
             if is_expected:
-                logger.warning("Interpreter LLM indisponible (%s) — forcing UNKNOWN", exc)
+                logger.warning(
+                    "Interpreter LLM indisponible (%s) — forcing UNKNOWN", exc
+                )
             else:
-                logger.error("Interpreter LLM CRASH : %s — forcing UNKNOWN", exc, exc_info=True)
+                logger.error(
+                    "Interpreter LLM CRASH : %s — forcing UNKNOWN", exc, exc_info=True
+                )
             if onboarding_active:
                 return _emit_onboarding({}, "onboarding_llm_crash")
             # Repli déterministe AVANT d'abandonner en UNKNOWN : une demande
@@ -864,8 +958,11 @@ def make_input_interpreter(role: str = "PRODUCER"):
             # épuisé (cause racine des récaps vides observés en prod).
             degraded = _degraded_fallback(role_up, text)
             if degraded is not None:
-                logger.info("[Interpreter] LLM en panne — repli déterministe %s (produit=%s)",
-                            degraded["detected_intent"], degraded["extracted_entities"].get("product"))
+                logger.info(
+                    "[Interpreter] LLM en panne — repli déterministe %s (produit=%s)",
+                    degraded["detected_intent"],
+                    degraded["extracted_entities"].get("product"),
+                )
                 return degraded
             return {
                 "interpreted_event": "UNKNOWN",
@@ -890,7 +987,9 @@ def make_input_interpreter(role: str = "PRODUCER"):
             raw_intent = "UNKNOWN"
 
         try:
-            confidence = max(0.0, min(1.0, float(parsed.get("interpreter_confidence") or 0.0)))
+            confidence = max(
+                0.0, min(1.0, float(parsed.get("interpreter_confidence") or 0.0))
+            )
         except (TypeError, ValueError):
             confidence = 0.0
 
@@ -928,9 +1027,18 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # de produit. Un produit DIFFÉRENT est un signal structurel sans
         # ambiguïté qu'il s'agit d'une nouvelle demande, pas d'une réponse.
         _raw_entities_preview = parsed.get("extracted_entities") or {}
-        _fresh_product_preview = str(_raw_entities_preview.get("product") or "").strip().lower()
-        _cur_product_preview = str((state.get("transaction_payload") or {}).get("product") or "").strip().lower()
-        _is_different_product = bool(_fresh_product_preview) and _fresh_product_preview != _cur_product_preview
+        _fresh_product_preview = (
+            str(_raw_entities_preview.get("product") or "").strip().lower()
+        )
+        _cur_product_preview = (
+            str((state.get("transaction_payload") or {}).get("product") or "")
+            .strip()
+            .lower()
+        )
+        _is_different_product = (
+            bool(_fresh_product_preview)
+            and _fresh_product_preview != _cur_product_preview
+        )
 
         # Refonte double-rôle — 2e signal de nouveauté, indépendant du produit :
         # beaucoup d'intentions n'ont structurellement PAS de champ `product`
@@ -975,7 +1083,9 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # est perdu. Une intention-jumelle "update" détectée ici doit rester une
         # correction DU MÊME goal en attente, pas une interruption vers un autre.
         _locked_goal_for_confirmation = str(locked_goal or "").upper().strip()
-        _pending_create_update_sibling = _PENDING_CREATE_UPDATE_SIBLINGS.get(_locked_goal_for_confirmation)
+        _pending_create_update_sibling = _PENDING_CREATE_UPDATE_SIBLINGS.get(
+            _locked_goal_for_confirmation
+        )
         if (
             expected_input == "CONFIRMATION"
             and _pending_create_update_sibling
@@ -984,17 +1094,26 @@ def make_input_interpreter(role: str = "PRODUCER"):
             logger.info(
                 "[Interpreter] Correction de brouillon non persisté (%s) pendant CONFIRMATION "
                 "— intent-jumeau %s absorbé comme UPDATE du même goal, pas une interruption.",
-                _locked_goal_for_confirmation, raw_intent,
+                _locked_goal_for_confirmation,
+                raw_intent,
             )
             raw_event = "UPDATE"
             raw_intent = _locked_goal_for_confirmation
 
-        if expected_input in {"SELECTION", "CONFIRMATION"} and raw_event not in {"SELECTION", "CONFIRM", "REJECT", "UPDATE"}:
+        if expected_input in {"SELECTION", "CONFIRMATION"} and raw_event not in {
+            "SELECTION",
+            "CONFIRM",
+            "REJECT",
+            "UPDATE",
+        }:
             # Seuil ALIGNÉ sur tunnel_manager (INTERRUPTION_CONFIDENCE_THRESHOLD) :
             # sous ce seuil, on reste proprement dans la confirmation/sélection
             # (RÈGLE 2 du goal_planner re-verrouille le goal) ; au-dessus, la
             # bascule est acceptée par tunnel_manager aussi — plus de zone morte.
-            if raw_intent != "UNKNOWN" and confidence >= INTERRUPTION_CONFIDENCE_THRESHOLD:
+            if (
+                raw_intent != "UNKNOWN"
+                and confidence >= INTERRUPTION_CONFIDENCE_THRESHOLD
+            ):
                 logger.info(
                     "Interruption détectée pendant %s → intent=%s (confidence=%.2f)",
                     expected_input,
@@ -1017,12 +1136,26 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # LLM qui a jugé l'accord en langage libre, pas une liste de mots. Un
         # refus (REJECT) reste un refus (l'annulation est gérée en aval).
         if cart_pending and raw_event == "CONFIRM":
-            logger.info("[Interpreter] Panier validé en langage libre → BUYER_PREORDER_INIT")
+            logger.info(
+                "[Interpreter] Panier validé en langage libre → BUYER_PREORDER_INIT"
+            )
             raw_event = "NEW_TASK"
             raw_intent = "BUYER_PREORDER_INIT"
             confidence = max(confidence, 0.9)
 
-        if raw_event not in {"NEW_TASK", "ANSWER", "CONFIRM", "REJECT", "SELECTION", "UPDATE", "INTERRUPTION", "RESUME", "OUT_OF_SCOPE", "UNKNOWN", "ONBOARDING_INPUT"}:
+        if raw_event not in {
+            "NEW_TASK",
+            "ANSWER",
+            "CONFIRM",
+            "REJECT",
+            "SELECTION",
+            "UPDATE",
+            "INTERRUPTION",
+            "RESUME",
+            "OUT_OF_SCOPE",
+            "UNKNOWN",
+            "ONBOARDING_INPUT",
+        }:
             raw_event = "UNKNOWN"
 
         # ══════════════════════════════════════════════════════════════════
@@ -1038,8 +1171,14 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # nous dit s'il a su lire l'unité. On le CONSOMME (avant, il était
         # write-only). C'est la voie primaire pour savoir « unité fiable ou non ».
         raw_validation = parsed.get("validation_status")
-        validation_status = str(raw_validation).upper().strip() if raw_validation else None
-        if validation_status not in {"VALID", "INVALID_MISSING_UNIT", "INVALID_AMBIGUOUS_UNIT"}:
+        validation_status = (
+            str(raw_validation).upper().strip() if raw_validation else None
+        )
+        if validation_status not in {
+            "VALID",
+            "INVALID_MISSING_UNIT",
+            "INVALID_AMBIGUOUS_UNIT",
+        }:
             validation_status = None
 
         # FALLBACK numérique : si le LLM a manqué la quantité, la regex la comble
@@ -1068,12 +1207,14 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 if remapped_entities.get("unit") != _text_unit:
                     logger.warning(
                         "[Interpreter] Unité : texte='%s' retenu contre LLM='%s' (anti-ancrage).",
-                        _text_unit, remapped_entities.get("unit"),
+                        _text_unit,
+                        remapped_entities.get("unit"),
                     )
                     remapped_entities["unit"] = _text_unit
                     fallback_applied = True
             elif remapped_entities.get("unit") and validation_status in {
-                "INVALID_MISSING_UNIT", "INVALID_AMBIGUOUS_UNIT",
+                "INVALID_MISSING_UNIT",
+                "INVALID_AMBIGUOUS_UNIT",
             }:
                 # Le message ne porte AUCUNE unité ET le LLM signale LUI-MÊME
                 # qu'elle est manquante/ambiguë : on suit son verdict et on
@@ -1081,7 +1222,8 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 # posée — défaut registre (KG) / élevage (TETE) appliqué en aval.
                 logger.info(
                     "[Interpreter] LLM signale %s + texte sans unité — unité '%s' écartée.",
-                    validation_status, remapped_entities.get("unit"),
+                    validation_status,
+                    remapped_entities.get("unit"),
                 )
                 remapped_entities.pop("unit", None)
             elif remapped_entities.get("unit"):
@@ -1106,8 +1248,14 @@ def make_input_interpreter(role: str = "PRODUCER"):
 
         if fallback_applied:
             if not validation_status:
-                validation_status = "VALID" if remapped_entities.get("unit") else "INVALID_MISSING_UNIT"
-            if raw_event == "UNKNOWN" and expected_input in {"QUANTITY", "UNIT", "PRICE"}:
+                validation_status = (
+                    "VALID" if remapped_entities.get("unit") else "INVALID_MISSING_UNIT"
+                )
+            if raw_event == "UNKNOWN" and expected_input in {
+                "QUANTITY",
+                "UNIT",
+                "PRICE",
+            }:
                 raw_event = "ANSWER"
             if raw_intent == "UNKNOWN" and locked_goal:
                 raw_intent = str(locked_goal).upper()
@@ -1119,8 +1267,10 @@ def make_input_interpreter(role: str = "PRODUCER"):
             "validation_status": validation_status,
             "extracted_entities": remapped_entities,
             "raw_analysis": {
-                "path": "llm", "role": role_up,
-                "model_used": _actual_model, "degraded_model": _degraded_model_used,
+                "path": "llm",
+                "role": role_up,
+                "model_used": _actual_model,
+                "degraded_model": _degraded_model_used,
             },
         }
 
@@ -1130,6 +1280,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
 # =====================================================================
 # ROUTING AFTER VALIDATOR (Aiguillage avec typage d'état AG-UI)
 # =====================================================================
+
 
 def make_route_after_validator(role: str = "PRODUCER"):
     """Crée la fonction de routage conditionnel après le nœud `validator`."""
@@ -1142,8 +1293,14 @@ def make_route_after_validator(role: str = "PRODUCER"):
         expected_input = str(state.get("expected_input") or "NONE").upper().strip()
         strategy = str(state.get("response_strategy") or "").upper().strip()
 
-        if state.get("waiting_for_confirmation") or state.get("status") == "WAITING_CONFIRMATION":
-            logger.info("[%s ROUTER] En attente de confirmation — Routage vers confirmation_gate", role_up)
+        if (
+            state.get("waiting_for_confirmation")
+            or state.get("status") == "WAITING_CONFIRMATION"
+        ):
+            logger.info(
+                "[%s ROUTER] En attente de confirmation — Routage vers confirmation_gate",
+                role_up,
+            )
             logger.debug("[AfterValidator] role=%s decision=to_confirmation", role_up)
             return "to_confirmation"
 
@@ -1152,7 +1309,7 @@ def make_route_after_validator(role: str = "PRODUCER"):
             logger.info(
                 "[%s ROUTER] Dérive détectée (%s) — Routage forcé vers response_strategy",
                 role_up,
-                interpreted_event
+                interpreted_event,
             )
             logger.debug(
                 "[AfterValidator] role=%s decision=to_strategy reason=drift event=%s",
@@ -1167,7 +1324,7 @@ def make_route_after_validator(role: str = "PRODUCER"):
             logger.info(
                 "[%s ROUTER] Formulaire incomplet (%d champs manquants) — Routage vers response_strategy",
                 role_up,
-                len(missing_fields)
+                len(missing_fields),
             )
             logger.debug(
                 "[AfterValidator] role=%s decision=to_strategy reason=missing_fields n=%d",
@@ -1187,16 +1344,24 @@ def make_route_after_validator(role: str = "PRODUCER"):
             return "to_resolver"
 
         # 2B. MENU DE SÉLECTION (sans missing_fields)
-        if state.get("status") == "WAITING_INPUT" and (expected_input == "SELECTION" or strategy == "SELECTION_MENU"):
+        if state.get("status") == "WAITING_INPUT" and (
+            expected_input == "SELECTION" or strategy == "SELECTION_MENU"
+        ):
             logger.info(
                 "[%s ROUTER] Sélection attendue — Routage vers response_strategy",
                 role_up,
             )
-            logger.debug("[AfterValidator] role=%s decision=to_strategy reason=selection_wait", role_up)
+            logger.debug(
+                "[AfterValidator] role=%s decision=to_strategy reason=selection_wait",
+                role_up,
+            )
             return "to_strategy"
 
         # 4. FLUX NOMINAL
-        logger.info("[%s ROUTER] Input validé et complet — Routage vers context_resolver", role_up)
+        logger.info(
+            "[%s ROUTER] Input validé et complet — Routage vers context_resolver",
+            role_up,
+        )
         logger.debug("[AfterValidator] role=%s decision=to_resolver", role_up)
         return "to_resolver"
 

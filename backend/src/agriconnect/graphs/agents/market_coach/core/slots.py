@@ -16,19 +16,21 @@ Usage
         SLOT_REGISTRY,
     )
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, Optional, Tuple
 
-
 # ---------------------------------------------------------------------------
 # Slot Definition
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class SlotDefinition:
     """Immutable descriptor for a single conversational slot."""
+
     canonical: str
     aliases: FrozenSet[str]
     value_type: str
@@ -46,10 +48,16 @@ class SlotDefinition:
 SLOT_REGISTRY: Tuple[SlotDefinition, ...] = (
     SlotDefinition(
         canonical="product",
-        aliases=frozenset({
-            "product_name", "produit", "name", "item_name", "commodity",
-            "culture",
-        }),
+        aliases=frozenset(
+            {
+                "product_name",
+                "produit",
+                "name",
+                "item_name",
+                "commodity",
+                "culture",
+            }
+        ),
         value_type="str",
         blocking=False,
         label_fr="produit/culture",
@@ -57,10 +65,17 @@ SLOT_REGISTRY: Tuple[SlotDefinition, ...] = (
     ),
     SlotDefinition(
         canonical="quantity",
-        aliases=frozenset({
-            "quantity_mentioned", "quantite", "qty", "volume",
-            "quantity_kg", "quantity_for_sale", "original_quantity",
-        }),
+        aliases=frozenset(
+            {
+                "quantity_mentioned",
+                "quantite",
+                "qty",
+                "volume",
+                "quantity_kg",
+                "quantity_for_sale",
+                "original_quantity",
+            }
+        ),
         value_type="float",
         blocking=False,
         label_fr="quantité",
@@ -68,9 +83,13 @@ SLOT_REGISTRY: Tuple[SlotDefinition, ...] = (
     ),
     SlotDefinition(
         canonical="unit",
-        aliases=frozenset({
-            "unit_mentioned", "unite", "original_unit",
-        }),
+        aliases=frozenset(
+            {
+                "unit_mentioned",
+                "unite",
+                "original_unit",
+            }
+        ),
         value_type="str",
         blocking=False,
         label_fr="unité",
@@ -79,10 +98,17 @@ SLOT_REGISTRY: Tuple[SlotDefinition, ...] = (
     ),
     SlotDefinition(
         canonical="price",
-        aliases=frozenset({
-            "price_mentioned", "prix", "montant", "montant_enchere",
-            "offered_price", "max_price", "prix_unitaire",
-        }),
+        aliases=frozenset(
+            {
+                "price_mentioned",
+                "prix",
+                "montant",
+                "montant_enchere",
+                "offered_price",
+                "max_price",
+                "prix_unitaire",
+            }
+        ),
         value_type="float",
         blocking=False,
         label_fr="prix",
@@ -90,9 +116,15 @@ SLOT_REGISTRY: Tuple[SlotDefinition, ...] = (
     ),
     SlotDefinition(
         canonical="zone",
-        aliases=frozenset({
-            "zone_name", "region", "localite", "target_zone", "location",
-        }),
+        aliases=frozenset(
+            {
+                "zone_name",
+                "region",
+                "localite",
+                "target_zone",
+                "location",
+            }
+        ),
         value_type="str",
         blocking=False,
         label_fr="zone géographique",
@@ -229,6 +261,7 @@ SLOT_FILLING_INPUTS: FrozenSet[str] = frozenset(_EXPECTED_INPUT_MAP.values())
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def resolve_canonical(key: str) -> str:
     """Returns the canonical key for any alias; returns key unchanged if unknown."""

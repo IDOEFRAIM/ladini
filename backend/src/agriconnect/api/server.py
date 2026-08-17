@@ -8,15 +8,14 @@ g
 """
 
 import uvicorn
-from agriconnect.api.main import app
 
 if __name__ == "__main__":
     # Utilisé uniquement pour le développement local
     # En production, utilisez Gunicorn comme indiqué dans le docstring ci-dessus
     uvicorn.run(
-        "agriconnect.api.server:app", 
-        host="0.0.0.0", 
-        port=8000, 
+        "agriconnect.api.server:app",
+        host="0.0.0.0",
+        port=8000,
         reload=True,  # À mettre à False en production
-        log_level="info"
+        log_level="info",
     )

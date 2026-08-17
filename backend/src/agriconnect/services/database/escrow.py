@@ -10,6 +10,7 @@ Cycle de vie porté par ``Order.payment_status`` (colonne existante) :
       -> PAID_OUT (code de livraison validé, fonds débloqués)
     CANCELLED / REFUNDED en sorties terminales (expiration, litige).
 """
+
 from __future__ import annotations
 
 import logging
@@ -18,12 +19,12 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, func
-from sqlalchemy.orm import selectinload, joinedload
+from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
 from agriconnect.core.formatting import fmt_num as _fmt_num
 from agriconnect.core.settings import settings
-from agriconnect.domain.models import Order, OrderItem, Product, Producer, User
+from agriconnect.domain.models import Order, OrderItem, Producer, Product, User
 from agriconnect.services.payments.paydunya_client import PaydunyaClient, PaydunyaError
 
 from .base import BaseMixin
@@ -61,7 +62,9 @@ def _generate_otp() -> str:
 class EscrowMixin(BaseMixin):
     """Séquestre de paiement Paydunya : facture -> confirmation -> OTP -> déblocage."""
 
-    async def initiate_escrow_payment(self, buyer_phone: str, preorder_id: str) -> Dict[str, Any]:
+    async def initiate_escrow_payment(
+        self, buyer_phone: str, preorder_id: str
+    ) -> Dict[str, Any]:
         """Génère une facture Paydunya pour une précommande DRAFT et réserve 24h.
 
         Ne débite PAS le stock (comme toute précommande DRAFT — voir
@@ -88,7 +91,8 @@ class EscrowMixin(BaseMixin):
                     Order.payment_status == "PENDING",
                     Order.paydunya_invoice_token.isnot(None),
                 )
-            ) or 0
+            )
+            or 0
         )
         if pending_count >= MAX_PENDING_PAYMENT_ORDERS:
             raise BusinessRuleException(
@@ -113,9 +117,13 @@ class EscrowMixin(BaseMixin):
 
         amount = float(order.total_amount or 0.0)
         if amount <= 0:
-            raise BusinessRuleException("Montant de commande invalide pour un paiement.")
+            raise BusinessRuleException(
+                "Montant de commande invalide pour un paiement."
+            )
 
-        callback_url = f"{str(settings.PUBLIC_API_BASE_URL).rstrip('/')}/api/webhooks/paydunya-ipn"
+        callback_url = (
+            f"{str(settings.PUBLIC_API_BASE_URL).rstrip('/')}/api/webhooks/paydunya-ipn"
+        )
         client = PaydunyaClient()
         try:
             invoice = await client.create_invoice(
@@ -126,7 +134,9 @@ class EscrowMixin(BaseMixin):
                 custom_data={"buyer_phone": buyer_phone},
             )
         except PaydunyaError as exc:
-            logger.error("ESCROW_INVOICE_CREATE_FAILED | order_id=%s | %s", order.id, exc)
+            logger.error(
+                "ESCROW_INVOICE_CREATE_FAILED | order_id=%s | %s", order.id, exc
+            )
             raise BusinessRuleException(
                 "Impossible de générer le lien de paiement pour le moment. Réessayez dans un instant."
             ) from exc
@@ -177,12 +187,17 @@ class EscrowMixin(BaseMixin):
         )
         if not order:
             raise BusinessRuleException(
-                "Commande introuvable pour ce token de paiement.", reason="order_not_found"
+                "Commande introuvable pour ce token de paiement.",
+                reason="order_not_found",
             )
 
         # Idempotence : Paydunya peut livrer le même IPN plusieurs fois.
         if str(order.payment_status or "").upper() in {"ESCROWED", "PAID_OUT"}:
-            return {"status": "success", "order_id": str(order.id), "already_processed": True}
+            return {
+                "status": "success",
+                "order_id": str(order.id),
+                "already_processed": True,
+            }
 
         if str(order.status or "").upper() != "DRAFT":
             raise BusinessRuleException(
@@ -202,16 +217,22 @@ class EscrowMixin(BaseMixin):
                 select(Product).where(Product.id == item.product_id).with_for_update()
             )
             if not product:
-                insufficient.append({"product_id": str(item.product_id), "reason": "product_not_found"})
+                insufficient.append(
+                    {"product_id": str(item.product_id), "reason": "product_not_found"}
+                )
                 continue
             requested = float(item.quantity or 0.0)
             available = float(product.quantity_for_sale or 0.0)
             if available < requested:
-                insufficient.append({
-                    "product_id": str(product.id), "name": product.name,
-                    "requested": requested, "available": available,
-                    "unit": (product.unit or "KG").upper(),
-                })
+                insufficient.append(
+                    {
+                        "product_id": str(product.id),
+                        "name": product.name,
+                        "requested": requested,
+                        "available": available,
+                        "unit": (product.unit or "KG").upper(),
+                    }
+                )
                 continue
             product.quantity_for_sale = available - requested
             running_total += float(item.price_at_sale or 0.0) * requested
@@ -224,14 +245,17 @@ class EscrowMixin(BaseMixin):
             # trace du paiement.
             logger.error(
                 "ESCROW_STOCK_SHORTAGE_AFTER_PAYMENT | order_id=%s | insufficient=%s",
-                order.id, insufficient,
+                order.id,
+                insufficient,
             )
 
         otp = _generate_otp()
         order.delivery_otp = otp
         order.payment_status = "ESCROWED"
         order.status = "CONFIRMED"
-        order.locked_amount = float(order.locked_amount or running_total or order.total_amount or 0.0)
+        order.locked_amount = float(
+            order.locked_amount or running_total or order.total_amount or 0.0
+        )
         order.preorder_converted_at = _naive_utc(datetime.now(timezone.utc))
         if running_total:
             order.subtotal = running_total
@@ -243,13 +267,15 @@ class EscrowMixin(BaseMixin):
         from agriconnect.workers.repositories import outbox_repo as _outbox_repo
 
         order_number = str(order.id)[:8].upper()
-        entries: List[Dict[str, Any]] = [{
-            "channel": "WHATSAPP",
-            "recipient_phone": order.customer_phone,
-            "template_key": _tpl.ESCROW_PAYMENT_RECEIVED_BUYER,
-            "payload": {"otp": otp, "order_number": order_number},
-            "dedupe_key": f"ESCROW_PAID_BUYER:{order.id}",
-        }]
+        entries: List[Dict[str, Any]] = [
+            {
+                "channel": "WHATSAPP",
+                "recipient_phone": order.customer_phone,
+                "template_key": _tpl.ESCROW_PAYMENT_RECEIVED_BUYER,
+                "payload": {"otp": otp, "order_number": order_number},
+                "dedupe_key": f"ESCROW_PAID_BUYER:{order.id}",
+            }
+        ]
 
         producer_phones: set[str] = set()
         for item in order.items or []:
@@ -266,23 +292,31 @@ class EscrowMixin(BaseMixin):
                     producer_phones.add(prod_row[0])
 
         for phone in producer_phones:
-            entries.append({
-                "channel": "WHATSAPP",
-                "recipient_phone": phone,
-                "template_key": _tpl.ESCROW_PAYMENT_SECURED_PRODUCER,
-                "payload": {
-                    "order_number": order_number,
-                    "amount": float(order.locked_amount or 0.0),
-                    "currency": order.currency or "FCFA",
-                },
-                "dedupe_key": f"ESCROW_PAID_PRODUCER:{order.id}:{phone}",
-            })
+            entries.append(
+                {
+                    "channel": "WHATSAPP",
+                    "recipient_phone": phone,
+                    "template_key": _tpl.ESCROW_PAYMENT_SECURED_PRODUCER,
+                    "payload": {
+                        "order_number": order_number,
+                        "amount": float(order.locked_amount or 0.0),
+                        "currency": order.currency or "FCFA",
+                    },
+                    "dedupe_key": f"ESCROW_PAID_PRODUCER:{order.id}:{phone}",
+                }
+            )
 
         await _outbox_repo.enqueue(current_session, entries)
 
-        return {"status": "success", "order_id": str(order.id), "order_number": order_number}
+        return {
+            "status": "success",
+            "order_id": str(order.id),
+            "order_number": order_number,
+        }
 
-    async def verify_delivery_otp(self, producer_phone: str, otp_code: str) -> Dict[str, Any]:
+    async def verify_delivery_otp(
+        self, producer_phone: str, otp_code: str
+    ) -> Dict[str, Any]:
         """Le producteur transmet le code reçu de l'acheteur pour débloquer ses fonds.
 
         Cherche UNIQUEMENT parmi les commandes ESCROWED dont un des articles
@@ -295,7 +329,9 @@ class EscrowMixin(BaseMixin):
 
         clean_code = "".join(ch for ch in str(otp_code or "") if ch.isdigit())
         if len(clean_code) != 4:
-            raise BusinessRuleException("Le code de livraison doit contenir exactement 4 chiffres.")
+            raise BusinessRuleException(
+                "Le code de livraison doit contenir exactement 4 chiffres."
+            )
 
         prod_row = (
             await current_session.execute(
@@ -343,7 +379,9 @@ class EscrowMixin(BaseMixin):
             ),
         }
 
-    async def list_producer_escrowed_orders(self, producer_phone: str) -> Dict[str, Any]:
+    async def list_producer_escrowed_orders(
+        self, producer_phone: str
+    ) -> Dict[str, Any]:
         """Lecture — commandes ESCROWED en attente de code pour ce producteur
         (utile si plusieurs livraisons sont en cours en même temps)."""
         current_session = self.session
@@ -363,14 +401,21 @@ class EscrowMixin(BaseMixin):
         producer_id = prod_row[0]
 
         rows = (
-            await current_session.execute(
-                select(Order)
-                .join(OrderItem, OrderItem.order_id == Order.id)
-                .join(Product, Product.id == OrderItem.product_id)
-                .where(Product.producer_id == producer_id, Order.payment_status == "ESCROWED")
-                .distinct()
+            (
+                await current_session.execute(
+                    select(Order)
+                    .join(OrderItem, OrderItem.order_id == Order.id)
+                    .join(Product, Product.id == OrderItem.product_id)
+                    .where(
+                        Product.producer_id == producer_id,
+                        Order.payment_status == "ESCROWED",
+                    )
+                    .distinct()
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
         return {
             "status": "success",
@@ -394,17 +439,21 @@ class EscrowMixin(BaseMixin):
 
         now = _naive_utc(datetime.now(timezone.utc))
         rows = (
-            await current_session.execute(
-                select(Order)
-                .where(
-                    Order.payment_status == "PENDING",
-                    Order.paydunya_invoice_token.isnot(None),
-                    Order.payment_expires_at.isnot(None),
-                    Order.payment_expires_at < now,
+            (
+                await current_session.execute(
+                    select(Order)
+                    .where(
+                        Order.payment_status == "PENDING",
+                        Order.paydunya_invoice_token.isnot(None),
+                        Order.payment_expires_at.isnot(None),
+                        Order.payment_expires_at < now,
+                    )
+                    .with_for_update(skip_locked=True)
                 )
-                .with_for_update(skip_locked=True)
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
         expired_ids: List[str] = []
         for order in rows:
@@ -416,7 +465,11 @@ class EscrowMixin(BaseMixin):
         if rows:
             await current_session.flush()
 
-        return {"status": "success", "expired_count": len(expired_ids), "expired_order_ids": expired_ids}
+        return {
+            "status": "success",
+            "expired_count": len(expired_ids),
+            "expired_order_ids": expired_ids,
+        }
 
 
 __all__ = ["EscrowMixin", "MAX_PENDING_PAYMENT_ORDERS"]

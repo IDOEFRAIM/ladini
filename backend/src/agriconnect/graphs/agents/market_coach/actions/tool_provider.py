@@ -6,6 +6,7 @@ backend used to execute tools (MCP, REST, local, mocks, ...).
 The default implementation, ``MCPToolProvider``, delegates to the
 existing ``MarketRuntime.call_db`` API to preserve behaviour.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -20,7 +21,9 @@ class ToolProvider(Protocol):
     The interface is intentionally minimal to avoid coupling.
     """
 
-    async def execute(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:  # pragma: no cover - interface
+    async def execute(
+        self, tool_name: str, args: Dict[str, Any]
+    ) -> Dict[str, Any]:  # pragma: no cover - interface
         """Execute *tool_name* with *args* and return a JSON-like result."""
 
 

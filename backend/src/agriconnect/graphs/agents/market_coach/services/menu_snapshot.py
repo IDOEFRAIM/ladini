@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Menu Snapshot Store — persistant mapping between UI menus and business ids.
 
 This module provides a lightweight, in-process registry that keeps a durable
@@ -8,6 +6,7 @@ business identifiers. By centralising the mapping we make numeric selections
 idempotent: even if ``available_mapping`` is wiped out of the LangGraph state,
 we can rebuild the association from the snapshot id.
 """
+from __future__ import annotations
 
 import time
 import uuid

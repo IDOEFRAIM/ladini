@@ -5,14 +5,15 @@ strict priority chain (``onboarding_profile`` > ``transaction_payload`` >
 top-level state keys) so that data collected in a prior turn is never lost
 even if individual state keys are cleared between turns.
 """
+
 from typing import Any, Dict, Optional
 
-from agriconnect.core.logger import get_logger
 from agriconnect.agents import (
     OnboardingState,
     OnboardingStep,
     run_onboarding_step,
 )
+from agriconnect.core.logger import get_logger
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     _llm_extract_onboarding_all,
@@ -30,7 +31,9 @@ def _pick(key: str, *sources: Dict[str, Any]) -> Any:
     return None
 
 
-async def onboarding_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+async def onboarding_node(
+    state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Dict[str, Any]:
     in_onboarding = bool(state.get("is_onboarding"))
     existing_strategy = str(state.get("response_strategy") or "").upper()
     if not in_onboarding and existing_strategy != "ONBOARDING":
@@ -39,7 +42,11 @@ async def onboarding_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
     ob_profile = dict(state.get("onboarding_profile") or {})
     tx_payload = dict(state.get("transaction_payload") or {})
 
-    phone = _pick("phone", ob_profile, tx_payload, state) or state.get("user_phone") or state.get("phone_number")
+    phone = (
+        _pick("phone", ob_profile, tx_payload, state)
+        or state.get("user_phone")
+        or state.get("phone_number")
+    )
 
     step_name = state.get("onboarding_internal_step") or state.get("onboarding_step")
     if not step_name:
@@ -63,7 +70,9 @@ async def onboarding_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
     )
 
     async def _llm_bulk(text: str, context_hint: str) -> Dict[str, Optional[str]]:
-        return await _llm_extract_onboarding_all(mc_runtime, text, context_hint=context_hint)
+        return await _llm_extract_onboarding_all(
+            mc_runtime, text, context_hint=context_hint
+        )
 
     user_text = (state.get("normalized_text") or state.get("user_query") or "").strip()
     extracted_entities = state.get("extracted_entities") or {}
@@ -121,7 +130,9 @@ async def onboarding_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
     }
     updates["transaction_payload"] = dict(updates["onboarding_profile"])
 
-    logger.info("[Onboarding] Step=%s completed=%s", resolved.step.value, resolved.completed)
+    logger.info(
+        "[Onboarding] Step=%s completed=%s", resolved.step.value, resolved.completed
+    )
     return updates
 
 

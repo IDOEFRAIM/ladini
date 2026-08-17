@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Post-LLM contract validation for critical intents (buyer + producer).
 
 Défense en profondeur exécutée par ``nodes/validation.py::validator`` (câblé
@@ -14,6 +12,7 @@ RÈGLE DE PARTAGE DES RESPONSABILITÉS :
 sinon un contrat exigeant ``order_id`` casserait le flux « liste puis
 sélectionne » d'order_tracking.
 """
+from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple, Type
 
@@ -68,6 +67,7 @@ class OrderStatusContract(ListOrdersContract):
 
 class PublishProductContract(BaseModel):
     """SALES_PUBLISH_PRODUCT / SALES_RECORD_DIRECT — publication & vente directe."""
+
     product: str = Field(..., min_length=2, max_length=80)
     quantity: float = Field(..., gt=0)
     price: float = Field(..., gt=0)
@@ -96,7 +96,9 @@ CONTRACTS: Dict[str, Type[BaseModel]] = {
 }
 
 
-def enforce_contract(intent: str, payload: Dict[str, Any]) -> Tuple[bool, Optional[str], Optional[str]]:
+def enforce_contract(
+    intent: str, payload: Dict[str, Any]
+) -> Tuple[bool, Optional[str], Optional[str]]:
     """Valide `payload` contre le contrat de `intent`.
 
     Retourne ``(ok, message, champ_fautif)``. Les erreurs de PRÉSENCE
@@ -113,7 +115,10 @@ def enforce_contract(intent: str, payload: Dict[str, Any]) -> Tuple[bool, Option
         if not value_errors:
             return True, None, None
         first_error = value_errors[0]
-        field = ".".join(str(p) for p in first_error.get("loc", []) if isinstance(p, str)) or None
+        field = (
+            ".".join(str(p) for p in first_error.get("loc", []) if isinstance(p, str))
+            or None
+        )
         msg = first_error.get("msg") or "Entrée invalide."
         return False, msg, field
 

@@ -8,6 +8,7 @@ besoin de préciser une commande — écrit depuis
 (Celery, quand une photo arrive). Module volontairement SANS dépendance
 ``celery`` — même principe que ``services/search_results_cache.py``.
 """
+
 from __future__ import annotations
 
 import logging

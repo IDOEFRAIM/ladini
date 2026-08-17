@@ -9,6 +9,7 @@ Responsabilités (et rien d'autre) :
 Flux : User → WorkspaceResolver → Orchestrator → Agent → MCP Runtime → Response.
 Aucune autre couche métier. Checkpointer = WorkspaceStore (colonne metadata JSONB).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -18,25 +19,30 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
-from agriconnect.workspace import Workspace, WorkspaceCheckpointer, WorkspaceResolver
-from agriconnect.workspace.metadata import LANGGRAPH_STATE_KEY, build_metadata_from_state
+from agriconnect.graphs.agents.market_coach.utils import build_runtime, ensure_dict
 from agriconnect.graphs.factory import GraphFactory
 from agriconnect.graphs.roles import normalize_role
-from agriconnect.graphs.agents.market_coach.utils import build_runtime, ensure_dict
+from agriconnect.workspace import Workspace, WorkspaceCheckpointer, WorkspaceResolver
+from agriconnect.workspace.metadata import (
+    LANGGRAPH_STATE_KEY,
+    build_metadata_from_state,
+)
 
 logger = logging.getLogger("AgriConnect.Orchestrator")
 
 # Clés d'état NON sérialisables / transitoires à exclure du snapshot Workspace.
-_SNAPSHOT_EXCLUDE = frozenset({
-    "mc_runtime",
-    "agent_config",
-    "_runtime",
-    "llm",
-    "llm_client",
-    "mcp_session",
-    "db_client",
-    "checkpointer",
-})
+_SNAPSHOT_EXCLUDE = frozenset(
+    {
+        "mc_runtime",
+        "agent_config",
+        "_runtime",
+        "llm",
+        "llm_client",
+        "mcp_session",
+        "db_client",
+        "checkpointer",
+    }
+)
 
 _FALLBACK_RESPONSE = (
     "Désolé, une difficulté technique est survenue. Veuillez reessayer.Si cela persiste,"
@@ -94,7 +100,11 @@ def _json_safe(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items() if k not in _SNAPSHOT_EXCLUDE}
+        return {
+            str(k): _json_safe(v)
+            for k, v in value.items()
+            if k not in _SNAPSHOT_EXCLUDE
+        }
     if isinstance(value, (list, tuple)):
         return [_json_safe(v) for v in value]
     return None
@@ -104,7 +114,10 @@ def _snapshot(state: Dict[str, Any]) -> Dict[str, Any]:
     minimal = build_metadata_from_state(state)
     minimal_size = len(json.dumps(minimal).encode("utf-8"))
     if minimal_size > 50_000:
-        logger.critical("Workspace snapshot exceeds 50KB even after sanitization (size=%s)", minimal_size)
+        logger.critical(
+            "Workspace snapshot exceeds 50KB even after sanitization (size=%s)",
+            minimal_size,
+        )
     return minimal
 
 
@@ -134,7 +147,9 @@ class Orchestrator:
         try:
             final = await asyncio.wait_for(
                 self._run_market(
-                    ws, user_query, phone,
+                    ws,
+                    user_query,
+                    phone,
                     force_role=force_role,
                     interactive_id=interactive_id,
                     location_shared=location_shared,
@@ -188,7 +203,11 @@ class Orchestrator:
                 final.get("current_goal"),
                 final.get("status"),
             )
-            langgraph_blob = copy.deepcopy(ws.agent_state) if isinstance(ws.agent_state, dict) else None
+            langgraph_blob = (
+                copy.deepcopy(ws.agent_state)
+                if isinstance(ws.agent_state, dict)
+                else None
+            )
             self._sync_workspace(ws, final, langgraph_blob)
             await self._flush_workspace(ws, reason="completed")
             return {
@@ -267,16 +286,27 @@ class Orchestrator:
 
             if not force_role:
                 meta_role = (
-                    (ws.metadata.get("user_role") if isinstance(ws.metadata, dict) else None)
-                    or ((ws.metadata.get("transaction_payload") or {}).get("role") if isinstance(ws.metadata, dict) else None)
+                    ws.metadata.get("user_role")
+                    if isinstance(ws.metadata, dict)
+                    else None
+                ) or (
+                    (ws.metadata.get("transaction_payload") or {}).get("role")
+                    if isinstance(ws.metadata, dict)
+                    else None
                 )
-                if isinstance(meta_role, str) and meta_role.strip().upper() in {"BUYER", "ACHETEUR", "ACHETEUSE"}:
+                if isinstance(meta_role, str) and meta_role.strip().upper() in {
+                    "BUYER",
+                    "ACHETEUR",
+                    "ACHETEUSE",
+                }:
                     role = "BUYER"
 
                 if role == "PRODUCER" and phone:
                     try:
                         raw = await asyncio.wait_for(
-                            live_runtime.call_db("get_user_by_phone", phone=str(phone).strip()),
+                            live_runtime.call_db(
+                                "get_user_by_phone", phone=str(phone).strip()
+                            ),
                             timeout=self._ROLE_CHECK_TIMEOUT,
                         )
                         profile_res = ensure_dict(raw)
@@ -296,25 +326,34 @@ class Orchestrator:
                 profile_status = str(profile_res.get("status") or "").upper()
                 if profile_status == "SUCCESS":
                     prof = profile_res.get("data") or {}
-                    inputs.update({
-                        "user_context_loaded": True,
-                        "is_onboarding": False,
-                        "user_name": prof.get("name") or "N/A",
-                        "zone_name": (prof.get("zone") or {}).get("name"),
-                        "zone_id": (prof.get("zone") or {}).get("id"),
-                    })
+                    inputs.update(
+                        {
+                            "user_context_loaded": True,
+                            "is_onboarding": False,
+                            "user_name": prof.get("name") or "N/A",
+                            "zone_name": (prof.get("zone") or {}).get("name"),
+                            "zone_id": (prof.get("zone") or {}).get("id"),
+                        }
+                    )
                     user_uuid = prof.get("id")
                     if user_uuid:
                         inputs["user_id"] = str(user_uuid)
                 elif profile_status == "NEW_USER":
-                    inputs.update({
-                        "user_context_loaded": False,
-                        "is_onboarding": True,
-                        "onboarding_step": "COLLECT_ROLE",
-                        "onboarding_internal_step": "COLLECT_ROLE",
-                    })
+                    inputs.update(
+                        {
+                            "user_context_loaded": False,
+                            "is_onboarding": True,
+                            "onboarding_step": "COLLECT_ROLE",
+                            "onboarding_internal_step": "COLLECT_ROLE",
+                        }
+                    )
 
-            logger.info("Orchestrator | phone=%s | resolved role=%s | ws_type=%s", phone, role, ws.workspace_type)
+            logger.info(
+                "Orchestrator | phone=%s | resolved role=%s | ws_type=%s",
+                phone,
+                role,
+                ws.workspace_type,
+            )
 
             graph = self._graph_factory.get_graph(
                 role,
@@ -327,7 +366,9 @@ class Orchestrator:
     # Workspace sync
     # ------------------------------------------------------------------
     @staticmethod
-    def _sync_workspace(ws: Workspace, final: Dict[str, Any], langgraph_state: Dict[str, Any] | None) -> None:
+    def _sync_workspace(
+        ws: Workspace, final: Dict[str, Any], langgraph_state: Dict[str, Any] | None
+    ) -> None:
         role_raw = final.get("user_role")
         if not role_raw and isinstance(final.get("transaction_payload"), dict):
             role_raw = (final.get("transaction_payload") or {}).get("role")
@@ -338,7 +379,9 @@ class Orchestrator:
             elif role_up in {"PRODUCER", "PRODUCTEUR", "PRODUCTRICE"}:
                 ws.workspace_type = "producer"
 
-        ws.active_goal = str(final.get("current_goal") or "") if final.get("current_goal") else ""
+        ws.active_goal = (
+            str(final.get("current_goal") or "") if final.get("current_goal") else ""
+        )
         ws.active_form = final.get("active_form")
         checkpoint_blob = langgraph_state or ws.metadata.get(LANGGRAPH_STATE_KEY)
         if isinstance(checkpoint_blob, dict):
@@ -347,7 +390,10 @@ class Orchestrator:
         if checkpoint_blob is not None:
             ws.metadata[LANGGRAPH_STATE_KEY] = checkpoint_blob
         success = str(final.get("goal_status") or "").upper() == "COMPLETED"
-        success = success or str(final.get("status") or "").upper() in {"COMPLETED", "SUCCESS"}
+        success = success or str(final.get("status") or "").upper() in {
+            "COMPLETED",
+            "SUCCESS",
+        }
         if success:
             ws.close_tunnel()
         elif ws.active_goal or ws.active_form:
@@ -370,7 +416,9 @@ class Orchestrator:
         try:
             flush_metrics = self._checkpointer.finalize_for_persistence(ws)
         except Exception:  # pragma: no cover - ne jamais bloquer le flush
-            logger.debug("finalize_for_persistence a échoué (non bloquant)", exc_info=True)
+            logger.debug(
+                "finalize_for_persistence a échoué (non bloquant)", exc_info=True
+            )
             flush_metrics = {}
 
         logger.info(

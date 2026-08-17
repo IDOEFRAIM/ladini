@@ -3,11 +3,13 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Set
 
 from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.utils import CANONICAL_TRANSACTION_FIELDS
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
+from agriconnect.graphs.agents.market_coach.utils import CANONICAL_TRANSACTION_FIELDS
 
 _MAX_CHAT_HISTORY = 4
-_ACTIVE_GOAL_STATES = frozenset({"ACTIVE", "WAITING_INPUT", "WAITING_CONFIRMATION", "EXECUTING"})
+_ACTIVE_GOAL_STATES = frozenset(
+    {"ACTIVE", "WAITING_INPUT", "WAITING_CONFIRMATION", "EXECUTING"}
+)
 _EPHEMERAL_WORKING_KEYS = ("payload_richness", "last_confidence", "step_index")
 _ONBOARDING_TRANSACTION_FIELDS = frozenset({"name", "zone_name", "zone_id", "phone"})
 
@@ -42,12 +44,17 @@ def _goal_slot_fields(state: MarketAgentState) -> Set[str]:
     return fields
 
 
-def _sanitize_transaction_payload(payload: Any, state: MarketAgentState) -> Optional[Dict[str, Any]]:
+def _sanitize_transaction_payload(
+    payload: Any, state: MarketAgentState
+) -> Optional[Dict[str, Any]]:
     if not isinstance(payload, dict):
         return None
     allowed: Set[str] = set(CANONICAL_TRANSACTION_FIELDS)
     allowed.update(_goal_slot_fields(state))
-    if state.get("is_onboarding") or str(state.get("response_strategy") or "").upper() == "ONBOARDING":
+    if (
+        state.get("is_onboarding")
+        or str(state.get("response_strategy") or "").upper() == "ONBOARDING"
+    ):
         allowed.update(_ONBOARDING_TRANSACTION_FIELDS)
     sanitized = {
         key: value
@@ -128,25 +135,42 @@ async def state_cleaner_node(
         patch["active_form"] = None
         patch["form_step"] = None
         wm_terminal = dict(patch.get("working_memory") or working)
-        for key in ("active_goal", "locked_intent", "pending_goal",
-                    "buyer_request_waiting_choice", "buyer_request_catalog_checked",
-                    "buyer_request_last_product"):
+        for key in (
+            "active_goal",
+            "locked_intent",
+            "pending_goal",
+            "buyer_request_waiting_choice",
+            "buyer_request_catalog_checked",
+            "buyer_request_last_product",
+        ):
             wm_terminal[key] = None
         patch["working_memory"] = wm_terminal
     else:
-        payload_patch = _sanitize_transaction_payload(state.get("transaction_payload"), state)
+        payload_patch = _sanitize_transaction_payload(
+            state.get("transaction_payload"), state
+        )
         if payload_patch is not None:
             patch["transaction_payload"] = payload_patch
 
     draft_payload = state.get("draft_payload")
-    if isinstance(draft_payload, dict) and draft_payload and not draft_payload.get("__reset__"):
+    if (
+        isinstance(draft_payload, dict)
+        and draft_payload
+        and not draft_payload.get("__reset__")
+    ):
         goal_status = str(state.get("goal_status") or "").upper()
         current_goal = str(state.get("current_goal") or "").upper()
-        _DRAFT_SAFE_GOALS = frozenset({
-            "BUYER_ADD_TO_CART", "BUYER_VIEW_CART",
-            "BUYER_PREORDER_INIT", "BUYER_PREORDER_CONFIRM",
-        })
-        transaction_active = goal_status in _ACTIVE_GOAL_STATES and current_goal in _DRAFT_SAFE_GOALS
+        _DRAFT_SAFE_GOALS = frozenset(
+            {
+                "BUYER_ADD_TO_CART",
+                "BUYER_VIEW_CART",
+                "BUYER_PREORDER_INIT",
+                "BUYER_PREORDER_CONFIRM",
+            }
+        )
+        transaction_active = (
+            goal_status in _ACTIVE_GOAL_STATES and current_goal in _DRAFT_SAFE_GOALS
+        )
         status_flag = str(state.get("status") or "").upper()
         if not transaction_active or status_flag in {"FAILED", "COMPLETED"}:
             patch["draft_payload"] = {"__reset__": True}

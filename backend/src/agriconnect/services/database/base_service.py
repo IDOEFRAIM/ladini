@@ -55,6 +55,7 @@ db_session_ctx: ContextVar[Optional[AsyncSession]] = ContextVar(
 def _is_connection_lost(exc: Exception) -> bool:
     try:
         import asyncpg  # type: ignore
+
         if isinstance(exc, asyncpg.exceptions.ConnectionDoesNotExistError):
             return True
     except ImportError:
@@ -71,6 +72,7 @@ def transactional(*, write: bool = False):
     (mixins style AgriDatabaseService). Dans les deux cas, la logique de cycle de
     vie (ouverture, commit, rollback, retry, barrière erreurs) est identique.
     """
+
     def decorator(fn):
         _takes_session = "session" in inspect.signature(fn).parameters
 

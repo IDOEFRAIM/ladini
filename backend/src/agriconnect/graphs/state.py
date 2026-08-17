@@ -1,6 +1,6 @@
 import operator
-from typing import TypedDict, Annotated, List, Dict, Any, Union, Optional
 from enum import Enum
+from typing import Annotated, Any, Dict, List, Optional, TypedDict
 
 
 class Severity(Enum):
@@ -18,10 +18,11 @@ class Alert(TypedDict):
 
 class ExpertResponse(TypedDict):
     """Réponse individuelle d'un expert (fan-out/fan-in pattern)."""
-    expert: str           # Nom de l'expert (sentinelle, formation, market)
-    response: str         # Contenu de la réponse
-    is_lead: bool         # True si c'est l'expert principal (sa réponse sera la base)
-    has_alerts: bool      # True si contient des alertes critiques
+
+    expert: str  # Nom de l'expert (sentinelle, formation, market)
+    response: str  # Contenu de la réponse
+    is_lead: bool  # True si c'est l'expert principal (sa réponse sera la base)
+    has_alerts: bool  # True si contient des alertes critiques
 
 
 # Niveaux d'utilisateur pour le RAG adaptatif
@@ -33,17 +34,17 @@ class GlobalAgriState(TypedDict):
     zone_id: str
     requete_utilisateur: Optional[str]  # Optionnel car peut être un rapport auto
     user_id: str
-    user_phone: Optional[str]           # Numéro WhatsApp (pour MarketplaceAgent)
-    crop: str                           # Culture principale (ex: Maïs, Coton)
-    user_reliability_score: float       # Pilier 2 — Note de confiance (0.0 à 1.0)
-    is_sms_mode: bool                   # Pilier 4 — Mode SMS activé
-    user_level: str                     # "debutant" | "intermediaire" | "expert"
+    user_phone: Optional[str]  # Numéro WhatsApp (pour MarketplaceAgent)
+    crop: str  # Culture principale (ex: Maïs, Coton)
+    user_reliability_score: float  # Pilier 2 — Note de confiance (0.0 à 1.0)
+    is_sms_mode: bool  # Pilier 4 — Mode SMS activé
+    user_level: str  # "debutant" | "intermediaire" | "expert"
 
     # --- Flow Control ---
-    flow_type: str                      # "MESSAGE" ou "REPORT"
-    is_agricultural: Optional[bool]     # True si question agricole, False si hors-sujet
-    off_topic_reason: Optional[str]     # Raison du rejet si hors-sujet
-    needs: Optional[Dict[str, Any]]     # Analyse de l'intention et besoins experts
+    flow_type: str  # "MESSAGE" ou "REPORT"
+    is_agricultural: Optional[bool]  # True si question agricole, False si hors-sujet
+    off_topic_reason: Optional[str]  # Raison du rejet si hors-sujet
+    needs: Optional[Dict[str, Any]]  # Analyse de l'intention et besoins experts
 
     # --- Data Lake (Données collectées) ---
     meteo_data: Optional[Dict[str, Any]]
@@ -63,24 +64,24 @@ class GlobalAgriState(TypedDict):
     audio_url: Optional[str]  # Chemin du fichier .wav généré par TTS
 
     # --- Mémoire 3 Niveaux (injectés par ContextOptimizer) ---
-    memory_profile: Optional[str]       # Niveau 1: Fiche Ferme JSON (~80 tokens)
-    memory_episodes: Optional[str]      # Niveau 2: Résumés épisodiques (~120 tokens)
-    memory_context: Optional[str]       # Combiné: Profil + Épisodes (~200 tokens)
-    memory_token_estimate: Optional[int] # Estimation tokens du contexte mémoire
+    memory_profile: Optional[str]  # Niveau 1: Fiche Ferme JSON (~80 tokens)
+    memory_episodes: Optional[str]  # Niveau 2: Résumés épisodiques (~120 tokens)
+    memory_context: Optional[str]  # Combiné: Profil + Épisodes (~200 tokens)
+    memory_token_estimate: Optional[int]  # Estimation tokens du contexte mémoire
 
     # --- Community Benchmark (reports) ---
     community_benchmark: Optional[Dict[str, Any]]
 
     # --- HITL (Human-in-the-Loop) ---
-    requires_validation: Optional[bool]       # True si action risquée en attente
-    pending_action_id: Optional[str]          # ID de l'action figée
+    requires_validation: Optional[bool]  # True si action risquée en attente
+    pending_action_id: Optional[str]  # ID de l'action figée
     pending_action_payload: Optional[Dict[str, Any]]  # Données de l'action en attente
-    hitl_status: Optional[str]                # "PENDING" | "APPROVED" | "REJECTED"
+    hitl_status: Optional[str]  # "PENDING" | "APPROVED" | "REJECTED"
 
     # --- LangGraph Send (fan-out per-expert) ---
-    _expert_target: Optional[str]             # Expert name for Send() dispatch
-    _expert_is_lead: Optional[bool]           # True if primary expert in fan-out
+    _expert_target: Optional[str]  # Expert name for Send() dispatch
+    _expert_is_lead: Optional[bool]  # True if primary expert in fan-out
 
     # --- Context Elicitation ---
-    awaiting_context: Optional[bool]          # True si données manquantes
+    awaiting_context: Optional[bool]  # True si données manquantes
     missing_fields: Optional[List[Dict[str, str]]]  # Champs à demander

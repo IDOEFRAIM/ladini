@@ -3,6 +3,7 @@
 Eliminates the duplicated phone-first / user_id fallback pattern
 found in both Formation (load_profile_node) and Market (onboarding_node).
 """
+
 from __future__ import annotations
 
 import logging
@@ -136,7 +137,9 @@ async def resolve_identity(
     return identity
 
 
-async def _fetch_farms(gateway: DataGateway, identity: UserIdentity) -> List[Dict[str, Any]]:
+async def _fetch_farms(
+    gateway: DataGateway, identity: UserIdentity
+) -> List[Dict[str, Any]]:
     """Fetch user farms with phone-first, user_id fallback."""
     farms: List[Dict[str, Any]] = []
 

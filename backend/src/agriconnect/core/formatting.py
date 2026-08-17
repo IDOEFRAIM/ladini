@@ -10,6 +10,7 @@ pas "1.5e+06 FCFA". Cette fonction est LA seule à utiliser pour formater un
 nombre affiché à l'utilisateur ; ``_fmt_num`` était dupliqué (et parfois
 buggé de la même façon) dans plusieurs fichiers — voir historique.
 """
+
 from __future__ import annotations
 
 import math

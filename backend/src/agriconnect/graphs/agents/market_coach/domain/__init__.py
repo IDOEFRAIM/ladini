@@ -5,9 +5,17 @@ objects used by action handlers. It is intentionally decoupled from MCP,
 registry, and transport concerns so that business rules remain testable
 and stable over time.
 """
+
 from __future__ import annotations
 
-from .model import DomainContext, DomainEvent, ActionStarted, ActionCompleted, ActionFailed, DomainResult
+from .model import (
+    ActionCompleted,
+    ActionFailed,
+    ActionStarted,
+    DomainContext,
+    DomainEvent,
+    DomainResult,
+)
 
 __all__ = [
     "DomainContext",

@@ -13,6 +13,7 @@ Design rules:
     without inheriting stale data from what interrupted it), the node
     writes `{"__reset__": True, **fresh_data}`.
 """
+
 from __future__ import annotations
 
 import copy
@@ -22,6 +23,7 @@ from typing import Any, Dict, List
 # ── Sentinel object ─────────────────────────────────────────────────
 class _KeepSentinel:
     """Sentinel — when a reducer receives this, it preserves old value."""
+
     __slots__ = ()
 
     def __repr__(self) -> str:
@@ -35,6 +37,7 @@ _KEEP = _KeepSentinel()
 
 
 # ── Reducers ────────────────────────────────────────────────────────
+
 
 def replace_value(old: Any, new: Any) -> Any:
     """Pure overwrite. Returns old if new is _KEEP."""

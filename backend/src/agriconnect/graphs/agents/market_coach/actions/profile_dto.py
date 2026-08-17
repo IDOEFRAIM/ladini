@@ -4,7 +4,6 @@ from typing import Any, Mapping, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-
 _EMPTY_SLOT_VALUES: Tuple[object, ...] = (None, "", [], {})
 
 

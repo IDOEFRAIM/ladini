@@ -10,20 +10,26 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Tuple
 
 try:
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import (
+        AsyncSession,
+        async_sessionmaker,
+        create_async_engine,
+    )
 except ImportError:
     # Fallback for SQLAlchemy < 2.0 (Airflow uses 1.4)
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
     from sqlalchemy.orm import sessionmaker
 
     def async_sessionmaker(*args, **kwargs):
-        kwargs.setdefault('class_', AsyncSession)
+        kwargs.setdefault("class_", AsyncSession)
         return sessionmaker(*args, **kwargs)
+
+
+import asyncio
 
 from sqlalchemy import text
 
 from agriconnect.core.settings import settings
-import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -74,15 +80,21 @@ def _init_db_locked() -> None:
         # canonical domain models
         import agriconnect.domain.models as _domain_models  # noqa: F401
     except Exception:
-        logger.debug("Could not import agriconnect.domain.models at init time (will try fallback)")
+        logger.debug(
+            "Could not import agriconnect.domain.models at init time (will try fallback)"
+        )
 
     clean_url = settings.DATABASE_URL.split("?")[0]
 
     # TRANSFORMATION : On force le driver asynchrone
     url = clean_url.replace("postgresql://", "postgresql+asyncpg://")
-    
+
     # CONFIGURATION SSL : mode explicite piloté par settings
-    ssl_mode = str(getattr(settings, "DB_SSL_MODE", "verify-full") or "verify-full").strip().lower()
+    ssl_mode = (
+        str(getattr(settings, "DB_SSL_MODE", "verify-full") or "verify-full")
+        .strip()
+        .lower()
+    )
     ca_path = getattr(settings, "DB_CA_PATH", None)
     ssl_context = None
     if ssl_mode == "disable":
@@ -102,6 +114,7 @@ def _init_db_locked() -> None:
             # resolve relative to BASE_DIR if needed
             try:
                 from pathlib import Path
+
                 p = Path(ca_path)
                 if not p.is_absolute():
                     p = Path(settings.BASE_DIR) / p
@@ -120,9 +133,13 @@ def _init_db_locked() -> None:
                 raise
         else:
             logger.error("No DB_CA_PATH configured for verify-full SSL mode.")
-            raise RuntimeError("DB_CA_PATH not configured; set settings.DB_CA_PATH or switch DB_SSL_MODE=require for local diagnostics")
+            raise RuntimeError(
+                "DB_CA_PATH not configured; set settings.DB_CA_PATH or switch DB_SSL_MODE=require for local diagnostics"
+            )
     else:
-        raise RuntimeError(f"Unsupported DB_SSL_MODE: {ssl_mode}. Expected verify-full|require|disable")
+        raise RuntimeError(
+            f"Unsupported DB_SSL_MODE: {ssl_mode}. Expected verify-full|require|disable"
+        )
 
     # Disable asyncpg statement caches because DigitalOcean regularly rotates
     # schema metadata during maintenance windows, which invalidates prepared
@@ -147,7 +164,9 @@ def _init_db_locked() -> None:
         logger.warning("DB_POOL_MAX_OVERFLOW négatif (%s) — forçage à 0.", max_overflow)
         max_overflow = 0
     if pool_timeout < 10:
-        logger.warning("DB_POOL_TIMEOUT trop faible (%s) — forçage à 10s.", pool_timeout)
+        logger.warning(
+            "DB_POOL_TIMEOUT trop faible (%s) — forçage à 10s.", pool_timeout
+        )
         pool_timeout = 10.0
 
     _async_engine = create_async_engine(
@@ -159,11 +178,9 @@ def _init_db_locked() -> None:
         pool_pre_ping=True,
         echo=bool(getattr(settings, "DEBUG", False)),
     )
-    
+
     _AsyncSessionLocal = async_sessionmaker(
-        bind=_async_engine, 
-        class_=AsyncSession, 
-        expire_on_commit=False
+        bind=_async_engine, class_=AsyncSession, expire_on_commit=False
     )
     logger.info("✅ Database engine asynchrone initialized for DigitalOcean.")
 
@@ -180,7 +197,6 @@ def get_sessionmaker():
     if _AsyncSessionLocal is None:
         init_db()
     return _AsyncSessionLocal
-
 
 
 async def close_db() -> None:
@@ -204,7 +220,9 @@ async def close_db() -> None:
     except RuntimeError as e:
         # Happens when loop is already closed -> fallback to sync dispose
         if "Event loop is closed" in str(e):
-            logger.warning("Event loop closed during async dispose; attempting sync dispose.")
+            logger.warning(
+                "Event loop closed during async dispose; attempting sync dispose."
+            )
             try:
                 sync = getattr(engine_ref, "sync_engine", None)
                 if sync is not None:
@@ -228,8 +246,10 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     if _AsyncSessionLocal is None:
         init_db()
     if _AsyncSessionLocal is None:
-        raise RuntimeError("Database non initialisée. Configurez DATABASE_URL avant d'utiliser la DB.")
-    
+        raise RuntimeError(
+            "Database non initialisée. Configurez DATABASE_URL avant d'utiliser la DB."
+        )
+
     async with _AsyncSessionLocal() as session:
         try:
             yield session
@@ -254,7 +274,7 @@ async def check_connection() -> bool:
             last_exc = e
             logger.warning("DB health check failed (attempt %s/3): %s", attempt + 1, e)
             # exponential backoff
-            await asyncio.sleep(0.2 * (2 ** attempt))
+            await asyncio.sleep(0.2 * (2**attempt))
     logger.warning("DB health check final failure: %s", last_exc)
     return False
 
@@ -289,18 +309,24 @@ async def check_connection_aggressive() -> Tuple[bool, str]:
         async with _async_engine.begin() as conn:
             await conn.execute(text("SELECT 1"))
 
-            has_uuid = await conn.scalar(text("SELECT to_regproc('gen_random_uuid') IS NOT NULL"))
+            has_uuid = await conn.scalar(
+                text("SELECT to_regproc('gen_random_uuid') IS NOT NULL")
+            )
             if not bool(has_uuid):
                 return False, "gen_random_uuid_unavailable"
 
             has_vector = await conn.scalar(
-                text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname='vector')")
+                text(
+                    "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname='vector')"
+                )
             )
             if not bool(has_vector):
                 return False, "pgvector_unavailable"
 
             await conn.execute(
-                text("CREATE TEMP TABLE IF NOT EXISTS _agri_health_probe(v INT) ON COMMIT DROP")
+                text(
+                    "CREATE TEMP TABLE IF NOT EXISTS _agri_health_probe(v INT) ON COMMIT DROP"
+                )
             )
             await conn.execute(text("INSERT INTO _agri_health_probe(v) VALUES (1)"))
         return True, "ok"
@@ -344,14 +370,13 @@ async def ensure_extensions() -> dict:
 
             # uuid-ossp (fallback for uuid_generate_v4)
             try:
-                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\""))
+                await conn.execute(text('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"'))
                 results["uuid-ossp"] = "ok"
             except Exception as e:
                 results["uuid-ossp"] = str(e)
     except Exception as e:
         logger.warning("ensure_extensions failed: %s", e)
     return results
-    
 
 
 if __name__ == "__main__":
@@ -359,11 +384,11 @@ if __name__ == "__main__":
 
     async def test_database_lifecycle():
         print("\n🔍 --- DÉBUT DES TESTS DATABASE (Digital Ocean Ready) ---")
-        
+
         # 1. Test Initialisation
         print("\n1️⃣ Initialisation du moteur...")
         init_db()
-        
+
         # 2. Test de connectivité (Health Check)
         print("2️⃣ Vérification de la connectivité (Health Check)...")
         is_alive = await check_connection()
@@ -378,7 +403,9 @@ if __name__ == "__main__":
         try:
             async with get_db() as session:
                 # On exécute une requête simple pour tester la session
-                result = await session.execute(text("SELECT current_database(), now();"))
+                result = await session.execute(
+                    text("SELECT current_database(), now();")
+                )
                 db_name, current_time = result.fetchone()
                 print(f"   ✅ Session active sur la base : '{db_name}'")
                 print(f"   ✅ Heure du serveur : {current_time}")
@@ -388,13 +415,13 @@ if __name__ == "__main__":
         # 4. Test de fermeture
         print("4️⃣ Fermeture du pool de connexions...")
         await close_db()
-        
+
         # 5. Vérification après fermeture
         # Une fois fermé, le health check doit échouer ou être impossible
         is_alive_after = await check_connection()
         if not is_alive_after:
             print("   ✅ Moteur arrêté proprement.")
-        
+
         print("\n🚀 --- TESTS TERMINÉS AVEC SUCCÈS ---")
 
     # Lancement du script de test

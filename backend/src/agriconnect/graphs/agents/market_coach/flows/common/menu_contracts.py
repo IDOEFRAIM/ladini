@@ -14,6 +14,7 @@ Règle d'or :
 Dépendances : AUCUNE import vers flows/ ou core/ — ce module est une
 feuille pure du graphe de dépendances.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ class MenuOption:
         value: Identifiant métier associé (UUID, slug…). Si ``None``,
                ``index`` est utilisé comme valeur par défaut.
     """
+
     index: str
     label: str
     value: Optional[str] = None
@@ -61,6 +63,7 @@ class MenuRequest:
                           ``final_response`` au lieu de la génération auto.
                           Si ``None``, le ``ui_engine`` génère le texte.
     """
+
     title: str
     options: List[MenuOption]
     kind: str = "generic"
@@ -107,7 +110,9 @@ class MenuRequest:
         """
         items = list(mapping.items())
         options = [
-            MenuOption(index=idx, label=labels[i] if i < len(labels) else idx, value=val)
+            MenuOption(
+                index=idx, label=labels[i] if i < len(labels) else idx, value=val
+            )
             for i, (idx, val) in enumerate(items)
         ]
         return cls(
@@ -144,6 +149,7 @@ class DomainResult:
         pending_menu: Menu optionnel ; le ``ui_engine`` le transformera
                       en ``ag_ui_component`` + ``available_mapping``.
     """
+
     state_patch: Dict[str, Any] = field(default_factory=dict)
     pending_menu: Optional[MenuRequest] = None
 

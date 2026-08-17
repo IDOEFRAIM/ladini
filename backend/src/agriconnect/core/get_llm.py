@@ -1,5 +1,5 @@
-import os
 import logging
+import os
 from typing import Any, Optional
 
 logger = logging.getLogger("agriconnect.core.get_llm")
@@ -64,6 +64,7 @@ def get_groq_sdk(force_refresh: bool = False) -> Any:
 def _is_rate_limit_error(exc: Exception) -> bool:
     try:
         from groq import RateLimitError
+
         if isinstance(exc, RateLimitError):
             return True
     except ImportError:
@@ -77,6 +78,7 @@ def _fallback_model_for(requested_model: str) -> Optional[str]:
     (déjà sur le modèle rapide, ou modèle demandé inconnu)."""
     try:
         from agriconnect.core.settings import settings
+
         fast_model = str(getattr(settings, "LLM_MODEL", "") or "")
     except Exception:
         fast_model = ""
@@ -99,7 +101,7 @@ class _NormalizedChatResponse:
             def __init__(self, content: str):
                 self.message = _Msg(content)
 
-        self.choices = [ _Choice(text) ]
+        self.choices = [_Choice(text)]
 
 
 class _GroqAdapter:
@@ -130,6 +132,7 @@ class _GroqAdapter:
                 # d'appel (contrairement à l'idée de patcher cognitive.py, qui ne
                 # fait AUCUN appel LLM). Import local + best-effort : jamais bloquant.
                 import time as _t
+
                 _model = str(kwargs.get("model") or "unknown")
                 _messages = kwargs.get("messages")
                 _t0 = _t.perf_counter()
@@ -138,9 +141,14 @@ class _GroqAdapter:
                 def _emit(output, usage):
                     try:
                         from agriconnect.core.telemetry import record_generation
+
                         record_generation(
-                            model=_model, messages=_messages, output=output,
-                            latency_s=_t.perf_counter() - _t0, usage=usage, error=_err,
+                            model=_model,
+                            messages=_messages,
+                            output=output,
+                            latency_s=_t.perf_counter() - _t0,
+                            usage=usage,
+                            error=_err,
                         )
                     except Exception:
                         pass
@@ -165,7 +173,11 @@ class _GroqAdapter:
                 # Best-effort: try `client.chat.completions.create` if present
                 try:
                     chat = getattr(client, "chat", None)
-                    if chat and hasattr(chat, "completions") and hasattr(chat.completions, "create"):
+                    if (
+                        chat
+                        and hasattr(chat, "completions")
+                        and hasattr(chat.completions, "create")
+                    ):
                         try:
                             resp = chat.completions.create(**kwargs)
                         except Exception as call_exc:
@@ -186,7 +198,9 @@ class _GroqAdapter:
                             if is_rate_limit and fallback_model:
                                 logger.warning(
                                     "GROQ_RATE_LIMIT_FALLBACK | model=%s -> %s | %s",
-                                    _model, fallback_model, call_exc,
+                                    _model,
+                                    fallback_model,
+                                    call_exc,
                                 )
                                 fallback_kwargs = dict(kwargs)
                                 fallback_kwargs["model"] = fallback_model
@@ -194,7 +208,9 @@ class _GroqAdapter:
                                     resp = chat.completions.create(**fallback_kwargs)
                                     _model = fallback_model
                                 except Exception as fallback_exc:
-                                    _err = f"{type(fallback_exc).__name__}: {fallback_exc}"
+                                    _err = (
+                                        f"{type(fallback_exc).__name__}: {fallback_exc}"
+                                    )
                                     _emit(None, None)
                                     raise fallback_exc
                             else:
@@ -228,7 +244,9 @@ class _GroqAdapter:
                     pass
 
                 # Last resort: return a normalized wrapper with an error message
-                return _NormalizedChatResponse("<llm-error: adapter could not call underlying sdk>")
+                return _NormalizedChatResponse(
+                    "<llm-error: adapter could not call underlying sdk>"
+                )
 
         @property
         def completions(self):
@@ -266,6 +284,7 @@ def get_llm(llm_client: Optional[Any] = None) -> Optional[Any]:
     # Use central settings to determine API key (ensures .env is respected)
     try:
         from agriconnect.core.settings import settings
+
         groq_key = settings.llm_api_key
     except Exception:
         groq_key = os.getenv("GROQ_API_KEY") or os.getenv("AGRICONNECT_APIKEY")

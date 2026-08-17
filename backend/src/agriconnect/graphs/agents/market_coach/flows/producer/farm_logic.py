@@ -1,14 +1,16 @@
 from __future__ import annotations
+
 from typing import Any, Dict, Iterable, Optional
+
 from agriconnect.core.logger import get_logger
-from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
-from agriconnect.graphs.agents.market_coach.services.mcp.gateway import FarmGateway
 from agriconnect.graphs.agents.market_coach.core.base import (
     _AUTO_FARM_NOTICE,
-    MARKET_VALIDATION_CONFIG,
     FARM_CRITICAL_GOALS,
     FARM_ID_REQUIRED_GOALS,
+    MARKET_VALIDATION_CONFIG,
 )
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import FarmGateway
+from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
 
 logger = get_logger("AgriConnect.MarketCoach.AutoFarm")
 
@@ -25,7 +27,9 @@ def _extract_farm_id(candidates: Iterable[Dict[str, Any]]) -> Optional[str]:
     return None
 
 
-async def ensure_farm_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+async def ensure_farm_node(
+    state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Dict[str, Any]:
     """Garantit la présence d'un farm_id avant les appels critiques.
 
     Asymmetric behavior (Mission 3):
@@ -43,16 +47,22 @@ async def ensure_farm_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
         return {}
 
     if state.get("farm_creation_attempted"):
-        logger.info("[AutoFarm] Tentative déjà effectuée pour cette transaction — aucune action.")
+        logger.info(
+            "[AutoFarm] Tentative déjà effectuée pour cette transaction — aucune action."
+        )
         return {}
 
     phone = state.get("user_phone") or payload.get("phone")
     if not phone:
-        logger.debug("[AutoFarm] Impossible de déterminer le téléphone utilisateur — abandon.")
+        logger.debug(
+            "[AutoFarm] Impossible de déterminer le téléphone utilisateur — abandon."
+        )
         return {}
 
     is_read_intent = goal in FARM_RULES.read_optional_farm
-    is_write_intent = goal in FARM_RULES.write_requires_farm or goal in FARM_ID_REQUIRED_GOALS
+    is_write_intent = (
+        goal in FARM_RULES.write_requires_farm or goal in FARM_ID_REQUIRED_GOALS
+    )
     updates: Dict[str, Any] = {"farm_creation_attempted": True}
 
     # Short-circuit: check in-memory cache before network call
@@ -66,7 +76,9 @@ async def ensure_farm_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
             farm_gw = FarmGateway(mc_runtime)
             farms_cache = await farm_gw.list_farms(str(phone))
         except Exception as exc:  # pragma: no cover - log only
-            logger.warning("[AutoFarm] Impossible de récupérer les fermes existantes: %s", exc)
+            logger.warning(
+                "[AutoFarm] Impossible de récupérer les fermes existantes: %s", exc
+            )
 
     if farms_cache:
         updates["user_farms_cache"] = farms_cache
@@ -77,7 +89,10 @@ async def ensure_farm_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
 
     # --- MULTI-FARM AMBIGUITY: always prompt user for explicit choice ---
     if len(farms_list) > 1:
-        logger.info("[AutoFarm] %d farms detected — prompting user for selection", len(farms_list))
+        logger.info(
+            "[AutoFarm] %d farms detected — prompting user for selection",
+            len(farms_list),
+        )
         lines = ["🌾 *Sur quelle exploitation souhaitez-vous travailler ?*"]
         mapping: Dict[str, str] = {}
         for i, f in enumerate(farms_list, start=1):
@@ -97,19 +112,23 @@ async def ensure_farm_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
 
     # --- READ intents: block auto-provisioning ---
     if not farm_id and is_read_intent and not no_farms:
-        logger.info("[AutoFarm] No farm for READ intent '%s' — prompting creation", goal)
+        logger.info(
+            "[AutoFarm] No farm for READ intent '%s' — prompting creation", goal
+        )
         updates["status"] = "WAITING_INPUT"
         updates["response_strategy"] = "ASK_CLARIFICATION"
         updates["final_response"] = (
             "Vous n'avez pas encore d'exploitation enregistrée. "
             "Pour consulter vos données, créez d'abord une ferme en disant "
-            "par exemple : *\"Créer une ferme Ferme principale à Dakar\"*."
+            'par exemple : *"Créer une ferme Ferme principale à Dakar"*.'
         )
         return updates
 
     # --- Auto-provision is allowed for WRITE intents or when no farm exists yet ---
     if not farm_id and not auto_provision_allowed:
-        logger.warning("[AutoFarm] Goal '%s' not authorized for auto-provisioning", goal)
+        logger.warning(
+            "[AutoFarm] Goal '%s' not authorized for auto-provisioning", goal
+        )
         updates["status"] = "WAITING_INPUT"
         updates["response_strategy"] = "ASK_CLARIFICATION"
         updates["final_response"] = (

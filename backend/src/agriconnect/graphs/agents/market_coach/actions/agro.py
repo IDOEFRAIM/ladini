@@ -1,26 +1,30 @@
 """Action handlers for the Agronomy domain."""
+
 from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Tuple
 
-from agriconnect.graphs.agents.market_coach.registry import register_action
-from agriconnect.graphs.agents.market_coach.actions.tooling import ToolResolver
 from agriconnect.graphs.agents.market_coach.actions.common import require, require_phone
+from agriconnect.graphs.agents.market_coach.actions.farm_dto import (
+    FarmCreatePayload,
+    FarmGetMyListPayload,
+    FarmUpdatePayload,
+)
+from agriconnect.graphs.agents.market_coach.actions.tooling import ToolResolver
 from agriconnect.graphs.agents.market_coach.domain import DomainContext
 from agriconnect.graphs.agents.market_coach.domain.agro import (
     AgronomyService,
-    FarmGetMyListCommand,
     FarmCreateCommand,
+    FarmGetMyListCommand,
     FarmUpdateCommand,
 )
-from agriconnect.graphs.agents.market_coach.actions.farm_dto import (
-    FarmGetMyListPayload,
-    FarmCreatePayload,
-    FarmUpdatePayload,
-)
+from agriconnect.graphs.agents.market_coach.registry import register_action
+
 
 @register_action("AGRO_GET_CYCLES", mode="READ")
-def prep_agro_get_cycles(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_agro_get_cycles(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare l'historique des cycles d'un domaine."""
     context = DomainContext.from_state(state)
     service = AgronomyService(context=context)
@@ -30,7 +34,9 @@ def prep_agro_get_cycles(state: Mapping[str, Any], payload: Mapping[str, Any]) -
 
 
 @register_action("AGRO_GET_STANDARDS", mode="READ")
-def prep_agro_get_standards(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_agro_get_standards(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare la consultation des fiches techniques."""
     context = DomainContext.from_state(state)
     service = AgronomyService(context=context)
@@ -40,7 +46,9 @@ def prep_agro_get_standards(state: Mapping[str, Any], payload: Mapping[str, Any]
 
 
 @register_action("AGRO_GET_ECONOMICS", mode="READ")
-def prep_agro_get_economics(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_agro_get_economics(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare le bilan financier d'une parcelle."""
     context = DomainContext.from_state(state)
     service = AgronomyService(context=context)
@@ -50,7 +58,9 @@ def prep_agro_get_economics(state: Mapping[str, Any], payload: Mapping[str, Any]
 
 
 @register_action("AGRO_GET_RISKS", mode="READ")
-def prep_agro_get_risks(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_agro_get_risks(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare l'analyse des risques sanitaires."""
     context = DomainContext.from_state(state)
     service = AgronomyService(context=context)
@@ -60,7 +70,9 @@ def prep_agro_get_risks(state: Mapping[str, Any], payload: Mapping[str, Any]) ->
 
 
 @register_action("FARM_GET_MY_LIST", mode="READ")
-def prep_farm_get_my_list(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_farm_get_my_list(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare la demande de listing des exploitations du producteur."""
     require_phone(state)
     context = DomainContext.from_state(state)
@@ -73,7 +85,9 @@ def prep_farm_get_my_list(state: Mapping[str, Any], payload: Mapping[str, Any]) 
 
 
 @register_action("CROP_START_CYCLE", mode="WRITE")
-def prep_crop_start_cycle(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_crop_start_cycle(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     service = AgronomyService(context=context)
     result = service.start_cycle(state, payload)
@@ -82,7 +96,9 @@ def prep_crop_start_cycle(state: Mapping[str, Any], payload: Mapping[str, Any]) 
 
 
 @register_action("DECLARE_CROP_CYCLE", mode="WRITE")
-def prep_declare_crop_cycle(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_declare_crop_cycle(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     service = AgronomyService(context=context)
     result = service.declare_crop_cycle(state, payload)
@@ -91,7 +107,9 @@ def prep_declare_crop_cycle(state: Mapping[str, Any], payload: Mapping[str, Any]
 
 
 @register_action("CROP_RECORD_INTERVENTION", mode="WRITE")
-def prep_crop_record_intervention(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_crop_record_intervention(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     service = AgronomyService(context=context)
     result = service.record_intervention(state, payload)
@@ -100,7 +118,9 @@ def prep_crop_record_intervention(state: Mapping[str, Any], payload: Mapping[str
 
 
 @register_action("CROP_RECORD_OBSERVATION", mode="WRITE")
-def prep_crop_record_observation(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_crop_record_observation(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     service = AgronomyService(context=context)
     result = service.record_observation(state, payload)
@@ -109,7 +129,9 @@ def prep_crop_record_observation(state: Mapping[str, Any], payload: Mapping[str,
 
 
 @register_action("CROP_UPDATE_STAGE", mode="WRITE")
-def prep_crop_update_stage(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_crop_update_stage(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     service = AgronomyService(context=context)
     result = service.update_stage(state, payload)
@@ -118,7 +140,9 @@ def prep_crop_update_stage(state: Mapping[str, Any], payload: Mapping[str, Any])
 
 
 @register_action("CROP_UPDATE_SOIL", mode="WRITE")
-def prep_crop_update_soil(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_crop_update_soil(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     service = AgronomyService(context=context)
     result = service.update_soil(state, payload)
@@ -127,7 +151,9 @@ def prep_crop_update_soil(state: Mapping[str, Any], payload: Mapping[str, Any]) 
 
 
 @register_action("FARM_CREATE", mode="WRITE")
-def prep_farm_create(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_farm_create(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     require_phone(state)
     require(payload, "farm_name")
     require(payload, "zone")
@@ -146,7 +172,9 @@ def prep_farm_create(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tu
 
 
 @register_action("FARM_UPDATE", mode="WRITE")
-def prep_farm_update(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_farm_update(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     require_phone(state)
     require(payload, "farm_id")
     context = DomainContext.from_state(state)

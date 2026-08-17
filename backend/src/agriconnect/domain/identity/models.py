@@ -13,14 +13,15 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
-    Index,
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID, DOUBLE_PRECISION
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION, JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import relationship
 
 from agriconnect.domain.orm_base import Base, _uuid4
@@ -54,12 +55,20 @@ class User(Base):
     identity_verified = Column(Boolean, default=False)
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
     # Modération / abus : blocage (annulations répétées) & bannissement (produits interdits).
-    account_status = Column(String, default="ACTIVE", nullable=False, server_default=text("'ACTIVE'"), index=True)
+    account_status = Column(
+        String,
+        default="ACTIVE",
+        nullable=False,
+        server_default=text("'ACTIVE'"),
+        index=True,
+    )
     blocked_reason = Column(Text)
     blocked_at = Column(DateTime)
     deleted_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
     producer = relationship("Producer", back_populates="user", uselist=False)
 
@@ -69,7 +78,11 @@ class Account(Base):
     __table_args__ = {"schema": "auth"}
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("auth.users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
     type = Column(String, nullable=False)
     provider = Column(String, nullable=False)
     provider_account_id = Column(String, nullable=False)
@@ -88,7 +101,11 @@ class Session(Base):
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
     session_token = Column(String, unique=True, nullable=False)
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("auth.users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
     expires = Column(DateTime, nullable=False)
 
 
@@ -104,9 +121,17 @@ class Producer(Base):
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True)
-    organization_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id"))
+    id = Column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    user_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True
+    )
+    organization_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id")
+    )
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
     business_name = Column(String)
     status = Column(String, default="PENDING", nullable=False)
@@ -120,12 +145,22 @@ class Producer(Base):
     reviews_count = Column(Integer, default=0, nullable=False)
     company_registration_number = Column(String)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
-    user = relationship("User", back_populates="producer", lazy="joined", foreign_keys=[user_id])
-    farms = relationship("Farm", back_populates="producer", cascade="all, delete-orphan")
-    clients = relationship("Client", back_populates="producer", cascade="all, delete-orphan")
-    offers = relationship("MarketOffer", back_populates="producer", cascade="all, delete-orphan")
+    user = relationship(
+        "User", back_populates="producer", lazy="joined", foreign_keys=[user_id]
+    )
+    farms = relationship(
+        "Farm", back_populates="producer", cascade="all, delete-orphan"
+    )
+    clients = relationship(
+        "Client", back_populates="producer", cascade="all, delete-orphan"
+    )
+    offers = relationship(
+        "MarketOffer", back_populates="producer", cascade="all, delete-orphan"
+    )
 
 
 class Client(Base):
@@ -137,7 +172,11 @@ class Client(Base):
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    id = Column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
     producer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"))
     name = Column(String, nullable=False)
     phone = Column(String, nullable=False)
@@ -149,20 +188,30 @@ class Client(Base):
     tax_id = Column(String)
     prefered_payement_method = Column(JSONB)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
-    producer = relationship("Producer", back_populates="clients", foreign_keys=[producer_id])
+    producer = relationship(
+        "Producer", back_populates="clients", foreign_keys=[producer_id]
+    )
 
 
 class BuyerType(Base):
     __tablename__ = "buyer_types"
     __table_args__ = {"schema": "marketplace"}
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    id = Column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
     name = Column(String, unique=True, nullable=False)
     description = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class BuyerProfile(Base):
@@ -174,9 +223,17 @@ class BuyerProfile(Base):
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True)
-    buyer_type_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.buyer_types.id"))
+    id = Column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    user_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True
+    )
+    buyer_type_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.buyer_types.id")
+    )
     establishment_name = Column(String)
     default_delivery_address = Column(Text)
     is_verified = Column(Boolean, default=False, nullable=False)
@@ -187,7 +244,9 @@ class BuyerProfile(Base):
     verified_at = Column(DateTime)
     verified_by_id = Column(PG_UUID(as_uuid=True))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
     user = relationship("User", foreign_keys=[user_id])
 
@@ -196,14 +255,22 @@ class DeliveryAgent(Base):
     __tablename__ = "delivery_agents"
     __table_args__ = {"schema": "marketplace"}
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True)
+    id = Column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    user_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True
+    )
     vehicle_type = Column(String)
     license_number = Column(String)
     status = Column(String, default="OFFLINE", nullable=False)
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
     user = relationship("User", foreign_keys=[user_id])
 
@@ -216,14 +283,18 @@ class TrustScore(Base):
     __table_args__ = {"schema": "intelligence"}
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True)
+    user_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True
+    )
     global_score = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
     reliability_index = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
     quality_index = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
     compliance_index = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
     resilience_bonus = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 __all__ = [

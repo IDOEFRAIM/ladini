@@ -1,24 +1,35 @@
 import logging
 import unicodedata
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, desc, update, case, literal, or_, func
-from sqlalchemy.orm import selectinload, joinedload
-
+from sqlalchemy import case, desc, func, literal, or_, select, update
+from sqlalchemy.orm import joinedload, selectinload
 
 from agriconnect.core.formatting import fmt_num as _fmt_num
-from .common import normalize_phone
-from .search import fuzzy_match, similarity_rank
-from .base import BaseMixin
-from .errors import BusinessRuleException
+
 # Import des modèles alignés sur le schéma
 from agriconnect.domain.models import (
-    BuyerProfile, Order, OrderItem, Delivery, 
-    Product, User, BuyerType, Zone, Producer, TrustScore,
-    Auction, Bid, MarketOffer, Farm
+    Auction,
+    BuyerProfile,
+    BuyerType,
+    Delivery,
+    Farm,
+    MarketOffer,
+    Order,
+    OrderItem,
+    Producer,
+    Product,
+    TrustScore,
+    User,
+    Zone,
 )
+
+from .base import BaseMixin
+from .common import normalize_phone
+from .errors import BusinessRuleException
+from .search import fuzzy_match, similarity_rank
 
 logger = logging.getLogger("agriconnect.services.database.buyer")
 
@@ -100,9 +111,12 @@ def _guess_display_unit(product_name: Optional[str], db_unit: Optional[str]) -> 
     if unit and unit not in {"", "KG"}:
         return unit
     normalized_name = _normalize_ascii_lower(product_name)
-    if normalized_name and any(keyword in normalized_name for keyword in _LIVESTOCK_KEYWORDS):
+    if normalized_name and any(
+        keyword in normalized_name for keyword in _LIVESTOCK_KEYWORDS
+    ):
         return "TETE"
     return unit or "KG"
+
 
 class BuyerMixin(BaseMixin):
     """
@@ -111,7 +125,7 @@ class BuyerMixin(BaseMixin):
     """
 
     # ─── SECTION 1 : CONTEXTES ET COMPORTEMENTS LLM ───────────────────────
-         
+
     async def get_buyer_context(self, phone: str) -> Dict[str, Any]:
         """Génère le contexte d'activité complet à destination des agents LangGraph."""
         try:
@@ -121,13 +135,15 @@ class BuyerMixin(BaseMixin):
             return {
                 "role": "new_user",
                 "message": "Profil acheteur introuvable.",
-                "user_info": None
+                "user_info": None,
             }
 
         # Résolution du nom de la zone si elle est présente sur l'user
         zone_name = "Inconnue"
         if user_obj.zone_id:
-            zone_obj = await self.session.scalar(select(Zone.name).where(Zone.id == user_obj.zone_id))
+            zone_obj = await self.session.scalar(
+                select(Zone.name).where(Zone.id == user_obj.zone_id)
+            )
             if zone_obj:
                 zone_name = zone_obj
 
@@ -137,17 +153,21 @@ class BuyerMixin(BaseMixin):
             "role": "existing_buyer",
             "user_info": {
                 "id": str(profile_obj.id),
-                "name": getattr(profile_obj, 'establishment_name', None) or user_obj.name or "Acheteur",
+                "name": getattr(profile_obj, "establishment_name", None)
+                or user_obj.name
+                or "Acheteur",
                 "zone": zone_name,
-                "zone_id": str(user_obj.zone_id) if user_obj.zone_id else None
+                "zone_id": str(user_obj.zone_id) if user_obj.zone_id else None,
             },
             "recent_history": active_orders[:3],
-            "can_order": user_obj.zone_id is not None
+            "can_order": user_obj.zone_id is not None,
         }
 
     # ─── SECTION 2 : GESTION DES FLUX (COMMANDES & LIVRAISONS) ──────────────
 
-    async def get_active_orders_context_by_phone(self, phone: str) -> List[Dict[str, Any]]:
+    async def get_active_orders_context_by_phone(
+        self, phone: str
+    ) -> List[Dict[str, Any]]:
         """Récupère le statut des commandes en cours d'un acheteur."""
         current_session = self.session
         if not current_session:
@@ -162,7 +182,7 @@ class BuyerMixin(BaseMixin):
                 .join(User, BuyerProfile.user_id == User.id)
                 .options(
                     selectinload(Order.items).joinedload(OrderItem.product),
-                    selectinload(Order.delivery).joinedload(Delivery.agent)
+                    selectinload(Order.delivery).joinedload(Delivery.agent),
                 )
                 .where(User.phone == clean_phone, Order.status.in_(ACTIVE_STATUSES))
                 .order_by(desc(Order.created_at))
@@ -170,15 +190,20 @@ class BuyerMixin(BaseMixin):
 
             result = await current_session.execute(stmt)
             orders = result.unique().scalars().all()
-            
+
             return [
                 {
                     "id": str(o.id),
                     "status": o.status,
                     "total": o.total_amount,
-                    "items": [{"name": i.product.name, "qty": i.quantity} for i in o.items] if o.items else [],
-                    "date": o.created_at.isoformat() if o.created_at else None
-                } for o in orders
+                    "items": [
+                        {"name": i.product.name, "qty": i.quantity} for i in o.items
+                    ]
+                    if o.items
+                    else [],
+                    "date": o.created_at.isoformat() if o.created_at else None,
+                }
+                for o in orders
             ]
         except Exception as e:
             logger.error(f"Erreur context commandes pour {phone}: {e}")
@@ -186,8 +211,9 @@ class BuyerMixin(BaseMixin):
 
     # ─── SECTION 3 : RECHERCHE GÉOLOCALISÉE ───────────────────────────
 
-
-    async def search_products(self, product: str, phone: str, limit: int = 15) -> Dict[str, Any]:
+    async def search_products(
+        self, product: str, phone: str, limit: int = 15
+    ) -> Dict[str, Any]:
         """Recherche unifiée Buyer : catalogue immédiat + productions futures.
 
         Retourne un schéma homogène pour permettre au flow buyer de distinguer
@@ -196,12 +222,18 @@ class BuyerMixin(BaseMixin):
         """
         current_session = self.session
         if not current_session:
-            return {"status": "error", "message": "Session de base de données indisponible."}
-            
+            return {
+                "status": "error",
+                "message": "Session de base de données indisponible.",
+            }
+
         try:
             clean_product = str(product).strip()
             if not clean_product:
-                return {"status": "error", "message": "Le nom du produit à rechercher est vide."}
+                return {
+                    "status": "error",
+                    "message": "Le nom du produit à rechercher est vide.",
+                }
 
             # Résolution du profil de l'acheteur
             user_obj, _ = await self.get_buyer_profile(phone=phone)
@@ -219,8 +251,12 @@ class BuyerMixin(BaseMixin):
                 conditions.append((Producer.zone_id == target_uuid, 1))
             if parent_id:
                 conditions.append((Zone.parent_id == parent_id, 2))
-                
-            priority_score = case(*conditions, else_=3).label("priority") if conditions else literal(3).label("priority")
+
+            priority_score = (
+                case(*conditions, else_=3).label("priority")
+                if conditions
+                else literal(3).label("priority")
+            )
 
             catalog_stmt = (
                 select(
@@ -248,7 +284,11 @@ class BuyerMixin(BaseMixin):
                 .limit(limit)
             )
 
-            future_priority_score = case(*conditions, else_=3).label("priority") if conditions else literal(3).label("priority")
+            future_priority_score = (
+                case(*conditions, else_=3).label("priority")
+                if conditions
+                else literal(3).label("priority")
+            )
             future_stmt = (
                 select(
                     MarketOffer.id,
@@ -280,72 +320,104 @@ class BuyerMixin(BaseMixin):
                 .limit(limit)
             )
 
-            catalog_rows = (await current_session.execute(catalog_stmt)).mappings().all()
+            catalog_rows = (
+                (await current_session.execute(catalog_stmt)).mappings().all()
+            )
             future_rows = (await current_session.execute(future_stmt)).mappings().all()
-            
+
             if not catalog_rows and not future_rows:
                 return {
-                    "status": "success", 
-                    "message": f"Désolé, aucun produit correspondant à '{clean_product}' n'est disponible."
+                    "status": "success",
+                    "message": f"Désolé, aucun produit correspondant à '{clean_product}' n'est disponible.",
                 }
 
             combined_results: List[Dict[str, Any]] = []
 
             for row in catalog_rows:
-                is_local = target_uuid is not None and row.get("priority") and int(row["priority"]) <= 2
+                is_local = (
+                    target_uuid is not None
+                    and row.get("priority")
+                    and int(row["priority"]) <= 2
+                )
                 tag = "📍 Local" if is_local else "🌐 National"
-                
-                unit_label = _guess_display_unit(row['name'], row["unit"])
 
-                combined_results.append({
-                    "id": str(row["id"]),
-                    "name": f"{row['name']} ({tag})",
-                    "price": float(row["price"]),
-                    "priority": int(row.get("priority") or 3),
-                    "unit": unit_label,
-                    "vendor": row["producer_name"] or "Producteur Anonyme",
-                    "vendor_name": row["producer_name"] or "Producteur Anonyme",
-                    "producer_name": row["producer_name"] or "Producteur Anonyme",
-                    "producer_id": str(row.get("producer_id") or ""),
-                    "zone_name": row.get("zone_name"),
-                    "is_local": is_local,
-                    "source_type": "DIRECT",
-                    "availability_kind": "CATALOG",
-                    "available_quantity": float(row.get("quantity_for_sale") or 0.0),
-                    # Voir services/search_results_cache.py — permet à l'acheteur
-                    # de demander "photos <numéro>" pour un résultat de recherche.
-                    "images": list(row.get("images") or []),
-                })
+                unit_label = _guess_display_unit(row["name"], row["unit"])
+
+                combined_results.append(
+                    {
+                        "id": str(row["id"]),
+                        "name": f"{row['name']} ({tag})",
+                        "price": float(row["price"]),
+                        "priority": int(row.get("priority") or 3),
+                        "unit": unit_label,
+                        "vendor": row["producer_name"] or "Producteur Anonyme",
+                        "vendor_name": row["producer_name"] or "Producteur Anonyme",
+                        "producer_name": row["producer_name"] or "Producteur Anonyme",
+                        "producer_id": str(row.get("producer_id") or ""),
+                        "zone_name": row.get("zone_name"),
+                        "is_local": is_local,
+                        "source_type": "DIRECT",
+                        "availability_kind": "CATALOG",
+                        "available_quantity": float(
+                            row.get("quantity_for_sale") or 0.0
+                        ),
+                        # Voir services/search_results_cache.py — permet à l'acheteur
+                        # de demander "photos <numéro>" pour un résultat de recherche.
+                        "images": list(row.get("images") or []),
+                    }
+                )
 
             for row in future_rows:
                 estimated = row.get("estimated_available_at")
                 estimated_iso = estimated.isoformat() if estimated else None
-                crop_name = row.get("product_label") or row.get("species") or clean_product
-                is_local = target_uuid is not None and row.get("priority") and int(row["priority"]) <= 2
+                crop_name = (
+                    row.get("product_label") or row.get("species") or clean_product
+                )
+                is_local = (
+                    target_uuid is not None
+                    and row.get("priority")
+                    and int(row["priority"]) <= 2
+                )
                 tag = "📍 Local" if is_local else "🌐 National"
                 display_name = f"{crop_name} ({tag} • ⏳ Future)"
 
-                combined_results.append({
-                    "id": str(row["id"]),
-                    "name": display_name,
-                    "price": float(row.get("price_per_unit") or 0.0),
-                    "priority": int(row.get("priority") or 3),
-                    "unit": _guess_display_unit(crop_name, row.get("production_type") == "LIVESTOCK" and "TETE" or "KG"),
-                    "vendor": row.get("producer_name") or "Producteur Anonyme",
-                    "vendor_name": row.get("producer_name") or "Producteur Anonyme",
-                    "producer_name": row.get("producer_name") or "Producteur Anonyme",
-                    "producer_id": str(row.get("producer_id") or ""),
-                    "zone_name": row.get("zone_name"),
-                    "is_local": is_local,
-                    "source_type": "FUTURE",
-                    "availability_kind": "FUTURE",
-                    "estimated_available_at": estimated_iso,
-                    "available_quantity": float(row.get("available_quantity") or 0.0),
-                    "crop_cycle_id": str(row["id"]),
-                    "images": [],  # productions futures : pas de photo avant récolte
-                })
+                combined_results.append(
+                    {
+                        "id": str(row["id"]),
+                        "name": display_name,
+                        "price": float(row.get("price_per_unit") or 0.0),
+                        "priority": int(row.get("priority") or 3),
+                        "unit": _guess_display_unit(
+                            crop_name,
+                            row.get("production_type") == "LIVESTOCK"
+                            and "TETE"
+                            or "KG",
+                        ),
+                        "vendor": row.get("producer_name") or "Producteur Anonyme",
+                        "vendor_name": row.get("producer_name") or "Producteur Anonyme",
+                        "producer_name": row.get("producer_name")
+                        or "Producteur Anonyme",
+                        "producer_id": str(row.get("producer_id") or ""),
+                        "zone_name": row.get("zone_name"),
+                        "is_local": is_local,
+                        "source_type": "FUTURE",
+                        "availability_kind": "FUTURE",
+                        "estimated_available_at": estimated_iso,
+                        "available_quantity": float(
+                            row.get("available_quantity") or 0.0
+                        ),
+                        "crop_cycle_id": str(row["id"]),
+                        "images": [],  # productions futures : pas de photo avant récolte
+                    }
+                )
 
-            combined_results.sort(key=lambda r: (int(r.get("priority") or 3), 0 if r.get("source_type") == "DIRECT" else 1, float(r.get("price") or 0.0)))
+            combined_results.sort(
+                key=lambda r: (
+                    int(r.get("priority") or 3),
+                    0 if r.get("source_type") == "DIRECT" else 1,
+                    float(r.get("price") or 0.0),
+                )
+            )
             formatted_results = []
             for idx, item in enumerate(combined_results[: max(1, int(limit))], 1):
                 item["display_index"] = idx
@@ -355,17 +427,23 @@ class BuyerMixin(BaseMixin):
             return {
                 "status": "success",
                 "results": formatted_results,
-                "search_info": "Inclut produits disponibles (catalogue) et productions futures (précommande)."
+                "search_info": "Inclut produits disponibles (catalogue) et productions futures (précommande).",
             }
-            
-        except Exception as e:
-            logger.error(f"[Marketplace Search] Erreur critique: {str(e)}", exc_info=True)
-            return {"status": "error", "message": "Erreur technique lors de la recherche."}
 
-        
+        except Exception as e:
+            logger.error(
+                f"[Marketplace Search] Erreur critique: {str(e)}", exc_info=True
+            )
+            return {
+                "status": "error",
+                "message": "Erreur technique lors de la recherche.",
+            }
+
     # ─── SECTION 4 : CRÉATION TRANSACTIONNELLE DE COMMANDES ──────────────────
 
-    async def finalize_multi_order(self, items: List[Dict[str, Any]], phone: str) -> Dict[str, Any]:
+    async def finalize_multi_order(
+        self, items: List[Dict[str, Any]], phone: str
+    ) -> Dict[str, Any]:
         """Crée une commande ferme multi-produits avec Row-level locking strict."""
         current_session = self.session
         if not current_session:
@@ -411,7 +489,7 @@ class BuyerMixin(BaseMixin):
             payment_status="PENDING",
             delivery_status="PENDING",
             source="WHATSAPP",
-            created_at=datetime.now(timezone.utc).replace(tzinfo=None)
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
         )
         current_session.add(new_order)
         await current_session.flush()
@@ -433,7 +511,9 @@ class BuyerMixin(BaseMixin):
             )
 
             if not product:
-                raise BusinessRuleException("Un produit sélectionné n'est plus disponible.")
+                raise BusinessRuleException(
+                    "Un produit sélectionné n'est plus disponible."
+                )
             if product.quantity_for_sale < qty:
                 raise BusinessRuleException(
                     f"Stock insuffisant pour {product.name} (Dispo: {product.quantity_for_sale}).",
@@ -443,10 +523,15 @@ class BuyerMixin(BaseMixin):
             line_total = float(product.price) * qty
             running_total += line_total
 
-            current_session.add(OrderItem(
-                id=uuid.uuid4(), order_id=new_order.id, product_id=product.id,
-                quantity=qty, price_at_sale=float(product.price)
-            ))
+            current_session.add(
+                OrderItem(
+                    id=uuid.uuid4(),
+                    order_id=new_order.id,
+                    product_id=product.id,
+                    quantity=qty,
+                    price_at_sale=float(product.price),
+                )
+            )
 
             product.quantity_for_sale -= qty
             summary_items.append(f"{product.name} (x{qty} {product.unit or 'u'})")
@@ -463,12 +548,14 @@ class BuyerMixin(BaseMixin):
             "order_number": str(new_order.id)[:8].upper(),
             "total_amount": running_total,
             "summary": ", ".join(summary_items),
-            "message": f"✅ Commande enregistrée ! Total: {running_total} FCFA."
+            "message": f"✅ Commande enregistrée ! Total: {running_total} FCFA.",
         }
 
     # ─── SECTION 5 : FEEDBACK & RÉPUTATION ───────────────────────────────────
 
-    async def rate_delivery(self, order_id: str, rating: int, comment: str) -> Dict[str, Any]:
+    async def rate_delivery(
+        self, order_id: str, rating: int, comment: str
+    ) -> Dict[str, Any]:
         """Évalue une livraison et ajuste le TrustScore de l'agent."""
         current_session = self.session
         if not current_session:
@@ -477,11 +564,15 @@ class BuyerMixin(BaseMixin):
         o_uuid = uuid.UUID(order_id) if isinstance(order_id, str) else order_id
 
         delivery = await current_session.scalar(
-            select(Delivery).where(Delivery.order_id == o_uuid).options(joinedload(Delivery.agent))
+            select(Delivery)
+            .where(Delivery.order_id == o_uuid)
+            .options(joinedload(Delivery.agent))
         )
 
         if not delivery or not delivery.delivery_agent_id or not delivery.agent:
-            raise BusinessRuleException("Aucun agent de livraison associé à cette commande.")
+            raise BusinessRuleException(
+                "Aucun agent de livraison associé à cette commande."
+            )
 
         score_impact = 0.5 if rating >= 4 else (-0.5 if rating <= 2 else 0.0)
 
@@ -491,26 +582,35 @@ class BuyerMixin(BaseMixin):
             )
 
             if trust_score:
-                trust_score.reliability_index = float(trust_score.reliability_index or 0.0) + score_impact
+                trust_score.reliability_index = (
+                    float(trust_score.reliability_index or 0.0) + score_impact
+                )
                 trust_score.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
             else:
-                current_session.add(TrustScore(
-                    id=uuid.uuid4(),
-                    user_id=delivery.agent.user_id,
-                    reliability_index=5.0 + score_impact,
-                    updated_at=datetime.now(timezone.utc).replace(tzinfo=None)
-                ))
+                current_session.add(
+                    TrustScore(
+                        id=uuid.uuid4(),
+                        user_id=delivery.agent.user_id,
+                        reliability_index=5.0 + score_impact,
+                        updated_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                    )
+                )
 
             await current_session.flush()
 
-        return {"status": "success", "message": "Merci pour votre retour ! Pris en compte."}
+        return {
+            "status": "success",
+            "message": "Merci pour votre retour ! Pris en compte.",
+        }
 
     async def list_buyer_types(self) -> Dict[str, Any]:
         """Liste les typologies/segments d'acheteurs de la plateforme."""
         current_session = self.session
         if not current_session:
             return {"status": "error", "message": "Session indisponible."}
-        result = await current_session.execute(select(BuyerType).order_by(BuyerType.name))
+        result = await current_session.execute(
+            select(BuyerType).order_by(BuyerType.name)
+        )
         types = [{"id": str(bt.id), "name": bt.name} for bt in result.scalars().all()]
         return {"status": "success", "data": types}
 
@@ -523,10 +623,15 @@ class BuyerMixin(BaseMixin):
         t_uuid = uuid.UUID(type_id) if isinstance(type_id, str) else type_id
 
         await current_session.execute(
-            update(BuyerProfile).where(BuyerProfile.id == b_uuid).values(buyer_type_id=t_uuid)
+            update(BuyerProfile)
+            .where(BuyerProfile.id == b_uuid)
+            .values(buyer_type_id=t_uuid)
         )
         await current_session.flush()
-        return {"status": "success", "data": {"buyer_id": str(b_uuid), "type_id": str(t_uuid)}}
+        return {
+            "status": "success",
+            "data": {"buyer_id": str(b_uuid), "type_id": str(t_uuid)},
+        }
 
     async def get_buyer_orders_dashboard(self, phone: str) -> Dict[str, Any]:
         """Génère un tableau de bord WhatsApp des commandes en cours pour cet acheteur."""
@@ -536,7 +641,7 @@ class BuyerMixin(BaseMixin):
         try:
             # Phone-First : Résolution du profil via BaseMixin
             _, profile_obj = await self.get_buyer_profile(phone=phone)
-            
+
             # Statuts traduits avec des emojis explicites pour l'utilisateur WhatsApp
             status_map = {
                 "PENDING": "⏳ En attente de validation",
@@ -545,7 +650,7 @@ class BuyerMixin(BaseMixin):
                 "SHIPPED": "🚛 En cours de route",
                 "PICKED_UP": "📍 Arrivée au point de collecte",
                 "DELIVERED": "📦 Livrée avec succès",
-                "CANCELLED": "❌ Annulée"
+                "CANCELLED": "❌ Annulée",
             }
 
             stmt = (
@@ -560,17 +665,21 @@ class BuyerMixin(BaseMixin):
             if not orders:
                 return {
                     "status": "success",
-                    "formatted_menu": "📦 *Vos Commandes :*\n\nVous n'avez pas encore passé de commande sur AgriConnect. Tapez *Marketplace* pour voir les produits disponibles !"
+                    "formatted_menu": "📦 *Vos Commandes :*\n\nVous n'avez pas encore passé de commande sur AgriConnect. Tapez *Marketplace* pour voir les produits disponibles !",
                 }
 
             menu_lines = ["📦 *SUIVI DE VOS COMMANDES :*"]
             mapping_cache = {}
 
             for idx, order in enumerate(orders, start=1):
-                items_summary = ", ".join([f"{item.product.name} (x{item.quantity})" for item in order.items])
-                display_status = status_map.get(order.status.upper(), f"🔄 Status: {order.status}")
+                items_summary = ", ".join(
+                    [f"{item.product.name} (x{item.quantity})" for item in order.items]
+                )
+                display_status = status_map.get(
+                    order.status.upper(), f"🔄 Status: {order.status}"
+                )
                 date_str = order.created_at.strftime("%d/%m/%Y")
-                
+
                 line = (
                     f"\n*{idx}. Commande #{str(order.id)[:8].upper()}* ({date_str})\n"
                     f"🛒 Articles : {items_summary}\n"
@@ -580,18 +689,25 @@ class BuyerMixin(BaseMixin):
                 menu_lines.append(line)
                 mapping_cache[str(idx)] = str(order.id)
 
-            menu_lines.append("\n_Pour annuler une commande en attente, répondez avec le numéro correspondant._")
+            menu_lines.append(
+                "\n_Pour annuler une commande en attente, répondez avec le numéro correspondant._"
+            )
 
             return {
                 "status": "success",
                 "formatted_menu": "\n".join(menu_lines),
-                "mapping": mapping_cache
+                "mapping": mapping_cache,
             }
         except Exception as e:
             logger.error(f"Erreur get_buyer_orders_dashboard pour {phone}: {e}")
-            return {"status": "error", "message": "Impossible de charger votre suivi de commande."}
+            return {
+                "status": "error",
+                "message": "Impossible de charger votre suivi de commande.",
+            }
 
-    async def cancel_pending_order(self, order_id: str, phone: str, reason: Optional[str] = None) -> Dict[str, Any]:
+    async def cancel_pending_order(
+        self, order_id: str, phone: str, reason: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Annule une commande PENDING et recrédite les stocks des produits associés."""
         current_session = self.session
         if not current_session:
@@ -620,7 +736,11 @@ class BuyerMixin(BaseMixin):
         # Restitution physique des stocks aux producteurs
         for item in order.items:
             if item.product:
-                prod_stmt = select(Product).where(Product.id == item.product_id).with_for_update()
+                prod_stmt = (
+                    select(Product)
+                    .where(Product.id == item.product_id)
+                    .with_for_update()
+                )
                 product = await current_session.scalar(prod_stmt)
                 if product:
                     product.quantity_for_sale += item.quantity
@@ -678,7 +798,8 @@ class BuyerMixin(BaseMixin):
                     .where(
                         Order.buyer_id == buyer_profile_id,
                         func.upper(Order.status) == "CANCELLED",
-                        func.upper(func.coalesce(Order.cancellation_role, "")) == "BUYER",
+                        func.upper(func.coalesce(Order.cancellation_role, ""))
+                        == "BUYER",
                     )
                 )
                 or 0
@@ -697,15 +818,18 @@ class BuyerMixin(BaseMixin):
             await session.flush()
             logger.warning(
                 "Compte %s BLOQUÉ : %s annulations (> %s).",
-                getattr(user_obj, "id", "?"), count, MAX_CANCELLATIONS,
+                getattr(user_obj, "id", "?"),
+                count,
+                MAX_CANCELLATIONS,
             )
             return True
         except Exception:
             logger.warning("Enforcement du plafond d'annulations échoué", exc_info=True)
             return False
 
-
-    async def estimate_delivery_cost(self, phone: str, product_ids: List[str]) -> Dict[str, Any]:
+    async def estimate_delivery_cost(
+        self, phone: str, product_ids: List[str]
+    ) -> Dict[str, Any]:
         """Calcule une estimation transparente des frais de transport du panier vers la zone de l'acheteur."""
         current_session = self.session
         if not current_session:
@@ -713,7 +837,10 @@ class BuyerMixin(BaseMixin):
         try:
             user_obj, _ = await self.get_buyer_profile(phone=phone)
             if not user_obj.zone_id:
-                return {"status": "error", "message": "Veuillez configurer votre zone pour estimer la livraison."}
+                return {
+                    "status": "error",
+                    "message": "Veuillez configurer votre zone pour estimer la livraison.",
+                }
 
             buyer_zone_id = user_obj.zone_id
             total_transport_estimate = 0.0
@@ -721,28 +848,42 @@ class BuyerMixin(BaseMixin):
 
             for p_id in product_ids:
                 p_uuid = uuid.UUID(p_id) if isinstance(p_id, str) else p_id
-                
+
                 # Récupération de la zone de production
-                stmt = select(Producer.zone_id).join(Product, Product.producer_id == Producer.id).where(Product.id == p_uuid)
+                stmt = (
+                    select(Producer.zone_id)
+                    .join(Product, Product.producer_id == Producer.id)
+                    .where(Product.id == p_uuid)
+                )
                 producer_zone_id = await current_session.scalar(stmt)
 
                 if not producer_zone_id:
                     continue
 
                 number_of_pickup_points += 1
-                
+
                 # Heuristique intelligente de routage logistique ouest-africain
                 if producer_zone_id == buyer_zone_id:
-                    total_transport_estimate += 1500.0  # Même ville / village (Circuit ultra-court)
+                    total_transport_estimate += (
+                        1500.0  # Même ville / village (Circuit ultra-court)
+                    )
                 else:
                     # Vérification si même région (même parent logistique)
-                    p_parent = await current_session.scalar(select(Zone.parent_id).where(Zone.id == producer_zone_id))
-                    b_parent = await current_session.scalar(select(Zone.parent_id).where(Zone.id == buyer_zone_id))
-                    
+                    p_parent = await current_session.scalar(
+                        select(Zone.parent_id).where(Zone.id == producer_zone_id)
+                    )
+                    b_parent = await current_session.scalar(
+                        select(Zone.parent_id).where(Zone.id == buyer_zone_id)
+                    )
+
                     if p_parent and p_parent == b_parent:
-                        total_transport_estimate += 4000.0  # Transit régional (Inter-communal)
+                        total_transport_estimate += (
+                            4000.0  # Transit régional (Inter-communal)
+                        )
                     else:
-                        total_transport_estimate += 12000.0 # Transit national / Longue distance
+                        total_transport_estimate += (
+                            12000.0  # Transit national / Longue distance
+                        )
 
             formatted_text = (
                 f"🚛 *ESTIMATION LOGISTIQUE AGRICONNECT :*\n\n"
@@ -755,11 +896,14 @@ class BuyerMixin(BaseMixin):
             return {
                 "status": "success",
                 "estimated_cost": total_transport_estimate,
-                "formatted_text": formatted_text
+                "formatted_text": formatted_text,
             }
         except Exception as e:
             logger.error(f"Erreur estimation transport pour {phone}: {e}")
-            return {"status": "error", "message": "Calcul logistique indisponible temporairement."}
+            return {
+                "status": "error",
+                "message": "Calcul logistique indisponible temporairement.",
+            }
 
     # ─── SECTION 6 : TUNNEL TRANSACTIONNEL "GRADE ENTREPRISE" ────────────────
     # Outils MCP alignés sur les modèles Product, Stock, Order/OrderItem,
@@ -794,7 +938,10 @@ class BuyerMixin(BaseMixin):
         """
         current_session = self.session
         if not current_session:
-            return {"status": "error", "message": "Session de base de données indisponible."}
+            return {
+                "status": "error",
+                "message": "Session de base de données indisponible.",
+            }
 
         p_uuid = self._to_uuid(product_id)
         if p_uuid is None:
@@ -805,7 +952,10 @@ class BuyerMixin(BaseMixin):
         except (TypeError, ValueError):
             return {"status": "error", "message": "Quantité demandée invalide."}
         if requested <= 0:
-            return {"status": "error", "message": "La quantité demandée doit être strictement positive."}
+            return {
+                "status": "error",
+                "message": "La quantité demandée doit être strictement positive.",
+            }
 
         try:
             product = await current_session.scalar(
@@ -830,7 +980,9 @@ class BuyerMixin(BaseMixin):
                     "requested_quantity": requested,
                     "unit": response_unit,
                     "unit_price": float(product.price or 0.0),
-                    "producer_id": str(product.producer_id) if product.producer_id else None,
+                    "producer_id": str(product.producer_id)
+                    if product.producer_id
+                    else None,
                     "message": f"{requested} {response_unit} de {product.name} disponibles.",
                 }
 
@@ -839,13 +991,21 @@ class BuyerMixin(BaseMixin):
             # strict pour proposer de vraies alternatives (haute sensibilité —
             # mieux vaut un faux positif que zéro fallback pour l'agent).
             alt_rows = await current_session.execute(
-                select(Product.id, Product.name, Product.price, Product.quantity_for_sale, Product.unit)
+                select(
+                    Product.id,
+                    Product.name,
+                    Product.price,
+                    Product.quantity_for_sale,
+                    Product.unit,
+                )
                 .where(
                     fuzzy_match(Product.name, product.name),
                     Product.id != product.id,
                     Product.quantity_for_sale >= requested,
                 )
-                .order_by(similarity_rank(Product.name, product.name), Product.price.asc())
+                .order_by(
+                    similarity_rank(Product.name, product.name), Product.price.asc()
+                )
                 .limit(3)
             )
             fallback = [
@@ -873,8 +1033,13 @@ class BuyerMixin(BaseMixin):
                 "fallback": fallback,
             }
         except Exception as e:
-            logger.error(f"validate_stock_availability_atomic({product_id}): {e}", exc_info=True)
-            return {"status": "error", "message": "Erreur technique lors de la vérification du stock."}
+            logger.error(
+                f"validate_stock_availability_atomic({product_id}): {e}", exc_info=True
+            )
+            return {
+                "status": "error",
+                "message": "Erreur technique lors de la vérification du stock.",
+            }
 
     async def reserve_future_offer(
         self,
@@ -901,7 +1066,9 @@ class BuyerMixin(BaseMixin):
         except (TypeError, ValueError):
             qty = 0.0
         if qty <= 0:
-            raise BusinessRuleException("La quantité à réserver doit être supérieure à 0.")
+            raise BusinessRuleException(
+                "La quantité à réserver doit être supérieure à 0."
+            )
 
         try:
             o_uuid = uuid.UUID(str(market_offer_id))
@@ -918,9 +1085,13 @@ class BuyerMixin(BaseMixin):
         if not offer:
             raise BusinessRuleException("Cette production n'est plus disponible.")
         if not bool(offer.preorder_enabled) or not bool(offer.is_public):
-            raise BusinessRuleException("Cette production n'accepte pas encore de précommande.")
+            raise BusinessRuleException(
+                "Cette production n'accepte pas encore de précommande."
+            )
         if str(offer.status or "").upper() in {"CLOSED", "CANCELLED", "SOLD_OUT"}:
-            raise BusinessRuleException(f"Cette production n'est plus ouverte (statut : {offer.status}).")
+            raise BusinessRuleException(
+                f"Cette production n'est plus ouverte (statut : {offer.status})."
+            )
 
         available = float(offer.available_quantity or 0.0)
         reserved = float(offer.reserved_quantity or 0.0)
@@ -939,7 +1110,9 @@ class BuyerMixin(BaseMixin):
         except (TypeError, ValueError):
             unit_price = None
         if unit_price is None:
-            unit_price = float(offer.price_per_unit) if offer.price_per_unit is not None else 0.0
+            unit_price = (
+                float(offer.price_per_unit) if offer.price_per_unit is not None else 0.0
+            )
         total = round(unit_price * qty, 2)
 
         eta = offer.estimated_available_at or offer.expected_harvest_date
@@ -949,7 +1122,8 @@ class BuyerMixin(BaseMixin):
             buyer_id=profile_obj.id,
             market_offer_id=offer.id,
             zone_id=zone_uuid,
-            customer_name=getattr(profile_obj, "establishment_name", None) or user_obj.name,
+            customer_name=getattr(profile_obj, "establishment_name", None)
+            or user_obj.name,
             customer_phone=normalize_phone(buyer_phone, required=False),
             total_amount=total,
             subtotal=total,
@@ -994,13 +1168,17 @@ class BuyerMixin(BaseMixin):
                 f"*{offer.product_label}* ({price_txt} FCFA/unité).\n"
                 f"📅 Disponibilité prévue : *{eta_txt}*.\n"
                 f"💰 Total estimé : *{_fmt_num(total)} FCFA*.\n\n"
-                + ("🔔 Le producteur a été notifié de votre réservation."
-                   if notified else
-                   "Le producteur sera informé de votre réservation.")
+                + (
+                    "🔔 Le producteur a été notifié de votre réservation."
+                    if notified
+                    else "Le producteur sera informé de votre réservation."
+                )
             ),
         }
 
-    async def _notify_producer_reservation(self, offer: MarketOffer, qty: float, total: float) -> bool:
+    async def _notify_producer_reservation(
+        self, offer: MarketOffer, qty: float, total: float
+    ) -> bool:
         """Enfile une notif producteur (« un acheteur a réservé X ») via l'outbox.
 
         Dans la MÊME transaction que la réservation : si le commit échoue, la
@@ -1025,24 +1203,33 @@ class BuyerMixin(BaseMixin):
             from agriconnect.workers.repositories import outbox_repo as _outbox_repo
 
             eta = offer.estimated_available_at or offer.expected_harvest_date
-            await _outbox_repo.enqueue(self.session, [{
-                "channel": "WHATSAPP",
-                "recipient_phone": prod_phone,
-                "template_key": _tpl.PREORDER_RESERVED_PRODUCER,
-                "payload": {
-                    "product": offer.product_label,
-                    "quantity": float(qty),
-                    "unit": offer.unit or "KG",
-                    "total": float(total),
-                    "reserved_total": float(offer.reserved_quantity or 0.0),
-                    "available": float(offer.available_quantity or 0.0),
-                    "eta": eta.strftime("%d/%m/%Y") if isinstance(eta, datetime) else None,
-                },
-                "dedupe_key": f"PREORDER_RESERVED:{offer.id}:{datetime.now(timezone.utc).replace(tzinfo=None).timestamp()}",
-            }])
+            await _outbox_repo.enqueue(
+                self.session,
+                [
+                    {
+                        "channel": "WHATSAPP",
+                        "recipient_phone": prod_phone,
+                        "template_key": _tpl.PREORDER_RESERVED_PRODUCER,
+                        "payload": {
+                            "product": offer.product_label,
+                            "quantity": float(qty),
+                            "unit": offer.unit or "KG",
+                            "total": float(total),
+                            "reserved_total": float(offer.reserved_quantity or 0.0),
+                            "available": float(offer.available_quantity or 0.0),
+                            "eta": eta.strftime("%d/%m/%Y")
+                            if isinstance(eta, datetime)
+                            else None,
+                        },
+                        "dedupe_key": f"PREORDER_RESERVED:{offer.id}:{datetime.now(timezone.utc).replace(tzinfo=None).timestamp()}",
+                    }
+                ],
+            )
             return True
         except Exception as exc:  # pragma: no cover - non bloquant
-            logger.warning("[Preorder] notif producteur échouée (non bloquant): %s", exc)
+            logger.warning(
+                "[Preorder] notif producteur échouée (non bloquant): %s", exc
+            )
             return False
 
     async def create_preorder_draft(
@@ -1063,7 +1250,9 @@ class BuyerMixin(BaseMixin):
         if not current_session:
             raise BusinessRuleException("Session indisponible.")
         if not cart_items:
-            raise BusinessRuleException("Le panier est vide, impossible de créer une précommande.")
+            raise BusinessRuleException(
+                "Le panier est vide, impossible de créer une précommande."
+            )
 
         user_obj, profile_obj = await self.get_buyer_profile(phone=buyer_phone)
 
@@ -1082,14 +1271,20 @@ class BuyerMixin(BaseMixin):
                 fulfillment_dt = datetime.fromisoformat(str(expected_fulfillment_date))
             except ValueError:
                 fulfillment_dt = None
-        if fulfillment_dt is not None and getattr(fulfillment_dt, "tzinfo", None) is not None:
-            fulfillment_dt = fulfillment_dt.astimezone(timezone.utc).replace(tzinfo=None)
+        if (
+            fulfillment_dt is not None
+            and getattr(fulfillment_dt, "tzinfo", None) is not None
+        ):
+            fulfillment_dt = fulfillment_dt.astimezone(timezone.utc).replace(
+                tzinfo=None
+            )
 
         new_order = Order(
             id=uuid.uuid4(),
             buyer_id=profile_obj.id,
             zone_id=zone_uuid,
-            customer_name=getattr(profile_obj, "establishment_name", None) or user_obj.name,
+            customer_name=getattr(profile_obj, "establishment_name", None)
+            or user_obj.name,
             customer_phone=normalize_phone(buyer_phone, required=False),
             total_amount=0.0,
             subtotal=0.0,
@@ -1119,7 +1314,9 @@ class BuyerMixin(BaseMixin):
             if p_uuid is None or qty <= 0:
                 continue
 
-            product = await current_session.scalar(select(Product).where(Product.id == p_uuid))
+            product = await current_session.scalar(
+                select(Product).where(Product.id == p_uuid)
+            )
             if not product:
                 unresolved.append(str(item.get("product_id")))
                 continue
@@ -1128,13 +1325,15 @@ class BuyerMixin(BaseMixin):
             line_total = price * qty
             running_total += line_total
 
-            current_session.add(OrderItem(
-                id=uuid.uuid4(),
-                order_id=new_order.id,
-                product_id=product.id,
-                quantity=qty,
-                price_at_sale=price,
-            ))
+            current_session.add(
+                OrderItem(
+                    id=uuid.uuid4(),
+                    order_id=new_order.id,
+                    product_id=product.id,
+                    quantity=qty,
+                    price_at_sale=price,
+                )
+            )
             summary_items.append(f"{product.name} (x{qty} {product.unit or 'KG'})")
 
         if not summary_items:
@@ -1192,11 +1391,15 @@ class BuyerMixin(BaseMixin):
         except (TypeError, ValueError):
             raise BusinessRuleException("Prix proposé invalide.") from None
         if offer <= 0:
-            raise BusinessRuleException("Le prix proposé doit être strictement positif.")
+            raise BusinessRuleException(
+                "Le prix proposé doit être strictement positif."
+            )
 
         user_obj, profile_obj = await self.get_buyer_profile(phone=buyer_phone)
 
-        product = await current_session.scalar(select(Product).where(Product.id == p_uuid))
+        product = await current_session.scalar(
+            select(Product).where(Product.id == p_uuid)
+        )
         if not product:
             raise BusinessRuleException(
                 "Produit introuvable, impossible d'ouvrir une négociation.",
@@ -1220,7 +1423,9 @@ class BuyerMixin(BaseMixin):
 
         zone_name = "À convenir"
         if user_obj.zone_id:
-            zname = await current_session.scalar(select(Zone.name).where(Zone.id == user_obj.zone_id))
+            zname = await current_session.scalar(
+                select(Zone.name).where(Zone.id == user_obj.zone_id)
+            )
             if zname:
                 zone_name = zname
 
@@ -1232,7 +1437,10 @@ class BuyerMixin(BaseMixin):
             quantity=qty,
             unit=(product.unit or "KG").upper(),
             max_price_per_unit=offer,
-            description=(message or f"Négociation sur {product.name} (prix proposé: {offer} FCFA)."),
+            description=(
+                message
+                or f"Négociation sur {product.name} (prix proposé: {offer} FCFA)."
+            ),
             delivery_location=zone_name,
             delivery_deadline=deadline,
             deadline=deadline,
@@ -1294,7 +1502,10 @@ class BuyerMixin(BaseMixin):
                 _, profile_obj = await self.get_buyer_profile(phone=buyer_phone)
                 stmt = stmt.where(Order.buyer_id == profile_obj.id)
             else:
-                return {"status": "error", "message": "Fournir order_id ou buyer_phone."}
+                return {
+                    "status": "error",
+                    "message": "Fournir order_id ou buyer_phone.",
+                }
 
             order = await current_session.scalar(stmt)
             if not order:
@@ -1310,7 +1521,8 @@ class BuyerMixin(BaseMixin):
                     "product_name": it.product.name if it.product else "?",
                     "quantity": float(it.quantity or 0.0),
                     "unit_price": float(it.price_at_sale or 0.0),
-                    "line_total": float(it.quantity or 0.0) * float(it.price_at_sale or 0.0),
+                    "line_total": float(it.quantity or 0.0)
+                    * float(it.price_at_sale or 0.0),
                 }
                 for it in (order.items or [])
             ]
@@ -1326,7 +1538,9 @@ class BuyerMixin(BaseMixin):
                         "status": auction.status,
                         "max_price_per_unit": float(auction.max_price_per_unit or 0.0),
                         "quantity": float(auction.quantity or 0.0),
-                        "winner_bid_id": str(auction.winner_bid_id) if auction.winner_bid_id else None,
+                        "winner_bid_id": str(auction.winner_bid_id)
+                        if auction.winner_bid_id
+                        else None,
                     }
 
             return {
@@ -1344,7 +1558,9 @@ class BuyerMixin(BaseMixin):
                     "currency": order.currency or "XOF",
                     "items": items,
                     "negotiation": negotiation,
-                    "created_at": order.created_at.isoformat() if order.created_at else None,
+                    "created_at": order.created_at.isoformat()
+                    if order.created_at
+                    else None,
                 },
                 "message": (
                     f"Commande #{str(order.id)[:8].upper()} — {order.status} — "
@@ -1352,9 +1568,14 @@ class BuyerMixin(BaseMixin):
                 ),
             }
         except Exception as e:
-            logger.error(f"get_transaction_summary(order={order_id}, phone={buyer_phone}): {e}", exc_info=True)
-            return {"status": "error", "message": "Erreur technique lors de la récupération de la transaction."}
-
+            logger.error(
+                f"get_transaction_summary(order={order_id}, phone={buyer_phone}): {e}",
+                exc_info=True,
+            )
+            return {
+                "status": "error",
+                "message": "Erreur technique lors de la récupération de la transaction.",
+            }
 
     async def confirm_preorder_draft(
         self,
@@ -1380,7 +1601,8 @@ class BuyerMixin(BaseMixin):
 
             if not is_within_burkina_faso(delivery_lat, delivery_lon):
                 raise BusinessRuleException(
-                    "Le point de livraison est hors du Burkina Faso.", reason="out_of_country",
+                    "Le point de livraison est hors du Burkina Faso.",
+                    reason="out_of_country",
                 )
 
         o_uuid = self._to_uuid(preorder_id)
@@ -1414,27 +1636,29 @@ class BuyerMixin(BaseMixin):
                 continue
 
             product = await current_session.scalar(
-                select(Product)
-                .where(Product.id == item.product_id)
-                .with_for_update()
+                select(Product).where(Product.id == item.product_id).with_for_update()
             )
             if not product:
-                insufficient.append({
-                    "product_id": str(item.product_id),
-                    "reason": "product_not_found",
-                })
+                insufficient.append(
+                    {
+                        "product_id": str(item.product_id),
+                        "reason": "product_not_found",
+                    }
+                )
                 continue
 
             requested = float(item.quantity or 0.0)
             available = float(product.quantity_for_sale or 0.0)
             if available < requested:
-                insufficient.append({
-                    "product_id": str(product.id),
-                    "name": product.name,
-                    "requested": requested,
-                    "available": available,
-                    "unit": (product.unit or "KG").upper(),
-                })
+                insufficient.append(
+                    {
+                        "product_id": str(product.id),
+                        "name": product.name,
+                        "requested": requested,
+                        "available": available,
+                        "unit": (product.unit or "KG").upper(),
+                    }
+                )
                 continue
 
             product.quantity_for_sale = available - requested
@@ -1469,7 +1693,6 @@ class BuyerMixin(BaseMixin):
                 f"pour {float(order.total_amount or 0.0)} {order.currency or 'XOF'}."
             ),
         }
-
 
     async def cancel_preorder_draft(
         self,
@@ -1506,7 +1729,9 @@ class BuyerMixin(BaseMixin):
         order.status = "CANCELLED"
         order.cancellation_role = "BUYER"
         if reason:
-            order.delivery_desc = (order.delivery_desc or "") + f"\n[CancelReason] {reason}"
+            order.delivery_desc = (
+                order.delivery_desc or ""
+            ) + f"\n[CancelReason] {reason}"
         await current_session.flush()
 
         return {
@@ -1514,7 +1739,6 @@ class BuyerMixin(BaseMixin):
             "order_id": str(order.id),
             "message": f"❌ Précommande #{str(order.id)[:8].upper()} annulée.",
         }
-
 
     async def update_negotiation_offer(
         self,
@@ -1535,7 +1759,9 @@ class BuyerMixin(BaseMixin):
         except (TypeError, ValueError):
             raise BusinessRuleException("Nouveau prix invalide.") from None
         if price <= 0:
-            raise BusinessRuleException("Le nouveau prix doit être strictement positif.")
+            raise BusinessRuleException(
+                "Le nouveau prix doit être strictement positif."
+            )
 
         _, profile_obj = await self.get_buyer_profile(phone=buyer_phone)
         stmt = (
@@ -1565,7 +1791,6 @@ class BuyerMixin(BaseMixin):
             "new_price": price,
             "message": f"🔁 Offre mise à jour : {old} → {price} FCFA/{auction.unit}.",
         }
-
 
     async def close_negotiation_session(
         self,
@@ -1609,4 +1834,3 @@ class BuyerMixin(BaseMixin):
             "negotiation_id": str(auction.id),
             "message": "❌ Négociation annulée.",
         }
-

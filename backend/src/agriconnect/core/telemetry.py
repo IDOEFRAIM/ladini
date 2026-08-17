@@ -17,10 +17,10 @@ Activation via settings/env :
     PROMETHEUS_ENABLED
     LANGFUSE_ENABLED, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST
 """
+
 from __future__ import annotations
 
 import logging
-import time
 from contextvars import ContextVar
 from typing import Any, Dict, Optional
 
@@ -31,10 +31,17 @@ logger = logging.getLogger("agriconnect.telemetry")
 # ─────────────────────────────────────────────────────────────────────
 # Le trace_id OTel courant, propagé de bout en bout. Sert d'ID de Trace
 # Langfuse pour lier l'infra à l'IA. `None` hors d'une requête tracée.
-_current_trace_id: ContextVar[Optional[str]] = ContextVar("current_trace_id", default=None)
+_current_trace_id: ContextVar[Optional[str]] = ContextVar(
+    "current_trace_id", default=None
+)
 # Contexte métier attaché à la trace courante (phone, role, goal…) pour
 # enrichir la Trace Langfuse au 1er appel LLM.
-_current_trace_meta: ContextVar[Dict[str, Any]] = ContextVar("current_trace_meta", default={})
+# default=None (pas {}) : un dict par défaut serait UN SEUL objet partagé
+# entre tous les contextes n'ayant jamais appelé `.set()` — une mutation en
+# place fuiterait entre requêtes concurrentes. Les lecteurs font `.get() or {}`.
+_current_trace_meta: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+    "current_trace_meta", default=None
+)
 
 # Handles singletons (initialisés une fois au démarrage du process).
 _langfuse_client: Optional[Any] = None
@@ -131,20 +138,26 @@ def init_telemetry(service_name: str = "agriconnect") -> None:
     if _flag("OTEL_ENABLED", False):
         try:
             from opentelemetry import trace
-            from opentelemetry.sdk.resources import Resource
-            from opentelemetry.sdk.trace import TracerProvider
-            from opentelemetry.sdk.trace.export import BatchSpanProcessor
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
                 OTLPSpanExporter,
             )
+            from opentelemetry.sdk.resources import Resource
+            from opentelemetry.sdk.trace import TracerProvider
+            from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
-            endpoint = getattr(settings, "OTEL_EXPORTER_OTLP_ENDPOINT", None) if settings else None
+            endpoint = (
+                getattr(settings, "OTEL_EXPORTER_OTLP_ENDPOINT", None)
+                if settings
+                else None
+            )
             provider = TracerProvider(
                 resource=Resource.create({"service.name": service_name})
             )
             if endpoint:
                 provider.add_span_processor(
-                    BatchSpanProcessor(OTLPSpanExporter(endpoint=endpoint, insecure=True))
+                    BatchSpanProcessor(
+                        OTLPSpanExporter(endpoint=endpoint, insecure=True)
+                    )
                 )
             trace.set_tracer_provider(provider)
             _otel_tracer = trace.get_tracer(service_name)
@@ -173,6 +186,7 @@ def init_telemetry(service_name: str = "agriconnect") -> None:
 def _otel_enabled() -> bool:
     try:
         from agriconnect.core.settings import settings
+
         return bool(getattr(settings, "OTEL_ENABLED", False))
     except Exception:
         return False
@@ -184,6 +198,7 @@ def instrument_fastapi(app: Any) -> None:
         return
     try:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
         FastAPIInstrumentor.instrument_app(app)
         logger.info("[telemetry] FastAPI instrumenté (OTel).")
     except Exception as exc:
@@ -204,6 +219,7 @@ def instrument_celery() -> None:
         return
     try:
         from opentelemetry.instrumentation.celery import CeleryInstrumentor
+
         CeleryInstrumentor().instrument()
         logger.info("[telemetry] Celery instrumenté (OTel).")
     except Exception as exc:
@@ -217,6 +233,7 @@ def new_trace_id() -> str:
     """Génère un trace_id (hex 32) — format OTel, réutilisable comme id Langfuse."""
     try:
         from opentelemetry import trace
+
         span = trace.get_current_span()
         ctx = span.get_span_context() if span else None
         if ctx and getattr(ctx, "trace_id", 0):
@@ -224,6 +241,7 @@ def new_trace_id() -> str:
     except Exception:
         pass
     import uuid
+
     return uuid.uuid4().hex
 
 
@@ -291,9 +309,13 @@ def record_generation(
             _metric("llm_latency").labels(model=model).observe(latency_s)
         if _metric("llm_tokens"):
             if prompt_tokens:
-                _metric("llm_tokens").labels(model=model, kind="prompt").inc(prompt_tokens)
+                _metric("llm_tokens").labels(model=model, kind="prompt").inc(
+                    prompt_tokens
+                )
             if completion_tokens:
-                _metric("llm_tokens").labels(model=model, kind="completion").inc(completion_tokens)
+                _metric("llm_tokens").labels(model=model, kind="completion").inc(
+                    completion_tokens
+                )
     except Exception:
         pass
 
@@ -342,9 +364,13 @@ def flush() -> None:
 def observe_http(method: str, route: str, status_code: int, duration_s: float) -> None:
     try:
         if _metric("http_requests"):
-            _metric("http_requests").labels(method=method, route=route, status=str(status_code)).inc()
+            _metric("http_requests").labels(
+                method=method, route=route, status=str(status_code)
+            ).inc()
         if _metric("http_latency"):
-            _metric("http_latency").labels(method=method, route=route).observe(duration_s)
+            _metric("http_latency").labels(method=method, route=route).observe(
+                duration_s
+            )
         if status_code >= 500 and _metric("http_5xx"):
             _metric("http_5xx").labels(route=route).inc()
     except Exception:
@@ -362,7 +388,8 @@ def count_webhook(channel: str = "twilio") -> None:
 def prometheus_asgi_response():
     """Retourne (body, content_type) pour l'endpoint /metrics, ou None si absent."""
     try:
-        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
         return generate_latest(), CONTENT_TYPE_LATEST
     except Exception:
         return None

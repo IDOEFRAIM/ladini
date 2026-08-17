@@ -1,23 +1,27 @@
 """Action handlers for the Finance domain."""
+
 from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Tuple
 
-from agriconnect.graphs.agents.market_coach.registry import register_action
-from agriconnect.graphs.agents.market_coach.actions.tooling import ToolResolver
-from agriconnect.graphs.agents.market_coach.domain import DomainContext
-from agriconnect.graphs.agents.market_coach.domain.finance import (
-    FinanceService,
-    FinanceGetSummaryCommand,
-    FinanceLogExpenseCommand,
-)
 from agriconnect.graphs.agents.market_coach.actions.finance_dto import (
     FinanceGetSummaryPayload,
     FinanceLogExpensePayload,
 )
+from agriconnect.graphs.agents.market_coach.actions.tooling import ToolResolver
+from agriconnect.graphs.agents.market_coach.domain import DomainContext
+from agriconnect.graphs.agents.market_coach.domain.finance import (
+    FinanceGetSummaryCommand,
+    FinanceLogExpenseCommand,
+    FinanceService,
+)
+from agriconnect.graphs.agents.market_coach.registry import register_action
+
 
 @register_action("FINANCE_GET_SUMMARY", mode="READ")
-def prep_finance_get_summary(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_finance_get_summary(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare le bilan comptable synthétique."""
     context = DomainContext.from_state(state)
     dto = FinanceGetSummaryPayload.from_payload(payload)
@@ -33,7 +37,9 @@ def prep_finance_get_summary(state: Mapping[str, Any], payload: Mapping[str, Any
 
 
 @register_action("FINANCE_LOG_EXPENSE", mode="WRITE")
-def prep_finance_log_expense(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_finance_log_expense(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     dto = FinanceLogExpensePayload.from_payload(payload)
     command = FinanceLogExpenseCommand(

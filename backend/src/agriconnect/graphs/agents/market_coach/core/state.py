@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """MarketAgentState — Single Source of Truth pour la machine à états MarketCoach.
 
 Contrat strict d'état partagé entre tous les nodes du graphe LangGraph.
@@ -15,10 +13,11 @@ Règles de conception :
   - Le node `Goal Planner` est SEUL responsable de l'écriture de `current_goal`,
     `goal_stack`, `suspended_goal`. Les autres nodes ne touchent jamais ces clés.
 """
+from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
-from typing_extensions import Annotated, TypedDict
 
+from typing_extensions import Annotated, TypedDict
 
 # =====================================================================
 # REDUCERS — canonical source: agriconnect.agents.reducers
@@ -43,7 +42,6 @@ from agriconnect.agents.reducers import (  # noqa: F401
 from agriconnect.graphs.agents.market_coach.flows.buyer.state import BuyerContext
 from agriconnect.graphs.agents.market_coach.flows.producer.state import ProducerContext
 
-
 # =====================================================================
 # EVENT TYPES
 # =====================================================================
@@ -67,8 +65,8 @@ UserEvent = Literal[
 # MAIN STATE
 # =====================================================================
 
-class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
 
+class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # ================================================================
     # 1. RAW INPUT LAYER
     # ================================================================
@@ -144,14 +142,8 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # ================================================================
 
     security_status: Annotated[
-        Literal[
-            "SAFE",
-            "SUSPICIOUS",
-            "WARNING",
-            "SCAM_DETECTED",
-            "BLOCKED"
-        ],
-        replace_value
+        Literal["SAFE", "SUSPICIOUS", "WARNING", "SCAM_DETECTED", "BLOCKED"],
+        replace_value,
     ]
 
     security_reason: Annotated[Optional[str], replace_value]
@@ -172,25 +164,13 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
 
     validation_status: Annotated[Optional[str], replace_value]
 
-    extracted_entities: Annotated[
-        Dict[str, Any],
-        merge_dict
-    ]
+    extracted_entities: Annotated[Dict[str, Any], merge_dict]
 
-    raw_analysis: Annotated[
-        Dict[str, Any],
-        merge_dict
-    ]
+    raw_analysis: Annotated[Dict[str, Any], merge_dict]
 
-    intent_competition: Annotated[
-        List[Dict[str, Any]],
-        replace_list
-    ]
+    intent_competition: Annotated[List[Dict[str, Any]], replace_list]
 
-    cognitive_decision: Annotated[
-        Dict[str, Any],
-        merge_dict
-    ]
+    cognitive_decision: Annotated[Dict[str, Any], merge_dict]
 
     # ================================================================
     # 5. GOAL MANAGEMENT
@@ -209,15 +189,9 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # faire. Voir [[market-coach-turn-boundary-state]].
     last_terminated_goal: Annotated[Optional[str], replace_value]
 
-    pending_goal: Annotated[
-        Optional[str],
-        replace_value
-    ]
+    pending_goal: Annotated[Optional[str], replace_value]
 
-    goal_stack: Annotated[
-        List[str],
-        replace_list
-    ]
+    goal_stack: Annotated[List[str], replace_list]
 
     goal_status: Annotated[
         Literal[
@@ -228,20 +202,14 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
             "EXECUTING",
             "COMPLETED",
             "FAILED",
-            "INTERRUPTED"
+            "INTERRUPTED",
         ],
-        replace_value
+        replace_value,
     ]
 
-    current_plan_id: Annotated[
-        Optional[str],
-        replace_value
-    ]
+    current_plan_id: Annotated[Optional[str], replace_value]
 
-    goal_metadata: Annotated[
-        Dict[str, Any],
-        merge_dict
-    ]
+    goal_metadata: Annotated[Dict[str, Any], merge_dict]
 
     # ================================================================
     # 6. EXPECTATION ENGINE (Focus Formulaire IHM)
@@ -258,142 +226,73 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
                 "SELECTION",
                 "LOCATION",
                 "DATE",
-                "NONE"
+                "NONE",
             ]
         ],
-        replace_value
+        replace_value,
     ]
 
-    last_agent_question: Annotated[
-        Optional[str],
-        replace_value
-    ]
+    last_agent_question: Annotated[Optional[str], replace_value]
 
-    expected_candidates: Annotated[
-        List[str],
-        replace_list
-    ]
+    expected_candidates: Annotated[List[str], replace_list]
 
-    last_missing_field: Annotated[
-        Optional[str],
-        replace_value
-    ]
+    last_missing_field: Annotated[Optional[str], replace_value]
 
     # ================================================================
     # 7. WORKING MEMORY
     # ================================================================
 
-    working_memory: Annotated[
-        Dict[str, Any],
-        merge_dict
-    ]
+    working_memory: Annotated[Dict[str, Any], merge_dict]
 
-    transaction_payload: Annotated[
-        Dict[str, Any],
-        merge_dict
-    ]
+    transaction_payload: Annotated[Dict[str, Any], merge_dict]
 
-    draft_payload: Annotated[
-        Dict[str, Any],
-        merge_dict
-    ]
+    draft_payload: Annotated[Dict[str, Any], merge_dict]
 
-    stable_entities: Annotated[
-        Dict[str, Any],
-        merge_dict
-    ]
+    stable_entities: Annotated[Dict[str, Any], merge_dict]
 
-    volatile_entities: Annotated[
-        Dict[str, Any],
-        merge_dict
-    ]
+    volatile_entities: Annotated[Dict[str, Any], merge_dict]
 
-    available_mapping: Annotated[
-        Dict[str, str],
-        replace_value
-    ]
+    available_mapping: Annotated[Dict[str, str], replace_value]
 
-    pending_cleanup: Annotated[
-        Optional[Dict[str, Any]],
-        replace_value
-    ]
+    pending_cleanup: Annotated[Optional[Dict[str, Any]], replace_value]
 
     # ================================================================
     # 8. SLOT TRACKING (Deltas du validateur)
     # ================================================================
 
-    required_fields: Annotated[
-        List[str],
-        replace_list
-    ]
+    required_fields: Annotated[List[str], replace_list]
 
-    missing_fields: Annotated[
-        List[str],
-        replace_list
-    ]
+    missing_fields: Annotated[List[str], replace_list]
 
-    completed_fields: Annotated[
-        List[str],
-        replace_list
-    ]
+    completed_fields: Annotated[List[str], replace_list]
 
-    validation_errors: Annotated[
-        List[str],
-        replace_list
-    ]
+    validation_errors: Annotated[List[str], replace_list]
 
-    warnings: Annotated[
-        List[str],
-        replace_list
-    ]
+    warnings: Annotated[List[str], replace_list]
 
     # ================================================================
     # 9. INTERRUPTIONS / MULTI-TASK
     # ================================================================
 
-    interruption_detected: Annotated[
-        bool,
-        replace_value
-    ]
+    interruption_detected: Annotated[bool, replace_value]
 
-    interruption_type: Annotated[
-        Optional[str],
-        replace_value
-    ]
+    interruption_type: Annotated[Optional[str], replace_value]
 
-    interruption_payload: Annotated[
-        Dict[str, Any],
-        merge_dict
-    ]
+    interruption_payload: Annotated[Dict[str, Any], merge_dict]
 
-    suspended_goal: Annotated[
-        Optional[str],
-        replace_value
-    ]
+    suspended_goal: Annotated[Optional[str], replace_value]
 
-    suspended_payload: Annotated[
-        Dict[str, Any],
-        merge_dict
-    ]
+    suspended_payload: Annotated[Dict[str, Any], merge_dict]
 
     # ================================================================
     # 10. CONFIRMATION / EXECUTION
     # ================================================================
 
-    waiting_for_confirmation: Annotated[
-        bool,
-        replace_value
-    ]
+    waiting_for_confirmation: Annotated[bool, replace_value]
 
-    is_certified: Annotated[
-        bool,
-        replace_value
-    ]
+    is_certified: Annotated[bool, replace_value]
 
-    confirmation_summary: Annotated[
-        Optional[str],
-        replace_value
-    ]
+    confirmation_summary: Annotated[Optional[str], replace_value]
 
     # Réponse COURTE générée par le LLM quand l'utilisateur dit autre chose
     # qu'un oui/non pendant une confirmation en attente (question,
@@ -401,10 +300,7 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # nodes/rendering/confirm.py au lieu de le répéter mot pour mot. Voir
     # confirmation_gate.py::_llm_deviation_reply et
     # [[onboarding-adaptive-questions-2026-08]] (même principe).
-    confirmation_deviation_note: Annotated[
-        Optional[str],
-        replace_value
-    ]
+    confirmation_deviation_note: Annotated[Optional[str], replace_value]
 
     # Horodatage (epoch seconds) auquel confirmation_gate a levé cette
     # confirmation en attente. Sert de garde-fou de péremption : si trop de
@@ -412,63 +308,33 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # abandonnée silencieusement plutôt que ré-affichée indéfiniment sur un
     # message sans rapport (ex: partage GPS reçu bien après coup). Voir
     # confirmation_gate.py::_CONFIRMATION_TTL_SECONDS.
-    confirmation_raised_at: Annotated[
-        Optional[float],
-        replace_value
-    ]
+    confirmation_raised_at: Annotated[Optional[float], replace_value]
 
-    execution_authorized: Annotated[
-        bool,
-        replace_value
-    ]
+    execution_authorized: Annotated[bool, replace_value]
 
-    execution_result: Annotated[
-        Dict[str, Any],
-        merge_dict
-    ]
+    execution_result: Annotated[Dict[str, Any], merge_dict]
 
     # ================================================================
     # 11. MCP / TOOL EXECUTION
     # ================================================================
 
-    selected_tool: Annotated[
-        Optional[str],
-        replace_value
-    ]
+    selected_tool: Annotated[Optional[str], replace_value]
 
-    selected_tool_args: Annotated[
-        Dict[str, Any],
-        merge_dict
-    ]
+    selected_tool_args: Annotated[Dict[str, Any], merge_dict]
 
-    tool_execution_history: Annotated[
-        List[Dict[str, Any]],
-        replace_list
-    ]
+    tool_execution_history: Annotated[List[Dict[str, Any]], replace_list]
 
-    retry_count: Annotated[
-        int,
-        replace_value
-    ]
+    retry_count: Annotated[int, replace_value]
 
     # ================================================================
     # 12. RESPONSE GENERATION
     # ================================================================
 
-    final_response: Annotated[
-        Optional[str],
-        replace_value
-    ]
+    final_response: Annotated[Optional[str], replace_value]
 
-    ag_ui_component: Annotated[
-        Optional[Dict[str, Any]],
-        replace_value
-    ]
+    ag_ui_component: Annotated[Optional[Dict[str, Any]], replace_value]
 
-    reply_audio_url: Annotated[
-        Optional[str],
-        replace_value
-    ]
+    reply_audio_url: Annotated[Optional[str], replace_value]
 
     response_strategy: Annotated[
         Optional[
@@ -484,7 +350,7 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
                 "ONBOARDING",
             ]
         ],
-        replace_value
+        replace_value,
     ]
 
     onboarding_prompt: Annotated[Optional[str], replace_value]
@@ -504,25 +370,16 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
             "EXECUTING",
             "COMPLETED",
             "ERROR",
-            "BLOCKED"
+            "BLOCKED",
         ],
-        replace_value
+        replace_value,
     ]
 
-    is_locked: Annotated[
-        bool,
-        replace_value
-    ]
+    is_locked: Annotated[bool, replace_value]
 
-    should_replan: Annotated[
-        bool,
-        replace_value
-    ]
+    should_replan: Annotated[bool, replace_value]
 
-    should_interrupt: Annotated[
-        bool,
-        replace_value
-    ]
+    should_interrupt: Annotated[bool, replace_value]
 
     # ================================================================
     # 14. SLOT-FILLING (DRY form engine)

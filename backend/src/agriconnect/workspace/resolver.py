@@ -5,6 +5,7 @@ _workspace_ from Postgres, keep existing tunnel information, but we always
 force the agent to ``"market"``. This keeps the persistence model unchanged
 while dramatically simplifying orchestration.
 """
+
 from __future__ import annotations
 
 import logging
@@ -32,14 +33,17 @@ class WorkspaceResolver:
             ws = self._build_initial_workspace(workspace_id, workspace_type)
             logger.info(
                 "WorkspaceResolver: new workspace %s type=%s",
-                workspace_id, ws.workspace_type,
+                workspace_id,
+                ws.workspace_type,
             )
             return ws
 
         if workspace_type and ws.workspace_type != workspace_type:
             logger.info(
                 "WorkspaceResolver: %s type updated %s → %s",
-                workspace_id, ws.workspace_type, workspace_type,
+                workspace_id,
+                ws.workspace_type,
+                workspace_type,
             )
             ws.workspace_type = workspace_type
             ws.mark_dirty()

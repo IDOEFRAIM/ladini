@@ -3,18 +3,17 @@
 Le webhook ne route plus : il transmet (phone, text) à l'Orchestrator via
 Celery. C'est le WorkspaceResolver qui décide l'agent, de façon collante.
 """
+
 import logging
 from typing import Optional
 
 import redis
-
 from fastapi import APIRouter, BackgroundTasks, Form, Request, Response
 
 from agriconnect.api.tasks import process_agent_task
-from agriconnect.graphs.roles import normalize_role
-from agriconnect.workspace.store import WorkspaceStore
-from agriconnect.core.settings import settings
 from agriconnect.core.geofencing import OUT_OF_COUNTRY_MESSAGE
+from agriconnect.core.settings import settings
+from agriconnect.graphs.roles import normalize_role
 from agriconnect.workers.media.product_photo_task import (
     pending_photo_key,
     pending_view_key,
@@ -24,6 +23,7 @@ from agriconnect.workers.media.product_photo_task import (
     send_product_photos_task,
     send_search_result_photos_task,
 )
+from agriconnect.workspace.store import WorkspaceStore
 
 router = APIRouter()
 logger = logging.getLogger("AgriConnect.TwilioWebhook")
@@ -35,10 +35,19 @@ def _empty_twiml() -> Response:
 
 
 # Statuts de livraison sortants à ignorer (callbacks de statut)
-_DELIVERY_STATUSES = frozenset({
-    "accepted", "queued", "sending", "sent",
-    "delivered", "read", "undelivered", "failed", "canceled",
-})
+_DELIVERY_STATUSES = frozenset(
+    {
+        "accepted",
+        "queued",
+        "sending",
+        "sent",
+        "delivered",
+        "read",
+        "undelivered",
+        "failed",
+        "canceled",
+    }
+)
 
 # Initialisation du client Redis
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
@@ -70,9 +79,11 @@ def _extract_media(form: dict) -> Optional[tuple[str, str]]:
     num_media_raw = str(form.get("NumMedia") or "")
     num_media = int(num_media_raw) if num_media_raw.isdigit() else 0
     media_url = form.get("MediaUrl0")
-    media_content_type = str(
-        form.get("MediaContentType0") or form.get("MimeType0") or ""
-    ).strip().lower()
+    media_content_type = (
+        str(form.get("MediaContentType0") or form.get("MimeType0") or "")
+        .strip()
+        .lower()
+    )
     if num_media > 0 and media_url and media_content_type.startswith("image/"):
         return str(media_url), media_content_type
     return None
@@ -93,7 +104,7 @@ def _extract_view_photos_query(text: str) -> Optional[str]:
     lowered = stripped.lower()
     for prefix in _VIEW_PHOTOS_PREFIXES:
         if lowered.startswith(prefix):
-            query = stripped[len(prefix):].strip()
+            query = stripped[len(prefix) :].strip()
             return query or None
     return None
 
@@ -114,10 +125,14 @@ def _extract_location(form: dict) -> Optional[tuple[float, float, Optional[str]]
         lat = float(raw_lat)
         lon = float(raw_lon)
     except (TypeError, ValueError):
-        logger.warning("TWILIO_WEBHOOK_LOCATION_INVALID | lat=%r | lon=%r", raw_lat, raw_lon)
+        logger.warning(
+            "TWILIO_WEBHOOK_LOCATION_INVALID | lat=%r | lon=%r", raw_lat, raw_lon
+        )
         return None
     if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
-        logger.warning("TWILIO_WEBHOOK_LOCATION_OUT_OF_RANGE | lat=%s | lon=%s", lat, lon)
+        logger.warning(
+            "TWILIO_WEBHOOK_LOCATION_OUT_OF_RANGE | lat=%s | lon=%s", lat, lon
+        )
         return None
     address = form.get("Address") or form.get("Label") or None
     return lat, lon, address
@@ -131,8 +146,8 @@ async def _persist_location_background(phone: str, lat: float, lon: float) -> No
     surchargé. Best-effort : toute erreur est loguée, jamais propagée.
     """
     try:
-        from agriconnect.services.database.auth import AuthMixin
         from agriconnect.core.database import get_sessionmaker
+        from agriconnect.services.database.auth import AuthMixin
 
         class _GeoOnlyService(AuthMixin):
             def __init__(self, session):
@@ -144,7 +159,9 @@ async def _persist_location_background(phone: str, lat: float, lon: float) -> No
 
         sessionmaker = get_sessionmaker()
         if sessionmaker is None:
-            logger.warning("TWILIO_WEBHOOK_LOCATION_SKIPPED | sessionmaker indisponible")
+            logger.warning(
+                "TWILIO_WEBHOOK_LOCATION_SKIPPED | sessionmaker indisponible"
+            )
             return
         async with sessionmaker() as session:
             service = _GeoOnlyService(session)
@@ -156,7 +173,8 @@ async def _persist_location_background(phone: str, lat: float, lon: float) -> No
                 await session.rollback()
                 logger.warning(
                     "TWILIO_WEBHOOK_LOCATION_NOT_SAVED | phone=***%s | reason=%s",
-                    phone[-4:], result.get("message"),
+                    phone[-4:],
+                    result.get("message"),
                 )
                 # Cas précis "hors Burkina Faso" : l'utilisateur doit être
                 # informé (un point GPS jamais persisté silencieusement ne
@@ -167,13 +185,17 @@ async def _persist_location_background(phone: str, lat: float, lon: float) -> No
                 if str(result.get("reason") or "") == "out_of_country":
                     try:
                         from agriconnect.api.tasks import send_confirmation_text
+
                         await send_confirmation_text(phone, OUT_OF_COUNTRY_MESSAGE)
                     except Exception:
                         logger.exception(
-                            "TWILIO_WEBHOOK_LOCATION_OUT_OF_COUNTRY_NOTICE_FAILED | phone=***%s", phone[-4:],
+                            "TWILIO_WEBHOOK_LOCATION_OUT_OF_COUNTRY_NOTICE_FAILED | phone=***%s",
+                            phone[-4:],
                         )
     except Exception:
-        logger.exception("TWILIO_WEBHOOK_LOCATION_PERSIST_ERROR | phone=***%s", phone[-4:])
+        logger.exception(
+            "TWILIO_WEBHOOK_LOCATION_PERSIST_ERROR | phone=***%s", phone[-4:]
+        )
 
 
 @router.post("/webhook/twilio")
@@ -185,7 +207,9 @@ async def twilio_webhook(
     MessageSid: str = Form(...),
 ):
     try:
-        return await _handle_twilio_webhook(request, background_tasks, From, Body, MessageSid)
+        return await _handle_twilio_webhook(
+            request, background_tasks, From, Body, MessageSid
+        )
     except Exception:
         # Filet de sécurité pour éviter l'erreur Twilio 12300 (Invalid Content-Type)
         logger.exception("TWILIO_WEBHOOK_UNHANDLED_ERROR")
@@ -205,11 +229,16 @@ async def _handle_twilio_webhook(
         # Renvoie True uniquement si la clé n'existait pas (nouveau message)
         is_new_message = redis_client.set(redis_key, "processing", ex=3600, nx=True)
         if not is_new_message:
-            logger.warning("TWILIO_WEBHOOK_DUPLICATE | MessageSid=%s déjà en cours ou traité", MessageSid)
+            logger.warning(
+                "TWILIO_WEBHOOK_DUPLICATE | MessageSid=%s déjà en cours ou traité",
+                MessageSid,
+            )
             return _empty_twiml()
     except Exception as e:
         # Si Redis flanche, on logue l'erreur mais on laisse passer le message (résilience)
-        logger.error("TWILIO_WEBHOOK_REDIS_ERROR | Impossible de vérifier l'idempotence: %s", e)
+        logger.error(
+            "TWILIO_WEBHOOK_REDIS_ERROR | Impossible de vérifier l'idempotence: %s", e
+        )
 
     # --- 2. NETTOYAGE DU NUMÉRO DE TÉLÉPHONE ---
     raw_sender = From
@@ -228,15 +257,21 @@ async def _handle_twilio_webhook(
     # Twilio, pas de contenu utilisateur).
     logger.info(
         "TWILIO_WEBHOOK_MEDIA_FIELDS | NumMedia=%r | MediaUrl0=%r | MediaContentType0=%r | MimeType0=%r",
-        form.get("NumMedia"), form.get("MediaUrl0"), form.get("MediaContentType0"), form.get("MimeType0"),
+        form.get("NumMedia"),
+        form.get("MediaUrl0"),
+        form.get("MediaContentType0"),
+        form.get("MimeType0"),
     )
 
     # --- 3. FILTRAGE DES CALLBACKS DE STATUT ---
-    status_value = (form.get("MessageStatus") or form.get("SmsStatus") or "").strip().lower()
+    status_value = (
+        (form.get("MessageStatus") or form.get("SmsStatus") or "").strip().lower()
+    )
     if status_value in _DELIVERY_STATUSES:
         logger.info(
             "TWILIO_STATUS_CALLBACK ignoré | sid=%s | status=%s",
-            MessageSid, status_value,
+            MessageSid,
+            status_value,
         )
         return _empty_twiml()
 
@@ -245,7 +280,9 @@ async def _handle_twilio_webhook(
     if interactive_id:
         logger.info(
             "TWILIO_INBOUND_INTERACTIVE | phone=%s | id=%s | form_keys=%s",
-            phone, interactive_id, list(form.keys())
+            phone,
+            interactive_id,
+            list(form.keys()),
         )
 
     # --- 4bis. CAPTURE GPS NATIVE (message de localisation WhatsApp) ---
@@ -259,13 +296,17 @@ async def _handle_twilio_webhook(
         lat, lon, address = location
         logger.info(
             "TWILIO_INBOUND_LOCATION | phone=%s | lat=%s | lon=%s | address=%r",
-            phone, lat, lon, address,
+            phone,
+            lat,
+            lon,
+            address,
         )
         background_tasks.add_task(_persist_location_background, phone, lat, lon)
         location_shared = True
 
     try:
         from agriconnect.core import telemetry
+
         telemetry.count_webhook("twilio")
         trace_id = getattr(request.state, "trace_id", None) or telemetry.new_trace_id()
     except Exception:
@@ -280,7 +321,9 @@ async def _handle_twilio_webhook(
     if media:
         media_url, media_content_type = media
         logger.info(
-            "TWILIO_INBOUND_MEDIA | phone=%s | content_type=%s", phone, media_content_type,
+            "TWILIO_INBOUND_MEDIA | phone=%s | content_type=%s",
+            phone,
+            media_content_type,
         )
         process_product_photo_task.delay(
             phone_number=phone,
@@ -304,7 +347,9 @@ async def _handle_twilio_webhook(
         except Exception:
             has_pending_photo = False
         if has_pending_photo:
-            resolve_pending_product_photo_task.delay(phone_number=phone, selection_text=text)
+            resolve_pending_product_photo_task.delay(
+                phone_number=phone, selection_text=text
+            )
             return _empty_twiml()
 
         # Même principe pour la désambiguïsation côté CONSULTATION (plusieurs
@@ -317,7 +362,9 @@ async def _handle_twilio_webhook(
         except Exception:
             has_pending_view = False
         if has_pending_view:
-            resolve_pending_view_photos_task.delay(phone_number=phone, selection_text=text)
+            resolve_pending_view_photos_task.delay(
+                phone_number=phone, selection_text=text
+            )
             return _empty_twiml()
 
     # --- 4quinquies. CONSULTATION "PHOTOS <NOM>" / "PHOTOS <NUMÉRO>" ---
@@ -333,9 +380,13 @@ async def _handle_twilio_webhook(
     #   - "photos <nom>"    -> catalogue PRODUCTEUR (ses propres produits).
     view_query = _extract_view_photos_query(text)
     if view_query:
-        logger.info("TWILIO_INBOUND_VIEW_PHOTOS | phone=%s | query=%r", phone, view_query)
+        logger.info(
+            "TWILIO_INBOUND_VIEW_PHOTOS | phone=%s | query=%r", phone, view_query
+        )
         if view_query.isdigit():
-            send_search_result_photos_task.delay(phone_number=phone, index_text=view_query)
+            send_search_result_photos_task.delay(
+                phone_number=phone, index_text=view_query
+            )
         else:
             send_product_photos_task.delay(phone_number=phone, product_query=view_query)
         return _empty_twiml()
@@ -352,7 +403,12 @@ async def _handle_twilio_webhook(
         resolved_role = normalize_role("BUYER" if ws_type == "buyer" else "PRODUCER")
         force_role = True
 
-    logger.info("Twilio webhook | phone=%s | text=%r | existing_workspace=%s", phone, text[:80], bool(workspace))
+    logger.info(
+        "Twilio webhook | phone=%s | text=%r | existing_workspace=%s",
+        phone,
+        text[:80],
+        bool(workspace),
+    )
 
     # --- 6. DÉLÉGATION À CELERY ---
     process_agent_task.delay(
@@ -361,9 +417,9 @@ async def _handle_twilio_webhook(
         workspace_type=ws_type,
         role=resolved_role,
         force_role=force_role,
-        interactive_id=interactive_id,   # Bypass LLM si clic bouton/liste
-        trace_id=trace_id,               # Propagation de la trace d'observabilité
-        location_shared=location_shared, # Position GPS reçue ce tour (accusé onboarding)
+        interactive_id=interactive_id,  # Bypass LLM si clic bouton/liste
+        trace_id=trace_id,  # Propagation de la trace d'observabilité
+        location_shared=location_shared,  # Position GPS reçue ce tour (accusé onboarding)
     )
 
     return _empty_twiml()

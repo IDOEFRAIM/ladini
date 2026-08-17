@@ -1,27 +1,31 @@
 """Action handlers for the System domain."""
+
 from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Tuple
 
-from agriconnect.graphs.agents.market_coach.registry import register_action
+from agriconnect.graphs.agents.market_coach.actions.system_dto import (
+    SystemBindZonePayload,
+    SystemCommitTransactionPayload,
+    SystemGetPendingPayload,
+    SystemReportAnomalyPayload,
+)
 from agriconnect.graphs.agents.market_coach.actions.tooling import ToolResolver
 from agriconnect.graphs.agents.market_coach.domain import DomainContext
 from agriconnect.graphs.agents.market_coach.domain.system import (
-    SystemService,
-    SystemGetPendingCommand,
-    SystemReportAnomalyCommand,
     SystemBindZoneCommand,
     SystemCommitTransactionCommand,
+    SystemGetPendingCommand,
+    SystemReportAnomalyCommand,
+    SystemService,
 )
-from agriconnect.graphs.agents.market_coach.actions.system_dto import (
-    SystemGetPendingPayload,
-    SystemReportAnomalyPayload,
-    SystemBindZonePayload,
-    SystemCommitTransactionPayload,
-)
+from agriconnect.graphs.agents.market_coach.registry import register_action
+
 
 @register_action("SYSTEM_GET_PENDING", mode="READ")
-def prep_system_get_pending(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_system_get_pending(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare la consultation des actions en attente.
 
     Outil MCP : get_pending_actions(agent_name?, limit?).
@@ -37,7 +41,9 @@ def prep_system_get_pending(state: Mapping[str, Any], payload: Mapping[str, Any]
 
 
 @register_action("SYSTEM_REPORT_ANOMALY", mode="WRITE")
-def prep_system_report_anomaly(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_system_report_anomaly(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     dto = SystemReportAnomalyPayload.from_payload(payload)
     command = SystemReportAnomalyCommand(
@@ -54,7 +60,9 @@ def prep_system_report_anomaly(state: Mapping[str, Any], payload: Mapping[str, A
 
 
 @register_action("SYSTEM_BIND_ZONE", mode="WRITE")
-def prep_system_bind_zone(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_system_bind_zone(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     dto = SystemBindZonePayload.from_payload(payload)
     command = SystemBindZoneCommand(phone=context.phone or "", zone=dto.zone)
@@ -65,10 +73,14 @@ def prep_system_bind_zone(state: Mapping[str, Any], payload: Mapping[str, Any]) 
 
 
 @register_action("SYSTEM_COMMIT_TRANSACTION", mode="WRITE")
-def prep_system_commit_transaction(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_system_commit_transaction(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     dto = SystemCommitTransactionPayload.from_payload(payload)
-    command = SystemCommitTransactionCommand(phone=context.phone or "", staging_id=dto.staging_id)
+    command = SystemCommitTransactionCommand(
+        phone=context.phone or "", staging_id=dto.staging_id
+    )
     service = SystemService(context=context)
     result = service.commit_transaction(command)
     tool_name = ToolResolver.resolve_name(result.tool_id or "commit_staged_transaction")

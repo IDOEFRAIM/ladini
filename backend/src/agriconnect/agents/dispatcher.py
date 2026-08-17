@@ -1,4 +1,5 @@
 """Generic dispatcher primitives shared by conversational agents."""
+
 from __future__ import annotations
 
 import inspect
@@ -66,7 +67,9 @@ class BaseAgentDispatcher:
         if not key:
             raise ValueError("intent name must be a non-empty string")
         if key in self._actions:
-            raise ValueError(f"Action '{intent}' already registered for {self.agent_name}")
+            raise ValueError(
+                f"Action '{intent}' already registered for {self.agent_name}"
+            )
         self._actions[key] = spec
 
     def has_action(self, intent: str) -> bool:
@@ -142,15 +145,19 @@ async def execute_prepared_action(
     """Executes a prepared action with automatic fallback handling."""
 
     try:
-        return await _execute_single(prepared, mcp_runtime=mcp_runtime, db_service=db_service)
+        return await _execute_single(
+            prepared, mcp_runtime=mcp_runtime, db_service=db_service
+        )
     except Exception as exc:
         if not prepared.fallbacks:
             raise
         last_error = exc
         for fallback in prepared.fallbacks:
             try:
-                return await _execute_single(fallback, mcp_runtime=mcp_runtime, db_service=db_service)
+                return await _execute_single(
+                    fallback, mcp_runtime=mcp_runtime, db_service=db_service
+                )
             except Exception as fb_exc:  # pragma: no cover - diagnostics only
                 last_error = fb_exc
                 continue
-        raise last_error
+        raise last_error from exc

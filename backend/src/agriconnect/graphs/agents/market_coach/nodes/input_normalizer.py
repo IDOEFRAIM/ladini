@@ -1,15 +1,23 @@
-from typing import Any, Dict, Optional
-from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
-from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, _normalize_text, _now, INTENT_CONFIG
-from agriconnect.graphs.agents.market_coach.services.profile_loader import (
-    load_user_profile,
-    preload_farms,
-    _mask_phone,
-)
-from agriconnect.graphs.agents.market_coach.services.onboarding import resolve_onboarding_state
 import copy
 import inspect
 import re
+from typing import Any, Dict, Optional
+
+from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
+from agriconnect.graphs.agents.market_coach.services.onboarding import (
+    resolve_onboarding_state,
+)
+from agriconnect.graphs.agents.market_coach.services.profile_loader import (
+    _mask_phone,
+    load_user_profile,
+    preload_farms,
+)
+from agriconnect.graphs.agents.market_coach.utils import (
+    INTENT_CONFIG,
+    MarketRuntime,
+    _normalize_text,
+    _now,
+)
 
 logger = get_node_logger("InputNormalizer")
 
@@ -25,9 +33,7 @@ _CONTEXT_INJECTION_PATTERNS = (
     re.compile(r"reset\s+the\s+guardrails", re.IGNORECASE),
     re.compile(r"disable\s+(?:security|moderation)", re.IGNORECASE),
 )
-_SYSTEM_OVERRIDE_PROMPT = (
-    "SYSTEM_GUARD: blocage d'instructions malveillantes. Restreindre la réponse à une clarification métier."
-)
+_SYSTEM_OVERRIDE_PROMPT = "SYSTEM_GUARD: blocage d'instructions malveillantes. Restreindre la réponse à une clarification métier."
 
 
 def _harden_text(text: str) -> str:
@@ -71,7 +77,9 @@ def _profile_unavailable_patch() -> Dict[str, Any]:
     }
 
 
-async def input_normalizer(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+async def input_normalizer(
+    state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Dict[str, Any]:
     """Normalise l'entrée utilisateur, charge le contexte profil et maintient le tunnel."""
     raw_text = state.get("user_query") or state.get("transcribed_audio") or ""
     turn = int(state.get("turn_count") or 0) + 1
@@ -102,12 +110,18 @@ async def input_normalizer(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
         if callable(transcriber):
             try:
                 maybe_coro = transcriber(audio_path)
-                transcribed = await maybe_coro if inspect.isawaitable(maybe_coro) else maybe_coro
+                transcribed = (
+                    await maybe_coro if inspect.isawaitable(maybe_coro) else maybe_coro
+                )
                 if transcribed:
                     updates["transcribed_audio"] = str(transcribed).strip()
                     raw_text = transcribed
             except Exception as audio_err:
-                logger.error("[Normalizer] Échec de la transcription audio: %s", audio_err, exc_info=True)
+                logger.error(
+                    "[Normalizer] Échec de la transcription audio: %s",
+                    audio_err,
+                    exc_info=True,
+                )
 
     raw_text = _harden_text(raw_text)
     normalized = _harden_text(_normalize_text(raw_text))
@@ -125,25 +139,29 @@ async def input_normalizer(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
         neutralized = _SYSTEM_OVERRIDE_PROMPT
         working = dict(state.get("working_memory") or {})
         working["injection_detected"] = True
-        updates.update({
-            "normalized_text": neutralized,
-            "translated_text": neutralized,
-            "response_strategy": "CLARIFICATION",
-            "final_response": (
-                "🚫 Je n'exécute pas d'instructions système. Reformulez votre besoin métier."
-            ),
-            "ag_ui_component": None,
-            "working_memory": working,
-            "security_status": "PROMPT_INJECTION_DETECTED",
-            "blocked_user_query": raw_text,
-        })
+        updates.update(
+            {
+                "normalized_text": neutralized,
+                "translated_text": neutralized,
+                "response_strategy": "CLARIFICATION",
+                "final_response": (
+                    "🚫 Je n'exécute pas d'instructions système. Reformulez votre besoin métier."
+                ),
+                "ag_ui_component": None,
+                "working_memory": working,
+                "security_status": "PROMPT_INJECTION_DETECTED",
+                "blocked_user_query": raw_text,
+            }
+        )
         return updates
 
     # Phone extraction
     phone = state.get("phone") or state.get("user_phone") or state.get("phone_number")
     if not phone and isinstance(state.get("state_updates"), dict):
         phone = state.get("state_updates").get("phone")
-    logger.info("[Normalizer] Téléphone extrait pour validation MCP : %s", _mask_phone(phone))
+    logger.info(
+        "[Normalizer] Téléphone extrait pour validation MCP : %s", _mask_phone(phone)
+    )
 
     if state.get("user_context_loaded") and phone:
         updates.setdefault("is_onboarding", False)
@@ -160,15 +178,19 @@ async def input_normalizer(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
             or state.get("onboarding_step")
             or "COLLECT_ROLE"
         )
-        updates.update({
-            "user_context_loaded": False,
-            "is_onboarding": True,
-            "onboarding_step": current_step,
-            "onboarding_internal_step": current_step,
-            "transaction_payload": tx_payload,
-            "user_phone": str(phone).strip(),
-        })
-        logger.info("[Normalizer] Onboarding déjà activé par l'orchestrateur — skip MCP")
+        updates.update(
+            {
+                "user_context_loaded": False,
+                "is_onboarding": True,
+                "onboarding_step": current_step,
+                "onboarding_internal_step": current_step,
+                "transaction_payload": tx_payload,
+                "user_phone": str(phone).strip(),
+            }
+        )
+        logger.info(
+            "[Normalizer] Onboarding déjà activé par l'orchestrateur — skip MCP"
+        )
 
     elif not state.get("user_context_loaded") and phone:
         try:
@@ -176,15 +198,25 @@ async def input_normalizer(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
 
             if profile_updates.get("user_context_loaded"):
                 updates.update(profile_updates)
-                updates["user_role"] = profile_updates.get("user_role") or state.get("user_role") or "PRODUCER"
+                updates["user_role"] = (
+                    profile_updates.get("user_role")
+                    or state.get("user_role")
+                    or "PRODUCER"
+                )
 
                 if state.get("user_farms_cache") is None:
                     try:
                         farm_list = await preload_farms(str(phone), mc_runtime)
                         updates["user_farms_cache"] = farm_list
-                        logger.info("[Normalizer] Cache synchronisé : %d ferme(s).", len(farm_list))
+                        logger.info(
+                            "[Normalizer] Cache synchronisé : %d ferme(s).",
+                            len(farm_list),
+                        )
                     except Exception as farm_exc:
-                        logger.warning("[Normalizer] Échec non-fatal du préchargement des fermes: %s", farm_exc)
+                        logger.warning(
+                            "[Normalizer] Échec non-fatal du préchargement des fermes: %s",
+                            farm_exc,
+                        )
                         updates["user_farms_cache"] = []
 
             elif profile_updates.get("_new_user"):
@@ -197,14 +229,18 @@ async def input_normalizer(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
                     or state.get("onboarding_step")
                     or "COLLECT_ROLE"
                 )
-                updates.update({
-                    "user_context_loaded": False,
-                    "is_onboarding": True,
-                    "onboarding_step": current_step,
-                    "onboarding_internal_step": current_step,
-                    "transaction_payload": tx_payload,
-                    "user_phone": str(phone).strip() if phone else state.get("user_phone"),
-                })
+                updates.update(
+                    {
+                        "user_context_loaded": False,
+                        "is_onboarding": True,
+                        "onboarding_step": current_step,
+                        "onboarding_internal_step": current_step,
+                        "transaction_payload": tx_payload,
+                        "user_phone": str(phone).strip()
+                        if phone
+                        else state.get("user_phone"),
+                    }
+                )
             else:
                 # Profil non résolu (échec technique) : message clair, pas de fantôme.
                 updates["user_context_loaded"] = False
@@ -214,7 +250,11 @@ async def input_normalizer(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
                     return updates
 
         except Exception as db_err:
-            logger.error("[Normalizer] Erreur de communication critique avec le serveur MCP DB: %s", db_err, exc_info=True)
+            logger.error(
+                "[Normalizer] Erreur de communication critique avec le serveur MCP DB: %s",
+                db_err,
+                exc_info=True,
+            )
             updates["user_context_loaded"] = False
             updates["user_phone"] = str(phone).strip()
             updates.update(_profile_unavailable_patch())

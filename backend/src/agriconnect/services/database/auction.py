@@ -1,28 +1,44 @@
-from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
 import logging
 import re
 import unicodedata
 import uuid
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+
 from rapidfuzz import fuzz, process
-from sqlalchemy import select, and_, or_, func, update, exists
+from sqlalchemy import and_, exists, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
+
 from agriconnect.core.formatting import fmt_num as _fmt_num
-from .common import clean_text, normalize_phone
-from .search import fuzzy_match, similarity_rank
-from .errors import BusinessRuleException
-from .category import _is_confident_category_match
-from .moderation import _fold as _fold_for_moderation
 
 # Importation stricte des modèles requis pour le domaine des enchères
-from agriconnect.domain.models import Auction, Bid, SubCategory, Zone, BuyerProfile, User,Producer, Order, Product, Category
+from agriconnect.domain.models import (
+    Auction,
+    Bid,
+    BuyerProfile,
+    Category,
+    Order,
+    Producer,
+    Product,
+    SubCategory,
+    User,
+    Zone,
+)
+
 from .base import BaseMixin
+from .category import _is_confident_category_match
+from .common import clean_text, normalize_phone
+from .errors import BusinessRuleException
+from .moderation import _fold as _fold_for_moderation
+from .search import fuzzy_match, similarity_rank
 
 logger = logging.getLogger("agriconnect.services.database.auction")
 
 _FUZZY_SUBCATEGORY_THRESHOLD = 78
-_MAX_PHOTOS_PER_LOT = 8  # même plafond que Product.images (product.py::_MAX_PHOTOS_PER_PRODUCT)
+_MAX_PHOTOS_PER_LOT = (
+    8  # même plafond que Product.images (product.py::_MAX_PHOTOS_PER_PRODUCT)
+)
 
 
 def _normalize_product_label(value: str) -> str:
@@ -43,18 +59,21 @@ def _normalize_product_label(value: str) -> str:
         tokens.append(cleaned)
     return " ".join(t for t in tokens if t)
 
+
 class AuctionMixin(BaseMixin):
     """
     AuctionMixin - Moteur exclusif du cycle de vie des Enchères et Appels d'Offres.
-    
+
     ZÉRO FUITE DE RESPONSABILITÉ :
-    - La gestion, le listing et le requêtage brut des profils (Acheteurs/Producteurs) 
+    - La gestion, le listing et le requêtage brut des profils (Acheteurs/Producteurs)
       sont délégués aux mixins spécialisés de la classe hôte via 'self'.
     - Ce mixin ne contient que la logique métier liée aux tables `Auction` et `Bid`.
     """
 
     # ─── SECTION 1 : LOGIQUE DE RÉSOLUTION AUXILIAIRE ────────────────────
-    async def _fuzzy_match_sub_category(self, product_query: str) -> Optional[SubCategory]:
+    async def _fuzzy_match_sub_category(
+        self, product_query: str
+    ) -> Optional[SubCategory]:
         """Fallback when the exact ILIKE fails (handles accents, plurals, typos)."""
         current_session = self.session
         if not current_session:
@@ -64,7 +83,9 @@ class AuctionMixin(BaseMixin):
         if not normalized_query:
             return None
 
-        rows: List[SubCategory] = (await current_session.execute(select(SubCategory))).scalars().all()
+        rows: List[SubCategory] = (
+            (await current_session.execute(select(SubCategory))).scalars().all()
+        )
         if not rows:
             return None
 
@@ -97,7 +118,9 @@ class AuctionMixin(BaseMixin):
 
         return None
 
-    async def _get_or_create_sub_category_for_rfq(self, product_query_clean: str) -> SubCategory:
+    async def _get_or_create_sub_category_for_rfq(
+        self, product_query_clean: str
+    ) -> SubCategory:
         """Auto-provisionne une sous-catégorie catalogue pour un appel d'offres.
 
         Restaurée (2026-08-15) après un incident réel en production :
@@ -142,7 +165,9 @@ class AuctionMixin(BaseMixin):
                         reason="prohibited_product",
                     )
 
-        category_name = (await self.guess_category(product_query_clean) or "AUTRES").strip().upper()
+        category_name = (
+            (await self.guess_category(product_query_clean) or "AUTRES").strip().upper()
+        )
         category = await current_session.scalar(
             select(Category).where(func.upper(Category.name) == category_name)
         )
@@ -151,7 +176,9 @@ class AuctionMixin(BaseMixin):
             current_session.add(category)
             await current_session.flush()
 
-        new_sub_cat = SubCategory(category_id=category.id, name=product_query_clean.strip().title())
+        new_sub_cat = SubCategory(
+            category_id=category.id, name=product_query_clean.strip().title()
+        )
         current_session.add(new_sub_cat)
         try:
             await current_session.flush()
@@ -170,7 +197,8 @@ class AuctionMixin(BaseMixin):
             raise
         logger.info(
             "[Auction] Sous-catégorie auto-provisionnée pour un appel d'offres : '%s' (catégorie=%s)",
-            new_sub_cat.name, category.name,
+            new_sub_cat.name,
+            category.name,
         )
         return new_sub_cat
 
@@ -196,9 +224,11 @@ class AuctionMixin(BaseMixin):
         """Retrouve l'ID de l'enchère ouverte la plus récente pour un acheteur."""
         current_session = self.session
         if not current_session:
-            logger.error("❌ Aucune session active trouvée pour get_active_auction_for_user")
+            logger.error(
+                "❌ Aucune session active trouvée pour get_active_auction_for_user"
+            )
             return None
-            
+
         try:
             clean_phone = normalize_phone(phone)
             stmt = (
@@ -213,26 +243,26 @@ class AuctionMixin(BaseMixin):
             )
             res = await current_session.scalar(stmt)
             return str(res) if res else None
-            
+
         except Exception as e:
             logger.error(f"❌ Erreur get_active_auction_for_user: {e}", exc_info=True)
             return None
 
     # ─── SECTION 2 : ENREGISTREMENT ET ÉDITION ───────────────────────────
     async def create_auction(
-        self, 
-        phone: str, 
-        product_query: str, 
-        qty: float, 
-        unit: str, 
+        self,
+        phone: str,
+        product_query: str,
+        qty: float,
+        unit: str,
         max_price: float,
-        deadline: Any, 
-        delivery_location: str,      # Obligatoire selon votre modèle
-        delivery_deadline: datetime, # Obligatoire selon votre modèle
-        incoterm: str = "DDP",       # Valeur par défaut
-        zone_query: Optional[str] = None, 
+        deadline: Any,
+        delivery_location: str,  # Obligatoire selon votre modèle
+        delivery_deadline: datetime,  # Obligatoire selon votre modèle
+        incoterm: str = "DDP",  # Valeur par défaut
+        zone_query: Optional[str] = None,
         description: Optional[str] = None,
-        auto_extend: bool = True
+        auto_extend: bool = True,
     ) -> Dict[str, Any]:
         """Crée un appel d'offre (Auction) avec les contraintes logistiques respectées."""
         current_session = self.session
@@ -248,7 +278,6 @@ class AuctionMixin(BaseMixin):
 
         buyer_id = buyer_profile.id
         target_zone_id = user_obj.zone_id
-        final_zone_name = "Zone non spécifiée"
 
         product_query_clean = str(product_query or "").strip()
 
@@ -280,7 +309,9 @@ class AuctionMixin(BaseMixin):
             .limit(1)
         )
         sub_cat = await current_session.scalar(sub_cat_stmt)
-        if sub_cat and not _is_confident_category_match(product_query_clean, sub_cat.name):
+        if sub_cat and not _is_confident_category_match(
+            product_query_clean, sub_cat.name
+        ):
             sub_cat = None
         if not sub_cat:
             # Bug réel confirmé (2026-08-16) : "champignons" a été accepté
@@ -293,10 +324,14 @@ class AuctionMixin(BaseMixin):
             # du MÊME produit. Le garde-fou de confiance (substring) doit
             # s'appliquer ICI AUSSI, pas seulement au premier candidat SQL.
             candidate = await self._fuzzy_match_sub_category(product_query_clean)
-            if candidate and _is_confident_category_match(product_query_clean, candidate.name):
+            if candidate and _is_confident_category_match(
+                product_query_clean, candidate.name
+            ):
                 sub_cat = candidate
         if not sub_cat:
-            sub_cat = await self._get_or_create_sub_category_for_rfq(product_query_clean)
+            sub_cat = await self._get_or_create_sub_category_for_rfq(
+                product_query_clean
+            )
 
         # 3. Résolution zone — recherche floue trigram (référentiel logistique).
         if zone_query and zone_query.strip():
@@ -308,7 +343,6 @@ class AuctionMixin(BaseMixin):
             )
             if zone_obj:
                 target_zone_id = zone_obj.id
-                final_zone_name = zone_obj.name
 
         # 4. Validation dates
         if isinstance(deadline, str):
@@ -321,7 +355,9 @@ class AuctionMixin(BaseMixin):
         delivery_deadline_dt = delivery_deadline
         if isinstance(delivery_deadline_dt, str):
             try:
-                delivery_deadline_dt = datetime.fromisoformat(delivery_deadline_dt.replace(" ", "T"))
+                delivery_deadline_dt = datetime.fromisoformat(
+                    delivery_deadline_dt.replace(" ", "T")
+                )
             except ValueError:
                 delivery_deadline_dt = None
         if not isinstance(delivery_deadline_dt, datetime):
@@ -348,7 +384,7 @@ class AuctionMixin(BaseMixin):
             target_zone_id=target_zone_id,
             version=0,
             created_at=now,
-            updated_at=now
+            updated_at=now,
         )
 
         current_session.add(new_auction)
@@ -385,19 +421,29 @@ class AuctionMixin(BaseMixin):
         try:
             phone = clean_text(phone, "phone", required=True)
             auction_id = clean_text(auction_id, "auction_id", required=True)
-            image_url = clean_text(image_url, "image_url", required=True, max_length=2048)
+            image_url = clean_text(
+                image_url, "image_url", required=True, max_length=2048
+            )
             _, buyer_profile = await self.get_buyer_profile(phone)
 
             stmt = (
                 select(Auction)
-                .where(and_(Auction.id == uuid.UUID(auction_id), Auction.buyer_id == buyer_profile.id))
+                .where(
+                    and_(
+                        Auction.id == uuid.UUID(auction_id),
+                        Auction.buyer_id == buyer_profile.id,
+                    )
+                )
                 .with_for_update()
             )
             res = await self.session.execute(stmt)
             auction = res.scalar_one_or_none()
 
             if not auction:
-                return {"status": "error", "message": "Appel d'offres introuvable ou non autorisé."}
+                return {
+                    "status": "error",
+                    "message": "Appel d'offres introuvable ou non autorisé.",
+                }
 
             if replace:
                 current_images = [image_url]
@@ -407,7 +453,10 @@ class AuctionMixin(BaseMixin):
                     return {
                         "status": "success",
                         "message": "Photo déjà associée à cet appel d'offres.",
-                        "data": {"auction_id": str(auction.id), "images": current_images},
+                        "data": {
+                            "auction_id": str(auction.id),
+                            "images": current_images,
+                        },
                     }
                 current_images.append(image_url)
                 if len(current_images) > _MAX_PHOTOS_PER_LOT:
@@ -419,7 +468,10 @@ class AuctionMixin(BaseMixin):
 
             logger.info(
                 "AUCTION_PHOTO_ADDED: ID %s par %s (total photos: %d, replace=%s)",
-                auction_id, phone, len(current_images), replace,
+                auction_id,
+                phone,
+                len(current_images),
+                replace,
             )
 
             return {
@@ -431,15 +483,12 @@ class AuctionMixin(BaseMixin):
         except ValueError as e:
             return {"status": "error", "message": str(e)}
 
-
-
-
     async def place_bid(
-        self, 
-        auction_id: str, 
-        phone: str, 
-        offered_price: float, 
-        message: str | None = None
+        self,
+        auction_id: str,
+        phone: str,
+        offered_price: float,
+        message: str | None = None,
     ) -> Dict[str, Any]:
         """Permet à un producteur d'émettre un prix (Bid) sur un marché ouvert."""
         current_session = self.session
@@ -451,7 +500,9 @@ class AuctionMixin(BaseMixin):
             _, producer_obj = await self.get_producer_profile(phone=str(phone))
         except ValueError as e:
             logger.warning(f"⚠️ Échec de résolution producteur pour {phone} : {str(e)}")
-            raise BusinessRuleException("Votre compte producteur n'est pas encore identifié.") from e
+            raise BusinessRuleException(
+                "Votre compte producteur n'est pas encore identifié."
+            ) from e
 
         producer_id = producer_obj.id
 
@@ -463,7 +514,9 @@ class AuctionMixin(BaseMixin):
             raise BusinessRuleException("Cette opportunité de marché n'existe plus.")
 
         if auction.status.upper() != "OPEN":
-            raise BusinessRuleException(f"Désolé, cette enchère est fermée (Statut : {auction.status}).")
+            raise BusinessRuleException(
+                f"Désolé, cette enchère est fermée (Statut : {auction.status})."
+            )
 
         if float(offered_price) <= 0:
             raise BusinessRuleException("Le prix proposé doit être supérieur à 0 CFA.")
@@ -512,7 +565,7 @@ class AuctionMixin(BaseMixin):
             status="PENDING",
             message=message.strip() if message else None,
             created_at=now,
-            updated_at=now
+            updated_at=now,
         )
 
         current_session.add(new_bid)
@@ -521,7 +574,7 @@ class AuctionMixin(BaseMixin):
         return {
             "status": "success",
             "bid_id": str(new_bid.id),
-            "message": f"✅ Votre offre de *{_fmt_num(offered_price)} CFA* a été transmise à l'acheteur avec succès."
+            "message": f"✅ Votre offre de *{_fmt_num(offered_price)} CFA* a été transmise à l'acheteur avec succès.",
         }
 
     async def add_bid_photo(
@@ -540,19 +593,26 @@ class AuctionMixin(BaseMixin):
         try:
             phone = clean_text(phone, "phone", required=True)
             bid_id = clean_text(bid_id, "bid_id", required=True)
-            image_url = clean_text(image_url, "image_url", required=True, max_length=2048)
+            image_url = clean_text(
+                image_url, "image_url", required=True, max_length=2048
+            )
             _, producer = await self.get_producer_profile(phone)
 
             stmt = (
                 select(Bid)
-                .where(and_(Bid.id == uuid.UUID(bid_id), Bid.producer_id == producer.id))
+                .where(
+                    and_(Bid.id == uuid.UUID(bid_id), Bid.producer_id == producer.id)
+                )
                 .with_for_update()
             )
             res = await self.session.execute(stmt)
             bid = res.scalar_one_or_none()
 
             if not bid:
-                return {"status": "error", "message": "Offre introuvable ou non autorisée."}
+                return {
+                    "status": "error",
+                    "message": "Offre introuvable ou non autorisée.",
+                }
 
             if replace:
                 current_images = [image_url]
@@ -574,7 +634,10 @@ class AuctionMixin(BaseMixin):
 
             logger.info(
                 "BID_PHOTO_ADDED: ID %s par %s (total photos: %d, replace=%s)",
-                bid_id, phone, len(current_images), replace,
+                bid_id,
+                phone,
+                len(current_images),
+                replace,
             )
 
             return {
@@ -589,17 +652,20 @@ class AuctionMixin(BaseMixin):
     # ─── SECTION 3 : CONSULTATIONS ET MARCHÉ (READS) ─────────────────────
 
     async def get_auctions(
-        self, 
+        self,
         phone: str | None = None,
-        product_name: str | None = None, 
-        zone_name: str | None = None, 
+        product_name: str | None = None,
+        zone_name: str | None = None,
         status: str = "OPEN",
-        view_mode: str = "MARKETPLACE"
+        view_mode: str = "MARKETPLACE",
     ) -> Dict[str, Any]:
         """Récupère et formate les appels d'offres actifs pour l'interface WhatsApp."""
         current_session = self.session
         if not current_session:
-            return {"status": "error", "message": "Session de base de données indisponible."}
+            return {
+                "status": "error",
+                "message": "Session de base de données indisponible.",
+            }
         try:
             clean_phone = normalize_phone(phone) if phone else None
 
@@ -619,15 +685,12 @@ class AuctionMixin(BaseMixin):
             # [[auction-bid-photos-2026-08]] : sans ce flag, la liste
             # "suivre mes appels" ne pouvait jamais indiquer la présence
             # d'une photo d'offre, seulement celle de l'enchère.
-            has_bid_photos_sq = (
-                exists(
-                    select(Bid.id).where(
-                        Bid.auction_id == Auction.id,
-                        func.cardinality(Bid.images) > 0,
-                    )
+            has_bid_photos_sq = exists(
+                select(Bid.id).where(
+                    Bid.auction_id == Auction.id,
+                    func.cardinality(Bid.images) > 0,
                 )
-                .label("has_bid_photos")
-            )
+            ).label("has_bid_photos")
 
             stmt = (
                 select(
@@ -670,38 +733,51 @@ class AuctionMixin(BaseMixin):
 
             stmt = stmt.where(Auction.deadline > datetime.now())
             stmt = stmt.order_by(Auction.created_at.desc())
-            
+
             results = await current_session.execute(stmt)
             rows = results.all()
 
             if not rows:
                 return {
-                    "status": "success", 
-                    "count": 0, 
-                    "message": "Aucun marché disponible correspondant à vos critères actuellement."
+                    "status": "success",
+                    "count": 0,
+                    "message": "Aucun marché disponible correspondant à vos critères actuellement.",
                 }
 
             auctions_list = []
             menu_lines = [f"🔎 *Marchés disponibles ({status}) :*"]
             mapping_cache = {}
 
-            for i, (auction, p_name, z_name, b_name, bid_count, has_bid_photos) in enumerate(rows, start=1):
+            for i, (
+                auction,
+                p_name,
+                z_name,
+                b_name,
+                bid_count,
+                has_bid_photos,
+            ) in enumerate(rows, start=1):
                 diff = auction.deadline - datetime.now()
-                time_str = f"{diff.days}j {diff.seconds // 3600}h" if diff.days > 0 else f"{diff.seconds // 3600}h"
+                time_str = (
+                    f"{diff.days}j {diff.seconds // 3600}h"
+                    if diff.days > 0
+                    else f"{diff.seconds // 3600}h"
+                )
                 n_bids = int(bid_count or 0)
 
-                auctions_list.append({
-                    "auction_id": str(auction.id),
-                    "product": p_name,
-                    "qty": auction.quantity,
-                    "quantity": auction.quantity,
-                    "unit": auction.unit,
-                    "status": auction.status,
-                    "max_price": auction.max_price_per_unit,
-                    "bid_count": n_bids,
-                    "images": list(auction.images or []),
-                    "has_bid_photos": bool(has_bid_photos),
-                })
+                auctions_list.append(
+                    {
+                        "auction_id": str(auction.id),
+                        "product": p_name,
+                        "qty": auction.quantity,
+                        "quantity": auction.quantity,
+                        "unit": auction.unit,
+                        "status": auction.status,
+                        "max_price": auction.max_price_per_unit,
+                        "bid_count": n_bids,
+                        "images": list(auction.images or []),
+                        "has_bid_photos": bool(has_bid_photos),
+                    }
+                )
 
                 bids_badge = f"\n📥 Offres reçues : *{n_bids}*" if n_bids else ""
                 line = (
@@ -714,20 +790,27 @@ class AuctionMixin(BaseMixin):
                 menu_lines.append(line)
                 mapping_cache[str(i)] = str(auction.id)
 
-            menu_lines.append("\n_Répondez avec le *numéro* de la ligne pour proposer votre prix (ex: *1*)._")
+            menu_lines.append(
+                "\n_Répondez avec le *numéro* de la ligne pour proposer votre prix (ex: *1*)._"
+            )
 
             return {
                 "status": "success",
                 "count": len(rows),
                 "formatted_menu": "\n".join(menu_lines),
                 "mapping": mapping_cache,
-                "data": auctions_list
+                "data": auctions_list,
             }
         except Exception as e:
             logger.error(f"❌ Erreur get_auctions : {str(e)}", exc_info=True)
-            return {"status": "error", "message": "Impossible de charger les marchés disponibles."}
-        
-    async def get_auction_bids(self, auction_id: str, phone: str | None = None) -> Dict[str, Any]:
+            return {
+                "status": "error",
+                "message": "Impossible de charger les marchés disponibles.",
+            }
+
+    async def get_auction_bids(
+        self, auction_id: str, phone: str | None = None
+    ) -> Dict[str, Any]:
         """Récupère l'ensemble des propositions de prix soumises sur une offre.
 
         ``phone`` (optionnel) : numéro de l'acheteur appelant. Non utilisé par la
@@ -737,7 +820,10 @@ class AuctionMixin(BaseMixin):
         """
         current_session = self.session
         if not current_session:
-            return {"status": "error", "message": "Session de base de données indisponible."}
+            return {
+                "status": "error",
+                "message": "Session de base de données indisponible.",
+            }
         try:
             a_uuid = uuid.UUID(auction_id)
 
@@ -760,9 +846,13 @@ class AuctionMixin(BaseMixin):
                     "product": product_name,
                     "product_name": product_name,
                     "status": auction_obj.status,
-                    "quantity": float(auction_obj.quantity) if auction_obj.quantity is not None else None,
+                    "quantity": float(auction_obj.quantity)
+                    if auction_obj.quantity is not None
+                    else None,
                     "unit": auction_obj.unit,
-                    "max_price": float(auction_obj.max_price_per_unit) if auction_obj.max_price_per_unit is not None else None,
+                    "max_price": float(auction_obj.max_price_per_unit)
+                    if auction_obj.max_price_per_unit is not None
+                    else None,
                     "images": list(auction_obj.images or []),
                 }
 
@@ -781,39 +871,40 @@ class AuctionMixin(BaseMixin):
 
             bids_list = []
             for bid, prod_name in results:
-                bids_list.append({
-                    "bid_id": str(bid.id),
-                    "producer": prod_name or "Producteur Anonyme",
-                    "producer_name": prod_name or "Producteur Anonyme",
-                    "price": float(bid.offered_price),
-                    "offered_price": float(bid.offered_price),
-                    "status": str(bid.status or "PENDING").upper(),
-                    "message": bid.message,
-                    "delivery": "Non inclus",
-                    "images": list(bid.images or []),
-                })
+                bids_list.append(
+                    {
+                        "bid_id": str(bid.id),
+                        "producer": prod_name or "Producteur Anonyme",
+                        "producer_name": prod_name or "Producteur Anonyme",
+                        "price": float(bid.offered_price),
+                        "offered_price": float(bid.offered_price),
+                        "status": str(bid.status or "PENDING").upper(),
+                        "message": bid.message,
+                        "delivery": "Non inclus",
+                        "images": list(bid.images or []),
+                    }
+                )
 
             return {
                 "status": "success",
                 "count": len(bids_list),
                 "auction": auction_info,
                 "auction_status": auction_info.get("status"),
-                "bids": bids_list
+                "bids": bids_list,
             }
         except Exception as e:
             logger.error(f"❌ Erreur get_auction_bids: {e}", exc_info=True)
-            return {"status": "error", "message": f"Impossible de charger les propositions : {str(e)}"}
-
-
+            return {
+                "status": "error",
+                "message": f"Impossible de charger les propositions : {str(e)}",
+            }
 
     # ==================================================================
     # 4. GESTION DES OFFRES PHONECENTRIC (READS & STATUTS)
     # ==================================================================
 
     async def get_auctions_bids(
-        self, 
-        phone: str | None = None, 
-        status: str = "OPEN"
+        self, phone: str | None = None, status: str = "OPEN"
     ) -> Dict[str, Any]:
         """
         Vision Phone-First : Récupère les offres (Bids) reçues par un acheteur sur ses marchés.
@@ -821,7 +912,10 @@ class AuctionMixin(BaseMixin):
         """
         current_session = self.session
         if not current_session:
-            return {"status": "error", "message": "Erreur interne : session de base de données indisponible."}
+            return {
+                "status": "error",
+                "message": "Erreur interne : session de base de données indisponible.",
+            }
         try:
             # Création d'un alias propre pour la table User côté producteur
             producer_user = aliased(User, name="producer_user")
@@ -829,15 +923,17 @@ class AuctionMixin(BaseMixin):
             # 1. Requête de base unifiée avec toutes les jointures sémantiques indispensables
             stmt = (
                 select(
-                    Bid, 
+                    Bid,
                     producer_user.name.label("producer_name"),
                     SubCategory.name.label("product_name"),
                     Auction.quantity,
-                    Auction.unit
+                    Auction.unit,
                 )
                 .join(Auction, Bid.auction_id == Auction.id)
                 .join(Producer, Bid.producer_id == Producer.id)
-                .join(producer_user, Producer.user_id == producer_user.id) # Jointure sur le user du producteur
+                .join(
+                    producer_user, Producer.user_id == producer_user.id
+                )  # Jointure sur le user du producteur
                 .join(SubCategory, Auction.sub_category_id == SubCategory.id)
                 .where(Auction.status == status)
                 .order_by(Bid.created_at.desc())
@@ -846,8 +942,10 @@ class AuctionMixin(BaseMixin):
             # 2. Filtrage Phone-First ultra-robuste avec isolation de l'Acheteur
             if phone:
                 clean_phone = normalize_phone(phone)
-                buyer_user = aliased(User, name="buyer_user") # Alias pour le user de l'acheteur
-                
+                buyer_user = aliased(
+                    User, name="buyer_user"
+                )  # Alias pour le user de l'acheteur
+
                 stmt = (
                     # Correction de la FK : Auction.buyer_id pointe sur BuyerProfile.id
                     stmt.join(BuyerProfile, Auction.buyer_id == BuyerProfile.id)
@@ -860,9 +958,9 @@ class AuctionMixin(BaseMixin):
 
             if not rows:
                 return {
-                    "status": "success", 
-                    "count": 0, 
-                    "message": "Aucune offre d'achat n'est disponible sur le marché actuellement pour votre compte."
+                    "status": "success",
+                    "count": 0,
+                    "message": "Aucune offre d'achat n'est disponible sur le marché actuellement pour votre compte.",
                 }
 
             bids_list = []
@@ -870,16 +968,20 @@ class AuctionMixin(BaseMixin):
             mapping_cache = {}
 
             # 3. Construction du menu indexé pour WhatsApp
-            for i, (bid, prod_name, product_name, qty, unit) in enumerate(rows, start=1):
+            for i, (bid, prod_name, product_name, qty, unit) in enumerate(
+                rows, start=1
+            ):
                 clean_prod_name = prod_name or "Producteur Externe"
-                
-                bids_list.append({
-                    "bid_id": str(bid.id),
-                    "product": product_name,
-                    "price": bid.offered_price,
-                    "producer": clean_prod_name,
-                    "images": list(bid.images or []),
-                })
+
+                bids_list.append(
+                    {
+                        "bid_id": str(bid.id),
+                        "product": product_name,
+                        "price": bid.offered_price,
+                        "producer": clean_prod_name,
+                        "images": list(bid.images or []),
+                    }
+                )
 
                 line = (
                     f"\n*{i}. Lot {product_name}* ({qty} {unit})\n"
@@ -889,23 +991,29 @@ class AuctionMixin(BaseMixin):
                 menu_lines.append(line)
                 mapping_cache[str(i)] = str(bid.id)
 
-            menu_lines.append("\n_Répondez simplement avec le *numéro* de la ligne pour accepter l'offre (ex: *1*)._")
+            menu_lines.append(
+                "\n_Répondez simplement avec le *numéro* de la ligne pour accepter l'offre (ex: *1*)._"
+            )
 
             return {
                 "status": "success",
                 "count": len(bids_list),
                 "formatted_menu": "\n".join(menu_lines),
                 "mapping": mapping_cache,
-                "data": bids_list
+                "data": bids_list,
             }
 
         except Exception as e:
             logger.error(f"❌ Erreur critique get_auctions_bids: {e}", exc_info=True)
-            return {"status": "error", "message": "Impossible de charger vos offres pour le moment."}
-
+            return {
+                "status": "error",
+                "message": "Impossible de charger vos offres pour le moment.",
+            }
 
     @staticmethod
-    def _derive_bid_status(bid_status: str, is_winner: bool, auction_status: str) -> tuple[str, str]:
+    def _derive_bid_status(
+        bid_status: str, is_winner: bool, auction_status: str
+    ) -> tuple[str, str]:
         """Statut effectif d'une offre, dérivé du bid ET de l'état de l'enchère.
 
         Retourne ``(code, libellé_affichable)``. On ne se fie pas au seul
@@ -933,7 +1041,10 @@ class AuctionMixin(BaseMixin):
         """
         current_session = self.session
         if not current_session:
-            return {"status": "error", "message": "Erreur interne : session de base de données indisponible."}
+            return {
+                "status": "error",
+                "message": "Erreur interne : session de base de données indisponible.",
+            }
         try:
             clean_phone = normalize_phone(phone)
 
@@ -968,25 +1079,29 @@ class AuctionMixin(BaseMixin):
             data: List[Dict[str, Any]] = []
             mapping: Dict[str, str] = {}
 
-            for i, (bid, product_name, qty, unit, auction_status) in enumerate(rows, start=1):
+            for i, (bid, product_name, qty, unit, auction_status) in enumerate(
+                rows, start=1
+            ):
                 status_code, friendly_status = self._derive_bid_status(
                     bid.status, bool(getattr(bid, "is_winner", False)), auction_status
                 )
                 bid_id = str(bid.id)
                 price_txt = _fmt_num(bid.offered_price)
-                data.append({
-                    "bid_id": bid_id,
-                    "auction_id": str(bid.auction_id),
-                    "product": product_name,
-                    "product_name": product_name,
-                    "quantity": float(qty) if qty is not None else None,
-                    "unit": unit,
-                    "offered_price": float(bid.offered_price),
-                    "price": float(bid.offered_price),
-                    "status": status_code,
-                    "status_label": friendly_status,
-                    "images": list(bid.images or []),
-                })
+                data.append(
+                    {
+                        "bid_id": bid_id,
+                        "auction_id": str(bid.auction_id),
+                        "product": product_name,
+                        "product_name": product_name,
+                        "quantity": float(qty) if qty is not None else None,
+                        "unit": unit,
+                        "offered_price": float(bid.offered_price),
+                        "price": float(bid.offered_price),
+                        "status": status_code,
+                        "status_label": friendly_status,
+                        "images": list(bid.images or []),
+                    }
+                )
                 mapping[str(i)] = bid_id
 
                 line = (
@@ -1006,8 +1121,10 @@ class AuctionMixin(BaseMixin):
 
         except Exception as e:
             logger.error(f"❌ Erreur get_my_active_bids: {e}", exc_info=True)
-            return {"status": "error", "message": "Impossible de récupérer vos propositions."}
-
+            return {
+                "status": "error",
+                "message": "Impossible de récupérer vos propositions.",
+            }
 
     async def get_producer_auctions(
         self,
@@ -1028,7 +1145,10 @@ class AuctionMixin(BaseMixin):
         """
         current_session = self.session
         if not current_session:
-            return {"status": "error", "message": "Session de base de données indisponible."}
+            return {
+                "status": "error",
+                "message": "Session de base de données indisponible.",
+            }
         try:
             clean_phone = normalize_phone(phone) if phone else None
             scope_up = str(scope or "MATCHABLE").upper().strip()
@@ -1037,17 +1157,21 @@ class AuctionMixin(BaseMixin):
             supplied_ids: List[Any] = []
             if clean_phone:
                 supplied_rows = (
-                    await current_session.execute(
-                        select(Product.sub_category_id)
-                        .join(Producer, Product.producer_id == Producer.id)
-                        .join(User, Producer.user_id == User.id)
-                        .where(
-                            User.phone == clean_phone,
-                            Product.sub_category_id.isnot(None),
+                    (
+                        await current_session.execute(
+                            select(Product.sub_category_id)
+                            .join(Producer, Product.producer_id == Producer.id)
+                            .join(User, Producer.user_id == User.id)
+                            .where(
+                                User.phone == clean_phone,
+                                Product.sub_category_id.isnot(None),
+                            )
+                            .distinct()
                         )
-                        .distinct()
                     )
-                ).scalars().all()
+                    .scalars()
+                    .all()
+                )
                 supplied_ids = [sid for sid in supplied_rows if sid is not None]
 
             has_categories = bool(supplied_ids)
@@ -1120,22 +1244,28 @@ class AuctionMixin(BaseMixin):
 
                 idx += 1
                 diff = auction.deadline - datetime.now()
-                time_str = f"{diff.days}j {diff.seconds // 3600}h" if diff.days > 0 else f"{diff.seconds // 3600}h"
+                time_str = (
+                    f"{diff.days}j {diff.seconds // 3600}h"
+                    if diff.days > 0
+                    else f"{diff.seconds // 3600}h"
+                )
                 qty_txt = _fmt_num(auction.quantity)
                 price_txt = _fmt_num(auction.max_price_per_unit)
 
-                data.append({
-                    "auction_id": str(auction.id),
-                    "product": p_name,
-                    "product_name": p_name,
-                    "category": cat_name,
-                    "quantity": float(auction.quantity),
-                    "unit": auction.unit,
-                    "max_price": float(auction.max_price_per_unit),
-                    "zone": z_name,
-                    "buyer_name": b_name,
-                    "images": list(auction.images or []),
-                })
+                data.append(
+                    {
+                        "auction_id": str(auction.id),
+                        "product": p_name,
+                        "product_name": p_name,
+                        "category": cat_name,
+                        "quantity": float(auction.quantity),
+                        "unit": auction.unit,
+                        "max_price": float(auction.max_price_per_unit),
+                        "zone": z_name,
+                        "buyer_name": b_name,
+                        "images": list(auction.images or []),
+                    }
+                )
                 mapping[str(idx)] = str(auction.id)
 
                 menu_lines.append(
@@ -1160,7 +1290,10 @@ class AuctionMixin(BaseMixin):
             }
         except Exception as e:
             logger.error(f"❌ Erreur get_producer_auctions: {e}", exc_info=True)
-            return {"status": "error", "message": "Impossible de charger les appels d'offres."}
+            return {
+                "status": "error",
+                "message": "Impossible de charger les appels d'offres.",
+            }
 
     # ─── SECTION 5 : CLÔTURE ET CONVERSION EN COMMANDE ───────────────────
 
@@ -1191,13 +1324,17 @@ class AuctionMixin(BaseMixin):
         """
         current_session = self.session
         if not current_session:
-            raise BusinessRuleException("Erreur interne : session de base de données indisponible.")
+            raise BusinessRuleException(
+                "Erreur interne : session de base de données indisponible."
+            )
 
         if delivery_lat is not None and delivery_lon is not None:
             from agriconnect.core.geofencing import is_within_burkina_faso
+
             if not is_within_burkina_faso(delivery_lat, delivery_lon):
                 raise BusinessRuleException(
-                    "Le point de livraison est hors du Burkina Faso.", reason="out_of_country",
+                    "Le point de livraison est hors du Burkina Faso.",
+                    reason="out_of_country",
                 )
 
         b_id = uuid.UUID(bid_id)
@@ -1206,7 +1343,13 @@ class AuctionMixin(BaseMixin):
         # lien User cassé ne doit PAS déclencher « Offre introuvable » (le
         # nom retombe sur « Producteur Anonyme »). Cohérent avec get_auction_bids.
         stmt = (
-            select(Bid, Auction, User.name.label("producer_name"), User.phone.label("producer_phone"), SubCategory)
+            select(
+                Bid,
+                Auction,
+                User.name.label("producer_name"),
+                User.phone.label("producer_phone"),
+                SubCategory,
+            )
             .join(Auction, Bid.auction_id == Auction.id)
             .outerjoin(Producer, Bid.producer_id == Producer.id)
             .outerjoin(User, Producer.user_id == User.id)
@@ -1217,12 +1360,16 @@ class AuctionMixin(BaseMixin):
         record = res.fetchone()
 
         if not record:
-            raise BusinessRuleException("Offre introuvable ou retirée par le producteur.")
+            raise BusinessRuleException(
+                "Offre introuvable ou retirée par le producteur."
+            )
 
         bid, auction, prod_name, prod_phone, sub_cat = record
 
         if auction.status == "CLOSED":
-            raise BusinessRuleException("Cette enchère a déjà été clôturée avec un autre partenaire.")
+            raise BusinessRuleException(
+                "Cette enchère a déjà été clôturée avec un autre partenaire."
+            )
 
         # 1. Mises à jour atomiques des états du Marché
         bid.is_winner = True
@@ -1256,7 +1403,7 @@ class AuctionMixin(BaseMixin):
             zone_id=auction.target_zone_id,
             gps_lat=delivery_lat,
             gps_lng=delivery_lon,
-            created_at=datetime.now()
+            created_at=datetime.now(),
         )
 
         current_session.add(new_order)
@@ -1272,18 +1419,23 @@ class AuctionMixin(BaseMixin):
             from agriconnect.workers.outbox import templates as _outbox_templates
             from agriconnect.workers.repositories import outbox_repo as _outbox_repo
 
-            await _outbox_repo.enqueue(current_session, [{
-                "channel": "WHATSAPP",
-                "recipient_phone": prod_phone,
-                "template_key": _outbox_templates.AUCTION_WON_PRODUCER,
-                "payload": {
-                    "product": sub_cat.name,
-                    "quantity": float(auction.quantity),
-                    "unit": auction.unit,
-                    "total": total,
-                },
-                "dedupe_key": f"AUCTION_WON:{new_order.id}",
-            }])
+            await _outbox_repo.enqueue(
+                current_session,
+                [
+                    {
+                        "channel": "WHATSAPP",
+                        "recipient_phone": prod_phone,
+                        "template_key": _outbox_templates.AUCTION_WON_PRODUCER,
+                        "payload": {
+                            "product": sub_cat.name,
+                            "quantity": float(auction.quantity),
+                            "unit": auction.unit,
+                            "total": total,
+                        },
+                        "dedupe_key": f"AUCTION_WON:{new_order.id}",
+                    }
+                ],
+            )
             notified = True
 
         clean_prod_name = prod_name or "Producteur Anonyme"
@@ -1307,10 +1459,8 @@ class AuctionMixin(BaseMixin):
                 f"Votre offre pour {auction.quantity} {auction.unit} de {sub_cat.name} a été retenue !\n"
                 f"💵 Montant du marché : *{total} CFA*\n\n"
                 f"Veuillez contacter l'acheteur pour coordonner les détails de la livraison."
-            )
+            ),
         }
-
-
 
     # ==================================================================
     # 5. extra
@@ -1337,7 +1487,9 @@ class AuctionMixin(BaseMixin):
             raise BusinessRuleException("Action non autorisée ou marché introuvable.")
 
         if auction.status.upper() != "OPEN":
-            raise BusinessRuleException(f"Impossible d'annuler un marché avec le statut : {auction.status}.")
+            raise BusinessRuleException(
+                f"Impossible d'annuler un marché avec le statut : {auction.status}."
+            )
 
         # Passage à l'état annulé
         auction.status = "CANCELLED"
@@ -1346,10 +1498,12 @@ class AuctionMixin(BaseMixin):
 
         return {
             "status": "success",
-            "message": "🗑️ Votre appel d'offre a été retiré du marché avec succès."
+            "message": "🗑️ Votre appel d'offre a été retiré du marché avec succès.",
         }
 
-    async def update_bid_price(self, bid_id: str, phone: str, new_price: float) -> Dict[str, Any]:
+    async def update_bid_price(
+        self, bid_id: str, phone: str, new_price: float
+    ) -> Dict[str, Any]:
         """Permet à un producteur de corriger le prix d'une offre encore PENDING."""
         current_session = self.session
         if not current_session:
@@ -1370,7 +1524,9 @@ class AuctionMixin(BaseMixin):
             raise BusinessRuleException("Offre introuvable ou action non autorisée.")
 
         if bid.status.upper() != "PENDING":
-            raise BusinessRuleException("Impossible de modifier une offre déjà traitée.")
+            raise BusinessRuleException(
+                "Impossible de modifier une offre déjà traitée."
+            )
 
         if float(new_price) <= 0:
             raise BusinessRuleException("Le prix proposé doit être supérieur à 0 CFA.")
@@ -1405,7 +1561,9 @@ class AuctionMixin(BaseMixin):
         bid = await current_session.scalar(stmt)
 
         if not bid:
-            raise BusinessRuleException("Proposition introuvable ou action non autorisée.")
+            raise BusinessRuleException(
+                "Proposition introuvable ou action non autorisée."
+            )
 
         if bid.status.upper() != "PENDING":
             raise BusinessRuleException("Impossible de retirer une offre déjà traitée.")
@@ -1416,7 +1574,7 @@ class AuctionMixin(BaseMixin):
 
         return {
             "status": "success",
-            "message": "👋 Votre proposition de prix a été retirée avec succès."
+            "message": "👋 Votre proposition de prix a été retirée avec succès.",
         }
 
     async def check_and_expire_auctions(self) -> Dict[str, Any]:
@@ -1437,7 +1595,7 @@ class AuctionMixin(BaseMixin):
         return {
             "status": "success",
             "expired_count": result.rowcount,
-            "message": f"🤖 Nettoyage effectué : {result.rowcount} marché(s) expiré(s)."
+            "message": f"🤖 Nettoyage effectué : {result.rowcount} marché(s) expiré(s).",
         }
 
     async def get_my_active_auctions(self, phone: str) -> Dict[str, Any]:
@@ -1453,7 +1611,7 @@ class AuctionMixin(BaseMixin):
                 select(
                     Auction,
                     SubCategory.name.label("product_name"),
-                    func.count(Bid.id).label("bids_count")
+                    func.count(Bid.id).label("bids_count"),
                 )
                 .join(SubCategory, Auction.sub_category_id == SubCategory.id)
                 .join(BuyerProfile, Auction.buyer_id == BuyerProfile.id)
@@ -1468,7 +1626,11 @@ class AuctionMixin(BaseMixin):
             rows = results.all()
 
             if not rows:
-                return {"status": "success", "count": 0, "message": "📢 Vous n'avez aucun appel d'offre actif sur le marché actuellement."}
+                return {
+                    "status": "success",
+                    "count": 0,
+                    "message": "📢 Vous n'avez aucun appel d'offre actif sur le marché actuellement.",
+                }
 
             menu_lines = ["📊 *Vos appels d'offres en cours :*"]
             auctions_list = []
@@ -1476,7 +1638,11 @@ class AuctionMixin(BaseMixin):
 
             for i, (auction, p_name, bids_count) in enumerate(rows, start=1):
                 diff = auction.deadline - datetime.now()
-                time_str = f"{diff.days}j {diff.seconds // 3600}h" if diff.days > 0 else f"{diff.seconds // 3600}h"
+                time_str = (
+                    f"{diff.days}j {diff.seconds // 3600}h"
+                    if diff.days > 0
+                    else f"{diff.seconds // 3600}h"
+                )
 
                 auctions_list.append({"auction_id": str(auction.id), "product": p_name})
 
@@ -1488,18 +1654,23 @@ class AuctionMixin(BaseMixin):
                 menu_lines.append(line)
                 mapping_cache[str(i)] = str(auction.id)
 
-            menu_lines.append("\n_Pour voir ou accepter les offres d'un lot, affichez ses propositions._")
+            menu_lines.append(
+                "\n_Pour voir ou accepter les offres d'un lot, affichez ses propositions._"
+            )
 
             return {
                 "status": "success",
                 "count": len(rows),
                 "formatted_menu": "\n".join(menu_lines),
                 "mapping": mapping_cache,
-                "data": auctions_list
+                "data": auctions_list,
             }
         except Exception as e:
             logger.error(f"❌ Erreur get_my_active_auctions: {e}", exc_info=True)
-            return {"status": "error", "message": "Impossible de charger votre tableau de bord."}
+            return {
+                "status": "error",
+                "message": "Impossible de charger votre tableau de bord.",
+            }
 
     async def get_auction_details(self, auction_id: str) -> Dict[str, Any]:
         """Récupère la fiche signalétique complète d'un appel d'offre spécifique."""
@@ -1513,7 +1684,7 @@ class AuctionMixin(BaseMixin):
                     Auction,
                     SubCategory.name.label("product_name"),
                     Zone.name.label("zone_name"),
-                    BuyerProfile.establishment_name.label("buyer_name")
+                    BuyerProfile.establishment_name.label("buyer_name"),
                 )
                 .join(SubCategory, Auction.sub_category_id == SubCategory.id)
                 .outerjoin(Zone, Auction.target_zone_id == Zone.id)
@@ -1524,11 +1695,18 @@ class AuctionMixin(BaseMixin):
             record = result.fetchone()
 
             if not record:
-                return {"status": "error", "message": "Cette opportunité de marché est introuvable."}
+                return {
+                    "status": "error",
+                    "message": "Cette opportunité de marché est introuvable.",
+                }
 
             auction, p_name, z_name, b_name = record
             diff = auction.deadline - datetime.now()
-            time_left = f"{diff.days}j {diff.seconds // 3600}h" if diff.days > 0 else f"{diff.seconds // 3600}h"
+            time_left = (
+                f"{diff.days}j {diff.seconds // 3600}h"
+                if diff.days > 0
+                else f"{diff.seconds // 3600}h"
+            )
 
             details = (
                 f"📦 *FICHE MARCHÉ : {p_name.upper()}*\n\n"
@@ -1547,15 +1725,19 @@ class AuctionMixin(BaseMixin):
                 "data": {
                     "auction_id": str(auction.id),
                     "product": p_name,
-                    "max_price": auction.max_price_per_unit
-                }
+                    "max_price": auction.max_price_per_unit,
+                },
             }
         except Exception as e:
             logger.error(f"❌ Erreur get_auction_details: {e}", exc_info=True)
-            return {"status": "error", "message": "Erreur lors de la récupération des détails."}
+            return {
+                "status": "error",
+                "message": "Erreur lors de la récupération des détails.",
+            }
 
-
-    async def get_price_recommendation(self, product_query: str, zone_query: str | None = None) -> Dict[str, Any]:
+    async def get_price_recommendation(
+        self, product_query: str, zone_query: str | None = None
+    ) -> Dict[str, Any]:
         """Calcule le prix moyen pratiqué sur le marché pour un produit sur la base des deals conclus (Orders)."""
         current_session = self.session
         if not current_session:
@@ -1570,7 +1752,10 @@ class AuctionMixin(BaseMixin):
                 .limit(1)
             )
             if not sub_cat:
-                return {"status": "error", "message": f"Produit '{product_query}' inconnu."}
+                return {
+                    "status": "error",
+                    "message": f"Produit '{product_query}' inconnu.",
+                }
 
             # 2. Construction de la requête statistique sur les ordres passés (CONFIRMED)
             # Prix unitaire calculé par le montant de l'ordre divisé par la quantité de l'enchère liée
@@ -1578,10 +1763,12 @@ class AuctionMixin(BaseMixin):
                 select(
                     func.avg(Order.total_amount / Auction.quantity).label("avg_price"),
                     func.min(Order.total_amount / Auction.quantity).label("min_price"),
-                    func.max(Order.total_amount / Auction.quantity).label("max_price")
+                    func.max(Order.total_amount / Auction.quantity).label("max_price"),
                 )
                 .join(Auction, Order.auction_id == Auction.id)
-                .where(Auction.sub_category_id == sub_cat.id, Order.status == "CONFIRMED")
+                .where(
+                    Auction.sub_category_id == sub_cat.id, Order.status == "CONFIRMED"
+                )
             )
 
             # Filtrage géographique optionnel pour affiner la recommandation locale
@@ -1604,10 +1791,14 @@ class AuctionMixin(BaseMixin):
                 return {
                     "status": "success",
                     "has_history": False,
-                    "message": f"📊 *Indicateur de prix ({sub_cat.name}) :*\n\nAucun deal historique enregistré pour le moment. Nous vous conseillons de vous baser sur les prix du marché local."
+                    "message": f"📊 *Indicateur de prix ({sub_cat.name}) :*\n\nAucun deal historique enregistré pour le moment. Nous vous conseillons de vous baser sur les prix du marché local.",
                 }
 
-            avg_p, min_p, max_p = round(stats.avg_price, 1), round(stats.min_price, 1), round(stats.max_price, 1)
+            avg_p, min_p, max_p = (
+                round(stats.avg_price, 1),
+                round(stats.min_price, 1),
+                round(stats.max_price, 1),
+            )
 
             msg = (
                 f"📊 *Indicateur de prix AgriConnect ({sub_cat.name}) :*\n\n"
@@ -1621,8 +1812,11 @@ class AuctionMixin(BaseMixin):
                 "status": "success",
                 "has_history": True,
                 "formatted_recommendation": msg,
-                "data": {"average": avg_p, "min": min_p, "max": max_p}
+                "data": {"average": avg_p, "min": min_p, "max": max_p},
             }
         except Exception as e:
             logger.error(f"❌ Erreur get_price_recommendation: {e}", exc_info=True)
-            return {"status": "error", "message": "Calcul de la tendance de prix indisponible."}
+            return {
+                "status": "error",
+                "message": "Calcul de la tendance de prix indisponible.",
+            }

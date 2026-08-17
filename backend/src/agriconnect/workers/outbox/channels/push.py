@@ -1,4 +1,5 @@
 """Canal Push — stub derrière l'interface (activable en v2 : FCM/APNs…)."""
+
 from __future__ import annotations
 
 import logging

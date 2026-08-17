@@ -9,7 +9,6 @@ from agriconnect.graphs.agents.market_coach.actions.common import (
     to_float,
 )
 
-
 _EMPTY_SLOT_VALUES: Tuple[object, ...] = (None, "", [], {})
 
 
@@ -69,12 +68,14 @@ class SalesUpdateProductPayload(BaseModel):
             else None
         )
         name_raw = coalesce_entity_value(
-            payload, entity,
+            payload,
+            entity,
             payload_keys=("product", "name"),
             entity_keys=("name",),
         )
         unit_raw = coalesce_entity_value(
-            payload, entity,
+            payload,
+            entity,
             payload_keys=("unit",),
             entity_keys=("unit",),
         )
@@ -83,8 +84,12 @@ class SalesUpdateProductPayload(BaseModel):
             product_id=str(product_id),
             price=price_value,
             quantity=quantity_value,
-            name=(str(name_raw).strip() if name_raw not in _EMPTY_SLOT_VALUES else None),
-            unit=(str(unit_raw).strip() if unit_raw not in _EMPTY_SLOT_VALUES else None),
+            name=(
+                str(name_raw).strip() if name_raw not in _EMPTY_SLOT_VALUES else None
+            ),
+            unit=(
+                str(unit_raw).strip() if unit_raw not in _EMPTY_SLOT_VALUES else None
+            ),
         )
 
 
@@ -119,18 +124,12 @@ class SalesPublishProductPayload(BaseModel):
         if product_raw in _EMPTY_SLOT_VALUES:
             raise ValueError("Le nom du produit est requis pour la publication.")
 
-        quantity_raw = (
-            payload.get("quantity")
-            or payload.get("quantity_for_sale")
-        )
+        quantity_raw = payload.get("quantity") or payload.get("quantity_for_sale")
         quantity_value = to_float(quantity_raw, field="quantity")
         if quantity_value is None:
             raise ValueError("La quantité est requise pour la publication du produit.")
 
-        price_raw = (
-            payload.get("price")
-            or payload.get("unit_price")
-        )
+        price_raw = payload.get("price") or payload.get("unit_price")
         price_value = to_float(price_raw, field="price")
         if price_value is None:
             raise ValueError("Le prix est requis pour la publication du produit.")
@@ -140,7 +139,9 @@ class SalesPublishProductPayload(BaseModel):
         return cls(
             product=str(product_raw),
             quantity=quantity_value,
-            unit=str(unit_value).strip().upper() if unit_value not in _EMPTY_SLOT_VALUES else None,
+            unit=str(unit_value).strip().upper()
+            if unit_value not in _EMPTY_SLOT_VALUES
+            else None,
             price=price_value,
             description=payload.get("description"),
             category_label=payload.get("category_label"),
@@ -180,9 +181,7 @@ class MarketGetRequestsPayload(BaseModel):
         zone_raw = payload.get("zone") or payload.get("zone_name")
 
         status = (
-            str(status_raw).strip()
-            if status_raw not in _EMPTY_SLOT_VALUES
-            else None
+            str(status_raw).strip() if status_raw not in _EMPTY_SLOT_VALUES else None
         )
 
         return cls(
@@ -193,9 +192,7 @@ class MarketGetRequestsPayload(BaseModel):
                 else None
             ),
             zone_name=(
-                str(zone_raw).strip()
-                if zone_raw not in _EMPTY_SLOT_VALUES
-                else None
+                str(zone_raw).strip() if zone_raw not in _EMPTY_SLOT_VALUES else None
             ),
         )
 

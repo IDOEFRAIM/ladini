@@ -2,6 +2,7 @@
 
 Extracted from ``nodes/executor.py``.
 """
+
 from __future__ import annotations
 
 from typing import Dict
@@ -38,10 +39,21 @@ _UNKNOWN_PRODUCT_MESSAGE = (
 INFRA_ERROR_CODE = "infrastructure_unavailable"
 BUSINESS_ERROR_CODE = "business_error"
 
-_INFRA_KEYWORDS = frozenset({
-    "timeout", "connection", "unavailable", "unreachable", "refused",
-    "reset", "eof", "broken pipe", "dns", "ssl", "tls",
-})
+_INFRA_KEYWORDS = frozenset(
+    {
+        "timeout",
+        "connection",
+        "unavailable",
+        "unreachable",
+        "refused",
+        "reset",
+        "eof",
+        "broken pipe",
+        "dns",
+        "ssl",
+        "tls",
+    }
+)
 
 
 def classify_error(raw_error: str) -> str:

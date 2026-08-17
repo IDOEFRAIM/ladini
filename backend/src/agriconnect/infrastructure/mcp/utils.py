@@ -30,19 +30,40 @@ _LIFECYCLE_POOL: ThreadPoolExecutor | None = None
 # producteur. Quiconque a accès aux logs pouvait valider une livraison.
 
 # Redaction TOTALE : aucune de ces valeurs n'a d'intérêt de debug.
-_LOG_REDACT_KEYS = frozenset({
-    "otp", "otp_code", "delivery_code", "delivery_otp",
-    "password", "password_hash", "hashed_password",
-    "token", "access_token", "refresh_token", "api_key", "secret",
-    "private_key", "credit_card", "ssn",
-})
+_LOG_REDACT_KEYS = frozenset(
+    {
+        "otp",
+        "otp_code",
+        "delivery_code",
+        "delivery_otp",
+        "password",
+        "password_hash",
+        "hashed_password",
+        "token",
+        "access_token",
+        "refresh_token",
+        "api_key",
+        "secret",
+        "private_key",
+        "credit_card",
+        "ssn",
+    }
+)
 
 # Masquage PARTIEL (4 derniers caractères conservés) : un numéro tronqué reste
 # corrélable entre deux lignes de log pour le debug, sans exposer l'identité.
-_LOG_PARTIAL_KEYS = frozenset({
-    "phone", "user_phone", "producer_phone", "buyer_phone",
-    "customer_phone", "phone_number", "_caller_phone", "recipient_phone",
-})
+_LOG_PARTIAL_KEYS = frozenset(
+    {
+        "phone",
+        "user_phone",
+        "producer_phone",
+        "buyer_phone",
+        "customer_phone",
+        "phone_number",
+        "_caller_phone",
+        "recipient_phone",
+    }
+)
 
 _LOG_MAX_DEPTH = 4
 
@@ -86,7 +107,9 @@ def mask_log_args(payload: Any, _depth: int = 0) -> Any:
 def _get_lifecycle_pool() -> ThreadPoolExecutor:
     global _LIFECYCLE_POOL
     if _LIFECYCLE_POOL is None:
-        _LIFECYCLE_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mcp-sync-bridge")
+        _LIFECYCLE_POOL = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="mcp-sync-bridge"
+        )
         atexit.register(_LIFECYCLE_POOL.shutdown, wait=False)
     return _LIFECYCLE_POOL
 
@@ -96,7 +119,9 @@ def _run_with_runner(coro: Coroutine[Any, Any, _T]) -> _T:
         return runner.run(coro)
 
 
-def run_coro_blocking(coro: Coroutine[Any, Any, _T], *, timeout: Optional[float] = None) -> _T:
+def run_coro_blocking(
+    coro: Coroutine[Any, Any, _T], *, timeout: Optional[float] = None
+) -> _T:
     """Exécute une coroutine depuis du code SYNCHRONE, sans imbriquer d'event loop.
 
     ⚠️ DANGER D'AFFINITÉ DE LOOP (asyncpg) :

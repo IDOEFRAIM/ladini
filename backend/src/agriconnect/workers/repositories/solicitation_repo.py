@@ -5,6 +5,7 @@ et ``(market_offer_id, target_buyer_id)`` : l'upsert ``ON CONFLICT DO NOTHING``
 ne réinsère jamais une sollicitation déjà émise, et ne retourne QUE les lignes
 réellement créées → seules celles-ci génèrent un message dans l'outbox.
 """
+
 from __future__ import annotations
 
 from datetime import datetime

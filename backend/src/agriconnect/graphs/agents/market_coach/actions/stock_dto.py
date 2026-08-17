@@ -9,7 +9,6 @@ from agriconnect.graphs.agents.market_coach.actions.common import (
     to_float,
 )
 
-
 _EMPTY_SLOT_VALUES: Tuple[object, ...] = (None, "", [], {})
 
 
@@ -72,7 +71,9 @@ class StockUpdateLevelPayload(BaseModel):
         )
         quantity_value = to_float(quantity_raw, field="quantity")
         if quantity_value is None:
-            raise ValueError("Aucune nouvelle quantité fournie pour la mise à jour du lot.")
+            raise ValueError(
+                "Aucune nouvelle quantité fournie pour la mise à jour du lot."
+            )
 
         unit_value = coalesce_entity_value(
             payload,

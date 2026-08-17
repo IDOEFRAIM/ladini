@@ -6,6 +6,7 @@ unboundedly across turns.
 
 Used by ``nodes/validation.py`` and ``nodes/memory.py``.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -52,7 +53,9 @@ def compact_order_tracking_context(
     return None
 
 
-def build_compaction_patch(state: Dict[str, Any], *, tracking_strategy: str = "trim") -> Dict[str, Any]:
+def build_compaction_patch(
+    state: Dict[str, Any], *, tracking_strategy: str = "trim"
+) -> Dict[str, Any]:
     patch: Dict[str, Any] = {}
     for key in ("messages", "history", "conversation_history"):
         trimmed = trim_sequence_window(state.get(key), MAX_MESSAGE_HISTORY)

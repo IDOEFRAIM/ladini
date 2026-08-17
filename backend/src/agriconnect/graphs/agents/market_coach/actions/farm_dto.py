@@ -4,7 +4,6 @@ from typing import Any, Mapping, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-
 _EMPTY_SLOT_VALUES: Tuple[object, ...] = (None, "", [], {})
 
 
@@ -53,7 +52,9 @@ class FarmCreatePayload(BaseModel):
                 surface_val = float(surface_raw)
             except (TypeError, ValueError):
                 surface_val = None
-        return cls(farm_name=str(name).strip(), zone=str(zone).strip(), surface=surface_val)
+        return cls(
+            farm_name=str(name).strip(), zone=str(zone).strip(), surface=surface_val
+        )
 
 
 class FarmUpdatePayload(BaseModel):
@@ -83,4 +84,8 @@ class FarmUpdatePayload(BaseModel):
                 surface_val = float(surface_raw)
             except (TypeError, ValueError):
                 surface_val = None
-        return cls(farm_id=str(farm_id).strip(), farm_name=(str(name).strip() if name not in _EMPTY_SLOT_VALUES else None), surface=surface_val)
+        return cls(
+            farm_id=str(farm_id).strip(),
+            farm_name=(str(name).strip() if name not in _EMPTY_SLOT_VALUES else None),
+            surface=surface_val,
+        )

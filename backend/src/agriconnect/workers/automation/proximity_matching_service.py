@@ -7,6 +7,7 @@ n'écrit que ``solicitations`` + ``notification_outbox``.
     2. Identifier les acheteurs de la même zone.
     3. Upsert des alertes (idempotent) → outbox.
 """
+
 from __future__ import annotations
 
 import logging
@@ -76,7 +77,9 @@ class ProximityMatchingService:
 
         for offer, zone_id, producer_name in rows:
             try:
-                await self._process_offer(offer, zone_id, producer_name, report, targeting_limit)
+                await self._process_offer(
+                    offer, zone_id, producer_name, report, targeting_limit
+                )
             except Exception as exc:
                 logger.exception("Alerte offre %s échouée", offer.id)
                 report.errors.append(f"{offer.id}: {exc}")

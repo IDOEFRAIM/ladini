@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import inspect
-import functools
-import logging
 import datetime as _dt
-import uuid
+import functools
+import inspect
+import logging
 import types as _types
+import uuid
 from typing import Any, Callable, Dict, Union, get_args, get_origin, get_type_hints
 
 from agriconnect.services.database.d import AgriDatabaseService as DatabaseService
@@ -79,7 +79,9 @@ def _type_to_json_schema(annotation: Any) -> dict[str, Any]:
         if len(non_none) == 1:
             base = _type_to_json_schema(non_none[0])
             return {"anyOf": [base, {"type": "null"}]}
-        return {"anyOf": [_type_to_json_schema(a) for a in non_none] + [{"type": "null"}]}
+        return {
+            "anyOf": [_type_to_json_schema(a) for a in non_none] + [{"type": "null"}]
+        }
 
     # Containers
     if origin in (list, tuple, set, frozenset):
@@ -127,7 +129,9 @@ def build_mcp_infrastructure(
         method_name = aliases.get(tool_name, tool_name)
         method = getattr(db_service, method_name, None)
         if method is None:
-            logger.warning("Declared tool '%s' but method '%s' not found.", tool_name, method_name)
+            logger.warning(
+                "Declared tool '%s' but method '%s' not found.", tool_name, method_name
+            )
             continue
 
         # Use the class method for wraps() so signature/docstring are stable.
@@ -184,7 +188,9 @@ def build_mcp_infrastructure(
 
 # Convenience: module-level registries (kept for backward compatibility)
 service_instance = DatabaseService()
-TOOL_HANDLERS, TOOL_DESCRIPTIONS, TOOL_SCHEMAS = build_mcp_infrastructure(service_instance)
+TOOL_HANDLERS, TOOL_DESCRIPTIONS, TOOL_SCHEMAS = build_mcp_infrastructure(
+    service_instance
+)
 
 
 if __name__ == "__main__":

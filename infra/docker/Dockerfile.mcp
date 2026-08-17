@@ -2,12 +2,13 @@
 # ─────────────────────────────────────────────────────────────────────
 # Image du daemon MCP HTTP (AgriDBMCPServer, transport persistant).
 # Réutilise EXACTEMENT le même build que l'API (Dockerfile.api builder,
-# mêmes deps) — seule la commande de lancement change. Voir la docstring
-# de protocols/mcp/servers/http_server.py pour le contrat HTTP exposé
-# (GET /tools, POST /call) et pourquoi --workers doit rester à 1 (pool DB
-# singleton process-local ; scaler horizontalement via plusieurs services
-# `mcp` sur des ports différents derrière un load balancer, pas via
-# --workers > 1 dans le même process).
+# mêmes deps, même ENTRYPOINT tini hérité) — seule la commande change. Voir
+# la docstring de protocols/mcp/servers/http_server.py pour le contrat HTTP
+# exposé (GET /tools, POST /call) et pourquoi --workers doit rester à 1 (pool
+# DB singleton process-local ; scaler horizontalement via plusieurs SERVICES
+# `mcp` sur des ports différents derrière un load balancer, jamais via
+# --workers > 1 dans le même process, et jamais via `--scale mcp=N` sur ce
+# même service/port).
 # ─────────────────────────────────────────────────────────────────────
 ARG API_IMAGE=ladini-api:latest
 FROM ${API_IMAGE} AS runtime
@@ -20,5 +21,16 @@ EXPOSE 8003
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -fsS http://localhost:8003/health || exit 1
 
+# --workers 1 : NON négociable (voir bandeau ci-dessus).
+# --loop uvloop --http httptools : uvicorn[standard] (pyproject.toml) les
+# embarque déjà et les auto-détecte, mais on les rend explicites — c'est le
+# chemin le plus rapide pour un daemon qui encaisse tout le trafic MCP
+# api+worker, et évite une régression silencieuse si `uvicorn[standard]`
+# devient un jour `uvicorn` nu dans les deps.
+# --timeout-graceful-shutdown 30 : laisse les appels d'outils MCP en vol
+# (potentiellement un aller-retour DB + logique métier) se terminer avant
+# coupure — doit rester <= stop_grace_period côté compose.
 CMD ["uvicorn", "agriconnect.protocols.mcp.servers.http_server:app", \
-     "--host", "0.0.0.0", "--port", "8003", "--workers", "1"]
+     "--host", "0.0.0.0", "--port", "8003", "--workers", "1", \
+     "--loop", "uvloop", "--http", "httptools", \
+     "--timeout-graceful-shutdown", "30"]

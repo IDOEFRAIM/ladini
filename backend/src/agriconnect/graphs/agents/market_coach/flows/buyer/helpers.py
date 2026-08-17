@@ -1,10 +1,30 @@
 """Buyer flow shared helpers — entity extraction, state builders, constants."""
+
 from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
+# =====================================================================
+# GOAL SETS — aliases de compat ; source canonique : core/goals.py
+# (dérivés d'INTENT_CONFIG, anti-drift). Ne jamais redéfinir localement.
+# =====================================================================
+from agriconnect.graphs.agents.market_coach.core.goals import (
+    BUYER_AUCTION_TRACKING_GOALS as AUCTION_TRACKING_GOALS,
+)
+from agriconnect.graphs.agents.market_coach.core.goals import (
+    BUYER_CART_GOALS as CART_GOALS,
+)
+from agriconnect.graphs.agents.market_coach.core.goals import (
+    BUYER_NEGOTIATION_GOALS as NEGOTIATION_GOALS,
+)
+from agriconnect.graphs.agents.market_coach.core.goals import (
+    BUYER_ORDER_TRACKING_GOALS as ORDER_TRACKING_GOALS,
+)
+from agriconnect.graphs.agents.market_coach.core.goals import (
+    BUYER_PREORDER_GOALS as PREORDER_GOALS,
+)
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
@@ -13,38 +33,35 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_text import (
     render_numbered_menu,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.buyer_common import (
-    SUPPORT_FOOTER,
     with_support_footer,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
-    CartDomainService,
     SOURCE_TYPE_LABELS,
+    CartDomainService,
 )
 
 logger = logging.getLogger("AgriConnect.Market.BuyerFlow")
 
-# =====================================================================
-# GOAL SETS — aliases de compat ; source canonique : core/goals.py
-# (dérivés d'INTENT_CONFIG, anti-drift). Ne jamais redéfinir localement.
-# =====================================================================
-
-from agriconnect.graphs.agents.market_coach.core.goals import (  # noqa: E402
-    BUYER_CART_GOALS as CART_GOALS,
-    BUYER_PREORDER_GOALS as PREORDER_GOALS,
-    BUYER_NEGOTIATION_GOALS as NEGOTIATION_GOALS,
-    BUYER_ORDER_TRACKING_GOALS as ORDER_TRACKING_GOALS,
-    BUYER_AUCTION_TRACKING_GOALS as AUCTION_TRACKING_GOALS,
+READ_ONLY_INTENTS = frozenset(
+    {
+        "BUYER_VIEW_CART",
+        "BUYER_LIST_ORDERS",
+        "BUYER_CHECK_ORDER_STATUS",
+        "BUYER_LIST_AUCTIONS",
+        "BUYER_CHECK_AUCTION_STATUS",
+    }
 )
 
-READ_ONLY_INTENTS = frozenset({
-    "BUYER_VIEW_CART", "BUYER_LIST_ORDERS", "BUYER_CHECK_ORDER_STATUS",
-    "BUYER_LIST_AUCTIONS", "BUYER_CHECK_AUCTION_STATUS",
-})
-
-ESCALATE_KEYWORDS = frozenset({
-    "appel", "appels", "appel d'offres", "appel doffres",
-    "appel d offre", "lancer appel",
-})
+ESCALATE_KEYWORDS = frozenset(
+    {
+        "appel",
+        "appels",
+        "appel d'offres",
+        "appel doffres",
+        "appel d offre",
+        "lancer appel",
+    }
+)
 CONFIRM_KEYWORDS = frozenset({"oui", "yes", "ok"})
 DECLINE_KEYWORDS = frozenset({"non", "no", "aucun", "aucune", "annuler"})
 
@@ -57,12 +74,47 @@ _PRODUCT_HINT_PATTERN = re.compile(
     r"([a-zàâçéèêëîïôûùüÿñæœ'\-]+(?:\s+[a-zàâçéèêëîïôûùüÿñæœ'\-]+)?)",
     re.IGNORECASE,
 )
-_PRODUCT_STOP_WORDS = frozenset({
-    "kg", "kgs", "kilo", "kilos", "kilogramme", "kilogrammes", "tonne", "tonnes",
-    "sac", "sacs", "panier", "paniers", "de", "du", "des", "d", "le", "la", "les",
-    "un", "une", "au", "aux", "en", "pour", "avec", "mon", "ma", "mes", "ton",
-    "ta", "tes", "son", "sa", "ses", "et", "ou",
-})
+_PRODUCT_STOP_WORDS = frozenset(
+    {
+        "kg",
+        "kgs",
+        "kilo",
+        "kilos",
+        "kilogramme",
+        "kilogrammes",
+        "tonne",
+        "tonnes",
+        "sac",
+        "sacs",
+        "panier",
+        "paniers",
+        "de",
+        "du",
+        "des",
+        "d",
+        "le",
+        "la",
+        "les",
+        "un",
+        "une",
+        "au",
+        "aux",
+        "en",
+        "pour",
+        "avec",
+        "mon",
+        "ma",
+        "mes",
+        "ton",
+        "ta",
+        "tes",
+        "son",
+        "sa",
+        "ses",
+        "et",
+        "ou",
+    }
+)
 
 
 def infer_product_from_text(state: Dict[str, Any]) -> Optional[str]:
@@ -88,16 +140,14 @@ def infer_product_from_text(state: Dict[str, Any]) -> Optional[str]:
 # ENTITY RESOLUTION — consistent product/quantity/unit extraction
 # =====================================================================
 
+
 def resolve_product(
     payload: Dict[str, Any],
     stable_entities: Dict[str, Any],
     state: Dict[str, Any],
 ) -> Optional[str]:
     """Resolve product name from payload → stable entities → text inference → memory."""
-    product = (
-        payload.get("product")
-        or stable_entities.get("product")
-    )
+    product = payload.get("product") or stable_entities.get("product")
     if not product:
         product = infer_product_from_text(state)
         if product:
@@ -122,7 +172,9 @@ def additional_products_hint(payload: Dict[str, Any], state: Dict[str, Any]) -> 
     (jamais de recherche simultanée sur un terme composite) : sans cet
     avertissement, les produits supplémentaires disparaîtraient silencieusement.
     Voir [[buyer-search-fuzzy-match-safety-2026-08]]."""
-    extras = payload.get("additional_products") or (state.get("extracted_entities") or {}).get("additional_products")
+    extras = payload.get("additional_products") or (
+        state.get("extracted_entities") or {}
+    ).get("additional_products")
     if not extras or not isinstance(extras, (list, tuple)):
         return ""
     names = [str(p).strip() for p in extras if str(p or "").strip()]
@@ -153,10 +205,7 @@ def resolve_unit(
     stable_entities: Dict[str, Any],
 ) -> Optional[str]:
     """Resolve unit from payload → stable entities."""
-    unit = (
-        payload.get("unit")
-        or stable_entities.get("unit")
-    )
+    unit = payload.get("unit") or stable_entities.get("unit")
     if unit:
         payload.setdefault("unit", unit)
     return unit
@@ -219,7 +268,9 @@ def draft_block_response(draft: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def capture_cart_draft(state: Dict[str, Any], payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def capture_cart_draft(
+    state: Dict[str, Any], payload: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
     """Capture partial slot data into a draft payload snapshot."""
     draft = dict(state.get("draft_payload") or {})
     changed = False
@@ -241,7 +292,10 @@ def capture_cart_draft(state: Dict[str, Any], payload: Dict[str, Any]) -> Option
 # STATE RESET HELPERS
 # =====================================================================
 
-def clear_active_goal(state: Dict[str, Any], *, clear_cart_snapshot: bool = False) -> Dict[str, Any]:
+
+def clear_active_goal(
+    state: Dict[str, Any], *, clear_cart_snapshot: bool = False
+) -> Dict[str, Any]:
     """Return a working_memory patch with the goal/lock cleared."""
     working = dict(state.get("working_memory") or {})
     working["active_goal"] = None
@@ -278,13 +332,21 @@ def phone_missing_error() -> Dict[str, Any]:
 
 PREORDER_ACTION_OPTIONS = [
     MenuOption(index="1", label="✅ Confirmer la commande", value="PREORDER_CONFIRM"),
-    MenuOption(index="2", label="↩️ Annuler et revenir au panier", value="PREORDER_CANCEL"),
-    MenuOption(index="3", label="➕ Ajouter d'autres produits", value="PREORDER_ADD_MORE"),
+    MenuOption(
+        index="2", label="↩️ Annuler et revenir au panier", value="PREORDER_CANCEL"
+    ),
+    MenuOption(
+        index="3", label="➕ Ajouter d'autres produits", value="PREORDER_ADD_MORE"
+    ),
 ]
 
 NEGOTIATION_ACTION_OPTIONS = [
-    MenuOption(index="1", label="📥 Voir les offres reçues", value="NEGOTIATION_VIEW_OFFERS"),
-    MenuOption(index="2", label="🔁 Proposer un autre prix", value="NEGOTIATION_COUNTER"),
+    MenuOption(
+        index="1", label="📥 Voir les offres reçues", value="NEGOTIATION_VIEW_OFFERS"
+    ),
+    MenuOption(
+        index="2", label="🔁 Proposer un autre prix", value="NEGOTIATION_COUNTER"
+    ),
     MenuOption(index="3", label="❌ Abandonner", value="NEGOTIATION_ABORT"),
 ]
 
@@ -302,7 +364,9 @@ CART_ACTION_KEYWORDS = {
 }
 
 
-def resolve_menu_value_by_index(options: Sequence[MenuOption], index: Any) -> Optional[str]:
+def resolve_menu_value_by_index(
+    options: Sequence[MenuOption], index: Any
+) -> Optional[str]:
     """Find the value associated with a given menu index."""
     if index in (None, ""):
         return None
@@ -321,7 +385,9 @@ def negotiation_choice_from_index(index: Any) -> Optional[str]:
     return resolve_menu_value_by_index(NEGOTIATION_ACTION_OPTIONS, index)
 
 
-def render_interactive_menu(options: Sequence[MenuOption], header: Optional[str] = None) -> str:
+def render_interactive_menu(
+    options: Sequence[MenuOption], header: Optional[str] = None
+) -> str:
     """Build a numbered menu string for WhatsApp / AG-UI."""
     return render_numbered_menu(options, header=header)
 
@@ -333,7 +399,9 @@ def preorder_action_menu(preorder_id: str, **extra_meta: Any) -> MenuRequest:
         options=list(PREORDER_ACTION_OPTIONS),
         kind="preorder_action",
         metadata={"preorder_id": str(preorder_id), **extra_meta},
-        preformatted_text=render_interactive_menu(PREORDER_ACTION_OPTIONS, "Choisissez une option :"),
+        preformatted_text=render_interactive_menu(
+            PREORDER_ACTION_OPTIONS, "Choisissez une option :"
+        ),
     )
 
 
@@ -371,9 +439,15 @@ def detect_cart_action(state: Dict[str, Any]) -> Optional[str]:
 
     cart = state.get("active_cart") or []
     working = state.get("working_memory") or {}
-    mapping_kind = str(
-        working.get("available_mapping_kind") or working.get("available_mapping_meta") or ""
-    ).lower().strip()
+    mapping_kind = (
+        str(
+            working.get("available_mapping_kind")
+            or working.get("available_mapping_meta")
+            or ""
+        )
+        .lower()
+        .strip()
+    )
     in_cart_context = mapping_kind in {"cart", "preorder_action"}
 
     if event == "REJECT":
@@ -390,17 +464,38 @@ def read_only_intent(intent: Optional[str]) -> bool:
 
 
 __all__ = [
-    "CART_GOALS", "PREORDER_GOALS", "NEGOTIATION_GOALS",
-    "ORDER_TRACKING_GOALS", "AUCTION_TRACKING_GOALS", "READ_ONLY_INTENTS",
-    "ESCALATE_KEYWORDS", "CONFIRM_KEYWORDS", "DECLINE_KEYWORDS",
-    "infer_product_from_text", "resolve_product", "additional_products_hint", "resolve_quantity", "resolve_unit",
-    "missing_draft_field", "draft_requires_completion", "draft_expected_input",
-    "draft_block_response", "capture_cart_draft",
-    "clear_active_goal", "error_response", "phone_missing_error",
-    "PREORDER_ACTION_OPTIONS", "NEGOTIATION_ACTION_OPTIONS",
-    "resolve_menu_value_by_index", "preorder_choice_from_index",
-    "negotiation_choice_from_index", "render_interactive_menu",
-    "preorder_action_menu", "negotiation_action_menu",
-    "detect_cart_action", "read_only_intent",
-    "SOURCE_TYPE_LABELS", "logger",
+    "CART_GOALS",
+    "PREORDER_GOALS",
+    "NEGOTIATION_GOALS",
+    "ORDER_TRACKING_GOALS",
+    "AUCTION_TRACKING_GOALS",
+    "READ_ONLY_INTENTS",
+    "ESCALATE_KEYWORDS",
+    "CONFIRM_KEYWORDS",
+    "DECLINE_KEYWORDS",
+    "infer_product_from_text",
+    "resolve_product",
+    "additional_products_hint",
+    "resolve_quantity",
+    "resolve_unit",
+    "missing_draft_field",
+    "draft_requires_completion",
+    "draft_expected_input",
+    "draft_block_response",
+    "capture_cart_draft",
+    "clear_active_goal",
+    "error_response",
+    "phone_missing_error",
+    "PREORDER_ACTION_OPTIONS",
+    "NEGOTIATION_ACTION_OPTIONS",
+    "resolve_menu_value_by_index",
+    "preorder_choice_from_index",
+    "negotiation_choice_from_index",
+    "render_interactive_menu",
+    "preorder_action_menu",
+    "negotiation_action_menu",
+    "detect_cart_action",
+    "read_only_intent",
+    "SOURCE_TYPE_LABELS",
+    "logger",
 ]

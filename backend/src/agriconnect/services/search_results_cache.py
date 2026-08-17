@@ -8,6 +8,7 @@ n'importe volontairement PAS `celery` (contrairement à
 que le rendu d'un résultat de recherche reste indépendant de l'infrastructure
 de traitement asynchrone des photos.
 """
+
 from __future__ import annotations
 
 import json
@@ -47,7 +48,10 @@ def store_results(phone: str, entries: Dict[str, Dict[str, Any]]) -> None:
     try:
         _redis().setex(key_for(phone), _TTL_SECONDS, json.dumps(entries))
     except Exception:
-        logger.warning("SEARCH_RESULTS_CACHE_WRITE_FAILED | phone=%s", phone[-4:] if len(phone) >= 4 else "?")
+        logger.warning(
+            "SEARCH_RESULTS_CACHE_WRITE_FAILED | phone=%s",
+            phone[-4:] if len(phone) >= 4 else "?",
+        )
 
 
 def load_results(phone: str) -> Optional[Dict[str, Dict[str, Any]]]:

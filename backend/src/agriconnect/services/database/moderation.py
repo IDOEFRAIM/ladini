@@ -11,6 +11,7 @@ marketplace :
 Toutes les méthodes s'appuient sur ``self.session`` (ContextVar unifié) —
 aucune ouverture de session ici, le wrapper d'``AgriDatabaseService`` s'en charge.
 """
+
 from __future__ import annotations
 
 import logging
@@ -28,14 +29,15 @@ from agriconnect.domain.models import (
     ProhibitedTerm,
     User,
 )
+
 from .common import normalize_phone
 
 logger = logging.getLogger("agriconnect.services.database.moderation")
 
 
 # ── Seuils (interprétation « strictement plus de 3 fois » → au 4e) ──────────
-MAX_CANCELLATIONS = 3        # blocage si annulations > 3
-MAX_MODERATION_STRIKES = 3   # bannissement si mentions interdites > 3
+MAX_CANCELLATIONS = 3  # blocage si annulations > 3
+MAX_MODERATION_STRIKES = 3  # bannissement si mentions interdites > 3
 
 
 # ── Base par défaut de produits interdits (fail-safe si la table est vide) ──
@@ -43,17 +45,55 @@ MAX_MODERATION_STRIKES = 3   # bannissement si mentions interdites > 3
 # l'entrée utilisateur, donc « cocaïne » == « cocaine ».
 DEFAULT_PROHIBITED_TERMS: Set[str] = {
     # drogues
-    "drogue", "drogues", "cocaine", "coke", "heroine", "cannabis", "weed",
-    "marijuana", "ganja", "haschich", "hashish", "shit", "meth",
-    "methamphetamine", "amphetamine", "ecstasy", "mdma", "lsd", "crack",
-    "opium", "kush", "chanvre indien", "stupefiant", "stupefiants",
+    "drogue",
+    "drogues",
+    "cocaine",
+    "coke",
+    "heroine",
+    "cannabis",
+    "weed",
+    "marijuana",
+    "ganja",
+    "haschich",
+    "hashish",
+    "shit",
+    "meth",
+    "methamphetamine",
+    "amphetamine",
+    "ecstasy",
+    "mdma",
+    "lsd",
+    "crack",
+    "opium",
+    "kush",
+    "chanvre indien",
+    "stupefiant",
+    "stupefiants",
     # armes & explosifs
-    "arme a feu", "armes a feu", "pistolet", "revolver", "kalachnikov",
-    "kalash", "fusil", "munition", "munitions", "grenade", "explosif",
-    "explosifs", "tnt", "dynamite", "lance roquette",
+    "arme a feu",
+    "armes a feu",
+    "pistolet",
+    "revolver",
+    "kalachnikov",
+    "kalash",
+    "fusil",
+    "munition",
+    "munitions",
+    "grenade",
+    "explosif",
+    "explosifs",
+    "tnt",
+    "dynamite",
+    "lance roquette",
     # illicite divers
-    "faux billet", "faux billets", "contrefacon", "ivoire", "pangolin",
-    "corne de rhinoceros", "organe humain", "organes humains",
+    "faux billet",
+    "faux billets",
+    "contrefacon",
+    "ivoire",
+    "pangolin",
+    "corne de rhinoceros",
+    "organe humain",
+    "organes humains",
     "espece protegee",
 }
 
@@ -103,16 +143,20 @@ class ModerationMixin:
         norm = normalize_phone(phone, required=False)
         if not norm:
             return {
-                "status": "success", "account_status": "ACTIVE",
-                "is_blocked": False, "is_banned": False,
+                "status": "success",
+                "account_status": "ACTIVE",
+                "is_blocked": False,
+                "is_banned": False,
             }
 
         user = await session.scalar(select(User).where(User.phone == norm))
         if user is None:
             # Compte inconnu : neutre — l'onboarding créera le profil.
             return {
-                "status": "success", "account_status": "ACTIVE",
-                "is_blocked": False, "is_banned": False,
+                "status": "success",
+                "account_status": "ACTIVE",
+                "is_blocked": False,
+                "is_banned": False,
             }
 
         acc = str(user.account_status or "ACTIVE").upper()
@@ -129,7 +173,10 @@ class ModerationMixin:
         """Liste des termes interdits actifs (table admin ∪ base par défaut), cachée."""
         now = time.monotonic()
         cached = _TERMS_CACHE.get("terms")
-        if cached is not None and (now - _TERMS_CACHE.get("ts", 0.0)) < _TERMS_TTL_SECONDS:
+        if (
+            cached is not None
+            and (now - _TERMS_CACHE.get("ts", 0.0)) < _TERMS_TTL_SECONDS
+        ):
             return {"status": "success", "terms": cached, "cached": True}
 
         db_terms: List[str] = []
@@ -137,13 +184,22 @@ class ModerationMixin:
         if session is not None:
             try:
                 rows = (
-                    await session.execute(
-                        select(ProhibitedTerm.term).where(ProhibitedTerm.is_active.is_(True))
+                    (
+                        await session.execute(
+                            select(ProhibitedTerm.term).where(
+                                ProhibitedTerm.is_active.is_(True)
+                            )
+                        )
                     )
-                ).scalars().all()
+                    .scalars()
+                    .all()
+                )
                 db_terms = [_fold(t) for t in rows if t]
             except Exception:
-                logger.debug("get_prohibited_terms: lecture table échouée, défauts seuls", exc_info=True)
+                logger.debug(
+                    "get_prohibited_terms: lecture table échouée, défauts seuls",
+                    exc_info=True,
+                )
 
         merged = sorted({t for t in db_terms if t} | DEFAULT_PROHIBITED_TERMS)
         _TERMS_CACHE["terms"] = merged
@@ -187,15 +243,24 @@ class ModerationMixin:
             await session.scalar(
                 select(func.count())
                 .select_from(ModerationEvent)
-                .where(ModerationEvent.phone == (norm or "unknown"), ModerationEvent.kind == kind_up)
+                .where(
+                    ModerationEvent.phone == (norm or "unknown"),
+                    ModerationEvent.kind == kind_up,
+                )
             )
             or 0
         )
 
         banned = strikes > MAX_MODERATION_STRIKES
-        if banned and user is not None and str(user.account_status or "").upper() != "BANNED":
+        if (
+            banned
+            and user is not None
+            and str(user.account_status or "").upper() != "BANNED"
+        ):
             user.account_status = "BANNED"
-            user.blocked_reason = "Mentions répétées de produits interdits sur la marketplace."
+            user.blocked_reason = (
+                "Mentions répétées de produits interdits sur la marketplace."
+            )
             user.blocked_at = _utcnow_naive()
             event.action_taken = "BANNED"
             await session.flush()
@@ -229,7 +294,9 @@ class ModerationMixin:
         z_uuid = _to_uuid(zone_id)
 
         existing = await session.scalar(
-            select(DemandSignal).where(DemandSignal.normalized_term == term).with_for_update()
+            select(DemandSignal)
+            .where(DemandSignal.normalized_term == term)
+            .with_for_update()
         )
         if existing is not None:
             existing.occurrences = int(existing.occurrences or 0) + 1

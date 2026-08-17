@@ -1,13 +1,11 @@
-from typing import Any, Dict, List, Optional, Union
 import logging
-from sqlalchemy import select, func, desc
-from datetime import datetime
 import uuid
-from .common import clean_text, positive_float
-from .base import BaseMixin
-from .errors import BusinessRuleException
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Union
+
+from sqlalchemy import desc, func, select
+
 from agriconnect.domain.models import (
-    Client,
     Expense,
     Farm,
     Order,
@@ -17,10 +15,12 @@ from agriconnect.domain.models import (
     Stock,
     StockMovement,
     User,
-    Zone,
     _uuid4,
 )
 
+from .base import BaseMixin
+from .common import clean_text, positive_float
+from .errors import BusinessRuleException
 
 logger = logging.getLogger("agriconnect.services.database")
 
@@ -38,7 +38,6 @@ def _is_uuid(value: str) -> bool:
 
 
 class MarketplaceMixin(BaseMixin):
-
     # =======================================================================
     # RESOLUTION HELPERS
     # =======================================================================
@@ -57,18 +56,27 @@ class MarketplaceMixin(BaseMixin):
             prod2 = result2.scalar_one_or_none()
             if prod2:
                 return str(prod2.id)
-            return {"status": "error", "message": f"Profil producteur introuvable pour l'identifiant : {identifier}"}
+            return {
+                "status": "error",
+                "message": f"Profil producteur introuvable pour l'identifiant : {identifier}",
+            }
         else:
             stmt = select(User).where(User.phone == str(identifier).strip())
             result = await current_session.execute(stmt)
             user = result.scalar_one_or_none()
             if not user:
-                return {"status": "error", "message": f"Aucun utilisateur trouvé pour : {identifier}"}
+                return {
+                    "status": "error",
+                    "message": f"Aucun utilisateur trouvé pour : {identifier}",
+                }
             stmt2 = select(Producer).where(Producer.user_id == user.id)
             result2 = await current_session.execute(stmt2)
             prod = result2.scalar_one_or_none()
             if not prod:
-                return {"status": "error", "message": f"Profil producteur introuvable pour l'utilisateur : {identifier}"}
+                return {
+                    "status": "error",
+                    "message": f"Profil producteur introuvable pour l'utilisateur : {identifier}",
+                }
             return str(prod.id)
 
     # =======================================================================
@@ -101,7 +109,17 @@ class MarketplaceMixin(BaseMixin):
     # GESTION DES STOCKS
     # =======================================================================
 
-    async def add_stock(self, farm_id: str, item_name: str, quantity: float, unit: str = "KG", stock_type: str = "HARVEST", reason: str = "Ajout via agent", warehouse_id: str = None, organization_id: str = None) -> Dict[str, Any]:
+    async def add_stock(
+        self,
+        farm_id: str,
+        item_name: str,
+        quantity: float,
+        unit: str = "KG",
+        stock_type: str = "HARVEST",
+        reason: str = "Ajout via agent",
+        warehouse_id: str = None,
+        organization_id: str = None,
+    ) -> Dict[str, Any]:
         """Incrémente ou crée une ligne de stock pour un produit donné."""
         current_session = self.session
         farm_id = clean_text(farm_id, "farm_id", required=True)
@@ -115,7 +133,14 @@ class MarketplaceMixin(BaseMixin):
         if not farm:
             raise BusinessRuleException(f"Ferme introuvable: {farm_id}")
 
-        stmt = select(Stock).where(Stock.farm_id == farm_id, func.lower(Stock.item_name) == item_name.lower()).with_for_update()
+        stmt = (
+            select(Stock)
+            .where(
+                Stock.farm_id == farm_id,
+                func.lower(Stock.item_name) == item_name.lower(),
+            )
+            .with_for_update()
+        )
         result = await current_session.execute(stmt)
         stock = result.scalar_one_or_none()
 
@@ -125,29 +150,65 @@ class MarketplaceMixin(BaseMixin):
             new_total = stock.quantity
         else:
             stock_id = _uuid()
-            stock = Stock(id=stock_id, farm_id=farm_id, item_name=item_name, quantity=quantity, unit=unit, type=stock_type, warehouse_id=warehouse_id, organization_id=organization_id)
+            stock = Stock(
+                id=stock_id,
+                farm_id=farm_id,
+                item_name=item_name,
+                quantity=quantity,
+                unit=unit,
+                type=stock_type,
+                warehouse_id=warehouse_id,
+                organization_id=organization_id,
+            )
             current_session.add(stock)
             new_total = quantity
 
-        mvt = StockMovement(id=_uuid(), stock_id=stock_id, type="IN", quantity=quantity, reason=reason)
+        mvt = StockMovement(
+            id=_uuid(), stock_id=stock_id, type="IN", quantity=quantity, reason=reason
+        )
         current_session.add(mvt)
         await current_session.flush()
 
-        return {"status": "success", "data": {"stock_id": stock_id, "item_name": item_name, "added": quantity, "new_total": new_total, "unit": unit}}
+        return {
+            "status": "success",
+            "data": {
+                "stock_id": stock_id,
+                "item_name": item_name,
+                "added": quantity,
+                "new_total": new_total,
+                "unit": unit,
+            },
+        }
 
-    async def remove_stock(self, farm_id: str, item_name: str, quantity: float, reason: str = "Retrait", movement_type: str = "OUT") -> Dict[str, Any]:
+    async def remove_stock(
+        self,
+        farm_id: str,
+        item_name: str,
+        quantity: float,
+        reason: str = "Retrait",
+        movement_type: str = "OUT",
+    ) -> Dict[str, Any]:
         """Décrémente le stock d'un produit après vérification des disponibilités."""
         current_session = self.session
         farm_id = clean_text(farm_id, "farm_id", required=True)
         item_name = clean_text(item_name, "item_name", required=True)
         quantity = positive_float(quantity, "quantity")
 
-        stmt = select(Stock).where(Stock.farm_id == farm_id, func.lower(Stock.item_name) == item_name.lower()).with_for_update()
+        stmt = (
+            select(Stock)
+            .where(
+                Stock.farm_id == farm_id,
+                func.lower(Stock.item_name) == item_name.lower(),
+            )
+            .with_for_update()
+        )
         result = await current_session.execute(stmt)
         stock = result.scalar_one_or_none()
 
         if not stock:
-            raise BusinessRuleException(f"Aucun stock de '{item_name}' trouvé pour cette exploitation.")
+            raise BusinessRuleException(
+                f"Aucun stock de '{item_name}' trouvé pour cette exploitation."
+            )
         if stock.quantity < quantity:
             raise BusinessRuleException(
                 f"Stock insuffisant : {stock.quantity} {stock.unit} disponibles, retrait de {quantity} {stock.unit} demandé.",
@@ -156,17 +217,56 @@ class MarketplaceMixin(BaseMixin):
 
         stock.quantity -= quantity
 
-        mvt = StockMovement(id=_uuid(), stock_id=str(stock.id), type=movement_type, quantity=quantity, reason=reason)
+        mvt = StockMovement(
+            id=_uuid(),
+            stock_id=str(stock.id),
+            type=movement_type,
+            quantity=quantity,
+            reason=reason,
+        )
         current_session.add(mvt)
         await current_session.flush()
 
-        return {"status": "success", "data": {"stock_id": str(stock.id), "item_name": item_name, "removed": quantity, "remaining": stock.quantity, "unit": stock.unit}}
+        return {
+            "status": "success",
+            "data": {
+                "stock_id": str(stock.id),
+                "item_name": item_name,
+                "removed": quantity,
+                "remaining": stock.quantity,
+                "unit": stock.unit,
+            },
+        }
 
-    async def adjust_stock(self, farm_id: str, item_name: str, quantity_change: float, reason: str = "Adjustment via MCP", unit: str = "KG", stock_type: str = "HARVEST", warehouse_id: str = None, organization_id: str = None) -> Dict[str, Any]:
+    async def adjust_stock(
+        self,
+        farm_id: str,
+        item_name: str,
+        quantity_change: float,
+        reason: str = "Adjustment via MCP",
+        unit: str = "KG",
+        stock_type: str = "HARVEST",
+        warehouse_id: str = None,
+        organization_id: str = None,
+    ) -> Dict[str, Any]:
         if quantity_change >= 0:
-            return await self.add_stock(farm_id=farm_id, item_name=item_name, quantity=quantity_change, unit=unit, stock_type=stock_type, reason=reason, warehouse_id=warehouse_id, organization_id=organization_id)
+            return await self.add_stock(
+                farm_id=farm_id,
+                item_name=item_name,
+                quantity=quantity_change,
+                unit=unit,
+                stock_type=stock_type,
+                reason=reason,
+                warehouse_id=warehouse_id,
+                organization_id=organization_id,
+            )
         else:
-            return await self.remove_stock(farm_id=farm_id, item_name=item_name, quantity=abs(quantity_change), reason=reason)
+            return await self.remove_stock(
+                farm_id=farm_id,
+                item_name=item_name,
+                quantity=abs(quantity_change),
+                reason=reason,
+            )
 
     # NB : `get_stocks` vit désormais UNIQUEMENT dans `ProducerMgmtMixin`
     # (services/database/producer.py) — vue catalogue complète (Product avec
@@ -176,11 +276,26 @@ class MarketplaceMixin(BaseMixin):
     # silencieusement via le MRO — cause du bug « le producteur ne voit pas
     # son catalogue » (SALES_GET_CATALOG). Voir [[farm-autoprovision-critical-goals]].
 
-    async def get_stock_movements(self, stock_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+    async def get_stock_movements(
+        self, stock_id: str, limit: int = 20
+    ) -> List[Dict[str, Any]]:
         current_session = self.session
-        stmt = select(StockMovement).where(StockMovement.stock_id == stock_id).order_by(desc(StockMovement.created_at)).limit(limit)
+        stmt = (
+            select(StockMovement)
+            .where(StockMovement.stock_id == stock_id)
+            .order_by(desc(StockMovement.created_at))
+            .limit(limit)
+        )
         result = await current_session.execute(stmt)
-        return [{"type": m.type, "quantity": m.quantity, "reason": m.reason, "date": m.created_at.isoformat() if m.created_at else None} for m in result.scalars()]
+        return [
+            {
+                "type": m.type,
+                "quantity": m.quantity,
+                "reason": m.reason,
+                "date": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in result.scalars()
+        ]
 
     # =======================================================================
     # PRODUCTS
@@ -310,17 +425,33 @@ class MarketplaceMixin(BaseMixin):
     # EXPENSES
     # =======================================================================
 
-    async def add_expense(self, farm_id: str, label: str, amount: float, category: str = "OTHER", date: datetime = None) -> Dict[str, Any]:
+    async def add_expense(
+        self,
+        farm_id: str,
+        label: str,
+        amount: float,
+        category: str = "OTHER",
+        date: datetime = None,
+    ) -> Dict[str, Any]:
         current_session = self.session
         farm_id = clean_text(farm_id, "farm_id", required=True)
         label = clean_text(label, "label", required=True)
         amount = positive_float(amount, "amount")
-        expense = Expense(id=_uuid(), farm_id=farm_id, label=label, amount=amount, category=category, date=date or datetime.utcnow())
+        expense = Expense(
+            id=_uuid(),
+            farm_id=farm_id,
+            label=label,
+            amount=amount,
+            category=category,
+            date=date or datetime.utcnow(),
+        )
         current_session.add(expense)
         await current_session.flush()
         return {"status": "success", "data": expense.to_dict()}
 
-    async def get_expenses(self, farm_id: str, category: str = None, limit: int = 50) -> List[Dict[str, Any]]:
+    async def get_expenses(
+        self, farm_id: str, category: str = None, limit: int = 50
+    ) -> List[Dict[str, Any]]:
         current_session = self.session
         stmt = select(Expense).where(Expense.farm_id == farm_id)
         if category:
@@ -331,11 +462,25 @@ class MarketplaceMixin(BaseMixin):
 
     async def get_expense_summary(self, farm_id: str) -> Dict[str, Any]:
         current_session = self.session
-        stmt = select(Expense.category, func.sum(Expense.amount).label("total"), func.count(Expense.id).label("count")).where(Expense.farm_id == farm_id).group_by(Expense.category)
+        stmt = (
+            select(
+                Expense.category,
+                func.sum(Expense.amount).label("total"),
+                func.count(Expense.id).label("count"),
+            )
+            .where(Expense.farm_id == farm_id)
+            .group_by(Expense.category)
+        )
         result = await current_session.execute(stmt)
         categories = {}
         grand_total = 0.0
         for row in result:
-            categories[row.category] = {"total": float(row.total), "count": int(row.count)}
+            categories[row.category] = {
+                "total": float(row.total),
+                "count": int(row.count),
+            }
             grand_total += float(row.total)
-        return {"status": "success", "data": {"categories": categories, "grand_total": grand_total}}
+        return {
+            "status": "success",
+            "data": {"categories": categories, "grand_total": grand_total},
+        }

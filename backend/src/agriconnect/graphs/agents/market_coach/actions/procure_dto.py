@@ -4,7 +4,6 @@ from typing import Any, Mapping, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-
 _EMPTY_SLOT_VALUES: Tuple[object, ...] = (None, "", [], {})
 
 
@@ -30,18 +29,24 @@ class ProcurementCreateRequestPayload(BaseModel):
         return str(value).strip()
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "ProcurementCreateRequestPayload":
+    def from_payload(
+        cls, payload: Mapping[str, Any]
+    ) -> "ProcurementCreateRequestPayload":
         product_raw = payload.get("product")
         if product_raw in _EMPTY_SLOT_VALUES:
             raise ValueError("Le produit recherché est requis pour créer une demande.")
 
         qty_raw = payload.get("quantity")
         if qty_raw in _EMPTY_SLOT_VALUES:
-            raise ValueError("La quantité recherchée est requise pour créer une demande.")
+            raise ValueError(
+                "La quantité recherchée est requise pour créer une demande."
+            )
 
         price_raw = payload.get("price")
         if price_raw in _EMPTY_SLOT_VALUES:
-            raise ValueError("Le prix plafond proposé est requis pour créer une demande.")
+            raise ValueError(
+                "Le prix plafond proposé est requis pour créer une demande."
+            )
 
         unit_raw = payload.get("unit")
 
@@ -51,8 +56,14 @@ class ProcurementCreateRequestPayload(BaseModel):
             product=str(product_raw).strip(),
             quantity=float(qty_raw),
             price=float(price_raw),
-            unit=(str(unit_raw).strip().upper() if unit_raw not in _EMPTY_SLOT_VALUES else None),
-            zone_name=(str(zone_raw).strip() if zone_raw not in _EMPTY_SLOT_VALUES else None),
+            unit=(
+                str(unit_raw).strip().upper()
+                if unit_raw not in _EMPTY_SLOT_VALUES
+                else None
+            ),
+            zone_name=(
+                str(zone_raw).strip() if zone_raw not in _EMPTY_SLOT_VALUES else None
+            ),
             deadline=payload.get("deadline"),
             delivery_location=(
                 str(payload.get("delivery_location")).strip()
@@ -65,7 +76,11 @@ class ProcurementCreateRequestPayload(BaseModel):
                 if payload.get("incoterm") not in _EMPTY_SLOT_VALUES
                 else "DDP"
             ),
-            auto_extend=(bool(payload.get("auto_extend")) if payload.get("auto_extend") not in _EMPTY_SLOT_VALUES else True),
+            auto_extend=(
+                bool(payload.get("auto_extend"))
+                if payload.get("auto_extend") not in _EMPTY_SLOT_VALUES
+                else True
+            ),
         )
 
 
@@ -76,7 +91,9 @@ class ProcurementSelectWinnerPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "ProcurementSelectWinnerPayload":
+    def from_payload(
+        cls, payload: Mapping[str, Any]
+    ) -> "ProcurementSelectWinnerPayload":
         auction_id = payload.get("auction_id")
         bid_id = payload.get("bid_id")
         if auction_id in _EMPTY_SLOT_VALUES:
@@ -92,7 +109,9 @@ class ProcurementAcceptOfferPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "ProcurementAcceptOfferPayload":
+    def from_payload(
+        cls, payload: Mapping[str, Any]
+    ) -> "ProcurementAcceptOfferPayload":
         bid_id = payload.get("bid_id")
         if bid_id in _EMPTY_SLOT_VALUES:
             raise ValueError("bid_id is required")

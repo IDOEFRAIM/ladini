@@ -1,4 +1,5 @@
 """Cron : vider l'outbox — envoie les notifications dues via les canaux."""
+
 from __future__ import annotations
 
 import logging
@@ -21,4 +22,4 @@ def run_outbox_dispatch_cron(self, batch_size: int = 50) -> dict:
         return run_async(_run(batch_size))
     except Exception as exc:
         logger.exception("Cron outbox_dispatch en échec")
-        raise self.retry(exc=exc, countdown=15)
+        raise self.retry(exc=exc, countdown=15) from exc

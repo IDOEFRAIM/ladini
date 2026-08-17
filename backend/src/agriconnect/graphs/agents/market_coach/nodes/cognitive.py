@@ -4,14 +4,20 @@ from typing import Any, Dict, List, Optional
 
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
-from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, _compute_progress
+from agriconnect.graphs.agents.market_coach.nodes.response_handlers import (
+    _label_for_field,
+)
 from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import (
     _DISAMBIGUATION_CONFIDENCE_THRESHOLD,
     _detect_disambiguation_candidates,
 )
-from agriconnect.graphs.agents.market_coach.nodes.response_handlers import _label_for_field
+from agriconnect.graphs.agents.market_coach.utils import (
+    MarketRuntime,
+    _compute_progress,
+)
 
 logger = get_node_logger("CognitiveNode")
+
 
 def _build_proactive_hint(
     goal: Optional[str],
@@ -110,7 +116,11 @@ async def cognitive_guard(
         updates["extracted_entities"] = carried_entities
         decision["entity_carry_forward"] = True
 
-    if current_goal and event == "NEW_TASK" and detected_intent not in {"UNKNOWN", str(current_goal).upper()}:
+    if (
+        current_goal
+        and event == "NEW_TASK"
+        and detected_intent not in {"UNKNOWN", str(current_goal).upper()}
+    ):
         updates.update(
             {
                 "interpreted_event": "INTERRUPTION",
@@ -163,7 +173,10 @@ async def cognitive_guard(
                     "ag_ui_component": None,
                     "response_strategy": "CLARIFICATION",
                     "intent_competition": competition,
-                    "cognitive_decision": {**decision, "action": "abandon_tunnel_max_retries"},
+                    "cognitive_decision": {
+                        **decision,
+                        "action": "abandon_tunnel_max_retries",
+                    },
                     "proactive_hint": "L'opération a été annulée. Dites-moi ce que vous souhaitez faire.",
                 }
             )
@@ -176,7 +189,11 @@ async def cognitive_guard(
                 "goal_status": "WAITING_INPUT",
                 "response_strategy": "RECOVERY",
                 "intent_competition": competition,
-                "cognitive_decision": {**decision, "action": "recover_active_tunnel", "retry": retry_count},
+                "cognitive_decision": {
+                    **decision,
+                    "action": "recover_active_tunnel",
+                    "retry": retry_count,
+                },
             }
         )
         return updates
@@ -220,7 +237,15 @@ async def cognitive_orchestrator(
                 "phase": "reason",
                 "next_step": "onboarding",
                 "reason": "onboarding",
-                "loop": ["perceive", "think", "decide", "act", "observe", "reason", "retry"],
+                "loop": [
+                    "perceive",
+                    "think",
+                    "decide",
+                    "act",
+                    "observe",
+                    "reason",
+                    "retry",
+                ],
                 "event": event,
                 "intent": intent,
                 "current_goal": None,
@@ -271,7 +296,15 @@ async def cognitive_orchestrator(
             "phase": phase,
             "next_step": next_step,
             "reason": reason,
-            "loop": ["perceive", "think", "decide", "act", "observe", "reason", "retry"],
+            "loop": [
+                "perceive",
+                "think",
+                "decide",
+                "act",
+                "observe",
+                "reason",
+                "retry",
+            ],
             "event": event,
             "intent": intent,
             "current_goal": current_goal or None,

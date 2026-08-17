@@ -1,10 +1,11 @@
+import asyncio
 from typing import Any, Dict
+
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
-from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
 from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import (
     _detect_disambiguation_candidates,
 )
-import asyncio
+from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
 
 logger = get_node_logger("ClarificationNode")
 
@@ -24,7 +25,9 @@ def _sanitize_for_prompt(text: str) -> str:
     return clean[:_MAX_USER_TEXT_IN_PROMPT]
 
 
-async def clarification_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+async def clarification_node(
+    state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Dict[str, Any]:
     """Noeud de clarification pédagogique.
 
     Activé quand :
@@ -40,7 +43,7 @@ async def clarification_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -
     cognitive = state.get("cognitive_decision") or {}
     cognitive_action = cognitive.get("action", "")
     user_role = str(state.get("user_role") or "PRODUCER").upper()
-    user_name = state.get("user_name","") 
+    user_name = state.get("user_name", "")
     text = state.get("normalized_text") or state.get("user_query") or ""
 
     # Only intervene on specific conditions. `not current_goal` is
@@ -55,9 +58,10 @@ async def clarification_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -
     # (a stray "non" with nothing pending). See
     # [[precommande-architecture-consolidation-2026-08]].
     needs_clarification = (
-        (event in {"OUT_OF_SCOPE", "UNKNOWN", "REJECT"} and expected_input == "NONE" and not current_goal)
-        or cognitive_action == "abandon_tunnel_max_retries"
-    )
+        event in {"OUT_OF_SCOPE", "UNKNOWN", "REJECT"}
+        and expected_input == "NONE"
+        and not current_goal
+    ) or cognitive_action == "abandon_tunnel_max_retries"
     if not needs_clarification:
         return {}
     if _detect_disambiguation_candidates(text.lower(), user_role):
@@ -80,9 +84,11 @@ async def clarification_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -
 
     context_parts = []
     if cognitive_action == "abandon_tunnel_max_retries":
-        context_parts.append("L'opération précédente a été annulée car je n'arrivais pas à comprendre.")
+        context_parts.append(
+            "L'opération précédente a été annulée car je n'arrivais pas à comprendre."
+        )
     if text:
-        context_parts.append(f"L'utilisateur a dit : \"{_sanitize_for_prompt(text)}\"")
+        context_parts.append(f'L\'utilisateur a dit : "{_sanitize_for_prompt(text)}"')
 
     prompt = (
         f"Tu es un assistant commercial agricole WhatsApp au Burkina Faso.\n"
@@ -100,7 +106,9 @@ async def clarification_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -
         completion = await asyncio.wait_for(
             asyncio.to_thread(
                 lambda: llm.chat.completions.create(
-                    model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
+                    model=getattr(
+                        mc_runtime, "model_answer", "llama-3.3-70b-versatile"
+                    ),
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.4,
                     max_tokens=150,
@@ -119,5 +127,3 @@ async def clarification_node(state: Dict[str, Any], mc_runtime: MarketRuntime) -
         logger.warning("[ClarificationNode] LLM call failed: %s", exc)
 
     return {}
-
-

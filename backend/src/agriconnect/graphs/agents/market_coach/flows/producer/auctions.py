@@ -22,23 +22,24 @@ Goals pris en charge :
   - ``MARKET_BROWSE_REQUESTS`` / ``SALES_PLACE_BID`` : découverte + dépôt d'offre.
   - ``MARKET_GET_MY_PROPOSALS``                   : suivi de l'état de mes offres.
 """
+
 from __future__ import annotations
 
 import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from agriconnect.core.formatting import fmt_num as _fmt_num
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
 )
-from agriconnect.core.formatting import fmt_num as _fmt_num
 from agriconnect.graphs.agents.market_coach.services.mcp.gateway import AuctionGateway
-from agriconnect.services.pending_photo_target import set_pending_bid_photo
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     is_success_response,
 )
+from agriconnect.services.pending_photo_target import set_pending_bid_photo
 
 logger = logging.getLogger("AgriConnect.Market.ProducerFlow.Auctions")
 
@@ -49,18 +50,52 @@ logger = logging.getLogger("AgriConnect.Market.ProducerFlow.Auctions")
 # et « tout le marché » reste capté par "tout". Mieux vaut ne PAS élargir le
 # périmètre que l'élargir à tort sur un « ça marche » d'acquiescement.
 _ALL_SCOPE_TOKENS = (
-    "toutes", "tout", "tous", "autres", "autre", "elargir", "élargir",
+    "toutes",
+    "tout",
+    "tous",
+    "autres",
+    "autre",
+    "elargir",
+    "élargir",
 )
 
-_YES_TOKENS = frozenset({
-    "oui", "ok", "okay", "daccord", "d'accord", "cest bon", "c'est bon", "confirme",
-    "confirmer", "je confirme", "valide", "valider", "go", "vasy", "vas-y", "parfait",
-    "yes", "yep", "ouais",
-})
-_NO_TOKENS = frozenset({
-    "non", "annuler", "annule", "annulation", "stop", "cancel", "quitter", "retour",
-    "pas maintenant", "laisse tomber",
-})
+_YES_TOKENS = frozenset(
+    {
+        "oui",
+        "ok",
+        "okay",
+        "daccord",
+        "d'accord",
+        "cest bon",
+        "c'est bon",
+        "confirme",
+        "confirmer",
+        "je confirme",
+        "valide",
+        "valider",
+        "go",
+        "vasy",
+        "vas-y",
+        "parfait",
+        "yes",
+        "yep",
+        "ouais",
+    }
+)
+_NO_TOKENS = frozenset(
+    {
+        "non",
+        "annuler",
+        "annule",
+        "annulation",
+        "stop",
+        "cancel",
+        "quitter",
+        "retour",
+        "pas maintenant",
+        "laisse tomber",
+    }
+)
 
 _NUM_RE = re.compile(r"(\d+(?:[.,]\d+)?)")
 
@@ -72,12 +107,15 @@ _NUM_RE = re.compile(r"(\d+(?:[.,]\d+)?)")
 # HELPERS
 # =====================================================================
 
+
 def _text_of(state: Dict[str, Any]) -> str:
     return str(state.get("normalized_text") or state.get("user_query") or "").strip()
 
 
 _ALL_SCOPE_RE = re.compile(
-    r"(?<![a-zàâäéèêëïîôöùûüÿç])(" + "|".join(_ALL_SCOPE_TOKENS) + r")(?![a-zàâäéèêëïîôöùûüÿç])"
+    r"(?<![a-zàâäéèêëïîôöùûüÿç])("
+    + "|".join(_ALL_SCOPE_TOKENS)
+    + r")(?![a-zàâäéèêëïîôöùûüÿç])"
 )
 
 
@@ -112,8 +150,11 @@ def _price_from_answer(state: Dict[str, Any]) -> Optional[float]:
     ASK_PRICE : sur un tour de sélection, « 1 » est un index, pas un prix.
     """
     payload = state.get("transaction_payload") or {}
-    for c in (payload.get("price"), payload.get("offered_price"),
-              (state.get("extracted_entities") or {}).get("price")):
+    for c in (
+        payload.get("price"),
+        payload.get("offered_price"),
+        (state.get("extracted_entities") or {}).get("price"),
+    ):
         if c in (None, "", [], {}):
             continue
         try:
@@ -167,9 +208,14 @@ def _error(message: str) -> Dict[str, Any]:
 # et `pending_bid_price` persistaient après un bid réussi → le tour suivant
 # ré-affichait le récap au lieu de parcourir, et le payload gardait `price`.
 _BID_WM_KEYS = (
-    "available_mapping_kind", "auction_menu", "bid_phase",
-    "pending_bid_auction", "pending_bid_price",
-    "pending_modify_bid", "my_bids_brief", "auction_brief",
+    "available_mapping_kind",
+    "auction_menu",
+    "bid_phase",
+    "pending_bid_auction",
+    "pending_bid_price",
+    "pending_modify_bid",
+    "my_bids_brief",
+    "auction_brief",
 )
 
 
@@ -203,8 +249,13 @@ def _clear_bid_payload() -> Dict[str, Any]:
     transaction est complète — cause du récap générique parasite + « erreur
     technique » observés.
     """
-    return {"price": None, "auction_id": None, "bid_id": None,
-            "selection_index": None, "selected_value": None}
+    return {
+        "price": None,
+        "auction_id": None,
+        "bid_id": None,
+        "selection_index": None,
+        "selected_value": None,
+    }
 
 
 def _auction_label(brief: Dict[str, Any]) -> tuple[str, str, Optional[float]]:
@@ -223,10 +274,15 @@ def _auction_label(brief: Dict[str, Any]) -> tuple[str, str, Optional[float]]:
 # 1. DISCOVERY — lister les enchères (par catégorie)
 # =====================================================================
 
-async def browse_auctions(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+
+async def browse_auctions(
+    state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Dict[str, Any]:
     phone = str(state.get("user_phone") or "")
     if not phone:
-        return _error("Numéro de téléphone introuvable, impossible de charger le marché.")
+        return _error(
+            "Numéro de téléphone introuvable, impossible de charger le marché."
+        )
 
     scope = "ALL" if _wants_all_scope(state) else "MATCHABLE"
     payload = state.get("transaction_payload") or {}
@@ -303,6 +359,7 @@ async def browse_auctions(state: Dict[str, Any], mc_runtime: MarketRuntime) -> D
 # 2. ASK PRICE — enchère choisie, demander le prix (slot-filling)
 # =====================================================================
 
+
 async def ask_bid_price(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
@@ -310,7 +367,9 @@ async def ask_bid_price(
     *,
     reask: bool = False,
 ) -> Dict[str, Any]:
-    brief = ((state.get("working_memory") or {}).get("auction_brief") or {}).get(str(auction_id)) or {}
+    brief = ((state.get("working_memory") or {}).get("auction_brief") or {}).get(
+        str(auction_id)
+    ) or {}
     product, unit, max_price = _auction_label(brief)
 
     if reask:
@@ -324,7 +383,9 @@ async def ask_bid_price(
             except (TypeError, ValueError):
                 pass
         if max_price is not None:
-            lines.append(f"💰 Prix plafond acheteur : *{_fmt_num(max_price)} FCFA/{unit}*")
+            lines.append(
+                f"💰 Prix plafond acheteur : *{_fmt_num(max_price)} FCFA/{unit}*"
+            )
         lines.append("\n💬 *Quel prix proposez-vous ?* (par unité, en FCFA)")
         msg = "\n".join(lines)
 
@@ -339,8 +400,12 @@ async def ask_bid_price(
     payload["selected_value"] = None
     payload["price"] = None
 
-    wm = _bid_wm(state, bid_phase="ASK_PRICE", pending_bid_auction=str(auction_id),
-                 pending_bid_price=None)
+    wm = _bid_wm(
+        state,
+        bid_phase="ASK_PRICE",
+        pending_bid_auction=str(auction_id),
+        pending_bid_price=None,
+    )
 
     return {
         "status": "WAITING_INPUT",
@@ -359,6 +424,7 @@ async def ask_bid_price(
 # 3. RECAP + CONFIRMATION — prix saisi, corrigeable avant dépôt
 # =====================================================================
 
+
 async def recap_bid(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
@@ -367,7 +433,9 @@ async def recap_bid(
     *,
     reask: bool = False,
 ) -> Dict[str, Any]:
-    brief = ((state.get("working_memory") or {}).get("auction_brief") or {}).get(str(auction_id)) or {}
+    brief = ((state.get("working_memory") or {}).get("auction_brief") or {}).get(
+        str(auction_id)
+    ) or {}
     product, unit, max_price = _auction_label(brief)
     price_txt = _fmt_num(price)
 
@@ -391,8 +459,12 @@ async def recap_bid(
     payload["auction_id"] = str(auction_id)
     payload["price"] = float(price)
 
-    wm = _bid_wm(state, bid_phase="CONFIRM", pending_bid_auction=str(auction_id),
-                 pending_bid_price=float(price))
+    wm = _bid_wm(
+        state,
+        bid_phase="CONFIRM",
+        pending_bid_auction=str(auction_id),
+        pending_bid_price=float(price),
+    )
 
     return {
         "status": "WAITING_INPUT",
@@ -416,11 +488,15 @@ async def submit_bid(
     """Dépose la proposition (place_bid) APRÈS confirmation, puis confirme au producteur."""
     phone = str(state.get("user_phone") or "")
     if not phone:
-        return _error("Numéro de téléphone introuvable, impossible d'enregistrer votre proposition.")
+        return _error(
+            "Numéro de téléphone introuvable, impossible d'enregistrer votre proposition."
+        )
 
     gw = AuctionGateway(mc_runtime)
     try:
-        result = await gw.place_bid(auction_id=str(auction_id), phone=phone, offered_price=price)
+        result = await gw.place_bid(
+            auction_id=str(auction_id), phone=phone, offered_price=price
+        )
     except Exception as exc:
         logger.exception("submit_bid: place_bid failed: %s", exc)
         return {
@@ -436,7 +512,8 @@ async def submit_bid(
         return {
             "status": "COMPLETED",
             "response_strategy": "ERROR",
-            "final_response": result.get("message") or "Votre proposition n'a pas pu être enregistrée.",
+            "final_response": result.get("message")
+            or "Votre proposition n'a pas pu être enregistrée.",
             "working_memory": _clear_bid_wm(state),
             "transaction_payload": {"__reset__": True},
             "ag_ui_component": None,
@@ -444,7 +521,10 @@ async def submit_bid(
 
     price_txt = _fmt_num(price)
     # Message du DB (distingue « transmise » d'une « mise à jour » via l'upsert).
-    db_msg = result.get("message") or f"✅ Votre proposition de *{price_txt} FCFA* a été transmise à l'acheteur."
+    db_msg = (
+        result.get("message")
+        or f"✅ Votre proposition de *{price_txt} FCFA* a été transmise à l'acheteur."
+    )
 
     # Photo du lot proposé — même hint que le chemin générique
     # (nodes/rendering/success.py), posé ICI aussi : ce flow construit son
@@ -495,7 +575,10 @@ def _cancel_bid(state: Dict[str, Any]) -> Dict[str, Any]:
 # 4. TRACK — suivre l'état de mes offres
 # =====================================================================
 
-async def track_my_bids(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+
+async def track_my_bids(
+    state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Dict[str, Any]:
     """Liste les propositions du producteur ET permet d'agir dessus :
     sélectionner une proposition *en attente* ouvre le tunnel de correction de prix
     (voir ``ask_modify_price``/``recap_modify_price``/``submit_modify_price``).
@@ -503,7 +586,9 @@ async def track_my_bids(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
     """
     phone = str(state.get("user_phone") or "")
     if not phone:
-        return _error("Numéro de téléphone introuvable, impossible de charger vos propositions.")
+        return _error(
+            "Numéro de téléphone introuvable, impossible de charger vos propositions."
+        )
 
     gw = AuctionGateway(mc_runtime)
     result = await gw.get_my_active_bids(phone)
@@ -512,7 +597,8 @@ async def track_my_bids(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         return {
             "status": "COMPLETED",
             "response_strategy": "SUCCESS",
-            "final_response": result.get("message") or "Impossible de charger vos propositions en cours.",
+            "final_response": result.get("message")
+            or "Impossible de charger vos propositions en cours.",
             "working_memory": _clear_bid_wm(state),
             "ag_ui_component": None,
         }
@@ -538,11 +624,13 @@ async def track_my_bids(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         if not bid_id:
             continue
         mapping[str(i)] = bid_id
-        options.append(MenuOption(
-            index=str(i),
-            label=f"{item.get('product')} — {item.get('offered_price')} FCFA",
-            value=bid_id,
-        ))
+        options.append(
+            MenuOption(
+                index=str(i),
+                label=f"{item.get('product')} — {item.get('offered_price')} FCFA",
+                value=bid_id,
+            )
+        )
         brief[bid_id] = {
             "product": item.get("product"),
             "unit": item.get("unit"),
@@ -585,6 +673,7 @@ async def track_my_bids(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
 # 4b. MODIFY — corriger le prix d'une offre PENDING existante
 # =====================================================================
 
+
 async def ask_modify_price(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
@@ -592,7 +681,9 @@ async def ask_modify_price(
     *,
     reask: bool = False,
 ) -> Dict[str, Any]:
-    brief = ((state.get("working_memory") or {}).get("my_bids_brief") or {}).get(str(bid_id)) or {}
+    brief = ((state.get("working_memory") or {}).get("my_bids_brief") or {}).get(
+        str(bid_id)
+    ) or {}
     product = brief.get("product") or "ce produit"
     unit = brief.get("unit") or "unité"
     current_price = brief.get("price")
@@ -613,8 +704,12 @@ async def ask_modify_price(
     payload.pop("selected_value", None)
     payload.pop("price", None)
 
-    wm = _bid_wm(state, bid_phase="ASK_PRICE_MODIFY", pending_modify_bid=str(bid_id),
-                 pending_bid_price=None)
+    wm = _bid_wm(
+        state,
+        bid_phase="ASK_PRICE_MODIFY",
+        pending_modify_bid=str(bid_id),
+        pending_bid_price=None,
+    )
 
     return {
         "status": "WAITING_INPUT",
@@ -637,7 +732,9 @@ async def recap_modify_price(
     *,
     reask: bool = False,
 ) -> Dict[str, Any]:
-    brief = ((state.get("working_memory") or {}).get("my_bids_brief") or {}).get(str(bid_id)) or {}
+    brief = ((state.get("working_memory") or {}).get("my_bids_brief") or {}).get(
+        str(bid_id)
+    ) or {}
     product = brief.get("product") or "ce produit"
     unit = brief.get("unit") or "unité"
     price_txt = _fmt_num(new_price)
@@ -654,8 +751,12 @@ async def recap_modify_price(
     payload["bid_id"] = str(bid_id)
     payload["price"] = float(new_price)
 
-    wm = _bid_wm(state, bid_phase="CONFIRM_MODIFY", pending_modify_bid=str(bid_id),
-                 pending_bid_price=float(new_price))
+    wm = _bid_wm(
+        state,
+        bid_phase="CONFIRM_MODIFY",
+        pending_modify_bid=str(bid_id),
+        pending_bid_price=float(new_price),
+    )
 
     return {
         "status": "WAITING_INPUT",
@@ -678,11 +779,15 @@ async def submit_modify_price(
 ) -> Dict[str, Any]:
     phone = str(state.get("user_phone") or "")
     if not phone:
-        return _error("Numéro de téléphone introuvable, impossible de modifier votre proposition.")
+        return _error(
+            "Numéro de téléphone introuvable, impossible de modifier votre proposition."
+        )
 
     gw = AuctionGateway(mc_runtime)
     try:
-        result = await gw.update_bid_price(bid_id=str(bid_id), phone=phone, new_price=new_price)
+        result = await gw.update_bid_price(
+            bid_id=str(bid_id), phone=phone, new_price=new_price
+        )
     except Exception as exc:
         logger.exception("submit_modify_price: update_bid_price failed: %s", exc)
         return {
@@ -698,7 +803,8 @@ async def submit_modify_price(
         return {
             "status": "COMPLETED",
             "response_strategy": "ERROR",
-            "final_response": result.get("message") or "Votre proposition n'a pas pu être mise à jour.",
+            "final_response": result.get("message")
+            or "Votre proposition n'a pas pu être mise à jour.",
             "working_memory": _clear_bid_wm(state),
             "transaction_payload": {"__reset__": True},
             "ag_ui_component": None,
@@ -734,6 +840,7 @@ def _cancel_modify(state: Dict[str, Any]) -> Dict[str, Any]:
 # ORCHESTRATOR
 # =====================================================================
 
+
 async def producer_auction_resolver(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
@@ -767,7 +874,10 @@ async def producer_auction_resolver(
     # FCFA attendait confirmation). Purge le tunnel de bid et laisse tomber vers
     # le routage normal (C/D/E/F), qui gère déjà correctement MARKET_GET_MY_PROPOSALS
     # / une sélection fraîche / le browse par défaut.
-    if phase in {"CONFIRM", "ASK_PRICE", "CONFIRM_MODIFY", "ASK_PRICE_MODIFY"} and event == "INTERRUPTION":
+    if (
+        phase in {"CONFIRM", "ASK_PRICE", "CONFIRM_MODIFY", "ASK_PRICE_MODIFY"}
+        and event == "INTERRUPTION"
+    ):
         logger.info(
             "[ProducerAuctionResolver] Interruption autorisée casse le tunnel de bid "
             "(phase=%s) — purge et redirection vers le routage normal.",
@@ -793,18 +903,28 @@ async def producer_auction_resolver(
             return _cancel_modify(state)
         new_price = _first_number(text)
         if new_price is not None:
-            return await recap_modify_price(state, mc_runtime, str(pending_modify_bid), new_price)
+            return await recap_modify_price(
+                state, mc_runtime, str(pending_modify_bid), new_price
+            )
         if event == "CONFIRM" or text in _YES_TOKENS:
-            return await submit_modify_price(state, mc_runtime, str(pending_modify_bid), float(pending_price))
-        return await recap_modify_price(state, mc_runtime, str(pending_modify_bid), float(pending_price), reask=True)
+            return await submit_modify_price(
+                state, mc_runtime, str(pending_modify_bid), float(pending_price)
+            )
+        return await recap_modify_price(
+            state, mc_runtime, str(pending_modify_bid), float(pending_price), reask=True
+        )
 
     if phase == "ASK_PRICE_MODIFY" and pending_modify_bid:
         if event == "REJECT" or text in _NO_TOKENS:
             return _cancel_modify(state)
         price = _price_from_answer(state)
         if price is not None:
-            return await recap_modify_price(state, mc_runtime, str(pending_modify_bid), price)
-        return await ask_modify_price(state, mc_runtime, str(pending_modify_bid), reask=True)
+            return await recap_modify_price(
+                state, mc_runtime, str(pending_modify_bid), price
+            )
+        return await ask_modify_price(
+            state, mc_runtime, str(pending_modify_bid), reask=True
+        )
 
     # (B) Tunnel NOUVELLE offre en cours.
     if phase == "CONFIRM" and pending_auction and pending_price is not None:
@@ -814,9 +934,13 @@ async def producer_auction_resolver(
         if new_price is not None:
             return await recap_bid(state, mc_runtime, str(pending_auction), new_price)
         if event == "CONFIRM" or text in _YES_TOKENS:
-            return await submit_bid(state, mc_runtime, str(pending_auction), float(pending_price))
+            return await submit_bid(
+                state, mc_runtime, str(pending_auction), float(pending_price)
+            )
         # Réponse ambiguë : on ré-affiche le récap.
-        return await recap_bid(state, mc_runtime, str(pending_auction), float(pending_price), reask=True)
+        return await recap_bid(
+            state, mc_runtime, str(pending_auction), float(pending_price), reask=True
+        )
 
     if phase == "ASK_PRICE" and pending_auction:
         if event == "REJECT" or text in _NO_TOKENS:
@@ -853,7 +977,9 @@ async def producer_auction_resolver(
 
     # (E) Enchère fraîchement choisie (memory_update a posé payload.auction_id).
     picked = payload.get("auction_id") if mapping_kind == "auction" else None
-    if not picked and (mapping_kind == "auction" or payload.get("selection_index") is not None):
+    if not picked and (
+        mapping_kind == "auction" or payload.get("selection_index") is not None
+    ):
         picked = _resolve_selected_auction_id(state)
     if picked:
         return await ask_bid_price(state, mc_runtime, str(picked))

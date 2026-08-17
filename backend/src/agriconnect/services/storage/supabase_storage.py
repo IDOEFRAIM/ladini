@@ -5,6 +5,7 @@ Client HTTP direct (API REST Storage) — même style de client que
 explicite, exception métier dédiée). Réservé aux uploads serveur à serveur
 avec la clé de SERVICE ROLE : jamais exposé côté client.
 """
+
 from __future__ import annotations
 
 import logging
@@ -90,7 +91,9 @@ async def upload_product_photo(binary: bytes, content_type: str, phone: str) -> 
 
     if resp.status_code not in (200, 201):
         logger.error(
-            "SUPABASE_UPLOAD_REJECTED | status=%s | body=%r", resp.status_code, resp.text[:300]
+            "SUPABASE_UPLOAD_REJECTED | status=%s | body=%r",
+            resp.status_code,
+            resp.text[:300],
         )
         raise SupabaseStorageError("Échec de l'envoi de la photo, réessayez.")
 

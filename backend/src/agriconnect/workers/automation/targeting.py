@@ -3,6 +3,7 @@
 Requêtes SQL pures et bornées. On renvoie des dicts plats (pas d'entités ORM
 détachées) pour rester simple à sérialiser et à tester.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional

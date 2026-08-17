@@ -34,7 +34,7 @@ log "1/4 · git pull + pull des images de base…"
 if [ "${SKIP_GIT_PULL:-0}" != "1" ] && command -v git >/dev/null 2>&1; then
   git pull --ff-only || warn "git pull ignoré (repo non-git ou divergence)."
 fi
-${COMPOSE} pull redis postgres pgbouncer clickhouse minio langfuse-web langfuse-worker langfuse-postgres || warn "pull partiel."
+${COMPOSE} pull redis pgbouncer clickhouse minio langfuse-web langfuse-worker langfuse-postgres autoheal || warn "pull partiel."
 
 # ── 2. Build ─────────────────────────────────────────────────────────
 log "2/4 · build des images api + worker…"
@@ -42,14 +42,11 @@ ${COMPOSE} build api worker
 
 # ── 3. Migrations Alembic (conteneur éphémère, AVANT la bascule) ──────
 log "3/4 · migrations base de données…"
-# On démarre d'abord la DB + pgbouncer et on attend leur santé.
-${COMPOSE} up -d postgres pgbouncer
-log "   attente santé DB…"
-for i in $(seq 1 30); do
-  if ${COMPOSE} exec -T postgres pg_isready -U "${POSTGRES_USER:-postgres}" >/dev/null 2>&1; then break; fi
-  sleep 2
-  [ "$i" = "30" ] && die "Postgres non prêt après 60s."
-done
+# PgBouncer local → DB managée DigitalOcean (voir docker-compose.prod.yml,
+# service `pgbouncer` : plus de Postgres local dans cette stack). `--wait`
+# bloque tant que le healthcheck (nc -z 127.0.0.1 6432) n'est pas OK.
+${COMPOSE} up -d --wait --wait-timeout 60 pgbouncer \
+  || die "PgBouncer non healthy après 60s — vérifiez DO_DB_HOST/PORT/USER/PASSWORD/NAME dans .env."
 
 if [ -f "backend/alembic.ini" ]; then
   # Conteneur JETABLE (--rm) qui applique les migrations puis disparaît. Offline :

@@ -5,9 +5,13 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from agriconnect.api.routes.market import router as market_router
-from agriconnect.api.routes.twilio_webhook import router as twilio_router  # repli (MESSAGING_PROVIDER=twilio)
-from agriconnect.api.routes.whatsapp_webhook import router as whatsapp_router  # provider par défaut
 from agriconnect.api.routes.paydunya_webhook import router as paydunya_router
+from agriconnect.api.routes.twilio_webhook import (
+    router as twilio_router,  # repli (MESSAGING_PROVIDER=twilio)
+)
+from agriconnect.api.routes.whatsapp_webhook import (
+    router as whatsapp_router,  # provider par défaut
+)
 from agriconnect.core import telemetry
 from agriconnect.core.settings import settings
 
@@ -57,6 +61,18 @@ async def _startup_telemetry() -> None:
     telemetry.instrument_fastapi(app)
 
 
+@app.on_event("shutdown")
+async def _shutdown_db() -> None:
+    # Ferme proprement le pool SQLAlchemy/asyncpg pendant la fenêtre de
+    # graceful shutdown de gunicorn (SIGTERM → drain requêtes → ce hook —
+    # voir --graceful-timeout côté Dockerfile.api et stop_grace_period côté
+    # compose). Sans ça, les connexions au pooler DB restent ouvertes côté
+    # client jusqu'au SIGKILL du process, au lieu d'être libérées à temps.
+    from agriconnect.core.database import close_db
+
+    await close_db()
+
+
 @app.middleware("http")
 async def trace_and_metrics_middleware(request: Request, call_next):
     """Génère/propage un trace_id unique par requête + mesure latence & codes.
@@ -95,9 +111,15 @@ app.include_router(market_router, prefix="/api")
 # MESSAGING_PROVIDER (core/settings.py) décide lequel le worker utilise pour
 # ENVOYER — recevoir sur les deux endpoints ne coûte rien et permet de
 # basculer Meta/Twilio côté configuration webhook sans redéployer l'API.
-app.include_router(whatsapp_router, prefix="/api")  # endpoint réel : /api/webhook/whatsapp
-app.include_router(twilio_router, prefix="/api")  # endpoint réel : /api/webhook/twilio (repli)
-app.include_router(paydunya_router, prefix="/api")  # endpoint réel : /api/webhooks/paydunya-ipn
+app.include_router(
+    whatsapp_router, prefix="/api"
+)  # endpoint réel : /api/webhook/whatsapp
+app.include_router(
+    twilio_router, prefix="/api"
+)  # endpoint réel : /api/webhook/twilio (repli)
+app.include_router(
+    paydunya_router, prefix="/api"
+)  # endpoint réel : /api/webhooks/paydunya-ipn
 
 
 @app.get("/health")
@@ -119,7 +141,9 @@ async def readiness_check():
     # DB
     try:
         from sqlalchemy import text as _sql_text
+
         from agriconnect.core.database import get_engine
+
         engine = get_engine()
         if engine is None:
             components["database"] = "unconfigured"
@@ -135,7 +159,9 @@ async def readiness_check():
     # Redis (broker Celery)
     try:
         import redis as _redis
+
         from agriconnect.core.settings import settings
+
         _redis.from_url(settings.REDIS_URL, socket_connect_timeout=2).ping()
         components["redis"] = "ok"
     except Exception as exc:
@@ -157,6 +183,8 @@ async def metrics():
     """Endpoint de scrape Prometheus (format texte OpenMetrics)."""
     out = telemetry.prometheus_asgi_response()
     if out is None:
-        return Response(content="# prometheus_client indisponible\n", media_type="text/plain")
+        return Response(
+            content="# prometheus_client indisponible\n", media_type="text/plain"
+        )
     body, content_type = out
     return Response(content=body, media_type=content_type)

@@ -3,6 +3,7 @@
 Source de vérité durable. Aucun checkpointing externe : l'état agent vit
 dans la colonne JSONB `langgraph_state`. Table créée de façon idempotente au boot.
 """
+
 from __future__ import annotations
 
 import base64
@@ -30,8 +31,8 @@ logger = logging.getLogger("AgriConnect.Workspace.Store")
 # Payload size caps — must be enforced BEFORE sending to Postgres.
 # Oversized JSONB payloads cause asyncpg to close the connection mid-transfer.
 # ---------------------------------------------------------------------------
-_MAX_STATE_BYTES = 480_000   # 480 KB: langgraph_state hard cap
-_MAX_META_BYTES  =  48_000   #  48 KB: metadata hard cap
+_MAX_STATE_BYTES = 480_000  # 480 KB: langgraph_state hard cap
+_MAX_META_BYTES = 48_000  #  48 KB: metadata hard cap
 _COMPRESS_THRESHOLD = 100_000  # bytes — start compressing large state blobs
 
 _DDL = """
@@ -121,13 +122,20 @@ class WorkspaceStore:
         try:
             async with get_db() as session:
                 row = (
-                    await session.execute(text(_SELECT), {"workspace_id": workspace_id})
-                ).mappings().first()
+                    (
+                        await session.execute(
+                            text(_SELECT), {"workspace_id": workspace_id}
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
         except Exception as exc:
             if self._is_fatal_connection_error(exc):
                 logger.warning(
                     "WorkspaceStore.get(%s) fatal DB error — resetting row, returning None: %s",
-                    workspace_id, exc,
+                    workspace_id,
+                    exc,
                 )
                 await self._reset_workspace_row(workspace_id)
             else:
@@ -174,7 +182,8 @@ class WorkspaceStore:
         if meta_bytes > _MAX_META_BYTES:
             logger.error(
                 "WorkspaceStore.save(%s): metadata too large (%d bytes) — saving empty",
-                workspace.workspace_id, meta_bytes,
+                workspace.workspace_id,
+                meta_bytes,
             )
             meta_json = json.dumps({})
 
@@ -194,7 +203,12 @@ class WorkspaceStore:
                 workspace.workspace_id,
                 stored_bytes,
             )
-            state_json = json.dumps({"__truncated__": True, "original_size": state_metrics.get("raw_bytes", stored_bytes)})
+            state_json = json.dumps(
+                {
+                    "__truncated__": True,
+                    "original_size": state_metrics.get("raw_bytes", stored_bytes),
+                }
+            )
             state_metrics["truncated"] = True
             stored_bytes = len(state_json.encode("utf-8"))
 
@@ -214,7 +228,10 @@ class WorkspaceStore:
         try:
             async with get_db() as session:
                 row = (
-                    await session.execute(text(_SELECT_FOR_UPDATE), {"workspace_id": workspace.workspace_id})
+                    await session.execute(
+                        text(_SELECT_FOR_UPDATE),
+                        {"workspace_id": workspace.workspace_id},
+                    )
                 ).scalar()
                 if row:
                     await session.execute(text(_UPDATE), payload)
@@ -231,7 +248,9 @@ class WorkspaceStore:
             )
             return True
         except Exception as exc:
-            logger.error("WorkspaceStore.save(%s) failed: %s", workspace.workspace_id, exc)
+            logger.error(
+                "WorkspaceStore.save(%s) failed: %s", workspace.workspace_id, exc
+            )
             return False
 
     # ------------------------------------------------------------------
@@ -261,7 +280,9 @@ class WorkspaceStore:
                 if not result.rowcount:
                     await session.execute(text(_INSERT), payload)
                 await session.commit()
-            logger.info("WorkspaceStore: reset workspace %s to empty state", workspace_id)
+            logger.info(
+                "WorkspaceStore: reset workspace %s to empty state", workspace_id
+            )
             return True
         except Exception as exc:
             logger.error("WorkspaceStore: reset failed for %s: %s", workspace_id, exc)
@@ -338,7 +359,9 @@ def _decode_state_blob(raw_state: Optional[dict]) -> dict:
         payload = raw_state.get("payload")
         encoding = raw_state.get("encoding")
         if not isinstance(payload, str) or encoding != "zlib+base64":
-            logger.warning("WorkspaceStore: unsupported compressed blob encoding: %s", encoding)
+            logger.warning(
+                "WorkspaceStore: unsupported compressed blob encoding: %s", encoding
+            )
             return {}
         try:
             compressed = base64.b64decode(payload.encode("ascii"))

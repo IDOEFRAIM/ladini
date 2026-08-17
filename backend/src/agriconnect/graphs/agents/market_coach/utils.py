@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import ast
+import asyncio
 import contextvars
-import inspect
 import json
 import logging
 import re
@@ -16,12 +15,18 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Set
 
 from agriconnect.core.llm import get_llm
 from agriconnect.core.settings import settings
-from agriconnect.graphs.agents.market_coach.security import SecurityService
-from agriconnect.graphs.agents.market_coach.core.slots import build_canonical_field_aliases
+from agriconnect.graphs.agents.market_coach.core.slots import (
+    build_canonical_field_aliases,
+)
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
+from agriconnect.graphs.agents.market_coach.security import SecurityService
 from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
-from agriconnect.infrastructure.mcp.context import FarmerContext, get_mcp_context, mcp_context_scope
-from agriconnect.infrastructure.mcp.security import PermissionScope, TOOL_SCOPE_MAP
+from agriconnect.infrastructure.mcp.context import (
+    FarmerContext,
+    get_mcp_context,
+    mcp_context_scope,
+)
+from agriconnect.infrastructure.mcp.security import TOOL_SCOPE_MAP, PermissionScope
 
 logger = logging.getLogger("Agent.MarketCoach")
 
@@ -78,7 +83,9 @@ class ToolScopeManager:
     )
     _scopes: Dict[str, ToolScope] = {
         "default": ToolScope(name="default", allowed_tools=None, allow_direct_db=True),
-        "llm_only": ToolScope(name="llm_only", allowed_tools=set(), allow_direct_db=False),
+        "llm_only": ToolScope(
+            name="llm_only", allowed_tools=set(), allow_direct_db=False
+        ),
     }
     _node_to_scope: Dict[str, str] = {
         # Conversational nodes must never hit MCP/DB even if compromised.
@@ -134,10 +141,11 @@ class ToolScopeManager:
         return pattern == tool_name
 
 
-
 # ── ASCII folding (Postel's Law — MCP never receives accented strings) ──
 
-_ASCII_LIGATURE_MAP = str.maketrans({"œ": "oe", "Œ": "OE", "æ": "ae", "Æ": "AE", "’": "'"})
+_ASCII_LIGATURE_MAP = str.maketrans(
+    {"œ": "oe", "Œ": "OE", "æ": "ae", "Æ": "AE", "’": "'"}
+)
 
 
 def _ascii_fold_str(text: str) -> str:
@@ -214,6 +222,7 @@ def normalize_slot_keys(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 def slot_has_value(value: Any) -> bool:
     return value not in _EMPTY_SLOT_VALUES
 
+
 # Generic error message returned when MCP fails irrecoverably
 _GENERIC_TECHNICAL_ERROR = (
     "Une erreur technique est survenue lors de l'enregistrement. "
@@ -272,11 +281,12 @@ def canonical_unit_label(value: Any, default: str = "KG") -> str:
 
 class MarketRuntimeError(RuntimeError):
     """Erreur spécifique au runtime du MarketCoach."""
+
     pass
 
 
-
 # --- UTILS ---
+
 
 async def _maybe_await(obj: Any) -> Any:
     """Utilitaire pour gérer les appels synchrones ou asynchrones du runtime."""
@@ -284,13 +294,16 @@ async def _maybe_await(obj: Any) -> Any:
         return await obj
     return obj
 
+
 def _to_float(value: Any) -> Optional[float]:
     """Sécurise la conversion numérique pour les calculs et la DB."""
     try:
-        if value is None: return None
-        return float(str(value).replace(',', '.'))
+        if value is None:
+            return None
+        return float(str(value).replace(",", "."))
     except (ValueError, TypeError):
         return None
+
 
 # Nœuds d'infrastructure (aucun raisonnement métier) — le goal routé vers le
 # LLM_ROUTER pour ces nœuds est leur PROPRE identité de stage, pas le goal
@@ -305,10 +318,14 @@ _FAST_PATH_NODE_LABELS: Dict[str, str] = {
 }
 
 
-def _safe_node(fn: Callable[..., Awaitable[Dict[str, Any]]], name: str) -> Callable[..., Awaitable[Dict[str, Any]]]:
+def _safe_node(
+    fn: Callable[..., Awaitable[Dict[str, Any]]], name: str
+) -> Callable[..., Awaitable[Dict[str, Any]]]:
     """Décorateur pour sécuriser les noeuds LangGraph et tracer leur durée."""
 
-    async def _wrapped(state: Dict[str, Any], mc_runtime: "MarketRuntime", **_: Any) -> Dict[str, Any]:
+    async def _wrapped(
+        state: Dict[str, Any], mc_runtime: "MarketRuntime", **_: Any
+    ) -> Dict[str, Any]:
         scope_token = ToolScopeManager.activate_for_node(name)
         goal = str(state.get("current_goal") or "").upper()
         status = str(state.get("status") or "").upper()
@@ -366,7 +383,11 @@ def ensure_dict(obj: Any) -> Dict[str, Any]:
 
     # If MCP already gave us a dict, we may still need to unwrap raw_result.
     if isinstance(obj, dict):
-        raw = (obj.get("data") or {}).get("raw_result") if isinstance(obj.get("data"), dict) else None
+        raw = (
+            (obj.get("data") or {}).get("raw_result")
+            if isinstance(obj.get("data"), dict)
+            else None
+        )
         if isinstance(raw, str) and raw.strip():
             parsed = ensure_dict(raw)
             # If the embedded payload is a dict-like response, prefer it.
@@ -409,11 +430,11 @@ def ensure_dict(obj: Any) -> Dict[str, Any]:
             return {
                 "status": "error",
                 "data": {"raw_result": obj},
-                "message": "Non-JSON response from MCP"
+                "message": "Non-JSON response from MCP",
             }
-    
+
     # Si c'est un objet (ex: Result de MCP)
-    if hasattr(obj, "content"): # Format spécifique à certains clients MCP
+    if hasattr(obj, "content"):  # Format spécifique à certains clients MCP
         return {"status": "ok", "data": obj.content}
 
     return {"status": "ok", "data": str(obj)}
@@ -448,11 +469,16 @@ def unwrap_tool_envelope(result: Any) -> Any:
         merged.setdefault("status", "success" if ok else "error")
         return merged
     if isinstance(data, list) and data:
-        return {"status": "success" if ok else "error", "data": data,
-                "message": (str(error) or None) if error else None}
+        return {
+            "status": "success" if ok else "error",
+            "data": data,
+            "message": (str(error) or None) if error else None,
+        }
     # data vide → propager le verdict de l'enveloppe comme erreur/succès domaine.
-    return {"status": "success" if ok else "error",
-            "message": (str(error) or None) if error else None}
+    return {
+        "status": "success" if ok else "error",
+        "message": (str(error) or None) if error else None,
+    }
 
 
 def is_success_response(res: Dict[str, Any]) -> bool:
@@ -548,7 +574,9 @@ class MarketRuntime:
         self.db_client = mcp_session
         self.transport_config = None
         if mcp_session is None:
-            self.transport_config = transport_config or self._load_transport_from_settings()
+            self.transport_config = (
+                transport_config or self._load_transport_from_settings()
+            )
 
         self.security = SecurityService(self.llm)
         self.db_service = db_service
@@ -586,6 +614,7 @@ class MarketRuntime:
         property est totalement transparent (aucun changement de nœud requis).
         """
         from agriconnect.graphs.agents.market_coach.llm_router import get_model_for_goal
+
         return get_model_for_goal(self.current_goal)
 
     def set_current_goal(self, goal: Optional[str]) -> None:
@@ -644,6 +673,7 @@ class MarketRuntime:
             uniformly.
         """
         import warnings
+
         warnings.warn(
             "ensure_db() bypasses MCP tooling — use a gateway instead",
             DeprecationWarning,
@@ -659,9 +689,13 @@ class MarketRuntime:
             from agriconnect.services.database import AgriDatabaseService
 
             self.db_service = AgriDatabaseService()
-            logger.info("MarketRuntime DB service initialised (id=%s)", hex(id(self.db_service)))
+            logger.info(
+                "MarketRuntime DB service initialised (id=%s)", hex(id(self.db_service))
+            )
         except Exception as exc:
-            logger.warning("MarketRuntime unable to initialise AgriDatabaseService: %s", exc)
+            logger.warning(
+                "MarketRuntime unable to initialise AgriDatabaseService: %s", exc
+            )
             self.db_service = None
         return self.db_service
 
@@ -669,7 +703,9 @@ class MarketRuntime:
         """Expose the underlying MCP runtime/session when available."""
         return self.db_client
 
-    def _build_context_identity(self, kwargs: Dict[str, Any]) -> Optional[FarmerContext]:
+    def _build_context_identity(
+        self, kwargs: Dict[str, Any]
+    ) -> Optional[FarmerContext]:
         """Dérive l'identité de contexte MCP pour le gate de permission.
 
         Filet de sécurité GLOBAL (voir ``bind_user``) : si aucun kwarg
@@ -705,7 +741,11 @@ class MarketRuntime:
             context_identity = get_mcp_context()
             return context_identity
         session_id = str(kwargs.get("session_id") or uuid.uuid4())
-        return FarmerContext(user_id=user_id or phone, phone_number=phone or "unknown", session_id=session_id)
+        return FarmerContext(
+            user_id=user_id or phone,
+            phone_number=phone or "unknown",
+            session_id=session_id,
+        )
 
     async def call_db(self, tool_name: str, **kwargs: Any) -> Dict[str, Any]:
         """Single entry point for all MCP tool calls.
@@ -731,7 +771,7 @@ class MarketRuntime:
         safe_kwargs = _ascii_fold_value(safe_kwargs)
 
         # CORRECTIF TRANSPORT (voir bind_user) : en production, MCP_DB_TRANSPORT
-        #="stdio" — le serveur DB tourne dans un PROCESSUS SÉPARÉ (db_server.py).
+        # ="stdio" — le serveur DB tourne dans un PROCESSUS SÉPARÉ (db_server.py).
         # Le `mcp_context_scope` posé ci-dessous (contextvar) ne vit que dans CE
         # processus-ci et ne traverse JAMAIS la frontière stdio : côté serveur,
         # `AgriDBMCPServer.call_tool` ne voit QUE les clés JSON envoyées dans
@@ -742,9 +782,15 @@ class MarketRuntime:
         # le retire TOUJOURS avant d'invoquer la méthode DB (jamais un TypeError
         # pour les tools qui n'acceptent pas `phone`). Voir runtime.py:call_tool.
         if self._bound_phone and not any(
-            k in safe_kwargs for k in (
-                "phone", "user_phone", "buyer_phone", "customer_phone",
-                "producer_id", "buyer_id", "user_id",
+            k in safe_kwargs
+            for k in (
+                "phone",
+                "user_phone",
+                "buyer_phone",
+                "customer_phone",
+                "producer_id",
+                "buyer_id",
+                "user_id",
             )
         ):
             safe_kwargs["_caller_phone"] = self._bound_phone
@@ -782,32 +828,39 @@ class MarketRuntime:
         if context is None:
             return nullcontext()
         return mcp_context_scope(context)
-        
+
     @classmethod
     def from_auto_path(cls, llm_client: Any = None) -> MarketRuntime:
         """Gardé pour compatibilité, mais maintenant alias du constructeur par défaut."""
         return cls(llm_client=llm_client)
 
-def build_runtime(llm_client: Any = None, transport_config: MCPTransportConfig | None = None) -> MarketRuntime:
+
+def build_runtime(
+    llm_client: Any = None, transport_config: MCPTransportConfig | None = None
+) -> MarketRuntime:
     """
     Factory pour instancier le MarketRuntime.
-    
+
     Args:
         llm_client: Client LLM (ex: Groq, OpenAI). Si None, le runtime utilisera get_llm().
         transport_config: Configuration de transport MCP. Si None, lit depuis settings.
-    
+
     Returns:
         Une instance prête de MarketRuntime (nécessite ensuite 'async with' pour la connexion).
     """
     return MarketRuntime(llm_client=llm_client, transport_config=transport_config)
 
 
-def build_runtime_from_session(llm_client: Any = None, mcp_session: Any = None) -> MarketRuntime:
+def build_runtime_from_session(
+    llm_client: Any = None, mcp_session: Any = None
+) -> MarketRuntime:
     """Factory pour runtime basé sur une session MCP déjà ouverte."""
     return MarketRuntime(llm_client=llm_client, mcp_session=mcp_session)
 
 
-def _compute_progress(goal: Optional[str], payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _compute_progress(
+    goal: Optional[str], payload: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
     """Progression de remplissage des champs requis du but courant.
 
     Les champs auto-résolus (`_AUTO_RESOLVABLE_FIELDS`) sont exclus du calcul :
@@ -836,6 +889,7 @@ def _compute_progress(goal: Optional[str], payload: Dict[str, Any]) -> Optional[
 # =====================================================================
 # TEXT / QUANTITY NORMALIZATION
 # =====================================================================
+
 
 def _now() -> float:
     """Current Unix timestamp (seconds, float)."""
@@ -879,7 +933,8 @@ def _normalize_quantity_to_kg(payload: Dict[str, Any]) -> Dict[str, Any]:
         normalized["quantity"] = qf * 1000.0
         normalized["unit"] = "KG"
         normalized["unit_conversion"] = {
-            "from_unit": normalized.get("original_unit") or canonical_unit_label(unit, "TONNE"),
+            "from_unit": normalized.get("original_unit")
+            or canonical_unit_label(unit, "TONNE"),
             "to_unit": "KG",
             "factor": 1000,
             "original_quantity": normalized.get("original_quantity", qf),
@@ -917,6 +972,7 @@ def _clean_candidate_text(value: Optional[str]) -> Optional[str]:
 # LLM-BASED ONBOARDING FIELD EXTRACTION
 # =====================================================================
 
+
 async def _llm_extract_onboarding_all(
     mc_runtime: "MarketRuntime",
     user_text: str,
@@ -941,8 +997,12 @@ async def _llm_extract_onboarding_all(
     several fields mid-flow).
     """
     empty: Dict[str, Optional[str]] = {
-        "role": None, "name": None, "zone": None, "confirm": None,
-        "is_question": False, "reply": None,
+        "role": None,
+        "name": None,
+        "zone": None,
+        "confirm": None,
+        "is_question": False,
+        "reply": None,
     }
     if not user_text or not user_text.strip():
         return empty
@@ -962,8 +1022,8 @@ async def _llm_extract_onboarding_all(
         "L'utilisateur peut donner plusieurs informations dans n'importe quel ordre, ou juste une, "
         "ou corriger une valeur precedente. Ne devine JAMAIS a partir d'une salutation ou d'une politesse.\n\n"
         "Reponds STRICTEMENT en JSON avec exactement ces 6 cles (mets null si non applicable) :\n"
-        '{\"role\": \"BUYER\"|\"PRODUCER\"|null, \"name\": string|null, \"zone\": string|null, '
-        '\"confirm\": \"YES\"|\"NO\"|null, \"is_question\": true|false, \"reply\": string|null}\n\n'
+        '{"role": "BUYER"|"PRODUCER"|null, "name": string|null, "zone": string|null, '
+        '"confirm": "YES"|"NO"|null, "is_question": true|false, "reply": string|null}\n\n'
         "Regles :\n"
         "- role : 'PRODUCER' pour agriculteur, eleveur, producteur, fournisseur d'engrais/intrants/semences. "
         "'BUYER' pour acheteur, commercant, grossiste, client, revendeur. Sinon null.\n"
@@ -990,7 +1050,9 @@ async def _llm_extract_onboarding_all(
         completion = await asyncio.wait_for(
             asyncio.to_thread(
                 lambda: llm.chat.completions.create(
-                    model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
+                    model=getattr(
+                        mc_runtime, "model_answer", "llama-3.3-70b-versatile"
+                    ),
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_text.strip()},
@@ -1007,12 +1069,20 @@ async def _llm_extract_onboarding_all(
         logger.warning("ONBOARDING_BULK_EXTRACT_ERROR | %s", exc)
         return empty
 
-    logger.info("ONBOARDING_BULK_EXTRACT | input=%r | output=%s", user_text[:120], payload)
+    logger.info(
+        "ONBOARDING_BULK_EXTRACT | input=%r | output=%s", user_text[:120], payload
+    )
 
     _CONFIRM_NORMALIZE: Dict[str, str] = {
-        "OUI": "YES", "NON": "NO", "OK": "YES",
-        "CORRECT": "YES", "EXACT": "YES", "TRUE": "YES", "FALSE": "NO",
-        "VRAI": "YES", "FAUX": "NO",
+        "OUI": "YES",
+        "NON": "NO",
+        "OK": "YES",
+        "CORRECT": "YES",
+        "EXACT": "YES",
+        "TRUE": "YES",
+        "FALSE": "NO",
+        "VRAI": "YES",
+        "FAUX": "NO",
     }
 
     def _norm(value: Any, allowed: Optional[set] = None) -> Optional[str]:
@@ -1051,6 +1121,7 @@ async def _llm_extract_onboarding_all(
 # Voir [[precommande-architecture-consolidation-2026-08]].
 # =====================================================================
 
+
 async def llm_deviation_reply(
     mc_runtime: "MarketRuntime",
     user_text: str,
@@ -1079,7 +1150,7 @@ async def llm_deviation_reply(
         "Un utilisateur AgriConnect (WhatsApp, Burkina Faso) devait répondre "
         "quelque chose de précis à cette étape et a dit autre chose.\n\n"
         f"Ce qui est attendu à cette étape : {context}\n\n"
-        f"Message de l'utilisateur : \"{user_text}\"\n\n"
+        f'Message de l\'utilisateur : "{user_text}"\n\n'
         "Réponds en 1-2 phrases courtes, chaleureuses, en français simple : "
         "reconnais ce qu'il a dit (question, correction, hésitation, remarque "
         "hostile — reste calme et professionnel même si le message est hostile) "
@@ -1090,7 +1161,9 @@ async def llm_deviation_reply(
         completion = await asyncio.wait_for(
             asyncio.to_thread(
                 lambda: llm.chat.completions.create(
-                    model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
+                    model=getattr(
+                        mc_runtime, "model_answer", "llama-3.3-70b-versatile"
+                    ),
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.4,
                     max_tokens=150,
@@ -1108,6 +1181,7 @@ async def llm_deviation_reply(
 # =====================================================================
 # STATE RESET HELPERS
 # =====================================================================
+
 
 def reset_error_status(state: Dict[str, Any]) -> Dict[str, Any]:
     """Reset error-related flags to allow re-planning after a failure."""
@@ -1151,6 +1225,3 @@ __all__ = [
     "_GENERIC_TECHNICAL_ERROR",
     "INTENT_CONFIG",
 ]
-
-
-

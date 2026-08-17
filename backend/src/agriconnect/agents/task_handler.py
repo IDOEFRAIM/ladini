@@ -1,4 +1,5 @@
 """TaskHandler — orchestrateur robuste avec validation stricte et circuit breaker."""
+
 from __future__ import annotations
 
 import enum
@@ -95,7 +96,9 @@ class TaskHandler:
         self.storage = storage
         self.executor = executor
 
-    async def handle(self, raw_payload: Dict[str, Any], *, retry_seed: int = 0) -> AgentState:
+    async def handle(
+        self, raw_payload: Dict[str, Any], *, retry_seed: int = 0
+    ) -> AgentState:
         try:
             payload = TaskPayload(**raw_payload)
         except ValidationError as exc:
@@ -136,7 +139,10 @@ class TaskHandler:
             if missing:
                 state.goal_state = GoalState.WAITING_INPUT
                 state.metadata["missing_fields"] = missing
-                state.metadata["plan"] = {"action": state.payload.goal, "status": "INCOMPLETE"}
+                state.metadata["plan"] = {
+                    "action": state.payload.goal,
+                    "status": "INCOMPLETE",
+                }
                 state.metadata["history"].append(f"think:incomplete:{missing}")
                 return
             self._transition(state, GoalState.WAITING_CONFIRMATION)
@@ -181,7 +187,10 @@ class TaskHandler:
     # ------------------------------------------------------------------
 
     def _transition(self, state: AgentState, target: GoalState) -> None:
-        if state.goal_state == GoalState.WAITING_CONFIRMATION and target == GoalState.COMPLETED:
+        if (
+            state.goal_state == GoalState.WAITING_CONFIRMATION
+            and target == GoalState.COMPLETED
+        ):
             raise RuntimeError("Confirmation requise avant completion")
         if target == GoalState.COMPLETED and not state.payload.is_ready():
             missing = state.payload.get_missing_fields()
@@ -191,7 +200,9 @@ class TaskHandler:
     @staticmethod
     def _fail_fast(exc: ValidationError, raw: Dict[str, Any]) -> AgentState:
         state = AgentState(
-            payload=TaskPayload.construct(phone="+000000000", goal="INVALID", context={}),
+            payload=TaskPayload.construct(
+                phone="+000000000", goal="INVALID", context={}
+            ),
             goal_state=GoalState.ERROR_RECOVERY,
             metadata={
                 "clarification_prompt": str(exc),
@@ -202,4 +213,6 @@ class TaskHandler:
 
     @staticmethod
     def _log_fatal(state: AgentState, exc: Exception) -> None:
-        logger.error("Fatal agent error: %s | state=%s", exc, state.json(), exc_info=True)
+        logger.error(
+            "Fatal agent error: %s | state=%s", exc, state.json(), exc_info=True
+        )

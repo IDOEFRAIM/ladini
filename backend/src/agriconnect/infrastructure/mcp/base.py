@@ -23,8 +23,10 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Protocol
 from fastmcp import FastMCP
 from pydantic import BaseModel, ValidationError, create_model
 
-from agriconnect.infrastructure.mcp.context import FarmerContext, get_mcp_context
-from agriconnect.infrastructure.mcp.security import PermissionDenied, get_execution_policy
+from agriconnect.infrastructure.mcp.context import get_mcp_context
+from agriconnect.infrastructure.mcp.security import (
+    get_execution_policy,
+)
 from agriconnect.infrastructure.mcp.utils import run_coro_blocking
 
 logger = logging.getLogger("MCP.Core.Base")
@@ -43,11 +45,9 @@ class MCPToolSpec:
 class MCPProvider(Protocol):
     name: str
 
-    def get_tools(self) -> List[MCPToolSpec]:
-        ...
+    def get_tools(self) -> List[MCPToolSpec]: ...
 
-    async def ping(self) -> Dict[str, Any]:
-        ...
+    async def ping(self) -> Dict[str, Any]: ...
 
 
 class ValidationFailure(Exception):
@@ -85,14 +85,24 @@ class MCPServerApp:
             for spec in provider.get_tools():
                 wrapped = self._wrap_tool(provider.name, spec)
                 self.mcp.tool(wrapped)
-                logger.info("Registered MCP tool '%s' from provider '%s'", spec.name, provider.name)
+                logger.info(
+                    "Registered MCP tool '%s' from provider '%s'",
+                    spec.name,
+                    provider.name,
+                )
 
-    def _wrap_tool(self, provider_name: str, spec: MCPToolSpec) -> Callable[..., Awaitable[dict[str, Any]]]:
+    def _wrap_tool(
+        self, provider_name: str, spec: MCPToolSpec
+    ) -> Callable[..., Awaitable[dict[str, Any]]]:
         sig = inspect.signature(spec.handler)
         input_model = spec.input_model or self._build_input_model(spec.name, sig)
 
         for param in sig.parameters.values():
-            if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+            if param.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.VAR_POSITIONAL,
+                inspect.Parameter.VAR_KEYWORD,
+            ):
                 logger.warning(
                     "Tool '%s' from provider '%s' has unsupported signature shape for strict wrapper; using raw handler",
                     spec.name,
@@ -104,15 +114,21 @@ class MCPServerApp:
             clean_kwargs = dict(call_kwargs)
             context_identity = get_mcp_context()
             if context_identity is None:
-                raise MissingContextError(f"Context identity missing for tool '{spec.name}' execution")
+                raise MissingContextError(
+                    f"Context identity missing for tool '{spec.name}' execution"
+                )
             request_id = str(clean_kwargs.get("request_id") or uuid.uuid4())
 
-            validate_input = {k: v for k, v in clean_kwargs.items() if k not in {"ctx", "request_id"}}
+            validate_input = {
+                k: v for k, v in clean_kwargs.items() if k not in {"ctx", "request_id"}
+            }
             try:
                 validated = input_model.model_validate(validate_input).model_dump()
             except ValidationError as exc:
                 error_text = _format_validation_error(exc)
-                logger.warning("Validation failed for tool %s: %s", spec.name, error_text)
+                logger.warning(
+                    "Validation failed for tool %s: %s", spec.name, error_text
+                )
                 raise ValidationFailure(error_text) from exc
 
             if "ctx" in clean_kwargs:
@@ -133,10 +149,14 @@ class MCPServerApp:
 
             if spec.output_model is not None:
                 try:
-                    validated_out = spec.output_model.model_validate(envelope.get("data") or {})
+                    validated_out = spec.output_model.model_validate(
+                        envelope.get("data") or {}
+                    )
                     envelope["data"] = validated_out.model_dump()
                 except ValidationError as exc:
-                    raise ToolOutputValidationError(f"{spec.name}: invalid_output {exc.errors()}") from exc
+                    raise ToolOutputValidationError(
+                        f"{spec.name}: invalid_output {exc.errors()}"
+                    ) from exc
 
             return envelope
 
@@ -156,7 +176,9 @@ class MCPServerApp:
         for pname, param in sig.parameters.items():
             if pname in {"self", "ctx", "request_id"}:
                 continue
-            annotation = param.annotation if param.annotation is not inspect._empty else Any
+            annotation = (
+                param.annotation if param.annotation is not inspect._empty else Any
+            )
             default = param.default if param.default is not inspect._empty else ...
             fields[pname] = (annotation, default)
         model_name = f"{tool_name.title().replace('_', '')}Input"
@@ -168,9 +190,14 @@ class MCPServerApp:
             providers_health: Dict[str, Any] = {}
             for provider in self.providers:
                 try:
-                    providers_health[provider.name] = await asyncio.wait_for(provider.ping(), timeout=5.0)
+                    providers_health[provider.name] = await asyncio.wait_for(
+                        provider.ping(), timeout=5.0
+                    )
                 except Exception as exc:
-                    providers_health[provider.name] = {"status": "down", "error": str(exc)}
+                    providers_health[provider.name] = {
+                        "status": "down",
+                        "error": str(exc),
+                    }
             return json.dumps(
                 {
                     "status": "ok",
@@ -182,7 +209,11 @@ class MCPServerApp:
 
     def _install_signal_handlers(self) -> None:
         def _shutdown_handler(signum: int, _frame: Any) -> None:
-            logger.warning("Signal %s received, terminating MCP server '%s'", signum, self.server_name)
+            logger.warning(
+                "Signal %s received, terminating MCP server '%s'",
+                signum,
+                self.server_name,
+            )
             try:
                 run_coro_blocking(self._run_shutdown_callbacks(), timeout=10)
             except Exception:
@@ -196,7 +227,9 @@ class MCPServerApp:
             try:
                 signal.signal(sig, _shutdown_handler)
             except Exception:
-                logger.debug("Cannot register handler for %s on this platform", sig_name)
+                logger.debug(
+                    "Cannot register handler for %s on this platform", sig_name
+                )
 
     async def _run_startup_callbacks(self) -> None:
         await self._run_callbacks(self._startup_callbacks, stage="startup")
@@ -204,7 +237,9 @@ class MCPServerApp:
     async def _run_shutdown_callbacks(self) -> None:
         await self._run_callbacks(self._shutdown_callbacks, stage="shutdown")
 
-    async def _run_callbacks(self, callbacks: List[Callable[[], Any]], stage: str) -> None:
+    async def _run_callbacks(
+        self, callbacks: List[Callable[[], Any]], stage: str
+    ) -> None:
         if not callbacks:
             return
         tasks = [self._invoke_callback(cb, stage) for cb in callbacks]
@@ -222,7 +257,12 @@ class MCPServerApp:
         except Exception:
             logger.exception("MCP %s callback failed", stage)
 
-    def run(self, transport: str = "stdio", host: Optional[str] = None, port: Optional[int] = None) -> None:
+    def run(
+        self,
+        transport: str = "stdio",
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+    ) -> None:
         logger.info(
             "Starting MCP server '%s' with transport=%s host=%s port=%s",
             self.server_name,
@@ -263,5 +303,9 @@ class BaseServer(MCPServerApp):
         startup_callbacks: Optional[List[Callable[[], Any]]] = None,
         shutdown_callbacks: Optional[List[Callable[[], Any]]] = None,
     ) -> None:
-        super().__init__(server_name, providers or [], startup_callbacks=startup_callbacks, shutdown_callbacks=shutdown_callbacks)
-
+        super().__init__(
+            server_name,
+            providers or [],
+            startup_callbacks=startup_callbacks,
+            shutdown_callbacks=shutdown_callbacks,
+        )

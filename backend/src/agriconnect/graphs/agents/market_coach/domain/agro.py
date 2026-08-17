@@ -3,33 +3,46 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
 
-from .model import DomainContext, DomainResult
+from agriconnect.graphs.agents.market_coach.actions.common import (
+    normalize_quantity_to_kg,
+    require,
+    require_phone,
+)
 from agriconnect.graphs.agents.market_coach.actions.tooling import ToolId
-from agriconnect.graphs.agents.market_coach.actions.common import require, require_phone, normalize_quantity_to_kg
+
+from .model import DomainContext, DomainResult
 
 
 @dataclass
 class AgronomyService:
     context: DomainContext
 
-    def get_cycles(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def get_cycles(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         require_phone(state)
         farm_id = str(require(payload, "farm_id"))
         args: Dict[str, Any] = {"farm_id": farm_id}
         return DomainResult(tool_id=ToolId.GET_CROP_CYCLES, tool_args=args)
 
-    def get_standards(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def get_standards(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         product = str(require(payload, "product"))
         args: Dict[str, Any] = {"crop_type": product}
         return DomainResult(tool_id=ToolId.GET_CROP_REQUIREMENTS, tool_args=args)
 
-    def get_economics(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def get_economics(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         require_phone(state)
         cycle_id = str(require(payload, "cycle_id"))
         args: Dict[str, Any] = {"cycle_id": cycle_id}
         return DomainResult(tool_id=ToolId.GET_CYCLE_ECONOMICS, tool_args=args)
 
-    def get_risks(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def get_risks(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         require_phone(state)
         farm_id = str(require(payload, "farm_id"))
         args: Dict[str, Any] = {"farm_id": farm_id}
@@ -39,7 +52,9 @@ class AgronomyService:
         args: Dict[str, Any] = {"phone": str(command.phone)}
         return DomainResult(tool_id=ToolId.GET_PRODUCER_FARM, tool_args=args)
 
-    def start_cycle(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def start_cycle(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         require_phone(state)
         farm_id = str(require(payload, "farm_id"))
         product = str(require(payload, "product"))
@@ -52,7 +67,9 @@ class AgronomyService:
         args: Dict[str, Any] = {"farm_id": farm_id, "data": data}
         return DomainResult(tool_id=ToolId.CREATE_CROP_CYCLE, tool_args=args)
 
-    def declare_crop_cycle(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def declare_crop_cycle(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         phone = require_phone(state)
         farm_id = str(require(payload, "farm_id"))
         product = str(require(payload, "product"))
@@ -90,14 +107,18 @@ class AgronomyService:
         if payload.get("area_size"):
             production_payload["area_size"] = payload["area_size"]
         if payload.get("expected_harvest_date"):
-            production_payload["expected_harvest_date"] = payload["expected_harvest_date"]
+            production_payload["expected_harvest_date"] = payload[
+                "expected_harvest_date"
+            ]
         if payload.get("planted_at"):
             production_payload["planted_at"] = payload["planted_at"]
 
         args: Dict[str, Any] = {"payload": production_payload, "phone": phone}
         return DomainResult(tool_id=ToolId.DECLARE_FUTURE_PRODUCTION, tool_args=args)
 
-    def record_intervention(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def record_intervention(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         require_phone(state)
         cycle_id = str(require(payload, "cycle_id"))
         intervention_type = str(require(payload, "intervention_type")).upper().strip()
@@ -111,7 +132,9 @@ class AgronomyService:
         args: Dict[str, Any] = {"cycle_id": cycle_id, "data": data}
         return DomainResult(tool_id=ToolId.LOG_INTERVENTION, tool_args=args)
 
-    def record_observation(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def record_observation(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         require_phone(state)
         cycle_id = str(require(payload, "cycle_id"))
         stage = payload.get("stage_code") or payload.get("stage_label")
@@ -122,7 +145,9 @@ class AgronomyService:
         args: Dict[str, Any] = {"cycle_id": cycle_id, "stage_code": stage_code}
         return DomainResult(tool_id=ToolId.ADD_GROWTH_LOG, tool_args=args)
 
-    def update_stage(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def update_stage(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         require_phone(state)
         cycle_id = str(require(payload, "cycle_id"))
         stage_name = str(require(payload, "stage_name"))
@@ -130,7 +155,9 @@ class AgronomyService:
         args: Dict[str, Any] = {"data": data}
         return DomainResult(tool_id=ToolId.ADD_CROP_GROWTH_STAGE, tool_args=args)
 
-    def update_soil(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def update_soil(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         require_phone(state)
         farm_id = str(require(payload, "farm_id"))
         ph = float(require(payload, "ph"))
@@ -151,6 +178,7 @@ class AgronomyService:
     def update_farm(self, command: FarmUpdateCommand) -> DomainResult:
         args: Dict[str, Any] = {"farm_id": str(command.farm_id)}
         return DomainResult(tool_id=ToolId.UPDATE_FARM, tool_args=args)
+
 
 @dataclass(frozen=True)
 class FarmGetMyListCommand:

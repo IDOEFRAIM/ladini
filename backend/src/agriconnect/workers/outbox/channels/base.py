@@ -1,4 +1,5 @@
 """Interface commune des canaux de notification (découplage total du métier)."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

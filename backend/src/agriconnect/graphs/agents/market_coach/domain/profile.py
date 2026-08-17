@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict
 
-from agriconnect.graphs.agents.market_coach.domain.model import DomainContext, DomainResult
 from agriconnect.graphs.agents.market_coach.actions.tooling import ToolId
-from agriconnect.graphs.agents.market_coach.actions.common import require, require_phone
+from agriconnect.graphs.agents.market_coach.domain.model import (
+    DomainContext,
+    DomainResult,
+)
 
 
 @dataclass(frozen=True)
@@ -62,7 +64,11 @@ class ProfileService:
     def set_geo(self, command: ProfileSetGeoCommand) -> DomainResult:
         # `phone`, pas `user_id` : update_geo_location résout l'UUID en interne
         # (l'appelant conversationnel ne connaît que le numéro de téléphone).
-        args: Dict[str, Any] = {"phone": str(command.phone), "lat": float(command.latitude), "lon": float(command.longitude)}
+        args: Dict[str, Any] = {
+            "phone": str(command.phone),
+            "lat": float(command.latitude),
+            "lon": float(command.longitude),
+        }
         return DomainResult(tool_id=ToolId.UPDATE_GEO_LOCATION, tool_args=args)
 
     def set_prefs(self, command: ProfileSetPrefsCommand) -> DomainResult:

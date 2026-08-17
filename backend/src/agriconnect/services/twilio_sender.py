@@ -5,11 +5,14 @@ from typing import Optional
 
 from twilio.http.http_client import TwilioHttpClient
 from twilio.rest import Client
+
 from agriconnect.core.settings import settings
 
 logger = logging.getLogger("AgriConnect.TwilioSender")
 
-MAX_WHATSAPP_BODY_LENGTH = 1200  # Seuil de sécurité pour éviter le blocage Meta/WhatsApp
+MAX_WHATSAPP_BODY_LENGTH = (
+    1200  # Seuil de sécurité pour éviter le blocage Meta/WhatsApp
+)
 
 # ⚠️ RÉSILIENCE — le SDK Twilio construit par défaut un `TwilioHttpClient(
 # timeout=None)`, c'est-à-dire AUCUN timeout : une connexion suspendue côté
@@ -37,11 +40,11 @@ def send_whatsapp_message(to_phone: str, body_text: str):
         settings.TWILIO_AUTH_TOKEN,
         http_client=TwilioHttpClient(timeout=_TIMEOUT_S),
     )
-    
+
     # Formatage propre des numéros
     clean_from = settings.TWILIO_WHATSAPP_NUMBER.replace("whatsapp:", "").strip()
     clean_to = to_phone.replace("whatsapp:", "").strip()
-    
+
     from_formatted = f"whatsapp:{clean_from}"
     to_formatted = f"whatsapp:{clean_to}"
 
@@ -50,7 +53,7 @@ def send_whatsapp_message(to_phone: str, body_text: str):
         chunks = [body_text]
     else:
         chunks = [
-            body_text[i:i + MAX_WHATSAPP_BODY_LENGTH]
+            body_text[i : i + MAX_WHATSAPP_BODY_LENGTH]
             for i in range(0, len(body_text), MAX_WHATSAPP_BODY_LENGTH)
         ]
 
@@ -58,25 +61,31 @@ def send_whatsapp_message(to_phone: str, body_text: str):
     for index, chunk in enumerate(chunks):
         try:
             res = client.messages.create(
-                from_=from_formatted,
-                to=to_formatted,
-                body=chunk
+                from_=from_formatted, to=to_formatted, body=chunk
             )
             responses.append(res)
             logger.info(
                 "TWILIO_SEND_CHUNK_SUCCESS | chunk=%d/%d | sid=%s | to=%s",
-                index + 1, len(chunks), res.sid, _mask_phone(clean_to)
+                index + 1,
+                len(chunks),
+                res.sid,
+                _mask_phone(clean_to),
             )
         except Exception as e:
             logger.error(
                 "TWILIO_SEND_CHUNK_FAILED | chunk=%d/%d | to=%s | error=%s",
-                index + 1, len(chunks), _mask_phone(clean_to), e
+                index + 1,
+                len(chunks),
+                _mask_phone(clean_to),
+                e,
             )
 
     return responses
 
 
-def send_whatsapp_media(to_phone: str, media_url: str, caption: str = "") -> Optional[str]:
+def send_whatsapp_media(
+    to_phone: str, media_url: str, caption: str = ""
+) -> Optional[str]:
     """Envoie UNE image WhatsApp via Twilio (``media_url``) — renvoie le SID
     Twilio, ou ``None`` en cas d'échec. Une image par appel : WhatsApp
     n'affiche de façon fiable qu'un seul média par message, contrairement à
@@ -101,11 +110,15 @@ def send_whatsapp_media(to_phone: str, media_url: str, caption: str = "") -> Opt
             body=caption or "",
         )
         logger.info(
-            "TWILIO_SEND_MEDIA_SUCCESS | sid=%s | to=%s", res.sid, _mask_phone(clean_to),
+            "TWILIO_SEND_MEDIA_SUCCESS | sid=%s | to=%s",
+            res.sid,
+            _mask_phone(clean_to),
         )
         return res.sid
     except Exception as e:
         logger.error(
-            "TWILIO_SEND_MEDIA_FAILED | to=%s | error=%s", _mask_phone(clean_to), e,
+            "TWILIO_SEND_MEDIA_FAILED | to=%s | error=%s",
+            _mask_phone(clean_to),
+            e,
         )
         return None

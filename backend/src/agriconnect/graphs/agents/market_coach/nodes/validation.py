@@ -8,32 +8,34 @@ slot_enrichment.  This node only:
 4. Produces structured missing_fields / validation_errors.
 5. Delegates prompt generation to response_handlers.final_response.
 """
+
 from typing import Any, Dict, List
 
 from agriconnect.core.logger import get_logger
-from agriconnect.graphs.agents.market_coach.utils import (
-    MarketRuntime,
-    _AUTO_RESOLVABLE_FIELDS,
-    _normalize_quantity_to_kg,
-    _compute_progress,
-    canonical_unit_label,
-    normalize_slot_keys,
-    slot_has_value,
-)
-from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
-from agriconnect.graphs.agents.market_coach.interpreter.contracts import (
-    CONTRACTS,
-    enforce_contract,
-)
 from agriconnect.graphs.agents.market_coach.core.goals import BUYER_CART_GOALS
-from agriconnect.graphs.agents.market_coach.nodes.response_handlers import _label_for_field
-from agriconnect.graphs.agents.market_coach.core.state_compaction import (
-    build_compaction_patch,
-)
 from agriconnect.graphs.agents.market_coach.core.slots import (
     expected_input_for_field,
     field_priority,
     get_slot,
+)
+from agriconnect.graphs.agents.market_coach.core.state_compaction import (
+    build_compaction_patch,
+)
+from agriconnect.graphs.agents.market_coach.interpreter.contracts import (
+    CONTRACTS,
+    enforce_contract,
+)
+from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
+from agriconnect.graphs.agents.market_coach.nodes.response_handlers import (
+    _label_for_field,
+)
+from agriconnect.graphs.agents.market_coach.utils import (
+    _AUTO_RESOLVABLE_FIELDS,
+    MarketRuntime,
+    _compute_progress,
+    _normalize_quantity_to_kg,
+    canonical_unit_label,
+    normalize_slot_keys,
 )
 
 logger = get_logger("AgriConnect.MarketCoach.Validator")
@@ -55,7 +57,9 @@ def _canonicalize_required_fields(fields: List[str]) -> List[str]:
     return canonical
 
 
-def _finalize_validator_response(state: Dict[str, Any], response: Dict[str, Any]) -> Dict[str, Any]:
+def _finalize_validator_response(
+    state: Dict[str, Any], response: Dict[str, Any]
+) -> Dict[str, Any]:
     cleanup = build_compaction_patch(state)
     if cleanup:
         response.update(cleanup)
@@ -76,24 +80,33 @@ def _is_technical_id_field(field: str) -> bool:
     return name.endswith(_TECHNICAL_ID_SUFFIXES)
 
 
-def _missing_fields_for_goal(payload: Dict[str, Any], required_fields: List[str]) -> List[str]:
+def _missing_fields_for_goal(
+    payload: Dict[str, Any], required_fields: List[str]
+) -> List[str]:
     missing = [
-        f for f in required_fields
-        if f not in _AUTO_RESOLVABLE_FIELDS
-        and payload.get(f) in (None, "", [], {})
+        f
+        for f in required_fields
+        if f not in _AUTO_RESOLVABLE_FIELDS and payload.get(f) in (None, "", [], {})
     ]
     missing.sort(key=lambda f: field_priority(f))
     return missing
 
 
-def _apply_slot_defaults(payload: Dict[str, Any], missing: List[str], goal_upper: str) -> List[str]:
+def _apply_slot_defaults(
+    payload: Dict[str, Any], missing: List[str], goal_upper: str
+) -> List[str]:
     """Apply registered default values for missing slots. Returns updated missing list."""
     remaining = []
     for f in missing:
         slot_def = get_slot(f)
         if slot_def and slot_def.default_value is not None:
             payload[f] = slot_def.default_value
-            logger.info("[Validator] %s: %s missing — defaulting to %s", goal_upper, f, slot_def.default_value)
+            logger.info(
+                "[Validator] %s: %s missing — defaulting to %s",
+                goal_upper,
+                f,
+                slot_def.default_value,
+            )
         else:
             remaining.append(f)
     return remaining
@@ -107,23 +120,33 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
     checks only.
     """
     goal = state.get("current_goal")
-    payload: Dict[str, Any] = normalize_slot_keys(dict(state.get("transaction_payload") or {}))
+    payload: Dict[str, Any] = normalize_slot_keys(
+        dict(state.get("transaction_payload") or {})
+    )
     goal_upper = str(goal or "").upper()
     goal_config = INTENT_CONFIG.get(goal_upper) or {}
-    required_for_goal = _canonicalize_required_fields(list(goal_config.get("required") or []))
+    required_for_goal = _canonicalize_required_fields(
+        list(goal_config.get("required") or [])
+    )
 
     if not payload and state.get("extracted_entities"):
         payload = normalize_slot_keys(dict(state.get("extracted_entities")))
 
     working_memory = state.get("working_memory") or {}
 
-    previous_goal = working_memory.get("active_goal") or working_memory.get("locked_intent")
+    previous_goal = working_memory.get("active_goal") or working_memory.get(
+        "locked_intent"
+    )
     prev_goal_upper = str(previous_goal or "").upper()
     goal_changed = bool(previous_goal and goal and prev_goal_upper != goal_upper)
 
-    _BUYER_CART_CONTINUITY = frozenset({
-        "BUYER_REQUEST", "BUYER_ADD_TO_CART", "SEARCH_PRODUCTS",
-    })
+    _BUYER_CART_CONTINUITY = frozenset(
+        {
+            "BUYER_REQUEST",
+            "BUYER_ADD_TO_CART",
+            "SEARCH_PRODUCTS",
+        }
+    )
     strip_structural = False
     if goal_upper in {"BUYER_LIST_ORDERS", "BUYER_VIEW_CART"}:
         strip_structural = True
@@ -229,7 +252,9 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
             if qf <= 0:
                 errors.append("La quantité doit être supérieure à 0.")
             elif qf > 100_000:
-                warnings.append(f"Quantité très importante ({qf:,.0f}). Vérifiez l'unité.")
+                warnings.append(
+                    f"Quantité très importante ({qf:,.0f}). Vérifiez l'unité."
+                )
         except (TypeError, ValueError):
             errors.append("La quantité indiquée n'est pas un nombre valide.")
 
@@ -237,9 +262,7 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
 
     unit_raw = str(payload.get("unit") or "KG").upper()
     unit_display = canonical_unit_label(
-        payload.get("unit_display")
-        or payload.get("original_unit")
-        or unit_raw
+        payload.get("unit_display") or payload.get("original_unit") or unit_raw
     )
     if qty is not None and unit_display == "TONNE":
         try:
@@ -264,15 +287,23 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
         if not contract_ok:
             label = _label_for_field(goal, contract_field) if contract_field else None
             errors.append(
-                f"{label} : valeur invalide." if label else (contract_msg or "Entrée invalide.")
+                f"{label} : valeur invalide."
+                if label
+                else (contract_msg or "Entrée invalide.")
             )
-            if contract_field and contract_field != "phone" and contract_field not in missing:
+            if (
+                contract_field
+                and contract_field != "phone"
+                and contract_field not in missing
+            ):
                 # Re-demander le champ fautif comme s'il manquait.
                 payload.pop(contract_field, None)
                 missing.insert(0, contract_field)
             logger.info(
                 "[Validator] Contrat %s rejeté (champ=%s): %s",
-                goal_upper, contract_field, contract_msg,
+                goal_upper,
+                contract_field,
+                contract_msg,
             )
 
     progress = _compute_progress(goal, payload)
@@ -300,7 +331,8 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
             logger.warning(
                 "[Validator] %s : champ technique '%s' manquant sans résolveur — "
                 "clarification au lieu de réclamer un identifiant à l'utilisateur.",
-                goal_upper, blocking_id,
+                goal_upper,
+                blocking_id,
             )
             return _finalize_validator_response(
                 state,

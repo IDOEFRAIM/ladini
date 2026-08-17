@@ -10,6 +10,7 @@ Actif uniquement quand ``settings.MESSAGING_PROVIDER == "whatsapp_cloud"``
 (voir ``api/main.py``) — le webhook Twilio reste disponible en parallèle
 pour un rollback instantané.
 """
+
 from __future__ import annotations
 
 import logging
@@ -20,9 +21,9 @@ from fastapi import APIRouter, BackgroundTasks, Request, Response
 
 from agriconnect.api.security import verify_whatsapp_cloud_signature
 from agriconnect.api.tasks import process_agent_task
+from agriconnect.core.settings import settings
 from agriconnect.graphs.roles import normalize_role
 from agriconnect.workspace.store import WorkspaceStore
-from agriconnect.core.settings import settings
 
 router = APIRouter()
 logger = logging.getLogger("AgriConnect.WhatsAppWebhook")
@@ -41,6 +42,7 @@ def _plain_ok(body: str = "EVENT_RECEIVED") -> Response:
 # =====================================================================
 # GET — Vérification du webhook (configuration initiale dans Meta for Developers)
 # =====================================================================
+
 
 @router.get("/webhook/whatsapp")
 async def verify_whatsapp_webhook(request: Request) -> Response:
@@ -61,7 +63,10 @@ async def verify_whatsapp_webhook(request: Request) -> Response:
 # POST — Réception des messages
 # =====================================================================
 
-def _extract_location(message: Dict[str, Any]) -> Optional[tuple[float, float, Optional[str]]]:
+
+def _extract_location(
+    message: Dict[str, Any],
+) -> Optional[tuple[float, float, Optional[str]]]:
     """Miroir de ``twilio_webhook.py::_extract_location`` pour le format Cloud API."""
     loc = message.get("location")
     if not isinstance(loc, dict):
@@ -72,10 +77,14 @@ def _extract_location(message: Dict[str, Any]) -> Optional[tuple[float, float, O
     try:
         lat, lon = float(raw_lat), float(raw_lon)
     except (TypeError, ValueError):
-        logger.warning("WHATSAPP_WEBHOOK_LOCATION_INVALID | lat=%r | lon=%r", raw_lat, raw_lon)
+        logger.warning(
+            "WHATSAPP_WEBHOOK_LOCATION_INVALID | lat=%r | lon=%r", raw_lat, raw_lon
+        )
         return None
     if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
-        logger.warning("WHATSAPP_WEBHOOK_LOCATION_OUT_OF_RANGE | lat=%s | lon=%s", lat, lon)
+        logger.warning(
+            "WHATSAPP_WEBHOOK_LOCATION_OUT_OF_RANGE | lat=%s | lon=%s", lat, lon
+        )
         return None
     address = loc.get("address") or loc.get("name") or None
     return lat, lon, address
@@ -101,8 +110,8 @@ def _extract_interactive_id(message: Dict[str, Any]) -> Optional[str]:
 async def _persist_location_background(phone: str, lat: float, lon: float) -> None:
     """Identique à la version Twilio — persistance découplée, best-effort."""
     try:
-        from agriconnect.services.database.auth import AuthMixin
         from agriconnect.core.database import get_sessionmaker
+        from agriconnect.services.database.auth import AuthMixin
 
         class _GeoOnlyService(AuthMixin):
             def __init__(self, session):
@@ -114,7 +123,9 @@ async def _persist_location_background(phone: str, lat: float, lon: float) -> No
 
         sessionmaker = get_sessionmaker()
         if sessionmaker is None:
-            logger.warning("WHATSAPP_WEBHOOK_LOCATION_SKIPPED | sessionmaker indisponible")
+            logger.warning(
+                "WHATSAPP_WEBHOOK_LOCATION_SKIPPED | sessionmaker indisponible"
+            )
             return
         async with sessionmaker() as session:
             service = _GeoOnlyService(session)
@@ -126,14 +137,19 @@ async def _persist_location_background(phone: str, lat: float, lon: float) -> No
                 await session.rollback()
                 logger.warning(
                     "WHATSAPP_WEBHOOK_LOCATION_NOT_SAVED | phone=***%s | reason=%s",
-                    phone[-4:], result.get("message"),
+                    phone[-4:],
+                    result.get("message"),
                 )
     except Exception:
-        logger.exception("WHATSAPP_WEBHOOK_LOCATION_PERSIST_ERROR | phone=***%s", phone[-4:])
+        logger.exception(
+            "WHATSAPP_WEBHOOK_LOCATION_PERSIST_ERROR | phone=***%s", phone[-4:]
+        )
 
 
 @router.post("/webhook/whatsapp")
-async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
+async def whatsapp_webhook(
+    request: Request, background_tasks: BackgroundTasks
+) -> Response:
     try:
         return await _handle_whatsapp_webhook(request, background_tasks)
     except Exception:
@@ -141,7 +157,9 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks) 
         return _plain_ok()
 
 
-async def _handle_whatsapp_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
+async def _handle_whatsapp_webhook(
+    request: Request, background_tasks: BackgroundTasks
+) -> Response:
     raw_body = await request.body()
 
     # --- 0. VÉRIFICATION DE SIGNATURE (anti-usurpation) ---
@@ -150,9 +168,13 @@ async def _handle_whatsapp_webhook(request: Request, background_tasks: Backgroun
         signature = request.headers.get("X-Hub-Signature-256", "")
         if not verify_whatsapp_cloud_signature(app_secret, raw_body, signature):
             logger.warning("WHATSAPP_WEBHOOK_BAD_SIGNATURE")
-            return Response(content="Forbidden", media_type="text/plain", status_code=403)
+            return Response(
+                content="Forbidden", media_type="text/plain", status_code=403
+            )
     else:
-        logger.warning("WHATSAPP_WEBHOOK_SIGNATURE_CHECK_SKIPPED | WHATSAPP_APP_SECRET non configuré")
+        logger.warning(
+            "WHATSAPP_WEBHOOK_SIGNATURE_CHECK_SKIPPED | WHATSAPP_APP_SECRET non configuré"
+        )
 
     payload = await request.json()
 
@@ -175,7 +197,9 @@ async def _handle_whatsapp_webhook(request: Request, background_tasks: Backgroun
     return _plain_ok()
 
 
-async def _process_single_message(message: Dict[str, Any], background_tasks: BackgroundTasks) -> None:
+async def _process_single_message(
+    message: Dict[str, Any], background_tasks: BackgroundTasks
+) -> None:
     # --- 1. ANTI-DOUBLON / IDEMPOTENCE (REDIS) ---
     message_id = str(message.get("id") or "").strip()
     if message_id:
@@ -183,10 +207,16 @@ async def _process_single_message(message: Dict[str, Any], background_tasks: Bac
         try:
             is_new_message = redis_client.set(redis_key, "processing", ex=3600, nx=True)
             if not is_new_message:
-                logger.warning("WHATSAPP_WEBHOOK_DUPLICATE | id=%s déjà en cours ou traité", message_id)
+                logger.warning(
+                    "WHATSAPP_WEBHOOK_DUPLICATE | id=%s déjà en cours ou traité",
+                    message_id,
+                )
                 return
         except Exception as e:
-            logger.error("WHATSAPP_WEBHOOK_REDIS_ERROR | Impossible de vérifier l'idempotence: %s", e)
+            logger.error(
+                "WHATSAPP_WEBHOOK_REDIS_ERROR | Impossible de vérifier l'idempotence: %s",
+                e,
+            )
 
     # --- 2. NUMÉRO DE TÉLÉPHONE ---
     phone = str(message.get("from") or "").strip()
@@ -202,7 +232,9 @@ async def _process_single_message(message: Dict[str, Any], background_tasks: Bac
     # --- 3. INTERACTIF (bouton/liste) ---
     interactive_id = _extract_interactive_id(message)
     if interactive_id:
-        logger.info("WHATSAPP_INBOUND_INTERACTIVE | phone=%s | id=%s", phone, interactive_id)
+        logger.info(
+            "WHATSAPP_INBOUND_INTERACTIVE | phone=%s | id=%s", phone, interactive_id
+        )
 
     # --- 4. GPS NATIF ---
     location = _extract_location(message)
@@ -211,13 +243,17 @@ async def _process_single_message(message: Dict[str, Any], background_tasks: Bac
         lat, lon, address = location
         logger.info(
             "WHATSAPP_INBOUND_LOCATION | phone=%s | lat=%s | lon=%s | address=%r",
-            phone, lat, lon, address,
+            phone,
+            lat,
+            lon,
+            address,
         )
         background_tasks.add_task(_persist_location_background, phone, lat, lon)
         location_shared = True
 
     try:
         from agriconnect.core import telemetry
+
         telemetry.count_webhook("whatsapp_cloud")
         trace_id = telemetry.new_trace_id()
     except Exception:
@@ -237,7 +273,10 @@ async def _process_single_message(message: Dict[str, Any], background_tasks: Bac
 
     logger.info(
         "WhatsApp Cloud webhook | phone=%s | type=%s | text=%r | existing_workspace=%s",
-        phone, msg_type, text[:80], bool(workspace),
+        phone,
+        msg_type,
+        text[:80],
+        bool(workspace),
     )
 
     # --- 6. DÉLÉGATION À CELERY ---

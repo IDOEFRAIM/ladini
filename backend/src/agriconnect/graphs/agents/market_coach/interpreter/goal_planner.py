@@ -3,26 +3,30 @@
 Extracted from ``interpreter/routing.py`` so that the planner logic
 (~400 lines of pure state-machine rules) lives in its own module.
 """
+
 from __future__ import annotations
 
 import logging
 import re as _re
 from typing import Any, Dict, Optional
 
+from agriconnect.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
 from agriconnect.graphs.agents.market_coach.interpreter.intent import (
     INTENT_CONFIG,
     INTENT_DISAMBIGUATION,
 )
-from agriconnect.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
-from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
+
 # Source UNIQUE des clés de menu/sélection volatiles (nodes/cleanup.py) : le
 # purge de verrou sur REJECT DOIT vider exactement le même univers de clés que
 # le nettoyage de fin de tour, sinon un menu périmé survit à une annulation
 # d'intention. Importer d'ici évite une 2e liste qui dériverait.
 from agriconnect.graphs.agents.market_coach.nodes.cleanup import (
     _GENERIC_SELECTION_KEYS as _MENU_SELECTION_KEYS,
+)
+from agriconnect.graphs.agents.market_coach.nodes.cleanup import (
     _MENU_CACHE_KEYS,
 )
+from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
 
 logger = logging.getLogger("AgriConnect.Market.GoalPlanner")
 
@@ -43,7 +47,9 @@ from agriconnect.graphs.agents.market_coach.core.goals import (  # noqa: E402
 )
 
 
-def _init_intent_to_goal_map(producer_intents: frozenset, buyer_intents: frozenset, common_intents: frozenset) -> None:
+def _init_intent_to_goal_map(
+    producer_intents: frozenset, buyer_intents: frozenset, common_intents: frozenset
+) -> None:
     """Populate INTENT_TO_GOAL_MAP once role-based sets are available.
 
     Called from routing.py at module-load time to avoid a circular import
@@ -82,38 +88,40 @@ _BUYER_PRODUCT_EXCLUDES = (
     "appel",
     "prix",
 )
-_BUYER_FILLER_WORDS = frozenset({
-    "je",
-    "veux",
-    "voudrais",
-    "cherches",
-    "cherche",
-    "recherche",
-    "du",
-    "de",
-    "des",
-    "de la",
-    "d",
-    "un",
-    "une",
-    "le",
-    "la",
-    "les",
-    "il",
-    "me",
-    "faut",
-    "besoin",
-    "avoir",
-    "jai",
-    "j",
-    "ai",
-    "pour",
-    "acheter",
-    # "commander"/"commandez" = verbe d'achat, jamais un produit : filtré de
-    # l'extraction pour que "je veux commander des tomates" donne "tomates".
-    "commander",
-    "commandez",
-})
+_BUYER_FILLER_WORDS = frozenset(
+    {
+        "je",
+        "veux",
+        "voudrais",
+        "cherches",
+        "cherche",
+        "recherche",
+        "du",
+        "de",
+        "des",
+        "de la",
+        "d",
+        "un",
+        "une",
+        "le",
+        "la",
+        "les",
+        "il",
+        "me",
+        "faut",
+        "besoin",
+        "avoir",
+        "jai",
+        "j",
+        "ai",
+        "pour",
+        "acheter",
+        # "commander"/"commandez" = verbe d'achat, jamais un produit : filtré de
+        # l'extraction pour que "je veux commander des tomates" donne "tomates".
+        "commander",
+        "commandez",
+    }
+)
 
 
 def _looks_like_buyer_product_request(clean_text: str) -> bool:
@@ -121,7 +129,10 @@ def _looks_like_buyer_product_request(clean_text: str) -> bool:
         return False
     if not any(hint in clean_text for hint in _BUYER_PRODUCT_HINTS):
         return False
-    if any(_re.search(rf"\b{_re.escape(ex)}\b", clean_text) for ex in _BUYER_PRODUCT_EXCLUDES):
+    if any(
+        _re.search(rf"\b{_re.escape(ex)}\b", clean_text)
+        for ex in _BUYER_PRODUCT_EXCLUDES
+    ):
         return False
     tokens = _re.findall(r"[a-zàâçéèêëîïôûùüÿñæœ']+", clean_text)
     meaningful = [t for t in tokens if t not in _BUYER_FILLER_WORDS]
@@ -145,12 +156,19 @@ def _extract_buyer_product(clean_text: str) -> Optional[str]:
 
 # ── Goal planner node ──────────────────────────────────────────────
 
-async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+
+async def goal_planner(
+    state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Dict[str, Any]:
     """Machine à états pure pour la gestion du cycle de vie des intentions."""
     event = str(state.get("interpreted_event") or "UNKNOWN").upper()
     detected_intent = str(state.get("detected_intent") or "UNKNOWN").upper()
     working = state.get("working_memory") or {}
-    current_goal = state.get("current_goal") or working.get("active_goal") or working.get("locked_intent")
+    current_goal = (
+        state.get("current_goal")
+        or working.get("active_goal")
+        or working.get("locked_intent")
+    )
     # Restauration du pseudo-goal DISAMBIGUATION_PENDING entre deux tours.
     # `_lock` (plus bas) refuse volontairement de verrouiller ce pseudo-goal dans
     # working_memory.active_goal, et post_response_cleanup remet current_goal à
@@ -165,7 +183,11 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
     expected_input = state.get("expected_input")
     goal_stack = list(state.get("goal_stack") or [])
     in_tunnel = bool(current_goal and expected_input and expected_input != "NONE")
-    text = str(state.get("normalized_text") or state.get("user_query") or "").strip().lower()
+    text = (
+        str(state.get("normalized_text") or state.get("user_query") or "")
+        .strip()
+        .lower()
+    )
     if not text:
         messages = state.get("messages") or []
         if isinstance(messages, list):
@@ -179,7 +201,9 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
                 if isinstance(content, str) and content.strip():
                     text = content.strip().lower()
                     break
-    is_short = len(text) <= 4 or text.isdigit() or text in {"oui", "non", "ok", "yes", "no"}
+    is_short = (
+        len(text) <= 4 or text.isdigit() or text in {"oui", "non", "ok", "yes", "no"}
+    )
 
     updates: Dict[str, Any] = {
         "status": "PLANNING",
@@ -194,7 +218,9 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         expected_input,
     )
 
-    def _lock(goal: Optional[str], extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _lock(
+        goal: Optional[str], extra: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         wm = dict(working)
         if goal and goal != "DISAMBIGUATION_PENDING":
             wm["active_goal"] = goal
@@ -244,7 +270,9 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
             "form_data": {"__reset__": True},
         }
 
-    def _with_goal_metadata(payload: Dict[str, Any], goal_hint: Optional[str] = None) -> Dict[str, Any]:
+    def _with_goal_metadata(
+        payload: Dict[str, Any], goal_hint: Optional[str] = None
+    ) -> Dict[str, Any]:
         target_goal = goal_hint
         if target_goal is None:
             target_goal = payload.get("current_goal")
@@ -269,30 +297,39 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
     # RÈGLE 0bis — RÉSOLUTION DE DÉSAMBIGUÏSATION
     if current_goal == "DISAMBIGUATION_PENDING":
         override_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
-        if event in {"INTERRUPTION", "NEW_TASK"} and override_goal and override_goal != "DISAMBIGUATION_PENDING":
+        if (
+            event in {"INTERRUPTION", "NEW_TASK"}
+            and override_goal
+            and override_goal != "DISAMBIGUATION_PENDING"
+        ):
             logger.info(
                 "[Disambiguation Override] event=%s intent=%s -> current_goal=%s",
                 event,
                 detected_intent,
                 override_goal,
             )
-            return _with_goal_metadata({
-                "status": "PLANNING",
-                "current_goal": override_goal,
-                "goal_status": "ACTIVE",
-                "interruption_detected": event == "INTERRUPTION",
-                "working_memory": {
-                    **_lock(override_goal),
-                    "disambiguation_pending": False,
-                    "available_mapping_kind": None,
+            return _with_goal_metadata(
+                {
+                    "status": "PLANNING",
+                    "current_goal": override_goal,
+                    "goal_status": "ACTIVE",
+                    "interruption_detected": event == "INTERRUPTION",
+                    "working_memory": {
+                        **_lock(override_goal),
+                        "disambiguation_pending": False,
+                        "available_mapping_kind": None,
+                    },
+                    **_purge_transaction_state(),
                 },
-                **_purge_transaction_state(),
-            }, override_goal)
+                override_goal,
+            )
 
         extracted = state.get("extracted_entities") or {}
         mapping = dict(state.get("available_mapping") or {})
 
-        trigger_id = str((state.get("working_memory") or {}).get("disambiguation_trigger_id") or "").strip()
+        trigger_id = str(
+            (state.get("working_memory") or {}).get("disambiguation_trigger_id") or ""
+        ).strip()
         if trigger_id:
             entry = INTENT_DISAMBIGUATION.get(trigger_id)
             if entry:
@@ -337,24 +374,28 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         if resolved_intent and resolved_intent in INTENT_TO_GOAL_MAP:
             logger.info(
                 "[Disambiguation Resolved] selection=%s promoted to current_goal=%s",
-                sel_idx or sel_val, resolved_intent,
+                sel_idx or sel_val,
+                resolved_intent,
             )
-            return _with_goal_metadata({
-                "status": "PLANNING",
-                "current_goal": resolved_intent,
-                "goal_status": "ACTIVE",
-                "interruption_detected": False,
-                "expected_input": "NONE",
-                "expected_candidates": [],
-                "available_mapping": {},
-                "missing_fields": [],
-                "completed_fields": [],
-                "working_memory": {
-                    **_lock(resolved_intent),
-                    "disambiguation_pending": False,
-                    "available_mapping_kind": None,
+            return _with_goal_metadata(
+                {
+                    "status": "PLANNING",
+                    "current_goal": resolved_intent,
+                    "goal_status": "ACTIVE",
+                    "interruption_detected": False,
+                    "expected_input": "NONE",
+                    "expected_candidates": [],
+                    "available_mapping": {},
+                    "missing_fields": [],
+                    "completed_fields": [],
+                    "working_memory": {
+                        **_lock(resolved_intent),
+                        "disambiguation_pending": False,
+                        "available_mapping_kind": None,
+                    },
                 },
-            }, resolved_intent)
+                resolved_intent,
+            )
         # Sélection invalide ou pas encore reçue : on garde le menu actif.
         updates["current_goal"] = "DISAMBIGUATION_PENDING"
         updates["goal_status"] = "WAITING_INPUT"
@@ -371,17 +412,22 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
 
     # RÈGLE 1 — CANCEL/REJECT (Annulation explicite)
     if event == "REJECT":
-        waiting_confirm = bool(state.get("waiting_for_confirmation") or str(expected_input or "").upper() == "CONFIRMATION")
+        waiting_confirm = bool(
+            state.get("waiting_for_confirmation")
+            or str(expected_input or "").upper() == "CONFIRMATION"
+        )
         if not waiting_confirm:
-            return _with_goal_metadata({
-                "status": "WAITING_INPUT",
-                "current_goal": None,
-                "goal_status": "IDLE",
-                "interruption_detected": False,
-                "response_strategy": "CLARIFICATION",
-                "working_memory": _clear_goal_lock(),
-                **_purge_transaction_state(),
-            })
+            return _with_goal_metadata(
+                {
+                    "status": "WAITING_INPUT",
+                    "current_goal": None,
+                    "goal_status": "IDLE",
+                    "interruption_detected": False,
+                    "response_strategy": "CLARIFICATION",
+                    "working_memory": _clear_goal_lock(),
+                    **_purge_transaction_state(),
+                }
+            )
 
         # Rejet pendant confirmation : laisser confirmation_gate gérer la logique.
         updates["current_goal"] = current_goal
@@ -397,15 +443,25 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         return _with_goal_metadata(updates)
 
     # RÈGLE 1ter — PERSISTENCE PAR DÉFAUT
-    if current_goal and detected_intent == "UNKNOWN" and event in {"UNKNOWN", "NEW_TASK"}:
+    if (
+        current_goal
+        and detected_intent == "UNKNOWN"
+        and event in {"UNKNOWN", "NEW_TASK"}
+    ):
         updates["current_goal"] = current_goal
         updates["detected_intent"] = str(current_goal).upper()
-        updates["goal_status"] = "ACTIVE" if expected_input in (None, "", "NONE") else "WAITING_INPUT"
+        updates["goal_status"] = (
+            "ACTIVE" if expected_input in (None, "", "NONE") else "WAITING_INPUT"
+        )
         updates["working_memory"] = _lock(current_goal)
         return _with_goal_metadata(updates)
 
     # RÈGLE 1quater — VERROUILLAGE PENDANT SLOT-FILLING
-    if current_goal and event == "NEW_TASK" and expected_input not in (None, "", "NONE"):
+    if (
+        current_goal
+        and event == "NEW_TASK"
+        and expected_input not in (None, "", "NONE")
+    ):
         confidence = float(state.get("interpreter_confidence") or 0.0)
         td = tunnel_manager.evaluate(
             current_goal=current_goal,
@@ -429,7 +485,9 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
                 updates.update(_purge_transaction_state())
                 logger.info(
                     "[GoalPlanner] TunnelManager allowed NEW_TASK switch: %s → %s (reason=%s)",
-                    current_goal, new_goal, td.reason,
+                    current_goal,
+                    new_goal,
+                    td.reason,
                 )
                 return _with_goal_metadata(updates)
         # Tunnel stays locked — re-assert current goal.
@@ -442,7 +500,9 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
     if is_short and current_goal:
         updates["current_goal"] = current_goal
         updates["detected_intent"] = str(current_goal).upper()
-        updates["goal_status"] = "ACTIVE" if expected_input in {None, "NONE"} else "WAITING_INPUT"
+        updates["goal_status"] = (
+            "ACTIVE" if expected_input in {None, "NONE"} else "WAITING_INPUT"
+        )
         updates["working_memory"] = _lock(current_goal)
         return _with_goal_metadata(updates)
 
@@ -481,20 +541,27 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         # rien = une nouvelle tâche → on bascule directement. Sans ce
         # `or not current_goal`, l'utilisateur restait piégé dans le menu, sa
         # nouvelle demande (« je veux des tomates ») ignorée en boucle.
-        if new_goal and new_goal != current_goal and (td.allow_interrupt or not current_goal):
+        if (
+            new_goal
+            and new_goal != current_goal
+            and (td.allow_interrupt or not current_goal)
+        ):
             if current_goal:
                 goal_stack.append(current_goal)
-            return _with_goal_metadata({
-                "status": "PLANNING",
-                "current_goal": new_goal,
-                "goal_stack": goal_stack,
-                "goal_status": "ACTIVE",
-                "interruption_detected": True,
-                "suspended_goal": current_goal,
-                "suspended_payload": state.get("transaction_payload") or {},
-                **_purge_transaction_state(),
-                "working_memory": _lock(new_goal),
-            }, new_goal)
+            return _with_goal_metadata(
+                {
+                    "status": "PLANNING",
+                    "current_goal": new_goal,
+                    "goal_stack": goal_stack,
+                    "goal_status": "ACTIVE",
+                    "interruption_detected": True,
+                    "suspended_goal": current_goal,
+                    "suspended_payload": state.get("transaction_payload") or {},
+                    **_purge_transaction_state(),
+                    "working_memory": _lock(new_goal),
+                },
+                new_goal,
+            )
         if td.allow_interrupt and new_goal and new_goal == current_goal:
             # Same goal, new entities: user is mid-confirmation for one
             # instance of this goal (e.g. BUYER_REQUEST "poulets") and just
@@ -505,14 +572,17 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
             # transaction so the freshly extracted entities populate a
             # clean slate instead of merging onto an already-confirmed-
             # looking recap.
-            return _with_goal_metadata({
-                "status": "PLANNING",
-                "current_goal": new_goal,
-                "goal_status": "ACTIVE",
-                "interruption_detected": True,
-                **_purge_transaction_state(),
-                "working_memory": _lock(new_goal),
-            }, new_goal)
+            return _with_goal_metadata(
+                {
+                    "status": "PLANNING",
+                    "current_goal": new_goal,
+                    "goal_status": "ACTIVE",
+                    "interruption_detected": True,
+                    **_purge_transaction_state(),
+                    "working_memory": _lock(new_goal),
+                },
+                new_goal,
+            )
         updates["current_goal"] = current_goal
         updates["response_strategy"] = "CLARIFICATION"
         updates["status"] = "WAITING_INPUT"
@@ -525,32 +595,35 @@ async def goal_planner(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         if goal_stack:
             resumed = goal_stack.pop()
             restored_payload = dict(state.get("suspended_payload") or {})
-            return _with_goal_metadata({
-                "status": "PLANNING",
-                "current_goal": resumed,
-                "goal_stack": goal_stack,
-                "goal_status": "ACTIVE",
-                "interruption_detected": False,
-                "suspended_goal": None,
-                "suspended_payload": {"__reset__": True},
-                # Full canonical purge FIRST — clears whatever the
-                # interrupting goal accumulated in its own
-                # transaction_payload/vendor_selection_context/
-                # negotiation_context/preorder_workflow/selected_tool_args/
-                # execution_result/draft_payload/form_data (previously this
-                # branch hand-rolled a shorter reset list and missed all of
-                # these, letting the interrupting goal's fields leak into
-                # the resumed one) — THEN restore the resumed goal's own
-                # payload via the combined reset+populate sentinel: a plain
-                # merge of `restored_payload` onto the just-purged (but not
-                # yet actually empty, since it's one reducer call) old value
-                # would let any key present in the interrupting goal's
-                # payload but absent from `restored_payload` survive the
-                # merge — this sentinel guarantees a true replace instead.
-                **_purge_transaction_state(),
-                "transaction_payload": {"__reset__": True, **restored_payload},
-                "working_memory": _lock(resumed),
-            }, resumed)
+            return _with_goal_metadata(
+                {
+                    "status": "PLANNING",
+                    "current_goal": resumed,
+                    "goal_stack": goal_stack,
+                    "goal_status": "ACTIVE",
+                    "interruption_detected": False,
+                    "suspended_goal": None,
+                    "suspended_payload": {"__reset__": True},
+                    # Full canonical purge FIRST — clears whatever the
+                    # interrupting goal accumulated in its own
+                    # transaction_payload/vendor_selection_context/
+                    # negotiation_context/preorder_workflow/selected_tool_args/
+                    # execution_result/draft_payload/form_data (previously this
+                    # branch hand-rolled a shorter reset list and missed all of
+                    # these, letting the interrupting goal's fields leak into
+                    # the resumed one) — THEN restore the resumed goal's own
+                    # payload via the combined reset+populate sentinel: a plain
+                    # merge of `restored_payload` onto the just-purged (but not
+                    # yet actually empty, since it's one reducer call) old value
+                    # would let any key present in the interrupting goal's
+                    # payload but absent from `restored_payload` survive the
+                    # merge — this sentinel guarantees a true replace instead.
+                    **_purge_transaction_state(),
+                    "transaction_payload": {"__reset__": True, **restored_payload},
+                    "working_memory": _lock(resumed),
+                },
+                resumed,
+            )
         # Aucun goal suspendu — traiter comme clarification
         updates["current_goal"] = current_goal
         updates["response_strategy"] = "CLARIFICATION"

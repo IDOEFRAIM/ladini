@@ -5,6 +5,7 @@ identifiants du compte (même ``TWILIO_ACCOUNT_SID``/``TWILIO_AUTH_TOKEN`` que
 l'envoi sortant, voir ``services/twilio_sender.py``) — sans elle, Twilio
 répond 401.
 """
+
 from __future__ import annotations
 
 import logging
@@ -46,12 +47,16 @@ async def download_twilio_media(media_url: str) -> Tuple[bytes, str]:
         # y a un changement d'origine — pas de fuite des identifiants Twilio
         # vers un hôte tiers.
         async with httpx.AsyncClient(
-            timeout=_TIMEOUT_S, auth=(account_sid, auth_token), follow_redirects=True,
+            timeout=_TIMEOUT_S,
+            auth=(account_sid, auth_token),
+            follow_redirects=True,
         ) as client:
             resp = await client.get(media_url)
     except httpx.HTTPError as exc:
         logger.error("TWILIO_MEDIA_DOWNLOAD_HTTP_ERROR | %s", exc)
-        raise TwilioMediaError("Impossible de récupérer la photo depuis WhatsApp.") from exc
+        raise TwilioMediaError(
+            "Impossible de récupérer la photo depuis WhatsApp."
+        ) from exc
 
     if resp.status_code != 200:
         logger.error("TWILIO_MEDIA_DOWNLOAD_REJECTED | status=%s", resp.status_code)
@@ -61,5 +66,7 @@ async def download_twilio_media(media_url: str) -> Tuple[bytes, str]:
     if len(binary) > _MAX_BYTES:
         raise TwilioMediaError("Photo trop volumineuse (8 Mo maximum).")
 
-    content_type = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    content_type = (
+        (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+    )
     return binary, content_type

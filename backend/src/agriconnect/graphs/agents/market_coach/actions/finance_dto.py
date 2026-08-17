@@ -6,7 +6,6 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from agriconnect.graphs.agents.market_coach.actions.common import to_float
 
-
 _EMPTY_SLOT_VALUES: Tuple[object, ...] = (None, "", [], {})
 
 
@@ -73,7 +72,11 @@ class FinanceLogExpensePayload(BaseModel):
         label_val = None if label_raw in _EMPTY_SLOT_VALUES else str(label_raw).strip()
 
         category_raw = payload.get("category")
-        category_val = None if category_raw in _EMPTY_SLOT_VALUES else str(category_raw).strip().upper()
+        category_val = (
+            None
+            if category_raw in _EMPTY_SLOT_VALUES
+            else str(category_raw).strip().upper()
+        )
 
         return cls(
             farm_id=str(farm_id),

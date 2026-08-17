@@ -24,6 +24,7 @@ Dépendances :
   - ``flows.common.menu_contracts`` (feuille pure, zéro cycle)
   - ``core.state`` (types uniquement, pas de logique)
 """
+
 from __future__ import annotations
 
 import logging
@@ -43,7 +44,10 @@ logger = logging.getLogger("AgriConnect.Market.UIEngine")
 # PUBLIC NODE
 # =====================================================================
 
-async def ui_engine(state: Dict[str, Any], _mc_runtime: Any | None = None, **_kwargs: Any) -> Dict[str, Any]:
+
+async def ui_engine(
+    state: Dict[str, Any], _mc_runtime: Any | None = None, **_kwargs: Any
+) -> Dict[str, Any]:
     """Nœud LangGraph : transforme un ``MenuRequest`` en composant AG-UI.
 
     Paramètres ignorés via ``**_kwargs`` pour compatibilité avec
@@ -76,7 +80,9 @@ async def ui_engine(state: Dict[str, Any], _mc_runtime: Any | None = None, **_kw
         metadata=menu.metadata,
     )
     wm_patch["menu_snapshot_id"] = snapshot.menu_id
-    ag_ui.setdefault("kwargs", {}).setdefault("metadata", {})["menu_snapshot_id"] = snapshot.menu_id
+    ag_ui.setdefault("kwargs", {}).setdefault("metadata", {})["menu_snapshot_id"] = (
+        snapshot.menu_id
+    )
 
     result: Dict[str, Any] = {
         "ag_ui_component": ag_ui,
@@ -117,12 +123,10 @@ async def ui_engine(state: Dict[str, Any], _mc_runtime: Any | None = None, **_kw
 # PRIVATE — construction du dict AG-UI
 # =====================================================================
 
+
 def _build_ag_ui_component(menu: MenuRequest) -> Dict[str, Any]:
     """Construit le dictionnaire ``ag_ui_component`` normalisé."""
-    options_list = [
-        {"index": opt.index, "label": opt.label}
-        for opt in menu.options
-    ]
+    options_list = [{"index": opt.index, "label": opt.label} for opt in menu.options]
     metadata = dict(menu.metadata)
     metadata.setdefault("kind", menu.kind)
 

@@ -12,9 +12,9 @@ qui délègue chaque domaine à son sous-module spécialisé :
 
 Re-exporte les symboles publics pour compatibilité ascendante.
 """
+
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, Optional
 
 from agriconnect.graphs.agents.market_coach.services.domain.buyer_common import (
@@ -91,7 +91,9 @@ def build_product_selection_menu(
 # =====================================================================
 
 
-async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+async def buyer_context_resolver(
+    state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Dict[str, Any]:
     """Deterministic phase-based orchestrator for the buyer flow.
 
     Routes to the correct sub-node based on ``current_goal`` and
@@ -108,7 +110,10 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
     active_cart = state.get("active_cart") or []
 
     if not active_cart and last_cart_snapshot:
-        logger.info("buyer_context_resolver: repopulating active_cart from working_memory snapshot (items=%d)", len(last_cart_snapshot))
+        logger.info(
+            "buyer_context_resolver: repopulating active_cart from working_memory snapshot (items=%d)",
+            len(last_cart_snapshot),
+        )
         state = dict(state)
         state["active_cart"] = list(last_cart_snapshot)
         active_cart = state["active_cart"]
@@ -119,7 +124,10 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
 
     logger.info(
         "buyer_context_resolver: goal=%s phase=%s intent=%s event=%s cart_items=%d",
-        goal, phase, detected_intent or "", interpreted_event or "",
+        goal,
+        phase,
+        detected_intent or "",
+        interpreted_event or "",
         len(active_cart),
     )
 
@@ -149,7 +157,10 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
     ):
         product_candidate = _resolve_product_candidate(payload, stable_entities, state)
         if product_candidate:
-            logger.info("buyer_context_resolver: bridging to BUYER_ADD_TO_CART (product=%s)", product_candidate)
+            logger.info(
+                "buyer_context_resolver: bridging to BUYER_ADD_TO_CART (product=%s)",
+                product_candidate,
+            )
             synthetic = dict(state)
             syn_payload = dict(payload)
             syn_payload.setdefault("product", product_candidate)
@@ -178,7 +189,10 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
             or bool(state.get("location_shared"))
         )
     ):
-        logger.info("buyer_context_resolver: routing preorder menu reply to create_preorder (event=%s)", interpreted_event)
+        logger.info(
+            "buyer_context_resolver: routing preorder menu reply to create_preorder (event=%s)",
+            interpreted_event,
+        )
         next_state = dict(state)
         next_payload = dict(next_state.get("transaction_payload") or {})
         # Un CONFIRM en langage libre (sans passer par le menu numéroté) n'a
@@ -199,7 +213,11 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
 
     # ── Phase-locked routing: if PREORDER_DRAFTED, stay in preorder ───
     if phase == "PREORDER_DRAFTED" and goal not in PREORDER_GOALS:
-        logger.info("buyer_context_resolver: forcing preorder branch (phase=%s goal=%s)", phase, goal)
+        logger.info(
+            "buyer_context_resolver: forcing preorder branch (phase=%s goal=%s)",
+            phase,
+            goal,
+        )
         goal = "BUYER_PREORDER_INIT"
         state = dict(state)
         state["current_goal"] = goal
@@ -228,16 +246,22 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
         if new_product and ctx_product and new_product != ctx_product:
             logger.info(
                 "buyer_context_resolver: stale vendor_ctx (product=%s) vs payload (product=%s) — skipping",
-                ctx_product, new_product,
+                ctx_product,
+                new_product,
             )
             vendor_ctx_valid = False
     if vendor_ctx_valid:
         has_selection = payload.get("selection_index") is not None
-        has_chosen = bool(vendor_ctx.get("chosen_vendor")) if isinstance(vendor_ctx, dict) else False
+        has_chosen = (
+            bool(vendor_ctx.get("chosen_vendor"))
+            if isinstance(vendor_ctx, dict)
+            else False
+        )
         if has_selection or has_chosen:
             logger.info(
                 "buyer_context_resolver: vendor_ctx active (selection=%s chosen=%s) — forcing cart",
-                has_selection, has_chosen,
+                has_selection,
+                has_chosen,
             )
             synthetic = dict(state)
             synthetic["current_goal"] = "BUYER_ADD_TO_CART"
@@ -263,6 +287,7 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
             order_tracking_resolver,
         )
+
         draft = state.get("draft_payload")
         if draft_requires_completion(draft) and not read_only_intent(goal):
             return _finalize(draft_block_response(draft))
@@ -272,13 +297,17 @@ async def buyer_context_resolver(state: Dict[str, Any], mc_runtime: MarketRuntim
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
             order_tracking_resolver,
         )
+
         return _finalize(await order_tracking_resolver(state, mc_runtime))
 
     # ── Auction/bid flows ─────────────────────────────────────────────
     if goal == "MARKET_GET_REQUEST_DETAIL":
         return _finalize(await resolve_received_bids(mc_runtime, str(phone), payload))
 
-    if goal in {"PROCUREMENT_ACCEPT_OFFER", "PROCUREMENT_SELECT_WINNER"} and not payload.get("bid_id"):
+    if goal in {
+        "PROCUREMENT_ACCEPT_OFFER",
+        "PROCUREMENT_SELECT_WINNER",
+    } and not payload.get("bid_id"):
         return _finalize(await resolve_buyer_bid_pick(mc_runtime, str(phone), payload))
 
     # ── Default: planning or draft gate ───────────────────────────────

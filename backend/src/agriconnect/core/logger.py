@@ -29,7 +29,7 @@ def _init_sentry_if_needed(level: int = logging.INFO) -> Optional[object]:
         from sentry_sdk.integrations.logging import LoggingIntegration
 
         sentry_logging = LoggingIntegration(
-            level=level,        # Capture info and above as breadcrumbs
+            level=level,  # Capture info and above as breadcrumbs
             event_level=logging.ERROR,  # Send errors as events
         )
 
@@ -43,7 +43,9 @@ def _init_sentry_if_needed(level: int = logging.INFO) -> Optional[object]:
         return sentry_sdk
     except Exception:
         # If sentry not installed or fails, continue without raising
-        logging.getLogger("AgriConnect").warning("Sentry SDK not available or failed to init")
+        logging.getLogger("AgriConnect").warning(
+            "Sentry SDK not available or failed to init"
+        )
         return None
 
 

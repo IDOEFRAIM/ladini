@@ -23,6 +23,7 @@ Cart Line Structure (enriched):
     status: "DRAFT" | "VALIDATED" | "CONFIRMED",
   }
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional

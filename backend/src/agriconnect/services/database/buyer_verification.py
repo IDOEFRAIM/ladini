@@ -1,16 +1,15 @@
 import logging
 import uuid
 from typing import Any, Dict, List, Literal
+
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 
-from agriconnect.domain.models import (
-    BuyerProfile, User, TrustScore, AuditLog
-)
+from agriconnect.domain.models import AuditLog, BuyerProfile, User
 
 logger = logging.getLogger("agriconnect.services.database.verification")
 
-TrustBadge = Literal['VERIFIED_INSTITUTION', 'VERIFIED_COMMERCE', 'VERIFIED_ID']
+TrustBadge = Literal["VERIFIED_INSTITUTION", "VERIFIED_COMMERCE", "VERIFIED_ID"]
 
 
 class BuyerVerificationMixin:
@@ -23,7 +22,7 @@ class BuyerVerificationMixin:
         self,
         buyer_profile_id: str,
         admin_user_id: str,
-        verification_type: Literal['CNIB', 'COMMERCE_REGISTER']
+        verification_type: Literal["CNIB", "COMMERCE_REGISTER"],
     ) -> Dict[str, Any]:
         current_session = self.session
         bp_id = uuid.UUID(buyer_profile_id)
@@ -33,7 +32,7 @@ class BuyerVerificationMixin:
             select(BuyerProfile)
             .options(
                 joinedload(BuyerProfile.user).joinedload(User.trust_score),
-                joinedload(BuyerProfile.buyer_type)
+                joinedload(BuyerProfile.buyer_type),
             )
             .where(BuyerProfile.id == bp_id)
         )
@@ -43,23 +42,27 @@ class BuyerVerificationMixin:
         if not profile:
             raise ValueError("Profil acheteur introuvable")
 
-        if verification_type == 'CNIB':
+        if verification_type == "CNIB":
             if not profile.user or not profile.user.cnib_number:
                 raise ValueError("Vérification CNIB impossible : numéro manquant")
 
-        badge: TrustBadge = 'VERIFIED_ID'
-        type_name = (profile.buyer_type.name or "").upper() if profile.buyer_type else ""
+        badge: TrustBadge = "VERIFIED_ID"
+        type_name = (
+            (profile.buyer_type.name or "").upper() if profile.buyer_type else ""
+        )
 
-        if verification_type == 'COMMERCE_REGISTER':
-            if any(k in type_name for k in ['HOTEL', 'HÔTEL', 'RESTAURANT', 'INSTITUTION']):
-                badge = 'VERIFIED_INSTITUTION'
+        if verification_type == "COMMERCE_REGISTER":
+            if any(
+                k in type_name for k in ["HOTEL", "HÔTEL", "RESTAURANT", "INSTITUTION"]
+            ):
+                badge = "VERIFIED_INSTITUTION"
             else:
-                badge = 'VERIFIED_COMMERCE'
+                badge = "VERIFIED_COMMERCE"
 
         profile.is_verified = True
         profile.trust_badge = badge
 
-        if verification_type == 'CNIB' and profile.user:
+        if verification_type == "CNIB" and profile.user:
             profile.user.identity_verified = True
             if profile.user.trust_score:
                 profile.user.trust_score.compliance_index = 1.0
@@ -70,7 +73,7 @@ class BuyerVerificationMixin:
             action="VERIFY_BUYER",
             entity_id=str(bp_id),
             entity_type="BUYER_PROFILE",
-            new_value={"badge": badge, "type": verification_type}
+            new_value={"badge": badge, "type": verification_type},
         )
         current_session.add(audit_entry)
         await current_session.flush()
@@ -83,17 +86,14 @@ class BuyerVerificationMixin:
         stmt = (
             select(BuyerProfile)
             .options(joinedload(BuyerProfile.user))
-            .where(BuyerProfile.is_verified == False)
+            .where(not BuyerProfile.is_verified)
             .order_by(BuyerProfile.created_at.desc())
         )
         result = await current_session.execute(stmt)
         return [p.to_dict() for p in result.scalars().all()]
 
     async def revoke_buyer_trust_badge(
-        self,
-        buyer_profile_id: str,
-        admin_user_id: str,
-        reason: str
+        self, buyer_profile_id: str, admin_user_id: str, reason: str
     ) -> Dict[str, Any]:
         current_session = self.session
         bp_id = uuid.UUID(buyer_profile_id)
@@ -121,7 +121,7 @@ class BuyerVerificationMixin:
             action="REVOKE_BUYER_BADGE",
             entity_id=str(bp_id),
             entity_type="BUYER_PROFILE",
-            new_value={"reason": reason}
+            new_value={"reason": reason},
         )
         current_session.add(audit)
         await current_session.flush()

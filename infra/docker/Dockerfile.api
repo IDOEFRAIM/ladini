@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1.7
 # ─────────────────────────────────────────────────────────────────────
 # Image FastAPI (API / Webhook) — build multi-stage Poetry.
-# Sert aussi de base au worker Celery (même code, commande différente).
+# Sert aussi de base au worker et au daemon MCP (même code, commande
+# différente — voir Dockerfile.worker / Dockerfile.mcp, qui font
+# `FROM ladini-api:latest` pour ne JAMAIS recompiler les deps 3 fois).
 # ─────────────────────────────────────────────────────────────────────
 FROM python:3.11-slim AS builder
 
@@ -11,17 +13,30 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     POETRY_VIRTUALENVS_CREATE=false \
     PIP_NO_CACHE_DIR=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential curl libpq-dev \
+# build-essential/libpq-dev : nécessaires pour compiler les extensions C
+# (psycopg2-binary a des wheels, mais asyncpg/certains deps ML en ont besoin
+# sur des plateformes sans wheel manylinux). curl retiré d'ici (uniquement
+# utile en runtime pour le HEALTHCHECK, pas au build).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install "poetry==${POETRY_VERSION}"
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "poetry==${POETRY_VERSION}"
 
 WORKDIR /app/backend
-# Copie SEULEMENT le manifeste d'abord → cache Docker sur les deps.
+# Copie SEULEMENT le manifeste d'abord → le layer d'install des deps reste en
+# cache Docker tant que pyproject.toml ne change pas (le code applicatif
+# change à chaque commit, les deps beaucoup plus rarement).
 COPY backend/pyproject.toml backend/poetry.toml* ./
-# Deps de prod uniquement + les extras d'observabilité (voir pyproject).
-RUN poetry install --no-root --only main \
+# --mount=type=cache : cache Poetry/pip PERSISTANT entre builds (BuildKit),
+# distinct du cache de layer Docker — accélère un `poetry install` même
+# quand pyproject.toml change (deps déjà téléchargées restent en cache).
+RUN --mount=type=cache,target=/root/.cache/pypoetry \
+    --mount=type=cache,target=/root/.cache/pip \
+    poetry install --no-root --only main \
     && pip install \
         "opentelemetry-sdk>=1.27" \
         "opentelemetry-exporter-otlp-proto-grpc>=1.27" \
@@ -36,8 +51,18 @@ FROM python:3.11-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/backend/src
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libpq5 curl \
+# libpq5 : client Postgres runtime (asyncpg/psycopg2 en ont besoin).
+# curl : HEALTHCHECK. tini : PID 1 propre — reap les processus zombies
+# (gunicorn ne fork jamais de sous-process orphelin lui-même, mais tout ce
+# que ses workers/uvicorn peuvent spawn indirectement — ex: un subprocess
+# dans un outil LLM — doit être reap correctement) ET transmet SIGTERM
+# fidèlement aux enfants (sans PID 1 dédié, le kernel n'installe AUCUN
+# handler de signal par défaut pour PID 1, ce qui peut faire ignorer un
+# `docker stop`/redéploiement jusqu'au SIGKILL).
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+        libpq5 curl tini ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 10001 appuser
 
@@ -50,14 +75,29 @@ WORKDIR /app/backend/src
 USER appuser
 EXPOSE 8000
 
-# Healthcheck natif de l'image (double du healthcheck compose, utile hors compose).
+# Healthcheck natif de l'image (double du healthcheck compose, utile hors
+# compose — ex: run direct, ECS/K8s qui ignorent le HEALTHCHECK Dockerfile
+# de toute façon mais où il sert de documentation/fallback).
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -fsS http://localhost:8000/health || exit 1
 
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
 # Production : gunicorn + workers uvicorn (voir docstring api/server.py).
+# -w 4 : formule usuelle (2×CPU+1) en CPU-bound ; ici la charge est
+# I/O-bound (webhooks courts, la latence LLM/MCP est déléguée à Celery), donc
+# 4 workers reste raisonnable même sur 1-2 vCPU — AJUSTER selon `nproc` réel
+# de l'hôte et scaler par RÉPLICAS (voir docker-compose.prod.yml) plutôt que
+# de pousser -w très haut dans un seul conteneur (blast radius d'un restart).
+# --worker-tmp-dir /dev/shm : le heartbeat gunicorn (fichier temp par worker)
+# vit en tmpfs (RAM) au lieu du disque du conteneur — évite les faux
+# "worker timeout" sous I/O disque saturé (cause classique de kills gunicorn
+# aléatoires en prod que rien côté appli n'explique).
+# --graceful-timeout 30 : doit rester <= stop_grace_period côté compose
+# (sinon Docker envoie SIGKILL avant que gunicorn ait fini de drainer).
 CMD ["gunicorn", "agriconnect.api.main:app", \
      "-k", "uvicorn.workers.UvicornWorker", \
      "-w", "4", "--bind", "0.0.0.0:8000", \
+     "--worker-tmp-dir", "/dev/shm", \
      "--timeout", "120", "--graceful-timeout", "30", \
      "--access-logfile", "-", "--error-logfile", "-"]
- 

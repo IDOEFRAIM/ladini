@@ -1,4 +1,5 @@
 """Plugin registry for MarketCoach action handlers."""
+
 from __future__ import annotations
 
 import importlib
@@ -9,12 +10,25 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Type, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+)
 
-from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from agriconnect.graphs.agents.market_coach.actions.tooling import ToolId, ToolResolver
+from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 
-ActionCallable = Callable[[Mapping[str, Any], Mapping[str, Any]], Tuple[str, Dict[str, Any]]]
+ActionCallable = Callable[
+    [Mapping[str, Any], Mapping[str, Any]], Tuple[str, Dict[str, Any]]
+]
 
 
 class DuplicateIntentError(RuntimeError):
@@ -133,7 +147,10 @@ class PermissionResolver:
         return True
 
 
-MiddlewareCallable = Callable[[ActionContext, Callable[[], Tuple[str, Dict[str, Any]]]], Tuple[str, Dict[str, Any]]]
+MiddlewareCallable = Callable[
+    [ActionContext, Callable[[], Tuple[str, Dict[str, Any]]]],
+    Tuple[str, Dict[str, Any]],
+]
 
 _MIDDLEWARES: List[MiddlewareCallable] = []
 _BEFORE_HOOKS: List[Callable[[ActionContext], None]] = []
@@ -175,7 +192,9 @@ def register_action(
             mode_flag = False
 
         cfg = INTENT_CONFIG.get(intent_key, {})
-        lifecycle_mode = str(cfg.get("lifecycle_mode") or ("WRITE" if mode_flag else "READ"))
+        lifecycle_mode = str(
+            cfg.get("lifecycle_mode") or ("WRITE" if mode_flag else "READ")
+        )
         lifecycle_mode = lifecycle_mode.upper().strip()
         if lifecycle_mode not in {"CREATE", "UPDATE", "READ"}:
             lifecycle_mode = "READ" if not mode_flag else "CREATE"
@@ -184,9 +203,13 @@ def register_action(
         try:
             version_int = int(version)
         except (TypeError, ValueError) as exc:  # pragma: no cover - defensive
-            raise InvalidRegistrationError(f"Invalid version for intent {intent_key}: {version!r}") from exc
+            raise InvalidRegistrationError(
+                f"Invalid version for intent {intent_key}: {version!r}"
+            ) from exc
         if version_int < 1:
-            raise InvalidRegistrationError(f"Version must be >= 1 for intent {intent_key}")
+            raise InvalidRegistrationError(
+                f"Version must be >= 1 for intent {intent_key}"
+            )
 
         # Normalise tool_id (optional in Phase 1 — legacy handlers use raw strings)
         tool_id_norm: Optional[ToolId]
@@ -213,7 +236,9 @@ def register_action(
         )
         existing = REGISTRY.get(intent_key)
         if existing and existing.handler is not func:
-            raise DuplicateIntentError(f"Action already registered for intent {intent_key}")
+            raise DuplicateIntentError(
+                f"Action already registered for intent {intent_key}"
+            )
         REGISTRY[intent_key] = entry
         return func
 
@@ -401,7 +426,9 @@ def describe() -> Dict[str, Any]:
                 "metrics": {
                     "calls": metrics.calls if metrics else 0,
                     "errors": metrics.errors if metrics else 0,
-                    "average_duration_ms": metrics.average_duration_ms if metrics else 0.0,
+                    "average_duration_ms": metrics.average_duration_ms
+                    if metrics
+                    else 0.0,
                 },
             }
         )
@@ -421,7 +448,11 @@ def actions(capability: Optional[str] = None) -> List[ActionRegistration]:
     if not capability:
         return list(REGISTRY.values())
     cap_key = capability.upper().strip()
-    return [reg for reg in REGISTRY.values() if (reg.capability or "").upper().strip() == cap_key]
+    return [
+        reg
+        for reg in REGISTRY.values()
+        if (reg.capability or "").upper().strip() == cap_key
+    ]
 
 
 __all__ = [

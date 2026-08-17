@@ -5,28 +5,28 @@ chaque handler reçoit un ``RenderContext`` et retourne le patch d'état
 ``{"final_response": str, "ag_ui_component": dict|None, ...}``.
 """
 
+from agriconnect.graphs.agents.market_coach.nodes.rendering.ask import (
+    render_ask_missing_field,
+    render_onboarding,
+)
 from agriconnect.graphs.agents.market_coach.nodes.rendering.common import (
     RenderContext,
     label_for_field,
 )
-from agriconnect.graphs.agents.market_coach.nodes.rendering.ask import (
-    render_onboarding,
-    render_ask_missing_field,
-)
 from agriconnect.graphs.agents.market_coach.nodes.rendering.confirm import (
     render_confirmation,
+)
+from agriconnect.graphs.agents.market_coach.nodes.rendering.feedback import (
+    render_clarification,
+    render_error,
+    render_interruption,
+    render_recovery,
 )
 from agriconnect.graphs.agents.market_coach.nodes.rendering.menus import (
     render_selection_menu,
 )
 from agriconnect.graphs.agents.market_coach.nodes.rendering.success import (
     render_success,
-)
-from agriconnect.graphs.agents.market_coach.nodes.rendering.feedback import (
-    render_error,
-    render_recovery,
-    render_interruption,
-    render_clarification,
 )
 
 __all__ = [

@@ -1,23 +1,35 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import contextvars
 import hashlib
 import importlib
 import json
 import logging
+import os
 import re
 import time
 import uuid
 from collections import deque
 from enum import Enum
-from typing import Any, Callable, Coroutine, Dict, Iterable, List, Optional, Protocol, Tuple
+from typing import (
+    Any,
+    Callable,
+    Coroutine,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Protocol,
+    Tuple,
+)
 
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("MCP.Core.Security")
-_REQUEST_ID_CTX: contextvars.ContextVar[str] = contextvars.ContextVar("mcp_request_id", default="")
+_REQUEST_ID_CTX: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "mcp_request_id", default=""
+)
 
 
 class PermissionScope(str, Enum):
@@ -150,8 +162,19 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
 # fail-safe vers le chemin de contrôle plutôt que d'auto-autoriser un outil
 # inconnu potentiellement destructeur en READ_ONLY.
 _READ_PREFIXES = (
-    "get", "list", "search", "fetch", "read", "guess", "normalize",
-    "check", "validate", "count", "find", "resolve", "db_status",
+    "get",
+    "list",
+    "search",
+    "fetch",
+    "read",
+    "guess",
+    "normalize",
+    "check",
+    "validate",
+    "count",
+    "find",
+    "resolve",
+    "db_status",
 )
 
 
@@ -223,7 +246,8 @@ def _autofill_tool_scopes() -> None:
             "MCP_SCOPE_GAP | %d outil(s) exposé(s) sans PermissionScope déclaré "
             "— désormais refusés (fail-closed) tant qu'ils ne sont pas ajoutés "
             "à TOOL_SCOPE_MAP : %s",
-            len(undeclared), ", ".join(undeclared),
+            len(undeclared),
+            ", ".join(undeclared),
         )
 
 
@@ -315,7 +339,9 @@ class ToolExecutionEnvelope(BaseModel):
 class ToolRateLimiter:
     """In-memory per-user per-tool rate limiter (sliding window with eviction)."""
 
-    def __init__(self, max_calls: int = 60, window_seconds: float = 60.0, max_keys: int = 2048) -> None:
+    def __init__(
+        self, max_calls: int = 60, window_seconds: float = 60.0, max_keys: int = 2048
+    ) -> None:
         self.max_calls = max(1, int(max_calls))
         self.window_seconds = max(1.0, float(window_seconds))
         self.max_keys = max(128, int(max_keys))
@@ -328,14 +354,21 @@ class ToolRateLimiter:
         while events and events[0] < cutoff:
             events.popleft()
         if len(events) >= self.max_calls:
-            return False, f"rate_limit_exceeded:{self.max_calls}/{int(self.window_seconds)}s"
+            return (
+                False,
+                f"rate_limit_exceeded:{self.max_calls}/{int(self.window_seconds)}s",
+            )
         events.append(now)
         if len(self._events) > self.max_keys:
             self._prune_stale(now)
         return True, "ok"
 
     def _prune_stale(self, now: float) -> None:
-        stale_keys = [k for k, v in self._events.items() if not v or v[-1] < now - (self.window_seconds * 5)]
+        stale_keys = [
+            k
+            for k, v in self._events.items()
+            if not v or v[-1] < now - (self.window_seconds * 5)
+        ]
         for key in stale_keys:
             self._events.pop(key, None)
 
@@ -350,7 +383,9 @@ class ToolExecutionPolicy:
         default_timeout_seconds: float = 30.0,
     ) -> None:
         self._registry = registry or get_registry()
-        self._limiter = ToolRateLimiter(max_calls=max_calls_per_minute, window_seconds=60.0)
+        self._limiter = ToolRateLimiter(
+            max_calls=max_calls_per_minute, window_seconds=60.0
+        )
         self._default_timeout = max(0.1, float(default_timeout_seconds))
         self._overrides: dict[str, float] = {}
 
@@ -386,8 +421,7 @@ class ToolExecutionPolicy:
 
         try:
             raw = await asyncio.wait_for(handler(**arguments), timeout=timeout)
-            
-            
+
             normalized = MCPPermissionClient._normalize_output(raw)
             elapsed = round((time.monotonic() - start) * 1000, 1)
             envelope = ToolExecutionEnvelope(
@@ -465,7 +499,9 @@ def get_execution_policy() -> ToolExecutionPolicy:
             default_timeout = float(default_env) if default_env is not None else 30.0
         except Exception:
             default_timeout = 30.0
-        _GLOBAL_EXECUTION_POLICY = ToolExecutionPolicy(default_timeout_seconds=default_timeout)
+        _GLOBAL_EXECUTION_POLICY = ToolExecutionPolicy(
+            default_timeout_seconds=default_timeout
+        )
         # Load optional per-tool overrides from env var JSON: {"search_agronomy_docs": 60}
         overrides_raw = os.getenv("MCP_TOOL_TIMEOUT_OVERRIDES")
         if overrides_raw:
@@ -478,7 +514,9 @@ def get_execution_policy() -> ToolExecutionPolicy:
                         except Exception:
                             pass
             except Exception:
-                logger.warning("Invalid MCP_TOOL_TIMEOUT_OVERRIDES; must be JSON mapping tool->seconds")
+                logger.warning(
+                    "Invalid MCP_TOOL_TIMEOUT_OVERRIDES; must be JSON mapping tool->seconds"
+                )
     return _GLOBAL_EXECUTION_POLICY
 
 
@@ -491,10 +529,10 @@ class MCPToolRegistry:
         for name, scope in TOOL_SCOPE_MAP.items():
             self._tools[name] = MCPToolMeta(
                 name=name,
-                server= MCPServerKind.DB,
+                server=MCPServerKind.DB,
                 scope=scope,
                 risk=TOOL_RISK_MAP.get(name, RiskLevel.MEDIUM),
-                timeout_seconds= 90.0,
+                timeout_seconds=90.0,
                 retries=1,
             )
 
@@ -504,7 +542,9 @@ class MCPToolRegistry:
     def get_tool(self, tool_name: str) -> Optional[MCPToolMeta]:
         return self._tools.get(tool_name)
 
-    def list_tools(self, server: Optional[MCPServerKind] = None) -> list[dict[str, Any]]:
+    def list_tools(
+        self, server: Optional[MCPServerKind] = None
+    ) -> list[dict[str, Any]]:
         items = []
         for meta in self._tools.values():
             if server and meta.server != server:
@@ -513,7 +553,9 @@ class MCPToolRegistry:
         items.sort(key=lambda x: x["name"])
         return items
 
-    def sync_discovered_tools(self, server: MCPServerKind, discovered: Iterable[dict[str, Any]]) -> None:
+    def sync_discovered_tools(
+        self, server: MCPServerKind, discovered: Iterable[dict[str, Any]]
+    ) -> None:
         for item in discovered:
             name = str(item.get("name")).strip()
             if not name or name in self._tools:
@@ -522,9 +564,9 @@ class MCPToolRegistry:
                 name=name,
                 server=server,
                 scope=PermissionScope.DB_DATA_WRITE,
-                risk= RiskLevel.MEDIUM,
+                risk=RiskLevel.MEDIUM,
                 description=str(item.get("description")),
-                timeout_seconds= 30.0,
+                timeout_seconds=30.0,
                 retries=1,
             )
 
@@ -562,7 +604,9 @@ class HostBlockedError(Exception):
         self.tool_name = tool_name
         self.agent_message = agent_message
         self.suggestion = suggestion
-        super().__init__(f"[HOST] {tool_name}: {agent_message} | Suggestion: {suggestion}")
+        super().__init__(
+            f"[HOST] {tool_name}: {agent_message} | Suggestion: {suggestion}"
+        )
 
 
 class PermissionDecision(BaseModel):
@@ -599,7 +643,9 @@ class MCPPermissionClient:
         decision = self._check_permission(tool_name, arguments)
         if not decision.allowed:
             if decision.decision == "HITL_REQUIRED":
-                approved = await self._request_hitl(tool_name, arguments, decision.reason)
+                approved = await self._request_hitl(
+                    tool_name, arguments, decision.reason
+                )
                 if not approved:
                     raise PermissionDenied(tool_name, decision.reason)
             else:
@@ -623,36 +669,82 @@ class MCPPermissionClient:
         )
         return result
 
-    async def execute(self, tool_name: str, arguments: Dict[str, Any] | None = None) -> Any:
+    async def execute(
+        self, tool_name: str, arguments: Dict[str, Any] | None = None
+    ) -> Any:
         return await self.call_tool(tool_name, arguments)
 
     def list_tools(self) -> list[dict]:
         return self._registry.list_tools()
 
-    def _check_permission(self, tool_name: str, arguments: Optional[Dict[str, Any]] = None) -> PermissionDecision:
+    def _check_permission(
+        self, tool_name: str, arguments: Optional[Dict[str, Any]] = None
+    ) -> PermissionDecision:
         meta = self._registry.get_tool(tool_name)
-        scope = meta.scope if meta else TOOL_SCOPE_MAP.get(tool_name, PermissionScope.DB_DATA_WRITE)
+        scope = (
+            meta.scope
+            if meta
+            else TOOL_SCOPE_MAP.get(tool_name, PermissionScope.DB_DATA_WRITE)
+        )
         risk = meta.risk if meta else TOOL_RISK_MAP.get(tool_name, RiskLevel.MEDIUM)
 
         if arguments:
             suspicious, reason = self._scan_arguments_for_risk(arguments)
             if suspicious:
-                return PermissionDecision(allowed=False, decision="HITL_REQUIRED", reason=reason, scope=scope, risk=RiskLevel.CRITICAL)
+                return PermissionDecision(
+                    allowed=False,
+                    decision="HITL_REQUIRED",
+                    reason=reason,
+                    scope=scope,
+                    risk=RiskLevel.CRITICAL,
+                )
 
         if scope == PermissionScope.DB_SCHEMA_MODIFY:
             if self.maintenance_mode:
-                return PermissionDecision(allowed=True, decision="ALLOW", reason="maintenance", scope=scope, risk=risk)
-            return PermissionDecision(allowed=False, decision="DENY", reason="Schema modification denied", scope=scope, risk=risk)
+                return PermissionDecision(
+                    allowed=True,
+                    decision="ALLOW",
+                    reason="maintenance",
+                    scope=scope,
+                    risk=risk,
+                )
+            return PermissionDecision(
+                allowed=False,
+                decision="DENY",
+                reason="Schema modification denied",
+                scope=scope,
+                risk=risk,
+            )
 
         if scope == PermissionScope.DB_READ_ONLY:
-            return PermissionDecision(allowed=True, decision="ALLOW", reason="read-only", scope=scope, risk=risk)
+            return PermissionDecision(
+                allowed=True,
+                decision="ALLOW",
+                reason="read-only",
+                scope=scope,
+                risk=risk,
+            )
 
         if risk in (RiskLevel.HIGH, RiskLevel.CRITICAL):
-            return PermissionDecision(allowed=False, decision="HITL_REQUIRED", reason="Human confirmation required", scope=scope, risk=risk)
+            return PermissionDecision(
+                allowed=False,
+                decision="HITL_REQUIRED",
+                reason="Human confirmation required",
+                scope=scope,
+                risk=risk,
+            )
 
-        return PermissionDecision(allowed=True, decision="ALLOW", reason="write-allowed", scope=scope, risk=risk)
+        return PermissionDecision(
+            allowed=True,
+            decision="ALLOW",
+            reason="write-allowed",
+            scope=scope,
+            risk=risk,
+        )
 
-    async def _request_hitl(self, tool_name: str, args: Dict[str, Any], reason: str) -> bool:
+    async def _request_hitl(
+        self, tool_name: str, args: Dict[str, Any], reason: str
+    ) -> bool:
         if self._hitl_callback is None:
             return False
         try:
@@ -668,7 +760,14 @@ class MCPPermissionClient:
             return "***RECURSION***"
         seen.add(obj_id)
         if isinstance(data, dict):
-            return {k: ("***MASKED***" if k.lower() in SENSITIVE_COLUMNS else self._mask_sensitive(v, seen)) for k, v in data.items()}
+            return {
+                k: (
+                    "***MASKED***"
+                    if k.lower() in SENSITIVE_COLUMNS
+                    else self._mask_sensitive(v, seen)
+                )
+                for k, v in data.items()
+            }
         if isinstance(data, list):
             return [self._mask_sensitive(x, seen) for x in data]
         if isinstance(data, str):
@@ -707,11 +806,15 @@ class MCPPermissionClient:
 
     @staticmethod
     def _hash_args(arguments: Dict[str, Any]) -> str:
-        return hashlib.sha256(json.dumps(arguments, sort_keys=True, default=str).encode()).hexdigest()[:16]
+        return hashlib.sha256(
+            json.dumps(arguments, sort_keys=True, default=str).encode()
+        ).hexdigest()[:16]
 
 
 class PreflightResult:
-    def __init__(self, passed: bool, reason: str = "", risk_override: Optional[RiskLevel] = None):
+    def __init__(
+        self, passed: bool, reason: str = "", risk_override: Optional[RiskLevel] = None
+    ):
         self.passed = passed
         self.reason = reason
         self.risk_override = risk_override
@@ -727,20 +830,28 @@ class MCPPermissionHostApp:
         self._sql_re = SQL_INJECTION_REGEX
         self._file_re = [re.compile(p) for p in SENSITIVE_FILE_PATTERNS]
 
-    async def execute(self, tool_name: str, arguments: Dict[str, Any] | None = None) -> Any:
+    async def execute(
+        self, tool_name: str, arguments: Dict[str, Any] | None = None
+    ) -> Any:
         arguments = arguments or {}
         pf = self._preflight_scan(tool_name, arguments)
         if not pf:
-            raise HostBlockedError(tool_name, pf.reason, self._suggest_fix(tool_name, pf.reason))
+            raise HostBlockedError(
+                tool_name, pf.reason, self._suggest_fix(tool_name, pf.reason)
+            )
         try:
             return await self._client.call_tool(tool_name, arguments)
         except PermissionDenied as pd:
-            raise HostBlockedError(pd.tool_name, pd.reason, self._suggest_fix(pd.tool_name, pd.reason)) from pd
+            raise HostBlockedError(
+                pd.tool_name, pd.reason, self._suggest_fix(pd.tool_name, pd.reason)
+            ) from pd
 
     def list_tools(self) -> list[dict]:
         return self._client.list_tools()
 
-    def _preflight_scan(self, tool_name: str, arguments: Dict[str, Any]) -> PreflightResult:
+    def _preflight_scan(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> PreflightResult:
         values = self._flatten_strings(arguments)
         for val in values:
             for rx in self._sql_re:
@@ -778,7 +889,16 @@ class MCPPermissionHostApp:
     @staticmethod
     def _looks_like_raw_sql(val: str) -> bool:
         vu = val.upper().strip()
-        starters = ("SELECT ", "INSERT ", "UPDATE ", "DELETE ", "DROP ", "ALTER ", "CREATE ", "TRUNCATE ")
+        starters = (
+            "SELECT ",
+            "INSERT ",
+            "UPDATE ",
+            "DELETE ",
+            "DROP ",
+            "ALTER ",
+            "CREATE ",
+            "TRUNCATE ",
+        )
         if not any(vu.startswith(s) for s in starters):
             return False
         secondary = ("FROM ", "WHERE ", "SET ", "INTO ", "TABLE ", "VALUES")
@@ -786,26 +906,32 @@ class MCPPermissionHostApp:
 
 
 class MCPSessionManager:
-    def __init__(self, host: MCPPermissionHostApp, session_id: str = "unknown", trust_window_seconds: int = 300) -> None:
+    def __init__(
+        self,
+        host: MCPPermissionHostApp,
+        session_id: str = "unknown",
+        trust_window_seconds: int = 300,
+    ) -> None:
         self._host = host
         self.session_id = session_id
         self._trust_window = trust_window_seconds
         self._trusted_tools: Dict[str, float] = {}
 
-    async def execute(self, tool_name: str, arguments: Dict[str, Any] | None = None) -> Any:
+    async def execute(
+        self, tool_name: str, arguments: Dict[str, Any] | None = None
+    ) -> Any:
         return await self._host.execute(tool_name, arguments)
 
-    async def safe_read(self, tool_name: str, arguments: Dict[str, Any] | None = None) -> Any:
+    async def safe_read(
+        self, tool_name: str, arguments: Dict[str, Any] | None = None
+    ) -> Any:
         return await self._host.execute(tool_name, arguments)
 
 
 class AsyncMCPBackend(Protocol):
-    async def call_tool(self, name: str, arguments) -> Any:
-        ...
+    async def call_tool(self, name: str, arguments) -> Any: ...
 
-    async def list_tools(self) -> list[dict[str, Any]]:
-        ...
-
+    async def list_tools(self) -> list[dict[str, Any]]: ...
 
 
 class DBInProcessBackend:
@@ -841,14 +967,16 @@ class MCPManager:
     async def ensure_ready(self) -> None:
         if self._ready:
             return
-        
+
         # Synchronisation uniquement pour le backend DB
         db_tools = await self._backends[MCPServerKind.DB].list_tools()
         self.registry.sync_discovered_tools(MCPServerKind.DB, db_tools)
-        
+
         self._ready = True
 
-    async def call_tool(self, tool_name: str, arguments: Dict[str, Any] | None = None) -> Any:
+    async def call_tool(
+        self, tool_name: str, arguments: Dict[str, Any] | None = None
+    ) -> Any:
         await self.ensure_ready()
         arguments = arguments or {}
         meta = self.registry.get_tool(tool_name)
@@ -858,7 +986,7 @@ class MCPManager:
         backend = self._backends[meta.server]
         attempts = 1 + max(0, int(meta.retries))
         last_error: Optional[Exception] = None
-        
+
         for attempt in range(1, attempts + 1):
             try:
                 return await backend.call_tool(tool_name, arguments)
@@ -866,7 +994,7 @@ class MCPManager:
                 last_error = exc
                 if attempt >= attempts:
                     break
-                    
+
         raise RuntimeError(f"MCP call failed for '{tool_name}': {last_error}")
 
     async def list_tools(self) -> dict[str, list[dict[str, Any]]]:
@@ -881,8 +1009,12 @@ class ShieldHub:
     def __init__(self, session_id: str = "unknown") -> None:
         self.registry = get_registry()
         self.manager = MCPManager(registry=self.registry)
-        self._shield = MCPPermissionClient(backend=self.manager, session_id=session_id, registry=self.registry)
-        self.session = MCPSessionManager(host=MCPPermissionHostApp(client=self._shield), session_id=session_id)
+        self._shield = MCPPermissionClient(
+            backend=self.manager, session_id=session_id, registry=self.registry
+        )
+        self.session = MCPSessionManager(
+            host=MCPPermissionHostApp(client=self._shield), session_id=session_id
+        )
 
     async def call(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         await self.manager.ensure_ready()
@@ -901,7 +1033,9 @@ class MCPShield:
     def __init__(self, session_id: str = "unknown") -> None:
         self._hub = ShieldHub(session_id=session_id)
 
-    async def authorize_and_call(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
+    async def authorize_and_call(
+        self, tool_name: str, arguments: Dict[str, Any]
+    ) -> Any:
         return await self._hub.call(tool_name, arguments)
 
     async def list_allowed_tools(self) -> dict[str, list[dict]]:
@@ -912,7 +1046,9 @@ class UnifiedMCPClient:
     def __init__(self, session_id: str = "unknown") -> None:
         self._hub = ShieldHub(session_id=session_id)
 
-    async def call_tool(self, tool_name: str, arguments: Dict[str, Any] | None = None) -> Any:
+    async def call_tool(
+        self, tool_name: str, arguments: Dict[str, Any] | None = None
+    ) -> Any:
         return await self._hub.call(tool_name, arguments or {})
 
     async def list_tools(self) -> dict[str, list[dict]]:

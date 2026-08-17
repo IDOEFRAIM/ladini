@@ -4,21 +4,57 @@
 # Deux blocs sur le MÊME réseau `agri_net` :
 #   1. APPLICATIF : api (FastAPI), worker (Celery), mcp (daemon HTTP
 #      AgriDBMCPServer — transport persistant, pool DB chaud, voir
-#      protocols/mcp/servers/http_server.py), redis (broker), flower
-#      (monitoring Celery).
-#      DB applicative = Postgres managé DigitalOcean EXTERNE, via
-#      DATABASE_URL/DB_SSL_MODE (voir x-app-env + .env) — PAS les services
-#      `postgres`/`pgbouncer` ci-dessous, qui ne contiennent aucune des
-#      tables de l'app et restent définis uniquement pour un usage
-#      local/dev optionnel (rien n'en dépend en prod).
+#      protocols/mcp/servers/http_server.py), redis (broker), pgbouncer
+#      (pooler vers la DB EXTERNE DigitalOcean — voir bandeau DB
+#      ci-dessous), flower (monitoring Celery), autoheal (auto-restart
+#      des conteneurs `unhealthy`, voir bandeau HEALTHCHECKS ci-dessous).
 #   2. LANGFUSE v3 (LLMOps self-hosted) : langfuse-web, langfuse-worker,
 #      clickhouse, minio, langfuse-postgres.
+#
+# ⚠️  DB — Postgres managé DigitalOcean, EXTERNE, via PgBouncer LOCAL :
+#     `pgbouncer` ne pointe PAS vers un Postgres local (il n'y en a plus
+#     dans ce fichier) mais vers le cluster DO (DO_DB_HOST/PORT/USER/…,
+#     voir x-app-env et le service `pgbouncer`). Objectif : DO impose un
+#     `max_connections` bas sur les plans managés ; sans pooler, chaque
+#     process applicatif qui ouvre son propre pool SQLAlchemy (4 workers
+#     gunicorn × api-replicas + concurrency×worker-replicas + mcp) peut
+#     dépasser ce plafond dès qu'on scale — PgBouncer en mode `transaction`
+#     multiplexe TOUTES ces connexions applicatives sur un nombre borné de
+#     connexions réelles vers DO. Voir DEFAULT_POOL_SIZE dans le service
+#     `pgbouncer` : DOIT être aligné sur le `max_connections` réel de votre
+#     plan DO (Databases → Settings dans la console DO).
 #
 # ⚠️  Le service `mcp` DOIT rester à 1 seule réplique/process (voir la
 #     docstring de http_server.py) : AgriDBMCPServer/runtime sont des
 #     singletons process-local. Pour plus de débit, dupliquer le SERVICE
 #     (plusieurs conteneurs `mcp` sur des ports différents + load
 #     balancer), jamais via plusieurs workers/replicas du même service.
+#
+# ⚠️  HEALTHCHECKS & AUTO-HEALING : `docker compose` (hors Swarm) ne
+#     redémarre JAMAIS un conteneur automatiquement sur un healthcheck qui
+#     passe à `unhealthy` — c'est un malentendu fréquent. Le statut
+#     `unhealthy` est seulement REPORTÉ (`docker ps`, `depends_on:
+#     condition: service_healthy` d'un autre service), rien ne le corrige
+#     seul. `restart: unless-stopped` ne couvre que le cas où le PROCESS
+#     quitte (crash, exit code non-zero) — pas le cas où un healthcheck
+#     échoue alors que le process tourne encore (deadlock applicatif, DB
+#     injoignable, etc.). D'où `autoheal` ci-dessous : il surveille l'état
+#     Docker natif et `docker restart` tout conteneur marqué `unhealthy` —
+#     seule façon d'obtenir un vrai auto-healing SANS migrer vers Swarm/K8s.
+#
+# ⚠️  GRACEFUL SHUTDOWN : chaque service a un `stop_grace_period` aligné
+#     sur le délai de "warm shutdown" de son process (gunicorn
+#     --graceful-timeout, celery warm shutdown, uvicorn
+#     --timeout-graceful-shutdown — voir les Dockerfiles). Si Docker
+#     envoie SIGKILL AVANT que le process ait fini de drainer (délai par
+#     défaut = 10s, bien trop court pour une tâche LLM en cours), une
+#     requête/tâche en vol est perdue brutalement au lieu d'être terminée
+#     proprement. Pour Celery, le vrai filet de sécurité reste
+#     `task_acks_late=True` (celery_app.py) : même si le SIGKILL arrive
+#     quand même, la tâche non-acquittée est redélivrée à un autre worker —
+#     `stop_grace_period` MINIMISE les interruptions forcées, il ne les
+#     élimine pas totalement (une tâche peut légitimement dépasser le
+#     délai).
 #
 # ⚠️  IMPORTANT — Langfuse v3 : contrairement à v2 (postgres seul), le
 #     self-host v3 EXIGE ClickHouse + un stockage S3 (MinIO) + Redis. Le bloc
@@ -27,25 +63,33 @@
 #     `langfuse/langfuse` avant mise en prod (les clés de chiffrement/salt
 #     évoluent entre versions). Ne PAS déployer avec les secrets par défaut.
 #
-# Ressources : `deploy.resources.limits` est honoré par `docker compose up`
-# (Compose v2). `reservations` est best-effort. Ajustez selon votre hôte.
+# Ressources : `deploy.resources.limits` EST honoré par `docker compose up`
+# (impose un plafond cgroup dur → OOM-killer si dépassé — c'est le VRAI
+# levier anti-OOM-aléatoire). `reservations` reste best-effort hors Swarm
+# (surtout indicatif/documentaire ici). Les valeurs ci-dessous supposent un
+# hôte ~8 vCPU / 16 Go RAM — RECALCULEZ pour votre hôte réel (voir le detail
+# du calcul en commentaire sur chaque service).
 # ═════════════════════════════════════════════════════════════════════
 
 x-app-env: &app-env
-  # DB : Postgres managé externe (DigitalOcean), PAS le conteneur local
-  # `postgres`/`pgbouncer` — celui-ci ne contient aucune des tables de
-  # l'app (voir agri_workspaces, intelligence.notification_outbox, etc.),
-  # qui vivent uniquement sur le cluster DO. Renseignez DATABASE_URL (ou
-  # DO_DATABASE_URL, prioritaire — voir core/settings.py) dans `.env` avec
-  # la chaîne fournie par DigitalOcean (hôte *.db.ondigitalocean.com).
-  # Passthrough tel quel : router à nouveau vers pgbouncer:6432 ici casse
-  # tout, PgBouncer local n'a jamais les tables applicatives.
-  DATABASE_URL: "${DATABASE_URL:-}"
-  DO_DATABASE_URL: "${DO_DATABASE_URL:-}"
-  # require = TLS sans vérification du certificat — c'est le mode attendu
-  # par les DB managées DigitalOcean (asyncpg refuse une connexion en clair
-  # côté DO). "disable" n'a de sens que pour un Postgres 100% local.
-  DB_SSL_MODE: "${DB_SSL_MODE:-require}"
+  # DB — via PgBouncer LOCAL (voir bandeau DB en tête de fichier). Le TLS
+  # vers DO est géré par PgBouncer lui-même (SERVER_TLS_SSLMODE, service
+  # `pgbouncer`) : la connexion app → pgbouncer reste en clair sur le
+  # réseau Docker interne (agri_net), donc DB_SSL_MODE=disable ICI est
+  # correct (ce n'est PAS la connexion qui touche Internet).
+  DATABASE_URL: "postgresql+asyncpg://${DO_DB_USER}:${DO_DB_PASSWORD}@pgbouncer:6432/${DO_DB_NAME}"
+  DB_SSL_MODE: "disable"
+  # Pool SQLAlchemy PAR PROCESS — volontairement resserré maintenant que
+  # PgBouncer absorbe le fan-in : chaque process n'a plus besoin d'un pool
+  # profond, seulement de quoi couvrir SES requêtes concurrentes propres.
+  # Calcul du plafond réel de connexions vers pgbouncer, à ajuster si vous
+  # changez concurrency/replicas :
+  #   api  : replicas × 4 (gunicorn -w)      × (DB_POOL_SIZE+MAX_OVERFLOW)
+  #   worker: replicas × 4 (--concurrency)    × (DB_POOL_SIZE+MAX_OVERFLOW)
+  #   mcp  : 1                                × (DB_POOL_SIZE+MAX_OVERFLOW)
+  # → doit rester << MAX_CLIENT_CONN du service pgbouncer.
+  DB_POOL_SIZE: "${DB_POOL_SIZE:-5}"
+  DB_POOL_MAX_OVERFLOW: "${DB_POOL_MAX_OVERFLOW:-5}"
   REDIS_URL: "redis://redis:6379/0"
   # MCP — daemon HTTP persistant (remplace le spawn stdio par tour, voir
   # protocols/mcp/servers/http_server.py). api/worker s'y connectent tous les
@@ -55,9 +99,7 @@ x-app-env: &app-env
   # LLM
   LLM_PROVIDER: "groq"
   GROQ_API_KEY: "${GROQ_API_KEY}"
-  # Fournisseur de messagerie WhatsApp — non transmis ici auparavant, donc
-  # toujours retombé sur le défaut Pydantic "whatsapp_cloud" en conteneur
-  # même quand .env vaut "twilio" (cause des erreurs d'envoi en prod).
+  # Fournisseur de messagerie WhatsApp
   MESSAGING_PROVIDER: "${MESSAGING_PROVIDER:-whatsapp_cloud}"
   # Twilio
   TWILIO_ACCOUNT_SID: "${TWILIO_ACCOUNT_SID}"
@@ -83,12 +125,21 @@ x-app-env: &app-env
   LANGFUSE_SECRET_KEY: "${LANGFUSE_SECRET_KEY}"
   LANGFUSE_HOST: "http://langfuse-web:3000"
 
+# ulimits partagés par les services applicatifs à fort trafic sortant
+# (appels LLM Groq, MCP HTTP, webhooks) : le défaut Docker (1024 fds) sature
+# vite sous forte concurrence de connexions HTTPS sortantes + entrantes —
+# une mort silencieuse classique sous charge ("Too many open files") qui ne
+# ressemble à rien côté logs applicatifs.
+x-high-fd-ulimits: &high-fd-ulimits
+  nofile:
+    soft: 65536
+    hard: 65536
+
 networks:
   agri_net:
     driver: bridge
 
 volumes:
-  pg_data:
   langfuse_pg_data:
   clickhouse_data:
   minio_data:
@@ -103,16 +154,26 @@ services:
       args:
         API_IMAGE: ladini-api:latest
     environment: *app-env
+    depends_on:
+      pgbouncer: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ulimits: *high-fd-ulimits
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8003/health"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 30s
+    # >= --timeout-graceful-shutdown (Dockerfile.mcp) + marge.
+    stop_grace_period: 35s
+    labels: ["autoheal=true"]
     deploy:
       resources:
+        # Process UNIQUE (--workers 1, contrainte singleton) : pas de
+        # multiplication par replicas ici. 768m couvre le pool DB chaud +
+        # le cache d'outils MCP ; reservation = usage stable observé.
         limits: { cpus: "1.0", memory: 768m }
-        reservations: { cpus: "0.25", memory: 256m }
+        reservations: { cpus: "0.25", memory: 384m }
     restart: unless-stopped
     networks: [agri_net]
 
@@ -125,18 +186,36 @@ services:
     ports:
       - "8000:8000"
     depends_on:
+      pgbouncer: { condition: service_healthy }
       redis: { condition: service_healthy }
       mcp: { condition: service_healthy }
+    ulimits: *high-fd-ulimits
+    sysctls:
+      # Backlog d'acceptation TCP — évite des connexions refusées/droppées
+      # lors d'un burst de webhooks entrants (Twilio/Meta) au-delà du défaut
+      # kernel (128), avant même que gunicorn n'ait pu les mettre en file.
+      net.core.somaxconn: 1024
     healthcheck:
+      # Liveness pure (aucune dépendance externe) — voir /health/ready pour
+      # une vraie readiness DB+Redis, à brancher sur un futur load balancer
+      # plutôt que sur CE healthcheck : on ne veut PAS que Docker/autoheal
+      # redémarre l'API juste parce que la DB a un blip passager (redémarrer
+      # l'API ne répare rien et ajoute un restart-storm inutile).
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 30s
+    # >= --graceful-timeout gunicorn (30s, Dockerfile.api) + marge.
+    stop_grace_period: 40s
+    labels: ["autoheal=true"]
     deploy:
       resources:
-        limits: { cpus: "1.0", memory: 1g }
-        reservations: { cpus: "0.25", memory: 384m }
+        # -w 4 gunicorn : ~150-250MB/worker (FastAPI + imports LangChain
+        # partagés) + overhead process → limite avec marge pour pics de
+        # requêtes concurrentes (webhooks + polling santé).
+        limits: { cpus: "1.5", memory: 1536m }
+        reservations: { cpus: "0.5", memory: 512m }
     restart: unless-stopped
     networks: [agri_net]
 
@@ -150,18 +229,34 @@ services:
     environment: *app-env
     depends_on:
       api: { condition: service_started }
+      pgbouncer: { condition: service_healthy }
       redis: { condition: service_healthy }
       mcp: { condition: service_healthy }
+    ulimits: *high-fd-ulimits
     healthcheck:
       test: ["CMD-SHELL", "celery -A agriconnect.api.celery_app inspect ping || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+    # Fenêtre de warm shutdown généreuse pour une tâche LLM en cours (elle
+    # peut légitimement prendre plusieurs secondes à quelques dizaines de
+    # secondes) SANS aller jusqu'au plafond task_time_limit=600s (ça
+    # rendrait un redéploiement/scale-down interminable) — au-delà, le
+    # SIGKILL arrive mais task_acks_late=True garantit que la tâche est
+    # simplement redéliverée, pas perdue.
+    stop_grace_period: 90s
+    labels: ["autoheal=true"]
     deploy:
       resources:
-        limits: { cpus: "2.0", memory: 2g }
-        reservations: { cpus: "0.5", memory: 512m }
+        # concurrency=4 : ~350-500MB/enfant (LangGraph/LangChain chargés +
+        # pool DB chaud par process) → 4 enfants + process parent Celery.
+        # --max-memory-per-child (Dockerfile.worker) recycle un enfant AVANT
+        # d'atteindre ce plafond conteneur — donc en usage normal cette
+        # limite ne devrait quasi jamais être le mécanisme qui intervient
+        # (c'est le filet de dernier recours, pas le mécanisme nominal).
+        limits: { cpus: "3.0", memory: 2560m }
+        reservations: { cpus: "0.75", memory: 1024m }
     restart: unless-stopped
     networks: [agri_net]
 
@@ -192,6 +287,10 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+    # Stateless/rapide : pas de tâche en vol à drainer, juste flush du
+    # fichier schedule.
+    stop_grace_period: 15s
+    labels: ["autoheal=true"]
     deploy:
       resources:
         limits: { cpus: "0.25", memory: 256m }
@@ -202,6 +301,7 @@ services:
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    ulimits: *high-fd-ulimits
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -210,62 +310,57 @@ services:
     deploy:
       resources:
         limits: { cpus: "0.5", memory: 640m }
+        reservations: { cpus: "0.1", memory: 256m }
     restart: unless-stopped
     networks: [agri_net]
 
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: "${POSTGRES_USER}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
-      POSTGRES_DB: "${POSTGRES_DB}"
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    deploy:
-      resources:
-        limits: { cpus: "1.0", memory: 1g }
-    restart: unless-stopped
-    networks: [agri_net]
-
+  # PgBouncer — pooler LOCAL en mode `transaction` devant le Postgres
+  # managé DigitalOcean (PAS un Postgres local, voir bandeau DB en tête de
+  # fichier). SERVER_TLS_SSLMODE : DO refuse les connexions Postgres en
+  # clair, donc le LEG pgbouncer → DO doit être en TLS (contrairement au
+  # leg app → pgbouncer, en clair sur le réseau Docker interne agri_net).
   pgbouncer:
     image: edoburu/pgbouncer:latest
     environment:
-      # L'image edoburu/pgbouncer écoute par défaut sur 5432 (son propre
-      # défaut LISTEN_PORT) — sans cette variable elle IGNORE la convention
-      # "pgbouncer:6432" utilisée par DATABASE_URL (x-app-env) et tout le
-      # reste de la stack se voit refuser la connexion sur 6432.
       LISTEN_PORT: "6432"
-      DB_HOST: postgres
-      DB_PORT: "5432"
-      DB_USER: "${POSTGRES_USER}"
-      DB_PASSWORD: "${POSTGRES_PASSWORD}"
-      DB_NAME: "${POSTGRES_DB}"
+      DB_HOST: "${DO_DB_HOST}"
+      DB_PORT: "${DO_DB_PORT:-25060}"
+      DB_USER: "${DO_DB_USER}"
+      DB_PASSWORD: "${DO_DB_PASSWORD}"
+      DB_NAME: "${DO_DB_NAME}"
+      SERVER_TLS_SSLMODE: "require"
       # Transaction pooling : le meilleur ratio pour N workers courts. Compatible
-      # avec asyncpg ICI car le repo force statement_cache_size=0.
+      # avec asyncpg ICI car le repo force statement_cache_size=0 (core/database.py).
       POOL_MODE: transaction
-      MAX_CLIENT_CONN: "500"
-      DEFAULT_POOL_SIZE: "25"
+      # Connexions ACCEPTÉES côté app — pas chères (pooling), donc généreux
+      # pour absorber un scale-out sans reconfig. Voir le calcul en tête de
+      # fichier (x-app-env) pour vérifier que vous restez bien en dessous.
+      MAX_CLIENT_CONN: "1000"
+      # Connexions RÉELLES ouvertes vers DO — ⚠️ DOIT être <= (max_connections
+      # de votre plan DO managé − marge pour connexions admin/DO internes,
+      # ex: réservez ~10). Vérifiez Databases → Settings dans la console DO
+      # AVANT de monter cette valeur ; la dépasser fait échouer les
+      # connexions côté DO avec "too many connections", pas un problème
+      # côté pgbouncer.
+      DEFAULT_POOL_SIZE: "${PGBOUNCER_DEFAULT_POOL_SIZE:-20}"
       AUTH_TYPE: scram-sha-256
-    depends_on:
-      postgres: { condition: service_healthy }
+    ulimits: *high-fd-ulimits
     healthcheck:
-      # pgbouncer écoute en local sur 6432 (5432 est le port de `postgres`,
-      # injoignable depuis CE conteneur) — un check sur le mauvais port ne
-      # passe jamais healthy, ce qui bloque tous les services en aval
+      # pgbouncer écoute en local sur 6432 (LISTEN_PORT ci-dessus) — l'image
+      # edoburu/pgbouncer écoute par défaut sur 5432 SANS cette variable, ce
+      # qui casserait silencieusement toute la stack en aval
       # (`depends_on: condition: service_healthy`).
       test: ["CMD-SHELL", "nc -z 127.0.0.1 6432 || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 5
       start_period: 5s
+    stop_grace_period: 10s
+    labels: ["autoheal=true"]
     deploy:
       resources:
         limits: { cpus: "0.5", memory: 256m }
+        reservations: { cpus: "0.1", memory: 64m }
     restart: unless-stopped
     networks: [agri_net]
 
@@ -281,6 +376,28 @@ services:
     deploy:
       resources:
         limits: { cpus: "0.25", memory: 256m }
+        reservations: { cpus: "0.05", memory: 128m }
+    restart: unless-stopped
+    networks: [agri_net]
+
+  # Auto-healing : `docker restart` tout conteneur marqué `autoheal=true`
+  # dès que SON PROPRE healthcheck Docker passe à `unhealthy` — voir bandeau
+  # HEALTHCHECKS & AUTO-HEALING en tête de fichier pour pourquoi plain
+  # `docker compose` ne le fait pas nativement. Lecture seule du statut via
+  # le socket Docker ; nécessite un accès au socket (privilège équivalent à
+  # root sur l'hôte) — c'est un compromis délibéré et standard pour ce
+  # pattern, acceptable ici car l'hôte n'exécute que cette stack.
+  autoheal:
+    image: willfarrell/autoheal:latest
+    environment:
+      AUTOHEAL_CONTAINER_LABEL: "autoheal"
+      AUTOHEAL_INTERVAL: "10"
+      AUTOHEAL_START_PERIOD: "30"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        limits: { cpus: "0.1", memory: 64m }
     restart: unless-stopped
     networks: [agri_net]
 

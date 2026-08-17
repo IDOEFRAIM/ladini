@@ -13,6 +13,7 @@ Usage::
     gw = ProfileGateway(mc_runtime)
     profile = await gw.get_user_by_phone("+226…")
 """
+
 from __future__ import annotations
 
 import logging
@@ -59,6 +60,7 @@ class _BaseGateway:
 
 # ── Profile ────────────────────────────────────────────────────────
 
+
 class ProfileGateway(_BaseGateway):
     async def get_user_by_phone(self, phone: str) -> Dict[str, Any]:
         result = await self._call("get_user_by_phone", phone=phone.strip())
@@ -70,6 +72,7 @@ class ProfileGateway(_BaseGateway):
 
 
 # ── Farm ───────────────────────────────────────────────────────────
+
 
 class FarmGateway(_BaseGateway):
     async def list_farms(self, phone: str) -> List[Dict[str, Any]]:
@@ -88,7 +91,10 @@ class FarmGateway(_BaseGateway):
         return result.get("data") or result
 
     async def get_or_create_farm(
-        self, phone: str, farm_name: str | None = None, zone_id: str | None = None,
+        self,
+        phone: str,
+        farm_name: str | None = None,
+        zone_id: str | None = None,
     ) -> Dict[str, Any]:
         """Idempotent : renvoie la ferme existante ou en crée une (crée aussi le
         profil producteur si absent). Outil role-allowed via l'intent FARM_CREATE
@@ -102,7 +108,9 @@ class FarmGateway(_BaseGateway):
         result = await self._call("get_or_create_farm", **kwargs)
         return result.get("data") or result
 
-    async def get_offer_reservations(self, phone: str, market_offer_id: str | None = None) -> Dict[str, Any]:
+    async def get_offer_reservations(
+        self, phone: str, market_offer_id: str | None = None
+    ) -> Dict[str, Any]:
         """Précommandes reçues par le producteur sur ses productions futures."""
         kwargs: Dict[str, Any] = {"phone": phone.strip()}
         if market_offer_id:
@@ -111,6 +119,7 @@ class FarmGateway(_BaseGateway):
 
 
 # ── Auctions & Bids ───────────────────────────────────────────────
+
 
 class AuctionGateway(_BaseGateway):
     async def search_auctions(self, **kwargs: Any) -> Dict[str, Any]:
@@ -150,7 +159,9 @@ class AuctionGateway(_BaseGateway):
     async def get_my_active_bids(self, phone: str) -> Dict[str, Any]:
         return await self._call("get_my_active_bids", phone=phone.strip())
 
-    async def update_bid_price(self, bid_id: str, phone: str, new_price: Any) -> Dict[str, Any]:
+    async def update_bid_price(
+        self, bid_id: str, phone: str, new_price: Any
+    ) -> Dict[str, Any]:
         return await self._call(
             "update_bid_price", bid_id=bid_id, phone=phone.strip(), new_price=new_price
         )
@@ -158,7 +169,9 @@ class AuctionGateway(_BaseGateway):
     async def get_auctions_bids(self, **kwargs: Any) -> Dict[str, Any]:
         return await self._call("get_auctions_bids", **kwargs)
 
-    async def get_auction_bids(self, auction_id: str, phone: str | None = None) -> Dict[str, Any]:
+    async def get_auction_bids(
+        self, auction_id: str, phone: str | None = None
+    ) -> Dict[str, Any]:
         # phone requis pour l'identité de contexte MCP (sinon PermissionDenied
         # « missing_context_identity »). _call strip les None automatiquement.
         return await self._call("get_auction_bids", auction_id=auction_id, phone=phone)
@@ -172,12 +185,16 @@ class AuctionGateway(_BaseGateway):
     ) -> Dict[str, Any]:
         # phone requis pour l'identité de contexte MCP (sinon PermissionDenied).
         return await self._call(
-            "select_winning_bid", bid_id=bid_id, phone=phone,
-            delivery_lat=delivery_lat, delivery_lon=delivery_lon,
+            "select_winning_bid",
+            bid_id=bid_id,
+            phone=phone,
+            delivery_lat=delivery_lat,
+            delivery_lon=delivery_lon,
         )
 
 
 # ── Stock ──────────────────────────────────────────────────────────
+
 
 class StockGateway(_BaseGateway):
     async def get_producer_stocks(self, phone: str) -> Dict[str, Any]:
@@ -187,14 +204,20 @@ class StockGateway(_BaseGateway):
         """Liste aplatie des productions futures / lots (MarketOffer) du producteur."""
         return await self._call("list_producer_productions", phone=phone.strip())
 
-    async def update_production(self, phone: str, cycle_id: str, **fields: Any) -> Dict[str, Any]:
+    async def update_production(
+        self, phone: str, cycle_id: str, **fields: Any
+    ) -> Dict[str, Any]:
         """Mise à jour partielle d'un lot (prix/quantité/nom/unité/date/type)."""
         return await self._call(
             "update_production_fields", phone=phone.strip(), cycle_id=cycle_id, **fields
         )
 
     async def validate_stock_availability(
-        self, product_id: str, quantity: float, unit: str, buyer_phone: str,
+        self,
+        product_id: str,
+        quantity: float,
+        unit: str,
+        buyer_phone: str,
     ) -> Dict[str, Any]:
         return await self._call(
             "validate_stock_availability_atomic",
@@ -207,6 +230,7 @@ class StockGateway(_BaseGateway):
 
 # ── Product Search ─────────────────────────────────────────────────
 
+
 class ProductGateway(_BaseGateway):
     async def search_products(self, product: str, phone: str) -> Dict[str, Any]:
         return await self._call("search_products", product=product, phone=phone)
@@ -214,18 +238,28 @@ class ProductGateway(_BaseGateway):
     async def get_my_products(self, phone: str) -> Dict[str, Any]:
         return await self._call("get_my_products", phone=phone.strip())
 
-    async def update_product(self, phone: str, product_id: str, **fields: Any) -> Dict[str, Any]:
+    async def update_product(
+        self, phone: str, product_id: str, **fields: Any
+    ) -> Dict[str, Any]:
         """Mise à jour partielle d'un produit catalogue (prix/quantité/nom/unité)."""
         return await self._call(
-            "update_product_price_and_qty", phone=phone.strip(), product_id=product_id, **fields
+            "update_product_price_and_qty",
+            phone=phone.strip(),
+            product_id=product_id,
+            **fields,
         )
 
 
 # ── Negotiation ────────────────────────────────────────────────────
 
+
 class NegotiationGateway(_BaseGateway):
     async def initiate_session(
-        self, buyer_phone: str, product_id: str, offered_price: Any, quantity: Any,
+        self,
+        buyer_phone: str,
+        product_id: str,
+        offered_price: Any,
+        quantity: Any,
     ) -> Dict[str, Any]:
         return await self._call(
             "initiate_negotiation_session",
@@ -235,7 +269,9 @@ class NegotiationGateway(_BaseGateway):
             quantity=quantity,
         )
 
-    async def update_offer(self, buyer_phone: str, negotiation_id: str, new_price: Any) -> Dict[str, Any]:
+    async def update_offer(
+        self, buyer_phone: str, negotiation_id: str, new_price: Any
+    ) -> Dict[str, Any]:
         return await self._call(
             "update_negotiation_offer",
             buyer_phone=buyer_phone,
@@ -243,7 +279,9 @@ class NegotiationGateway(_BaseGateway):
             new_price=new_price,
         )
 
-    async def close_session(self, buyer_phone: str, negotiation_id: str, reason: str = "buyer_abandoned") -> Dict[str, Any]:
+    async def close_session(
+        self, buyer_phone: str, negotiation_id: str, reason: str = "buyer_abandoned"
+    ) -> Dict[str, Any]:
         return await self._call(
             "close_negotiation_session",
             buyer_phone=buyer_phone,
@@ -254,8 +292,15 @@ class NegotiationGateway(_BaseGateway):
 
 # ── Preorder ───────────────────────────────────────────────────────
 
+
 class PreorderGateway(_BaseGateway):
-    async def create_draft(self, buyer_phone: str, cart_items: Any, payment_method: str = "CASH", delivery_zone_id: Any = None) -> Dict[str, Any]:
+    async def create_draft(
+        self,
+        buyer_phone: str,
+        cart_items: Any,
+        payment_method: str = "CASH",
+        delivery_zone_id: Any = None,
+    ) -> Dict[str, Any]:
         return await self._call(
             "create_preorder_draft",
             buyer_phone=buyer_phone,
@@ -280,7 +325,11 @@ class PreorderGateway(_BaseGateway):
         )
 
     async def reserve_future_offer(
-        self, buyer_phone: str, market_offer_id: str, quantity: Any, desired_price: Any = None,
+        self,
+        buyer_phone: str,
+        market_offer_id: str,
+        quantity: Any,
+        desired_price: Any = None,
     ) -> Dict[str, Any]:
         return await self._call(
             "reserve_future_offer",
@@ -293,6 +342,7 @@ class PreorderGateway(_BaseGateway):
 
 # ── Order Tracking ─────────────────────────────────────────────────
 
+
 class OrderTrackingGateway(_BaseGateway):
     async def get_transaction_summary(self, **kwargs: Any) -> Dict[str, Any]:
         return await self._call("get_transaction_summary", **kwargs)
@@ -300,14 +350,19 @@ class OrderTrackingGateway(_BaseGateway):
     async def get_buyer_orders_dashboard(self, phone: str) -> Dict[str, Any]:
         return await self._call("get_buyer_orders_dashboard", phone=phone.strip())
 
-    async def cancel_pending_order(self, order_id: str, phone: str, reason: str = "") -> Dict[str, Any]:
+    async def cancel_pending_order(
+        self, order_id: str, phone: str, reason: str = ""
+    ) -> Dict[str, Any]:
         return await self._call(
             "cancel_pending_order",
-            order_id=order_id, phone=phone, reason=reason,
+            order_id=order_id,
+            phone=phone,
+            reason=reason,
         )
 
 
 # ── Moderation / Anti-abuse ────────────────────────────────────────
+
 
 class ModerationGateway(_BaseGateway):
     async def get_account_status(self, phone: str) -> Dict[str, Any]:
@@ -317,26 +372,43 @@ class ModerationGateway(_BaseGateway):
         return await self._call("get_prohibited_terms")
 
     async def record_moderation_strike(
-        self, phone: str, matched_term: str = "", excerpt: str = "", kind: str = "PROHIBITED_PRODUCT",
+        self,
+        phone: str,
+        matched_term: str = "",
+        excerpt: str = "",
+        kind: str = "PROHIBITED_PRODUCT",
     ) -> Dict[str, Any]:
         return await self._call(
             "record_moderation_strike",
-            phone=phone.strip(), matched_term=matched_term, excerpt=excerpt, kind=kind,
+            phone=phone.strip(),
+            matched_term=matched_term,
+            excerpt=excerpt,
+            kind=kind,
         )
 
     async def record_demand_signal(
-        self, phone: str = "", raw_query: str = "", normalized_term: str = "", zone_id: Any = None,
+        self,
+        phone: str = "",
+        raw_query: str = "",
+        normalized_term: str = "",
+        zone_id: Any = None,
     ) -> Dict[str, Any]:
         return await self._call(
             "record_demand_signal",
-            phone=phone, raw_query=raw_query, normalized_term=normalized_term, zone_id=zone_id,
+            phone=phone,
+            raw_query=raw_query,
+            normalized_term=normalized_term,
+            zone_id=zone_id,
         )
 
 
 # ── Agent Actions ──────────────────────────────────────────────────
 
+
 class AgentActionGateway(_BaseGateway):
-    async def create_action(self, agent_name: str, action_type: str, payload: Any) -> Dict[str, Any]:
+    async def create_action(
+        self, agent_name: str, action_type: str, payload: Any
+    ) -> Dict[str, Any]:
         return await self._call(
             "create_agent_action",
             agent_name=agent_name,
@@ -347,19 +419,30 @@ class AgentActionGateway(_BaseGateway):
 
 # ── Escrow (Paydunya) ──────────────────────────────────────────────
 
+
 class EscrowGateway(_BaseGateway):
-    async def initiate_escrow_payment(self, buyer_phone: str, preorder_id: str) -> Dict[str, Any]:
+    async def initiate_escrow_payment(
+        self, buyer_phone: str, preorder_id: str
+    ) -> Dict[str, Any]:
         return await self._call(
-            "initiate_escrow_payment", buyer_phone=buyer_phone.strip(), preorder_id=preorder_id,
+            "initiate_escrow_payment",
+            buyer_phone=buyer_phone.strip(),
+            preorder_id=preorder_id,
         )
 
-    async def verify_delivery_otp(self, producer_phone: str, otp_code: str) -> Dict[str, Any]:
+    async def verify_delivery_otp(
+        self, producer_phone: str, otp_code: str
+    ) -> Dict[str, Any]:
         return await self._call(
-            "verify_delivery_otp", producer_phone=producer_phone.strip(), otp_code=otp_code,
+            "verify_delivery_otp",
+            producer_phone=producer_phone.strip(),
+            otp_code=otp_code,
         )
 
     async def list_escrowed_orders(self, producer_phone: str) -> Dict[str, Any]:
-        return await self._call("list_producer_escrowed_orders", producer_phone=producer_phone.strip())
+        return await self._call(
+            "list_producer_escrowed_orders", producer_phone=producer_phone.strip()
+        )
 
 
 __all__ = [

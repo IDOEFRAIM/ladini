@@ -1,7 +1,11 @@
 """Workspace package — contexte durable unique d'AgriConnect."""
+
 from agriconnect.workspace.checkpointer import WorkspaceCheckpointer
 from agriconnect.workspace.context_guard import ContextGuard
-from agriconnect.workspace.metadata import build_metadata_from_state, filter_metadata_dict
+from agriconnect.workspace.metadata import (
+    build_metadata_from_state,
+    filter_metadata_dict,
+)
 from agriconnect.workspace.models import Workspace
 from agriconnect.workspace.resolver import WorkspaceResolver
 from agriconnect.workspace.store import WorkspaceStore

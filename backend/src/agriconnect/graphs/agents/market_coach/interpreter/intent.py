@@ -1,6 +1,6 @@
-
-from agriconnect.graphs.agents.market_coach.core.slots import build_canonical_field_aliases
-
+from agriconnect.graphs.agents.market_coach.core.slots import (
+    build_canonical_field_aliases,
+)
 
 INTENT_CONFIG = {
     # =======================================================================
@@ -16,8 +16,8 @@ INTENT_CONFIG = {
             "product": "produit/culture récolté",
             "quantity": "quantité récoltée",
             "unit": "unité",
-            "farm_id": "exploitation source"
-        }
+            "farm_id": "exploitation source",
+        },
     },
     "STOCK_RECORD_MOVEMENT": {
         "tool_name": "add_stock_movement_by_id",
@@ -29,8 +29,8 @@ INTENT_CONFIG = {
             "stock_id": "référence stock (numéro)",
             "movement_type": "sens (Entrée/Sortie/Perte)",
             "quantity": "quantité bougée",
-            "reason": "motif"
-        }
+            "reason": "motif",
+        },
     },
     "STOCK_ADJUST": {
         "tool_name": "adjust_stock_by_id",
@@ -41,8 +41,8 @@ INTENT_CONFIG = {
         "label_map": {
             "stock_id": "référence stock (numéro)",
             "quantity": "nouvelle quantité réelle constatée",
-            "reason": "motif"
-        }
+            "reason": "motif",
+        },
     },
     "STOCK_REMOVE_PARTIAL": {
         "tool_name": "remove_stock_by_id",
@@ -52,8 +52,8 @@ INTENT_CONFIG = {
         "label": "Retrait partiel du stock disponible",
         "label_map": {
             "stock_id": "référence stock (numéro)",
-            "quantity": "quantité à retirer"
-        }
+            "quantity": "quantité à retirer",
+        },
     },
     "STOCK_DELETE": {
         "tool_name": "delete_stock_by_id",
@@ -61,7 +61,7 @@ INTENT_CONFIG = {
         "action_type": "WRITE",
         "requires_farm": False,
         "label": "Suppression définitive d'une ligne de stock",
-        "label_map": {"stock_id": "identifiant stock"}
+        "label_map": {"stock_id": "identifiant stock"},
     },
     "STOCK_UPDATE_LEVEL": {
         "tool_name": "adjust_stock_by_id",
@@ -74,10 +74,9 @@ INTENT_CONFIG = {
             "stock_id": "identifiant stock",
             "quantity": "nouvelle quantité réelle",
             "unit": "unité (optionnel)",
-            "reason": "motif"
-        }
+            "reason": "motif",
+        },
     },
-
     # =======================================================================
     # DOMAINE : MARCHÉ PRODUCTEUR — VENTES (WRITE — PRODUCER)
     # =======================================================================
@@ -92,8 +91,8 @@ INTENT_CONFIG = {
             "price": "prix unitaire proposé",
             "quantity": "quantité disponible",
             "unit": "unité",
-            "description": "détails"
-        }
+            "description": "détails",
+        },
     },
     "SALES_RECORD_DIRECT": {
         "tool_name": "record_sale",
@@ -105,8 +104,8 @@ INTENT_CONFIG = {
             "product": "produit vendu",
             "quantity": "quantité",
             "price": "montant total de la vente",
-            "unit": "unité"
-        }
+            "unit": "unité",
+        },
     },
     "SALES_LIST_ORDERS": {
         "tool_name": "get_producer_orders",
@@ -129,8 +128,8 @@ INTENT_CONFIG = {
             "auction_id": "numéro de l'appel d'offres",
             "price": "votre prix proposé",
             "quantity": "quantité proposée",
-            "message": "note"
-        }
+            "message": "note",
+        },
     },
     "SALES_ACCEPT_CONTRACT": {
         "tool_name": "commit_staged_transaction",
@@ -138,7 +137,7 @@ INTENT_CONFIG = {
         "action_type": "WRITE",
         "requires_farm": False,
         "label": "Validation définitive des termes du contrat verrouillé",
-        "label_map": {"bid_id": "numéro de transaction/offre"}
+        "label_map": {"bid_id": "numéro de transaction/offre"},
     },
     "SALES_UPDATE_PRODUCT": {
         "tool_name": "update_product_price_and_qty",
@@ -152,8 +151,8 @@ INTENT_CONFIG = {
             "price": "nouveau prix unitaire",
             "quantity": "nouvelle quantité disponible",
             "product": "nouveau nom du produit",
-            "unit": "unité (optionnel)"
-        }
+            "unit": "unité (optionnel)",
+        },
     },
     # Mise à jour d'une PRODUCTION FUTURE / lot (MarketOffer), distincte du
     # produit catalogue ci-dessus. Permet de corriger prix, quantité, NOM
@@ -174,10 +173,9 @@ INTENT_CONFIG = {
             "product": "nouveau nom du produit",
             "unit": "unité (optionnel)",
             "estimated_available_at": "nouvelle date de disponibilité",
-            "production_type": "type (culture ou élevage)"
-        }
+            "production_type": "type (culture ou élevage)",
+        },
     },
-
     # Escrow (Paydunya) : le producteur transmet le code de livraison à 4
     # chiffres reçu de l'acheteur pour débloquer ses fonds bloqués. Tunnel
     # auto-suffisant "producer_escrow" (extraction déterministe du code,
@@ -195,7 +193,6 @@ INTENT_CONFIG = {
             "otp_code": "code de livraison à 4 chiffres",
         },
     },
-
     # =======================================================================
     # DOMAINE : MARCHÉ ACHETEUR — APPROVISIONNEMENT (WRITE — BUYER)
     # =======================================================================
@@ -211,8 +208,8 @@ INTENT_CONFIG = {
             "price": "prix plafond proposé",
             "unit": "unité",
             "zone": "région de collecte",
-            "deadline": "date limite"
-        }
+            "deadline": "date limite",
+        },
     },
     "PROCUREMENT_SELECT_WINNER": {
         "tool_name": "select_winning_bid",
@@ -222,8 +219,8 @@ INTENT_CONFIG = {
         "label": "Sélection et validation de l'offre gagnante sur mon marché",
         "label_map": {
             "auction_id": "numéro de votre appel d'offres",
-            "bid_id": "numéro de la proposition retenue"
-        }
+            "bid_id": "numéro de la proposition retenue",
+        },
     },
     "PROCUREMENT_ACCEPT_OFFER": {
         "tool_name": "accept_bid",
@@ -231,9 +228,8 @@ INTENT_CONFIG = {
         "action_type": "WRITE",
         "requires_farm": False,
         "label": "Achat direct simple d'un produit du catalogue indexé",
-        "label_map": {"bid_id": "numéro du produit catalogue"}
+        "label_map": {"bid_id": "numéro du produit catalogue"},
     },
-
     "BUYER_REQUEST": {
         "tool_name": "search_products",
         "required": ["product"],
@@ -245,9 +241,8 @@ INTENT_CONFIG = {
             "product": "produit recherché",
             "quantity": "quantité souhaitée (optionnel)",
             "unit": "unité (optionnel)",
-        }
+        },
     },
-
     # =======================================================================
     # DOMAINE : TUNNEL TRANSACTIONNEL ACHETEUR ("Grade Entreprise")
     # Panier multi-items → Précommande → Négociation. Le routage de phase
@@ -264,7 +259,7 @@ INTENT_CONFIG = {
             "product": "produit à ajouter",
             "quantity": "quantité souhaitée",
             "unit": "unité",
-        }
+        },
     },
     "BUYER_VIEW_CART": {
         "tool_name": "view_cart",
@@ -273,7 +268,7 @@ INTENT_CONFIG = {
         "requires_farm": False,
         "handled_by_flow": True,
         "label": "Consultation du panier de précommande en cours",
-        "label_map": {}
+        "label_map": {},
     },
     "BUYER_CREATE_PREORDER": {
         "tool_name": "create_preorder",
@@ -285,7 +280,7 @@ INTENT_CONFIG = {
         "label_map": {
             "expected_fulfillment_date": "date de livraison souhaitée",
             "payment_method": "moyen de paiement",
-        }
+        },
     },
     "BUYER_PREORDER_INIT": {
         "tool_name": "init_preorder",
@@ -316,9 +311,8 @@ INTENT_CONFIG = {
             "product": "produit à négocier",
             "price": "prix proposé",
             "quantity": "quantité concernée",
-        }
+        },
     },
-
     # --- Suivi conversationnel de commandes (Buyer Order Tracking) ---
     "BUYER_CHECK_ORDER_STATUS": {
         "tool_name": "check_order_status",
@@ -329,7 +323,7 @@ INTENT_CONFIG = {
         "label": "Vérification du statut d'une commande (Où est ma commande ?)",
         "label_map": {
             "order_id": "numéro/référence de la commande",
-        }
+        },
     },
     "BUYER_LIST_ORDERS": {
         "tool_name": "list_buyer_orders",
@@ -338,7 +332,7 @@ INTENT_CONFIG = {
         "requires_farm": False,
         "handled_by_flow": True,
         "label": "Consultation du tableau de bord des commandes en cours",
-        "label_map": {}
+        "label_map": {},
     },
     "BUYER_CANCEL_ORDER": {
         "tool_name": "cancel_order",
@@ -349,9 +343,8 @@ INTENT_CONFIG = {
         "label": "Annulation d'une commande en attente",
         "label_map": {
             "order_id": "numéro/référence de la commande à annuler",
-        }
+        },
     },
-
     # --- Suivi conversationnel des enchères (Buyer Auction Tracking) ---
     "BUYER_LIST_AUCTIONS": {
         "tool_name": "get_auctions",
@@ -360,7 +353,7 @@ INTENT_CONFIG = {
         "requires_farm": False,
         "handled_by_flow": True,
         "label": "Liste de mes appels d'offres (tous statuts)",
-        "label_map": {}
+        "label_map": {},
     },
     "BUYER_CHECK_AUCTION_STATUS": {
         "tool_name": "get_auction_bids",
@@ -371,9 +364,8 @@ INTENT_CONFIG = {
         "label": "Détail d'une enchère et offres reçues",
         "label_map": {
             "auction_id": "numéro de l'appel d'offres",
-        }
+        },
     },
-
     # =======================================================================
     # DOMAINE : AGRONOMIE — PILOTAGE DE CULTURE (WRITE)
     # =======================================================================
@@ -387,12 +379,19 @@ INTENT_CONFIG = {
             "farm_id": "identifiant exploitation",
             "product": "culture",
             "surface": "superficie parcelle",
-            "variety": "variété/semence"
-        }
+            "variety": "variété/semence",
+        },
     },
     "DECLARE_CROP_CYCLE": {
         "tool_name": "declare_future_production",
-        "required": ["farm_id", "production_type", "product", "quantity", "estimated_available_at", "price"],
+        "required": [
+            "farm_id",
+            "production_type",
+            "product",
+            "quantity",
+            "estimated_available_at",
+            "price",
+        ],
         "action_type": "WRITE",
         "requires_farm": True,
         "label": "Déclaration d'un lot futur (culture/élevage) pour précommande",
@@ -407,8 +406,8 @@ INTENT_CONFIG = {
             "surface": "superficie (si culture)",
             "breed": "race (si élevage)",
             "preorder_enabled": "précommande active (oui/non)",
-            "is_public": "visible catalogue (oui/non)"
-        }
+            "is_public": "visible catalogue (oui/non)",
+        },
     },
     "CROP_RECORD_INTERVENTION": {
         "tool_name": "log_intervention",
@@ -421,8 +420,8 @@ INTENT_CONFIG = {
             "intervention_type": "type d'action",
             "input_used": "intrant/matériel",
             "quantity": "quantité intrant",
-            "details": "observations"
-        }
+            "details": "observations",
+        },
     },
     "CROP_RECORD_OBSERVATION": {
         "tool_name": "add_growth_log",
@@ -433,8 +432,8 @@ INTENT_CONFIG = {
         "label_map": {
             "cycle_id": "cycle de culture",
             "stage_label": "stade observé",
-            "observation": "notes de suivi"
-        }
+            "observation": "notes de suivi",
+        },
     },
     "CROP_UPDATE_STAGE": {
         "tool_name": "add_crop_growth_stage",
@@ -444,8 +443,8 @@ INTENT_CONFIG = {
         "label": "Changement formel de stade phénologique",
         "label_map": {
             "cycle_id": "cycle de culture",
-            "stage_name": "nom du nouveau stade"
-        }
+            "stage_name": "nom du nouveau stade",
+        },
     },
     "CROP_UPDATE_SOIL": {
         "tool_name": "update_soil_profile",
@@ -456,10 +455,9 @@ INTENT_CONFIG = {
         "label_map": {
             "farm_id": "identifiant exploitation",
             "ph": "acidité sol (pH)",
-            "organic_matter": "taux matière organique"
-        }
+            "organic_matter": "taux matière organique",
+        },
     },
-
     # =======================================================================
     # DOMAINE : FINANCES (WRITE — Producteur)
     # =======================================================================
@@ -473,10 +471,9 @@ INTENT_CONFIG = {
             "price": "montant dépense",
             "product": "nature/libellé charge",
             "category": "catégorie",
-            "farm_id": "exploitation concernée"
-        }
+            "farm_id": "exploitation concernée",
+        },
     },
-
     # =======================================================================
     # DOMAINE : EXPLOITATION AGROBIZ (WRITE)
     # =======================================================================
@@ -489,8 +486,8 @@ INTENT_CONFIG = {
         "label_map": {
             "farm_name": "nom domaine",
             "surface": "superficie totale",
-            "zone": "zone géographique"
-        }
+            "zone": "zone géographique",
+        },
     },
     "FARM_UPDATE": {
         "tool_name": "update_farm",
@@ -501,10 +498,9 @@ INTENT_CONFIG = {
         "label_map": {
             "farm_id": "identifiant exploitation",
             "farm_name": "nouveau nom",
-            "surface": "superficie"
-        }
+            "surface": "superficie",
+        },
     },
-
     # =======================================================================
     # DOMAINE : PROFIL UTILISATEUR & GEO (WRITE — Générique)
     # =======================================================================
@@ -514,7 +510,7 @@ INTENT_CONFIG = {
         "action_type": "WRITE",
         "requires_farm": False,
         "label": "Mise à jour de votre position GPS réelle",
-        "label_map": {"latitude": "latitude", "longitude": "longitude"}
+        "label_map": {"latitude": "latitude", "longitude": "longitude"},
     },
     "PROFILE_SET_PREFS": {
         "tool_name": "update_communication_prefs",
@@ -522,7 +518,7 @@ INTENT_CONFIG = {
         "action_type": "WRITE",
         "requires_farm": False,
         "label": "Configuration langue et notifications",
-        "label_map": {"language": "langue", "allow_voice": "notifications vocales"}
+        "label_map": {"language": "langue", "allow_voice": "notifications vocales"},
     },
     "PROFILE_SWITCH_ROLE": {
         "tool_name": "create_agent_action",
@@ -530,9 +526,8 @@ INTENT_CONFIG = {
         "action_type": "WRITE",
         "requires_farm": False,
         "label": "Changement de mode d'interface (PRODUCER/BUYER)",
-        "label_map": {"target_role": "rôle cible"}
+        "label_map": {"target_role": "rôle cible"},
     },
-
     # =======================================================================
     # SYSTEME & SÉCURITÉ (WRITE)
     # =======================================================================
@@ -545,8 +540,8 @@ INTENT_CONFIG = {
         "label_map": {
             "target_id": "cible problème",
             "anomaly_type": "type incident",
-            "description": "détails"
-        }
+            "description": "détails",
+        },
     },
     "SYSTEM_BIND_ZONE": {
         "tool_name": "create_agent_action",
@@ -554,7 +549,7 @@ INTENT_CONFIG = {
         "action_type": "WRITE",
         "requires_farm": False,
         "label": "Rattachement territorial (zone agricole)",
-        "label_map": {"zone": "nom zone"}
+        "label_map": {"zone": "nom zone"},
     },
     "SYSTEM_COMMIT_TRANSACTION": {
         "tool_name": "commit_staged_transaction",
@@ -562,9 +557,8 @@ INTENT_CONFIG = {
         "action_type": "WRITE",
         "requires_farm": False,
         "label": "Validation définitive d'une transaction verrouillée",
-        "label_map": {"staging_id": "identifiant de staging"}
+        "label_map": {"staging_id": "identifiant de staging"},
     },
-
     # =======================================================================
     # intentions DE LECTURE (READ — Consultations MCP Réelles)
     # Mappage strict sémantique des label_map
@@ -575,7 +569,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Inventaire global multi-sites (Outil: get_stocks)",
-        "label_map": {"zone": "filtre zone", "product": "filtre produit"}
+        "label_map": {"zone": "filtre zone", "product": "filtre produit"},
     },
     "STOCK_GET_DETAIL": {
         "tool_name": "get_farm_stocks",
@@ -583,7 +577,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": True,
         "label": "Inventaire détaillé par exploitation",
-        "label_map": {"farm_id": "identifiant exploitation"}
+        "label_map": {"farm_id": "identifiant exploitation"},
     },
     "STOCK_GET_MOVEMENTS": {
         "tool_name": "get_stock_movements",
@@ -591,7 +585,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Grand livre de traçabilité d'un stock",
-        "label_map": {"stock_id": "identifiant stock"}
+        "label_map": {"stock_id": "identifiant stock"},
     },
     "SALES_GET_CATALOG": {
         "tool_name": "get_stocks",
@@ -599,7 +593,10 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": True,
         "label": "Consultation de mon catalogue de produits en vente",
-        "label_map": {"phone": "votre téléphone", "farm_id": "identifiant exploitation"}
+        "label_map": {
+            "phone": "votre téléphone",
+            "farm_id": "identifiant exploitation",
+        },
     },
     # SPLIT (2026-07-20, UX + bug de routage) : l'ancien goal unique
     # "MARKET_GET_REQUESTS" avait un sens OPPOSÉ selon le rôle — parcourir le
@@ -615,7 +612,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Parcours des appels d'offres du marché (producteur cherche à répondre)",
-        "label_map": {"zone": "zone", "product": "produit", "status": "statut"}
+        "label_map": {"zone": "zone", "product": "produit", "status": "statut"},
     },
     "MARKET_MY_REQUESTS": {
         "tool_name": "get_auctions",
@@ -624,7 +621,7 @@ INTENT_CONFIG = {
         "requires_farm": False,
         "handled_by_flow": True,
         "label": "Consultation de mes propres appels d'offres publiés (acheteur)",
-        "label_map": {"zone": "zone", "product": "produit", "status": "statut"}
+        "label_map": {"zone": "zone", "product": "produit", "status": "statut"},
     },
     "MARKET_GET_REQUEST_DETAIL": {
         "tool_name": "get_auctions_bids",
@@ -632,7 +629,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Consultation des offres reçues sur mon appel d'offres",
-        "label_map": {"auction_id": "identifiant enchère"}
+        "label_map": {"auction_id": "identifiant enchère"},
     },
     "MARKET_GET_MY_PROPOSALS": {
         "tool_name": "get_my_active_bids",
@@ -640,7 +637,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Suivi de mes propositions de vente envoyées",
-        "label_map": {"phone": "votre téléphone"}
+        "label_map": {"phone": "votre téléphone"},
     },
     "MARKET_SNAPSHOT": {
         "tool_name": "get_market_snapshot",
@@ -648,7 +645,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Cours et prix actuel du marché local",
-        "label_map": {"zone": "zone de cotation"}
+        "label_map": {"zone": "zone de cotation"},
     },
     "MARKET_SNAPSHOT_ZONAL": {
         "tool_name": "get_zone_market_overview",
@@ -656,7 +653,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Volumes de transaction et tendances locaux",
-        "label_map": {"zone": "zone"}
+        "label_map": {"zone": "zone"},
     },
     "AGRO_GET_CYCLES": {
         "tool_name": "get_crop_cycles",
@@ -664,7 +661,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": True,
         "label": "Historique des cycles de culture d'un domaine",
-        "label_map": {"farm_id": "identifiant exploitation"}
+        "label_map": {"farm_id": "identifiant exploitation"},
     },
     "AGRO_GET_STANDARDS": {
         "tool_name": "get_crop_requirements",
@@ -672,7 +669,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Besoins biologiques théoriques d'une culture",
-        "label_map": {"product": "culture"}
+        "label_map": {"product": "culture"},
     },
     "AGRO_GET_ECONOMICS": {
         "tool_name": "get_cycle_economics",
@@ -680,7 +677,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Bilan financier analytique d'une parcelle",
-        "label_map": {"cycle_id": "identifiant cycle"}
+        "label_map": {"cycle_id": "identifiant cycle"},
     },
     "AGRO_GET_RISKS": {
         "tool_name": "get_active_sanitary_risks",
@@ -688,7 +685,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Analyse des risques sanitaires régionaux",
-        "label_map": {"zone": "zone"}
+        "label_map": {"zone": "zone"},
     },
     "FARM_GET_MY_LIST": {
         "tool_name": "get_producer_farm",
@@ -696,7 +693,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Liste de mes domaines et exploitations AgriConnect",
-        "label_map": {"phone": "votre téléphone"}
+        "label_map": {"phone": "votre téléphone"},
     },
     "FINANCE_GET_SUMMARY": {
         "tool_name": "get_expense_summary",
@@ -704,7 +701,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": True,
         "label": "Bilan comptable synthétique d'exploitation",
-        "label_map": {"phone": "téléphone producteur", "days": "historique (jours)"}
+        "label_map": {"phone": "téléphone producteur", "days": "historique (jours)"},
     },
     "PROFILE_GET_MCP_USER": {
         "tool_name": "get_user_by_phone",
@@ -712,7 +709,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Consultation profil AgriConnect par téléphone",
-        "label_map": {"phone": "téléphone de recherche"}
+        "label_map": {"phone": "téléphone de recherche"},
     },
     "PROFILE_GET_TRUST": {
         "tool_name": "get_trust_score",
@@ -720,7 +717,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Note de confiance commerciale",
-        "label_map": {"phone": "votre téléphone"}
+        "label_map": {"phone": "votre téléphone"},
     },
     "PROFILE_GET_CONTEXT": {
         "tool_name": "get_user_context",
@@ -728,7 +725,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Variables de session NLU/Agent (Zéro MCP)",
-        "label_map": {}
+        "label_map": {},
     },
     "DASHBOARD_PRODUCER": {
         "tool_name": "get_producer_dashboard",
@@ -736,7 +733,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Tableau de bord d'exploitation AgriConnect",
-        "label_map": {"phone": "votre téléphone"}
+        "label_map": {"phone": "votre téléphone"},
     },
     "SEARCH_PRODUCTS": {
         "tool_name": "search_products",
@@ -744,7 +741,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Recherche par mot-clé dans le catalogue",
-        "label_map": {"product": "terme recherché"}
+        "label_map": {"product": "terme recherché"},
     },
     "SEARCH_NEARBY": {
         "tool_name": "get_all_zone_market_overview",
@@ -752,7 +749,7 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Recherche infrastructures / offres de proximité GPS",
-        "label_map": {"latitude": "latitude", "longitude": "longitude"}
+        "label_map": {"latitude": "latitude", "longitude": "longitude"},
     },
     "VALIDATE_PRICE": {
         "tool_name": "check_price_anomaly",
@@ -760,7 +757,11 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Vérification cohérence prix face à la tendance marché",
-        "label_map": {"product": "produit", "price": "prix proposé", "zone": "marché référence"}
+        "label_map": {
+            "product": "produit",
+            "price": "prix proposé",
+            "zone": "marché référence",
+        },
     },
     "SYSTEM_GET_PENDING": {
         "tool_name": "get_pending_actions",
@@ -768,8 +769,8 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "label": "Consultation des actions système en attente de traitement",
-        "label_map": {}
-    }
+        "label_map": {},
+    },
 }
 
 
@@ -972,16 +973,28 @@ INTENT_ROLE = {
 # coaching hints, and analytics. Adds clarity for the unit normalizer
 # (e.g. "SAC" of millet ≈ 100kg, "PANIER" of tomato ≈ 25kg).
 # =======================================================================
-INTENT_DOMAIN = {k: ("STOCK"     if k.startswith("STOCK_")       else
-                     "SALES"     if k.startswith("SALES_")       else
-                     "PROCUREMENT" if k.startswith("PROCUREMENT_") else
-                     "MARKET"    if k.startswith("MARKET_") or k.startswith("SEARCH_") or k == "VALIDATE_PRICE" else
-                     "CROP"      if k.startswith("CROP_") or k.startswith("AGRO_") or k.startswith("DECLARE_") else
-                     "FARM"      if k.startswith("FARM_") else
-                     "FINANCE"   if k.startswith("FINANCE_") else
-                     "PROFILE"   if k.startswith("PROFILE_") or k == "DASHBOARD_PRODUCER" else
-                     "SYSTEM")
-                 for k in INTENT_CONFIG}
+INTENT_DOMAIN = {
+    k: (
+        "STOCK"
+        if k.startswith("STOCK_")
+        else "SALES"
+        if k.startswith("SALES_")
+        else "PROCUREMENT"
+        if k.startswith("PROCUREMENT_")
+        else "MARKET"
+        if k.startswith("MARKET_") or k.startswith("SEARCH_") or k == "VALIDATE_PRICE"
+        else "CROP"
+        if k.startswith("CROP_") or k.startswith("AGRO_") or k.startswith("DECLARE_")
+        else "FARM"
+        if k.startswith("FARM_")
+        else "FINANCE"
+        if k.startswith("FINANCE_")
+        else "PROFILE"
+        if k.startswith("PROFILE_") or k == "DASHBOARD_PRODUCER"
+        else "SYSTEM"
+    )
+    for k in INTENT_CONFIG
+}
 
 
 # =======================================================================
@@ -1024,15 +1037,34 @@ INTENT_DISAMBIGUATION = {
             "indiquer une date de disponibilité et permettre les précommandes."
         ),
         "options": [
-            ("SALES_PUBLISH_PRODUCT",
-             "📦 Prêt maintenant (disponible immédiatement, publié sur le marché)"),
-            ("DECLARE_CROP_CYCLE",
-             "⏳ Prêt plus tard (récolte ou production à venir, avec une date)"),
+            (
+                "SALES_PUBLISH_PRODUCT",
+                "📦 Prêt maintenant (disponible immédiatement, publié sur le marché)",
+            ),
+            (
+                "DECLARE_CROP_CYCLE",
+                "⏳ Prêt plus tard (récolte ou production à venir, avec une date)",
+            ),
         ],
         "lexical_hints": [
-            "j'ai", "j ai", "récolte", "recolte", "disponible", "en stock", "stocké",
-            "poussin", "poussins", "veau", "veaux", "agneau", "agneaux", "chevreau",
-            "semis", "jeune plant", "jeunes plants", "en cours de croissance",
+            "j'ai",
+            "j ai",
+            "récolte",
+            "recolte",
+            "disponible",
+            "en stock",
+            "stocké",
+            "poussin",
+            "poussins",
+            "veau",
+            "veaux",
+            "agneau",
+            "agneaux",
+            "chevreau",
+            "semis",
+            "jeune plant",
+            "jeunes plants",
+            "en cours de croissance",
             # Verbes de vente/publication BRUTS (sans info de disponibilité) :
             # "je veux publier des chèvres", "vendre des tomates"... doivent
             # TOUJOURS demander "prêt maintenant ou plus tard ?" plutôt que de
@@ -1042,9 +1074,17 @@ INTENT_DISAMBIGUATION = {
             # désambiguïser ce cas. Les entités déjà extraites (quantité/prix)
             # sont sauvegardées par semantic_disambiguation avant le menu, donc
             # aucun tour perdu — juste un choix explicite en 2 boutons.
-            "publier", "publie", "publiez", "mettre en vente", "mets en vente",
-            "mise en vente", "vendre", "proposer", "propose",
-            "mettre sur le marché", "mettre sur le marche",
+            "publier",
+            "publie",
+            "publiez",
+            "mettre en vente",
+            "mets en vente",
+            "mise en vente",
+            "vendre",
+            "proposer",
+            "propose",
+            "mettre sur le marché",
+            "mettre sur le marche",
         ],
     },
     # "Je veux vendre" / "espace vendeur" — le producteur exprime une intention
@@ -1060,15 +1100,16 @@ INTENT_DISAMBIGUATION = {
     # semantic_disambiguation._detect_disambiguation_candidates) laisserait
     # sinon STOCK_OR_SALES_DECLARATION perdre face à un "vendre" trop court.
     "SELLER_HUB": {
-        "candidates": ["SALES_PUBLISH_PRODUCT", "DECLARE_CROP_CYCLE", "MARKET_BROWSE_REQUESTS"],
+        "candidates": [
+            "SALES_PUBLISH_PRODUCT",
+            "DECLARE_CROP_CYCLE",
+            "MARKET_BROWSE_REQUESTS",
+        ],
         "title": "🧑‍🌾 Espace Vendeur — que souhaitez-vous faire ?",
         "options": [
-            ("SALES_PUBLISH_PRODUCT",
-             "📦 Publier un produit disponible maintenant"),
-            ("DECLARE_CROP_CYCLE",
-             "⏳ Déclarer une récolte ou production à venir"),
-            ("MARKET_BROWSE_REQUESTS",
-             "📢 Répondre à un appel d'offres d'un acheteur"),
+            ("SALES_PUBLISH_PRODUCT", "📦 Publier un produit disponible maintenant"),
+            ("DECLARE_CROP_CYCLE", "⏳ Déclarer une récolte ou production à venir"),
+            ("MARKET_BROWSE_REQUESTS", "📢 Répondre à un appel d'offres d'un acheteur"),
         ],
         "roles": ["PRODUCER"],
         # Volontairement SANS "je veux vendre" / "vendre mes produits" : ces
@@ -1076,9 +1117,14 @@ INTENT_DISAMBIGUATION = {
         # 100kg de tomates à 300f maintenant"), qui doit être traité
         # directement plutôt que ré-interrompu par ce menu générique.
         "lexical_hints": [
-            "comment vendre", "aide pour vendre", "aide à la vente",
-            "espace vendeur", "menu vendeur", "options de vente",
-            "que puis-je vendre", "comment vendre mes produits",
+            "comment vendre",
+            "aide pour vendre",
+            "aide à la vente",
+            "espace vendeur",
+            "menu vendeur",
+            "options de vente",
+            "que puis-je vendre",
+            "comment vendre mes produits",
         ],
     },
     # "J'ai vendu 100kg" — already happened
@@ -1086,24 +1132,44 @@ INTENT_DISAMBIGUATION = {
         "candidates": ["SALES_RECORD_DIRECT", "STOCK_REMOVE_PARTIAL"],
         "title": "Voulez-vous enregistrer une vente ou une simple sortie de stock ?",
         "options": [
-            ("SALES_RECORD_DIRECT",
-             "💰 Vente : avec montant encaissé (impacte mon chiffre d'affaires)"),
-            ("STOCK_REMOVE_PARTIAL",
-             "📤 Sortie : ajustement du stock sans revenu (perte, autoconsommation)"),
+            (
+                "SALES_RECORD_DIRECT",
+                "💰 Vente : avec montant encaissé (impacte mon chiffre d'affaires)",
+            ),
+            (
+                "STOCK_REMOVE_PARTIAL",
+                "📤 Sortie : ajustement du stock sans revenu (perte, autoconsommation)",
+            ),
         ],
-        "lexical_hints": ["j'ai vendu", "j ai vendu", "donné", "donne", "perdu", "consommé"],
+        "lexical_hints": [
+            "j'ai vendu",
+            "j ai vendu",
+            "donné",
+            "donne",
+            "perdu",
+            "consommé",
+        ],
     },
     # "Je cherche du mais" — buy via auction or just look at catalog
     "BUY_VS_BROWSE": {
         "candidates": ["BUYER_REQUEST", "PROCUREMENT_CREATE_REQUEST"],
         "title": "Voulez-vous consulter le catalogue ou lancer un appel d'offres ?",
         "options": [
-            ("BUYER_REQUEST",
-             "🛒 Catalogue : voir ce qui est disponible immédiatement"),
-            ("PROCUREMENT_CREATE_REQUEST",
-             "📢 Appel d'offres : demander à nos producteurs de répondre (gros volumes, rupture de stock)"),
+            (
+                "BUYER_REQUEST",
+                "🛒 Catalogue : voir ce qui est disponible immédiatement",
+            ),
+            (
+                "PROCUREMENT_CREATE_REQUEST",
+                "📢 Appel d'offres : demander à nos producteurs de répondre (gros volumes, rupture de stock)",
+            ),
         ],
-        "lexical_hints": ["je cherche", "j'aimerais acheter", "il me faut", "besoin de"],
+        "lexical_hints": [
+            "je cherche",
+            "j'aimerais acheter",
+            "il me faut",
+            "besoin de",
+        ],
     },
     # "Le maïs est à combien" — multiple market lookups
     "MARKET_PRICE_LOOKUP": {
@@ -1123,7 +1189,15 @@ INTENT_DISAMBIGUATION = {
             ("BUYER_PREORDER_INIT", "✅ Finaliser la commande"),
             ("BUYER_VIEW_CART", "🧺 Voir le panier"),
         ],
-        "lexical_hints": ["reprendre", "reprends", "reprenons", "continuer", "continue", "continuer ma commande", "retour"],
+        "lexical_hints": [
+            "reprendre",
+            "reprends",
+            "reprenons",
+            "continuer",
+            "continue",
+            "continuer ma commande",
+            "retour",
+        ],
     },
     "ORDER_TRACKING_INTENT": {
         # Refonte double-rôle : "mes commandes" est structurellement ambigu
@@ -1134,19 +1208,32 @@ INTENT_DISAMBIGUATION = {
         # issue vers ce qu'il cherchait réellement. Voir SALES_LIST_ORDERS
         # (`tool_name=get_producer_orders`, PRODUCER, intent.py).
         "candidates": [
-            "BUYER_CHECK_ORDER_STATUS", "BUYER_LIST_ORDERS", "BUYER_CANCEL_ORDER",
+            "BUYER_CHECK_ORDER_STATUS",
+            "BUYER_LIST_ORDERS",
+            "BUYER_CANCEL_ORDER",
             "SALES_LIST_ORDERS",
         ],
         "title": "Que souhaitez-vous faire concernant vos commandes ?",
         "options": [
-            ("BUYER_CHECK_ORDER_STATUS", "📋 Voir le statut d'une commande que j'ai passée"),
+            (
+                "BUYER_CHECK_ORDER_STATUS",
+                "📋 Voir le statut d'une commande que j'ai passée",
+            ),
             ("BUYER_LIST_ORDERS", "📦 Lister toutes les commandes que j'ai passées"),
             ("BUYER_CANCEL_ORDER", "❌ Annuler une commande que j'ai passée"),
             ("SALES_LIST_ORDERS", "🧾 Voir les commandes reçues sur mes produits"),
         ],
         "lexical_hints": [
-            "ma commande", "mes commandes", "où est", "statut", "status",
-            "suivi", "suivre", "tracking", "livraison", "annuler commande",
+            "ma commande",
+            "mes commandes",
+            "où est",
+            "statut",
+            "status",
+            "suivi",
+            "suivre",
+            "tracking",
+            "livraison",
+            "annuler commande",
         ],
     },
     # RÉDUIT À 2 VOIES (2026-07-20, UX + bug) : la 3ᵉ option "Parcourir les
@@ -1160,16 +1247,33 @@ INTENT_DISAMBIGUATION = {
         "title": "Que souhaitez-vous faire concernant vos appels d'offres ?",
         "options": [
             ("BUYER_LIST_AUCTIONS", "📋 Voir mes appels d'offres (tous statuts)"),
-            ("BUYER_CHECK_AUCTION_STATUS", "🔍 Détail d'un appel d'offres et propositions reçues"),
+            (
+                "BUYER_CHECK_AUCTION_STATUS",
+                "🔍 Détail d'un appel d'offres et propositions reçues",
+            ),
         ],
         "roles": ["BUYER"],
         "lexical_hints": [
-            "mes enchères", "mes encheres", "mon enchère", "mon enchere",
-            "appel d'offres", "appel doffres", "appels d'offres",
-            "mes appels", "mes appel", "mon appel", "suivre mes appel",
-            "suivre mes appels", "suivi de mes appels", "voir mes appels",
-            "mes demandes", "offres reçues", "offres recues",
-            "état enchère", "etat enchere", "statut enchère",
+            "mes enchères",
+            "mes encheres",
+            "mon enchère",
+            "mon enchere",
+            "appel d'offres",
+            "appel doffres",
+            "appels d'offres",
+            "mes appels",
+            "mes appel",
+            "mon appel",
+            "suivre mes appel",
+            "suivre mes appels",
+            "suivi de mes appels",
+            "voir mes appels",
+            "mes demandes",
+            "offres reçues",
+            "offres recues",
+            "état enchère",
+            "etat enchere",
+            "statut enchère",
         ],
     },
 }
@@ -1179,6 +1283,7 @@ INTENT_DISAMBIGUATION = {
 # SCHEMA-DRIVEN ACCESSORS — canonical functions consumed by executor,
 # validator, TaskHandler, and flow logic. Single source of truth.
 # =======================================================================
+
 
 def get_intent_config(intent: str) -> dict:
     """Return full config dict for *intent*, or empty dict if unknown."""
@@ -1206,7 +1311,13 @@ def intent_requires_farm(intent: str) -> bool:
 
 
 __all__ = [
-    "INTENT_CONFIG", "INTENT_ROLE", "INTENT_DOMAIN", "INTENT_DISAMBIGUATION",
-    "get_intent_config", "get_required_fields", "get_tool_name",
-    "is_write_intent", "intent_requires_farm",
+    "INTENT_CONFIG",
+    "INTENT_ROLE",
+    "INTENT_DOMAIN",
+    "INTENT_DISAMBIGUATION",
+    "get_intent_config",
+    "get_required_fields",
+    "get_tool_name",
+    "is_write_intent",
+    "intent_requires_farm",
 ]

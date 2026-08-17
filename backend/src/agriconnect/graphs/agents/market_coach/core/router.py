@@ -16,27 +16,37 @@ Architecture anti-circularité :
   Les flows ``buyer/flow`` et ``producer/flow`` sont importés LOCALEMENT
   dans ``resolve()`` pour casser le cycle ``core → flows → core``.
 """
+
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, FrozenSet, Optional, Protocol, Sequence, runtime_checkable
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    Optional,
+    Protocol,
+    Sequence,
+    runtime_checkable,
+)
 
+from agriconnect.graphs.agents.market_coach.core.goals import (
+    BUYER_AUCTION_TRACKING_GOALS,
+    BUYER_CART_GOALS,
+    BUYER_NEGOTIATION_GOALS,
+    BUYER_ORDER_TRACKING_GOALS,
+    BUYER_PREORDER_GOALS,
+    PRODUCER_ESCROW_GOALS,
+    PRODUCER_RESOLVER_GOALS,
+    PRODUCER_UPDATE_GOALS,
+)
+from agriconnect.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     DomainResult,
     MenuRequest,
 )
-from agriconnect.graphs.agents.market_coach.core.goals import (
-    BUYER_CART_GOALS,
-    BUYER_NEGOTIATION_GOALS,
-    BUYER_ORDER_TRACKING_GOALS,
-    BUYER_AUCTION_TRACKING_GOALS,
-    BUYER_PREORDER_GOALS,
-    PRODUCER_RESOLVER_GOALS,
-    PRODUCER_UPDATE_GOALS,
-    PRODUCER_ESCROW_GOALS,
-)
-from agriconnect.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_ROLE
 
 logger = logging.getLogger("AgriConnect.Market.DomainRouter")
@@ -46,6 +56,7 @@ logger = logging.getLogger("AgriConnect.Market.DomainRouter")
 # PROTOCOL (structural typing — les flows buyer/producer n'ont pas
 # besoin d'hériter quoi que ce soit, ils exposent juste `resolve`).
 # =====================================================================
+
 
 @runtime_checkable
 class DomainResolver(Protocol):
@@ -62,6 +73,7 @@ class DomainResolver(Protocol):
 # ROUTE RULE — une décision de routage post-validator
 # =====================================================================
 
+
 @dataclass(frozen=True)
 class RouteRule:
     """Si le goal courant appartient à ``goals``, router vers ``target``.
@@ -69,6 +81,7 @@ class RouteRule:
     ``guard`` optionnel : si fourni et qu'il retourne False, la règle est
     bloquée et la décision retombe sur ``to_strategy`` (réponse utilisateur).
     """
+
     goals: FrozenSet[str]
     target: str
     guard: Optional[Callable[[Dict[str, Any]], bool]] = None
@@ -108,6 +121,7 @@ def _goal_domain(state: Dict[str, Any]) -> str:
 # =====================================================================
 # DOMAIN ROUTER — resolve() + decide() fusionnés
 # =====================================================================
+
 
 class DomainRouter:
     """Routeur de domaine unifié : contexte + post-validator."""
@@ -150,12 +164,16 @@ class DomainRouter:
             if rule.guard is not None and not rule.guard(state):
                 logger.info(
                     "[Router] Rule %s blocked by guard (goal=%s, status=%s) → to_strategy",
-                    rule.target, goal, status,
+                    rule.target,
+                    goal,
+                    status,
                 )
                 return "to_strategy"
             logger.info(
                 "[Router] Routing to %s (goal=%s, status=%s)",
-                rule.target, goal, status,
+                rule.target,
+                goal,
+                status,
             )
             return rule.target
 
@@ -192,6 +210,7 @@ class DomainRouter:
         from agriconnect.graphs.agents.market_coach.flows.buyer.flow import (
             buyer_context_resolver,
         )
+
         raw = await buyer_context_resolver(state, mc_runtime)
         return _wrap_raw_result(raw)
 
@@ -203,6 +222,7 @@ class DomainRouter:
         from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
             producer_context_resolver,
         )
+
         raw = await producer_context_resolver(state, mc_runtime)
         return _wrap_raw_result(raw)
 
@@ -217,16 +237,28 @@ class DomainRouter:
         from agriconnect.graphs.agents.market_coach.interpreter.routing import (
             make_route_after_validator,
         )
+
         rules = [
             RouteRule(goals=BUYER_CART_GOALS, target="to_cart", guard=_cart_guard),
-            RouteRule(goals=BUYER_NEGOTIATION_GOALS, target="to_negotiation", guard=_negotiation_guard),
-            RouteRule(goals=BUYER_ORDER_TRACKING_GOALS | BUYER_AUCTION_TRACKING_GOALS, target="to_order_tracking"),
+            RouteRule(
+                goals=BUYER_NEGOTIATION_GOALS,
+                target="to_negotiation",
+                guard=_negotiation_guard,
+            ),
+            RouteRule(
+                goals=BUYER_ORDER_TRACKING_GOALS | BUYER_AUCTION_TRACKING_GOALS,
+                target="to_order_tracking",
+            ),
             RouteRule(goals=BUYER_PREORDER_GOALS, target="to_resolver"),
             RouteRule(goals=PRODUCER_RESOLVER_GOALS, target="to_resolver"),
             RouteRule(goals=PRODUCER_UPDATE_GOALS, target="to_resolver"),
             RouteRule(goals=PRODUCER_ESCROW_GOALS, target="to_resolver"),
         ]
-        return cls("UNIFIED", rules=rules, fallback_router=make_route_after_validator("UNIFIED"))
+        return cls(
+            "UNIFIED",
+            rules=rules,
+            fallback_router=make_route_after_validator("UNIFIED"),
+        )
 
     # Compat : anciens points d'appel — renvoient désormais le même routeur
     # unifié (il n'y a plus de graphe/routeur séparé par rôle).
@@ -247,6 +279,7 @@ def get_domain_router(role: str | None = None) -> DomainRouter:
 # =====================================================================
 # HELPERS
 # =====================================================================
+
 
 def _extract_menu_from_patch(patch: Dict[str, Any]) -> Optional[MenuRequest]:
     menu = patch.pop("pending_menu", None)

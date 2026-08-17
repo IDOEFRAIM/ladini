@@ -17,6 +17,7 @@ logger = logging.getLogger("AgriConnect.Market.Rendering")
 # CONTEXTE DE RENDU — calculé une fois par le dispatcher
 # =====================================================================
 
+
 @dataclass(slots=True)
 class RenderContext:
     state: Dict[str, Any]
@@ -45,9 +46,17 @@ def label_for_field(goal: Optional[str], field: Optional[str]) -> str:
     if not field:
         return "cette information"
     clean_field = field.replace("_mentioned", "").replace("_for_sale", "")
-    goal_config = (INTENT_CONFIG.get(goal or "") or {})
+    goal_config = INTENT_CONFIG.get(goal or "") or {}
     label_map = goal_config.get("label_map") or {}
-    return label_map.get(field, label_map.get(clean_field, _DEFAULT_LABEL_MAP.get(field, _DEFAULT_LABEL_MAP.get(clean_field, clean_field))))
+    return label_map.get(
+        field,
+        label_map.get(
+            clean_field,
+            _DEFAULT_LABEL_MAP.get(
+                field, _DEFAULT_LABEL_MAP.get(clean_field, clean_field)
+            ),
+        ),
+    )
 
 
 # POURQUOI chaque champ compte (valeur métier montrée à l'utilisateur)
@@ -70,6 +79,7 @@ FIELD_BUSINESS_REASON: Dict[str, str] = {
 # =====================================================================
 # GOAL RESOLUTION & DÉPLIAGE DÉFENSIF
 # =====================================================================
+
 
 def resolve_goal_for_ui(state: Dict[str, Any]) -> Optional[str]:
     """Résout un goal stable pour les métadonnées AG-UI (jamais 'UNKNOWN')."""
@@ -108,6 +118,7 @@ def unwrap_execution_result(exec_result: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(raw, str) and raw.strip():
             try:
                 from agriconnect.graphs.agents.market_coach.utils import ensure_dict
+
                 parsed = ensure_dict(raw)
             except Exception:
                 parsed = None
@@ -117,7 +128,9 @@ def unwrap_execution_result(exec_result: Dict[str, Any]) -> Dict[str, Any]:
                 if outer_message and not current.get("message"):
                     current["message"] = outer_message
                 continue
-        has_wrapper_shape = any(k in nested for k in ("status", "data", "message", "error"))
+        has_wrapper_shape = any(
+            k in nested for k in ("status", "data", "message", "error")
+        )
         if not has_wrapper_shape:
             break
         outer_message = current.get("message")
@@ -130,6 +143,7 @@ def unwrap_execution_result(exec_result: Dict[str, Any]) -> Dict[str, Any]:
 # =====================================================================
 # FORMAT HELPERS
 # =====================================================================
+
 
 def fmt_num(val: Any) -> str:
     """50.0 -> '50', 12.5 -> '12.5'. Voir core/formatting.py — jamais de
@@ -156,6 +170,7 @@ def fmt_date(date_val: Any) -> Optional[str]:
 # COMPOSANTS AG-UI — constructeurs uniques (zéro dict inline dupliqué)
 # =====================================================================
 
+
 def status_component(kind: str, **kwargs: Any) -> Dict[str, Any]:
     return {
         "lc_type": "constructor",
@@ -164,8 +179,9 @@ def status_component(kind: str, **kwargs: Any) -> Dict[str, Any]:
     }
 
 
-def list_menu_component(title: str, options: List[Dict[str, str]],
-                        metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def list_menu_component(
+    title: str, options: List[Dict[str, str]], metadata: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     return {
         "lc_type": "constructor",
         "id": ["ag_ui", "ListMenu"],
@@ -184,7 +200,9 @@ def indexed_options(candidates: List[str]) -> List[Dict[str, str]]:
 _USER_FACING_CORRECTIONS = {"product", "quantity", "price", "unit", "zone"}
 
 
-def apply_corrections(state: Dict[str, Any], response: Dict[str, Any]) -> Dict[str, Any]:
+def apply_corrections(
+    state: Dict[str, Any], response: Dict[str, Any]
+) -> Dict[str, Any]:
     status = str(state.get("status") or "").upper().strip()
     strategy = str(state.get("response_strategy") or "").upper().strip()
     if status == "COMPLETED" or strategy == "SUCCESS":
@@ -217,7 +235,9 @@ def apply_corrections(state: Dict[str, Any], response: Dict[str, Any]) -> Dict[s
 
     if parts:
         acknowledgement = "\n\n" + "\n".join(parts)
-        response["final_response"] = f"{response.get('final_response', '')}{acknowledgement}"
+        response["final_response"] = (
+            f"{response.get('final_response', '')}{acknowledgement}"
+        )
         working = dict(working)
         working["recent_corrections"] = None
         response["working_memory"] = working

@@ -1,9 +1,7 @@
+"""Buyer domain shared helpers (support footer)."""
 from __future__ import annotations
 
-"""Buyer domain shared helpers (support footer)."""
-
 from typing import Optional
-
 
 SUPPORT_FOOTER = (
     "🙏 Toute l'équipe Ladini s'excuse pour la gêne occasionnée.\n"

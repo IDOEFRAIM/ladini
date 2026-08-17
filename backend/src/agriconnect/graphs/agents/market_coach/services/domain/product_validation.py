@@ -3,11 +3,12 @@
 Extracted from ``interpreter/routing.py`` to isolate domain-level product
 validation from the interpreter orchestration layer.
 """
+
 from __future__ import annotations
 
 import logging
 import re as _re
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from agriconnect.graphs.agents.market_coach.interpreter.entities import (
     _GENERIC_PRODUCT_STOPWORDS,
@@ -18,7 +19,6 @@ from agriconnect.graphs.agents.market_coach.services.mcp.gateway import ProductG
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     _clean_candidate_text,
-    is_success_response,
 )
 
 logger = logging.getLogger("AgriConnect.Market.ProductValidation")

@@ -6,8 +6,10 @@ and DDL statements for performance indexes.
 
 from __future__ import annotations
 
+import math
+import re
 from logging import getLogger
-from typing import Any
+from typing import Any, Optional
 
 from agriconnect.domain.orm_base import _uuid4
 
@@ -15,19 +17,18 @@ logger = getLogger("agriconnect.services.database")
 
 
 def _uuid() -> str:
-	"""Return a new UUID4 string."""
-	return _uuid4()
+    """Return a new UUID4 string."""
+    return _uuid4()
 
-
-import re
-from typing import Any, Optional
 
 # Caractères de contrôle (hors tab/newline) : neutralisés silencieusement pour
 # éviter qu'un payload agent bruité ne pollue les logs ou les colonnes texte.
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
-def clean_text(value: Any, field: str = "champ", *, required: bool = False, max_length: int = 255) -> Optional[str]:
+def clean_text(
+    value: Any, field: str = "champ", *, required: bool = False, max_length: int = 255
+) -> Optional[str]:
     """Nettoyage générique pour les chaînes de caractères.
 
     Note sécurité : ne protège PAS contre l'injection SQL (inutile — toutes les
@@ -63,12 +64,8 @@ def escape_like(term: str) -> str:
     """
     if term is None:
         return ""
-    return (
-        str(term)
-        .replace("\\", "\\\\")
-        .replace("%", "\\%")
-        .replace("_", "\\_")
-    )
+    return str(term).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
 
 def normalize_phone(phone: Any, required: bool = True) -> str:
     """
@@ -80,17 +77,18 @@ def normalize_phone(phone: Any, required: bool = True) -> str:
         if required:
             raise ValueError("Le numéro de téléphone est obligatoire")
         return ""
-    
+
     phone_str = str(phone).strip()
-    
+
     # On ne garde que les chiffres et le symbole '+'
     # Utile pour contrer les saisies type "+226 70 00 00 00" -> "+22670000000"
     normalized = re.sub(r"[^\d+]", "", phone_str)
-    
+
     if required and not normalized:
         raise ValueError("Numéro de téléphone invalide")
-        
+
     return normalized
+
 
 def normalize_uuid(uuid_val: Any) -> Optional[str]:
     """Assure qu'un UUID est bien au format string propre pour SQL."""
@@ -100,21 +98,21 @@ def normalize_uuid(uuid_val: Any) -> Optional[str]:
 
 
 def positive_float(value: Any, field: str, *, allow_zero: bool = False) -> float:
-	try:
-		number = float(value)
-	except (TypeError, ValueError) as exc:
-		raise ValueError(f"{field} must be numeric") from exc
-	if number < 0 or (number == 0 and not allow_zero):
-		raise ValueError(f"{field} must be positive")
-	return number
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be numeric") from exc
+    if number < 0 or (number == 0 and not allow_zero):
+        raise ValueError(f"{field} must be positive")
+    return number
 
 
 def clamp_limit(value: Any, default: int = 20, maximum: int = 100) -> int:
-	try:
-		limit = int(value)
-	except (TypeError, ValueError):
-		limit = default
-	return max(1, min(limit, maximum))
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        limit = default
+    return max(1, min(limit, maximum))
 
 
 # CORRECTIF AUDIT : les DDL étaient (a) NON qualifiés par schéma alors que les
@@ -136,85 +134,83 @@ def clamp_limit(value: Any, default: int = 20, maximum: int = 100) -> int:
 # textuel interrogé par `auction.py` (resolve_sub_category, create_auction,
 # get_auctions, get_price_recommendation).
 PERFORMANCE_INDEX_DDL = (
-	# Extension requise pour SIMILARITY / opérateur `%` / index GIN trigram.
-	"CREATE EXTENSION IF NOT EXISTS pg_trgm",
-
-	# products.name — recherche catalogue (get_public_products, search_products).
-	"CREATE INDEX IF NOT EXISTS ix_products_name_trgm "
-	"ON marketplace.products USING gin (name gin_trgm_ops)",
-	# market_offers.product_label — recherche offres/préventes futures.
-	"CREATE INDEX IF NOT EXISTS ix_market_offers_label_trgm "
-	"ON marketplace.market_offers USING gin (product_label gin_trgm_ops)",
-	# sub_categories.name — résolution produit pour enchères/appels d'offres.
-	"CREATE INDEX IF NOT EXISTS ix_subcategories_name_trgm "
-	"ON governance.sub_categories USING gin (name gin_trgm_ops)",
-	# zones.name — résolution de secteur logistique (livraison, marché local).
-	"CREATE INDEX IF NOT EXISTS ix_zones_name_trgm "
-	"ON governance.zones USING gin (name gin_trgm_ops)",
+    # Extension requise pour SIMILARITY / opérateur `%` / index GIN trigram.
+    "CREATE EXTENSION IF NOT EXISTS pg_trgm",
+    # products.name — recherche catalogue (get_public_products, search_products).
+    "CREATE INDEX IF NOT EXISTS ix_products_name_trgm "
+    "ON marketplace.products USING gin (name gin_trgm_ops)",
+    # market_offers.product_label — recherche offres/préventes futures.
+    "CREATE INDEX IF NOT EXISTS ix_market_offers_label_trgm "
+    "ON marketplace.market_offers USING gin (product_label gin_trgm_ops)",
+    # sub_categories.name — résolution produit pour enchères/appels d'offres.
+    "CREATE INDEX IF NOT EXISTS ix_subcategories_name_trgm "
+    "ON governance.sub_categories USING gin (name gin_trgm_ops)",
+    # zones.name — résolution de secteur logistique (livraison, marché local).
+    "CREATE INDEX IF NOT EXISTS ix_zones_name_trgm "
+    "ON governance.zones USING gin (name gin_trgm_ops)",
 )
 
 # Colonnes ajoutées après la création initiale du schéma — ALTER TABLE
 # idempotents (mêmes garanties que PERFORMANCE_INDEX_DDL : rejouables sans
 # erreur, exécutés au même endroit — voir AgriDatabaseService.ensure_performance_indexes).
 SCHEMA_COLUMN_DDL = (
-	# Géolocalisation utilisateur (GPS WhatsApp natif) : nullable, ne bloque
-	# jamais un profil sans position — voir services/database/auth.py::update_geo_location.
-	"ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMP",
-	# Escrow Paydunya — voir services/database/escrow.py. Toutes nullable :
-	# une commande CASH classique n'a jamais ces champs renseignés.
-	"ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS paydunya_invoice_token VARCHAR",
-	"ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS delivery_otp VARCHAR",
-	"ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS payment_expires_at TIMESTAMP",
-	"ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS locked_amount NUMERIC(14,2)",
-	# Unicité du token (index partiel : la colonne est nullable et la
-	# contrainte ne doit s'appliquer qu'aux commandes qui en ont réellement un).
-	"CREATE UNIQUE INDEX IF NOT EXISTS ix_orders_paydunya_token "
-	"ON marketplace.orders (paydunya_invoice_token) WHERE paydunya_invoice_token IS NOT NULL",
-	# Repérage rapide des commandes en attente de paiement à expirer (cron).
-	"CREATE INDEX IF NOT EXISTS ix_orders_payment_expires_at "
-	"ON marketplace.orders (payment_expires_at) WHERE payment_status = 'PENDING'",
-	# Photos enchères/offres — voir services/database/auction.py
-	# (add_auction_photo / add_bid_photo). Toujours NOT NULL avec un défaut
-	# tableau vide, même pattern que Product.images.
-	"ALTER TABLE marketplace.auctions ADD COLUMN IF NOT EXISTS images TEXT[] NOT NULL DEFAULT '{}'",
-	"ALTER TABLE marketplace.bids ADD COLUMN IF NOT EXISTS images TEXT[] NOT NULL DEFAULT '{}'",
+    # Géolocalisation utilisateur (GPS WhatsApp natif) : nullable, ne bloque
+    # jamais un profil sans position — voir services/database/auth.py::update_geo_location.
+    "ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMP",
+    # Escrow Paydunya — voir services/database/escrow.py. Toutes nullable :
+    # une commande CASH classique n'a jamais ces champs renseignés.
+    "ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS paydunya_invoice_token VARCHAR",
+    "ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS delivery_otp VARCHAR",
+    "ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS payment_expires_at TIMESTAMP",
+    "ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS locked_amount NUMERIC(14,2)",
+    # Unicité du token (index partiel : la colonne est nullable et la
+    # contrainte ne doit s'appliquer qu'aux commandes qui en ont réellement un).
+    "CREATE UNIQUE INDEX IF NOT EXISTS ix_orders_paydunya_token "
+    "ON marketplace.orders (paydunya_invoice_token) WHERE paydunya_invoice_token IS NOT NULL",
+    # Repérage rapide des commandes en attente de paiement à expirer (cron).
+    "CREATE INDEX IF NOT EXISTS ix_orders_payment_expires_at "
+    "ON marketplace.orders (payment_expires_at) WHERE payment_status = 'PENDING'",
+    # Photos enchères/offres — voir services/database/auction.py
+    # (add_auction_photo / add_bid_photo). Toujours NOT NULL avec un défaut
+    # tableau vide, même pattern que Product.images.
+    "ALTER TABLE marketplace.auctions ADD COLUMN IF NOT EXISTS images TEXT[] NOT NULL DEFAULT '{}'",
+    "ALTER TABLE marketplace.bids ADD COLUMN IF NOT EXISTS images TEXT[] NOT NULL DEFAULT '{}'",
 )
 
 
-import math
-
-
 def haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-	"""Distance orthodromique (grand cercle) entre deux points GPS, en kilomètres.
+    """Distance orthodromique (grand cercle) entre deux points GPS, en kilomètres.
 
-	Utilitaire partagé pour tout filtre de proximité (produits, appels
-	d'offres, mise en relation producteur/acheteur). Retourne 0.0 si une
-	coordonnée est manquante/nulle plutôt que de lever une erreur — cohérent
-	avec le principe "l'absence de GPS ne bloque jamais" du reste du module.
-	"""
-	if not all([lat1, lon1, lat2, lon2]):
-		return 0.0
-	R = 6371.0  # Rayon moyen de la Terre en km
-	dlat = math.radians(lat2 - lat1)
-	dlon = math.radians(lon2 - lon1)
-	a = (
-		math.sin(dlat / 2) ** 2
-		+ math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
-	)
-	c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-	return round(R * c, 2)
+    Utilitaire partagé pour tout filtre de proximité (produits, appels
+    d'offres, mise en relation producteur/acheteur). Retourne 0.0 si une
+    coordonnée est manquante/nulle plutôt que de lever une erreur — cohérent
+    avec le principe "l'absence de GPS ne bloque jamais" du reste du module.
+    """
+    if not all([lat1, lon1, lat2, lon2]):
+        return 0.0
+    R = 6371.0  # Rayon moyen de la Terre en km
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return round(R * c, 2)
 
 
 __all__ = [
-	"_uuid",
-	"logger",
-	"clean_text",
-	"escape_like",
-	"normalize_phone",
-	"normalize_uuid",
-	"positive_float",
-	"clamp_limit",
-	"PERFORMANCE_INDEX_DDL",
-	"SCHEMA_COLUMN_DDL",
-	"haversine_distance_km",
+    "_uuid",
+    "logger",
+    "clean_text",
+    "escape_like",
+    "normalize_phone",
+    "normalize_uuid",
+    "positive_float",
+    "clamp_limit",
+    "PERFORMANCE_INDEX_DDL",
+    "SCHEMA_COLUMN_DDL",
+    "haversine_distance_km",
 ]

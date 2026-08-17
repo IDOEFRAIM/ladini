@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from .model import DomainContext, DomainResult
 from agriconnect.graphs.agents.market_coach.actions.tooling import ToolId
-from agriconnect.graphs.agents.market_coach.actions.common import require, require_phone
+
+from .model import DomainContext, DomainResult
 
 
 @dataclass(frozen=True)
@@ -47,7 +47,11 @@ class SystemService:
     def report_anomaly(self, command: SystemReportAnomalyCommand) -> DomainResult:
         zone = str(command.zone or "")
         description = str(command.description)
-        args: Dict[str, Any] = {"zone_id": zone, "title": description[:80], "level": "MEDIUM"}
+        args: Dict[str, Any] = {
+            "zone_id": zone,
+            "title": description[:80],
+            "level": "MEDIUM",
+        }
         return DomainResult(tool_id=ToolId.REPORT_ANOMALY, tool_args=args)
 
     def bind_zone(self, command: SystemBindZoneCommand) -> DomainResult:
@@ -58,6 +62,11 @@ class SystemService:
         }
         return DomainResult(tool_id=ToolId.CREATE_AGENT_ACTION, tool_args=args)
 
-    def commit_transaction(self, command: SystemCommitTransactionCommand) -> DomainResult:
-        args: Dict[str, Any] = {"transaction_id": str(command.staging_id), "approved": True}
+    def commit_transaction(
+        self, command: SystemCommitTransactionCommand
+    ) -> DomainResult:
+        args: Dict[str, Any] = {
+            "transaction_id": str(command.staging_id),
+            "approved": True,
+        }
         return DomainResult(tool_id=ToolId.COMMIT_STAGED_TRANSACTION, tool_args=args)

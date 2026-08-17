@@ -8,6 +8,7 @@ Fonctionnalités :
   5. check_auction_status — Détail d'une enchère + offres reçues.
   6. proactive_order_check — Greeting proactif après inactivité.
 """
+
 from __future__ import annotations
 
 import logging
@@ -17,6 +18,28 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from agriconnect.core.formatting import fmt_num as _fmt_num
+
+# Aliases de compat — source canonique : core/goals.py (dérivés d'INTENT_CONFIG).
+# NOTE : MARKET_MY_REQUESTS ∈ AUCTION_TRACKING_GOALS depuis la fusion du
+# 2026-07-21 (resolve_own_auctions absorbé par list_buyer_auctions, strict
+# superset : tous statuts + compte d'offres + sélection → check_auction_status
+# /finalize_winner). Voir [[market-coach-turn-boundary-state]].
+from agriconnect.graphs.agents.market_coach.core.goals import (
+    BUYER_AUCTION_TRACKING_GOALS as AUCTION_TRACKING_GOALS,
+)
+from agriconnect.graphs.agents.market_coach.core.goals import (
+    BUYER_ORDER_TRACKING_GOALS as ORDER_TRACKING_GOALS,
+)
+
+# Gate GPS partagé avec preorder.py — voir
+# [[precommande-architecture-consolidation-2026-08]]. Ré-exporté sous ces
+# mêmes noms pour ne pas casser les imports existants
+# (`from .order_tracking import _get_stored_location`, utilisés par
+# negotiation.py et preorder.py).
+from agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate import (
+    enter_gps_stage,
+    resolve_gps_stage,
+)
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
@@ -33,20 +56,8 @@ from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     is_success_response,
 )
-from agriconnect.services.search_results_cache import store_results as _store_search_photo_results
-
-# Gate GPS partagé avec preorder.py — voir
-# [[precommande-architecture-consolidation-2026-08]]. Ré-exporté sous ces
-# mêmes noms pour ne pas casser les imports existants
-# (`from .order_tracking import _get_stored_location`, utilisés par
-# negotiation.py et preorder.py).
-from agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate import (
-    _GPS_FIRST_TIME_PROMPT,
-    _GPS_HABITUAL_PROMPT,
-    _GPS_TEXT_REMINDER,
-    _get_stored_location,
-    enter_gps_stage,
-    resolve_gps_stage,
+from agriconnect.services.search_results_cache import (
+    store_results as _store_search_photo_results,
 )
 
 logger = logging.getLogger("AgriConnect.Market.BuyerFlow.OrderTracking")
@@ -72,7 +83,11 @@ def _cache_photo_menu(
         images = item.get("images") or []
         if images:
             has_photos = True
-        entries[str(idx)] = {"id": item.get(id_key), "name": label_fn(item), "images": images}
+        entries[str(idx)] = {
+            "id": item.get(id_key),
+            "name": label_fn(item),
+            "images": images,
+        }
     if entries:
         _store_search_photo_results(phone, entries)
     return has_photos
@@ -107,17 +122,6 @@ AUCTION_STATUS_MAP = {
     "CANCELLED": ("❌", "Annulée"),
     "COMPLETED": ("✅", "Terminée"),
 }
-
-# Aliases de compat — source canonique : core/goals.py (dérivés d'INTENT_CONFIG).
-# NOTE : MARKET_MY_REQUESTS ∈ AUCTION_TRACKING_GOALS depuis la fusion du
-# 2026-07-21 (resolve_own_auctions absorbé par list_buyer_auctions, strict
-# superset : tous statuts + compte d'offres + sélection → check_auction_status
-# /finalize_winner). Voir [[market-coach-turn-boundary-state]].
-from agriconnect.graphs.agents.market_coach.core.goals import (  # noqa: E402
-    BUYER_ORDER_TRACKING_GOALS as ORDER_TRACKING_GOALS,
-    BUYER_AUCTION_TRACKING_GOALS as AUCTION_TRACKING_GOALS,
-)
-
 
 # =====================================================================
 # HELPERS
@@ -191,7 +195,9 @@ def _tracking_ctx_patch(order_id: Optional[str] = None, **extra: Any) -> Dict[st
     return ctx
 
 
-async def _safe_gw_call(mc_runtime: MarketRuntime, method: str, **kwargs: Any) -> Dict[str, Any]:
+async def _safe_gw_call(
+    mc_runtime: MarketRuntime, method: str, **kwargs: Any
+) -> Dict[str, Any]:
     try:
         gw = OrderTrackingGateway(mc_runtime)
         fn = getattr(gw, method, None)
@@ -206,6 +212,7 @@ async def _safe_gw_call(mc_runtime: MarketRuntime, method: str, **kwargs: Any) -
 # =====================================================================
 # 1. LIST ORDERS — Dashboard avec menu interactif
 # =====================================================================
+
 
 async def list_orders(
     state: Dict[str, Any],
@@ -264,7 +271,9 @@ async def list_orders(
         "response_strategy": "SELECTION_MENU",
         "final_response": menu_text + render_selection_prompt(noun="commande"),
         "available_mapping": mapping,
-        "expected_candidates": [f"Commande #{oid[:8].upper()}" for oid in mapping.values()],
+        "expected_candidates": [
+            f"Commande #{oid[:8].upper()}" for oid in mapping.values()
+        ],
         "order_tracking_context": _tracking_ctx_patch(menu_generated_at=time.time()),
         "ag_ui_component": None,
         "pending_menu": MenuRequest(
@@ -280,9 +289,12 @@ async def list_orders(
 # 2. CHECK ORDER STATUS — Détail conversationnel
 # =====================================================================
 
+
 def _build_status_response(order_data: Dict[str, Any]) -> str:
     status = str(order_data.get("status") or "PENDING").upper()
-    order_number = order_data.get("order_number") or str(order_data.get("id", ""))[:8].upper()
+    order_number = (
+        order_data.get("order_number") or str(order_data.get("id", ""))[:8].upper()
+    )
     total = order_data.get("total_amount") or order_data.get("total") or 0
     currency = order_data.get("currency") or "FCFA"
     created_at = order_data.get("created_at") or order_data.get("date")
@@ -378,7 +390,9 @@ async def check_order_status(
     order_id = _resolve_order_id(state)
 
     if not order_id and not phone:
-        return _error("Je n'ai pas pu identifier votre commande. Quel est votre numéro de commande ?")
+        return _error(
+            "Je n'ai pas pu identifier votre commande. Quel est votre numéro de commande ?"
+        )
 
     # buyer_phone toujours transmis (même quand order_id est connu) : requis
     # pour l'identité de contexte MCP, sinon PermissionDenied silencieux.
@@ -413,7 +427,9 @@ async def check_order_status(
         "status": "COMPLETED",
         "response_strategy": "SUCCESS",
         "final_response": _build_status_response(data),
-        "order_tracking_context": _tracking_ctx_patch(resolved_order_id, last_status=data.get("status")),
+        "order_tracking_context": _tracking_ctx_patch(
+            resolved_order_id, last_status=data.get("status")
+        ),
         "ag_ui_component": None,
     }
 
@@ -421,6 +437,7 @@ async def check_order_status(
 # =====================================================================
 # 3. CANCEL ORDER
 # =====================================================================
+
 
 async def cancel_order(
     state: Dict[str, Any],
@@ -510,6 +527,7 @@ async def cancel_order(
 # 4. LIST BUYER AUCTIONS — Dashboard enchères (tous statuts)
 # =====================================================================
 
+
 async def list_buyer_auctions(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
@@ -541,7 +559,9 @@ async def list_buyer_auctions(
             "final_response": (
                 "📋 *Vos appels d'offres*\n\n"
                 "Vous n'avez aucun appel d'offres pour le moment."
-                + render_quick_actions(["lancer un appel d'offres", "chercher un produit"])
+                + render_quick_actions(
+                    ["lancer un appel d'offres", "chercher un produit"]
+                )
             ),
             "ag_ui_component": None,
         }
@@ -554,7 +574,9 @@ async def list_buyer_auctions(
             "final_response": (
                 "📋 *Vos appels d'offres*\n\n"
                 "Vous n'avez aucun appel d'offres pour le moment."
-                + render_quick_actions(["lancer un appel d'offres", "chercher un produit"])
+                + render_quick_actions(
+                    ["lancer un appel d'offres", "chercher un produit"]
+                )
             ),
             "ag_ui_component": None,
         }
@@ -575,7 +597,11 @@ async def list_buyer_auctions(
 
         qty_str = f" — {qty} {unit}" if qty else ""
         price_str = f" — Budget: {price} FCFA" if price else ""
-        bids_str = f" — 📥 {bid_count} proposition{'s' if int(bid_count) > 1 else ''}" if bid_count else ""
+        bids_str = (
+            f" — 📥 {bid_count} proposition{'s' if int(bid_count) > 1 else ''}"
+            if bid_count
+            else ""
+        )
 
         label = f"{product}{qty_str}{price_str}"
         lines.append(f"*{i}.* {label}\n   {status_label}{bids_str}")
@@ -592,11 +618,15 @@ async def list_buyer_auctions(
     # numéro (check_auction_status, déjà câblé). Bug réel signalé le
     # 2026-08-13 : le hint n'apparaissait jamais dans ce cas précis.
     has_reference_photos = _cache_photo_menu(
-        phone, data, "auction_id",
+        phone,
+        data,
+        "auction_id",
         lambda a: a.get("product") or a.get("product_name") or "Appel d'offres",
     )
     if has_reference_photos:
-        lines.append("\n📸 Tapez *photos <numéro>* pour voir la photo de référence d'un appel d'offres.")
+        lines.append(
+            "\n📸 Tapez *photos <numéro>* pour voir la photo de référence d'un appel d'offres."
+        )
     elif any(a.get("has_bid_photos") for a in data):
         lines.append(
             "\n📸 Une ou plusieurs offres reçues ont des photos — "
@@ -617,7 +647,9 @@ async def list_buyer_auctions(
         "response_strategy": "SELECTION_MENU",
         "final_response": menu_text,
         "available_mapping": mapping,
-        "expected_candidates": [f"Appel d'offres #{oid[:8]}" for oid in mapping.values() if oid],
+        "expected_candidates": [
+            f"Appel d'offres #{oid[:8]}" for oid in mapping.values() if oid
+        ],
         "working_memory": wm,
         "ag_ui_component": None,
         "pending_menu": MenuRequest(
@@ -633,6 +665,7 @@ async def list_buyer_auctions(
 # 5. CHECK AUCTION STATUS — Détail + offres reçues
 # =====================================================================
 
+
 async def check_auction_status(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
@@ -640,10 +673,7 @@ async def check_auction_status(
     """Affiche le détail d'un appel d'offres + les propositions reçues dessus."""
     payload = state.get("transaction_payload") or {}
 
-    auction_id = (
-        payload.get("auction_id")
-        or payload.get("selected_value")
-    )
+    auction_id = payload.get("auction_id") or payload.get("selected_value")
     if not auction_id:
         selection_idx = payload.get("selection_index")
         if selection_idx is not None:
@@ -663,12 +693,20 @@ async def check_auction_status(
         }
 
     gw = AuctionGateway(mc_runtime)
-    bids_result = await gw.get_auction_bids(auction_id=str(auction_id), phone=str(state.get("user_phone") or ""))
+    bids_result = await gw.get_auction_bids(
+        auction_id=str(auction_id), phone=str(state.get("user_phone") or "")
+    )
 
     bids = bids_result.get("bids") or bids_result.get("data") or []
     auction_info = bids_result.get("auction") or {}
-    product = auction_info.get("product") or auction_info.get("product_name") or "Votre produit"
-    status_raw = str(auction_info.get("status") or bids_result.get("auction_status") or "OPEN").upper()
+    product = (
+        auction_info.get("product")
+        or auction_info.get("product_name")
+        or "Votre produit"
+    )
+    status_raw = str(
+        auction_info.get("status") or bids_result.get("auction_status") or "OPEN"
+    ).upper()
     status_label = _status_label(status_raw, AUCTION_STATUS_MAP)
 
     lines = [
@@ -681,7 +719,9 @@ async def check_auction_status(
         if status_raw == "OPEN":
             lines.append("Les producteurs peuvent encore soumettre des propositions.")
     else:
-        lines.append(f"\n📥 *{len(bids)} proposition{'s' if len(bids) > 1 else ''} reçue{'s' if len(bids) > 1 else ''} :*")
+        lines.append(
+            f"\n📥 *{len(bids)} proposition{'s' if len(bids) > 1 else ''} reçue{'s' if len(bids) > 1 else ''} :*"
+        )
         mapping: Dict[str, str] = {}
         options: List[MenuOption] = []
 
@@ -690,7 +730,13 @@ async def check_auction_status(
             producer = bid.get("producer") or bid.get("producer_name") or "Producteur"
             price = bid.get("price") or bid.get("offered_price") or "?"
             bid_status = str(bid.get("status") or "PENDING").upper()
-            bid_emoji = "🟡" if bid_status == "PENDING" else "✅" if bid_status == "ACCEPTED" else "🔴"
+            bid_emoji = (
+                "🟡"
+                if bid_status == "PENDING"
+                else "✅"
+                if bid_status == "ACCEPTED"
+                else "🔴"
+            )
 
             label = f"{producer} — {price} FCFA"
             lines.append(f"\n*{i}.* {bid_emoji} {label}")
@@ -701,13 +747,21 @@ async def check_auction_status(
         # confiance clé avant de désigner un gagnant. Voir
         # [[auction-bid-photos-2026-08]].
         if _cache_photo_menu(
-            str(state.get("user_phone") or ""), bids, "bid_id",
-            lambda b: f"{b.get('producer') or b.get('producer_name') or 'Producteur'} — {product}",
+            str(state.get("user_phone") or ""),
+            bids,
+            "bid_id",
+            lambda b: (
+                f"{b.get('producer') or b.get('producer_name') or 'Producteur'} — {product}"
+            ),
         ):
-            lines.append("\n📸 Tapez *photos <numéro>* pour voir la photo d'un lot proposé.")
+            lines.append(
+                "\n📸 Tapez *photos <numéro>* pour voir la photo d'un lot proposé."
+            )
 
         if status_raw == "OPEN":
-            lines.append("\n_Répondez avec le *numéro* de la proposition pour désigner le gagnant._")
+            lines.append(
+                "\n_Répondez avec le *numéro* de la proposition pour désigner le gagnant._"
+            )
 
             # kind="bid" → memory_update résout la sélection en payload.bid_id
             # (et NON auction_id : "auction_bids" est mappé vers auction_id, ce
@@ -752,14 +806,38 @@ async def check_auction_status(
 # 5b. WINNER SELECTION — désigner le gagnant d'une enchère
 # =====================================================================
 
-_YES_TOKENS = frozenset({
-    "oui", "ok", "okay", "daccord", "d'accord", "c'est bon", "cest bon",
-    "confirme", "confirmer", "je confirme", "valide", "valider", "go", "vasy",
-    "parfait", "yes",
-})
-_NO_TOKENS = frozenset({
-    "non", "annuler", "annule", "stop", "cancel", "quitter", "pas maintenant", "retour",
-})
+_YES_TOKENS = frozenset(
+    {
+        "oui",
+        "ok",
+        "okay",
+        "daccord",
+        "d'accord",
+        "c'est bon",
+        "cest bon",
+        "confirme",
+        "confirmer",
+        "je confirme",
+        "valide",
+        "valider",
+        "go",
+        "vasy",
+        "parfait",
+        "yes",
+    }
+)
+_NO_TOKENS = frozenset(
+    {
+        "non",
+        "annuler",
+        "annule",
+        "stop",
+        "cancel",
+        "quitter",
+        "pas maintenant",
+        "retour",
+    }
+)
 
 
 def _selection_index(state: Dict[str, Any]) -> Optional[int]:
@@ -790,7 +868,9 @@ async def confirm_winner_selection(
 
     # memory_update (kind="bid") a normalement déjà posé payload.bid_id ; sinon
     # on retombe sur le mapping index→bid_id.
-    bid_id = payload.get("bid_id") or (mapping.get(str(sel)) if sel is not None else None)
+    bid_id = payload.get("bid_id") or (
+        mapping.get(str(sel)) if sel is not None else None
+    )
     if not bid_id:
         return {
             "status": "WAITING_INPUT",
@@ -807,7 +887,9 @@ async def confirm_winner_selection(
     if auction_id:
         gw = AuctionGateway(mc_runtime)
         try:
-            detail = await gw.get_auction_bids(auction_id=str(auction_id), phone=str(state.get("user_phone") or ""))
+            detail = await gw.get_auction_bids(
+                auction_id=str(auction_id), phone=str(state.get("user_phone") or "")
+            )
             product = (detail.get("auction") or {}).get("product") or product
             for b in detail.get("bids") or []:
                 if str(b.get("bid_id") or b.get("id")) == str(bid_id):
@@ -849,8 +931,10 @@ async def _execute_winner_selection(
     gw = AuctionGateway(mc_runtime)
     try:
         result = await gw.select_winning_bid(
-            bid_id=str(bid_id), phone=str(state.get("user_phone") or ""),
-            delivery_lat=delivery_lat, delivery_lon=delivery_lon,
+            bid_id=str(bid_id),
+            phone=str(state.get("user_phone") or ""),
+            delivery_lat=delivery_lat,
+            delivery_lon=delivery_lon,
         )
     except Exception as exc:
         logger.exception("finalize_winner: select_winning_bid failed: %s", exc)
@@ -866,12 +950,16 @@ async def _execute_winner_selection(
         return {
             "status": "COMPLETED",
             "response_strategy": "ERROR",
-            "final_response": result.get("message") or "Cette proposition n'a pas pu être retenue.",
+            "final_response": result.get("message")
+            or "Cette proposition n'a pas pu être retenue.",
             "working_memory": clear_wm(),
             "ag_ui_component": None,
         }
 
-    summary = result.get("summary_buyer") or "🤝 Proposition retenue ! La commande a été créée et le producteur informé."
+    summary = (
+        result.get("summary_buyer")
+        or "🤝 Proposition retenue ! La commande a été créée et le producteur informé."
+    )
     return {
         "status": "COMPLETED",
         "response_strategy": "SUCCESS",
@@ -905,8 +993,11 @@ async def finalize_winner(
     def _clear_wm() -> Dict[str, Any]:
         wm = dict(working)
         for k in (
-            "available_mapping_kind", "pending_winner_bid", "winner_auction_id",
-            "winner_gps_stage", "winner_gps_default",
+            "available_mapping_kind",
+            "pending_winner_bid",
+            "winner_auction_id",
+            "winner_gps_stage",
+            "winner_gps_default",
         ):
             wm[k] = None
         return wm
@@ -933,8 +1024,10 @@ async def finalize_winner(
     if not gps_stage:
         if not is_yes:
             from agriconnect.graphs.agents.market_coach.utils import llm_deviation_reply
+
             note = await llm_deviation_reply(
-                mc_runtime, str(state.get("normalized_text") or ""),
+                mc_runtime,
+                str(state.get("normalized_text") or ""),
                 "confirmer le gagnant retenu pour cet appel d'offres (oui/non)",
             )
             prompt = "Répondez *oui* pour confirmer le gagnant, ou *non* pour annuler."
@@ -964,14 +1057,21 @@ async def finalize_winner(
 
     # ── Étape 2 : point GPS de livraison ────────────────────────────────
     resolution = await resolve_gps_stage(
-        mc_runtime, phone,
-        location_shared=location_shared, is_yes=is_yes,
+        mc_runtime,
+        phone,
+        location_shared=location_shared,
+        is_yes=is_yes,
         gps_default=working.get("winner_gps_default"),
         user_text=str(state.get("normalized_text") or ""),
     )
     if resolution.resolved:
         return await _execute_winner_selection(
-            state, mc_runtime, bid_id, _clear_wm, resolution.lat, resolution.lon,
+            state,
+            mc_runtime,
+            bid_id,
+            _clear_wm,
+            resolution.lat,
+            resolution.lon,
         )
     return {
         "status": "WAITING_INPUT",
@@ -985,6 +1085,7 @@ async def finalize_winner(
 # =====================================================================
 # 6. PROACTIVE ORDER CHECK
 # =====================================================================
+
 
 async def proactive_order_check(
     state: Dict[str, Any],
@@ -1011,7 +1112,9 @@ async def proactive_order_check(
     if not first_order_id:
         return None
 
-    detail = await _safe_gw_call(mc_runtime, "get_transaction_summary", order_id=first_order_id)
+    detail = await _safe_gw_call(
+        mc_runtime, "get_transaction_summary", order_id=first_order_id
+    )
     if not is_success_response(detail):
         return None
 
@@ -1036,6 +1139,7 @@ async def proactive_order_check(
 # =====================================================================
 # 7. ORCHESTRATOR
 # =====================================================================
+
 
 async def order_tracking_resolver(
     state: Dict[str, Any],
@@ -1085,10 +1189,18 @@ async def order_tracking_resolver(
     ):
         return await finalize_winner(state, mc_runtime)
     # 2. Une offre vient d'être choisie sur une enchère de l'acheteur → récap.
-    if goal in AUCTION_TRACKING_GOALS and payload.get("bid_id") and working.get("winner_auction_id"):
+    if (
+        goal in AUCTION_TRACKING_GOALS
+        and payload.get("bid_id")
+        and working.get("winner_auction_id")
+    ):
         return await confirm_winner_selection(state, mc_runtime)
     # 3. Une enchère vient d'être choisie dans la liste → afficher ses offres.
-    if goal in AUCTION_TRACKING_GOALS and payload.get("auction_id") and not payload.get("bid_id"):
+    if (
+        goal in AUCTION_TRACKING_GOALS
+        and payload.get("auction_id")
+        and not payload.get("bid_id")
+    ):
         return await check_auction_status(state, mc_runtime)
 
     if goal == "BUYER_CHECK_ORDER_STATUS":
@@ -1106,6 +1218,7 @@ async def order_tracking_resolver(
 # =====================================================================
 # INTERNAL HELPERS
 # =====================================================================
+
 
 def _error(message: str) -> Dict[str, Any]:
     return {
@@ -1131,8 +1244,12 @@ def _order_not_found_response(order_id: Optional[str], phone: str) -> Dict[str, 
         "pending_menu": MenuRequest(
             title="Commande introuvable",
             options=[
-                MenuOption(index="1", label="📦 Voir mes commandes", value="BUYER_LIST_ORDERS"),
-                MenuOption(index="2", label="🛒 Nouvelle commande", value="BUYER_ADD_TO_CART"),
+                MenuOption(
+                    index="1", label="📦 Voir mes commandes", value="BUYER_LIST_ORDERS"
+                ),
+                MenuOption(
+                    index="2", label="🛒 Nouvelle commande", value="BUYER_ADD_TO_CART"
+                ),
             ],
             kind="order_recovery",
         ),

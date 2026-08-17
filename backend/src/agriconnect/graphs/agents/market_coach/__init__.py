@@ -18,7 +18,6 @@ from agriconnect.graphs.agents.market_coach.registry import (
     validate_integrity,
 )
 
-
 load_all_actions()
 validate_integrity()
 
@@ -34,18 +33,29 @@ __all__ = [
 
 def __getattr__(name):
     if name == "onboarding_node":
-        from agriconnect.graphs.agents.market_coach.flows.common.onboarding import onboarding_node
+        from agriconnect.graphs.agents.market_coach.flows.common.onboarding import (
+            onboarding_node,
+        )
+
         return onboarding_node
     if name == "memory_update":
         from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
+
         return memory_update
     if name == "mcp_tool_executor":
-        from agriconnect.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
+        from agriconnect.graphs.agents.market_coach.nodes.executor import (
+            mcp_tool_executor,
+        )
+
         return mcp_tool_executor
     if name == "validator":
         from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+
         return validator
     if name == "ensure_farm_node":
-        from agriconnect.graphs.agents.market_coach.flows.producer.farm_logic import ensure_farm_node
+        from agriconnect.graphs.agents.market_coach.flows.producer.farm_logic import (
+            ensure_farm_node,
+        )
+
         return ensure_farm_node
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

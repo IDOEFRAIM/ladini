@@ -47,9 +47,14 @@ _VOLATILE_WORKING_KEYS = _GENERIC_SELECTION_KEYS + _MENU_CACHE_KEYS
 # general leak, not just the one instance that happened to be raw data.
 _MENU_CACHE_OWNERS: Dict[str, frozenset] = {
     "bids_menu": frozenset({"MARKET_GET_REQUEST_DETAIL", "SALES_ACCEPT_CONTRACT"}),
-    "stocks_menu": frozenset({
-        "STOCK_ADJUST", "STOCK_REMOVE_PARTIAL", "STOCK_RECORD_MOVEMENT", "STOCK_DELETE",
-    }),
+    "stocks_menu": frozenset(
+        {
+            "STOCK_ADJUST",
+            "STOCK_REMOVE_PARTIAL",
+            "STOCK_RECORD_MOVEMENT",
+            "STOCK_DELETE",
+        }
+    ),
     # auction_menu / generic_menu: no reachable code path currently writes
     # them with real content (dead references kept only for backward
     # compatibility with any checkpoint that still carries them) — never
@@ -114,7 +119,9 @@ _EPHEMERAL_REPLACE_FIELDS = {
 }
 
 
-async def post_response_cleanup(state: Dict[str, Any], mc_runtime: Any) -> Dict[str, Any]:
+async def post_response_cleanup(
+    state: Dict[str, Any], mc_runtime: Any
+) -> Dict[str, Any]:
     pending = state.get("pending_cleanup")
     status = str(state.get("status") or "").upper().strip()
     expected_input = str(state.get("expected_input") or "NONE").upper().strip()
@@ -143,7 +150,10 @@ async def post_response_cleanup(state: Dict[str, Any], mc_runtime: Any) -> Dict[
     # tournait en boucle entre les mêmes questions. Même famille de bug que
     # [[market-coach-turn-boundary-state]], nouvelle instance jamais corrigée
     # jusqu'ici. Voir [[precommande-architecture-consolidation-2026-08]].
-    keep_field_channel = status == "WAITING_INPUT" and expected_input not in ("", "NONE")
+    keep_field_channel = status == "WAITING_INPUT" and expected_input not in (
+        "",
+        "NONE",
+    )
 
     working = dict(state.get("working_memory") or {})
     if working:
@@ -190,7 +200,9 @@ async def post_response_cleanup(state: Dict[str, Any], mc_runtime: Any) -> Dict[
         "current_goal",
         "confirmation_raised_at",
     }
-    _keep_goal_channel = keep_confirmation_channel or keep_selection_channel or keep_field_channel
+    _keep_goal_channel = (
+        keep_confirmation_channel or keep_selection_channel or keep_field_channel
+    )
     for field, default in _EPHEMERAL_REPLACE_FIELDS.items():
         if field == "current_goal":
             if _keep_goal_channel:

@@ -11,14 +11,15 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
-    Index,
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID, DOUBLE_PRECISION
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION, JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 from agriconnect.domain.orm_base import Base, _uuid4
 
@@ -33,7 +34,9 @@ class AuditLog(Base):
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    actor_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
+    actor_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False
+    )
     action = Column(Text, nullable=False)
     entity_id = Column(Text, nullable=False)
     entity_type = Column(Text, nullable=False)
@@ -61,14 +64,18 @@ class AgentAction(Base):
     payload = Column(JSONB)
     status = Column(String, default="PENDING", nullable=False)
     priority = Column(String, default="MEDIUM", nullable=False)
-    order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), unique=True)
+    order_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), unique=True
+    )
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
     audit_trail_id = Column(Text)
     ai_reasoning = Column(Text)
     admin_notes = Column(Text)
     validated_by_id = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class Conversation(Base):
@@ -100,7 +107,9 @@ class Conversation(Base):
     response_time_ms = Column(Integer)
     audit_trail_id = Column(Text, unique=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class AgentContextMemory(Base):
@@ -114,14 +123,18 @@ class AgentContextMemory(Base):
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
     user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
-    market_offer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.market_offers.id"))
+    market_offer_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.market_offers.id")
+    )
     context_key = Column(Text, nullable=False)
     context_value = Column(JSONB, nullable=False)
     source = Column(Text, default="AGENT", nullable=False)
     confidence = Column(DOUBLE_PRECISION)
     expires_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class AIRatingReasoning(Base):
@@ -133,7 +146,11 @@ class AIRatingReasoning(Base):
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    trust_score_id = Column(PG_UUID(as_uuid=True), ForeignKey("intelligence.trust_scores.id"), nullable=False)
+    trust_score_id = Column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("intelligence.trust_scores.id"),
+        nullable=False,
+    )
     agent_name = Column(Text, nullable=False)
     justification = Column(Text, nullable=False)
     data_points = Column(JSONB, nullable=False)
@@ -181,9 +198,13 @@ class DemandSignal(Base):
     user_id = Column(PG_UUID(as_uuid=True))
     zone_id = Column(PG_UUID(as_uuid=True))
     occurrences = Column(Integer, default=1, nullable=False, server_default=text("1"))
-    resolved = Column(Boolean, default=False, nullable=False, server_default=text("false"))
+    resolved = Column(
+        Boolean, default=False, nullable=False, server_default=text("false")
+    )
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class Solicitation(Base):
@@ -194,8 +215,18 @@ class Solicitation(Base):
 
     __tablename__ = "solicitations"
     __table_args__ = (
-        Index("solicitations_auction_producer_uq", "auction_id", "target_producer_id", unique=True),
-        Index("solicitations_offer_buyer_uq", "market_offer_id", "target_buyer_id", unique=True),
+        Index(
+            "solicitations_auction_producer_uq",
+            "auction_id",
+            "target_producer_id",
+            unique=True,
+        ),
+        Index(
+            "solicitations_offer_buyer_uq",
+            "market_offer_id",
+            "target_buyer_id",
+            unique=True,
+        ),
         Index("solicitations_kind_status_idx", "kind", "status"),
         Index("solicitations_auction_idx", "auction_id"),
         {"schema": "intelligence"},
@@ -209,11 +240,15 @@ class Solicitation(Base):
     target_buyer_id = Column(PG_UUID(as_uuid=True))
     sub_category_id = Column(PG_UUID(as_uuid=True))
     zone_id = Column(PG_UUID(as_uuid=True))
-    status = Column(String, default="PENDING", nullable=False, server_default=text("'PENDING'"))
+    status = Column(
+        String, default="PENDING", nullable=False, server_default=text("'PENDING'")
+    )
     notified_at = Column(DateTime)
     responded_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class NotificationOutbox(Base):
@@ -237,14 +272,18 @@ class NotificationOutbox(Base):
     template_key = Column(String, nullable=False)
     payload = Column(JSONB, nullable=False)
     dedupe_key = Column(Text, nullable=False)
-    status = Column(String, default="PENDING", nullable=False, server_default=text("'PENDING'"))
+    status = Column(
+        String, default="PENDING", nullable=False, server_default=text("'PENDING'")
+    )
     attempts = Column(Integer, default=0, nullable=False, server_default=text("0"))
     max_attempts = Column(Integer, default=5, nullable=False, server_default=text("5"))
     next_attempt_at = Column(DateTime, server_default=func.now(), nullable=False)
     last_error = Column(Text)
     sent_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 __all__ = [

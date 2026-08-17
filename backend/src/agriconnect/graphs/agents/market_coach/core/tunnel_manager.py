@@ -17,14 +17,15 @@ Design principles
   all nodes import it directly.
 * All thresholds and intent whitelists are explicit constants, easy to tune.
 """
+
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, FrozenSet, List, Optional
+from typing import FrozenSet, List, Optional
 
 from agriconnect.graphs.agents.market_coach.core.slots import (
-    is_blocking_slot,
     SLOT_FILLING_INPUTS,
+    is_blocking_slot,
 )
 
 logger = logging.getLogger("AgriConnect.Market.TunnelManager")
@@ -52,25 +53,30 @@ from agriconnect.graphs.agents.market_coach.core.goals import (  # noqa: E402
 SOFT_EXPECTED_INPUTS: FrozenSet[str] = SLOT_FILLING_INPUTS | frozenset({"SELECTION"})
 
 #: expected_input values that are never interruptible (hard slots).
-HARD_EXPECTED_INPUTS: FrozenSet[str] = frozenset({
-    "CONFIRMATION",
-    "OTP",
-    "OTP_CODE",
-})
+HARD_EXPECTED_INPUTS: FrozenSet[str] = frozenset(
+    {
+        "CONFIRMATION",
+        "OTP",
+        "OTP_CODE",
+    }
+)
 
 #: Subset of HARD_EXPECTED_INPUTS that must NEVER be interrupted, under any
 #: circumstance (payment/security codes). CONFIRMATION is deliberately
 #: excluded: a user saying "non, je veux X à la place" mid-recap is normal
 #: conversation, not noise — see ALWAYS_UNBREAKABLE_INPUTS usage below.
-ALWAYS_UNBREAKABLE_INPUTS: FrozenSet[str] = frozenset({
-    "OTP",
-    "OTP_CODE",
-})
+ALWAYS_UNBREAKABLE_INPUTS: FrozenSet[str] = frozenset(
+    {
+        "OTP",
+        "OTP_CODE",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # TunnelDecision — result object
 # ---------------------------------------------------------------------------
+
 
 class TunnelDecision:
     """Encapsulates the outcome of a tunnel evaluation.
@@ -103,6 +109,7 @@ class TunnelDecision:
 # ---------------------------------------------------------------------------
 # TunnelManager
 # ---------------------------------------------------------------------------
+
 
 class TunnelManager:
     """Decides whether an ongoing slot-filling tunnel should be maintained or
@@ -152,11 +159,7 @@ class TunnelManager:
         event_upper = str(incoming_event or "UNKNOWN").upper().strip()
         intent_upper = str(incoming_intent or "UNKNOWN").upper().strip()
 
-        has_tunnel = bool(
-            current_goal
-            and exp_upper
-            and exp_upper not in ("", "NONE")
-        )
+        has_tunnel = bool(current_goal and exp_upper and exp_upper not in ("", "NONE"))
 
         if not has_tunnel:
             return TunnelDecision(
@@ -196,10 +199,16 @@ class TunnelManager:
         # only a high-confidence INTERRUPTION/NEW_TASK can break through —
         # never silently, but never unconditionally either.
         if is_blocking_slot(exp_upper) or exp_upper in HARD_EXPECTED_INPUTS:
-            if event_upper in {"INTERRUPTION", "NEW_TASK"} and confidence >= self._threshold:
+            if (
+                event_upper in {"INTERRUPTION", "NEW_TASK"}
+                and confidence >= self._threshold
+            ):
                 logger.info(
                     "[TunnelManager] Hard slot '%s' interrupted: intent=%s conf=%.2f >= %.2f",
-                    exp_upper, intent_upper, confidence, self._threshold,
+                    exp_upper,
+                    intent_upper,
+                    confidence,
+                    self._threshold,
                 )
                 return TunnelDecision(
                     stay_in_tunnel=False,
@@ -215,7 +224,9 @@ class TunnelManager:
             if confidence >= self._threshold:
                 logger.info(
                     "[TunnelManager] INTERRUPTION allowed: intent=%s conf=%.2f >= %.2f",
-                    intent_upper, confidence, self._threshold,
+                    intent_upper,
+                    confidence,
+                    self._threshold,
                 )
                 return TunnelDecision(
                     stay_in_tunnel=False,
@@ -224,10 +235,13 @@ class TunnelManager:
                 )
             logger.debug(
                 "[TunnelManager] INTERRUPTION blocked: conf=%.2f < %.2f",
-                confidence, self._threshold,
+                confidence,
+                self._threshold,
             )
             return TunnelDecision(
-                stay_in_tunnel=True, allow_interrupt=False, reason="interruption_low_confidence"
+                stay_in_tunnel=True,
+                allow_interrupt=False,
+                reason="interruption_low_confidence",
             )
 
         # NEW_TASK during a *soft* slot: allow if confidence is sufficient.
@@ -235,7 +249,9 @@ class TunnelManager:
             if confidence >= self._threshold:
                 logger.info(
                     "[TunnelManager] NEW_TASK during soft slot '%s': intent=%s conf=%.2f",
-                    exp_upper, intent_upper, confidence,
+                    exp_upper,
+                    intent_upper,
+                    confidence,
                 )
                 return TunnelDecision(
                     stay_in_tunnel=False,

@@ -5,6 +5,7 @@ This module centralizes the logic for what can be stored in the
 navigation context required to resume a conversation, while banning any bulk
 business data (catalogs, stocks, traces, etc.).
 """
+
 from __future__ import annotations
 
 import json
@@ -107,7 +108,17 @@ def clean_candidates(candidates: Any) -> List[str]:
     return cleaned
 
 
-_CART_LINE_KEYS = frozenset({"product", "product_name", "quantity", "unit", "price", "vendor_phone", "vendor_name"})
+_CART_LINE_KEYS = frozenset(
+    {
+        "product",
+        "product_name",
+        "quantity",
+        "unit",
+        "price",
+        "vendor_phone",
+        "vendor_name",
+    }
+)
 
 
 def clean_cart_snapshot(cart: Any) -> List[Dict[str, Any]]:
@@ -180,7 +191,11 @@ def build_metadata_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
     if cleaned_form:
         snapshot["form_data"] = cleaned_form
 
-    session_id = state.get("session_id") or state.get("workspace_session_id") or state.get("thread_id")
+    session_id = (
+        state.get("session_id")
+        or state.get("workspace_session_id")
+        or state.get("thread_id")
+    )
     if session_id:
         snapshot["session_id"] = str(session_id)
 
@@ -229,9 +244,15 @@ def filter_metadata_dict(meta: Any) -> Dict[str, Any]:
     filtered.update(internal)
 
     # Size guard — drop optional bulk fields first, then give up entirely.
-    if len(json.dumps(filtered, ensure_ascii=False).encode("utf-8")) > _MAX_METADATA_BYTES:
+    if (
+        len(json.dumps(filtered, ensure_ascii=False).encode("utf-8"))
+        > _MAX_METADATA_BYTES
+    ):
         filtered.pop("last_active_cart", None)
-    if len(json.dumps(filtered, ensure_ascii=False).encode("utf-8")) > _MAX_METADATA_BYTES:
+    if (
+        len(json.dumps(filtered, ensure_ascii=False).encode("utf-8"))
+        > _MAX_METADATA_BYTES
+    ):
         return {}
 
     return filtered

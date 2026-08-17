@@ -8,13 +8,13 @@ from typing import Optional
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agriconnect.domain.models import Product, MarketOffer
-from agriconnect.domain.catalog.dto import ProductDTO as ProductModel, MarketOfferDTO as MarketOfferModel
+from agriconnect.domain.catalog.dto import MarketOfferDTO as MarketOfferModel
+from agriconnect.domain.catalog.dto import ProductDTO as ProductModel
+from agriconnect.domain.models import MarketOffer, Product
 from agriconnect.services.database.base_service import BaseService, transactional
 
 
 class ProductService(BaseService):
-
     # ── Catalogue produits ──────────────────────────────────────────────────
     @transactional(write=False)
     async def search_products(
@@ -30,7 +30,9 @@ class ProductService(BaseService):
         return [ProductModel.model_validate(p) for p in rows]
 
     @transactional(write=False)
-    async def get_product(self, session: AsyncSession, product_id: str) -> Optional[ProductModel]:
+    async def get_product(
+        self, session: AsyncSession, product_id: str
+    ) -> Optional[ProductModel]:
         obj = await session.get(Product, product_id)
         return ProductModel.model_validate(obj) if obj else None
 
@@ -54,7 +56,11 @@ class ProductService(BaseService):
     # ── Offres de marché (prévente) ─────────────────────────────────────────
     @transactional(write=False)
     async def list_public_offers(
-        self, session: AsyncSession, *, sub_category_id: Optional[str] = None, limit: int = 30
+        self,
+        session: AsyncSession,
+        *,
+        sub_category_id: Optional[str] = None,
+        limit: int = 30,
     ) -> list[MarketOfferModel]:
         stmt = (
             select(MarketOffer)
@@ -67,7 +73,9 @@ class ProductService(BaseService):
         return [MarketOfferModel.model_validate(o) for o in rows]
 
     @transactional(write=True)
-    async def publish_offer(self, session: AsyncSession, offer: MarketOfferModel) -> str:
+    async def publish_offer(
+        self, session: AsyncSession, offer: MarketOfferModel
+    ) -> str:
         payload = offer.to_db()
         payload.setdefault("status", "PUBLISHED")
         payload["is_public"] = True
@@ -84,7 +92,10 @@ class ProductService(BaseService):
         stmt = (
             update(MarketOffer)
             .where(MarketOffer.id == offer_id)
-            .where((MarketOffer.available_quantity - MarketOffer.reserved_quantity) >= quantity)
+            .where(
+                (MarketOffer.available_quantity - MarketOffer.reserved_quantity)
+                >= quantity
+            )
             .values(reserved_quantity=MarketOffer.reserved_quantity + quantity)
         )
         result = await session.execute(stmt)

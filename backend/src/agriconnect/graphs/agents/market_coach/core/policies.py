@@ -5,6 +5,7 @@ Le routage post-validator vit dans ``core/router.py::DomainRouter.decide``
 (fusion Phase 1 de l'ex-``AfterValidatorPolicy``) ; les ensembles de goals
 sont dérivés d'INTENT_CONFIG dans ``core/goals.py``.
 """
+
 from __future__ import annotations
 
 import logging
@@ -20,9 +21,11 @@ logger = logging.getLogger("AgriConnect.Market.Policies")
 # FAST-PATH POLICY
 # =====================================================================
 
+
 @dataclass(frozen=True)
 class FastPathRule:
     """Events + goals that qualify for cognitive-chain bypass."""
+
     events: FrozenSet[str]
     goals: FrozenSet[str]
 
@@ -51,7 +54,8 @@ class FastPathPolicy:
             if event in rule.events and goal in rule.goals:
                 logger.info(
                     "[FastPath] Skipping cognitive chain → memory_update: event=%s goal=%s",
-                    event, goal,
+                    event,
+                    goal,
                 )
                 return True
         return False
@@ -65,12 +69,14 @@ class FastPathPolicy:
 
     @classmethod
     def for_buyer(cls) -> "FastPathPolicy":
-        return cls(rules=[
-            FastPathRule(
-                events=frozenset({"ANSWER", "SELECTION"}),
-                goals=ALL_BUYER_TUNNEL_GOALS,
-            ),
-        ])
+        return cls(
+            rules=[
+                FastPathRule(
+                    events=frozenset({"ANSWER", "SELECTION"}),
+                    goals=ALL_BUYER_TUNNEL_GOALS,
+                ),
+            ]
+        )
 
     @classmethod
     def for_producer(cls) -> "FastPathPolicy":

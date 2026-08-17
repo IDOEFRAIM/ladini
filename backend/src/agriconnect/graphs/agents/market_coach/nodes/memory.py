@@ -1,6 +1,17 @@
-from typing import Any, Dict, List, Optional
 import unicodedata
+from typing import Any, Dict, Optional
+
 from agriconnect.core.logger import get_logger
+from agriconnect.graphs.agents.market_coach.core.slots import build_alias_mirrors
+from agriconnect.graphs.agents.market_coach.core.state_compaction import (
+    build_compaction_patch,
+)
+from agriconnect.graphs.agents.market_coach.nodes.cleaner import (
+    _EPHEMERAL_WORKING_KEYS as _EPHEMERAL_WORKING_KEYS_TUPLE,
+)
+from agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment import (
+    enrich_payload_from_text,
+)
 from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
     menu_snapshot_store,
 )
@@ -11,13 +22,6 @@ from agriconnect.graphs.agents.market_coach.utils import (
     merge_payload,
     normalize_slot_keys,
     slot_has_value,
-)
-from agriconnect.graphs.agents.market_coach.core.slots import build_alias_mirrors
-from agriconnect.graphs.agents.market_coach.core.state_compaction import (
-    build_compaction_patch,
-)
-from agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment import (
-    enrich_payload_from_text,
 )
 
 logger = get_logger("AgriConnect.MarketCoach.MemoryUpdate")
@@ -62,10 +66,6 @@ _AUCTION_MAPPING_KINDS = frozenset({"auction", "buyer_auction_list", "auction_bi
 # les deux doivent porter exactement le même ensemble, sinon une clé « nettoyée »
 # d'un côté est réhydratée de l'autre (et inversement). Elles étaient
 # auparavant déclarées deux fois à l'identique.
-from agriconnect.graphs.agents.market_coach.nodes.cleaner import (
-    _EPHEMERAL_WORKING_KEYS as _EPHEMERAL_WORKING_KEYS_TUPLE,
-)
-
 _EPHEMERAL_WORKING_KEYS = frozenset(_EPHEMERAL_WORKING_KEYS_TUPLE)
 _PRODUCT_CASCADE_FIELDS = (
     "quantity",
@@ -83,19 +83,21 @@ _UNIT_CASCADE_FIELDS = ("price",)
 _CANONICAL_SLOT_ORDER = ("product", "quantity", "unit", "price", "zone")
 
 
-_BUYER_REQUEST_SPECIALIZATIONS = frozenset({
-    "BUYER_ADD_TO_CART",
-    "BUYER_VIEW_CART",
-    "BUYER_PREORDER_INIT",
-    "BUYER_PREORDER_CONFIRM",
-    "BUYER_NEGOTIATE_PRICE",
-    "BUYER_CHECK_ORDER_STATUS",
-    "BUYER_LIST_ORDERS",
-    "BUYER_CANCEL_ORDER",
-    "BUYER_LIST_AUCTIONS",
-    "BUYER_CHECK_AUCTION_STATUS",
-    "BUYER_CART_RESET",
-})
+_BUYER_REQUEST_SPECIALIZATIONS = frozenset(
+    {
+        "BUYER_ADD_TO_CART",
+        "BUYER_VIEW_CART",
+        "BUYER_PREORDER_INIT",
+        "BUYER_PREORDER_CONFIRM",
+        "BUYER_NEGOTIATE_PRICE",
+        "BUYER_CHECK_ORDER_STATUS",
+        "BUYER_LIST_ORDERS",
+        "BUYER_CANCEL_ORDER",
+        "BUYER_LIST_AUCTIONS",
+        "BUYER_CHECK_AUCTION_STATUS",
+        "BUYER_CART_RESET",
+    }
+)
 
 
 def _is_goal_refinement(previous: str, incoming: str) -> bool:
@@ -121,8 +123,6 @@ def _mirror_aliases(container: Dict[str, Any]) -> None:
                 container.pop(alias, None)
 
 
-
-
 def _values_equal(a: Any, b: Any) -> bool:
     if isinstance(a, str) and isinstance(b, str):
         return a.strip().lower() == b.strip().lower()
@@ -133,7 +133,7 @@ def _format_value(value: Any) -> str:
     if not slot_has_value(value):
         return "∅"
     if isinstance(value, float):
-        return ("%g" % value)
+        return "%g" % value
     return str(value)
 
 
@@ -150,7 +150,9 @@ def _resolve_unit_value(value: Any) -> Optional[str]:
     return None
 
 
-async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+async def memory_update(
+    state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Dict[str, Any]:
     """Met à jour la mémoire de transaction, résout les sélections AG-UI,
     hérite les entités stables pour continuité inter-tours, et injecte
     les défauts profil (zone) quand l'utilisateur ne les spécifie pas."""
@@ -159,7 +161,9 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
     stable_source: Dict[str, Any] = dict(state.get("stable_entities") or {})
     working_source: Dict[str, Any] = dict(state.get("working_memory") or {})
     working: Dict[str, Any] = {
-        key: value for key, value in working_source.items() if key not in _EPHEMERAL_WORKING_KEYS
+        key: value
+        for key, value in working_source.items()
+        if key not in _EPHEMERAL_WORKING_KEYS
     }
     draft_source: Dict[str, Any] = dict(state.get("draft_payload") or {})
 
@@ -179,7 +183,9 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
                 payload.pop(_transient, None)
     onboarding_profile = dict(state.get("onboarding_profile") or {})
 
-    def _rehydrate_onboarding_slot(source_key: str, target_key: Optional[str] = None) -> None:
+    def _rehydrate_onboarding_slot(
+        source_key: str, target_key: Optional[str] = None
+    ) -> None:
         key = target_key or source_key
         value = onboarding_profile.get(source_key)
         if slot_has_value(value) and not slot_has_value(payload.get(key)):
@@ -310,10 +316,20 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
     if incoming_role == "UNKNOWN":
         incoming_role = None
     previous_role = _clean_upper(payload.get("role"))
-    if previous_role and incoming_role and previous_role != incoming_role and not onboarding_active:
+    if (
+        previous_role
+        and incoming_role
+        and previous_role != incoming_role
+        and not onboarding_active
+    ):
         _record_correction("role", previous_role, incoming_role)
         _reset_payload("role_change")
-    elif previous_role and incoming_role and previous_role != incoming_role and onboarding_active:
+    elif (
+        previous_role
+        and incoming_role
+        and previous_role != incoming_role
+        and onboarding_active
+    ):
         _record_correction("role", previous_role, incoming_role)
     if incoming_role:
         payload["role"] = incoming_role
@@ -328,7 +344,12 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
     if incoming_intent == "UNKNOWN":
         incoming_intent = None
     previous_intent = _clean_upper(payload.get("intent"))
-    if previous_intent and incoming_intent and previous_intent != incoming_intent and not onboarding_active:
+    if (
+        previous_intent
+        and incoming_intent
+        and previous_intent != incoming_intent
+        and not onboarding_active
+    ):
         if not _is_goal_refinement(previous_intent, incoming_intent):
             _record_correction("intent", previous_intent, incoming_intent)
             if not form_completed:
@@ -344,8 +365,15 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
     in_tunnel = bool(previous_goal and expected_input not in {"", "NONE"})
     if (
         previous_goal
-        and (incoming_goal in (None, "", "UNKNOWN") or interpreted_event in {"UNKNOWN", "ANSWER"})
-        and (in_tunnel or str(state.get("status") or "").upper() in {"WAITING_INPUT", "WAITING_CONFIRMATION"})
+        and (
+            incoming_goal in (None, "", "UNKNOWN")
+            or interpreted_event in {"UNKNOWN", "ANSWER"}
+        )
+        and (
+            in_tunnel
+            or str(state.get("status") or "").upper()
+            in {"WAITING_INPUT", "WAITING_CONFIRMATION"}
+        )
     ):
         current_goal = previous_goal
     else:
@@ -353,7 +381,11 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
 
     goal_upper = str(current_goal or "").upper()
 
-    if goal_upper == "BUYER_ADD_TO_CART" and draft_payload and not draft_payload.get("__reset__"):
+    if (
+        goal_upper == "BUYER_ADD_TO_CART"
+        and draft_payload
+        and not draft_payload.get("__reset__")
+    ):
         # `draft_payload` is in `_DRAFT_SAFE_GOALS` (state_cleaner_node), so it
         # is NEVER purged between two separate BUYER_ADD_TO_CART attempts as
         # long as the goal name doesn't change — only on FAILED/COMPLETED
@@ -365,10 +397,15 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         # in-progress add), not a fresh add for a different one.
         incoming_product = extracted.get("product")
         draft_product = draft_payload.get("product")
-        if incoming_product and draft_product and not _values_equal(draft_product, incoming_product):
+        if (
+            incoming_product
+            and draft_product
+            and not _values_equal(draft_product, incoming_product)
+        ):
             logger.info(
                 "[MemoryUpdate] Stale cart draft for '%s' discarded (new product '%s')",
-                draft_product, incoming_product,
+                draft_product,
+                incoming_product,
             )
         else:
             payload = merge_payload(draft_payload, payload)
@@ -456,7 +493,9 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
     # (interpreter/routing.py, lu depuis `completion.model` de la réponse
     # Groq) est le seul signal fiable pour savoir APRÈS COUP si le repli a été
     # utilisé pour CE tour précis.
-    _degraded_model_response = bool((state.get("raw_analysis") or {}).get("degraded_model"))
+    _degraded_model_response = bool(
+        (state.get("raw_analysis") or {}).get("degraded_model")
+    )
 
     if (
         interpreted_event in {"ANSWER", "UPDATE"}
@@ -474,7 +513,10 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
                     logger.warning(
                         "[MemoryUpdate] %s attendu=%s : champ hors-sujet '%s'=%r ignoré "
                         "(hors-scope du slot en cours — probable bruit/hallucination LLM)",
-                        interpreted_event, expected_input, key, dropped,
+                        interpreted_event,
+                        expected_input,
+                        key,
+                        dropped,
                     )
 
     if not _skip_merge:
@@ -498,7 +540,9 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
             if key == "product" and skip_product_inheritance:
                 continue
             payload[key] = stable[key]
-            logger.debug("[MemoryUpdate] Inherited stable entity %s=%s", key, stable[key])
+            logger.debug(
+                "[MemoryUpdate] Inherited stable entity %s=%s", key, stable[key]
+            )
 
     # --- VENDOR CONTEXT RECOVERY for cart tunnel ---
     # When the buyer is selecting a vendor, the product and quantity live in
@@ -510,17 +554,22 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
             if not slot_has_value(payload.get("product")):
                 chosen = vendor_ctx.get("chosen_vendor")
                 recovered_product = (
-                    (chosen.get("name") if isinstance(chosen, dict) else None)
-                    or vendor_ctx.get("product")
-                )
+                    chosen.get("name") if isinstance(chosen, dict) else None
+                ) or vendor_ctx.get("product")
                 if slot_has_value(recovered_product):
                     payload["product"] = recovered_product
-                    logger.info("[MemoryUpdate] Recovered product '%s' from vendor_selection_context", recovered_product)
+                    logger.info(
+                        "[MemoryUpdate] Recovered product '%s' from vendor_selection_context",
+                        recovered_product,
+                    )
             if not slot_has_value(payload.get("quantity")):
                 recovered_qty = vendor_ctx.get("requested_quantity")
                 if slot_has_value(recovered_qty):
                     payload["quantity"] = recovered_qty
-                    logger.info("[MemoryUpdate] Recovered quantity '%s' from vendor_selection_context", recovered_qty)
+                    logger.info(
+                        "[MemoryUpdate] Recovered quantity '%s' from vendor_selection_context",
+                        recovered_qty,
+                    )
             if not slot_has_value(payload.get("unit")):
                 recovered_unit = vendor_ctx.get("requested_unit")
                 if slot_has_value(recovered_unit):
@@ -533,9 +582,13 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
             payload["zone"] = str(profile_zone).strip()
 
     # --- SLOT ENRICHMENT: text-based extraction (single pass) ---
-    normalized_text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+    normalized_text = str(
+        state.get("normalized_text") or state.get("user_query") or ""
+    ).strip()
     if normalized_text and current_goal:
-        payload = await enrich_payload_from_text(payload, normalized_text, current_goal, mc_runtime)
+        payload = await enrich_payload_from_text(
+            payload, normalized_text, current_goal, mc_runtime
+        )
 
     # --- AG-UI: free-text resolution of ListMenu labels ---
     user_free_text = (
@@ -570,10 +623,7 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
     mapping = state.get("available_mapping") or {}
     mapping_kind = working.get("available_mapping_kind")
     session_id = str(state.get("session_id") or state.get("user_phone") or "")
-    snapshot_id = (
-        working.get("menu_snapshot_id")
-        or state.get("menu_snapshot_id")
-    )
+    snapshot_id = working.get("menu_snapshot_id") or state.get("menu_snapshot_id")
 
     if sel_idx is not None or sel_val is not None:
         resolved_id = None
@@ -585,7 +635,9 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         if resolved_id is None and snapshot_id:
             selection_token = sel_idx if sel_idx is not None else sel_val
             try:
-                resolved_id = menu_snapshot_store.resolve(session_id, snapshot_id, selection_token)
+                resolved_id = menu_snapshot_store.resolve(
+                    session_id, snapshot_id, selection_token
+                )
             except Exception as snap_exc:
                 logger.warning(
                     "[MemoryUpdate] menu_snapshot_store.resolve failed (snapshot=%s token=%s): %s",
@@ -635,7 +687,11 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
     status = str(state.get("status") or "").upper()
     goal_status = str(state.get("goal_status") or "").upper()
     strategy = str(state.get("response_strategy") or "").upper()
-    transaction_closed = strategy == "SUCCESS" or status in {"COMPLETED", "SUCCESS"} or goal_status == "COMPLETED"
+    transaction_closed = (
+        strategy == "SUCCESS"
+        or status in {"COMPLETED", "SUCCESS"}
+        or goal_status == "COMPLETED"
+    )
 
     updated_stable = dict(stable)
     if transaction_closed:
@@ -654,7 +710,9 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         working["locked_intent"] = current_goal
         working["step_index"] = 0
 
-    existing_draft = draft_payload if draft_payload and not draft_payload.get("__reset__") else {}
+    existing_draft = (
+        draft_payload if draft_payload and not draft_payload.get("__reset__") else {}
+    )
 
     draft_patch: Dict[str, Any] | None = None
     if goal_upper == "BUYER_ADD_TO_CART":
@@ -705,5 +763,3 @@ async def memory_update(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dic
         result.update(compaction_patch)
 
     return result
-
-

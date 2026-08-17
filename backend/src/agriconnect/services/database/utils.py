@@ -1,27 +1,39 @@
-from typing import Tuple, Dict, Any
+from typing import Any, Dict, Tuple
 
 from .common import clean_text, positive_float
 
 
 class UtilsMixin:
-    async def normalize_unit(self, quantity: float, unit: str) -> Tuple[float, str, float]:
+    async def normalize_unit(
+        self, quantity: float, unit: str
+    ) -> Tuple[float, str, float]:
         quantity = positive_float(quantity, "quantity", allow_zero=True)
         key = (unit).lower().strip()
         UNIT_TO_KG = {
-            "sac": 100, "sacs": 100,
-            "tine": 18, "tines": 18,
-            "plat": 2.5, "plats": 2.5,
-            "kg": 1, "kilo": 1, "kilos": 1,
-            "tonne": 1000, "tonnes": 1000,
+            "sac": 100,
+            "sacs": 100,
+            "tine": 18,
+            "tines": 18,
+            "plat": 2.5,
+            "plats": 2.5,
+            "kg": 1,
+            "kilo": 1,
+            "kilos": 1,
+            "tonne": 1000,
+            "tonnes": 1000,
         }
         multiplier = UNIT_TO_KG.get(key, 1.0)
         unit_final = "KG" if key in UNIT_TO_KG else (unit or "").upper()
         qty_kg = quantity * multiplier
         return multiplier, unit_final, qty_kg
 
-    async def check_price_anomaly(self, product_name: str, proposed_price: float, zone_id: str) -> Dict[str, Any]:
+    async def check_price_anomaly(
+        self, product_name: str, proposed_price: float, zone_id: str
+    ) -> Dict[str, Any]:
         product_name = clean_text(product_name, "product_name", required=True)
-        proposed_price = positive_float(proposed_price, "proposed_price", allow_zero=True)
+        proposed_price = positive_float(
+            proposed_price, "proposed_price", allow_zero=True
+        )
         getter = getattr(self, "get_standard_price", None)
         if callable(getter):
             try:
@@ -31,7 +43,10 @@ class UtilsMixin:
         else:
             ref = None
         if not ref:
-            return {"is_anomaly": False, "reason": "Pas de prix de référence disponible."}
+            return {
+                "is_anomaly": False,
+                "reason": "Pas de prix de référence disponible.",
+            }
 
         ref_price = ref["price_per_unit"]
         ratio = proposed_price / ref_price if ref_price > 0 else 0

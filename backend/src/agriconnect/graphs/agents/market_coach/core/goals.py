@@ -12,6 +12,7 @@ est un bug — importer d'ici.
 `_validate_goal_drift()` échoue fort à l'import si le catalogue et ce module
 divergent (intent tunnel inconnu, rôle incohérent, tunnel vide).
 """
+
 from __future__ import annotations
 
 from typing import FrozenSet
@@ -24,8 +25,7 @@ from agriconnect.graphs.agents.market_coach.interpreter.intent import (
 
 def _goals_for_tunnel(name: str) -> FrozenSet[str]:
     return frozenset(
-        goal for goal, cfg in INTENT_CONFIG.items()
-        if (cfg or {}).get("tunnel") == name
+        goal for goal, cfg in INTENT_CONFIG.items() if (cfg or {}).get("tunnel") == name
     )
 
 
@@ -34,7 +34,9 @@ BUYER_CART_GOALS: FrozenSet[str] = _goals_for_tunnel("cart")
 # BUYER_CART_RESET est un goal INTERNE : émis par les flows (preorder.py,
 # memory.py), jamais par l'interpréteur — donc volontairement absent du
 # catalogue INTENT_CONFIG. Adjonction explicite, pas une dérive.
-BUYER_PREORDER_GOALS: FrozenSet[str] = _goals_for_tunnel("preorder") | {"BUYER_CART_RESET"}
+BUYER_PREORDER_GOALS: FrozenSet[str] = _goals_for_tunnel("preorder") | {
+    "BUYER_CART_RESET"
+}
 BUYER_NEGOTIATION_GOALS: FrozenSet[str] = _goals_for_tunnel("negotiation")
 BUYER_ORDER_TRACKING_GOALS: FrozenSet[str] = _goals_for_tunnel("order_tracking")
 BUYER_AUCTION_TRACKING_GOALS: FrozenSet[str] = _goals_for_tunnel("auction_tracking")
@@ -66,15 +68,21 @@ PRODUCER_ESCROW_GOALS: FrozenSet[str] = _goals_for_tunnel("producer_escrow")
 # Intents de navigation autorisés à interrompre un tunnel actif.
 # Consommé par TunnelManager (breakout) et goal_planner/routing (navigation).
 NAVIGATION_BREAKOUT_GOALS: FrozenSet[str] = frozenset(
-    goal for goal, cfg in INTENT_CONFIG.items()
-    if (cfg or {}).get("breakout")
+    goal for goal, cfg in INTENT_CONFIG.items() if (cfg or {}).get("breakout")
 )
 
-_KNOWN_TUNNELS = frozenset({
-    "cart", "preorder", "negotiation", "order_tracking",
-    "auction_tracking", "producer_auction", "producer_update",
-    "producer_escrow",
-})
+_KNOWN_TUNNELS = frozenset(
+    {
+        "cart",
+        "preorder",
+        "negotiation",
+        "order_tracking",
+        "auction_tracking",
+        "producer_auction",
+        "producer_update",
+        "producer_escrow",
+    }
+)
 
 # Intents handled_by_flow sans tunnel de routage post-validator (résolus
 # ailleurs dans le graphe) — liste fermée, toute nouveauté doit être choisie.
@@ -88,8 +96,11 @@ def _validate_goal_drift() -> None:
         tunnel = (cfg or {}).get("tunnel")
         if tunnel is not None and tunnel not in _KNOWN_TUNNELS:
             problems.append(f"{goal}: tunnel inconnu {tunnel!r}")
-        if (cfg or {}).get("handled_by_flow") and tunnel is None \
-                and goal not in _TUNNELLESS_FLOW_INTENTS:
+        if (
+            (cfg or {}).get("handled_by_flow")
+            and tunnel is None
+            and goal not in _TUNNELLESS_FLOW_INTENTS
+        ):
             problems.append(
                 f"{goal}: handled_by_flow sans tunnel — assigner un tunnel "
                 "dans intent.py (_TUNNEL_ASSIGNMENTS) ou l'ajouter à "
@@ -106,13 +117,19 @@ def _validate_goal_drift() -> None:
             problems.append(f"{goal}: tunnel buyer mais rôle {INTENT_ROLE.get(goal)!r}")
     for goal in PRODUCER_RESOLVER_GOALS:
         if INTENT_ROLE.get(goal) not in {"PRODUCER", "BOTH"}:
-            problems.append(f"{goal}: tunnel producer mais rôle {INTENT_ROLE.get(goal)!r}")
+            problems.append(
+                f"{goal}: tunnel producer mais rôle {INTENT_ROLE.get(goal)!r}"
+            )
     for goal in PRODUCER_UPDATE_GOALS:
         if INTENT_ROLE.get(goal) not in {"PRODUCER", "BOTH"}:
-            problems.append(f"{goal}: tunnel producer_update mais rôle {INTENT_ROLE.get(goal)!r}")
+            problems.append(
+                f"{goal}: tunnel producer_update mais rôle {INTENT_ROLE.get(goal)!r}"
+            )
     for goal in PRODUCER_ESCROW_GOALS:
         if INTENT_ROLE.get(goal) not in {"PRODUCER", "BOTH"}:
-            problems.append(f"{goal}: tunnel producer_escrow mais rôle {INTENT_ROLE.get(goal)!r}")
+            problems.append(
+                f"{goal}: tunnel producer_escrow mais rôle {INTENT_ROLE.get(goal)!r}"
+            )
 
     if problems:
         raise RuntimeError(

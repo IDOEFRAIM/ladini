@@ -11,6 +11,7 @@ Rejouable sans doublon : les producteurs déjà sollicités sont ignorés, et le
 ``dedupe_key`` garantit qu'aucun message n'est enfilé deux fois. Si ce service
 plante, AUCUN message n'est parti — on relance sans effet de bord.
 """
+
 from __future__ import annotations
 
 import logging

@@ -10,6 +10,7 @@ Aucun nom de modèle n'est codé en dur ici : la correspondance goal -> modèle
 vit dans `settings.ROUTING_MAP` (core/settings.py, dérivée de
 `LLM_MODEL`/`LLM_MODEL_REASONING`) — ce module ne fait que la consulter.
 """
+
 from __future__ import annotations
 
 from typing import Optional

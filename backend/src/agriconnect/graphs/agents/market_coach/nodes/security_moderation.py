@@ -1,18 +1,21 @@
-from typing import Any, Dict, List, Optional
 import asyncio
 import inspect
 import re
 import time
 import unicodedata
+from typing import Any, Dict, List, Optional
 
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
+from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
+    ModerationGateway,
+)
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
-from agriconnect.graphs.agents.market_coach.services.mcp.gateway import ModerationGateway
 
 logger = get_node_logger("SecurityModerationNode")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
+
 
 def _unwrap(res: Any) -> Dict[str, Any]:
     """Déballe l'enveloppe outil {ok,data,...} → dict métier plat."""
@@ -50,12 +53,18 @@ def _blocked_patch(message: str) -> Dict[str, Any]:
     }
 
 
-async def _check_account_gate(mc_runtime: MarketRuntime, phone: str) -> Optional[Dict[str, Any]]:
+async def _check_account_gate(
+    mc_runtime: MarketRuntime, phone: str
+) -> Optional[Dict[str, Any]]:
     """Bloque l'entrée si le compte est BLOCKED (annulations) ou BANNED (produits interdits)."""
     try:
         res = await ModerationGateway(mc_runtime).get_account_status(phone)
-    except Exception as exc:  # dégradé : ne jamais bloquer un compte sain sur erreur technique
-        logger.warning("[SecurityModeration] account gate failed: %s — laissé passer", exc)
+    except (
+        Exception
+    ) as exc:  # dégradé : ne jamais bloquer un compte sain sur erreur technique
+        logger.warning(
+            "[SecurityModeration] account gate failed: %s — laissé passer", exc
+        )
         return None
 
     data = _unwrap(res)
@@ -103,7 +112,9 @@ _TERMS_CACHE_TTL_SECONDS = 300.0
 _terms_cache: Dict[str, Any] = {"at": 0.0, "terms": None}
 
 
-async def _get_prohibited_terms_cached(mc_runtime: MarketRuntime) -> Optional[List[Any]]:
+async def _get_prohibited_terms_cached(
+    mc_runtime: MarketRuntime,
+) -> Optional[List[Any]]:
     now = time.monotonic()
     cached = _terms_cache["terms"]
     if cached is not None and (now - _terms_cache["at"]) < _TERMS_CACHE_TTL_SECONDS:
@@ -141,7 +152,10 @@ async def _check_prohibited(
         try:
             rec = _unwrap(
                 await ModerationGateway(mc_runtime).record_moderation_strike(
-                    phone=phone, matched_term=str(matched), excerpt=text, kind="PROHIBITED_PRODUCT",
+                    phone=phone,
+                    matched_term=str(matched),
+                    excerpt=text,
+                    kind="PROHIBITED_PRODUCT",
                 )
             )
             strikes = int(rec.get("strikes") or 0)
@@ -149,8 +163,13 @@ async def _check_prohibited(
         except Exception as exc:
             logger.warning("[SecurityModeration] record_strike failed: %s", exc)
 
-    logger.warning("[SecurityModeration] PROHIBITED term=%r phone=%s strikes=%s banned=%s",
-                   matched, phone, strikes, banned)
+    logger.warning(
+        "[SecurityModeration] PROHIBITED term=%r phone=%s strikes=%s banned=%s",
+        matched,
+        phone,
+        strikes,
+        banned,
+    )
 
     if banned:
         return _blocked_patch(
@@ -187,12 +206,19 @@ async def _check_prohibited(
 
 # ── Node ─────────────────────────────────────────────────────────────
 
-async def security_moderation(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+
+async def security_moderation(
+    state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Dict[str, Any]:
     """Vérifie les risques de sécurité, l'état du compte et les produits interdits."""
     # Un blocage déjà décidé en amont (ex: profil indisponible côté normaliseur)
     # est respecté tel quel — on ne l'écrase pas.
-    if str(state.get("status") or "").upper() == "BLOCKED" and state.get("final_response"):
-        return {"security_status": state.get("security_status") or "PROFILE_UNAVAILABLE"}
+    if str(state.get("status") or "").upper() == "BLOCKED" and state.get(
+        "final_response"
+    ):
+        return {
+            "security_status": state.get("security_status") or "PROFILE_UNAVAILABLE"
+        }
 
     text = state.get("normalized_text") or state.get("user_query") or ""
     phone = str(state.get("user_phone") or "").strip()
@@ -223,10 +249,15 @@ async def security_moderation(state: Dict[str, Any], mc_runtime: MarketRuntime) 
         else:
             raw = _call
     except asyncio.TimeoutError:
-        logger.warning("[SecurityModeration] moderate_content timed out — defaulting to SAFE (degraded)")
+        logger.warning(
+            "[SecurityModeration] moderate_content timed out — defaulting to SAFE (degraded)"
+        )
         return {"security_status": "SAFE", "trust_score": 0.3, "ag_ui_component": None}
     except Exception as mod_exc:
-        logger.warning("[SecurityModeration] moderate_content failed: %s — defaulting to SAFE (degraded)", mod_exc)
+        logger.warning(
+            "[SecurityModeration] moderate_content failed: %s — defaulting to SAFE (degraded)",
+            mod_exc,
+        )
         return {"security_status": "SAFE", "trust_score": 0.3, "ag_ui_component": None}
 
     if not isinstance(raw, dict):

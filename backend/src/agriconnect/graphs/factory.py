@@ -15,7 +15,9 @@ class GraphFactory:
         self._cache: Dict[Tuple[str, int, int], Any] = {}
 
     @staticmethod
-    def _cache_key(role: str, mc_runtime: Any, checkpointer: Any) -> Tuple[str, int, int]:
+    def _cache_key(
+        role: str, mc_runtime: Any, checkpointer: Any
+    ) -> Tuple[str, int, int]:
         role_norm = normalize_role(role)
         runtime_id = id(mc_runtime) if mc_runtime is not None else 0
         checkpointer_id = id(checkpointer) if checkpointer is not None else 0

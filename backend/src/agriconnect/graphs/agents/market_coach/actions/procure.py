@@ -1,26 +1,33 @@
 """Action handlers for the Procurement domain."""
+
 from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Tuple
 
-from agriconnect.graphs.agents.market_coach.registry import register_action
-from agriconnect.graphs.agents.market_coach.actions.common import require, require_phone, normalize_quantity_to_kg
+from agriconnect.graphs.agents.market_coach.actions.common import (
+    require,
+    require_phone,
+)
+from agriconnect.graphs.agents.market_coach.actions.procure_dto import (
+    ProcurementAcceptOfferPayload,
+    ProcurementCreateRequestPayload,
+    ProcurementSelectWinnerPayload,
+)
 from agriconnect.graphs.agents.market_coach.actions.tooling import ToolResolver
 from agriconnect.graphs.agents.market_coach.domain import DomainContext
 from agriconnect.graphs.agents.market_coach.domain.procurement import (
-    ProcurementService,
+    ProcurementAcceptOfferCommand,
     ProcurementCreateRequestCommand,
     ProcurementSelectWinnerCommand,
-    ProcurementAcceptOfferCommand,
+    ProcurementService,
 )
-from agriconnect.graphs.agents.market_coach.actions.procure_dto import (
-    ProcurementCreateRequestPayload,
-    ProcurementSelectWinnerPayload,
-    ProcurementAcceptOfferPayload,
-)
+from agriconnect.graphs.agents.market_coach.registry import register_action
+
 
 @register_action("PROCUREMENT_CREATE_REQUEST", mode="WRITE")
-def prep_procurement_create_request(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_procurement_create_request(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     # Validation légère spécifique au handler (ex: présence de champs clés)
     require_phone(state)
     require(payload, "product")
@@ -51,7 +58,9 @@ def prep_procurement_create_request(state: Mapping[str, Any], payload: Mapping[s
 
 
 @register_action("PROCUREMENT_SELECT_WINNER", mode="WRITE")
-def prep_procurement_select_winner(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_procurement_select_winner(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     require_phone(state)
     require(payload, "auction_id")
     require(payload, "bid_id")
@@ -71,7 +80,9 @@ def prep_procurement_select_winner(state: Mapping[str, Any], payload: Mapping[st
 
 
 @register_action("PROCUREMENT_ACCEPT_OFFER", mode="WRITE")
-def prep_procurement_accept_offer(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_procurement_accept_offer(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     require_phone(state)
     require(payload, "bid_id")
 

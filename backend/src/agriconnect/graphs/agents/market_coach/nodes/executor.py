@@ -4,47 +4,64 @@ import asyncio
 import json
 import time
 from copy import deepcopy
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
+from agriconnect.agents.task_handler import GoalState, TaskHandler
 from agriconnect.core.logger import get_logger
-
-logger = get_logger("AgriConnect.MarketCoach.Executor")
-
-from agriconnect.graphs.agents.market_coach.registry import (
-    get_action,
-    load_all_actions,
+from agriconnect.graphs.agents.market_coach.actions.tool_provider import (
+    MCPToolProvider,
+    ToolProvider,
 )
-from agriconnect.graphs.agents.market_coach.actions.tool_provider import MCPToolProvider, ToolProvider
-from agriconnect.workspace.context_guard import ContextGuard
-from agriconnect.agents.task_handler import TaskHandler, GoalState
+from agriconnect.graphs.agents.market_coach.core.base import (
+    _AUTO_FARM_NOTICE,
+    FARM_CRITICAL_GOALS,
+)
+from agriconnect.graphs.agents.market_coach.core.slots import resolve_canonical
+from agriconnect.graphs.agents.market_coach.flows.producer.farm_logic import (
+    ensure_farm_node,
+)
 from agriconnect.graphs.agents.market_coach.interpreter.intent import (
     get_required_fields,
     intent_requires_farm,
 )
-from agriconnect.graphs.agents.market_coach.flows.producer.farm_logic import ensure_farm_node
-from agriconnect.graphs.agents.market_coach.core.base import FARM_CRITICAL_GOALS, _AUTO_FARM_NOTICE
-from agriconnect.graphs.agents.market_coach.core.slots import resolve_canonical
-from agriconnect.graphs.agents.market_coach.utils import (
-    MarketRuntime,
-    is_success_response,
-)
-
-
-from agriconnect.graphs.agents.market_coach.services.mcp.schema_resolver import (
-    get_tool_schema as _get_mcp_tool_schema,
-    build_resolved_tool_args as _build_resolved_tool_args,
-    MissingRequiredMCPArgs,
-    sanitize_mcp_args as _sanitize_mcp_args,
-    mask_pii_args as _mask_pii_args,
-    ascii_fold_value as _ascii_fold_value,
+from agriconnect.graphs.agents.market_coach.registry import (
+    get_action,
+    load_all_actions,
 )
 from agriconnect.graphs.agents.market_coach.services.mcp.error_translation import (
     GENERIC_TECHNICAL_ERROR as _GENERIC_TECHNICAL_ERROR,
+)
+from agriconnect.graphs.agents.market_coach.services.mcp.error_translation import (
     translate_mcp_error as _translate_mcp_error,
 )
 from agriconnect.graphs.agents.market_coach.services.mcp.post_success import (
     post_success_suggestion as _post_success_suggestion,
 )
+from agriconnect.graphs.agents.market_coach.services.mcp.schema_resolver import (
+    MissingRequiredMCPArgs,
+)
+from agriconnect.graphs.agents.market_coach.services.mcp.schema_resolver import (
+    ascii_fold_value as _ascii_fold_value,
+)
+from agriconnect.graphs.agents.market_coach.services.mcp.schema_resolver import (
+    build_resolved_tool_args as _build_resolved_tool_args,
+)
+from agriconnect.graphs.agents.market_coach.services.mcp.schema_resolver import (
+    get_tool_schema as _get_mcp_tool_schema,
+)
+from agriconnect.graphs.agents.market_coach.services.mcp.schema_resolver import (
+    mask_pii_args as _mask_pii_args,
+)
+from agriconnect.graphs.agents.market_coach.services.mcp.schema_resolver import (
+    sanitize_mcp_args as _sanitize_mcp_args,
+)
+from agriconnect.graphs.agents.market_coach.utils import (
+    MarketRuntime,
+    is_success_response,
+)
+from agriconnect.workspace.context_guard import ContextGuard
+
+logger = get_logger("AgriConnect.MarketCoach.Executor")
 
 load_all_actions()
 
@@ -56,6 +73,7 @@ def _now() -> float:
 # =====================================================================
 # FARM AUTO-PROVISIONING
 # =====================================================================
+
 
 async def _auto_provision_farm_if_needed(
     state: Dict[str, Any],
@@ -91,21 +109,39 @@ async def _auto_provision_farm_if_needed(
     # l'utilisateur, on garantit une ferme via `get_or_create_farm` (idempotent,
     # crée producteur+ferme si absent). On NE le fait PAS si ensure_farm_node
     # demande explicitement une sélection multi-fermes (WAITING_INPUT).
-    if status != "WAITING_INPUT" and updated_payload.get("farm_id") in (None, "", [], {}):
+    if status != "WAITING_INPUT" and updated_payload.get("farm_id") in (
+        None,
+        "",
+        [],
+        {},
+    ):
         phone = state.get("user_phone") or payload.get("phone")
         if phone:
             try:
-                from agriconnect.graphs.agents.market_coach.services.mcp.gateway import FarmGateway
-                farm_data = await FarmGateway(mc_runtime).get_or_create_farm(phone=str(phone).strip())
-                fid = str((farm_data or {}).get("id") or (farm_data or {}).get("farm_id") or "")
+                from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
+                    FarmGateway,
+                )
+
+                farm_data = await FarmGateway(mc_runtime).get_or_create_farm(
+                    phone=str(phone).strip()
+                )
+                fid = str(
+                    (farm_data or {}).get("id")
+                    or (farm_data or {}).get("farm_id")
+                    or ""
+                )
                 if fid:
                     updated_payload["farm_id"] = fid
                     updates = dict(updates)
                     updates["transaction_payload"] = updated_payload
                     updates.setdefault("auto_farm_notice", _AUTO_FARM_NOTICE)
-                    logger.info("[Executor] farm garanti via get_or_create_farm: %s", fid)
+                    logger.info(
+                        "[Executor] farm garanti via get_or_create_farm: %s", fid
+                    )
             except Exception as exc:
-                logger.warning("[Executor] get_or_create_farm (filet ultime) a échoué: %s", exc)
+                logger.warning(
+                    "[Executor] get_or_create_farm (filet ultime) a échoué: %s", exc
+                )
 
     if not updates:
         return payload, {}
@@ -123,6 +159,7 @@ async def _auto_provision_farm_if_needed(
 # TASK HANDLER ADAPTERS
 # =====================================================================
 
+
 class _RuntimeStorageAdapter:
     def __init__(self, runtime: Any) -> None:
         self.runtime = runtime
@@ -131,7 +168,10 @@ class _RuntimeStorageAdapter:
         phone = str(phone or "").strip()
         if not phone:
             raise ValueError("phone requis pour la validation")
-        from agriconnect.graphs.agents.market_coach.services.mcp.gateway import ProfileGateway
+        from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
+            ProfileGateway,
+        )
+
         await ProfileGateway(self.runtime).identify_or_create_user(phone)
 
 
@@ -156,7 +196,9 @@ def _extract_float(*values: Any) -> Optional[float]:
 
 def _build_task_payload(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     payload = dict(state.get("transaction_payload") or {})
-    phone = state.get("user_phone") or payload.get("producer_id") or payload.get("phone")
+    phone = (
+        state.get("user_phone") or payload.get("producer_id") or payload.get("phone")
+    )
     goal = (state.get("current_goal") or payload.get("goal") or "").upper()
     if not phone or not goal:
         return None
@@ -170,11 +212,7 @@ def _build_task_payload(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         payload.get("quantity"),
         state.get("quantity"),
     )
-    unit = (
-        payload.get("unit")
-        or state.get("unit")
-        or "KG"
-    )
+    unit = payload.get("unit") or state.get("unit") or "KG"
 
     required_fields = get_required_fields(goal)
 
@@ -197,6 +235,7 @@ def _build_task_payload(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 # NODE 9 — MCP TOOL EXECUTOR
 # =====================================================================
 
+
 async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str, Any]:
     """MCP executor with self-healing, transient retry, error translation,
     and post-success suggestions.
@@ -210,7 +249,9 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
         side_effects = dict(state_side_effects)
 
         if "transaction_payload" not in explicit_keys:
-            merged["transaction_payload"] = deepcopy(side_effects.pop("transaction_payload", payload))
+            merged["transaction_payload"] = deepcopy(
+                side_effects.pop("transaction_payload", payload)
+            )
         else:
             side_effects.pop("transaction_payload", None)
 
@@ -231,38 +272,44 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
     allowed, guard_msg = ContextGuard.ensure_agent(state, expected_agent="market")
     if not allowed:
         logger.warning("ContextGuard: tool execution blocked (market)")
-        return _apply_side_effects({
-            "status": "WAITING_INPUT",
-            "response_strategy": "CLARIFICATION",
-            "final_response": guard_msg,
-            "execution_authorized": False,
-            "validation_errors": ["agent_mismatch"],
-            "ag_ui_component": None,
-        })
+        return _apply_side_effects(
+            {
+                "status": "WAITING_INPUT",
+                "response_strategy": "CLARIFICATION",
+                "final_response": guard_msg,
+                "execution_authorized": False,
+                "validation_errors": ["agent_mismatch"],
+                "ag_ui_component": None,
+            }
+        )
 
     if not state.get("execution_authorized"):
         logger.warning("Executor invoqué sans autorisation — refus d'écriture")
-        return _apply_side_effects({
-            "status": "ERROR",
-            "validation_errors": ["execution_not_authorized"],
-            "response_strategy": "ERROR",
-            "ag_ui_component": None,
-        })
+        return _apply_side_effects(
+            {
+                "status": "ERROR",
+                "validation_errors": ["execution_not_authorized"],
+                "response_strategy": "ERROR",
+                "ag_ui_component": None,
+            }
+        )
 
     goal = (state.get("current_goal") or "").upper()
-    phone = state.get("user_phone")
+    state.get("user_phone")
     retry_count = int(state.get("retry_count") or 0)
 
     if not goal:
         logger.error("Aucun goal défini — exécution impossible")
-        return _apply_side_effects({
-            "status": "ERROR",
-            "validation_errors": ["no_goal_defined"],
-            "response_strategy": "ERROR",
-            "selected_tool": None,
-            "selected_tool_args": {},
-            "ag_ui_component": None,
-        })
+        return _apply_side_effects(
+            {
+                "status": "ERROR",
+                "validation_errors": ["no_goal_defined"],
+                "response_strategy": "ERROR",
+                "selected_tool": None,
+                "selected_tool_args": {},
+                "ag_ui_component": None,
+            }
+        )
 
     registration = get_action(goal)
     if registration is None:
@@ -285,7 +332,9 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
         if preflight_updates:
             state_side_effects.update(preflight_updates)
             payload = dict(preflight_payload)
-            waiting = str(preflight_updates.get("status") or "").upper() == "WAITING_INPUT"
+            waiting = (
+                str(preflight_updates.get("status") or "").upper() == "WAITING_INPUT"
+            )
             if waiting:
                 return _apply_side_effects(preflight_updates)
         else:
@@ -314,46 +363,71 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
             # passagère.
             handler_state = None
             try:
-                handler_state = await handler.handle(task_payload, retry_seed=retry_count)
+                handler_state = await handler.handle(
+                    task_payload, retry_seed=retry_count
+                )
             except Exception as exc:
                 logger.warning(
                     "[Executor] Pré-validation TaskHandler indisponible pour %s (%s) — "
                     "poursuite vers l'appel outil qui gère retries/traduction.",
-                    goal, exc,
+                    goal,
+                    exc,
                 )
 
             # `handler_state is None` = pré-validation indisponible : on saute
             # ses verdicts et on laisse l'appel outil principal trancher.
-            if handler_state is not None and handler_state.goal_state == GoalState.WAITING_INPUT:
+            if (
+                handler_state is not None
+                and handler_state.goal_state == GoalState.WAITING_INPUT
+            ):
                 missing = handler_state.metadata.get("missing_fields", [])
-                logger.info("[Executor] TaskHandler INCOMPLETE for %s — missing: %s", goal, missing)
-                return _apply_side_effects({
-                    "status": "WAITING_INPUT",
-                    "response_strategy": "ASK_CLARIFICATION",
-                    "missing_fields": missing,
-                    "validation_errors": [f"missing:{f}" for f in missing],
-                    "execution_authorized": False,
-                    "ag_ui_component": None,
-                })
-            if handler_state is not None and handler_state.goal_state == GoalState.ERROR_RECOVERY:
-                prompt = handler_state.metadata.get("clarification_prompt") or "Merci de préciser les informations manquantes."
-                return _apply_side_effects({
-                    "status": "ERROR",
-                    "response_strategy": "ASK_CLARIFICATION",
-                    "final_response": prompt,
-                    "execution_authorized": False,
-                    "validation_errors": ["payload_invalid"],
-                    "ag_ui_component": None,
-                })
-            if handler_state is not None and handler_state.goal_state == GoalState.HUMAN_INTERVENTION:
-                return _apply_side_effects({
-                    "status": "HUMAN_INTERVENTION",
-                    "response_strategy": "ESCALATE",
-                    "final_response": "Je transmets cette demande à un agent humain.",
-                    "execution_authorized": False,
-                    "validation_errors": ["manual_takeover"],
-                    "ag_ui_component": None,
-                })
+                logger.info(
+                    "[Executor] TaskHandler INCOMPLETE for %s — missing: %s",
+                    goal,
+                    missing,
+                )
+                return _apply_side_effects(
+                    {
+                        "status": "WAITING_INPUT",
+                        "response_strategy": "ASK_CLARIFICATION",
+                        "missing_fields": missing,
+                        "validation_errors": [f"missing:{f}" for f in missing],
+                        "execution_authorized": False,
+                        "ag_ui_component": None,
+                    }
+                )
+            if (
+                handler_state is not None
+                and handler_state.goal_state == GoalState.ERROR_RECOVERY
+            ):
+                prompt = (
+                    handler_state.metadata.get("clarification_prompt")
+                    or "Merci de préciser les informations manquantes."
+                )
+                return _apply_side_effects(
+                    {
+                        "status": "ERROR",
+                        "response_strategy": "ASK_CLARIFICATION",
+                        "final_response": prompt,
+                        "execution_authorized": False,
+                        "validation_errors": ["payload_invalid"],
+                        "ag_ui_component": None,
+                    }
+                )
+            if (
+                handler_state is not None
+                and handler_state.goal_state == GoalState.HUMAN_INTERVENTION
+            ):
+                return _apply_side_effects(
+                    {
+                        "status": "HUMAN_INTERVENTION",
+                        "response_strategy": "ESCALATE",
+                        "final_response": "Je transmets cette demande à un agent humain.",
+                        "execution_authorized": False,
+                        "validation_errors": ["manual_takeover"],
+                        "ag_ui_component": None,
+                    }
+                )
 
     dispatch_handler = registration.handler
 
@@ -363,7 +437,11 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
         tool_args = dict(tool_args or {})
     except ValueError as ve:
         missing_field = str(ve).replace("Missing required field: ", "").strip()
-        logger.info("[SelfHeal] Dispatcher ValueError for %s: missing '%s' — attempting repair", goal, missing_field)
+        logger.info(
+            "[SelfHeal] Dispatcher ValueError for %s: missing '%s' — attempting repair",
+            goal,
+            missing_field,
+        )
 
         repair_sources = [
             state.get("stable_entities") or {},
@@ -379,45 +457,58 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
 
         if repaired_value is not None:
             payload[missing_field] = repaired_value
-            logger.info("[SelfHeal] Repaired '%s' = %r from state — retrying dispatcher", missing_field, repaired_value)
+            logger.info(
+                "[SelfHeal] Repaired '%s' = %r from state — retrying dispatcher",
+                missing_field,
+                repaired_value,
+            )
             try:
                 tool_name, tool_args = dispatch_handler(state, payload)
                 tool_name = str(tool_name)
                 tool_args = dict(tool_args or {})
             except Exception as exc2:
                 logger.error("[SelfHeal] Dispatcher still fails after repair: %s", exc2)
-                return _apply_side_effects({
-                    "status": "ERROR",
-                    "validation_errors": [f"dispatcher_error_after_repair: {exc2}"],
-                    "response_strategy": "ERROR",
-                    "final_response": _GENERIC_TECHNICAL_ERROR,
+                return _apply_side_effects(
+                    {
+                        "status": "ERROR",
+                        "validation_errors": [f"dispatcher_error_after_repair: {exc2}"],
+                        "response_strategy": "ERROR",
+                        "final_response": _GENERIC_TECHNICAL_ERROR,
+                        "selected_tool": None,
+                        "selected_tool_args": {},
+                        "ag_ui_component": None,
+                    }
+                )
+        else:
+            logger.warning(
+                "[SelfHeal] Cannot repair '%s' — routing to ASK_MISSING_FIELD",
+                missing_field,
+            )
+            return _apply_side_effects(
+                {
+                    "status": "WAITING_INPUT",
+                    "missing_fields": [missing_field],
+                    "last_missing_field": missing_field,
+                    "response_strategy": "ASK_MISSING_FIELD",
+                    "validation_errors": [],
                     "selected_tool": None,
                     "selected_tool_args": {},
                     "ag_ui_component": None,
-                })
-        else:
-            logger.warning("[SelfHeal] Cannot repair '%s' — routing to ASK_MISSING_FIELD", missing_field)
-            return _apply_side_effects({
-                "status": "WAITING_INPUT",
-                "missing_fields": [missing_field],
-                "last_missing_field": missing_field,
-                "response_strategy": "ASK_MISSING_FIELD",
-                "validation_errors": [],
+                }
+            )
+    except Exception as exc:
+        logger.error("Le dispatcher pour %s a échoué: %s", goal, exc)
+        return _apply_side_effects(
+            {
+                "status": "ERROR",
+                "validation_errors": [f"dispatcher_error: {exc}"],
+                "response_strategy": "ERROR",
+                "final_response": _GENERIC_TECHNICAL_ERROR,
                 "selected_tool": None,
                 "selected_tool_args": {},
                 "ag_ui_component": None,
-            })
-    except Exception as exc:
-        logger.error("Le dispatcher pour %s a échoué: %s", goal, exc)
-        return _apply_side_effects({
-            "status": "ERROR",
-            "validation_errors": [f"dispatcher_error: {exc}"],
-            "response_strategy": "ERROR",
-            "final_response": _GENERIC_TECHNICAL_ERROR,
-            "selected_tool": None,
-            "selected_tool_args": {},
-            "ag_ui_component": None,
-        })
+            }
+        )
 
     # NOTE (refonte double-rôle) : le blocage par "rôle de session" a été
     # retiré ici — tout utilisateur peut déclencher un outil producteur OU
@@ -464,17 +555,21 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
         missing_slots = [m for m in missing_slots if m]
 
         first_missing = missing_slots[0] if missing_slots else None
-        return _apply_side_effects({
-            "status": "WAITING_INPUT",
-            "execution_authorized": False,
-            "validation_errors": [f"missing_required_args: {', '.join(exc.missing_args)}"],
-            "selected_tool": tool_name,
-            "selected_tool_args": {},
-            "missing_fields": missing_slots,
-            "last_missing_field": first_missing,
-            "response_strategy": "ASK_MISSING_FIELD",
-            "ag_ui_component": None,
-        })
+        return _apply_side_effects(
+            {
+                "status": "WAITING_INPUT",
+                "execution_authorized": False,
+                "validation_errors": [
+                    f"missing_required_args: {', '.join(exc.missing_args)}"
+                ],
+                "selected_tool": tool_name,
+                "selected_tool_args": {},
+                "missing_fields": missing_slots,
+                "last_missing_field": first_missing,
+                "response_strategy": "ASK_MISSING_FIELD",
+                "ag_ui_component": None,
+            }
+        )
 
     resolved_args = _sanitize_mcp_args(resolved_args)
     resolved_args = _ascii_fold_value(resolved_args)
@@ -489,7 +584,14 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
     provider: ToolProvider = MCPToolProvider(runtime=mc_runtime)
 
     _MCP_MAX_TRANSIENT_RETRIES = 2
-    _TRANSIENT_MARKERS = ("timeout", "connection", "unavailable", "temporary", "503", "502")
+    _TRANSIENT_MARKERS = (
+        "timeout",
+        "connection",
+        "unavailable",
+        "temporary",
+        "503",
+        "502",
+    )
     last_exc: Optional[Exception] = None
 
     for attempt in range(1, _MCP_MAX_TRANSIENT_RETRIES + 1):
@@ -497,31 +599,44 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
             result = await provider.execute(tool_name, resolved_args)
             success = is_success_response(result)
 
-            history.append({
-                "tool": tool_name,
-                "args": resolved_args,
-                "success": success,
-                "raw": result,
-                "ts": _now(),
-                "attempt": attempt,
-            })
+            history.append(
+                {
+                    "tool": tool_name,
+                    "args": resolved_args,
+                    "success": success,
+                    "raw": result,
+                    "ts": _now(),
+                    "attempt": attempt,
+                }
+            )
 
             if not success:
-                err_msg = result.get("message") or result.get("error") or "Transaction rejetée par le système"
-                logger.warning("Tool %s rejeté par le MCP (tentative %d): %s", tool_name, attempt, err_msg)
+                err_msg = (
+                    result.get("message")
+                    or result.get("error")
+                    or "Transaction rejetée par le système"
+                )
+                logger.warning(
+                    "Tool %s rejeté par le MCP (tentative %d): %s",
+                    tool_name,
+                    attempt,
+                    err_msg,
+                )
                 user_msg = _translate_mcp_error(str(err_msg))
-                return _apply_side_effects({
-                    "status": "ERROR",
-                    "execution_result": result,
-                    "selected_tool": tool_name,
-                    "selected_tool_args": resolved_args,
-                    "tool_execution_history": history,
-                    "retry_count": retry_count,
-                    "validation_errors": [str(err_msg)],
-                    "response_strategy": "ERROR",
-                    "final_response": user_msg,
-                    "ag_ui_component": None,
-                })
+                return _apply_side_effects(
+                    {
+                        "status": "ERROR",
+                        "execution_result": result,
+                        "selected_tool": tool_name,
+                        "selected_tool_args": resolved_args,
+                        "tool_execution_history": history,
+                        "retry_count": retry_count,
+                        "validation_errors": [str(err_msg)],
+                        "response_strategy": "ERROR",
+                        "final_response": user_msg,
+                        "ag_ui_component": None,
+                    }
+                )
 
             proactive = _post_success_suggestion(goal, payload)
 
@@ -581,34 +696,46 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
             last_exc = exc
             exc_lower = str(exc).lower()
             is_transient = any(m in exc_lower for m in _TRANSIENT_MARKERS)
-            history.append({
-                "tool": tool_name,
-                "args": resolved_args,
-                "success": False,
-                "error": str(exc),
-                "ts": _now(),
-                "attempt": attempt,
-                "transient": is_transient,
-            })
+            history.append(
+                {
+                    "tool": tool_name,
+                    "args": resolved_args,
+                    "success": False,
+                    "error": str(exc),
+                    "ts": _now(),
+                    "attempt": attempt,
+                    "transient": is_transient,
+                }
+            )
             if is_transient and attempt < _MCP_MAX_TRANSIENT_RETRIES:
                 logger.warning(
                     "[Executor] Transient error on %s (attempt %d/%d): %s — retrying",
-                    tool_name, attempt, _MCP_MAX_TRANSIENT_RETRIES, exc,
+                    tool_name,
+                    attempt,
+                    _MCP_MAX_TRANSIENT_RETRIES,
+                    exc,
                 )
                 await asyncio.sleep(0.5 * attempt)
                 continue
             break
 
-    logger.exception("Le call MCP %s a crashé après %d tentatives: %s", tool_name, _MCP_MAX_TRANSIENT_RETRIES, last_exc)
-    return _apply_side_effects({
-        "status": "ERROR",
-        "selected_tool": tool_name,
-        "selected_tool_args": resolved_args,
-        "tool_execution_history": history,
-        "retry_count": retry_count + 1,
-        "validation_errors": [f"mcp_crash: {last_exc}"],
-        "execution_authorized": False,
-        "response_strategy": "ERROR",
-        "final_response": _translate_mcp_error(str(last_exc)),
-        "ag_ui_component": None,
-    })
+    logger.exception(
+        "Le call MCP %s a crashé après %d tentatives: %s",
+        tool_name,
+        _MCP_MAX_TRANSIENT_RETRIES,
+        last_exc,
+    )
+    return _apply_side_effects(
+        {
+            "status": "ERROR",
+            "selected_tool": tool_name,
+            "selected_tool_args": resolved_args,
+            "tool_execution_history": history,
+            "retry_count": retry_count + 1,
+            "validation_errors": [f"mcp_crash: {last_exc}"],
+            "execution_authorized": False,
+            "response_strategy": "ERROR",
+            "final_response": _translate_mcp_error(str(last_exc)),
+            "ag_ui_component": None,
+        }
+    )

@@ -3,35 +3,43 @@ from __future__ import annotations
 import logging
 import types
 from typing import Any, Callable, Dict, Optional, Set
-import uuid
 
-from sqlalchemy import text, select
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from agriconnect.core.database import get_sessionmaker
-from datetime import datetime, timezone, timedelta
+from agriconnect.services.database.auction import AuctionMixin
 
 # Imports des Mixins
 from agriconnect.services.database.auth import AuthMixin
-from agriconnect.services.database.utils import UtilsMixin
-from agriconnect.services.database.marketplace import MarketplaceMixin
-from agriconnect.services.database.category import PublicProductMixin
-from agriconnect.services.database.buyer import BuyerMixin
-from agriconnect.services.database.buyer_verification import BuyerVerificationMixin
-from agriconnect.services.database.producer import ProducerMgmtMixin
-from agriconnect.services.database.product import ProductMixin
-from agriconnect.services.database.auction import AuctionMixin
-from agriconnect.services.database.moderation import ModerationMixin
-from agriconnect.services.database.escrow import EscrowMixin
 
 # ContextVar unifié : partagé avec BaseService/@transactional.
 # Une session ouverte ici est visible depuis OrderService/UserContextService/ProductService
 # et vice-versa — un seul pool, une seule transaction, zéro deadlock inter-service.
 from agriconnect.services.database.base_service import db_session_ctx, transactional
+from agriconnect.services.database.buyer import BuyerMixin
+from agriconnect.services.database.buyer_verification import BuyerVerificationMixin
+from agriconnect.services.database.category import PublicProductMixin
+from agriconnect.services.database.escrow import EscrowMixin
+from agriconnect.services.database.marketplace import MarketplaceMixin
+from agriconnect.services.database.moderation import ModerationMixin
+from agriconnect.services.database.producer import ProducerMgmtMixin
+from agriconnect.services.database.product import ProductMixin
+from agriconnect.services.database.utils import UtilsMixin
+
 
 class AgriDatabaseService(
-    AuthMixin, UtilsMixin,
-    MarketplaceMixin, PublicProductMixin, BuyerMixin, BuyerVerificationMixin,
-    ProducerMgmtMixin, ProductMixin, AuctionMixin, ModerationMixin, EscrowMixin
+    AuthMixin,
+    UtilsMixin,
+    MarketplaceMixin,
+    PublicProductMixin,
+    BuyerMixin,
+    BuyerVerificationMixin,
+    ProducerMgmtMixin,
+    ProductMixin,
+    AuctionMixin,
+    ModerationMixin,
+    EscrowMixin,
 ):
     _logger = logging.getLogger("AgriConnect.DatabaseService")
 
@@ -48,32 +56,41 @@ class AgriDatabaseService(
     # ==================================================================
     _READ_ONLY_METHODS: Set[str] = {
         # Auth, Identity & Profiles
-        "get_user_by_phone", "get_user_by_id", "get_user_context", "get_trust_score",
-        "get_agent_memory", "get_clients", "get_producer_profile", "get_buyer_profile",
+        "get_user_by_phone",
+        "get_user_by_id",
+        "get_user_context",
+        "get_trust_score",
+        "get_agent_memory",
+        "get_clients",
+        "get_producer_profile",
+        "get_buyer_profile",
         "get_producer_farm",
-
         # Marketplace & Stock
-        "get_farms", "get_stocks", "get_stock_movements", "list_products",
-        "search_products", "get_orders", "get_producer_stocks",
-
+        "get_farms",
+        "get_stocks",
+        "get_stock_movements",
+        "list_products",
+        "search_products",
+        "get_orders",
+        "get_producer_stocks",
         # Auctions / bids (reads)
-        "get_auction_bids", "get_producer_auctions", "get_my_active_bids",
-
+        "get_auction_bids",
+        "get_producer_auctions",
+        "get_my_active_bids",
         # Buyer transactional reads
-        "validate_stock_availability_atomic", "get_transaction_summary",
-
+        "validate_stock_availability_atomic",
+        "get_transaction_summary",
         # Marketplace utilities
         "guess_category",
-
         # Finance reads
-        "get_expenses", "get_expense_summary",
-
+        "get_expenses",
+        "get_expense_summary",
         # Producer reads
-        "get_producer_orders", "get_offer_reservations",
-
+        "get_producer_orders",
+        "get_offer_reservations",
         # Moderation / anti-abuse reads
-        "get_account_status", "get_prohibited_terms",
-
+        "get_account_status",
+        "get_prohibited_terms",
         # Escrow reads
         "list_producer_escrowed_orders",
     }
@@ -82,7 +99,10 @@ class AgriDatabaseService(
     # DISPATCHER — proxy pur vers @transactional
     # ==================================================================
     _BYPASS_DISPATCH: Set[str] = {
-        "ensure_performance_indexes", "DatabaseServiceError", "IntegrityError", "session",
+        "ensure_performance_indexes",
+        "DatabaseServiceError",
+        "IntegrityError",
+        "session",
     }
     # Cache CLASSE : méthode brute → wrapper @transactional (décoration faite une
     # seule fois par méthode, jamais par appel). Clé = "nom:is_write".
@@ -137,10 +157,13 @@ class AgriDatabaseService(
     # ==================================================================
     # MÉTHODES SPÉCIFIQUES & EXCEPTIONS
     # ==================================================================
-    
+
     async def ensure_performance_indexes(self, session: Optional[AsyncSession] = None):
         """Méthode de maintenance des index SQL exécutée de manière isolée."""
-        from agriconnect.services.database.common import PERFORMANCE_INDEX_DDL, SCHEMA_COLUMN_DDL
+        from agriconnect.services.database.common import (
+            PERFORMANCE_INDEX_DDL,
+            SCHEMA_COLUMN_DDL,
+        )
 
         async def _logic(sess: AsyncSession):
             for ddl in (*PERFORMANCE_INDEX_DDL, *SCHEMA_COLUMN_DDL):
@@ -150,13 +173,16 @@ class AgriDatabaseService(
                 except Exception:
                     continue
             return {"status": "indexes_checked"}
-        
-        if session: 
+
+        if session:
             return await _logic(session)
         async with get_sessionmaker()() as s:
             res = await _logic(s)
             await s.commit()
             return res
 
-    class DatabaseServiceError(Exception): pass
-    class IntegrityError(DatabaseServiceError): pass
+    class DatabaseServiceError(Exception):
+        pass
+
+    class IntegrityError(DatabaseServiceError):
+        pass

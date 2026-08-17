@@ -26,20 +26,20 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List
 
-
 # ═══════════════════════════════════════════════════════════════
 # CORRELATION
 # ═══════════════════════════════════════════════════════════════
+
 
 @dataclass
 class CorrelationCtx:
     """Propagée à chaque appel protocolaire pour le traçage bout-en-bout."""
 
     correlation_id: str = ""
-    parent_id: str = ""          # parent span / message id
-    session_id: str = ""         # session de conversation utilisateur
+    parent_id: str = ""  # parent span / message id
+    session_id: str = ""  # session de conversation utilisateur
     user_id: str = ""
-    originated_at: str = ""      # timestamp ISO de première création
+    originated_at: str = ""  # timestamp ISO de première création
 
     def __post_init__(self):
         if not self.correlation_id:
@@ -65,6 +65,7 @@ class CorrelationCtx:
 # TRACE ENVELOPE
 # ═══════════════════════════════════════════════════════════════
 
+
 class TraceCategory(str, Enum):
     DISCOVERY = "discovery"
     ROUTING = "routing"
@@ -80,8 +81,8 @@ class TraceStep:
     """Étape unitaire de raisonnement / décision dans une trace."""
 
     category: TraceCategory
-    module: str                        # ex: "WhatsAppRenderer"
-    action: str                        # ex: "render"
+    module: str  # ex: "WhatsAppRenderer"
+    action: str  # ex: "render"
     input_summary: Dict[str, Any] = field(default_factory=dict)
     output_summary: Dict[str, Any] = field(default_factory=dict)
     reasoning: str = ""
@@ -107,7 +108,7 @@ class TraceEnvelope:
     steps: List[TraceStep] = field(default_factory=list)
     created_at: str = ""
     completed_at: str = ""
-    status: str = "in_progress"      # in_progress | completed | error
+    status: str = "in_progress"  # in_progress | completed | error
 
     def __post_init__(self):
         if not self.trace_id:
@@ -190,11 +191,29 @@ class TraceEnvelope:
 
 # Mots-clés qui forcent le contournement du cache (urgence, maladie…)
 CACHE_BYPASS_KEYWORDS: set[str] = {
-    "urgence", "urgent", "emergency", "maladie", "disease",
-    "inondation", "flood", "criquet", "locust", "invasion",
-    "famine", "sécheresse", "drought", "alerte", "alert",
-    "danger", "mort", "dead", "dying", "mourir",
-    "épidémie", "epidemic", "contamination",
+    "urgence",
+    "urgent",
+    "emergency",
+    "maladie",
+    "disease",
+    "inondation",
+    "flood",
+    "criquet",
+    "locust",
+    "invasion",
+    "famine",
+    "sécheresse",
+    "drought",
+    "alerte",
+    "alert",
+    "danger",
+    "mort",
+    "dead",
+    "dying",
+    "mourir",
+    "épidémie",
+    "epidemic",
+    "contamination",
 }
 
 
@@ -203,7 +222,7 @@ class CachePolicy:
     """Métadonnées de cache par entrée, pour invalidation sémantique."""
 
     key: str
-    ttl_seconds: int = 300          # 5 min par défaut
+    ttl_seconds: int = 300  # 5 min par défaut
     created_at: str = ""
     bypass_keywords: set[str] = field(default_factory=lambda: CACHE_BYPASS_KEYWORDS)
 
@@ -214,7 +233,9 @@ class CachePolicy:
     @property
     def is_expired(self) -> bool:
         created = datetime.fromisoformat(self.created_at)
-        return datetime.now(timezone.utc) > created + timedelta(seconds=self.ttl_seconds)
+        return datetime.now(timezone.utc) > created + timedelta(
+            seconds=self.ttl_seconds
+        )
 
     def should_bypass(self, text: str) -> bool:
         """True si *text* contient un mot-clé prioritaire → ignorer le cache."""
@@ -239,6 +260,7 @@ class CachePolicy:
 # CLIENT CAPABILITIES (négociation AG-UI)
 # ═══════════════════════════════════════════════════════════════
 
+
 @dataclass
 class ClientCapabilities:
     """Manifeste de contraintes fourni par le canal UI AVANT génération.
@@ -246,45 +268,59 @@ class ClientCapabilities:
     L'agent DOIT utiliser ces contraintes pour élaguer sa sortie.
     """
 
-    channel: str = "web"                    # whatsapp | web | sms | ussd | mobile
-    max_chars: int = 0                      # 0 = illimité
-    max_buttons: int = 10                   # WhatsApp = 3
-    max_list_items: int = 50                # WhatsApp = 10
+    channel: str = "web"  # whatsapp | web | sms | ussd | mobile
+    max_chars: int = 0  # 0 = illimité
+    max_buttons: int = 10  # WhatsApp = 3
+    max_list_items: int = 50  # WhatsApp = 10
     supports_images: bool = True
     supports_cards: bool = True
     supports_charts: bool = True
     supports_voice: bool = False
     supports_markdown: bool = True
-    supports_interactive: bool = True       # boutons / list pickers
+    supports_interactive: bool = True  # boutons / list pickers
     locale: str = "fr"
-    text_format: str = "markdown"           # plain | markdown | html
+    text_format: str = "markdown"  # plain | markdown | html
 
     @classmethod
     def whatsapp(cls) -> "ClientCapabilities":
         return cls(
-            channel="whatsapp", max_chars=4096, max_buttons=3,
-            max_list_items=10, supports_charts=False,
-            supports_markdown=False, text_format="plain",
+            channel="whatsapp",
+            max_chars=4096,
+            max_buttons=3,
+            max_list_items=10,
+            supports_charts=False,
+            supports_markdown=False,
+            text_format="plain",
             supports_voice=True,
         )
 
     @classmethod
     def sms(cls) -> "ClientCapabilities":
         return cls(
-            channel="sms", max_chars=160, max_buttons=0,
-            max_list_items=0, supports_images=False,
-            supports_cards=False, supports_charts=False,
-            supports_interactive=False, supports_markdown=False,
+            channel="sms",
+            max_chars=160,
+            max_buttons=0,
+            max_list_items=0,
+            supports_images=False,
+            supports_cards=False,
+            supports_charts=False,
+            supports_interactive=False,
+            supports_markdown=False,
             text_format="plain",
         )
 
     @classmethod
     def ussd(cls) -> "ClientCapabilities":
         return cls(
-            channel="ussd", max_chars=182, max_buttons=0,
-            max_list_items=9, supports_images=False,
-            supports_cards=False, supports_charts=False,
-            supports_markdown=False, text_format="plain",
+            channel="ussd",
+            max_chars=182,
+            max_buttons=0,
+            max_list_items=9,
+            supports_images=False,
+            supports_cards=False,
+            supports_charts=False,
+            supports_markdown=False,
+            text_format="plain",
         )
 
     @classmethod

@@ -4,28 +4,33 @@ Extracted from ``interpreter/routing.py`` so that entity-handling logic
 lives in its own module and routing.py stays focused on LLM interpretation
 and the goal planner state machine.
 """
+
 from __future__ import annotations
 
 import logging
 import re as _re
-import unicodedata as _unicodedata
 from typing import Any, Dict, Optional
 
 from agriconnect.graphs.agents.market_coach.core.slots import build_remap_dict
 from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
     UNIT_SYNONYMS as _CANONICAL_UNIT_SYNONYMS,
+)
+from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
     normalize_unit_token as _normalize_unit_token_impl,
+)
+from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
     parse_quantity_unit_from_text,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment import (
-    PRODUCTION_TYPE_WORDS as _PRODUCTION_TYPE_WORDS_CANON,
     PRODUCTION_TYPE_FILLER as _PRODUCTION_TYPE_FILLER_CANON,
 )
+from agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment import (
+    PRODUCTION_TYPE_WORDS as _PRODUCTION_TYPE_WORDS_CANON,
+)
 from agriconnect.graphs.agents.market_coach.utils import (
-    canonical_unit_label,
+    _clean_candidate_text,
     normalize_slot_keys,
     slot_has_value,
-    _clean_candidate_text,
 )
 
 logger = logging.getLogger("AgriConnect.Market.Entities")
@@ -151,17 +156,21 @@ def _sanitize_product_candidate(value: Any) -> Optional[str]:
 def _remap_entities(raw_entities: Dict[str, Any]) -> Dict[str, Any]:
     """Normalise les clés d'entités extraites par le LLM vers les clés canoniques."""
 
-    canonicalized = normalize_slot_keys({
-        _ENTITY_KEY_REMAP.get(str(k).lower().strip(), k): v
-        for k, v in (raw_entities or {}).items()
-    })
+    canonicalized = normalize_slot_keys(
+        {
+            _ENTITY_KEY_REMAP.get(str(k).lower().strip(), k): v
+            for k, v in (raw_entities or {}).items()
+        }
+    )
     normalized: Dict[str, Any] = {}
     for key, value in canonicalized.items():
         if not slot_has_value(value):
             continue
         if key in {"price", "quantity"}:
             try:
-                clean_str = str(value).replace(",", ".").replace(" ", "").replace("\xa0", "")
+                clean_str = (
+                    str(value).replace(",", ".").replace(" ", "").replace("\xa0", "")
+                )
                 normalized[key] = float(clean_str)
             except (ValueError, TypeError):
                 logger.warning("Entity '%s' non numérique: %r — ignoré", key, value)
@@ -184,7 +193,12 @@ def _remap_entities(raw_entities: Dict[str, Any]) -> Dict[str, Any]:
             # On rejette toute valeur contaminée par une devise/un séparateur
             # dès l'extraction plutôt que de la laisser se propager.
             candidate = str(value).strip().upper()
-            if candidate and "FCFA" not in candidate and "CFA" not in candidate and "/" not in candidate:
+            if (
+                candidate
+                and "FCFA" not in candidate
+                and "CFA" not in candidate
+                and "/" not in candidate
+            ):
                 normalized[key] = candidate
         else:
             normalized[key] = str(value).strip() if isinstance(value, str) else value

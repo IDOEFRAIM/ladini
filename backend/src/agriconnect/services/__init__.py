@@ -10,5 +10,6 @@ __all__ = ["AgriDatabaseService"]
 def __getattr__(name):
     if name == "AgriDatabaseService":
         from agriconnect.services.database import AgriDatabaseService
+
         return AgriDatabaseService
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -3,8 +3,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from twilio.rest import Client
 from celery.signals import worker_process_init, worker_process_shutdown
+from twilio.rest import Client
 
 from agriconnect.api.celery_app import celery_app
 from agriconnect.core.database import close_db, get_engine
@@ -23,6 +23,7 @@ _TWILIO_DISCLAIMER = " (Détails complets disponibles sur votre dashboard)"
 
 # --- Initialisation de la boucle d'événements au démarrage du Worker ---
 
+
 async def _warmup_db() -> None:
     """Ouvre une connexion réelle pour amorcer le pool + handshake SSL.
 
@@ -30,10 +31,13 @@ async def _warmup_db() -> None:
     tâche paie la connexion à froid vers la base de données.
     """
     from sqlalchemy import text as _sql_text
+
     try:
         engine = get_engine()
         if engine is None:
-            logger.warning("Warm-up DB ignoré : moteur indisponible (DATABASE_URL manquante ?).")
+            logger.warning(
+                "Warm-up DB ignoré : moteur indisponible (DATABASE_URL manquante ?)."
+            )
             return
         async with engine.connect() as conn:
             await conn.execute(_sql_text("SELECT 1"))
@@ -51,6 +55,7 @@ async def _ensure_schema() -> None:
     """
     try:
         from agriconnect.services.database.d import AgriDatabaseService
+
         await AgriDatabaseService().ensure_performance_indexes()
         logger.info("🔧 Schéma DB vérifié (index + colonnes) au démarrage du worker.")
     except Exception as exc:
@@ -61,7 +66,9 @@ async def _ensure_schema() -> None:
 def init_worker_process(**kwargs):
     """Exécuté une seule fois à l'initialisation du processus worker Celery."""
     global _loop, _orchestrator
-    logger.info("Initialisation de la boucle d'événements asyncio globale pour le Worker.")
+    logger.info(
+        "Initialisation de la boucle d'événements asyncio globale pour le Worker."
+    )
     _loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_loop)
 
@@ -71,6 +78,7 @@ def init_worker_process(**kwargs):
     # Télémétrie worker : initialise OTel/Prometheus/Langfuse + instrumente Celery
     try:
         from agriconnect.core import telemetry
+
         telemetry.init_telemetry(service_name="agriconnect-worker")
         telemetry.instrument_celery()
     except Exception as exc:
@@ -124,7 +132,9 @@ def _chunk_whatsapp_body(body: str, limit: int = _TWILIO_SOFT_LIMIT) -> List[str
 
     if len(chunks) > 4:
         kept = chunks[:3]
-        kept.append(f"{chunks[3][:limit - len(_TWILIO_DISCLAIMER) - 5]} {_TWILIO_DISCLAIMER}")
+        kept.append(
+            f"{chunks[3][: limit - len(_TWILIO_DISCLAIMER) - 5]} {_TWILIO_DISCLAIMER}"
+        )
         logger.warning("Response exceeded chunk limit; truncated with disclaimer")
         return kept
 
@@ -145,7 +155,9 @@ def send_whatsapp_message(
 
     # Évite les erreurs si l'expéditeur et le destinataire sont identiques
     if clean_from == clean_to:
-        logger.warning("Tentative d'envoi WhatsApp vers le même numéro (%s). Ignoré.", clean_to)
+        logger.warning(
+            "Tentative d'envoi WhatsApp vers le même numéro (%s). Ignoré.", clean_to
+        )
         return None
 
     from_formatted = f"whatsapp:{clean_from}"
@@ -172,6 +184,7 @@ def send_whatsapp_message(
 
 
 # --- Tâche Celery ---
+
 
 @celery_app.task(
     bind=True,
@@ -202,11 +215,14 @@ def process_agent_task(
     global _loop, _orchestrator
 
     if _loop is None or _orchestrator is None:
-        raise RuntimeError("Le worker Celery n'a pas été initialisé correctement (boucle/orchestrateur manquant).")
+        raise RuntimeError(
+            "Le worker Celery n'a pas été initialisé correctement (boucle/orchestrateur manquant)."
+        )
 
     # Rattache ce tour à la trace infra reçue de l'API (contexte worker)
     try:
         from agriconnect.core import telemetry
+
         telemetry.set_trace_context(trace_id, user_phone=phone_number)
     except Exception:
         telemetry = None  # type: ignore
@@ -239,13 +255,19 @@ def process_agent_task(
         telemetry.flush()
 
     final_text = result.get("final_response") or "Je n'ai pas pu générer de réponse."
-    provider = str(getattr(settings, "MESSAGING_PROVIDER", "") or "whatsapp_cloud").strip().lower()
+    provider = (
+        str(getattr(settings, "MESSAGING_PROVIDER", "") or "whatsapp_cloud")
+        .strip()
+        .lower()
+    )
 
     if provider == "twilio":
         return _send_via_twilio(phone_number, final_text, result)
 
     try:
-        return _loop.run_until_complete(_send_via_whatsapp_cloud(phone_number, final_text, result))
+        return _loop.run_until_complete(
+            _send_via_whatsapp_cloud(phone_number, final_text, result)
+        )
     except Exception as e:
         logger.error("Erreur envoi WhatsApp Cloud API : %s", e)
         raise
@@ -256,7 +278,11 @@ async def send_confirmation_text(phone_number: str, text: str) -> Dict[str, Any]
     ``process_agent_task``) — utilisé par les tâches Celery qui n'ont pas de
     tour de conversation LangGraph à leur origine (ex: confirmation d'ajout
     de photo produit, voir workers/media/product_photo_task.py)."""
-    provider = str(getattr(settings, "MESSAGING_PROVIDER", "") or "whatsapp_cloud").strip().lower()
+    provider = (
+        str(getattr(settings, "MESSAGING_PROVIDER", "") or "whatsapp_cloud")
+        .strip()
+        .lower()
+    )
     if provider == "twilio":
         return _send_via_twilio(phone_number, text, {})
     return await _send_via_whatsapp_cloud(phone_number, text, {})
@@ -271,19 +297,22 @@ async def _send_via_whatsapp_cloud(
     from agriconnect.services.whatsapp import cloud_api_client as wa
 
     if not wa.is_configured():
-        logger.error("WhatsApp Cloud API configuration incomplete; cannot send response")
+        logger.error(
+            "WhatsApp Cloud API configuration incomplete; cannot send response"
+        )
         raise RuntimeError("WhatsApp Cloud API configuration incomplete")
 
     logger.info(
         "WHATSAPP_CLOUD_SEND | to=%s | body_len=%d | body_preview=%r",
-        phone_number, len(str(final_text)), str(final_text)[:120],
+        phone_number,
+        len(str(final_text)),
+        str(final_text)[:120],
     )
 
     # --- Rendu interactif natif (boutons de confirmation) ---
     interactive = result.get("interactive") or {}
-    if (
-        interactive.get("kind") == "confirm"
-        and getattr(settings, "WHATSAPP_NATIVE_INTERACTIVE_ENABLED", True)
+    if interactive.get("kind") == "confirm" and getattr(
+        settings, "WHATSAPP_NATIVE_INTERACTIVE_ENABLED", True
     ):
         message_id = await wa.send_interactive_buttons(
             phone_number,
@@ -301,7 +330,11 @@ async def _send_via_whatsapp_cloud(
     message_ids = await wa.send_text(phone_number, str(final_text))
     if not message_ids:
         return {"status": "message_skipped", "reason": "send_failed"}
-    return {"status": "message_sent", "sid": message_ids[-1], "chunks": len(message_ids)}
+    return {
+        "status": "message_sent",
+        "sid": message_ids[-1],
+        "chunks": len(message_ids),
+    }
 
 
 def _send_via_twilio(
@@ -324,13 +357,19 @@ def _send_via_twilio(
 
     logger.info(
         "TWILIO_SEND | account=%s | from=%s | to=%s | body_len=%d | body_preview=%r",
-        account_sid[:10], from_number, to_addr, len(str(final_text)), str(final_text)[:120],
+        account_sid[:10],
+        from_number,
+        to_addr,
+        len(str(final_text)),
+        str(final_text)[:120],
     )
 
     try:
         # --- Rendu interactif (boutons de confirmation) ---
         interactive = result.get("interactive") or {}
-        confirm_sid = str(getattr(settings, "TWILIO_CONFIRM_CONTENT_SID", "") or "").strip()
+        confirm_sid = str(
+            getattr(settings, "TWILIO_CONFIRM_CONTENT_SID", "") or ""
+        ).strip()
         if (
             interactive.get("kind") == "confirm"
             and getattr(settings, "TWILIO_INTERACTIVE_ENABLED", False)
@@ -346,7 +385,11 @@ def _send_via_twilio(
             )
             if message is None:
                 return {"status": "message_skipped", "reason": "same_from_to"}
-            return {"status": "message_sent", "sid": message.sid, "interactive": "confirm"}
+            return {
+                "status": "message_sent",
+                "sid": message.sid,
+                "interactive": "confirm",
+            }
 
         # --- Sinon : texte brut chunké ---
         chunks = _chunk_whatsapp_body(str(final_text))

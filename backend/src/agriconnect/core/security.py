@@ -7,8 +7,8 @@ Fournit :
 - Sanitization des entrées utilisateur
 """
 
-import secrets
 import logging
+import secrets
 from typing import Optional
 
 from agriconnect.core.settings import settings

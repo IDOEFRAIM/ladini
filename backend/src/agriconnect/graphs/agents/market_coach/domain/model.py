@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, FrozenSet
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional
 
 from agriconnect.graphs.agents.market_coach.actions.tooling import ToolId
 
@@ -25,8 +25,12 @@ class DomainContext:
     timezone: Optional[str]
 
     @classmethod
-    def from_state(cls, state: Mapping[str, Any], permissions: Optional[Iterable[str]] = None) -> "DomainContext":
-        perms: FrozenSet[str] = frozenset(str(p).strip() for p in (permissions or ()) if p)
+    def from_state(
+        cls, state: Mapping[str, Any], permissions: Optional[Iterable[str]] = None
+    ) -> "DomainContext":
+        perms: FrozenSet[str] = frozenset(
+            str(p).strip() for p in (permissions or ()) if p
+        )
         return cls(
             user_id=str(state.get("user_id")) or None,
             phone=str(state.get("user_phone")) or None,

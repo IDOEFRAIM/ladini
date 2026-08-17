@@ -27,6 +27,7 @@ _GENERIC_SAFE_MESSAGE = (
     "Veuillez réessayer dans un instant."
 )
 
+
 class BusinessRuleException(Exception):
     """Échec métier explicite, levé volontairement par les mixins.
 
@@ -68,10 +69,27 @@ _SAFE_BUSINESS_EXCEPTIONS: tuple[type[BaseException], ...] = (
 # Fragments techniques qui ne doivent JAMAIS transiter vers l'agent, même
 # nichés dans un message par ailleurs anodin (filet de sécurité défensif).
 _LEAK_MARKERS: tuple[str, ...] = (
-    "constraint", "violates", "psycopg", "asyncpg", "sqlalchemy",
-    "traceback", "relation ", "column ", "duplicate key", "syntax error",
-    "foreign key", "null value", "select ", "insert ", "update ", "schema",
-    "pg_", "detail:", "hint:", "line ", "  file ",
+    "constraint",
+    "violates",
+    "psycopg",
+    "asyncpg",
+    "sqlalchemy",
+    "traceback",
+    "relation ",
+    "column ",
+    "duplicate key",
+    "syntax error",
+    "foreign key",
+    "null value",
+    "select ",
+    "insert ",
+    "update ",
+    "schema",
+    "pg_",
+    "detail:",
+    "hint:",
+    "line ",
+    "  file ",
 )
 
 
@@ -127,12 +145,19 @@ def sanitize_error_message(exc: BaseException | str, *, context: str = "") -> st
         if msg and not _looks_technical(msg):
             return msg
         # Un ValueError/KeyError qui contient malgré tout du technique → log + générique.
-        logger.warning("Message métier contenant un marqueur technique masqué (%s).", context)
+        logger.warning(
+            "Message métier contenant un marqueur technique masqué (%s).", context
+        )
         return _GENERIC_SAFE_MESSAGE
 
     # Exception technique (driver/ORM/infrastructure) : on ne divulgue JAMAIS
     # str(exc) — seule la stack serveur (exc_info) porte le détail réel.
-    logger.error("Erreur technique masquée pour l'agent (%s): %r", context or "?", exc, exc_info=True)
+    logger.error(
+        "Erreur technique masquée pour l'agent (%s): %r",
+        context or "?",
+        exc,
+        exc_info=True,
+    )
     return _GENERIC_SAFE_MESSAGE
 
 
@@ -141,7 +166,10 @@ def safe_error_dict(exc: BaseException | str, *, context: str = "", **extra) -> 
 
     Remplace le pattern à risque `return {"status": "error", "message": str(e)}`.
     """
-    payload = {"status": "error", "message": sanitize_error_message(exc, context=context)}
+    payload = {
+        "status": "error",
+        "message": sanitize_error_message(exc, context=context),
+    }
     payload.update(extra)
     return payload
 
@@ -157,7 +185,9 @@ def scrub_error_result(result: dict) -> dict:
         return result
     msg = result.get("message")
     if isinstance(msg, str) and msg and _looks_technical(msg):
-        logger.warning("Message d'erreur technique neutralisé par le dispatcher: %r", msg)
+        logger.warning(
+            "Message d'erreur technique neutralisé par le dispatcher: %r", msg
+        )
         result = dict(result)
         result["message"] = _GENERIC_SAFE_MESSAGE
     return result

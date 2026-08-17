@@ -1,11 +1,12 @@
 """Canaux de notification — un adaptateur par média, derrière une interface commune."""
+
 from agriconnect.workers.outbox.channels.base import (
     NotificationChannel,
     SendResult,
 )
-from agriconnect.workers.outbox.channels.whatsapp import WhatsAppChannel
 from agriconnect.workers.outbox.channels.email import EmailChannel
 from agriconnect.workers.outbox.channels.push import PushChannel
+from agriconnect.workers.outbox.channels.whatsapp import WhatsAppChannel
 
 __all__ = [
     "NotificationChannel",

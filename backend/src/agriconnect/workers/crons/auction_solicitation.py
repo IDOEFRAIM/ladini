@@ -1,4 +1,5 @@
 """Cron : solliciter les producteurs pertinents pour les enchères ouvertes."""
+
 from __future__ import annotations
 
 import logging
@@ -24,4 +25,4 @@ def run_auction_solicitation_cron(self, batch_size: int = 100) -> dict:
         return run_async(_run(batch_size))
     except Exception as exc:
         logger.exception("Cron auction_solicitation en échec")
-        raise self.retry(exc=exc, countdown=30)
+        raise self.retry(exc=exc, countdown=30) from exc

@@ -4,14 +4,14 @@ Handles tool-schema discovery, argument lookup/casting, PII masking,
 ASCII folding, and self-healing arg repair.  Extracted from the former
 monolithic ``nodes/executor.py``.
 """
+
 from __future__ import annotations
 
 import asyncio
 import inspect
 import json
-import re
 import unicodedata
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from agriconnect.core.logger import get_logger
 
@@ -21,6 +21,7 @@ logger = get_logger("AgriConnect.Market.SchemaResolver")
 # =====================================================================
 # TOOL SCHEMA EXTRACTION
 # =====================================================================
+
 
 def extract_tool_schema(tool_item: Any) -> Dict[str, Any]:
     if isinstance(tool_item, dict):
@@ -192,7 +193,9 @@ class MissingRequiredMCPArgs(ValueError):
     def __init__(self, tool_name: str, missing_args: List[str]):
         self.tool_name = tool_name
         self.missing_args = missing_args
-        super().__init__(f"Missing required MCP args for {tool_name}: {', '.join(missing_args)}")
+        super().__init__(
+            f"Missing required MCP args for {tool_name}: {', '.join(missing_args)}"
+        )
 
 
 def build_resolved_tool_args(
@@ -209,14 +212,13 @@ def build_resolved_tool_args(
         return {k: v for k, v in (initial_args or {}).items() if v is not None}
 
     resolved_args: Dict[str, Any] = {}
-    resolved_identity = False
     missing_required: List[str] = []
     for param_name, param_schema in properties.items():
         json_type = str(param_schema.get("type") or "string").lower()
         value = lookup_arg_value(param_name, state, payload, initial_args)
 
         if param_name in IDENTITY_ALIASES and value is not None:
-            resolved_identity = True
+            pass
 
         if value in (None, "", [], {}):
             if param_name in required:
@@ -239,6 +241,7 @@ def build_resolved_tool_args(
 # SANITIZATION, PII MASKING, ASCII FOLDING
 # =====================================================================
 
+
 def sanitize_mcp_args(args: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in args.items() if v is not None}
 
@@ -257,15 +260,17 @@ def mask_pii_args(args: Dict[str, Any]) -> Dict[str, Any]:
     return masked
 
 
-_ASCII_FOLD_TRANSLATION = str.maketrans({
-    "œ": "oe",
-    "Œ": "OE",
-    "æ": "ae",
-    "Æ": "AE",
-    "'": "'",
-    "“": '"',
-    "”": '"',
-})
+_ASCII_FOLD_TRANSLATION = str.maketrans(
+    {
+        "œ": "oe",
+        "Œ": "OE",
+        "æ": "ae",
+        "Æ": "AE",
+        "'": "'",
+        "“": '"',
+        "”": '"',
+    }
+)
 
 
 def _ascii_fold_str(text: str) -> str:
@@ -296,6 +301,7 @@ def sanitize_and_fold(args: Dict[str, Any]) -> Dict[str, Any]:
 # SELF-HEALING ARG REPAIR
 # =====================================================================
 
+
 def attempt_arg_repair(raw_value: Any, expected_type: str) -> Optional[Any]:
     if raw_value is None:
         return None
@@ -304,13 +310,25 @@ def attempt_arg_repair(raw_value: Any, expected_type: str) -> Optional[Any]:
     if expected_type in ("number", "integer"):
         for suffix in ("kg", "tonnes", "tonne", "t", "sacs", "sac", "fcfa", "cfa", "f"):
             if s.endswith(suffix):
-                s = s[:-len(suffix)].strip()
+                s = s[: -len(suffix)].strip()
                 break
         s = s.replace(",", ".").replace(" ", "").replace("\xa0", "")
         _WORD_NUMS = {
-            "un": 1, "deux": 2, "trois": 3, "quatre": 4, "cinq": 5,
-            "six": 6, "sept": 7, "huit": 8, "neuf": 9, "dix": 10,
-            "vingt": 20, "trente": 30, "cinquante": 50, "cent": 100, "mille": 1000,
+            "un": 1,
+            "deux": 2,
+            "trois": 3,
+            "quatre": 4,
+            "cinq": 5,
+            "six": 6,
+            "sept": 7,
+            "huit": 8,
+            "neuf": 9,
+            "dix": 10,
+            "vingt": 20,
+            "trente": 30,
+            "cinquante": 50,
+            "cent": 100,
+            "mille": 1000,
         }
         if s in _WORD_NUMS:
             return float(_WORD_NUMS[s]) if expected_type == "number" else _WORD_NUMS[s]

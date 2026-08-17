@@ -9,6 +9,7 @@ propres clés secrètes. Le webhook (`api/routes/paydunya_webhook.py`) DOIT
 toujours rappeler `confirm_invoice(token)` avant de toucher la base — jamais
 faire confiance au corps de la requête entrante.
 """
+
 from __future__ import annotations
 
 import logging
@@ -42,7 +43,7 @@ class PaydunyaClient:
         private_key: Optional[str] = None,
         public_key: Optional[str] = None,
         token: Optional[str] = None,
-    ) -> None: 
+    ) -> None:
         self._master_key = master_key or settings.PAYDUNYA_MASTER_KEY
         self._private_key = private_key or settings.PAYDUNYA_PRIVATE_KEY
         self._public_key = public_key or settings.PAYDUNYA_PUBLIC_KEY
@@ -91,24 +92,33 @@ class PaydunyaClient:
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPError as exc:
-            logger.error("PAYDUNYA_CREATE_INVOICE_HTTP_ERROR | order_id=%s | %s", order_id, exc)
-            raise PaydunyaError("Impossible de contacter le service de paiement pour le moment.") from exc
+            logger.error(
+                "PAYDUNYA_CREATE_INVOICE_HTTP_ERROR | order_id=%s | %s", order_id, exc
+            )
+            raise PaydunyaError(
+                "Impossible de contacter le service de paiement pour le moment."
+            ) from exc
 
         response_code = str(data.get("response_code") or "")
         if response_code != "00":
             logger.warning(
                 "PAYDUNYA_CREATE_INVOICE_REJECTED | order_id=%s | code=%s | msg=%s",
-                order_id, response_code, data.get("response_text"),
+                order_id,
+                response_code,
+                data.get("response_text"),
             )
             raise PaydunyaError(
-                data.get("response_text") or "La création de la facture de paiement a échoué.",
+                data.get("response_text")
+                or "La création de la facture de paiement a échoué.",
                 response_code=response_code,
             )
 
         token = data.get("token")
         checkout_url = data.get("response_text")
         if not token or not checkout_url:
-            raise PaydunyaError("Réponse Paydunya incomplète (token/lien de paiement manquant).")
+            raise PaydunyaError(
+                "Réponse Paydunya incomplète (token/lien de paiement manquant)."
+            )
 
         return {"invoice_token": str(token), "checkout_url": str(checkout_url)}
 
@@ -129,8 +139,14 @@ class PaydunyaClient:
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPError as exc:
-            logger.error("PAYDUNYA_CONFIRM_INVOICE_HTTP_ERROR | token=%s | %s", invoice_token, exc)
-            raise PaydunyaError("Impossible de vérifier le statut du paiement pour le moment.") from exc
+            logger.error(
+                "PAYDUNYA_CONFIRM_INVOICE_HTTP_ERROR | token=%s | %s",
+                invoice_token,
+                exc,
+            )
+            raise PaydunyaError(
+                "Impossible de vérifier le statut du paiement pour le moment."
+            ) from exc
 
         raw_status = str(data.get("status") or "").lower()
         invoice = data.get("invoice") or {}

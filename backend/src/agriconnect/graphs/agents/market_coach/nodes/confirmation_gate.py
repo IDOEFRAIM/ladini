@@ -1,31 +1,41 @@
 import time
 from typing import Any, Dict, Optional
 
-from agriconnect.graphs.agents.market_coach.core.base import get_node_logger, _READ_GOALS
+from agriconnect.graphs.agents.market_coach.core.base import (
+    _READ_GOALS,
+    get_node_logger,
+)
 from agriconnect.graphs.agents.market_coach.services.ui.confirmation_summary import (
     build_confirmation_summary as _build_confirmation_summary,
 )
-from agriconnect.graphs.agents.market_coach.utils import llm_deviation_reply as _llm_deviation_reply_impl
+from agriconnect.graphs.agents.market_coach.utils import (
+    llm_deviation_reply as _llm_deviation_reply_impl,
+)
 
 logger = get_node_logger("ConfirmationGateNode")
 
 
-async def _llm_deviation_reply(mc_runtime: Any, user_text: str, summary: str) -> Optional[str]:
+async def _llm_deviation_reply(
+    mc_runtime: Any, user_text: str, summary: str
+) -> Optional[str]:
     """Réponse COURTE générée par le LLM quand l'utilisateur dit autre chose
     qu'un oui/non pendant une confirmation en attente — voir
     `utils.py::llm_deviation_reply` (implémentation partagée avec
     `flows/buyer/gps_delivery_gate.py`, voir
     [[precommande-architecture-consolidation-2026-08]])."""
     return await _llm_deviation_reply_impl(
-        mc_runtime, user_text, f"un récapitulatif à confirmer :\n{summary}",
+        mc_runtime,
+        user_text,
+        f"un récapitulatif à confirmer :\n{summary}",
         extra_instructions=(
             "Le récapitulatif ci-dessus reflète DÉJÀ les valeurs les plus "
             "récentes fournies par l'utilisateur (une correction éventuelle a "
             "déjà été appliquée) — accuse juste réception brièvement (ex: "
-            "\"Noté, c'est corrigé.\"), ne demande PAS de reformuler et ne "
+            '"Noté, c\'est corrigé."), ne demande PAS de reformuler et ne '
             "redemande PAS oui/non toi-même."
         ),
     )
+
 
 # Goals où un REJECT pendant la confirmation ne doit PAS effacer le brouillon
 # (produit/quantité/prix déjà saisis) — l'utilisateur doit pouvoir corriger un
@@ -157,12 +167,17 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
         # mais on se protège quand même), on abandonne silencieusement au
         # lieu de ré-afficher un récap confus voire vide.
         raised_at = state.get("confirmation_raised_at")
-        is_stale = bool(raised_at) and (time.time() - float(raised_at)) > _CONFIRMATION_TTL_SECONDS
+        is_stale = (
+            bool(raised_at)
+            and (time.time() - float(raised_at)) > _CONFIRMATION_TTL_SECONDS
+        )
         is_orphaned = not goal or not payload
         if is_stale or is_orphaned:
             logger.info(
                 "[ConfirmationGate] Confirmation abandonnée (stale=%s, orphaned=%s, goal=%r)",
-                is_stale, is_orphaned, goal,
+                is_stale,
+                is_orphaned,
+                goal,
             )
             return dict(_ABANDON_PATCH)
 
@@ -185,9 +200,13 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
         # réutiliser pour la note LLM ET le récap final, au lieu de deux
         # sources désynchronisées. Voir
         # [[precommande-architecture-consolidation-2026-08]].
-        user_text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+        user_text = str(
+            state.get("normalized_text") or state.get("user_query") or ""
+        ).strip()
         fresh_summary = _build_confirmation_summary(goal, payload)
-        deviation_note = await _llm_deviation_reply(mc_runtime, user_text, fresh_summary)
+        deviation_note = await _llm_deviation_reply(
+            mc_runtime, user_text, fresh_summary
+        )
 
     # Garde-fou symétrique à celui du ré-affichage ci-dessus : ne JAMAIS lever
     # une confirmation sans goal ni payload — ça ne peut produire qu'un récap
@@ -197,7 +216,8 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
     if not goal or not payload:
         logger.warning(
             "[ConfirmationGate] Appel avec goal/payload vide — abandon au lieu d'un récap creux (goal=%r, payload_keys=%s)",
-            goal, list(payload.keys()),
+            goal,
+            list(payload.keys()),
         )
         return dict(_ABANDON_PATCH)
 

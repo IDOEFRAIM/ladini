@@ -6,6 +6,7 @@ Ne touche jamais une commande déjà ESCROWED/PAID_OUT (voir
 précommandes DRAFT ne débitent pas le stock, "libérer la disponibilité" est
 automatique dès l'annulation : rien de plus à faire côté producteur.
 """
+
 from __future__ import annotations
 
 import logging
@@ -29,7 +30,8 @@ async def _run() -> dict:
     if result.get("expired_count"):
         logger.info(
             "ORDER_EXPIRY | %d commande(s) annulée(s) : %s",
-            result["expired_count"], result.get("expired_order_ids"),
+            result["expired_count"],
+            result.get("expired_order_ids"),
         )
     return result
 
@@ -40,4 +42,4 @@ def run_order_expiry_cron(self) -> dict:
         return run_async(_run())
     except Exception as exc:
         logger.exception("Cron order_expiry en échec")
-        raise self.retry(exc=exc, countdown=30)
+        raise self.retry(exc=exc, countdown=30) from exc

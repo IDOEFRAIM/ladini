@@ -5,6 +5,7 @@ Graph de Meta, sans intermédiaire facturé au message ni au segment. Voir
 ``api/routes/whatsapp_webhook.py`` pour la réception (webhook + vérification
 de signature HMAC) et ``core/settings.py`` pour la configuration.
 """
+
 from __future__ import annotations
 
 import logging
@@ -71,18 +72,24 @@ def is_configured() -> bool:
 
 async def _post(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not is_configured():
-        raise WhatsAppCloudAPIError("Configuration WhatsApp Cloud API incomplète (token/phone_number_id).")
+        raise WhatsAppCloudAPIError(
+            "Configuration WhatsApp Cloud API incomplète (token/phone_number_id)."
+        )
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT_S) as client:
             resp = await client.post(_base_url(), json=payload, headers=_headers())
             data = resp.json() if resp.content else {}
     except httpx.HTTPError as exc:
         logger.error("WHATSAPP_SEND_HTTP_ERROR | %s", exc)
-        raise WhatsAppCloudAPIError("Impossible de contacter WhatsApp Cloud API pour le moment.") from exc
+        raise WhatsAppCloudAPIError(
+            "Impossible de contacter WhatsApp Cloud API pour le moment."
+        ) from exc
 
     if resp.status_code >= 400:
         err = data.get("error") or {}
-        logger.error("WHATSAPP_SEND_REJECTED | status=%s | error=%s", resp.status_code, err)
+        logger.error(
+            "WHATSAPP_SEND_REJECTED | status=%s | error=%s", resp.status_code, err
+        )
         raise WhatsAppCloudAPIError(
             err.get("message") or f"Échec d'envoi WhatsApp (HTTP {resp.status_code}).",
             error_code=str(err.get("code") or ""),
@@ -100,12 +107,14 @@ async def send_text(to_phone: str, body: str) -> List[str]:
     for chunk in chunk_body(body):
         if not chunk:
             continue
-        data = await _post({
-            "messaging_product": "whatsapp",
-            "to": clean_to,
-            "type": "text",
-            "text": {"body": chunk, "preview_url": False},
-        })
+        data = await _post(
+            {
+                "messaging_product": "whatsapp",
+                "to": clean_to,
+                "type": "text",
+                "text": {"body": chunk, "preview_url": False},
+            }
+        )
         msgs = data.get("messages") or []
         if msgs:
             message_ids.append(str(msgs[0].get("id") or ""))
@@ -125,21 +134,29 @@ async def send_interactive_buttons(
     un ContentSid enregistré à l'avance).
     """
     clean_to = to_phone.replace("whatsapp:", "").strip().lstrip("+")
-    data = await _post({
-        "messaging_product": "whatsapp",
-        "to": clean_to,
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {"text": body[:1024]},
-            "action": {
-                "buttons": [
-                    {"type": "reply", "reply": {"id": str(b["id"])[:256], "title": str(b["title"])[:20]}}
-                    for b in buttons[:3]
-                ]
+    data = await _post(
+        {
+            "messaging_product": "whatsapp",
+            "to": clean_to,
+            "type": "interactive",
+            "interactive": {
+                "type": "button",
+                "body": {"text": body[:1024]},
+                "action": {
+                    "buttons": [
+                        {
+                            "type": "reply",
+                            "reply": {
+                                "id": str(b["id"])[:256],
+                                "title": str(b["title"])[:20],
+                            },
+                        }
+                        for b in buttons[:3]
+                    ]
+                },
             },
-        },
-    })
+        }
+    )
     msgs = data.get("messages") or []
     return str(msgs[0].get("id")) if msgs else None
 

@@ -123,7 +123,14 @@ class Settings(BaseSettings):
     MCP_DB_SERVER_HOST: str = "localhost"
     MCP_DB_SERVER_PORT: int = 8003
     MCP_DB_TRANSPORT: str = "http"
-    MCP_DB_STDIO_ENTRYPOINT: str = str((Path(__file__).resolve().parent.parent.parent) / "agriconnect" / "protocols" / "mcp" / "servers" / "db_server.py")
+    MCP_DB_STDIO_ENTRYPOINT: str = str(
+        (Path(__file__).resolve().parent.parent.parent)
+        / "agriconnect"
+        / "protocols"
+        / "mcp"
+        / "servers"
+        / "db_server.py"
+    )
     MCP_DB_STDIO_CWD: str = str(Path(__file__).resolve().parent.parent.parent.parent)
     MCP_DB_STDIO_PYTHON: str = ""
     MCP_DB_STDIO_ENV: dict[str, str] = Field(
@@ -199,9 +206,13 @@ class Settings(BaseSettings):
 
     # --- WhatsApp Cloud API (Meta directe — provider par défaut) ---
     # Récupérés dans Meta for Developers → votre app → WhatsApp → API Setup.
-    WHATSAPP_CLOUD_API_TOKEN: str = ""          # Access token permanent (System User)
-    WHATSAPP_PHONE_NUMBER_ID: str = ""          # ID du numéro expéditeur (pas le numéro lui-même)
-    WHATSAPP_BUSINESS_ACCOUNT_ID: str = ""      # WABA ID (pour la gestion des templates, optionnel ici)
+    WHATSAPP_CLOUD_API_TOKEN: str = ""  # Access token permanent (System User)
+    WHATSAPP_PHONE_NUMBER_ID: str = (
+        ""  # ID du numéro expéditeur (pas le numéro lui-même)
+    )
+    WHATSAPP_BUSINESS_ACCOUNT_ID: str = (
+        ""  # WABA ID (pour la gestion des templates, optionnel ici)
+    )
     # Chaîne arbitraire que VOUS choisissez et déclarez dans Meta lors de la
     # configuration du webhook — sert uniquement à la vérification GET
     # initiale (hub.verify_token), jamais utilisée après.
@@ -341,8 +352,10 @@ class Settings(BaseSettings):
         "fews_net",
     ]
 
+
 # Singleton — importable partout
 settings = Settings()
+
 
 # Normalize DB URLs: remove surrounding quotes and whitespace so all code
 # sees a canonical value. Support DO_DATABASE_URL as an explicit override.
@@ -354,8 +367,13 @@ def _normalize_db_url(url: str | None) -> str | None:
         s = s[1:-1].strip()
     return s or None
 
+
 # Prefer explicit provider URL when present (loaded via pydantic from env).
-_do_db = _normalize_db_url(settings.DO_DATABASE_URL or os.getenv("DO_DATABASE_URL") or os.getenv("AGRICONNECT_DO_DATABASE_URL"))
+_do_db = _normalize_db_url(
+    settings.DO_DATABASE_URL
+    or os.getenv("DO_DATABASE_URL")
+    or os.getenv("AGRICONNECT_DO_DATABASE_URL")
+)
 _db = _normalize_db_url(settings.DATABASE_URL or os.getenv("DATABASE_URL"))
 if _do_db:
     settings.DO_DATABASE_URL = _do_db
@@ -377,5 +395,6 @@ def _bootstrap_langsmith():
     os.environ.setdefault("LANGCHAIN_API_KEY", _key)
     os.environ.setdefault("LANGCHAIN_PROJECT", settings.LANGCHAIN_PROJECT)
     os.environ.setdefault("LANGCHAIN_ENDPOINT", settings.LANGCHAIN_ENDPOINT)
+
 
 _bootstrap_langsmith()

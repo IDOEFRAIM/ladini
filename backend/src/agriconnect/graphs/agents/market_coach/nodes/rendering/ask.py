@@ -24,15 +24,22 @@ async def render_onboarding(ctx: RenderContext) -> Dict[str, Any]:
     prompt = ctx.state.get("onboarding_prompt") or (
         f"{ctx.salutation}Bienvenue sur AgriConnect ! Quel est votre nom complet ?"
     )
-    return apply_corrections(ctx.state, {
-        "final_response": prompt,
-        "ag_ui_component": ctx.state.get("ag_ui_component"),
-    })
+    return apply_corrections(
+        ctx.state,
+        {
+            "final_response": prompt,
+            "ag_ui_component": ctx.state.get("ag_ui_component"),
+        },
+    )
 
 
 async def generate_llm_question(
-    mc_runtime: Any, goal: str, field: str, label: str,
-    payload: Dict[str, Any], state: Optional[Dict[str, Any]] = None,
+    mc_runtime: Any,
+    goal: str,
+    field: str,
+    label: str,
+    payload: Dict[str, Any],
+    state: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Question coaching-style via LLM : POURQUOI + exemple + encouragement."""
     llm = getattr(mc_runtime, "llm", None)
@@ -41,11 +48,17 @@ async def generate_llm_question(
     if llm is None:
         return fallback
 
-    goal_label = (INTENT_CONFIG.get(goal) or {}).get("label", goal.replace("_", " ").lower())
-    already_known = ", ".join(
-        f"{k}={v}" for k, v in (payload or {}).items()
-        if v not in (None, "", [], {}) and not k.endswith("_id") and k != "phone"
-    ) or "rien"
+    goal_label = (INTENT_CONFIG.get(goal) or {}).get(
+        "label", goal.replace("_", " ").lower()
+    )
+    already_known = (
+        ", ".join(
+            f"{k}={v}"
+            for k, v in (payload or {}).items()
+            if v not in (None, "", [], {}) and not k.endswith("_id") and k != "phone"
+        )
+        or "rien"
+    )
 
     progress_ctx = ""
     is_last_field = False
@@ -54,12 +67,16 @@ async def generate_llm_question(
         if progress:
             remaining = len(progress.get("remaining") or [])
             is_last_field = remaining <= 1
-            progress_ctx = f" Étape {progress.get('filled', 0) + 1}/{progress.get('total', '?')}."
+            progress_ctx = (
+                f" Étape {progress.get('filled', 0) + 1}/{progress.get('total', '?')}."
+            )
         user_name = state.get("user_name")
         if user_name:
             progress_ctx += f" Prénom utilisateur : {user_name}."
 
-    last_hint = " C'est la DERNIÈRE info : dis qu'on y est presque." if is_last_field else ""
+    last_hint = (
+        " C'est la DERNIÈRE info : dis qu'on y est presque." if is_last_field else ""
+    )
 
     # Prompt compact et déterministe : ~70 tokens vs ~180 avant (Phase 3).
     prompt = (
@@ -74,7 +91,9 @@ async def generate_llm_question(
         completion = await asyncio.wait_for(
             asyncio.to_thread(
                 lambda: llm.chat.completions.create(
-                    model=getattr(mc_runtime, "model_answer", "llama-3.3-70b-versatile"),
+                    model=getattr(
+                        mc_runtime, "model_answer", "llama-3.3-70b-versatile"
+                    ),
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.3,
                     max_tokens=90,
@@ -88,7 +107,9 @@ async def generate_llm_question(
         logger.warning("RESPONSE_LLM_TIMEOUT | goal=%s | field=%s", goal, field)
         return fallback
     except Exception as exc:
-        logger.warning("RESPONSE_LLM_ERROR | goal=%s | field=%s | error=%s", goal, field, exc)
+        logger.warning(
+            "RESPONSE_LLM_ERROR | goal=%s | field=%s | error=%s", goal, field, exc
+        )
         return fallback
 
 
@@ -97,16 +118,22 @@ async def render_ask_missing_field(ctx: RenderContext) -> Dict[str, Any]:
     # Réutiliser un final_response pré-calculé en amont s'il existe.
     precomputed_ask = state.get("final_response")
     if precomputed_ask:
-        return apply_corrections(state, {
-            "final_response": precomputed_ask,
-            "ag_ui_component": state.get("ag_ui_component"),
-        })
+        return apply_corrections(
+            state,
+            {
+                "final_response": precomputed_ask,
+                "ag_ui_component": state.get("ag_ui_component"),
+            },
+        )
 
     if not ctx.goal:
-        return apply_corrections(state, {
-            "final_response": f"{ctx.salutation}Que souhaitez-vous faire (vendre, acheter, stock, enchères) ?",
-            "ag_ui_component": None,
-        })
+        return apply_corrections(
+            state,
+            {
+                "final_response": f"{ctx.salutation}Que souhaitez-vous faire (vendre, acheter, stock, enchères) ?",
+                "ag_ui_component": None,
+            },
+        )
 
     missing = state.get("missing_fields") or []
     field = state.get("last_missing_field") or (missing[0] if missing else None)
@@ -114,7 +141,12 @@ async def render_ask_missing_field(ctx: RenderContext) -> Dict[str, Any]:
     candidates = state.get("expected_candidates") or []
 
     question = await generate_llm_question(
-        ctx.mc_runtime, ctx.goal, field or "", label, ctx.payload, state=state,
+        ctx.mc_runtime,
+        ctx.goal,
+        field or "",
+        label,
+        ctx.payload,
+        state=state,
     )
     progress = state.get("conversation_progress") or {}
     if progress:
@@ -134,9 +166,13 @@ async def render_ask_missing_field(ctx: RenderContext) -> Dict[str, Any]:
     # tous les goals d'un coup plutôt que d'attendre le prochain rapport de
     # bug par goal. Voir [[precommande-architecture-consolidation-2026-08]].
     event = str(state.get("interpreted_event") or "").upper()
-    user_text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+    user_text = str(
+        state.get("normalized_text") or state.get("user_query") or ""
+    ).strip()
     if event in {"UNKNOWN", "OUT_OF_SCOPE"} and user_text:
-        note = await llm_deviation_reply(ctx.mc_runtime, user_text, f"répondre à : {label}")
+        note = await llm_deviation_reply(
+            ctx.mc_runtime, user_text, f"répondre à : {label}"
+        )
         if note:
             question = f"{note}\n\n{question}"
 
@@ -159,4 +195,6 @@ async def render_ask_missing_field(ctx: RenderContext) -> Dict[str, Any]:
             },
         }
 
-    return apply_corrections(state, {"final_response": question, "ag_ui_component": ag_component})
+    return apply_corrections(
+        state, {"final_response": question, "ag_ui_component": ag_component}
+    )

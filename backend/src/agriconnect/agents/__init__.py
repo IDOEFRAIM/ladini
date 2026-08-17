@@ -15,6 +15,16 @@ from .dispatcher import (
     PreparedAction,
     execute_prepared_action,
 )
+from .forms import (
+    AUCTION_FORM,
+    CROP_CYCLE_FORM,
+    FORM_REGISTRY,
+    PRODUCT_FORM,
+    FormSpec,
+    FormStepResult,
+    SlotSpec,
+    run_form_step,
+)
 from .gateway import DataGateway
 from .identity import (
     UserIdentity,
@@ -27,16 +37,6 @@ from .onboarding import (
     OnboardingState,
     OnboardingStep,
     run_onboarding_step,
-)
-from .forms import (
-    FormSpec,
-    FormStepResult,
-    SlotSpec,
-    run_form_step,
-    PRODUCT_FORM,
-    AUCTION_FORM,
-    CROP_CYCLE_FORM,
-    FORM_REGISTRY,
 )
 from .reducers import (
     _KEEP,

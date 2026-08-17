@@ -13,6 +13,7 @@ Monitoring : l'état est entièrement porté par l'outbox (``status``, ``attempt
 ``sent_at``) et par ``solicitations`` (``NOTIFIED`` → ``RESPONDED``). Le taux de
 conversion = RESPONDED / NOTIFIED se lit directement en SQL, sans table annexe.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -40,7 +41,12 @@ class DispatchReport:
     errors: List[str] = field(default_factory=list)
 
     def as_dict(self) -> Dict[str, Any]:
-        return {"claimed": self.claimed, "sent": self.sent, "failed": self.failed, "errors": self.errors}
+        return {
+            "claimed": self.claimed,
+            "sent": self.sent,
+            "failed": self.failed,
+            "errors": self.errors,
+        }
 
 
 def _to_job(row: Any) -> Dict[str, Any]:
@@ -76,7 +82,9 @@ class OutboxDispatcher:
                     await outbox_repo.mark_sent(session, job["id"])
                     report.sent += 1
                 else:
-                    await outbox_repo.mark_failed(session, job["id"], error=result.error or "unknown")
+                    await outbox_repo.mark_failed(
+                        session, job["id"], error=result.error or "unknown"
+                    )
                     report.failed += 1
                     report.errors.append(f"{job['id']}: {result.error}")
             await asyncio.sleep(_INTER_SEND_PAUSE_S)

@@ -16,9 +16,9 @@ Resources:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import asyncio
 import time
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -26,7 +26,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Optional
 
-from fastmcp import FastMCP, Context
+from fastmcp import Context, FastMCP
+
 from agriconnect.infrastructure.mcp.utils import run_coro_blocking
 
 logger = logging.getLogger("MCP.Context")
@@ -46,7 +47,9 @@ class FarmerContext:
     language: str = "fr"
 
 
-_MCP_CONTEXT: ContextVar[Optional[FarmerContext]] = ContextVar("agriconnect_mcp_context", default=None)
+_MCP_CONTEXT: ContextVar[Optional[FarmerContext]] = ContextVar(
+    "agriconnect_mcp_context", default=None
+)
 
 
 def set_mcp_context(context: Optional[FarmerContext]) -> None:
@@ -71,6 +74,8 @@ def mcp_context_scope(context: Optional[FarmerContext]) -> Generator[None, None,
 _optimizer = None
 _session_factory = None
 _llm_client = None
+
+
 @dataclass
 class _CacheEntry:
     payload: Dict[str, Any]
@@ -98,11 +103,12 @@ def _lazy_optimizer():
     if _optimizer is None and _session_factory:
         try:
             from agriconnect.services.memory import (
-                UserFarmProfile,
+                ContextOptimizer,
                 EpisodicMemory,
                 ProfileExtractor,
-                ContextOptimizer,
+                UserFarmProfile,
             )
+
             _profile = UserFarmProfile(_session_factory)
             _episodic = EpisodicMemory(_session_factory, llm_client=_llm_client)
             _extractor = ProfileExtractor(_llm_client, _profile)
@@ -132,7 +138,9 @@ def _cache_get(user_id: str) -> Optional[Dict[str, Any]]:
 
 def _prune_context_cache() -> None:
     now = time.monotonic()
-    stale_keys = [key for key, value in _context_cache.items() if value.expires_at < now]
+    stale_keys = [
+        key for key, value in _context_cache.items() if value.expires_at < now
+    ]
     for key in stale_keys:
         _context_cache.pop(key, None)
     # Keep cache bounded (e.g., 512 entries) to avoid memory leaks
@@ -145,10 +153,13 @@ def _sync_await(coro):
         asyncio.get_running_loop()
     except RuntimeError:
         return run_coro_blocking(coro)
-    raise RuntimeError("Synchronous MCPContextServer API called from running event loop; use async equivalent")
+    raise RuntimeError(
+        "Synchronous MCPContextServer API called from running event loop; use async equivalent"
+    )
 
 
 # ────────────────────── Tools ─────────────────────────────────────────────
+
 
 @mcp.tool()
 async def build_context(
@@ -174,14 +185,19 @@ async def build_context(
 
     optimizer = _lazy_optimizer()
     if not optimizer:
-        return json.dumps({
-            "error": "ContextOptimizer indisponible",
-            "combined_context": "",
-            "token_estimate": 0,
-        })
+        return json.dumps(
+            {
+                "error": "ContextOptimizer indisponible",
+                "combined_context": "",
+                "token_estimate": 0,
+            }
+        )
 
     result = optimizer.build_context(
-        user_id, query, zone=zone or None, crop=crop or None,
+        user_id,
+        query,
+        zone=zone or None,
+        crop=crop or None,
     )
     # cache result
     _cache_set(user_id, result)
@@ -195,14 +211,17 @@ async def get_token_budget(ctx: Context = None) -> str:
         await ctx.info("Returning token budget")
     try:
         from agriconnect.services.memory.context_optimizer import TOKEN_BUDGETS
+
         return json.dumps(TOKEN_BUDGETS, ensure_ascii=False)
     except Exception:
-        return json.dumps({
-            "profile": 80,
-            "episodes": 120,
-            "metadata": 50,
-            "total": 350,
-        })
+        return json.dumps(
+            {
+                "profile": 80,
+                "episodes": 120,
+                "metadata": 50,
+                "total": 350,
+            }
+        )
 
 
 @mcp.tool()
@@ -251,7 +270,9 @@ async def record_interaction(
 
     optimizer = _lazy_optimizer()
     if not optimizer:
-        return json.dumps({"status": "skipped", "reason": "ContextOptimizer indisponible"})
+        return json.dumps(
+            {"status": "skipped", "reason": "ContextOptimizer indisponible"}
+        )
 
     try:
         optimizer.record_interaction(
@@ -269,17 +290,21 @@ async def record_interaction(
 
 # ────────────────────── Resources ─────────────────────────────────────────
 
+
 @mcp.resource("context://status")
 async def context_status() -> str:
     """Health-check resource for context server."""
-    return json.dumps({
-        "server": "AgriConnect Context MCP Server",
-        "cached_users": len(_context_cache),
-        "optimizer_ready": _lazy_optimizer() is not None,
-    })
+    return json.dumps(
+        {
+            "server": "AgriConnect Context MCP Server",
+            "cached_users": len(_context_cache),
+            "optimizer_ready": _lazy_optimizer() is not None,
+        }
+    )
 
 
 # ────────────────────── Backward-compatible class wrapper ─────────────────
+
 
 class MCPContextServer:
     """
@@ -293,7 +318,11 @@ class MCPContextServer:
     """
 
     def __init__(self, context_optimizer=None, session_factory=None, llm_client=None):
-        _configure(context_optimizer=context_optimizer, session_factory=session_factory, llm_client=llm_client)
+        _configure(
+            context_optimizer=context_optimizer,
+            session_factory=session_factory,
+            llm_client=llm_client,
+        )
         logger.info("MCP Context Server v2 (FastMCP) initialised")
 
     # ── MCP interface ────────────────────────────────────────────────
@@ -301,16 +330,27 @@ class MCPContextServer:
     @staticmethod
     def list_tools() -> list:
         return [
-            {"name": "build_context", "description": "Construit le contexte utilisateur optimisé"},
+            {
+                "name": "build_context",
+                "description": "Construit le contexte utilisateur optimisé",
+            },
             {"name": "get_token_budget", "description": "Budget tokens par composant"},
-            {"name": "enrich_state", "description": "Enrichit un état avec le contexte mémoire"},
+            {
+                "name": "enrich_state",
+                "description": "Enrichit un état avec le contexte mémoire",
+            },
             {"name": "record_interaction", "description": "Enregistre une interaction"},
         ]
 
     @staticmethod
     def list_resources() -> list:
         return [
-            {"uri": "context://status", "name": "Context Status", "description": "Health check", "mimeType": "application/json"},
+            {
+                "uri": "context://status",
+                "name": "Context Status",
+                "description": "Health check",
+                "mimeType": "application/json",
+            },
         ]
 
     @staticmethod
@@ -369,6 +409,7 @@ class MCPContextServer:
         """
         try:
             from agriconnect.protocols.core import CachePolicy
+
             if query:
                 temp = CachePolicy(key="_check")
                 bypass = temp.should_bypass(query)
@@ -382,7 +423,9 @@ class MCPContextServer:
             return cached
 
         raw = _sync_await(
-            build_context(user_id=user_id or "anonymous", query=query, zone=zone, crop=crop)
+            build_context(
+                user_id=user_id or "anonymous", query=query, zone=zone, crop=crop
+            )
         )
         try:
             result = json.loads(raw) if isinstance(raw, str) else raw
@@ -393,7 +436,9 @@ class MCPContextServer:
         return result
 
     @staticmethod
-    def check_required_fields(context: Dict[str, Any], required: List[str]) -> Dict[str, Any]:
+    def check_required_fields(
+        context: Dict[str, Any], required: List[str]
+    ) -> Dict[str, Any]:
         """Vérifie que les champs requis sont présents dans le contexte."""
         missing = [f for f in required if not context.get(f)]
         if missing:

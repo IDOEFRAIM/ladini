@@ -6,6 +6,7 @@ Deux garde-fous d'idempotence :
 * claim ``FOR UPDATE SKIP LOCKED`` → deux dispatchers ne prennent jamais la
   même ligne (concurrence sûre).
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta

@@ -1,7 +1,7 @@
 """Buyer negotiation gate — counter-offers, bid viewing, session lifecycle."""
+
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, List, Optional
 
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
@@ -13,7 +13,10 @@ from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
     NegotiationGateway,
     ProductGateway,
 )
-from agriconnect.graphs.agents.market_coach.utils import MarketRuntime, is_success_response
+from agriconnect.graphs.agents.market_coach.utils import (
+    MarketRuntime,
+    is_success_response,
+)
 
 from .helpers import (
     NEGOTIATION_GOALS,
@@ -58,7 +61,9 @@ def _build_bids_menu(
         "pending_menu": MenuRequest(
             title="Offres reçues",
             options=[
-                MenuOption(index=o["index"], label=o["label"], value=mapping.get(o["index"]))
+                MenuOption(
+                    index=o["index"], label=o["label"], value=mapping.get(o["index"])
+                )
                 for o in options
             ],
             kind="bid",
@@ -179,18 +184,26 @@ async def _handle_viewing_offers(
                 from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
                     _get_stored_location,
                 )
-                _delivery_lat, _delivery_lon = await _get_stored_location(mc_runtime, str(_buyer_phone))
+
+                _delivery_lat, _delivery_lon = await _get_stored_location(
+                    mc_runtime, str(_buyer_phone)
+                )
             except Exception:
-                logger.warning("_handle_viewing_offers: échec de lecture du point GPS par défaut")
+                logger.warning(
+                    "_handle_viewing_offers: échec de lecture du point GPS par défaut"
+                )
         win = await AuctionGateway(mc_runtime).select_winning_bid(
-            bid_id=str(bid_id), phone=str(_buyer_phone) if _buyer_phone else None,
-            delivery_lat=_delivery_lat, delivery_lon=_delivery_lon,
+            bid_id=str(bid_id),
+            phone=str(_buyer_phone) if _buyer_phone else None,
+            delivery_lat=_delivery_lat,
+            delivery_lon=_delivery_lon,
         )
         if str(win.get("status") or "").lower() != "success":
             return {
                 "status": "COMPLETED",
                 "response_strategy": "ERROR",
-                "final_response": win.get("message") or "Impossible de valider cette offre.",
+                "final_response": win.get("message")
+                or "Impossible de valider cette offre.",
                 "transaction_payload": {"resolved_id": None},
                 "negotiation_context": {"__reset__": True},
                 "ag_ui_component": None,
@@ -236,7 +249,11 @@ async def _handle_negotiation_menu(
     action = str(action).upper().strip() if action else ""
 
     if not action:
-        msg = nctx.get("last_message") or state.get("final_response") or "Négociation en cours."
+        msg = (
+            nctx.get("last_message")
+            or state.get("final_response")
+            or "Négociation en cours."
+        )
         neg_menu = negotiation_action_menu(str(auction_id))
         return {
             "status": "WAITING_INPUT",
@@ -248,7 +265,9 @@ async def _handle_negotiation_menu(
         }
 
     if action == "NEGOTIATION_VIEW_OFFERS":
-        return await _fetch_and_show_bids(mc_runtime, auction_id, nctx, "VIEWING_OFFERS", phone=phone)
+        return await _fetch_and_show_bids(
+            mc_runtime, auction_id, nctx, "VIEWING_OFFERS", phone=phone
+        )
 
     if action == "NEGOTIATION_COUNTER":
         return {
@@ -317,7 +336,8 @@ async def _initiate_negotiation(
         return {
             "status": "COMPLETED",
             "response_strategy": "ERROR",
-            "final_response": res.get("message") or "Impossible d'ouvrir la négociation.",
+            "final_response": res.get("message")
+            or "Impossible d'ouvrir la négociation.",
             "fallback_recommendations": res.get("fallback") or [],
             "ag_ui_component": None,
         }
@@ -325,10 +345,19 @@ async def _initiate_negotiation(
     seller_min = res.get("seller_minimum")
     gap = res.get("price_gap")
     recos = []
-    if isinstance(gap, (int, float)) and isinstance(seller_min, (int, float)) and gap > 0:
+    if (
+        isinstance(gap, (int, float))
+        and isinstance(seller_min, (int, float))
+        and gap > 0
+    ):
         suggested = round((offer + float(seller_min)) / 2.0, 2)
-        recos = [{"type": "suggested_price", "value": suggested,
-                  "label": f"Proposer un prix médian de {suggested} FCFA"}]
+        recos = [
+            {
+                "type": "suggested_price",
+                "value": suggested,
+                "label": f"Proposer un prix médian de {suggested} FCFA",
+            }
+        ]
 
     neg_init_menu = MenuRequest(
         title="Négociation en cours",
@@ -366,7 +395,9 @@ async def _resolve_product_ref(
     """Resolve a product name to a catalog reference."""
     if not product_name:
         return None
-    res = await ProductGateway(mc_runtime).search_products(product=str(product_name), phone=str(phone))
+    res = await ProductGateway(mc_runtime).search_products(
+        product=str(product_name), phone=str(phone)
+    )
     if not is_success_response(res):
         return None
     results = res.get("results") or (res.get("data") or {}).get("results") or []
@@ -380,7 +411,9 @@ async def _resolve_product_ref(
         "price": float(best.get("price") or 0.0),
         "unit": str(best.get("unit") or "KG").upper(),
         "vendor": best.get("vendor"),
-        "vendor_name": best.get("vendor_name") or best.get("producer_name") or best.get("vendor"),
+        "vendor_name": best.get("vendor_name")
+        or best.get("producer_name")
+        or best.get("vendor"),
         "producer_id": best.get("producer_id") or best.get("vendor_id"),
     }
 
@@ -390,7 +423,9 @@ async def _resolve_product_ref(
 # =====================================================================
 
 
-async def negotiation_gate(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+async def negotiation_gate(
+    state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Dict[str, Any]:
     """Negotiation gate — deterministic phase-based routing."""
     goal = (state.get("current_goal") or "").upper()
     payload: Dict[str, Any] = dict(state.get("transaction_payload") or {})
@@ -415,7 +450,9 @@ async def negotiation_gate(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
         return await _handle_viewing_offers(mc_runtime, payload, nctx, auction_id)
 
     if auction_id and nphase == "NEGOTIATION_MENU":
-        return await _handle_negotiation_menu(mc_runtime, phone, payload, state, nctx, auction_id)
+        return await _handle_negotiation_menu(
+            mc_runtime, phone, payload, state, nctx, auction_id
+        )
 
     # No active session — initiate new negotiation
     if not product_name or payload.get("price") in (None, "", 0):
@@ -427,7 +464,9 @@ async def negotiation_gate(state: Dict[str, Any], mc_runtime: MarketRuntime) -> 
             "ag_ui_component": None,
         }
 
-    return await _initiate_negotiation(mc_runtime, phone, str(product_name), quantity, payload)
+    return await _initiate_negotiation(
+        mc_runtime, phone, str(product_name), quantity, payload
+    )
 
 
 __all__ = ["negotiation_gate"]

@@ -1,4 +1,5 @@
 """Canal Email — stub derrière l'interface (activable en v2 : SES/SendGrid…)."""
+
 from __future__ import annotations
 
 import logging

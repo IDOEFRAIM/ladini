@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Mapping
+from typing import Any, Dict, Mapping
 
-from agriconnect.graphs.agents.market_coach.domain.model import DomainContext, DomainResult
-from agriconnect.graphs.agents.market_coach.actions.tooling import ToolId
 from agriconnect.graphs.agents.market_coach.actions.common import (
     normalize_quantity_to_kg,
     require,
     require_phone,
+)
+from agriconnect.graphs.agents.market_coach.actions.tooling import ToolId
+from agriconnect.graphs.agents.market_coach.domain.model import (
+    DomainContext,
+    DomainResult,
 )
 
 
@@ -26,24 +29,32 @@ class StockUpdateLevelCommand:
 class StockService:
     context: DomainContext
 
-    def get_summary(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def get_summary(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         phone = require_phone(state)
         args: Dict[str, Any] = {"phone": phone}
         return DomainResult(tool_id=ToolId.GET_STOCKS, tool_args=args)
 
-    def get_detail(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def get_detail(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         require_phone(state)
         farm_id = str(require(payload, "farm_id"))
         args: Dict[str, Any] = {"farm_id": farm_id}
         return DomainResult(tool_id=ToolId.GET_FARM_STOCKS, tool_args=args)
 
-    def get_movements(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def get_movements(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         require_phone(state)
         stock_id = str(require(payload, "stock_id"))
         args: Dict[str, Any] = {"stock_id": stock_id}
         return DomainResult(tool_id=ToolId.GET_STOCK_MOVEMENTS, tool_args=args)
 
-    def register_harvest(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def register_harvest(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         require_phone(state)
         farm_id = str(require(payload, "farm_id"))
         product = str(require(payload, "product"))
@@ -59,7 +70,9 @@ class StockService:
         }
         return DomainResult(tool_id=ToolId.ADD_STOCK, tool_args=args)
 
-    def record_movement(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def record_movement(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         phone = require_phone(state)
         stock_id = str(require(payload, "stock_id"))
         movement_type = str(require(payload, "movement_type")).upper().strip()
@@ -74,7 +87,9 @@ class StockService:
         }
         return DomainResult(tool_id=ToolId.ADD_STOCK_MOVEMENT_BY_ID, tool_args=args)
 
-    def adjust(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def adjust(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         phone = require_phone(state)
         stock_id = str(require(payload, "stock_id"))
         qty_raw = float(require(payload, "quantity"))
@@ -87,7 +102,9 @@ class StockService:
         }
         return DomainResult(tool_id=ToolId.ADJUST_STOCK_BY_ID, tool_args=args)
 
-    def remove_partial(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def remove_partial(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         phone = require_phone(state)
         stock_id = str(require(payload, "stock_id"))
         qty_raw = float(require(payload, "quantity"))
@@ -100,7 +117,9 @@ class StockService:
         }
         return DomainResult(tool_id=ToolId.REMOVE_STOCK_BY_ID, tool_args=args)
 
-    def delete(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def delete(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         phone = require_phone(state)
         stock_id = str(require(payload, "stock_id"))
         args: Dict[str, Any] = {"producer_id": phone, "stock_id": stock_id}

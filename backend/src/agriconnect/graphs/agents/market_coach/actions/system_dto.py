@@ -4,7 +4,6 @@ from typing import Any, Mapping, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-
 _EMPTY_SLOT_VALUES: Tuple[object, ...] = (None, "", [], {})
 
 
@@ -50,9 +49,17 @@ class SystemReportAnomalyPayload(BaseModel):
         target_id = (payload or {}).get("target_id")
         return cls(
             description=str(description).strip(),
-            zone=(str(zone_val).strip() if zone_val not in _EMPTY_SLOT_VALUES else None),
-            anomaly_type=(str(anomaly_type).strip() if anomaly_type not in _EMPTY_SLOT_VALUES else None),
-            target_id=(str(target_id).strip() if target_id not in _EMPTY_SLOT_VALUES else None),
+            zone=(
+                str(zone_val).strip() if zone_val not in _EMPTY_SLOT_VALUES else None
+            ),
+            anomaly_type=(
+                str(anomaly_type).strip()
+                if anomaly_type not in _EMPTY_SLOT_VALUES
+                else None
+            ),
+            target_id=(
+                str(target_id).strip() if target_id not in _EMPTY_SLOT_VALUES else None
+            ),
         )
 
 
@@ -89,7 +96,9 @@ class SystemCommitTransactionPayload(BaseModel):
         return str(value).strip()
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "SystemCommitTransactionPayload":
+    def from_payload(
+        cls, payload: Mapping[str, Any]
+    ) -> "SystemCommitTransactionPayload":
         staging_id = (payload or {}).get("staging_id")
         if staging_id in _EMPTY_SLOT_VALUES:
             raise ValueError("staging_id is required")

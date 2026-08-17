@@ -12,22 +12,22 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agriconnect.domain.identity.dto import TrustScoreDTO as TrustScoreModel
+from agriconnect.domain.identity.dto import UserContextDTO as UserContextModel
 from agriconnect.domain.models import (
-    User,
-    Producer,
+    AgentContextMemory,
     BuyerProfile,
     DeliveryAgent,
-    Zone,
+    Producer,
     TrustScore,
-    AgentContextMemory,
+    User,
+    Zone,
 )
-from agriconnect.domain.identity.dto import UserContextDTO as UserContextModel, TrustScoreDTO as TrustScoreModel
 from agriconnect.services.database.base_service import BaseService, transactional
 from agriconnect.services.database.common import normalize_phone
 
 
 class UserContextService(BaseService):
-
     # ── Résolution d'identité (une requête, jointure polymorphe) ────────────
     @transactional(write=False)
     async def resolve_by_phone(
@@ -48,7 +48,7 @@ class UserContextService(BaseService):
         if not row:
             return None
         user, producer, buyer, delivery, zone = row
-        is_admin = (user.role == "ADMIN")
+        is_admin = user.role == "ADMIN"
         return UserContextModel(
             id=str(user.id),
             name=user.name or f"User_{clean[-4:]}",
@@ -71,7 +71,9 @@ class UserContextService(BaseService):
 
     # ── Réputation ──────────────────────────────────────────────────────────
     @transactional(write=False)
-    async def get_trust_score(self, session: AsyncSession, user_id: str) -> Optional[TrustScoreModel]:
+    async def get_trust_score(
+        self, session: AsyncSession, user_id: str
+    ) -> Optional[TrustScoreModel]:
         stmt = select(TrustScore).where(TrustScore.user_id == user_id)
         obj = (await session.execute(stmt)).scalar_one_or_none()
         return TrustScoreModel.model_validate(obj) if obj else None
@@ -79,14 +81,23 @@ class UserContextService(BaseService):
     # ── Mémoire agent (upsert idempotent sur (user_id, context_key)) ────────
     @transactional(write=True)
     async def set_memory(
-        self, session: AsyncSession, user_id: str, key: str, value: Any,
-        *, source: str = "AGENT", market_offer_id: Optional[str] = None,
+        self,
+        session: AsyncSession,
+        user_id: str,
+        key: str,
+        value: Any,
+        *,
+        source: str = "AGENT",
+        market_offer_id: Optional[str] = None,
     ) -> None:
         stmt = (
             pg_insert(AgentContextMemory.__table__)
             .values(
-                user_id=user_id, context_key=key, context_value=value,
-                source=source, market_offer_id=market_offer_id,
+                user_id=user_id,
+                context_key=key,
+                context_value=value,
+                source=source,
+                market_offer_id=market_offer_id,
             )
             .on_conflict_do_update(
                 index_elements=["user_id", "context_key"],

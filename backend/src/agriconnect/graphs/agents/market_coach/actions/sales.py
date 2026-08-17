@@ -1,10 +1,9 @@
 """Action handlers for the Sales & Marketplace domain."""
+
 from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Tuple
 
-from agriconnect.graphs.agents.market_coach.registry import register_action
-from agriconnect.graphs.agents.market_coach.actions.tooling import ToolResolver
 from agriconnect.graphs.agents.market_coach.actions.common import (
     is_update_mode,
     require_current_entity,
@@ -16,6 +15,7 @@ from agriconnect.graphs.agents.market_coach.actions.sales_dto import (
     SalesRecordDirectPayload,
     SalesUpdateProductPayload,
 )
+from agriconnect.graphs.agents.market_coach.actions.tooling import ToolResolver
 from agriconnect.graphs.agents.market_coach.domain import DomainContext
 from agriconnect.graphs.agents.market_coach.domain.sales import (
     MarketGetRequestsCommand,
@@ -26,9 +26,13 @@ from agriconnect.graphs.agents.market_coach.domain.sales import (
     SalesUpdateProductCommand,
     SalesUpdateProductionCommand,
 )
+from agriconnect.graphs.agents.market_coach.registry import register_action
+
 
 @register_action("SALES_GET_CATALOG", mode="READ")
-def prep_sales_get_catalog(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_sales_get_catalog(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare la consultation du catalogue, des stocks et des productions futures."""
     context = DomainContext.from_state(state)
     service = SalesService(context=context)
@@ -38,11 +42,15 @@ def prep_sales_get_catalog(state: Mapping[str, Any], payload: Mapping[str, Any])
 
 
 @register_action("MARKET_BROWSE_REQUESTS", mode="READ")
-def prep_market_get_requests(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_market_get_requests(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare la liste des appels d'offres du marché."""
     context = DomainContext.from_state(state)
     if not context.phone:
-        raise ValueError("Le numéro de téléphone de l'utilisateur est requis pour consulter les appels d'offres.")
+        raise ValueError(
+            "Le numéro de téléphone de l'utilisateur est requis pour consulter les appels d'offres."
+        )
 
     dto = MarketGetRequestsPayload.from_payload(payload)
 
@@ -61,7 +69,9 @@ def prep_market_get_requests(state: Mapping[str, Any], payload: Mapping[str, Any
 
 
 @register_action("MARKET_GET_REQUEST_DETAIL", mode="READ")
-def prep_market_get_request_detail(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_market_get_request_detail(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare la consultation des offres reçues sur sa propre demande."""
     context = DomainContext.from_state(state)
     service = SalesService(context=context)
@@ -71,7 +81,9 @@ def prep_market_get_request_detail(state: Mapping[str, Any], payload: Mapping[st
 
 
 @register_action("MARKET_GET_MY_PROPOSALS", mode="READ")
-def prep_market_get_my_proposals(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_market_get_my_proposals(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare le suivi des propositions envoyées par le producteur."""
     context = DomainContext.from_state(state)
     service = SalesService(context=context)
@@ -81,7 +93,9 @@ def prep_market_get_my_proposals(state: Mapping[str, Any], payload: Mapping[str,
 
 
 @register_action("MARKET_SNAPSHOT", mode="READ")
-def prep_market_snapshot(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_market_snapshot(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare la consultation des cours du marché local."""
     context = DomainContext.from_state(state)
     service = SalesService(context=context)
@@ -91,7 +105,9 @@ def prep_market_snapshot(state: Mapping[str, Any], payload: Mapping[str, Any]) -
 
 
 @register_action("MARKET_SNAPSHOT_ZONAL", mode="READ")
-def prep_market_snapshot_zonal(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_market_snapshot_zonal(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare l'analyse des tendances locales."""
     context = DomainContext.from_state(state)
     service = SalesService(context=context)
@@ -101,7 +117,9 @@ def prep_market_snapshot_zonal(state: Mapping[str, Any], payload: Mapping[str, A
 
 
 @register_action("DASHBOARD_PRODUCER", mode="READ")
-def prep_dashboard_producer(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_dashboard_producer(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare le chargement du tableau de bord d'exploitation."""
     context = DomainContext.from_state(state)
     service = SalesService(context=context)
@@ -111,7 +129,9 @@ def prep_dashboard_producer(state: Mapping[str, Any], payload: Mapping[str, Any]
 
 
 @register_action("SEARCH_PRODUCTS", mode="READ")
-def prep_search_products(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_search_products(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare la recherche par mot-clé dans le catalogue."""
     context = DomainContext.from_state(state)
     service = SalesService(context=context)
@@ -121,17 +141,23 @@ def prep_search_products(state: Mapping[str, Any], payload: Mapping[str, Any]) -
 
 
 @register_action("SEARCH_NEARBY", mode="READ")
-def prep_search_nearby(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_search_nearby(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare la recherche de proximité GPS."""
     context = DomainContext.from_state(state)
     service = SalesService(context=context)
     result = service.search_nearby(state, payload)
-    tool_name = ToolResolver.resolve_name(result.tool_id or "get_all_zone_market_overview")
+    tool_name = ToolResolver.resolve_name(
+        result.tool_id or "get_all_zone_market_overview"
+    )
     return tool_name, dict(result.tool_args)
 
 
 @register_action("VALIDATE_PRICE", mode="READ")
-def prep_validate_price(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_validate_price(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Prépare la vérification de cohérence de prix."""
     context = DomainContext.from_state(state)
     service = SalesService(context=context)
@@ -141,10 +167,14 @@ def prep_validate_price(state: Mapping[str, Any], payload: Mapping[str, Any]) ->
 
 
 @register_action("SALES_PUBLISH_PRODUCT", mode="WRITE")
-def prep_sales_publish_product(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_sales_publish_product(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     if not context.phone:
-        raise ValueError("Le numéro de téléphone du producteur est requis pour publier un produit.")
+        raise ValueError(
+            "Le numéro de téléphone du producteur est requis pour publier un produit."
+        )
 
     dto = SalesPublishProductPayload.from_payload(payload)
 
@@ -165,10 +195,14 @@ def prep_sales_publish_product(state: Mapping[str, Any], payload: Mapping[str, A
 
 
 @register_action("SALES_RECORD_DIRECT", mode="WRITE")
-def prep_sales_record_direct(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_sales_record_direct(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     if not context.phone:
-        raise ValueError("Le numéro de téléphone du producteur est requis pour enregistrer une vente.")
+        raise ValueError(
+            "Le numéro de téléphone du producteur est requis pour enregistrer une vente."
+        )
 
     dto = SalesRecordDirectPayload.from_payload(payload)
 
@@ -187,7 +221,9 @@ def prep_sales_record_direct(state: Mapping[str, Any], payload: Mapping[str, Any
 
 
 @register_action("SALES_PLACE_BID", mode="WRITE")
-def prep_sales_place_bid(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_sales_place_bid(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     service = SalesService(context=context)
     result = service.place_bid(state, payload)
@@ -196,7 +232,9 @@ def prep_sales_place_bid(state: Mapping[str, Any], payload: Mapping[str, Any]) -
 
 
 @register_action("SALES_ACCEPT_CONTRACT", mode="WRITE")
-def prep_sales_accept_contract(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_sales_accept_contract(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     service = SalesService(context=context)
     result = service.accept_contract(state, payload)
@@ -205,16 +243,22 @@ def prep_sales_accept_contract(state: Mapping[str, Any], payload: Mapping[str, A
 
 
 @register_action("SALES_UPDATE_PRODUCT", mode="WRITE")
-def prep_sales_update_product(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_sales_update_product(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     if not is_update_mode(state):
         raise ValueError("SALES_UPDATE_PRODUCT doit être invoqué en mode update.")
 
     entity = require_current_entity(state, intent="SALES_UPDATE_PRODUCT")
-    dto = SalesUpdateProductPayload.from_state_and_payload(payload=payload, entity=entity)
+    dto = SalesUpdateProductPayload.from_state_and_payload(
+        payload=payload, entity=entity
+    )
 
     context = DomainContext.from_state(state)
     if not context.phone:
-        raise ValueError("Le numéro de téléphone du producteur est requis pour mettre à jour le produit.")
+        raise ValueError(
+            "Le numéro de téléphone du producteur est requis pour mettre à jour le produit."
+        )
 
     command = SalesUpdateProductCommand(
         producer_id=context.phone,
@@ -227,7 +271,9 @@ def prep_sales_update_product(state: Mapping[str, Any], payload: Mapping[str, An
 
     service = SalesService(context=context)
     result = service.update_product(command)
-    tool_name = ToolResolver.resolve_name(result.tool_id or "update_product_price_and_qty")
+    tool_name = ToolResolver.resolve_name(
+        result.tool_id or "update_product_price_and_qty"
+    )
     return tool_name, dict(result.tool_args)
 
 
@@ -241,11 +287,15 @@ def _coerce_opt_float(value: Any) -> Any:
 
 
 @register_action("SALES_UPDATE_PRODUCTION", mode="WRITE")
-def prep_sales_update_production(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_sales_update_production(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     """Mise à jour d'un lot futur (MarketOffer) : prix/quantité/nom/unité/date/type."""
     context = DomainContext.from_state(state)
     if not context.phone:
-        raise ValueError("Le numéro de téléphone du producteur est requis pour mettre à jour la production.")
+        raise ValueError(
+            "Le numéro de téléphone du producteur est requis pour mettre à jour la production."
+        )
 
     # cycle_id : posé par la sélection (memory.py mappe la ligne choisie), avec
     # plusieurs alias possibles selon le canal de sélection.
@@ -256,7 +306,9 @@ def prep_sales_update_production(state: Mapping[str, Any], payload: Mapping[str,
         or payload.get("selected_value")
     )
     if not cycle_id:
-        raise ValueError("Sélectionnez d'abord la production à modifier (numéro dans la liste).")
+        raise ValueError(
+            "Sélectionnez d'abord la production à modifier (numéro dans la liste)."
+        )
 
     # Nouveau nom éventuel : `product` (slot canonique). Rejeté s'il vaut un mot
     # de type (culture/élevage) — déjà filtré en amont par _sanitize_product_candidate.
@@ -265,7 +317,9 @@ def prep_sales_update_production(state: Mapping[str, Any], payload: Mapping[str,
         cycle_id=str(cycle_id),
         price=_coerce_opt_float(payload.get("price")),
         quantity=_coerce_opt_float(payload.get("quantity")),
-        product_label=(str(payload["product"]).strip() if payload.get("product") else None),
+        product_label=(
+            str(payload["product"]).strip() if payload.get("product") else None
+        ),
         unit=(str(payload["unit"]).strip() if payload.get("unit") else None),
         estimated_available_at=(payload.get("estimated_available_at") or None),
         production_type=(payload.get("production_type") or None),
@@ -278,10 +332,14 @@ def prep_sales_update_production(state: Mapping[str, Any], payload: Mapping[str,
 
 
 @register_action("SALES_LIST_ORDERS", mode="READ")
-def prep_sales_list_orders(state: Mapping[str, Any], payload: Mapping[str, Any]) -> Tuple[str, Dict[str, Any]]:
+def prep_sales_list_orders(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
     context = DomainContext.from_state(state)
     if not context.phone:
-        raise ValueError("Le numéro de téléphone du producteur est requis pour consulter ses commandes.")
+        raise ValueError(
+            "Le numéro de téléphone du producteur est requis pour consulter ses commandes."
+        )
 
     dto = SalesListOrdersPayload.from_payload(payload)
     command = SalesListOrdersCommand(

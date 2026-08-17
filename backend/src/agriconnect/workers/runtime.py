@@ -5,6 +5,7 @@ worker Celery (voir ``api/tasks.py``). Réutiliser cette même boucle évite les
 erreurs « attached to a different loop ». En dehors d'un worker (script, test),
 on retombe sur ``asyncio.run``.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -25,6 +26,7 @@ def run_async(coro: "Awaitable[T]") -> "T":
     loop = None
     try:
         from agriconnect.api import tasks as _tasks  # import tardif : évite un cycle
+
         loop = getattr(_tasks, "_loop", None)
     except Exception:  # pragma: no cover - défensif
         loop = None
@@ -42,7 +44,9 @@ async def worker_session() -> AsyncIterator[Any]:
     """
     session_factory = get_sessionmaker()
     if session_factory is None:
-        raise RuntimeError("Sessionmaker indisponible (init_db non exécuté / DATABASE_URL manquante).")
+        raise RuntimeError(
+            "Sessionmaker indisponible (init_db non exécuté / DATABASE_URL manquante)."
+        )
 
     async with session_factory() as session:
         token = db_session_ctx.set(session)

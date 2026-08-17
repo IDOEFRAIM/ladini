@@ -2,39 +2,43 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Literal, Union
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Any, Dict, List, Literal, Optional, Union
 
-from sqlalchemy import select, update, delete, and_, or_, desc, func
-from sqlalchemy.orm import selectinload, joinedload, load_only, with_loader_criteria, aliased
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import desc, func, or_, select
+from sqlalchemy.orm import (
+    aliased,
+    joinedload,
+    load_only,
+    selectinload,
+)
 
+from agriconnect.core.formatting import fmt_num as _fmt_num
 from agriconnect.domain.models import (
-    Producer,
+    BuyerProfile,
+    Category,
+    Client,
     Farm,
-    Stock,
-    StockMovement,
-    User,
-    Product,
     MarketOffer,
     Order,
     OrderItem,
-    Client,
-    Expense,
+    Producer,
+    Product,
+    Stock,
+    StockMovement,
     SubCategory,
-    Category,
-    BuyerProfile,
+    User,
 )
-from agriconnect.core.formatting import fmt_num as _fmt_num
+
 from .base import BaseMixin
-from .common import clean_text, positive_float, normalize_phone, clamp_limit
-from .search import fuzzy_match, similarity_rank
+from .common import clamp_limit, clean_text, positive_float
 from .errors import BusinessRuleException
+from .search import fuzzy_match, similarity_rank
 
 logger = logging.getLogger("agriconnect.services.producer_mgmt")
 
-MovementType = Literal['IN', 'OUT', 'WASTE']
+MovementType = Literal["IN", "OUT", "WASTE"]
 
 
 _BOOL_TRUE = {"1", "true", "on", "yes", "y", "oui", "vrai"}
@@ -62,7 +66,14 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
-def _coerce_float(value: Any, field: str, *, allow_zero: bool = True, positive: bool = False, default: Optional[float] = None) -> Optional[float]:
+def _coerce_float(
+    value: Any,
+    field: str,
+    *,
+    allow_zero: bool = True,
+    positive: bool = False,
+    default: Optional[float] = None,
+) -> Optional[float]:
     if value in (None, ""):
         return default
     try:
@@ -76,7 +87,9 @@ def _coerce_float(value: Any, field: str, *, allow_zero: bool = True, positive: 
     return parsed
 
 
-def _parse_datetime(value: Any, field: str, *, required: bool = False) -> Optional[datetime]:
+def _parse_datetime(
+    value: Any, field: str, *, required: bool = False
+) -> Optional[datetime]:
     if value in (None, ""):
         if required:
             raise ValueError(f"{field} est obligatoire")
@@ -90,7 +103,9 @@ def _parse_datetime(value: Any, field: str, *, required: bool = False) -> Option
         try:
             dt_value = datetime.fromisoformat(text)
         except ValueError as exc:
-            raise ValueError(f"{field} doit être une date ISO (YYYY-MM-DD ou YYYY-MM-DDTHH:MM)") from exc
+            raise ValueError(
+                f"{field} doit être une date ISO (YYYY-MM-DD ou YYYY-MM-DDTHH:MM)"
+            ) from exc
     if dt_value.tzinfo is None:
         dt_value = dt_value.replace(tzinfo=timezone.utc)
     return dt_value
@@ -104,7 +119,9 @@ def _utc_naive(value: Optional[datetime]) -> Optional[datetime]:
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
-def _normalize_offer_payload(payload: Dict[str, Any], *, is_future: bool = False) -> Dict[str, Any]:
+def _normalize_offer_payload(
+    payload: Dict[str, Any], *, is_future: bool = False
+) -> Dict[str, Any]:
     """Normalise un payload de déclaration d'offre marché (MarketOffer).
 
     ``is_future=True`` (déclaration de production FUTURE / précommandable) impose
@@ -124,7 +141,11 @@ def _normalize_offer_payload(payload: Dict[str, Any], *, is_future: bool = False
     normalized: Dict[str, Any] = {}
     normalized["farm_id"] = _as_uuid(payload.get("farm_id"), "farm_id")
 
-    production_type = str(payload.get("production_type") or payload.get("type") or "CROP").strip().upper()
+    production_type = (
+        str(payload.get("production_type") or payload.get("type") or "CROP")
+        .strip()
+        .upper()
+    )
     if production_type not in {"CROP", "LIVESTOCK"}:
         raise ValueError("production_type doit valoir 'CROP' ou 'LIVESTOCK'")
     normalized["production_type"] = production_type
@@ -143,7 +164,11 @@ def _normalize_offer_payload(payload: Dict[str, Any], *, is_future: bool = False
 
     normalized["species"] = payload.get("species") or None
     normalized["breed"] = payload.get("breed") or payload.get("race") or None
-    normalized["unit"] = str(payload.get("unit") or payload.get("unit_mentioned") or ("HEAD" if production_type == "LIVESTOCK" else "KG")).upper()
+    normalized["unit"] = str(
+        payload.get("unit")
+        or payload.get("unit_mentioned")
+        or ("HEAD" if production_type == "LIVESTOCK" else "KG")
+    ).upper()
 
     available_qty = (
         payload.get("available_quantity")
@@ -151,21 +176,55 @@ def _normalize_offer_payload(payload: Dict[str, Any], *, is_future: bool = False
         or payload.get("quantity_mentioned")
         or 0.0
     )
-    normalized["available_quantity"] = positive_float(available_qty, "available_quantity", allow_zero=True)
-    normalized["reserved_quantity"] = _coerce_float(payload.get("reserved_quantity"), "reserved_quantity", allow_zero=True, positive=True, default=0.0) or 0.0
+    normalized["available_quantity"] = positive_float(
+        available_qty, "available_quantity", allow_zero=True
+    )
+    normalized["reserved_quantity"] = (
+        _coerce_float(
+            payload.get("reserved_quantity"),
+            "reserved_quantity",
+            allow_zero=True,
+            positive=True,
+            default=0.0,
+        )
+        or 0.0
+    )
     # Une production FUTURE n'a pas de stock réel : ne pas recopier available_quantity.
     _stock_default = 0.0 if is_future else normalized["available_quantity"]
-    normalized["current_stock"] = _coerce_float(payload.get("current_stock"), "current_stock", allow_zero=True, positive=True, default=_stock_default)
+    normalized["current_stock"] = _coerce_float(
+        payload.get("current_stock"),
+        "current_stock",
+        allow_zero=True,
+        positive=True,
+        default=_stock_default,
+    )
 
-    _raw_price = _coerce_float(payload.get("price_per_unit") or payload.get("price_mentioned"), "price_per_unit", allow_zero=True, positive=True)
-    normalized["price_per_unit"] = round(_raw_price, 2) if _raw_price is not None else None
+    _raw_price = _coerce_float(
+        payload.get("price_per_unit") or payload.get("price_mentioned"),
+        "price_per_unit",
+        allow_zero=True,
+        positive=True,
+    )
+    normalized["price_per_unit"] = (
+        round(_raw_price, 2) if _raw_price is not None else None
+    )
 
-    normalized["preorder_enabled"] = _coerce_bool(payload.get("preorder_enabled"), default=is_future)
+    normalized["preorder_enabled"] = _coerce_bool(
+        payload.get("preorder_enabled"), default=is_future
+    )
     normalized["is_public"] = _coerce_bool(payload.get("is_public"), default=is_future)
-    normalized["status"] = str(payload.get("status") or ("AVAILABLE" if is_future else "DRAFT")).strip().upper()
+    normalized["status"] = (
+        str(payload.get("status") or ("AVAILABLE" if is_future else "DRAFT"))
+        .strip()
+        .upper()
+    )
 
-    normalized["estimated_available_at"] = _parse_datetime(payload.get("estimated_available_at"), "estimated_available_at")
-    normalized["expected_harvest_date"] = _parse_datetime(payload.get("expected_harvest_date"), "expected_harvest_date")
+    normalized["estimated_available_at"] = _parse_datetime(
+        payload.get("estimated_available_at"), "estimated_available_at"
+    )
+    normalized["expected_harvest_date"] = _parse_datetime(
+        payload.get("expected_harvest_date"), "expected_harvest_date"
+    )
     if normalized["estimated_available_at"] is None:
         normalized["estimated_available_at"] = normalized["expected_harvest_date"]
 
@@ -180,11 +239,15 @@ def _normalize_offer_payload(payload: Dict[str, Any], *, is_future: bool = False
     return normalized
 
 
-def _offer_to_payload(offer: MarketOffer, farm: Optional[Farm] = None) -> Dict[str, Any]:
+def _offer_to_payload(
+    offer: MarketOffer, farm: Optional[Farm] = None
+) -> Dict[str, Any]:
     def _iso(dt_value: Optional[datetime]) -> Optional[str]:
         return dt_value.isoformat() if isinstance(dt_value, datetime) else None
 
-    farm_name = farm.name if farm else getattr(getattr(offer, "farm", None), "name", None)
+    farm_name = (
+        farm.name if farm else getattr(getattr(offer, "farm", None), "name", None)
+    )
     farm_id = str(farm.id) if farm else str(getattr(offer, "farm_id", ""))
 
     return {
@@ -196,11 +259,19 @@ def _offer_to_payload(offer: MarketOffer, farm: Optional[Farm] = None) -> Dict[s
         "species": offer.species,
         "breed": offer.breed,
         "status": (offer.status or "DRAFT").upper(),
-        "available_quantity": float(offer.available_quantity) if offer.available_quantity is not None else None,
-        "reserved_quantity": float(offer.reserved_quantity) if offer.reserved_quantity is not None else 0.0,
-        "current_stock": float(offer.current_stock) if offer.current_stock is not None else None,
+        "available_quantity": float(offer.available_quantity)
+        if offer.available_quantity is not None
+        else None,
+        "reserved_quantity": float(offer.reserved_quantity)
+        if offer.reserved_quantity is not None
+        else 0.0,
+        "current_stock": float(offer.current_stock)
+        if offer.current_stock is not None
+        else None,
         "unit": (offer.unit or "KG").upper(),
-        "price_per_unit": float(offer.price_per_unit) if offer.price_per_unit is not None else None,
+        "price_per_unit": float(offer.price_per_unit)
+        if offer.price_per_unit is not None
+        else None,
         "preorder_enabled": bool(offer.preorder_enabled),
         "is_public": bool(offer.is_public),
         "estimated_available_at": _iso(offer.estimated_available_at),
@@ -214,10 +285,11 @@ class ProducerMgmtMixin(BaseMixin):
     Mixin centralisé pour la gestion des exploitations, des catalogues de produits,
     des finances et des flux de stocks transactionnels via agent MCP.
     """
+
     # ✅ LA SIGNATURE CORRIGÉE : Plus de paramètre "session" dans les parenthèses
     async def guess_category(self, product_name: str) -> str:
         """
-        Analyse le nom d'un produit et interroge la base de données 
+        Analyse le nom d'un produit et interroge la base de données
         via self.session pour trouver la catégorie parente correspondante.
         """
         if not product_name:
@@ -250,14 +322,16 @@ class ProducerMgmtMixin(BaseMixin):
                     return cat.upper()
 
         except Exception as e:
-            logger.error(f"⚠️ Erreur lors de la résolution de la catégorie pour '{product_name}': {e}")
+            logger.error(
+                f"⚠️ Erreur lors de la résolution de la catégorie pour '{product_name}': {e}"
+            )
 
         # 3. Fallback de sécurité
         MAPPING_DE_SECOURS = {
             "CÉRÉALES": ["MAÏS", "RIZ", "MIL", "SORGHO", "FONIO"],
             "LÉGUMES": ["TOMATE", "OIGNON", "PIMENT", "CHOU", "GOMBO", "CAROTTE"],
             "FRUITS": ["MANGUE", "ORANGE", "CITRON", "BANANE", "PAPAYE"],
-            "ANIMAUX": ["POULET", "BOEUF", "MOUTON", "CHÈVRE", "OEUF"]
+            "ANIMAUX": ["POULET", "BOEUF", "MOUTON", "CHÈVRE", "OEUF"],
         }
 
         for categorie, mots_cles in MAPPING_DE_SECOURS.items():
@@ -278,22 +352,29 @@ class ProducerMgmtMixin(BaseMixin):
         """
         Récupère la ferme existante d'un producteur ou en crée une nouvelle par défaut via self.session.
         """
-        resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        resolved_phone = await self._resolve_producer_phone(
+            phone=phone, producer_id=producer_id
+        )
 
         # 1. Résolution de l'identité complète (User + Producer)
         row = await self._fetch_user_entities(phone=resolved_phone)
         if not row:
-            raise ValueError(f"Aucun utilisateur trouvé pour le numéro {resolved_phone}")
-        
+            raise ValueError(
+                f"Aucun utilisateur trouvé pour le numéro {resolved_phone}"
+            )
+
         user_obj, producer_obj, _, _, _ = row
 
         # 2. Création du Producer s'il n'existe pas encore
         if not producer_obj:
-            logger.info("ℹ️ Profil producteur manquant pour l'utilisateur %s, création automatique...", user_obj.id)
+            logger.info(
+                "ℹ️ Profil producteur manquant pour l'utilisateur %s, création automatique...",
+                user_obj.id,
+            )
             producer_obj = Producer(
                 id=user_obj.id,
                 user_id=user_obj.id,
-                business_name=user_obj.name or "Mon Agrobusiness"
+                business_name=user_obj.name or "Mon Agrobusiness",
             )
             self.session.add(producer_obj)
             await self.session.flush()
@@ -301,25 +382,30 @@ class ProducerMgmtMixin(BaseMixin):
         # 3. Recherche de la première ferme existante
         stmt = select(Farm).where(Farm.producer_id == producer_obj.id).limit(1)
         farm = (await self.session.execute(stmt)).scalars().first()
-        
+
         if farm:
-            logger.info("ℹ️ Ferme existante trouvée pour le producteur %s", resolved_phone)
+            logger.info(
+                "ℹ️ Ferme existante trouvée pour le producteur %s", resolved_phone
+            )
             return farm.to_dict()
 
         # 4. Création d'une ferme par défaut si aucune n'existe
         farm = Farm(
-            id=uuid.uuid4(), 
-            name=farm_name, 
-            producer_id=producer_obj.id, 
-            zone_id=uuid.UUID(str(zone_id)) if zone_id else None
+            id=uuid.uuid4(),
+            name=farm_name,
+            producer_id=producer_obj.id,
+            zone_id=uuid.UUID(str(zone_id)) if zone_id else None,
         )
         self.session.add(farm)
         await self.session.flush()
         await self.session.refresh(farm)
-        
-        logger.info("✅ Ferme créée automatiquement : %s pour le numéro %s", farm_name, resolved_phone)
-        return farm.to_dict()
 
+        logger.info(
+            "✅ Ferme créée automatiquement : %s pour le numéro %s",
+            farm_name,
+            resolved_phone,
+        )
+        return farm.to_dict()
 
     async def create_farm(
         self,
@@ -339,16 +425,20 @@ class ProducerMgmtMixin(BaseMixin):
 
         row = await self._fetch_user_entities(phone=phone)
         if not row:
-            raise ValueError(f"Impossible de créer une ferme : aucun utilisateur avec le numéro {phone}")
+            raise ValueError(
+                f"Impossible de créer une ferme : aucun utilisateur avec le numéro {phone}"
+            )
 
         user_obj, producer_obj, _, _, _ = row
 
         if not producer_obj:
-            logger.info("Profil producteur manquant pour %s, creation automatique...", phone)
+            logger.info(
+                "Profil producteur manquant pour %s, creation automatique...", phone
+            )
             producer_obj = Producer(
                 id=user_obj.id,
                 user_id=user_obj.id,
-                business_name=user_obj.name or "Mon Agrobusiness"
+                business_name=user_obj.name or "Mon Agrobusiness",
             )
             self.session.add(producer_obj)
             await self.session.flush()
@@ -359,7 +449,7 @@ class ProducerMgmtMixin(BaseMixin):
             name=name,
             location=location,
             size=positive_float(size),
-            zone_id=uuid.UUID(str(zone_id)) if zone_id else None
+            zone_id=uuid.UUID(str(zone_id)) if zone_id else None,
         )
         self.session.add(new_farm)
         await self.session.flush()
@@ -384,12 +474,14 @@ class ProducerMgmtMixin(BaseMixin):
             if farm_id:
                 stmt = select(Farm).where(Farm.id == uuid.UUID(str(farm_id)))
             else:
-                resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+                resolved_phone = await self._resolve_producer_phone(
+                    phone=phone, producer_id=producer_id
+                )
                 row = await self._fetch_user_entities(phone=resolved_phone)
                 if not row or not row[1]:
                     raise ValueError(f"Aucun profil producteur pour {resolved_phone}")
                 stmt = select(Farm).where(Farm.producer_id == row[1].id).limit(1)
-            
+
             farm = (await self.session.execute(stmt)).scalars().first()
             if not farm:
                 identity = resolved_phone or phone or "<inconnu>"
@@ -412,7 +504,10 @@ class ProducerMgmtMixin(BaseMixin):
             return farm.to_dict()
 
         except Exception as e:
-            logger.error(f"Erreur critique lors de l'update de la ferme ({phone}): {e}", exc_info=True)
+            logger.error(
+                f"Erreur critique lors de l'update de la ferme ({phone}): {e}",
+                exc_info=True,
+            )
             raise
 
     async def get_farms(
@@ -424,7 +519,9 @@ class ProducerMgmtMixin(BaseMixin):
         """Retourne la liste structurée des fermes du producteur en résolvant l'identité."""
 
         try:
-            resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+            resolved_phone = await self._resolve_producer_phone(
+                phone=phone, producer_id=producer_id
+            )
         except ValueError as exc:
             return {"status": "error", "message": str(exc), "data": []}
 
@@ -441,107 +538,121 @@ class ProducerMgmtMixin(BaseMixin):
 
     # ─── SECTION 2 : GESTION DU CATALOGUE PRODUITS ───────────────────────
     async def create_product(
-            self, 
-            name: str, 
-            price: float, 
-            quantity_for_sale: float, 
-            unit: str = "KG", 
-            category_label: str = None, 
-            sub_category_id: str = None, 
-            description: str = None, 
-            local_names: dict = None,
-            *,
-            producer_id: str | None = None, 
-            phone: str | None = None
-        ) -> Dict[str, Any]:
-            """
-            Ajoute un produit au catalogue public de vente du producteur via self.session.
-            """
-            phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
-            phone = clean_text(phone, "phone", required=True)
-            name = clean_text(name, "name", required=True)
-            price = positive_float(price, "price", allow_zero=True)
-            quantity_for_sale = positive_float(quantity_for_sale, "quantity_for_sale", allow_zero=True)
-            unit = clean_text(unit, "unit", required=False, max_length=20) or "KG"
+        self,
+        name: str,
+        price: float,
+        quantity_for_sale: float,
+        unit: str = "KG",
+        category_label: str = None,
+        sub_category_id: str = None,
+        description: str = None,
+        local_names: dict = None,
+        *,
+        producer_id: str | None = None,
+        phone: str | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Ajoute un produit au catalogue public de vente du producteur via self.session.
+        """
+        phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        phone = clean_text(phone, "phone", required=True)
+        name = clean_text(name, "name", required=True)
+        price = positive_float(price, "price", allow_zero=True)
+        quantity_for_sale = positive_float(
+            quantity_for_sale, "quantity_for_sale", allow_zero=True
+        )
+        unit = clean_text(unit, "unit", required=False, max_length=20) or "KG"
 
-            profile_res = await self.get_producer_profile(phone)
+        profile_res = await self.get_producer_profile(phone)
 
-            if not profile_res or profile_res[0] is None:
-                logger.warning(f"⚠️ Échec create_product : Le numéro {phone} n'a pas de profil producteur.")
-                raise BusinessRuleException(
-                    f"Création impossible : Le numéro {phone} n'est rattaché à aucun compte producteur actif."
-                )
-
-            user, producer = profile_res
-
-            if not producer or not producer.id:
-                raise BusinessRuleException("Profil producteur invalide ou corrompu. Pas d'id disponible.")
-
-            product_id = str(uuid.uuid4())
-            short_code = product_id[:8].upper()
-
-            if not sub_category_id:
-                name_clean = name.strip()
-                # Recherche floue trigram (catalogue) : tolère les fautes de
-                # frappe du producteur sur le nom de son propre produit.
-                sub_cat_stmt = (
-                    select(SubCategory.id)
-                    .where(fuzzy_match(SubCategory.name, name_clean))
-                    .order_by(similarity_rank(SubCategory.name, name_clean))
-                    .limit(1)
-                )
-                sub_category_id = await self.session.scalar(sub_cat_stmt)
-
-            category_label = (
-                clean_text(category_label, "category_label", required=False)
-                or await self.guess_category(product_name=name)
+        if not profile_res or profile_res[0] is None:
+            logger.warning(
+                f"⚠️ Échec create_product : Le numéro {phone} n'a pas de profil producteur."
+            )
+            raise BusinessRuleException(
+                f"Création impossible : Le numéro {phone} n'est rattaché à aucun compte producteur actif."
             )
 
-            product = Product(
-                id=uuid.UUID(product_id),
-                short_code=short_code,
-                name=name.strip(),
-                price=float(price),
-                unit=unit.upper().strip(),
-                quantity_for_sale=float(quantity_for_sale),
-                producer_id=producer.id,
-                category_label=category_label,
-                sub_category_id=uuid.UUID(str(sub_category_id)) if sub_category_id else None,
-                description=description.strip() if description else None,
-                local_names=local_names,
-                created_at=datetime.now(),
-                updated_at=datetime.now()
+        user, producer = profile_res
+
+        if not producer or not producer.id:
+            raise BusinessRuleException(
+                "Profil producteur invalide ou corrompu. Pas d'id disponible."
             )
 
-            self.session.add(product)
-            await self.session.flush()
+        product_id = str(uuid.uuid4())
+        short_code = product_id[:8].upper()
 
-            return {
-                "status": "success",
+        if not sub_category_id:
+            name_clean = name.strip()
+            # Recherche floue trigram (catalogue) : tolère les fautes de
+            # frappe du producteur sur le nom de son propre produit.
+            sub_cat_stmt = (
+                select(SubCategory.id)
+                .where(fuzzy_match(SubCategory.name, name_clean))
+                .order_by(similarity_rank(SubCategory.name, name_clean))
+                .limit(1)
+            )
+            sub_category_id = await self.session.scalar(sub_cat_stmt)
+
+        category_label = clean_text(
+            category_label, "category_label", required=False
+        ) or await self.guess_category(product_name=name)
+
+        product = Product(
+            id=uuid.UUID(product_id),
+            short_code=short_code,
+            name=name.strip(),
+            price=float(price),
+            unit=unit.upper().strip(),
+            quantity_for_sale=float(quantity_for_sale),
+            producer_id=producer.id,
+            category_label=category_label,
+            sub_category_id=uuid.UUID(str(sub_category_id))
+            if sub_category_id
+            else None,
+            description=description.strip() if description else None,
+            local_names=local_names,
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+
+        self.session.add(product)
+        await self.session.flush()
+
+        return {
+            "status": "success",
+            "product_id": product_id,
+            "short_code": short_code,
+            "message": f"🎉 Le produit *{name}* a été ajouté avec succès à votre catalogue de vente !",
+            "data": {
                 "product_id": product_id,
                 "short_code": short_code,
-                "message": f"🎉 Le produit *{name}* a été ajouté avec succès à votre catalogue de vente !",
-                "data": {
-                    "product_id": product_id,
-                    "short_code": short_code,
-                    "name": name,
-                    "price_fcfa": price,
-                    "quantity": quantity_for_sale,
-                    "unit": unit,
-                    "category_label": category_label
-                }
-            }
+                "name": name,
+                "price_fcfa": price,
+                "quantity": quantity_for_sale,
+                "unit": unit,
+                "category_label": category_label,
+            },
+        }
 
-    async def list_products(self, producer_id: str | None = None, *, phone: str | None = None) -> Dict[str, Any]:
+    async def list_products(
+        self, producer_id: str | None = None, *, phone: str | None = None
+    ) -> Dict[str, Any]:
         """
         Vision Phone-First : Liste tous les produits via self.session.
         """
         try:
-            clean_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+            clean_phone = await self._resolve_producer_phone(
+                phone=phone, producer_id=producer_id
+            )
             profile_res = await self.get_producer_profile(clean_phone)
             if not profile_res or profile_res[0] is None:
-                return {"status": "error", "message": "Votre compte producteur n'est pas identifié."}
-                
+                return {
+                    "status": "error",
+                    "message": "Votre compte producteur n'est pas identifié.",
+                }
+
             user, producer = profile_res
 
             stmt = (
@@ -556,7 +667,7 @@ class ProducerMgmtMixin(BaseMixin):
                 return {
                     "status": "success",
                     "count": 0,
-                    "message": "📦 Votre catalogue est actuellement vide. Pour ajouter un produit, écrivez par exemple : 'Je veux vendre 50 kg de riz à 1200 CFA le kg'."
+                    "message": "📦 Votre catalogue est actuellement vide. Pour ajouter un produit, écrivez par exemple : 'Je veux vendre 50 kg de riz à 1200 CFA le kg'.",
                 }
 
             products_list = []
@@ -565,14 +676,16 @@ class ProducerMgmtMixin(BaseMixin):
 
             for i, p in enumerate(products, start=1):
                 price_val = float(p.price) if isinstance(p.price, Decimal) else p.price
-                products_list.append({
-                    "product_id": str(p.id),
-                    "short_code": p.short_code,
-                    "name": p.name,
-                    "price": price_val,
-                    "quantity": p.quantity_for_sale,
-                    "unit": p.unit
-                })
+                products_list.append(
+                    {
+                        "product_id": str(p.id),
+                        "short_code": p.short_code,
+                        "name": p.name,
+                        "price": price_val,
+                        "quantity": p.quantity_for_sale,
+                        "unit": p.unit,
+                    }
+                )
 
                 line = (
                     f"\n*{i}. {p.name}* (Réf: #{p.short_code})\n"
@@ -582,19 +695,24 @@ class ProducerMgmtMixin(BaseMixin):
                 menu_lines.append(line)
                 mapping_cache[str(i)] = str(p.id)
 
-            menu_lines.append("\n_Pour modifier un prix ou une quantité, mentionnez simplement le nom du produit ou son numéro._")
+            menu_lines.append(
+                "\n_Pour modifier un prix ou une quantité, mentionnez simplement le nom du produit ou son numéro._"
+            )
 
             return {
                 "status": "success",
                 "count": len(products_list),
                 "formatted_menu": "\n".join(menu_lines),
                 "mapping": mapping_cache,
-                "data": products_list
+                "data": products_list,
             }
 
         except Exception as e:
             logger.error(f"❌ Erreur lors du listing des produits : {str(e)}")
-            return {"status": "error", "message": "Impossible d'accéder à votre catalogue pour le moment."}
+            return {
+                "status": "error",
+                "message": "Impossible d'accéder à votre catalogue pour le moment.",
+            }
 
     # ─── SECTION 3 : LOGIQUE DU STOCK TRANSACTIONNEL ──────────────────────
 
@@ -607,12 +725,18 @@ class ProducerMgmtMixin(BaseMixin):
     # (le MRO liste `MarketplaceMixin` avant `ProducerMgmtMixin`). Voir
     # [[farm-autoprovision-critical-goals]].
 
-    async def get_stocks(self, phone: str | None = None, *, producer_id: str | None = None, **kwargs) -> Dict[str, Any]:
+    async def get_stocks(
+        self, phone: str | None = None, *, producer_id: str | None = None, **kwargs
+    ) -> Dict[str, Any]:
         """Récupère les stocks, le catalogue et les futures récoltes d'un producteur."""
 
         try:
-            clean_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
-            logger.debug(f"[get_stocks] Extraction des stocks pour le téléphone : {clean_phone}")
+            clean_phone = await self._resolve_producer_phone(
+                phone=phone, producer_id=producer_id
+            )
+            logger.debug(
+                f"[get_stocks] Extraction des stocks pour le téléphone : {clean_phone}"
+            )
 
             producer_uuid: uuid.UUID | None = None
             if producer_id:
@@ -624,16 +748,26 @@ class ProducerMgmtMixin(BaseMixin):
             if producer_uuid is None:
                 profile_res = await self.get_producer_profile(clean_phone)
                 if not profile_res or profile_res[0] is None:
-                    raise ValueError("Profil producteur introuvable pour la consultation des stocks.")
+                    raise ValueError(
+                        "Profil producteur introuvable pour la consultation des stocks."
+                    )
 
                 _user_obj, producer_obj = profile_res
                 producer_uuid = getattr(producer_obj, "id", None)
 
-            safe_catalog_limit = clamp_limit(kwargs.get("catalog_limit"), default=30, maximum=200)
+            safe_catalog_limit = clamp_limit(
+                kwargs.get("catalog_limit"), default=30, maximum=200
+            )
             farm_limit = clamp_limit(kwargs.get("farm_limit"), default=20, maximum=50)
-            stock_limit = clamp_limit(kwargs.get("stock_limit"), default=500, maximum=5000)
-            cycle_limit = clamp_limit(kwargs.get("cycle_limit"), default=150, maximum=2000)
-            date_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+            stock_limit = clamp_limit(
+                kwargs.get("stock_limit"), default=500, maximum=5000
+            )
+            cycle_limit = clamp_limit(
+                kwargs.get("cycle_limit"), default=150, maximum=2000
+            )
+            date_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+                days=1
+            )
             inactive_statuses = ("HARVESTED", "CANCELLED", "ABANDONED")
 
             if producer_uuid:
@@ -652,7 +786,9 @@ class ProducerMgmtMixin(BaseMixin):
                 )
 
             farm_rows = (await self.session.execute(farm_stmt)).all()
-            farm_ids: list[uuid.UUID] = [row[0] for row in farm_rows if row and row[0] is not None]
+            farm_ids: list[uuid.UUID] = [
+                row[0] for row in farm_rows if row and row[0] is not None
+            ]
 
             # Fallback: filtering farms by producer_id can miss them when the
             # profile resolves a different producer row than the one that owns
@@ -660,22 +796,33 @@ class ProducerMgmtMixin(BaseMixin):
             # get_producer_farm) and realign producer_uuid so the catalog query
             # below targets the correct producer too.
             if not farm_rows:
-                fallback_rows = (await self.session.execute(
-                    select(Farm.id, Farm.name, Farm.location, Farm.size, Farm.producer_id)
-                    .join(Farm.producer)
-                    .join(Producer.user)
-                    .where(User.phone == clean_phone)
-                    .limit(farm_limit)
-                )).all()
+                fallback_rows = (
+                    await self.session.execute(
+                        select(
+                            Farm.id,
+                            Farm.name,
+                            Farm.location,
+                            Farm.size,
+                            Farm.producer_id,
+                        )
+                        .join(Farm.producer)
+                        .join(Producer.user)
+                        .where(User.phone == clean_phone)
+                        .limit(farm_limit)
+                    )
+                ).all()
                 if fallback_rows:
                     farm_rows = [(r[0], r[1], r[2], r[3]) for r in fallback_rows]
                     farm_ids = [r[0] for r in fallback_rows if r and r[0] is not None]
-                    recovered_producer_id = next((r[4] for r in fallback_rows if r and r[4]), None)
+                    recovered_producer_id = next(
+                        (r[4] for r in fallback_rows if r and r[4]), None
+                    )
                     if recovered_producer_id is not None:
                         producer_uuid = recovered_producer_id
                     logger.info(
                         "[get_stocks] Farm fallback via phone join recovered %d farm(s) for %s",
-                        len(farm_rows), clean_phone,
+                        len(farm_rows),
+                        clean_phone,
                     )
 
             catalog_snapshot: List[Dict[str, Any]] = []
@@ -701,7 +848,11 @@ class ProducerMgmtMixin(BaseMixin):
                 product_result = await self.session.execute(product_stmt)
                 products = product_result.scalars().all()
                 for prod in products:
-                    price_val = float(prod.price) if isinstance(prod.price, Decimal) else prod.price
+                    price_val = (
+                        float(prod.price)
+                        if isinstance(prod.price, Decimal)
+                        else prod.price
+                    )
                     catalog_snapshot.append(
                         {
                             "product_id": str(prod.id),
@@ -710,8 +861,12 @@ class ProducerMgmtMixin(BaseMixin):
                             "price": price_val,
                             "unit": prod.unit,
                             "quantity": prod.quantity_for_sale,
-                            "status": "AVAILABLE" if getattr(prod, "is_available", True) else "HIDDEN",
-                            "updated_at": prod.updated_at.isoformat() if getattr(prod, "updated_at", None) else None,
+                            "status": "AVAILABLE"
+                            if getattr(prod, "is_available", True)
+                            else "HIDDEN",
+                            "updated_at": prod.updated_at.isoformat()
+                            if getattr(prod, "updated_at", None)
+                            else None,
                         }
                     )
 
@@ -734,8 +889,12 @@ class ProducerMgmtMixin(BaseMixin):
             farm_size_by_id: Dict[uuid.UUID, float] = {}
 
             for farm_id, farm_name, farm_location, farm_size in farm_rows:
-                farm_name_by_id[farm_id] = str(farm_name) if farm_name else "Ferme sans nom"
-                farm_loc_by_id[farm_id] = str(farm_location) if farm_location else "Non spécifiée"
+                farm_name_by_id[farm_id] = (
+                    str(farm_name) if farm_name else "Ferme sans nom"
+                )
+                farm_loc_by_id[farm_id] = (
+                    str(farm_location) if farm_location else "Non spécifiée"
+                )
                 farm_size_by_id[farm_id] = float(farm_size) if farm_size else 0.0
                 stocks_farm_by_farm[str(farm_id)] = {
                     "farm_name": farm_name_by_id[farm_id],
@@ -747,7 +906,13 @@ class ProducerMgmtMixin(BaseMixin):
 
             if farm_ids:
                 stock_stmt = (
-                    select(Stock.id, Stock.farm_id, Stock.item_name, Stock.quantity, Stock.unit)
+                    select(
+                        Stock.id,
+                        Stock.farm_id,
+                        Stock.item_name,
+                        Stock.quantity,
+                        Stock.unit,
+                    )
                     .where(Stock.farm_id.in_(farm_ids))
                     .order_by(Stock.farm_id, Stock.item_name)
                     .limit(stock_limit)
@@ -826,13 +991,25 @@ class ProducerMgmtMixin(BaseMixin):
                         "species": species,
                         "breed": breed,
                         "status": (status or "DRAFT").upper(),
-                        "estimated_available_at": estimated_available_at.isoformat() if isinstance(estimated_available_at, datetime) else None,
-                        "expected_harvest_date": expected_harvest_date.isoformat() if isinstance(expected_harvest_date, datetime) else None,
-                        "available_quantity": float(available_quantity) if available_quantity is not None else None,
-                        "reserved_quantity": float(reserved_quantity) if reserved_quantity is not None else 0.0,
-                        "current_stock": float(current_stock) if current_stock is not None else None,
+                        "estimated_available_at": estimated_available_at.isoformat()
+                        if isinstance(estimated_available_at, datetime)
+                        else None,
+                        "expected_harvest_date": expected_harvest_date.isoformat()
+                        if isinstance(expected_harvest_date, datetime)
+                        else None,
+                        "available_quantity": float(available_quantity)
+                        if available_quantity is not None
+                        else None,
+                        "reserved_quantity": float(reserved_quantity)
+                        if reserved_quantity is not None
+                        else 0.0,
+                        "current_stock": float(current_stock)
+                        if current_stock is not None
+                        else None,
                         "unit": (unit or "KG").upper(),
-                        "price_per_unit": float(price_per_unit) if price_per_unit is not None else None,
+                        "price_per_unit": float(price_per_unit)
+                        if price_per_unit is not None
+                        else None,
                         "preorder_enabled": bool(preorder_enabled),
                         "is_public": bool(is_public),
                         "display_label": product_label or species or "Production",
@@ -853,10 +1030,10 @@ class ProducerMgmtMixin(BaseMixin):
             }
 
         except Exception as e:
-            logger.error(f"❌ Erreur SQL de jointure dans get_stocks : {str(e)}", exc_info=True)
+            logger.error(
+                f"❌ Erreur SQL de jointure dans get_stocks : {str(e)}", exc_info=True
+            )
             raise e
-
-
 
     async def declare_future_production(
         self,
@@ -867,7 +1044,9 @@ class ProducerMgmtMixin(BaseMixin):
     ) -> Dict[str, Any]:
         """Déclare une production future (culture ou élevage) prête pour les précommandes."""
 
-        resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        resolved_phone = await self._resolve_producer_phone(
+            phone=phone, producer_id=producer_id
+        )
         normalized = _normalize_offer_payload(payload, is_future=True)
 
         farm = await self.session.get(Farm, normalized["farm_id"])
@@ -879,7 +1058,9 @@ class ProducerMgmtMixin(BaseMixin):
             raise ValueError("Profil producteur introuvable pour ce numero")
         producer_obj = user_row[1]
         if farm.producer_id != producer_obj.id:
-            raise ValueError("Cette exploitation n'appartient pas a votre profil producteur")
+            raise ValueError(
+                "Cette exploitation n'appartient pas a votre profil producteur"
+            )
 
         offer = MarketOffer(
             id=uuid.uuid4(),
@@ -892,14 +1073,18 @@ class ProducerMgmtMixin(BaseMixin):
             unit=normalized.get("unit"),
             available_quantity=normalized.get("available_quantity") or 0.0,
             reserved_quantity=normalized.get("reserved_quantity") or 0.0,
-            current_stock=normalized.get("current_stock") or normalized.get("available_quantity") or 0.0,
+            current_stock=normalized.get("current_stock")
+            or normalized.get("available_quantity")
+            or 0.0,
             price_per_unit=normalized.get("price_per_unit"),
             preorder_enabled=normalized.get("preorder_enabled", False),
             is_public=normalized.get("is_public", False),
             status=normalized.get("status", "DRAFT"),
             estimated_available_at=_utc_naive(normalized.get("estimated_available_at")),
             expected_harvest_date=_utc_naive(normalized.get("expected_harvest_date")),
-            sub_category_id=uuid.UUID(str(normalized["sub_category_id"])) if normalized.get("sub_category_id") else None,
+            sub_category_id=uuid.UUID(str(normalized["sub_category_id"]))
+            if normalized.get("sub_category_id")
+            else None,
         )
 
         self.session.add(offer)
@@ -913,7 +1098,6 @@ class ProducerMgmtMixin(BaseMixin):
             "message": f"Offre '{label}' enregistree sur {snapshot.get('farm_name')}.",
             "data": snapshot,
         }
-
 
     async def get_offer_reservations(
         self,
@@ -929,13 +1113,19 @@ class ProducerMgmtMixin(BaseMixin):
         avec quantité réservée et acheteurs. Filtrable sur une offre précise.
         """
         try:
-            resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+            resolved_phone = await self._resolve_producer_phone(
+                phone=phone, producer_id=producer_id
+            )
         except ValueError as exc:
             return {"status": "error", "message": str(exc), "data": []}
 
         profile_res = await self.get_producer_profile(resolved_phone)
         if not profile_res or not profile_res[1]:
-            return {"status": "error", "message": "Profil producteur introuvable.", "data": []}
+            return {
+                "status": "error",
+                "message": "Profil producteur introuvable.",
+                "data": [],
+            }
         producer_obj = profile_res[1]
 
         buyer_user = aliased(User)
@@ -967,7 +1157,11 @@ class ProducerMgmtMixin(BaseMixin):
             try:
                 stmt = stmt.where(MarketOffer.id == uuid.UUID(str(market_offer_id)))
             except (TypeError, ValueError):
-                return {"status": "error", "message": "Référence d'offre invalide.", "data": []}
+                return {
+                    "status": "error",
+                    "message": "Référence d'offre invalide.",
+                    "data": [],
+                }
 
         rows = (await self.session.execute(stmt)).all()
 
@@ -982,25 +1176,34 @@ class ProducerMgmtMixin(BaseMixin):
         offers: Dict[str, Dict[str, Any]] = {}
         for r in rows:
             oid = str(r.offer_id)
-            bucket = offers.setdefault(oid, {
-                "market_offer_id": oid,
-                "product": r.product_label,
-                "unit": (r.unit or "KG"),
-                "available_quantity": float(r.available_quantity or 0.0),
-                "reserved_quantity": float(r.reserved_quantity or 0.0),
-                "eta": r.estimated_available_at.isoformat() if isinstance(r.estimated_available_at, datetime) else None,
-                "reservation_count": 0,
-                "reservations": [],
-            })
+            bucket = offers.setdefault(
+                oid,
+                {
+                    "market_offer_id": oid,
+                    "product": r.product_label,
+                    "unit": (r.unit or "KG"),
+                    "available_quantity": float(r.available_quantity or 0.0),
+                    "reserved_quantity": float(r.reserved_quantity or 0.0),
+                    "eta": r.estimated_available_at.isoformat()
+                    if isinstance(r.estimated_available_at, datetime)
+                    else None,
+                    "reservation_count": 0,
+                    "reservations": [],
+                },
+            )
             bucket["reservation_count"] += 1
-            bucket["reservations"].append({
-                "order_id": str(r.order_id),
-                "buyer_name": r.buyer_name or "Acheteur",
-                "buyer_phone": r.buyer_phone,
-                "total": float(r.total_amount or 0.0),
-                "status": (r.order_status or "PENDING"),
-                "reserved_at": r.reserved_at.isoformat() if isinstance(r.reserved_at, datetime) else None,
-            })
+            bucket["reservations"].append(
+                {
+                    "order_id": str(r.order_id),
+                    "buyer_name": r.buyer_name or "Acheteur",
+                    "buyer_phone": r.buyer_phone,
+                    "total": float(r.total_amount or 0.0),
+                    "status": (r.order_status or "PENDING"),
+                    "reserved_at": r.reserved_at.isoformat()
+                    if isinstance(r.reserved_at, datetime)
+                    else None,
+                }
+            )
 
         data = list(offers.values())
         lines = ["📊 *Réservations sur vos productions futures :*"]
@@ -1036,13 +1239,19 @@ class ProducerMgmtMixin(BaseMixin):
         """Retourne les commandes associées au producteur (catalogue + précommandes)."""
 
         try:
-            resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+            resolved_phone = await self._resolve_producer_phone(
+                phone=phone, producer_id=producer_id
+            )
         except ValueError as exc:
             return {"status": "error", "message": str(exc), "data": []}
 
         profile_res = await self.get_producer_profile(resolved_phone)
         if not profile_res or not profile_res[1]:
-            return {"status": "error", "message": "Profil producteur introuvable pour ce numéro.", "data": []}
+            return {
+                "status": "error",
+                "message": "Profil producteur introuvable pour ce numéro.",
+                "data": [],
+            }
 
         producer_obj = profile_res[1]
         safe_limit = clamp_limit(limit, default=20, maximum=50)
@@ -1070,7 +1279,9 @@ class ProducerMgmtMixin(BaseMixin):
         )
 
         if status_filter:
-            candidate_ids = candidate_ids.where(func.upper(Order.status) == status_filter)
+            candidate_ids = candidate_ids.where(
+                func.upper(Order.status) == status_filter
+            )
 
         order_ids = (
             candidate_ids.order_by(desc(Order.created_at)).limit(safe_limit * 2)
@@ -1124,7 +1335,10 @@ class ProducerMgmtMixin(BaseMixin):
             relevant_items: List[Dict[str, Any]] = []
             for item in order.items or []:
                 product = item.product
-                if not product or getattr(product, "producer_id", None) != producer_obj.id:
+                if (
+                    not product
+                    or getattr(product, "producer_id", None) != producer_obj.id
+                ):
                     continue
                 relevant_items.append(
                     {
@@ -1139,7 +1353,11 @@ class ProducerMgmtMixin(BaseMixin):
             cycle_context = None
             if not relevant_items and order.offer and order.offer.farm:
                 if order.offer.farm.producer_id == producer_obj.id:
-                    cycle_label = order.offer.product_label or order.offer.species or "Production future"
+                    cycle_label = (
+                        order.offer.product_label
+                        or order.offer.species
+                        or "Production future"
+                    )
                     cycle_context = {
                         "product_id": str(order.offer.id),
                         "product_name": cycle_label,
@@ -1150,12 +1368,18 @@ class ProducerMgmtMixin(BaseMixin):
                     relevant_items.append(cycle_context)
 
             status_value = (order.status or "PENDING").upper()
-            status_label = f"{status_icons.get(status_value, '🧾')} {status_value.title()}"
+            status_label = (
+                f"{status_icons.get(status_value, '🧾')} {status_value.title()}"
+            )
             order_code = (order.whatsapp_id or str(order.id))[:8].upper()
             amount_label = _fmt_amount(order.total_amount, order.currency)
             buyer_label = order.customer_name or "Acheteur"
             buyer_phone = order.customer_phone or "-"
-            source_type = "PREORDER" if order.market_offer_id else (order.order_type or "STANDARD").upper()
+            source_type = (
+                "PREORDER"
+                if order.market_offer_id
+                else (order.order_type or "STANDARD").upper()
+            )
 
             summary_items = ", ".join(
                 f"{item['product_name']} ({item['quantity']:.0f} {item['unit']})"
@@ -1179,7 +1403,9 @@ class ProducerMgmtMixin(BaseMixin):
                     "status": status_value,
                     "delivery_status": (order.delivery_status or "PENDING").upper(),
                     "payment_status": (order.payment_status or "PENDING").upper(),
-                    "created_at": order.created_at.isoformat() if order.created_at else None,
+                    "created_at": order.created_at.isoformat()
+                    if order.created_at
+                    else None,
                     "total_amount": float(order.total_amount or 0.0),
                     "currency": order.currency or "XOF",
                     "buyer_name": buyer_label,
@@ -1197,7 +1423,6 @@ class ProducerMgmtMixin(BaseMixin):
             "data": payload,
         }
 
-
     async def update_production_visibility(
         self,
         cycle_id: str,
@@ -1209,7 +1434,9 @@ class ProducerMgmtMixin(BaseMixin):
     ) -> Dict[str, Any]:
         """Permet d'activer/désactiver l'exposition d'un lot de production future."""
 
-        resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        resolved_phone = await self._resolve_producer_phone(
+            phone=phone, producer_id=producer_id
+        )
         cycle_uuid = _as_uuid(cycle_id, "cycle_id")
 
         stmt = (
@@ -1263,7 +1490,9 @@ class ProducerMgmtMixin(BaseMixin):
         Sécurisé : vérifie que le producteur appelant possède bien le lot
         (row-lock via with_for_update).
         """
-        resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        resolved_phone = await self._resolve_producer_phone(
+            phone=phone, producer_id=producer_id
+        )
         cycle_uuid = _as_uuid(cycle_id, "cycle_id")
 
         stmt = (
@@ -1275,14 +1504,20 @@ class ProducerMgmtMixin(BaseMixin):
         result = await self.session.execute(stmt)
         row = result.first()
         if not row:
-            return {"status": "error", "message": "Production introuvable pour l'identifiant fourni."}
+            return {
+                "status": "error",
+                "message": "Production introuvable pour l'identifiant fourni.",
+            }
         cycle, farm = row
 
         user_row = await self._fetch_user_entities(resolved_phone)
         if not user_row or not user_row[1]:
             return {"status": "error", "message": "Profil producteur introuvable."}
         if farm.producer_id != user_row[1].id:
-            return {"status": "error", "message": "Vous n'êtes pas autorisé à modifier cette production."}
+            return {
+                "status": "error",
+                "message": "Vous n'êtes pas autorisé à modifier cette production.",
+            }
 
         changed: List[str] = []
         try:
@@ -1290,10 +1525,14 @@ class ProducerMgmtMixin(BaseMixin):
                 cycle.price_per_unit = positive_float(price, "price", allow_zero=True)
                 changed.append("prix")
             if quantity is not None:
-                cycle.available_quantity = positive_float(quantity, "quantity", allow_zero=True)
+                cycle.available_quantity = positive_float(
+                    quantity, "quantity", allow_zero=True
+                )
                 changed.append("quantité")
             if product_label is not None:
-                label = clean_text(product_label, "product_label", required=True, max_length=120)
+                label = clean_text(
+                    product_label, "product_label", required=True, max_length=120
+                )
                 cycle.product_label = label
                 changed.append("nom")
             if unit is not None:
@@ -1308,24 +1547,34 @@ class ProducerMgmtMixin(BaseMixin):
             if production_type is not None:
                 ptype = str(production_type).strip().upper()
                 if ptype not in {"CROP", "LIVESTOCK"}:
-                    return {"status": "error", "message": "Le type doit être une culture (CROP) ou un élevage (LIVESTOCK)."}
+                    return {
+                        "status": "error",
+                        "message": "Le type doit être une culture (CROP) ou un élevage (LIVESTOCK).",
+                    }
                 cycle.production_type = ptype
                 changed.append("type")
         except ValueError as exc:
             return {"status": "error", "message": str(exc)}
 
         if not changed:
-            return {"status": "error", "message": "Aucun champ à modifier n'a été fourni."}
+            return {
+                "status": "error",
+                "message": "Aucun champ à modifier n'a été fourni.",
+            }
 
         await self.session.flush()
         snapshot = _offer_to_payload(cycle, farm)
-        logger.info("PRODUCTION_UPDATED: cycle=%s par %s (champs: %s)", cycle_id, resolved_phone, ", ".join(changed))
+        logger.info(
+            "PRODUCTION_UPDATED: cycle=%s par %s (champs: %s)",
+            cycle_id,
+            resolved_phone,
+            ", ".join(changed),
+        )
         return {
             "status": "success",
             "message": f"Production mise à jour ({', '.join(changed)}).",
             "data": snapshot,
         }
-
 
     async def get_producer_stocks(
         self,
@@ -1335,7 +1584,9 @@ class ProducerMgmtMixin(BaseMixin):
         """Retourne un inventaire aplati (liste d'items) pour l'agent conversationnel."""
 
         try:
-            lookup_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+            lookup_phone = await self._resolve_producer_phone(
+                phone=phone, producer_id=producer_id
+            )
         except ValueError:
             return {
                 "status": "error",
@@ -1389,9 +1640,15 @@ class ProducerMgmtMixin(BaseMixin):
         unit, price, estimated_available_at, production_type, farm_name}.
         """
         try:
-            lookup_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+            lookup_phone = await self._resolve_producer_phone(
+                phone=phone, producer_id=producer_id
+            )
         except ValueError:
-            return {"status": "error", "message": "Identité producteur introuvable.", "data": []}
+            return {
+                "status": "error",
+                "message": "Identité producteur introuvable.",
+                "data": [],
+            }
 
         base_res = await self.get_stocks(phone=lookup_phone)
         if (base_res or {}).get("status") != "success":
@@ -1408,37 +1665,41 @@ class ProducerMgmtMixin(BaseMixin):
             if not isinstance(cycles, list):
                 continue
             for cycle in cycles:
-                cid = cycle.get("offer_id") or cycle.get("market_offer_id") or cycle.get("id")
+                cid = (
+                    cycle.get("offer_id")
+                    or cycle.get("market_offer_id")
+                    or cycle.get("id")
+                )
                 if not cid:
                     continue
-                flattened.append({
-                    "cycle_id": str(cid),
-                    "product_label": cycle.get("product_label") or cycle.get("display_label") or cycle.get("species"),
-                    "quantity": cycle.get("available_quantity") or cycle.get("quantity"),
-                    "unit": cycle.get("unit", "KG"),
-                    "price": cycle.get("price_per_unit") or cycle.get("price"),
-                    "estimated_available_at": cycle.get("estimated_available_at") or cycle.get("expected_harvest_date"),
-                    "production_type": cycle.get("production_type"),
-                    "farm_id": farm_id,
-                    "farm_name": metadata.get("farm_name"),
-                })
+                flattened.append(
+                    {
+                        "cycle_id": str(cid),
+                        "product_label": cycle.get("product_label")
+                        or cycle.get("display_label")
+                        or cycle.get("species"),
+                        "quantity": cycle.get("available_quantity")
+                        or cycle.get("quantity"),
+                        "unit": cycle.get("unit", "KG"),
+                        "price": cycle.get("price_per_unit") or cycle.get("price"),
+                        "estimated_available_at": cycle.get("estimated_available_at")
+                        or cycle.get("expected_harvest_date"),
+                        "production_type": cycle.get("production_type"),
+                        "farm_id": farm_id,
+                        "farm_name": metadata.get("farm_name"),
+                    }
+                )
 
         return {"status": "success", "count": len(flattened), "data": flattened}
 
     async def add_stock_movement(
-        self, 
-        phone: str, 
-        stock_id: any, 
-        mtype: str, 
-        quantity: float, 
-        reason: str = None
+        self, phone: str, stock_id: any, mtype: str, quantity: float, reason: str = None
     ) -> any:
         """
-        Enregistre un mouvement de stock granulaire (IN/OUT) avec vérification 
+        Enregistre un mouvement de stock granulaire (IN/OUT) avec vérification
         stricte des permissions du producteur.
         """
-        from sqlalchemy.orm import joinedload
-        from agriconnect.domain.models import Stock, Farm, Producer, User, StockMovement
+        from agriconnect.domain.models import Farm, Producer, Stock
 
         # 1. Préparation de la requête avec verrou ciblé
         stmt = (
@@ -1451,50 +1712,59 @@ class ProducerMgmtMixin(BaseMixin):
             )
             .with_for_update(of=Stock)
         )
-        
+
         res = await self.session.execute(stmt)
-        
+
         # 2. Extraction immédiate de l'objet unique
         stock_obj = res.unique().scalar_one_or_none()
-        
+
         # 3. Barrière de sécurité et validation des droits d'accès
         if not stock_obj:
             raise BusinessRuleException("Stock introuvable.")
 
-        if not stock_obj.farm or not stock_obj.farm.producer or not stock_obj.farm.producer.user:
-            raise BusinessRuleException("Structure de propriété du stock incomplète en base de données.")
+        if (
+            not stock_obj.farm
+            or not stock_obj.farm.producer
+            or not stock_obj.farm.producer.user
+        ):
+            raise BusinessRuleException(
+                "Structure de propriété du stock incomplète en base de données."
+            )
 
         if stock_obj.farm.producer.user.phone != phone:
-            raise BusinessRuleException("Accès refusé au stock ciblé.", reason="permission_denied")
-            
+            raise BusinessRuleException(
+                "Accès refusé au stock ciblé.", reason="permission_denied"
+            )
+
         # 4. Application de la logique métier (Incrémentation ou Décrémentation)
         if mtype == "IN":
             stock_obj.quantity += quantity
         elif mtype == "OUT":
             if stock_obj.quantity < quantity:
-                raise ValueError(f"Stock insuffisant. Disponible : {stock_obj.quantity} {stock_obj.unit}")
+                raise ValueError(
+                    f"Stock insuffisant. Disponible : {stock_obj.quantity} {stock_obj.unit}"
+                )
             stock_obj.quantity -= quantity
         else:
             raise ValueError("Type de mouvement invalide. Utilisez 'IN' ou 'OUT'.")
-            
+
         # 5. Création de la ligne d'historique (Parfaitement alignée avec ton modèle BDD)
         movement = StockMovement(
-            stock_id=stock_obj.id,
-            type=mtype,
-            quantity=quantity,
-            reason=reason
+            stock_id=stock_obj.id, type=mtype, quantity=quantity, reason=reason
         )
-        
+
         self.session.add(movement)
-        await self.session.flush() # Enregistre sans clore la transaction globale
-        
+        await self.session.flush()  # Enregistre sans clore la transaction globale
+
         # À la fin de add_stock_movement :
         return {
             "status": "success",
             "data": {
                 "stock_id": str(stock_obj.id),
                 "item_name": stock_obj.item_name,
-                "old_quantity": stock_obj.quantity - quantity if mtype == "IN" else stock_obj.quantity + quantity,
+                "old_quantity": stock_obj.quantity - quantity
+                if mtype == "IN"
+                else stock_obj.quantity + quantity,
                 "new_quantity": stock_obj.quantity,
                 "unit": stock_obj.unit,
             },
@@ -1505,18 +1775,26 @@ class ProducerMgmtMixin(BaseMixin):
     # AgriDatabaseService). Voir [[farm-autoprovision-critical-goals]].
 
     async def delete_stock(self, phone: str, stock_id: any) -> bool:
-        from sqlalchemy.orm import joinedload
-        from agriconnect.domain.models import Stock, Farm, Producer, User
+        from agriconnect.domain.models import Farm, Producer, Stock
 
         stmt = (
             select(Stock)
             .where(Stock.id == stock_id)
-            .options(joinedload(Stock.farm).joinedload(Farm.producer).joinedload(Producer.user))
+            .options(
+                joinedload(Stock.farm)
+                .joinedload(Farm.producer)
+                .joinedload(Producer.user)
+            )
         )
         res = await self.session.execute(stmt)
-        stock_obj = res.unique().scalar_one_or_none() # 🚀 On extrait TOUT DE SUITE
+        stock_obj = res.unique().scalar_one_or_none()  # 🚀 On extrait TOUT DE SUITE
 
-        if not stock_obj or not stock_obj.farm or not stock_obj.farm.producer or not stock_obj.farm.producer.user:
+        if (
+            not stock_obj
+            or not stock_obj.farm
+            or not stock_obj.farm.producer
+            or not stock_obj.farm.producer.user
+        ):
             raise ValueError("Stock introuvable ou droits insuffisants.")
 
         if stock_obj.farm.producer.user.phone != phone:
@@ -1528,22 +1806,24 @@ class ProducerMgmtMixin(BaseMixin):
 
     # ─── SECTION 4 : SUIVI COMMERCIAL & CRM (CLIENTS / ORDERS) ───────────
 
-    async def update_order_status(self, order_id: str, new_status: str, payment_status: str = None) -> Optional[Dict[str, Any]]:
+    async def update_order_status(
+        self, order_id: str, new_status: str, payment_status: str = None
+    ) -> Optional[Dict[str, Any]]:
         """
         Met à jour de manière sécurisée le statut d'une commande via self.session.
         """
         stmt = select(Order).where(Order.id == uuid.UUID(order_id)).with_for_update()
         result = await self.session.execute(stmt)
         order = result.scalar_one_or_none()
-        
+
         if not order:
             logger.warning(f"Commande introuvable : {order_id}")
             return None
-            
+
         order.status = new_status
         if payment_status:
             order.payment_status = payment_status
-            
+
         await self.session.flush()
         await self.session.refresh(order)
         return order.to_dict()
@@ -1562,34 +1842,58 @@ class ProducerMgmtMixin(BaseMixin):
         Identifie ou ajoute un client via self.session.
         """
         name = clean_text(name, "name", required=True)
-        client_phone = clean_text(client_phone, "client_phone", required=True, max_length=40)
+        client_phone = clean_text(
+            client_phone, "client_phone", required=True, max_length=40
+        )
 
-        resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+        resolved_phone = await self._resolve_producer_phone(
+            phone=phone, producer_id=producer_id
+        )
         _, producer = await self.get_producer_profile(resolved_phone)
 
-        stmt = select(Client).where(Client.producer_id == producer.id, Client.phone == client_phone)
+        stmt = select(Client).where(
+            Client.producer_id == producer.id, Client.phone == client_phone
+        )
         result = await self.session.execute(stmt)
         client = result.scalar_one_or_none()
 
         if client:
             return {"status": "success", "data": client.to_dict()}
 
-        client = Client(id=uuid.uuid4(), name=name, phone=client_phone, email=email, location=location, producer_id=producer.id)
+        client = Client(
+            id=uuid.uuid4(),
+            name=name,
+            phone=client_phone,
+            email=email,
+            location=location,
+            producer_id=producer.id,
+        )
         self.session.add(client)
         await self.session.flush()
         await self.session.refresh(client)
         return {"status": "success", "data": client.to_dict()}
 
-    async def get_clients(self, producer_id: str | None = None, *, phone: str | None = None) -> Union[List[Dict[str, Any]], Dict[str, str]]:
+    async def get_clients(
+        self, producer_id: str | None = None, *, phone: str | None = None
+    ) -> Union[List[Dict[str, Any]], Dict[str, str]]:
         """
         Liste les clients via self.session.
         """
         try:
-            resolved_phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
+            resolved_phone = await self._resolve_producer_phone(
+                phone=phone, producer_id=producer_id
+            )
             _, producer = await self.get_producer_profile(resolved_phone)
-            stmt = select(Client).where(Client.producer_id == producer.id).order_by(desc(Client.total_spent))
+            stmt = (
+                select(Client)
+                .where(Client.producer_id == producer.id)
+                .order_by(desc(Client.total_spent))
+            )
             result = await self.session.execute(stmt)
-            return {"status": "success", "data": [c.to_dict() for c in result.scalars()]}
+            return {
+                "status": "success",
+                "data": [c.to_dict() for c in result.scalars()],
+            }
         except ValueError as e:
             return {"status": "error", "message": str(e)}
 
@@ -1600,7 +1904,9 @@ class ProducerMgmtMixin(BaseMixin):
     # `FARM_CRITICAL_GOALS`. Doublons `phone`-based ici — dead code, jamais
     # atteint via `AgriDatabaseService`. Voir [[farm-autoprovision-critical-goals]].
 
-    async def get_market_offers(self, phone: str) -> Union[List[Dict[str, Any]], Dict[str, str]]:
+    async def get_market_offers(
+        self, phone: str
+    ) -> Union[List[Dict[str, Any]], Dict[str, str]]:
         """Liste les offres de marché (productions futures) de la première ferme du producteur."""
         try:
             farms_payload = await self.get_producer_farm(phone)
@@ -1610,7 +1916,11 @@ class ProducerMgmtMixin(BaseMixin):
                 farms_data = farms_payload
 
             if not farms_data:
-                msg = (farms_payload.get("message") if isinstance(farms_payload, dict) else None) or "Aucune exploitation trouvée pour ce producteur."
+                msg = (
+                    farms_payload.get("message")
+                    if isinstance(farms_payload, dict)
+                    else None
+                ) or "Aucune exploitation trouvée pour ce producteur."
                 return {"status": "error", "message": msg}
 
             first_farm = farms_data[0]
@@ -1619,11 +1929,17 @@ class ProducerMgmtMixin(BaseMixin):
             else:
                 raw_farm_id = getattr(first_farm, "id", None)
             if not raw_farm_id:
-                return {"status": "error", "message": "Impossible de déterminer l'exploitation principale."}
+                return {
+                    "status": "error",
+                    "message": "Impossible de déterminer l'exploitation principale.",
+                }
 
             farm_id = uuid.UUID(str(raw_farm_id))
             stmt = select(MarketOffer).where(MarketOffer.farm_id == farm_id)
             result = await self.session.execute(stmt)
-            return {"status": "success", "data": [c.to_dict() for c in result.scalars()]}
+            return {
+                "status": "success",
+                "data": [c.to_dict() for c in result.scalars()],
+            }
         except ValueError as e:
             return {"status": "error", "message": str(e)}

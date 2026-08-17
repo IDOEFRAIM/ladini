@@ -12,15 +12,16 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
-    Index,
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID, ARRAY as PG_ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import relationship
 
 from agriconnect.domain.orm_base import Base, _uuid4
@@ -36,9 +37,20 @@ class Delivery(Base):
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False, unique=True)
-    delivery_agent_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.delivery_agents.id"))
+    id = Column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    order_id = Column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("marketplace.orders.id"),
+        nullable=False,
+        unique=True,
+    )
+    delivery_agent_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.delivery_agents.id")
+    )
     status = Column(String, default="PENDING", nullable=False)
     delivery_code = Column(String)
     origin_gps_lat = Column(Float)
@@ -55,7 +67,9 @@ class Delivery(Base):
     delivered_at = Column(DateTime)
     failed_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
     agent = relationship("DeliveryAgent", foreign_keys=[delivery_agent_id])
     order = relationship("Order", back_populates="delivery", foreign_keys=[order_id])
@@ -81,9 +95,13 @@ class Order(Base):
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    buyer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.buyer_profiles.id"))
+    buyer_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.buyer_profiles.id")
+    )
     client_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.clients.id"))
-    organization_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id"))
+    organization_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id")
+    )
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
     customer_name = Column(String)
     customer_phone = Column(String)
@@ -119,21 +137,33 @@ class Order(Base):
     delivery_otp = Column(String, nullable=True)
     payment_expires_at = Column(DateTime, nullable=True)
     locked_amount = Column(Numeric(14, 2), nullable=True)
-    market_offer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.market_offers.id"))
+    market_offer_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.market_offers.id")
+    )
     expected_fulfillment_date = Column(DateTime)
     preorder_converted_at = Column(DateTime)
     confirmed_at = Column(DateTime)
-    auction_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.auctions.id"), unique=True)
+    auction_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.auctions.id"), unique=True
+    )
     winning_bid_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.bids.id"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
     items = relationship("OrderItem", back_populates="order", lazy="selectin")
     delivery = relationship("Delivery", back_populates="order", uselist=False)
     offer = relationship("MarketOffer", back_populates="orders")
-    payments = relationship("Payment", back_populates="order", cascade="all, delete-orphan")
-    status_history = relationship("OrderStatusHistory", back_populates="order", cascade="all, delete-orphan")
-    reminders = relationship("OrderReminder", back_populates="order", cascade="all, delete-orphan")
+    payments = relationship(
+        "Payment", back_populates="order", cascade="all, delete-orphan"
+    )
+    status_history = relationship(
+        "OrderStatusHistory", back_populates="order", cascade="all, delete-orphan"
+    )
+    reminders = relationship(
+        "OrderReminder", back_populates="order", cascade="all, delete-orphan"
+    )
 
 
 class OrderItem(Base):
@@ -145,8 +175,12 @@ class OrderItem(Base):
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False)
-    product_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.products.id"), nullable=False)
+    order_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False
+    )
+    product_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.products.id"), nullable=False
+    )
     quantity = Column(Numeric(14, 3), nullable=False)
     price_at_sale = Column(Numeric(12, 2), nullable=False)
 
@@ -166,7 +200,9 @@ class Payment(Base):
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False)
+    order_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False
+    )
     amount = Column(Numeric(14, 2), nullable=False)
     currency = Column(String, default="XOF", nullable=False)
     method = Column(String, default="CASH", nullable=False)
@@ -179,7 +215,9 @@ class Payment(Base):
     captured_at = Column(DateTime)
     refunded_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
     order = relationship("Order", back_populates="payments")
 
@@ -196,7 +234,9 @@ class OrderStatusHistory(Base):
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False)
+    order_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False
+    )
     status_type = Column(String, nullable=False)  # ORDER | PAYMENT | DELIVERY
     from_status = Column(String)
     to_status = Column(String, nullable=False)
@@ -218,7 +258,9 @@ class OrderReminder(Base):
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False)
+    order_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False
+    )
     type = Column(String, nullable=False)
     channel = Column(String, default="WHATSAPP", nullable=False)
     status = Column(String, default="SCHEDULED", nullable=False)
@@ -227,7 +269,9 @@ class OrderReminder(Base):
     attempts = Column(Integer, default=0, nullable=False)
     last_error = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
     order = relationship("Order", back_populates="reminders")
 
@@ -243,12 +287,16 @@ class OrderDispute(Base):
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False)
+    order_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False
+    )
     escrow_wallet_id = Column(PG_UUID(as_uuid=True), nullable=True)
     raised_by_id = Column(PG_UUID(as_uuid=True), nullable=False)
     reason_category = Column(String, nullable=False)
     description = Column(Text, nullable=False)
-    evidence_images = Column(PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]"))
+    evidence_images = Column(
+        PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]")
+    )
     requested_solution = Column(String, nullable=False)
     disputed_amount = Column(Numeric(14, 2), default=0, nullable=False)
     escrow_payout_status = Column(String, default="HELD", nullable=False)
@@ -256,7 +304,9 @@ class OrderDispute(Base):
     resolution_notes = Column(Text)
     resolved_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class Auction(Base):
@@ -271,8 +321,16 @@ class Auction(Base):
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    buyer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.buyer_profiles.id"), nullable=False)
-    sub_category_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.sub_categories.id"), nullable=False)
+    buyer_id = Column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("marketplace.buyer_profiles.id"),
+        nullable=False,
+    )
+    sub_category_id = Column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("governance.sub_categories.id"),
+        nullable=False,
+    )
     winner_bid_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.bids.id"))
     quantity = Column(Numeric(14, 3), nullable=False)
     unit = Column(String, default="TONNE", nullable=False)
@@ -282,11 +340,15 @@ class Auction(Base):
     delivery_location = Column(String, nullable=False)
     delivery_deadline = Column(DateTime, nullable=False)
     quality_grading = Column(String)
-    required_certifications = Column(PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]"))
+    required_certifications = Column(
+        PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]")
+    )
     preferred_packaging = Column(String)
     # Photos de référence jointes par l'acheteur (ce qu'il recherche) — voir
     # services/database/auction.py::add_auction_photo.
-    images = Column(PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]"))
+    images = Column(
+        PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]")
+    )
     deadline = Column(DateTime, nullable=False)
     auto_extend = Column(Boolean, default=True, nullable=False)
     escrow_wallet_id = Column(PG_UUID(as_uuid=True), nullable=True)
@@ -298,7 +360,9 @@ class Auction(Base):
     awarded_at = Column(DateTime)
     cancelled_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class Bid(Base):
@@ -313,8 +377,12 @@ class Bid(Base):
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    auction_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.auctions.id"), nullable=False)
-    producer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"), nullable=False)
+    auction_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.auctions.id"), nullable=False
+    )
+    producer_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"), nullable=False
+    )
     offered_price = Column(Numeric(12, 2), nullable=False)
     linked_stock_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.stocks.id"))
     is_winner = Column(Boolean, default=False, nullable=False)
@@ -327,9 +395,13 @@ class Bid(Base):
     # services/database/auction.py::add_bid_photo. Indépendant de
     # `linked_stock_id` (jamais renseigné par `place_bid` en pratique) : le
     # `Stock` référencé n'a lui-même aucune colonne image.
-    images = Column(PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]"))
+    images = Column(
+        PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]")
+    )
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class MarketplaceRating(Base):
@@ -343,7 +415,9 @@ class MarketplaceRating(Base):
     )
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    order_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False)
+    order_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False
+    )
     author_type = Column(String, nullable=False)
     author_id = Column(PG_UUID(as_uuid=True), nullable=False)
     target_type = Column(String, nullable=False)

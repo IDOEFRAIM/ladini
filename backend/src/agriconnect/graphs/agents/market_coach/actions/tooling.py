@@ -1,4 +1,5 @@
 """Shared tooling abstractions for MarketCoach action handlers."""
+
 from __future__ import annotations
 
 from enum import Enum

@@ -3,6 +3,7 @@
 Provides typed helpers for loading user profiles and pre-caching farms
 via the MCP gateways, keeping the normalizer node thin.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -48,14 +49,17 @@ async def load_user_profile(phone: str, mc_runtime: Any) -> Dict[str, Any]:
         status = str(res_dict.get("status", "")).upper()
         profile = res_dict.get("data")
         is_real_profile = (
-            status == "SUCCESS" and isinstance(profile, dict) and bool(profile.get("id"))
+            status == "SUCCESS"
+            and isinstance(profile, dict)
+            and bool(profile.get("id"))
         )
         decisive = is_real_profile or status == "NEW_USER"
         if decisive or attempt == 1:
             break
         logger.warning(
             "[ProfileLoader] Résolution indécise (status=%s) pour %s — nouvelle tentative (cold-start).",
-            status or "(vide)", _mask_phone(phone),
+            status or "(vide)",
+            _mask_phone(phone),
         )
         await asyncio.sleep(0.4)
 
@@ -85,7 +89,9 @@ async def load_user_profile(phone: str, mc_runtime: Any) -> Dict[str, Any]:
         # un utilisateur et on NE propose pas de transaction : on remonte l'échec.
         logger.warning(
             "[ProfileLoader] Résolution de profil non aboutie (status=%s, data_vide=%s) pour %s",
-            status or "(vide)", profile in (None, {}, ""), _mask_phone(phone),
+            status or "(vide)",
+            profile in (None, {}, ""),
+            _mask_phone(phone),
         )
         updates["user_context_loaded"] = False
         updates["_profile_unavailable"] = True

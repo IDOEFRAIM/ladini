@@ -4,6 +4,7 @@ All menu string assembly lives here so that flows and services only
 build ``MenuOption`` lists and call these helpers for the text output.
 No state access, no MCP calls — pure string functions.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
@@ -106,13 +107,16 @@ def render_cart_actions_hint(has_auction_items: bool = False) -> str:
     """Standard cart actions footer."""
     hint = "\n_Répondez *précommander* pour valider, ou ajoutez un autre produit._"
     if has_auction_items:
-        hint += "\n_Pour les articles en enchère : *négocier* pour faire une contre-offre._"
+        hint += (
+            "\n_Pour les articles en enchère : *négocier* pour faire une contre-offre._"
+        )
     return hint
 
 
 # =====================================================================
 # HARMONISED UX HELPERS — one consistent voice across every buyer menu
 # =====================================================================
+
 
 def render_selection_prompt(
     *,

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """AgriConnect MCP runtime (simple & predictable).
 
 Principes (alignés avec `services/database/database_service.py`):
@@ -11,6 +9,7 @@ MCP:
 - `fastmcp` est instancié **paresseusement** (lazy) via un proxy pour éviter
   les effets de bord à l'import (certains packages font du setup lourd).
 """
+from __future__ import annotations
 
 import asyncio
 import json
@@ -33,10 +32,10 @@ from agriconnect.infrastructure.mcp.context import (
     mcp_context_scope,
 )
 from agriconnect.infrastructure.mcp.security import (
+    TOOL_SCOPE_MAP,
     HostBlockedError,
     MCPPermissionHostApp,
     PermissionDenied,
-    TOOL_SCOPE_MAP,
     ensure_scopes_filled,
     get_execution_policy,
 )
@@ -72,7 +71,14 @@ def _derive_context_identity(payload: dict[str, Any]) -> FarmerContext | None:
     # orchestrateur pour transporter l'identité À TRAVERS la frontière stdio
     # (processus séparé — les contextvars ne traversent pas). Jamais un vrai
     # paramètre métier ; toujours retiré des args avant l'appel réel plus bas.
-    phone = _pick("phone", "user_phone", "phone_number", "buyer_phone", "customer_phone", "_caller_phone")
+    phone = _pick(
+        "phone",
+        "user_phone",
+        "phone_number",
+        "buyer_phone",
+        "customer_phone",
+        "_caller_phone",
+    )
     session_id = _pick("session_id", "request_id")
     if not user_id and not phone:
         return None
@@ -173,7 +179,11 @@ class MCPRuntime:
             yield self
         finally:
             # Do not close DB by default (host responsibility).
-            if (os.getenv("MCP_CLOSE_DB_ON_STOP", "0") or "0").strip() in {"1", "true", "True"}:
+            if (os.getenv("MCP_CLOSE_DB_ON_STOP", "0") or "0").strip() in {
+                "1",
+                "true",
+                "True",
+            }:
                 try:
                     await close_db()
                 except Exception:
@@ -193,7 +203,11 @@ class MCPRuntime:
         `retries` and `retry_delay_s` are accepted for backwards compatibility
         but intentionally unused to keep runtime simple.
         """
-        require = (not settings.MCP_ALLOW_DEGRADED_START) if require_connection is None else require_connection
+        require = (
+            (not settings.MCP_ALLOW_DEGRADED_START)
+            if require_connection is None
+            else require_connection
+        )
 
         run_coro_blocking(self._ensure_db_service())
         self._refresh_ready_state()
@@ -212,7 +226,11 @@ class MCPRuntime:
 
         By default, does nothing. Set `MCP_CLOSE_DB_ON_STOP=1` for local runs.
         """
-        if (os.getenv("MCP_CLOSE_DB_ON_STOP", "0") or "0").strip() not in {"1", "true", "True"}:
+        if (os.getenv("MCP_CLOSE_DB_ON_STOP", "0") or "0").strip() not in {
+            "1",
+            "true",
+            "True",
+        }:
             return
         try:
             run_coro_blocking(close_db())
@@ -242,7 +260,9 @@ def _log_call(tool_name: str, params: dict[str, Any], response: str) -> None:
         res_preview = (response[:250] + "...") if len(response) > 250 else response
         logger.info(
             "MCP_CALL [%s] | PARAMS: %s | RES: %s",
-            tool_name, mask_log_args(params), res_preview,
+            tool_name,
+            mask_log_args(params),
+            res_preview,
         )
     except Exception as exc:
         logger.warning("Erreur lors du logging de l'appel %s: %s", tool_name, exc)
@@ -253,13 +273,15 @@ def _log_call(tool_name: str, params: dict[str, Any], response: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-_PUBLIC_CATALOG_TOOLS: frozenset[str] = frozenset({
-    "get_zone_by_name",
-    "get_available_zones",
-    # Donnée de référence publique (liste de termes bannis) — aucune donnée
-    # utilisateur, appelée sans identité par le gate de modération.
-    "get_prohibited_terms",
-})
+_PUBLIC_CATALOG_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_zone_by_name",
+        "get_available_zones",
+        # Donnée de référence publique (liste de termes bannis) — aucune donnée
+        # utilisateur, appelée sans identité par le gate de modération.
+        "get_prohibited_terms",
+    }
+)
 
 
 class AgriDBMCPServer:
@@ -284,27 +306,29 @@ class AgriDBMCPServer:
         for name, description in TOOL_DESCRIPTIONS.items():
             # Récupération du schéma généré par l'introspection
             # Si le schéma n'existe pas, on renvoie un objet vide par défaut
-            schema = TOOL_SCHEMAS.get(name, {
-                "type": "object", 
-                "properties": {}, 
-                "required": []
-            })
+            schema = TOOL_SCHEMAS.get(
+                name, {"type": "object", "properties": {}, "required": []}
+            )
 
-            tools.append({
-                "name": name,
-                "description": description,
-                "inputSchema": schema  # CRITIQUE : C'est ce champ qui active les inputs dans l'UI
-            })
-            
+            tools.append(
+                {
+                    "name": name,
+                    "description": description,
+                    "inputSchema": schema,  # CRITIQUE : C'est ce champ qui active les inputs dans l'UI
+                }
+            )
+
         return tools
-        
+
     async def call_tool(self, name: str, arguments: dict | None = None, **kwargs):
         """Backend tool execution: context → scope check → preflight → execute → audit."""
         full_args = {**(arguments or {}), **kwargs}
         # Masquage AVANT écriture en log : `verify_delivery_otp` transporte le
         # code à 4 chiffres qui débloque les fonds escrow, et presque tous les
         # outils transportent un numéro de téléphone (PII). Cf. `mask_log_args`.
-        logger.info("Backend call_tool: tool=%s, args=%s", name, mask_log_args(full_args))
+        logger.info(
+            "Backend call_tool: tool=%s, args=%s", name, mask_log_args(full_args)
+        )
 
         # 1. Resolve identity (scoped OR derived from payload)
         context_identity = get_mcp_context() or _derive_context_identity(full_args)
@@ -322,7 +346,9 @@ class AgriDBMCPServer:
             # 2. Static scope check (fail-closed on unknown tools)
             ensure_scopes_filled()
             if name not in TOOL_SCOPE_MAP:
-                reason = f"L'outil '{name}' n'est pas autorisé (absent de TOOL_SCOPE_MAP)."
+                reason = (
+                    f"L'outil '{name}' n'est pas autorisé (absent de TOOL_SCOPE_MAP)."
+                )
                 logger.error("DENY | tool=%s | reason=not_in_scope", name)
                 await self._persist_audit(name, full_args, "DENY", reason)
                 raise PermissionDenied(name, reason)
@@ -375,7 +401,9 @@ class AgriDBMCPServer:
                 # l'outil ET le motif rend ces cas immédiatement diagnosticables
                 # au lieu d'un échec opaque côté utilisateur.
                 logger.warning(
-                    "PREFLIGHT_BLOCK | tool=%s | reason=%s", tool_name, reason,
+                    "PREFLIGHT_BLOCK | tool=%s | reason=%s",
+                    tool_name,
+                    reason,
                 )
                 await self._persist_audit(tool_name, sanitized_args, "DENY", reason)
                 raise HostBlockedError(
@@ -389,7 +417,7 @@ class AgriDBMCPServer:
             reason = f"Erreur fatale lors du contrôle de sécurité : {exc}"
             logger.exception("SECURITY_EXCEPTION | tool=%s", tool_name)
             await self._persist_audit(tool_name, sanitized_args, "DENY", reason)
-            raise PermissionDenied(tool_name, reason)
+            raise PermissionDenied(tool_name, reason) from exc
 
     def _resolve_tool_fn(self, name: str):
         from agriconnect.protocols.mcp.servers.h import TOOL_HANDLERS
@@ -431,7 +459,11 @@ class AgriDBMCPServer:
                 "reason": reason or "",
             }
             logger.info("AUDIT|%s", json.dumps(entry, ensure_ascii=False))
-            if runtime.is_ready and runtime.db is not None and hasattr(runtime.db, "log_conversation"):
+            if (
+                runtime.is_ready
+                and runtime.db is not None
+                and hasattr(runtime.db, "log_conversation")
+            ):
                 await _log_audit_entry(tool_name, args_hash, entry)
         except Exception:
             logger.debug("Audit persistence failed (non-blocking)", exc_info=True)
@@ -448,7 +480,9 @@ def _load_backend_env() -> None:
         return
 
     here = os.path.abspath(__file__)
-    backend_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(here))))
+    backend_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(here)))
+    )
     env_file = os.path.join(backend_root, ".env")
     try:
         if os.path.exists(env_file):
@@ -464,7 +498,9 @@ def _should_reset_db(exc: Exception) -> bool:
     return "connection was closed" in msg or "connection does not exist" in msg
 
 
-async def _log_audit_entry(tool_name: str, args_hash: str, entry: dict[str, Any]) -> None:
+async def _log_audit_entry(
+    tool_name: str, args_hash: str, entry: dict[str, Any]
+) -> None:
     for attempt in range(2):
         try:
             await runtime.ensure_initialized()
@@ -490,6 +526,8 @@ async def _log_audit_entry(tool_name: str, args_hash: str, entry: dict[str, Any]
             if attempt == 1 or not _should_reset_db(exc):
                 logger.debug("Audit log_conversation failed", exc_info=True)
                 return
-            logger.warning("Audit log_conversation lost DB connection; reinitializing", exc_info=True)
+            logger.warning(
+                "Audit log_conversation lost DB connection; reinitializing",
+                exc_info=True,
+            )
             runtime.db = None
-

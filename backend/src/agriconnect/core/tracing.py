@@ -23,7 +23,6 @@ Usage pour tracer un .invoke() avec métadonnées custom :
 
 import functools
 import logging
-import os
 import time
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional
@@ -51,8 +50,11 @@ def get_ls_client():
 
     try:
         from langsmith import Client
+
         _ls_client = Client()
-        logger.info("✅ LangSmith client initialisé (projet: %s)", settings.LANGCHAIN_PROJECT)
+        logger.info(
+            "✅ LangSmith client initialisé (projet: %s)", settings.LANGCHAIN_PROJECT
+        )
         return _ls_client
     except Exception as e:
         logger.warning("⚠️  LangSmith client init échouée: %s", e)
@@ -76,7 +78,7 @@ def init_tracing() -> bool:
     # Vérification de santé
     try:
         # Tente de lister les projets pour valider la clé API
-        projects = list(client.list_projects(limit=1))
+        list(client.list_projects(limit=1))
         logger.info(
             "✅ LangSmith connecté — endpoint: %s, projet: %s",
             settings.LANGCHAIN_ENDPOINT,
@@ -89,6 +91,7 @@ def init_tracing() -> bool:
 
 
 # ── Décorateur de traçabilité ─────────────────────────────────────────
+
 
 def trace_agent(
     name: Optional[str] = None,
@@ -103,6 +106,7 @@ def trace_agent(
     def analyze_node(self, state):
         ...
     """
+
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -111,6 +115,7 @@ def trace_agent(
 
             try:
                 from langsmith.run_helpers import traceable
+
                 traced_fn = traceable(
                     name=name or func.__qualname__,
                     run_type=run_type,
@@ -125,11 +130,16 @@ def trace_agent(
                 return func(*args, **kwargs)
 
         return wrapper
+
     return decorator
 
 
 @contextmanager
-def trace_span(name: str, tags: Optional[List[str]] = None, metadata: Optional[Dict[str, Any]] = None):
+def trace_span(
+    name: str,
+    tags: Optional[List[str]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+):
     """
     Context manager pour créer un span de traçage autour d'un bloc.
 
@@ -149,6 +159,7 @@ def trace_span(name: str, tags: Optional[List[str]] = None, metadata: Optional[D
 
 
 # ── Config injectable dans .invoke() ──────────────────────────────────
+
 
 def get_tracing_config(
     run_name: Optional[str] = None,
@@ -181,6 +192,7 @@ def get_tracing_config(
 
 
 # ── Feedback programmatique ───────────────────────────────────────────
+
 
 def create_feedback(
     run_id: str,
@@ -218,6 +230,7 @@ def create_feedback(
 
 
 # ── Dataset helper ────────────────────────────────────────────────────
+
 
 def get_or_create_dataset(name: str, description: str = "") -> Optional[Any]:
     """

@@ -4,6 +4,7 @@ Le rendu se fait au moment de l'ENVOI (dispatcher), à partir du ``template_key`
 et du ``payload`` stockés dans l'outbox. Moins le destinataire fait d'étapes,
 plus le taux de réponse est élevé : chaque template embarque une action rapide.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -120,5 +121,8 @@ def render(template_key: str, payload: Dict[str, Any]) -> str:
     """Rend le corps du message. Fallback neutre si le template est inconnu."""
     renderer = _RENDERERS.get(template_key)
     if renderer is None:
-        return str((payload or {}).get("fallback") or "Vous avez une nouvelle notification AgriConnect.")
+        return str(
+            (payload or {}).get("fallback")
+            or "Vous avez une nouvelle notification AgriConnect."
+        )
     return renderer(payload or {})

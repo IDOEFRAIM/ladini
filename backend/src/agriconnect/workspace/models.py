@@ -4,11 +4,13 @@ Toutes les décisions de routage et d'exécution partent du Workspace,
 jamais du dernier message seul. Un Workspace par utilisateur (clé = téléphone)
 et un seul agent (MarketCoach).
 """
+
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
+
 
 @dataclass(slots=True)
 class Workspace:

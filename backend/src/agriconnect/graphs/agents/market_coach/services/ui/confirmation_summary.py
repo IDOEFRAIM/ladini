@@ -3,6 +3,7 @@
 Extracted from ``nodes/confirmation_gate.py`` to decouple business-goal
 knowledge from the confirmation orchestration node.
 """
+
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
@@ -28,16 +29,26 @@ def _safe_price_unit(raw: Any, fallback: str) -> str:
     return canonical_unit_label(text, fallback)
 
 
-def _resolve_units(payload: Dict[str, Any], default_unit: str = "KG") -> Tuple[str, str]:
+def _resolve_units(
+    payload: Dict[str, Any], default_unit: str = "KG"
+) -> Tuple[str, str]:
     conversion = payload.get("unit_conversion") or {}
     converted_unit = payload.get("unit") or conversion.get("to_unit") or default_unit
-    display_unit = payload.get("unit_display") or conversion.get("from_unit") or converted_unit
-    canonical_display = canonical_unit_label(display_unit, canonical_unit_label(default_unit))
-    canonical_converted = canonical_unit_label(converted_unit, canonical_unit_label(default_unit))
+    display_unit = (
+        payload.get("unit_display") or conversion.get("from_unit") or converted_unit
+    )
+    canonical_display = canonical_unit_label(
+        display_unit, canonical_unit_label(default_unit)
+    )
+    canonical_converted = canonical_unit_label(
+        converted_unit, canonical_unit_label(default_unit)
+    )
     return canonical_display, canonical_converted
 
 
-def _format_quantity(payload: Dict[str, Any], default_unit: str = "KG") -> Optional[str]:
+def _format_quantity(
+    payload: Dict[str, Any], default_unit: str = "KG"
+) -> Optional[str]:
     converted_qty = payload.get("quantity")
     if converted_qty in (None, "", [], {}):
         return None
@@ -58,17 +69,24 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
     if goal == "DECLARE_CROP_CYCLE":
         production_type = str(payload.get("production_type") or "CROP").upper()
         product = payload.get("product") or payload.get("species") or "production"
-        default_unit = payload.get("unit") or ("KG" if production_type == "CROP" else "HEAD")
+        default_unit = payload.get("unit") or (
+            "KG" if production_type == "CROP" else "HEAD"
+        )
         quantity_line = _format_quantity(payload, default_unit)
         display_unit, converted_unit = _resolve_units(payload, default_unit)
         price = payload.get("price") or payload.get("price_per_unit")
-        eta = payload.get("estimated_available_at") or payload.get("expected_harvest_date")
+        eta = payload.get("estimated_available_at") or payload.get(
+            "expected_harvest_date"
+        )
         farm = payload.get("farm_name") or payload.get("farm_id")
         # Le prix a sa propre base (ex: "10000 FCFA/kg" alors que la quantité
         # totale est en tonnes) — ne jamais réutiliser aveuglément l'unité de
         # la quantité pour l'affichage du prix si l'utilisateur en a donné une
         # explicitement (voir `price_unit`, interpreter/routing.py).
-        price_display_unit = _safe_price_unit(payload.get("price_unit"), canonical_unit_label(display_unit or converted_unit))
+        price_display_unit = _safe_price_unit(
+            payload.get("price_unit"),
+            canonical_unit_label(display_unit or converted_unit),
+        )
 
         lines = [
             f"Type : {production_type}",
@@ -95,15 +113,30 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         if payload.get("product") not in (None, "", [], {}):
             lines.append(f"Nouveau nom : {payload.get('product')}")
         if payload.get("price") not in (None, "", [], {}):
-            unit_for_price = _safe_price_unit(payload.get("price_unit"), canonical_unit_label(payload.get("unit") or "KG"))
-            lines.append(f"Nouveau prix : {_fmt_num(payload.get('price'))} FCFA/{unit_for_price}")
+            unit_for_price = _safe_price_unit(
+                payload.get("price_unit"),
+                canonical_unit_label(payload.get("unit") or "KG"),
+            )
+            lines.append(
+                f"Nouveau prix : {_fmt_num(payload.get('price'))} FCFA/{unit_for_price}"
+            )
         if payload.get("quantity") not in (None, "", [], {}):
             unit_for_qty = canonical_unit_label(payload.get("unit") or "KG")
-            lines.append(f"Nouvelle quantité : {_fmt_num(payload.get('quantity'))} {unit_for_qty}")
-        if payload.get("unit") not in (None, "", [], {}) and payload.get("price") in (None, "", [], {}) and payload.get("quantity") in (None, "", [], {}):
-            lines.append(f"Nouvelle unité : {canonical_unit_label(payload.get('unit'))}")
+            lines.append(
+                f"Nouvelle quantité : {_fmt_num(payload.get('quantity'))} {unit_for_qty}"
+            )
+        if (
+            payload.get("unit") not in (None, "", [], {})
+            and payload.get("price") in (None, "", [], {})
+            and payload.get("quantity") in (None, "", [], {})
+        ):
+            lines.append(
+                f"Nouvelle unité : {canonical_unit_label(payload.get('unit'))}"
+            )
         if payload.get("estimated_available_at") not in (None, "", [], {}):
-            lines.append(f"Nouvelle date de disponibilité : {payload.get('estimated_available_at')}")
+            lines.append(
+                f"Nouvelle date de disponibilité : {payload.get('estimated_available_at')}"
+            )
         if payload.get("production_type") not in (None, "", [], {}):
             lines.append(f"Nouveau type : {payload.get('production_type')}")
         bullet_list = "\n".join(f"- {line}" for line in lines)
@@ -117,13 +150,26 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         if payload.get("product") not in (None, "", [], {}):
             lines.append(f"Nouveau nom : {payload.get('product')}")
         if payload.get("price") not in (None, "", [], {}):
-            unit_for_price = _safe_price_unit(payload.get("price_unit"), canonical_unit_label(payload.get("unit") or "KG"))
-            lines.append(f"Nouveau prix : {_fmt_num(payload.get('price'))} FCFA/{unit_for_price}")
+            unit_for_price = _safe_price_unit(
+                payload.get("price_unit"),
+                canonical_unit_label(payload.get("unit") or "KG"),
+            )
+            lines.append(
+                f"Nouveau prix : {_fmt_num(payload.get('price'))} FCFA/{unit_for_price}"
+            )
         if payload.get("quantity") not in (None, "", [], {}):
             unit_for_qty = canonical_unit_label(payload.get("unit") or "KG")
-            lines.append(f"Nouvelle quantité : {_fmt_num(payload.get('quantity'))} {unit_for_qty}")
-        if payload.get("unit") not in (None, "", [], {}) and payload.get("price") in (None, "", [], {}) and payload.get("quantity") in (None, "", [], {}):
-            lines.append(f"Nouvelle unité : {canonical_unit_label(payload.get('unit'))}")
+            lines.append(
+                f"Nouvelle quantité : {_fmt_num(payload.get('quantity'))} {unit_for_qty}"
+            )
+        if (
+            payload.get("unit") not in (None, "", [], {})
+            and payload.get("price") in (None, "", [], {})
+            and payload.get("quantity") in (None, "", [], {})
+        ):
+            lines.append(
+                f"Nouvelle unité : {canonical_unit_label(payload.get('unit'))}"
+            )
         bullet_list = "\n".join(f"- {line}" for line in lines)
         summary = "Mise à jour du produit"
         return f"{summary} :\n{bullet_list}" if bullet_list else summary
@@ -136,7 +182,9 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
     # (ex: "10000 FCFA/kg" sur une quantité totale exprimée en tonnes) — voir
     # `price_unit` (interpreter/routing.py) ; sinon on retombe sur l'unité de
     # la quantité, comportement inchangé pour le cas courant (même unité).
-    price_unit = _safe_price_unit(payload.get("price_unit"), canonical_unit_label(converted_unit))
+    price_unit = _safe_price_unit(
+        payload.get("price_unit"), canonical_unit_label(converted_unit)
+    )
     price_fmt = _fmt_num(price) if price not in (None, "", [], {}) else None
 
     # `payload["quantity"]`/`payload["unit"]` (= `converted_unit` ici) sont
@@ -158,53 +206,74 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
     mismatch_note = (
         f"\n⚠️ Le prix sera appliqué par {quantity_unit_for_price} (unité de l'offre), "
         f"pas par {price_unit} — dites *modifier prix* si ce n'est pas ce que vous vouliez."
-        if price_unit_mismatch else ""
+        if price_unit_mismatch
+        else ""
     )
 
     mapping = {
         "SALES_PUBLISH_PRODUCT": (
             (
                 f"Vente de {quantity_line} de {product}"
-                f" à {price_fmt} FCFA/{price_unit}." if price_fmt else f"Vente de {quantity_line} de {product}."
-            ) + mismatch_note
-        ) if quantity_line else None,
+                f" à {price_fmt} FCFA/{price_unit}."
+                if price_fmt
+                else f"Vente de {quantity_line} de {product}."
+            )
+            + mismatch_note
+        )
+        if quantity_line
+        else None,
         "SALES_RECORD_DIRECT": (
             f"Enregistrement d'une vente directe : {quantity_line} de {product}"
-            f" à {price_fmt} FCFA." if price_fmt else f"Enregistrement d'une vente directe : {quantity_line} de {product}."
-        ) if quantity_line else None,
+            f" à {price_fmt} FCFA."
+            if price_fmt
+            else f"Enregistrement d'une vente directe : {quantity_line} de {product}."
+        )
+        if quantity_line
+        else None,
         "PROCUREMENT_CREATE_REQUEST": (
             (
                 f"Lancement d'un appel d'offres pour {quantity_line} de {product}"
-                f" au prix plafond de {price_fmt} FCFA/{price_unit}." if price_fmt else f"Lancement d'un appel d'offres pour {quantity_line} de {product}."
-            ) + mismatch_note
-        ) if quantity_line else None,
+                f" au prix plafond de {price_fmt} FCFA/{price_unit}."
+                if price_fmt
+                else f"Lancement d'un appel d'offres pour {quantity_line} de {product}."
+            )
+            + mismatch_note
+        )
+        if quantity_line
+        else None,
         "SALES_PLACE_BID": (
             f"Soumission d'une offre de {price_fmt} FCFA sur cette enchère."
-            if price_fmt else "Soumission d'une offre sur cette enchère."
+            if price_fmt
+            else "Soumission d'une offre sur cette enchère."
         ),
         "SALES_ACCEPT_CONTRACT": "Validation finale du contrat avec l'acheteur.",
         "PROCUREMENT_ACCEPT_OFFER": "Acceptation de l'offre du producteur sélectionné.",
         "PROCUREMENT_SELECT_WINNER": "Sélection de l'offre gagnante.",
         "STOCK_REGISTER_HARVEST": (
             f"Enregistrement d'une récolte : {quantity_line} de {product} en stock."
-            if quantity_line else "Enregistrement d'une récolte en stock."
+            if quantity_line
+            else "Enregistrement d'une récolte en stock."
         ),
         "STOCK_RECORD_MOVEMENT": (
             f"Mouvement de stock : {quantity_line} de {product}."
-            if quantity_line else "Mouvement de stock enregistré."
+            if quantity_line
+            else "Mouvement de stock enregistré."
         ),
         "STOCK_ADJUST": (
             f"Modification du stock de {product} à {quantity_line}."
-            if quantity_line else f"Modification du stock de {product}."
+            if quantity_line
+            else f"Modification du stock de {product}."
         ),
         "STOCK_REMOVE_PARTIAL": (
             f"Retrait de {quantity_line} de {product} du stock."
-            if quantity_line else f"Retrait partiel du stock pour {product}."
+            if quantity_line
+            else f"Retrait partiel du stock pour {product}."
         ),
         "STOCK_DELETE": f"Suppression définitive du lot de {product}.",
         "FINANCE_LOG_EXPENSE": (
             f"Enregistrement d'une dépense de {price_fmt} FCFA ({product})."
-            if price_fmt else f"Enregistrement d'une dépense pour {product}."
+            if price_fmt
+            else f"Enregistrement d'une dépense pour {product}."
         ),
         "FARM_CREATE": "Déclaration d'une nouvelle exploitation.",
         "CROP_RECORD_INTERVENTION": "Enregistrement d'une intervention agronomique.",
@@ -212,7 +281,9 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
     summary = mapping.get(goal)
     if summary:
         return summary
-    fallback_quantity = quantity_line or payload.get("quantity_display") or payload.get("quantity")
+    fallback_quantity = (
+        quantity_line or payload.get("quantity_display") or payload.get("quantity")
+    )
     if fallback_quantity not in (None, "", [], {}):
         return (
             f"Validation de l'opération : {goal}"

@@ -3,14 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Tuple
 
-from .model import DomainContext, DomainResult
-from agriconnect.graphs.agents.market_coach.actions.tooling import ToolId
 from agriconnect.graphs.agents.market_coach.actions.common import (
     normalize_quantity_to_kg,
     require,
     require_phone,
 )
+from agriconnect.graphs.agents.market_coach.actions.tooling import ToolId
 
+from .model import DomainContext, DomainResult
 
 _EMPTY_SLOT_VALUES = (None, "", [], {})
 
@@ -42,8 +42,8 @@ def _resolve_mass_payload(payload: Mapping[str, Any]) -> Tuple[float, str]:
 
     try:
         qty_value = float(str(quantity_raw).replace(",", "."))
-    except (TypeError, ValueError):
-        raise ValueError(f"Quantité invalide: {quantity_raw!r}")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Quantité invalide: {quantity_raw!r}") from exc
 
     qty_kg, canonical_unit = normalize_quantity_to_kg(qty_value, unit_raw)
     return qty_kg, canonical_unit
@@ -65,7 +65,7 @@ class SalesUpdateProductCommand:
 class SalesUpdateProductionCommand:
     """Typed command for SALES_UPDATE_PRODUCTION (mise à jour d'un lot futur / MarketOffer)."""
 
-    producer_id: str          # en pratique le téléphone (convention DB : arg `phone`)
+    producer_id: str  # en pratique le téléphone (convention DB : arg `phone`)
     cycle_id: str
     price: Optional[float] = None
     quantity: Optional[float] = None
@@ -129,15 +129,19 @@ class SalesService:
 
     context: DomainContext
 
-    def get_catalog(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
-        phone = require_phone(state)
+    def get_catalog(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
+        require_phone(state)
         farm_id = (
             payload.get("farm_id")
             or (state.get("transaction_payload") or {}).get("farm_id")
             or (state.get("stable_entities") or {}).get("farm_id")
         )
         if not farm_id:
-            raise ValueError("L'identifiant de la ferme est requis pour consulter le catalogue.")
+            raise ValueError(
+                "L'identifiant de la ferme est requis pour consulter le catalogue."
+            )
 
         args: Dict[str, Any] = {"farm_id": str(farm_id)}
         return DomainResult(tool_id=ToolId.GET_STOCKS, tool_args=args)
@@ -154,7 +158,9 @@ class SalesService:
             args["zone_name"] = command.zone_name
         return DomainResult(tool_id=ToolId.GET_AUCTIONS, tool_args=args)
 
-    def get_request_detail(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def get_request_detail(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         phone = require_phone(state)
         auction_id = str(require(payload, "auction_id"))
         args: Dict[str, Any] = {
@@ -164,11 +170,17 @@ class SalesService:
         }
         return DomainResult(tool_id=ToolId.GET_AUCTIONS_BIDS, tool_args=args)
 
-    def get_my_proposals(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def get_my_proposals(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         phone = require_phone(state)
-        return DomainResult(tool_id=ToolId.GET_MY_ACTIVE_BIDS, tool_args={"phone": phone})
+        return DomainResult(
+            tool_id=ToolId.GET_MY_ACTIVE_BIDS, tool_args={"phone": phone}
+        )
 
-    def market_snapshot(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def market_snapshot(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         args: Dict[str, Any] = {}
         zone = payload.get("zone") or payload.get("zone_name")
         if zone:
@@ -182,15 +194,25 @@ class SalesService:
             args["product_query"] = str(product)
         return DomainResult(tool_id=ToolId.GET_MARKET_SNAPSHOT, tool_args=args)
 
-    def market_snapshot_zonal(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def market_snapshot_zonal(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         zone = str(require(payload, "zone"))
-        return DomainResult(tool_id=ToolId.GET_ZONE_MARKET_OVERVIEW, tool_args={"zone_id": zone})
+        return DomainResult(
+            tool_id=ToolId.GET_ZONE_MARKET_OVERVIEW, tool_args={"zone_id": zone}
+        )
 
-    def dashboard_producer(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def dashboard_producer(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         phone = require_phone(state)
-        return DomainResult(tool_id=ToolId.GET_PRODUCER_DASHBOARD, tool_args={"producer_id": phone})
+        return DomainResult(
+            tool_id=ToolId.GET_PRODUCER_DASHBOARD, tool_args={"producer_id": phone}
+        )
 
-    def search_products(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def search_products(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         product = str(require(payload, "product"))
         phone = require_phone(state)
         args: Dict[str, Any] = {"product": product, "phone": phone}
@@ -199,14 +221,18 @@ class SalesService:
             args["zone_id"] = str(zone)
         return DomainResult(tool_id=ToolId.SEARCH_PRODUCTS, tool_args=args)
 
-    def search_nearby(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def search_nearby(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         require_phone(state)
         require(payload, "latitude")
         require(payload, "longitude")
         # The underlying tool uses contextual location; no direct args today.
         return DomainResult(tool_id=ToolId.GET_ALL_ZONE_MARKET_OVERVIEW, tool_args={})
 
-    def validate_price(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def validate_price(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         product = str(require(payload, "product"))
         price = float(require(payload, "price"))
         zone = str(require(payload, "zone"))
@@ -253,16 +279,24 @@ class SalesService:
         }
         return DomainResult(tool_id=ToolId.RECORD_SALE, tool_args=args)
 
-    def place_bid(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def place_bid(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         phone = require_phone(state)
         auction_id = str(require(payload, "auction_id"))
         price = float(require(payload, "price"))
-        args: Dict[str, Any] = {"phone": phone, "auction_id": auction_id, "offered_price": price}
+        args: Dict[str, Any] = {
+            "phone": phone,
+            "auction_id": auction_id,
+            "offered_price": price,
+        }
         if payload.get("message"):
             args["message"] = str(payload["message"])
         return DomainResult(tool_id=ToolId.PLACE_BID, tool_args=args)
 
-    def accept_contract(self, state: Mapping[str, Any], payload: Mapping[str, Any]) -> DomainResult:
+    def accept_contract(
+        self, state: Mapping[str, Any], payload: Mapping[str, Any]
+    ) -> DomainResult:
         require_phone(state)
         transaction_id = str(require(payload, "bid_id"))
         args = {"transaction_id": transaction_id, "approved": True}
@@ -271,7 +305,12 @@ class SalesService:
     def update_product(self, command: SalesUpdateProductCommand) -> DomainResult:
         """Domain logic for updating a published product from a typed command."""
 
-        if command.price is None and command.quantity is None and command.name is None and command.unit is None:
+        if (
+            command.price is None
+            and command.quantity is None
+            and command.name is None
+            and command.unit is None
+        ):
             raise ValueError(
                 "Indiquez au moins un champ à modifier (prix, quantité, nom ou unité)."
             )

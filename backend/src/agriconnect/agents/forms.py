@@ -15,6 +15,7 @@ Architecture:
 Agents plug this into their graph via a single node that delegates to
 `run_form_step` — zero duplication of collection logic.
 """
+
 from __future__ import annotations
 
 import logging
@@ -24,9 +25,9 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
-    parse_compound_quantity,
-    extract_unit_only_from_text,
     default_unit_for_product,
+    extract_unit_only_from_text,
+    parse_compound_quantity,
 )
 
 
@@ -50,16 +51,26 @@ def _coerce_number(v: Any) -> float:
 
 
 _FRENCH_MONTHS = {
-    "janvier": 1, "fevrier": 2, "février": 2, "mars": 3, "avril": 4, "mai": 5,
-    "juin": 6, "juillet": 7, "aout": 8, "août": 8, "septembre": 9,
-    "octobre": 10, "novembre": 11, "decembre": 12, "décembre": 12,
+    "janvier": 1,
+    "fevrier": 2,
+    "février": 2,
+    "mars": 3,
+    "avril": 4,
+    "mai": 5,
+    "juin": 6,
+    "juillet": 7,
+    "aout": 8,
+    "août": 8,
+    "septembre": 9,
+    "octobre": 10,
+    "novembre": 11,
+    "decembre": 12,
+    "décembre": 12,
 }
 _RELATIVE_DEADLINE_RE = re.compile(
     r"dans\s+(\d+)\s*(jour|jours|semaine|semaines|mois)", re.IGNORECASE
 )
-_ABSOLUTE_DEADLINE_RE = re.compile(
-    r"(\d{1,2})\s*(?:er)?\s+([a-zéû]+)", re.IGNORECASE
-)
+_ABSOLUTE_DEADLINE_RE = re.compile(r"(\d{1,2})\s*(?:er)?\s+([a-zéû]+)", re.IGNORECASE)
 
 
 def _coerce_deadline(v: Any) -> str:
@@ -151,6 +162,7 @@ logger = logging.getLogger("AgriConnect.Forms")
 @dataclass(frozen=True)
 class SlotSpec:
     """One piece of information to collect from the user."""
+
     name: str
     label: str
     prompt: str
@@ -164,6 +176,7 @@ class SlotSpec:
 @dataclass(frozen=True)
 class FormSpec:
     """Declarative definition of a multi-step conversational form."""
+
     form_id: str
     title: str
     slots: Sequence[SlotSpec]
@@ -178,6 +191,7 @@ class FormSpec:
 @dataclass
 class FormStepResult:
     """Returned by run_form_step — ready to merge into agent state."""
+
     patch: Dict[str, Any] = field(default_factory=dict)
     is_complete: bool = False
     summary: str = ""
@@ -281,7 +295,9 @@ def run_form_step(
 
     if current_step and current_step not in ("CONFIRMING", "COMPLETE") and extracted:
         allowed_keys = {current_step}
-        step_slot = next((slot for slot in spec.slots if slot.name == current_step), None)
+        step_slot = next(
+            (slot for slot in spec.slots if slot.name == current_step), None
+        )
         if step_slot:
             allowed_keys.update(str(alias) for alias in step_slot.aliases)
         # Le slot "quantité" est presque toujours répondu avec son unité dans
@@ -332,7 +348,9 @@ def run_form_step(
             existing_data[unit_slot_name] = unit_from_text
         else:
             # Livestock (poussins, moutons…) are counted per head, not weighed.
-            product_name = existing_data.get("product") or existing_data.get("product_name")
+            product_name = existing_data.get("product") or existing_data.get(
+                "product_name"
+            )
             existing_data[unit_slot_name] = default_unit_for_product(product_name)
 
     # ── 2. Find first missing required slot ─────────────────────────
@@ -359,7 +377,8 @@ def run_form_step(
                     "confirmation_summary": summary,
                     "waiting_for_confirmation": True,
                     "status": "WAITING_CONFIRMATION",
-                    "final_response": summary + "\n\nConfirmez-vous ces informations ? (Oui/Non)",
+                    "final_response": summary
+                    + "\n\nConfirmez-vous ces informations ? (Oui/Non)",
                     "ag_ui_component": {
                         "lc_type": "constructor",
                         "id": ["ag_ui", "FormConfirmation"],
@@ -399,7 +418,9 @@ def run_form_step(
 
     logger.info(
         "[Form:%s] Asking for slot '%s' %s",
-        spec.form_id, missing_slot.name, progress,
+        spec.form_id,
+        missing_slot.name,
+        progress,
     )
 
     return FormStepResult(

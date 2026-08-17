@@ -39,7 +39,7 @@ async def render_error(ctx: RenderContext) -> Dict[str, Any]:
 
     goal_label = (INTENT_CONFIG.get(ctx.goal or "") or {}).get("label", "")
     if goal_label:
-        text_output += "\n\nVous pouvez réessayer en reformulant ou dire \"annuler\"."
+        text_output += '\n\nVous pouvez réessayer en reformulant ou dire "annuler".'
 
     return {
         "final_response": text_output,
@@ -52,27 +52,40 @@ async def render_recovery(ctx: RenderContext) -> Dict[str, Any]:
     retry_count = int(state.get("retry_count") or 0)
     retry_next = min(retry_count + 1, _RECOVERY_MAX_RETRIES)
 
-    field = state.get("last_missing_field") or ((state.get("missing_fields") or [None])[0])
+    field = (
+        state.get("last_missing_field") or ((state.get("missing_fields") or [None])[0])
+    )
     if not field:
         form_step = state.get("form_step")
         if form_step not in (None, "", "CONFIRMING", "COMPLETE"):
             field = form_step
     if not field:
         expected_input = str(state.get("expected_input") or "").strip().lower()
-        if expected_input and expected_input not in {"none", "confirmation", "selection"}:
+        if expected_input and expected_input not in {
+            "none",
+            "confirmation",
+            "selection",
+        }:
             field = expected_input
 
     label = label_for_field(goal or "", field)
     goal_label = (
-        (INTENT_CONFIG.get(goal or "") or {}).get("label", (goal or "").replace("_", " ").lower())
-        if goal else "votre opération"
+        (INTENT_CONFIG.get(goal or "") or {}).get(
+            "label", (goal or "").replace("_", " ").lower()
+        )
+        if goal
+        else "votre opération"
     )
-    clean_field = str(field).replace("_mentioned", "").replace("_for_sale", "") if field else ""
-    business_reason = FIELD_BUSINESS_REASON.get(field or "", "") or FIELD_BUSINESS_REASON.get(clean_field, "")
+    clean_field = (
+        str(field).replace("_mentioned", "").replace("_for_sale", "") if field else ""
+    )
+    business_reason = FIELD_BUSINESS_REASON.get(
+        field or "", ""
+    ) or FIELD_BUSINESS_REASON.get(clean_field, "")
 
     if retry_count >= _RECOVERY_MAX_RETRIES:
         text_output = (
-            f"{ctx.salutation}Pas de souci ! L'opération \"{goal_label}\" est mise en pause. "
+            f'{ctx.salutation}Pas de souci ! L\'opération "{goal_label}" est mise en pause. '
             "Vous pourrez la reprendre à tout moment. Que puis-je faire d'autre pour vous ?"
         )
     else:
@@ -88,8 +101,12 @@ async def render_recovery(ctx: RenderContext) -> Dict[str, Any]:
         # même façon : reconnaître ce que l'utilisateur a dit avant de
         # rejouer la question, plutôt que le même texte figé en boucle. Voir
         # [[precommande-architecture-consolidation-2026-08]].
-        user_text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
-        note = await llm_deviation_reply(ctx.mc_runtime, user_text, f"répondre à : {label}")
+        user_text = str(
+            state.get("normalized_text") or state.get("user_query") or ""
+        ).strip()
+        note = await llm_deviation_reply(
+            ctx.mc_runtime, user_text, f"répondre à : {label}"
+        )
         if note:
             text_output = f"{note}\n\n{text_output}"
     return {
@@ -111,8 +128,12 @@ async def render_interruption(ctx: RenderContext) -> Dict[str, Any]:
     current_goal = str(state.get("current_goal") or "").upper().strip()
     expected = str(state.get("expected_input") or "").upper().strip()
 
-    suspended_label = (INTENT_CONFIG.get(suspended) or {}).get("label") if suspended else ""
-    current_label = (INTENT_CONFIG.get(current_goal) or {}).get("label") if current_goal else ""
+    suspended_label = (
+        (INTENT_CONFIG.get(suspended) or {}).get("label") if suspended else ""
+    )
+    current_label = (
+        (INTENT_CONFIG.get(current_goal) or {}).get("label") if current_goal else ""
+    )
 
     expected_hint = ""
     if expected == "SELECTION":
@@ -163,7 +184,10 @@ async def render_clarification(ctx: RenderContext) -> Dict[str, Any]:
     state, salutation = ctx.state, ctx.salutation
     precomputed = state.get("final_response")
     if precomputed:
-        return {"final_response": precomputed, "ag_ui_component": state.get("ag_ui_component")}
+        return {
+            "final_response": precomputed,
+            "ag_ui_component": state.get("ag_ui_component"),
+        }
     turn = int(state.get("turn_count") or 0)
 
     if turn <= 1:
@@ -183,7 +207,11 @@ async def render_clarification(ctx: RenderContext) -> Dict[str, Any]:
         # lieu de faire comme si la conversation venait de commencer. Voir
         # [[market-coach-turn-boundary-state]].
         terminated_goal = str(state.get("last_terminated_goal") or "").upper().strip()
-        terminated_label = (INTENT_CONFIG.get(terminated_goal) or {}).get("label") if terminated_goal else ""
+        terminated_label = (
+            (INTENT_CONFIG.get(terminated_goal) or {}).get("label")
+            if terminated_goal
+            else ""
+        )
 
         if terminated_label:
             fallback_text = (

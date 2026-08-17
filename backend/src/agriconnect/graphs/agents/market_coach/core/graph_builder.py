@@ -18,31 +18,21 @@ pédagogique via LLM et court-circuite vers response_strategy.
 Le `semantic_disambiguation` court-circuite vers `response_strategy` QUE si
 l'intention LLM est ambiguë ET qu'un déclencheur lexical matche.
 """
+
 from __future__ import annotations
 
 import asyncio
-import sys
 import logging
-import uuid
 from functools import partial
 from typing import Any, Dict, List, Optional
 
-from langgraph.graph import END, StateGraph
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, StateGraph
 
-from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.utils import (
-    MarketRuntime,
-    build_runtime,
-    build_runtime_from_session,
-    _safe_node,
-)
-from agriconnect.graphs.agents.market_coach.nodes.role_guard import make_role_guard
-from agriconnect.graphs.roles import normalize_role
-
-from agriconnect.graphs.agents.market_coach.core.router import get_domain_router
 from agriconnect.graphs.agents.market_coach.core.goals import BUYER_CART_GOALS
 from agriconnect.graphs.agents.market_coach.core.policies import get_fast_path_policy
+from agriconnect.graphs.agents.market_coach.core.router import get_domain_router
+from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
 from agriconnect.graphs.agents.market_coach.flows.buyer.flow import (
     cart_management,
     negotiation_gate,
@@ -50,34 +40,61 @@ from agriconnect.graphs.agents.market_coach.flows.buyer.flow import (
 from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
     order_tracking_resolver,
 )
-from agriconnect.graphs.agents.market_coach.flows.producer.farm_logic import ensure_farm_node
-from agriconnect.graphs.agents.market_coach.flows.common.onboarding import onboarding_node
-
+from agriconnect.graphs.agents.market_coach.flows.common.onboarding import (
+    onboarding_node,
+)
+from agriconnect.graphs.agents.market_coach.flows.producer.farm_logic import (
+    ensure_farm_node,
+)
 from agriconnect.graphs.agents.market_coach.interpreter.routing import (
     goal_planner,
     make_input_interpreter,
 )
-from agriconnect.graphs.agents.market_coach.interpreter.strategy import response_strategy
-
-from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
-from agriconnect.graphs.agents.market_coach.nodes.cognitive import cognitive_guard, cognitive_orchestrator
-from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import confirmation_gate
-from agriconnect.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
-from agriconnect.graphs.agents.market_coach.nodes.input_normalizer import input_normalizer
-from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
-from agriconnect.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
+from agriconnect.graphs.agents.market_coach.interpreter.strategy import (
+    response_strategy,
+)
+from agriconnect.graphs.agents.market_coach.nodes.clarification import (
+    clarification_node,
+)
 from agriconnect.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
-from agriconnect.graphs.agents.market_coach.nodes.response_handlers import final_response
+from agriconnect.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
+from agriconnect.graphs.agents.market_coach.nodes.cognitive import (
+    cognitive_guard,
+    cognitive_orchestrator,
+)
+from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+    confirmation_gate,
+)
+from agriconnect.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
+from agriconnect.graphs.agents.market_coach.nodes.input_normalizer import (
+    input_normalizer,
+)
+from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
+from agriconnect.graphs.agents.market_coach.nodes.response_handlers import (
+    final_response,
+)
+from agriconnect.graphs.agents.market_coach.nodes.role_guard import make_role_guard
 from agriconnect.graphs.agents.market_coach.nodes.routing import (
     _route_after_confirmation,
     _route_after_executor,
     _route_after_resolver,
     _route_after_security,
 )
-from agriconnect.graphs.agents.market_coach.nodes.security_moderation import security_moderation
-from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import semantic_disambiguation
+from agriconnect.graphs.agents.market_coach.nodes.security_moderation import (
+    security_moderation,
+)
+from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import (
+    semantic_disambiguation,
+)
 from agriconnect.graphs.agents.market_coach.nodes.ui_engine import ui_engine
 from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+from agriconnect.graphs.agents.market_coach.utils import (
+    MarketRuntime,
+    _safe_node,
+    build_runtime,
+    build_runtime_from_session,
+)
+from agriconnect.graphs.roles import normalize_role
 
 logger = logging.getLogger("AgriConnect.Market.GraphBuilder")
 
@@ -187,7 +204,9 @@ def build_graph(
 
     if mc_runtime is None:
         if mcp_session is not None:
-            mc_runtime = build_runtime_from_session(llm_client=llm_client, mcp_session=mcp_session)
+            mc_runtime = build_runtime_from_session(
+                llm_client=llm_client, mcp_session=mcp_session
+            )
         else:
             mc_runtime = build_runtime(llm_client=llm_client)
 
@@ -242,11 +261,13 @@ def build_graph(
     # Nœuds du tunnel transactionnel Acheteur — désormais TOUJOURS présents :
     # refonte double-rôle, tout utilisateur peut acheter ET vendre au sein de
     # la même conversation (plus de topologie de graphe conditionnée au rôle).
-    node_specs.extend([
-        ("cart_management", cart_management),
-        ("negotiation_gate", negotiation_gate),
-        ("order_tracking_node", order_tracking_resolver),
-    ])
+    node_specs.extend(
+        [
+            ("cart_management", cart_management),
+            ("negotiation_gate", negotiation_gate),
+            ("order_tracking_node", order_tracking_resolver),
+        ]
+    )
 
     for name, fn in node_specs:
         workflow.add_node(name, partial(_safe_node(fn, name), mc_runtime=mc_runtime))
@@ -271,7 +292,7 @@ def build_graph(
     )
 
     workflow.add_edge("cognitive_guard", "cognitive_orchestrator")
-    
+
     workflow.add_conditional_edges(
         "cognitive_orchestrator",
         _route_after_cognitive,
@@ -281,7 +302,10 @@ def build_graph(
     workflow.add_conditional_edges(
         "clarification_node",
         _route_after_clarification,
-        {"to_disambiguation": "semantic_disambiguation", "to_strategy": "response_strategy"},
+        {
+            "to_disambiguation": "semantic_disambiguation",
+            "to_strategy": "response_strategy",
+        },
     )
 
     workflow.add_conditional_edges(
@@ -313,7 +337,9 @@ def build_graph(
         "to_order_tracking": "order_tracking_node",
     }
 
-    workflow.add_conditional_edges("validator", route_after_validator, validator_targets)
+    workflow.add_conditional_edges(
+        "validator", route_after_validator, validator_targets
+    )
 
     # Tous les nœuds buyer doivent passer par ui_engine pour convertir
     # pending_menu → ag_ui_component (sinon pas de mapping/candidats).
@@ -324,7 +350,11 @@ def build_graph(
     workflow.add_conditional_edges(
         "context_resolver",
         _route_after_resolver,
-        {"to_confirmation": "confirmation_gate", "to_strategy": "ui_engine", "to_farm_guard": "ensure_farm_node"},
+        {
+            "to_confirmation": "confirmation_gate",
+            "to_strategy": "ui_engine",
+            "to_farm_guard": "ensure_farm_node",
+        },
     )
 
     # ui_engine transforme pending_menu → ag_ui_component puis passe à response_strategy
@@ -356,7 +386,6 @@ def build_graph(
 
 __all__ = ["build_graph"]
 
-import asyncio
 
 COMMAND_TEST_PHONE = "+22601479800"
 DEFAULT_REAL_DIALOG: List[str] = [
@@ -437,7 +466,13 @@ class DemoRuntime:
             # supplémentaire, farm_id injecté directement dans transaction_payload).
             return {
                 "status": "success",
-                "data": [{"id": "farm-demo-01", "name": "Ferme Démo", "location": "Bobo-Dioulasso"}],
+                "data": [
+                    {
+                        "id": "farm-demo-01",
+                        "name": "Ferme Démo",
+                        "location": "Bobo-Dioulasso",
+                    }
+                ],
             }
         if tool_name == "get_or_create_farm":
             return {"status": "success", "id": "farm-demo-01", "name": "Ferme Démo"}
@@ -445,7 +480,10 @@ class DemoRuntime:
             return {
                 "status": "success",
                 "message": f"✅ {kwargs.get('name') or kwargs.get('product_name')} publié sur le marché.",
-                "data": {"id": "prod-demo-01", "name": kwargs.get("name") or kwargs.get("product_name")},
+                "data": {
+                    "id": "prod-demo-01",
+                    "name": kwargs.get("name") or kwargs.get("product_name"),
+                },
             }
         if tool_name == "declare_future_production":
             return {
@@ -490,7 +528,8 @@ async def test_onboarding_flow() -> None:
             print(f"Réponse agent : {final_state.get('final_response')}")
 
             if step == expected_step or (
-                expected_step == "COMPLETED" and str(final_state.get("status")).upper() == "COMPLETED"
+                expected_step == "COMPLETED"
+                and str(final_state.get("status")).upper() == "COMPLETED"
             ):
                 print(f"✅ Étape {step} validée.")
             else:
@@ -504,11 +543,12 @@ async def demo_buyer_purchase_flow() -> None:
 
     from agriconnect.graphs.agents.market_coach.flows.buyer.flow import (
         _create_preorder,
-        build_product_selection_menu,
     )
 
     def _log(title: str, result: Dict[str, Any]) -> None:
-        print(f"\n[{title}] status={result.get('status')} strategy={result.get('response_strategy')}")
+        print(
+            f"\n[{title}] status={result.get('status')} strategy={result.get('response_strategy')}"
+        )
         if result.get("final_response"):
             print(result["final_response"])
         if result.get("pending_menu"):
@@ -528,9 +568,15 @@ async def demo_buyer_purchase_flow() -> None:
     _log("1. Ajout panier (résolution produit)", cart_result)
 
     # Step 1b: Simulate multi-vendor selection (demo)
-    if state.get("vendor_selection_context") and not state["vendor_selection_context"].get("__reset__"):
+    if state.get("vendor_selection_context") and not state[
+        "vendor_selection_context"
+    ].get("__reset__"):
         print("\n[1b] Multi-vendor menu detected — simulating selection of vendor #1")
-        state["transaction_payload"] = {"selection_index": 1, "product": "maïs blanc", "quantity": 50}
+        state["transaction_payload"] = {
+            "selection_index": 1,
+            "product": "maïs blanc",
+            "quantity": 50,
+        }
         state["current_goal"] = "BUYER_ADD_TO_CART"
         cart_result2 = await cart_management(state, runtime)
         state.update(cart_result2)
@@ -567,7 +613,9 @@ async def demo_buyer_purchase_flow() -> None:
     _log("4. Ouverture négociation", neg_open)
 
     # Step 5: View offers
-    negotiation_state["transaction_payload"] = {"resolved_id": "NEGOTIATION_VIEW_OFFERS"}
+    negotiation_state["transaction_payload"] = {
+        "resolved_id": "NEGOTIATION_VIEW_OFFERS"
+    }
     neg_offers = await negotiation_gate(negotiation_state, runtime)
     negotiation_state.update(neg_offers)
     _log("5. Consultation offres", neg_offers)
@@ -585,7 +633,9 @@ async def demo_buyer_purchase_flow() -> None:
     _log("7. Soumission contre-offre", neg_submit)
 
     # Step 8: Accept a bid
-    negotiation_state["transaction_payload"] = {"resolved_id": "NEGOTIATION_VIEW_OFFERS"}
+    negotiation_state["transaction_payload"] = {
+        "resolved_id": "NEGOTIATION_VIEW_OFFERS"
+    }
     neg_offers2 = await negotiation_gate(negotiation_state, runtime)
     negotiation_state.update(neg_offers2)
     negotiation_state["transaction_payload"] = {"bid_id": "bid-001"}
@@ -618,26 +668,56 @@ async def run_command_logic_test_suite() -> None:
 
     cart_result = await cart_management(state, runtime)
     state.update(cart_result)
-    test_results.append({"label": "Cart → sélection produit", "result": cart_result, "success": _is_success_status(cart_result)})
+    test_results.append(
+        {
+            "label": "Cart → sélection produit",
+            "result": cart_result,
+            "success": _is_success_status(cart_result),
+        }
+    )
 
-    if state.get("vendor_selection_context") and not state["vendor_selection_context"].get("__reset__"):
-        state["transaction_payload"] = {"selection_index": 1, "product": "maïs blanc", "quantity": 50}
+    if state.get("vendor_selection_context") and not state[
+        "vendor_selection_context"
+    ].get("__reset__"):
+        state["transaction_payload"] = {
+            "selection_index": 1,
+            "product": "maïs blanc",
+            "quantity": 50,
+        }
         state["current_goal"] = "BUYER_ADD_TO_CART"
         cart_result2 = await cart_management(state, runtime)
         state.update(cart_result2)
-        test_results.append({"label": "Cart → choix vendeur", "result": cart_result2, "success": _is_success_status(cart_result2)})
+        test_results.append(
+            {
+                "label": "Cart → choix vendeur",
+                "result": cart_result2,
+                "success": _is_success_status(cart_result2),
+            }
+        )
 
     state["current_goal"] = "BUYER_PREORDER_INIT"
     state["transaction_payload"] = {}
     draft_result = await _create_preorder(state, runtime)
     state.update(draft_result)
-    test_results.append({"label": "Précommande brouillon", "result": draft_result, "success": _is_success_status(draft_result)})
+    test_results.append(
+        {
+            "label": "Précommande brouillon",
+            "result": draft_result,
+            "success": _is_success_status(draft_result),
+        }
+    )
 
     state["current_goal"] = "BUYER_PREORDER_CONFIRM"
     state["transaction_payload"] = {"resolved_id": "PREORDER_CONFIRM"}
     confirm_result = await _create_preorder(state, runtime)
     state.update(confirm_result)
-    test_results.append({"label": "Précommande confirmation", "result": confirm_result, "success": _is_success_status(confirm_result)})
+    test_results.append(
+        {
+            "label": "Précommande confirmation",
+            "result": confirm_result,
+            "success": _is_success_status(confirm_result),
+        }
+    )
 
     negotiation_state: Dict[str, Any] = {
         "user_phone": phone,
@@ -652,29 +732,63 @@ async def run_command_logic_test_suite() -> None:
 
     neg_open = await negotiation_gate(negotiation_state, runtime)
     negotiation_state.update(neg_open)
-    test_results.append({"label": "Négociation ouverture", "result": neg_open, "success": _is_success_status(neg_open)})
+    test_results.append(
+        {
+            "label": "Négociation ouverture",
+            "result": neg_open,
+            "success": _is_success_status(neg_open),
+        }
+    )
 
-    negotiation_state["transaction_payload"] = {"resolved_id": "NEGOTIATION_VIEW_OFFERS"}
+    negotiation_state["transaction_payload"] = {
+        "resolved_id": "NEGOTIATION_VIEW_OFFERS"
+    }
     neg_offers = await negotiation_gate(negotiation_state, runtime)
     negotiation_state.update(neg_offers)
-    test_results.append({"label": "Négociation – offres", "result": neg_offers, "success": _is_success_status(neg_offers)})
+    test_results.append(
+        {
+            "label": "Négociation – offres",
+            "result": neg_offers,
+            "success": _is_success_status(neg_offers),
+        }
+    )
 
     negotiation_state["transaction_payload"] = {"resolved_id": "NEGOTIATION_COUNTER"}
     neg_counter = await negotiation_gate(negotiation_state, runtime)
     negotiation_state.update(neg_counter)
-    test_results.append({"label": "Négociation – demande contre-offre", "result": neg_counter, "success": _is_success_status(neg_counter)})
+    test_results.append(
+        {
+            "label": "Négociation – demande contre-offre",
+            "result": neg_counter,
+            "success": _is_success_status(neg_counter),
+        }
+    )
 
     negotiation_state["transaction_payload"] = {"price": 260}
     neg_submit = await negotiation_gate(negotiation_state, runtime)
     negotiation_state.update(neg_submit)
-    test_results.append({"label": "Négociation – soumission prix", "result": neg_submit, "success": _is_success_status(neg_submit)})
+    test_results.append(
+        {
+            "label": "Négociation – soumission prix",
+            "result": neg_submit,
+            "success": _is_success_status(neg_submit),
+        }
+    )
 
-    negotiation_state["transaction_payload"] = {"resolved_id": "NEGOTIATION_VIEW_OFFERS"}
+    negotiation_state["transaction_payload"] = {
+        "resolved_id": "NEGOTIATION_VIEW_OFFERS"
+    }
     neg_offers2 = await negotiation_gate(negotiation_state, runtime)
     negotiation_state.update(neg_offers2)
     negotiation_state["transaction_payload"] = {"bid_id": "bid-001"}
     neg_accept = await negotiation_gate(negotiation_state, runtime)
-    test_results.append({"label": "Négociation – acceptation offre", "result": neg_accept, "success": _is_success_status(neg_accept)})
+    test_results.append(
+        {
+            "label": "Négociation – acceptation offre",
+            "result": neg_accept,
+            "success": _is_success_status(neg_accept),
+        }
+    )
 
     print("\n=== RAPPORT TEST LOGIQUE COMMANDE ===")
     global_success = True
@@ -682,13 +796,17 @@ async def run_command_logic_test_suite() -> None:
         success = entry["success"]
         result = entry["result"]
         status = result.get("status")
-        print(f"[{entry['label']}] {'✅' if success else '❌'} status={status} strategy={result.get('response_strategy')}")
+        print(
+            f"[{entry['label']}] {'✅' if success else '❌'} status={status} strategy={result.get('response_strategy')}"
+        )
         if not success:
             global_success = False
             print(f"   ↪ Détails: {result}")
 
     if global_success:
-        print("✅ Tous les scénarios critiques de commande ont abouti sans erreur (runtime démo).")
+        print(
+            "✅ Tous les scénarios critiques de commande ont abouti sans erreur (runtime démo)."
+        )
     else:
         print("❌ Des erreurs ont été détectées — inspecter les logs ci-dessus.")
 
@@ -713,6 +831,7 @@ async def run_manual_smoke_tests() -> None:
 # contrats Pydantic (Phase 2), auto-provisioning de ferme, confirmation
 # explicite, dispatch registry → domain service → outil MCP, et rendu
 # SUCCESS (Phase 3, `nodes/rendering/`).
+
 
 async def _run_producer_write_flow(
     runtime: "DemoRuntime",
@@ -748,7 +867,11 @@ async def _run_producer_write_flow(
     # 2. context_resolver (producer) — auto-résolution farm_id / IDs différés.
     r = await producer_context_resolver(state, runtime)
     state.update(r)
-    if str(state.get("status") or "").upper() in {"WAITING_INPUT", "ERROR", "COMPLETED"}:
+    if str(state.get("status") or "").upper() in {
+        "WAITING_INPUT",
+        "ERROR",
+        "COMPLETED",
+    }:
         return state
 
     # 3. ensure_farm_node — filet WRITE (no-op si farm_id déjà résolu à l'étape 2).
@@ -820,9 +943,13 @@ async def run_producer_creation_test_suite() -> None:
     )
     assert publish_state.get("response_strategy") == "SUCCESS"
     assert publish_state.get("selected_tool") == "create_product"
-    assert publish_state.get("transaction_payload") == {}, "payload doit être purgé après succès"
-    print(f"[SALES_PUBLISH_PRODUCT] ✅ tool={publish_state.get('selected_tool')} "
-          f"réponse={publish_state.get('final_response')!r}")
+    assert publish_state.get("transaction_payload") == {}, (
+        "payload doit être purgé après succès"
+    )
+    print(
+        f"[SALES_PUBLISH_PRODUCT] ✅ tool={publish_state.get('selected_tool')} "
+        f"réponse={publish_state.get('final_response')!r}"
+    )
 
     future_state = await demo_producer_declare_future_production_flow()
     assert future_state.get("status") == "COMPLETED", (
@@ -834,13 +961,17 @@ async def run_producer_creation_test_suite() -> None:
     # `declare_future_production` prend un `payload` imbriqué (voir domain/agro.py
     # ::AgronomyService.declare_crop_cycle) — farm_id y est injecté par
     # producer_context_resolver._resolve_default_farm, PAS au 1er niveau des args.
-    future_tool_payload = (future_state.get("selected_tool_args") or {}).get("payload") or {}
+    future_tool_payload = (future_state.get("selected_tool_args") or {}).get(
+        "payload"
+    ) or {}
     assert future_tool_payload.get("farm_id") == "farm-demo-01", (
         "farm_id doit être auto-résolu (1 seule ferme) sans intervention utilisateur, "
         f"obtenu tool_args={future_state.get('selected_tool_args')}"
     )
-    print(f"[DECLARE_CROP_CYCLE] ✅ tool={future_state.get('selected_tool')} "
-          f"réponse={future_state.get('final_response')!r}")
+    print(
+        f"[DECLARE_CROP_CYCLE] ✅ tool={future_state.get('selected_tool')} "
+        f"réponse={future_state.get('final_response')!r}"
+    )
 
     # ── Garde-fou négatif : le contrat Pydantic (Phase 2) doit rejeter un
     # prix nul AVANT tout appel réseau — filet anti-hallucination LLM.
@@ -853,9 +984,13 @@ async def run_producer_creation_test_suite() -> None:
     assert invalid_state.get("status") == "WAITING_INPUT", (
         f"prix=0 doit être rejeté par le contrat, obtenu: {invalid_state.get('status')}"
     )
-    assert "price" in (invalid_state.get("missing_fields") or []), invalid_state.get("missing_fields")
-    print(f"[SALES_PUBLISH_PRODUCT/prix invalide] ✅ rejeté par le contrat Pydantic "
-          f"(re-demande: {invalid_state.get('missing_fields')})")
+    assert "price" in (invalid_state.get("missing_fields") or []), invalid_state.get(
+        "missing_fields"
+    )
+    print(
+        f"[SALES_PUBLISH_PRODUCT/prix invalide] ✅ rejeté par le contrat Pydantic "
+        f"(re-demande: {invalid_state.get('missing_fields')})"
+    )
 
     print("✅ Logique de création produit + production future validée bout-en-bout.")
 
@@ -872,6 +1007,7 @@ async def run_producer_creation_test_suite() -> None:
 # message de succès. Objectif : relecture humaine de l'UX (ton, concision,
 # français Burkina Faso), pas une assertion automatique.
 
+
 class _LiveLLMDemoRuntime(DemoRuntime):
     """DemoRuntime + accès au VRAI client LLM (Groq) pour voir les questions
     de coaching réellement générées, tout en gardant `call_db` stubbé (aucun
@@ -887,9 +1023,12 @@ class _LiveLLMDemoRuntime(DemoRuntime):
             self._llm_tried = True
             try:
                 from agriconnect.core.get_llm import get_llm
+
                 self._llm_cache = get_llm()
             except Exception as exc:
-                print(f"⚠️  LLM indisponible ({exc}) — bascule sur les réponses de secours statiques.")
+                print(
+                    f"⚠️  LLM indisponible ({exc}) — bascule sur les réponses de secours statiques."
+                )
                 self._llm_cache = None
         return self._llm_cache
 
@@ -902,7 +1041,10 @@ class _LiveLLMDemoRuntime(DemoRuntime):
 # naturel (pas l'ordre `field_priority` du validator) pour vérifier que
 # l'agent redemande bien SEULEMENT ce qui manque, dans un ordre cohérent.
 _FUTURE_PRODUCTION_TURNS = [
-    ("Bonjour, je vais avoir une récolte de sésame dans quelques mois", {"product": "Sésame"}),
+    (
+        "Bonjour, je vais avoir une récolte de sésame dans quelques mois",
+        {"product": "Sésame"},
+    ),
     ("Environ 200 kg je pense", {"quantity": 200, "unit": "KG"}),
     ("Je compte vendre ça à 300 FCFA le kilo", {"price": 300}),
     ("C'est une culture, pas de l'élevage", {"production_type": "CROP"}),
@@ -1010,8 +1152,10 @@ async def demo_producer_future_production_conversation() -> None:
     await _turn_boundary(state, runtime)
 
     print("\n" + "-" * 70)
-    print(f"Statut final : {executed_status} | stratégie : {executed_strategy} "
-          f"| outil exécuté : {executed_tool}")
+    print(
+        f"Statut final : {executed_status} | stratégie : {executed_strategy} "
+        f"| outil exécuté : {executed_tool}"
+    )
     print("=" * 70)
 
 

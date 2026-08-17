@@ -108,7 +108,7 @@ services/database/
 ```python
 _async_engine: Optional[AsyncEngine] = None
 _AsyncSessionLocal: Optional[async_sessionmaker] = None
-_engine_lock = threading.Lock()   # double-checked locking thread-safe
+_engine_lock = threading.Lock()  # double-checked locking thread-safe
 ```
 
 #### `init_db()`
@@ -144,7 +144,7 @@ Pattern snapshot-and-null : nullifie les globals **avant** d'appeler `dispose()`
 
 ```python
 async def close_db():
-    engine, _async_engine = _async_engine, None   # snapshot atomique
+    engine, _async_engine = _async_engine, None  # snapshot atomique
     if engine:
         await engine.dispose()
 ```
@@ -166,11 +166,17 @@ async def close_db():
 
 ```python
 class DatabaseEngine:
-    def engine(self)      -> AsyncEngine:       return _core_get_engine()
-    def sessionmaker(self) -> async_sessionmaker: return _core_get_sessionmaker()
-    def dispose(self)     -> Coroutine:          return _core_close_db()
+    def engine(self) -> AsyncEngine:
+        return _core_get_engine()
 
-engine = DatabaseEngine()   # singleton importable
+    def sessionmaker(self) -> async_sessionmaker:
+        return _core_get_sessionmaker()
+
+    def dispose(self) -> Coroutine:
+        return _core_close_db()
+
+
+engine = DatabaseEngine()  # singleton importable
 ```
 
 > **Ne pas créer de nouveau moteur ici.** L'erreur historique consistait à double-pooler (deux `create_async_engine`), épuisant les connexions sur un cluster Managed DB.
@@ -193,7 +199,9 @@ engine = DatabaseEngine()   # singleton importable
 #### `db_session_ctx`
 
 ```python
-db_session_ctx: ContextVar[Optional[AsyncSession]] = ContextVar("db_session_ctx", default=None)
+db_session_ctx: ContextVar[Optional[AsyncSession]] = ContextVar(
+    "db_session_ctx", default=None
+)
 ```
 
 Ce `ContextVar` est **le fil rouge** de toute la couche database, partagé entre
@@ -270,10 +278,16 @@ Python résout les méthodes dans cet ordre via MRO. Quand deux mixins ont une m
 Frozenset d'environ 25 noms de méthodes qui **ne commitent pas** après exécution (lectures pures). Exemple :
 
 ```python
-_READ_ONLY_METHODS = frozenset({
-    "get_user_by_phone", "search_products", "get_auctions",
-    "get_producer_orders", "get_account_status", ...
-})
+_READ_ONLY_METHODS = frozenset(
+    {
+        "get_user_by_phone",
+        "search_products",
+        "get_auctions",
+        "get_producer_orders",
+        "get_account_status",
+        ...,
+    }
+)
 ```
 
 #### `__getattribute__` — proxy pur, zéro logique transactionnelle
@@ -371,7 +385,7 @@ Convertit le tuple en dict standardisé :
         "can_buy": True,
         "can_deliver": delivery is not None,
         "is_admin": user.role == "ADMIN",
-    }
+    },
 }
 ```
 
@@ -423,12 +437,12 @@ Retourne une structure multi-niveau :
 {
     "farms": {
         "farm_uuid": {
-            "stocks": [...],          # Stock rows avec mouvements récents
-            "upcoming_cycles": [...]   # MarketOffer futures
+            "stocks": [...],  # Stock rows avec mouvements récents
+            "upcoming_cycles": [...],  # MarketOffer futures
         }
     },
-    "catalog": [...],                 # Tous les produits du producteur
-    "upcoming_cycles": [...]           # Agrégat global
+    "catalog": [...],  # Tous les produits du producteur
+    "upcoming_cycles": [...],  # Agrégat global
 }
 ```
 
@@ -492,9 +506,9 @@ Retourne `DIRECT` (catalogue stock disponible) + `FUTURE` (offres précommande) 
 
 ```python
 case(
-    (User.zone_id == buyer_zone_id, 1),          # même zone → priorité 1
+    (User.zone_id == buyer_zone_id, 1),  # même zone → priorité 1
     (Zone.parent_id == buyer_zone.parent_id, 2),  # zone parente → priorité 2
-    else_=3                                        # national → priorité 3
+    else_=3,  # national → priorité 3
 )
 ```
 
@@ -711,10 +725,14 @@ Pour `VERIFIED_ID` :
 #### Constantes
 
 ```python
-MAX_CANCELLATIONS = 3          # annulations avant blocage compte
-MAX_MODERATION_STRIKES = 3     # strikes avant bannissement
-DEFAULT_PROHIBITED_TERMS = {   # ~50 termes en ASCII folded (drogues, armes, etc.)
-    "cocaine", "drogue", "arme", "kalachnikov", ...
+MAX_CANCELLATIONS = 3  # annulations avant blocage compte
+MAX_MODERATION_STRIKES = 3  # strikes avant bannissement
+DEFAULT_PROHIBITED_TERMS = {  # ~50 termes en ASCII folded (drogues, armes, etc.)
+    "cocaine",
+    "drogue",
+    "arme",
+    "kalachnikov",
+    ...,
 }
 ```
 
@@ -824,7 +842,7 @@ Upsert PostgreSQL natif :
 ```python
 pg_insert(AgentContextMemory).values(...).on_conflict_do_update(
     index_elements=["user_id", "context_key"],
-    set_={"context_value": value, "updated_at": now}
+    set_={"context_value": value, "updated_at": now},
 )
 ```
 
@@ -876,9 +894,9 @@ Combine trois prédicats via OR :
 
 ```python
 or_(
-    func.similarity(column, term) >= threshold,    # similarité trigram
-    column.ilike(f"%{escape_like(term)}%"),        # contient
-    column.ilike(f"{escape_like(term)}%"),         # commence par
+    func.similarity(column, term) >= threshold,  # similarité trigram
+    column.ilike(f"%{escape_like(term)}%"),  # contient
+    column.ilike(f"{escape_like(term)}%"),  # commence par
 )
 ```
 
@@ -904,8 +922,15 @@ Utilisé en `ORDER BY` pour classer les résultats par pertinence après `fuzzy_
 
 ```python
 _LEAK_MARKERS = (
-    "constraint", "violates", "psycopg", "traceback",
-    "sqlalchemy", "asyncpg", "detail:", "column", "relation"
+    "constraint",
+    "violates",
+    "psycopg",
+    "traceback",
+    "sqlalchemy",
+    "asyncpg",
+    "detail:",
+    "column",
+    "relation",
 )
 ```
 
@@ -1008,9 +1033,9 @@ if has_active_orders:
     raise ValueError("Impossible de supprimer")
 elif has_any_past_orders:
     product.quantity_for_sale = 0
-    product.is_available = False   # soft delete
+    product.is_available = False  # soft delete
 else:
-    session.delete(product)        # hard delete
+    session.delete(product)  # hard delete
 ```
 
 ### Pattern 6 — Retry connexion sur perte
@@ -1023,9 +1048,9 @@ try:
 except Exception as exc:
     await _safe_rollback(session)
     if _is_connection_lost(exc) and attempt == 0:
-        await close_db()               # dispose + null engine
-        session_factory = get_sessionmaker()   # réinit
-        continue                        # 1 retry, nouvelle session
+        await close_db()  # dispose + null engine
+        session_factory = get_sessionmaker()  # réinit
+        continue  # 1 retry, nouvelle session
     ...
 ```
 

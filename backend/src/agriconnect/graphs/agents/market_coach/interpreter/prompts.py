@@ -13,8 +13,8 @@ du prompt système se fait là-bas. (Un ancien double statique vivait ici et ava
 dérivé — sans `price_unit`, unités incomplètes — supprimé pour éviter le piège
 d'éditer une copie morte.)
 """
-from __future__ import annotations
 
+from __future__ import annotations
 
 # =====================================================================
 # 1. INPUT INTERPRETER — USER PROMPT (le SYSTEM prompt est dans routing.py)

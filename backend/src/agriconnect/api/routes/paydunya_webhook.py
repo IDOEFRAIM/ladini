@@ -12,6 +12,7 @@ la base. Le webhook lui-même ne lit ni ne fait confiance à ``response_code``,
 Répond toujours vite (< 200ms visé) : aucun travail DB/HTTP ici, tout est
 délégué à Celery — même pattern que ``twilio_webhook.py``.
 """
+
 from __future__ import annotations
 
 import logging
@@ -81,12 +82,16 @@ async def _handle_paydunya_ipn(request: Request) -> Response:
 
     invoice_token = _extract_invoice_token(payload)
     if not invoice_token:
-        logger.warning("PAYDUNYA_WEBHOOK_NO_TOKEN | keys=%s", list(payload.keys()) if isinstance(payload, dict) else type(payload))
+        logger.warning(
+            "PAYDUNYA_WEBHOOK_NO_TOKEN | keys=%s",
+            list(payload.keys()) if isinstance(payload, dict) else type(payload),
+        )
         return _ok()
 
     logger.info("PAYDUNYA_WEBHOOK_RECEIVED | token=%s", invoice_token)
 
     from agriconnect.workers.payments.paydunya_ipn_task import process_paydunya_ipn
+
     process_paydunya_ipn.delay(invoice_token)
 
     return _ok()

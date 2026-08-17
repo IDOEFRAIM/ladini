@@ -21,7 +21,6 @@ import logging
 from typing import Any, Awaitable, Callable, Dict
 
 from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.utils import normalize_slot_keys
 from agriconnect.graphs.agents.market_coach.nodes.rendering import (
     RenderContext,
     label_for_field,
@@ -38,6 +37,7 @@ from agriconnect.graphs.agents.market_coach.nodes.rendering import (
 from agriconnect.graphs.agents.market_coach.nodes.rendering.common import (
     resolve_goal_for_ui,
 )
+from agriconnect.graphs.agents.market_coach.utils import normalize_slot_keys
 
 logger = logging.getLogger("AgriConnect.Market.ResponseHandlers")
 
@@ -60,17 +60,25 @@ _POST_SUCCESS: Dict[str, _Handler] = {
     "INTERRUPTION_HANDLER": render_interruption,
 }
 
-_SUCCESS_EXCLUDED = frozenset({
-    "SELECTION_MENU", "ASK_MISSING_FIELD", "CONFIRMATION",
-    "CLARIFICATION", "ERROR", "ONBOARDING",
-})
+_SUCCESS_EXCLUDED = frozenset(
+    {
+        "SELECTION_MENU",
+        "ASK_MISSING_FIELD",
+        "CONFIRMATION",
+        "CLARIFICATION",
+        "ERROR",
+        "ONBOARDING",
+    }
+)
 
 
 def _select_handler(strategy: str, status: str) -> _Handler:
     handler = _PRE_SUCCESS.get(strategy)
     if handler is not None:
         return handler
-    if strategy == "SUCCESS" or (status == "COMPLETED" and strategy not in _SUCCESS_EXCLUDED):
+    if strategy == "SUCCESS" or (
+        status == "COMPLETED" and strategy not in _SUCCESS_EXCLUDED
+    ):
         return render_success
     return _POST_SUCCESS.get(strategy, render_clarification)
 

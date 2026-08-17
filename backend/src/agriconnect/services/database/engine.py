@@ -14,13 +14,16 @@ Conservé uniquement pour la compatibilité d'import (`from ...engine import eng
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from agriconnect.core.database import (
     close_db as _core_close_db,
+)
+from agriconnect.core.database import (
     get_engine as _core_get_engine,
+)
+from agriconnect.core.database import (
     get_sessionmaker as _core_get_sessionmaker,
 )
 
@@ -39,7 +42,9 @@ class DatabaseEngine:
     def sessionmaker(self) -> async_sessionmaker[AsyncSession]:
         sm = _core_get_sessionmaker()
         if sm is None:
-            raise RuntimeError("Sessionmaker indisponible ; assurez-vous que init_db() a tourné.")
+            raise RuntimeError(
+                "Sessionmaker indisponible ; assurez-vous que init_db() a tourné."
+            )
         return sm
 
     async def dispose(self) -> None:

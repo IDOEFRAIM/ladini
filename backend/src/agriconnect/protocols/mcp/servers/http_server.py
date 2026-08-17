@@ -52,6 +52,7 @@ retomberait exactement dans le problème que ce daemon est censé résoudre
 daemons + load balancer) préserve la propriété "un pool chaud unique par
 process persistant" tout en augmentant le débit total.
 """
+
 from __future__ import annotations
 
 import hmac
@@ -61,8 +62,8 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 
 from agriconnect.core.database import close_db
 from agriconnect.core.settings import settings
@@ -96,7 +97,9 @@ def require_auth(request: Request) -> None:
 
     header = str(request.headers.get("authorization") or "")
     prefix = "bearer "
-    provided = header[len(prefix):].strip() if header.lower().startswith(prefix) else ""
+    provided = (
+        header[len(prefix) :].strip() if header.lower().startswith(prefix) else ""
+    )
     if not provided:
         provided = str(request.headers.get("x-mcp-token") or "").strip()
 
@@ -104,9 +107,11 @@ def require_auth(request: Request) -> None:
         # Ne jamais préciser si c'est le jeton ou son absence qui pose problème.
         logger.warning(
             "MCP_HTTP_AUTH_DENIED | client=%s | path=%s",
-            getattr(request.client, "host", "?"), request.url.path,
+            getattr(request.client, "host", "?"),
+            request.url.path,
         )
         raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 # ---------------------------------------------------------------------------
 # Singleton — instancié UNE SEULE FOIS au chargement du module, comme
@@ -139,6 +144,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     Celery), réutilisé ici tel quel plutôt que dupliqué.
     """
     from sqlalchemy import text as _sql_text
+
     from agriconnect.core.database import get_engine
 
     logger.info("🚀 MCP HTTP daemon starting — warming DB pool...")
@@ -164,7 +170,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             # Ne bloque pas le démarrage du daemon : le premier vrai appel
             # ré-essaiera. Le /health endpoint reflète l'état réel.
-            logger.warning("Warm-up DB au démarrage du daemon échoué (non bloquant).", exc_info=True)
+            logger.warning(
+                "Warm-up DB au démarrage du daemon échoué (non bloquant).",
+                exc_info=True,
+            )
 
         logger.info("✅ MCP HTTP daemon ready — listening.")
         try:
@@ -190,7 +199,10 @@ app = FastAPI(
 @app.get("/health")
 async def health() -> dict[str, Any]:
     """Health-check (systemd, load balancer, supervision)."""
-    return {"status": "ok" if runtime.is_ready else "degraded", "ready": runtime.is_ready}
+    return {
+        "status": "ok" if runtime.is_ready else "degraded",
+        "ready": runtime.is_ready,
+    }
 
 
 @app.get("/tools", dependencies=[Depends(require_auth)])
@@ -221,14 +233,16 @@ async def call_tool(request: Request) -> JSONResponse:
     # rien révéler de son implémentation.
     try:
         body = json.loads(raw_body or b"{}")
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        raise HTTPException(status_code=400, detail="Corps JSON invalide.")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="Corps JSON invalide.") from exc
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Le corps doit être un objet JSON.")
 
     name = body.get("name")
     if not name or not isinstance(name, str):
-        raise HTTPException(status_code=400, detail="Champ 'name' manquant ou invalide.")
+        raise HTTPException(
+            status_code=400, detail="Champ 'name' manquant ou invalide."
+        )
 
     # `arguments` est déballé en **kwargs plus bas dans la chaîne : une valeur
     # non-dict (liste, chaîne...) provoquerait un TypeError opaque au lieu
@@ -237,7 +251,9 @@ async def call_tool(request: Request) -> JSONResponse:
     if arguments is None:
         arguments = {}
     if not isinstance(arguments, dict):
-        raise HTTPException(status_code=400, detail="Champ 'arguments' doit être un objet JSON.")
+        raise HTTPException(
+            status_code=400, detail="Champ 'arguments' doit être un objet JSON."
+        )
 
     try:
         result = await backend.call_tool(name=name, arguments=arguments)

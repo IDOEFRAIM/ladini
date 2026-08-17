@@ -3,6 +3,7 @@
 Bascule sur ``settings.MESSAGING_PROVIDER`` (voir ``core/settings.py``) —
 même flag que ``api/tasks.py`` pour le chemin conversationnel principal.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -41,7 +42,11 @@ class WhatsAppChannel:
     name = "WHATSAPP"
 
     def _provider(self) -> str:
-        return str(getattr(settings, "MESSAGING_PROVIDER", "") or "whatsapp_cloud").strip().lower()
+        return (
+            str(getattr(settings, "MESSAGING_PROVIDER", "") or "whatsapp_cloud")
+            .strip()
+            .lower()
+        )
 
     def is_configured(self) -> bool:
         if self._provider() == "twilio":
@@ -51,6 +56,7 @@ class WhatsAppChannel:
                 and str(settings.TWILIO_WHATSAPP_NUMBER or "").strip()
             )
         from agriconnect.services.whatsapp import cloud_api_client as wa
+
         return wa.is_configured()
 
     async def send(
@@ -68,19 +74,26 @@ class WhatsAppChannel:
 
         if self._provider() == "twilio":
             try:
-                return await asyncio.to_thread(self._send_sync_twilio, recipient_phone, body)
+                return await asyncio.to_thread(
+                    self._send_sync_twilio, recipient_phone, body
+                )
             except Exception as exc:  # pragma: no cover - dépend du réseau
-                logger.warning("Envoi WhatsApp (Twilio) échoué vers %s : %s", recipient_phone, exc)
+                logger.warning(
+                    "Envoi WhatsApp (Twilio) échoué vers %s : %s", recipient_phone, exc
+                )
                 return SendResult.failure(str(exc))
 
         try:
             from agriconnect.services.whatsapp import cloud_api_client as wa
+
             message_ids = await wa.send_text(recipient_phone, body)
             if not message_ids:
                 return SendResult.failure("send_failed")
             return SendResult.success(provider_ref=message_ids[-1])
         except Exception as exc:  # pragma: no cover - dépend du réseau
-            logger.warning("Envoi WhatsApp (Cloud API) échoué vers %s : %s", recipient_phone, exc)
+            logger.warning(
+                "Envoi WhatsApp (Cloud API) échoué vers %s : %s", recipient_phone, exc
+            )
             return SendResult.failure(str(exc))
 
     def _send_sync_twilio(self, phone: str, body: str) -> SendResult:

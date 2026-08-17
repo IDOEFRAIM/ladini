@@ -1,15 +1,16 @@
 """Shared utilities for MarketCoach action plugins."""
+
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 import logging
-
-logger = logging.getLogger("Agent.MarketCoach.actions")
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 from agriconnect.graphs.agents.market_coach.utils import (
     canonical_unit_label,
     is_success_response,
 )
+
+logger = logging.getLogger("Agent.MarketCoach.actions")
 
 _EMPTY_SLOT_VALUES = (None, "", [], {})
 
@@ -26,11 +27,7 @@ def require_phone(state: Mapping[str, Any]) -> str:
     """Extract the caller identity from the state."""
     phone = None
     if state:
-        phone = (
-            state.get("user_phone")
-            or state.get("user_id")
-            or state.get("phone")
-        )
+        phone = state.get("user_phone") or state.get("user_id") or state.get("phone")
     if not phone:
         raise ValueError("Missing required identity: user_phone")
     return str(phone)
@@ -60,11 +57,28 @@ _UNIT_TO_KG: Dict[str, float] = {
     "CHARRETTES": 250.0,
 }
 
-_NON_MASS_UNITS = frozenset({
-    "HEAD", "TETE", "TÊTES", "TETES", "HEADS",
-    "UNIT", "UNITE", "UNITÉ", "UNITES", "UNITÉS", "UNITS", "PIECE", "PIÈCE", "PIECES", "PIÈCES",
-    "L", "LITRE", "LITRES",
-})
+_NON_MASS_UNITS = frozenset(
+    {
+        "HEAD",
+        "TETE",
+        "TÊTES",
+        "TETES",
+        "HEADS",
+        "UNIT",
+        "UNITE",
+        "UNITÉ",
+        "UNITES",
+        "UNITÉS",
+        "UNITS",
+        "PIECE",
+        "PIÈCE",
+        "PIECES",
+        "PIÈCES",
+        "L",
+        "LITRE",
+        "LITRES",
+    }
+)
 
 
 def normalize_quantity_to_kg(qty: float, unit_raw: Any) -> Tuple[float, str]:
@@ -115,11 +129,15 @@ def is_update_mode(state: Mapping[str, Any]) -> bool:
     return bool(get_goal_metadata(state).get("update_mode"))
 
 
-def require_current_entity(state: Mapping[str, Any], *, intent: Optional[str] = None) -> Dict[str, Any]:
+def require_current_entity(
+    state: Mapping[str, Any], *, intent: Optional[str] = None
+) -> Dict[str, Any]:
     current_entity = state.get("current_entity") if isinstance(state, Mapping) else None
     if not isinstance(current_entity, Mapping) or not current_entity:
         intent_label = f" '{intent}'" if intent else ""
-        raise ValueError(f"Update intent{intent_label} requires a loaded current_entity snapshot.")
+        raise ValueError(
+            f"Update intent{intent_label} requires a loaded current_entity snapshot."
+        )
     return dict(current_entity)
 
 
@@ -145,8 +163,8 @@ def to_float(value: Any, *, field: str) -> Optional[float]:
         return None
     try:
         return float(str(value).replace(",", "."))
-    except (TypeError, ValueError):
-        raise ValueError(f"Valeur numérique invalide pour {field}: {value!r}")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Valeur numérique invalide pour {field}: {value!r}") from exc
 
 
 def _snapshot_to_payload(kind: str, snapshot: Mapping[str, Any]) -> Dict[str, Any]:
@@ -155,7 +173,9 @@ def _snapshot_to_payload(kind: str, snapshot: Mapping[str, Any]) -> Dict[str, An
     if kind_up == "PRODUCT":
         return {
             "product_id": snap.get("product_id") or snap.get("id"),
-            "product": snap.get("name") or snap.get("product") or snap.get("product_name"),
+            "product": snap.get("name")
+            or snap.get("product")
+            or snap.get("product_name"),
             "price": snap.get("price") or snap.get("price_fcfa"),
             "quantity": snap.get("quantity") or snap.get("quantity_for_sale"),
             "unit": snap.get("unit"),
@@ -164,7 +184,9 @@ def _snapshot_to_payload(kind: str, snapshot: Mapping[str, Any]) -> Dict[str, An
         return {
             "stock_id": snap.get("stock_id") or snap.get("id"),
             "farm_id": snap.get("farm_id"),
-            "product": snap.get("item_name") or snap.get("product_name") or snap.get("product"),
+            "product": snap.get("item_name")
+            or snap.get("product_name")
+            or snap.get("product"),
             "quantity": snap.get("quantity"),
             "unit": snap.get("unit"),
         }
@@ -179,7 +201,9 @@ def _snapshot_to_payload(kind: str, snapshot: Mapping[str, Any]) -> Dict[str, An
     if kind_up in {"ORDER", "PREORDER"}:
         return {
             "order_id": snap.get("order_id") or snap.get("id"),
-            "preorder_id": snap.get("preorder_id") or snap.get("order_id") or snap.get("id"),
+            "preorder_id": snap.get("preorder_id")
+            or snap.get("order_id")
+            or snap.get("id"),
             "status": snap.get("status"),
             "order_type": snap.get("order_type"),
         }
@@ -220,10 +244,18 @@ async def load_entity_snapshot(
     else:
         raise ValueError(f"Unsupported entity_kind: {entity_kind!r}")
 
-    logger.info("[StatefulUpdate] loading snapshot tool=%s kind=%s goal=%s", tool_name, kind, goal_up)
+    logger.info(
+        "[StatefulUpdate] loading snapshot tool=%s kind=%s goal=%s",
+        tool_name,
+        kind,
+        goal_up,
+    )
     result = await mc_runtime.call_db(tool_name, **kwargs)
     if not is_success_response(result):
-        msg = result.get("message") or f"Impossible de charger l'état actuel ({tool_name})."
+        msg = (
+            result.get("message")
+            or f"Impossible de charger l'état actuel ({tool_name})."
+        )
         return {
             "status": "ERROR",
             "validation_errors": ["snapshot_load_failed"],

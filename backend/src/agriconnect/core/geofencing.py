@@ -8,6 +8,7 @@ la fois côté webhook (rejet immédiat d'un point hors zone) et côté DB
 profondeur, puisque ces méthodes sont aussi des outils MCP appelables hors
 du webhook Twilio.
 """
+
 from __future__ import annotations
 
 BURKINA_FASO_LAT_MIN = 9.3

@@ -3,6 +3,7 @@
 Eliminates duplicated MCP/DB access patterns across Formation and Market agents.
 Provides resilient execution with automatic fallback (MCP → DB direct).
 """
+
 from __future__ import annotations
 
 import inspect
@@ -66,7 +67,8 @@ class DataGateway:
                     raise
                 logger.debug(
                     "Gateway MCP failed for '%s', falling back to DB: %s",
-                    method_name, mcp_exc,
+                    method_name,
+                    mcp_exc,
                 )
 
         # Fallback to direct DB
@@ -137,7 +139,10 @@ class DataGateway:
 
     def _build_context(self, kwargs: Dict[str, Any]) -> Optional[FarmerContext]:
         user_id = str(
-            kwargs.get("user_id") or kwargs.get("producer_id") or kwargs.get("buyer_id") or ""
+            kwargs.get("user_id")
+            or kwargs.get("producer_id")
+            or kwargs.get("buyer_id")
+            or ""
         ).strip()
         phone = str(kwargs.get("phone") or kwargs.get("user_phone") or "").strip()
         session_id = str(kwargs.get("session_id") or uuid.uuid4())

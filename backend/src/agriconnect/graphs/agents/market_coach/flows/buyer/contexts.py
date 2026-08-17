@@ -15,6 +15,7 @@ Design principles
 * ``from_state`` class-methods make extraction from the LangGraph state
   a one-liner; ``to_patch`` produces a clean state patch dict.
 """
+
 from __future__ import annotations
 
 import logging
@@ -36,6 +37,7 @@ def _is_reset(ctx: Optional[Dict[str, Any]]) -> bool:
 # ---------------------------------------------------------------------------
 # VendorSelectionState
 # ---------------------------------------------------------------------------
+
 
 class VendorSelectionState:
     """Manages the multi-vendor disambiguation step in the cart flow.
@@ -105,7 +107,8 @@ class VendorSelectionState:
         if not (1 <= idx <= len(vendors)):
             logger.warning(
                 "[VendorSelectionState] index=%d out of range (vendors=%d)",
-                idx, len(vendors),
+                idx,
+                len(vendors),
             )
             return None
         vendor = vendors[idx - 1]
@@ -113,7 +116,8 @@ class VendorSelectionState:
         self._raw["selected_vendor"] = vendor
         logger.info(
             "[VendorSelectionState] Vendor selected: %s (index=%d)",
-            vendor.get("vendor_name"), idx,
+            vendor.get("vendor_name"),
+            idx,
         )
         return vendor
 
@@ -147,6 +151,7 @@ class VendorSelectionState:
 # ---------------------------------------------------------------------------
 # PreorderPhase
 # ---------------------------------------------------------------------------
+
 
 class PreorderPhase:
     """Typed wrapper for the ``preorder_workflow`` state blob.
@@ -217,6 +222,7 @@ class PreorderPhase:
 # ---------------------------------------------------------------------------
 # NegotiationContext
 # ---------------------------------------------------------------------------
+
 
 class NegotiationContext:
     """Typed wrapper for the ``negotiation_context`` state blob.

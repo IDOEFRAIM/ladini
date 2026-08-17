@@ -15,8 +15,6 @@ Prérequis : extension `pg_trgm` + index GIN (voir `common.PERFORMANCE_INDEX_DDL
 
 from __future__ import annotations
 
-from typing import Any
-
 from sqlalchemy import ColumnElement, func, or_
 
 from agriconnect.services.database.common import escape_like
@@ -30,7 +28,9 @@ DEFAULT_SIMILARITY_THRESHOLD = 0.22
 _MIN_TRIGRAM_LEN = 2
 
 
-def fuzzy_match(column: ColumnElement, term: str, *, threshold: float = DEFAULT_SIMILARITY_THRESHOLD) -> ColumnElement:
+def fuzzy_match(
+    column: ColumnElement, term: str, *, threshold: float = DEFAULT_SIMILARITY_THRESHOLD
+) -> ColumnElement:
     """Prédicat de recherche floue sur `column` pour `term`.
 
     Combine (OR) trois signaux, du plus tolérant au plus strict :
@@ -66,7 +66,7 @@ def similarity_rank(column: ColumnElement, term: str):
     plus proches remontent en tête — l'agent lit alors le résultat le plus
     probable en premier.
     """
-    cleaned =   (term or "").strip()
+    cleaned = (term or "").strip()
     if not cleaned:
         return func.now()  # ordre neutre si pas de terme
     return func.similarity(column, cleaned).desc()

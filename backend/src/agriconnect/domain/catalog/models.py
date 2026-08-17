@@ -12,14 +12,16 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Numeric,
     String,
     Text,
-    Index,
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID, ARRAY as PG_ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import relationship
 
 from agriconnect.domain.orm_base import Base, _uuid4
@@ -27,16 +29,25 @@ from agriconnect.domain.orm_base import Base, _uuid4
 
 class Warehouse(Base):
     __tablename__ = "warehouses"
-    __table_args__ = (Index("warehouses_zone_idx", "zone_id"), {"schema": "marketplace"})
+    __table_args__ = (
+        Index("warehouses_zone_idx", "zone_id"),
+        {"schema": "marketplace"},
+    )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    id = Column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
     name = Column(String, nullable=False)
     type = Column(String, nullable=False)
     capacity = Column(Float)
     location = Column(String)
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class Farm(Base):
@@ -51,10 +62,14 @@ class Farm(Base):
     name = Column(String, nullable=False)
     location = Column(String)
     size = Column(Float)
-    producer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"), nullable=False)
+    producer_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"), nullable=False
+    )
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
     producer = relationship("Producer", back_populates="farms")
     stocks = relationship("Stock", back_populates="farm", cascade="all, delete-orphan")
@@ -75,10 +90,18 @@ class MarketOffer(Base):
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    producer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"), nullable=False)
+    id = Column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    producer_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"), nullable=False
+    )
     farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
-    sub_category_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.sub_categories.id"))
+    sub_category_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("governance.sub_categories.id")
+    )
 
     product_label = Column(String, nullable=False)
     production_type = Column(String, default="CROP", nullable=False)
@@ -98,7 +121,9 @@ class MarketOffer(Base):
     status = Column(String, default="DRAFT", nullable=False)
 
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
     producer = relationship("Producer", back_populates="offers")
     farm = relationship("Farm", back_populates="offers")
@@ -113,18 +138,32 @@ class Stock(Base):
     __tablename__ = "stocks"
     __table_args__ = {"schema": "marketplace"}
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"), index=True)
-    warehouse_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.warehouses.id"), index=True)
-    verified_by_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), index=True)
-    organization_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id"))
+    id = Column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    farm_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"), index=True
+    )
+    warehouse_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.warehouses.id"), index=True
+    )
+    verified_by_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), index=True
+    )
+    organization_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id")
+    )
     item_name = Column(String, nullable=False)
     quantity = Column(Numeric(14, 3), default=0, nullable=False)
     unit = Column(String, default="KG", nullable=False)
     type = Column(String, default="HARVEST", nullable=False)
     verified_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
     farm = relationship("Farm", back_populates="stocks")
 
@@ -137,8 +176,14 @@ class StockMovement(Base):
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    stock_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.stocks.id"), nullable=False)
+    id = Column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    stock_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.stocks.id"), nullable=False
+    )
     type = Column(String, nullable=False)
     quantity = Column(Numeric(14, 3), nullable=False)
     reason = Column(String)
@@ -153,14 +198,24 @@ class Batch(Base):
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    stock_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.stocks.id"), nullable=False)
-    organization_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id"), nullable=False)
+    id = Column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    stock_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.stocks.id"), nullable=False
+    )
+    organization_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id"), nullable=False
+    )
     batch_number = Column(String, unique=True, nullable=False)
     origin_farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"))
     quantity = Column(Numeric(14, 3), nullable=False)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class Expense(Base):
@@ -172,8 +227,14 @@ class Expense(Base):
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    farm_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"), nullable=False)
+    id = Column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    farm_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.farms.id"), nullable=False
+    )
     label = Column(String, nullable=False)
     amount = Column(Numeric(14, 2), nullable=False)
     category = Column(String, server_default="OTHER", nullable=False)
@@ -198,27 +259,37 @@ class Product(Base):
     short_code = Column(String, unique=True)
     name = Column(String, default="Produit", nullable=False)
     category_label = Column(String, nullable=False)
-    sub_category_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.sub_categories.id"))
+    sub_category_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("governance.sub_categories.id")
+    )
     local_names = Column(JSONB)
     description = Column(Text)
     price = Column(Numeric(12, 2), nullable=False)
     unit = Column(String, default="KG", nullable=False)
     quantity_for_sale = Column(Numeric(14, 3), default=0, nullable=False)
-    images = Column(PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]"))
+    images = Column(
+        PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]")
+    )
     audio_url = Column(String)
     quality_class = Column(String)
     min_order_quality = Column(String)
     packaging_type = Column(String)
     harvest_date = Column(DateTime)
     is_available = Column(Boolean, default=True, nullable=False)
-    producer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"), nullable=False)
+    producer_id = Column(
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"), nullable=False
+    )
     verified_at = Column(DateTime)
     verified_by_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
     producer = relationship("Producer", backref="products")
-    sub_category = relationship("SubCategory", primaryjoin="Product.sub_category_id == SubCategory.id")
+    sub_category = relationship(
+        "SubCategory", primaryjoin="Product.sub_category_id == SubCategory.id"
+    )
 
 
 __all__ = [

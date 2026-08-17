@@ -10,14 +10,62 @@ FROM ${API_IMAGE} AS runtime
 USER appuser
 WORKDIR /app/backend/src
 
+# tini hérité de l'image API (déjà installé + ENTRYPOINT) — Celery prefork
+# EN PARTICULIER a besoin d'un reaper PID 1 fiable : le process "celery
+# worker" est lui-même un parent qui fork N enfants (concurrency) ; si PID 1
+# ne reap pas correctement, un enfant prefork recyclé (--max-tasks-per-child)
+# ou tué peut laisser un zombie qui s'accumule sur la durée de vie longue du
+# conteneur.
+
 # Pas de port exposé (le worker ne sert pas de HTTP).
 # Healthcheck : ping applicatif Celery (le worker répond au broker).
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD celery -A agriconnect.api.celery_app inspect ping -d "celery@$(hostname)" || exit 1
 
-# --pool=solo/threads selon la charge ; concurrency piloté par l'orchestrateur
-# (l'orchestrateur garde ses connexions DB chaudes par process — cf. tasks.py).
-# On lance 1 process worker par conteneur → scaling horizontal via `--scale`.
+# --- Tuning Celery : charge 100% I/O-bound (appels LLM Groq, MCP HTTP,
+# webhooks WhatsApp/Twilio, requêtes DB via pgbouncer) — AUCUNE tâche
+# CPU-bound dans ce worker (pas de torch/embeddings synchrones dans le
+# hot-path Celery, voir workers/). Ça dicte tous les choix ci-dessous :
+#
+# --pool=prefork (PAS gevent/eventlet) : chaque process Celery `worker_init`
+#   ouvre SA PROPRE boucle asyncio persistante (voir api/tasks.py::_loop) et
+#   exécute chaque tâche via `run_until_complete` — un pool gevent/eventlet
+#   fait du monkey-patching coopératif qui ENTRE EN CONFLIT avec une boucle
+#   asyncio déjà présente dans le même process (deux runtimes de concurrence
+#   différents, pas composables sans pont dédié type `asyncio-gevent`). Le
+#   prefork isole aussi CHAQUE tâche dans un process séparé : si une tâche
+#   segfault sur un binding C foireux (ex: torch, pgvector), un seul child
+#   meurt, pas tout le worker.
+#
+# --concurrency=4 : PAS dimensionné sur les cœurs CPU (charge I/O-bound =
+#   la plupart du temps chaque process ATTEND un appel réseau, pas de calcul).
+#   Dimensionné plutôt sur (a) la mémoire dispo par conteneur — chaque child
+#   charge langgraph/langchain + pool DB chaud, budget ~350-500MB/enfant
+#   observé, donc 4 childs tient dans une limite mémoire de 2GB avec marge —
+#   et (b) le nombre de connexions DB qu'il ouvre (chaque child = 1 pool
+#   SQLAlchemy chaud, voir DB_POOL_SIZE/pgbouncer). PRÉFÉRER scaler par
+#   RÉPLICAS de conteneurs (`docker compose up --scale worker=N` / Swarm
+#   `deploy.replicas`) plutôt que de pousser concurrency très haut dans un
+#   seul conteneur : blast radius plus petit si OOM/crash, et redémarrage
+#   d'un conteneur ne perd que 4 tâches en vol (task_acks_late=True dans
+#   celery_app.py les fait de toute façon redéliverer, jamais perdues).
+#
+# --max-tasks-per-child=200 : recycle chaque process après 200 tâches — filet
+#   de sécurité contre les fuites mémoire lentes (objets LangChain/LangGraph,
+#   connexions fantômes) sur un process qui vit potentiellement des jours.
+# --max-memory-per-child=450000 (Ko, ~450MB) : filet INDÉPENDANT du nombre de
+#   tâches — tue+respawn un child dès qu'il dépasse ce seuil RSS, avant qu'il
+#   ne mette la pression sur les autres childs du même conteneur (et avant
+#   que le conteneur entier ne se fasse OOM-killer par le noyau, ce qui
+#   tuerait TOUS les childs d'un coup au lieu d'un seul).
+#
+# -Ofair : désactive l'optimisation "early ack" par défaut de prefork —
+#   combiné à `worker_prefetch_multiplier=1` (celery_app.py), garantit une
+#   distribution round-robin équitable des tâches entre les 4 enfants même
+#   quand certaines tâches (appel LLM lent) durent bien plus longtemps que
+#   d'autres. Sans ça, un enfant peut se retrouver à accumuler une file
+#   pendant qu'un autre est libre.
 CMD ["celery", "-A", "agriconnect.api.celery_app", "worker", \
-     "--loglevel=info", "--concurrency=4", "--pool=prefork", \
-     "--max-tasks-per-child=200"]
+     "--loglevel=info", "-Ofair", \
+     "--concurrency=4", "--pool=prefork", \
+     "--max-tasks-per-child=200", "--max-memory-per-child=450000"]
