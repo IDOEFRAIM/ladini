@@ -16,6 +16,9 @@ from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import
     UNIT_SYNONYMS as _CANONICAL_UNIT_SYNONYMS,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+    normalize_unit as _normalize_unit_impl,
+)
+from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
     normalize_unit_token as _normalize_unit_token_impl,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
@@ -140,6 +143,14 @@ def _sanitize_product_candidate(value: Any) -> Optional[str]:
             continue
         _meaningful.append(_tok)
     if _meaningful and all(t in _PRODUCTION_TYPE_WORDS for t in _meaningful):
+        return None
+    # Bug réel confirmé (2026-08-17) : "je veux 42 kg" (réponse à une
+    # question de QUANTITÉ, produit déjà connu de la conversation) a fait
+    # extraire "kg" comme produit — rien ici ne rejetait un token d'UNITÉ
+    # (kg/tonne/sac/panier/unité...) accepté comme nom de produit. Même
+    # principe que le rejet des mots de TYPE de production ci-dessus : une
+    # réponse qui n'est QU'un mot d'unité n'est jamais un nom de produit.
+    if _meaningful and all(_normalize_unit_impl(t) is not None for t in _meaningful):
         return None
     if any(tok in lowered for tok in _KNOWN_PRODUCT_KEYWORDS):
         return candidate

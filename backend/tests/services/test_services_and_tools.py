@@ -65,6 +65,22 @@ class TestConfirmationSummary:
     def test_unknown_goal_never_crashes(self):
         assert build_confirmation_summary("GOAL_INEXISTANT", {}).strip()
 
+    def test_unknown_goal_never_leaks_the_internal_constant_name(self):
+        """Bug réel confirmé (2026-08-18) : un mauvais aiguillage a fait
+        atteindre ce fallback avec goal="BUYER_REQUEST" (normalement
+        `handled_by_flow`, jamais censé passer par un récap générique) — le
+        récap affichait littéralement "Validation de l'opération :
+        BUYER_REQUEST", un nom de constante interne exposé tel quel à
+        l'utilisateur. Quel que soit le goal en entrée, son nom brut ne doit
+        JAMAIS apparaître dans le texte renvoyé."""
+        s = build_confirmation_summary("BUYER_REQUEST", {"product": "oignon"})
+        assert "BUYER_REQUEST" not in s
+        assert "oignon" in s
+
+    def test_unknown_goal_with_no_product_still_never_leaks_the_name(self):
+        s = build_confirmation_summary("SOME_UNMAPPED_GOAL", {})
+        assert "SOME_UNMAPPED_GOAL" not in s
+
     def test_procurement_create_request_shows_the_price_unit(self):
         """Régression production (2026-08) : le récap d'un appel d'offres
         affichait « 300 FCFA » sans unité — ambigu (par kg ? par tonne ?),

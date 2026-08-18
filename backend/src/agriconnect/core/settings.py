@@ -38,7 +38,22 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     # Modèle rapide/économique — nœuds d'infrastructure (normalisation,
     # modération, nettoyage d'état) qui n'ont besoin d'aucun raisonnement.
-    LLM_MODEL: str = "openai/gpt-oss-20b"
+    #
+    # ATTENTION (2026-08-18, 2e incident du même type) : ces valeurs ont été
+    # changées pour des noms de modèles Qwen ("qwen/qwen-2.5-72b-instruct",
+    # "qwen/qwen-2.5-max") qui N'EXISTENT PAS sur Groq — ce sont des noms
+    # DashScope/Alibaba Cloud, pas la nomenclature Groq. Résultat, confirmé
+    # par log : "Error code: 404 - The model `qwen/qwen-2.5-max` does not
+    # exist" à CHAQUE appel d'input_interpreter, forçant un repli
+    # déterministe dégradé sur tous les tours — c'est la cause racine de
+    # toute une série de symptômes en cascade (produit mal extrait,
+    # confirmation générique "BUYER_REQUEST" qui fuite, etc.), pas des bugs
+    # indépendants. Remis aux deux SEULES valeurs dont ce projet a une
+    # preuve directe de fonctionnement sur Groq (200 OK observés en logs).
+    # Si un modèle Qwen est vraiment souhaité, vérifier d'ABORD son nom
+    # exact dans le catalogue Groq (console.groq.com/docs/models) — jamais
+    # copier un nom depuis la documentation d'un autre fournisseur.
+    LLM_MODEL: str = "qwen/qwen3.6-27b"
     # Modèle de raisonnement — tout goal métier complexe (interprétation
     # d'intent, planification de goal, génération de réponse). Utilisé par
     # `graphs/agents/market_coach/llm_router.py` via ROUTING_MAP ci-dessous.

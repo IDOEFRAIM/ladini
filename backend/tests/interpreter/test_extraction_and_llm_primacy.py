@@ -154,6 +154,27 @@ class TestUnitAnchoringGuard:
         r = self._interpret("je vends 200 de tomates", payload)
         assert r["extracted_entities"].get("unit") is None
 
+    def test_a_bare_unit_word_hallucinated_as_the_product_is_rejected(self):
+        """Bug réel confirmé (2026-08-17) : en réponse à une question de
+        QUANTITÉ, "je veux 42 kg" a fait extraire "kg" comme PRODUIT (le
+        panier cherchait ensuite le produit "kg", inexistant, et rejetait la
+        précommande) — écrasant le vrai produit ("tomates") déjà connu de la
+        conversation. Rien ne rejetait un mot d'unité (kg/tonne/sac/panier...)
+        accepté comme nom de produit — même défaut que les mots de TYPE de
+        production ci-dessus, corrigé par le même principe dans
+        `_sanitize_product_candidate`."""
+        payload = {
+            "interpreted_event": "ANSWER",
+            "detected_intent": "BUYER_ADD_TO_CART",
+            "interpreter_confidence": 0.9,
+            "validation_status": "VALID",
+            "extracted_entities": {"product": "kg", "quantity": 42.0, "unit": "KG"},
+        }
+        r = self._interpret("je veux 42 kg", payload)
+        assert "product" not in r["extracted_entities"]
+        assert r["extracted_entities"].get("quantity") == 42.0
+        assert r["extracted_entities"].get("unit") == "KG"
+
 
 # =====================================================================
 # AUCUNE LISTE FIGÉE NE DOIT DÉTOURNER LE LLM

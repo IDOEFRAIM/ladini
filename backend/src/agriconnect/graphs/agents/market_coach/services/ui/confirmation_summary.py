@@ -281,15 +281,27 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
     summary = mapping.get(goal)
     if summary:
         return summary
+    # Bug réel confirmé (2026-08-18) : un goal sans gabarit dédié (ex:
+    # BUYER_REQUEST — normalement `handled_by_flow`, ne devrait jamais
+    # atteindre ce point, mais un mauvais aiguillage l'y a fait arriver)
+    # affichait littéralement le nom de la constante interne à
+    # l'utilisateur : "Validation de l'opération : BUYER_REQUEST" — illisible
+    # et manifestement un bug technique exposé. Ne JAMAIS montrer un nom de
+    # goal interne ; retomber sur ce qu'on sait de concret (produit/quantité)
+    # plutôt que sur l'identifiant machine.
     fallback_quantity = (
         quantity_line or payload.get("quantity_display") or payload.get("quantity")
     )
     if fallback_quantity not in (None, "", [], {}):
         return (
-            f"Validation de l'opération : {goal}"
-            f" (quantité : {fallback_quantity}, unité : {display_unit or converted_unit})"
+            f"Confirmez-vous cette opération pour {fallback_quantity}"
+            f" {display_unit or converted_unit}"
+            + (f" de *{product}*" if product not in (None, "", [], {}) else "")
+            + " ?"
         )
-    return f"Validation de l'opération : {goal}"
+    if product not in (None, "", [], {}):
+        return f"Confirmez-vous cette opération concernant *{product}* ?"
+    return "Confirmez-vous cette opération ?"
 
 
 __all__ = ["build_confirmation_summary"]
