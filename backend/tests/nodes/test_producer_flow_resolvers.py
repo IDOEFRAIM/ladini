@@ -17,6 +17,44 @@ def rt(responses=None):
     return StubRuntime(responses=responses or {})
 
 
+class _Msg:
+    def __init__(self, content: str) -> None:
+        self.content = content
+
+
+class _Choice:
+    def __init__(self, content: str) -> None:
+        self.message = _Msg(content)
+
+
+class _Completion:
+    def __init__(self, content: str) -> None:
+        self.choices = [_Choice(content)]
+
+
+class _StubLLM:
+    """Double minimal pour `llm.chat.completions.create(...)` — voir
+    `utils.py::llm_deviation_reply`."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    @property
+    def chat(self):
+        return self
+
+    @property
+    def completions(self):
+        return self
+
+    def create(self, **kwargs):
+        return _Completion(self._text)
+
+
+def rt_with_llm(text: str, responses=None):
+    return StubRuntime(llm=_StubLLM(text), responses=responses or {})
+
+
 # =====================================================================
 # Parsing déterministe des corrections (_extract_*)
 # =====================================================================
@@ -266,6 +304,91 @@ class TestResolveBid:
 
 
 # =====================================================================
+# producer_auction_resolver — déviations (chantier résilience 2026-08)
+# =====================================================================
+
+class TestProducerAuctionResolverDeviations:
+    """`flows/producer/auctions.py::producer_auction_resolver` — les 4
+    branches "reask" (nouvelle offre + modification, prix + confirmation)
+    doivent accuser réception via le LLM avant de rejouer leur texte figé."""
+
+    def test_new_bid_confirm_phase_ambiguous_reply_gets_an_adaptive_note(self):
+        from agriconnect.graphs.agents.market_coach.flows.producer.auctions import (
+            producer_auction_resolver,
+        )
+        state = make_state(
+            current_goal="MARKET_BROWSE_REQUESTS",
+            normalized_text="attendez je réfléchis encore",
+            interpreted_event="",
+            working_memory={
+                "bid_phase": "CONFIRM",
+                "pending_bid_auction": "a1",
+                "pending_bid_price": 250,
+                "auction_brief": {"a1": {"product": "mais", "unit": "KG"}},
+            },
+        )
+        runtime = rt_with_llm("Pas de souci, prenez votre temps.")
+        result = run(producer_auction_resolver(state, runtime))
+        assert "Pas de souci" in result["final_response"]
+        assert "250" in result["final_response"]
+
+    def test_new_bid_ask_price_unknown_event_gets_an_adaptive_note(self):
+        from agriconnect.graphs.agents.market_coach.flows.producer.auctions import (
+            producer_auction_resolver,
+        )
+        state = make_state(
+            current_goal="MARKET_BROWSE_REQUESTS",
+            normalized_text="c'est combien la normale déjà ?",
+            interpreted_event="UNKNOWN",
+            working_memory={
+                "bid_phase": "ASK_PRICE",
+                "pending_bid_auction": "a1",
+                "auction_brief": {"a1": {"product": "mais", "unit": "KG"}},
+            },
+        )
+        runtime = rt_with_llm("Bonne question — je n'ai pas ce chiffre sous la main.")
+        result = run(producer_auction_resolver(state, runtime))
+        assert "Bonne question" in result["final_response"]
+
+    def test_modify_confirm_phase_ambiguous_reply_gets_an_adaptive_note(self):
+        from agriconnect.graphs.agents.market_coach.flows.producer.auctions import (
+            producer_auction_resolver,
+        )
+        state = make_state(
+            current_goal="MARKET_GET_MY_PROPOSALS",
+            normalized_text="hmm pas sûr",
+            interpreted_event="",
+            working_memory={
+                "bid_phase": "CONFIRM_MODIFY",
+                "pending_modify_bid": "b1",
+                "pending_bid_price": 300,
+                "my_bids_brief": {"b1": {"product": "tomates", "unit": "KG"}},
+            },
+        )
+        runtime = rt_with_llm("D'accord, dites-moi si vous préférez garder l'ancien prix.")
+        result = run(producer_auction_resolver(state, runtime))
+        assert "D'accord" in result["final_response"]
+
+    def test_modify_ask_price_unknown_event_gets_an_adaptive_note(self):
+        from agriconnect.graphs.agents.market_coach.flows.producer.auctions import (
+            producer_auction_resolver,
+        )
+        state = make_state(
+            current_goal="MARKET_GET_MY_PROPOSALS",
+            normalized_text="je sais pas trop quoi mettre",
+            interpreted_event="OUT_OF_SCOPE",
+            working_memory={
+                "bid_phase": "ASK_PRICE_MODIFY",
+                "pending_modify_bid": "b1",
+                "my_bids_brief": {"b1": {"product": "tomates", "unit": "KG"}},
+            },
+        )
+        runtime = rt_with_llm("Aucun souci, un prix approximatif suffit pour commencer.")
+        result = run(producer_auction_resolver(state, runtime))
+        assert "Aucun souci" in result["final_response"]
+
+
+# =====================================================================
 # _resolve_default_farm
 # =====================================================================
 
@@ -463,6 +586,42 @@ class TestResolveCycleForUpdate:
         assert result["expected_input"] == "CONFIRMATION"
         assert result["working_memory"]["update_pending"]["price"] == 400.0
 
+    def test_ambiguous_confirm_reply_gets_an_adaptive_note(self):
+        """Chantier résilience 2026-08 : la branche "ni correction ni CONFIRM
+        ni REJECT clair" doit accuser réception via le LLM avant de rejouer
+        le récap, pas juste le répéter mot pour mot."""
+        from agriconnect.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
+        working = {"update_phase": "CONFIRM", "update_cycle_id": "c1", "update_pending": {"price": 200}}
+        runtime = rt_with_llm("D'accord, dites-moi si vous voulez changer autre chose.")
+        result = run(_resolve_cycle_for_update(runtime, "+2260", {}, working, "attendez je réfléchis", ""))
+        assert result["final_response"].startswith("D'accord, dites-moi")
+        assert "prix" in result["final_response"].lower()
+
+    def test_collect_phase_unknown_event_gets_an_adaptive_note(self):
+        from agriconnect.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
+        working = {}
+        runtime = rt_with_llm("Je ne suis pas sûr de comprendre votre question.")
+        result = run(_resolve_cycle_for_update(
+            runtime, "+2260", {"cycle_id": "c1"}, working, "c'est compliqué tout ça", "UNKNOWN",
+        ))
+        assert result["final_response"].startswith("Je ne suis pas sûr")
+        assert "modifier" in result["final_response"].lower()
+
+    def test_collect_phase_answer_event_does_not_call_the_llm(self):
+        """Sur l'entrée fraîche (juste après la sélection du lot, event pas
+        classé UNKNOWN/OUT_OF_SCOPE), pas d'appel LLM inutile."""
+        from agriconnect.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
+        working = {}
+
+        class _BoomLLM(_StubLLM):
+            def create(self, **kwargs):
+                raise AssertionError("le LLM ne devait pas être appelé ici")
+
+        runtime = rt()
+        runtime.llm = _BoomLLM("n/a")
+        result = run(_resolve_cycle_for_update(runtime, "+2260", {"cycle_id": "c1"}, working, "1", "SELECTION"))
+        assert result["expected_input"] == "UPDATE_FIELD"
+
     def test_select_phase_gateway_exception(self, monkeypatch):
         import agriconnect.graphs.agents.market_coach.flows.producer.flow as mod
 
@@ -529,6 +688,23 @@ class TestResolveProductForUpdate:
         from agriconnect.graphs.agents.market_coach.flows.producer.flow import _resolve_product_for_update
         result = run(_resolve_product_for_update(rt(), "+2260", {"product_id": "p1"}, {}, "bonjour", ""))
         assert result["expected_input"] == "UPDATE_FIELD"
+
+    def test_ambiguous_confirm_reply_gets_an_adaptive_note(self):
+        from agriconnect.graphs.agents.market_coach.flows.producer.flow import _resolve_product_for_update
+        working = {"update_phase": "CONFIRM", "update_product_id": "p1", "update_pending": {"price": 200}}
+        runtime = rt_with_llm("Pas de souci, dites-moi ce que vous voulez ajuster.")
+        result = run(_resolve_product_for_update(runtime, "+2260", {}, working, "hmm attendez", ""))
+        assert result["final_response"].startswith("Pas de souci")
+        assert "prix" in result["final_response"].lower()
+
+    def test_collect_phase_unknown_event_gets_an_adaptive_note(self):
+        from agriconnect.graphs.agents.market_coach.flows.producer.flow import _resolve_product_for_update
+        runtime = rt_with_llm("Je note votre remarque.")
+        result = run(_resolve_product_for_update(
+            runtime, "+2260", {"product_id": "p1"}, {}, "c'est pas clair", "OUT_OF_SCOPE",
+        ))
+        assert result["final_response"].startswith("Je note votre remarque")
+        assert "produit" in result["final_response"].lower()
 
     def test_select_phase_gateway_exception(self, monkeypatch):
         import agriconnect.graphs.agents.market_coach.flows.producer.flow as mod

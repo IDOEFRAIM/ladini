@@ -186,3 +186,45 @@ class AgriDatabaseService(
 
     class IntegrityError(DatabaseServiceError):
         pass
+
+
+
+import asyncio
+import os
+import sys
+
+# Assurez-vous que le chemin vers src est dans le sys.path si nécessaire
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "backend", "src")))
+
+
+async def test_initiate_escrow():
+    # 1. Initialiser la base de données (charge DATABASE_URL et configure le sessionmaker)
+    print("Initialisation de la base de données...")
+
+    # 2. Données de test (à adapter avec un vrai numéro et un vrai UUID de précommande DRAFT en base)
+    test_buyer_phone = "+22601479800"
+    test_preorder_id = "dff0a2dc-14be-4c09-8ba1-0c8e408dd124"
+    test_lat = 12.3714 # Latitude Burkina Faso (ex: Ouagadougou)
+    test_lon = -1.5197 # Longitude Burkina Faso
+
+    print(f"Tentative d'initiation d'escrow pour la précommande {test_preorder_id}...")
+    service = AgriDatabaseService()
+
+    try:
+        result = await service.initiate_escrow_payment(
+                buyer_phone=test_buyer_phone,
+                preorder_id=test_preorder_id,
+                delivery_lat=test_lat,
+                delivery_lon=test_lon
+            )
+        print("\n Succès ! Résultat de l'API Paydunya :")
+        for k, v in result.items():
+            print(f"  - {k}: {v}")
+    except Exception as e:        
+        print(f"\n Échec capturé lors du test : {type(e).__name__} - {e}")    
+        
+
+
+if __name__ == "__main__":
+    # Exécution de la coroutine asynchrone
+    asyncio.run(test_initiate_escrow())

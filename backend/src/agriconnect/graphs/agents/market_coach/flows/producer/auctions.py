@@ -38,6 +38,7 @@ from agriconnect.graphs.agents.market_coach.services.mcp.gateway import AuctionG
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     is_success_response,
+    llm_deviation_reply,
 )
 from agriconnect.services.pending_photo_target import set_pending_bid_photo
 
@@ -366,6 +367,7 @@ async def ask_bid_price(
     auction_id: str,
     *,
     reask: bool = False,
+    deviation_note: Optional[str] = None,
 ) -> Dict[str, Any]:
     brief = ((state.get("working_memory") or {}).get("auction_brief") or {}).get(
         str(auction_id)
@@ -374,6 +376,8 @@ async def ask_bid_price(
 
     if reask:
         msg = f"💬 Indiquez un *prix* valide en FCFA (ex: 300) pour *{product}*."
+        if deviation_note:
+            msg = f"{deviation_note}\n\n{msg}"
     else:
         lines = [f"📦 *Appel d'offres sélectionné : {product}*"]
         qty = brief.get("quantity")
@@ -432,6 +436,7 @@ async def recap_bid(
     price: float,
     *,
     reask: bool = False,
+    deviation_note: Optional[str] = None,
 ) -> Dict[str, Any]:
     brief = ((state.get("working_memory") or {}).get("auction_brief") or {}).get(
         str(auction_id)
@@ -454,6 +459,8 @@ async def recap_bid(
         "👉 Répondez *oui* pour confirmer, envoyez un *autre montant* pour corriger, "
         "ou *non* pour annuler."
     )
+    if deviation_note:
+        msg = f"{deviation_note}\n\n{msg}"
 
     payload = dict(state.get("transaction_payload") or {})
     payload["auction_id"] = str(auction_id)
@@ -680,6 +687,7 @@ async def ask_modify_price(
     bid_id: str,
     *,
     reask: bool = False,
+    deviation_note: Optional[str] = None,
 ) -> Dict[str, Any]:
     brief = ((state.get("working_memory") or {}).get("my_bids_brief") or {}).get(
         str(bid_id)
@@ -690,6 +698,8 @@ async def ask_modify_price(
 
     if reask:
         msg = f"💬 Indiquez le *nouveau prix* en FCFA (ex: 300) pour *{product}*."
+        if deviation_note:
+            msg = f"{deviation_note}\n\n{msg}"
     else:
         cur_txt = _fmt_num(current_price) if current_price is not None else "?"
         msg = (
@@ -731,6 +741,7 @@ async def recap_modify_price(
     new_price: float,
     *,
     reask: bool = False,
+    deviation_note: Optional[str] = None,
 ) -> Dict[str, Any]:
     brief = ((state.get("working_memory") or {}).get("my_bids_brief") or {}).get(
         str(bid_id)
@@ -746,6 +757,8 @@ async def recap_modify_price(
         "👉 Répondez *oui* pour confirmer, envoyez un *autre montant* pour corriger, "
         "ou *non* pour annuler."
     )
+    if deviation_note:
+        msg = f"{deviation_note}\n\n{msg}"
 
     payload = dict(state.get("transaction_payload") or {})
     payload["bid_id"] = str(bid_id)
@@ -910,8 +923,15 @@ async def producer_auction_resolver(
             return await submit_modify_price(
                 state, mc_runtime, str(pending_modify_bid), float(pending_price)
             )
+        # Chantier résilience 2026-08 : accuse d'abord réception via le LLM
+        # au lieu de rejouer le même récap tel quel.
+        note = await llm_deviation_reply(
+            mc_runtime, _text_of(state),
+            "un récapitulatif de nouveau prix à confirmer (oui/non/autre montant)",
+        )
         return await recap_modify_price(
-            state, mc_runtime, str(pending_modify_bid), float(pending_price), reask=True
+            state, mc_runtime, str(pending_modify_bid), float(pending_price),
+            reask=True, deviation_note=note,
         )
 
     if phase == "ASK_PRICE_MODIFY" and pending_modify_bid:
@@ -922,8 +942,13 @@ async def producer_auction_resolver(
             return await recap_modify_price(
                 state, mc_runtime, str(pending_modify_bid), price
             )
+        note = None
+        if event in {"UNKNOWN", "OUT_OF_SCOPE"}:
+            note = await llm_deviation_reply(
+                mc_runtime, _text_of(state), "répondre au nouveau prix demandé (en FCFA)",
+            )
         return await ask_modify_price(
-            state, mc_runtime, str(pending_modify_bid), reask=True
+            state, mc_runtime, str(pending_modify_bid), reask=True, deviation_note=note,
         )
 
     # (B) Tunnel NOUVELLE offre en cours.
@@ -937,9 +962,15 @@ async def producer_auction_resolver(
             return await submit_bid(
                 state, mc_runtime, str(pending_auction), float(pending_price)
             )
-        # Réponse ambiguë : on ré-affiche le récap.
+        # Réponse ambiguë : accuse d'abord réception via le LLM (chantier
+        # résilience 2026-08) avant de rejouer le récap.
+        note = await llm_deviation_reply(
+            mc_runtime, _text_of(state),
+            "un récapitulatif de proposition à confirmer (oui/non/autre montant)",
+        )
         return await recap_bid(
-            state, mc_runtime, str(pending_auction), float(pending_price), reask=True
+            state, mc_runtime, str(pending_auction), float(pending_price),
+            reask=True, deviation_note=note,
         )
 
     if phase == "ASK_PRICE" and pending_auction:
@@ -948,7 +979,14 @@ async def producer_auction_resolver(
         price = _price_from_answer(state)
         if price is not None:
             return await recap_bid(state, mc_runtime, str(pending_auction), price)
-        return await ask_bid_price(state, mc_runtime, str(pending_auction), reask=True)
+        note = None
+        if event in {"UNKNOWN", "OUT_OF_SCOPE"}:
+            note = await llm_deviation_reply(
+                mc_runtime, _text_of(state), "répondre au prix proposé (en FCFA)",
+            )
+        return await ask_bid_price(
+            state, mc_runtime, str(pending_auction), reask=True, deviation_note=note,
+        )
 
     # (C) Sélection d'une offre depuis « mes offres » (kind="bid" → memory.py
     #     pose payload.bid_id). Doit être vérifié AVANT le court-circuit goal

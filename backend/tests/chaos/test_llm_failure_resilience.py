@@ -202,6 +202,76 @@ def test_executor_envelope_ko_is_domain_error():
 
 
 # =====================================================================
+# 4bis. Chantier mémoire 2026-08-19 — `tool_execution_history` borné en TAILLE
+# =====================================================================
+
+class TestToolHistoryRawIsSizeCapped:
+    """`tool_execution_history` était déjà borné en LONGUEUR (10 entrées,
+    `state_compaction.MAX_TOOL_HISTORY`) mais pas en TAILLE PAR ENTRÉE : une
+    réponse MCP volumineuse (ex. catalogue) était recopiée intégralement dans
+    le champ `raw`, purement diagnostique et jamais relu en production.
+    Mesuré : ~25 Ko/entrée pour un catalogue de 100 produits, soit plus de la
+    moitié du budget de persistance (480 Ko) pour 10 entrées."""
+
+    def _catalog_response(self, n: int = 100) -> dict:
+        return {
+            "status": "success",
+            "results": [
+                {"id": f"p{i}", "name": f"produit {i}", "description": "x" * 150}
+                for i in range(n)
+            ],
+        }
+
+    def test_a_large_response_is_compacted_but_keeps_diagnostic_fields(self):
+        from agriconnect.graphs.agents.market_coach.nodes.executor import (
+            _compact_raw_for_history,
+        )
+
+        big = self._catalog_response()
+        raw_size = len(str(big))
+        compact = _compact_raw_for_history(big)
+
+        assert compact["_truncated"] is True
+        assert compact["status"] == "success"
+        assert compact["_shape"]["results"] == "list[100]"
+        assert len(str(compact)) < raw_size, "doit être significativement plus petit"
+
+    def test_a_small_response_passes_through_unchanged(self):
+        from agriconnect.graphs.agents.market_coach.nodes.executor import (
+            _compact_raw_for_history,
+        )
+
+        small = {"status": "success", "message": "ok", "data": {"id": "x1"}}
+        assert _compact_raw_for_history(small) == small
+
+    def test_a_non_dict_result_passes_through_unchanged(self):
+        """Défense : un résultat non-dict (déjà anormal) ne doit jamais faire
+        planter la compaction — il doit simplement être laissé tel quel."""
+        from agriconnect.graphs.agents.market_coach.nodes.executor import (
+            _compact_raw_for_history,
+        )
+
+        assert _compact_raw_for_history("oops") == "oops"
+        assert _compact_raw_for_history(None) is None
+
+    def test_mcp_tool_executor_stores_the_compacted_form_end_to_end(self):
+        """Rupture prévenue : sans cette compaction, un catalogue volumineux
+        renvoyé par un outil MCP réel se retrouvait recopié tel quel dans
+        `tool_execution_history`, gonflant le state persisté à chaque appel."""
+        from agriconnect.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
+
+        rt = EnvelopeDBRuntime(responses=[self._catalog_response()])
+        result = run(mcp_tool_executor(_authorized_write_state(), rt))
+
+        history = result.get("tool_execution_history") or []
+        assert history, "l'historique doit contenir la tentative"
+        raw = history[-1]["raw"]
+        assert raw.get("_truncated") is True
+        assert raw["_shape"]["results"] == "list[100]"
+        assert len(str(raw)) < len(str(self._catalog_response()))
+
+
+# =====================================================================
 # 5. Anti-régression : configuration SDK & sites d'appel async
 # =====================================================================
 

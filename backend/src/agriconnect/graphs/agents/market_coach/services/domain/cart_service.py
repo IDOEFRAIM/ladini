@@ -35,6 +35,24 @@ from .quantity_unit import convert_quantity, normalize_unit
 logger = logging.getLogger("AgriConnect.Market.CartService")
 
 
+class ProductLookupUnavailable(Exception):
+    """La recherche catalogue a échoué TECHNIQUEMENT (outil MCP indisponible,
+    timeout, panne transitoire) — à ne JAMAIS confondre avec « aucun vendeur
+    pour ce produit ».
+
+    Chantier résilience 2026-08 : `resolve_product_vendors` renvoyait
+    `([], False)` dans les DEUX cas. Les appelants
+    (`flows/buyer/cart.py`, `flows/buyer/procurement.py`) rendent une liste
+    vide par « 📭 Le produit X n'est pas disponible dans notre catalogue » —
+    donc une simple panne backend affirmait à l'acheteur, à tort, que le
+    produit n'existe pas, et l'orientait vers un appel d'offres inutile pour
+    un produit pourtant bien en stock. Exactement le piège que
+    `flows/producer/flow.py` documente déjà pour ses propres listes
+    (« NE JAMAIS confondre une erreur technique avec une liste réellement
+    vide ») — la leçon n'avait jamais été appliquée côté acheteur.
+    """
+
+
 def _normalize_for_match(text: Any) -> str:
     text = str(text or "").lower().strip()
     text = text.replace("œ", "oe").replace("æ", "ae")
@@ -83,12 +101,24 @@ class CartDomainService:
     ) -> Tuple[List[Dict[str, Any]], bool]:
         if not product_name:
             return [], False
-        res = await ProductGateway(self.mc_runtime).search_products(
-            product=str(product_name),
-            phone=str(phone),
-        )
+        try:
+            res = await ProductGateway(self.mc_runtime).search_products(
+                product=str(product_name),
+                phone=str(phone),
+            )
+        except Exception as exc:
+            logger.error(
+                "resolve_product_vendors: search_products a échoué pour '%s': %s",
+                product_name, exc,
+            )
+            raise ProductLookupUnavailable(str(exc)) from exc
         if not is_success_response(res):
-            return [], False
+            # Panne backend, PAS un catalogue vide — voir ProductLookupUnavailable.
+            logger.error(
+                "resolve_product_vendors: search_products a renvoyé un échec pour '%s': %s",
+                product_name, (res or {}).get("message"),
+            )
+            raise ProductLookupUnavailable(str((res or {}).get("message") or "search_products failed"))
         results = res.get("results") or (res.get("data") or {}).get("results") or []
         if not results:
             return [], False

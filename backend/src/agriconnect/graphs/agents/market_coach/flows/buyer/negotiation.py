@@ -16,6 +16,7 @@ from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     is_success_response,
+    llm_deviation_reply,
 )
 
 from .helpers import (
@@ -83,9 +84,26 @@ async def _fetch_and_show_bids(
     """Fetch auction bids and return a menu state patch or fallback to negotiation menu."""
     # phone requis pour l'identité de contexte MCP (sinon PermissionDenied).
     buyer_phone = phone or nctx.get("buyer_phone") or nctx.get("phone")
-    bids_res = await AuctionGateway(mc_runtime).get_auction_bids(
-        auction_id=str(auction_id), phone=str(buyer_phone) if buyer_phone else None
-    )
+    # Chantier résilience 2026-08 : cet appel reposait uniquement sur le
+    # filet générique `_safe_node` (utils.py), qui catch bien l'exception
+    # pour éviter un crash dur du tour, mais ne nettoie PAS
+    # `negotiation_context` — un timeout MCP laissait l'utilisateur bloqué
+    # dans une phase de négociation incohérente au tour suivant. Miroir du
+    # pattern déjà utilisé côté flows/producer (try/except + reset propre).
+    try:
+        bids_res = await AuctionGateway(mc_runtime).get_auction_bids(
+            auction_id=str(auction_id), phone=str(buyer_phone) if buyer_phone else None
+        )
+    except Exception as exc:
+        logger.error("_fetch_and_show_bids: get_auction_bids a échoué: %s", exc)
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "ERROR",
+            "final_response": "Impossible de charger les offres pour le moment. Réessayez dans un instant.",
+            "transaction_payload": {"resolved_id": None},
+            "negotiation_context": {"__reset__": True},
+            "ag_ui_component": None,
+        }
     bids = bids_res.get("bids") or []
 
     if str(bids_res.get("status") or "").lower() != "success" or not bids:
@@ -118,23 +136,48 @@ async def _handle_counter_price(
     payload: Dict[str, Any],
     nctx: Dict[str, Any],
     auction_id: str,
+    state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Process the counter-offer price submission."""
     price = payload.get("price")
     if price in (None, "", 0):
+        base_question = "Quel est votre nouveau prix (FCFA) ?"
+        # Chantier résilience 2026-08 (volet acheteur) : cette branche n'est
+        # JAMAIS l'affichage initial de la question (celui-ci part de
+        # `_handle_negotiation_menu::NEGOTIATION_COUNTER`, qui ne passe pas
+        # par ici) — elle traite TOUJOURS une vraie réponse de l'utilisateur
+        # qui n'a pas pu être lue comme un prix. Accuse d'abord réception
+        # via le LLM au lieu de rejouer la même question mot pour mot.
+        note = None
+        user_text = str((state or {}).get("normalized_text") or (state or {}).get("user_query") or "")
+        if user_text.strip():
+            note = await llm_deviation_reply(
+                mc_runtime, user_text, "répondre au nouveau prix de votre contre-offre (en FCFA)",
+            )
         return {
             "status": "WAITING_INPUT",
             "expected_input": "PRICE",
             "response_strategy": "ASK_MISSING_FIELD",
-            "final_response": "Quel est votre nouveau prix (FCFA) ?",
+            "final_response": f"{note}\n\n{base_question}" if note else base_question,
             "ag_ui_component": None,
         }
 
-    upd = await NegotiationGateway(mc_runtime).update_offer(
-        buyer_phone=phone,
-        negotiation_id=str(auction_id),
-        new_price=price,
-    )
+    try:
+        upd = await NegotiationGateway(mc_runtime).update_offer(
+            buyer_phone=phone,
+            negotiation_id=str(auction_id),
+            new_price=price,
+        )
+    except Exception as exc:
+        logger.error("_handle_counter_price: update_offer a échoué: %s", exc)
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "ERROR",
+            "final_response": "Impossible d'enregistrer votre contre-offre pour le moment. Réessayez dans un instant.",
+            "transaction_payload": {"resolved_id": None},
+            "negotiation_context": {"__reset__": True},
+            "ag_ui_component": None,
+        }
     msg = upd.get("message") or "Offre mise à jour."
     neg_menu = negotiation_action_menu(str(auction_id))
     return {
@@ -192,12 +235,23 @@ async def _handle_viewing_offers(
                 logger.warning(
                     "_handle_viewing_offers: échec de lecture du point GPS par défaut"
                 )
-        win = await AuctionGateway(mc_runtime).select_winning_bid(
-            bid_id=str(bid_id),
-            phone=str(_buyer_phone) if _buyer_phone else None,
-            delivery_lat=_delivery_lat,
-            delivery_lon=_delivery_lon,
-        )
+        try:
+            win = await AuctionGateway(mc_runtime).select_winning_bid(
+                bid_id=str(bid_id),
+                phone=str(_buyer_phone) if _buyer_phone else None,
+                delivery_lat=_delivery_lat,
+                delivery_lon=_delivery_lon,
+            )
+        except Exception as exc:
+            logger.error("_handle_viewing_offers: select_winning_bid a échoué: %s", exc)
+            return {
+                "status": "COMPLETED",
+                "response_strategy": "ERROR",
+                "final_response": "Impossible de valider cette offre pour le moment. Réessayez dans un instant.",
+                "transaction_payload": {"resolved_id": None},
+                "negotiation_context": {"__reset__": True},
+                "ag_ui_component": None,
+            }
         if str(win.get("status") or "").lower() != "success":
             return {
                 "status": "COMPLETED",
@@ -254,12 +308,22 @@ async def _handle_negotiation_menu(
             or state.get("final_response")
             or "Négociation en cours."
         )
+        # Chantier résilience 2026-08 (volet acheteur) : cette branche traite
+        # toujours une vraie réponse à un menu déjà affiché (jamais l'entrée
+        # fraîche) — accuse d'abord réception via le LLM au lieu de rejouer
+        # le même texte tel quel.
+        user_text = str(state.get("normalized_text") or state.get("user_query") or "")
+        note = None
+        if user_text.strip():
+            note = await llm_deviation_reply(
+                mc_runtime, user_text, "choisir une action dans le menu de négociation ci-dessous",
+            )
         neg_menu = negotiation_action_menu(str(auction_id))
         return {
             "status": "WAITING_INPUT",
             "expected_input": "SELECTION",
             "response_strategy": "SELECTION_MENU",
-            "final_response": msg,
+            "final_response": f"{note}\n\n{msg}" if note else msg,
             "ag_ui_component": None,
             "pending_menu": neg_menu,
         }
@@ -281,11 +345,25 @@ async def _handle_negotiation_menu(
         }
 
     # NEGOTIATION_ABORT or unknown → close
-    close_res = await NegotiationGateway(mc_runtime).close_session(
-        buyer_phone=phone,
-        negotiation_id=str(auction_id),
-        reason="buyer_abandoned",
-    )
+    try:
+        close_res = await NegotiationGateway(mc_runtime).close_session(
+            buyer_phone=phone,
+            negotiation_id=str(auction_id),
+            reason="buyer_abandoned",
+        )
+    except Exception as exc:
+        logger.error("_handle_negotiation_menu: close_session a échoué: %s", exc)
+        # Même en échec technique, on ferme le tunnel côté état — retenter
+        # côté serveur laisserait l'utilisateur bloqué sans porte de sortie.
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "SUCCESS",
+            "final_response": "Négociation annulée.",
+            "current_goal": None,
+            "transaction_payload": {"__reset__": True},
+            "negotiation_context": {"__reset__": True},
+            "ag_ui_component": None,
+        }
     return {
         "status": "COMPLETED",
         "response_strategy": "SUCCESS",
@@ -444,7 +522,7 @@ async def negotiation_gate(
 
     # Route by negotiation phase
     if auction_id and nphase == "AWAIT_COUNTER_PRICE":
-        return await _handle_counter_price(mc_runtime, phone, payload, nctx, auction_id)
+        return await _handle_counter_price(mc_runtime, phone, payload, nctx, auction_id, state)
 
     if auction_id and nphase == "VIEWING_OFFERS":
         return await _handle_viewing_offers(mc_runtime, payload, nctx, auction_id)

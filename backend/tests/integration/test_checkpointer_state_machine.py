@@ -55,6 +55,18 @@ def make_checkpoint(checkpoint_id: str = "cp-1", channel_values: dict | None = N
     }
 
 
+def _decoded_channels(cp: WorkspaceCheckpointer, trimmed: dict) -> dict:
+    """Décode le checkpoint retenu et renvoie ses `channel_values` — permet de
+    vérifier ce qui a RÉELLEMENT survécu à l'élagage (le checkpoint est stocké
+    en blob base64 opaque, pas en JSON lisible)."""
+    for bucket in (trimmed.get("namespaces") or {}).values():
+        for entry in (bucket.get("checkpoints") or {}).values():
+            encoded = entry.get("checkpoint")
+            if isinstance(encoded, dict):
+                return _SerializedValue(**encoded).decode(cp.serde).get("channel_values", {})
+    return {}
+
+
 def config_for(thread_id: str, *, ns: str = "", checkpoint_id: str | None = None) -> dict:
     conf = {"thread_id": thread_id, "checkpoint_ns": ns}
     if checkpoint_id is not None:
@@ -655,6 +667,63 @@ class TestPruneForPersistence:
         assert metrics.get("truncated") is True
         assert trimmed["namespaces"] == {}
         assert "summary" in trimmed, "le résumé doit survivre même au wipe complet"
+
+    def test_a_bloated_non_durable_channel_no_longer_wipes_the_tunnel(self, monkeypatch):
+        """Chantier mémoire 2026-08-19 — palier 3 (`_keep_only_durable_channels`).
+
+        Avant : un canal NI éphémère-connu (`_SHRINKABLE_CHANNELS`) NI durable
+        — ex. `extracted_entities`, un merge_dict qui peut gonfler — passait au
+        travers des paliers 1 et 2 et déclenchait le WIPE COMPLET : la
+        conversation redémarrait de zéro au tour suivant (panier vidé, goal
+        perdu). Maintenant il est simplement retiré, et la continuité du
+        tunnel survit."""
+        cp, _ = make_checkpointer()
+        monkeypatch.setattr("agriconnect.workspace.checkpointer._MAX_PERSISTED_BYTES", 2000)
+        checkpoint = make_checkpoint(channel_values={
+            # Durables : doivent SURVIVRE.
+            "current_goal": "BUYER_PREORDER_INIT",
+            "active_cart": [{"name": "tomates", "quantity": 50}],
+            "working_memory": {"active_goal": "BUYER_PREORDER_INIT"},
+            # Ni durable ni "shrinkable" : le coupable, doit être retiré.
+            "extracted_entities": {"junk": "z" * 40_000},
+        })
+        run(cp.aput(config_for("phone-1"), checkpoint, {}, {}))
+        workspace = run(cp.store.get("phone-1"))
+        trimmed, metrics = cp._prune_for_persistence(workspace.agent_state)
+
+        assert not metrics.get("truncated"), "le wipe complet ne doit plus être atteint"
+        assert trimmed["namespaces"], "les namespaces doivent survivre"
+
+        # `extracted_entities` n'est NI dans `_SHRINKABLE_CHANNELS` NI dans les
+        # champs durables : le palier 3 est le SEUL capable de le retirer. Le
+        # voir disparaître pendant que les canaux durables survivent prouve
+        # donc que c'est bien lui qui s'est déclenché (et non un autre palier).
+        survivors = _decoded_channels(cp, trimmed)
+        assert survivors["current_goal"] == "BUYER_PREORDER_INIT"
+        assert survivors["active_cart"] == [{"name": "tomates", "quantity": 50}]
+        assert "extracted_entities" not in survivors
+
+    def test_langgraph_internal_channels_are_never_dropped(self, monkeypatch):
+        """Les canaux de bookkeeping LangGraph (`__start__`, `branch:...`) ne
+        sont pas de l'état métier : les retirer rendrait le checkpoint
+        illisible. Ils doivent survivre au palier 3 même s'ils ne figurent
+        évidemment pas dans la liste des champs durables."""
+        cp, _ = make_checkpointer()
+        monkeypatch.setattr("agriconnect.workspace.checkpointer._MAX_PERSISTED_BYTES", 2000)
+        checkpoint = make_checkpoint(channel_values={
+            "current_goal": "BUYER_PREORDER_INIT",
+            "__start__": {"internal": True},
+            "branch:to:cart": "x",
+            "extracted_entities": {"junk": "z" * 40_000},
+        })
+        run(cp.aput(config_for("phone-1"), checkpoint, {}, {}))
+        workspace = run(cp.store.get("phone-1"))
+        trimmed, _metrics = cp._prune_for_persistence(workspace.agent_state)
+
+        survivors = _decoded_channels(cp, trimmed)
+        assert "__start__" in survivors
+        assert "branch:to:cart" in survivors
+        assert "extracted_entities" not in survivors
 
     def test_finalize_for_persistence_mutates_workspace_agent_state_in_place(self):
         cp, _ = make_checkpointer()

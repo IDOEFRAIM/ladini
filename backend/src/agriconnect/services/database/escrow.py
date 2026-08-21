@@ -63,17 +63,40 @@ class EscrowMixin(BaseMixin):
     """Séquestre de paiement Paydunya : facture -> confirmation -> OTP -> déblocage."""
 
     async def initiate_escrow_payment(
-        self, buyer_phone: str, preorder_id: str
+        self,
+        buyer_phone: str,
+        preorder_id: str,
+        delivery_lat: Optional[float] = None,
+        delivery_lon: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Génère une facture Paydunya pour une précommande DRAFT et réserve 24h.
 
         Ne débite PAS le stock (comme toute précommande DRAFT — voir
         ``confirm_preorder_draft``) : le stock n'est débité qu'à la confirmation
         réelle du paiement (``mark_escrow_paid``), jamais avant.
+
+        ``delivery_lat``/``delivery_lon`` (optionnels) figent le point GPS de
+        livraison sur la commande — miroir de ``confirm_preorder_draft``
+        (BuyerMixin) pour le chemin escrow. Gap réel comblé le 2026-08-18 : ce
+        threading manquait depuis l'intégration escrow ; resté sans impact
+        tant qu'``ESCROW_PAYMENT_ENABLED`` était False (le chemin non-escrow,
+        seul actif, l'appliquait déjà), mais serait devenu une régression
+        silencieuse (précommandes escrow livrées sans point GPS) dès la
+        réactivation du paiement Paydunya. Voir
+        [[gps-delivery-burkina-faso-2026-08]].
         """
         current_session = self.session
         if not current_session:
             raise BusinessRuleException("Session indisponible.")
+
+        if delivery_lat is not None and delivery_lon is not None:
+            from agriconnect.core.geofencing import is_within_burkina_faso
+
+            if not is_within_burkina_faso(delivery_lat, delivery_lon):
+                raise BusinessRuleException(
+                    "Le point de livraison est hors du Burkina Faso.",
+                    reason="out_of_country",
+                )
 
         o_uuid = _to_uuid(preorder_id)
         if o_uuid is None:
@@ -149,6 +172,9 @@ class EscrowMixin(BaseMixin):
         order.payment_method = "PAYDUNYA"
         order.payment_expires_at = _naive_utc(expires_at)
         order.locked_amount = amount
+        if delivery_lat is not None and delivery_lon is not None:
+            order.gps_lat = delivery_lat
+            order.gps_lng = delivery_lon
         await current_session.flush()
 
         return {

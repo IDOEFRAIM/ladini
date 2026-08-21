@@ -66,6 +66,52 @@ logger = get_logger("AgriConnect.MarketCoach.Executor")
 load_all_actions()
 
 
+# Plafond de taille pour la copie de réponse d'outil conservée dans
+# `tool_execution_history` (diagnostic uniquement).
+_MAX_HISTORY_RAW_BYTES = 2_000
+
+
+def _compact_raw_for_history(result: Any) -> Any:
+    """Borne la réponse d'outil archivée dans `tool_execution_history`.
+
+    Chantier mémoire 2026-08-19 : la LONGUEUR de cet historique est bien
+    plafonnée (`state_compaction.MAX_TOOL_HISTORY = 10`), mais la TAILLE de
+    chaque entrée ne l'était pas — on y recopiait la réponse MCP intégrale.
+    Mesuré : un catalogue de 100 produits pèse ~25 Ko par entrée, soit
+    ~256 Ko pour 10 entrées — plus de la moitié du budget de persistance
+    (480 Ko, voir workspace/checkpointer.py) consommée par de la donnée
+    purement diagnostique, que RIEN en production ne relit (seul un test de
+    chaos inspecte ce champ, et uniquement ses drapeaux). Trop gros, il
+    déclenchait l'élagage du checkpointer, voire le wipe du tunnel.
+
+    On conserve ce qui a une valeur de diagnostic (statut, message d'erreur,
+    forme du résultat) et on jette le volume.
+    """
+    if not isinstance(result, dict):
+        return result
+    try:
+        if len(json.dumps(result, ensure_ascii=False, default=str).encode()) <= _MAX_HISTORY_RAW_BYTES:
+            return result
+    except Exception:  # pragma: no cover - sérialisation exotique
+        pass
+
+    compact: Dict[str, Any] = {"_truncated": True}
+    for key in ("status", "message", "error", "ok"):
+        if key in result:
+            compact[key] = result[key]
+    # Garder la FORME (combien d'éléments, quelles clés) sans le contenu :
+    # c'est ce qui sert réellement à diagnostiquer après coup.
+    shape: Dict[str, Any] = {}
+    for key, value in result.items():
+        if isinstance(value, list):
+            shape[key] = f"list[{len(value)}]"
+        elif isinstance(value, dict):
+            shape[key] = f"dict[{len(value)}]"
+    if shape:
+        compact["_shape"] = shape
+    return compact
+
+
 def _now() -> float:
     return time.time()
 
@@ -604,7 +650,7 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
                     "tool": tool_name,
                     "args": resolved_args,
                     "success": success,
-                    "raw": result,
+                    "raw": _compact_raw_for_history(result),
                     "ts": _now(),
                     "attempt": attempt,
                 }

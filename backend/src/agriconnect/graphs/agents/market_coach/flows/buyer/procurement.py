@@ -145,6 +145,7 @@ async def buyer_request_resolver(
     """Search catalog first, then escalate to procurement on confirmation."""
     from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
         CartDomainService,
+        ProductLookupUnavailable,
     )
 
     payload: Dict[str, Any] = dict(state.get("transaction_payload") or {})
@@ -351,9 +352,26 @@ async def buyer_request_resolver(
         synthetic["current_goal"] = "BUYER_ADD_TO_CART"
         return await cart_management(synthetic, mc_runtime)
 
-    vendors, has_multiple = await cart_service.resolve_product_vendors(
-        phone, str(product_name)
-    )
+    # Voir ProductLookupUnavailable : une panne de la recherche catalogue ne
+    # doit jamais devenir « aucun produit disponible » — ici c'est encore plus
+    # trompeur qu'au panier, puisque ce flux enchaînerait sur une proposition
+    # d'appel d'offres pour un produit qui est peut-être bien en stock.
+    try:
+        vendors, has_multiple = await cart_service.resolve_product_vendors(
+            phone, str(product_name)
+        )
+    except ProductLookupUnavailable:
+        return {
+            "status": "ERROR",
+            "response_strategy": "ERROR",
+            "final_response": (
+                f"🔌 Je n'arrive pas à consulter le catalogue pour « *{product_name}* » "
+                "en ce moment — c'est un souci technique de notre côté, pas une "
+                "absence de stock.\n\nRéessayez dans un instant."
+            ),
+            "working_memory": working_memory,
+            "ag_ui_component": None,
+        }
 
     # Un match qui n'est QUE trigram (pas de sous-texte réel entre le terme
     # cherché et le nom trouvé — voir _is_confident_product_match) n'est pas

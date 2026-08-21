@@ -40,6 +40,7 @@ from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     is_success_response,
+    llm_deviation_reply,
 )
 
 # Goals MCP qui exigent un farm_id en argument. Dérivé dynamiquement de
@@ -874,13 +875,26 @@ async def _resolve_cycle_for_update(
                 "ag_ui_component": None,
             }
         # Ni correction, ni CONFIRM, ni REJECT clair : on ré-affiche le récap
-        # sans rien perdre, plutôt que de deviner via des mots-clés.
+        # sans rien perdre, plutôt que de deviner via des mots-clés — mais on
+        # accuse d'abord réception via le LLM (chantier résilience 2026-08 :
+        # ce tunnel auto-suffisant posait son final_response directement,
+        # court-circuitant l'adaptivité générique de ask.py/feedback.py qui
+        # renvoie ce final_response précalculé tel quel).
+        recap_text = _format_pending_recap(pending, noun="lot")
+        note = await llm_deviation_reply(
+            mc_runtime, text, f"un récapitulatif de modification à confirmer :\n{recap_text}",
+            extra_instructions=(
+                "Le récapitulatif ci-dessus reflète déjà les valeurs les plus "
+                "récentes — accuse juste réception brièvement, ne demande pas "
+                "de reformuler et ne redemande pas oui/non toi-même."
+            ),
+        )
         return {
             "status": "WAITING_INPUT",
             "expected_input": "CONFIRMATION",
             "response_strategy": "ASK_MISSING_FIELD",
             "current_goal": "SALES_UPDATE_PRODUCTION",
-            "final_response": _format_pending_recap(pending, noun="lot"),
+            "final_response": f"{note}\n\n{recap_text}" if note else recap_text,
             "working_memory": {
                 **working,
                 "update_cycle_id": str(cycle_id),
@@ -896,6 +910,21 @@ async def _resolve_cycle_for_update(
     if cycle_id:
         correction = _parse_update_correction(text, allow_type_date=True)
         if not correction:
+            base_question = (
+                "✏️ Que souhaitez-vous modifier sur ce lot ?\n"
+                "Ex : « prix 400 », « nom maïs », « quantité 500 », « date 2026-12-31 »."
+            )
+            # Chantier résilience 2026-08 : uniquement sur une vraie déviation
+            # (event UNKNOWN/OUT_OF_SCOPE) — ce bloc est AUSSI atteint sur
+            # l'entrée fraîche juste après la sélection du lot (phase SELECT
+            # -> COLLECT, `text` = l'index tapé), où appeler le LLM serait
+            # inutile/à côté de la plaque. Même garde que
+            # nodes/rendering/ask.py::render_ask_missing_field.
+            note = None
+            if event in {"UNKNOWN", "OUT_OF_SCOPE"} and text.strip():
+                note = await llm_deviation_reply(
+                    mc_runtime, text, "répondre à : quel champ modifier sur ce lot (prix/nom/quantité/date) ?",
+                )
             return {
                 # "PRODUCT" est un slot SOFT (tunnel_manager.py) : n'importe
                 # quel NEW_TASK à confiance suffisante (ex: une correction
@@ -920,10 +949,7 @@ async def _resolve_cycle_for_update(
                     "locked_intent": "SALES_UPDATE_PRODUCTION",
                     "available_mapping_kind": None,
                 },
-                "final_response": (
-                    "✏️ Que souhaitez-vous modifier sur ce lot ?\n"
-                    "Ex : « prix 400 », « nom maïs », « quantité 500 », « date 2026-12-31 »."
-                ),
+                "final_response": f"{note}\n\n{base_question}" if note else base_question,
                 "ag_ui_component": None,
             }
         pending.update(correction)
@@ -1138,13 +1164,24 @@ async def _resolve_product_for_update(
                 "working_memory": _clear_wm(),
                 "ag_ui_component": None,
             }
-        # Ni correction, ni CONFIRM, ni REJECT clair : on ré-affiche le récap.
+        # Ni correction, ni CONFIRM, ni REJECT clair : on ré-affiche le récap
+        # — accuse d'abord réception via le LLM (chantier résilience 2026-08,
+        # même correctif que le miroir _resolve_cycle_for_update ci-dessus).
+        recap_text = _format_pending_recap(pending, noun="produit")
+        note = await llm_deviation_reply(
+            mc_runtime, text, f"un récapitulatif de modification à confirmer :\n{recap_text}",
+            extra_instructions=(
+                "Le récapitulatif ci-dessus reflète déjà les valeurs les plus "
+                "récentes — accuse juste réception brièvement, ne demande pas "
+                "de reformuler et ne redemande pas oui/non toi-même."
+            ),
+        )
         return {
             "status": "WAITING_INPUT",
             "expected_input": "CONFIRMATION",
             "response_strategy": "ASK_MISSING_FIELD",
             "current_goal": "SALES_UPDATE_PRODUCT",
-            "final_response": _format_pending_recap(pending, noun="produit"),
+            "final_response": f"{note}\n\n{recap_text}" if note else recap_text,
             "working_memory": {
                 **working,
                 "update_product_id": str(product_id),
@@ -1160,6 +1197,19 @@ async def _resolve_product_for_update(
     if product_id:
         correction = _parse_update_correction(text, allow_type_date=False)
         if not correction:
+            base_question = (
+                "✏️ Que souhaitez-vous modifier sur ce produit ?\n"
+                "Ex : « prix 400 », « nom maïs », « quantité 500 »."
+            )
+            # Voir le commentaire miroir dans _resolve_cycle_for_update : le
+            # LLM n'est appelé que sur une vraie déviation (event UNKNOWN/
+            # OUT_OF_SCOPE), jamais sur l'entrée fraîche juste après la
+            # sélection du produit (phase SELECT -> COLLECT).
+            note = None
+            if event in {"UNKNOWN", "OUT_OF_SCOPE"} and text.strip():
+                note = await llm_deviation_reply(
+                    mc_runtime, text, "répondre à : quel champ modifier sur ce produit (prix/nom/quantité) ?",
+                )
             return {
                 # Voir le commentaire miroir dans _resolve_cycle_for_update :
                 # "PRODUCT" est interruptible (slot SOFT), ce qui laissait une
@@ -1176,10 +1226,7 @@ async def _resolve_product_for_update(
                     "locked_intent": "SALES_UPDATE_PRODUCT",
                     "available_mapping_kind": None,
                 },
-                "final_response": (
-                    "✏️ Que souhaitez-vous modifier sur ce produit ?\n"
-                    "Ex : « prix 400 », « nom maïs », « quantité 500 »."
-                ),
+                "final_response": f"{note}\n\n{base_question}" if note else base_question,
                 "ag_ui_component": None,
             }
         pending.update(correction)

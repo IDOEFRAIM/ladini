@@ -143,6 +143,28 @@ async def cognitive_guard(
                 "[CognitiveGuard] Max retries reached for goal=%s — abandoning tunnel",
                 current_goal,
             )
+            # Chantier résilience 2026-08 : les mini machines à états
+            # auto-suffisantes (flows/producer/auctions.py::bid_phase,
+            # flows/producer/flow.py::update_phase) vivent EXCLUSIVEMENT dans
+            # working_memory, jamais touché par le reset ci-dessous avant ce
+            # correctif. Un abandon de tunnel en plein milieu (ex: bid_phase=
+            # "CONFIRM") laissait ces clés stales — relancer le même goal peu
+            # après (MARKET_BROWSE_REQUESTS / SALES_UPDATE_PRODUCTION /
+            # SALES_UPDATE_PRODUCT) relisait alors une phase/un id périmé et
+            # pouvait réafficher un récap obsolète au lieu de redémarrer
+            # proprement. current_goal étant remis à None juste en dessous
+            # (donc plus aucun tunnel actif), ces clés n'ont plus aucune
+            # raison de survivre non plus.
+            stale_wm_keys = (
+                "bid_phase", "pending_bid_auction", "pending_bid_price",
+                "pending_modify_bid",
+                "update_phase", "update_cycle_id", "update_product_id",
+                "update_pending",
+            )
+            working_memory = dict(state.get("working_memory") or {})
+            for key in stale_wm_keys:
+                working_memory[key] = None
+
             updates.update(
                 {
                     "current_goal": None,
@@ -178,21 +200,37 @@ async def cognitive_guard(
                         "action": "abandon_tunnel_max_retries",
                     },
                     "proactive_hint": "L'opération a été annulée. Dites-moi ce que vous souhaitez faire.",
+                    "working_memory": working_memory,
                 }
             )
             return updates
 
+        # BUG CAPITAL (2026-08-19) : cette branche RAPPORTAIT `retry_count`
+        # sans jamais l'INCRÉMENTER. Combiné au reset inconditionnel de
+        # `retry_count` par `post_response_cleanup` en fin de CHAQUE tour
+        # (voir _EPHEMERAL_REPLACE_FIELDS), le seuil `retry_count >= 2`
+        # ci-dessus était donc littéralement INATTEIGNABLE : l'abandon de
+        # tunnel `abandon_tunnel_max_retries` — la SEULE sortie de secours
+        # automatique de tout l'agent — était du code mort. Un utilisateur
+        # dont les messages ne sont pas classifiables (event=UNKNOWN) restait
+        # piégé dans le même tunnel indéfiniment, à recevoir "je n'ai pas bien
+        # saisi" à chaque tour, sans jamais que l'agent ne lâche prise de
+        # lui-même. Reproduit et vérifié avant correctif (5 tours simulés →
+        # `recover_active_tunnel` à l'infini). Le compteur est maintenant
+        # incrémenté ici, ET préservé d'un tour à l'autre tant que le tunnel
+        # vit (voir cleanup.py::_keep_goal_channel).
         updates.update(
             {
                 "status": "WAITING_INPUT",
                 "current_goal": current_goal,
                 "goal_status": "WAITING_INPUT",
                 "response_strategy": "RECOVERY",
+                "retry_count": retry_count + 1,
                 "intent_competition": competition,
                 "cognitive_decision": {
                     **decision,
                     "action": "recover_active_tunnel",
-                    "retry": retry_count,
+                    "retry": retry_count + 1,
                 },
             }
         )
@@ -214,6 +252,16 @@ async def cognitive_guard(
         hint = _build_proactive_hint(current_goal, progress, progress_payload)
         if hint:
             updates["proactive_hint"] = hint
+
+    # Le compteur d'échecs mesure des échecs CONSÉCUTIFS, pas cumulés sur
+    # toute la durée du tunnel : dès que ce tour a été compris (on atteint la
+    # branche "continue"), on repart de zéro. Sans ça, un utilisateur qui
+    # bute deux fois, se fait comprendre, puis bute une seule fois de plus se
+    # faisait éjecter de son opération — alors qu'il progressait. Vérifié par
+    # simulation avant/après (scénario UNKNOWN, UNKNOWN, ANSWER, UNKNOWN :
+    # abandonnait au 4e tour, ne le fait plus).
+    if in_tunnel and retry_count:
+        updates["retry_count"] = 0
 
     updates.update(
         {

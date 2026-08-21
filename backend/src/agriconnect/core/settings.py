@@ -255,13 +255,16 @@ class Settings(BaseSettings):
     SUPABASE_PRODUCT_BUCKET: str = "ladini"
 
     # --- Paydunya (Escrow paiement séquestre) ---
-    # Coupe-circuit : notre fournisseur (Paydunya) bloque temporairement les
-    # paiements (KYC marchand non validé côté Paydunya). Tant que False, la
-    # précommande se confirme directement (paiement à la livraison, comme
-    # avant l'intégration escrow) — voir flows/buyer/preorder.py. Le code
-    # escrow reste intact et se réactive en repassant ce flag à True une fois
-    # Paydunya débloqué, sans rien réécrire.
-    ESCROW_PAYMENT_ENABLED: bool = False
+    # Réactivé le 2026-08-18 : le blocage KYC côté Paydunya est résolu.
+    # Tant que True, une précommande N'EST PLUS confirmée directement — le
+    # paiement devient OBLIGATOIRE : `_execute_confirm`
+    # (flows/buyer/preorder.py) génère une facture Paydunya et réserve la
+    # commande en `AWAITING_PAYMENT` ; le débit de stock + statut CONFIRMED
+    # n'arrivent qu'à la réception de l'IPN, re-confirmée serveur-à-serveur
+    # auprès de Paydunya (voir EscrowMixin.mark_escrow_paid). Recouper avec
+    # False (paiement à la livraison) si Paydunya rebloque un jour — le code
+    # escrow reste intact, ce flag est le seul point de bascule.
+    ESCROW_PAYMENT_ENABLED: bool = True
     # URL publique de l'API (sans slash final) — sert à construire le
     # callback_url transmis à Paydunya (`/api/webhooks/paydunya-ipn`).
     PUBLIC_API_BASE_URL: str = ""

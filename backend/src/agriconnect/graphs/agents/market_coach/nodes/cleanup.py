@@ -204,7 +204,18 @@ async def post_response_cleanup(
         keep_confirmation_channel or keep_selection_channel or keep_field_channel
     )
     for field, default in _EPHEMERAL_REPLACE_FIELDS.items():
-        if field == "current_goal":
+        # `retry_count` suit EXACTEMENT le sort de `current_goal` : c'est le
+        # compteur d'échecs de compréhension DU TUNNEL COURANT (voir
+        # cognitive_guard::recover_active_tunnel). Le remettre à 0 en fin de
+        # CHAQUE tour — ce qui était le cas — rendait le seuil d'abandon
+        # (`retry_count >= 2`) inatteignable, donc la seule sortie de secours
+        # automatique de l'agent était du CODE MORT : un utilisateur dont les
+        # messages ne sont pas classifiables restait piégé indéfiniment dans
+        # le même tunnel. Il doit vivre tant que le tunnel vit, et disparaître
+        # avec lui (goal terminé/changé → le reset générique ci-dessous
+        # s'applique de nouveau et remet le compteur à 0 pour l'opération
+        # suivante).
+        if field in ("current_goal", "retry_count"):
             if _keep_goal_channel:
                 continue
         elif keep_confirmation_channel and field in _confirmation_preserved:

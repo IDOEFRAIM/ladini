@@ -17,7 +17,7 @@ Usage::
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from agriconnect.graphs.agents.market_coach.services.mcp.error_translation import (
     classify_error,
@@ -422,13 +422,20 @@ class AgentActionGateway(_BaseGateway):
 
 class EscrowGateway(_BaseGateway):
     async def initiate_escrow_payment(
-        self, buyer_phone: str, preorder_id: str
+        self,
+        buyer_phone: str,
+        preorder_id: str,
+        delivery_lat: Optional[float] = None,
+        delivery_lon: Optional[float] = None,
     ) -> Dict[str, Any]:
-        return await self._call(
-            "initiate_escrow_payment",
-            buyer_phone=buyer_phone.strip(),
-            preorder_id=preorder_id,
-        )
+        args: Dict[str, Any] = {
+            "buyer_phone": buyer_phone.strip(),
+            "preorder_id": preorder_id,
+        }
+        if delivery_lat is not None and delivery_lon is not None:
+            args["delivery_lat"] = delivery_lat
+            args["delivery_lon"] = delivery_lon
+        return await self._call("initiate_escrow_payment", **args)
 
     async def verify_delivery_otp(
         self, producer_phone: str, otp_code: str

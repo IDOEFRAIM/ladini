@@ -274,22 +274,43 @@ async def create_preorder(
         ]
         meta = CartDomainService.recompute_cart_meta(cart)
 
-        draft_res = await PreorderGateway(mc_runtime).create_draft(
-            buyer_phone=phone,
-            cart_items=items_payload,
-            payment_method=state.get("preferred_payment_method") or "CASH",
-            # `state["buyer_profile"]` n'existe nulle part dans le schéma d'état
-            # (aucun nœud ne l'écrit jamais) — c'était un lookup mort qui
-            # renvoyait toujours None. La zone du profil est chargée par
-            # profile_loader.py au niveau racine de l'état sous `zone_id`
-            # (voir core/state.py). Sans ce fix, `delivery_zone_id` était
-            # TOUJOURS None → create_preorder_draft se rabattait sur
-            # `user_obj.zone_id` en base, et échouait dès que cette valeur
-            # était absente, avec "Veuillez configurer votre zone de
-            # livraison" — même pour un acheteur dont la zone était bien
-            # connue de l'agent (juste jamais transmise).
-            delivery_zone_id=state.get("zone_id"),
-        )
+        # Chantier résilience 2026-08 : sans ce try/except, une panne/timeout
+        # MCP remontait jusqu'au filet générique `_safe_node` (utils.py), qui
+        # évite bien le crash du tour mais laisse `preorder_workflow` dans sa
+        # phase courante — l'acheteur se retrouvait bloqué dans un état de
+        # précommande incohérent au tour suivant. On repositionne
+        # explicitement la phase sur CART : son panier est intact, il peut
+        # réessayer immédiatement.
+        try:
+            draft_res = await PreorderGateway(mc_runtime).create_draft(
+                buyer_phone=phone,
+                cart_items=items_payload,
+                payment_method=state.get("preferred_payment_method") or "CASH",
+                # `state["buyer_profile"]` n'existe nulle part dans le schéma
+                # d'état (aucun nœud ne l'écrit jamais) — c'était un lookup
+                # mort qui renvoyait toujours None. La zone du profil est
+                # chargée par profile_loader.py au niveau racine de l'état
+                # sous `zone_id` (voir core/state.py). Sans ce fix,
+                # `delivery_zone_id` était TOUJOURS None →
+                # create_preorder_draft se rabattait sur `user_obj.zone_id` en
+                # base, et échouait dès que cette valeur était absente, avec
+                # "Veuillez configurer votre zone de livraison" — même pour un
+                # acheteur dont la zone était bien connue de l'agent (juste
+                # jamais transmise).
+                delivery_zone_id=state.get("zone_id"),
+            )
+        except Exception as exc:
+            logger.error("create_preorder: create_draft a échoué: %s", exc)
+            return {
+                "status": "ERROR",
+                "response_strategy": "ERROR",
+                "final_response": (
+                    "Impossible de préparer votre précommande pour le moment. "
+                    "Votre panier est conservé — réessayez dans un instant."
+                ),
+                "preorder_workflow": {"phase": "CART"},
+                "ag_ui_component": None,
+            }
 
         preorder_id = draft_res.get("preorder_id") or draft_res.get("id") or "DRAFT"
         if (
@@ -425,16 +446,39 @@ async def _execute_confirm(
         # confirmation réelle (débit stock + statut CONFIRMED) n'arrive
         # qu'à la réception de l'IPN, re-confirmée serveur-à-serveur
         # auprès de Paydunya (voir EscrowMixin.mark_escrow_paid). Le point
-        # GPS n'est pas encore threadé jusqu'ici — l'escrow est désactivé
-        # en production (voir plus bas), pas prioritaire tant qu'il l'est.
+        # GPS résolu par le gate ci-dessus est threadé jusqu'ici (voir
+        # EscrowMixin.initiate_escrow_payment) — sans ça, une précommande
+        # payée via escrow serait livrée sans point de livraison.
         from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
             EscrowGateway,
         )
 
-        escrow_res = await EscrowGateway(mc_runtime).initiate_escrow_payment(
-            buyer_phone=phone,
-            preorder_id=str(preorder_id),
-        )
+        # Chantier résilience 2026-08 : une panne Paydunya/MCP ne doit pas
+        # laisser l'acheteur bloqué — on le repositionne sur PREORDER_DRAFTED
+        # (brouillon intact, aucun stock débité) pour qu'il puisse relancer le
+        # paiement au tour suivant.
+        try:
+            escrow_res = await EscrowGateway(mc_runtime).initiate_escrow_payment(
+                buyer_phone=phone,
+                preorder_id=str(preorder_id),
+                delivery_lat=delivery_lat,
+                delivery_lon=delivery_lon,
+            )
+        except Exception as exc:
+            logger.error("_execute_confirm: initiate_escrow_payment a échoué: %s", exc)
+            return {
+                "status": "ERROR",
+                "response_strategy": "ERROR",
+                "final_response": (
+                    "Impossible de générer le lien de paiement pour le moment. "
+                    "Votre précommande est conservée — réessayez dans un instant."
+                ),
+                "preorder_workflow": {
+                    "phase": "PREORDER_DRAFTED",
+                    "preorder_id": preorder_id,
+                },
+                "ag_ui_component": None,
+            }
 
         if (
             not is_success_response(escrow_res)
@@ -490,12 +534,32 @@ async def _execute_confirm(
     # confirmation directe, paiement à la livraison — comportement
     # d'avant l'intégration escrow. Débite le stock immédiatement (voir
     # confirm_preorder_draft), pas d'attente de webhook/IPN.
-    confirm_res = await PreorderGateway(mc_runtime).confirm_draft(
-        buyer_phone=phone,
-        preorder_id=str(preorder_id),
-        delivery_lat=delivery_lat,
-        delivery_lon=delivery_lon,
-    )
+    # Chantier résilience 2026-08 : même principe que les deux appels
+    # ci-dessus. Le brouillon reste intact côté serveur (aucun stock débité
+    # tant que confirm_draft n'a pas réussi), donc repositionner sur
+    # PREORDER_DRAFTED permet un simple "oui" au tour suivant pour réessayer.
+    try:
+        confirm_res = await PreorderGateway(mc_runtime).confirm_draft(
+            buyer_phone=phone,
+            preorder_id=str(preorder_id),
+            delivery_lat=delivery_lat,
+            delivery_lon=delivery_lon,
+        )
+    except Exception as exc:
+        logger.error("_execute_confirm: confirm_draft a échoué: %s", exc)
+        return {
+            "status": "ERROR",
+            "response_strategy": "ERROR",
+            "final_response": (
+                "Impossible de confirmer votre précommande pour le moment. "
+                "Elle est conservée — réessayez dans un instant."
+            ),
+            "preorder_workflow": {
+                "phase": "PREORDER_DRAFTED",
+                "preorder_id": preorder_id,
+            },
+            "ag_ui_component": None,
+        }
 
     if (
         not is_success_response(confirm_res)

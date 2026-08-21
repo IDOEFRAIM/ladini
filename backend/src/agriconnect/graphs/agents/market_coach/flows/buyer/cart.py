@@ -6,9 +6,11 @@ from typing import Any, Dict, List
 
 from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
     CartDomainService,
+    ProductLookupUnavailable,
 )
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
+    llm_deviation_reply,
 )
 
 from .helpers import (
@@ -37,6 +39,8 @@ async def cart_management(
     - Free-text preorder keyword → delegate to preorder workflow
     """
     goal = (state.get("current_goal") or "").upper()
+    event = str(state.get("interpreted_event") or "").upper().strip()
+    user_text = str(state.get("normalized_text") or state.get("user_query") or "")
 
     payload: Dict[str, Any] = dict(state.get("transaction_payload") or {})
     if not payload and state.get("extracted_entities"):
@@ -282,18 +286,31 @@ async def cart_management(
                 if n_vendors > 1
                 else ""
             )
+            base_question = (
+                f"{switch_ack}"
+                f"👤 Vous avez choisi *{vendor_label}* pour *{product_name}*{price_info}.\n\n"
+                f"📦 Quelle quantité souhaitez-vous ?\n"
+                f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._\n"
+                f"{switch_hint}"
+            )
+            # Chantier résilience 2026-08 (volet acheteur) : c'est LE point
+            # le plus souvent atteint en pratique (vendor_selection_context
+            # persiste d'un tour à l'autre) — même correctif que le miroir
+            # "Single vendor" plus bas dans ce fichier : final_response
+            # précalculé court-circuite l'adaptivité générique de ask.py,
+            # et ce chemin est réatteint sur une VRAIE déviation (vendeur
+            # déjà choisi, quantité toujours absente).
+            note = None
+            if event in {"UNKNOWN", "OUT_OF_SCOPE"} and user_text.strip() and not vendor_switched:
+                note = await llm_deviation_reply(
+                    mc_runtime, user_text, f"répondre à : quelle quantité de {product_name} souhaitez-vous ?",
+                )
             return _with_base(
                 {
                     "status": "WAITING_INPUT",
                     "expected_input": "QUANTITY",
                     "response_strategy": "ASK_MISSING_FIELD",
-                    "final_response": (
-                        f"{switch_ack}"
-                        f"👤 Vous avez choisi *{vendor_label}* pour *{product_name}*{price_info}.\n\n"
-                        f"📦 Quelle quantité souhaitez-vous ?\n"
-                        f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._\n"
-                        f"{switch_hint}"
-                    ),
+                    "final_response": f"{note}\n\n{base_question}" if note else base_question,
                     "transaction_payload": payload,
                     "vendor_selection_context": vendor_ctx_payload,
                     "ag_ui_component": None,
@@ -344,9 +361,27 @@ async def cart_management(
         )
 
     # --- MULTI-VENDOR RESOLUTION ---
-    vendors, has_multiple = await cart_service.resolve_product_vendors(
-        phone, str(product_name)
-    )
+    # Une panne de la recherche catalogue ne doit JAMAIS être rendue comme
+    # « produit non disponible » (voir ProductLookupUnavailable) : ça affirme
+    # à l'acheteur, à tort, que le produit n'existe pas et l'oriente vers un
+    # appel d'offres inutile pour un produit pourtant en stock.
+    try:
+        vendors, has_multiple = await cart_service.resolve_product_vendors(
+            phone, str(product_name)
+        )
+    except ProductLookupUnavailable:
+        return _with_base(
+            {
+                "status": "ERROR",
+                "response_strategy": "ERROR",
+                "final_response": (
+                    f"🔌 Je n'arrive pas à consulter le catalogue pour « *{product_name}* » "
+                    "en ce moment — c'est un souci technique de notre côté, pas une "
+                    "absence de stock.\n\nRéessayez dans un instant."
+                ),
+                "ag_ui_component": None,
+            }
+        )
 
     # Un match qui n'est QUE trigram (pas de sous-texte réel entre le terme
     # cherché et le nom trouvé — voir _is_confident_product_match) n'est pas
@@ -418,17 +453,34 @@ async def cart_management(
             "requested_unit": None,
             "available_mapping_kind": "product_vendor",
         }
+        base_question = (
+            f"✅ *{product_name}* est disponible chez *{vendor_label}*{price_info}.\n\n"
+            f"📦 Quelle quantité souhaitez-vous ?\n"
+            f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._"
+            + extras_hint
+        )
+        # Chantier résilience 2026-08 (volet acheteur) : ce final_response
+        # est précalculé et posé directement sur l'état — comme les tunnels
+        # producteur, ça court-circuite le "reuse du final_response
+        # précalculé" de render_ask_missing_field (ask.py), qui ne peut donc
+        # jamais atteindre SA propre logique d'adaptivité. Ce même code
+        # chemin est réatteint sur une VRAIE déviation (vendeur déjà résolu,
+        # quantité toujours absente parce que l'utilisateur a dit autre
+        # chose) — pas seulement à la première résolution du vendeur — d'où
+        # le besoin du même accusé de réception LLM, gardé sur UNKNOWN/
+        # OUT_OF_SCOPE pour ne pas payer un appel inutile sur l'entrée
+        # fraîche.
+        note = None
+        if event in {"UNKNOWN", "OUT_OF_SCOPE"} and user_text.strip():
+            note = await llm_deviation_reply(
+                mc_runtime, user_text, f"répondre à : quelle quantité de {product_name} souhaitez-vous ?",
+            )
         return _with_base(
             {
                 "status": "WAITING_INPUT",
                 "expected_input": "QUANTITY",
                 "response_strategy": "ASK_MISSING_FIELD",
-                "final_response": (
-                    f"✅ *{product_name}* est disponible chez *{vendor_label}*{price_info}.\n\n"
-                    f"📦 Quelle quantité souhaitez-vous ?\n"
-                    f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._"
-                    + extras_hint
-                ),
+                "final_response": f"{note}\n\n{base_question}" if note else base_question,
                 "transaction_payload": payload,
                 "vendor_selection_context": vendor_ctx_seed,
                 "ag_ui_component": None,

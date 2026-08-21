@@ -162,6 +162,37 @@ class TestCognitiveGuardUnknownInTunnel:
         assert result["transaction_payload"] == {"__reset__": True}
         assert result["response_strategy"] == "CLARIFICATION"
 
+    def test_max_retries_abandon_also_clears_stale_producer_mini_state_machines(self):
+        """Chantier résilience 2026-08 : `bid_phase`/`update_phase` (mini
+        machines à états auto-suffisantes, flows/producer/auctions.py +
+        flow.py) vivent exclusivement dans working_memory, jamais touché par
+        ce reset avant ce fix — un abandon en plein milieu d'une confirmation
+        d'offre laissait `bid_phase="CONFIRM"` stale, et relancer le même
+        goal peu après pouvait réafficher un récap périmé au lieu de
+        redémarrer proprement."""
+        state = make_state(
+            current_goal="MARKET_BROWSE_REQUESTS",
+            interpreted_event="UNKNOWN",
+            expected_input="CONFIRMATION",
+            retry_count=2,
+            working_memory={
+                "bid_phase": "CONFIRM",
+                "pending_bid_auction": "a1",
+                "pending_bid_price": 250,
+                "update_phase": "COLLECT",
+                "update_cycle_id": "c1",
+                "auction_brief": {"a1": {"product": "mais"}},  # doit survivre
+            },
+        )
+        result = run(cognitive_guard(state, None))
+        wm = result["working_memory"]
+        assert wm["bid_phase"] is None
+        assert wm["pending_bid_auction"] is None
+        assert wm["pending_bid_price"] is None
+        assert wm["update_phase"] is None
+        assert wm["update_cycle_id"] is None
+        assert wm["auction_brief"] == {"a1": {"product": "mais"}}
+
     def test_unknown_event_outside_a_tunnel_does_not_trigger_this_branch(self):
         state = make_state(current_goal=None, interpreted_event="UNKNOWN", expected_input="NONE")
         result = run(cognitive_guard(state, None))

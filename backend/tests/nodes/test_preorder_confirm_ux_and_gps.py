@@ -149,6 +149,73 @@ class TestPreorderGpsGate:
         assert result["preorder_workflow"]["gps_default"] is None
 
     def test_confirming_the_habitual_point_at_the_gps_stage_finalizes_with_those_coordinates(self, monkeypatch):
+        """Escrow (Paydunya) est le chemin PAR DÉFAUT depuis le 2026-08-18
+        (voir settings.ESCROW_PAYMENT_ENABLED) — ce test verrouille que le
+        point GPS résolu par le gate est bien threadé jusqu'à
+        `initiate_escrow_payment`, pas seulement jusqu'à l'ancien
+        `confirm_draft` non-escrow. Voir [[gps-delivery-burkina-faso-2026-08]]."""
+        mod = _mod()
+        seen: Dict[str, Any] = {}
+
+        class _CapturingEscrowGateway:
+            def __init__(self, rt):
+                pass
+
+            async def initiate_escrow_payment(self, **kwargs):
+                seen.update(kwargs)
+                return {"status": "success", "order_id": "order1", "order_number": "ORD1"}
+
+        monkeypatch.setattr(
+            "agriconnect.graphs.agents.market_coach.services.mcp.gateway.EscrowGateway",
+            _CapturingEscrowGateway,
+        )
+
+        state = self._drafted_state(gps_stage=True, gps_default={"lat": 12.35, "lon": -1.5})
+        result = run(mod.create_preorder(state, None))
+
+        assert result["status"] == "COMPLETED"
+        assert seen["delivery_lat"] == 12.35
+        assert seen["delivery_lon"] == -1.5
+
+    def test_sharing_a_new_location_at_the_gps_stage_rereads_the_profile_and_finalizes(self, monkeypatch):
+        mod = _mod()
+        seen: Dict[str, Any] = {}
+
+        class _CapturingEscrowGateway:
+            def __init__(self, rt):
+                pass
+
+            async def initiate_escrow_payment(self, **kwargs):
+                seen.update(kwargs)
+                return {"status": "success", "order_id": "order1", "order_number": "ORD1"}
+
+        async def _fake_get_stored_location(mc_runtime, phone):
+            return 13.0, -1.0
+
+        monkeypatch.setattr(
+            "agriconnect.graphs.agents.market_coach.services.mcp.gateway.EscrowGateway",
+            _CapturingEscrowGateway,
+        )
+        monkeypatch.setattr(f"{_GATE_MODULE}._get_stored_location", _fake_get_stored_location)
+
+        state = self._drafted_state(gps_stage=True, gps_default=None)
+        state["location_shared"] = True
+        state["transaction_payload"] = {}
+
+        result = run(mod.create_preorder(state, None))
+
+        assert result["status"] == "COMPLETED"
+        assert seen["delivery_lat"] == 13.0
+        assert seen["delivery_lon"] == -1.0
+
+    def test_non_escrow_path_still_threads_gps_when_payment_disabled(self, monkeypatch):
+        """Non-régression : si `ESCROW_PAYMENT_ENABLED` repasse à False un
+        jour (Paydunya rebloqué), l'ancien chemin `confirm_draft` reçoit
+        toujours le point GPS — comportement historique préservé, pas
+        seulement le nouveau chemin escrow."""
+        from agriconnect.core.settings import settings
+
+        monkeypatch.setattr(settings, "ESCROW_PAYMENT_ENABLED", False)
         mod = _mod()
         seen: Dict[str, Any] = {}
 
@@ -168,34 +235,6 @@ class TestPreorderGpsGate:
         assert result["status"] == "COMPLETED"
         assert seen["delivery_lat"] == 12.35
         assert seen["delivery_lon"] == -1.5
-
-    def test_sharing_a_new_location_at_the_gps_stage_rereads_the_profile_and_finalizes(self, monkeypatch):
-        mod = _mod()
-        seen: Dict[str, Any] = {}
-
-        class _CapturingGateway:
-            def __init__(self, rt):
-                pass
-
-            async def confirm_draft(self, **kwargs):
-                seen.update(kwargs)
-                return {"status": "success", "order_id": "order1", "order_number": "ORD1"}
-
-        async def _fake_get_stored_location(mc_runtime, phone):
-            return 13.0, -1.0
-
-        monkeypatch.setattr(mod, "PreorderGateway", _CapturingGateway)
-        monkeypatch.setattr(f"{_GATE_MODULE}._get_stored_location", _fake_get_stored_location)
-
-        state = self._drafted_state(gps_stage=True, gps_default=None)
-        state["location_shared"] = True
-        state["transaction_payload"] = {}
-
-        result = run(mod.create_preorder(state, None))
-
-        assert result["status"] == "COMPLETED"
-        assert seen["delivery_lat"] == 13.0
-        assert seen["delivery_lon"] == -1.0
 
     def test_free_text_at_the_gps_stage_reminds_to_use_the_gps_button(self, stub_runtime):
         mod = _mod()

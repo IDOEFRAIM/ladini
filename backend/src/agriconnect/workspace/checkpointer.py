@@ -608,12 +608,41 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
                     payload_bytes,
                 )
 
+        # Tier 3 : DERNIER RECOURS NON DESTRUCTIF — ne garder que les canaux
+        # DURABLES (source unique : core/state_profile.py). Avant ce palier,
+        # l'échec des tiers 1-2 menait DIRECTEMENT au wipe total : la
+        # conversation redémarrait à zéro au tour suivant (panier vidé,
+        # tunnel perdu), le pire résultat possible pour l'utilisateur. Or
+        # les ~50 champs DURABLE sont par nature minuscules (drapeaux,
+        # identifiants courts, panier) : tout ce qui peut faire exploser la
+        # taille est, par construction, ÉPHÉMÈRE ou DÉRIVÉ, donc jetable
+        # sans conséquence sur la continuité conversationnelle. Ce palier
+        # rend donc le wipe total pratiquement inatteignable.
         if payload_bytes > _MAX_PERSISTED_BYTES:
-            logger.warning(
-                "WorkspaceCheckpointer payload STILL exceeds %s bytes (%s) after channel "
-                "shrink — persisting summary only (last resort: this wipes the live "
-                "tunnel state — active_cart/current_goal/transaction_payload — for the "
-                "NEXT turn, since aget_tuple() will find no checkpoint to resume from)",
+            dropped_non_durable = self._keep_only_durable_channels(namespaces)
+            if dropped_non_durable:
+                payload_bytes = len(
+                    json.dumps(trimmed, ensure_ascii=False).encode("utf-8")
+                )
+                metrics["payload_bytes"] = payload_bytes
+                metrics["dropped_non_durable"] = dropped_non_durable
+                logger.warning(
+                    "WorkspaceCheckpointer payload still exceeded %s bytes — kept ONLY "
+                    "durable channels, dropped %s. Tunnel continuity preserved "
+                    "(new size %s)",
+                    _MAX_PERSISTED_BYTES,
+                    sorted(dropped_non_durable),
+                    payload_bytes,
+                )
+
+        if payload_bytes > _MAX_PERSISTED_BYTES:
+            logger.error(
+                "WorkspaceCheckpointer payload STILL exceeds %s bytes (%s) even after "
+                "keeping only durable channels — persisting summary only (last resort: "
+                "this wipes the live tunnel state — active_cart/current_goal/"
+                "transaction_payload — for the NEXT turn, since aget_tuple() will find "
+                "no checkpoint to resume from). A DURABLE channel is pathologically "
+                "oversized; see the per-channel breakdown below.",
                 _MAX_PERSISTED_BYTES,
                 payload_bytes,
             )
@@ -779,6 +808,75 @@ class WorkspaceCheckpointer(BaseCheckpointSaver):
                     # the caller falls through to the last-resort full wipe.
                     logger.debug(
                         "Channel shrink failed for checkpoint %s (non-blocking)",
+                        checkpoint_id,
+                        exc_info=True,
+                    )
+                    continue
+        return dropped
+
+    def _keep_only_durable_channels(self, namespaces: Dict[str, Any]) -> set:
+        """Tier-3 defense, run only when tiers 1-2 weren't enough and the sole
+        remaining alternative is the destructive full wipe.
+
+        Strips every channel that is NOT durable from the retained
+        checkpoint(s), keeping the conversation resumable. The durable set is
+        read from ``core/state_profile.py`` — the SAME single source the
+        cleanup nodes use to decide what survives a turn — rather than a
+        hand-maintained copy here, which would inevitably drift (a lesson
+        already paid for in this codebase with parallel slot tables).
+
+        LangGraph's own bookkeeping channels (``__start__``, ``branch:...``)
+        are NEVER dropped: they are not application state, they are what makes
+        the checkpoint loadable at all.
+
+        Returns the set of channel names actually dropped (empty if nothing
+        could be dropped — caller then falls through to the full wipe).
+        """
+        # Import local : `state_profile` ne dépend que de la stdlib, mais le
+        # faire ici évite toute contrainte d'ordre d'import entre le paquet
+        # `workspace` et le paquet `graphs` (qui importe déjà
+        # `workspace.context_guard`).
+        from agriconnect.graphs.agents.market_coach.core.state_profile import (
+            _DURABLE_FIELDS,
+        )
+
+        dropped: set = set()
+        for bucket in namespaces.values():
+            if not isinstance(bucket, dict):
+                continue
+            checkpoints = bucket.get("checkpoints")
+            if not isinstance(checkpoints, dict):
+                continue
+            for checkpoint_id, entry in checkpoints.items():
+                encoded = entry.get("checkpoint")
+                if not isinstance(encoded, dict):
+                    continue
+                try:
+                    checkpoint = _SerializedValue(**encoded).decode(self.serde)
+                    channel_values = checkpoint.get("channel_values")
+                    if not isinstance(channel_values, dict):
+                        continue
+                    local_dropped = False
+                    for channel in list(channel_values.keys()):
+                        name = str(channel)
+                        # Canaux internes LangGraph : jamais de l'état métier,
+                        # indispensables au rechargement du checkpoint.
+                        if name.startswith("__") or ":" in name:
+                            continue
+                        if name in _DURABLE_FIELDS:
+                            continue
+                        del channel_values[channel]
+                        dropped.add(name)
+                        local_dropped = True
+                    if local_dropped:
+                        entry["checkpoint"] = asdict(
+                            _SerializedValue.encode(self.serde, checkpoint)
+                        )
+                except Exception:
+                    # Never let this attempt break persistence — worst case the
+                    # caller falls through to the last-resort full wipe.
+                    logger.debug(
+                        "Durable-only shrink failed for checkpoint %s (non-blocking)",
                         checkpoint_id,
                         exc_info=True,
                     )
