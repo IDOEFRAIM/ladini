@@ -70,44 +70,33 @@
 # hôte ~8 vCPU / 16 Go RAM — RECALCULEZ pour votre hôte réel (voir le detail
 # du calcul en commentaire sur chaque service).
 # ═════════════════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════════════════
+# Ladini — docker-compose.prod.yml (Version Allégée / MVP < 100 users)
+# Langfuse externalisé sur le Cloud — DB Postgres/PgBouncer conservée
+# ═════════════════════════════════════════════════════════════════════
 
 x-app-env: &app-env
-  # DB — via PgBouncer LOCAL (voir bandeau DB en tête de fichier). Le TLS
-  # vers DO est géré par PgBouncer lui-même (SERVER_TLS_SSLMODE, service
-  # `pgbouncer`) : la connexion app → pgbouncer reste en clair sur le
-  # réseau Docker interne (agri_net), donc DB_SSL_MODE=disable ICI est
-  # correct (ce n'est PAS la connexion qui touche Internet).
   DATABASE_URL: "postgresql+asyncpg://${DO_DB_USER}:${DO_DB_PASSWORD}@pgbouncer:6432/${DO_DB_NAME}"
   DB_SSL_MODE: "disable"
-  # Pool SQLAlchemy PAR PROCESS — volontairement resserré maintenant que
-  # PgBouncer absorbe le fan-in : chaque process n'a plus besoin d'un pool
-  # profond, seulement de quoi couvrir SES requêtes concurrentes propres.
-  # Calcul du plafond réel de connexions vers pgbouncer, à ajuster si vous
-  # changez concurrency/replicas :
-  #   api  : replicas × 4 (gunicorn -w)      × (DB_POOL_SIZE+MAX_OVERFLOW)
-  #   worker: replicas × 4 (--concurrency)    × (DB_POOL_SIZE+MAX_OVERFLOW)
-  #   mcp  : 1                                × (DB_POOL_SIZE+MAX_OVERFLOW)
-  # → doit rester << MAX_CLIENT_CONN du service pgbouncer.
   DB_POOL_SIZE: "${DB_POOL_SIZE:-5}"
   DB_POOL_MAX_OVERFLOW: "${DB_POOL_MAX_OVERFLOW:-5}"
   REDIS_URL: "redis://redis:6379/0"
-  # MCP — daemon HTTP persistant (remplace le spawn stdio par tour, voir
-  # protocols/mcp/servers/http_server.py). api/worker s'y connectent tous les
-  # deux ; settings.py défaut déjà MCP_DB_TRANSPORT=http, explicité ici.
+  
+  # MCP
   MCP_DB_TRANSPORT: "http"
   MCP_DB_HTTP_URL: "http://mcp:8003"
+  
   # LLM
   LLM_PROVIDER: "groq"
   GROQ_API_KEY: "${GROQ_API_KEY}"
-  # Fournisseur de messagerie WhatsApp
+  
+  # Messaging (WhatsApp / Twilio)
   MESSAGING_PROVIDER: "${MESSAGING_PROVIDER:-whatsapp_cloud}"
-  # Twilio
   TWILIO_ACCOUNT_SID: "${TWILIO_ACCOUNT_SID}"
   TWILIO_AUTH_TOKEN: "${TWILIO_AUTH_TOKEN}"
   TWILIO_WHATSAPP_NUMBER: "${TWILIO_WHATSAPP_NUMBER}"
   TWILIO_INTERACTIVE_ENABLED: "${TWILIO_INTERACTIVE_ENABLED:-false}"
   TWILIO_CONFIRM_CONTENT_SID: "${TWILIO_CONFIRM_CONTENT_SID:-}"
-  # WhatsApp Cloud API (Meta directe)
   WHATSAPP_CLOUD_API_TOKEN: "${WHATSAPP_CLOUD_API_TOKEN:-}"
   WHATSAPP_PHONE_NUMBER_ID: "${WHATSAPP_PHONE_NUMBER_ID:-}"
   WHATSAPP_BUSINESS_ACCOUNT_ID: "${WHATSAPP_BUSINESS_ACCOUNT_ID:-}"
@@ -115,21 +104,18 @@ x-app-env: &app-env
   WHATSAPP_APP_SECRET: "${WHATSAPP_APP_SECRET:-}"
   WHATSAPP_GRAPH_API_VERSION: "${WHATSAPP_GRAPH_API_VERSION:-v21.0}"
   WHATSAPP_NATIVE_INTERACTIVE_ENABLED: "${WHATSAPP_NATIVE_INTERACTIVE_ENABLED:-true}"
+  
   # Observabilité infra
   OTEL_ENABLED: "${OTEL_ENABLED:-true}"
   OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
   PROMETHEUS_ENABLED: "true"
-  # LLMOps (Langfuse)
+  
+  # LLMOps — Basculé sur Langfuse Cloud (plus de stack locale lourde)
   LANGFUSE_ENABLED: "${LANGFUSE_ENABLED:-true}"
   LANGFUSE_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY}"
   LANGFUSE_SECRET_KEY: "${LANGFUSE_SECRET_KEY}"
-  LANGFUSE_HOST: "http://langfuse-web:3000"
+  LANGFUSE_HOST: "https://cloud.langfuse.com"
 
-# ulimits partagés par les services applicatifs à fort trafic sortant
-# (appels LLM Groq, MCP HTTP, webhooks) : le défaut Docker (1024 fds) sature
-# vite sous forte concurrence de connexions HTTPS sortantes + entrantes —
-# une mort silencieuse classique sous charge ("Too many open files") qui ne
-# ressemble à rien côté logs applicatifs.
 x-high-fd-ulimits: &high-fd-ulimits
   nofile:
     soft: 65536
@@ -140,11 +126,12 @@ networks:
     driver: bridge
 
 volumes:
-  langfuse_pg_data:
-  clickhouse_data:
-  minio_data:
+  # Seuls les volumes indispensables persistent si besoin, 
+  # les volumes Langfuse (ClickHouse, MinIO, etc.) ont été purgés.
+  {}
 
 services:
+
   # ── 1. APPLICATIF ──────────────────────────────────────────────────
   mcp:
     image: ladini-mcp:latest
@@ -164,14 +151,10 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
-    # >= --timeout-graceful-shutdown (Dockerfile.mcp) + marge.
     stop_grace_period: 35s
     labels: ["autoheal=true"]
     deploy:
       resources:
-        # Process UNIQUE (--workers 1, contrainte singleton) : pas de
-        # multiplication par replicas ici. 768m couvre le pool DB chaud +
-        # le cache d'outils MCP ; reservation = usage stable observé.
         limits: { cpus: "1.0", memory: 768m }
         reservations: { cpus: "0.25", memory: 384m }
     restart: unless-stopped
@@ -191,29 +174,17 @@ services:
       mcp: { condition: service_healthy }
     ulimits: *high-fd-ulimits
     sysctls:
-      # Backlog d'acceptation TCP — évite des connexions refusées/droppées
-      # lors d'un burst de webhooks entrants (Twilio/Meta) au-delà du défaut
-      # kernel (128), avant même que gunicorn n'ait pu les mettre en file.
       net.core.somaxconn: 1024
     healthcheck:
-      # Liveness pure (aucune dépendance externe) — voir /health/ready pour
-      # une vraie readiness DB+Redis, à brancher sur un futur load balancer
-      # plutôt que sur CE healthcheck : on ne veut PAS que Docker/autoheal
-      # redémarre l'API juste parce que la DB a un blip passager (redémarrer
-      # l'API ne répare rien et ajoute un restart-storm inutile).
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
       interval: 15s
       timeout: 5s
       retries: 3
       start_period: 30s
-    # >= --graceful-timeout gunicorn (30s, Dockerfile.api) + marge.
     stop_grace_period: 40s
     labels: ["autoheal=true"]
     deploy:
       resources:
-        # -w 4 gunicorn : ~150-250MB/worker (FastAPI + imports LangChain
-        # partagés) + overhead process → limite avec marge pour pics de
-        # requêtes concurrentes (webhooks + polling santé).
         limits: { cpus: "1.5", memory: 1536m }
         reservations: { cpus: "0.5", memory: 512m }
     restart: unless-stopped
@@ -239,45 +210,20 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-    # Fenêtre de warm shutdown généreuse pour une tâche LLM en cours (elle
-    # peut légitimement prendre plusieurs secondes à quelques dizaines de
-    # secondes) SANS aller jusqu'au plafond task_time_limit=600s (ça
-    # rendrait un redéploiement/scale-down interminable) — au-delà, le
-    # SIGKILL arrive mais task_acks_late=True garantit que la tâche est
-    # simplement redéliverée, pas perdue.
     stop_grace_period: 90s
     labels: ["autoheal=true"]
     deploy:
       resources:
-        # concurrency=4 : ~350-500MB/enfant (LangGraph/LangChain chargés +
-        # pool DB chaud par process) → 4 enfants + process parent Celery.
-        # --max-memory-per-child (Dockerfile.worker) recycle un enfant AVANT
-        # d'atteindre ce plafond conteneur — donc en usage normal cette
-        # limite ne devrait quasi jamais être le mécanisme qui intervient
-        # (c'est le filet de dernier recours, pas le mécanisme nominal).
         limits: { cpus: "3.0", memory: 2560m }
         reservations: { cpus: "0.75", memory: 1024m }
     restart: unless-stopped
     networks: [agri_net]
 
-  # Planificateur Celery Beat — publie les 4 tâches périodiques
-  # (workers/beat_schedule.py : auction-solicitation, outbox-dispatch,
-  # proximity-matching, order-payment-expiry) sur le broker Redis à leur
-  # cadence. SANS ce service, `celery_app.conf.beat_schedule` est un
-  # config mort : `worker` ne fait qu'exécuter des tâches déjà en file,
-  # rien ne les y publie jamais — les sollicitations proactives, la
-  # livraison de l'outbox (notifs) et l'expiration des paiements escrow ne
-  # tournent jamais. Process SÉPARÉ et UNIQUE (jamais `--scale beat=N` :
-  # plusieurs beat dupliqueraient chaque tâche N fois sur le broker).
   beat:
     image: ladini-worker:latest
-    # --schedule pointe vers /tmp (writable par l'utilisateur non-root
-    # `appuser` — voir infra/docker/Dockerfile.worker) : le défaut Celery
-    # écrit `celerybeat-schedule` dans le CWD de l'image, appartenant à
-    # root, d'où un "Permission denied" systématique au démarrage.
     command: ["celery", "-A", "agriconnect.api.celery_app", "beat",
-              "--loglevel=info", "--pidfile=/tmp/celerybeat.pid",
-              "--schedule=/tmp/celerybeat-schedule"]
+             "--loglevel=info", "--pidfile=/tmp/celerybeat.pid",
+             "--schedule=/tmp/celerybeat-schedule"]
     environment: *app-env
     depends_on:
       redis: { condition: service_healthy }
@@ -287,8 +233,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
-    # Stateless/rapide : pas de tâche en vol à drainer, juste flush du
-    # fichier schedule.
     stop_grace_period: 15s
     labels: ["autoheal=true"]
     deploy:
@@ -314,11 +258,6 @@ services:
     restart: unless-stopped
     networks: [agri_net]
 
-  # PgBouncer — pooler LOCAL en mode `transaction` devant le Postgres
-  # managé DigitalOcean (PAS un Postgres local, voir bandeau DB en tête de
-  # fichier). SERVER_TLS_SSLMODE : DO refuse les connexions Postgres en
-  # clair, donc le LEG pgbouncer → DO doit être en TLS (contrairement au
-  # leg app → pgbouncer, en clair sur le réseau Docker interne agri_net).
   pgbouncer:
     image: edoburu/pgbouncer:latest
     environment:
@@ -329,27 +268,12 @@ services:
       DB_PASSWORD: "${DO_DB_PASSWORD}"
       DB_NAME: "${DO_DB_NAME}"
       SERVER_TLS_SSLMODE: "require"
-      # Transaction pooling : le meilleur ratio pour N workers courts. Compatible
-      # avec asyncpg ICI car le repo force statement_cache_size=0 (core/database.py).
       POOL_MODE: transaction
-      # Connexions ACCEPTÉES côté app — pas chères (pooling), donc généreux
-      # pour absorber un scale-out sans reconfig. Voir le calcul en tête de
-      # fichier (x-app-env) pour vérifier que vous restez bien en dessous.
       MAX_CLIENT_CONN: "1000"
-      # Connexions RÉELLES ouvertes vers DO — ⚠️ DOIT être <= (max_connections
-      # de votre plan DO managé − marge pour connexions admin/DO internes,
-      # ex: réservez ~10). Vérifiez Databases → Settings dans la console DO
-      # AVANT de monter cette valeur ; la dépasser fait échouer les
-      # connexions côté DO avec "too many connections", pas un problème
-      # côté pgbouncer.
       DEFAULT_POOL_SIZE: "${PGBOUNCER_DEFAULT_POOL_SIZE:-20}"
       AUTH_TYPE: scram-sha-256
     ulimits: *high-fd-ulimits
     healthcheck:
-      # pgbouncer écoute en local sur 6432 (LISTEN_PORT ci-dessus) — l'image
-      # edoburu/pgbouncer écoute par défaut sur 5432 SANS cette variable, ce
-      # qui casserait silencieusement toute la stack en aval
-      # (`depends_on: condition: service_healthy`).
       test: ["CMD-SHELL", "nc -z 127.0.0.1 6432 || exit 1"]
       interval: 5s
       timeout: 3s
@@ -365,9 +289,9 @@ services:
     networks: [agri_net]
 
   flower:
-    image: ladini-api:latest   # même image (flower est dans pyproject)
+    image: ladini-api:latest
     command: ["celery", "-A", "agriconnect.api.celery_app", "flower",
-              "--port=5555", "--basic_auth=${FLOWER_USER}:${FLOWER_PASSWORD}"]
+             "--port=5555", "--basic_auth=${FLOWER_USER}:${FLOWER_PASSWORD}"]
     environment: *app-env
     ports:
       - "5555:5555"
@@ -380,13 +304,6 @@ services:
     restart: unless-stopped
     networks: [agri_net]
 
-  # Auto-healing : `docker restart` tout conteneur marqué `autoheal=true`
-  # dès que SON PROPRE healthcheck Docker passe à `unhealthy` — voir bandeau
-  # HEALTHCHECKS & AUTO-HEALING en tête de fichier pour pourquoi plain
-  # `docker compose` ne le fait pas nativement. Lecture seule du statut via
-  # le socket Docker ; nécessite un accès au socket (privilège équivalent à
-  # root sur l'hôte) — c'est un compromis délibéré et standard pour ce
-  # pattern, acceptable ici car l'hôte n'exécute que cette stack.
   autoheal:
     image: willfarrell/autoheal:latest
     environment:
@@ -398,120 +315,5 @@ services:
     deploy:
       resources:
         limits: { cpus: "0.1", memory: 64m }
-    restart: unless-stopped
-    networks: [agri_net]
-
-  # ── 2. LANGFUSE v3 (LLMOps self-hosted) ────────────────────────────
-  langfuse-web:
-    image: langfuse/langfuse:3
-    depends_on:
-      langfuse-postgres: { condition: service_healthy }
-      clickhouse: { condition: service_healthy }
-      minio: { condition: service_healthy }
-      redis: { condition: service_healthy }
-    ports:
-      - "3000:3000"
-    environment:
-      DATABASE_URL: "postgresql://${LANGFUSE_DB_USER}:${LANGFUSE_DB_PASSWORD}@langfuse-postgres:5432/${LANGFUSE_DB_NAME}"
-      NEXTAUTH_URL: "${LANGFUSE_PUBLIC_URL:-http://localhost:3000}"
-      NEXTAUTH_SECRET: "${LANGFUSE_NEXTAUTH_SECRET}"
-      SALT: "${LANGFUSE_SALT}"
-      ENCRYPTION_KEY: "${LANGFUSE_ENCRYPTION_KEY}"   # hex 64 (openssl rand -hex 32)
-      CLICKHOUSE_URL: "http://clickhouse:8123"
-      CLICKHOUSE_USER: "${CLICKHOUSE_USER}"
-      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD}"
-      CLICKHOUSE_MIGRATION_URL: "clickhouse://clickhouse:9000"
-      # `clickhouse` ci-dessous est un nœud UNIQUE, sans Zookeeper/Keeper —
-      # sans ce flag, les migrations Langfuse v3 tentent `ON CLUSTER default`
-      # + `ReplicatedMergeTree`, qui exigent un Zookeeper inexistant ici et
-      # échouent (code 139 "There is no Zookeeper configuration").
-      CLICKHOUSE_CLUSTER_ENABLED: "false"
-      REDIS_CONNECTION_STRING: "redis://redis:6379/1"
-      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "${MINIO_BUCKET}"
-      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "http://minio:9000"
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: "${MINIO_ROOT_USER}"
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD}"
-      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/public/health"]
-      interval: 20s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
-    restart: unless-stopped
-    networks: [agri_net]
-
-  langfuse-worker:
-    image: langfuse/langfuse-worker:3
-    depends_on:
-      langfuse-postgres: { condition: service_healthy }
-      clickhouse: { condition: service_healthy }
-      minio: { condition: service_healthy }
-      redis: { condition: service_healthy }
-    environment:
-      DATABASE_URL: "postgresql://${LANGFUSE_DB_USER}:${LANGFUSE_DB_PASSWORD}@langfuse-postgres:5432/${LANGFUSE_DB_NAME}"
-      SALT: "${LANGFUSE_SALT}"
-      ENCRYPTION_KEY: "${LANGFUSE_ENCRYPTION_KEY}"
-      CLICKHOUSE_URL: "http://clickhouse:8123"
-      CLICKHOUSE_USER: "${CLICKHOUSE_USER}"
-      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD}"
-      CLICKHOUSE_MIGRATION_URL: "clickhouse://clickhouse:9000"
-      CLICKHOUSE_CLUSTER_ENABLED: "false"   # voir commentaire sur langfuse-web
-      REDIS_CONNECTION_STRING: "redis://redis:6379/1"
-      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: "${MINIO_BUCKET}"
-      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: "http://minio:9000"
-      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: "${MINIO_ROOT_USER}"
-      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: "${MINIO_ROOT_PASSWORD}"
-      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
-    restart: unless-stopped
-    networks: [agri_net]
-
-  langfuse-postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: "${LANGFUSE_DB_USER}"
-      POSTGRES_PASSWORD: "${LANGFUSE_DB_PASSWORD}"
-      POSTGRES_DB: "${LANGFUSE_DB_NAME}"
-    volumes:
-      - langfuse_pg_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${LANGFUSE_DB_USER} -d ${LANGFUSE_DB_NAME}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-    networks: [agri_net]
-
-  clickhouse:
-    image: clickhouse/clickhouse-server:24.3
-    environment:
-      CLICKHOUSE_USER: "${CLICKHOUSE_USER}"
-      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD}"
-    volumes:
-      - clickhouse_data:/var/lib/clickhouse
-    ulimits:
-      nofile: { soft: 262144, hard: 262144 }
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    restart: unless-stopped
-    networks: [agri_net]
-
-  minio:
-    image: minio/minio:latest
-    command: ["server", "/data", "--console-address", ":9001"]
-    environment:
-      MINIO_ROOT_USER: "${MINIO_ROOT_USER}"
-      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
-    volumes:
-      - minio_data:/data
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:9000/minio/health/live"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
     restart: unless-stopped
     networks: [agri_net]

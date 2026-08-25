@@ -43,7 +43,7 @@ RUN --mount=type=cache,target=/root/.cache/pypoetry \
         "opentelemetry-instrumentation-fastapi>=0.48b0" \
         "opentelemetry-instrumentation-celery>=0.48b0" \
         "prometheus-client>=0.21" \
-        "langfuse>=2.53,<3"
+        "langfuse"
 
 # ── Runtime ──────────────────────────────────────────────────────────
 FROM python:3.11-slim AS runtime
