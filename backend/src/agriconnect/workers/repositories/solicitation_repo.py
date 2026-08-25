@@ -47,28 +47,38 @@ async def upsert_auction_solicitations(
     *,
     auction: Auction,
     producers: Sequence[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+) -> Dict[str, List[Dict[str, Any]]]:
     """Insère les sollicitations manquantes pour une enchère (idempotent).
 
-    Retourne uniquement les lignes NOUVELLEMENT créées (celles à notifier).
+    Retourne ``{"created": [...], "skipped": [...]}``. Chaque producteur
+    écarté porte une raison explicite (``missing_producer_id`` ou
+    ``already_solicited``) — sans ça, un lot ``producers_targeted=2,
+    solicitations_created=0`` est indistinguable entre "tout le monde était
+    déjà sollicité" et "les données producteur sont corrompues" (incident du
+    2026-08-24 : le rapport agrégé seul ne permettait pas de trancher).
     """
+    skipped: List[Dict[str, Any]] = []
     if not producers:
-        return []
+        return {"created": [], "skipped": skipped}
 
-    rows = [
-        {
-            "kind": "AUCTION_INVITE",
-            "auction_id": auction.id,
-            "target_producer_id": p["producer_id"],
-            "sub_category_id": auction.sub_category_id,
-            "zone_id": auction.target_zone_id,
-            "status": "PENDING",
-        }
-        for p in producers
-        if p.get("producer_id")
-    ]
+    rows: List[Dict[str, Any]] = []
+    for p in producers:
+        producer_id = p.get("producer_id")
+        if not producer_id:
+            skipped.append({"producer_id": None, "reason": "missing_producer_id"})
+            continue
+        rows.append(
+            {
+                "kind": "AUCTION_INVITE",
+                "auction_id": auction.id,
+                "target_producer_id": producer_id,
+                "sub_category_id": auction.sub_category_id,
+                "zone_id": auction.target_zone_id,
+                "status": "PENDING",
+            }
+        )
     if not rows:
-        return []
+        return {"created": [], "skipped": skipped}
 
     stmt = (
         pg_insert(Solicitation)
@@ -81,7 +91,15 @@ async def upsert_auction_solicitations(
         {"solicitation_id": r_id, "producer_id": prod_id}
         for r_id, prod_id in result.all()
     ]
-    return created
+    created_ids = {c["producer_id"] for c in created}
+    for row in rows:
+        producer_id = row["target_producer_id"]
+        if producer_id not in created_ids:
+            # ON CONFLICT DO NOTHING n'a rien inséré pour ce producteur :
+            # une sollicitation (auction_id, target_producer_id) existe déjà.
+            skipped.append({"producer_id": producer_id, "reason": "already_solicited"})
+
+    return {"created": created, "skipped": skipped}
 
 
 async def upsert_offer_solicitations(

@@ -230,13 +230,17 @@ class TestPaydunyaIpnTask:
 # =====================================================================
 
 class TestAuctionAutomationService:
-    def _service(self, monkeypatch, *, auctions, producers, created, session=None):
+    def _service(self, monkeypatch, *, auctions, producers, created, skipped=None, session=None):
         import agriconnect.workers.automation.auction_automation_service as mod
 
         session = session or SimpleNamespace()
         monkeypatch.setattr(mod.solicitation_repo, "fetch_auctions_to_solicit", AsyncMock(return_value=auctions))
         monkeypatch.setattr(mod, "producers_for_auction", AsyncMock(return_value=producers))
-        monkeypatch.setattr(mod.solicitation_repo, "upsert_auction_solicitations", AsyncMock(return_value=created))
+        monkeypatch.setattr(
+            mod.solicitation_repo,
+            "upsert_auction_solicitations",
+            AsyncMock(return_value={"created": created, "skipped": skipped or []}),
+        )
         monkeypatch.setattr(mod.outbox_repo, "enqueue", AsyncMock(return_value=len(created)))
         monkeypatch.setattr(mod.solicitation_repo, "mark_notified", AsyncMock())
         return mod.AuctionAutomationService(session), mod
@@ -311,6 +315,39 @@ class TestAuctionAutomationService:
         assert len(report.errors) == 1
         assert "a-bad" in report.errors[0]
         assert report.solicitations_created == 1, "la bonne enchère doit quand même aboutir"
+
+    def test_all_producers_already_solicited_logs_a_reason_per_producer(self, monkeypatch, caplog):
+        """Incident 2026-08-24 : le rapport agrégé seul (`producers_targeted=2,
+        solicitations_created=0`) ne dit pas SI c'est parce que les 2
+        producteurs étaient déjà sollicités, avaient des données corrompues,
+        etc. `upsert_auction_solicitations` doit désormais motiver chaque
+        producteur écarté, et le service doit journaliser cette raison."""
+        import logging
+
+        auction = SimpleNamespace(id="a1", sub_category_id="sc1", target_zone_id="z1", quantity=1, unit="kg", max_price_per_unit=1)
+        producers = [
+            {"producer_id": "p1", "user_id": "u1", "phone": "+2260"},
+            {"producer_id": "p2", "user_id": "u2", "phone": "+2261"},
+        ]
+        skipped = [
+            {"producer_id": "p1", "reason": "already_solicited"},
+            {"producer_id": "p2", "reason": "already_solicited"},
+        ]
+        service, mod = self._service(
+            monkeypatch, auctions=[auction], producers=producers, created=[], skipped=skipped
+        )
+
+        with caplog.at_level(logging.INFO, logger="AgriConnect.Workers.AuctionAutomation"):
+            report = run(service.run())
+
+        assert report.producers_targeted == 2
+        assert report.solicitations_created == 0
+        mod.outbox_repo.enqueue.assert_not_awaited()
+
+        decisions = [r.message for r in caplog.records if "AuctionSolicitationDecision" in r.message]
+        assert len(decisions) == 2, "chaque producteur écarté doit être motivé individuellement"
+        assert all("already_solicited" in d for d in decisions)
+        assert all("SKIPPED" in d for d in decisions)
 
     def test_sub_category_name_defaults_when_missing(self, monkeypatch):
         session = SimpleNamespace(scalar=AsyncMock(return_value=None))

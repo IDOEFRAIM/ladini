@@ -88,9 +88,12 @@ class AuctionAutomationService:
         )
         report.producers_targeted += len(producers)
 
-        created = await solicitation_repo.upsert_auction_solicitations(
+        upsert_result = await solicitation_repo.upsert_auction_solicitations(
             self.session, auction=auction, producers=producers
         )
+        created = upsert_result["created"]
+        for skip in upsert_result["skipped"]:
+            self._log_decision(auction, skip["producer_id"], "SKIPPED", skip["reason"])
         if not created:
             return
         report.solicitations_created += len(created)
@@ -104,7 +107,11 @@ class AuctionAutomationService:
         for row in created:
             producer = producer_by_id.get(row["producer_id"])
             if not producer or not producer.get("phone"):
+                self._log_decision(
+                    auction, row["producer_id"], "CREATED", "missing_phone_no_outbox"
+                )
                 continue
+            self._log_decision(auction, row["producer_id"], "CREATED", None)
             entries.append(
                 {
                     "solicitation_id": row["solicitation_id"],
@@ -127,6 +134,27 @@ class AuctionAutomationService:
         if entries:
             report.outbox_enqueued += await outbox_repo.enqueue(self.session, entries)
             await solicitation_repo.mark_notified(self.session, notified_ids)
+
+    @staticmethod
+    def _log_decision(
+        auction: Auction, producer_id: Any, decision: str, reason: Optional[str]
+    ) -> None:
+        """Trace la décision prise pour CHAQUE producteur candidat.
+
+        Sans ceci, un rapport agrégé du type ``producers_targeted=2,
+        solicitations_created=0`` ne dit pas SI les 2 producteurs étaient
+        déjà sollicités, avaient des données corrompues, ou autre — la seule
+        façon de trancher était de rejouer en debug (voir incident du
+        2026-08-24)."""
+        logger.info(
+            "AuctionSolicitationDecision | %s",
+            {
+                "auction_id": str(auction.id),
+                "producer_id": producer_id,
+                "decision": decision,
+                "reason": reason,
+            },
+        )
 
     async def _sub_category_name(self, sub_category_id: Any) -> str:
         if not sub_category_id:

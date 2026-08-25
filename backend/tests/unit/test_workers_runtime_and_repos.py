@@ -245,20 +245,26 @@ class TestSolicitationRepo:
         session = SimpleNamespace(execute=AsyncMock())
         auction = SimpleNamespace(id="a1", sub_category_id="sc1", target_zone_id=None)
         result = run(upsert_auction_solicitations(session, auction=auction, producers=[]))
-        assert result == []
+        assert result == {"created": [], "skipped": []}
         session.execute.assert_not_awaited()
 
     def test_upsert_auction_solicitations_filters_producers_without_an_id(self):
         """Un producteur sans `producer_id` (donnée de ciblage incomplète) ne
         doit jamais atteindre l'INSERT — sinon une ligne NULL casserait la
-        contrainte d'idempotence sur `(auction_id, target_producer_id)`."""
+        contrainte d'idempotence sur `(auction_id, target_producer_id)`. Il
+        doit apparaître dans `skipped` avec une raison explicite (chantier
+        traçabilité 2026-08-24), pas juste disparaître silencieusement."""
         from agriconnect.workers.repositories.solicitation_repo import upsert_auction_solicitations
 
         session = SimpleNamespace(execute=AsyncMock())
         auction = SimpleNamespace(id="a1", sub_category_id="sc1", target_zone_id=None)
         producers = [{"producer_id": None}, {}]
         result = run(upsert_auction_solicitations(session, auction=auction, producers=producers))
-        assert result == []
+        assert result["created"] == []
+        assert result["skipped"] == [
+            {"producer_id": None, "reason": "missing_producer_id"},
+            {"producer_id": None, "reason": "missing_producer_id"},
+        ]
         session.execute.assert_not_awaited()
 
     def test_upsert_auction_solicitations_returns_newly_created_rows(self):
@@ -267,7 +273,27 @@ class TestSolicitationRepo:
         session = SimpleNamespace(execute=AsyncMock(return_value=_FakeExecResult(all_rows=[("sol-1", "prod-1")])))
         auction = SimpleNamespace(id="a1", sub_category_id="sc1", target_zone_id="z1")
         result = run(upsert_auction_solicitations(session, auction=auction, producers=[{"producer_id": "prod-1"}]))
-        assert result == [{"solicitation_id": "sol-1", "producer_id": "prod-1"}]
+        assert result == {
+            "created": [{"solicitation_id": "sol-1", "producer_id": "prod-1"}],
+            "skipped": [],
+        }
+
+    def test_upsert_auction_solicitations_reports_already_solicited_producers(self):
+        """Reproduit l'incident du 2026-08-24 : 2 producteurs ciblés, mais
+        ON CONFLICT DO NOTHING n'insère rien pour l'un des deux (déjà
+        sollicité) — ce producteur doit apparaître dans `skipped`, pas juste
+        se traduire par un compteur `solicitations_created` inférieur au
+        nombre de producteurs sans aucune explication."""
+        from agriconnect.workers.repositories.solicitation_repo import upsert_auction_solicitations
+
+        # Un seul des deux producteurs revient dans `RETURNING` : l'autre a
+        # été ignoré par ON CONFLICT DO NOTHING (déjà sollicité).
+        session = SimpleNamespace(execute=AsyncMock(return_value=_FakeExecResult(all_rows=[("sol-1", "prod-1")])))
+        auction = SimpleNamespace(id="a1", sub_category_id="sc1", target_zone_id="z1")
+        producers = [{"producer_id": "prod-1"}, {"producer_id": "prod-2"}]
+        result = run(upsert_auction_solicitations(session, auction=auction, producers=producers))
+        assert result["created"] == [{"solicitation_id": "sol-1", "producer_id": "prod-1"}]
+        assert result["skipped"] == [{"producer_id": "prod-2", "reason": "already_solicited"}]
 
     def test_upsert_offer_solicitations_returns_empty_on_no_buyers(self):
         from agriconnect.workers.repositories.solicitation_repo import upsert_offer_solicitations

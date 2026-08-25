@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from agriconnect.core.settings import settings
 from tests.conftest import make_state, run
 
 _GATE_MODULE = "agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate"
@@ -149,11 +150,14 @@ class TestPreorderGpsGate:
         assert result["preorder_workflow"]["gps_default"] is None
 
     def test_confirming_the_habitual_point_at_the_gps_stage_finalizes_with_those_coordinates(self, monkeypatch):
-        """Escrow (Paydunya) est le chemin PAR DÉFAUT depuis le 2026-08-18
-        (voir settings.ESCROW_PAYMENT_ENABLED) — ce test verrouille que le
-        point GPS résolu par le gate est bien threadé jusqu'à
+        """Ce test verrouille spécifiquement le chemin escrow (Paydunya) : le
+        point GPS résolu par le gate doit être threadé jusqu'à
         `initiate_escrow_payment`, pas seulement jusqu'à l'ancien
-        `confirm_draft` non-escrow. Voir [[gps-delivery-burkina-faso-2026-08]]."""
+        `confirm_draft` non-escrow. `ESCROW_PAYMENT_ENABLED` est désactivé par
+        défaut depuis 2026-08-24 (voir .env) — on l'épingle donc à True ici
+        pour tester ce chemin précis, indépendamment du défaut ambiant. Voir
+        [[gps-delivery-burkina-faso-2026-08]]."""
+        monkeypatch.setattr(settings, "ESCROW_PAYMENT_ENABLED", True)
         mod = _mod()
         seen: Dict[str, Any] = {}
 
@@ -178,6 +182,8 @@ class TestPreorderGpsGate:
         assert seen["delivery_lon"] == -1.5
 
     def test_sharing_a_new_location_at_the_gps_stage_rereads_the_profile_and_finalizes(self, monkeypatch):
+        """Chemin escrow — voir docstring du test précédent."""
+        monkeypatch.setattr(settings, "ESCROW_PAYMENT_ENABLED", True)
         mod = _mod()
         seen: Dict[str, Any] = {}
 
