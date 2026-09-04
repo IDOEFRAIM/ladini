@@ -118,13 +118,31 @@ class TestWorkers:
 
     def test_db_touching_crons_open_a_session(self):
         """Régression : `order_expiry` et l'IPN Paydunya appelaient un service
-        exigeant une session sans jamais l'ouvrir -> échec à CHAQUE exécution."""
+        exigeant une session sans jamais l'ouvrir -> échec à CHAQUE exécution.
+
+        (2026-09-03, clôture escrow/IPN) : `paydunya_ipn_task.py` délègue
+        désormais la re-confirmation + `mark_escrow_paid` à
+        `flows/buyer/preorder_payment.py::reconcile_invoice` (PARTAGÉ avec
+        `PreorderReconciliationService`, mandat §26 — pas de duplication) —
+        c'est CE module qui ouvre la session, pas le wrapper Celery
+        lui-même. Vérifié en conséquence."""
         import inspect
         from agriconnect.workers.crons import order_expiry
         from agriconnect.workers.payments import paydunya_ipn_task
-        for mod in (order_expiry, paydunya_ipn_task):
+        from agriconnect.graphs.agents.market_coach.flows.buyer import preorder_payment
+
+        for mod in (order_expiry, preorder_payment):
             src = inspect.getsource(mod)
             assert "worker_session" in src, f"{mod.__name__} n'ouvre pas de session DB"
+
+        # `paydunya_ipn_task` lui-même ne touche plus la DB directement — il
+        # délègue à `preorder_payment.reconcile_invoke` (ci-dessus, vérifié
+        # séparément) pour éviter de dupliquer la logique de branchement
+        # Paydunya avec `PreorderReconciliationService` (mandat §26).
+        assert "reconcile_invoice" in inspect.getsource(paydunya_ipn_task), (
+            "paydunya_ipn_task ne délègue plus vers reconcile_invoice — "
+            "vérifier qui ouvre la session DB à sa place"
+        )
 
     def test_outbox_templates_render_without_crashing_on_empty_payload(self):
         """Un payload incomplet ne doit jamais faire planter l'envoi."""

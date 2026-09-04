@@ -175,6 +175,16 @@ SCHEMA_COLUMN_DDL = (
     # tableau vide, même pattern que Product.images.
     "ALTER TABLE marketplace.auctions ADD COLUMN IF NOT EXISTS images TEXT[] NOT NULL DEFAULT '{}'",
     "ALTER TABLE marketplace.bids ADD COLUMN IF NOT EXISTS images TEXT[] NOT NULL DEFAULT '{}'",
+    # Déclinaisons de prix/conditionnement (2026-08-27) — voir
+    # domain/catalog/models.py::Product.pricing_tiers. Nullable : NULL =
+    # produit à tarif unique, comportement historique inchangé.
+    "ALTER TABLE marketplace.products ADD COLUMN IF NOT EXISTS pricing_tiers JSONB",
+    # Traçabilité du palier acheté côté acheteur (2026-08-30) — voir
+    # domain/pricing_tiers.py + domain/orders/models.py::OrderItem. Nullable
+    # sur TOUTE commande sans palier (produit à tarif unique, ou commande
+    # créée avant cette colonne) : comportement historique inchangé.
+    "ALTER TABLE marketplace.order_items ADD COLUMN IF NOT EXISTS tier_id TEXT",
+    "ALTER TABLE marketplace.order_items ADD COLUMN IF NOT EXISTS base_unit_quantity NUMERIC(14,3)",
 )
 
 

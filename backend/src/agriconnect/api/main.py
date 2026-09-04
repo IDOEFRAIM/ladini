@@ -4,6 +4,7 @@ import time
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+from agriconnect.api.routes.admin import router as admin_router
 from agriconnect.api.routes.market import router as market_router
 from agriconnect.api.routes.paydunya_webhook import router as paydunya_router
 from agriconnect.api.routes.twilio_webhook import (
@@ -59,6 +60,27 @@ async def _startup_telemetry() -> None:
     # puis instrumente FastAPI (spans automatiques par requête).
     telemetry.init_telemetry(service_name="agriconnect-api")
     telemetry.instrument_fastapi(app)
+
+    # (2026-09-02) Amorce le pool DB au démarrage — même correctif que
+    # `api/tasks.py::init_worker_process` pour le worker Celery (voir
+    # [[worker-warm-pool-cold-start]]), jamais appliqué au process API/webhook :
+    # `core/database.py::get_sessionmaker()` initialise le moteur PARESSEUSEMENT
+    # à la première requête qui le touche. Sans warm-up, la 1ère requête d'un
+    # process API tout juste démarré (déploiement, scaling, restart) paie la
+    # connexion à froid (handshake SSL DigitalOcean managed DB inclus) — si
+    # cette 1ère requête est justement `persist_shared_location` (webhook GPS,
+    # `core/location.py`), un simple ralentissement au démarrage peut se
+    # traduire par un faux `LOCATION_PERSISTENCE_ERROR` (except Exception large,
+    # jamais bloquant pour le webhook lui-même) présenté à l'utilisateur comme
+    # un problème permanent, alors que c'était un coût de démarrage à usage
+    # unique. Best-effort, jamais bloquant : un échec ici ne doit jamais
+    # empêcher l'API de démarrer.
+    try:
+        from agriconnect.api.tasks import _warmup_db
+
+        await _warmup_db()
+    except Exception as exc:
+        logger.warning("Warm-up DB au démarrage de l'API ignoré : %s", exc)
 
 
 @app.on_event("shutdown")
@@ -120,6 +142,7 @@ app.include_router(
 app.include_router(
     paydunya_router, prefix="/api"
 )  # endpoint réel : /api/webhooks/paydunya-ipn
+app.include_router(admin_router)  # endpoint réel : /admin/llm/health (auth token)
 
 
 @app.get("/health")

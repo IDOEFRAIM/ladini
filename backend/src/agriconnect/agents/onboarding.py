@@ -623,8 +623,16 @@ async def _build_zone_catalog_hint(mcp_runtime: Any) -> str:
 
     try:
         zone_catalog = await mcp_runtime.call_db("get_available_zones") or []
-        payload = _unwrap_tool_payload(zone_catalog) or zone_catalog
-        labels = _extract_zone_labels(payload)
+        # NB: on n'appelle PAS `_unwrap_tool_payload` ici — elle est conçue
+        # pour dérouler un objet UNIQUE (`Optional[Dict]`) et, sur une
+        # liste, retourne dès que le PREMIER élément se déroule avec succès
+        # au lieu de la liste entière. Sur une réponse `get_available_zones`
+        # (plusieurs zones), ça ne gardait que la toute première ville de la
+        # DB — d'où l'incident "l'agent ne cite que Bobo Dioulasso comme
+        # zone valide" (2026-08-26). `_extract_zone_labels` déroule déjà
+        # correctement l'enveloppe {"data": [...]} elle-même, sur la liste
+        # complète.
+        labels = _extract_zone_labels(zone_catalog)
         if labels:
             sample = ", ".join(labels[:10])
             return f" Zones valides : {sample}."

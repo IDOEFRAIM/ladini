@@ -65,6 +65,37 @@ def _format_quantity(
     return f"{_fmt_num(converted_qty)} {converted_unit}".strip()
 
 
+def _format_pricing_tiers(payload: Dict[str, Any]) -> Optional[str]:
+    """Récapitulatif groupé des déclinaisons de prix/conditionnement pour un
+    MÊME produit (2026-08-27, ex: "500f le demi-litre en sachet et 600f le
+    bidon"). `unit` y est affiché TEL QUEL, littéralement — jamais passé par
+    `canonical_unit_label` (ni aucune autre normalisation d'unité) : c'est
+    exactement le point de cette fonctionnalité, voir
+    domain/catalog/models.py::Product.pricing_tiers. Renvoie `None` si
+    `pricing_tiers` est absent/vide/mal formé (un seul tarif → rendu classique
+    inchangé, géré ailleurs)."""
+    tiers = payload.get("pricing_tiers")
+    if not isinstance(tiers, list) or not tiers:
+        return None
+    lines = []
+    for tier in tiers:
+        if not isinstance(tier, dict):
+            continue
+        qty = tier.get("quantity")
+        unit = str(tier.get("unit") or "").strip()
+        price = tier.get("price")
+        packaging = tier.get("packaging")
+        if qty in (None, "", [], {}) or not unit or price in (None, "", [], {}):
+            continue
+        label = f"{_fmt_num(qty)} {unit}"
+        if packaging:
+            label += f" ({packaging})"
+        lines.append(f"  • {label} — {_fmt_num(price)} FCFA")
+    if not lines:
+        return None
+    return "\n".join(lines)
+
+
 def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
     if goal == "DECLARE_CROP_CYCLE":
         production_type = str(payload.get("production_type") or "CROP").upper()
@@ -210,18 +241,24 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         else ""
     )
 
+    pricing_tiers_block = _format_pricing_tiers(payload)
+
     mapping = {
         "SALES_PUBLISH_PRODUCT": (
-            (
-                f"Vente de {quantity_line} de {product}"
-                f" à {price_fmt} FCFA/{price_unit}."
-                if price_fmt
-                else f"Vente de {quantity_line} de {product}."
+            f"Vente de {product} — plusieurs déclinaisons :\n{pricing_tiers_block}"
+            if pricing_tiers_block
+            else (
+                (
+                    f"Vente de {quantity_line} de {product}"
+                    f" à {price_fmt} FCFA/{price_unit}."
+                    if price_fmt
+                    else f"Vente de {quantity_line} de {product}."
+                )
+                + mismatch_note
             )
-            + mismatch_note
-        )
-        if quantity_line
-        else None,
+            if quantity_line
+            else None
+        ),
         "SALES_RECORD_DIRECT": (
             f"Enregistrement d'une vente directe : {quantity_line} de {product}"
             f" à {price_fmt} FCFA."
@@ -250,9 +287,13 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         "PROCUREMENT_ACCEPT_OFFER": "Acceptation de l'offre du producteur sélectionné.",
         "PROCUREMENT_SELECT_WINNER": "Sélection de l'offre gagnante.",
         "STOCK_REGISTER_HARVEST": (
-            f"Enregistrement d'une récolte : {quantity_line} de {product} en stock."
-            if quantity_line
-            else "Enregistrement d'une récolte en stock."
+            f"Enregistrement d'une récolte de {product} — plusieurs déclinaisons :\n{pricing_tiers_block}"
+            if pricing_tiers_block
+            else (
+                f"Enregistrement d'une récolte : {quantity_line} de {product} en stock."
+                if quantity_line
+                else "Enregistrement d'une récolte en stock."
+            )
         ),
         "STOCK_RECORD_MOVEMENT": (
             f"Mouvement de stock : {quantity_line} de {product}."

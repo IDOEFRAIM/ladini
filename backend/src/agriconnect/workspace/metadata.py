@@ -20,7 +20,7 @@ ALLOWED_METADATA_KEYS = frozenset(
         "current_goal",
         "form_data",
         "session_id",
-        "expected_input",
+        "pending_interaction_kind",
         "available_mapping",
         "expected_candidates",
         "disambiguation_trigger_id",
@@ -165,9 +165,15 @@ def build_metadata_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
     if current_goal:
         snapshot["current_goal"] = str(current_goal)
 
-    expected_input = state.get("expected_input")
-    if expected_input:
-        snapshot["expected_input"] = str(expected_input)
+    # (2026-09-02, "no legacy shim") : projection ops-only du DISCRIMINANT
+    # (le `kind`, pas le dict complet — snapshot minimal, cf. docstring de
+    # module). `pending_interaction` reste de toute façon disponible pour la
+    # reprise réelle via le checkpoint LangGraph normal (DURABLE, voir
+    # core/state_profile.py) — cette ligne ne sert QUE l'observabilité de ce
+    # snapshot compact, ce n'est pas une 2e source de vérité runtime.
+    pending_interaction = state.get("pending_interaction")
+    if isinstance(pending_interaction, dict) and pending_interaction.get("kind"):
+        snapshot["pending_interaction_kind"] = str(pending_interaction["kind"])
 
     available_mapping = clean_mapping(state.get("available_mapping"))
     if available_mapping:

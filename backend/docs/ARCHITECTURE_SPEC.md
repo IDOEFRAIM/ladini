@@ -69,7 +69,7 @@ backend/src/agriconnect/
 │   ├── context.py                    # FastMCP "context server" (FarmerContext, cache sémantique)
 │   ├── main.py                       # script de test manuel
 │   ├── runtime.py                    # MCPRuntime, AgriDBMCPServer (singleton global `runtime`)
-│   ├── security.py                   # PermissionScope/RiskLevel, ToolExecutionPolicy, MCPShield, UnifiedMCPClient
+│   ├── security.py                   # PermissionScope, TOOL_SCOPE_MAP, ToolExecutionPolicy, MCPPermissionHostApp (préflight)
 │   └── utils.py                      # run_coro_blocking (bridge sync/async)
 ├── orchestrator/
 │   ├── __init__.py
@@ -459,14 +459,12 @@ class MCPTransportConfig:
 ## 2.11 `infrastructure/mcp/security.py`
 ```python
 class PermissionScope(str, Enum): DB_READ_ONLY, DB_DATA_WRITE, DB_SCHEMA_MODIFY
-class RiskLevel(str, Enum): LOW, MEDIUM, HIGH, CRITICAL
 class MCPServerKind(str, Enum): DB = "db"
 
 class MCPToolMeta(BaseModel):
     name: str
     server: MCPServerKind
     scope: PermissionScope
-    risk: RiskLevel
     description: str = ""
     timeout_seconds: float = Field(default=15.0, ge=0.1)
     retries: int = Field(default=1, ge=0, le=5)
@@ -484,15 +482,23 @@ class ToolExecutionEnvelope(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
     error: str = ""
     meta: ToolExecutionMeta
-
-class PermissionDecision(BaseModel):
-    allowed: bool
-    decision: str
-    reason: str
-    scope: PermissionScope
-    risk: RiskLevel
 ```
 Exceptions : `PermissionDenied(tool_name, reason)`, `ToolExecutionTimeout(tool_name, timeout_seconds)`, `HostBlockedError(tool_name, agent_message, suggestion)`.
+
+**Audit MCP/AGUI 2026-08-26 — nettoyage architectural :** `MCPPermissionClient`,
+`ShieldHub`, `MCPShield`, `UnifiedMCPClient`, `PermissionDecision`,
+`RiskLevel` et `TOOL_RISK_MAP` ont été **supprimés**. Ce sous-arbre
+construisait un moteur de décision de risque à trois niveaux
+(`HITL_REQUIRED` pour les outils `HIGH`/`CRITICAL`) dont le seul appelant
+dans tout le dépôt était un script de test manuel
+(`infrastructure/mcp/main.py`, désormais adapté pour appeler
+`AgriDBMCPServer` directement). Le chemin RÉELLEMENT emprunté par chaque
+appel d'outil de l'agent (`AgriDBMCPServer.call_tool`, `runtime.py`) n'a
+jamais consulté ce moteur : il applique uniquement `TOOL_SCOPE_MAP`
+(fail-closed) + `MCPPermissionHostApp` (préflight SQL/fichiers sensibles,
+toujours actif). Le VRAI point de confirmation humaine (HITL) est
+`graphs/agents/market_coach/nodes/confirmation_gate.py`, en amont de tout
+appel d'outil, dans le graphe de l'agent — pas au niveau du protocole MCP.
 
 ---
 
@@ -1615,8 +1621,10 @@ mcp_tool_executor (nodes/executor.py)
       → ASCII-fold + None-strip
       → mcp_context_scope(FarmerContext(user_id, phone, session_id))
       → AgriMCPClient.call_tool(tool_name, arguments)  [transport stdio|http|grpc selon MCP_DB_TRANSPORT]
-          → infrastructure/mcp/security.py::MCPPermissionClient/MCPShield (scope+risk+rate-limit+preflight SQL-injection scan)
-          → infrastructure/mcp/runtime.py::AgriDBMCPServer.call_tool → services/database/d.py::AgriDatabaseService (dispatch MRO)
+          → infrastructure/mcp/runtime.py::AgriDBMCPServer.call_tool
+              → TOOL_SCOPE_MAP (scope, fail-closed) + MCPPermissionHostApp._preflight_scan (SQL-injection/fichiers sensibles)
+              → ToolExecutionPolicy.execute (rate-limit + sanitisation + timeout + audit)
+              → services/database/d.py::AgriDatabaseService (dispatch MRO)
               → Mixin.<method>(...) — session via db_session_ctx / @transactional
               → PostgreSQL (asyncpg, SQLAlchemy async)
   → ensure_dict(response) → is_success_response() → normalisation résultat

@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    CART_TUNNEL_KINDS,
+    InteractionKind,
+    get_pending_interaction,
+)
+
 # NB : on N'IMPORTE PLUS `CLEANABLE_AFTER_RESPONSE`/`build_reset_patch` ici.
 # Ce nœud est le DERNIER du graphe : l'état qu'il retourne EST celui que
 # l'orchestrateur lit pour envoyer la réponse (final.get("final_response"),
@@ -88,6 +94,11 @@ _EPHEMERAL_REPLACE_FIELDS = {
     "selected_tool": None,
     "retry_count": 0,
     "confirmation_summary": None,
+    # Suivent `confirmation_summary` dans TOUS les cas (même préservation,
+    # même reset) — voir `_confirmation_preserved` ci-dessous et l'incident
+    # "champignons/chèvres" (2026-08-27, nodes/rendering/confirm.py).
+    "confirmation_summary_goal": None,
+    "confirmation_summary_payload": None,
     "confirmation_raised_at": None,
     # Note d'écart LLM (voir confirmation_gate.py::_llm_deviation_reply) —
     # strictement mono-tour, JAMAIS préservée même quand la confirmation elle-
@@ -95,7 +106,6 @@ _EPHEMERAL_REPLACE_FIELDS = {
     # récap à chaque tour suivant.
     "confirmation_deviation_note": None,
     "execution_authorized": False,
-    "waiting_for_confirmation": False,
     "is_certified": False,
     "is_locked": False,
     "should_replan": False,
@@ -116,6 +126,12 @@ _EPHEMERAL_REPLACE_FIELDS = {
     # ferait croire à l'onboarding qu'une position vient d'arriver à un tour
     # ultérieur sans rapport.
     "location_shared": False,
+    # (2026-09-02) Même mono-tour que location_shared ci-dessus — l'issue de
+    # CE tour ne doit jamais être relue comme si elle décrivait un tour
+    # ultérieur.
+    "location_outcome": None,
+    "location_lat": None,
+    "location_lon": None,
 }
 
 
@@ -124,11 +140,17 @@ async def post_response_cleanup(
 ) -> Dict[str, Any]:
     pending = state.get("pending_cleanup")
     status = str(state.get("status") or "").upper().strip()
-    expected_input = str(state.get("expected_input") or "NONE").upper().strip()
+    # (2026-09-02, "no legacy shim") : plus de lecture de `expected_input` —
+    # `pending_interaction` (déjà DURABLE, survit nativement au checkpoint)
+    # est la seule source pour savoir QUEL canal garder vivant.
+    pending_kind = get_pending_interaction(state).kind
 
     patch: Dict[str, Any] = {}
 
-    keep_selection_channel = status == "WAITING_INPUT" and expected_input == "SELECTION"
+    keep_selection_channel = status == "WAITING_INPUT" and (
+        pending_kind == InteractionKind.SELECTION_MENU
+        or pending_kind in CART_TUNNEL_KINDS
+    )
 
     # When the turn parks the transaction awaiting explicit confirmation, the
     # confirmation channel (waiting_for_confirmation / confirmation_summary) MUST
@@ -139,20 +161,19 @@ async def post_response_cleanup(
     # BUG RÉEL, CONFIRMÉ PAR LOGS (2026-08-15) : ce garde-fou ne couvrait QUE
     # les canaux SELECTION et CONFIRMATION — pas le cas, bien plus courant,
     # d'un formulaire générique en attente d'UN CHAMP précis (prix, quantité,
-    # date limite...) via ASK_MISSING_FIELD (`expected_input` = "PRICE" /
-    # "QUANTITY" / "DEADLINE" / etc., status="WAITING_INPUT"). Sans ce
-    # troisième canal, `current_goal` ci-dessous était effacé après CHAQUE
-    # tour d'appel d'offres/vente/déclaration de culture — le tour suivant
-    # démarrait avec goal_planner voyant `current_goal=None`, alors même que
-    # l'opération était en plein milieu. Le formulaire semblait limper (une
-    # question suivante cohérente pouvait quand même s'afficher via d'autres
-    # champs survivants) mais ne pouvait jamais réellement s'exécuter, et
-    # tournait en boucle entre les mêmes questions. Même famille de bug que
+    # date limite...) via ASK_MISSING_FIELD (`pending_interaction.kind ==
+    # ENTER_FIELD`, status="WAITING_INPUT"). Sans ce troisième canal,
+    # `current_goal` ci-dessous était effacé après CHAQUE tour d'appel
+    # d'offres/vente/déclaration de culture — le tour suivant démarrait avec
+    # goal_planner voyant `current_goal=None`, alors même que l'opération
+    # était en plein milieu. Le formulaire semblait limper (une question
+    # suivante cohérente pouvait quand même s'afficher via d'autres champs
+    # survivants) mais ne pouvait jamais réellement s'exécuter, et tournait
+    # en boucle entre les mêmes questions. Même famille de bug que
     # [[market-coach-turn-boundary-state]], nouvelle instance jamais corrigée
     # jusqu'ici. Voir [[precommande-architecture-consolidation-2026-08]].
-    keep_field_channel = status == "WAITING_INPUT" and expected_input not in (
-        "",
-        "NONE",
+    keep_field_channel = (
+        status == "WAITING_INPUT" and pending_kind == InteractionKind.ENTER_FIELD
     )
 
     working = dict(state.get("working_memory") or {})
@@ -195,8 +216,9 @@ async def post_response_cleanup(
     # deux portes d'entrée. `confirmation_raised_at` doit survivre pour le
     # garde-fou de péremption (voir confirmation_gate.py).
     _confirmation_preserved = {
-        "waiting_for_confirmation",
         "confirmation_summary",
+        "confirmation_summary_goal",
+        "confirmation_summary_payload",
         "current_goal",
         "confirmation_raised_at",
     }

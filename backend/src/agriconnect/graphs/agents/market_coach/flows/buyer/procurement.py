@@ -5,6 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    clear_pending_interaction,
+    set_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
@@ -20,8 +25,6 @@ from agriconnect.graphs.agents.market_coach.utils import (
 
 from .cart import cart_management
 from .helpers import (
-    CONFIRM_KEYWORDS,
-    DECLINE_KEYWORDS,
     ESCALATE_KEYWORDS,
     additional_products_hint,
     logger,
@@ -99,7 +102,11 @@ def build_procurement_escalation(
         k for k in required_order if form_data.get(k) in (None, "", 0, [], {})
     ]
     last_missing_field = missing_fields[0] if missing_fields else None
-    expected_input = last_missing_field.upper() if last_missing_field else "NONE"
+    pending_patch = (
+        set_pending_interaction(InteractionKind.ENTER_FIELD, field_name=last_missing_field)
+        if last_missing_field
+        else clear_pending_interaction("form_complete")
+    )
 
     wm = dict(working_memory)
     wm["active_goal"] = "PROCUREMENT_CREATE_REQUEST"
@@ -128,7 +135,7 @@ def build_procurement_escalation(
         "form_step": None,
         "missing_fields": missing_fields,
         "last_missing_field": last_missing_field,
-        "expected_input": expected_input,
+        **pending_patch,
         "vendor_selection_context": {"__reset__": True},
         "ag_ui_component": None,
     }
@@ -287,16 +294,19 @@ async def buyer_request_resolver(
     interpreted_event = str(state.get("interpreted_event") or "").upper()
 
     if waiting_choice:
-        confirm_signal = (
-            normalized_text in CONFIRM_KEYWORDS or interpreted_event == "CONFIRM"
-        )
-        reject_signal = (
-            normalized_text in DECLINE_KEYWORDS or interpreted_event == "REJECT"
-        )
-
-        if confirm_signal or normalized_text in ESCALATE_KEYWORDS:
+        # (2026-09-03, refonte transactionnelle, mandat §10) : ce choix est
+        # déjà posé via `PendingInteraction(kind=CONFIRM_ACTION)` (voir plus
+        # bas dans ce fichier, là où `buyer_request_waiting_choice=True` est
+        # écrit) — `interpreted_event` (CONFIRM/REJECT) est donc DÉJÀ le
+        # signal canonique fiable, produit par le MÊME contrat fast-path/LLM
+        # que toute autre confirmation (`_CONFIRM_EXACT_PHRASES`,
+        # `interpreter/routing.py`). Le domaine ne compare plus jamais le
+        # texte utilisateur lui-même — un 2e moteur de reconnaissance
+        # oui/non (une liste locale, vocabulaire plus étroit et désynchronisé
+        # de `_CONFIRM_EXACT_PHRASES`) a été supprimé.
+        if interpreted_event == "CONFIRM" or normalized_text in ESCALATE_KEYWORDS:
             return _escalate(_ESCALATION_MSG)
-        if reject_signal:
+        if interpreted_event == "REJECT":
             wm = dict(working_memory)
             # None-overwrite (merge_dict) — voir explication plus haut : un pop
             # ici laissait `buyer_request_waiting_choice` actif après un refus.
@@ -319,7 +329,7 @@ async def buyer_request_resolver(
     if not product_name:
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "PRODUCT",
+            **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="product"),
             "response_strategy": "ASK_MISSING_FIELD",
             "final_response": "Quel produit recherchez-vous ?",
             "transaction_payload": payload,
@@ -432,7 +442,7 @@ async def buyer_request_resolver(
         }
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "QUANTITY",
+            **set_pending_interaction(InteractionKind.ENTER_QUANTITY, field_name="quantity"),
             "response_strategy": "ASK_MISSING_FIELD",
             "final_response": (
                 f"✅ *{product_name}* est disponible chez *{vendor_label}*{price_info}{qty_info}.\n\n"
@@ -498,7 +508,7 @@ async def buyer_request_resolver(
     )
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "CONFIRMATION",
+        **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
         "response_strategy": "ASK_MISSING_FIELD",
         "final_response": msg,
         "ag_ui_component": None,
@@ -566,7 +576,7 @@ async def resolve_received_bids(
     ]
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "working_memory": {"bids_menu": menu},
         "response_strategy": "SELECTION_MENU",
         "final_response": menu,

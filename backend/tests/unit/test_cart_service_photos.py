@@ -112,3 +112,30 @@ class TestResolveProductVendorsImages:
         vendors, _ = run(_svc().resolve_product_vendors("+22670000001", "maïs"))
 
         assert vendors[0]["images"] == ["https://x/a.jpg"]
+
+    def test_a_raw_uuid_producer_id_is_cast_to_str(self, monkeypatch):
+        """Incident 21656 (2026-08-27) : `producer_id` provient tel quel du
+        driver DB (souvent un `uuid.UUID`, pas une string) et finit dans
+        `MenuOption.value` — typé `Optional[str]` mais non vérifié à
+        l'exécution — puis dans `content_variables` envoyées à Twilio."""
+        import uuid
+        from unittest.mock import AsyncMock
+        import agriconnect.graphs.agents.market_coach.services.mcp.gateway as gw
+
+        raw_uuid = uuid.uuid4()
+        monkeypatch.setattr(
+            gw.ProductGateway, "search_products",
+            AsyncMock(return_value={
+                "status": "success",
+                "results": [{
+                    "id": "p1", "producer_id": raw_uuid, "name": "maïs",
+                    "price": 250, "unit": "KG", "vendor_name": "Ferme Koné",
+                }],
+            }),
+        )
+
+        from tests.conftest import run
+        vendors, _ = run(_svc().resolve_product_vendors("+22670000001", "maïs"))
+
+        assert vendors[0]["producer_id"] == str(raw_uuid)
+        assert isinstance(vendors[0]["producer_id"], str)

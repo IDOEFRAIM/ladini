@@ -8,13 +8,14 @@ import os
 import sys
 import tempfile
 import time
+import uuid
 from abc import ABC, abstractmethod
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional
 
-import aiohttp
+import httpx
 
 # Tentative d'import de FastMCP
 try:
@@ -223,53 +224,67 @@ class FastMCPProcessAdapter(MCPTransportAdapter):
 
 
 class HttpMCPAdapter(MCPTransportAdapter):
-    def __init__(self, config: MCPTransportConfig) -> None:
+    """Transport HTTP conforme au spec MCP (Streamable HTTP, JSON-RPC 2.0).
+
+    Audit MCP/AGUI 2026-08-27 : remplace l'ancien contrat REST maison
+    (``GET /tools``, ``POST /call``) que ``protocols/mcp/servers/http_server.py``
+    n'expose plus — ce daemon route désormais tout le trafic MCP via un
+    ``StreamableHTTPSessionManager`` officiel sur l'unique endpoint ``/mcp``.
+    Même construction que ``FastMCPProcessAdapter`` (``fastmcp.Client`` +
+    handlers elicitation/progress/message), transport différent uniquement.
+    """
+
+    def __init__(
+        self,
+        config: MCPTransportConfig,
+        elicitation_handler: Optional[Callable[..., Awaitable[Any]]] = None,
+        progress_handler: Optional[Callable[..., Awaitable[Any]]] = None,
+        message_handler: Optional[Callable[..., Awaitable[Any]]] = None,
+    ) -> None:
         self.config = config
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._client: Optional[Client] = None
+        self._exit_stack = AsyncExitStack()
+        self._elicitation_handler = elicitation_handler
+        self._progress_handler = progress_handler
+        self._message_handler = message_handler
 
     async def connect(self) -> None:
+        if not Client:
+            raise ImportError("fastmcp est requis pour le transport http")
+        from fastmcp.client.transports import StreamableHttpTransport
+
         if not self.config.http_base_url:
             raise ValueError("http_base_url manquant pour le transport HTTP")
-        timeout = aiohttp.ClientTimeout(total=30)
-        self._session = aiohttp.ClientSession(timeout=timeout)
+
+        transport = StreamableHttpTransport(
+            # Trailing slash évite un aller-retour 307 Temporary Redirect sur
+            # CHAQUE appel MCP (FastMCP monte ses routes en "/mcp/", voir les
+            # logs "POST /mcp -> 307 -> POST /mcp/ -> 200" — cosmétique mais
+            # double la latence réseau de chaque appel pour rien).
+            url=f"{self.config.http_base_url.rstrip('/')}/mcp/",
+            headers=dict(self.config.http_headers or {}),
+        )
+        self._client = Client(
+            transport,
+            elicitation_handler=self._elicitation_handler,
+            progress_handler=self._progress_handler,
+            message_handler=self._message_handler,
+        )
+        await self._exit_stack.enter_async_context(self._client)
 
     async def close(self) -> None:
-        if self._session:
-            await self._session.close()
-            self._session = None
-
-    def _headers(self) -> Dict[str, str]:
-        base = {"Content-Type": "application/json"}
-        base.update(self.config.http_headers or {})
-        return base
-
-    def _endpoint(self, suffix: str) -> str:
-        assert self.config.http_base_url
-        return f"{self.config.http_base_url.rstrip('/')}/{suffix.lstrip('/')}"
+        await self._exit_stack.aclose()
+        self._client = None
 
     async def list_tools(self) -> List[Any]:
-        if not self._session:
-            raise RuntimeError("Session HTTP non initialisée")
-        async with self._session.get(
-            self._endpoint("tools"), headers=self._headers()
-        ) as resp:
-            resp.raise_for_status()
-            return await resp.json()
+        if not self._client:
+            raise RuntimeError("Client HTTP MCP non initialisé")
+        return await self._client.list_tools()
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
-        if not self._session:
-            raise RuntimeError("Session HTTP non initialisée")
-        payload = {"name": tool_name, "arguments": arguments}
-        async with self._session.post(
-            self._endpoint("call"),
-            headers=self._headers(),
-            json=payload,
-        ) as resp:
-            resp.raise_for_status()
-            content_type = resp.headers.get("Content-Type", "")
-            if "application/json" in content_type:
-                return await resp.json()
-            return await resp.text()
+        if not self._client:
+            raise RuntimeError("Client HTTP MCP non initialisé")
+        return await self._client.call_tool(tool_name, arguments)
 
 
 class GrpcMCPAdapter(MCPTransportAdapter):
@@ -434,7 +449,12 @@ class AgriMCPClient:
                 message_handler=self._handle_message,
             )
         if kind == "http":
-            return HttpMCPAdapter(self.transport)
+            return HttpMCPAdapter(
+                self.transport,
+                elicitation_handler=self._handle_elicitation,
+                progress_handler=self._handle_progress,
+                message_handler=self._handle_message,
+            )
         if kind == "grpc":
             return GrpcMCPAdapter(self.transport)
         raise ValueError(f"Unsupported MCP transport kind: {self.transport.kind}")
@@ -511,25 +531,57 @@ class AgriMCPClient:
             cleaned[k] = v
         return cleaned
 
-    async def call_tool(self, tool_name: str, arguments) -> Any:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments,
+        *,
+        idempotency_key: str | None = None,
+    ) -> Any:
+        """Exécute un outil, en retentant jusqu'à `_MAX_RECONNECT_ATTEMPTS`
+        fois après une coupure réseau intermédiaire (`reconnect()` entre deux
+        tentatives).
+
+        `idempotency_key` (audit MCP/AGUI 2026-08-27) : identifie la tentative
+        logique — PAS chaque essai HTTP/stdio individuel. Une clé unique est
+        générée si l'appelant n'en fournit pas, puis réutilisée TELLE QUELLE
+        à chaque itération de la boucle ci-dessous. Sans ça, un retry après
+        coupure réseau (la connexion tombe APRÈS que l'écriture a réellement
+        atteint la DB, mais AVANT que la réponse ne revienne) rejouerait un
+        `create_order`/`initiate_escrow_payment` comme un appel entièrement
+        nouveau, indistinguable d'une seconde commande légitime.
+
+        Note de portée : ceci propage la clé jusqu'au backend (`_idempotency_key`
+        dans les arguments) — la déduplication CÔTÉ SERVEUR (contrainte
+        unique, table de déduplication...) n'est pas dans le périmètre de ce
+        chantier et reste à implémenter tool par tool pour les actions
+        sensibles. `AgriDBMCPServer.call_tool` (runtime.py) retire déjà la
+        clé avant dispatch, exactement comme `_caller_phone`, pour ne pas
+        faire planter un outil dont la signature ne l'accepte pas.
+        """
         if not self._adapter or not self._connected:
             raise RuntimeError("Client non connecté.")
 
-        safe_args = self._sanitize_arguments(arguments)
+        key = idempotency_key or str(uuid.uuid4())
+        safe_args = {**self._sanitize_arguments(arguments), "_idempotency_key": key}
 
         logger.info(
-            "MCP_CALL_AUDIT | tool=%s | args=%s",
+            "MCP_CALL_AUDIT | tool=%s | idempotency_key=%s | args=%s",
             tool_name,
+            key,
             json.dumps(safe_args, default=str, ensure_ascii=False),
         )
 
         for attempt in range(1, self._MAX_RECONNECT_ATTEMPTS + 1):
             try:
+                # `safe_args` (donc la même `_idempotency_key`) est réutilisé
+                # tel quel à chaque tentative — c'est ce qui rend le retry
+                # idempotent-compatible plutôt qu'un nouvel appel logique.
                 result = await self._with_lock(
                     self._adapter.call_tool, tool_name, safe_args
                 )
                 break
-            except (ConnectionError, OSError, RuntimeError, aiohttp.ClientError) as exc:
+            except (ConnectionError, OSError, RuntimeError, httpx.HTTPError) as exc:
                 logger.warning(
                     "MCP call_tool attempt %d/%d failed (%s): %s",
                     attempt,
@@ -604,11 +656,6 @@ class AgriMCPClient:
             and message.method == "notifications/tools/list_changed"
         ):
             await self.refresh_tools()
-
-
-# NOTE: `UnifiedMCPClient` is defined once in `security.py` (canonical location,
-# closest to ShieldHub). Import it from there:
-#     from agriconnect.infrastructure.mcp.security import UnifiedMCPClient
 
 
 async def main():

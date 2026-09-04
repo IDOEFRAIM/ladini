@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from agriconnect.graphs.agents.market_coach.actions.common import (
     normalize_quantity_to_kg,
@@ -59,6 +59,7 @@ class SalesUpdateProductCommand:
     quantity: Optional[float] = None
     name: Optional[str] = None
     unit: Optional[str] = None
+    pricing_tiers: Optional[List[Dict[str, Any]]] = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,10 @@ class SalesPublishProductCommand:
     price: float
     description: Optional[str] = None
     category_label: Optional[str] = None
+    # Voir sales_dto.py::SalesPublishProductPayload.pricing_tiers — jamais
+    # passé par `_resolve_mass_payload` (conversion kg), contrairement à
+    # `quantity`/`unit` ci-dessus : ces unités restent LITTÉRALES.
+    pricing_tiers: Optional[List[Dict[str, Any]]] = None
 
 
 @dataclass(frozen=True)
@@ -261,6 +266,8 @@ class SalesService:
             args["description"] = command.description
         if command.category_label:
             args["category_label"] = command.category_label
+        if command.pricing_tiers:
+            args["pricing_tiers"] = command.pricing_tiers
         return DomainResult(tool_id=ToolId.CREATE_PRODUCT, tool_args=args)
 
     def record_direct_sale(self, command: SalesRecordDirectCommand) -> DomainResult:
@@ -310,9 +317,10 @@ class SalesService:
             and command.quantity is None
             and command.name is None
             and command.unit is None
+            and command.pricing_tiers is None
         ):
             raise ValueError(
-                "Indiquez au moins un champ à modifier (prix, quantité, nom ou unité)."
+                "Indiquez au moins un champ à modifier (prix, quantité, nom, unité ou tarifs)."
             )
 
         args: Dict[str, Any] = {
@@ -327,6 +335,8 @@ class SalesService:
             args["name"] = command.name
         if command.unit is not None:
             args["unit"] = command.unit
+        if command.pricing_tiers is not None:
+            args["pricing_tiers"] = command.pricing_tiers
 
         return DomainResult(tool_id=ToolId.UPDATE_PRODUCT_PRICE_AND_QTY, tool_args=args)
 

@@ -22,6 +22,33 @@ _MCP_ERROR_TRANSLATIONS: Dict[str, str] = {
     "timeout": "Le service met trop de temps à répondre. Veuillez réessayer.",
     "connection": "Impossible de joindre le service. Veuillez réessayer dans quelques instants.",
     "unavailable": "Le service est temporairement indisponible. Veuillez réessayer.",
+    # (2026-09-02, refonte GPS/erreurs) : `BusinessRuleException("... hors du
+    # Burkina Faso.")` (services/database/auction.py::select_winning_bid,
+    # buyer.py, escrow.py — geofencing en défense en profondeur) ne matchait
+    # AUCUNE clé ci-dessus et retombait donc sur `GENERIC_TECHNICAL_ERROR` —
+    # un rejet géographique explicite affiché comme une panne technique
+    # ("réessayez"), qui ne changera jamais rien puisque le point reste hors
+    # zone. Voir core/geofencing.py::OUT_OF_COUNTRY_MESSAGE (même famille de
+    # message, contexte différent : ici après coup, sur la commande).
+    "burkina faso": (
+        "📍 Le point de livraison associé à cette commande est hors du "
+        "Burkina Faso — notre service de livraison y est limité pour le "
+        "moment."
+    ),
+    # (2026-09-03, idempotence MCP réelle) : `mcp_idempotency_store.py`
+    # refuse une même clé réutilisée avec un payload différent — jamais
+    # résolu silencieusement (une des deux tentatives a un contenu erroné,
+    # l'utilisateur doit recommencer proprement plutôt que de risquer une
+    # confusion entre deux transactions).
+    "idempotency_conflict": (
+        "Cette action semble avoir déjà été traitée avec des informations "
+        "différentes — par prudence, elle n'a pas été rejouée. Veuillez "
+        "recommencer votre demande."
+    ),
+    "idempotency_in_progress": (
+        "Cette action est déjà en cours de traitement — merci de patienter "
+        "un instant avant de réessayer."
+    ),
 }
 
 # Produit absent du catalogue (ex: "Produit 'antilope' inconnu.") — ce n'est

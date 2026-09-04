@@ -158,37 +158,72 @@ class TestLogMasking:
 
 # =====================================================================
 # 3. DAEMON MCP HTTP — authentification + validation d'entrée
+#
+# Audit MCP/AGUI 2026-08-27 : le contrat REST maison (GET /tools,
+# POST /call) a été remplacé par le transport MCP Streamable HTTP officiel
+# (JSON-RPC 2.0) sur un unique endpoint /mcp — voir http_server.py.
 # =====================================================================
 
-@pytest.fixture()
-def http_client(monkeypatch):
-    """Client de test du daemon, secret partagé activé."""
+_ACCEPT_HEADERS = {"Accept": "application/json, text/event-stream"}
+
+
+def _jsonrpc_call(client, method, headers, *, params=None, id_=1):
+    """Requête JSON-RPC minimale sur /mcp (Accept requis par le spec
+    Streamable HTTP — sans lui le serveur répond 406, indépendamment de
+    l'authentification)."""
+    return client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "method": method, "id": id_, "params": params or {}},
+        headers={**headers, **_ACCEPT_HEADERS},
+    )
+
+
+@pytest.fixture(scope="module")
+def http_app_client():
+    """Un SEUL client pour tout ce fichier.
+
+    `session_manager` (http_server.py) est un singleton module-level dont
+    `.run()` — appelé par le `lifespan` FastAPI à l'entrée du
+    `TestClient` — ne peut être invoqué qu'UNE SEULE fois par processus
+    (contrat du SDK MCP : `StreamableHTTPSessionManager.run() can only be
+    called once per instance`). Ré-ouvrir un `TestClient(hs.app)` à chaque
+    test lèverait `RuntimeError` dès le deuxième. Un seul client, réutilisé
+    par tous les tests, reflète d'ailleurs la réalité de production : ce
+    daemon démarre une fois et sert tous les tours ensuite.
+    """
     from fastapi.testclient import TestClient
-    from agriconnect.core.settings import settings
     import agriconnect.protocols.mcp.servers.http_server as hs
 
+    with TestClient(hs.app) as client:
+        yield client
+
+
+@pytest.fixture()
+def http_client(http_app_client, monkeypatch):
+    """Client + en-tête d'authentification — le jeton est ré-évalué à
+    CHAQUE requête par `require_auth` (jamais mis en cache au démarrage),
+    donc le faire varier par test via `monkeypatch` reste sûr même avec un
+    client/app partagé pour tout le fichier."""
+    from agriconnect.core.settings import settings
+
     monkeypatch.setattr(settings, "MCP_HTTP_AUTH_TOKEN", "secret-de-test", raising=False)
-    return TestClient(hs.app), {"Authorization": "Bearer secret-de-test"}
+    return http_app_client, {"Authorization": "Bearer secret-de-test"}
 
 
 class TestHttpDaemonAuth:
-    def test_call_without_a_token_is_rejected(self, http_client):
+    def test_mcp_without_a_token_is_rejected(self, http_client):
         client, _ = http_client
-        assert client.post("/call", json={"name": "get_orders"}).status_code == 401
-
-    def test_call_with_a_wrong_token_is_rejected(self, http_client):
-        client, _ = http_client
-        r = client.post("/call", json={"name": "get_orders"}, headers={"Authorization": "Bearer faux"})
+        r = _jsonrpc_call(client, "tools/list", {})
         assert r.status_code == 401
 
-    def test_tools_catalogue_is_also_protected(self, http_client):
-        """Le catalogue révèle toute la surface d'attaque (noms + schémas)."""
+    def test_mcp_with_a_wrong_token_is_rejected(self, http_client):
         client, _ = http_client
-        assert client.get("/tools").status_code == 401
+        r = _jsonrpc_call(client, "tools/list", {"Authorization": "Bearer faux"})
+        assert r.status_code == 401
 
     def test_x_mcp_token_header_is_accepted_as_an_alternative(self, http_client):
         client, _ = http_client
-        r = client.get("/tools", headers={"X-MCP-Token": "secret-de-test"})
+        r = _jsonrpc_call(client, "tools/list", {"X-MCP-Token": "secret-de-test"})
         assert r.status_code == 200
 
     def test_health_endpoint_stays_open_for_supervision(self, http_client):
@@ -197,43 +232,59 @@ class TestHttpDaemonAuth:
         client, _ = http_client
         assert client.get("/health").status_code == 200
 
-    def test_no_token_configured_keeps_existing_deployments_working(self, monkeypatch):
+    def test_no_token_configured_keeps_existing_deployments_working(self, http_app_client, monkeypatch):
         """Rétro-compatibilité assumée : sans secret configuré le daemon
-        répond toujours (un CRITICAL est journalisé au démarrage)."""
-        from fastapi.testclient import TestClient
+        répond toujours (un CRITICAL a déjà été journalisé au démarrage du
+        process — `require_auth` lit `MCP_HTTP_AUTH_TOKEN` à CHAQUE requête,
+        pas seulement au lifespan, donc ce test n'a pas besoin de relancer
+        le daemon pour le vérifier)."""
         from agriconnect.core.settings import settings
-        import agriconnect.protocols.mcp.servers.http_server as hs
 
         monkeypatch.setattr(settings, "MCP_HTTP_AUTH_TOKEN", "", raising=False)
-        assert TestClient(hs.app).get("/tools").status_code == 200
+        assert _jsonrpc_call(http_app_client, "tools/list", {}).status_code == 200
 
 
 class TestHttpDaemonInputValidation:
     def test_malformed_json_yields_400_not_500(self, http_client):
         client, headers = http_client
         r = client.post(
-            "/call", content=b"{pas du json",
-            headers={**headers, "Content-Type": "application/json"},
+            "/mcp", content=b"{pas du json",
+            headers={**headers, **_ACCEPT_HEADERS, "Content-Type": "application/json"},
         )
         assert r.status_code == 400
 
-    def test_missing_tool_name_is_rejected(self, http_client):
+    def test_missing_jsonrpc_method_is_rejected(self, http_client):
+        """Le SDK MCP applique lui-même la validation du schéma JSON-RPC —
+        une requête sans `method` reste refusée proprement (400), pas une
+        500 opaque."""
         client, headers = http_client
-        assert client.post("/call", json={}, headers=headers).status_code == 400
-
-    def test_non_dict_arguments_are_rejected(self, http_client):
-        """`arguments` finit déballé en **kwargs : une liste provoquerait un
-        TypeError opaque au lieu d'un refus net."""
-        client, headers = http_client
-        r = client.post("/call", json={"name": "get_orders", "arguments": [1, 2]}, headers=headers)
+        r = client.post(
+            "/mcp", json={"jsonrpc": "2.0", "id": 1},
+            headers={**headers, **_ACCEPT_HEADERS},
+        )
         assert r.status_code == 400
+
+    def test_missing_accept_header_is_rejected_per_spec(self, http_client):
+        """Streamable HTTP exige `Accept: application/json, text/event-stream`
+        — un client qui ne le déclare pas est rejeté (406), avant même
+        d'atteindre la logique métier."""
+        client, headers = http_client
+        r = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "method": "tools/list", "id": 1, "params": {}},
+            headers=headers,
+        )
+        assert r.status_code == 406
 
     def test_oversized_body_is_rejected(self, http_client):
         client, headers = http_client
-        payload = b'{"name":"x","p":"' + b"a" * 300_000 + b'"}'
+        payload = (
+            b'{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"x",'
+            b'"arguments":{"p":"' + b"a" * 300_000 + b'"}}}'
+        )
         r = client.post(
-            "/call", content=payload,
-            headers={**headers, "Content-Type": "application/json"},
+            "/mcp", content=payload,
+            headers={**headers, **_ACCEPT_HEADERS, "Content-Type": "application/json"},
         )
         assert r.status_code == 413
 
@@ -249,13 +300,15 @@ class TestTechnicalErrorsNeverLeak:
         async def _boom(name, arguments=None, **kw):
             raise RuntimeError('relation "orders" does not exist LINE 1: SELECT * FROM orders')
 
-        monkeypatch.setattr(hs.backend, "call_tool", _boom)
+        monkeypatch.setattr(hs.mcp_entry_point.backend, "call_tool", _boom)
         client, headers = http_client
-        body = client.post("/call", json={"name": "get_orders"}, headers=headers).json()
+        r = _jsonrpc_call(client, "tools/call", headers, params={"name": "get_orders", "arguments": {}})
 
-        assert body["ok"] is False
-        assert "relation" not in body["error"]
-        assert "SELECT" not in body["error"]
+        body = _sse_json_result(r)
+        payload = json.loads(body["content"][0]["text"])
+        assert payload["ok"] is False
+        assert "relation" not in payload["error"]
+        assert "SELECT" not in payload["error"]
 
     def test_business_errors_still_reach_the_caller_intact(self, http_client, monkeypatch):
         """La sanitisation ne doit pas rendre l'agent aveugle : un échec
@@ -266,10 +319,27 @@ class TestTechnicalErrorsNeverLeak:
         async def _business(name, arguments=None, **kw):
             raise BusinessRuleException("Stock insuffisant : il reste 12 KG")
 
-        monkeypatch.setattr(hs.backend, "call_tool", _business)
+        monkeypatch.setattr(hs.mcp_entry_point.backend, "call_tool", _business)
         client, headers = http_client
-        body = client.post("/call", json={"name": "add_stock"}, headers=headers).json()
-        assert "Stock insuffisant" in body["error"]
+        # Le SDK MCP valide les arguments contre le JSON Schema déclaré
+        # AVANT d'atteindre call_tool — `add_stock` exige farm_id/item_name/
+        # quantity, sans quoi la requête est rejetée en amont du mock.
+        args = {"farm_id": "f1", "item_name": "tomates", "quantity": 10}
+        r = _jsonrpc_call(client, "tools/call", headers, params={"name": "add_stock", "arguments": args})
+
+        body = _sse_json_result(r)
+        payload = json.loads(body["content"][0]["text"])
+        assert "Stock insuffisant" in payload["error"]
+
+
+def _sse_json_result(response):
+    """Extrait le corps JSON-RPC d'une réponse Streamable HTTP — le SDK MCP
+    répond en flux `text/event-stream` (une ligne `data: {...}`) même pour
+    un résultat unique et immédiat."""
+    for line in response.text.splitlines():
+        if line.startswith("data: "):
+            return json.loads(line[len("data: "):])["result"]
+    raise AssertionError(f"aucune ligne 'data:' dans la réponse SSE: {response.text!r}")
 
     def test_tool_wrapper_sanitizes_technical_failures(self):
         """`h.py::_safe` interpolait l'exception brute — 2e surface de fuite

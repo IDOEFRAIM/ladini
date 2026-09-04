@@ -195,11 +195,29 @@ def recording_runtime() -> RecordingRuntime:
 
 
 class _RuntimeShell:
-    """Coque runtime minimale : porte un llm injecté + call_db stub."""
+    """Coque runtime minimale : porte un llm injecté + call_db stub.
+
+    `llm_gateway`/`profile_answer` (2026-09-02) : même miroir que
+    `tests/conftest.py::StubRuntime` — voir sa docstring pour le "pourquoi"
+    (jamais le vrai Gateway/Redis dans un test chaos)."""
 
     def __init__(self, llm: Any = None) -> None:
         self.llm = llm
         self.model_answer = "llama-3.1-8b-instant"
+
+    @property
+    def profile_answer(self) -> Any:
+        from agriconnect.graphs.agents.market_coach.llm_gateway.types import LLMProfile
+
+        return LLMProfile.REASONING
+
+    @property
+    def llm_gateway(self) -> Any:
+        from agriconnect.graphs.agents.market_coach.llm_gateway import (
+            LegacyOverrideGateway,
+        )
+
+        return LegacyOverrideGateway(self.llm, lambda: self.model_answer)
 
     async def call_db(self, tool_name: str, **kwargs: Any) -> Dict[str, Any]:
         return {"status": "success"}

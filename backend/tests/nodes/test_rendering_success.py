@@ -92,6 +92,53 @@ class TestRenderFarmSections:
         text, options = _render_farm_sections({"f1": {"farm_name": "F", "stocks": [], "upcoming_cycles": cycles}})
         assert "+3 autre" in text
 
+    def test_a_large_stock_is_paginated_instead_of_producing_one_giant_block(self):
+        """Incident 2026-08-27 : une exploitation avec beaucoup de produits
+        produisait un texte non borné, tronqué à l'aveugle (et perdu au-delà
+        de 4 messages) par `api/tasks.py::_chunk_whatsapp_body`. Le rendu
+        doit désormais poser des marqueurs PAGE_BREAK entre pages d'au plus
+        5 éléments, jamais au milieu d'un élément."""
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.success import (
+            PAGE_BREAK,
+            _STOCK_LIST_MAX_ITEMS_PER_PAGE,
+        )
+
+        stocks = [
+            {"item_name": f"produit{i}", "quantity": 10, "unit": "kg", "stock_id": f"s{i}"}
+            for i in range(12)
+        ]
+        text, options = _render_farm_sections({"f1": {"farm_name": "Ferme A", "stocks": stocks}})
+
+        assert len(options) == 12
+        pages = text.split(PAGE_BREAK)
+        assert len(pages) > 1
+        # Chaque page (hors la dernière, qui porte aussi le footer) contient
+        # au plus le nombre max d'éléments configuré.
+        for page in pages:
+            assert page.count("️⃣") <= _STOCK_LIST_MAX_ITEMS_PER_PAGE
+
+    def test_pagination_never_cuts_an_item_in_half(self):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.success import PAGE_BREAK
+
+        stocks = [
+            {"item_name": f"produit{i}", "quantity": 10, "unit": "kg", "stock_id": f"s{i}"}
+            for i in range(8)
+        ]
+        text, _options = _render_farm_sections({"f1": {"farm_name": "Ferme A", "stocks": stocks}})
+
+        for i in range(8):
+            # Chaque libellé d'item apparaît une seule fois, entier, jamais
+            # scindé par un PAGE_BREAK au milieu.
+            assert f"produit{i} : 10 KG" in text.replace(PAGE_BREAK, "\n")
+
+    def test_a_small_stock_has_no_page_markers(self):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.success import PAGE_BREAK
+
+        text, _options = _render_farm_sections(
+            {"f1": {"farm_name": "Ferme A", "stocks": [{"item_name": "mais", "quantity": 10, "unit": "kg", "stock_id": "s1"}]}}
+        )
+        assert PAGE_BREAK not in text
+
 
 # =====================================================================
 # _render_catalog_section
@@ -118,17 +165,46 @@ class TestRenderCatalogSection:
 # =====================================================================
 
 class TestRenderCyclesSection:
-    def test_empty_list_yields_empty_string(self):
-        assert _render_cycles_section([]) == ""
+    def test_empty_list_yields_empty_string_and_no_options(self):
+        assert _render_cycles_section([]) == ("", [])
 
     def test_deduplicates_by_id(self):
         cycles = [{"cycle_id": "c1", "display_label": "mais"}, {"cycle_id": "c1", "display_label": "mais dup"}]
-        text = _render_cycles_section(cycles)
+        text, options = _render_cycles_section(cycles)
         assert text.count("mais") <= 2  # une seule occurrence retenue (dédup)
+        assert len(options) == 1
 
     def test_skips_non_dict_entries(self):
-        text = _render_cycles_section(["not-a-dict", {"cycle_id": "c1", "display_label": "mais"}])
+        text, _options = _render_cycles_section(["not-a-dict", {"cycle_id": "c1", "display_label": "mais"}])
         assert "mais" in text
+
+    def test_builds_one_selectable_option_per_cycle(self):
+        """Audit UX interactive 2026-08-27 : c'était le seul rendu structuré
+        de ce fichier à ne jamais produire d'options — condamnait les
+        précommandes/productions futures à du texte brut sur WhatsApp."""
+        cycles = [
+            {"cycle_id": "c1", "display_label": "Poussins", "farm_name": "Ferme de Jojo"},
+            {"cycle_id": "c2", "display_label": "Maïs", "farm_name": "Ferme de Jojo"},
+        ]
+        text, options = _render_cycles_section(cycles)
+        assert len(options) == 2
+        assert options[0] == {"index": "1", "label": "Poussins (Ferme de Jojo)", "value": "c1"}
+        assert options[1]["value"] == "c2"
+
+    def test_text_lines_use_numbered_emoji_index_not_a_bare_bullet(self):
+        """Corrigé sur demande explicite (2026-08-27) : cette section
+        utilisait une puce "•" simple, seule exception aux index numérotés
+        déjà utilisés partout ailleurs dans ce fichier (farms, catalog,
+        flat_list) — incohérent avec les options sélectionnables juste en
+        dessous, qui elles étaient déjà numérotées 1, 2, 3..."""
+        cycles = [
+            {"cycle_id": "c1", "display_label": "Poussins", "farm_name": "Ferme de Jojo"},
+            {"cycle_id": "c2", "display_label": "Maïs", "farm_name": "Ferme de Jojo"},
+        ]
+        text, _options = _render_cycles_section(cycles)
+        assert "•" not in text
+        assert "1️⃣" in text
+        assert "2️⃣" in text
 
 
 # =====================================================================
@@ -166,20 +242,32 @@ class TestRenderFlatList:
 # =====================================================================
 
 class TestRenderBuyerCatalogSections:
-    def test_empty_list_yields_empty_string(self):
-        assert _render_buyer_catalog_sections([]) == ""
+    def test_empty_list_yields_empty_string_and_no_options(self):
+        assert _render_buyer_catalog_sections([]) == ("", [])
 
     def test_direct_items_are_shown_separately_from_future(self):
-        result = _render_buyer_catalog_sections([
+        text, _options = _render_buyer_catalog_sections([
             {"name": "mais", "price": 250, "source_type": "DIRECT"},
             {"name": "riz", "estimated_available_at": "2026-12-31"},
         ])
-        assert "disponibles immédiatement" in result
-        assert "Productions futures" in result
+        assert "disponibles immédiatement" in text
+        assert "Productions futures" in text
 
     def test_missing_price_shows_a_placeholder(self):
-        result = _render_buyer_catalog_sections([{"name": "mais", "source_type": "DIRECT"}])
-        assert "communiqué" in result
+        text, _options = _render_buyer_catalog_sections([{"name": "mais", "source_type": "DIRECT"}])
+        assert "communiqué" in text
+
+    def test_only_direct_items_become_selectable_options(self):
+        """Audit UX interactive 2026-08-27 : les items DIRECT (déjà numérotés
+        dans le texte) deviennent sélectionnables ; les productions futures
+        restent du texte pur — pas de régression sur leur affichage, qui
+        n'était de toute façon jamais numéroté."""
+        text, options = _render_buyer_catalog_sections([
+            {"name": "mais", "price": 250, "source_type": "DIRECT", "id": "p1"},
+            {"name": "riz", "estimated_available_at": "2026-12-31"},
+        ])
+        assert len(options) == 1
+        assert options[0]["value"] == "p1"
 
 
 # =====================================================================
@@ -241,6 +329,71 @@ class TestTransactionalFallbackText:
             selected_tool="create_auction",
         )
         assert "appel d'offres" in text
+
+    def test_a_stale_read_goal_does_not_shadow_a_successful_write(self):
+        """Incident réel (2026-08-27) : `add_stock` a RÉUSSI (575 poulets
+        enregistrés) mais le message final annonçait "Je n'ai rien trouvé à
+        afficher" — la branche LECTURE (LIST/GET/CHECK/SEARCH/VIEW/
+        DASHBOARD/SNAPSHOT) était la SEULE de cette fonction sans garde-fou
+        `selected_tool`, contrairement à toutes les autres. Un `goal` PÉRIMÉ
+        contenant "GET" (ex: reliquat de `get_farms` appelé plus tôt par
+        `context_resolver` dans la même conversation) suffisait à déclencher
+        le texte "rien à afficher" même quand l'outil réellement exécuté ce
+        tour était une écriture."""
+        text = _transactional_fallback_text(
+            "STOCK_GET_HISTORY", "", {}, selected_tool="add_stock",
+        )
+        assert "rien trouvé" not in text
+        assert "C'est noté" in text
+
+    def test_a_genuinely_matching_read_tool_still_stays_neutral(self):
+        text = _transactional_fallback_text(
+            "STOCK_GET_HISTORY", "", {}, selected_tool="get_stock",
+        )
+        assert "rien trouvé" in text
+
+    def test_stock_register_harvest_confirms_instead_of_the_generic_fallback(self):
+        """Point 1 de la demande 2026-08-27 : une action confirmée ne doit
+        plus retomber sur "C'est noté. Dites-moi ce que vous souhaitez
+        faire..." — un gabarit dédié doit confirmer CE qui vient de se
+        passer."""
+        text = _transactional_fallback_text(
+            "STOCK_REGISTER_HARVEST", "", {"product": "poulet", "quantity": 575, "unit": "UNITE"},
+            selected_tool="add_stock",
+        )
+        assert "C'est noté" not in text
+        assert "poulet" in text
+        assert "575" in text
+
+    def test_stock_register_harvest_is_not_honored_by_a_mismatched_tool(self):
+        text = _transactional_fallback_text(
+            "STOCK_REGISTER_HARVEST", "", {"product": "poulet"},
+            selected_tool="get_farms",
+        )
+        assert "Récolte enregistrée" not in text
+
+    @pytest.mark.parametrize(
+        ("goal", "tool"),
+        [
+            ("STOCK_RECORD_MOVEMENT", "add_stock_movement_by_id"),
+            ("STOCK_ADJUST", "adjust_stock_by_id"),
+            ("STOCK_REMOVE_PARTIAL", "remove_stock_by_id"),
+            ("STOCK_DELETE", "delete_stock_by_id"),
+        ],
+    )
+    def test_other_stock_write_goals_also_confirm(self, goal, tool):
+        text = _transactional_fallback_text(
+            goal, "", {"product": "mais"}, selected_tool=tool,
+        )
+        assert "C'est noté" not in text
+        assert "rien trouvé" not in text
+
+    def test_stock_read_goals_are_unaffected_by_the_write_templates(self):
+        # "STOCK_" est un préfixe partagé — les goals de LECTURE
+        # (STOCK_GET_*) ne doivent matcher AUCUN des nouveaux gabarits
+        # d'écriture (match exact, pas substring).
+        text = _transactional_fallback_text("STOCK_GET_SUMMARY", "", {}, selected_tool="get_stocks")
+        assert "rien trouvé" in text
 
 
 # =====================================================================

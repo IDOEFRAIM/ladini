@@ -104,102 +104,77 @@ class TestTransportConfigFromSettings:
 
 
 # =====================================================================
-# HttpMCPAdapter
+# HttpMCPAdapter — audit MCP/AGUI 2026-08-27 : remplace l'ancien contrat
+# REST maison (GET /tools, POST /call, session aiohttp) par le vrai
+# transport MCP Streamable HTTP (fastmcp.Client + StreamableHttpTransport),
+# le pendant HTTP exact de FastMCPProcessAdapter — mêmes fixtures/patterns
+# de test (`_FakeFastMCPClient`, défini plus bas dans ce fichier).
 # =====================================================================
 
-class _FakeResponse:
-    def __init__(self, *, json_body=None, text_body=None, content_type="application/json"):
-        self._json_body = json_body
-        self._text_body = text_body
-        self.headers = {"Content-Type": content_type}
-
-    def raise_for_status(self):
-        pass
-
-    async def json(self):
-        return self._json_body
-
-    async def text(self):
-        return self._text_body
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-
-class _FakeAiohttpSession:
-    def __init__(self, get_response=None, post_response=None):
-        self._get_response = get_response
-        self._post_response = post_response
-        self.closed = False
-
-    def get(self, url, headers=None):
-        return self._get_response
-
-    def post(self, url, headers=None, json=None):
-        return self._post_response
-
-    async def close(self):
-        self.closed = True
-
-
 class TestHttpMCPAdapter:
-    def test_connect_requires_a_base_url(self):
+    def test_connect_raises_without_fastmcp_installed(self, monkeypatch):
+        import agriconnect.infrastructure.mcp.client as client_mod
         from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
+
+        monkeypatch.setattr(client_mod, "Client", None)
+        adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url="http://x"))
+        with pytest.raises(ImportError, match="fastmcp est requis"):
+            run(adapter.connect())
+
+    def test_connect_requires_a_base_url(self, monkeypatch):
+        import agriconnect.infrastructure.mcp.client as client_mod
+        from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
+
+        monkeypatch.setattr(client_mod, "Client", _FakeFastMCPClient)
         adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url=None))
         with pytest.raises(ValueError, match="http_base_url"):
             run(adapter.connect())
 
-    def test_list_tools_without_connect_raises(self):
+    def test_connect_targets_the_mcp_endpoint(self, monkeypatch):
+        """Le daemon n'expose plus qu'un unique endpoint `/mcp` (Streamable
+        HTTP) — vérifie que l'URL construite pointe bien dessus, y compris
+        quand `http_base_url` porte un slash final."""
+        import agriconnect.infrastructure.mcp.client as client_mod
         from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
-        adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url="http://x"))
-        with pytest.raises(RuntimeError, match="Session HTTP non initialisée"):
-            run(adapter.list_tools())
 
-    def test_call_tool_without_connect_raises(self):
+        monkeypatch.setattr(client_mod, "Client", _FakeFastMCPClient)
+
+        class _FakeTransport:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        import fastmcp.client.transports as transports_mod
+        monkeypatch.setattr(transports_mod, "StreamableHttpTransport", _FakeTransport)
+
+        adapter = HttpMCPAdapter(MCPTransportConfig(
+            kind="http", http_base_url="http://x/", http_headers={"H": "1"},
+        ))
+        run(adapter.connect())
+        assert adapter._client is not None
+        assert adapter._client.transport.kwargs["url"] == "http://x/mcp/"
+        assert adapter._client.transport.kwargs["headers"] == {"H": "1"}
+        run(adapter.close())
+        assert adapter._client is None
+
+    def test_list_tools_and_call_tool_require_a_connected_client(self):
         from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
         adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url="http://x"))
-        with pytest.raises(RuntimeError, match="Session HTTP non initialisée"):
+        with pytest.raises(RuntimeError, match="Client HTTP MCP non initialisé"):
+            run(adapter.list_tools())
+        with pytest.raises(RuntimeError, match="Client HTTP MCP non initialisé"):
             run(adapter.call_tool("t", {}))
 
-    def test_list_tools_returns_parsed_json(self):
+    def test_list_tools_and_call_tool_delegate_once_connected(self):
         from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
-        adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url="http://x", http_headers={"H": "1"}))
-        adapter._session = _FakeAiohttpSession(get_response=_FakeResponse(json_body=[{"name": "t1"}]))
+        adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url="http://x"))
+        adapter._client = _FakeFastMCPClient(transport=None)
         assert run(adapter.list_tools()) == [{"name": "t1"}]
+        assert run(adapter.call_tool("t1", {"a": 1})) == {"name": "t1", "arguments": {"a": 1}}
 
-    def test_call_tool_returns_json_when_content_type_json(self):
-        from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
-        adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url="http://x"))
-        adapter._session = _FakeAiohttpSession(post_response=_FakeResponse(json_body={"ok": True}))
-        assert run(adapter.call_tool("t1", {"a": 1})) == {"ok": True}
-
-    def test_call_tool_returns_text_when_content_type_not_json(self):
-        from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
-        adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url="http://x"))
-        adapter._session = _FakeAiohttpSession(post_response=_FakeResponse(text_body="plain", content_type="text/plain"))
-        assert run(adapter.call_tool("t1", {})) == "plain"
-
-    def test_endpoint_strips_slashes_correctly(self):
-        from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
-        adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url="http://x/"))
-        assert adapter._endpoint("/tools") == "http://x/tools"
-
-    def test_close_is_a_noop_without_a_session(self):
+    def test_close_is_a_noop_without_a_connected_client(self):
         from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
         adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url="http://x"))
         run(adapter.close())  # ne doit pas lever
-
-    def test_close_closes_the_session(self):
-        from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
-        adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url="http://x"))
-        fake_session = _FakeAiohttpSession()
-        adapter._session = fake_session
-        run(adapter.close())
-        assert fake_session.closed is True
-        assert adapter._session is None
 
 
 # =====================================================================
@@ -400,6 +375,9 @@ class _FakeAdapter:
         self._fail_exc = fail_exc or ConnectionError("transient")
         self.call_count = 0
         self.list_tools_calls = 0
+        # Args réellement reçus à CHAQUE tentative — utilisé par les tests
+        # d'idempotence pour vérifier ce qui traverse la boucle de retry.
+        self.received_args = []
 
     async def connect(self):
         self.connected = True
@@ -415,6 +393,7 @@ class _FakeAdapter:
         return self._tools
 
     async def call_tool(self, tool_name, arguments):
+        self.received_args.append(dict(arguments))
         self.call_count += 1
         if self.call_count <= self._fail_n_times:
             raise self._fail_exc
@@ -479,6 +458,18 @@ class TestAgriMCPClientLifecycle:
         assert isinstance(AgriMCPClient(MCPTransportConfig(kind="stdio"))._create_adapter(), FastMCPProcessAdapter)
         assert isinstance(AgriMCPClient(MCPTransportConfig(kind="http"))._create_adapter(), HttpMCPAdapter)
         assert isinstance(AgriMCPClient(MCPTransportConfig(kind="grpc"))._create_adapter(), GrpcMCPAdapter)
+
+    def test_create_adapter_wires_handlers_into_the_http_adapter_too(self):
+        """Parité stdio/http (audit MCP/AGUI 2026-08-27) : les deux
+        transports passent désormais par `fastmcp.Client` — les handlers
+        elicitation/progress/message doivent être câblés sur les deux, pas
+        seulement sur le transport stdio historique."""
+        from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
+        client = AgriMCPClient(MCPTransportConfig(kind="http", http_base_url="http://x"))
+        adapter = client._create_adapter()
+        assert adapter._elicitation_handler == client._handle_elicitation
+        assert adapter._progress_handler == client._handle_progress
+        assert adapter._message_handler == client._handle_message
 
     def test_create_adapter_unknown_kind_raises(self):
         from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
@@ -714,6 +705,98 @@ class TestAgriMCPClientCallTool:
         client = _client_with_fake_adapter(monkeypatch, adapter)
         run(client.connect())
         assert run(client.call_tool("t", {})) == 42
+
+
+# =====================================================================
+# AgriMCPClient.call_tool — idempotence sur retry (audit MCP/AGUI 2026-08-27)
+#
+# Sans clé stable, un retry après coupure réseau intermédiaire (la
+# connexion tombe APRÈS que l'écriture a réellement atteint la DB, mais
+# AVANT que la réponse ne revienne côté client) rejoue create_order/
+# initiate_escrow_payment comme un appel entièrement nouveau — indistinguable
+# d'une seconde commande légitime pour tout mécanisme de déduplication
+# côté serveur qui s'appuierait sur cette clé.
+# =====================================================================
+
+class TestAgriMCPClientIdempotencyKey:
+    _UUID4_RE = (
+        r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    )
+
+    def test_a_uuid4_is_generated_when_no_key_is_provided(self, monkeypatch):
+        import re
+
+        adapter = _FakeAdapter(call_result={"ok": True})
+        client = _client_with_fake_adapter(monkeypatch, adapter)
+        run(client.connect())
+        run(client.call_tool("create_order", {"a": 1}))
+
+        assert len(adapter.received_args) == 1
+        key = adapter.received_args[0]["_idempotency_key"]
+        assert re.match(self._UUID4_RE, key), f"pas un UUIDv4: {key!r}"
+
+    def test_two_separate_calls_get_two_different_generated_keys(self, monkeypatch):
+        adapter = _FakeAdapter(call_result={"ok": True})
+        client = _client_with_fake_adapter(monkeypatch, adapter)
+        run(client.connect())
+        run(client.call_tool("create_order", {"a": 1}))
+        run(client.call_tool("create_order", {"a": 2}))
+
+        key1 = adapter.received_args[0]["_idempotency_key"]
+        key2 = adapter.received_args[1]["_idempotency_key"]
+        assert key1 != key2, "deux appels logiques distincts doivent avoir des clés distinctes"
+
+    def test_the_same_generated_key_survives_every_retry_attempt(self, monkeypatch):
+        """2e tentative (après une 1re coupure réseau) : même clé."""
+        adapter = _FakeAdapter(fail_n_times=1, call_result={"ok": True})
+        client = _client_with_fake_adapter(monkeypatch, adapter)
+        run(client.connect())
+        run(client.call_tool("initiate_escrow_payment", {"order_id": "o1"}))
+
+        assert adapter.call_count == 2
+        key1 = adapter.received_args[0]["_idempotency_key"]
+        key2 = adapter.received_args[1]["_idempotency_key"]
+        assert key1 == key2
+
+    def test_the_same_generated_key_survives_all_retries_up_to_exhaustion(self, monkeypatch):
+        """3e tentative (2 échecs consécutifs, dernière tentative levée) :
+        les 2 essais effectivement tentés portent la même clé — même quand
+        l'appel finit par échouer pour de bon."""
+        adapter = _FakeAdapter(fail_n_times=99, fail_exc=ConnectionError("still down"))
+        client = _client_with_fake_adapter(monkeypatch, adapter)
+        run(client.connect())
+        with pytest.raises(ConnectionError):
+            run(client.call_tool("create_order", {"a": 1}))
+
+        assert client._MAX_RECONNECT_ATTEMPTS >= 2
+        assert len(adapter.received_args) == client._MAX_RECONNECT_ATTEMPTS
+        keys = {a["_idempotency_key"] for a in adapter.received_args}
+        assert len(keys) == 1, f"une clé différente par tentative: {keys}"
+
+    def test_an_explicit_key_is_kept_verbatim_across_every_attempt(self, monkeypatch):
+        adapter = _FakeAdapter(fail_n_times=1, call_result={"ok": True})
+        client = _client_with_fake_adapter(monkeypatch, adapter)
+        run(client.connect())
+        run(client.call_tool(
+            "create_order", {"a": 1}, idempotency_key="custom-key-123",
+        ))
+
+        assert adapter.call_count == 2
+        assert adapter.received_args[0]["_idempotency_key"] == "custom-key-123"
+        assert adapter.received_args[1]["_idempotency_key"] == "custom-key-123"
+
+    def test_the_key_does_not_overwrite_a_business_argument_of_the_same_shape(self, monkeypatch):
+        """Non-régression : `_idempotency_key` est bien un champ dédié — les
+        arguments métier fournis par l'appelant restent intacts à côté."""
+        adapter = _FakeAdapter(call_result={"ok": True})
+        client = _client_with_fake_adapter(monkeypatch, adapter)
+        run(client.connect())
+        run(client.call_tool("create_order", {"product": "tomates", "qty": 50}))
+
+        sent = adapter.received_args[0]
+        assert sent["product"] == "tomates"
+        assert sent["qty"] == 50
+        assert "_idempotency_key" in sent
 
 
 class TestAgriMCPClientHandlers:

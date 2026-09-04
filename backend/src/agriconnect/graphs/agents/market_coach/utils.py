@@ -15,6 +15,10 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Set
 
 from agriconnect.core.llm import get_llm
 from agriconnect.core.settings import settings
+from agriconnect.graphs.agents.market_coach.llm_gateway import (
+    resolve_gateway,
+    resolve_profile,
+)
 from agriconnect.graphs.agents.market_coach.core.slots import (
     build_canonical_field_aliases,
 )
@@ -195,6 +199,13 @@ CANONICAL_TRANSACTION_FIELDS = frozenset(
         "quantity",
         "unit",
         "price",
+        # Déclinaisons de prix/conditionnement pour un MÊME produit (2026-08-27,
+        # ex: "500f le demi-litre en sachet et 600f le bidon") — liste de
+        # {"quantity","unit","price","packaging"}, en COMPLÉMENT de quantity/
+        # unit/price ci-dessus (qui restent le 1er tier). Voir
+        # interpreter/routing.py (extraction) et
+        # services/ui/confirmation_summary.py (rendu groupé).
+        "pricing_tiers",
         "currency",
         "is_negotiable",
         "zone",
@@ -612,10 +623,55 @@ class MarketRuntime:
         Tous les sites d'appel existants font
         `getattr(mc_runtime, "model_answer", ...)`, donc ce passage en
         property est totalement transparent (aucun changement de nœud requis).
-        """
+
+        DEPRECATED pour les nouveaux appels (2026-09-02) : les nodes migrés
+        au LLM Gateway utilisent `profile_answer` + `llm_gateway.complete(...)`
+        à la place — un nom de modèle ne doit plus jamais être choisi
+        directement par un node métier. Conservé pour les call sites pas
+        encore migrés (voir plan LLM Gateway, `services/memory/*`)."""
         from agriconnect.graphs.agents.market_coach.llm_router import get_model_for_goal
 
         return get_model_for_goal(self.current_goal)
+
+    @property
+    def profile_answer(self):
+        """`LLMProfile` (FAST/REASONING) du tour en cours — à passer tel quel
+        à `llm_gateway.complete(profile=...)`. Même résolution dynamique que
+        `model_answer` (via `self.current_goal`), juste exprimée en profil
+        plutôt qu'en nom de modèle — voir `llm_router.get_profile_for_goal`."""
+        from agriconnect.graphs.agents.market_coach.llm_router import (
+            get_profile_for_goal,
+        )
+
+        return get_profile_for_goal(self.current_goal)
+
+    @property
+    def llm_gateway(self):
+        """LLM Gateway (2026-09-02) — point d'entrée UNIQUE pour tout nouvel
+        appel LLM métier : `await mc_runtime.llm_gateway.complete(profile=
+        mc_runtime.profile_answer, messages=..., response_format=...)`.
+
+        Singleton process-wide (comme `get_llm()`) — voir
+        `llm_gateway/gateway.py::get_llm_gateway()`. Pas d'override par
+        instance en production : la santé/le disjoncteur DOIVENT être
+        partagés à travers tout le process (et, via Redis, tous les
+        workers), jamais réinitialisés par tour ou par MarketRuntime.
+
+        EXCEPTION délibérée : si `_llm_override` est fourni (tests / appelants
+        legacy — voir `self.llm` ci-dessus), retourne un `LegacyOverrideGateway`
+        qui appelle CE client directement, sans toucher Redis/le registry —
+        indispensable pour préserver la philosophie "AUCUN réseau" de la
+        suite de tests (`tests/conftest.py`) : le vrai Gateway interroge
+        Redis à CHAQUE décision de routage (`HealthRegistry.get`), ce qui
+        casserait tout test injectant un `ScriptedLLM` sans double Redis."""
+        from agriconnect.graphs.agents.market_coach.llm_gateway import (
+            LegacyOverrideGateway,
+            get_llm_gateway,
+        )
+
+        if self._llm_override is not None:
+            return LegacyOverrideGateway(self._llm_override, lambda: self.model_answer)
+        return get_llm_gateway()
 
     def set_current_goal(self, goal: Optional[str]) -> None:
         """Met à jour le goal courant, consommé par `model_answer`.
@@ -747,7 +803,9 @@ class MarketRuntime:
             session_id=session_id,
         )
 
-    async def call_db(self, tool_name: str, **kwargs: Any) -> Dict[str, Any]:
+    async def call_db(
+        self, tool_name: str, *, idempotency_key: Optional[str] = None, **kwargs: Any
+    ) -> Dict[str, Any]:
         """Single entry point for all MCP tool calls.
 
         Responsibilities consolidated here (no other layer should duplicate):
@@ -758,6 +816,17 @@ class MarketRuntime:
         5. Call the MCP client
         6. Normalise the response via ensure_dict
         7. Log success/failure with request_id
+
+        `idempotency_key` (2026-09-03, mandat §8) : transmis TEL QUEL à
+        `AgriMCPClient.call_tool` — identifie la TENTATIVE LOGIQUE (ex:
+        `procurement:{draft_id}:{version}`), pas chaque essai réseau. Portée
+        honnête (voir `domain/procurement_draft.py::execution_key`
+        docstring) : `AgriDBMCPServer.call_tool` (runtime.py) retire cette
+        clé AVANT dispatch — aucune déduplication CÔTÉ SERVEUR aujourd'hui.
+        Elle sert la CORRÉLATION (log MCP_CALL_AUDIT, Langfuse) et le retry
+        interne à `AgriMCPClient` (rejoue la MÊME clé après une coupure
+        réseau, jamais une nouvelle par tentative) — pas encore l'exactly-once
+        externe.
         """
         if not ToolScopeManager.can_call_tool(tool_name):
             raise MarketRuntimeError(
@@ -799,7 +868,9 @@ class MarketRuntime:
         try:
             context_manager = self._context_scope(safe_kwargs)
             with context_manager:
-                raw = await self.db_client.call_tool(tool_name, safe_kwargs)
+                raw = await self.db_client.call_tool(
+                    tool_name, safe_kwargs, idempotency_key=idempotency_key
+                )
         except Exception as exc:
             logger.error(
                 "MCP_CALL_FAILURE | rid=%s | tool=%s | keys=%s | error=%s",
@@ -903,23 +974,54 @@ def _normalize_text(raw: str) -> str:
     return re.sub(r"\s+", " ", raw).strip()
 
 
-def _normalize_quantity_to_kg(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Standardise the canonical (quantity, unit) pair to kilograms."""
+def _normalize_quantity_to_kg(
+    payload: Dict[str, Any], *, refresh_display: bool = False
+) -> Dict[str, Any]:
+    """Standardise the canonical (quantity, unit) pair to kilograms.
+
+    `quantity_display`/`original_quantity`/`unit_display`/`original_unit`
+    preserve the user's ORIGINAL wording for the confirmation recap (show
+    "2 TONNE" instead of the internally-converted "2000 KG"). They used
+    `setdefault` unconditionally, which was deliberate for the common case —
+    `transaction_payload` is a `merge_dict` channel, so this function re-runs
+    on the SAME already-converted payload every turn (even ones that never
+    touch quantity/unit again, e.g. answering just `deadline`); `setdefault`
+    stops that re-run from clobbering the once-established original wording
+    with the internal KG value.
+
+    Bug réel (2026-09-03, incident PROCUREMENT_CREATE_REQUEST) : cette même
+    protection empêchait aussi une VRAIE correction de quantité/unité
+    ("non, plutôt 1 tonne et 125 kg" après "2 tonnes et 250 kg") de jamais
+    rafraîchir l'affichage — `quantity`/`unit` (le contrat d'exécution)
+    étaient bien mis à jour par `_apply_slot`, mais le récapitulatif
+    (`services/ui/confirmation_summary.py::_format_quantity`, qui préfère
+    `quantity_display`) restait figé sur la toute première valeur, tour après
+    tour, alors même que l'action confirmée aurait utilisé la BONNE quantité.
+    `refresh_display=True` (passé par l'appelant quand quantity/unit ont
+    RÉELLEMENT changé CE tour — voir `nodes/memory.py`) force le
+    rafraîchissement au lieu de `setdefault`, sans changer le comportement
+    du cas commun (tour qui ne touche pas quantity/unit)."""
 
     normalized = dict(payload or {})
     qty = normalized.get("quantity")
     unit_original_value = normalized.get("unit")
     unit = str(unit_original_value or "").strip().upper()
 
+    def _set(key: str, value: Any) -> None:
+        if refresh_display:
+            normalized[key] = value
+        else:
+            normalized.setdefault(key, value)
+
     if slot_has_value(qty):
-        normalized.setdefault("quantity_display", qty)
-        normalized.setdefault("original_quantity", qty)
+        _set("quantity_display", qty)
+        _set("original_quantity", qty)
 
     if slot_has_value(unit_original_value):
         unit_display_upper = str(unit_original_value).strip().upper()
         unit_display = canonical_unit_label(unit_display_upper, unit or "KG")
-        normalized.setdefault("unit_display", unit_display)
-        normalized.setdefault("original_unit", unit_display)
+        _set("unit_display", unit_display)
+        _set("original_unit", unit_display)
 
     if not slot_has_value(qty) or not unit:
         return normalized
@@ -1047,22 +1149,18 @@ async def _llm_extract_onboarding_all(
         "Si is_question=false, mets reply a null."
     )
     try:
-        completion = await asyncio.wait_for(
-            asyncio.to_thread(
-                lambda: llm.chat.completions.create(
-                    model=getattr(
-                        mc_runtime, "model_answer", "llama-3.3-70b-versatile"
-                    ),
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_text.strip()},
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.3,
-                    max_tokens=350,
-                )
-            ),
-            timeout=10.0,
+        # LLM Gateway (2026-09-02) : budget/repli/disjoncteur portés par le
+        # Gateway — voir `llm_gateway/gateway.py`.
+        completion = await resolve_gateway(mc_runtime).complete(
+            profile=resolve_profile(mc_runtime),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_text.strip()},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3,
+            max_tokens=350,
+            agent_node="onboarding_bulk_extract",
         )
         payload = json.loads(completion.choices[0].message.content or "{}")
     except Exception as exc:
@@ -1158,18 +1256,14 @@ async def llm_deviation_reply(
         f"juste après ta réponse). {extra_instructions}"
     ).strip()
     try:
-        completion = await asyncio.wait_for(
-            asyncio.to_thread(
-                lambda: llm.chat.completions.create(
-                    model=getattr(
-                        mc_runtime, "model_answer", "llama-3.3-70b-versatile"
-                    ),
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.4,
-                    max_tokens=150,
-                )
-            ),
-            timeout=8.0,
+        # LLM Gateway (2026-09-02) : budget/repli/disjoncteur portés par le
+        # Gateway — voir `llm_gateway/gateway.py`.
+        completion = await resolve_gateway(mc_runtime).complete(
+            profile=resolve_profile(mc_runtime),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=150,
+            agent_node="llm_deviation_reply",
         )
         text = (completion.choices[0].message.content or "").strip()
         return text or None
@@ -1190,7 +1284,6 @@ def reset_error_status(state: Dict[str, Any]) -> Dict[str, Any]:
         "validation_errors": [],
         "execution_authorized": False,
         "is_certified": False,
-        "waiting_for_confirmation": False,
         "retry_count": 0,
     }
 

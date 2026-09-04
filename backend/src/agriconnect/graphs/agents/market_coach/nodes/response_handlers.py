@@ -20,6 +20,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Awaitable, Callable, Dict
 
+from agriconnect.core.telemetry import record_state_transition
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    get_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
 from agriconnect.graphs.agents.market_coach.nodes.rendering import (
     RenderContext,
@@ -36,6 +40,9 @@ from agriconnect.graphs.agents.market_coach.nodes.rendering import (
 )
 from agriconnect.graphs.agents.market_coach.nodes.rendering.common import (
     resolve_goal_for_ui,
+)
+from agriconnect.graphs.agents.market_coach.nodes.rendering.response_plan import (
+    ResponsePlan,
 )
 from agriconnect.graphs.agents.market_coach.utils import normalize_slot_keys
 
@@ -94,6 +101,13 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
     status = str(state.get("status") or "").upper().strip()
     user_name = state.get("user_name") or ""
 
+    # (2026-09-02, mandat §15-17/§35) : `ResponsePlan` matérialise la
+    # décision AVANT le rendu — `previous_interaction` capturé ici, avant
+    # que le handler ne s'exécute et n'écrive potentiellement une NOUVELLE
+    # interaction. Voir `nodes/rendering/response_plan.py` pour la portée
+    # exacte (délibérément scopée, pas un remplacement de RenderContext).
+    plan = ResponsePlan.from_state(state, strategy=strategy)
+
     ctx = RenderContext(
         state=state,
         mc_runtime=mc_runtime,
@@ -105,7 +119,25 @@ async def final_response(state: MarketAgentState, mc_runtime: Any) -> Dict[str, 
     )
 
     handler = _select_handler(strategy, status)
-    return await handler(ctx)
+    result = await handler(ctx)
+
+    try:
+        next_interaction = get_pending_interaction({**state, **result})
+        record_state_transition(
+            previous_interaction=plan.next_interaction.kind.value,
+            input_event=state.get("interpreted_event"),
+            interpretation=state.get("detected_intent"),
+            unknown_reason=state.get("unknown_reason"),
+            action=strategy,
+            next_interaction=next_interaction.kind.value,
+            outcome=str(result.get("status") or status),
+            goal=plan.data.get("goal"),
+        )
+    except Exception:
+        # Télémétrie best-effort — ne doit jamais faire échouer un tour réel.
+        logger.debug("[ResponseHandlers] record_state_transition ignoré", exc_info=True)
+
+    return result
 
 
 # Alias de compat — consommé par nodes/validation.py et nodes/cognitive.py.

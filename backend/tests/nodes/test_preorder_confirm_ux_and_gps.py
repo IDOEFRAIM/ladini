@@ -1,21 +1,28 @@
-"""`flows/buyer/preorder.py::create_preorder` — deux correctifs demandés par
-l'utilisateur après un test WhatsApp réel (2026-08-13) :
-
-1. UX redondante : le panier affichait déjà items+total en demandant de
-   taper *précommander*, puis le récap de précommande réaffichait la même
-   chose en demandant de choisir 1/2/3. Fusionné en un seul écran de
-   confirmation simple oui/non (plus de menu numéroté ni de double récap).
-2. Aucune géolocalisation n'était demandée avant de confirmer une
-   précommande — contrairement au flux gagnant d'enchère. Le même gate GPS
-   2 étapes (`_GPS_HABITUAL_PROMPT`/`_GPS_FIRST_TIME_PROMPT`/`_GPS_TEXT_REMINDER`)
-   est maintenant inséré juste avant `confirm_preorder_draft`.
-
-Voir [[gps-delivery-burkina-faso-2026-08]]."""
+"""`flows/buyer/preorder.py::create_preorder` — UX confirmation simple
+oui/non + gate GPS (voir [[gps-delivery-burkina-faso-2026-08]]), RÉÉCRIT
+2026-09-03 pour la migration transactionnelle PREORDER
+(`domain/preorder_draft.py` + `flows/buyer/preorder_confirmation.py`) — le
+brouillon vit désormais dans une ligne PostgreSQL versionnée (CAS), plus
+dans `preorder_workflow` seul. Réutilise le faux moteur SQL de
+`test_preorder_draft_persistence.py` (même fidélité, une seule source de
+vérité pour la simulation)."""
 from __future__ import annotations
 
 from typing import Any, Dict
 
+import pytest
+
 from agriconnect.core.settings import settings
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    get_pending_interaction,
+    to_tunnel_category,
+)
+from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+    PreorderDraft,
+    PreorderDraftStatus,
+)
+from agriconnect.services.database import preorder_draft_store as store_mod
+from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
 from tests.conftest import make_state, run
 
 _GATE_MODULE = "agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate"
@@ -32,13 +39,12 @@ def _mod():
 
 
 class TestPreorderConfirmScreenIsNotRedundant:
-    def test_typing_precommander_creates_the_draft_and_asks_a_simple_yes_no(self, stub_runtime):
+    def test_typing_precommander_creates_the_draft_and_asks_a_simple_yes_no(
+        self, stub_runtime, monkeypatch
+    ):
+        _install_fake_db(monkeypatch)
         mod = _mod()
-        state = make_state(
-            current_goal="BUYER_PREORDER_INIT",
-            active_cart=CART,
-            preorder_workflow={},
-        )
+        state = make_state(current_goal="BUYER_PREORDER_INIT", active_cart=CART, preorder_workflow={})
         runtime = stub_runtime(responses={
             "create_preorder_draft": {"status": "success", "preorder_id": "abc123"},
         })
@@ -46,8 +52,8 @@ class TestPreorderConfirmScreenIsNotRedundant:
         result = run(mod.create_preorder(state, runtime))
 
         assert result["status"] == "WAITING_INPUT"
-        assert result["expected_input"] == "CONFIRMATION"
-        assert result["response_strategy"] == "ASK_MISSING_FIELD"
+        assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
+        assert result["response_strategy"] == "CONFIRMATION"
         assert "OUI" in result["final_response"]
         assert "NON" in result["final_response"]
         # Plus de menu numéroté 1/2/3 ni de deuxième récap complet des lignes.
@@ -55,14 +61,20 @@ class TestPreorderConfirmScreenIsNotRedundant:
         assert "numéro" not in result["final_response"].lower()
         assert result["preorder_workflow"]["phase"] == "PREORDER_DRAFTED"
         assert not result["preorder_workflow"].get("gps_stage")
-        assert "pending_menu" not in result
+        assert result["preorder_draft"]["order_id"] == "abc123"
+        assert result["preorder_draft"]["status"] == "DRAFT"
+        assert result["preorder_draft"]["version"] == 1
+        target = get_pending_interaction(result).target
+        assert target == {"draft_id": result["preorder_draft"]["draft_id"], "draft_version": 1}
 
 
 class TestPreorderConfirmDeviationIsAdaptive:
-    def test_a_deviation_at_the_confirm_stage_gets_an_llm_generated_note(self):
+    def test_a_deviation_at_the_confirm_stage_gets_an_llm_generated_note(self, monkeypatch):
         """Bug réel (2026-08-14) : un écart au "confirmez-vous ?" de la
         précommande rejouait le même écran mot pour mot, quoi que dise
-        l'utilisateur. Voir [[precommande-architecture-consolidation-2026-08]]."""
+        l'utilisateur. Verrouillé maintenant via `PreorderOutcomeKind.
+        DRAFT_UNCHANGED` (même contrat que PROCUREMENT)."""
+        _install_fake_db(monkeypatch)
         mod = _mod()
 
         class _Msg:
@@ -87,18 +99,21 @@ class TestPreorderConfirmDeviationIsAdaptive:
                 return _Completion()
 
         from tests.conftest import StubRuntime
+
         runtime = StubRuntime(llm=_StubLLM())
+        draft = _draft(draft_id="abc123draft", order_id="abc123")
+        run(store_mod.insert(draft, conversation_id="+22670000000"))
+        target = {"draft_id": draft.draft_id, "draft_version": draft.version}
         state = make_state(
-            # `BUYER_PREORDER_INIT` (pas `_CONFIRM`) : sinon `create_preorder`
-            # force resolved_id="PREORDER_CONFIRM" quel que soit le texte
-            # (voir le goal-based short-circuit en tête de la fonction) et le
-            # test ne testerait plus du tout la branche d'écart.
             current_goal="BUYER_PREORDER_INIT",
+            user_phone="+22670000000",
             active_cart=CART,
-            preorder_workflow={"phase": "PREORDER_DRAFTED", "preorder_id": "abc123"},
+            preorder_draft=draft.to_dict(),
             transaction_payload={},
+            interpreted_event="UNKNOWN",
             normalized_text="je vends seulement des intrants patron",
         )
+        state["pending_interaction"] = {"kind": "CONFIRM_ACTION", "target": target}
 
         result = run(mod.create_preorder(state, runtime))
 
@@ -107,16 +122,36 @@ class TestPreorderConfirmDeviationIsAdaptive:
 
 
 class TestPreorderGpsGate:
-    def _drafted_state(self, **extra_flow: Any) -> Dict[str, Any]:
-        flow = {"phase": "PREORDER_DRAFTED", "preorder_id": "abc123", **extra_flow}
-        return make_state(
+    def _confirmed_no_location_state(self, monkeypatch, **overrides: Any) -> Dict[str, Any]:
+        """Draft DÉJÀ confirmé (CONFIRM reçu une 1ère fois) mais sans point
+        de livraison — l'état RÉEL au moment d'entrer dans le gate GPS. Le
+        draft reste `DRAFT` (mandat §20 : aucune mutation métier tant que
+        la localisation n'est pas connue)."""
+        _install_fake_db(monkeypatch)
+        # `claim_once` réel tape Redis — la même clé
+        # (`preorder_confirm:abc123draft:1`) est réutilisée par PLUSIEURS
+        # tests de cette classe : neutralisé ici pour éviter une collision
+        # entre exécutions (même principe que les tests PROCUREMENT).
+        import agriconnect.graphs.agents.market_coach.domain.preorder_draft as pd_mod
+        monkeypatch.setattr(pd_mod, "claim_once", lambda key: True)
+        draft = _draft(draft_id="abc123draft", order_id="abc123")
+        run(store_mod.insert(draft, conversation_id="+22670000000"))
+        target = {"draft_id": draft.draft_id, "draft_version": draft.version}
+        state = make_state(
             current_goal="BUYER_PREORDER_CONFIRM",
+            user_phone="+22670000000",
             active_cart=CART,
-            preorder_workflow=flow,
+            preorder_draft=draft.to_dict(),
             transaction_payload={"resolved_id": "PREORDER_CONFIRM"},
+            interpreted_event="CONFIRM",
         )
+        state["pending_interaction"] = {"kind": "CONFIRM_ACTION", "target": target}
+        state.update(overrides)
+        return state
 
-    def test_confirming_the_preorder_with_a_stored_location_offers_reuse(self, stub_runtime, monkeypatch):
+    def test_confirming_the_preorder_with_a_stored_location_offers_reuse(
+        self, stub_runtime, monkeypatch
+    ):
         mod = _mod()
 
         async def _fake_get_stored_location(mc_runtime, phone):
@@ -125,15 +160,20 @@ class TestPreorderGpsGate:
         monkeypatch.setattr(f"{_GATE_MODULE}._get_stored_location", _fake_get_stored_location)
         runtime = stub_runtime()
 
-        result = run(mod.create_preorder(self._drafted_state(), runtime))
+        result = run(mod.create_preorder(self._confirmed_no_location_state(monkeypatch), runtime))
 
         assert result["status"] == "WAITING_INPUT"
         assert "habituel" in result["final_response"]
         assert result["preorder_workflow"]["gps_stage"] is True
         assert result["preorder_workflow"]["gps_default"] == {"lat": 12.35, "lon": -1.5}
         assert "confirm_preorder_draft" not in runtime.calls
+        # Le draft reste DRAFT — aucune mutation tant que le point n'est
+        # pas connu (mandat §20).
+        assert result["preorder_draft"]["status"] == "DRAFT"
 
-    def test_confirming_the_preorder_without_a_stored_location_asks_to_share_one(self, stub_runtime, monkeypatch):
+    def test_confirming_the_preorder_without_a_stored_location_asks_to_share_one(
+        self, stub_runtime, monkeypatch
+    ):
         mod = _mod()
 
         async def _fake_get_stored_location(mc_runtime, phone):
@@ -142,21 +182,18 @@ class TestPreorderGpsGate:
         monkeypatch.setattr(f"{_GATE_MODULE}._get_stored_location", _fake_get_stored_location)
         runtime = stub_runtime()
 
-        result = run(mod.create_preorder(self._drafted_state(), runtime))
+        result = run(mod.create_preorder(self._confirmed_no_location_state(monkeypatch), runtime))
 
         assert result["status"] == "WAITING_INPUT"
         assert "📎" in result["final_response"]
         assert result["preorder_workflow"]["gps_stage"] is True
         assert result["preorder_workflow"]["gps_default"] is None
 
-    def test_confirming_the_habitual_point_at_the_gps_stage_finalizes_with_those_coordinates(self, monkeypatch):
-        """Ce test verrouille spécifiquement le chemin escrow (Paydunya) : le
-        point GPS résolu par le gate doit être threadé jusqu'à
-        `initiate_escrow_payment`, pas seulement jusqu'à l'ancien
-        `confirm_draft` non-escrow. `ESCROW_PAYMENT_ENABLED` est désactivé par
-        défaut depuis 2026-08-24 (voir .env) — on l'épingle donc à True ici
-        pour tester ce chemin précis, indépendamment du défaut ambiant. Voir
-        [[gps-delivery-burkina-faso-2026-08]]."""
+    def test_confirming_the_habitual_point_at_the_gps_stage_finalizes_with_those_coordinates(
+        self, monkeypatch
+    ):
+        """Chemin escrow (Paydunya) : le point GPS résolu par le gate doit
+        être threadé jusqu'à `initiate_escrow_payment`."""
         monkeypatch.setattr(settings, "ESCROW_PAYMENT_ENABLED", True)
         mod = _mod()
         seen: Dict[str, Any] = {}
@@ -173,16 +210,32 @@ class TestPreorderGpsGate:
             "agriconnect.graphs.agents.market_coach.services.mcp.gateway.EscrowGateway",
             _CapturingEscrowGateway,
         )
+        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
+        monkeypatch.setattr(pc_mod, "EscrowGateway", _CapturingEscrowGateway)
 
-        state = self._drafted_state(gps_stage=True, gps_default={"lat": 12.35, "lon": -1.5})
+        state = self._confirmed_no_location_state(
+            monkeypatch,
+            interpreted_event="CONFIRM",
+        )
+        state["pending_interaction"] = {
+            "kind": "PROVIDE_LOCATION",
+            "target": state["pending_interaction"]["target"],
+        }
+        state["preorder_workflow"] = {"gps_default": {"lat": 12.35, "lon": -1.5}}
+
         result = run(mod.create_preorder(state, None))
 
         assert result["status"] == "COMPLETED"
         assert seen["delivery_lat"] == 12.35
         assert seen["delivery_lon"] == -1.5
+        assert result["preorder_draft"]["status"] == "AWAITING_PAYMENT"
 
-    def test_sharing_a_new_location_at_the_gps_stage_rereads_the_profile_and_finalizes(self, monkeypatch):
-        """Chemin escrow — voir docstring du test précédent."""
+    def test_sharing_a_new_location_at_the_gps_stage_finalizes_with_it(self, monkeypatch):
+        """Chemin escrow — voir docstring du test précédent.
+
+        (2026-09-02, refonte GPS) : plus de relecture DB (`_get_stored_
+        location`) — `location_outcome`/`location_lat`/`location_lon` sont
+        déjà résolus SYNCHRONE côté webhook, avant l'enqueue Celery."""
         monkeypatch.setattr(settings, "ESCROW_PAYMENT_ENABLED", True)
         mod = _mod()
         seen: Dict[str, Any] = {}
@@ -195,17 +248,19 @@ class TestPreorderGpsGate:
                 seen.update(kwargs)
                 return {"status": "success", "order_id": "order1", "order_number": "ORD1"}
 
-        async def _fake_get_stored_location(mc_runtime, phone):
-            return 13.0, -1.0
+        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
+        monkeypatch.setattr(pc_mod, "EscrowGateway", _CapturingEscrowGateway)
 
-        monkeypatch.setattr(
-            "agriconnect.graphs.agents.market_coach.services.mcp.gateway.EscrowGateway",
-            _CapturingEscrowGateway,
-        )
-        monkeypatch.setattr(f"{_GATE_MODULE}._get_stored_location", _fake_get_stored_location)
-
-        state = self._drafted_state(gps_stage=True, gps_default=None)
+        state = self._confirmed_no_location_state(monkeypatch)
+        state["pending_interaction"] = {
+            "kind": "PROVIDE_LOCATION",
+            "target": state["pending_interaction"]["target"],
+        }
+        state["preorder_workflow"] = {"gps_default": None}
         state["location_shared"] = True
+        state["location_outcome"] = "NEW_LOCATION_ACCEPTED"
+        state["location_lat"] = 13.0
+        state["location_lon"] = -1.0
         state["transaction_payload"] = {}
 
         result = run(mod.create_preorder(state, None))
@@ -215,12 +270,8 @@ class TestPreorderGpsGate:
         assert seen["delivery_lon"] == -1.0
 
     def test_non_escrow_path_still_threads_gps_when_payment_disabled(self, monkeypatch):
-        """Non-régression : si `ESCROW_PAYMENT_ENABLED` repasse à False un
-        jour (Paydunya rebloqué), l'ancien chemin `confirm_draft` reçoit
-        toujours le point GPS — comportement historique préservé, pas
-        seulement le nouveau chemin escrow."""
-        from agriconnect.core.settings import settings
-
+        """Non-régression : si `ESCROW_PAYMENT_ENABLED` repasse à False, le
+        chemin `confirm_draft` reçoit toujours le point GPS."""
         monkeypatch.setattr(settings, "ESCROW_PAYMENT_ENABLED", False)
         mod = _mod()
         seen: Dict[str, Any] = {}
@@ -233,18 +284,31 @@ class TestPreorderGpsGate:
                 seen.update(kwargs)
                 return {"status": "success", "order_id": "order1", "order_number": "ORD1"}
 
-        monkeypatch.setattr(mod, "PreorderGateway", _CapturingGateway)
+        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
+        monkeypatch.setattr(pc_mod, "PreorderGateway", _CapturingGateway)
 
-        state = self._drafted_state(gps_stage=True, gps_default={"lat": 12.35, "lon": -1.5})
+        state = self._confirmed_no_location_state(monkeypatch)
+        state["pending_interaction"] = {
+            "kind": "PROVIDE_LOCATION",
+            "target": state["pending_interaction"]["target"],
+        }
+        state["preorder_workflow"] = {"gps_default": {"lat": 12.35, "lon": -1.5}}
+
         result = run(mod.create_preorder(state, None))
 
         assert result["status"] == "COMPLETED"
         assert seen["delivery_lat"] == 12.35
         assert seen["delivery_lon"] == -1.5
+        assert result["preorder_draft"]["status"] == "EXECUTED"
 
-    def test_free_text_at_the_gps_stage_reminds_to_use_the_gps_button(self, stub_runtime):
+    def test_free_text_at_the_gps_stage_reminds_to_use_the_gps_button(self, stub_runtime, monkeypatch):
         mod = _mod()
-        state = self._drafted_state(gps_stage=True, gps_default=None)
+        state = self._confirmed_no_location_state(monkeypatch)
+        state["pending_interaction"] = {
+            "kind": "PROVIDE_LOCATION",
+            "target": state["pending_interaction"]["target"],
+        }
+        state["preorder_workflow"] = {"gps_default": None}
         state["transaction_payload"] = {}
         runtime = stub_runtime()
 
@@ -254,9 +318,16 @@ class TestPreorderGpsGate:
         assert "📎" in result["final_response"]
         assert "confirm_preorder_draft" not in runtime.calls
 
-    def test_cancelling_at_the_gps_stage_still_cancels_the_whole_preorder(self, stub_runtime):
+    def test_cancelling_at_the_gps_stage_still_cancels_the_whole_preorder(
+        self, stub_runtime, monkeypatch
+    ):
         mod = _mod()
-        state = self._drafted_state(gps_stage=True, gps_default={"lat": 12.35, "lon": -1.5})
+        state = self._confirmed_no_location_state(monkeypatch)
+        state["pending_interaction"] = {
+            "kind": "PROVIDE_LOCATION",
+            "target": state["pending_interaction"]["target"],
+        }
+        state["preorder_workflow"] = {"gps_default": {"lat": 12.35, "lon": -1.5}}
         state["transaction_payload"] = {"resolved_id": "PREORDER_CANCEL"}
         runtime = stub_runtime()
 
@@ -265,3 +336,7 @@ class TestPreorderGpsGate:
         assert result["status"] == "COMPLETED"
         assert result["preorder_workflow"]["phase"] == "CART"
         assert "confirm_preorder_draft" not in runtime.calls
+        assert result["preorder_draft"]["status"] == "CANCELLED"
+        # Le panier reste disponible (mandat §... préservation, pas de stock
+        # débité) — pas vidé par l'annulation.
+        assert "annulée" in result["final_response"].lower()

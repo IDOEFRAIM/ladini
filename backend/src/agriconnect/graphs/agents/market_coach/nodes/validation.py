@@ -13,8 +13,12 @@ from typing import Any, Dict, List
 
 from agriconnect.core.logger import get_logger
 from agriconnect.graphs.agents.market_coach.core.goals import BUYER_CART_GOALS
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    clear_pending_interaction,
+    set_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.core.slots import (
-    expected_input_for_field,
     field_priority,
     get_slot,
 )
@@ -216,11 +220,11 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
                     "status": "PLANNING",
                     "missing_fields": [],
                     "last_missing_field": None,
-                    "expected_input": "NONE",
                     "completed_fields": [k for k in hint_fields if payload.get(k)],
                     "validation_errors": [],
                     "transaction_payload": payload,
                     "ag_ui_component": None,
+                    **clear_pending_interaction("resolver_passthrough"),
                 },
             )
 
@@ -341,7 +345,6 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
                     "goal_status": "COMPLETED",
                     "missing_fields": [],
                     "last_missing_field": None,
-                    "expected_input": "NONE",
                     "validation_errors": [],
                     "response_strategy": "CLARIFICATION",
                     "final_response": (
@@ -351,11 +354,11 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
                         "puis choisissez dans la liste."
                     ),
                     "transaction_payload": payload,
-                    "waiting_for_confirmation": False,
                     "is_certified": False,
                     "confirmation_summary": None,
                     "execution_authorized": False,
                     "ag_ui_component": None,
+                    **clear_pending_interaction("blocking_technical_id"),
                 },
             )
 
@@ -375,16 +378,24 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
                 "completed_fields": completed,
                 "validation_errors": errors + warnings,
                 "last_missing_field": first_missing,
-                "expected_input": expected_input_for_field(first_missing or ""),
                 "response_strategy": "ASK_MISSING_FIELD",
                 "transaction_payload": payload,
                 "conversation_progress": progress,
                 "proactive_hint": hint,
-                "waiting_for_confirmation": False,
                 "is_certified": False,
                 "confirmation_summary": None,
                 "execution_authorized": False,
                 "ag_ui_component": None,
+                # (2026-09-02) `get_pending_interaction()` donne toujours la
+                # priorité au tunnel panier (build_selection_context) sur ce
+                # champ quand les deux existent — écrire ENTER_FIELD ici
+                # même pour un goal panier est donc sans danger, jamais lu
+                # tant qu'un menu producteur/palier est réellement actif.
+                **set_pending_interaction(
+                    InteractionKind.ENTER_FIELD,
+                    goal=goal_upper,
+                    field_name=first_missing,
+                ),
             },
         )
 
@@ -394,7 +405,6 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
         "status": "PROCESSING" if is_cart_goal else "PLANNING",
         "missing_fields": [],
         "last_missing_field": None,
-        "expected_input": "NONE",
         "completed_fields": completed,
         "validation_errors": warnings,
         "transaction_payload": payload,
@@ -402,6 +412,7 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
         "proactive_hint": None,
         "final_response": None,
         "ag_ui_component": None,
+        **clear_pending_interaction("validated_complete"),
     }
 
     return _finalize_validator_response(state, result)

@@ -2,6 +2,10 @@ import unicodedata
 from typing import Any, Dict, Optional
 
 from agriconnect.core.logger import get_logger
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    get_pending_interaction,
+    to_tunnel_category,
+)
 from agriconnect.graphs.agents.market_coach.core.slots import build_alias_mirrors
 from agriconnect.graphs.agents.market_coach.core.state_compaction import (
     build_compaction_patch,
@@ -33,10 +37,19 @@ _ADD_TO_CART_DRAFT_FIELDS = {
     "unit",
     "price",
     "zone",
-    "selection_index",
-    "selected_value",
-    "resolved_id",
 }
+# `selection_index`/`selected_value`/`resolved_id` (2026-08-30, refonte
+# "palier avant quantité") : ce sont des signaux de sélection AG-UI
+# TRANSITOIRES pour LE tour courant, jamais des données de "brouillon" à
+# reconstituer plus tard. Incident réel : capturés ici dans `draft_payload`
+# (un canal `merge_dict` séparé, jamais nettoyé entre-temps), ils
+# survivaient au tour où le palier était choisi — puis `payload =
+# merge_payload(draft_payload, payload)` plus bas (le brouillon comble les
+# trous du payload courant) les RESSUSCITAIT sur un tour ultérieur dès que
+# `payload["selection_index"]` valait `None` (un `None` ne "comble" pas un
+# trou pour `merge_payload`, donc la valeur périmée du brouillon gagnait) —
+# une réponse quantité se faisait alors ré-interpréter comme un ancien
+# index de sélection.
 
 
 _PRIMARY_CANONICAL_UNITS = {"KG", "TONNE", "SAC", "UNITE", "PANIER", "TETE"}
@@ -46,8 +59,30 @@ _PRIMARY_CANONICAL_UNITS = {"KG", "TONNE", "SAC", "UNITE", "PANIER", "TETE"}
 # hallucination LLM et doit être ignoré — voir le garde-fou dans `memory_update`.
 _EXPECTED_INPUT_ALLOWED_FIELDS: Dict[str, frozenset] = {
     "PRODUCT": frozenset({"product", "product_id"}),
-    "QUANTITY": frozenset({"quantity", "unit"}),
-    "PRICE": frozenset({"price", "price_unit"}),
+    # `pricing_tiers` (2026-08-29) : un repli sur modèle dégradé (fréquent —
+    # voir GROQ_RATE_LIMIT_FALLBACK) filtrait tout champ hors de cet
+    # allowlist pour le slot en cours — un producteur répondant avec
+    # plusieurs tarifs/conditionnements ("25 L à 500 FCFA et 40 L à
+    # 900 FCFA") en réponse à la question quantité OU prix voyait
+    # `pricing_tiers` silencieusement jeté, la confirmation retombant sur le
+    # gabarit à tarif unique avec des valeurs incohérentes (quantité/prix
+    # d'un tour précédent). `pricing_tiers` doit survivre sur CES DEUX slots :
+    # c'est là qu'un producteur énumère naturellement ses déclinaisons.
+    # `agent_action`/`action_*` (2026-09-01) : le contrat d'action structurée
+    # (voir domain/selection_actions.py) répond au slot QUANTITY quand
+    # SET_PACKAGE_COUNT/SET_QUANTITY est l'action attendue ou quand une
+    # re-sélection de palier (SELECT_PRICING_TIER) survient pendant cette
+    # même question — sans cette entrée, un repli sur modèle Groq dégradé
+    # (429) aurait silencieusement jeté ces champs, rouvrant exactement
+    # l'incident que ce contrat corrige.
+    "QUANTITY": frozenset(
+        {
+            "quantity", "unit", "pricing_tiers",
+            "agent_action", "action_producer_id", "action_pricing_tier_id",
+            "action_package_count", "action_quantity", "action_unit",
+        }
+    ),
+    "PRICE": frozenset({"price", "price_unit", "pricing_tiers"}),
     "UNIT": frozenset({"unit"}),
     "LOCATION": frozenset({"zone"}),
     "DATE": frozenset({"estimated_available_at", "expected_harvest_date"}),
@@ -172,6 +207,16 @@ async def memory_update(
     stable = normalize_slot_keys(stable_source)
     draft_payload = normalize_slot_keys(draft_source)
 
+    # Valeurs déjà établies AVANT ce tour — capturées ici, avant toute fusion,
+    # pour un garde-fou ciblé plus bas (voir `_established_quantity`/
+    # `_established_price`) : un tour répondant au slot PRICE avec des
+    # `pricing_tiers` ne doit jamais laisser le `quantity` redondant que le
+    # LLM émet quand même (schéma JSON oblige) écraser une quantité DÉJÀ
+    # donnée à un tour précédent — et symétriquement pour QUANTITY/price.
+    _established_quantity = payload.get("quantity")
+    _established_unit = payload.get("unit")
+    _established_price = payload.get("price")
+
     # --- STALE TRANSIENT KEYS CLEANUP ---
     # transaction_payload uses merge_dict reducer → post_response_cleanup
     # cannot delete keys. Clear stale selection/resolved values here at the
@@ -240,6 +285,28 @@ async def memory_update(
         trimmed = str(value).strip().upper()
         return trimmed or None
 
+    def _selection_tunnel_active() -> bool:
+        """True quand un menu de sélection vendeur/palier est actif — voir
+        `_apply_slot`, branche `field == "product"`. Incident réel
+        (2026-08-30) : rien n'empêchait une extraction "product" parasite
+        (ex: mauvais classement LLM en marge du tunnel) de purger le
+        brouillon de panier en cours (`clear_vendor_ctx`, `stable_entities`)
+        pendant qu'un menu vendeur/palier attend une réponse — perdant tout
+        le contexte déjà résolu pour rien. Le fix #2 côté interpréteur
+        (routing.py, verrouillage FSM) ferme le chemin qui produisait ce
+        genre d'extraction parasite ; ce garde reste une défense en
+        profondeur pour tout autre chemin d'extraction non tracé."""
+        if str(working_source.get("available_mapping_kind") or "") in (
+            "pricing_tier",
+            "product_vendor",
+        ):
+            return True
+        for ctx_key in ("tier_selection_context", "vendor_selection_context"):
+            ctx = state.get(ctx_key)
+            if isinstance(ctx, dict) and ctx and not ctx.get("__reset__"):
+                return True
+        return False
+
     def _apply_slot(field: str, value: Any) -> None:
         nonlocal product_slot_changed, clear_vendor_ctx
         if not slot_has_value(value):
@@ -249,6 +316,14 @@ async def memory_update(
             payload[field] = value
             return
         if _values_equal(current_value, value):
+            return
+        if field == "product" and _selection_tunnel_active():
+            logger.info(
+                "[MemoryUpdate] Ignored conflicting product slot '%s' -> '%s' "
+                "while a selection tunnel is active — not purging vendor/tier context",
+                current_value,
+                value,
+            )
             return
         _record_correction(field, current_value, value)
         if field == "product":
@@ -274,7 +349,9 @@ async def memory_update(
         return "".join(ch for ch in normalized if ch.isalnum())
 
     interpreted_event = str(state.get("interpreted_event") or "").upper().strip()
-    expected_input = str(state.get("expected_input") or "NONE").upper().strip()
+    # (2026-09-02, "no legacy shim") : source unique, dérivée de
+    # `pending_interaction`.
+    expected_input = to_tunnel_category(get_pending_interaction(state))
     form_step_state = str(state.get("form_step") or "").upper().strip()
     form_completed = form_step_state == "COMPLETE"
     onboarding_active = bool(
@@ -431,8 +508,29 @@ async def memory_update(
     # si l'interpréteur n'a RÉELLEMENT rien extrait (cas du "non" bref) —
     # sinon les valeurs explicitement redonnées sont appliquées normalement.
     _extracted_has_real_values = any(slot_has_value(v) for v in extracted.values())
-    _skip_merge = interpreted_event == "CONFIRM" or (
-        interpreted_event == "REJECT" and not _extracted_has_real_values
+    # (2026-09-03, refonte transactionnelle) : une fois qu'un
+    # `procurement_draft` canonique existe pour ce goal (voir
+    # nodes/confirmation_gate.py + domain/procurement_draft.py), CE nœud
+    # cesse d'être l'autorité de mutation de ses champs métier —
+    # `flows/buyer/procurement_confirmation.py` lit `extracted_entities`
+    # directement et transitionne le draft lui-même. Sans cette garde,
+    # `transaction_payload` continuerait d'accumuler des mutations en
+    # parallèle du draft (2 représentations concurrentes du même fait
+    # métier, exactement l'anti-pattern qui a produit l'incident
+    # `quantity_display` figé — mandat §22 : « pourquoi un état métier
+    # transactionnel mutable est-il conservé dans un dict fusionné dont la
+    # sémantique peut figer des valeurs ? »). `transaction_payload` reste
+    # néanmoins écrit UNE fois, au tour de CONFIRM, par
+    # `procurement_confirmation.py` (`draft.execution_payload()`) — jamais
+    # par ce nœud, pour ce goal, à partir de ce point.
+    _draft_owns_this_goal = (
+        str(current_goal or "").upper() == "PROCUREMENT_CREATE_REQUEST"
+        and slot_has_value(state.get("procurement_draft"))
+    )
+    _skip_merge = (
+        interpreted_event == "CONFIRM"
+        or (interpreted_event == "REJECT" and not _extracted_has_real_values)
+        or _draft_owns_this_goal
     )
 
     # Garde-fou anti-hallucination pendant la collecte d'un slot PRÉCIS
@@ -667,21 +765,105 @@ async def memory_update(
                 payload["order_id"] = resolved_str
             elif mapping_kind == "intent_disambiguation":
                 pass
-            elif mapping_kind == "product_vendor":
-                # cart_management resolves the vendor by integer position in
-                # vendor_selection_context.vendors — it needs the original numeric
-                # selection_index, NOT the resolved UUID.  Do NOT inject the UUID and
-                # do NOT clear selection_index here; cart_management pops it itself
-                # once it has successfully located the vendor.
+            elif mapping_kind in ("product_vendor", "pricing_tier"):
+                # cart_management resolves the vendor/tier by integer position
+                # in vendor_selection_context.vendors / tier_selection_context.
+                # tiers — it needs the original numeric selection_index, NOT
+                # the resolved UUID. Do NOT inject the UUID and do NOT clear
+                # selection_index here; cart_management pops it itself once
+                # it has successfully located the vendor/tier.
                 pass
             else:
                 payload["resolved_id"] = resolved_str
-            # For product_vendor, keep selection_index so cart_management can use it.
-            # Clearing it here would cause cart_management to skip vendor resolution
-            # and re-show the vendor menu on every turn (infinite loop).
-            if mapping_kind != "product_vendor":
+            # For product_vendor/pricing_tier, keep selection_index so
+            # cart_management can use it. Clearing it here would cause
+            # cart_management to skip vendor/tier resolution and re-show the
+            # SAME menu on every turn (infinite loop — real incident
+            # 2026-08-30: a tier-selection reply was silently resolved
+            # against a STALE, unrelated `menu_snapshot_id`/`mapping_kind`
+            # left over from an earlier menu in the same conversation,
+            # popping `selection_index` before `cart_management` ever saw
+            # it — see cart.py's tier menu responses, which now set
+            # `available_mapping_kind="pricing_tier"` and clear the stale
+            # snapshot/mapping explicitly for exactly this reason).
+            if mapping_kind not in ("product_vendor", "pricing_tier"):
                 payload.pop("selection_index", None)
                 payload.pop("selected_value", None)
+
+    # --- Dérive quantity/price/unit depuis pricing_tiers si absents ---
+    # (2026-08-30) : un producteur donnant plusieurs tarifs/conditionnements
+    # ("25 L à 500 fcfa et 40 L à 900 fcfa") sans jamais donner de prix/
+    # quantité GLOBAL ne satisfaisait ni `_missing_fields_for_goal`
+    # (validator.py) ni `SalesPublishProductPayload.from_payload`
+    # (actions/sales_dto.py — lève une ValueError si `price` est absent) : les
+    # deux ne connaissent QUE `price`/`quantity` scalaires, jamais
+    # `pricing_tiers` — le producteur restait bloqué en boucle sur "prix
+    # unitaire ?" malgré avoir déjà tout donné. `pricing_tiers` porte déjà
+    # l'info réelle (voir confirmation_summary._format_pricing_tiers qui
+    # l'affiche) ; on dérive juste une valeur REPRÉSENTATIVE pour les champs
+    # scalaires que le reste du pipeline (validation, contrat, DTO) exige
+    # encore — 1er tarif pour price/unit, somme des quantités pour quantity.
+    def _tier_number(raw: Any) -> Optional[float]:
+        # Le JSON renvoyé par le LLM type parfois les nombres en chaîne
+        # ("500" au lieu de 500) — un simple `isinstance(x, (int, float))`
+        # rejette silencieusement ces tarifs pourtant valides.
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        if isinstance(raw, str):
+            try:
+                return float(raw.strip().replace(",", "."))
+            except ValueError:
+                return None
+        return None
+
+    tiers = payload.get("pricing_tiers")
+    if isinstance(tiers, list) and tiers:
+        clean_tiers = [t for t in tiers if isinstance(t, dict)]
+
+        # Incident réel (2026-08-30) : un producteur avait déjà répondu
+        # QUANTITY="300 litres" à un tour précédent, puis répondu au tour
+        # PRICE avec 2 tarifs ("5 L à 500 fcfa et 10 L à 900 fcfa"). Le LLM,
+        # tenu de renseigner `quantity` dans le JSON même quand
+        # `pricing_tiers` fait le vrai travail, y a mis 5.0 (le 1er tarif) —
+        # ce champ racine A ÉCRASÉ le 300 déjà établi via la fusion générique
+        # plus haut (`payload[key] = value` pour toute clé non-vide). Le
+        # produit publié affichait "5 LITRE dispo" au lieu de 300. Un
+        # `pricing_tiers` non-vide EST le vrai contenu d'une réponse PRICE —
+        # son `quantity`/`unit` racine n'est qu'un écho du 1er tarif, jamais
+        # une nouvelle réponse au slot QUANTITY : restaure la valeur déjà
+        # établie AVANT ce tour plutôt que de laisser cet écho la remplacer.
+        # Symétrique pour `price`/`price_unit` sur une réponse QUANTITY.
+        if expected_input == "PRICE" and slot_has_value(_established_quantity):
+            payload["quantity"] = _established_quantity
+            if slot_has_value(_established_unit):
+                payload["unit"] = _established_unit
+        if expected_input == "QUANTITY" and slot_has_value(_established_price):
+            payload["price"] = _established_price
+
+        if clean_tiers and not slot_has_value(payload.get("price")):
+            first_price = _tier_number(clean_tiers[0].get("price"))
+            if first_price is not None and first_price > 0:
+                payload["price"] = first_price
+                if not slot_has_value(payload.get("price_unit")):
+                    first_unit = clean_tiers[0].get("unit")
+                    if first_unit:
+                        payload["price_unit"] = first_unit
+        if clean_tiers and not slot_has_value(payload.get("quantity")):
+            total_qty = 0.0
+            all_numeric = True
+            for t in clean_tiers:
+                q = _tier_number(t.get("quantity"))
+                if q is not None:
+                    total_qty += q
+                else:
+                    all_numeric = False
+                    break
+            if all_numeric and total_qty > 0:
+                payload["quantity"] = total_qty
+                if not slot_has_value(payload.get("unit")):
+                    first_unit = clean_tiers[0].get("unit")
+                    if first_unit:
+                        payload["unit"] = canonical_unit_label(first_unit)
 
     # --- Update stable entities uniquement après complétion ---
     status = str(state.get("status") or "").upper()
@@ -735,7 +917,18 @@ async def memory_update(
     else:
         working["recent_corrections"] = None
 
-    payload = _normalize_quantity_to_kg(payload)
+    # (2026-09-03) `quantity`/`unit` ont-ils RÉELLEMENT changé ce tour (vs la
+    # valeur établie AVANT toute fusion, capturée en tête de fonction) ? Voir
+    # la docstring de `_normalize_quantity_to_kg` — sans ce signal, une vraie
+    # correction de quantité/unité pendant une confirmation mettait à jour le
+    # contrat d'exécution (`payload["quantity"]`) mais jamais le récapitulatif
+    # affiché (`quantity_display`, figé sur la 1ère valeur pour toujours).
+    _quantity_or_unit_changed = not _values_equal(
+        _established_quantity, payload.get("quantity")
+    ) or not _values_equal(_established_unit, payload.get("unit"))
+    payload = _normalize_quantity_to_kg(
+        payload, refresh_display=_quantity_or_unit_changed
+    )
     _mirror_aliases(payload)
     _mirror_aliases(updated_stable)
     if draft_patch and not draft_patch.get("__reset__"):
@@ -743,15 +936,37 @@ async def memory_update(
     elif existing_draft:
         _mirror_aliases(existing_draft)
 
-    result = {
-        "transaction_payload": payload,
+    result: Dict[str, Any] = {
         "stable_entities": updated_stable,
         "working_memory": working,
         "current_goal": current_goal,
     }
+    # (2026-09-03, durcissement architectural) : tant que `_draft_owns_this_
+    # goal`, ce nœud n'affirme AUCUNE valeur pour `transaction_payload` —
+    # pas seulement "ne réécrit pas les champs canoniques" (le garde
+    # `_skip_merge` ci-dessus), mais littéralement absent du patch retourné.
+    # `transaction_payload` est un canal `merge_dict` : une clé absente du
+    # patch n'est jamais touchée par le reducer, donc le SEUL écrivain
+    # restant pour ce goal est `flows/buyer/procurement_confirmation.py`
+    # (au moment CONFIRM, `draft.execution_payload()`). Preuve testable —
+    # voir tests/architecture/test_procurement_draft_transactional_contract.py
+    # ::TestSingleWriterGuarantee. La variable locale `payload` ci-dessus
+    # continue d'exister (bookkeeping interne — zone/stable inheritance,
+    # enrich_payload_from_text — inoffensif puisque jamais publié) mais
+    # n'est plus la source de vérité pour ce goal.
+    if not _draft_owns_this_goal:
+        result["transaction_payload"] = payload
 
     if clear_vendor_ctx:
         result["vendor_selection_context"] = None
+        # (2026-09-02, refonte state canonique — invariant "un produit/
+        # vendeur différent ne peut jamais réutiliser automatiquement un
+        # ancien palier") : `tier_selection_context` n'était JAMAIS remis à
+        # zéro ici alors que `vendor_selection_context` l'était — asymétrie
+        # confirmée par audit (G-2). Un palier n'a de sens que pour le
+        # vendeur/produit qui l'a proposé ; il doit disparaître exactement
+        # aux mêmes occasions que `vendor_selection_context`.
+        result["tier_selection_context"] = None
 
     if draft_patch is not None:
         result["draft_payload"] = draft_patch

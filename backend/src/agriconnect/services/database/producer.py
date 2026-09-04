@@ -16,6 +16,7 @@ from sqlalchemy.orm import (
 
 from agriconnect.core.formatting import fmt_num as _fmt_num
 from agriconnect.domain.models import (
+    Bid,
     BuyerProfile,
     Category,
     Client,
@@ -29,6 +30,12 @@ from agriconnect.domain.models import (
     StockMovement,
     SubCategory,
     User,
+)
+
+from agriconnect.graphs.agents.market_coach.domain.pricing_tiers import (
+    PricingTierError,
+    tiers_to_dicts,
+    validate_pricing_tiers,
 )
 
 from .base import BaseMixin
@@ -547,12 +554,22 @@ class ProducerMgmtMixin(BaseMixin):
         sub_category_id: str = None,
         description: str = None,
         local_names: dict = None,
+        pricing_tiers: Optional[List[Dict[str, Any]]] = None,
         *,
         producer_id: str | None = None,
         phone: str | None = None,
     ) -> Dict[str, Any]:
         """
         Ajoute un produit au catalogue public de vente du producteur via self.session.
+
+        `pricing_tiers` (2026-08-27) : déclinaisons de prix/conditionnement
+        pour ce MÊME produit (ex: "500f le demi-litre en sachet et 600f le
+        bidon"), liste de {"quantity", "unit", "price", "packaging"?}.
+        `unit` y est TOUJOURS conservé LITTÉRALEMENT (seuls espace/casse
+        superflus sont nettoyés) — aucune substitution/normalisation
+        (`_CANONICAL_UNIT_MAP`/`normalize_quantity_to_kg`) n'est appliquée
+        ici. `price`/`unit`/`quantity_for_sale` restent le PREMIER tier,
+        pour compatibilité avec tout code qui ne connaît pas encore ce champ.
         """
         phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
         phone = clean_text(phone, "phone", required=True)
@@ -562,6 +579,17 @@ class ProducerMgmtMixin(BaseMixin):
             quantity_for_sale, "quantity_for_sale", allow_zero=True
         )
         unit = clean_text(unit, "unit", required=False, max_length=20) or "KG"
+
+        # Validation typée unique (2026-08-30, voir domain/pricing_tiers.py) —
+        # remplace le sanitizing champ-par-champ qui acceptait silencieusement
+        # des tarifs incohérents entre eux (unités de familles différentes,
+        # doublons). Rejette TOUT le payload sur la première anomalie plutôt
+        # que de publier un produit à moitié cohérent.
+        try:
+            validated_tiers = validate_pricing_tiers(pricing_tiers, unit)
+        except PricingTierError as exc:
+            raise BusinessRuleException(str(exc)) from exc
+        clean_tiers: Optional[list] = tiers_to_dicts(validated_tiers) or None
 
         profile_res = await self.get_producer_profile(phone)
 
@@ -613,6 +641,7 @@ class ProducerMgmtMixin(BaseMixin):
             else None,
             description=description.strip() if description else None,
             local_names=local_names,
+            pricing_tiers=clean_tiers,
             created_at=datetime.now(),
             updated_at=datetime.now(),
         )
@@ -633,6 +662,7 @@ class ProducerMgmtMixin(BaseMixin):
                 "quantity": quantity_for_sale,
                 "unit": unit,
                 "category_label": category_label,
+                "pricing_tiers": clean_tiers,
             },
         }
 
@@ -839,6 +869,7 @@ class ProducerMgmtMixin(BaseMixin):
                             Product.quantity_for_sale,
                             Product.is_available,
                             Product.updated_at,
+                            Product.pricing_tiers,
                         )
                     )
                     .where(Product.producer_id == producer_uuid)
@@ -867,6 +898,13 @@ class ProducerMgmtMixin(BaseMixin):
                             "updated_at": prod.updated_at.isoformat()
                             if getattr(prod, "updated_at", None)
                             else None,
+                            # (2026-08-30) sans ce champ dans `load_only` ci-dessus,
+                            # la colonne pricing_tiers (bien persistée en DB) n'était
+                            # JAMAIS chargée ici — le catalogue du producteur
+                            # affichait toujours le tarif représentatif seul, même
+                            # après avoir corrigé le rendu (success.py) pour
+                            # l'afficher.
+                            "pricing_tiers": getattr(prod, "pricing_tiers", None),
                         }
                     )
 
@@ -1270,17 +1308,51 @@ class ProducerMgmtMixin(BaseMixin):
             .where(Farm.producer_id == producer_obj.id)
             .distinct()
         )
+        # (2026-09-04, audit Auction/Bid, volet "post-winner read side") :
+        # GAP RÉEL fermé ici — une commande née d'un `select_winning_bid`
+        # (`Order.auction_id`/`Order.winning_bid_id` posés, AUCUN
+        # `OrderItem` ni `market_offer_id` — voir services/database/auction.py)
+        # n'était atteinte par NI `product_order_ids` (exige un `OrderItem`)
+        # NI `cycle_order_ids` (exige un `market_offer_id`, réservé aux
+        # productions futures) : un producteur qui remporte un appel
+        # d'offres ne voyait JAMAIS cette commande dans "mes commandes" —
+        # seule la notification Outbox ponctuelle (`AUCTION_WON_PRODUCER`)
+        # l'informait, une fois, au moment du gain.
+        auction_order_ids = (
+            select(Order.id)
+            .join(Bid, Bid.id == Order.winning_bid_id)
+            .where(Bid.producer_id == producer_obj.id)
+            .distinct()
+        )
 
         candidate_ids = select(Order.id).where(
             or_(
                 Order.id.in_(product_order_ids),
                 Order.id.in_(cycle_order_ids),
+                Order.id.in_(auction_order_ids),
             )
         )
 
+        # (2026-09-04, audit Order(DRAFT) orphelin — volet producteur)
+        # `DRAFT` = checkout/précommande acheteur pas encore confirmé
+        # (`create_preorder_draft`, aucun stock débité, aucun engagement) ;
+        # `SUPERSEDED` = ancien brouillon remplacé par une recomposition de
+        # panier (cycle "ajouter d'autres produits") — ni l'un ni l'autre
+        # n'est une commande RÉELLEMENT engagée dans le parcours métier du
+        # producteur. Sans exclusion par défaut, "mes commandes" (aucun
+        # `status` fourni — voir `SALES_LIST_ORDERS`, `"required": []`)
+        # exposait ces lignes comme si l'acheteur avait réellement commandé.
+        # Même pattern que `services/database/buyer.py::get_buyer_orders_dashboard`/
+        # `get_transaction_summary` : l'exclusion ne s'applique QUE quand
+        # aucun statut n'est explicitement demandé — un `status="DRAFT"`
+        # explicite (support/debug) continue de fonctionner tel quel.
         if status_filter:
             candidate_ids = candidate_ids.where(
                 func.upper(Order.status) == status_filter
+            )
+        else:
+            candidate_ids = candidate_ids.where(
+                Order.status.notin_(["DRAFT", "SUPERSEDED"])
             )
 
         order_ids = (
@@ -1299,6 +1371,8 @@ class ProducerMgmtMixin(BaseMixin):
 
         if status_filter:
             stmt = stmt.where(func.upper(Order.status) == status_filter)
+        else:
+            stmt = stmt.where(Order.status.notin_(["DRAFT", "SUPERSEDED"]))
 
         result = await self.session.execute(stmt)
         orders = result.scalars().unique().all()

@@ -11,18 +11,23 @@
 #   2. LANGFUSE v3 (LLMOps self-hosted) : langfuse-web, langfuse-worker,
 #      clickhouse, minio, langfuse-postgres.
 #
-# ⚠️  DB — Postgres managé DigitalOcean, EXTERNE, via PgBouncer LOCAL :
+# ⚠️  DB — Postgres managé EXTERNE, via PgBouncer LOCAL :
 #     `pgbouncer` ne pointe PAS vers un Postgres local (il n'y en a plus
-#     dans ce fichier) mais vers le cluster DO (DO_DB_HOST/PORT/USER/…,
-#     voir x-app-env et le service `pgbouncer`). Objectif : DO impose un
-#     `max_connections` bas sur les plans managés ; sans pooler, chaque
-#     process applicatif qui ouvre son propre pool SQLAlchemy (4 workers
-#     gunicorn × api-replicas + concurrency×worker-replicas + mcp) peut
-#     dépasser ce plafond dès qu'on scale — PgBouncer en mode `transaction`
-#     multiplexe TOUTES ces connexions applicatives sur un nombre borné de
-#     connexions réelles vers DO. Voir DEFAULT_POOL_SIZE dans le service
-#     `pgbouncer` : DOIT être aligné sur le `max_connections` réel de votre
-#     plan DO (Databases → Settings dans la console DO).
+#     dans ce fichier) mais vers le cluster managé désigné par
+#     DO_DB_HOST/PORT/USER/… (voir x-app-env et le service `pgbouncer`).
+#     Ces variables sont nommées `DO_DB_*` pour raison historique
+#     (provider d'origine : DigitalOcean) mais portent, depuis la migration
+#     du 2026-09-02, les identifiants Heroku Postgres — voir le `.env` à la
+#     racine du host de déploiement (PAS versionné, absent de ce checkout).
+#     Objectif du pooler : les plans managés (DO comme Heroku) imposent un
+#     `max_connections` bas ; sans pooler, chaque process applicatif qui
+#     ouvre son propre pool SQLAlchemy (4 workers gunicorn × api-replicas +
+#     concurrency×worker-replicas + mcp) peut dépasser ce plafond dès qu'on
+#     scale — PgBouncer en mode `transaction` multiplexe TOUTES ces
+#     connexions applicatives sur un nombre borné de connexions réelles vers
+#     le cluster managé. Voir DEFAULT_POOL_SIZE dans le service `pgbouncer` :
+#     DOIT être aligné sur le `max_connections` réel de votre plan
+#     (dashboard Heroku Postgres → Settings).
 #
 # ⚠️  Le service `mcp` DOIT rester à 1 seule réplique/process (voir la
 #     docstring de http_server.py) : AgriDBMCPServer/runtime sont des
@@ -89,7 +94,31 @@ x-app-env: &app-env
   # LLM
   LLM_PROVIDER: "groq"
   GROQ_API_KEY: "${GROQ_API_KEY}"
-  
+  # Passerelle Bedrock compatible OpenAI — requis par tout candidat
+  # `bedrock_gateway:...` du LLM Gateway (voir bloc ci-dessous). Absents ici
+  # jusqu'au 2026-09-02 : `LLM_PROVIDER` étant figé à "groq" ci-dessus, la
+  # passerelle Bedrock n'était encore jamais utilisée par la stack Docker.
+  OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+  OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
+  # LLM Gateway (2026-09-02) — chaîne de repli par profil FAST/REASONING,
+  # disjoncteur partagé (Redis), budget par profil, alerting admin. Voir
+  # `.env.example` pour le détail de chaque variable et
+  # `graphs/agents/market_coach/llm_gateway/`.
+  LLM_FAST_PRIMARY: "${LLM_FAST_PRIMARY:-bedrock_gateway:qwen.qwen3-32b}"
+  LLM_FAST_FALLBACK_1: "${LLM_FAST_FALLBACK_1:-groq:llama-3.1-8b-instant}"
+  LLM_FAST_FALLBACK_2: "${LLM_FAST_FALLBACK_2:-}"
+  LLM_REASONING_PRIMARY: "${LLM_REASONING_PRIMARY:-bedrock_gateway:deepseek.v3.2}"
+  LLM_REASONING_FALLBACK_1: "${LLM_REASONING_FALLBACK_1:-bedrock_gateway:openai.gpt-oss-120b}"
+  LLM_REASONING_FALLBACK_2: "${LLM_REASONING_FALLBACK_2:-groq:llama-3.3-70b-versatile}"
+  LLM_CIRCUIT_FAILURE_THRESHOLD: "${LLM_CIRCUIT_FAILURE_THRESHOLD:-3}"
+  LLM_CIRCUIT_COOLDOWN_SECONDS: "${LLM_CIRCUIT_COOLDOWN_SECONDS:-30}"
+  LLM_HALF_OPEN_PROBES: "${LLM_HALF_OPEN_PROBES:-1}"
+  LLM_PROBE_LOCK_SECONDS: "${LLM_PROBE_LOCK_SECONDS:-10}"
+  LLM_FAST_BUDGET_SECONDS: "${LLM_FAST_BUDGET_SECONDS:-12}"
+  LLM_REASONING_BUDGET_SECONDS: "${LLM_REASONING_BUDGET_SECONDS:-20}"
+  ADMIN_ALERT_WEBHOOK_URL: "${ADMIN_ALERT_WEBHOOK_URL:-}"
+  ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:-}"
+
   # Messaging (WhatsApp / Twilio)
   MESSAGING_PROVIDER: "${MESSAGING_PROVIDER:-whatsapp_cloud}"
   TWILIO_ACCOUNT_SID: "${TWILIO_ACCOUNT_SID}"

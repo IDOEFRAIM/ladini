@@ -21,6 +21,7 @@ from fastapi import APIRouter, BackgroundTasks, Request, Response
 
 from agriconnect.api.security import verify_whatsapp_cloud_signature
 from agriconnect.api.tasks import process_agent_task
+from agriconnect.core.location import LocationOutcome, persist_shared_location
 from agriconnect.core.settings import settings
 from agriconnect.graphs.roles import normalize_role
 from agriconnect.workspace.store import WorkspaceStore
@@ -107,43 +108,12 @@ def _extract_interactive_id(message: Dict[str, Any]) -> Optional[str]:
     return str(val).strip() if val else None
 
 
-async def _persist_location_background(phone: str, lat: float, lon: float) -> None:
-    """Identique à la version Twilio — persistance découplée, best-effort."""
-    try:
-        from agriconnect.core.database import get_sessionmaker
-        from agriconnect.services.database.auth import AuthMixin
-
-        class _GeoOnlyService(AuthMixin):
-            def __init__(self, session):
-                self._session = session
-
-            @property
-            def session(self):
-                return self._session
-
-        sessionmaker = get_sessionmaker()
-        if sessionmaker is None:
-            logger.warning(
-                "WHATSAPP_WEBHOOK_LOCATION_SKIPPED | sessionmaker indisponible"
-            )
-            return
-        async with sessionmaker() as session:
-            service = _GeoOnlyService(session)
-            result = await service.update_geo_location(phone=phone, lat=lat, lon=lon)
-            if str(result.get("status")) == "success":
-                await session.commit()
-                logger.info("WHATSAPP_WEBHOOK_LOCATION_SAVED | phone=***%s", phone[-4:])
-            else:
-                await session.rollback()
-                logger.warning(
-                    "WHATSAPP_WEBHOOK_LOCATION_NOT_SAVED | phone=***%s | reason=%s",
-                    phone[-4:],
-                    result.get("message"),
-                )
-    except Exception:
-        logger.exception(
-            "WHATSAPP_WEBHOOK_LOCATION_PERSIST_ERROR | phone=***%s", phone[-4:]
-        )
+# (2026-09-02) Ancienne persistance `BackgroundTasks` retirée — voir
+# `core/location.py::persist_shared_location`, désormais appelée SYNCHRONE
+# (`await`) dans `_process_single_message` ci-dessous, AVANT l'enqueue
+# Celery. Même correction que `twilio_webhook.py` (miroir intentionnel,
+# voir docstring de module) — élimine la course webhook/tâche ET le repli
+# silencieux sur une position périmée.
 
 
 @router.post("/webhook/whatsapp")
@@ -237,8 +207,19 @@ async def _process_single_message(
         )
 
     # --- 4. GPS NATIF ---
+    # (2026-09-02, refonte GPS ; nettoyage architectural final 2026-09-02 —
+    # "un seul propriétaire de la réponse") : le webhook ne fait plus QUE
+    # normaliser l'événement entrant et persister le fait brut (ÉCRITURE,
+    # pas une décision de réponse). Voir le commentaire jumeau, plus complet,
+    # dans twilio_webhook.py — l'ancienne notification immédiate faisait du
+    # webhook un 2e propriétaire de la réponse, concurrent du tour de graphe
+    # normal (`nodes/clarification.py` couvre désormais, SEUL, le cas
+    # "aucune étape GPS active").
     location = _extract_location(message)
     location_shared = False
+    location_outcome: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lon: Optional[float] = None
     if location:
         lat, lon, address = location
         logger.info(
@@ -248,8 +229,11 @@ async def _process_single_message(
             lon,
             address,
         )
-        background_tasks.add_task(_persist_location_background, phone, lat, lon)
+        outcome, _user_message = await persist_shared_location(phone, lat, lon)
         location_shared = True
+        location_outcome = outcome.value
+        if outcome == LocationOutcome.NEW_LOCATION_ACCEPTED:
+            location_lat, location_lon = lat, lon
 
     try:
         from agriconnect.core import telemetry
@@ -289,6 +273,14 @@ async def _process_single_message(
         interactive_id=interactive_id,
         trace_id=trace_id,
         location_shared=location_shared,
+        location_outcome=location_outcome,
+        location_lat=location_lat,
+        location_lon=location_lon,
+        # (2026-09-02) Clé d'idempotence de l'ENVOI — voir api/tasks.py::
+        # _claim_single_response. Même identifiant que la clé de
+        # dédoublonnage webhook ci-dessus, réutilisé pour protéger aussi
+        # contre un retry Celery de la tâche elle-même.
+        message_sid=message_id,
     )
 
 

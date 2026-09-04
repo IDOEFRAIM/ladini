@@ -8,6 +8,15 @@ from sqlalchemy import case, desc, func, literal, or_, select, update
 from sqlalchemy.orm import joinedload, selectinload
 
 from agriconnect.core.formatting import fmt_num as _fmt_num
+from agriconnect.graphs.agents.market_coach.domain.order_policy import (
+    validate_minimum_order_quantity,
+)
+from agriconnect.graphs.agents.market_coach.domain.pricing_tiers import (
+    PricingTierError,
+    compute_line,
+    resolve_stock_debit,
+    resolve_tier,
+)
 
 # Import des modèles alignés sur le schéma
 from agriconnect.domain.models import (
@@ -21,6 +30,7 @@ from agriconnect.domain.models import (
     OrderItem,
     Producer,
     Product,
+    SubCategory,
     TrustScore,
     User,
     Zone,
@@ -266,14 +276,29 @@ class BuyerMixin(BaseMixin):
                     Product.quantity_for_sale,
                     Product.unit,
                     Product.images,
+                    # (2026-08-30) sans cette colonne, un produit à paliers
+                    # multiples (`pricing_tiers`) devenait invisible à
+                    # l'acheteur — même bug déjà corrigé côté producteur sur
+                    # `get_stocks` (colonne persistée mais jamais SELECTionnée
+                    # ici). Voir domain/pricing_tiers.py.
+                    Product.pricing_tiers,
                     Producer.id.label("producer_id"),
                     User.name.label("producer_name"),
                     Zone.name.label("zone_name"),
                     priority_score,
+                    # (2026-09-02) Seuil minimum de commande — politique
+                    # PLATEFORME portée par le TYPE de produit
+                    # (`SubCategory`), jamais par `Product`. Voir
+                    # domain/order_policy.py. `outerjoin` : un produit sans
+                    # `sub_category_id` (legacy) doit rester achetable —
+                    # NULL ici = aucune règle, jamais un blocage silencieux.
+                    SubCategory.minimum_order_quantity,
+                    SubCategory.minimum_order_unit,
                 )
                 .outerjoin(Producer, Producer.id == Product.producer_id)
                 .outerjoin(User, User.id == Producer.user_id)
                 .outerjoin(Zone, Zone.id == Producer.zone_id)
+                .outerjoin(SubCategory, SubCategory.id == Product.sub_category_id)
                 .where(
                     # Recherche floue trigram (« tomte » → « tomate ») au lieu du
                     # substring strict qui bloquait l'agent sur une faute de frappe.
@@ -302,11 +327,17 @@ class BuyerMixin(BaseMixin):
                     User.name.label("producer_name"),
                     Zone.name.label("zone_name"),
                     future_priority_score,
+                    # (2026-09-02) Même politique plateforme que le catalogue
+                    # direct — voir domain/order_policy.py. `MarketOffer` a
+                    # son propre `sub_category_id`.
+                    SubCategory.minimum_order_quantity,
+                    SubCategory.minimum_order_unit,
                 )
                 .outerjoin(Farm, Farm.id == MarketOffer.farm_id)
                 .outerjoin(Producer, Producer.id == Farm.producer_id)
                 .outerjoin(User, User.id == Producer.user_id)
                 .outerjoin(Zone, Zone.id == Producer.zone_id)
+                .outerjoin(SubCategory, SubCategory.id == MarketOffer.sub_category_id)
                 .where(
                     or_(
                         fuzzy_match(MarketOffer.product_label, clean_product),
@@ -364,6 +395,13 @@ class BuyerMixin(BaseMixin):
                         # Voir services/search_results_cache.py — permet à l'acheteur
                         # de demander "photos <numéro>" pour un résultat de recherche.
                         "images": list(row.get("images") or []),
+                        "pricing_tiers": row.get("pricing_tiers"),
+                        "minimum_order_quantity": (
+                            float(row["minimum_order_quantity"])
+                            if row.get("minimum_order_quantity") is not None
+                            else None
+                        ),
+                        "minimum_order_unit": row.get("minimum_order_unit"),
                     }
                 )
 
@@ -408,6 +446,12 @@ class BuyerMixin(BaseMixin):
                         ),
                         "crop_cycle_id": str(row["id"]),
                         "images": [],  # productions futures : pas de photo avant récolte
+                        "minimum_order_quantity": (
+                            float(row["minimum_order_quantity"])
+                            if row.get("minimum_order_quantity") is not None
+                            else None
+                        ),
+                        "minimum_order_unit": row.get("minimum_order_unit"),
                     }
                 )
 
@@ -514,13 +558,79 @@ class BuyerMixin(BaseMixin):
                 raise BusinessRuleException(
                     "Un produit sélectionné n'est plus disponible."
                 )
-            if product.quantity_for_sale < qty:
+
+            # (2026-08-30) Article à palier — re-résout le tarif contre les
+            # `pricing_tiers` LIVE du produit (pas la valeur mise en cache
+            # dans la ligne de panier au moment de l'ajout) : même philosophie
+            # anti-péremption que le repli `product.price` déjà en place pour
+            # les articles à tarif unique. `qty` reste le nombre de paquets
+            # (affichage), `base_unit_quantity` la quantité réelle à débiter.
+            # Voir domain/pricing_tiers.py.
+            tier_id = item.get("tier_id")
+            base_unit_quantity = None
+            if tier_id:
+                try:
+                    tier = resolve_tier(product.pricing_tiers, str(tier_id))
+                    computed = compute_line(tier, int(qty))
+                except PricingTierError as exc:
+                    raise BusinessRuleException(str(exc)) from exc
+                price_at_sale = tier.price
+                line_total = computed.price_total
+                base_unit_quantity = computed.base_unit_quantity
+                stock_debit = base_unit_quantity
+            else:
+                price_at_sale = float(product.price)
+                line_total = price_at_sale * qty
+                stock_debit = qty
+
+            # (2026-09-02) Seuil minimum de commande — RE-VALIDÉ ici contre la
+            # règle LIVE (jamais la valeur vue au moment de l'ajout au
+            # panier), même philosophie anti-péremption que `pricing_tiers`
+            # ci-dessus : un admin a pu relever le seuil ("50 KG -> 100 KG")
+            # entre l'ajout au panier et cette confirmation de commande — la
+            # commande finale doit respecter la règle EN VIGUEUR maintenant,
+            # jamais celle capturée plus tôt côté état conversationnel. Voir
+            # domain/order_policy.py (source unique, même fonction que
+            # `cart_service.py::add_to_cart_with_ref`).
+            min_check = None
+            if product.sub_category_id:
+                sub_row = (
+                    await current_session.execute(
+                        select(
+                            SubCategory.minimum_order_quantity,
+                            SubCategory.minimum_order_unit,
+                        ).where(SubCategory.id == product.sub_category_id)
+                    )
+                ).first()
+                if sub_row is not None:
+                    min_check = validate_minimum_order_quantity(
+                        minimum_order_quantity=(
+                            float(sub_row[0]) if sub_row[0] is not None else None
+                        ),
+                        minimum_order_unit=sub_row[1],
+                        total_quantity=stock_debit,
+                        total_unit=str(product.unit or "KG"),
+                    )
+            if min_check is not None and not min_check.passed:
+                if min_check.reason == "UNIT_INCOMPATIBLE":
+                    raise BusinessRuleException(
+                        f"Seuil minimum de commande pour {product.name} défini en "
+                        f"{min_check.minimum_unit}, incompatible avec {product.unit}.",
+                        reason="minimum_order_unit_incompatible",
+                    )
+                raise BusinessRuleException(
+                    f"La quantité minimale pour {product.name} est de "
+                    f"{min_check.minimum_in_total_unit:g} {product.unit} "
+                    f"(commande actuelle : {stock_debit:g} {product.unit}).",
+                    reason="below_minimum_order_quantity",
+                )
+
+            if product.quantity_for_sale < stock_debit:
                 raise BusinessRuleException(
                     f"Stock insuffisant pour {product.name} (Dispo: {product.quantity_for_sale}).",
                     reason="insufficient_stock",
                 )
 
-            line_total = float(product.price) * qty
             running_total += line_total
 
             current_session.add(
@@ -529,11 +639,13 @@ class BuyerMixin(BaseMixin):
                     order_id=new_order.id,
                     product_id=product.id,
                     quantity=qty,
-                    price_at_sale=float(product.price),
+                    price_at_sale=price_at_sale,
+                    tier_id=str(tier_id) if tier_id else None,
+                    base_unit_quantity=base_unit_quantity,
                 )
             )
 
-            product.quantity_for_sale -= qty
+            product.quantity_for_sale -= stock_debit
             summary_items.append(f"{product.name} (x{qty} {product.unit or 'u'})")
 
         if not summary_items:
@@ -656,7 +768,19 @@ class BuyerMixin(BaseMixin):
             stmt = (
                 select(Order)
                 .options(selectinload(Order.items).joinedload(OrderItem.product))
-                .where(Order.buyer_id == profile_obj.id)
+                .where(
+                    Order.buyer_id == profile_obj.id,
+                    # (2026-09-04, audit Order(DRAFT) orphelin) : un
+                    # `Order(status="DRAFT")` (ou "SUPERSEDED", même famille)
+                    # n'est PAS encore une commande — c'est un brouillon de
+                    # checkout, éventuellement abandonné. Sans cette
+                    # exclusion, `status_map` (ci-dessus, aucune entrée pour
+                    # DRAFT/SUPERSEDED) retombait sur le fallback générique
+                    # (`f"🔄 Status: {order.status}"`) et affichait un
+                    # brouillon annulé/remplacé comme une VRAIE commande dans
+                    # le tableau de bord de l'acheteur.
+                    Order.status.notin_(["DRAFT", "SUPERSEDED"]),
+                )
                 .order_by(desc(Order.created_at))
             )
             result = await current_session.execute(stmt)
@@ -743,7 +867,7 @@ class BuyerMixin(BaseMixin):
                 )
                 product = await current_session.scalar(prod_stmt)
                 if product:
-                    product.quantity_for_sale += item.quantity
+                    product.quantity_for_sale += resolve_stock_debit(item)
 
         order.status = "CANCELLED"
         order.cancellation_role = "BUYER"
@@ -1304,6 +1428,15 @@ class BuyerMixin(BaseMixin):
         running_total = 0.0
         summary_items: List[str] = []
         unresolved: List[str] = []
+        # (2026-09-04, audit CART→CHECKOUT) : items RÉELLEMENT écrits en base
+        # (prix/palier RÉSOLUS SERVEUR, jamais le panier tel quel) — c'est ce
+        # que l'appelant (`bootstrap_preorder_draft`) doit utiliser pour bâtir
+        # le récapitulatif affiché à l'acheteur, jamais les valeurs figées au
+        # moment de l'ajout au panier (voir la note "affichage ≠ exécution"
+        # ci-dessous). Un panier vu 5 minutes plus tôt peut légitimement
+        # différer du prix catalogue ACTUEL — ce champ garantit que ce que
+        # l'acheteur confirme est EXACTEMENT ce que cette transaction a écrit.
+        resolved_items: List[Dict[str, Any]] = []
 
         for item in cart_items:
             p_uuid = self._to_uuid(item.get("product_id"))
@@ -1321,20 +1454,141 @@ class BuyerMixin(BaseMixin):
                 unresolved.append(str(item.get("product_id")))
                 continue
 
-            price = float(product.price or 0.0)
-            line_total = price * qty
-            running_total += line_total
+            tier_id = item.get("tier_id")
+            order_item_kwargs: Dict[str, Any] = {
+                "id": uuid.uuid4(),
+                "order_id": new_order.id,
+                "product_id": product.id,
+            }
 
-            current_session.add(
-                OrderItem(
-                    id=uuid.uuid4(),
-                    order_id=new_order.id,
-                    product_id=product.id,
-                    quantity=qty,
-                    price_at_sale=price,
+            if tier_id:
+                # (2026-09-04, audit CART→CHECKOUT) : GAP RÉEL fermé ici — ce
+                # panier a résolu un PALIER (`domain/pricing_tiers.py`) au
+                # moment de l'ajout, mais `qty` reçu ici est un NOMBRE DE
+                # PAQUETS, jamais une quantité en unité de base — AVANT ce
+                # correctif, cette boucle traitait TOUT item comme un produit
+                # à tarif unique (`product.price * qty`), ce qui pour un
+                # article à palier facturait/débitait le nombre de PAQUETS au
+                # PRIX/UNITÉ DE BASE (ex: 3 bidons de 10L facturés comme 3 L
+                # au lieu de 3 bidons au tarif du palier — sous-facturation
+                # ET sous-débit de stock massifs). `resolve_tier`/`compute_line`
+                # (déjà utilisés côté panier, `services/domain/cart_service.py`)
+                # sont réutilisés ici SERVEUR pour re-résoudre le MÊME palier
+                # de façon AUTORITATIVE — jamais confiance au prix envoyé par
+                # le client. `OrderItem.tier_id`/`base_unit_quantity`
+                # (colonnes déjà existantes, JAMAIS peuplées jusqu'ici) sont
+                # désormais posées — c'est exactement CE que
+                # `resolve_stock_debit`/`confirm_preorder_draft` attendaient
+                # déjà en aval (voir leur docstring).
+                try:
+                    tier = resolve_tier(product.pricing_tiers, str(tier_id))
+                    if not float(qty).is_integer():
+                        raise PricingTierError(
+                            f"Nombre de paquets invalide pour {product.name} (qty={qty})."
+                        )
+                    computed = compute_line(tier, int(qty))
+                except PricingTierError as exc:
+                    logger.warning(
+                        "create_preorder_draft: palier %s introuvable/invalide pour "
+                        "produit %s (panier périmé ?) — article ignoré : %s",
+                        tier_id, p_uuid, exc,
+                    )
+                    unresolved.append(str(item.get("product_id")))
+                    continue
+
+                price = float(tier.price)  # prix PAR PAQUET, jamais par unité de base
+                line_total = computed.price_total
+                order_item_kwargs["quantity"] = qty
+                order_item_kwargs["price_at_sale"] = price
+                order_item_kwargs["tier_id"] = tier.tier_id
+                order_item_kwargs["base_unit_quantity"] = computed.base_unit_quantity
+                resolved_items.append(
+                    {
+                        "product_id": str(product.id),
+                        "name": product.name,
+                        "quantity": qty,
+                        "unit": tier.unit,
+                        "packaging": tier.packaging,
+                        "tier_quantity": tier.quantity,
+                        "base_unit_quantity": computed.base_unit_quantity,
+                        "tier_id": tier.tier_id,
+                        "price": price,
+                        "line_total": round(line_total, 2),
+                        "producer_id": str(product.producer_id) if product.producer_id else None,
+                    }
                 )
+                summary_items.append(
+                    f"{product.name} (x{int(qty)} {tier.packaging or tier.unit})"
+                )
+            else:
+                price = float(product.price or 0.0)
+                line_total = price * qty
+                order_item_kwargs["quantity"] = qty
+                order_item_kwargs["price_at_sale"] = price
+                resolved_items.append(
+                    {
+                        "product_id": str(product.id),
+                        "name": product.name,
+                        "quantity": qty,
+                        "unit": product.unit or "KG",
+                        "price": price,
+                        "line_total": round(line_total, 2),
+                        "producer_id": str(product.producer_id) if product.producer_id else None,
+                    }
+                )
+                summary_items.append(f"{product.name} (x{qty} {product.unit or 'KG'})")
+
+            # (2026-09-04, audit CART→CHECKOUT boundary closure) : GAP RÉEL
+            # fermé ici — le seuil minimum de commande (`governance.sub_categories`,
+            # SEULE source canonique, voir `domain/order_policy.py`) n'était
+            # revalidé qu'à l'AJOUT au panier (`cart_service.py::add_to_cart_with_ref`),
+            # jamais ici au moment du snapshot serveur faisant foi. Un panier
+            # composé AVANT qu'un admin ne relève le seuil (ex: 50 KG -> 100 KG)
+            # pouvait ainsi produire une précommande en dessous du minimum EN
+            # VIGUEUR — exactement le type de divergence "cart dit valide,
+            # checkout dit valide, alors que la règle actuelle dit invalide"
+            # que ce chantier doit fermer. Réutilise la MÊME fonction pure et
+            # la MÊME source (`SubCategory`) que `finalize_multi_order`
+            # (référence déjà correcte, jamais câblée) — aucune nouvelle
+            # primitive. Un item qui échoue est écarté (jamais silencieusement
+            # sous-facturé) et journalisé dans `unresolved_items`, comme un
+            # palier périmé juste au-dessus — `bootstrap_preorder_draft` en
+            # informe explicitement l'acheteur (voir son propre correctif).
+            total_qty_for_policy = (
+                computed.base_unit_quantity if tier_id else qty
             )
-            summary_items.append(f"{product.name} (x{qty} {product.unit or 'KG'})")
+            policy_unit = tier.unit if tier_id else (product.unit or "KG")
+            if getattr(product, "sub_category_id", None):
+                sub_row = (
+                    await current_session.execute(
+                        select(
+                            SubCategory.minimum_order_quantity,
+                            SubCategory.minimum_order_unit,
+                        ).where(SubCategory.id == product.sub_category_id)
+                    )
+                ).first()
+                if sub_row is not None:
+                    min_check = validate_minimum_order_quantity(
+                        minimum_order_quantity=(
+                            float(sub_row[0]) if sub_row[0] is not None else None
+                        ),
+                        minimum_order_unit=sub_row[1],
+                        total_quantity=total_qty_for_policy,
+                        total_unit=str(policy_unit),
+                    )
+                    if not min_check.passed:
+                        logger.warning(
+                            "create_preorder_draft: seuil minimum non atteint pour "
+                            "produit %s (qty=%s unit=%s, reason=%s) — article ignoré",
+                            p_uuid, total_qty_for_policy, policy_unit, min_check.reason,
+                        )
+                        resolved_items.pop()
+                        summary_items.pop()
+                        unresolved.append(str(item.get("product_id")))
+                        continue
+
+            running_total += line_total
+            current_session.add(OrderItem(**order_item_kwargs))
 
         if not summary_items:
             raise BusinessRuleException(
@@ -1356,6 +1610,7 @@ class BuyerMixin(BaseMixin):
             "total_amount": running_total,
             "currency": new_order.currency or "XOF",
             "items_count": len(summary_items),
+            "items": resolved_items,
             "summary": ", ".join(summary_items),
             "unresolved_items": unresolved,
             "message": (
@@ -1500,7 +1755,21 @@ class BuyerMixin(BaseMixin):
                 stmt = stmt.where(Order.id == o_uuid)
             elif buyer_phone:
                 _, profile_obj = await self.get_buyer_profile(phone=buyer_phone)
-                stmt = stmt.where(Order.buyer_id == profile_obj.id)
+                # (2026-09-04, audit Order(DRAFT) orphelin) : "la dernière
+                # transaction" ne doit JAMAIS être un brouillon de checkout
+                # abandonné/remplacé (DRAFT/SUPERSEDED) — sans cette
+                # exclusion, un acheteur demandant "où en est ma commande ?"
+                # juste après avoir annulé ou recomposé son panier se voyait
+                # répondre sur ce brouillon plutôt que sur sa VRAIE dernière
+                # commande (`order_tracking.py::check_order_status`, le seul
+                # appelant réel de cette branche sans `order_id` explicite).
+                # Portée volontairement limitée à CETTE branche : un
+                # `order_id` explicite reste consultable tel quel (support/
+                # debug), voir la branche `o_uuid is not None` ci-dessus.
+                stmt = stmt.where(
+                    Order.buyer_id == profile_obj.id,
+                    Order.status.notin_(["DRAFT", "SUPERSEDED"]),
+                )
             else:
                 return {
                     "status": "error",
@@ -1643,7 +1912,22 @@ class BuyerMixin(BaseMixin):
         insufficient: List[Dict[str, Any]] = []
         running_total = 0.0
 
-        for item in order.items or []:
+        # (2026-09-04, audit CART→CHECKOUT) : tri déterministe par
+        # `product_id` AVANT tout `FOR UPDATE` — même garde-fou anti-deadlock
+        # DÉJÀ présent dans `finalize_multi_order` (voir sa docstring : "deux
+        # requêtes concurrentes achetant les mêmes produits dans un ordre
+        # différent forment un cycle de verrous"), jamais appliqué ici
+        # jusqu'à cet audit. Deux précommandes concurrentes portant les MÊMES
+        # 2 produits, mais ajoutés au panier dans l'ordre inverse (buyer A :
+        # tomates puis maïs ; buyer B : maïs puis tomates), pouvaient
+        # verrouiller `Product` dans un ordre opposé — Postgres détecte et
+        # annule l'une des deux transactions (`deadlock_detected`), jamais de
+        # corruption de données, mais un échec évitable au lieu d'une simple
+        # sérialisation. Réutilise le motif déjà PROUVÉ ailleurs dans ce
+        # fichier, aucune nouvelle primitive.
+        sorted_items = sorted(order.items or [], key=lambda it: str(it.product_id or ""))
+
+        for item in sorted_items:
             if not item.product_id:
                 continue
 
@@ -1660,20 +1944,24 @@ class BuyerMixin(BaseMixin):
                 continue
 
             requested = float(item.quantity or 0.0)
+            # Quantité en unité de BASE à débiter — diffère de `requested`
+            # (le nombre de paquets/palier affiché à l'acheteur) dès qu'un
+            # `tier_id` est impliqué. Voir domain/pricing_tiers.py.
+            stock_debit = resolve_stock_debit(item)
             available = float(product.quantity_for_sale or 0.0)
-            if available < requested:
+            if available < stock_debit:
                 insufficient.append(
                     {
                         "product_id": str(product.id),
                         "name": product.name,
-                        "requested": requested,
+                        "requested": stock_debit,
                         "available": available,
                         "unit": (product.unit or "KG").upper(),
                     }
                 )
                 continue
 
-            product.quantity_for_sale = available - requested
+            product.quantity_for_sale = available - stock_debit
             running_total += float(item.price_at_sale or 0.0) * requested
 
         if insufficient:
@@ -1711,8 +1999,21 @@ class BuyerMixin(BaseMixin):
         buyer_phone: str,
         preorder_id: str,
         reason: Optional[str] = None,
+        target_status: str = "CANCELLED",
     ) -> Dict[str, Any]:
-        """Annule une précommande brouillon sans impacter les stocks (non débitée)."""
+        """Annule (ou remplace) une précommande brouillon sans impacter les
+        stocks (non débitée).
+
+        (2026-09-04, audit Order(DRAFT) orphelin) : `target_status` distingue
+        deux issues DIFFÉRENTES pour le même `Order(status=DRAFT)` abandonné :
+        `"CANCELLED"` (défaut, comportement historique inchangé — l'acheteur
+        a explicitement annulé sa précommande) vs `"SUPERSEDED"` (le cycle
+        "ajouter d'autres produits" a fait naître un NOUVEAU
+        `Order(status=DRAFT)` pour le MÊME `PreorderDraft` — l'ancien n'a
+        jamais été rejeté par l'acheteur, il a simplement été remplacé).
+        `cancellation_role`/`delivery_desc` (champs sémantiquement liés à un
+        VRAI rejet acheteur) ne sont posés QUE sur `target_status="CANCELLED"`.
+        """
         current_session = self.session
         if not current_session:
             raise BusinessRuleException("Session indisponible.")
@@ -1738,18 +2039,21 @@ class BuyerMixin(BaseMixin):
                 reason="not_draft",
             )
 
-        order.status = "CANCELLED"
-        order.cancellation_role = "BUYER"
+        order.status = target_status
+        if target_status == "CANCELLED":
+            order.cancellation_role = "BUYER"
         if reason:
             order.delivery_desc = (
                 order.delivery_desc or ""
             ) + f"\n[CancelReason] {reason}"
         await current_session.flush()
 
+        verb = "annulée" if target_status == "CANCELLED" else "remplacée"
         return {
             "status": "success",
             "order_id": str(order.id),
-            "message": f"❌ Précommande #{str(order.id)[:8].upper()} annulée.",
+            "order_status": target_status,
+            "message": f"❌ Précommande #{str(order.id)[:8].upper()} {verb}.",
         }
 
     async def update_negotiation_offer(
@@ -1793,7 +2097,15 @@ class BuyerMixin(BaseMixin):
 
         old = float(auction.max_price_per_unit or 0.0)
         auction.max_price_per_unit = price
-        auction.version = int(auction.version or 0) + 1
+        # (2026-09-04, audit Auction/Bid — décision `Auction.version`) :
+        # incrément retiré. C'était le SEUL écrivain de cette colonne dans
+        # tout le dépôt, et aucun lecteur nulle part (ni CAS optimiste — cette
+        # fonction protège déjà sa cohérence via `.with_for_update()`
+        # pessimiste ci-dessus —, ni affichage, ni réconciliation). La
+        # colonne reste en base (voir `Auction.version` dans
+        # `domain/orders/models.py` pour la justification complète : pas de
+        # suppression de colonne sans confirmer qu'aucun lecteur externe au
+        # dépôt n'existe), mais plus aucun code n'écrit dedans.
         await current_session.flush()
 
         return {

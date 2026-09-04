@@ -7,12 +7,15 @@ Usage:
     print(settings.DATABASE_URL)
 """
 
+import logging
 import os
 from pathlib import Path
 from typing import ClassVar
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings
+
+logger = logging.getLogger("agriconnect.settings")
 
 
 class Settings(BaseSettings):
@@ -32,8 +35,29 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: list[str] = ["*"]
 
     # --- LLM (Provider-agnostic) ---
-    # Valeurs possibles : "groq", "azure", "bedrock"
+    # Valeurs possibles : "groq" (défaut), "bedrock", "azure" (scaffolding non
+    # implémenté). Basculer de provider = changer LLM_PROVIDER + pointer
+    # LLM_MODEL/LLM_MODEL_REASONING vers des IDs de modèle valides pour CE
+    # provider (les noms Groq et Bedrock ne se recoupent pas) — jamais un
+    # changement de code, tous les sites d'appel consomment le même adapter
+    # normalisé.
+    #
+    # "bedrock" a DEUX chemins d'implémentation (voir core/get_llm.py) :
+    #   1. Passerelle compatible OpenAI (OPENAI_API_KEY/OPENAI_BASE_URL
+    #      ci-dessous, ex: "AWS Bedrock API keys") — PRÉFÉRÉ quand
+    #      OPENAI_BASE_URL est défini : c'est le protocole Groq lui-même
+    #      (Groq est déjà compatible OpenAI), donc réutilise l'adapter
+    #      existant tel quel, aucune traduction de requête nécessaire.
+    #   2. Accès natif via boto3/API Converse (identifiants IAM
+    #      AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN/
+    #      AWS_REGION ci-dessous) — utilisé en repli si OPENAI_BASE_URL
+    #      n'est pas défini.
     LLM_PROVIDER: str = "groq"
+    # Passerelle Bedrock compatible OpenAI (chemin 1 ci-dessus). Noms de
+    # variables volontairement alignés sur ceux lus nativement par le SDK
+    # `openai` (`OPENAI_API_KEY`/`OPENAI_BASE_URL`).
+    OPENAI_API_KEY: str = ""
+    OPENAI_BASE_URL: str = ""
     AGRICONNECT_APIKEY: str = ""
     GROQ_API_KEY: str = ""
     # Modèle rapide/économique — nœuds d'infrastructure (normalisation,
@@ -162,11 +186,12 @@ class Settings(BaseSettings):
     # Secret partagé entre le daemon MCP HTTP (protocols/mcp/servers/http_server.py)
     # et son client (infrastructure/mcp/client.py::HttpMCPAdapter).
     #
-    # ⚠️ SÉCURITÉ — le daemon expose `POST /call`, qui exécute N'IMPORTE QUEL
-    # outil DB (création de commande, déblocage de fonds escrow, suppression de
-    # stock...) ET dérive l'identité de l'appelant depuis le PAYLOAD
-    # (`_derive_context_identity`, runtime.py) : sans authentification,
-    # quiconque atteint ce port agit comme n'importe quel utilisateur.
+    # ⚠️ SÉCURITÉ — le daemon expose `POST /mcp` (JSON-RPC, tools/call), qui
+    # exécute N'IMPORTE QUEL outil DB (création de commande, déblocage de
+    # fonds escrow, suppression de stock...) ET dérive l'identité de
+    # l'appelant depuis le PAYLOAD (`_derive_context_identity`, runtime.py) :
+    # sans authentification, quiconque atteint ce port agit comme n'importe
+    # quel utilisateur.
     # Renseigner ce secret active la vérification `Authorization: Bearer ...`
     # côté daemon et son envoi automatique côté client. Laissé vide, le daemon
     # démarre quand même (aucune rupture de déploiement existant) mais journalise
@@ -206,6 +231,59 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str = ""
     TWILIO_WHATSAPP_NUMBER: str = ""
 
+    # --- Mode Sandbox (2026-08-27) ---
+    # Bascule EXPLICITE vers les environnements de test — jamais un simple
+    # "on espère que les bonnes clés sont dans .env". Voir `_apply_sandbox_mode`
+    # (model_validator ci-dessous) : quand True, force PAYDUNYA_MODE="test"
+    # (jamais de vrai paiement en sandbox) et avertit bruyamment si
+    # TWILIO_WHATSAPP_NUMBER n'est PAS le numéro sandbox public Twilio
+    # (whatsapp:+14155238886) — jamais de correction silencieuse d'un numéro
+    # explicitement configuré, seulement un avertissement au démarrage.
+    SANDBOX_MODE: bool = False
+    # Numéro sandbox public Twilio (identique pour tous les comptes, valable
+    # après avoir rejoint via le mot de passe sandbox dans la Console Twilio).
+    TWILIO_SANDBOX_WHATSAPP_NUMBER: str = "whatsapp:+14155238886"
+    # Remplace le SDK Groq réel par un client déterministe qui renvoie des
+    # réponses JSON factices — permet de faire tourner l'agent/les tests sans
+    # clé API réelle ni appel réseau. Voir core/get_llm.py::get_groq_sdk.
+    # Indépendant de SANDBOX_MODE (utile aussi hors sandbox, ex: CI) mais
+    # activé par défaut avec lui via `_apply_sandbox_mode` sauf override
+    # explicite.
+    MOCK_EXTERNAL_APIS: bool = False
+
+    @model_validator(mode="after")
+    def _apply_sandbox_mode(self) -> "Settings":
+        if not self.SANDBOX_MODE:
+            return self
+        if self.PAYDUNYA_MODE != "test":
+            logger.warning(
+                "SANDBOX_MODE=true : PAYDUNYA_MODE forcé à 'test' (était %r) — "
+                "aucun vrai paiement ne doit jamais partir en sandbox.",
+                self.PAYDUNYA_MODE,
+            )
+            self.PAYDUNYA_MODE = "test"
+        if (
+            self.TWILIO_WHATSAPP_NUMBER
+            and self.TWILIO_WHATSAPP_NUMBER != self.TWILIO_SANDBOX_WHATSAPP_NUMBER
+        ):
+            logger.warning(
+                "SANDBOX_MODE=true mais TWILIO_WHATSAPP_NUMBER=%r n'est PAS le "
+                "numéro sandbox public Twilio (%r) — vérifiez que ce numéro "
+                "pointe bien vers un environnement de test, pas vers un "
+                "sender WhatsApp de production.",
+                self.TWILIO_WHATSAPP_NUMBER,
+                self.TWILIO_SANDBOX_WHATSAPP_NUMBER,
+            )
+        logger.warning(
+            "🧪 SANDBOX_MODE actif — provider=%s, twilio_number=%s, "
+            "paydunya_mode=%s, mock_external_apis=%s",
+            self.MESSAGING_PROVIDER,
+            self.TWILIO_WHATSAPP_NUMBER or "(non configuré)",
+            self.PAYDUNYA_MODE,
+            self.MOCK_EXTERNAL_APIS,
+        )
+        return self
+
     # --- Twilio Messages Interactifs (boutons / listes) ---
     # Les boutons/listes WhatsApp passent par la Content API Twilio (ContentSid
     # pré-créé), et NE s'affichent PAS sur le sandbox — requièrent un Sender
@@ -218,6 +296,11 @@ class Settings(BaseSettings):
     # ContentSid du template Quick Reply de confirmation binaire (2 boutons :
     # payload "CONFIRM" et "REJECT"). Une variable {{1}} porte le corps du récap.
     TWILIO_CONFIRM_CONTENT_SID: str = ""
+    # ContentSid du template twilio/list-picker (menus à choix multiples —
+    # catalogue, précommandes, sélection de producteur...). Variables :
+    # {{1}} corps, {{2}} libellé du bouton, {{3}} items sérialisés en JSON
+    # (voir audit UX interactive 2026-08-27, api/tasks.py::_send_via_twilio).
+    TWILIO_LIST_PICKER_CONTENT_SID: str = ""
 
     # --- WhatsApp Cloud API (Meta directe — provider par défaut) ---
     # Récupérés dans Meta for Developers → votre app → WhatsApp → API Setup.
@@ -306,7 +389,78 @@ class Settings(BaseSettings):
     LANGFUSE_SECRET_KEY: str = ""
     # Host du Langfuse auto-hébergé (ex: http://langfuse-web:3000 en réseau
     # Docker interne, ou https://langfuse.mondomaine.com en externe).
-    LANGFUSE_HOST: str = "http://langfuse-web:3000"
+    # Incident 2026-08-27 : `.env` déclare `LANGFUSE_BASE_URL` (Langfuse Cloud),
+    # que ce champ n'a JAMAIS lu — il retombait donc sur le défaut Docker
+    # interne `langfuse-web`, injoignable hors docker-compose. Le thread
+    # consommateur de la SDK Langfuse tourne en arrière-plan (hors de tout
+    # try/except applicatif) : l'échec de connexion sur CHAQUE batch loggait
+    # "Unexpected error occurred..." sans jamais impacter l'envoi du message
+    # WhatsApp lui-même — silencieux mais total sur l'observabilité LLM.
+    LANGFUSE_HOST: str = Field(
+        default="http://langfuse-web:3000",
+        validation_alias=AliasChoices("LANGFUSE_HOST", "LANGFUSE_BASE_URL"),
+    )
+
+    # --- LLM Gateway (2026-09-02 — voir graphs/agents/market_coach/llm_gateway/) ---
+    # Chaîne de repli par profil, PILOTÉE PAR .ENV (jamais de nom de modèle en
+    # dur dans les nodes métier — voir Model Registry). Format : "provider:model"
+    # (provider ∈ {groq, bedrock_gateway, bedrock_native}). Vide = candidat absent.
+    # Défauts alignés sur les valeurs déjà en prod au moment de l'introduction
+    # de cette Gateway (aucune valeur inventée) :
+    LLM_FAST_PRIMARY: str = "bedrock_gateway:qwen.qwen3-32b"
+    LLM_FAST_FALLBACK_1: str = "groq:llama-3.1-8b-instant"
+    LLM_FAST_FALLBACK_2: str = ""
+    LLM_REASONING_PRIMARY: str = "bedrock_gateway:deepseek.v3.2"
+    LLM_REASONING_FALLBACK_1: str = "bedrock_gateway:openai.gpt-oss-120b"
+    LLM_REASONING_FALLBACK_2: str = "groq:llama-3.3-70b-versatile"
+    # --- Réconciliation PROCUREMENT (2026-09-03, phase 1 recovery) ---
+    # Fenêtre au-delà de laquelle un `ProcurementDraft` `EXECUTING` est
+    # considéré bloqué (crash probable) plutôt qu'en cours de traitement
+    # légitime — voir `services/database/procurement_draft_store.py::
+    # find_stale_executing` (qui réutilise `updated_at`, jamais un champ
+    # dupliqué) et `services/reconciliation/procurement_reconciliation_service.py`.
+    # Pas de valeur métier codée en dur ailleurs : ce SEUL seuil, ici.
+    PROCUREMENT_EXECUTING_STALE_SECONDS: float = 900.0
+    # Cadence du job de réconciliation périodique (Celery Beat).
+    PROCUREMENT_RECONCILIATION_INTERVAL_SECONDS: float = 300.0
+
+    # --- Réconciliation PREORDER (2026-09-03, clôture escrow/IPN) ---
+    # Même principe que PROCUREMENT ci-dessus, appliqué aux 2 statuts
+    # PREORDER pouvant rester bloqués : `EXECUTING` (appel
+    # `confirm_preorder_draft` en vol) et `AWAITING_PAYMENT` (IPN jamais
+    # reçu/traité). Un seul seuil pour les deux — même sémantique
+    # "combien de temps avant de considérer une transition en vol comme
+    # bloquée", pas de raison métier de les distinguer.
+    PREORDER_EXECUTING_STALE_SECONDS: float = 900.0
+    PREORDER_RECONCILIATION_INTERVAL_SECONDS: float = 300.0
+
+    # --- Réconciliation SALES_PUBLISH_PRODUCT (2026-09-04, migration SALES) ---
+    # Même principe que PROCUREMENT/PREORDER — un `SalesPublishDraft`
+    # `EXECUTING` bloqué au-delà de ce seuil déclenche la réconciliation
+    # périodique (`services/reconciliation/sales_publish_reconciliation_service.py`).
+    SALES_EXECUTING_STALE_SECONDS: float = 900.0
+    SALES_RECONCILIATION_INTERVAL_SECONDS: float = 300.0
+
+    # Disjoncteur — défauts repris tels quels de l'ancien `_CircuitBreaker`
+    # process-local de get_llm.py (3 échecs / 30s), désormais partagés via
+    # Redis entre tous les workers (API + Celery + MCP).
+    LLM_CIRCUIT_FAILURE_THRESHOLD: int = 3
+    LLM_CIRCUIT_COOLDOWN_SECONDS: float = 30.0
+    LLM_HALF_OPEN_PROBES: int = 1
+    LLM_PROBE_LOCK_SECONDS: float = 10.0
+    # Budget total (toutes tentatives/fallbacks confondus) par profil — repris
+    # des `asyncio.wait_for` déjà observés aux sites d'appel existants
+    # (8-15s), avec la marge nécessaire pour couvrir 1-2 fallbacks.
+    LLM_FAST_BUDGET_SECONDS: float = 12.0
+    LLM_REASONING_BUDGET_SECONDS: float = 20.0
+    # Alerting admin (incident LLM Gateway) — webhook générique compatible
+    # payload Slack Incoming Webhook. Vide = alertes en log structuré
+    # uniquement (aucun canal réel configuré tant que l'URL n'est pas fournie).
+    ADMIN_ALERT_WEBHOOK_URL: str = ""
+    # Auth du nouvel endpoint GET /admin/llm/health (header `X-Admin-Token`) —
+    # même esprit que MCP_HTTP_AUTH_TOKEN déjà en place ailleurs dans ce repo.
+    # Vide = endpoint refusé par défaut (fail-closed), jamais public sans token.
+    ADMIN_API_TOKEN: str = ""
 
     # --- RAG (adaptatif par profil) ---
     # Default RAG embedding model aligned with 768D pgvector schema.

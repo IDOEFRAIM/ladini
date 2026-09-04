@@ -81,11 +81,23 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # remis à None en fin de tour par post_response_cleanup.
     interactive_selection: Annotated[Optional[str], replace_value]
 
-    # Position GPS reçue et DÉJÀ persistée ce tour (webhook Twilio, en tâche
-    # de fond, découplé de ce pipeline) — signal purement conversationnel pour
-    # l'étape finale de l'onboarding. Amorcé par l'orchestrateur. Éphémère :
+    # Position GPS reçue et DÉJÀ persistée ce tour (webhook Twilio, appel
+    # SYNCHRONE avant l'enqueue Celery depuis 2026-09-02 — voir
+    # core/location.py) — signal purement conversationnel pour l'étape finale
+    # de l'onboarding. Amorcé par l'orchestrateur. Éphémère :
     # remis à False en fin de tour par post_response_cleanup.
     location_shared: Annotated[bool, replace_value]
+
+    # Issue EXACTE de la persistance ci-dessus (core.location.LocationOutcome,
+    # sérialisée en str) + les coordonnées SI acceptées — évite au graphe de
+    # relire la DB (source de la course webhook/tâche corrigée le
+    # 2026-09-02, voir flows/buyer/gps_delivery_gate.py::resolve_gps_stage).
+    # Éphémères, mono-tour, comme location_shared.
+    location_outcome: Annotated[Optional[str], replace_value]
+
+    location_lat: Annotated[Optional[float], replace_value]
+
+    location_lon: Annotated[Optional[float], replace_value]
 
     normalized_text: Annotated[str, replace_value]
 
@@ -158,6 +170,14 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
 
     interpreted_event: Annotated[UserEvent, replace_value]
 
+    # Peuplé UNIQUEMENT quand interpreted_event=="UNKNOWN" — distingue POURQUOI
+    # (ambiguïté, action invalide, échec LLM, aucune action produite, hors
+    # périmètre, erreur technique) au lieu de tout aplatir sous un seul
+    # UNKNOWN opaque. Voir interpreter/interpreter_result.py::UnknownReason.
+    # Consommé par le router (§26 "interdiction du bypass") et par
+    # Langfuse/Prometheus pour le diagnostic (§24/§38 du mandat refonte).
+    unknown_reason: Annotated[Optional[str], replace_value]
+
     detected_intent: Annotated[str, replace_value]
 
     interpreter_confidence: Annotated[float, replace_value]
@@ -215,22 +235,46 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # 6. EXPECTATION ENGINE (Focus Formulaire IHM)
     # ================================================================
 
-    expected_input: Annotated[
-        Optional[
-            Literal[
-                "PRODUCT",
-                "PRICE",
-                "QUANTITY",
-                "UNIT",
-                "CONFIRMATION",
-                "SELECTION",
-                "LOCATION",
-                "DATE",
-                "NONE",
-            ]
-        ],
-        replace_value,
-    ]
+    # Source canonique UNIQUE de "qu'attend-on de l'utilisateur ce tour ?"
+    # (refonte architecturale 2026-09-02, voir core/pending_interaction.py
+    # pour le contrat complet). Les anciens champs concurrents
+    # (`expected_input: Literal["PRODUCT","PRICE",...]`, `waiting_for_
+    # confirmation: bool`) ont été retirés du contrat — plus aucun node du
+    # chemin de production ne les lit ni ne les écrit. Ils peuvent encore
+    # apparaître, en LECTURE SEULE, dans le JSON déjà persisté d'anciens
+    # checkpoints (Postgres `agri_workspaces`, colonne `metadata` — voir
+    # `scripts/migrate_pending_interaction.py` pour le migrateur one-shot) ;
+    # `get_pending_interaction()` porte un pont de transition isolé qui les y
+    # relit encore, documenté et borné dans le temps. Sérialisé en dict (pas
+    # un objet Python direct) car `replace_value` transite par le checkpoint
+    # JSONB.
+    pending_interaction: Annotated[Optional[Dict[str, Any]], replace_value]
+
+    # (2026-09-03, refonte transactionnelle PROCUREMENT_CREATE_REQUEST) :
+    # `domain/procurement_draft.py::ProcurementDraft` sérialisé — état
+    # transactionnel CANONIQUE de l'appel d'offres en construction/
+    # confirmation. `replace_value`, PAS `merge_dict` : chaque mutation
+    # (`with_updates`) produit une version ENTIÈRE nouvelle qui remplace
+    # intégralement la précédente — jamais de fusion partielle qui pourrait
+    # laisser un champ d'affichage désynchronisé du contrat d'exécution
+    # (root cause de l'incident 2026-09-03 : `quantity_display` figé dans
+    # `transaction_payload`, un canal `merge_dict`). `transaction_payload`
+    # reste utilisé pour la COLLECTE initiale des champs (avant que le
+    # draft n'existe) et pour l'exécution MCP (`draft.execution_payload()`
+    # y est copié explicitement au moment de CONFIRM) — jamais comme source
+    # de vérité concurrente une fois ce champ posé.
+    procurement_draft: Annotated[Optional[Dict[str, Any]], replace_value]
+
+    # (2026-09-03, migration transactionnelle PREORDER) :
+    # `domain/preorder_draft.py::PreorderDraft` sérialisé — même contrat que
+    # `procurement_draft` ci-dessus (`replace_value`, jamais `merge_dict`).
+    # PostgreSQL (`preorder_draft_store.py`) reste la source CANONIQUE ; ce
+    # champ n'est qu'une PROJECTION de travail, rafraîchie à chaque tour par
+    # `flows/buyer/preorder_confirmation.py`. `preorder_workflow` (ci-dessous
+    # dans `BuyerContext`) n'est plus qu'une PROJECTION dérivée de ce champ
+    # une fois qu'un draft existe (voir `_phase_projection` dans ce module) —
+    # jamais une seconde source de vérité indépendante.
+    preorder_draft: Annotated[Optional[Dict[str, Any]], replace_value]
 
     last_agent_question: Annotated[Optional[str], replace_value]
 
@@ -288,11 +332,29 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # 10. CONFIRMATION / EXECUTION
     # ================================================================
 
-    waiting_for_confirmation: Annotated[bool, replace_value]
+    # `waiting_for_confirmation` (ancien bool) retiré du contrat — voir
+    # `pending_interaction.kind == CONFIRM_ACTION` (core/pending_interaction.py).
 
     is_certified: Annotated[bool, replace_value]
 
     confirmation_summary: Annotated[Optional[str], replace_value]
+
+    # Goal ET payload pour lesquels `confirmation_summary` a été calculé —
+    # voir `nodes/rendering/confirm.py::render_confirmation`. Incident réel
+    # (2026-08-27) : un acheteur commandait des chèvres, mais la
+    # confirmation affichée parlait de "35 KG de champignons" — un résumé
+    # PÉRIMÉ d'une tentative abandonnée bien plus tôt dans la conversation,
+    # jamais réinvalidé (aucun nœud du chemin UNKNOWN→CONFIRMATION ne
+    # repasse par `confirmation_gate`, la SEULE source qui régénère
+    # `confirmation_summary`). Le GOAL seul ne suffit pas à détecter la
+    # péremption : l'ancienne ET la nouvelle tentative étaient toutes deux
+    # `BUYER_PREORDER_INIT` (même type d'opération, produit différent) — le
+    # payload complet est donc comparé au rendu : tout écart (produit,
+    # quantité, prix...) invalide le résumé et force une reconstruction à
+    # la volée depuis le payload courant.
+    confirmation_summary_goal: Annotated[Optional[str], replace_value]
+
+    confirmation_summary_payload: Annotated[Optional[Dict[str, Any]], replace_value]
 
     # Réponse COURTE générée par le LLM quand l'utilisateur dit autre chose
     # qu'un oui/non pendant une confirmation en attente (question,

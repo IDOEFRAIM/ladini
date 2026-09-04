@@ -78,5 +78,13 @@ class BuyerContext(TypedDict, total=False):
     # {product_name, vendors: [...], selected_vendor_id, available_mapping_kind}
     vendor_selection_context: Annotated[Optional[Dict[str, Any]], replace_value]
 
+    # (2026-08-30) Pricing-tier selection context — voir domain/pricing_tiers.py
+    # + flows/buyer/cart.py. Un produit à `pricing_tiers` (5L bidon / 10L
+    # bidon...) exige de savoir LEQUEL avant l'ajout au panier ; ce contexte
+    # survit entre tours tant que le palier n'est pas encore choisi, même
+    # pattern que vendor_selection_context.
+    # {product_id, tiers: [...]}
+    tier_selection_context: Annotated[Optional[Dict[str, Any]], replace_value]
+
 
 __all__ = ["BuyerContext"]

@@ -272,6 +272,8 @@ class TunnelManager:
         self,
         status: str,
         missing_fields: Optional[List[str]] = None,
+        *,
+        selection_tunnel_active: bool = False,
     ) -> bool:
         """Returns True when it is safe to route to ``cart_management``.
 
@@ -282,13 +284,37 @@ class TunnelManager:
         slots satisfied) but ``status`` happens to be WAITING_INPUT because
         cart_management itself handles vendor-selection menus.
 
+        `selection_tunnel_active` (2026-09-02, refonte state canonique, G-1) :
+        deuxième exception, structurelle celle-là. Root cause confirmée par
+        audit : un menu producteur/palier ENCORE actif (dérivé à neuf de
+        `vendor_selection_context`/`tier_selection_context` — voir
+        `domain/selection_actions.py::build_selection_context`) fait presque
+        toujours remonter des `missing_fields` (la quantité/le palier ne
+        sont pas encore répondus), donc cette garde bloquait
+        SYSTÉMATIQUEMENT `cart_management` — le SEUL node qui sait
+        interpréter une réponse de sélection (`_execute_selection_action`) —
+        pendant exactement le tour où l'utilisateur répond au menu. Le
+        routeur retombait alors sur `to_strategy`, qui lit `expected_input`/
+        `waiting_for_confirmation` SANS savoir qu'un menu est actif : un
+        signal `CONFIRMATION` périmé d'un tour précédent gagnait, produisant
+        "Que souhaitez-vous confirmer exactement ?" en réponse à "celui de
+        10 l". Un tunnel de sélection actif doit TOUJOURS atteindre
+        `cart_management`, quels que soient les champs manquants — c'est
+        exactement le node conçu pour ce cas, pas response_strategy.
+
         Args:
             status: Current agent status from the state (str).
             missing_fields: List of field names reported as missing by the validator.
+            selection_tunnel_active: True si `build_selection_context(state)
+                ).expected_action` est non-None ce tour — calculé par
+                l'appelant (`core/router.py::_cart_guard`), ce module reste
+                sans dépendance vers `domain/selection_actions.py`.
         """
         status_upper = str(status or "").upper()
         if status_upper == "ERROR":
             return False
+        if selection_tunnel_active:
+            return True
         if status_upper == "WAITING_INPUT":
             # Only allow if there are genuinely no missing required fields
             # (cart handles vendor-selection internally).

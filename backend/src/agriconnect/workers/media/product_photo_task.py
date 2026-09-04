@@ -114,7 +114,11 @@ async def _resolve_target_product(phone: str) -> Dict[str, Any]:
 
 
 async def _link_photo_and_confirm(
-    phone: str, product: Dict[str, Any], image_url: str
+    phone: str,
+    product: Dict[str, Any],
+    image_url: str,
+    *,
+    message_sid: Optional[str] = None,
 ) -> None:
     from agriconnect.api.tasks import send_confirmation_text
     from agriconnect.services.database.d import AgriDatabaseService
@@ -132,16 +136,23 @@ async def _link_photo_and_confirm(
             or product.get("name")
             or "votre produit"
         )
-        await send_confirmation_text(phone, f"✅ Photo ajoutée à *{name}*.")
+        await send_confirmation_text(
+            phone, f"✅ Photo ajoutée à *{name}*.", message_sid=message_sid
+        )
     else:
         await send_confirmation_text(
             phone,
             f"❌ {result.get('message') or 'Échec de la liaison de la photo.'}",
+            message_sid=message_sid,
         )
 
 
 async def _ask_or_accumulate(
-    phone: str, candidates: List[Dict[str, Any]], image_url: str
+    phone: str,
+    candidates: List[Dict[str, Any]],
+    image_url: str,
+    *,
+    message_sid: Optional[str] = None,
 ) -> None:
     """Pose la question "quel produit ?" — UNE seule fois par rafale.
 
@@ -197,11 +208,15 @@ async def _ask_or_accumulate(
         "à la fin — elles seront toutes liées ensemble.\n"
         "Répondez avec le numéro correspondant (ex: 1)."
     )
-    await send_confirmation_text(phone, text)
+    await send_confirmation_text(phone, text, message_sid=message_sid)
 
 
 async def _link_bid_photo_and_confirm(
-    phone_number: str, bid_id: str, image_url: str
+    phone_number: str,
+    bid_id: str,
+    image_url: str,
+    *,
+    message_sid: Optional[str] = None,
 ) -> None:
     from agriconnect.api.tasks import send_confirmation_text
     from agriconnect.services.database.d import AgriDatabaseService
@@ -213,16 +228,23 @@ async def _link_bid_photo_and_confirm(
             image_url=image_url,
         )
     if str(result.get("status")) == "success":
-        await send_confirmation_text(phone_number, "✅ Photo ajoutée à votre offre.")
+        await send_confirmation_text(
+            phone_number, "✅ Photo ajoutée à votre offre.", message_sid=message_sid
+        )
     else:
         await send_confirmation_text(
             phone_number,
             f"❌ {result.get('message') or 'Échec de la liaison de la photo.'}",
+            message_sid=message_sid,
         )
 
 
 async def _link_auction_photo_and_confirm(
-    phone_number: str, auction_id: str, image_url: str
+    phone_number: str,
+    auction_id: str,
+    image_url: str,
+    *,
+    message_sid: Optional[str] = None,
 ) -> None:
     from agriconnect.api.tasks import send_confirmation_text
     from agriconnect.services.database.d import AgriDatabaseService
@@ -235,16 +257,25 @@ async def _link_auction_photo_and_confirm(
         )
     if str(result.get("status")) == "success":
         await send_confirmation_text(
-            phone_number, "✅ Photo ajoutée à votre appel d'offres."
+            phone_number,
+            "✅ Photo ajoutée à votre appel d'offres.",
+            message_sid=message_sid,
         )
     else:
         await send_confirmation_text(
             phone_number,
             f"❌ {result.get('message') or 'Échec de la liaison de la photo.'}",
+            message_sid=message_sid,
         )
 
 
-async def _process(phone_number: str, media_url: str, media_content_type: str) -> None:
+async def _process(
+    phone_number: str,
+    media_url: str,
+    media_content_type: str,
+    *,
+    message_sid: Optional[str] = None,
+) -> None:
     from agriconnect.api.tasks import send_confirmation_text
     from agriconnect.services.pending_photo_target import (
         pop_pending_auction_photo,
@@ -265,7 +296,7 @@ async def _process(phone_number: str, media_url: str, media_content_type: str) -
         logger.warning(
             "PRODUCT_PHOTO_DOWNLOAD_FAILED | phone=%s | %s", _mask(phone_number), exc
         )
-        await send_confirmation_text(phone_number, f"❌ {exc}")
+        await send_confirmation_text(phone_number, f"❌ {exc}", message_sid=message_sid)
         return
 
     content_type = (media_content_type or resolved_content_type or "").strip().lower()
@@ -276,7 +307,7 @@ async def _process(phone_number: str, media_url: str, media_content_type: str) -
         logger.warning(
             "PRODUCT_PHOTO_UPLOAD_FAILED | phone=%s | %s", _mask(phone_number), exc
         )
-        await send_confirmation_text(phone_number, f"❌ {exc}")
+        await send_confirmation_text(phone_number, f"❌ {exc}", message_sid=message_sid)
         return
 
     # Priorité : une offre/un appel d'offres tout juste créé(e) absorbe la
@@ -288,13 +319,15 @@ async def _process(phone_number: str, media_url: str, media_content_type: str) -
     # le catalogue produit du producteur (comportement historique inchangé).
     pending_bid_id = pop_pending_bid_photo(phone_number)
     if pending_bid_id:
-        await _link_bid_photo_and_confirm(phone_number, pending_bid_id, public_url)
+        await _link_bid_photo_and_confirm(
+            phone_number, pending_bid_id, public_url, message_sid=message_sid
+        )
         return
 
     pending_auction_id = pop_pending_auction_photo(phone_number)
     if pending_auction_id:
         await _link_auction_photo_and_confirm(
-            phone_number, pending_auction_id, public_url
+            phone_number, pending_auction_id, public_url, message_sid=message_sid
         )
         return
 
@@ -305,19 +338,27 @@ async def _process(phone_number: str, media_url: str, media_content_type: str) -
         await send_confirmation_text(
             phone_number,
             "Vous n'avez encore aucun produit publié — publiez un produit avant d'y ajouter une photo.",
+            message_sid=message_sid,
         )
         return
 
     if "resolved" in resolution:
-        await _link_photo_and_confirm(phone_number, resolution["resolved"], public_url)
+        await _link_photo_and_confirm(
+            phone_number, resolution["resolved"], public_url, message_sid=message_sid
+        )
         return
 
     await _ask_or_accumulate(
-        phone_number, resolution.get("ambiguous") or [], public_url
+        phone_number,
+        resolution.get("ambiguous") or [],
+        public_url,
+        message_sid=message_sid,
     )
 
 
-async def _resolve_pending(phone_number: str, selection_text: str) -> None:
+async def _resolve_pending(
+    phone_number: str, selection_text: str, *, message_sid: Optional[str] = None
+) -> None:
     from agriconnect.api.tasks import send_confirmation_text
 
     key = pending_photo_key(phone_number)
@@ -326,6 +367,7 @@ async def _resolve_pending(phone_number: str, selection_text: str) -> None:
         await send_confirmation_text(
             phone_number,
             "Cette sélection a expiré, veuillez renvoyer la photo.",
+            message_sid=message_sid,
         )
         return
 
@@ -349,7 +391,7 @@ async def _resolve_pending(phone_number: str, selection_text: str) -> None:
     )
     if idx < 0 or idx >= len(product_ids) or not image_urls:
         await send_confirmation_text(
-            phone_number, "Numéro invalide, veuillez réessayer."
+            phone_number, "Numéro invalide, veuillez réessayer.", message_sid=message_sid
         )
         return
 
@@ -379,11 +421,13 @@ async def _resolve_pending(phone_number: str, selection_text: str) -> None:
         await send_confirmation_text(
             phone_number,
             f"✅ {linked} photo{plural} ajoutée{plural} à *{name}*.",
+            message_sid=message_sid,
         )
     else:
         await send_confirmation_text(
             phone_number,
             f"❌ {last_error or 'Échec de la liaison des photos.'}",
+            message_sid=message_sid,
         )
 
 
@@ -400,6 +444,7 @@ def process_product_photo_task(
     media_url: str = "",
     media_content_type: str = "",
     trace_id: Optional[str] = None,
+    message_sid: Optional[str] = None,
 ) -> None:
     try:
         from agriconnect.core import telemetry
@@ -409,7 +454,11 @@ def process_product_photo_task(
         telemetry = None  # type: ignore
 
     try:
-        run_async(_process(phone_number, media_url, media_content_type))
+        run_async(
+            _process(
+                phone_number, media_url, media_content_type, message_sid=message_sid
+            )
+        )
     except Exception:
         logger.exception("PRODUCT_PHOTO_TASK_FAILED | phone=%s", _mask(phone_number))
         raise
@@ -423,9 +472,10 @@ def resolve_pending_product_photo_task(
     self,
     phone_number: str = "",
     selection_text: str = "",
+    message_sid: Optional[str] = None,
 ) -> None:
     try:
-        run_async(_resolve_pending(phone_number, selection_text))
+        run_async(_resolve_pending(phone_number, selection_text, message_sid=message_sid))
     except Exception:
         logger.exception("PRODUCT_PHOTO_RESOLVE_FAILED | phone=%s", _mask(phone_number))
         raise
@@ -474,7 +524,7 @@ async def _find_product_by_name(phone: str, query: str) -> Dict[str, Any]:
 
 
 async def _ask_which_batch_to_view(
-    phone: str, candidates: List[Dict[str, Any]]
+    phone: str, candidates: List[Dict[str, Any]], *, message_sid: Optional[str] = None
 ) -> None:
     from agriconnect.api.tasks import send_confirmation_text
 
@@ -489,32 +539,63 @@ async def _ask_which_batch_to_view(
         + "\n".join(lines)
         + "\n\nRépondez avec le numéro correspondant (ex: 1)."
     )
-    await send_confirmation_text(phone, text)
+    await send_confirmation_text(phone, text, message_sid=message_sid)
 
 
-async def _send_photos_for_product(phone_number: str, product: Dict[str, Any]) -> None:
-    from agriconnect.api.tasks import send_confirmation_text
-    from agriconnect.services.twilio_sender import send_whatsapp_media
+def _photo_items_for_product(product: Dict[str, Any]):
+    """Construit les `ImageResponse` (une par photo) pour un produit — PURE,
+    aucun envoi. Séparée de `_send_photos_for_product` pour que les
+    appelants qui doivent AUSSI ajouter un `TextResponse` complémentaire
+    (ex: `_send_search_result_photos`) composent un SEUL `ResponsePlan`
+    plutôt que deux dispatches indépendants dont les index d'idempotence
+    (`event_id:0`, `event_id:1`...) collisionneraient sinon silencieusement
+    (2026-09-02, bug trouvé et corrigé pendant cette consolidation)."""
+    from agriconnect.api.response_dispatch import ImageResponse
 
     name = product.get("name") or "ce produit"
     images: List[str] = product.get("images") or []
-    if not images:
+    return tuple(
+        ImageResponse(
+            url=url,
+            caption=(
+                f"📸 {name} ({i + 1}/{len(images)})" if len(images) > 1 else f"📸 {name}"
+            ),
+        )
+        for i, url in enumerate(images)
+    )
+
+
+async def _send_photos_for_product(
+    phone_number: str, product: Dict[str, Any], *, message_sid: Optional[str] = None
+) -> None:
+    """(2026-09-02, consolidation finale — mandat §3) : le média passe
+    désormais par le MÊME `ResponseDispatcher` que le texte — un
+    `ResponsePlan` porte une `ImageResponse` PAR PHOTO, chacune avec sa
+    propre clé d'idempotence (`event_id:index`, voir
+    `api/response_dispatch.py::ResponseDispatcher.dispatch`) : un retry
+    Celery après l'envoi de 2 photos sur 3 ne renvoie PAS les 2 déjà
+    parties, et complète bien la 3e manquante."""
+    from agriconnect.api.response_dispatch import ResponsePlan, get_dispatcher
+
+    items = _photo_items_for_product(product)
+    if not items:
+        from agriconnect.api.tasks import send_confirmation_text
+
+        name = product.get("name") or "ce produit"
         await send_confirmation_text(
-            phone_number, f"📭 Aucune photo pour *{name}* pour le moment."
+            phone_number,
+            f"📭 Aucune photo pour *{name}* pour le moment.",
+            message_sid=message_sid,
         )
         return
 
-    for i, url in enumerate(images):
-        caption = (
-            f"📸 {name} ({i + 1}/{len(images)})" if len(images) > 1 else f"📸 {name}"
-        )
-        # `send_whatsapp_media` est SYNC (SDK Twilio) — délestée sur un thread
-        # pour ne jamais bloquer la boucle asyncio du worker, même pattern
-        # que `_send_sync_twilio` dans workers/outbox/channels/whatsapp.py.
-        await asyncio.to_thread(send_whatsapp_media, phone_number, url, caption)
+    plan = ResponsePlan(event_id=message_sid, items=items)
+    await get_dispatcher().dispatch(phone_number, plan)
 
 
-async def _send_photos(phone_number: str, product_query: str) -> None:
+async def _send_photos(
+    phone_number: str, product_query: str, *, message_sid: Optional[str] = None
+) -> None:
     from agriconnect.api.tasks import send_confirmation_text
 
     async with worker_session():
@@ -524,6 +605,7 @@ async def _send_photos(phone_number: str, product_query: str) -> None:
         await send_confirmation_text(
             phone_number,
             "Vous n'avez encore aucun produit publié.",
+            message_sid=message_sid,
         )
         return
 
@@ -533,17 +615,24 @@ async def _send_photos(phone_number: str, product_query: str) -> None:
         await send_confirmation_text(
             phone_number,
             f"Produit « {product_query} » introuvable. Vos produits :\n{listing}",
+            message_sid=message_sid,
         )
         return
 
     if "ambiguous" in resolution:
-        await _ask_which_batch_to_view(phone_number, resolution["ambiguous"])
+        await _ask_which_batch_to_view(
+            phone_number, resolution["ambiguous"], message_sid=message_sid
+        )
         return
 
-    await _send_photos_for_product(phone_number, resolution["resolved"])
+    await _send_photos_for_product(
+        phone_number, resolution["resolved"], message_sid=message_sid
+    )
 
 
-async def _resolve_pending_view(phone_number: str, selection_text: str) -> None:
+async def _resolve_pending_view(
+    phone_number: str, selection_text: str, *, message_sid: Optional[str] = None
+) -> None:
     from agriconnect.api.tasks import send_confirmation_text
 
     key = pending_view_key(phone_number)
@@ -552,6 +641,7 @@ async def _resolve_pending_view(phone_number: str, selection_text: str) -> None:
         await send_confirmation_text(
             phone_number,
             "Cette sélection a expiré, retapez votre demande (ex: photos maïs).",
+            message_sid=message_sid,
         )
         return
 
@@ -572,7 +662,7 @@ async def _resolve_pending_view(phone_number: str, selection_text: str) -> None:
     product_ids: List[str] = pending.get("product_ids") or []
     if idx < 0 or idx >= len(product_ids):
         await send_confirmation_text(
-            phone_number, "Numéro invalide, veuillez réessayer."
+            phone_number, "Numéro invalide, veuillez réessayer.", message_sid=message_sid
         )
         return
 
@@ -586,10 +676,12 @@ async def _resolve_pending_view(phone_number: str, selection_text: str) -> None:
     products: List[Dict[str, Any]] = (result or {}).get("data") or []
     product = next((p for p in products if str(p.get("id")) == product_id), None)
     if not product:
-        await send_confirmation_text(phone_number, "Ce produit n'existe plus.")
+        await send_confirmation_text(
+            phone_number, "Ce produit n'existe plus.", message_sid=message_sid
+        )
         return
 
-    await _send_photos_for_product(phone_number, product)
+    await _send_photos_for_product(phone_number, product, message_sid=message_sid)
 
 
 @celery_app.task(bind=True, max_retries=2, autoretry_for=(Exception,), retry_backoff=5)
@@ -597,9 +689,10 @@ def send_product_photos_task(
     self,
     phone_number: str = "",
     product_query: str = "",
+    message_sid: Optional[str] = None,
 ) -> None:
     try:
-        run_async(_send_photos(phone_number, product_query))
+        run_async(_send_photos(phone_number, product_query, message_sid=message_sid))
     except Exception:
         logger.exception("PRODUCT_PHOTO_VIEW_FAILED | phone=%s", _mask(phone_number))
         raise
@@ -610,9 +703,12 @@ def resolve_pending_view_photos_task(
     self,
     phone_number: str = "",
     selection_text: str = "",
+    message_sid: Optional[str] = None,
 ) -> None:
     try:
-        run_async(_resolve_pending_view(phone_number, selection_text))
+        run_async(
+            _resolve_pending_view(phone_number, selection_text, message_sid=message_sid)
+        )
     except Exception:
         logger.exception(
             "PRODUCT_PHOTO_VIEW_RESOLVE_FAILED | phone=%s", _mask(phone_number)
@@ -633,7 +729,9 @@ def resolve_pending_view_photos_task(
 # de produit n'est jamais un chiffre pur, donc aucune ambiguïté possible.
 
 
-async def _send_search_result_photos(phone_number: str, index_text: str) -> None:
+async def _send_search_result_photos(
+    phone_number: str, index_text: str, *, message_sid: Optional[str] = None
+) -> None:
     from agriconnect.api.tasks import send_confirmation_text
     from agriconnect.services.search_results_cache import load_results
 
@@ -643,6 +741,7 @@ async def _send_search_result_photos(phone_number: str, index_text: str) -> None
             phone_number,
             "Je n'ai plus votre dernière recherche sous la main — refaites une "
             "recherche puis retapez *photos <numéro>*.",
+            message_sid=message_sid,
         )
         return
 
@@ -650,23 +749,40 @@ async def _send_search_result_photos(phone_number: str, index_text: str) -> None
     entry = cached.get(index_clean)
     if not entry:
         await send_confirmation_text(
-            phone_number, "Numéro invalide, veuillez réessayer."
+            phone_number, "Numéro invalide, veuillez réessayer.", message_sid=message_sid
         )
         return
 
-    await _send_photos_for_product(phone_number, entry)
-
-    # Rupture UX constatée en usage réel : consulter une photo ne doit jamais
-    # faire perdre le fil d'une commande en cours — ce message n'avance PAS
-    # la conversation (aucun état LangGraph touché, `photos <numéro>` est
-    # entièrement hors-graphe, voir docstring de module), donc le numéro
-    # affiché dans le menu d'origine (ex: choix producteur) reste valable ;
-    # on le rappelle explicitement pour que l'acheteur sache qu'il peut
-    # directement continuer.
-    await send_confirmation_text(
-        phone_number,
-        f"👆 Vous pouvez répondre *{index_clean}* pour continuer avec ce producteur.",
+    # (2026-09-02) UN SEUL `ResponsePlan` pour les photos + le rappel de
+    # numéro — jamais deux dispatches indépendants pour le même événement
+    # (chacun repartirait son propre index d'idempotence à 0, collisionnant
+    # silencieusement — bug trouvé et corrigé pendant cette consolidation,
+    # voir `_photo_items_for_product`). Rupture UX constatée en usage réel :
+    # consulter une photo ne doit jamais faire perdre le fil d'une commande
+    # en cours — ce message n'avance PAS la conversation (aucun état
+    # LangGraph touché, `photos <numéro>` est entièrement hors-graphe, voir
+    # docstring de module), donc le numéro affiché dans le menu d'origine
+    # (ex: choix producteur) reste valable ; on le rappelle explicitement
+    # pour que l'acheteur sache qu'il peut directement continuer.
+    from agriconnect.api.response_dispatch import (
+        ResponsePlan,
+        TextResponse,
+        get_dispatcher,
     )
+
+    photo_items = _photo_items_for_product(entry)
+    if not photo_items:
+        # Même apology que `_send_photos_for_product` pour ce cas — voir sa
+        # docstring : ce chemin ne passe PAS par elle (il compose SON PROPRE
+        # ResponsePlan multipart), donc le comportement doit être reproduit
+        # ici explicitement plutôt que silencieusement perdu.
+        name = entry.get("name") or "ce produit"
+        photo_items = (TextResponse(text=f"📭 Aucune photo pour *{name}* pour le moment."),)
+    reminder = TextResponse(
+        text=f"👆 Vous pouvez répondre *{index_clean}* pour continuer avec ce producteur."
+    )
+    plan = ResponsePlan(event_id=message_sid, items=(*photo_items, reminder))
+    await get_dispatcher().dispatch(phone_number, plan)
 
 
 @celery_app.task(bind=True, max_retries=2, autoretry_for=(Exception,), retry_backoff=5)
@@ -674,9 +790,12 @@ def send_search_result_photos_task(
     self,
     phone_number: str = "",
     index_text: str = "",
+    message_sid: Optional[str] = None,
 ) -> None:
     try:
-        run_async(_send_search_result_photos(phone_number, index_text))
+        run_async(
+            _send_search_result_photos(phone_number, index_text, message_sid=message_sid)
+        )
     except Exception:
         logger.exception("SEARCH_RESULT_PHOTO_FAILED | phone=%s", _mask(phone_number))
         raise

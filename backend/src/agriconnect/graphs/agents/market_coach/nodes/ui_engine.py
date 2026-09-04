@@ -7,6 +7,18 @@ et produit les champs d'état standardisés :
   - ``expected_candidates``: list[str] des labels d'options
   - ``working_memory``     : fragment ``{available_mapping_kind: ...}``
 
+Composants interactifs `list_menu`/`list_picker` DÉSACTIVÉS (2026-08-27) :
+``ag_ui_component`` continue d'être produit ici (toujours nécessaire pour
+``available_mapping``/``expected_candidates``, qui pilotent la sélection
+par numéro en texte), mais ``orchestrator.py::_interactive_hint`` ne le
+traduit plus jamais en indice interactif WhatsApp — plus de blocages de
+template (erreur 21656, schéma figé côté Console). ``final_response``
+(``menu.preformatted_text``) porte déjà le texte complet et PAGINÉ (voir
+``services/text_pagination.py``), donc rien n'est perdu pour l'utilisateur.
+Les confirmations (``QuickReplies``, construites ailleurs — voir
+``nodes/confirmation_gate.py``/``nodes/rendering/confirm.py``) restent
+interactives.
+
 Si ``pending_menu`` est ``None`` ou absent, le nœud est un **pass-through
 silencieux** (retourne un dict vide).
 
@@ -30,6 +42,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    set_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuRequest,
 )
@@ -88,7 +104,9 @@ async def ui_engine(
         "ag_ui_component": ag_ui,
         "available_mapping": mapping,
         "expected_candidates": candidates,
-        "expected_input": "SELECTION",
+        **set_pending_interaction(
+            InteractionKind.SELECTION_MENU, context_ref="ui_menu"
+        ),
         "working_memory": {
             **(state.get("working_memory") or {}),
             **wm_patch,

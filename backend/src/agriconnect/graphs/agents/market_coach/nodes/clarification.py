@@ -2,6 +2,14 @@ import asyncio
 from typing import Any, Dict
 
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    get_pending_interaction,
+)
+from agriconnect.graphs.agents.market_coach.llm_gateway import (
+    resolve_gateway,
+    resolve_profile,
+)
 from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import (
     _detect_disambiguation_candidates,
 )
@@ -39,12 +47,48 @@ async def clarification_node(
     """
     event = str(state.get("interpreted_event") or "").upper()
     current_goal = state.get("current_goal")
-    expected_input = str(state.get("expected_input") or "NONE").upper()
+    pending_kind = get_pending_interaction(state).kind
+    nothing_pending = pending_kind == InteractionKind.NONE
     cognitive = state.get("cognitive_decision") or {}
     cognitive_action = cognitive.get("action", "")
     user_role = str(state.get("user_role") or "PRODUCER").upper()
     user_name = state.get("user_name", "")
     text = state.get("normalized_text") or state.get("user_query") or ""
+
+    # --- LOCATION OUTCOME (précédence — 2026-09-02, "un seul propriétaire
+    # de la réponse") --------------------------------------------------
+    # Un point GPS partagé HORS d'une étape GPS active (aucun
+    # `PendingInteraction.PROVIDE_LOCATION` en cours — quand c'est le cas,
+    # `flows/buyer/gps_delivery_gate.py::resolve_gps_stage` s'en charge
+    # lui-même, plus bas dans le graphe) doit quand même être commenté UNE
+    # fois. Ce commentaire vit ICI et nulle part ailleurs : le webhook
+    # (api/routes/twilio_webhook.py`/`whatsapp_webhook.py`) ne fait plus
+    # QUE persister le fait brut (`location_outcome`) — il n'a plus le
+    # droit d'envoyer de message lui-même. Message déterministe (pas de
+    # dépendance LLM) : c'est une simple traduction d'un contrat de
+    # domaine déjà fermé (`core/location.py::LocationOutcome`), pas une
+    # interprétation de langage libre.
+    location_outcome = str(state.get("location_outcome") or "").upper()
+    if (
+        bool(state.get("location_shared"))
+        and location_outcome in {"LOCATION_OUT_OF_ZONE", "LOCATION_PERSISTENCE_ERROR"}
+        and pending_kind != InteractionKind.PROVIDE_LOCATION
+    ):
+        if location_outcome == "LOCATION_OUT_OF_ZONE":
+            message = (
+                "📍 Cette position semble se trouver hors de notre zone de "
+                "livraison (Burkina Faso) — rien n'a été enregistré."
+            )
+        else:
+            message = (
+                "Un souci technique a empêché l'enregistrement de ce point "
+                "GPS. Vous pouvez le repartager si besoin."
+            )
+        return {
+            "final_response": message,
+            "response_strategy": "CLARIFICATION",
+            "ag_ui_component": None,
+        }
 
     # Only intervene on specific conditions. `not current_goal` is
     # deliberate for OUT_OF_SCOPE/UNKNOWN/REJECT : when a goal IS active,
@@ -59,7 +103,7 @@ async def clarification_node(
     # [[precommande-architecture-consolidation-2026-08]].
     needs_clarification = (
         event in {"OUT_OF_SCOPE", "UNKNOWN", "REJECT"}
-        and expected_input == "NONE"
+        and nothing_pending
         and not current_goal
     ) or cognitive_action == "abandon_tunnel_max_retries"
     if not needs_clarification:
@@ -103,18 +147,14 @@ async def clarification_node(
     )
 
     try:
-        completion = await asyncio.wait_for(
-            asyncio.to_thread(
-                lambda: llm.chat.completions.create(
-                    model=getattr(
-                        mc_runtime, "model_answer", "llama-3.3-70b-versatile"
-                    ),
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.4,
-                    max_tokens=150,
-                )
-            ),
-            timeout=8.0,
+        # LLM Gateway (2026-09-02) : budget/repli/disjoncteur portés par le
+        # Gateway — voir `llm_gateway/gateway.py`.
+        completion = await resolve_gateway(mc_runtime).complete(
+            profile=resolve_profile(mc_runtime),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4,
+            max_tokens=150,
+            agent_node="clarification_node",
         )
         result = (completion.choices[0].message.content or "").strip()
         if result:

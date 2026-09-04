@@ -197,21 +197,36 @@ class TestPaydunyaIpnTask:
         stock/générer l'OTP via `mark_escrow_paid`, à l'intérieur d'une
         session worker explicitement ouverte (sans quoi la méthode lève
         `BusinessRuleException` — bug déjà vécu en prod, voir le commentaire
-        du fichier source)."""
+        du fichier source).
+
+        (2026-09-03, clôture escrow/IPN) : la re-confirmation Paydunya +
+        `mark_escrow_paid` vivent désormais dans
+        `flows/buyer/preorder_payment.py::reconcile_invoice` — PARTAGÉ avec
+        `PreorderReconciliationService` (mandat §26) — `paydunya_ipn_task.py`
+        n'est plus qu'un fin wrapper Celery autour. `worker_session` est
+        donc patché sur le module RÉEL qui l'ouvre désormais."""
         import agriconnect.workers.payments.paydunya_ipn_task as mod
+        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_payment as payment_mod
         import agriconnect.services.payments.paydunya_client as client_mod
         import agriconnect.services.database.d as db_mod
+        import agriconnect.services.database.preorder_draft_store as store_mod
 
-        _patch_worker_session(monkeypatch, mod)
+        _patch_worker_session(monkeypatch, payment_mod)
+        # Aucun `PreorderDraft` ne correspond à cet `order_id` dans ce test
+        # (hors périmètre ici, déjà couvert par
+        # `tests/architecture/test_preorder_payment_state_machine.py`) —
+        # `find_by_order_id` doit rester un NO-OP silencieux, pas une
+        # dépendance à une vraie base.
+        monkeypatch.setattr(store_mod, "get_sessionmaker", lambda: None)
         fake_client = SimpleNamespace(confirm_invoice=AsyncMock(return_value={"status": "completed"}))
         monkeypatch.setattr(client_mod, "PaydunyaClient", lambda: fake_client)
         fake_service = SimpleNamespace(mark_escrow_paid=AsyncMock(
-            return_value={"order_id": "o1", "already_processed": False}
+            return_value={"status": "success", "order_id": "o1", "already_processed": False}
         ))
         monkeypatch.setattr(db_mod, "AgriDatabaseService", lambda: fake_service)
 
         result = run(mod._run("token-3"))
-        assert result == {"order_id": "o1", "already_processed": False}
+        assert result == {"status": "success", "order_id": "o1", "already_processed": False}
         fake_service.mark_escrow_paid.assert_awaited_once_with("token-3")
 
     def test_celery_task_retries_on_unexpected_exception(self, monkeypatch):

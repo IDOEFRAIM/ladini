@@ -134,6 +134,21 @@ async def state_cleaner_node(
         patch["retry_count"] = 0
         patch["active_form"] = None
         patch["form_step"] = None
+        # (2026-08-31) Incident réel : ces trois champs n'étaient JAMAIS
+        # remis à zéro ici — `replace_value`/`replace_list`, donc ils
+        # survivent indéfiniment tels quels tant que rien ne les réécrit
+        # explicitement. Un `last_missing_field`/`conversation_progress`
+        # laissé par UN goal (ex: une publication de produit abandonnée)
+        # pouvait ressurgir sur un tour bien PLUS TARD, pour un goal sans
+        # aucun rapport (ex: juste après l'enregistrement d'une récolte) —
+        # `render_ask_missing_field` (nodes/rendering/ask.py) générait alors
+        # une question incohérente à partir de ce champ périmé. Combiné au
+        # fix du sentinelle `"NONE"` dans `interpreter/strategy.py`, ce
+        # nettoyage garantit qu'un goal qui se termine n'a plus AUCUN champ
+        # "en attente" à faire fuiter vers le tour suivant.
+        patch["last_missing_field"] = None
+        patch["missing_fields"] = []
+        patch["conversation_progress"] = None
         wm_terminal = dict(patch.get("working_memory") or working)
         for key in (
             "active_goal",

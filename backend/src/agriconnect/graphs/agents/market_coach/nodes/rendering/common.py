@@ -179,13 +179,65 @@ def status_component(kind: str, **kwargs: Any) -> Dict[str, Any]:
     }
 
 
+# Contraintes structurelles WhatsApp/Twilio (twilio/list-picker et
+# l'équivalent Meta Cloud API `interactive list`) — voir audit UX
+# interactive 2026-08-27 : rien dans la chaîne ne les appliquait avant.
+_MAX_TITLE_LEN = 24
+_MAX_DESCRIPTION_LEN = 72
+_MAX_BUTTON_LEN = 20
+_MAX_OPTIONS = 10
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Coupe proprement sur un espace si possible, jamais au milieu d'un mot."""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1].rsplit(" ", 1)[0] or text[: limit - 1]
+    return f"{cut}…"
+
+
 def list_menu_component(
-    title: str, options: List[Dict[str, str]], metadata: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
+    title: str,
+    options: List[Dict[str, str]],
+    metadata: Optional[Dict[str, Any]] = None,
+    *,
+    button_text: str = "Voir les options",
+) -> Optional[Dict[str, Any]]:
+    """ListMenu conforme WhatsApp/Twilio, ou ``None`` si la liste ne s'y
+    prête pas.
+
+    Au-delà de 10 options (plafond dur Meta/Twilio), on refuse de
+    construire un menu tronqué qui mentirait sur le nombre d'options
+    réellement disponibles — l'appelant garde alors son ``final_response``
+    texte tel quel (voir chaque site d'appel : ``ag_component`` reste
+    ``None``, jamais d'exception)."""
+    if not options or len(options) > _MAX_OPTIONS:
+        return None
+
+    safe_options: List[Dict[str, str]] = []
+    for opt in options:
+        entry: Dict[str, str] = {
+            "index": str(opt.get("index", "")),
+            "label": _truncate(str(opt.get("label", "")), _MAX_TITLE_LEN),
+        }
+        if opt.get("value") is not None:
+            entry["value"] = opt["value"]
+        if opt.get("description"):
+            entry["description"] = _truncate(
+                str(opt["description"]), _MAX_DESCRIPTION_LEN
+            )
+        safe_options.append(entry)
+
     return {
         "lc_type": "constructor",
         "id": ["ag_ui", "ListMenu"],
-        "kwargs": {"title": title, "options": options, "metadata": metadata or {}},
+        "kwargs": {
+            "title": _truncate(title, _MAX_TITLE_LEN),
+            "button_text": _truncate(button_text, _MAX_BUTTON_LEN),
+            "options": safe_options,
+            "metadata": metadata or {},
+        },
     }
 
 

@@ -119,6 +119,43 @@ class TestQuantityNormalisation:
         p = _normalize_quantity_to_kg({"quantity": 12, "unit": "TETE"})
         assert p["quantity"] == 12 and p["unit"] == "TETE"
 
+    def test_display_fields_stay_frozen_across_turns_that_dont_touch_quantity(self):
+        """Comportement voulu (setdefault, `refresh_display` par défaut à
+        False) : un tour qui répond à un AUTRE champ (deadline...) ne doit
+        pas remplacer "2 TONNE" affiché par la valeur interne convertie."""
+        established = _normalize_quantity_to_kg({"quantity": 2, "unit": "TONNE"})
+        assert established["unit_display"] == "TONNE"
+        # Le payload MERGE_DICT (transaction_payload) porte déjà ces clés au
+        # tour suivant — la fonction ne les touche pas, comme aujourd'hui.
+        untouched = _normalize_quantity_to_kg(established)
+        assert untouched["unit_display"] == "TONNE"
+        assert untouched["original_quantity"] == 2
+
+    def test_refresh_display_updates_the_recap_on_a_genuine_correction(self):
+        """Bug réel (2026-09-03, incident PROCUREMENT_CREATE_REQUEST) :
+        `quantity_display`/`unit_display` restaient figés sur "2 TONNE" à
+        travers PLUSIEURS corrections successives ("non j'ai dit 2 tonnes et
+        250 kg" puis "non, plutôt 1 tonne et 125 kg") — le contrat
+        d'exécution (`quantity`/`unit`) était bien mis à jour, mais le
+        récapitulatif affiché à l'utilisateur ne changeait jamais.
+        `refresh_display=True` (passé par `nodes/memory.py` quand
+        quantity/unit ont RÉELLEMENT changé ce tour) corrige ça sans changer
+        le comportement du cas commun ci-dessus."""
+        established = _normalize_quantity_to_kg({"quantity": 2, "unit": "TONNE"})
+        assert established["unit_display"] == "TONNE"
+
+        corrected = dict(established)
+        corrected["quantity"] = 1
+        corrected["unit"] = "TONNE"
+        refreshed = _normalize_quantity_to_kg(corrected, refresh_display=True)
+        assert refreshed["unit_display"] == "TONNE"
+        assert refreshed["original_quantity"] == 1
+        assert refreshed["quantity"] == 1000.0  # converti en KG
+
+        # Sans le flag (comportement historique) : reste figé sur 2.
+        stale = _normalize_quantity_to_kg(corrected)
+        assert stale["original_quantity"] == 2
+
     @pytest.mark.parametrize("raw,expected", [("kg", "KG"), ("tonnes", "TONNE"), ("", "KG")])
     def test_canonical_unit_label(self, raw, expected):
         assert canonical_unit_label(raw) == expected

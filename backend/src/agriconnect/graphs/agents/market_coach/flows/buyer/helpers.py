@@ -10,6 +10,13 @@ from typing import Any, Dict, Optional, Sequence
 # GOAL SETS — aliases de compat ; source canonique : core/goals.py
 # (dérivés d'INTENT_CONFIG, anti-drift). Ne jamais redéfinir localement.
 # =====================================================================
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    CART_TUNNEL_KINDS,
+    InteractionKind,
+    clear_pending_interaction,
+    get_pending_interaction,
+    set_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.core.goals import (
     BUYER_AUCTION_TRACKING_GOALS as AUCTION_TRACKING_GOALS,
 )
@@ -62,8 +69,6 @@ ESCALATE_KEYWORDS = frozenset(
         "lancer appel",
     }
 )
-CONFIRM_KEYWORDS = frozenset({"oui", "yes", "ok"})
-DECLINE_KEYWORDS = frozenset({"non", "no", "aucun", "aucune", "annuler"})
 
 # =====================================================================
 # PRODUCT INFERENCE
@@ -215,12 +220,6 @@ def resolve_unit(
 # DRAFT MANAGEMENT
 # =====================================================================
 
-_EXPECTED_INPUT_FROM_FIELD = {
-    "product": "PRODUCT",
-    "quantity": "QUANTITY",
-    "unit": "UNIT",
-}
-
 _DRAFT_FIELD_PAIRS = (
     ("product", None),
     ("quantity", None),
@@ -245,13 +244,6 @@ def draft_requires_completion(draft: Optional[Dict[str, Any]]) -> bool:
     return missing_draft_field(draft) is not None
 
 
-def draft_expected_input(draft: Optional[Dict[str, Any]]) -> str:
-    missing = missing_draft_field(draft)
-    if not missing:
-        return "NONE"
-    return _EXPECTED_INPUT_FROM_FIELD.get(missing, "NONE")
-
-
 def draft_block_response(draft: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Return a WAITING_INPUT state patch asking for the next missing draft field."""
     summary = CartDomainService.format_pending_draft(draft)
@@ -259,11 +251,17 @@ def draft_block_response(draft: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "✏️ *Ajout en cours*. Indiquez le produit, la quantité et l'unité "
         "avant de confirmer la précommande."
     )
+    missing = missing_draft_field(draft)
+    pending_patch = (
+        set_pending_interaction(InteractionKind.ENTER_FIELD, field_name=missing)
+        if missing
+        else clear_pending_interaction("draft_complete")
+    )
     return {
         "status": "WAITING_INPUT",
         "response_strategy": "ASK_MISSING_FIELD",
         "final_response": prompt,
-        "expected_input": draft_expected_input(draft),
+        **pending_patch,
         "ag_ui_component": None,
     }
 
@@ -429,8 +427,13 @@ def detect_cart_action(state: Dict[str, Any]) -> Optional[str]:
     s'appuie dessus. Le contexte (panier non vide, menu panier affiché) reste
     vérifié, lui, de façon déterministe.
     """
-    expected = str(state.get("expected_input") or "").upper().strip() or "SELECTION"
-    if expected not in {"SELECTION", "NONE", ""}:
+    # (2026-09-02, "no legacy shim") : NONE/SELECTION étaient les deux seules
+    # valeurs `expected_input` tolérées ici — équivaut à "aucune interaction
+    # PLUS SPÉCIFIQUE qu'un menu/rien n'est active" (un champ précis en
+    # attente, une confirmation, une localisation... doivent tous continuer
+    # à bloquer l'interprétation CONFIRM/REJECT comme une action panier).
+    pending_kind = get_pending_interaction(state).kind
+    if pending_kind not in ({InteractionKind.NONE, InteractionKind.SELECTION_MENU} | CART_TUNNEL_KINDS):
         return None
 
     event = str(state.get("interpreted_event") or "").upper().strip()
@@ -471,8 +474,6 @@ __all__ = [
     "AUCTION_TRACKING_GOALS",
     "READ_ONLY_INTENTS",
     "ESCALATE_KEYWORDS",
-    "CONFIRM_KEYWORDS",
-    "DECLINE_KEYWORDS",
     "infer_product_from_text",
     "resolve_product",
     "additional_products_hint",
@@ -480,7 +481,6 @@ __all__ = [
     "resolve_unit",
     "missing_draft_field",
     "draft_requires_completion",
-    "draft_expected_input",
     "draft_block_response",
     "capture_cart_draft",
     "clear_active_goal",

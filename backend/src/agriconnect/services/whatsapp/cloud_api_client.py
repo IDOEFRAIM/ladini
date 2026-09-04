@@ -161,10 +161,57 @@ async def send_interactive_buttons(
     return str(msgs[0].get("id")) if msgs else None
 
 
+async def send_interactive_list(
+    to_phone: str,
+    body: str,
+    *,
+    button_text: str,
+    options: List[Dict[str, Any]],
+    section_title: str = "Options",
+) -> Optional[str]:
+    """Menu liste natif (max 10 lignes, titre de ligne 24 caractères max).
+
+    ``options`` : ``[{"index": 1, "label": "Tomates"}, ...]`` — la forme déjà
+    produite par ``nodes/ui_engine.py::_build_ag_ui_component``. Contrepartie
+    de ``send_interactive_buttons`` pour les menus à choix multiples (au-delà
+    de 3 options, les quick-reply buttons ne suffisent plus — c'est le seul
+    autre type de message interactif natif que l'API Cloud supporte sans
+    template pré-approuvé).
+    """
+    clean_to = to_phone.replace("whatsapp:", "").strip().lstrip("+")
+    rows = [
+        {
+            "id": str(opt.get("index", i + 1)),
+            "title": str(opt.get("label", ""))[:24],
+        }
+        for i, opt in enumerate(options[:10])
+    ]
+    data = await _post(
+        {
+            "messaging_product": "whatsapp",
+            "to": clean_to,
+            "type": "interactive",
+            "interactive": {
+                "type": "list",
+                "body": {"text": body[:1024]},
+                "action": {
+                    "button": str(button_text)[:20] or "Choisir",
+                    "sections": [
+                        {"title": str(section_title)[:24], "rows": rows}
+                    ],
+                },
+            },
+        }
+    )
+    msgs = data.get("messages") or []
+    return str(msgs[0].get("id")) if msgs else None
+
+
 __all__ = [
     "WhatsAppCloudAPIError",
     "is_configured",
     "send_text",
     "send_interactive_buttons",
+    "send_interactive_list",
     "chunk_body",
 ]

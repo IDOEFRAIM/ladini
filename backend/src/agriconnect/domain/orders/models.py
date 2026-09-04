@@ -183,6 +183,18 @@ class OrderItem(Base):
     )
     quantity = Column(Numeric(14, 3), nullable=False)
     price_at_sale = Column(Numeric(12, 2), nullable=False)
+    # (2026-08-30) Support des paliers de prix/conditionnement multiples
+    # (`Product.pricing_tiers`) — voir domain/pricing_tiers.py. NULL sur
+    # TOUTE commande sans palier (produit sans pricing_tiers, ou commande
+    # créée avant cette colonne) : traçabilité complète du palier acheté
+    # sans casser aucune ligne de commande existante.
+    tier_id = Column(String, nullable=True)
+    # Quantité déjà convertie dans l'unité de BASE du produit (ex: 3 bidons
+    # de 10L => 30, en LITRE) — c'est CETTE valeur qu'il faut débiter de
+    # `Product.quantity_for_sale`, jamais `quantity` telle quelle dès qu'un
+    # palier est impliqué (voir domain/pricing_tiers.py::resolve_stock_debit,
+    # le SEUL point de calcul du débit de stock).
+    base_unit_quantity = Column(Numeric(14, 3), nullable=True)
 
     order = relationship("Order", back_populates="items")
     product = relationship("Product", lazy="selectin")
@@ -356,6 +368,20 @@ class Auction(Base):
     status = Column(String, default="OPEN", nullable=False)
     cancellation_reason = Column(String)
     target_zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
+    # DEPRECATED / UNUSED (2026-09-04, audit fonctionnel/transactionnel
+    # Auction↔Bid — voir docs/AUCTION_BID_TRANSACTIONAL_AUDIT_2026-09-04.md
+    # section L, et son suivi WINNER_AND_ORDER_LIFECYCLE audit) :
+    # aucun code de ce dépôt ne lit plus cette colonne (elle n'a jamais
+    # servi de verrou optimiste — toute la concurrence Auction/Bid est
+    # protégée par `SELECT...FOR UPDATE`, pas par CAS de version). Elle
+    # avait un unique écrivain (`services/database/buyer.py::update_negotiation_offer`,
+    # un compteur "nombre de corrections de prix" jamais consommé), retiré
+    # à cette même date. Colonne conservée en base : ce dépôt n'a PAS de
+    # mécanisme de migration destructive (DDL additif uniquement, voir
+    # `services/database/common.py::SCHEMA_COLUMN_DDL`), et un éventuel
+    # lecteur hors de ce dépôt (tableau de bord admin externe) ne peut pas
+    # être exclu depuis ici. Ne pas réutiliser cette colonne pour un
+    # nouveau besoin sans revérifier cette conclusion.
     version = Column(Integer, default=0, nullable=False)
     awarded_at = Column(DateTime)
     cancelled_at = Column(DateTime)

@@ -13,6 +13,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    CART_TUNNEL_KINDS,
+    get_pending_interaction,
+    to_tunnel_category,
+)
 from agriconnect.graphs.agents.market_coach.core.slots import SLOT_FILLING_INPUTS
 
 logger = logging.getLogger("AgriConnect.Market.IntentRouter")
@@ -28,7 +33,12 @@ async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
         or working.get("active_goal")
         or working.get("locked_intent")
     )
-    expected_input = state.get("expected_input")
+    # (2026-09-02, "no legacy shim") : source UNIQUE — dérivé de
+    # `pending_interaction`, plus jamais lu directement depuis l'état. Un
+    # seul point de traduction : toutes les comparaisons plus bas
+    # (`== "SELECTION"`, `== "CONFIRMATION"`, `in SLOT_FILLING_INPUTS`...)
+    # consomment cette même variable dans le même vocabulaire qu'avant.
+    expected_input = to_tunnel_category(get_pending_interaction(state))
     interpreted_event = state.get("interpreted_event")
     missing_fields = state.get("missing_fields") or []
     last_missing_field = state.get("last_missing_field")
@@ -104,6 +114,26 @@ async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
     if interpreted_event == "REJECT":
         return {
             "response_strategy": "CLARIFICATION",
+            "status": "WAITING_INPUT",
+            "ag_ui_component": None,
+        }
+
+    # (2026-09-02, refonte state canonique — G-1, défense en profondeur) :
+    # un tunnel panier (producteur/palier/quantité) ENCORE actif — dérivé à
+    # neuf ce tour depuis vendor_selection_context/tier_selection_context,
+    # jamais périmable — gagne TOUJOURS sur n'importe quel autre signal, y
+    # compris expected_input=="CONFIRMATION" resté périmé d'un tour
+    # antérieur. Le fix primaire est au niveau du routeur
+    # (core/router.py::_cart_guard, désormais laissé passer vers
+    # cart_management dans ce cas précis) ; cette garde protège les chemins
+    # qui atteignent quand même response_strategy directement (ex:
+    # to_confirmation/context_resolver, hors du guard cart). C'est la
+    # correction structurelle du bug réel "celui de 10 l" → "Que voulez-vous
+    # confirmer exactement ?".
+    pending = get_pending_interaction(state)
+    if pending.kind in CART_TUNNEL_KINDS:
+        return {
+            "response_strategy": "SELECTION_MENU",
             "status": "WAITING_INPUT",
             "ag_ui_component": None,
         }
@@ -224,10 +254,25 @@ async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
                 "status": "WAITING_INPUT",
                 "ag_ui_component": None,
             }
+        # (2026-08-31) Incident réel : `expected_input` porte le SENTINELLE
+        # littéral `"NONE"` (une chaîne non vide, donc vraie en Python) quand
+        # rien n'est réellement attendu — `bool("NONE")` vaut `True`. Ce
+        # check nu confondait donc TOUT tour où `validator` renvoie
+        # légitimement `status="WAITING_INPUT"` sans rien à demander (son
+        # repli `if not goal:` — aucun goal actif, simple clarification)
+        # avec un vrai champ manquant, escaladant à tort vers
+        # `ASK_MISSING_FIELD`. `render_ask_missing_field` retombait alors
+        # sur un `last_missing_field`/`detected_intent` PÉRIMÉS d'un tour
+        # sans rapport, produisant une question incohérente (ex: demander un
+        # prix après l'enregistrement d'une récolte) — dont la réponse de
+        # l'utilisateur était ensuite silencieusement perdue. Même exclusion
+        # explicite du sentinelle que la condition juste au-dessus
+        # (`expected_input not in {None, "NONE"}`), pour rester cohérent au
+        # sein de cette même fonction.
         if (
             state.get("missing_fields")
             or state.get("last_missing_field")
-            or expected_input
+            or expected_input not in (None, "", "NONE")
         ):
             return {
                 "response_strategy": "ASK_MISSING_FIELD",

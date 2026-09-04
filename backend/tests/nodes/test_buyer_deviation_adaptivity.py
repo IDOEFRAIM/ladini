@@ -15,6 +15,10 @@ maintenant réception avant de rejouer leur texte figé :
 from __future__ import annotations
 
 from tests.conftest import StubRuntime, make_state, run
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    get_pending_interaction,
+    to_tunnel_category,
+)
 
 
 class _Msg:
@@ -109,7 +113,7 @@ class TestCartQuantityAskDeviation:
             vendor_selection_context=self._vendor_ctx(),
         )
         result = run(cart_management(state, runtime))
-        assert result["expected_input"] == "QUANTITY"
+        assert to_tunnel_category(get_pending_interaction(result)) == "QUANTITY"
 
 
 # =====================================================================

@@ -11,7 +11,7 @@ import redis
 from fastapi import APIRouter, BackgroundTasks, Form, Request, Response
 
 from agriconnect.api.tasks import process_agent_task
-from agriconnect.core.geofencing import OUT_OF_COUNTRY_MESSAGE
+from agriconnect.core.location import LocationOutcome, persist_shared_location
 from agriconnect.core.settings import settings
 from agriconnect.graphs.roles import normalize_role
 from agriconnect.workers.media.product_photo_task import (
@@ -138,64 +138,10 @@ def _extract_location(form: dict) -> Optional[tuple[float, float, Optional[str]]
     return lat, lon, address
 
 
-async def _persist_location_background(phone: str, lat: float, lon: float) -> None:
-    """Enregistre la position GPS en tâche de fond — jamais bloquant pour Twilio.
-
-    Découplé du pipeline agent (Celery/LangGraph) à dessein : la persistance
-    doit réussir même si l'agent conversationnel échoue, timeout ou est
-    surchargé. Best-effort : toute erreur est loguée, jamais propagée.
-    """
-    try:
-        from agriconnect.core.database import get_sessionmaker
-        from agriconnect.services.database.auth import AuthMixin
-
-        class _GeoOnlyService(AuthMixin):
-            def __init__(self, session):
-                self._session = session
-
-            @property
-            def session(self):
-                return self._session
-
-        sessionmaker = get_sessionmaker()
-        if sessionmaker is None:
-            logger.warning(
-                "TWILIO_WEBHOOK_LOCATION_SKIPPED | sessionmaker indisponible"
-            )
-            return
-        async with sessionmaker() as session:
-            service = _GeoOnlyService(session)
-            result = await service.update_geo_location(phone=phone, lat=lat, lon=lon)
-            if str(result.get("status")) == "success":
-                await session.commit()
-                logger.info("TWILIO_WEBHOOK_LOCATION_SAVED | phone=***%s", phone[-4:])
-            else:
-                await session.rollback()
-                logger.warning(
-                    "TWILIO_WEBHOOK_LOCATION_NOT_SAVED | phone=***%s | reason=%s",
-                    phone[-4:],
-                    result.get("message"),
-                )
-                # Cas précis "hors Burkina Faso" : l'utilisateur doit être
-                # informé (un point GPS jamais persisté silencieusement ne
-                # doit jamais donner l'impression d'avoir marché — voir
-                # core/geofencing.py). Les autres erreurs (compte introuvable,
-                # etc.) restent silencieuses comme avant : best-effort, jamais
-                # bloquant pour Twilio.
-                if str(result.get("reason") or "") == "out_of_country":
-                    try:
-                        from agriconnect.api.tasks import send_confirmation_text
-
-                        await send_confirmation_text(phone, OUT_OF_COUNTRY_MESSAGE)
-                    except Exception:
-                        logger.exception(
-                            "TWILIO_WEBHOOK_LOCATION_OUT_OF_COUNTRY_NOTICE_FAILED | phone=***%s",
-                            phone[-4:],
-                        )
-    except Exception:
-        logger.exception(
-            "TWILIO_WEBHOOK_LOCATION_PERSIST_ERROR | phone=***%s", phone[-4:]
-        )
+# (2026-09-02) L'ancienne persistance en `BackgroundTasks` (best-effort,
+# APRÈS la réponse HTTP, sans garantie d'ordre vis-à-vis de la tâche Celery
+# déjà enqueuée) a été retirée — voir `core/location.py::persist_shared_location`,
+# maintenant appelée SYNCHRONE dans le handler ci-dessous, AVANT l'enqueue.
 
 
 @router.post("/webhook/twilio")
@@ -286,12 +232,25 @@ async def _handle_twilio_webhook(
         )
 
     # --- 4bis. CAPTURE GPS NATIVE (message de localisation WhatsApp) ---
-    # Persistance en tâche de fond, DÉCOUPLÉE du pipeline agent : la position
-    # doit être enregistrée même si l'agent échoue/timeout. `location_shared`
-    # est en plus transmis à l'agent pour qu'il puisse acquitter la réception
-    # pendant l'étape finale d'onboarding — voir agents/onboarding.py.
+    # (2026-09-02, refonte GPS ; nettoyage architectural final 2026-09-02 —
+    # "un seul propriétaire de la réponse") : le webhook ne fait plus QUE
+    # normaliser l'événement entrant et persister le fait brut
+    # (`persist_shared_location`, une ÉCRITURE, pas une décision de réponse).
+    # Il ne calcule, ne choisit, ni n'envoie plus AUCUN message utilisateur
+    # lié au GPS — l'ancienne notification immédiate ("hors de notre zone")
+    # a été supprimée : elle faisait du webhook un 2e propriétaire de la
+    # réponse, concurrent du tour de graphe normal, ce qui produisait
+    # EXACTEMENT le double message que la garde `pending_interaction_kind`
+    # rustinait localement sans traiter la cause. `location_outcome` est
+    # transmis tel quel au tour de graphe ; c'est CE tour, et lui seul, qui
+    # décide s'il y a quelque chose à dire (voir `nodes/clarification.py`
+    # pour le cas "aucune étape GPS active" — le seul cas où rien d'autre
+    # dans le graphe n'aurait autrement mentionné ce rejet).
     location = _extract_location(form)
     location_shared = False
+    location_outcome: Optional[str] = None
+    location_lat: Optional[float] = None
+    location_lon: Optional[float] = None
     if location:
         lat, lon, address = location
         logger.info(
@@ -301,8 +260,11 @@ async def _handle_twilio_webhook(
             lon,
             address,
         )
-        background_tasks.add_task(_persist_location_background, phone, lat, lon)
+        outcome, _user_message = await persist_shared_location(phone, lat, lon)
         location_shared = True
+        location_outcome = outcome.value
+        if outcome == LocationOutcome.NEW_LOCATION_ACCEPTED:
+            location_lat, location_lon = lat, lon
 
     try:
         from agriconnect.core import telemetry
@@ -330,6 +292,7 @@ async def _handle_twilio_webhook(
             media_url=media_url,
             media_content_type=media_content_type,
             trace_id=trace_id,
+            message_sid=MessageSid,
         )
         return _empty_twiml()
 
@@ -348,7 +311,7 @@ async def _handle_twilio_webhook(
             has_pending_photo = False
         if has_pending_photo:
             resolve_pending_product_photo_task.delay(
-                phone_number=phone, selection_text=text
+                phone_number=phone, selection_text=text, message_sid=MessageSid
             )
             return _empty_twiml()
 
@@ -363,7 +326,7 @@ async def _handle_twilio_webhook(
             has_pending_view = False
         if has_pending_view:
             resolve_pending_view_photos_task.delay(
-                phone_number=phone, selection_text=text
+                phone_number=phone, selection_text=text, message_sid=MessageSid
             )
             return _empty_twiml()
 
@@ -385,16 +348,17 @@ async def _handle_twilio_webhook(
         )
         if view_query.isdigit():
             send_search_result_photos_task.delay(
-                phone_number=phone, index_text=view_query
+                phone_number=phone, index_text=view_query, message_sid=MessageSid
             )
         else:
-            send_product_photos_task.delay(phone_number=phone, product_query=view_query)
+            send_product_photos_task.delay(
+                phone_number=phone, product_query=view_query, message_sid=MessageSid
+            )
         return _empty_twiml()
 
     # --- 5. RÉSOLUTION DU WORKSPACE & RÔLE ---
     store = WorkspaceStore()
     workspace = await store.get(phone)
-
     ws_type = workspace.workspace_type if workspace else None
     resolved_role = None
     force_role = False
@@ -420,6 +384,18 @@ async def _handle_twilio_webhook(
         interactive_id=interactive_id,  # Bypass LLM si clic bouton/liste
         trace_id=trace_id,  # Propagation de la trace d'observabilité
         location_shared=location_shared,  # Position GPS reçue ce tour (accusé onboarding)
+        # (2026-09-02) Issue EXACTE de la persistance (déjà terminée, ci-dessus,
+        # avant cet enqueue) — l'agent n'a plus besoin de relire la DB pour
+        # savoir si le point a été accepté/rejeté/en erreur. Voir
+        # core/location.py et gps_delivery_gate.py::resolve_gps_stage.
+        location_outcome=location_outcome,
+        location_lat=location_lat,
+        location_lon=location_lon,
+        # (2026-09-02) Clé d'idempotence de l'ENVOI — voir api/tasks.py::
+        # _claim_single_response. Même identifiant que la clé de
+        # dédoublonnage webhook ci-dessus (bloc 1), réutilisé pour protéger
+        # aussi contre un retry Celery de la tâche elle-même.
+        message_sid=MessageSid,
     )
 
     return _empty_twiml()

@@ -7,6 +7,10 @@ from __future__ import annotations
 import pytest
 
 from agriconnect.agents.reducers import merge_dict
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    get_pending_interaction,
+    to_tunnel_category,
+)
 from agriconnect.graphs.agents.market_coach.nodes.validation import validator
 from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
 from agriconnect.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
@@ -56,7 +60,7 @@ class TestValidatorNeverAsksForIds:
         r = run(validator(st, StubRuntime()))
         assert r["response_strategy"] == "ASK_MISSING_FIELD"
         assert r["last_missing_field"] == "product"
-        assert r["expected_input"] == "PRODUCT"
+        assert to_tunnel_category(get_pending_interaction(r)) == "PRODUCT"
 
     def test_invalid_price_is_rejected_by_contract(self):
         st = make_state(
@@ -123,6 +127,116 @@ class TestMemoryUpdate:
         p = run(memory_update(st, StubRuntime()))["transaction_payload"]
         assert p["product"] == "boeufs", "un champ hors-sujet a écrasé le produit validé"
         assert p["quantity"] == 78
+
+    def test_pricing_tiers_survives_the_degraded_model_guard_on_price_slot(self):
+        """Incident réel (2026-08-29) : un producteur répondant à la
+        question PRIX avec plusieurs tarifs ("25 L à 500 FCFA et 40 L à
+        900 FCFA de lait") pendant un repli modèle dégradé (fréquent, voir
+        GROQ_RATE_LIMIT_FALLBACK) se faisait amputer de `pricing_tiers` —
+        absent de l'ancien allowlist `{"price", "price_unit"}` du slot PRICE
+        — la confirmation retombait sur un gabarit à tarif unique avec des
+        valeurs incohérentes (quantité/prix d'un tour précédent)."""
+        st = make_state(
+            interpreted_event="ANSWER",
+            expected_input="PRICE",
+            current_goal="SALES_PUBLISH_PRODUCT",
+            detected_intent="SALES_PUBLISH_PRODUCT",
+            normalized_text="je vends les bidon de 25 L a 500 fcfa et le bidon de 40 l a 900 fcfa",
+            transaction_payload={"product": "lait", "quantity": 250, "unit": "KG"},
+            extracted_entities={
+                "price": 25.0,
+                "pricing_tiers": [
+                    {"quantity": 25, "unit": "L", "price": 500, "packaging": "bidon"},
+                    {"quantity": 40, "unit": "L", "price": 900, "packaging": "bidon"},
+                ],
+            },
+            raw_analysis={"path": "llm", "degraded_model": True, "model_used": "llama-3.1-8b-instant"},
+        )
+        p = run(memory_update(st, StubRuntime()))["transaction_payload"]
+        assert p.get("pricing_tiers") == [
+            {"quantity": 25, "unit": "L", "price": 500, "packaging": "bidon"},
+            {"quantity": 40, "unit": "L", "price": 900, "packaging": "bidon"},
+        ], "pricing_tiers a été jeté par le garde anti-hallucination du slot PRICE"
+
+    def test_pricing_tiers_survives_the_degraded_model_guard_on_quantity_slot(self):
+        st = make_state(
+            interpreted_event="ANSWER",
+            expected_input="QUANTITY",
+            current_goal="SALES_PUBLISH_PRODUCT",
+            detected_intent="SALES_PUBLISH_PRODUCT",
+            normalized_text="j'ai des bidons de 25 L et 40 L",
+            transaction_payload={"product": "lait"},
+            extracted_entities={
+                "pricing_tiers": [
+                    {"quantity": 25, "unit": "L", "price": None, "packaging": "bidon"},
+                    {"quantity": 40, "unit": "L", "price": None, "packaging": "bidon"},
+                ],
+            },
+            raw_analysis={"path": "llm", "degraded_model": True},
+        )
+        p = run(memory_update(st, StubRuntime()))["transaction_payload"]
+        assert p.get("pricing_tiers"), "pricing_tiers a été jeté par le garde anti-hallucination du slot QUANTITY"
+
+    def test_a_correction_during_confirmation_refreshes_the_displayed_quantity(self):
+        """Bug réel (2026-09-03, incident PROCUREMENT_CREATE_REQUEST) : après
+        un 1er tour établissant "2 tonnes" (quantity_display="2 TONNE" figé
+        par `_normalize_quantity_to_kg`), une VRAIE correction ("non, plutôt
+        1 tonne et 125 kg") mettait bien à jour `quantity` (contrat
+        d'exécution) mais JAMAIS `quantity_display`/`unit_display` — le
+        récapitulatif affiché à l'utilisateur restait figé sur "2 TONNE" tour
+        après tour, quel que soit le nombre de corrections. Voir
+        `services/ui/confirmation_summary.py::_format_quantity`, qui préfère
+        `quantity_display` à `quantity`."""
+        # Tour 1 : établit 2 tonnes (= 2000 KG), quantity_display="2"/TONNE.
+        st1 = make_state(
+            interpreted_event="UPDATE",
+            expected_input="CONFIRMATION",
+            current_goal="PROCUREMENT_CREATE_REQUEST",
+            detected_intent="PROCUREMENT_CREATE_REQUEST",
+            normalized_text="2 tonnes",
+            transaction_payload={"product": "tomates", "price": 250.0},
+            extracted_entities={"quantity": 2.0, "unit": "TONNE"},
+        )
+        payload1 = run(memory_update(st1, StubRuntime()))["transaction_payload"]
+        assert payload1["quantity"] == 2000.0
+        assert payload1["unit_display"] == "TONNE"
+        assert payload1["quantity_display"] == 2.0
+
+        # Tour 2 : correction explicite vers 1 tonne (= 1000 KG) — DOIT
+        # rafraîchir l'affichage, pas seulement le contrat d'exécution.
+        st2 = make_state(
+            interpreted_event="UPDATE",
+            expected_input="CONFIRMATION",
+            current_goal="PROCUREMENT_CREATE_REQUEST",
+            detected_intent="PROCUREMENT_CREATE_REQUEST",
+            normalized_text="non, plutot 1 tonne",
+            transaction_payload=payload1,
+            extracted_entities={"quantity": 1.0, "unit": "TONNE"},
+        )
+        payload2 = run(memory_update(st2, StubRuntime()))["transaction_payload"]
+        assert payload2["quantity"] == 1000.0
+        assert payload2["unit_display"] == "TONNE"
+        assert payload2["quantity_display"] == 1.0, (
+            "quantity_display est resté figé sur l'ancienne valeur (2) — "
+            "le récapitulatif affichera l'ancienne quantité malgré la "
+            "correction"
+        )
+
+        # Tour 3 : un tour qui NE touche PAS la quantité (juste la date) ne
+        # doit PAS, lui, faire dériver l'affichage — non-régression du
+        # comportement `setdefault` historique.
+        st3 = make_state(
+            interpreted_event="UPDATE",
+            expected_input="CONFIRMATION",
+            current_goal="PROCUREMENT_CREATE_REQUEST",
+            detected_intent="PROCUREMENT_CREATE_REQUEST",
+            normalized_text="la date limite c'est le 30 septembre",
+            transaction_payload=payload2,
+            extracted_entities={"estimated_available_at": "2026-09-30T00:00:00+00:00"},
+        )
+        payload3 = run(memory_update(st3, StubRuntime()))["transaction_payload"]
+        assert payload3["quantity_display"] == 1.0
+        assert payload3["unit_display"] == "TONNE"
 
 
 # =====================================================================

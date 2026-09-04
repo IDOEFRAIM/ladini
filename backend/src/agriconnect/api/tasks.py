@@ -1,12 +1,11 @@
 import asyncio
-import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from celery.signals import worker_process_init, worker_process_shutdown
-from twilio.rest import Client
 
 from agriconnect.api.celery_app import celery_app
+from agriconnect.api.response_dispatch import ResponsePlan, get_dispatcher
 from agriconnect.core.database import close_db, get_engine
 from agriconnect.core.settings import settings
 from agriconnect.orchestrator import Orchestrator
@@ -16,9 +15,6 @@ logger = logging.getLogger("AgriConnect.Worker")
 # Variables globales initialisées au démarrage du worker
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _orchestrator: Optional[Orchestrator] = None
-
-_TWILIO_SOFT_LIMIT = 1500
-_TWILIO_DISCLAIMER = " (Détails complets disponibles sur votre dashboard)"
 
 
 # --- Initialisation de la boucle d'événements au démarrage du Worker ---
@@ -111,78 +107,6 @@ def shutdown_worker_process(**kwargs):
             logger.info("Boucle d'événements asyncio globale fermée.")
 
 
-def _chunk_whatsapp_body(body: str, limit: int = _TWILIO_SOFT_LIMIT) -> List[str]:
-    """Découpe le message en sous-messages conformes à la limite Twilio (1500 chars)."""
-    if not body:
-        return [""]
-
-    remaining = body.strip()
-    chunks: List[str] = []
-
-    while len(remaining) > limit:
-        split_idx = remaining.rfind("\n", 0, limit)
-        if split_idx == -1 or split_idx < limit // 2:
-            split_idx = limit
-        chunk = remaining[:split_idx].rstrip()
-        chunks.append(chunk)
-        remaining = remaining[split_idx:].lstrip()
-
-    if remaining:
-        chunks.append(remaining)
-
-    if len(chunks) > 4:
-        kept = chunks[:3]
-        kept.append(
-            f"{chunks[3][: limit - len(_TWILIO_DISCLAIMER) - 5]} {_TWILIO_DISCLAIMER}"
-        )
-        logger.warning("Response exceeded chunk limit; truncated with disclaimer")
-        return kept
-
-    return chunks
-
-
-def send_whatsapp_message(
-    client: Client,
-    from_number: str,
-    to_phone: str,
-    body: Optional[str] = None,
-    content_sid: Optional[str] = None,
-    content_vars: Optional[Dict[str, Any]] = None,
-) -> Optional[Any]:
-    """Envoie un message WhatsApp via Twilio (texte brut ou Content Template interactif)."""
-    clean_from = from_number.replace("whatsapp:", "").strip()
-    clean_to = to_phone.replace("whatsapp:", "").strip()
-
-    # Évite les erreurs si l'expéditeur et le destinataire sont identiques
-    if clean_from == clean_to:
-        logger.warning(
-            "Tentative d'envoi WhatsApp vers le même numéro (%s). Ignoré.", clean_to
-        )
-        return None
-
-    from_formatted = f"whatsapp:{clean_from}"
-    to_formatted = f"whatsapp:{clean_to}"
-
-    kwargs: Dict[str, Any] = {
-        "from_": from_formatted,
-        "to": to_formatted,
-    }
-
-    if content_sid:
-        kwargs["content_sid"] = content_sid
-        if content_vars:
-            kwargs["content_variables"] = json.dumps(content_vars)
-        if body:
-            kwargs["body"] = body
-    elif body:
-        kwargs["body"] = body
-    else:
-        logger.warning("Ni body ni content_sid fourni à send_whatsapp_message.")
-        return None
-
-    return client.messages.create(**kwargs)
-
-
 # --- Tâche Celery ---
 
 
@@ -203,14 +127,30 @@ def process_agent_task(
     interactive_id: Optional[str] = None,
     trace_id: Optional[str] = None,
     location_shared: bool = False,
+    location_outcome: Optional[str] = None,
+    location_lat: Optional[float] = None,
+    location_lon: Optional[float] = None,
+    message_sid: Optional[str] = None,
 ):
     """Point d'entrée worker : exécute la coroutine dans la boucle persistante.
 
-    ``location_shared`` : une position GPS a été reçue et déjà persistée
-    (en tâche de fond, côté webhook) pour ce même tour — signal purement
-    conversationnel pour que l'agent puisse acquitter la réception pendant
-    l'étape finale de l'onboarding (voir agents/onboarding.py). La
-    persistance elle-même ne dépend jamais de ce paramètre.
+    ``message_sid`` (2026-09-02) : identifiant STABLE de l'événement entrant
+    (même valeur que la clé de dédoublonnage webhook, `msg:{MessageSid}`) —
+    devient `ResponsePlan.event_id`, la clé d'idempotence de l'ENVOI
+    (`ResponseDispatcher`, voir api/response_dispatch.py) pour qu'un retry
+    Celery de CETTE tâche (après un envoi déjà réussi) ne déclenche jamais
+    un second message.
+
+    ``location_shared`` : une position GPS a été reçue et déjà persistée —
+    SYNCHRONE, AVANT cet enqueue (voir core/location.py, refonte 2026-09-02) —
+    signal purement conversationnel pour que l'agent puisse acquitter la
+    réception pendant l'étape finale de l'onboarding (agents/onboarding.py).
+
+    ``location_outcome``/``location_lat``/``location_lon`` : l'issue EXACTE
+    de cette persistance (`core.location.LocationOutcome`, déjà résolue côté
+    webhook) — l'agent n'a plus besoin de relire la DB pour la redécouvrir
+    (élimine la course webhook/tâche ET le repli silencieux sur une position
+    périmée, voir `flows/buyer/gps_delivery_gate.py::resolve_gps_stage`).
     """
     global _loop, _orchestrator
 
@@ -241,6 +181,9 @@ def process_agent_task(
             force_role=forced,
             interactive_id=interactive_id,
             location_shared=location_shared,
+            location_outcome=location_outcome,
+            location_lat=location_lat,
+            location_lon=location_lon,
         )
 
     try:
@@ -255,158 +198,32 @@ def process_agent_task(
         telemetry.flush()
 
     final_text = result.get("final_response") or "Je n'ai pas pu générer de réponse."
-    provider = (
-        str(getattr(settings, "MESSAGING_PROVIDER", "") or "whatsapp_cloud")
-        .strip()
-        .lower()
+    interactive = result.get("interactive") or None
+    plan = ResponsePlan.text(message_sid, final_text, interactive=interactive)
+
+    # (2026-09-02, consolidation finale) : `process_agent_task` ne contient
+    # plus AUCUNE logique de transport ni de garde d'idempotence autonome —
+    # il construit un `ResponsePlan` (le contrat de sortie du domaine, ici
+    # un seul `TextResponse`) et délègue ENTIÈREMENT au `ResponseDispatcher`
+    # (api/response_dispatch.py), SEUL point d'autorité pour l'envoi.
+    return _loop.run_until_complete(
+        get_dispatcher().dispatch(phone_number, plan)
     )
 
-    if provider == "twilio":
-        return _send_via_twilio(phone_number, final_text, result)
 
-    try:
-        return _loop.run_until_complete(
-            _send_via_whatsapp_cloud(phone_number, final_text, result)
-        )
-    except Exception as e:
-        logger.error("Erreur envoi WhatsApp Cloud API : %s", e)
-        raise
-
-
-async def send_confirmation_text(phone_number: str, text: str) -> Dict[str, Any]:
-    """Envoi d'un texte simple hors pipeline agent (même dispatch provider que
-    ``process_agent_task``) — utilisé par les tâches Celery qui n'ont pas de
+async def send_confirmation_text(
+    phone_number: str, text: str, *, message_sid: Optional[str] = None
+) -> Dict[str, Any]:
+    """Constructeur de `ResponsePlan` (texte simple) + délégation complète
+    au `ResponseDispatcher` — utilisé par les tâches Celery qui n'ont pas de
     tour de conversation LangGraph à leur origine (ex: confirmation d'ajout
-    de photo produit, voir workers/media/product_photo_task.py)."""
-    provider = (
-        str(getattr(settings, "MESSAGING_PROVIDER", "") or "whatsapp_cloud")
-        .strip()
-        .lower()
-    )
-    if provider == "twilio":
-        return _send_via_twilio(phone_number, text, {})
-    return await _send_via_whatsapp_cloud(phone_number, text, {})
+    de photo produit, voir workers/media/product_photo_task.py).
 
-
-async def _send_via_whatsapp_cloud(
-    phone_number: str,
-    final_text: str,
-    result: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Envoi via l'API Cloud WhatsApp (Meta directe) — provider par défaut."""
-    from agriconnect.services.whatsapp import cloud_api_client as wa
-
-    if not wa.is_configured():
-        logger.error(
-            "WhatsApp Cloud API configuration incomplete; cannot send response"
-        )
-        raise RuntimeError("WhatsApp Cloud API configuration incomplete")
-
-    logger.info(
-        "WHATSAPP_CLOUD_SEND | to=%s | body_len=%d | body_preview=%r",
-        phone_number,
-        len(str(final_text)),
-        str(final_text)[:120],
-    )
-
-    # --- Rendu interactif natif (boutons de confirmation) ---
-    interactive = result.get("interactive") or {}
-    if interactive.get("kind") == "confirm" and getattr(
-        settings, "WHATSAPP_NATIVE_INTERACTIVE_ENABLED", True
-    ):
-        message_id = await wa.send_interactive_buttons(
-            phone_number,
-            str(final_text),
-            buttons=[
-                {"id": "CONFIRM", "title": "✅ Confirmer"},
-                {"id": "REJECT", "title": "❌ Annuler"},
-            ],
-        )
-        if message_id is None:
-            return {"status": "message_skipped", "reason": "send_failed"}
-        return {"status": "message_sent", "sid": message_id, "interactive": "confirm"}
-
-    # --- Sinon : texte brut chunké ---
-    message_ids = await wa.send_text(phone_number, str(final_text))
-    if not message_ids:
-        return {"status": "message_skipped", "reason": "send_failed"}
-    return {
-        "status": "message_sent",
-        "sid": message_ids[-1],
-        "chunks": len(message_ids),
-    }
-
-
-def _send_via_twilio(
-    phone_number: str,
-    final_text: str,
-    result: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Repli Twilio — conservé intact pour un rollback instantané
-    (``MESSAGING_PROVIDER=twilio``) si l'API Cloud pose problème en prod."""
-    account_sid = str(settings.TWILIO_ACCOUNT_SID or "").strip()
-    auth_token = str(settings.TWILIO_AUTH_TOKEN or "").strip()
-    from_number = str(settings.TWILIO_WHATSAPP_NUMBER or "").strip()
-
-    if not account_sid or not auth_token or not from_number:
-        logger.error("Twilio configuration incomplete; cannot send WhatsApp response")
-        raise RuntimeError("Twilio configuration incomplete")
-
-    client = Client(account_sid, auth_token)
-    to_addr = f"whatsapp:{phone_number}"
-
-    logger.info(
-        "TWILIO_SEND | account=%s | from=%s | to=%s | body_len=%d | body_preview=%r",
-        account_sid[:10],
-        from_number,
-        to_addr,
-        len(str(final_text)),
-        str(final_text)[:120],
-    )
-
-    try:
-        # --- Rendu interactif (boutons de confirmation) ---
-        interactive = result.get("interactive") or {}
-        confirm_sid = str(
-            getattr(settings, "TWILIO_CONFIRM_CONTENT_SID", "") or ""
-        ).strip()
-        if (
-            interactive.get("kind") == "confirm"
-            and getattr(settings, "TWILIO_INTERACTIVE_ENABLED", False)
-            and confirm_sid
-        ):
-            message = send_whatsapp_message(
-                client=client,
-                from_number=from_number,
-                to_phone=to_addr,
-                body=str(final_text),
-                content_sid=confirm_sid,
-                content_vars={"1": str(final_text)[:1500]},
-            )
-            if message is None:
-                return {"status": "message_skipped", "reason": "same_from_to"}
-            return {
-                "status": "message_sent",
-                "sid": message.sid,
-                "interactive": "confirm",
-            }
-
-        # --- Sinon : texte brut chunké ---
-        chunks = _chunk_whatsapp_body(str(final_text))
-        last_sid = None
-        for chunk in chunks:
-            message = send_whatsapp_message(
-                client=client,
-                from_number=from_number,
-                to_phone=to_addr,
-                body=chunk,
-            )
-            if message is None:
-                return {"status": "message_skipped", "reason": "same_from_to"}
-            last_sid = message.sid
-
-        return {"status": "message_sent", "sid": last_sid, "chunks": len(chunks)}
-
-    except Exception as e:
-        logger.error("Erreur Twilio : %s", e)
-        raise
+    (2026-09-02, consolidation finale — mandat §2) : cette fonction n'est
+    PLUS un second chokepoint d'envoi — elle ne fait qu'emballer `text` dans
+    un `ResponsePlan` à un seul `TextResponse` et appeler EXACTEMENT le même
+    `ResponseDispatcher` que `process_agent_task`. Aucune logique de
+    provider, de claim, ou de transport ne vit plus ici."""
+    plan = ResponsePlan.text(message_sid, text)
+    results = await get_dispatcher().dispatch(phone_number, plan)
+    return results[0] if results else {"status": "message_skipped", "reason": "no_items"}

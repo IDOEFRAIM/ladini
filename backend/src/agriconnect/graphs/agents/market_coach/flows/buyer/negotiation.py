@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    set_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
@@ -54,7 +58,7 @@ def _build_bids_menu(
     bids_text = "\n".join(lines)
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "response_strategy": "SELECTION_MENU",
         "final_response": bids_text,
         "transaction_payload": {"resolved_id": None, "bid_id": None},
@@ -111,7 +115,7 @@ async def _fetch_and_show_bids(
         neg_menu = negotiation_action_menu(str(auction_id))
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "SELECTION",
+            **set_pending_interaction(InteractionKind.SELECTION_MENU),
             "response_strategy": "SELECTION_MENU",
             "final_response": msg,
             "transaction_payload": {"resolved_id": None},
@@ -156,7 +160,7 @@ async def _handle_counter_price(
             )
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "PRICE",
+            **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="price"),
             "response_strategy": "ASK_MISSING_FIELD",
             "final_response": f"{note}\n\n{base_question}" if note else base_question,
             "ag_ui_component": None,
@@ -182,7 +186,7 @@ async def _handle_counter_price(
     neg_menu = negotiation_action_menu(str(auction_id))
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "response_strategy": "SELECTION_MENU",
         "final_response": msg,
         "transaction_payload": {"resolved_id": None},
@@ -321,7 +325,7 @@ async def _handle_negotiation_menu(
         neg_menu = negotiation_action_menu(str(auction_id))
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "SELECTION",
+            **set_pending_interaction(InteractionKind.SELECTION_MENU),
             "response_strategy": "SELECTION_MENU",
             "final_response": f"{note}\n\n{msg}" if note else msg,
             "ag_ui_component": None,
@@ -336,7 +340,7 @@ async def _handle_negotiation_menu(
     if action == "NEGOTIATION_COUNTER":
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "PRICE",
+            **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="price"),
             "response_strategy": "ASK_MISSING_FIELD",
             "final_response": "Quel est votre nouveau prix (FCFA) ?",
             "transaction_payload": {"resolved_id": None},
@@ -445,7 +449,7 @@ async def _initiate_negotiation(
     )
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "response_strategy": "SELECTION_MENU",
         "final_response": res.get("message"),
         "negotiation_context": {
@@ -536,7 +540,10 @@ async def negotiation_gate(
     if not product_name or payload.get("price") in (None, "", 0):
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "PRODUCT" if not product_name else "PRICE",
+            **set_pending_interaction(
+                InteractionKind.ENTER_FIELD,
+                field_name="product" if not product_name else "price",
+            ),
             "response_strategy": "ASK_MISSING_FIELD",
             "final_response": "Quel produit souhaitez-vous négocier et à quel prix ?",
             "ag_ui_component": None,

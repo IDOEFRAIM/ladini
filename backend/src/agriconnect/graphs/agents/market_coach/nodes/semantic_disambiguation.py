@@ -3,6 +3,11 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    get_pending_interaction,
+    set_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.interpreter.intent import (
     INTENT_CONFIG,
     INTENT_DISAMBIGUATION,
@@ -59,12 +64,16 @@ async def semantic_disambiguation(
     """Render a pedagogical AG-UI list when intent detection is ambiguous."""
     event = str(state.get("interpreted_event") or "").upper()
     confidence = float(state.get("interpreter_confidence") or 1.0)
-    expected_input = str(state.get("expected_input") or "NONE").upper()
+    # (2026-09-02, "no legacy shim") : plus de lecture de `expected_input` —
+    # un `pending_interaction` déjà actif (n'importe quel kind) signifie
+    # qu'un autre mécanisme attend déjà une réponse précise ; ne pas
+    # superposer un second menu de désambiguïsation par-dessus.
+    already_expecting = get_pending_interaction(state).kind != InteractionKind.NONE
     text_lower = (state.get("normalized_text") or state.get("user_query") or "").lower()
 
     if event not in {"NEW_TASK", "UNKNOWN"}:
         return {}
-    if expected_input != "NONE" or not text_lower:
+    if already_expecting or not text_lower:
         return {}
 
     role_upper = (
@@ -161,7 +170,11 @@ async def semantic_disambiguation(
         "status": "WAITING_INPUT",
         "current_goal": "DISAMBIGUATION_PENDING",
         "goal_status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(
+            InteractionKind.SELECTION_MENU,
+            goal="DISAMBIGUATION_PENDING",
+            context_ref="intent_disambiguation",
+        ),
         "expected_candidates": labels,
         "available_mapping": mapping,
         "transaction_payload": stashed_payload,

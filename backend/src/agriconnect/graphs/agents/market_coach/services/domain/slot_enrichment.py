@@ -16,6 +16,11 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, Field, ValidationError
 
 from agriconnect.core.logger import get_logger
+from agriconnect.graphs.agents.market_coach.llm_gateway import (
+    LLMGatewayExhausted,
+    resolve_gateway,
+    resolve_profile,
+)
 from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
     extract_unit_only_from_text as _extract_unit_only,
 )
@@ -247,7 +252,7 @@ def extract_future_datetime_from_text(text: str) -> Optional[str]:
         except ValueError:
             pass
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     month_match = re.search(r"dans\s+(\d+)\s*mois", text, re.IGNORECASE)
     if month_match:
         months = int(month_match.group(1))
@@ -289,22 +294,20 @@ async def llm_extract_quantity_unit(
     )
 
     try:
-        completion = await asyncio.wait_for(
-            asyncio.to_thread(
-                lambda: llm.chat.completions.create(
-                    model=getattr(
-                        mc_runtime, "model_answer", "llama-3.3-70b-versatile"
-                    ),
-                    messages=[
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": user_text},
-                    ],
-                    response_format={"type": "json_object"},
-                    temperature=0.0,
-                    max_tokens=90,
-                )
-            ),
-            timeout=10.0,
+        # LLM Gateway (2026-09-02) : budget/repli/disjoncteur portés par le
+        # Gateway (profil résolu comme avant via `mc_runtime.current_goal`,
+        # voir `profile_answer`), plus de `asyncio.wait_for` local — voir
+        # `llm_gateway/gateway.py`.
+        completion = await resolve_gateway(mc_runtime).complete(
+            profile=resolve_profile(mc_runtime),
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": user_text},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            max_tokens=90,
+            agent_node="llm_extract_quantity_unit",
         )
         parsed = json.loads(completion.choices[0].message.content or "{}")
         return SlotExtractionPayload.validate_payload(parsed) or None
@@ -316,6 +319,13 @@ async def llm_extract_quantity_unit(
         )
         raise
     except asyncio.TimeoutError:
+        logger.warning(
+            "SLOT_ENRICHMENT_LLM_TIMEOUT | user_text=%r", (user_text or "")[:160]
+        )
+        return None
+    except LLMGatewayExhausted:
+        # Gateway épuisé (tous les candidats du profil down/indisponibles
+        # dans le budget) — équivalent au timeout ci-dessus, même repli.
         logger.warning(
             "SLOT_ENRICHMENT_LLM_TIMEOUT | user_text=%r", (user_text or "")[:160]
         )

@@ -145,6 +145,35 @@ def lookup_arg_value(
     return None
 
 
+def _resolve_json_type(param_schema: Dict[str, Any]) -> str:
+    """Extrait le `type` JSON Schema d'un paramètre, y compris pour un champ
+    `Optional[...]` — Pydantic v2 ne met alors JAMAIS de clé `type` au niveau
+    racine, il émet `anyOf`/`oneOf: [{...vrai type...}, {"type":"null"}]`.
+
+    Incident réel (2026-08-30) : `pricing_tiers: Optional[List[Dict[str,
+    Any]]]` a ce schéma-là. `param_schema.get("type")` renvoyait `None` →
+    repli sur `"string"` → `cast_arg_value` finissait par faire `str(value)`
+    sur la LISTE de tarifs entière, envoyant un repr Python
+    ("[{'quantity': 25.0, ...}]") comme argument MCP — rejeté par la
+    validation JSON Schema côté outil ("is not valid under any of the given
+    schemas"). Tout paramètre Optional de type array/object dans N'IMPORTE
+    QUEL tool MCP peut être touché, pas seulement pricing_tiers — c'est un
+    trou générique dans la résolution de schéma, pas un bug pricing_tiers.
+    """
+    direct = param_schema.get("type")
+    if isinstance(direct, str):
+        return direct.lower()
+    for branch_key in ("anyOf", "oneOf"):
+        branches = param_schema.get(branch_key)
+        if isinstance(branches, list):
+            for branch in branches:
+                if isinstance(branch, dict):
+                    branch_type = branch.get("type")
+                    if isinstance(branch_type, str) and branch_type.lower() != "null":
+                        return branch_type.lower()
+    return "string"
+
+
 def cast_arg_value(value: Any, json_type: str) -> Any:
     if value in (None, "", [], {}):
         return None
@@ -214,7 +243,7 @@ def build_resolved_tool_args(
     resolved_args: Dict[str, Any] = {}
     missing_required: List[str] = []
     for param_name, param_schema in properties.items():
-        json_type = str(param_schema.get("type") or "string").lower()
+        json_type = _resolve_json_type(param_schema)
         value = lookup_arg_value(param_name, state, payload, initial_args)
 
         if param_name in IDENTITY_ALIASES and value is not None:

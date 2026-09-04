@@ -50,32 +50,48 @@ class TestEnterGpsStage:
 
 
 class TestResolveGpsStage:
-    def test_a_shared_location_re_reads_the_profile_and_resolves(self, monkeypatch):
-        async def _fake(mc_runtime, phone):
-            return 13.0, -1.0
-        monkeypatch.setattr(f"{_MODULE}._get_stored_location", _fake)
-
+    def test_a_shared_location_uses_the_outcome_already_resolved_by_the_webhook(self):
+        """(2026-09-02, refonte GPS) : plus de relecture DB (`_get_stored_
+        location`) pour ce cas — l'issue exacte (`location_outcome`) et les
+        coordonnées (`location_lat`/`location_lon`) sont déjà résolues,
+        SYNCHRONE, côté webhook AVANT l'enqueue Celery. Élimine la course
+        webhook/tâche que l'ancienne relecture pouvait exposer."""
         result = run(resolve_gps_stage(
             _RuntimeNoLLM(), "+22670000001",
             location_shared=True, is_yes=False, gps_default=None,
+            location_outcome="NEW_LOCATION_ACCEPTED",
+            location_lat=13.0, location_lon=-1.0,
         ))
 
         assert result.resolved is True
         assert result.lat == 13.0
         assert result.lon == -1.0
 
-    def test_a_shared_location_that_failed_to_persist_asks_to_reshare(self, monkeypatch):
-        async def _fake(mc_runtime, phone):
-            return None, None
-        monkeypatch.setattr(f"{_MODULE}._get_stored_location", _fake)
-
+    def test_a_persistence_error_asks_to_reshare_distinctly_from_out_of_zone(self):
         result = run(resolve_gps_stage(
             _RuntimeNoLLM(), "+22670000001",
             location_shared=True, is_yes=False, gps_default=None,
+            location_outcome="LOCATION_PERSISTENCE_ERROR",
         ))
 
         assert result.resolved is False
         assert "repartager" in result.message
+
+    def test_a_point_rejected_by_geofencing_is_never_silently_replaced_by_an_old_one(self):
+        """(2026-09-02, mandat §31 "no silent fallback") : un point rejeté
+        (hors zone) ne doit JAMAIS retomber silencieusement sur une position
+        déjà stockée — le message doit être EXPLICITE sur le rejet, jamais
+        un point lat/lon renvoyé comme si tout allait bien."""
+        result = run(resolve_gps_stage(
+            _RuntimeNoLLM(), "+22670000001",
+            location_shared=True, is_yes=False, gps_default={"lat": 12.0, "lon": -1.0},
+            location_outcome="LOCATION_OUT_OF_ZONE",
+        ))
+
+        assert result.resolved is False
+        assert result.lat is None
+        assert result.lon is None
+        assert "hors de notre zone" in result.message
 
     def test_confirming_the_habitual_default_resolves_with_those_coordinates(self):
         result = run(resolve_gps_stage(

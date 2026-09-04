@@ -12,6 +12,10 @@ from datetime import datetime
 import pytest
 
 from tests.conftest import StubRuntime, make_state, run
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    get_pending_interaction,
+    to_tunnel_category,
+)
 
 
 def rt(responses=None):
@@ -41,7 +45,7 @@ class TestBuildProcurementEscalation:
         result = build_procurement_escalation({}, {}, "mais", "KG", "msg")
         assert result["missing_fields"] == ["price", "quantity"]
         assert result["last_missing_field"] == "price"
-        assert result["expected_input"] == "PRICE"
+        assert to_tunnel_category(get_pending_interaction(result)) == "PRICE"
 
     def test_deadline_is_auto_filled_when_absent(self):
         from agriconnect.graphs.agents.market_coach.flows.buyer.procurement import build_procurement_escalation
@@ -96,7 +100,7 @@ class TestBuildProcurementEscalation:
         existing = {"price": 250, "quantity": 100, "deadline": "2030-01-01", "product": "mais"}
         result = build_procurement_escalation({}, {}, "mais", "KG", "msg", existing_form_data=existing)
         assert result["missing_fields"] == []
-        assert result["expected_input"] == "NONE"
+        assert to_tunnel_category(get_pending_interaction(result)) == "NONE"
 
 
 # =====================================================================
@@ -182,18 +186,16 @@ class TestBuyerRequestResolverEscalation:
         result = run(buyer_request_resolver(state, rt()))
         assert result["form_data"]["price"] == 250
 
-    def test_waiting_choice_confirm_escalates(self):
-        from agriconnect.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
-        state = make_state(
-            user_phone="+2260",
-            working_memory={"buyer_request_waiting_choice": True},
-            normalized_text="oui",
-            transaction_payload={"product": "mais"},
-        )
-        result = run(buyer_request_resolver(state, rt()))
-        assert result["active_form"] == "AUCTION_CREATE"
-
     def test_waiting_choice_confirm_via_event(self):
+        """(2026-09-03, refonte transactionnelle, mandat §10/§11) : ce choix
+        est déjà posé via `PendingInteraction(kind=CONFIRM_ACTION)` — le
+        SEUL signal canonique fiable est `interpreted_event`, produit par le
+        même contrat fast-path/LLM que toute autre confirmation
+        (`_CONFIRM_EXACT_PHRASES`, `interpreter/routing.py`). Un ancien
+        2e moteur de reconnaissance oui/non par texte brut
+        (`CONFIRM_KEYWORDS`/`DECLINE_KEYWORDS`, testé ici auparavant via
+        `normalized_text="oui"`/`"non"` SANS `interpreted_event`) a été
+        supprimé — ces deux tests couvraient exactement ce mécanisme retiré."""
         from agriconnect.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
         state = make_state(
             user_phone="+2260",
@@ -204,12 +206,12 @@ class TestBuyerRequestResolverEscalation:
         result = run(buyer_request_resolver(state, rt()))
         assert result["active_form"] == "AUCTION_CREATE"
 
-    def test_waiting_choice_reject_resets_and_completes(self):
+    def test_waiting_choice_reject_via_event_resets_and_completes(self):
         from agriconnect.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
         state = make_state(
             user_phone="+2260",
             working_memory={"buyer_request_waiting_choice": True},
-            normalized_text="non",
+            interpreted_event="REJECT",
             transaction_payload={"product": "mais"},
         )
         result = run(buyer_request_resolver(state, rt()))
@@ -227,7 +229,7 @@ class TestBuyerRequestResolverCatalogFlow:
         from agriconnect.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
         state = make_state(user_phone="+2260", transaction_payload={}, normalized_text="")
         result = run(buyer_request_resolver(state, rt()))
-        assert result["expected_input"] == "PRODUCT"
+        assert to_tunnel_category(get_pending_interaction(result)) == "PRODUCT"
 
     def test_product_and_quantity_bridges_to_cart_management(self, monkeypatch):
         from agriconnect.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
@@ -248,7 +250,7 @@ class TestBuyerRequestResolverCatalogFlow:
             "results": [{"vendor_name": "Awa", "unit": "KG", "price": 250, "available_qty": 300}],
         }})
         result = run(buyer_request_resolver(state, runtime))
-        assert result["expected_input"] == "QUANTITY"
+        assert to_tunnel_category(get_pending_interaction(result)) == "QUANTITY"
         assert "Awa" in result["final_response"]
         assert result["current_goal"] == "BUYER_ADD_TO_CART"
         assert result["vendor_selection_context"]["chosen_vendor"]["vendor_name"] == "Awa"
@@ -293,7 +295,7 @@ class TestBuyerRequestResolverCatalogFlow:
         result = run(buyer_request_resolver(state, runtime))
         assert "Bœuf" not in result["final_response"]
         assert "introuvable" in result["final_response"].lower() or "Aucun produit" in result["final_response"]
-        assert result["expected_input"] == "CONFIRMATION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
         assert result["working_memory"]["buyer_request_waiting_choice"] is True
 
     def test_a_second_product_mentioned_in_the_same_message_is_surfaced_not_lost(self):
@@ -321,7 +323,7 @@ class TestBuyerRequestResolverCatalogFlow:
             "record_demand_signal": {"status": "success"},
         })
         result = run(buyer_request_resolver(state, runtime))
-        assert result["expected_input"] == "CONFIRMATION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
         assert result["working_memory"]["buyer_request_waiting_choice"] is True
         assert "record_demand_signal" in runtime.calls
 
@@ -338,7 +340,7 @@ class TestBuyerRequestResolverCatalogFlow:
 
         state = make_state(user_phone="+2260", transaction_payload={"product": "produit_rare"})
         result = run(buyer_request_resolver(state, _BoomRuntime()))
-        assert result["expected_input"] == "CONFIRMATION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
 
 
 # =====================================================================
@@ -369,7 +371,7 @@ class TestResolveReceivedBids:
             {"bid_id": "b1", "producer_name": "Awa", "price": 250, "product": "mais"},
         ]}})
         result = run(resolve_received_bids(runtime, "+2260", {}))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
         assert len(result["pending_menu"].options) == 1
 
 
@@ -423,7 +425,7 @@ class TestResolveBuyerBidPick:
             {"bid_id": "b1", "producer_name": "Awa"},
         ]}})
         result = run(resolve_buyer_bid_pick(runtime, "+2260", {"selected_value": "someone_else_entirely"}))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
 
     def test_out_of_range_index_falls_back_to_redisplaying_bids(self):
         from agriconnect.graphs.agents.market_coach.flows.buyer.procurement import resolve_buyer_bid_pick
@@ -431,7 +433,7 @@ class TestResolveBuyerBidPick:
             {"bid_id": "b1", "producer_name": "Awa"},
         ]}})
         result = run(resolve_buyer_bid_pick(runtime, "+2260", {"selection_index": 99}))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
 
 
 # =====================================================================

@@ -15,7 +15,7 @@ python = ">=3.11,<3.14"
 numpy = "^2.1"
 tqdm = "^4.66"
 pydantic = "^2.0"
-httpx = "^0.27"
+httpx = "^0.28"
 shapely = "^2.0"
 pillow = "^10.0"
 loguru = "^0.7"
@@ -24,8 +24,8 @@ pytest = "^7.0"
 # Additional dependencies requested for Agri-OS
 
 # --- Web Framework ---
-fastapi = "^0.115"
-uvicorn = {extras = ["standard"], version = "^0.30"}
+fastapi = "^0.117"
+uvicorn = {extras = ["standard"], version = "^0.38"}
 python-multipart = ">=0.0.18"
 aiohttp = "^3.9"
 
@@ -89,7 +89,12 @@ ftfy = "^6.2"
 apscheduler = "^3.11.2"
 groq = ">=0.30.0,<1.0.0"
 rapidfuzz = "^3.9"
-fastmcp = ">=0.1"
+# >=0.1 laissait passer 2.1.2 (installé en pratique), qui n'a ni
+# fastmcp.client.elicitation ni fastmcp.client.transports.StreamableHttpTransport
+# — requis par infrastructure/mcp/client.py depuis l'audit MCP/AGUI 2026-08-27
+# (transport HTTP réel, StreamableHttpTransport). 3.1.0 est la version
+# vérifiée de bout en bout (stdio + http + Twilio réel) dans cet audit.
+fastmcp = "^3.1"
 earthengine-api = "^1.7.10"
 # removed: psycopg2 source build (use psycopg2-binary)
 pandas = "^2.1"

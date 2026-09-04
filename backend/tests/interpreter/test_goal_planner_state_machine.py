@@ -12,8 +12,16 @@ import pytest
 # Importer `routing` déclenche `_init_intent_to_goal_map(...)` au chargement du
 # module — sans ça, `INTENT_TO_GOAL_MAP` (consommé par goal_planner) est vide.
 import agriconnect.graphs.agents.market_coach.interpreter.routing  # noqa: F401
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    get_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import goal_planner
 from tests.conftest import make_state, run
+
+# La traduction `expected_input="PRODUCT"/"CONFIRMATION"/...` → écriture RÉELLE
+# de `pending_interaction` vit maintenant dans `make_state` elle-même (source
+# commune à toute la suite, tests/conftest.py) — plus de copie locale ici.
 
 
 def gp(**overrides):
@@ -59,7 +67,7 @@ class TestRule0bisDisambiguation:
             working_memory={"disambiguation_pending": True},
         )
         assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
-        assert r["expected_input"] == "NONE"
+        assert get_pending_interaction(r).kind == InteractionKind.NONE
         assert r["working_memory"]["disambiguation_pending"] is False
 
     def test_selection_by_text_value_resolves(self):
@@ -85,7 +93,7 @@ class TestRule0bisDisambiguation:
             working_memory={"disambiguation_pending": True},
         )
         assert r["current_goal"] == "DISAMBIGUATION_PENDING"
-        assert r["expected_input"] == "SELECTION"
+        assert get_pending_interaction(r).kind == InteractionKind.SELECTION_MENU
         assert r["response_strategy"] == "SELECTION_MENU"
 
     def test_no_selection_yet_keeps_menu_active(self):

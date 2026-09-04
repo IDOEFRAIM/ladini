@@ -37,6 +37,13 @@ UNIT_SYNONYMS: Dict[str, str] = {
     "tetes": "TETE",
     "unite": "UNITE",
     "unites": "UNITE",
+    # Litre (2026-08-29) : absent, un producteur laitier répondant "25 L à 500
+    # fcfa" voyait son "25" sans unité reconnue — le scanner le reclassait
+    # alors en PRIX par simple proximité de "fcfa" (voir scan_number_candidates
+    # plus bas), écrasant le prix réel du tour avec une valeur de quantité.
+    "l": "LITRE",
+    "litre": "LITRE",
+    "litres": "LITRE",
 }
 
 VALID_UNITS = frozenset(UNIT_SYNONYMS.values())
@@ -90,14 +97,7 @@ _UNIT_TO_KG: Dict[str, float] = {
 }
 
 
-def parse_quantity_unit_from_text(text: str) -> QuantityUnitResult:
-    """Extract ``(quantity, unit)`` from free text using regex + synonym map."""
-    if not text:
-        return QuantityUnitResult()
-    match = _QUANTITY_UNIT_RE.search(text)
-    if not match:
-        return QuantityUnitResult()
-
+def _extract_match(match: "re.Match") -> "tuple[Optional[float], Optional[str]]":
     qty_raw = (
         (match.group("qty") or "")
         .replace(" ", "")
@@ -108,10 +108,35 @@ def parse_quantity_unit_from_text(text: str) -> QuantityUnitResult:
         qty_val = float(qty_raw)
     except (ValueError, TypeError):
         qty_val = None
-
     unit_raw = normalize_unit_token(match.group("unit") or "")
     mapped_unit = UNIT_SYNONYMS.get(unit_raw)
+    return qty_val, mapped_unit
 
+
+def parse_quantity_unit_from_text(text: str) -> QuantityUnitResult:
+    """Extract ``(quantity, unit)`` from free text using regex + synonym map.
+
+    Scans EVERY number+trailing-word pair, not just the first — a price
+    mentioned earlier in the same message ("250 fcfa le kg ... 2 tonnes")
+    would otherwise be mistaken for the quantity, since the regex's "unit"
+    group is a bare word match and matches "fcfa" just as readily as "kg"
+    (incident réel 2026-09-03: returned quantity=250/unit=None from a
+    message whose actual quantity was further along the text). The first
+    match whose trailing word is an ACTUALLY recognized unit wins; only
+    when NONE of the matches carry a recognized unit does this fall back to
+    the historical behaviour (first raw number, unit=None)."""
+    if not text:
+        return QuantityUnitResult()
+    matches = list(_QUANTITY_UNIT_RE.finditer(text))
+    if not matches:
+        return QuantityUnitResult()
+
+    for m in matches:
+        qty_val, mapped_unit = _extract_match(m)
+        if mapped_unit is not None:
+            return QuantityUnitResult(quantity=qty_val, unit=mapped_unit)
+
+    qty_val, mapped_unit = _extract_match(matches[0])
     if qty_val is None and mapped_unit is None:
         return QuantityUnitResult()
     return QuantityUnitResult(quantity=qty_val, unit=mapped_unit)
@@ -123,28 +148,25 @@ def parse_compound_quantity(text: str) -> QuantityUnitResult:
     When multiple quantity+unit pairs are found and all units are convertible
     to KG (i.e. KG or TONNE), sums them in KG. Otherwise falls back to
     ``parse_quantity_unit_from_text`` (first match only).
-    """
+
+    Candidate pairs are filtered to those carrying an ACTUALLY recognized
+    unit before counting "how many pairs" — a price ("250 fcfa") elsewhere
+    in the same message is noise, not a 3rd (non-convertible) pair that
+    should abort the whole sum (same incident as
+    ``parse_quantity_unit_from_text`` above)."""
     if not text:
         return QuantityUnitResult()
     matches = list(_QUANTITY_UNIT_RE.finditer(text))
-    if len(matches) < 2:
+    unit_matches = [m for m in matches if _extract_match(m)[1] is not None]
+    if len(unit_matches) < 2:
         return parse_quantity_unit_from_text(text)
 
     total_kg = 0.0
     all_convertible = True
-    for m in matches:
-        qty_raw = (
-            (m.group("qty") or "")
-            .replace(" ", "")
-            .replace("\xa0", "")
-            .replace(",", ".")
-        )
-        try:
-            qty_val = float(qty_raw)
-        except (ValueError, TypeError):
+    for m in unit_matches:
+        qty_val, unit_canonical = _extract_match(m)
+        if qty_val is None:
             continue
-        unit_raw = normalize_unit_token(m.group("unit") or "")
-        unit_canonical = UNIT_SYNONYMS.get(unit_raw)
         kg_factor = _UNIT_TO_KG.get(unit_canonical or "")
         if kg_factor is None:
             all_convertible = False
@@ -207,7 +229,8 @@ _SCAN_WINDOW = 18
 _SCAN_UNIT_RE = re.compile(
     r"(?<![a-zàâäéèêëïîôöùûüÿçA-ZÀÂÄÉÈÊËÏÎÔÖÙÛÜŸÇ])"
     r"(k|kg|kgs|kilo|kilogramme|kilogrammes|ton|tons|tone|tones|tonne|tonnes|t|"
-    r"sac|sacs|sachet|sachets|panier|paniers|tete|têtes|tetes|unite|unité|unites|unités)\b"
+    r"sac|sacs|sachet|sachets|panier|paniers|tete|têtes|tetes|unite|unité|unites|unités|"
+    r"l|litre|litres)\b"
 )
 _SCAN_CURRENCY_RE = re.compile(
     r"(?<![a-zàâäéèêëïîôöùûüÿçA-ZÀÂÄÉÈÊËÏÎÔÖÙÛÜŸÇ])(fcfa|cfa|francs?|balles?)\b"
@@ -254,6 +277,101 @@ def scan_number_candidates(text: str) -> "list[NumberCandidate]":
             NumberCandidate(value=val, unit=mapped_unit, near_currency=near_currency)
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Deterministic multi-tier pricing parser
+# ---------------------------------------------------------------------------
+# Incident réel (2026-08-30) : la règle 5bis du prompt LLM ("plusieurs
+# tarifs/conditionnements") N'EST PAS fiable à 100% — la MÊME phrase exacte
+# ("je vend le bidon de 5l a 500 fcfa et celui de 10 l a 900 fcfa") a produit
+# `pricing_tiers` correctement une fois, puis a échoué (retour à un seul
+# tarif plat) sur un appel ultérieur avec le MÊME modèle, la MÊME
+# temperature=0.0 — non-déterminisme MoE connu côté Groq, pas un bug de
+# code. Ce parser déterministe retire la dépendance au LLM pour CE cas
+# précis : découpe le texte en clauses ("et"/"ou"/","/"puis"), et pour
+# chaque clause à EXACTEMENT 2 nombres, associe qty+unit et prix+devise par
+# adjacence SERRÉE (pas la fenêtre large de `scan_number_candidates`, qui
+# classe les DEUX nombres "near_currency" dès qu'ils sont proches l'un de
+# l'autre — inutilisable ici pour distinguer leurs rôles). Si UNE SEULE
+# clause est ambiguë (0 ou 2+ matches d'un type), la fonction entière renvoie
+# `None` — jamais de résultat partiel deviné.
+_TIER_CLAUSE_SPLIT_RE = re.compile(r"\bet\b|\bou\b|\bpuis\b|,|;", re.IGNORECASE)
+_TIER_QTY_UNIT_RE = re.compile(
+    r"(\d+[\d\s,.]*)\s*"
+    r"(kg|kgs|kilo|kilogramme|kilogrammes|tonnes?|tones?|tons?|"
+    r"sacs?|sachets?|paniers?|t[êe]tes?|unit[ée]s?|litres?|l)\b",
+    re.IGNORECASE,
+)
+_TIER_PRICE_CURRENCY_RE = re.compile(
+    r"(\d+[\d\s,.]*)\s*(fcfa|cfa|francs?|balles?)\b", re.IGNORECASE
+)
+_TIER_PACKAGING_WORDS = (
+    "bidon", "bidons", "sac", "sacs", "sachet", "sachets", "carton", "cartons",
+    "casier", "casiers", "bouteille", "bouteilles", "seau", "seaux",
+    "cuvette", "cuvettes", "panier", "paniers",
+)
+_TIER_PACKAGING_RE = re.compile(
+    r"\b(" + "|".join(_TIER_PACKAGING_WORDS) + r")\b", re.IGNORECASE
+)
+
+
+def _parse_number(raw: str) -> Optional[float]:
+    cleaned = (raw or "").replace(" ", "").replace(",", ".")
+    try:
+        return float(cleaned)
+    except (TypeError, ValueError):
+        return None
+
+
+def extract_deterministic_pricing_tiers(text: str) -> Optional[list]:
+    """Construit `pricing_tiers` déterministement depuis *text*, ou `None`
+    si une clause est ambiguë (jamais de résultat deviné à moitié).
+
+    Renvoie une liste de {"quantity","unit","price","packaging"} — même
+    forme que ce que le LLM produit pour `extracted_entities.pricing_tiers`
+    (voir routing.py règle 5bis) — uniquement si CHAQUE clause candidate a
+    livré EXACTEMENT une paire quantité+unité et prix+devise sans ambiguïté.
+    """
+    clean = (text or "").strip()
+    if not clean:
+        return None
+    clauses = [c.strip() for c in _TIER_CLAUSE_SPLIT_RE.split(clean) if c.strip()]
+    if len(clauses) < 2:
+        return None
+
+    tiers: list = []
+    for clause in clauses:
+        qty_matches = list(_TIER_QTY_UNIT_RE.finditer(clause))
+        price_matches = list(_TIER_PRICE_CURRENCY_RE.finditer(clause))
+        if len(qty_matches) != 1 or len(price_matches) != 1:
+            continue  # clause sans info tarifaire (ex: "je vend le bidon de")
+        qty_val = _parse_number(qty_matches[0].group(1))
+        unit_raw = qty_matches[0].group(2)
+        price_val = _parse_number(price_matches[0].group(1))
+        if qty_val is None or price_val is None or qty_val <= 0 or price_val <= 0:
+            return None
+        packaging_match = _TIER_PACKAGING_RE.search(clause)
+        # "celui de 10 L à 900f" (référence au conditionnement du tarif
+        # précédent, ex: "bidon") sans le renommer — hérite du dernier
+        # conditionnement vu plutôt que de le laisser vide.
+        packaging = (
+            packaging_match.group(1).lower()
+            if packaging_match
+            else (tiers[-1]["packaging"] if tiers else None)
+        )
+        tiers.append(
+            {
+                "quantity": qty_val,
+                "unit": unit_raw.strip(),
+                "price": price_val,
+                "packaging": packaging,
+            }
+        )
+
+    if len(tiers) < 2:
+        return None
+    return tiers
 
 
 # Livestock / poultry products are counted per head (TÊTE), never weighed in KG.

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    get_pending_interaction,
+    to_tunnel_category,
+)
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from agriconnect.graphs.agents.market_coach.nodes.rendering.common import (
     FIELD_BUSINESS_REASON,
@@ -60,7 +64,7 @@ async def render_recovery(ctx: RenderContext) -> Dict[str, Any]:
         if form_step not in (None, "", "CONFIRMING", "COMPLETE"):
             field = form_step
     if not field:
-        expected_input = str(state.get("expected_input") or "").strip().lower()
+        expected_input = to_tunnel_category(get_pending_interaction(state)).strip().lower()
         if expected_input and expected_input not in {
             "none",
             "confirmation",
@@ -126,7 +130,7 @@ async def render_interruption(ctx: RenderContext) -> Dict[str, Any]:
         }
     suspended = str(state.get("suspended_goal") or "").upper().strip()
     current_goal = str(state.get("current_goal") or "").upper().strip()
-    expected = str(state.get("expected_input") or "").upper().strip()
+    expected = to_tunnel_category(get_pending_interaction(state))
 
     suspended_label = (
         (INTENT_CONFIG.get(suspended) or {}).get("label") if suspended else ""

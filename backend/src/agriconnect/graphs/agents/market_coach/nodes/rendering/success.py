@@ -31,6 +31,12 @@ from agriconnect.services.pending_photo_target import (
 from agriconnect.services.search_results_cache import (
     store_results as _store_search_photo_results,
 )
+from agriconnect.graphs.agents.market_coach.services.text_pagination import (
+    MAX_CHARS_PER_PAGE,
+    MAX_ITEMS_PER_PAGE,
+    PAGE_BREAK,
+    paginate_item_blocks,
+)
 
 
 def _cache_numbered_items_with_photos(
@@ -101,12 +107,21 @@ def _format_future_cycle_line(cycle: Dict[str, Any]) -> str:
     return f"{emoji} {label} — statut {status}{suffix}"
 
 
+# Pagination des listes volumineuses (stocks, catalogue) — voir
+# services/text_pagination.py pour le détail (module partagé, réutilisé par
+# services/domain/cart_service.py pour le même besoin côté acheteur).
+_STOCK_LIST_MAX_ITEMS_PER_PAGE = MAX_ITEMS_PER_PAGE
+_STOCK_LIST_MAX_CHARS_PER_PAGE = MAX_CHARS_PER_PAGE
+_paginate_item_blocks = paginate_item_blocks
+
+
 def _render_farm_sections(
     farms_dict: Dict[str, Any],
 ) -> Tuple[str, List[Dict[str, str]]]:
     if not farms_dict:
         return "", []
-    lines = ["📋 *Voici l'état de vos stocks par exploitation :*\n"]
+    header = "📋 *Voici l'état de vos stocks par exploitation :*"
+    item_blocks: List[str] = []
     options: List[Dict[str, str]] = []
     index_counter = 1
     for farm_id, farm_info in farms_dict.items():
@@ -118,11 +133,11 @@ def _render_farm_sections(
             or "Exploitation sans nom"
         )
         location = farm_info.get("location") or "Zone non spécifiée"
-        lines.append(f"🏡 *{farm_name}* ({location})")
+        farm_header = f"🏡 *{farm_name}* ({location})"
         stocks = farm_info.get("stocks") or []
         if not stocks:
-            lines.append(
-                "  _Aucun produit stocké actuellement dans cette exploitation._"
+            item_blocks.append(
+                f"{farm_header}\n  _Aucun produit stocké actuellement dans cette exploitation._"
             )
         for stock in stocks:
             item_name = stock.get("item_name") or stock.get("product_name") or "Produit"
@@ -130,7 +145,7 @@ def _render_farm_sections(
             unit = str(stock.get("unit") or "KG").upper()
             stock_id = stock.get("stock_id") or stock.get("id") or farm_id
             label_item = f"{item_name} : {qty} {unit}"
-            lines.append(f"  {index_counter}️⃣ {label_item}")
+            item_blocks.append(f"{farm_header}\n  {index_counter}️⃣ {label_item}")
             options.append(
                 {
                     "index": str(index_counter),
@@ -142,7 +157,9 @@ def _render_farm_sections(
 
         cycles = farm_info.get("upcoming_cycles") or []
         for cycle in cycles[:2]:
-            lines.append(f"  {index_counter}️⃣ {_format_future_cycle_line(cycle)}")
+            item_blocks.append(
+                f"{farm_header}\n  {index_counter}️⃣ {_format_future_cycle_line(cycle)}"
+            )
             stock_id = cycle.get("offer_id") or cycle.get("market_offer_id") or farm_id
             label_item = (
                 cycle.get("display_label")
@@ -159,15 +176,18 @@ def _render_farm_sections(
             )
             index_counter += 1
         if len(cycles) > 2:
-            lines.append(f"    … +{len(cycles) - 2} autre(s) cycle(s) en préparation")
+            item_blocks.append(
+                f"{farm_header}\n    … +{len(cycles) - 2} autre(s) cycle(s) en préparation"
+            )
 
-        lines.append("")
-
-    if options:
-        lines.append(
-            "❓ *Que souhaitez-vous faire ?* Indiquez le numéro d'un lot pour le mettre en vente ou le modifier."
-        )
-    return "\n".join(lines).strip(), options
+    footer = (
+        "❓ *Que souhaitez-vous faire ?* Indiquez le numéro d'un lot pour le mettre en vente ou le modifier."
+        if options
+        else ""
+    )
+    if footer:
+        item_blocks.append(footer)
+    return _paginate_item_blocks(header, item_blocks), options
 
 
 def _render_catalog_section(
@@ -175,7 +195,8 @@ def _render_catalog_section(
 ) -> Tuple[str, List[Dict[str, str]]]:
     if not catalog:
         return "", []
-    lines = ["📦 *Produits listés dans votre catalogue :*\n"]
+    header = "📦 *Produits listés dans votre catalogue :*"
+    item_blocks: List[str] = []
     options: List[Dict[str, str]] = []
     for i, product in enumerate(catalog, start=1):
         name = product.get("name") or product.get("product_name") or f"Produit {i}"
@@ -187,14 +208,38 @@ def _render_catalog_section(
         line_header = f"{i}️⃣ *{name}*"
         if code:
             line_header += f" (Réf: #{code})"
-        lines.append(line_header)
         details = []
         if price is not None:
             details.append(f"💰 {fmt_num(price)} FCFA/{unit}")
         if qty not in (None, ""):
             details.append(f"⚖️ {fmt_num(qty)} {unit} dispo")
         details.append(f"Statut : {status}")
-        lines.append("  " + " | ".join(details))
+        block = f"{line_header}\n  " + " | ".join(details)
+        # Déclinaisons de prix/conditionnement (2026-08-30) : `price`/`qty`
+        # ci-dessus ne sont qu'un résumé représentatif (1er tarif / somme des
+        # quantités, voir memory.py) — sans ceci, un producteur avec
+        # plusieurs tarifs ("5 L à 500f, 10 L à 900f") voyait SEULEMENT le
+        # 1er dans son propre catalogue, comme si le 2e avait disparu, alors
+        # que le récapitulatif de confirmation les montrait bien groupés.
+        tiers = product.get("pricing_tiers")
+        if isinstance(tiers, list) and tiers:
+            tier_lines = []
+            for tier in tiers:
+                if not isinstance(tier, dict):
+                    continue
+                t_qty = tier.get("quantity")
+                t_unit = str(tier.get("unit") or "").strip()
+                t_price = tier.get("price")
+                if t_qty in (None, "", [], {}) or not t_unit or t_price in (None, "", [], {}):
+                    continue
+                label = f"{fmt_num(t_qty)} {t_unit}"
+                packaging = tier.get("packaging")
+                if packaging:
+                    label += f" ({packaging})"
+                tier_lines.append(f"    • {label} — {fmt_num(t_price)} FCFA")
+            if tier_lines:
+                block += "\n" + "\n".join(tier_lines)
+        item_blocks.append(block)
         options.append(
             {
                 "index": str(i),
@@ -207,15 +252,22 @@ def _render_catalog_section(
                 ),
             }
         )
-    lines.append(
+    item_blocks.append(
         "✏️ _Pour changer le prix, la quantité, le nom ou l'unité d'un produit, tapez *modifier un produit*._"
     )
-    return "\n".join(lines).strip(), options
+    return _paginate_item_blocks(header, item_blocks), options
 
 
-def _render_cycles_section(cycles: List[Dict[str, Any]]) -> str:
+def _render_cycles_section(
+    cycles: List[Dict[str, Any]],
+) -> Tuple[str, List[Dict[str, str]]]:
+    """Audit UX interactive 2026-08-27 : construit désormais aussi les
+    options de sélection (`ListMenu`), en plus du texte — c'était le seul
+    des rendus structurés de ce fichier à n'en jamais produire, condamnant
+    toute précommande/production future à un pavé de texte brut sur
+    WhatsApp (voir farms/catalog ci-dessus, qui en construisaient déjà)."""
     if not cycles:
-        return ""
+        return "", []
     deduped: Dict[str, Dict[str, Any]] = {}
     for raw_cycle in cycles:
         if not isinstance(raw_cycle, dict):
@@ -230,15 +282,36 @@ def _render_cycles_section(cycles: List[Dict[str, Any]]) -> str:
             continue
         deduped[cycle_id] = raw_cycle
     if not deduped:
-        return ""
+        return "", []
     lines = ["🌱 *Cultures en cours / futures récoltes :*"]
-    for cycle in deduped.values():
+    options: List[Dict[str, str]] = []
+    for cycle_id, cycle in deduped.items():
         farm_name = cycle.get("farm_name") or "ferme"
-        lines.append(f"• {_format_future_cycle_line(cycle)} ({farm_name})")
+        # Index numéroté (audit UX interactive 2026-08-27) : cette section
+        # utilisait une puce "•" simple, seule exception aux index emoji
+        # numérotés déjà utilisés partout ailleurs dans ce fichier (farms,
+        # catalog, flat_list) — incohérent avec les `options` sélectionnables
+        # juste en dessous, qui ELLES étaient déjà numérotées.
+        lines.append(
+            f"{len(options) + 1}️⃣ {_format_future_cycle_line(cycle)} ({farm_name})"
+        )
+        label = (
+            cycle.get("display_label")
+            or cycle.get("product_label")
+            or cycle.get("species")
+            or "Production future"
+        )
+        options.append(
+            {
+                "index": str(len(options) + 1),
+                "label": f"{label} ({farm_name})",
+                "value": cycle_id,
+            }
+        )
     lines.append(
         "\n✏️ _Pour changer le prix, la quantité, le nom ou la date d'un lot, tapez *modifier une production*._"
     )
-    return "\n".join(lines)
+    return "\n".join(lines), options
 
 
 def _render_market_snapshot(exec_result: Dict[str, Any]) -> str:
@@ -424,9 +497,16 @@ def _render_flat_list(items: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, 
     return "\n".join(lines), options_ui
 
 
-def _render_buyer_catalog_sections(items: List[Dict[str, Any]]) -> str:
+def _render_buyer_catalog_sections(
+    items: List[Dict[str, Any]],
+) -> Tuple[str, List[Dict[str, str]]]:
+    """Audit UX interactive 2026-08-27 : construit désormais aussi les
+    options de sélection pour les produits DIRECT (déjà numérotés dans le
+    texte ci-dessous). Les productions futures restent du texte descriptif
+    pur, comme avant ce correctif — elles n'étaient de toute façon jamais
+    numérotées, donc pas de régression sur leur affichage."""
     if not items:
-        return ""
+        return "", []
 
     direct_items: List[Dict[str, Any]] = []
     future_items: List[Dict[str, Any]] = []
@@ -443,6 +523,7 @@ def _render_buyer_catalog_sections(items: List[Dict[str, Any]]) -> str:
         bucket.append(item)
 
     sections: List[str] = []
+    options: List[Dict[str, str]] = []
 
     if direct_items:
         lines = ["🌐 *Produits disponibles immédiatement :*"]
@@ -468,6 +549,15 @@ def _render_buyer_catalog_sections(items: List[Dict[str, Any]]) -> str:
             if available_qty not in (None, ""):
                 line += f" | ⚖️ {fmt_num(available_qty)} {unit}"
             lines.append(line)
+            options.append(
+                {
+                    "index": str(idx),
+                    "label": f"{name} — {vendor}",
+                    "value": str(
+                        product.get("id") or product.get("product_id") or idx
+                    ),
+                }
+            )
         sections.append("\n".join(lines))
 
     if future_items:
@@ -496,7 +586,7 @@ def _render_buyer_catalog_sections(items: List[Dict[str, Any]]) -> str:
             lines.append(f"• *{name}* — {price_label} — livré vers {eta} ({vendor})")
         sections.append("\n".join(lines))
 
-    return "\n\n".join([section for section in sections if section]).strip()
+    return "\n\n".join([section for section in sections if section]).strip(), options
 
 
 # Pour chaque gabarit transactionnel à fort impact ci-dessous, l'outil MCP
@@ -511,6 +601,11 @@ _FALLBACK_GOAL_REQUIRES_TOOL: Dict[str, Tuple[str, ...]] = {
     "PROCUREMENT_OR_AUCTION": ("create_auction",),
     "PUBLISH_OR_SELL": ("create_product", "record_sale"),
     "BID": ("place_bid",),
+    "STOCK_REGISTER_HARVEST": ("add_stock",),
+    "STOCK_RECORD_MOVEMENT": ("add_stock_movement_by_id",),
+    "STOCK_ADJUST": ("adjust_stock_by_id",),
+    "STOCK_REMOVE_PARTIAL": ("remove_stock_by_id",),
+    "STOCK_DELETE": ("delete_stock_by_id",),
 }
 
 
@@ -572,11 +667,36 @@ def _transactional_fallback_text(
         price_bid = fmt_num(payload.get("price"))
         p_info = f" à {price_bid} FCFA" if price_bid else ""
         return f"✅ {salutation}Votre proposition de prix{p_info} pour *{prod_name}* a bien été transmise."
+    # Actions d'écriture sur le stock — incident 2026-08-27 : ces goals
+    # n'avaient AUCUN gabarit dédié, donc une récolte (ou un ajustement)
+    # réellement enregistrée retombait sur le message générique "C'est
+    # noté. Dites-moi ce que vous souhaitez faire..." — une rupture de ton
+    # juste après une action confirmée avec succès. Match EXACT (pas
+    # substring) : "STOCK_" est aussi le préfixe des goals de LECTURE
+    # (STOCK_GET_DETAIL/MOVEMENTS/SUMMARY), gérés par la branche LECTURE
+    # ci-dessous.
+    if g == "STOCK_REGISTER_HARVEST" and _tool_matches("STOCK_REGISTER_HARVEST"):
+        return f"✅ {salutation}Récolte enregistrée{q_info} pour *{prod_name}*."
+    if g == "STOCK_RECORD_MOVEMENT" and _tool_matches("STOCK_RECORD_MOVEMENT"):
+        return f"✅ {salutation}Mouvement de stock enregistré{q_info} pour *{prod_name}*."
+    if g == "STOCK_ADJUST" and _tool_matches("STOCK_ADJUST"):
+        return f"✅ {salutation}Stock ajusté{q_info} pour *{prod_name}*."
+    if g == "STOCK_REMOVE_PARTIAL" and _tool_matches("STOCK_REMOVE_PARTIAL"):
+        return f"✅ {salutation}Quantité retirée{q_info} pour *{prod_name}*."
+    if g == "STOCK_DELETE" and _tool_matches("STOCK_DELETE"):
+        return f"✅ {salutation}*{prod_name}* a été retiré de votre stock."
     if any(
         tok in g
         for tok in ("LIST", "GET", "CHECK", "SEARCH", "VIEW", "DASHBOARD", "SNAPSHOT")
-    ):
-        # Goal de LECTURE sans contenu : rester neutre et honnête.
+    ) and (not selected_tool or selected_tool.startswith(("get_", "list_", "search_", "check_"))):
+        # Goal de LECTURE sans contenu : rester neutre et honnête. Incident
+        # réel (2026-08-27) : contrairement aux branches ci-dessus, cette
+        # branche n'avait AUCUN garde-fou `_tool_matches` — un `goal` PÉRIMÉ
+        # contenant "GET" (ex: reliquat de `get_farms` appelé par
+        # context_resolver plus tôt dans la même conversation) a annoncé
+        # "rien à afficher" juste après qu'un `add_stock` (575 poulets) ait
+        # RÉUSSI. Le garde-fou ci-dessus n'autorise ce texte que si l'outil
+        # réellement exécuté ce tour est lui-même un outil de lecture.
         return f"{salutation}Je n'ai rien trouvé à afficher pour cette demande pour le moment."
     return (
         f"{salutation}C'est noté. Dites-moi ce que vous souhaitez faire "
@@ -738,9 +858,13 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
                 )
 
         if cycles_payload:
-            cycles_text = _render_cycles_section(cycles_payload)
+            cycles_text, cycles_options = _render_cycles_section(cycles_payload)
             if cycles_text:
                 sections.append(cycles_text)
+            if cycles_options and ag_component is None:
+                ag_component = _menu(
+                    "Productions à venir", cycles_options, mode="cycles"
+                )
 
         if sections:
             text_output = "\n\n".join(
@@ -789,17 +913,23 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
         elif isinstance(exec_result.get("results"), list):
             results_payload_list = exec_result["results"]  # type: ignore[index]
 
-        buyer_sections = _render_buyer_catalog_sections(results_payload_list)
+        buyer_sections, buyer_options = _render_buyer_catalog_sections(
+            results_payload_list
+        )
         if buyer_sections:
             text_output = buyer_sections
             structured_sections_handled = True
+            if buyer_options and ag_component is None:
+                ag_component = _menu(
+                    "Produits disponibles", buyer_options, mode="buyer_catalog"
+                )
 
             # Cache les résultats DIRECT (numéro affiché -> id/photos) pour
             # que la commande WhatsApp « photos <numéro> » retrouve quel
             # produit un numéro désignait (workers/media/product_photo_task.py).
             # Même filtre DIRECT/FUTURE que `_render_buyer_catalog_sections`
             # ci-dessus, dupliqué ici à dessein pour ne pas changer le contrat
-            # de retour (string) de cette fonction pure, verrouillé par
+            # de retour (string, str) de cette fonction pure, verrouillé par
             # tests/nodes/test_rendering_success.py::TestRenderBuyerCatalogSections.
             direct_items = [
                 item

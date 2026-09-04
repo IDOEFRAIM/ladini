@@ -193,6 +193,45 @@ class TestCognitiveGuardUnknownInTunnel:
         assert wm["update_cycle_id"] is None
         assert wm["auction_brief"] == {"a1": {"product": "mais"}}
 
+    def test_max_retries_abandon_also_clears_stale_buyer_gps_stage_flags(self):
+        """Même bug, côté acheteur (incident réel +22601479800, 2026-09-02) :
+        `preorder_workflow.gps_stage`/`gps_default` (flows/buyer/preorder.py)
+        et `working_memory.winner_gps_stage` (flows/buyer/order_tracking.py)
+        sont la même famille de mini-état auto-suffisant que
+        `bid_phase`/`update_phase` ci-dessus, mais vivaient hors de portée du
+        reset : `pending_interaction` (PROVIDE_LOCATION) était bien effacé à
+        l'abandon, mais `gps_stage=True` restait collé (merge_dict ne s'auto-
+        efface jamais). Reprendre le même goal plus tard retombait alors sur
+        `resolve_gps_stage` sans aucun `pending_interaction` actif pour le
+        justifier — exactement la désynchronisation observée en prod."""
+        from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+            InteractionKind,
+            set_pending_interaction,
+        )
+
+        state = make_state(
+            current_goal="BUYER_PREORDER_INIT",
+            interpreted_event="UNKNOWN",
+            retry_count=2,
+            working_memory={"winner_gps_stage": True},
+            preorder_workflow={
+                "phase": "PREORDER_DRAFTED",
+                "preorder_id": "abc123",
+                "gps_stage": True,
+                "gps_default": {"lat": 12.35, "lon": -1.5},
+            },
+            **set_pending_interaction(
+                InteractionKind.PROVIDE_LOCATION, context_ref="confirmation"
+            ),
+        )
+        result = run(cognitive_guard(state, None))
+
+        assert result["cognitive_decision"]["action"] == "abandon_tunnel_max_retries"
+        assert result["working_memory"]["winner_gps_stage"] is None
+        assert result["preorder_workflow"]["gps_stage"] is None
+        assert result["preorder_workflow"]["gps_default"] is None
+        assert result["pending_interaction"] is None
+
     def test_unknown_event_outside_a_tunnel_does_not_trigger_this_branch(self):
         state = make_state(current_goal=None, interpreted_event="UNKNOWN", expected_input="NONE")
         result = run(cognitive_guard(state, None))

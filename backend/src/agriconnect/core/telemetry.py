@@ -105,6 +105,18 @@ def _init_prometheus() -> None:
             ["model"],
             buckets=(0.1, 0.25, 0.5, 1, 2, 4, 8, 16),
         ),
+        # ── LLM Gateway (2026-09-02) — cardinalité bornée à dessein : jamais
+        # de label user_id/phone/conversation_id (§24 du brief anti-cardinalité).
+        "llm_fallback": Counter(
+            "agriconnect_llm_fallback_total",
+            "Bascules de repli du LLM Gateway (candidat primaire indisponible).",
+            ["profile", "provider", "reason"],
+        ),
+        "llm_circuit_open": Counter(
+            "agriconnect_llm_circuit_open_total",
+            "Ouvertures du disjoncteur LLM Gateway par candidat.",
+            ["provider", "model"],
+        ),
     }
 
 
@@ -286,6 +298,19 @@ def record_generation(
     usage: Optional[Dict[str, int]] = None,
     error: Optional[str] = None,
     name: str = "groq_completion",
+    # ── LLM Gateway (2026-09-02) — tous optionnels, rétrocompatibles avec
+    # les 2 sites d'appel existants (_GroqAdapter/_BedrockAdapter dans
+    # get_llm.py) qui n'en passent aucun. Jamais de secret/credential dedans
+    # (§21/§52 : vérifié — aucun champ ci-dessous ne porte de clé/token).
+    profile: Optional[str] = None,
+    provider: Optional[str] = None,
+    attempt: Optional[int] = None,
+    fallback_from: Optional[str] = None,
+    fallback_reason: Optional[str] = None,
+    structured_output_required: Optional[bool] = None,
+    structured_output_valid: Optional[bool] = None,
+    request_id: Optional[str] = None,
+    agent_node: Optional[str] = None,
 ) -> None:
     """Enregistre un appel LLM : Langfuse Generation + métriques Prometheus.
 
@@ -295,6 +320,8 @@ def record_generation(
       - la latence précise de l'appel
       - l'usage tokens (prompt_tokens / completion_tokens) → coût
       - les erreurs API (rate limit / timeout / …)
+      - depuis le LLM Gateway : profile/provider/attempt/fallback/structured
+        validity — voir `graphs/agents/market_coach/llm_gateway/gateway.py`.
     Défensif : n'échoue jamais, quel que soit l'état des backends.
     """
     status = "error" if error else "success"
@@ -316,6 +343,12 @@ def record_generation(
                 _metric("llm_tokens").labels(model=model, kind="completion").inc(
                     completion_tokens
                 )
+        if fallback_from and _metric("llm_fallback"):
+            _metric("llm_fallback").labels(
+                profile=profile or "unknown",
+                provider=provider or "unknown",
+                reason=fallback_reason or "unknown",
+            ).inc()
     except Exception:
         pass
 
@@ -327,12 +360,32 @@ def record_generation(
         if trace_id:
             _ensure_langfuse_trace(trace_id)
         meta = _current_trace_meta.get() or {}
+        gen_metadata: Dict[str, Any] = {
+            "goal": meta.get("goal"),
+            "latency_s": round(latency_s, 3),
+        }
+        # N'ajouter les champs Gateway QUE quand fournis — garde les
+        # Generations des 2 sites d'appel historiques (get_llm.py) inchangées.
+        for key, value in (
+            ("profile", profile),
+            ("provider", provider),
+            ("attempt", attempt),
+            ("fallback_from", fallback_from),
+            ("fallback_reason", fallback_reason),
+            ("structured_output_required", structured_output_required),
+            ("structured_output_valid", structured_output_valid),
+            ("agent_node", agent_node),
+            ("request_id", request_id),
+        ):
+            if value is not None:
+                gen_metadata[key] = value
+
         gen_kwargs: Dict[str, Any] = {
             "name": name,
             "model": model,
             "input": messages,
             "output": output,
-            "metadata": {"goal": meta.get("goal"), "latency_s": round(latency_s, 3)},
+            "metadata": gen_metadata,
             "usage": {
                 "input": prompt_tokens or None,
                 "output": completion_tokens or None,
@@ -347,6 +400,199 @@ def record_generation(
         _langfuse_client.generation(**gen_kwargs)
     except Exception as exc:
         logger.debug("[telemetry] record_generation langfuse échoué: %s", exc)
+
+
+def record_state_transition(
+    *,
+    previous_interaction: Optional[str],
+    input_event: Optional[str],
+    interpretation: Optional[str],
+    unknown_reason: Optional[str],
+    action: Optional[str],
+    next_interaction: Optional[str],
+    outcome: Optional[str],
+    goal: Optional[str] = None,
+) -> None:
+    """Événement `CONVERSATION_STATE_TRANSITION` (refonte 2026-09-02, mandat
+    §35) — un événement Langfuse PAR TOUR, rattaché à la Trace du trace_id
+    courant, capturant exactement les 6 champs minimum demandés : interaction
+    précédente/suivante, message interprété, action, issue. Aucune donnée
+    utilisateur brute (texte du message, téléphone) — uniquement les
+    DISCRIMINANTS (kinds/goals/strategies), déjà non sensibles par nature.
+    Même discipline défensive que `record_generation` : ne casse jamais le
+    tour si Langfuse est absent/indisponible.
+    """
+    if _langfuse_client is None:
+        return
+    trace_id = _current_trace_id.get()
+    try:
+        if trace_id:
+            _ensure_langfuse_trace(trace_id)
+        kwargs: Dict[str, Any] = {
+            "name": "CONVERSATION_STATE_TRANSITION",
+            "input": {
+                "previous_interaction": previous_interaction,
+                "event": input_event,
+                "interpretation": interpretation,
+                "unknown_reason": unknown_reason,
+                "goal": goal,
+            },
+            "output": {
+                "action": action,
+                "next_interaction": next_interaction,
+                "outcome": outcome,
+            },
+        }
+        if trace_id:
+            kwargs["trace_id"] = trace_id
+        _langfuse_client.event(**kwargs)
+    except Exception as exc:
+        logger.debug("[telemetry] record_state_transition échoué: %s", exc)
+
+
+def record_procurement_transaction_event(
+    *,
+    event_id: str,
+    conversation_id: Optional[str],
+    message_id: Optional[str] = None,
+    draft_id: Optional[str],
+    draft_version_before: Optional[int],
+    draft_version_after: Optional[int],
+    pending_kind: Optional[str],
+    confirmation_target: Optional[Dict[str, Any]],
+    interpreter_event: Optional[str],
+    domain_action: Optional[str],
+    state_before: Optional[str],
+    state_after: Optional[str],
+    execution_key: Optional[str] = None,
+    external_request_id: Optional[str] = None,
+    mcp_status: Optional[str] = None,
+    execution_result: Optional[str] = None,
+    payment_status: Optional[str] = None,
+    outcome: str,
+    error: Optional[str] = None,
+) -> None:
+    """Événement `PROCUREMENT_TRANSACTION_STEP` — un événement Langfuse PAR
+    APPEL à `apply_domain_action`/`finalize_after_execution`, rattaché à la
+    Trace du `trace_id` courant (2026-09-03, clôture de l'observabilité
+    corrélée demandée : remplace/complète le `logger.info("PROCUREMENT_TRACE"...)`
+    qui n'était PAS de l'instrumentation Langfuse — un `logger.info` reste
+    utile pour le grep local, mais ce n'est PAS ce que ce mandat exige).
+
+    Mêmes garanties que `record_state_transition` (précédent direct, mandat
+    §35) : même client, même mécanisme de Trace, même discipline défensive
+    (`_langfuse_client is None` → no-op, `except Exception` → jamais un tour
+    cassé par une panne d'observabilité). Capture exactement les champs
+    requis : identité de l'événement/conversation/message, identité et
+    version du draft (avant/après), interaction en attente et cible de
+    confirmation, action métier décidée, statut transactionnel avant/après,
+    clé d'idempotence d'exécution et référence externe MCP le cas échéant,
+    issue et erreur. AUCUNE donnée utilisateur brute (texte, téléphone) —
+    uniquement des discriminants, comme `record_state_transition`.
+
+    `payment_status` (2026-09-03, clôture escrow/IPN PREORDER) : optionnel,
+    réutilise ce MÊME événement plutôt que d'en créer un nouveau pour la
+    couche paiement — porte le statut Paydunya déjà adapté par
+    `adapt_payment_outcome` (jamais relu ici, uniquement journalisé) quand
+    l'appelant est `flows/buyer/preorder_payment.py`. `None` pour les
+    appelants PROCUREMENT existants (rétrocompatible)."""
+    if _langfuse_client is None:
+        return
+    trace_id = _current_trace_id.get()
+    try:
+        if trace_id:
+            _ensure_langfuse_trace(trace_id)
+        kwargs: Dict[str, Any] = {
+            "name": "PROCUREMENT_TRANSACTION_STEP",
+            "input": {
+                "event_id": event_id,
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+                "draft_id": draft_id,
+                "draft_version_before": draft_version_before,
+                "pending_kind": pending_kind,
+                "confirmation_target": confirmation_target,
+                "interpreter_event": interpreter_event,
+                "state_before": state_before,
+            },
+            "output": {
+                "domain_action": domain_action,
+                "draft_version_after": draft_version_after,
+                "state_after": state_after,
+                "execution_key": execution_key,
+                "external_request_id": external_request_id,
+                "mcp_status": mcp_status,
+                "execution_result": execution_result,
+                "payment_status": payment_status,
+                "outcome": outcome,
+                "error": error,
+            },
+        }
+        if trace_id:
+            kwargs["trace_id"] = trace_id
+        _langfuse_client.event(**kwargs)
+    except Exception as exc:
+        logger.debug("[telemetry] record_procurement_transaction_event échoué: %s", exc)
+
+
+def record_procurement_reconciliation_event(
+    *,
+    event_name: str,
+    draft_id: str,
+    draft_version: Optional[int],
+    execution_key: Optional[str],
+    state_before: Optional[str],
+    state_after: Optional[str],
+    reconciliation_reason: str,
+    external_lookup: Optional[str],
+    external_result: Optional[Any] = None,
+    attempt: Optional[int] = None,
+    outcome: str,
+) -> None:
+    """Événement Langfuse dédié à la RÉCONCILIATION (mandat recovery phase
+    1/6, distinct de `record_procurement_transaction_event` — un tour
+    utilisateur normal n'est PAS une réconciliation, et un worker de fond
+    n'a pas de `trace_id` de tour à rattacher, donc pas de
+    `conversation_id`/`message_id` significatifs ici). `event_name` porte
+    le type d'événement demandé (`STALE_EXECUTING_DETECTED`,
+    `RECONCILIATION_FOUND_EXTERNAL_EFFECT`, `RECONCILIATION_RETRY`,
+    `RECONCILIATION_UNKNOWN`...) plutôt qu'un nom fixe — chaque appel
+    produit un événement Langfuse nommément identifiable, pas une trace
+    générique à décoder après coup. Même discipline défensive que les
+    autres fonctions de ce module (no-op si Langfuse absent, jamais un
+    crash du worker de réconciliation pour une panne d'observabilité)."""
+    if _langfuse_client is None:
+        return
+    try:
+        _langfuse_client.event(
+            name=event_name,
+            input={
+                "draft_id": draft_id,
+                "draft_version": draft_version,
+                "execution_key": execution_key,
+                "state_before": state_before,
+                "reconciliation_reason": reconciliation_reason,
+                "attempt": attempt,
+            },
+            output={
+                "state_after": state_after,
+                "external_lookup": external_lookup,
+                "external_result": external_result,
+                "outcome": outcome,
+            },
+        )
+    except Exception as exc:
+        logger.debug("[telemetry] record_procurement_reconciliation_event échoué: %s", exc)
+
+
+def record_circuit_open(provider: str, model: str) -> None:
+    """Métrique dédiée (§24) — appelée par le LLM Gateway à chaque ouverture
+    RÉELLE du disjoncteur (pas à chaque échec pendant qu'il est déjà ouvert)."""
+    try:
+        if _metric("llm_circuit_open"):
+            _metric("llm_circuit_open").labels(provider=provider, model=model).inc()
+    except Exception:
+        pass
 
 
 def flush() -> None:
@@ -403,6 +649,10 @@ __all__ = [
     "set_trace_context",
     "get_trace_id",
     "record_generation",
+    "record_state_transition",
+    "record_procurement_transaction_event",
+    "record_procurement_reconciliation_event",
+    "record_circuit_open",
     "observe_http",
     "count_webhook",
     "prometheus_asgi_response",

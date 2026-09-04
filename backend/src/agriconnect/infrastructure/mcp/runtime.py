@@ -41,6 +41,8 @@ from agriconnect.infrastructure.mcp.security import (
 )
 from agriconnect.infrastructure.mcp.utils import mask_log_args, run_coro_blocking
 from agriconnect.services.database import AgriDatabaseService
+from agriconnect.services.database import mcp_idempotency_store
+from agriconnect.services.database.mcp_idempotency_store import IdempotencyOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -320,6 +322,19 @@ class AgriDBMCPServer:
 
         return tools
 
+    @staticmethod
+    def list_tools_by_name(name: str) -> dict:
+        """Descripteur d'un seul outil (sous-ensemble de ``list_tools()``).
+
+        Utilisé par le serveur stdio (``protocols/mcp/servers/db_server.py``)
+        pour peupler la description des Resources MCP — sans devoir relister
+        et filtrer l'intégralité du catalogue à chaque appel.
+        """
+        for tool in AgriDBMCPServer.list_tools():
+            if tool["name"] == name:
+                return tool
+        return {}
+
     async def call_tool(self, name: str, arguments: dict | None = None, **kwargs):
         """Backend tool execution: context → scope check → preflight → execute → audit."""
         full_args = {**(arguments or {}), **kwargs}
@@ -359,21 +374,99 @@ class AgriDBMCPServer:
             # inconditionnellement pour ne jamais faire planter un tool dont la
             # signature ne l'accepte pas (ex: add_stock(farm_id, item_name, ...)).
             sanitized_args.pop("_caller_phone", None)
+            # `_idempotency_key` (AgriMCPClient.call_tool, audit MCP/AGUI
+            # 2026-08-27 ; RÉELLEMENT appliquée depuis 2026-09-03, mandat
+            # phase 2 — voir services/database/mcp_idempotency_store.py pour
+            # le mécanisme et sa limite honnête) : retirée des arguments
+            # transmis au handler (aucun n'a de paramètre pour la recevoir),
+            # mais désormais utilisée AVANT dispatch pour dédupliquer/rejouer.
+            idempotency_key = sanitized_args.pop("_idempotency_key", None)
+
+            claim_result = None
+            request_hash = None
+            if idempotency_key:
+                request_hash = mcp_idempotency_store.compute_request_hash(sanitized_args)
+                claim_result = await mcp_idempotency_store.claim(
+                    idempotency_key, name, request_hash
+                )
+                if claim_result.outcome is IdempotencyOutcome.REPLAY:
+                    logger.info(
+                        "MCP_IDEMPOTENCY_REPLAY | tool=%s | key=%s",
+                        name,
+                        idempotency_key,
+                    )
+                    return claim_result.stored_result
+                if claim_result.outcome is IdempotencyOutcome.CONFLICT:
+                    logger.warning(
+                        "MCP_IDEMPOTENCY_CONFLICT | tool=%s | key=%s",
+                        name,
+                        idempotency_key,
+                    )
+                    raise RuntimeError(
+                        f"idempotency_conflict: la clé '{idempotency_key}' a déjà "
+                        f"été utilisée avec un payload différent pour l'outil "
+                        f"'{name}'."
+                    )
+                if claim_result.outcome is IdempotencyOutcome.IN_PROGRESS:
+                    logger.warning(
+                        "MCP_IDEMPOTENCY_IN_PROGRESS | tool=%s | key=%s",
+                        name,
+                        idempotency_key,
+                    )
+                    raise RuntimeError(
+                        f"idempotency_in_progress: une tentative (temporary) est "
+                        f"déjà en cours pour la clé '{idempotency_key}' sur "
+                        f"l'outil '{name}'."
+                    )
+                # CLAIMED ou UNAVAILABLE : on procède à l'exécution. UNAVAILABLE
+                # (DB de dédup injoignable) N'EST PAS traité comme un blocage —
+                # même discipline "best-effort, jamais un tour cassé" que le
+                # reste de ce chantier ; journalisé bruyamment, la garantie de
+                # dédup est simplement absente pour CETTE tentative.
+                if claim_result.outcome is IdempotencyOutcome.UNAVAILABLE:
+                    logger.error(
+                        "MCP_IDEMPOTENCY_STORE_UNAVAILABLE | tool=%s | key=%s | "
+                        "DEGRADED: aucune garantie de dédup pour cette tentative",
+                        name,
+                        idempotency_key,
+                    )
 
             # 3. Preflight security scan
             await self._run_preflight(name, sanitized_args)
 
             # 4. Execute under policy (timeout / audit envelope)
             fn = self._resolve_tool_fn(name)
-            envelope = await policy.execute(
-                name,
-                fn,
-                sanitized_args,
-                user_id=context_identity.user_id,
-                request_id=str(uuid.uuid4()),
-            )
+            try:
+                envelope = await policy.execute(
+                    name,
+                    fn,
+                    sanitized_args,
+                    user_id=context_identity.user_id,
+                    request_id=str(uuid.uuid4()),
+                )
+            except Exception as exc:
+                if idempotency_key and claim_result is not None and claim_result.outcome is IdempotencyOutcome.CLAIMED:
+                    # Échec CONFIRMÉ (l'exception vient de `fn`/`policy.execute`,
+                    # pas de notre propre code ci-dessus) — retry légitime sous
+                    # la MÊME clé, voir `mcp_idempotency_store.claim` branche
+                    # FAILED. LIMITE HONNÊTE (pas un vrai "aucun effet externe"
+                    # universel) : cette hypothèse est correcte pour les
+                    # handlers de CE repo qui valident/résolvent AVANT toute
+                    # écriture risquée (ex: `create_auction` résout le profil
+                    # acheteur avant de créer la ligne `Auction` — vérifié) ;
+                    # elle serait FAUSSE pour un handler qui écrirait puis
+                    # lèverait ensuite (ex: notification post-écriture en
+                    # échec). Un crash RÉEL du process (pas une exception
+                    # attrapée ici) ne passe PAS par cette branche — la ligne
+                    # reste PENDING, gérée par la réconciliation domaine
+                    # (mandat phase 1), pas par cette table seule.
+                    await mcp_idempotency_store.fail(idempotency_key, name, str(exc))
+                raise
+            result_data = envelope.get("data", envelope)
+            if idempotency_key and claim_result is not None and claim_result.outcome is IdempotencyOutcome.CLAIMED:
+                await mcp_idempotency_store.complete(idempotency_key, name, result_data)
             await self._persist_audit(name, sanitized_args, "ALLOW", None)
-            return envelope.get("data", envelope)
+            return result_data
 
     async def _run_preflight(self, tool_name: str, sanitized_args: dict) -> None:
         try:

@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from agriconnect.core.location import LocationOutcome
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
@@ -87,9 +88,18 @@ async def enter_gps_stage(mc_runtime: MarketRuntime, phone: str) -> Dict[str, An
 @dataclass
 class GpsResolution:
     """Résultat d'un tour pendant l'étape GPS : soit un point résolu (prêt à
-    exécuter l'opération), soit un message à afficher en attendant mieux."""
+    exécuter l'opération), soit un message à afficher en attendant mieux.
+
+    `outcome` (2026-09-02, refonte GPS) est le contrat canonique — voir
+    `core/location.py::LocationOutcome`. `resolved` reste un booléen dérivé
+    (`outcome == NEW_LOCATION_ACCEPTED`) pour compatibilité descendante avec
+    les 2 appelants existants (`preorder.py`, `order_tracking.py`), qui ne
+    lisent que ce champ aujourd'hui — jamais un repli implicite : si un
+    appelant a besoin de distinguer un rejet géographique d'une erreur
+    technique, il lit `outcome` directement."""
 
     resolved: bool
+    outcome: LocationOutcome = LocationOutcome.NO_LOCATION
     lat: Optional[float] = None
     lon: Optional[float] = None
     message: Optional[str] = None
@@ -103,26 +113,65 @@ async def resolve_gps_stage(
     is_yes: bool,
     gps_default: Optional[Dict[str, Any]],
     user_text: str = "",
+    location_outcome: Optional[str] = None,
+    location_lat: Optional[float] = None,
+    location_lon: Optional[float] = None,
 ) -> GpsResolution:
     """Un tour PENDANT l'étape GPS (gps_stage déjà True). Résout le point de
     livraison à partir d'un partage WhatsApp natif, d'un "oui" au point par
     défaut, ou — si l'utilisateur dit autre chose — génère une réponse
     adaptée (LLM) avant de rappeler ce qui est attendu, plutôt que de
-    répéter le même texte figé quoi qu'il arrive."""
+    répéter le même texte figé quoi qu'il arrive.
+
+    `location_outcome`/`location_lat`/`location_lon` (2026-09-02) : l'issue
+    EXACTE déjà résolue côté webhook, SYNCHRONE avant l'enqueue Celery — voir
+    core/location.py. Remplace l'ancienne relecture DB
+    (`_get_stored_location`), qui pouvait courir avant l'écriture réelle
+    (BackgroundTasks vs tâche Celery déjà enqueuée) et produisait un message
+    ambigu ("je n'ai pas pu récupérer ce point") aussi bien pour une vraie
+    erreur technique que pour un rejet géographique — jamais de repli
+    silencieux sur une ancienne position stockée dans les deux cas."""
     if location_shared:
-        # Le webhook a déjà persisté ce point (best-effort, tâche de fond,
-        # voir api/routes/twilio_webhook.py::_persist_location_background) —
-        # on relit la position COURANTE du profil plutôt que de faire
-        # transiter lat/lon dans le state du graphe.
-        lat, lon = await _get_stored_location(mc_runtime, phone)
-        if lat is None or lon is None:
-            # Filet de sécurité : improbable (le webhook vient de l'écrire),
-            # mais ne doit jamais planter l'opération.
+        try:
+            outcome = LocationOutcome(location_outcome or "")
+        except ValueError:
+            outcome = LocationOutcome.LOCATION_PERSISTENCE_ERROR
+
+        if outcome == LocationOutcome.NEW_LOCATION_ACCEPTED and (
+            location_lat is not None and location_lon is not None
+        ):
+            return GpsResolution(
+                resolved=True,
+                outcome=outcome,
+                lat=location_lat,
+                lon=location_lon,
+            )
+
+        if outcome == LocationOutcome.LOCATION_OUT_OF_ZONE:
+            # Jamais de repli silencieux sur une ancienne position stockée —
+            # le rejet est explicite, l'utilisateur DOIT en être informé
+            # (le webhook a déjà envoyé OUT_OF_COUNTRY_MESSAGE en parallèle,
+            # ce message-ci ré-ancre la conversation sur l'étape GPS).
             return GpsResolution(
                 resolved=False,
-                message="Je n'ai pas pu récupérer ce point GPS, merci de le repartager.",
+                outcome=outcome,
+                message=(
+                    "Ce point est hors de notre zone de livraison — "
+                    "partage une position à l'intérieur du Burkina Faso."
+                ),
             )
-        return GpsResolution(resolved=True, lat=lat, lon=lon)
+
+        # Erreur de persistance (infra) — distincte d'un rejet géographique :
+        # jamais présentée comme "je n'ai pas compris ta position" (message
+        # trompeur), ni comblée silencieusement par une ancienne position.
+        return GpsResolution(
+            resolved=False,
+            outcome=LocationOutcome.LOCATION_PERSISTENCE_ERROR,
+            message=(
+                "Un souci technique a empêché l'enregistrement de ce point "
+                "GPS. Peux-tu le repartager ?"
+            ),
+        )
 
     if is_yes:
         default = gps_default or {}
@@ -130,15 +179,29 @@ async def resolve_gps_stage(
         if lat is None or lon is None:
             # "oui" sans point par défaut connu (désynchro d'état) → redemander
             # explicitement le partage.
-            return GpsResolution(resolved=False, message=_GPS_FIRST_TIME_PROMPT)
-        return GpsResolution(resolved=True, lat=lat, lon=lon)
+            return GpsResolution(
+                resolved=False,
+                outcome=LocationOutcome.NO_LOCATION,
+                message=_GPS_FIRST_TIME_PROMPT,
+            )
+        return GpsResolution(
+            resolved=True,
+            outcome=LocationOutcome.NEW_LOCATION_ACCEPTED,
+            lat=lat,
+            lon=lon,
+        )
 
     # Texte libre (ni "oui", ni position partagée) : reconnaître ce qui a été
     # dit avant de rappeler le bouton GPS, au lieu du même rappel figé en
     # boucle — voir [[precommande-architecture-consolidation-2026-08]].
+    # Aucun parseur de texte/URL n'existe (mandat §29 — décision de périmètre
+    # séparée) : un lien Google Maps collé ici est traité comme un texte
+    # libre quelconque, jamais silencieusement ignoré ni faussement accepté.
     note = await llm_deviation_reply(mc_runtime, user_text, _GPS_STAGE_CONTEXT)
     message = f"{note}\n\n{_GPS_TEXT_REMINDER}" if note else _GPS_TEXT_REMINDER
-    return GpsResolution(resolved=False, message=message)
+    return GpsResolution(
+        resolved=False, outcome=LocationOutcome.LOCATION_PARSE_ERROR, message=message
+    )
 
 
 __all__ = [

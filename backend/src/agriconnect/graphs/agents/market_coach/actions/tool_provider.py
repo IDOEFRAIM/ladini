@@ -10,7 +10,7 @@ existing ``MarketRuntime.call_db`` API to preserve behaviour.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Protocol, runtime_checkable
+from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -22,9 +22,18 @@ class ToolProvider(Protocol):
     """
 
     async def execute(
-        self, tool_name: str, args: Dict[str, Any]
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        *,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:  # pragma: no cover - interface
-        """Execute *tool_name* with *args* and return a JSON-like result."""
+        """Execute *tool_name* with *args* and return a JSON-like result.
+
+        `idempotency_key` (2026-09-03, mandat §8) : optionnel, identifie la
+        tentative logique côté appelant (ex: draft procurement versionné) —
+        voir `MarketRuntime.call_db` pour la portée exacte de ce que ça
+        garantit (corrélation + retry interne, PAS de dédup serveur)."""
 
 
 @dataclass
@@ -38,9 +47,17 @@ class MCPToolProvider:
 
     runtime: Any
 
-    async def execute(self, tool_name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        *,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
         # MarketRuntime.call_db already returns a JSON-like structure.
-        return await self.runtime.call_db(tool_name, **args)
+        return await self.runtime.call_db(
+            tool_name, idempotency_key=idempotency_key, **args
+        )
 
 
 __all__ = ["ToolProvider", "MCPToolProvider"]

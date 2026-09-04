@@ -164,9 +164,28 @@ class AgriDatabaseService(
             PERFORMANCE_INDEX_DDL,
             SCHEMA_COLUMN_DDL,
         )
+        from agriconnect.services.database.procurement_draft_store import (
+            PROCUREMENT_DRAFT_SCHEMA_DDL,
+        )
+        from agriconnect.services.database.mcp_idempotency_store import (
+            MCP_IDEMPOTENCY_SCHEMA_DDL,
+        )
+        from agriconnect.services.database.preorder_draft_store import (
+            PREORDER_DRAFT_SCHEMA_DDL,
+        )
+        from agriconnect.services.database.sales_publish_draft_store import (
+            SALES_PUBLISH_DRAFT_SCHEMA_DDL,
+        )
 
         async def _logic(sess: AsyncSession):
-            for ddl in (*PERFORMANCE_INDEX_DDL, *SCHEMA_COLUMN_DDL):
+            for ddl in (
+                *PERFORMANCE_INDEX_DDL,
+                *SCHEMA_COLUMN_DDL,
+                *PROCUREMENT_DRAFT_SCHEMA_DDL,
+                *MCP_IDEMPOTENCY_SCHEMA_DDL,
+                *PREORDER_DRAFT_SCHEMA_DDL,
+                *SALES_PUBLISH_DRAFT_SCHEMA_DDL,
+            ):
                 try:
                     async with sess.begin_nested():
                         await sess.execute(text(ddl))

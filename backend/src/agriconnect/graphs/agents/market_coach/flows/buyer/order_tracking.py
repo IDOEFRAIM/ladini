@@ -24,6 +24,10 @@ from agriconnect.core.formatting import fmt_num as _fmt_num
 # 2026-07-21 (resolve_own_auctions absorbé par list_buyer_auctions, strict
 # superset : tous statuts + compte d'offres + sélection → check_auction_status
 # /finalize_winner). Voir [[market-coach-turn-boundary-state]].
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    set_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.core.goals import (
     BUYER_AUCTION_TRACKING_GOALS as AUCTION_TRACKING_GOALS,
 )
@@ -49,8 +53,12 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_text import (
     render_quick_actions,
     render_selection_prompt,
 )
+from agriconnect.graphs.agents.market_coach.services.mcp.error_translation import (
+    BUSINESS_ERROR_CODE,
+)
 from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
     AuctionGateway,
+    MCPCallError,
     OrderTrackingGateway,
 )
 from agriconnect.graphs.agents.market_coach.utils import (
@@ -268,7 +276,7 @@ async def list_orders(
 
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "response_strategy": "SELECTION_MENU",
         "final_response": menu_text + render_selection_prompt(noun="commande"),
         "available_mapping": mapping,
@@ -451,7 +459,7 @@ async def cancel_order(
     if not order_id:
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "ORDER_ID",
+            **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="order_id"),
             "response_strategy": "ASK_MISSING_FIELD",
             "final_response": (
                 "Quelle commande souhaitez-vous annuler ?\n\n"
@@ -467,7 +475,7 @@ async def cancel_order(
     if cancel_reason in (None, "", [], {}):
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "CANCELLATION_REASON",
+            **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="cancellation_reason"),
             "response_strategy": "ASK_MISSING_FIELD",
             "final_response": (
                 "Pour annuler cette commande, merci d'indiquer la raison.\n"
@@ -644,7 +652,7 @@ async def list_buyer_auctions(
 
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "response_strategy": "SELECTION_MENU",
         "final_response": menu_text,
         "available_mapping": mapping,
@@ -684,7 +692,7 @@ async def check_auction_status(
     if not auction_id:
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "SELECTION",
+            **set_pending_interaction(InteractionKind.SELECTION_MENU),
             "response_strategy": "ASK_MISSING_FIELD",
             "final_response": (
                 "Quel appel d'offres souhaitez-vous consulter ?\n"
@@ -777,7 +785,7 @@ async def check_auction_status(
 
             return {
                 "status": "WAITING_INPUT",
-                "expected_input": "SELECTION",
+                **set_pending_interaction(InteractionKind.SELECTION_MENU),
                 "response_strategy": "SELECTION_MENU",
                 "final_response": "\n".join(lines),
                 "available_mapping": mapping,
@@ -856,6 +864,41 @@ def _selection_index(state: Dict[str, Any]) -> Optional[int]:
         return None
 
 
+async def _fetch_winner_recap(
+    mc_runtime: MarketRuntime, auction_id: Optional[str], bid_id: str, phone: str
+) -> Dict[str, Any]:
+    """Projette le récap "vous allez retenir X" depuis l'état RÉEL de
+    l'offre, jamais depuis un texte mis en cache (2026-09-04, correctif
+    stale recap). SEULE fonction qui sait construire ce récap — utilisée à
+    la fois pour l'affichage initial (`confirm_winner_selection`) et pour
+    la revalidation juste avant exécution (`_execute_winner_selection`) :
+    un seul point de vérité, jamais deux implémentations qui pourraient
+    diverger."""
+    producer = "ce producteur"
+    price = None
+    product = "votre produit"
+    bid_status: Optional[str] = None
+    if auction_id:
+        gw = AuctionGateway(mc_runtime)
+        try:
+            detail = await gw.get_auction_bids(auction_id=str(auction_id), phone=phone)
+            product = (detail.get("auction") or {}).get("product") or product
+            for b in detail.get("bids") or []:
+                if str(b.get("bid_id") or b.get("id")) == str(bid_id):
+                    producer = b.get("producer") or b.get("producer_name") or producer
+                    price = b.get("price") or b.get("offered_price")
+                    bid_status = str(b.get("status") or "").upper() or None
+                    break
+        except Exception as exc:
+            logger.warning("_fetch_winner_recap: refetch failed: %s", exc)
+    return {
+        "producer": producer,
+        "price": price,
+        "product": product,
+        "bid_status": bid_status,
+    }
+
+
 async def confirm_winner_selection(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
@@ -875,44 +918,38 @@ async def confirm_winner_selection(
     if not bid_id:
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "SELECTION",
+            **set_pending_interaction(InteractionKind.SELECTION_MENU),
             "response_strategy": "ASK_MISSING_FIELD",
             "final_response": "Indiquez le *numéro* de la proposition à retenir (ex: 1).",
             "ag_ui_component": None,
         }
 
-    # Récap : re-fetch des offres pour retrouver producteur + prix de l'offre choisie.
-    producer = "ce producteur"
-    price_txt = ""
-    product = "votre produit"
-    if auction_id:
-        gw = AuctionGateway(mc_runtime)
-        try:
-            detail = await gw.get_auction_bids(
-                auction_id=str(auction_id), phone=str(state.get("user_phone") or "")
-            )
-            product = (detail.get("auction") or {}).get("product") or product
-            for b in detail.get("bids") or []:
-                if str(b.get("bid_id") or b.get("id")) == str(bid_id):
-                    producer = b.get("producer") or b.get("producer_name") or producer
-                    price = b.get("price") or b.get("offered_price")
-                    if price is not None:
-                        price_txt = f" à *{_fmt_num(price)} FCFA*"
-                    break
-        except Exception as exc:
-            logger.warning("confirm_winner_selection: refetch failed: %s", exc)
+    recap = await _fetch_winner_recap(
+        mc_runtime, auction_id, str(bid_id), str(state.get("user_phone") or "")
+    )
+    price_txt = (
+        f" à *{_fmt_num(recap['price'])} FCFA*" if recap["price"] is not None else ""
+    )
 
     wm = dict(working)
     wm["available_mapping_kind"] = "confirm_winner"
     wm["pending_winner_bid"] = str(bid_id)
+    # (2026-09-04, correctif stale recap) : le prix EFFECTIVEMENT montré à
+    # l'acheteur devient la cible de confirmation — pas juste un texte,
+    # une VALEUR comparable. `_execute_winner_selection` la revalide contre
+    # l'état réel juste avant d'exécuter (voir sa docstring) : c'est CETTE
+    # comparaison, pas un `refresh_confirmation()` cosmétique, qui ferme
+    # la fenêtre de péremption autour de l'étape GPS.
+    wm["pending_winner_price"] = recap["price"]
 
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "CONFIRMATION",
+        **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
         "response_strategy": "ASK_MISSING_FIELD",
         "current_goal": "BUYER_CHECK_AUCTION_STATUS",
         "final_response": (
-            f"🤝 Vous allez retenir la proposition de *{producer}*{price_txt} pour *{product}*.\n\n"
+            f"🤝 Vous allez retenir la proposition de *{recap['producer']}*{price_txt} "
+            f"pour *{recap['product']}*.\n\n"
             "⚠️ Cette action *clôture l'appel d'offres* et crée la commande.\n"
             "👉 Répondez *oui* pour confirmer, ou *non* pour annuler."
         ),
@@ -928,7 +965,67 @@ async def _execute_winner_selection(
     clear_wm: "Callable[[], Dict[str, Any]]",
     delivery_lat: Optional[float] = None,
     delivery_lon: Optional[float] = None,
+    auction_id: Optional[str] = None,
+    expected_price: Optional[float] = None,
 ) -> Dict[str, Any]:
+    """Exécute la sélection — MAIS revalide d'abord contre l'état RÉEL
+    (2026-09-04, correctif stale recap).
+
+    Entre le "oui" de l'acheteur (`confirm_winner_selection`, où
+    `expected_price` a été capturé) et cet appel, une étape GPS s'intercale
+    (1+ tour conversationnel). Le producteur reste libre de modifier son
+    prix ou de retirer son offre PENDANT cette fenêtre (`Bid` n'est
+    verrouillé/figé qu'au moment de `select_winning_bid` lui-même — aucune
+    nouvelle table/Draft introduite pour "geler" plus tôt, voir le rapport
+    d'audit). La BASE reste toujours cohérente dans tous les cas (le verrou
+    de `select_winning_bid` garantit qu'elle utilise TOUJOURS le prix
+    réellement courant) — ce qui manquait, c'est que le RÉCAP déjà montré à
+    l'acheteur pouvait diverger silencieusement de ce qui allait réellement
+    s'exécuter. On revalide donc ICI, juste avant d'exécuter : si le prix a
+    changé ou que l'offre n'est plus sélectionnable, on n'exécute JAMAIS
+    silencieusement sur l'ancienne valeur — on reconstruit le récap à
+    partir de `_fetch_winner_recap` (LA même projection que l'affichage
+    initial, jamais un second calcul divergent) et on redemande une
+    confirmation EXPLICITE sur l'état actuel."""
+    if auction_id and expected_price is not None:
+        recap = await _fetch_winner_recap(
+            mc_runtime, auction_id, str(bid_id), str(state.get("user_phone") or "")
+        )
+        current_status = recap["bid_status"]
+        current_price = recap["price"]
+
+        if current_status is not None and current_status != "PENDING":
+            return {
+                "status": "COMPLETED",
+                "response_strategy": "ERROR",
+                "final_response": (
+                    "⚠️ Cette proposition n'est plus disponible (retirée ou déjà "
+                    "traitée entre-temps). Tapez *mes appels d'offres* pour revoir "
+                    "les offres actuelles."
+                ),
+                "working_memory": clear_wm(),
+                "ag_ui_component": None,
+            }
+
+        if current_price is not None and float(current_price) != float(expected_price):
+            wm = dict(state.get("working_memory") or {})
+            wm["pending_winner_bid"] = str(bid_id)
+            wm["pending_winner_price"] = current_price
+            wm["winner_gps_stage"] = None
+            wm["winner_gps_default"] = None
+            return {
+                "status": "WAITING_INPUT",
+                **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
+                "response_strategy": "ASK_MISSING_FIELD",
+                "final_response": (
+                    f"⚠️ Le prix de cette offre a changé entre-temps : il est "
+                    f"maintenant *{_fmt_num(current_price)} FCFA*.\n\n"
+                    "👉 Répondez *oui* pour confirmer à ce nouveau prix, ou *non* pour annuler."
+                ),
+                "working_memory": wm,
+                "ag_ui_component": None,
+            }
+
     gw = AuctionGateway(mc_runtime)
     try:
         result = await gw.select_winning_bid(
@@ -937,6 +1034,28 @@ async def _execute_winner_selection(
             delivery_lat=delivery_lat,
             delivery_lon=delivery_lon,
         )
+    except MCPCallError as exc:
+        # (2026-09-02, taxonomie d'erreurs) : un BUSINESS_ERROR_CODE (ex:
+        # BusinessRuleException "hors du Burkina Faso" levée par
+        # services/database/auction.py::select_winning_bid, geofencing en
+        # défense en profondeur) porte un message déjà traduit et
+        # actionnable (error_translation.py) — ne JAMAIS le remplacer par le
+        # générique "réessayez", qui laisse croire qu'un nouvel essai
+        # pourrait suffire alors que la cause ne changera pas. Réservé aux
+        # VRAIES pannes techniques (INFRA_ERROR_CODE).
+        logger.warning("finalize_winner: select_winning_bid rejeté: %s", exc)
+        is_business = exc.error_code == BUSINESS_ERROR_CODE
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "ERROR",
+            "final_response": (
+                str(exc)
+                if is_business
+                else "Impossible de valider le gagnant pour le moment. Réessayez dans un instant."
+            ),
+            "working_memory": clear_wm(),
+            "ag_ui_component": None,
+        }
     except Exception as exc:
         logger.exception("finalize_winner: select_winning_bid failed: %s", exc)
         return {
@@ -996,6 +1115,7 @@ async def finalize_winner(
         for k in (
             "available_mapping_kind",
             "pending_winner_bid",
+            "pending_winner_price",
             "winner_auction_id",
             "winner_gps_stage",
             "winner_gps_default",
@@ -1034,7 +1154,7 @@ async def finalize_winner(
             prompt = "Répondez *oui* pour confirmer le gagnant, ou *non* pour annuler."
             return {
                 "status": "WAITING_INPUT",
-                "expected_input": "CONFIRMATION",
+                **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
                 "response_strategy": "ASK_MISSING_FIELD",
                 "final_response": f"{note}\n\n{prompt}" if note else prompt,
                 "ag_ui_component": None,
@@ -1049,7 +1169,9 @@ async def finalize_winner(
         wm["winner_gps_default"] = gate["gps_default"]
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "CONFIRMATION",
+            # (2026-09-02, validation réelle) : PROVIDE_LOCATION, pas
+            # CONFIRM_ACTION — voir le commentaire jumeau dans preorder.py.
+            **set_pending_interaction(InteractionKind.PROVIDE_LOCATION, context_ref="confirmation"),
             "response_strategy": "ASK_MISSING_FIELD",
             "final_response": gate["prompt"],
             "working_memory": wm,
@@ -1064,6 +1186,9 @@ async def finalize_winner(
         is_yes=is_yes,
         gps_default=working.get("winner_gps_default"),
         user_text=str(state.get("normalized_text") or ""),
+        location_outcome=state.get("location_outcome"),
+        location_lat=state.get("location_lat"),
+        location_lon=state.get("location_lon"),
     )
     if resolution.resolved:
         return await _execute_winner_selection(
@@ -1073,10 +1198,12 @@ async def finalize_winner(
             _clear_wm,
             resolution.lat,
             resolution.lon,
+            auction_id=working.get("winner_auction_id"),
+            expected_price=working.get("pending_winner_price"),
         )
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "CONFIRMATION",
+        **set_pending_interaction(InteractionKind.PROVIDE_LOCATION, context_ref="confirmation"),
         "response_strategy": "ASK_MISSING_FIELD",
         "final_response": resolution.message,
         "ag_ui_component": None,

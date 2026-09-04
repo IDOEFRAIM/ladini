@@ -186,6 +186,7 @@ def prep_sales_publish_product(
         price=dto.price,
         description=dto.description,
         category_label=dto.category_label,
+        pricing_tiers=dto.pricing_tiers,
     )
 
     service = SalesService(context=context)
@@ -267,6 +268,7 @@ def prep_sales_update_product(
         quantity=dto.quantity,
         name=dto.name,
         unit=dto.unit,
+        pricing_tiers=dto.pricing_tiers,
     )
 
     service = SalesService(context=context)

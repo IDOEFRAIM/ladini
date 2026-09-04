@@ -1,9 +1,23 @@
+"""
+Point UNIQUE de confirmation humaine (HITL) avant toute action à risque.
+Aucun garde-fou équivalent n'existe au niveau protocolaire MCP (infrastructure/mcp/runtime.py
+applique uniquement scope + préflight SQL). Tout nouveau chemin d'appel qui BYPASSE ce nœud
+s'exécute sans validation humaine.
+"""
+
 import time
 from typing import Any, Dict, Optional
 
 from agriconnect.graphs.agents.market_coach.core.base import (
     _READ_GOALS,
     get_node_logger,
+)
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    clear_pending_interaction,
+    get_pending_interaction,
+    resolve_pending_interaction,
+    set_pending_interaction,
 )
 from agriconnect.graphs.agents.market_coach.services.ui.confirmation_summary import (
     build_confirmation_summary as _build_confirmation_summary,
@@ -13,6 +27,24 @@ from agriconnect.graphs.agents.market_coach.utils import (
 )
 
 logger = get_node_logger("ConfirmationGateNode")
+
+# (2026-09-03/04, refonte transactionnelle) : goals qui possèdent leur
+# PROPRE cycle de confirmation versionné (draft canonique + target de
+# confirmation lié à une version précise — voir domain/procurement_draft.py,
+# domain/sales_publish_draft.py) plutôt que le mécanisme générique
+# confirmation_summary/transaction_payload de ce nœud. `confirmation_gate`
+# DÉLÈGUE entièrement pour ces goals — il ne doit JAMAIS ré-interpréter un
+# état déjà tranché par une décision métier canonique (mandat §15 : le
+# routing doit être piloté par InterpreterResult + PendingInteraction +
+# DomainContext, pas par des restes d'ancien état).
+#
+# SALES_PUBLISH_PRODUCT ajouté 2026-09-04 (migration SALES, hardening
+# transverse) — audité et confirmé utiliser AVANT ce chantier exactement le
+# mécanisme générique `transaction_payload`/`confirmation_summary` que
+# cette liste existe pour remplacer (voir rapport final, section C).
+_DRAFT_BASED_CONFIRMATION_GOALS = frozenset(
+    {"PROCUREMENT_CREATE_REQUEST", "SALES_PUBLISH_PRODUCT"}
+)
 
 
 async def _llm_deviation_reply(
@@ -63,18 +95,200 @@ _CONFIRMATION_TTL_SECONDS = 600.0
 _ABANDON_PATCH: Dict[str, Any] = {
     "is_certified": False,
     "execution_authorized": False,
-    "waiting_for_confirmation": False,
     "confirmation_summary": None,
     "confirmation_raised_at": None,
     "current_goal": None,
     "transaction_payload": {"__reset__": True},
     "missing_fields": [],
     "completed_fields": [],
-    "expected_input": "NONE",
     "goal_status": "IDLE",
     "status": "COMPLETED",
     "response_strategy": None,
     "ag_ui_component": None,
+    "pending_interaction": None,
+}
+
+
+async def _resolve_draft_based_confirmation(
+    state: Dict[str, Any], mc_runtime: Any, goal: str, payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Point d'entrée pour les goals à draft canonique versionné (voir
+    `_DRAFT_BASED_CONFIRMATION_GOALS`). Deux cas :
+
+    1. Aucun `procurement_draft` encore posé — la collecte initiale des
+       champs (mécanisme générique existant : validator/ASK_MISSING_FIELD,
+       `transaction_payload`) est TOUJOURS en cours. Ce nœud ne fait rien
+       tant que `transaction_payload` ne porte pas tous les champs requis —
+       il redevient un no-op (`{}`), laissant le chemin générique gérer ce
+       tour EXACTEMENT comme avant pour cette phase (pas encore de contrat
+       transactionnel à protéger).
+    2. Dès que les champs requis sont réunis, LA PREMIÈRE version du draft
+       est créée ICI, une fois — c'est la bascule : à partir de ce tour,
+       `transaction_payload` n'est plus lu comme source de vérité pour ce
+       goal (voir `nodes/memory.py`, garde symétrique), seul le draft
+       compte. Tout tour suivant délègue entièrement à
+       `flows/buyer/procurement_confirmation.py::resolve_procurement_confirmation`
+       — LA seule autorité de mutation du draft à partir de là."""
+    from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+        ProcurementDraft,
+    )
+    from agriconnect.graphs.agents.market_coach.flows.buyer.procurement_confirmation import (
+        resolve_procurement_confirmation,
+    )
+    from agriconnect.services.database import procurement_draft_store
+
+    if state.get("procurement_draft") is not None:
+        return await resolve_procurement_confirmation(state, mc_runtime)
+
+    import uuid
+
+    candidate = ProcurementDraft.new(draft_id=uuid.uuid4().hex[:12], **payload)
+    if not candidate.is_complete():
+        # Collecte encore en cours (validateur/slot-filling générique, en
+        # amont, gère la relance) — AUCUN draft n'existe encore, donc rien
+        # à protéger transactionnellement. Mais I1/I2 (chaos suite,
+        # `tests/chaos/test_state_machine_invariants.py`) exigent qu'un
+        # `execution_authorized=True` FORGÉ en amont ne survive JAMAIS à ce
+        # nœud, même pendant cette phase — défense explicite, pas un simple
+        # no-op silencieux.
+        return {"execution_authorized": False, "is_certified": False}
+
+    # (2026-09-03, persistance transactionnelle) : la ligne PostgreSQL
+    # CANONIQUE est créée ICI, AVANT de poser le cache LangGraph — jamais
+    # l'inverse (voir procurement_confirmation.py, qui refuse de faire
+    # confiance au cache seul). Best-effort : un échec d'insertion ne
+    # bloque pas le tour (repli dégradé déjà géré côté lecture), mais est
+    # journalisé bruyamment — ce n'est PAS le chemin normal.
+    conversation_id = str(state.get("user_phone") or state.get("session_id") or "")
+    inserted = await procurement_draft_store.insert(candidate, conversation_id=conversation_id)
+    if not inserted:
+        logger.warning(
+            "[ConfirmationGate] %s : échec insertion PostgreSQL du draft v1 "
+            "(draft_id=%s) — poursuite en mode dégradé (cache LangGraph seul)",
+            goal,
+            candidate.draft_id,
+        )
+
+    logger.info(
+        "[ConfirmationGate] %s : draft v1 créé (champs réunis) — draft_id=%s",
+        goal,
+        candidate.draft_id,
+    )
+    from agriconnect.core.telemetry import record_procurement_transaction_event
+
+    record_procurement_transaction_event(
+        event_id=uuid.uuid4().hex,
+        conversation_id=conversation_id or None,
+        message_id=state.get("message_sid"),
+        draft_id=candidate.draft_id,
+        draft_version_before=None,  # aucune version antérieure — c'est la création
+        draft_version_after=candidate.version,
+        pending_kind="CONFIRM_ACTION",
+        confirmation_target={"draft_id": candidate.draft_id, "draft_version": candidate.version},
+        interpreter_event=str(state.get("interpreted_event") or "") or None,
+        domain_action="bootstrap_draft_v1",
+        state_before=None,
+        state_after=candidate.status.value,
+        outcome="DRAFT_CREATED" if inserted else "DRAFT_CREATED_DEGRADED_CACHE_ONLY",
+    )
+    return {
+        "procurement_draft": candidate.to_dict(),
+        "status": "WAITING_INPUT",
+        "response_strategy": "CONFIRMATION",
+        "final_response": f"{candidate.render_summary()}\n\nConfirmez-vous ?",
+        "ag_ui_component": None,
+        # Défense identique à la branche "collecte en cours" ci-dessus : un
+        # `execution_authorized`/`is_certified` forgé en amont ne doit
+        # JAMAIS survivre à ce nœud tant que le draft n'est pas passé par
+        # `resolve_procurement_confirmation` (seul point qui les met à True,
+        # et uniquement sur CONFIRM_ACTION résolu — voir apply_response_plan).
+        "execution_authorized": False,
+        "is_certified": False,
+        **set_pending_interaction(
+            InteractionKind.CONFIRM_ACTION,
+            context_ref="confirmation",
+            target={"draft_id": candidate.draft_id, "draft_version": candidate.version},
+        ),
+    }
+
+
+async def _resolve_sales_draft_based_confirmation(
+    state: Dict[str, Any], mc_runtime: Any, goal: str, payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Équivalent SALES de `_resolve_draft_based_confirmation` ci-dessus —
+    même structure en 2 cas (docstring identique en esprit), draft
+    `SalesPublishDraft` au lieu de `ProcurementDraft` (2026-09-04, migration
+    SALES). Fonction SÉPARÉE plutôt qu'un paramètre de classe générique sur
+    `_resolve_draft_based_confirmation` (mandat hardening : pas d'abstraction
+    prématurée pour 2 domaines — voir rapport final, section A)."""
+    from agriconnect.graphs.agents.market_coach.domain.sales_publish_draft import (
+        SalesPublishDraft,
+    )
+    from agriconnect.graphs.agents.market_coach.flows.producer.sales_confirmation import (
+        resolve_sales_confirmation,
+    )
+    from agriconnect.services.database import sales_publish_draft_store
+
+    if state.get("sales_publish_draft") is not None:
+        return await resolve_sales_confirmation(state, mc_runtime)
+
+    import uuid
+
+    candidate = SalesPublishDraft.new(draft_id=uuid.uuid4().hex[:12], **payload)
+    if not candidate.is_complete():
+        return {"execution_authorized": False, "is_certified": False}
+
+    conversation_id = str(state.get("user_phone") or state.get("session_id") or "")
+    inserted = await sales_publish_draft_store.insert(candidate, conversation_id=conversation_id)
+    if not inserted:
+        logger.warning(
+            "[ConfirmationGate] %s : échec insertion PostgreSQL du draft v1 "
+            "(draft_id=%s) — poursuite en mode dégradé (cache LangGraph seul)",
+            goal,
+            candidate.draft_id,
+        )
+
+    logger.info(
+        "[ConfirmationGate] %s : draft v1 créé (champs réunis) — draft_id=%s",
+        goal,
+        candidate.draft_id,
+    )
+    from agriconnect.core.telemetry import record_procurement_transaction_event
+
+    record_procurement_transaction_event(
+        event_id=uuid.uuid4().hex,
+        conversation_id=conversation_id or None,
+        message_id=state.get("message_sid"),
+        draft_id=candidate.draft_id,
+        draft_version_before=None,
+        draft_version_after=candidate.version,
+        pending_kind="CONFIRM_ACTION",
+        confirmation_target={"draft_id": candidate.draft_id, "draft_version": candidate.version},
+        interpreter_event=str(state.get("interpreted_event") or "") or None,
+        domain_action="bootstrap_draft_v1",
+        state_before=None,
+        state_after=candidate.status.value,
+        outcome="DRAFT_CREATED" if inserted else "DRAFT_CREATED_DEGRADED_CACHE_ONLY",
+    )
+    return {
+        "sales_publish_draft": candidate.to_dict(),
+        "status": "WAITING_INPUT",
+        "response_strategy": "CONFIRMATION",
+        "final_response": f"{candidate.render_summary()}\n\nConfirmez-vous ?",
+        "ag_ui_component": None,
+        "execution_authorized": False,
+        "is_certified": False,
+        **set_pending_interaction(
+            InteractionKind.CONFIRM_ACTION,
+            context_ref="confirmation",
+            target={"draft_id": candidate.draft_id, "draft_version": candidate.version},
+        ),
+    }
+
+
+_DRAFT_BASED_RESOLVER_BY_GOAL = {
+    "PROCUREMENT_CREATE_REQUEST": _resolve_draft_based_confirmation,
+    "SALES_PUBLISH_PRODUCT": _resolve_sales_draft_based_confirmation,
 }
 
 
@@ -84,29 +298,39 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
     payload: Dict[str, Any] = state.get("transaction_payload") or {}
     event = str(state.get("interpreted_event") or "").upper()
 
+    if goal in _DRAFT_BASED_CONFIRMATION_GOALS:
+        resolver = _DRAFT_BASED_RESOLVER_BY_GOAL[goal]
+        return await resolver(state, mc_runtime, goal, payload)
+
     if goal in _READ_GOALS:
         return {
             "is_certified": True,
             "execution_authorized": True,
-            "waiting_for_confirmation": False,
             "status": "EXECUTING",
             "ag_ui_component": None,
+            **clear_pending_interaction("read_goal_auto_authorized"),
         }
 
     deviation_note: Optional[str] = None
 
-    awaiting_confirmation = bool(state.get("waiting_for_confirmation")) or (
-        str(state.get("expected_input") or "").upper() == "CONFIRMATION"
+    # (2026-09-02, "no legacy shim") : source UNIQUE — `waiting_for_confirmation`
+    # et `expected_input` ne sont plus lus ici. `get_pending_interaction` gère
+    # elle-même, dans SON seul module, le pont de transition pour les
+    # conversations déjà persistées avant ce déploiement (voir
+    # core/pending_interaction.py) — ce node n'a plus à connaître ces
+    # anciens champs du tout.
+    awaiting_confirmation = (
+        get_pending_interaction(state).kind == InteractionKind.CONFIRM_ACTION
     )
     if awaiting_confirmation:
         if event == "CONFIRM":
             return {
                 "is_certified": True,
                 "execution_authorized": True,
-                "waiting_for_confirmation": False,
                 "confirmation_raised_at": None,
                 "status": "EXECUTING",
                 "ag_ui_component": None,
+                **resolve_pending_interaction(),
             }
         if event == "REJECT":
             if goal in _DRAFT_PRESERVING_REJECT_GOALS:
@@ -128,10 +352,8 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
                 return {
                     "is_certified": False,
                     "execution_authorized": False,
-                    "waiting_for_confirmation": False,
                     "confirmation_raised_at": None,
                     "confirmation_summary": None,
-                    "expected_input": "NONE",
                     "goal_status": "ACTIVE",
                     "status": "PLANNING",
                     "response_strategy": "SUCCESS",
@@ -141,11 +363,11 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
                         "*annuler* pour abandonner."
                     ),
                     "ag_ui_component": None,
+                    **clear_pending_interaction("reject_draft_preserved"),
                 }
             return {
                 "is_certified": False,
                 "execution_authorized": False,
-                "waiting_for_confirmation": False,
                 "confirmation_raised_at": None,
                 "current_goal": None,
                 "transaction_payload": {"__reset__": True},
@@ -156,6 +378,7 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
                 "response_strategy": "CLARIFICATION",
                 "final_response": "Opération annulée. Que souhaitez-vous faire ?",
                 "ag_ui_component": None,
+                **clear_pending_interaction("reject_cancelled"),
             }
 
         # Ni CONFIRM ni REJECT : soit une correction (gérée en amont par les
@@ -223,25 +446,40 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
 
     summary = _build_confirmation_summary(goal, payload)
     return {
-        "waiting_for_confirmation": True,
         "is_certified": False,
         "execution_authorized": False,
         "confirmation_summary": summary,
+        "confirmation_summary_goal": goal,
+        "confirmation_summary_payload": dict(payload),
         "confirmation_deviation_note": deviation_note,
         "confirmation_raised_at": state.get("confirmation_raised_at") or time.time(),
-        "expected_input": "CONFIRMATION",
         "last_agent_question": summary,
         "status": "WAITING_CONFIRMATION",
         "goal_status": "WAITING_CONFIRMATION",
         "response_strategy": "CONFIRMATION",
+        # (2026-09-02) confirmation_gate.py est le SEUL écrivain de
+        # CONFIRM_ACTION — voir core/pending_interaction.py. context_ref
+        # pointe vers confirmation_summary/transaction_payload (déjà posés
+        # ci-dessus), pas de duplication du contenu détaillé.
+        **set_pending_interaction(
+            InteractionKind.CONFIRM_ACTION, goal=goal, context_ref="confirmation"
+        ),
+        # QuickReplies (audit UX interactive 2026-08-27) : remplace
+        # FormConfirmation, un composant que rien ne lisait jamais —
+        # orchestrator.py::_interactive_hint ne reconnaissait que ListMenu,
+        # donc la confirmation retombait sur les flags status/
+        # response_strategy ci-dessus, déconnectés de ce composant. Les
+        # id "CONFIRM"/"REJECT" correspondent exactement aux valeurs déjà
+        # matchées par le bypass zéro-token (interpreter/routing.py).
         "ag_ui_component": {
             "lc_type": "constructor",
-            "id": ["ag_ui", "FormConfirmation"],
+            "id": ["ag_ui", "QuickReplies"],
             "kwargs": {
-                "title": "Confirmation requise",
-                "summary": summary,
-                "submit_label": "Confirmer",
-                "cancel_label": "Annuler",
+                "body": summary,
+                "buttons": [
+                    {"id": "CONFIRM", "title": "✅ Confirmer"},
+                    {"id": "REJECT", "title": "❌ Annuler"},
+                ],
                 "metadata": {"goal": goal},
             },
         },

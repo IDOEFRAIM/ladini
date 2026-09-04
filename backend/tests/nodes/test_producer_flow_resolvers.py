@@ -11,6 +11,10 @@ from __future__ import annotations
 import pytest
 
 from tests.conftest import StubRuntime, make_state, run
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    get_pending_interaction,
+    to_tunnel_category,
+)
 
 
 def rt(responses=None):
@@ -222,7 +226,7 @@ class TestResolveAuction:
             "data": [{"product": "mais"}, {"product": "riz"}],
         }})
         result = run(_resolve_auction(runtime, "+2260", {"product": "mais", "zone": "z1"}))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
         assert len(result["pending_menu"].options) == 2
 
 
@@ -254,7 +258,7 @@ class TestResolveMyBids:
             {"bid_id": "b1", "product": "mais", "offered_price": 250, "status": "PENDING"},
         ]}})
         result = run(_resolve_my_bids(runtime, "+2260", {}))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
         assert result["available_mapping" ] if "available_mapping" in result else True
 
 
@@ -300,7 +304,7 @@ class TestResolveBid:
             {"bid_id": "b1", "buyer_name": "Awa", "product_name": "mais", "price": 250, "quantity": 100},
         ]}})
         result = run(_resolve_bid(runtime, "+2260", {}))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
 
 
 # =====================================================================
@@ -440,7 +444,7 @@ class TestResolveDefaultFarm:
             {"id": "f1", "name": "Ferme A", "size": 5}, {"id": "f2", "name": "Ferme B"},
         ]}})
         result = run(_resolve_default_farm(runtime, "+2260", {}))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
         assert len(result["pending_menu"].options) == 2
 
 
@@ -484,7 +488,7 @@ class TestResolveStock:
             {"stock_id": "s2", "item_name": "mais", "quantity": 20},
         ]}})
         result = run(_resolve_stock(runtime, "+2260", {"product": "mais"}))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
 
     def test_multiple_matches_with_selection_index_resolves(self):
         from agriconnect.graphs.agents.market_coach.flows.producer.flow import _resolve_stock
@@ -571,19 +575,19 @@ class TestResolveCycleForUpdate:
         from agriconnect.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         working = {"update_phase": "CONFIRM", "update_cycle_id": "c1", "update_pending": {"price": 200}}
         result = run(_resolve_cycle_for_update(rt(), "+2260", {}, working, "peut-etre", ""))
-        assert result["expected_input"] == "CONFIRMATION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
 
     def test_collect_phase_no_correction_asks_what_to_update(self):
         from agriconnect.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         working = {}
         result = run(_resolve_cycle_for_update(rt(), "+2260", {"cycle_id": "c1"}, working, "bonjour", ""))
-        assert result["expected_input"] == "UPDATE_FIELD"
+        assert to_tunnel_category(get_pending_interaction(result)) == "UPDATE_FIELD"
 
     def test_collect_phase_with_correction_moves_to_confirm(self):
         from agriconnect.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         working = {}
         result = run(_resolve_cycle_for_update(rt(), "+2260", {"cycle_id": "c1"}, working, "prix 400", ""))
-        assert result["expected_input"] == "CONFIRMATION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
         assert result["working_memory"]["update_pending"]["price"] == 400.0
 
     def test_ambiguous_confirm_reply_gets_an_adaptive_note(self):
@@ -620,7 +624,7 @@ class TestResolveCycleForUpdate:
         runtime = rt()
         runtime.llm = _BoomLLM("n/a")
         result = run(_resolve_cycle_for_update(runtime, "+2260", {"cycle_id": "c1"}, working, "1", "SELECTION"))
-        assert result["expected_input"] == "UPDATE_FIELD"
+        assert to_tunnel_category(get_pending_interaction(result)) == "UPDATE_FIELD"
 
     def test_select_phase_gateway_exception(self, monkeypatch):
         import agriconnect.graphs.agents.market_coach.flows.producer.flow as mod
@@ -654,7 +658,7 @@ class TestResolveCycleForUpdate:
             {"cycle_id": "c1", "product_label": "mais", "quantity": 100, "unit": "kg", "price": 250},
         ]}})
         result = run(_resolve_cycle_for_update(runtime, "+2260", {}, {}, "", ""))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
         assert result["available_mapping"] == {"1": "c1"}
 
 
@@ -687,7 +691,7 @@ class TestResolveProductForUpdate:
     def test_collect_phase_no_correction_asks(self):
         from agriconnect.graphs.agents.market_coach.flows.producer.flow import _resolve_product_for_update
         result = run(_resolve_product_for_update(rt(), "+2260", {"product_id": "p1"}, {}, "bonjour", ""))
-        assert result["expected_input"] == "UPDATE_FIELD"
+        assert to_tunnel_category(get_pending_interaction(result)) == "UPDATE_FIELD"
 
     def test_ambiguous_confirm_reply_gets_an_adaptive_note(self):
         from agriconnect.graphs.agents.market_coach.flows.producer.flow import _resolve_product_for_update
@@ -732,7 +736,7 @@ class TestResolveProductForUpdate:
             {"id": "p1", "name": "mais", "quantity_for_sale": 100, "unit": "kg", "price": 250},
         ]}})
         result = run(_resolve_product_for_update(runtime, "+2260", {}, {}, "", ""))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
 
 
 # =====================================================================
@@ -748,7 +752,7 @@ class TestResolveDeliveryOtp:
     def test_no_code_asks_for_it(self):
         from agriconnect.graphs.agents.market_coach.flows.producer.flow import _resolve_delivery_otp
         result = run(_resolve_delivery_otp(rt(), "+2260", {}, {}, "pas encore livré", ""))
-        assert result["expected_input"] == "OTP_CODE"
+        assert to_tunnel_category(get_pending_interaction(result)) == "OTP_CODE"
 
     def test_gateway_exception_returns_error(self, monkeypatch):
         import agriconnect.graphs.agents.market_coach.flows.producer.flow as mod
@@ -768,7 +772,7 @@ class TestResolveDeliveryOtp:
         from agriconnect.graphs.agents.market_coach.flows.producer.flow import _resolve_delivery_otp
         runtime = rt({"verify_delivery_otp": {"status": "error", "message": "Code invalide"}})
         result = run(_resolve_delivery_otp(runtime, "+2260", {}, {}, "code 1234", ""))
-        assert result["expected_input"] == "OTP_CODE"
+        assert to_tunnel_category(get_pending_interaction(result)) == "OTP_CODE"
         assert result["final_response"] == "Code invalide"
 
     def test_valid_code_unlocks_funds(self):
@@ -862,7 +866,7 @@ class TestProducerContextResolver:
             transaction_payload={}, working_memory={}, normalized_text="pas de code",
         )
         result = run(producer_context_resolver(state, rt()))
-        assert result["expected_input"] == "OTP_CODE"
+        assert to_tunnel_category(get_pending_interaction(result)) == "OTP_CODE"
 
     def test_sales_accept_contract_without_bid_id_routes_to_resolve_bid(self):
         from agriconnect.graphs.agents.market_coach.flows.producer.flow import producer_context_resolver
@@ -894,7 +898,7 @@ class TestProducerContextResolver:
             {"stock_id": "s2", "item_name": "riz"},
         ]}})
         result = run(producer_context_resolver(state, runtime))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
 
     def test_default_fallback_returns_planning(self):
         from agriconnect.graphs.agents.market_coach.flows.producer.flow import producer_context_resolver

@@ -74,6 +74,7 @@ _FIELDS: Tuple[FieldSpec, ...] = (
     FieldSpec("requires_human", FieldLifecycle.EPHEMERAL, reset_value=False),
     # ── 4. INTERPRETER OUTPUT ─────────────────────────────────────
     FieldSpec("interpreted_event", FieldLifecycle.EPHEMERAL, reset_value=None),
+    FieldSpec("unknown_reason", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec("detected_intent", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec("interpreter_confidence", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec("validation_status", FieldLifecycle.EPHEMERAL, reset_value=None),
@@ -96,7 +97,26 @@ _FIELDS: Tuple[FieldSpec, ...] = (
     FieldSpec("current_plan_id", FieldLifecycle.DURABLE),
     FieldSpec("goal_metadata", FieldLifecycle.DURABLE),
     # ── 6. EXPECTATION ENGINE ─────────────────────────────────────
-    FieldSpec("expected_input", FieldLifecycle.DURABLE),
+    # `expected_input` (ancien Literal[...]) retiré du registre (2026-09-02,
+    # "no legacy shim") — plus dans MarketAgentState, donc plus DURABLE :
+    # une purge Tier-3 (voir workspace/checkpointer.py) peut désormais le
+    # dropper d'un vieux checkpoint sans risque (rien ne le relit, hors le
+    # pont de transition isolé de get_pending_interaction()).
+    # (2026-09-02) Source canonique — voir core/pending_interaction.py. DURABLE
+    # pour la même raison que expected_input : doit survivre au tour suivant
+    # tant que l'interaction (confirmation, champ, localisation...) n'est pas
+    # résolue. `resolve_pending_interaction()`/`clear_pending_interaction()`
+    # le remettent explicitement à None quand ce n'est plus le cas — jamais
+    # laissé au hasard d'un reset générique de fin de tour.
+    FieldSpec("pending_interaction", FieldLifecycle.DURABLE),
+    # (2026-09-03) domain/procurement_draft.py::ProcurementDraft sérialisé —
+    # DURABLE pour la même raison que pending_interaction : le draft d'un
+    # appel d'offres en cours de construction/confirmation doit survivre au
+    # tour suivant, minuscule (quelques scalaires), jamais candidat au
+    # nettoyage même en dernier recours (Tier-3, workspace/checkpointer.py).
+    FieldSpec("procurement_draft", FieldLifecycle.DURABLE),
+    # (2026-09-03, migration PREORDER) — même raison que procurement_draft.
+    FieldSpec("preorder_draft", FieldLifecycle.DURABLE),
     FieldSpec("last_agent_question", FieldLifecycle.DURABLE),
     FieldSpec("expected_candidates", FieldLifecycle.DURABLE),
     FieldSpec("last_missing_field", FieldLifecycle.DURABLE),
@@ -127,9 +147,16 @@ _FIELDS: Tuple[FieldSpec, ...] = (
     FieldSpec("suspended_goal", FieldLifecycle.DURABLE),
     FieldSpec("suspended_payload", FieldLifecycle.DURABLE),
     # ── 10. CONFIRMATION / EXECUTION ──────────────────────────────
-    FieldSpec("waiting_for_confirmation", FieldLifecycle.EPHEMERAL, reset_value=False),
+    # `waiting_for_confirmation` (ancien bool) retiré du registre — voir
+    # `pending_interaction` ci-dessus.
     FieldSpec("is_certified", FieldLifecycle.EPHEMERAL, reset_value=False),
     FieldSpec("confirmation_summary", FieldLifecycle.EPHEMERAL, reset_value=None),
+    FieldSpec("confirmation_summary_goal", FieldLifecycle.EPHEMERAL, reset_value=None),
+    # `replace_value` (pas `merge_dict`) : contrairement aux champs
+    # `_MERGE_DICT_RESET`, un simple `None` suffit à effacer ce champ (voir
+    # agents/reducers.py::replace_value — seul le sentinel _KEEP préserve
+    # l'ancienne valeur, `None` écrase réellement).
+    FieldSpec("confirmation_summary_payload", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec("execution_authorized", FieldLifecycle.EPHEMERAL, reset_value=False),
     FieldSpec(
         "execution_result", FieldLifecycle.EPHEMERAL, reset_value={"__reset__": True}
@@ -169,6 +196,17 @@ _FIELDS: Tuple[FieldSpec, ...] = (
     FieldSpec("last_order_summary", FieldLifecycle.DURABLE),
     FieldSpec("order_tracking_context", FieldLifecycle.DURABLE),
     FieldSpec("vendor_selection_context", FieldLifecycle.DURABLE),
+    # (2026-08-30) Sans cette entrée, `tier_selection_context` — bien
+    # déclaré comme channel LangGraph dans flows/buyer/state.py — était
+    # quand même traité comme éphémère par LE CHECKPOINTER (registre
+    # SÉPARÉ, voir workspace/checkpointer.py) et ne survivait PAS d'un tour
+    # à l'autre : le menu de paliers se réaffichait indéfiniment, "2" ne
+    # trouvant jamais aucun contexte actif au tour suivant. Même bug de
+    # fond que la note plus haut sur `vendor_selection_context` — trois
+    # registres distincts (Annotated reducer, BuyerContext, ce profil de
+    # durabilité) doivent TOUS connaître un champ multi-tour pour qu'il
+    # survive réellement en production.
+    FieldSpec("tier_selection_context", FieldLifecycle.DURABLE),
     # ── PRODUCER CONTEXT ──────────────────────────────────────────
     FieldSpec("user_farms_cache", FieldLifecycle.DURABLE),
     FieldSpec("original_entity", FieldLifecycle.DURABLE),

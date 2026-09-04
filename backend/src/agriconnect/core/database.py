@@ -86,8 +86,22 @@ def _init_db_locked() -> None:
 
     clean_url = settings.DATABASE_URL.split("?")[0]
 
-    # TRANSFORMATION : On force le driver asynchrone
-    url = clean_url.replace("postgresql://", "postgresql+asyncpg://")
+    # TRANSFORMATION : On force le driver asynchrone.
+    # Deux schémas valides émis par les providers gérés selon le fournisseur :
+    # DigitalOcean/Supabase/Neon → "postgresql://" ; Heroku Postgres → le
+    # schéma court "postgres://" (RFC historique, toujours accepté par libpq
+    # mais PAS par le registre de dialectes SQLAlchemy). Ne normaliser que
+    # "postgresql://" laissait passer "postgres://" tel quel, provoquant
+    # `NoSuchModuleError: Can't load plugin: sqlalchemy.dialects:postgres`
+    # dès la bascule vers Heroku — corrigé en gérant explicitement les deux.
+    if clean_url.startswith("postgresql+asyncpg://"):
+        url = clean_url
+    elif clean_url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + clean_url[len("postgresql://") :]
+    elif clean_url.startswith("postgres://"):
+        url = "postgresql+asyncpg://" + clean_url[len("postgres://") :]
+    else:
+        url = clean_url
 
     # CONFIGURATION SSL : mode explicite piloté par settings
     ssl_mode = (

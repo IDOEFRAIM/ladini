@@ -17,6 +17,12 @@ AUCTION_WON_PRODUCER = "AUCTION_WON_PRODUCER"
 PREORDER_RESERVED_PRODUCER = "PREORDER_RESERVED_PRODUCER"
 ESCROW_PAYMENT_RECEIVED_BUYER = "ESCROW_PAYMENT_RECEIVED_BUYER"
 ESCROW_PAYMENT_SECURED_PRODUCER = "ESCROW_PAYMENT_SECURED_PRODUCER"
+# (2026-09-03, clôture escrow/IPN PREORDER) : jusqu'ici, un paiement
+# Paydunya rejeté ou expiré (TTL) annulait la commande SANS notifier
+# l'acheteur — gap réel comblé ici, même convention que les 2 templates
+# escrow existants.
+ESCROW_PAYMENT_FAILED_BUYER = "ESCROW_PAYMENT_FAILED_BUYER"
+ESCROW_PAYMENT_EXPIRED_BUYER = "ESCROW_PAYMENT_EXPIRED_BUYER"
 
 
 def _render_auction_invite(p: Dict[str, Any]) -> str:
@@ -107,6 +113,22 @@ def _render_escrow_payment_secured_producer(p: Dict[str, Any]) -> str:
     )
 
 
+def _render_escrow_payment_failed_buyer(p: Dict[str, Any]) -> str:
+    order_number = str(p.get("order_number") or "")
+    return (
+        f"❌ *Paiement non abouti* pour la commande #{order_number} — "
+        "aucune somme n'a été débitée. Vous pouvez recommencer votre précommande."
+    )
+
+
+def _render_escrow_payment_expired_buyer(p: Dict[str, Any]) -> str:
+    order_number = str(p.get("order_number") or "")
+    return (
+        f"⏱️ Le délai de paiement de la commande #{order_number} est dépassé — "
+        "elle a été annulée, aucune somme n'a été débitée."
+    )
+
+
 _RENDERERS = {
     AUCTION_INVITE_PRODUCER: _render_auction_invite,
     NEW_PRODUCT_ALERT_BUYER: _render_new_product_alert,
@@ -114,6 +136,8 @@ _RENDERERS = {
     PREORDER_RESERVED_PRODUCER: _render_preorder_reserved,
     ESCROW_PAYMENT_RECEIVED_BUYER: _render_escrow_payment_received_buyer,
     ESCROW_PAYMENT_SECURED_PRODUCER: _render_escrow_payment_secured_producer,
+    ESCROW_PAYMENT_FAILED_BUYER: _render_escrow_payment_failed_buyer,
+    ESCROW_PAYMENT_EXPIRED_BUYER: _render_escrow_payment_expired_buyer,
 }
 
 

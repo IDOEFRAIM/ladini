@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from agriconnect.core.settings import settings
+
 BEAT_SCHEDULE: Dict[str, Dict[str, Any]] = {
     # Engagement enchères : réactif (les producteurs doivent répondre vite).
     "auction-solicitation": {
@@ -34,5 +36,33 @@ BEAT_SCHEDULE: Dict[str, Dict[str, Any]] = {
         "task": "workers.order_expiry",
         "schedule": 900.0,  # toutes les 15 min
         "options": {"expires": 600},
+    },
+    # Réconciliation des ProcurementDraft bloqués en EXECUTING (2026-09-03,
+    # mandat recovery) — cadence configurable, jamais codée en dur ici (voir
+    # `settings.PROCUREMENT_RECONCILIATION_INTERVAL_SECONDS`).
+    "procurement-reconciliation": {
+        "task": "workers.procurement_reconciliation",
+        "schedule": settings.PROCUREMENT_RECONCILIATION_INTERVAL_SECONDS,
+        "options": {
+            "expires": max(1.0, settings.PROCUREMENT_RECONCILIATION_INTERVAL_SECONDS - 30)
+        },
+    },
+    # Réconciliation des PreorderDraft bloqués en EXECUTING/AWAITING_PAYMENT
+    # (2026-09-03, clôture escrow/IPN) — même principe que PROCUREMENT.
+    "preorder-reconciliation": {
+        "task": "workers.preorder_reconciliation",
+        "schedule": settings.PREORDER_RECONCILIATION_INTERVAL_SECONDS,
+        "options": {
+            "expires": max(1.0, settings.PREORDER_RECONCILIATION_INTERVAL_SECONDS - 30)
+        },
+    },
+    # Réconciliation des SalesPublishDraft bloqués en EXECUTING
+    # (2026-09-04, migration SALES) — même principe que PROCUREMENT/PREORDER.
+    "sales-publish-reconciliation": {
+        "task": "workers.sales_publish_reconciliation",
+        "schedule": settings.SALES_RECONCILIATION_INTERVAL_SECONDS,
+        "options": {
+            "expires": max(1.0, settings.SALES_RECONCILIATION_INTERVAL_SECONDS - 30)
+        },
     },
 }

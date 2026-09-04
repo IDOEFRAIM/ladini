@@ -250,7 +250,19 @@ INTENT_CONFIG = {
     # =======================================================================
     "BUYER_ADD_TO_CART": {
         "tool_name": "add_to_cart",
-        "required": ["product", "quantity", "unit"],
+        # (2026-08-30, refonte "palier avant quantité") : `quantity`/`unit`
+        # retirés de `required`. Incident réel confirmé en direct : avec ces
+        # deux champs requis ici, `tunnel_manager.is_cart_routeable()`
+        # refusait de router vers `cart_management` tant que la quantité
+        # n'était pas déjà connue (garde-fou anti-boucle générique) — le
+        # validator répondait alors LUI-MÊME "quelle quantité ?" via son
+        # propre prompt générique, AVANT même que `cart_management` ait pu
+        # découvrir qu'un produit propose plusieurs conditionnements et
+        # montrer le menu de paliers. `cart_management` gère déjà
+        # entièrement lui-même la demande de quantité (avec ou sans palier,
+        # voir flows/buyer/cart.py) — seul `product` doit bloquer le
+        # routage ici.
+        "required": ["product"],
         "action_type": "WRITE",
         "requires_farm": False,
         "handled_by_flow": True,

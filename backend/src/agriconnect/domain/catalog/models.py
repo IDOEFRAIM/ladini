@@ -267,6 +267,18 @@ class Product(Base):
     price = Column(Numeric(12, 2), nullable=False)
     unit = Column(String, default="KG", nullable=False)
     quantity_for_sale = Column(Numeric(14, 3), default=0, nullable=False)
+    # Déclinaisons de prix/conditionnement pour UN MÊME produit (2026-08-27) :
+    # ex. "500f le demi-litre en sachet et 600f le bidon" — deux tarifs
+    # distincts, jamais fusionnables dans les colonnes plates ci-dessus.
+    # Liste de {"quantity": float, "unit": str, "price": float,
+    # "packaging": str|null} — `unit` est TOUJOURS la valeur LITTÉRALE saisie
+    # par l'utilisateur (jamais passée par `_CANONICAL_UNIT_MAP`/
+    # `normalize_quantity_to_kg`, voir services/domain/quantity_unit.py).
+    # `price`/`unit`/`quantity_for_sale` ci-dessus restent renseignés avec le
+    # PREMIER tier (compatibilité avec tout code existant qui ne connaît pas
+    # encore `pricing_tiers`). NULL = produit à tarif unique (comportement
+    # historique inchangé).
+    pricing_tiers = Column(JSONB, nullable=True)
     images = Column(
         PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]")
     )

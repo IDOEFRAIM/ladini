@@ -6,6 +6,9 @@ import time
 from copy import deepcopy
 from typing import Any, Dict, Optional, Tuple
 
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    clear_pending_interaction,
+)
 from agriconnect.agents.task_handler import GoalState, TaskHandler
 from agriconnect.core.logger import get_logger
 from agriconnect.graphs.agents.market_coach.actions.tool_provider import (
@@ -629,6 +632,28 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
 
     provider: ToolProvider = MCPToolProvider(runtime=mc_runtime)
 
+    # (2026-09-03, mandat §8) : clé d'idempotence CLIENT — générique, pas
+    # spécifique à un goal câblé en dur ici (l'exécuteur reste agnostique
+    # des goals, mandat §2) : dérivée du `procurement_draft` versionné
+    # SEULEMENT s'il est présent dans l'état de CE tour (aujourd'hui, seul
+    # PROCUREMENT_CREATE_REQUEST en pose un). No-op pour les 15+ autres
+    # goals. Portée honnête : voir `MarketRuntime.call_db` — corrélation +
+    # retry interne au client MCP, PAS de dédup serveur.
+    idempotency_key: Optional[str] = None
+    _draft_for_key = state.get("procurement_draft")
+    if isinstance(_draft_for_key, dict) and _draft_for_key.get("draft_id"):
+        # Réutilise LA même fonction que le domaine (jamais un format
+        # dupliqué à la main ici — verrouillé par
+        # `test_procurement_execution_pipeline_closure.py::TestExecutionKey`).
+        from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+            ProcurementDraft as _ProcurementDraft,
+            execution_key as _procurement_execution_key,
+        )
+
+        _parsed_draft = _ProcurementDraft.from_dict(_draft_for_key)
+        if _parsed_draft is not None:
+            idempotency_key = _procurement_execution_key(_parsed_draft)
+
     _MCP_MAX_TRANSIENT_RETRIES = 2
     _TRANSIENT_MARKERS = (
         "timeout",
@@ -642,7 +667,9 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
 
     for attempt in range(1, _MCP_MAX_TRANSIENT_RETRIES + 1):
         try:
-            result = await provider.execute(tool_name, resolved_args)
+            result = await provider.execute(
+                tool_name, resolved_args, idempotency_key=idempotency_key
+            )
             success = is_success_response(result)
 
             history.append(
@@ -696,11 +723,10 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
                 "retry_count": retry_count,
                 "is_certified": False,
                 "execution_authorized": False,
-                "waiting_for_confirmation": False,
                 "transaction_payload": {},
                 "missing_fields": [],
                 "completed_fields": [],
-                "expected_input": "NONE",
+                **clear_pending_interaction("execution_complete"),
                 "current_goal": None,
                 "response_strategy": "SUCCESS",
                 "proactive_hint": proactive,

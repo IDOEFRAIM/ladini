@@ -20,13 +20,17 @@ from tests.conftest import ForbiddenLLM, ScriptedLLM, StubRuntime, make_state, r
 
 
 def fast(text, expected_input, goal="SALES_PUBLISH_PRODUCT", skip=False, payload=None):
-    state = {
-        "expected_input": expected_input,
-        "current_goal": goal,
-        "working_memory": {"active_goal": goal},
-        "transaction_payload": payload if payload is not None else {"product": "tomates"},
-        "user_role": "PRODUCER",
-    }
+    # `make_state` traduit `expected_input=` en écriture RÉELLE de
+    # `pending_interaction` (source canonique — voir tests/conftest.py) ;
+    # `_interpret_fast_path` ne lit plus `expected_input` directement depuis
+    # 2026-09-02 (refonte "no legacy shim").
+    state = make_state(
+        expected_input=expected_input,
+        current_goal=goal,
+        working_memory={"active_goal": goal},
+        transaction_payload=payload if payload is not None else {"product": "tomates"},
+        user_role="PRODUCER",
+    )
     return _interpret_fast_path(state, text, skip_numeric_shortcut=skip)
 
 
@@ -174,6 +178,75 @@ class TestUnitAnchoringGuard:
         assert "product" not in r["extracted_entities"]
         assert r["extracted_entities"].get("quantity") == 42.0
         assert r["extracted_entities"].get("unit") == "KG"
+
+
+# =====================================================================
+# PRIMAUTÉ DU LLM — une quantité composée écrite par l'utilisateur fait foi
+# =====================================================================
+
+class TestCompoundQuantityAntiTruncationGuard:
+    """Bug réel (2026-09-03, incident +22601479800) : « je veux 2 tonnes et
+    250 kg » → le LLM a répondu quantity=2/unit=TONNE, tronquant le "et 250
+    kg" — récap et confirmation figés sur "2 TONNE" à travers plusieurs
+    tours, y compris après la correction explicite de l'utilisateur ("non
+    j'ai dit 2 tonnes et 250 kg"). Même famille de garde que
+    TestUnitAnchoringGuard : le texte de l'utilisateur prime sur une
+    extraction LLM possiblement partielle."""
+
+    TRUNCATED = {
+        "interpreted_event": "UPDATE",
+        "detected_intent": "PROCUREMENT_CREATE_REQUEST",
+        "interpreter_confidence": 0.9,
+        "validation_status": "VALID",
+        "extracted_entities": {"quantity": 2.0, "unit": "TONNE"},
+    }
+
+    def _interpret(self, text, llm_payload=None):
+        interp = make_input_interpreter("BUYER")
+        rt = StubRuntime(llm=ScriptedLLM(llm_payload or self.TRUNCATED))
+        st = make_state(
+            normalized_text=text,
+            expected_input="CONFIRMATION",
+            current_goal="PROCUREMENT_CREATE_REQUEST",
+            user_role="BUYER",
+        )
+        return run(interp(st, rt))
+
+    def test_compound_quantity_in_text_overrides_a_truncated_llm_value(self):
+        r = self._interpret(
+            "je suis pret a payer maximum 250 fcfa le kg et je veux 2 tonnes et 250 kg"
+        )
+        ents = r["extracted_entities"]
+        assert ents.get("quantity") == pytest.approx(2250.0)
+        assert ents.get("unit") == "KG"
+
+    def test_the_correction_turn_also_applies_the_compound_quantity(self):
+        """La 2e formulation (correction explicite de l'utilisateur) doit
+        elle aussi appliquer la somme — pas seulement la 1ère."""
+        r = self._interpret("non j ai dit 2 tonnes et 250 kg")
+        ents = r["extracted_entities"]
+        assert ents.get("quantity") == pytest.approx(2250.0)
+        assert ents.get("unit") == "KG"
+
+    def test_a_single_quantity_pair_is_left_untouched(self):
+        """Neutre quand le texte ne porte qu'UNE SEULE paire — pas de faux
+        déclenchement sur une quantité simple correctement extraite."""
+        payload = dict(self.TRUNCATED)
+        payload["extracted_entities"] = {"quantity": 3.0, "unit": "TONNE"}
+        r = self._interpret("je veux 3 tonnes de tomates", payload)
+        ents = r["extracted_entities"]
+        assert ents.get("quantity") == 3.0
+        assert ents.get("unit") == "TONNE"
+
+    def test_a_non_convertible_unit_pair_is_left_untouched(self):
+        """« 2 tonnes et 3 sacs » n'est pas sommable (SAC n'a pas d'équivalent
+        KG universel) — aucune correction, on laisse le LLM/simple parse."""
+        payload = dict(self.TRUNCATED)
+        payload["extracted_entities"] = {"quantity": 2.0, "unit": "TONNE"}
+        r = self._interpret("je veux 2 tonnes et 3 sacs", payload)
+        ents = r["extracted_entities"]
+        assert ents.get("quantity") == 2.0
+        assert ents.get("unit") == "TONNE"
 
 
 # =====================================================================

@@ -209,6 +209,7 @@ class TestPreorderNetworkFailuresKeepTheBuyerUnstuck:
 
     def test_draft_creation_failure_returns_the_buyer_to_the_cart(self, monkeypatch):
         import agriconnect.graphs.agents.market_coach.flows.buyer.preorder as mod
+        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
 
         class _Boom:
             def __init__(self, rt):
@@ -217,7 +218,10 @@ class TestPreorderNetworkFailuresKeepTheBuyerUnstuck:
             async def create_draft(self, **kwargs):
                 raise RuntimeError("mcp timeout")
 
-        monkeypatch.setattr(mod, "PreorderGateway", _Boom)
+        # `PreorderGateway.create_draft` est maintenant appelé depuis
+        # `preorder_confirmation.py::bootstrap_preorder_draft` (2026-09-03,
+        # migration transactionnelle), pas depuis `preorder.py`.
+        monkeypatch.setattr(pc_mod, "PreorderGateway", _Boom)
         state = make_state(
             current_goal="BUYER_PREORDER_INIT",
             active_cart=self.CART,
@@ -228,13 +232,29 @@ class TestPreorderNetworkFailuresKeepTheBuyerUnstuck:
         assert result["preorder_workflow"]["phase"] == "CART"
         assert "panier est conservé" in result["final_response"]
 
-    def test_confirmation_failure_keeps_the_draft_for_a_retry(self, monkeypatch):
-        """Le brouillon reste intact (aucun stock débité) — l'acheteur peut
-        simplement redire « oui » au tour suivant."""
+    def test_confirmation_failure_is_reported_as_execution_unknown_not_a_silent_retry(
+        self, monkeypatch
+    ):
+        """(2026-09-03, migration transactionnelle) — remplace l'ancien
+        comportement "reste en PREORDER_DRAFTED, retape juste oui" : une
+        exception PENDANT `confirm_draft` (ex: timeout réseau) est
+        AMBIGUË — l'appel a peut-être quand même abouti côté serveur.
+        Deviner "aucun effet" et laisser rejouer un simple oui aurait pu
+        redéclencher un débit stock DOUBLE. Le nouveau contrat transite
+        vers `EXECUTION_UNKNOWN` (jamais un faux échec ni un faux succès),
+        exactement la même doctrine que PROCUREMENT — voir
+        `domain/preorder_draft.py::adapt_mcp_result`."""
         import agriconnect.graphs.agents.market_coach.flows.buyer.preorder as mod
+        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
+        import agriconnect.graphs.agents.market_coach.domain.preorder_draft as pd_mod
         from agriconnect.core.settings import settings
+        from agriconnect.graphs.agents.market_coach.domain.preorder_draft import PreorderDraft
+        from agriconnect.services.database import preorder_draft_store as store_mod
+        from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
 
         monkeypatch.setattr(settings, "ESCROW_PAYMENT_ENABLED", False)
+        _install_fake_db(monkeypatch)
+        monkeypatch.setattr(pd_mod, "claim_once", lambda key: True)
 
         class _Boom:
             def __init__(self, rt):
@@ -243,17 +263,30 @@ class TestPreorderNetworkFailuresKeepTheBuyerUnstuck:
             async def confirm_draft(self, **kwargs):
                 raise RuntimeError("mcp timeout")
 
-        monkeypatch.setattr(mod, "PreorderGateway", _Boom)
+        monkeypatch.setattr(pc_mod, "PreorderGateway", _Boom)
+
+        draft = _draft(draft_id="abc123draft", order_id="abc123")
+        run(store_mod.insert(draft, conversation_id="+22670000000"))
+        target = {"draft_id": draft.draft_id, "draft_version": draft.version}
         state = make_state(
             current_goal="BUYER_PREORDER_CONFIRM",
+            user_phone="+22670000000",
             active_cart=self.CART,
-            preorder_workflow={
-                "phase": "PREORDER_DRAFTED", "preorder_id": "abc123",
-                "gps_stage": True, "gps_default": {"lat": 12.35, "lon": -1.5},
-            },
+            preorder_draft=draft.to_dict(),
             transaction_payload={"resolved_id": "PREORDER_CONFIRM"},
+            interpreted_event="CONFIRM",
         )
+        state["pending_interaction"] = {
+            "kind": "PROVIDE_LOCATION",
+            "target": target,
+        }
+        state["location_shared"] = True
+        state["location_outcome"] = "NEW_LOCATION_ACCEPTED"
+        state["location_lat"] = 12.35
+        state["location_lon"] = -1.5
+
         result = run(mod.create_preorder(state, None))
-        assert result["response_strategy"] == "ERROR"
-        assert result["preorder_workflow"]["phase"] == "PREORDER_DRAFTED"
-        assert result["preorder_workflow"]["preorder_id"] == "abc123"
+
+        assert result["status"] == "COMPLETED"
+        assert result["preorder_draft"]["status"] == "EXECUTION_UNKNOWN"
+        assert "vérification" in result["final_response"].lower()

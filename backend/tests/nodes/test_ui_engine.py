@@ -3,6 +3,10 @@ AG-UI. Consomme `state["pending_menu"]` et produit `ag_ui_component`,
 `available_mapping`, `expected_candidates`, `working_memory` patch."""
 from __future__ import annotations
 
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    get_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
@@ -37,7 +41,10 @@ class TestUiEngine:
         result = run(ui_engine(state, None))
         assert result["available_mapping"] == {"1": "1", "2": "2"}
         assert result["expected_candidates"] == ["Mais", "Riz"]
-        assert result["expected_input"] == "SELECTION"
+        assert (
+            get_pending_interaction({**state, **result}).kind
+            == InteractionKind.SELECTION_MENU
+        )
 
     def test_option_with_explicit_value_overrides_index_in_mapping(self):
         menu = _menu(options=[MenuOption(index="1", label="Mais", value="stock-uuid-1")])

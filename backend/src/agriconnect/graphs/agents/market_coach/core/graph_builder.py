@@ -30,6 +30,10 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from agriconnect.graphs.agents.market_coach.core.goals import BUYER_CART_GOALS
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    get_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.core.policies import get_fast_path_policy
 from agriconnect.graphs.agents.market_coach.core.router import get_domain_router
 from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
@@ -64,6 +68,12 @@ from agriconnect.graphs.agents.market_coach.nodes.cognitive import (
 )
 from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
     confirmation_gate,
+)
+from agriconnect.graphs.agents.market_coach.flows.buyer.procurement_execution_finalizer import (
+    finalize_procurement_execution,
+)
+from agriconnect.graphs.agents.market_coach.flows.producer.sales_execution_finalizer import (
+    finalize_sales_publish_execution,
 )
 from agriconnect.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
 from agriconnect.graphs.agents.market_coach.nodes.input_normalizer import (
@@ -151,7 +161,7 @@ def _route_after_disambiguation(state: MarketAgentState) -> str:
     """
     if (
         state.get("current_goal") == "DISAMBIGUATION_PENDING"
-        and state.get("expected_input") == "SELECTION"
+        and get_pending_interaction(state).kind == InteractionKind.SELECTION_MENU
         and state.get("response_strategy") == "SELECTION_MENU"
     ):
         return "to_strategy"
@@ -252,6 +262,8 @@ def build_graph(
         ("ensure_farm_node", ensure_farm_node),
         ("confirmation_gate", confirmation_gate),
         ("mcp_tool_executor", mcp_tool_executor),
+        ("procurement_execution_finalizer", finalize_procurement_execution),
+        ("sales_execution_finalizer", finalize_sales_publish_execution),
         ("response_strategy", response_strategy),
         ("state_cleaner", state_cleaner_node),
         ("final_response", final_response),
@@ -371,8 +383,23 @@ def build_graph(
     workflow.add_conditional_edges(
         "mcp_tool_executor",
         _route_after_executor,
-        {"to_strategy": "response_strategy"},
+        {"to_strategy": "procurement_execution_finalizer"},
     )
+    # (2026-09-03, clôture du pipeline transactionnel) : nœud inséré entre
+    # l'exécuteur générique et response_strategy — no-op immédiat pour tout
+    # tour hors PROCUREMENT_CREATE_REQUEST (voir sa docstring). Renommer la
+    # cible `_route_after_executor` "to_strategy" plutôt que d'ajouter une
+    # branche dédiée : `_route_after_executor` ne retourne qu'UNE seule
+    # valeur possible aujourd'hui, donc pas de risque de contourner ce nœud.
+    #
+    # (2026-09-04, migration SALES) : `sales_execution_finalizer` CHAÎNÉ
+    # juste après — même raisonnement, no-op immédiat pour tout tour hors
+    # SALES_PUBLISH_PRODUCT. Un draft ne peut être QUE PROCUREMENT ou SALES
+    # pour un tour donné (goals disjoints), donc au plus UN des deux nœuds
+    # fait réellement quelque chose par tour — coût négligeable pour
+    # l'autre, même précédent que le nœud précédent.
+    workflow.add_edge("procurement_execution_finalizer", "sales_execution_finalizer")
+    workflow.add_edge("sales_execution_finalizer", "response_strategy")
 
     workflow.add_edge("response_strategy", "state_cleaner")
     workflow.add_edge("state_cleaner", "final_response")
@@ -883,7 +910,15 @@ async def _run_producer_write_flow(
     # 4. confirmation_gate — 1er passage : pose le récapitulatif, attend CONFIRM.
     c1 = await confirmation_gate(state, runtime)
     state.update(c1)
-    assert state.get("status") == "WAITING_CONFIRMATION", (
+    # `WAITING_CONFIRMATION` (mécanisme générique confirmation_summary,
+    # goals pas encore migrés — ex: DECLARE_CROP_CYCLE) ou `WAITING_INPUT`
+    # (draft canonique versionné — SALES_PUBLISH_PRODUCT depuis 2026-09-04,
+    # PROCUREMENT_CREATE_REQUEST depuis 2026-09-03, voir
+    # `nodes/confirmation_gate.py::_DRAFT_BASED_CONFIRMATION_GOALS`) sont
+    # TOUS LES DEUX des issues valides "en attente de confirmation" — la
+    # valeur exacte dépend de l'état de migration de CE goal précis, pas
+    # une régression.
+    assert state.get("status") in {"WAITING_CONFIRMATION", "WAITING_INPUT"}, (
         f"confirmation_gate attendu en attente, obtenu: {state.get('status')}"
     )
 

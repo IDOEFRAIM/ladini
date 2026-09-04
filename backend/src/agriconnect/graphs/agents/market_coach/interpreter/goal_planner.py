@@ -10,6 +10,13 @@ import logging
 import re as _re
 from typing import Any, Dict, Optional
 
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    clear_pending_interaction,
+    get_pending_interaction,
+    set_pending_interaction,
+    to_tunnel_category,
+)
 from agriconnect.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
 from agriconnect.graphs.agents.market_coach.interpreter.intent import (
     INTENT_CONFIG,
@@ -180,7 +187,14 @@ async def goal_planner(
     # résoudre la sélection.
     if not current_goal and working.get("disambiguation_pending"):
         current_goal = "DISAMBIGUATION_PENDING"
-    expected_input = state.get("expected_input")
+    # (2026-09-02, refonte "no legacy shim") : `expected_input` n'est plus lu
+    # depuis `state` — dérivé de `pending_interaction`, seule source
+    # canonique, via `to_tunnel_category` (traduction vers le vocabulaire
+    # grossier attendu par TunnelManager, catégorie DISTINCTE du kind précis).
+    # Un seul point de traduction : tout le reste de cette fonction (in_tunnel,
+    # libellés de statut, les deux appels tunnel_manager.evaluate ci-dessous)
+    # consomme cette même variable, plus jamais `state.get("expected_input")`.
+    expected_input = to_tunnel_category(get_pending_interaction(state))
     goal_stack = list(state.get("goal_stack") or [])
     in_tunnel = bool(current_goal and expected_input and expected_input != "NONE")
     text = (
@@ -249,16 +263,24 @@ async def goal_planner(
             "missing_fields": [],
             "completed_fields": [],
             "last_missing_field": None,
-            "expected_input": "NONE",
             "expected_candidates": [],
             "available_mapping": {},
-            "waiting_for_confirmation": False,
             "confirmation_summary": None,
             "selected_tool": None,
             "selected_tool_args": {"__reset__": True},
             "execution_result": {"__reset__": True},
             "retry_count": 0,
             "vendor_selection_context": {"__reset__": True},
+            # (2026-09-02, refonte state canonique, G-2) : symétrique de la
+            # ligne au-dessus — un switch de goal/intention doit invalider le
+            # palier choisi exactement comme il invalide le vendeur choisi.
+            # Absent jusqu'ici : un `tier_selection_context` pouvait survivre
+            # à un changement d'intention et être réutilisé pour un NOUVEAU
+            # produit sans aucun rapport (confirmé par audit — voir
+            # `domain/selection_actions.py::build_selection_context`, qui
+            # lit ce champ tel quel sans jamais vérifier qu'il correspond
+            # encore au vendeur/produit courant).
+            "tier_selection_context": {"__reset__": True},
             "negotiation_context": {"__reset__": True},
             "preorder_workflow": {"__reset__": True},
             # A form belongs to exactly one goal instance — leaving it set
@@ -268,6 +290,12 @@ async def goal_planner(
             "active_form": None,
             "form_step": None,
             "form_data": {"__reset__": True},
+            # (2026-09-02) Politique d'invalidation centralisée (mandat §8) :
+            # un switch de goal/intention efface aussi le discriminant
+            # canonique — sans ceci, un `pending_interaction` persisté
+            # (CONFIRM_ACTION/ENTER_FIELD/...) pouvait survivre à un
+            # changement d'intention et fuiter dans le nouveau parcours.
+            **clear_pending_interaction("goal_changed"),
         }
 
     def _with_goal_metadata(
@@ -383,7 +411,6 @@ async def goal_planner(
                     "current_goal": resolved_intent,
                     "goal_status": "ACTIVE",
                     "interruption_detected": False,
-                    "expected_input": "NONE",
                     "expected_candidates": [],
                     "available_mapping": {},
                     "missing_fields": [],
@@ -393,14 +420,20 @@ async def goal_planner(
                         "disambiguation_pending": False,
                         "available_mapping_kind": None,
                     },
+                    **clear_pending_interaction("disambiguation_resolved"),
                 },
                 resolved_intent,
             )
         # Sélection invalide ou pas encore reçue : on garde le menu actif.
         updates["current_goal"] = "DISAMBIGUATION_PENDING"
         updates["goal_status"] = "WAITING_INPUT"
-        updates["expected_input"] = "SELECTION"
-        updates["waiting_for_confirmation"] = False
+        updates.update(
+            set_pending_interaction(
+                InteractionKind.SELECTION_MENU,
+                goal="DISAMBIGUATION_PENDING",
+                context_ref="intent_disambiguation",
+            )
+        )
         updates["confirmation_summary"] = None
         updates["response_strategy"] = "SELECTION_MENU"
         updates["working_memory"] = {
@@ -412,10 +445,10 @@ async def goal_planner(
 
     # RÈGLE 1 — CANCEL/REJECT (Annulation explicite)
     if event == "REJECT":
-        waiting_confirm = bool(
-            state.get("waiting_for_confirmation")
-            or str(expected_input or "").upper() == "CONFIRMATION"
-        )
+        # Source unique : `expected_input` ci-dessus est déjà dérivé de
+        # `pending_interaction` (voir plus haut) — plus de lecture directe de
+        # `waiting_for_confirmation`.
+        waiting_confirm = str(expected_input or "").upper() == "CONFIRMATION"
         if not waiting_confirm:
             return _with_goal_metadata(
                 {

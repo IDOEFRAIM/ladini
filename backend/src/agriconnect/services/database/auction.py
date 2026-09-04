@@ -507,8 +507,17 @@ class AuctionMixin(BaseMixin):
         producer_id = producer_obj.id
 
         # 2. Validation de la cible
+        # (2026-09-04, hardening concurrence) : verrou `FOR UPDATE` sur
+        # `Auction` — sans lui, un `place_bid` concurrent à un
+        # `select_winning_bid` pouvait lire `status="OPEN"` juste avant que
+        # l'enchère ne soit clôturée par l'autre transaction, et déposer une
+        # offre sur une enchère déjà fermée (jamais gagnante, mais une
+        # incohérence silencieuse — même classe de bug que "UPDATE + ACCEPT
+        # concurrent"). Même convention que `producer.py::with_for_update(of=...)`.
         a_uuid = uuid.UUID(auction_id)
-        auction = await current_session.get(Auction, a_uuid)
+        auction = await current_session.scalar(
+            select(Auction).where(Auction.id == a_uuid).with_for_update()
+        )
 
         if not auction:
             raise BusinessRuleException("Cette opportunité de marché n'existe plus.")
@@ -526,12 +535,22 @@ class AuctionMixin(BaseMixin):
         #    existe déjà, on MET À JOUR son prix au lieu de tenter un INSERT
         #    qui lèverait IntegrityError (→ transaction empoisonnée → « erreur
         #    technique »). UX naturelle : « participer » 2× = corriger son prix.
+        # `FOR UPDATE` (2026-09-04) : ferme la fenêtre de course entre la
+        # lecture de `existing_bid` et l'INSERT/UPDATE qui suit — deux
+        # `place_bid` concurrents du MÊME producteur sur la MÊME enchère
+        # (double-tap, retry Celery) ne doivent produire qu'UNE seule ligne,
+        # jamais une tentative d'INSERT en double comptant sur la seule
+        # contrainte unique pour l'empêcher (celle-ci protège les données,
+        # pas l'expérience — un IntegrityError non attrapé ici devenait une
+        # « erreur technique » brute côté utilisateur).
         now = datetime.now()
         existing_bid = await current_session.scalar(
-            select(Bid).where(
+            select(Bid)
+            .where(
                 Bid.auction_id == a_uuid,
                 Bid.producer_id == producer_id,
             )
+            .with_for_update()
         )
 
         if existing_bid is not None:
@@ -1198,7 +1217,28 @@ class AuctionMixin(BaseMixin):
             )
 
             if scope_effective == "MATCHABLE" and supplied_ids:
-                stmt = stmt.where(Auction.sub_category_id.in_(supplied_ids))
+                # (2026-08-31) Incident réel : `guess_category()` (producer.py)
+                # retombe sur "AUTRES" dès qu'un produit légitime (ex: "pommes
+                # de terre") ne matche aucune sous-catégorie EXISTANTE ni aucun
+                # mot-clé de son repli codé en dur — la sous-catégorie créée
+                # est alors neuve, avec ZÉRO produit producteur rattaché.
+                # Filtrer strictement sur `supplied_ids` rendait cette enchère
+                # INVISIBLE pour TOUT producteur, y compris ceux vendant
+                # réellement ce produit (leur propre catalogue pointe vers une
+                # sous-catégorie différente/inexistante à ce moment-là) : un
+                # appel d'offres pouvait ne jamais être vu par personne. Les
+                # enchères classées "AUTRES" (catégorie fourre-tout, jamais
+                # une vraie filière) restent donc visibles pour TOUS les
+                # producteurs en MATCHABLE, en plus de leur propre catalogue —
+                # c'est ce filet de sécurité, pas une liste de mots-clés
+                # toujours incomplète, qui garantit qu'aucune enchère légitime
+                # ne devient structurellement invisible.
+                stmt = stmt.where(
+                    or_(
+                        Auction.sub_category_id.in_(supplied_ids),
+                        func.upper(Category.name) == "AUTRES",
+                    )
+                )
             # Champs catalogue/référentiel : recherche floue trigram.
             if product_name:
                 stmt = stmt.where(fuzzy_match(SubCategory.name, product_name))
@@ -1342,6 +1382,25 @@ class AuctionMixin(BaseMixin):
         # OUTER JOIN Producer/User : un bid gagnant dont le producteur a un
         # lien User cassé ne doit PAS déclencher « Offre introuvable » (le
         # nom retombe sur « Producteur Anonyme »). Cohérent avec get_auction_bids.
+        #
+        # (2026-09-04, hardening concurrence — mandat "double accept") :
+        # `FOR UPDATE OF bids, auctions` — AVANT ce correctif, cette requête
+        # n'avait AUCUN verrou. Deux `select_winning_bid` concurrents (deux
+        # bids DIFFÉRENTS de la MÊME enchère — double-tap acheteur, ou 2
+        # workers qui rejouent le même message) pouvaient TOUS LES DEUX lire
+        # `auction.status="OPEN"` avant que l'un des deux ne commite
+        # `status="CLOSED"` — la contrainte unique `orders_auction_unique`
+        # empêchait bien un 2e `Order` d'exister EN BASE, mais l'échec
+        # arrivait comme une `IntegrityError` brute non gérée (« erreur
+        # technique » pour l'acheteur), pas comme un refus métier propre. Le
+        # verrou sérialise les deux tentatives : la 2e relit
+        # `auction.status="CLOSED"` (déjà posé par la 1re, RÉELLEMENT commité
+        # avant que la 2e n'acquière le verrou) et lève l'exception métier
+        # normale ci-dessous — jamais une exception SQL brute, jamais deux
+        # `Order`. `of=` scope le verrou à `Bid`/`Auction` (mêmes lignes
+        # mutées ci-dessous) — `User`/`SubCategory` restent des jointures en
+        # lecture seule, jamais verrouillées inutilement (même convention que
+        # `producer.py::with_for_update(of=...)`).
         stmt = (
             select(
                 Bid,
@@ -1355,6 +1414,7 @@ class AuctionMixin(BaseMixin):
             .outerjoin(User, Producer.user_id == User.id)
             .join(SubCategory, Auction.sub_category_id == SubCategory.id)
             .where(Bid.id == b_id)
+            .with_for_update(of=[Bid, Auction])
         )
         res = await current_session.execute(stmt)
         record = res.fetchone()
@@ -1366,9 +1426,43 @@ class AuctionMixin(BaseMixin):
 
         bid, auction, prod_name, prod_phone, sub_cat = record
 
-        if auction.status == "CLOSED":
+        # (2026-09-04, audit fonctionnel/transactionnel Auction↔Bid) : GAP
+        # RÉEL fermé ici — ce garde ne rejetait QUE `status == "CLOSED"`.
+        # Une enchère `EXPIRED` (cron `check_and_expire_auctions`) ou
+        # `CANCELLED` (`cancel_auction`) n'est PAS "CLOSED" au sens littéral
+        # de ce champ, mais n'est PLUS "OPEN" non plus — désigner un gagnant
+        # dessus créait quand même un `Order` (le verrou `FOR UPDATE`
+        # protège contre une COURSE entre deux sélections concurrentes, mais
+        # ne protégeait pas contre une sélection SOLITAIRE sur une enchère
+        # déjà sortie du cycle de vie actif). Toute valeur non-OPEN est
+        # désormais rejetée — message dédié pour CLOSED (déjà un partenaire
+        # retenu), générique pour EXPIRED/CANCELLED.
+        auction_status_up = str(auction.status or "").upper()
+        if auction_status_up == "CLOSED":
             raise BusinessRuleException(
-                "Cette enchère a déjà été clôturée avec un autre partenaire."
+                "Cette enchère a déjà été clôturée avec un autre partenaire.",
+                reason="auction_already_closed",
+            )
+        if auction_status_up != "OPEN":
+            raise BusinessRuleException(
+                f"Cette enchère n'est plus ouverte (statut={auction.status}).",
+                reason="auction_not_open",
+            )
+
+        # (2026-09-04, idem) : GAP RÉEL fermé ici — AUCUN garde ne vérifiait
+        # le statut du BID lui-même avant de le désigner gagnant. Un
+        # producteur peut retirer son offre (`withdraw_bid`, → `WITHDRAWN`)
+        # SANS que l'enchère ne se ferme (elle reste `OPEN` — d'autres
+        # offres peuvent encore arriver) : rien n'empêchait alors
+        # `select_winning_bid` de désigner CETTE offre retirée comme
+        # gagnante, créant une `Order` sur un engagement que le producteur
+        # avait explicitement annulé. Même risque pour une offre déjà
+        # `LOST` (un `bid_id` périmé rejoué). Seule une offre `PENDING`
+        # (jamais retirée, jamais déjà traitée) peut être sélectionnée.
+        if str(bid.status or "").upper() != "PENDING":
+            raise BusinessRuleException(
+                "Cette offre a été retirée ou n'est plus disponible pour sélection.",
+                reason="bid_not_selectable",
             )
 
         # 1. Mises à jour atomiques des états du Marché
@@ -1475,11 +1569,25 @@ class AuctionMixin(BaseMixin):
         a_uuid = uuid.UUID(auction_id)
 
         # Recherche de l'enchère en s'assurant qu'elle appartient bien à l'utilisateur via son profil
+        # `FOR UPDATE` (2026-09-04, audit fonctionnel/transactionnel
+        # Auction↔Bid) : GAP RÉEL fermé ici — cette requête n'avait AUCUN
+        # verrou, contrairement à TOUTES les autres écritures sur `Auction`
+        # (`place_bid`, `select_winning_bid`). Une annulation acheteur
+        # concurrente à une désignation de gagnant (double-tap, ou
+        # webhook/Celery rejoué) pouvait lire `status="OPEN"` avant que
+        # `select_winning_bid` n'ait commité `status="CLOSED"`, puis écrire
+        # `status="CANCELLED"` PAR-DESSUS une enchère déjà close avec un
+        # `Order` déjà créé — un `Auction.status="CANCELLED"` incohérent
+        # avec l'existence d'une commande confirmée liée. Le verrou sérialise
+        # les deux : la seconde transaction relit le statut RÉELLEMENT
+        # commité par la première et se voit opposer le refus métier normal
+        # ci-dessous, jamais une écrasement silencieux.
         stmt = (
             select(Auction)
             .join(BuyerProfile, Auction.buyer_id == BuyerProfile.id)
             .join(User, BuyerProfile.user_id == User.id)
             .where(Auction.id == a_uuid, User.phone == clean_phone)
+            .with_for_update(of=Auction)
         )
         auction = await current_session.scalar(stmt)
 
@@ -1512,11 +1620,22 @@ class AuctionMixin(BaseMixin):
         clean_phone = normalize_phone(phone)
         b_uuid = uuid.UUID(bid_id)
 
+        # `FOR UPDATE` (2026-09-04, hardening concurrence, mandat "UPDATE +
+        # ACCEPT concurrent") : sans ce verrou, une correction de prix
+        # pouvait courir contre `select_winning_bid` sur le MÊME bid — le
+        # perdant de la course (silencieux, sans lock) pouvait voir son
+        # écriture écrasée ou verrouiller un prix déjà périmé au moment où
+        # l'acheteur accepte. Le verrou sérialise : soit le prix corrigé est
+        # déjà visible quand `select_winning_bid` lit la ligne, soit
+        # `select_winning_bid` a déjà clos l'enchère et CETTE fonction
+        # retombe sur "offre déjà traitée" (bid.status != PENDING) — jamais
+        # un prix silencieusement périmé.
         stmt = (
             select(Bid)
             .join(Producer, Bid.producer_id == Producer.id)
             .join(User, Producer.user_id == User.id)
             .where(Bid.id == b_uuid, User.phone == clean_phone)
+            .with_for_update(of=Bid)
         )
         bid = await current_session.scalar(stmt)
 
@@ -1552,11 +1671,15 @@ class AuctionMixin(BaseMixin):
         b_uuid = uuid.UUID(bid_id)
 
         # Sécurisation : Le bid doit appartenir au producteur lié au numéro de téléphone
+        # `FOR UPDATE` (2026-09-04) : même raisonnement que `update_bid_price`
+        # — un retrait ne doit jamais courir en silence contre une
+        # sélection gagnante concurrente sur le même bid.
         stmt = (
             select(Bid)
             .join(Producer, Bid.producer_id == Producer.id)
             .join(User, Producer.user_id == User.id)
             .where(Bid.id == b_uuid, User.phone == clean_phone)
+            .with_for_update(of=Bid)
         )
         bid = await current_session.scalar(stmt)
 

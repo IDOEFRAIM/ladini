@@ -130,7 +130,7 @@ class TestQuantityUnit:
 
     def test_unit_synonyms_map_only_to_valid_units(self):
         valid = set(UNIT_SYNONYMS.values())
-        assert valid == {"KG", "TONNE", "SAC", "PANIER", "TETE", "UNITE"}
+        assert valid == {"KG", "TONNE", "SAC", "PANIER", "TETE", "UNITE", "LITRE"}
 
     @pytest.mark.parametrize("text,qty,unit", [
         ("200 kg", 200.0, "KG"),

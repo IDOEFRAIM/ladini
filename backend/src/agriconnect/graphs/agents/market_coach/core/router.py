@@ -90,7 +90,23 @@ class RouteRule:
 def _cart_guard(state: Dict[str, Any]) -> bool:
     status = str(state.get("status") or "").upper()
     missing = list(state.get("missing_fields") or [])
-    return tunnel_manager.is_cart_routeable(status, missing)
+    # (2026-09-02, G-1) : un menu producteur/palier encore actif doit
+    # TOUJOURS atteindre cart_management, quels que soient les champs
+    # manquants — voir la docstring de `is_cart_routeable` pour l'incident
+    # exact que ceci corrige. Import local : évite tout risque de cycle avec
+    # `domain/selection_actions.py` (pur, sans dépendance vers router.py,
+    # mais gardé local par précaution symétrique aux autres imports de ce
+    # module).
+    from agriconnect.graphs.agents.market_coach.domain.selection_actions import (
+        build_selection_context,
+    )
+
+    selection_tunnel_active = (
+        build_selection_context(state).expected_action is not None
+    )
+    return tunnel_manager.is_cart_routeable(
+        status, missing, selection_tunnel_active=selection_tunnel_active
+    )
 
 
 def _negotiation_guard(state: Dict[str, Any]) -> bool:

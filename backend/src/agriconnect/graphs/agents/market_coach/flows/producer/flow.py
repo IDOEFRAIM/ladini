@@ -19,6 +19,11 @@ from typing import Any, Dict, List, Optional
 
 from agriconnect.core.formatting import fmt_num as _fmt_num
 from agriconnect.graphs.agents.market_coach.actions.common import load_entity_snapshot
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    resolve_pending_interaction,
+    set_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
@@ -112,7 +117,7 @@ async def _resolve_auction(
     ]
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "working_memory": {"auction_menu": menu},
         "response_strategy": "SELECTION_MENU",
         "final_response": menu,
@@ -184,7 +189,7 @@ async def _resolve_my_bids(
     candidates = [str(b.get("product") or "?") for b in data]
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "working_memory": {"bids_menu": menu},
         "response_strategy": "SELECTION_MENU",
         "final_response": menu,
@@ -281,7 +286,7 @@ async def _resolve_bid(
     ]
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "working_memory": {"bids_menu": menu},
         "response_strategy": "SELECTION_MENU",
         "final_response": menu,
@@ -397,7 +402,7 @@ async def _resolve_default_farm(
     farm_menu_text = "\n".join(lines)
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "response_strategy": "SELECTION_MENU",
         "final_response": farm_menu_text,
         "ag_ui_component": None,
@@ -510,7 +515,7 @@ async def _resolve_stock(
     ]
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "working_memory": {"stocks_menu": menu},
         "response_strategy": "SELECTION_MENU",
         "final_response": menu,
@@ -812,7 +817,7 @@ async def _resolve_cycle_for_update(
             pending.update(correction)
             return {
                 "status": "WAITING_INPUT",
-                "expected_input": "CONFIRMATION",
+                **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
                 "response_strategy": "ASK_MISSING_FIELD",
                 "current_goal": "SALES_UPDATE_PRODUCTION",
                 "final_response": _format_pending_recap(pending, noun="lot"),
@@ -891,7 +896,7 @@ async def _resolve_cycle_for_update(
         )
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "CONFIRMATION",
+            **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
             "response_strategy": "ASK_MISSING_FIELD",
             "current_goal": "SALES_UPDATE_PRODUCTION",
             "final_response": f"{note}\n\n{recap_text}" if note else recap_text,
@@ -938,7 +943,11 @@ async def _resolve_cycle_for_update(
                 # goals de navigation critiques (mes commandes, etc.) peuvent
                 # encore s'échapper.
                 "status": "WAITING_INPUT",
-                "expected_input": "UPDATE_FIELD",
+                **set_pending_interaction(
+                    InteractionKind.ENTER_FIELD,
+                    field_name="update_field",
+                    goal="SALES_UPDATE_PRODUCTION",
+                ),
                 "response_strategy": "ASK_MISSING_FIELD",
                 "current_goal": "SALES_UPDATE_PRODUCTION",
                 "working_memory": {
@@ -955,7 +964,7 @@ async def _resolve_cycle_for_update(
         pending.update(correction)
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "CONFIRMATION",
+            **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
             "response_strategy": "ASK_MISSING_FIELD",
             "current_goal": "SALES_UPDATE_PRODUCTION",
             "final_response": _format_pending_recap(pending, noun="lot"),
@@ -1032,7 +1041,7 @@ async def _resolve_cycle_for_update(
     menu = "\n".join(lines)
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "response_strategy": "SELECTION_MENU",
         "current_goal": "SALES_UPDATE_PRODUCTION",
         "final_response": menu,
@@ -1105,7 +1114,7 @@ async def _resolve_product_for_update(
             pending.update(correction)
             return {
                 "status": "WAITING_INPUT",
-                "expected_input": "CONFIRMATION",
+                **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
                 "response_strategy": "ASK_MISSING_FIELD",
                 "current_goal": "SALES_UPDATE_PRODUCT",
                 "final_response": _format_pending_recap(pending, noun="produit"),
@@ -1178,7 +1187,7 @@ async def _resolve_product_for_update(
         )
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "CONFIRMATION",
+            **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
             "response_strategy": "ASK_MISSING_FIELD",
             "current_goal": "SALES_UPDATE_PRODUCT",
             "final_response": f"{note}\n\n{recap_text}" if note else recap_text,
@@ -1215,7 +1224,11 @@ async def _resolve_product_for_update(
                 # "PRODUCT" est interruptible (slot SOFT), ce qui laissait une
                 # correction riche dérailler ce tunnel vers un autre goal.
                 "status": "WAITING_INPUT",
-                "expected_input": "UPDATE_FIELD",
+                **set_pending_interaction(
+                    InteractionKind.ENTER_FIELD,
+                    field_name="update_field",
+                    goal="SALES_UPDATE_PRODUCT",
+                ),
                 "response_strategy": "ASK_MISSING_FIELD",
                 "current_goal": "SALES_UPDATE_PRODUCT",
                 "working_memory": {
@@ -1232,7 +1245,7 @@ async def _resolve_product_for_update(
         pending.update(correction)
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "CONFIRMATION",
+            **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
             "response_strategy": "ASK_MISSING_FIELD",
             "current_goal": "SALES_UPDATE_PRODUCT",
             "final_response": _format_pending_recap(pending, noun="produit"),
@@ -1303,7 +1316,7 @@ async def _resolve_product_for_update(
     menu = "\n".join(lines)
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "response_strategy": "SELECTION_MENU",
         "current_goal": "SALES_UPDATE_PRODUCT",
         "final_response": menu,
@@ -1359,7 +1372,6 @@ async def _resolve_delivery_otp(
     if not code:
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "OTP_CODE",
             "response_strategy": "ASK_MISSING_FIELD",
             "current_goal": "PRODUCER_CONFIRM_DELIVERY_OTP",
             "working_memory": {
@@ -1372,6 +1384,14 @@ async def _resolve_delivery_otp(
                 "Ex : « code 1234 » ou juste « 1234 »."
             ),
             "ag_ui_component": None,
+            # (2026-09-02) Sans ceci, TunnelManager (migré pour dériver sa
+            # catégorie d'interruption depuis `pending_interaction`, pas
+            # `expected_input` directement) ne verrait plus ce tunnel comme
+            # actif et perdrait la protection ALWAYS_UNBREAKABLE sur un flux
+            # qui débloque de l'argent.
+            **set_pending_interaction(
+                InteractionKind.VERIFY_OTP, goal="PRODUCER_CONFIRM_DELIVERY_OTP"
+            ),
         }
 
     try:
@@ -1386,6 +1406,7 @@ async def _resolve_delivery_otp(
             "final_response": "Impossible de vérifier le code pour le moment. Réessayez dans un instant.",
             "working_memory": {**working, "active_goal": None, "locked_intent": None},
             "ag_ui_component": None,
+            **resolve_pending_interaction(),
         }
 
     if not is_success_response(result):
@@ -1393,7 +1414,6 @@ async def _resolve_delivery_otp(
         # d'abandonner — le producteur a probablement fait une faute de frappe.
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "OTP_CODE",
             "response_strategy": "ASK_MISSING_FIELD",
             "current_goal": "PRODUCER_CONFIRM_DELIVERY_OTP",
             "final_response": (result or {}).get("message")
@@ -1404,6 +1424,9 @@ async def _resolve_delivery_otp(
                 "locked_intent": "PRODUCER_CONFIRM_DELIVERY_OTP",
             },
             "ag_ui_component": None,
+            **set_pending_interaction(
+                InteractionKind.VERIFY_OTP, goal="PRODUCER_CONFIRM_DELIVERY_OTP"
+            ),
         }
 
     return {
@@ -1414,6 +1437,7 @@ async def _resolve_delivery_otp(
         "working_memory": {**working, "active_goal": None, "locked_intent": None},
         "transaction_payload": {"__reset__": True},
         "ag_ui_component": None,
+        **resolve_pending_interaction(),
     }
 
 

@@ -17,6 +17,29 @@ from typing import Optional
 
 from agriconnect.core.settings import settings
 
+# Goals routés vers le profil FAST — même liste que les clés explicites de
+# `settings.ROUTING_MAP` (voir `_build_routing_map` dans core/settings.py) :
+# ce module ne fait qu'exprimer la MÊME politique en termes de PROFIL plutôt
+# que de nom de modèle, pour le LLM Gateway (2026-09-02) — voir
+# `graphs/agents/market_coach/llm_gateway/`. Zéro changement de comportement
+# de routage : les mêmes 3 goals restent "rapide", tout le reste reste
+# "raisonnement".
+_FAST_PROFILE_GOALS = frozenset(
+    {"INPUT_NORMALIZATION", "SECURITY_MODERATION", "STATE_CLEANER"}
+)
+
+
+def get_profile_for_goal(goal: Optional[str]):
+    """Retourne le `LLMProfile` (FAST/REASONING) pour `goal` — à consommer
+    par `MarketRuntime.llm_gateway.complete(profile=...)`, jamais par un nom
+    de modèle en dur dans un node métier (§5 du brief LLM Gateway)."""
+    from agriconnect.graphs.agents.market_coach.llm_gateway.types import LLMProfile
+
+    key = str(goal or "").strip().upper()
+    if key in _FAST_PROFILE_GOALS:
+        return LLMProfile.FAST
+    return LLMProfile.REASONING
+
 
 def get_model_for_goal(goal: Optional[str]) -> str:
     """Retourne le modèle Groq approprié pour `goal`.
@@ -38,4 +61,4 @@ def get_model_for_goal(goal: Optional[str]) -> str:
     return routing_map.get("__default__") or settings.LLM_MODEL
 
 
-__all__ = ["get_model_for_goal"]
+__all__ = ["get_model_for_goal", "get_profile_for_goal"]

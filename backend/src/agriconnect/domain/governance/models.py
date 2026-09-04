@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -229,6 +230,22 @@ class SubCategory(Base):
     blocked_zone_ids = Column(
         PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]")
     )
+    # Politique plateforme (2026-09-02, demande explicite utilisateur) : quantité
+    # minimale, en unité de BASE, qu'une commande de ce TYPE de produit doit
+    # représenter pour être poursuivie — ex. "Tomates" -> 50 KG. Définie par
+    # l'ADMIN au niveau du type de produit, jamais par le producteur (voir
+    # `services/database/producer.py` — aucun payload de création/mise à jour
+    # de `Product` ne touche `SubCategory`). NULL = aucune règle configurée =
+    # comportement historique (tout produit historique reste commandable).
+    # Sans rapport avec `PricingTier.min_order_quantity`
+    # (domain/pricing_tiers.py) — celui-ci est un minimum de NOMBRE DE
+    # PAQUETS pour UN palier tarifaire précis, jamais une quantité de base ni
+    # une politique de plateforme. Source unique consommée par
+    # `domain/order_policy.py::validate_minimum_order_quantity` — le web
+    # (Next.js/drizzle, table miroir `governance.sub_categories`) et l'agent
+    # lisent tous deux CES colonnes, jamais une copie locale.
+    minimum_order_quantity = Column(Numeric(14, 3), nullable=True)
+    minimum_order_unit = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False

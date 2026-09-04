@@ -3,6 +3,10 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, Optional
 
 from agriconnect.core.logger import get_logger
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    set_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.core.base import (
     _AUTO_FARM_NOTICE,
     FARM_CRITICAL_GOALS,
@@ -101,7 +105,7 @@ async def ensure_farm_node(
             lines.append(f"{i}. *{name}*")
             mapping[str(i)] = f_id
         updates["status"] = "WAITING_INPUT"
-        updates["expected_input"] = "SELECTION"
+        updates.update(set_pending_interaction(InteractionKind.SELECTION_MENU))
         updates["response_strategy"] = "SELECTION_MENU"
         updates["final_response"] = "\n".join(lines)
         updates["available_mapping"] = mapping

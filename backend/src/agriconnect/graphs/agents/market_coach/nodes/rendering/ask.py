@@ -7,6 +7,11 @@ import logging
 from typing import Any, Dict, Optional
 
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
+from agriconnect.graphs.agents.market_coach.llm_gateway import (
+    LLMGatewayExhausted,
+    resolve_gateway,
+    resolve_profile,
+)
 from agriconnect.graphs.agents.market_coach.nodes.rendering.common import (
     FIELD_BUSINESS_REASON,
     RenderContext,
@@ -88,22 +93,18 @@ async def generate_llm_question(
         f"concret si utile (ex: 250 FCFA/kg, 5 sacs, Ouagadougou).{last_hint}"
     )
     try:
-        completion = await asyncio.wait_for(
-            asyncio.to_thread(
-                lambda: llm.chat.completions.create(
-                    model=getattr(
-                        mc_runtime, "model_answer", "llama-3.3-70b-versatile"
-                    ),
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
-                    max_tokens=90,
-                )
-            ),
-            timeout=10.0,
+        # LLM Gateway (2026-09-02) : budget/repli/disjoncteur portés par le
+        # Gateway — voir `llm_gateway/gateway.py`.
+        completion = await resolve_gateway(mc_runtime).complete(
+            profile=resolve_profile(mc_runtime),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=90,
+            agent_node="generate_llm_question",
         )
         result = (completion.choices[0].message.content or "").strip()
         return result if result else fallback
-    except asyncio.TimeoutError:
+    except LLMGatewayExhausted:
         logger.warning("RESPONSE_LLM_TIMEOUT | goal=%s | field=%s", goal, field)
         return fallback
     except Exception as exc:

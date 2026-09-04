@@ -42,7 +42,8 @@ class TestSendSearchResultPhotos:
     def test_viewing_a_photo_reminds_the_buyer_the_selection_number_still_works(self, monkeypatch):
         """Rupture prévenue : consulter une photo ne doit jamais faire perdre
         le fil d'une commande en cours (constaté en usage réel — "on perd le
-        fil")."""
+        fil"). Photo + rappel partent désormais dans UN SEUL ResponsePlan
+        multipart (voir docstring de `_send_search_result_photos`)."""
         import agriconnect.workers.media.product_photo_task as mod
 
         monkeypatch.setattr(
@@ -53,13 +54,28 @@ class TestSendSearchResultPhotos:
             "agriconnect.services.twilio_sender.send_whatsapp_media",
             lambda phone, url, caption="": "SM1",
         )
-        sent = AsyncMock()
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        captured = {}
+
+        class _CapturingDispatcher:
+            async def dispatch(self, phone_number, plan):
+                captured["plan"] = plan
+                return []
+
+        monkeypatch.setattr(
+            "agriconnect.api.response_dispatch.get_dispatcher",
+            lambda: _CapturingDispatcher(),
+        )
 
         run(mod._send_search_result_photos(PHONE, "2"))
 
-        assert "*2*" in sent.await_args.args[1]
-        assert "continuer" in sent.await_args.args[1]
+        from agriconnect.api.response_dispatch import ImageResponse, TextResponse
+
+        plan = captured["plan"]
+        assert isinstance(plan.items[0], ImageResponse)
+        reminder = plan.items[-1]
+        assert isinstance(reminder, TextResponse)
+        assert "*2*" in reminder.text
+        assert "continuer" in reminder.text
 
     def test_an_unknown_index_reports_invalid(self, monkeypatch):
         import agriconnect.workers.media.product_photo_task as mod
@@ -95,10 +111,19 @@ class TestSendSearchResultPhotos:
             "agriconnect.services.search_results_cache.load_results",
             lambda phone: {"1": {"id": "p1", "name": "tomates", "images": []}},
         )
-        sent = AsyncMock()
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        captured = {}
+
+        class _CapturingDispatcher:
+            async def dispatch(self, phone_number, plan):
+                captured["plan"] = plan
+                return []
+
+        monkeypatch.setattr(
+            "agriconnect.api.response_dispatch.get_dispatcher",
+            lambda: _CapturingDispatcher(),
+        )
 
         run(mod._send_search_result_photos(PHONE, "1"))
 
-        texts = [call.args[1] for call in sent.await_args_list]
+        texts = [item.text for item in captured["plan"].items]
         assert any("Aucune photo" in t and "tomates" in t for t in texts)

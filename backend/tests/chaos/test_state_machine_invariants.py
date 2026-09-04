@@ -27,7 +27,32 @@ def _read_goals():
     return sorted(_READ_GOALS)
 
 
-@pytest.mark.parametrize("goal", _write_goals())
+# PROCUREMENT_CREATE_REQUEST (2026-09-03) et SALES_PUBLISH_PRODUCT
+# (2026-09-04) : ces 2 goals ont désormais leur PROPRE cycle de confirmation
+# versionné (draft canonique + `ConfirmationTarget` lié à une version
+# précise — `domain/procurement_draft.py`/`domain/sales_publish_draft.py`),
+# au lieu du mécanisme générique `confirmation_summary`/`transaction_payload`
+# de `confirmation_gate.py`. I1/I2/I3 restent TOUS garantis pour ces goals —
+# vérifiés séparément ci-dessous avec le VRAI contrat actuel
+# (`pending_interaction` CONFIRM_ACTION, draft versionné), plutôt que le
+# contrat générique (`confirmation_summary`, `WAITING_CONFIRMATION`) qui ne
+# s'applique plus à eux. Exclus des 3 parametrizations génériques ci-dessous
+# pour cette raison.
+#
+# (2026-09-04, hardening transverse) : ce frozenset était auparavant
+# DUPLIQUÉ localement (`{"PROCUREMENT_CREATE_REQUEST"}`, jamais mis à jour
+# quand SALES a migré) — c'est CE genre de duplication silencieuse que
+# l'audit transverse a précisément pour but de fermer. Importé directement
+# depuis `confirmation_gate.py` : une seule source de vérité, ne peut plus
+# dériver.
+from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+    _DRAFT_BASED_CONFIRMATION_GOALS,
+)
+
+
+@pytest.mark.parametrize(
+    "goal", [g for g in _write_goals() if g not in _DRAFT_BASED_CONFIRMATION_GOALS]
+)
 def test_no_write_executes_without_explicit_confirm(goal):
     """Rupture prévenue : une vente/enchère/commande exécutée sans que
     l'utilisateur ait dit « oui ». Pour CHAQUE intent WRITE du catalogue :
@@ -50,7 +75,9 @@ def test_no_write_executes_without_explicit_confirm(goal):
     assert out.get("confirmation_summary"), f"{goal}: récap absent — confirmation aveugle"
 
 
-@pytest.mark.parametrize("goal", _write_goals())
+@pytest.mark.parametrize(
+    "goal", [g for g in _write_goals() if g not in _DRAFT_BASED_CONFIRMATION_GOALS]
+)
 def test_confirm_event_authorizes_exactly_once(goal):
     """Rupture prévenue : le « oui » de l'utilisateur ignoré (re-demande en
     boucle — bug historique du canal de confirmation). CONFIRM en attente
@@ -69,19 +96,109 @@ def test_confirm_event_authorizes_exactly_once(goal):
     assert out["status"] == "EXECUTING" and out["execution_authorized"] is True, goal
 
 
-# PROCUREMENT_CREATE_REQUEST (2026-08) : exception délibérée et scopée à
-# l'invariant "purge totale sur REJECT" ci-dessous. Bug production : refuser
-# le récap d'un appel d'offres perdait tout le brouillon (produit/quantité/
-# prix), rendant impossible la moindre correction ("non" puis "plafond 400"
-# atterrissait sans contexte). Le brouillon est désormais préservé pour ce
-# goal — voir `_DRAFT_PRESERVING_REJECT_GOALS` dans confirmation_gate.py et
-# `tests/nodes/test_confirmation_gate_reject.py` pour la couverture dédiée.
-# I1/I2 (aucune écriture non autorisée) restent garantis : seul I3 (aucun
-# résidu) est volontairement assoupli, et UNIQUEMENT pour ce goal.
-_DRAFT_PRESERVING_REJECT_GOALS = frozenset({"PROCUREMENT_CREATE_REQUEST"})
+@pytest.mark.parametrize("goal", sorted(_DRAFT_BASED_CONFIRMATION_GOALS))
+def test_no_write_executes_without_explicit_confirm_draft_based_goal(goal):
+    """Équivalent I1 pour un goal à draft versionné — contrat RÉEL actuel :
+    `WAITING_INPUT`/pending_interaction CONFIRM_ACTION au lieu de
+    `WAITING_CONFIRMATION`/`confirmation_summary`. Deux phases couvertes :
+    (a) collecte encore incomplète, (b) champs réunis, draft v1 bootstrapé
+    — dans les DEUX cas, un `execution_authorized` forgé en amont doit être
+    écrasé à False (voir le correctif ajouté dans `_resolve_draft_based_confirmation`)."""
+    from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+        confirmation_gate,
+    )
+
+    # (a) Payload encore incomplet (pas de `unit`/`price_unit`) — aucun
+    # draft ne peut encore être créé.
+    incomplete_state = {
+        "current_goal": goal,
+        "transaction_payload": {"product": "maïs", "quantity": 50, "price": 250},
+        "interpreted_event": "NEW_TASK",
+        "execution_authorized": True,  # forgé — doit être écrasé
+    }
+    out_incomplete = run(confirmation_gate(incomplete_state, None))
+    assert out_incomplete["execution_authorized"] is False, (
+        f"{goal}: autorisation forgée non écrasée pendant la collecte"
+    )
+    assert out_incomplete.get("is_certified") is False
+
+    # (b) Payload complet — le draft v1 est bootstrapé, parqué en attente
+    # d'une confirmation explicite (jamais exécuté au premier passage).
+    complete_state = {
+        "current_goal": goal,
+        "transaction_payload": {
+            "product": "maïs", "quantity": 50, "unit": "KG",
+            "price": 250, "price_unit": "KG",
+        },
+        "interpreted_event": "NEW_TASK",
+        "execution_authorized": True,  # forgé — doit être écrasé
+    }
+    out_complete = run(confirmation_gate(complete_state, None))
+    assert out_complete["status"] == "WAITING_INPUT", f"{goal}: draft non parqué"
+    assert out_complete["execution_authorized"] is False, (
+        f"{goal}: autorisation forgée non écrasée au bootstrap du draft"
+    )
+    assert out_complete["pending_interaction"]["kind"] == "CONFIRM_ACTION"
+    assert out_complete.get("final_response"), f"{goal}: récap absent — confirmation aveugle"
 
 
-@pytest.mark.parametrize("goal", [g for g in _write_goals() if g not in _DRAFT_PRESERVING_REJECT_GOALS])
+_DRAFT_BASED_GOAL_FIXTURE = {
+    # goal -> (state_key, draft_module_path, draft_class_name, extra_new_kwargs)
+    "PROCUREMENT_CREATE_REQUEST": (
+        "procurement_draft",
+        "agriconnect.graphs.agents.market_coach.domain.procurement_draft",
+        "ProcurementDraft",
+        {"product": "maïs", "quantity": 50.0, "unit": "KG", "price": 250.0, "price_unit": "KG"},
+    ),
+    "SALES_PUBLISH_PRODUCT": (
+        "sales_publish_draft",
+        "agriconnect.graphs.agents.market_coach.domain.sales_publish_draft",
+        "SalesPublishDraft",
+        {"product": "maïs", "quantity": 50.0, "unit": "KG", "price": 250.0},
+    ),
+}
+
+
+@pytest.mark.parametrize("goal", sorted(_DRAFT_BASED_CONFIRMATION_GOALS))
+def test_confirm_event_authorizes_exactly_once_draft_based_goal(goal, monkeypatch):
+    """Équivalent I2 pour un goal à draft versionné — CONFIRM contre la
+    cible EXACTE du draft en attente doit basculer en EXECUTING/authorized,
+    exactement comme le contrat générique pour les autres goals. Dispatché
+    par goal (mandat hardening : PROCUREMENT/PREORDER/SALES restent des
+    domaines séparés, pas une abstraction commune prématurée — voir
+    `_DRAFT_BASED_GOAL_FIXTURE`, une table de données pas de code partagé)."""
+    import importlib
+
+    from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+        confirmation_gate,
+    )
+
+    assert goal in _DRAFT_BASED_GOAL_FIXTURE, f"pas de fixture pour {goal} — l'ajouter ci-dessus"
+    state_key, module_path, class_name, new_kwargs = _DRAFT_BASED_GOAL_FIXTURE[goal]
+    draft_mod = importlib.import_module(module_path)
+    draft_cls = getattr(draft_mod, class_name)
+
+    # `claim_once` réel tape Redis (voir tests/architecture/
+    # test_procurement_draft_transactional_contract.py pour la même note) —
+    # neutralisé ici, le test verrouille I2, pas l'idempotence Redis.
+    monkeypatch.setattr(draft_mod, "claim_once", lambda key: True)
+
+    v1 = draft_cls.new(draft_id="chaos-confirm-1", **new_kwargs)
+    state = {
+        "current_goal": goal,
+        state_key: v1.to_dict(),
+        "interpreted_event": "CONFIRM",
+        "extracted_entities": {},
+        "pending_interaction": {
+            "kind": "CONFIRM_ACTION",
+            "target": {"draft_id": v1.draft_id, "draft_version": v1.version},
+        },
+    }
+    out = run(confirmation_gate(state, None))
+    assert out["status"] == "EXECUTING" and out["execution_authorized"] is True, goal
+
+
+@pytest.mark.parametrize("goal", [g for g in _write_goals() if g not in _DRAFT_BASED_CONFIRMATION_GOALS])
 def test_reject_cancels_and_purges_payload(goal):
     """Rupture prévenue : l'utilisateur dit « non » mais le payload survit et
     ré-alimente la transaction suivante (fuite inter-tunnel, source n°1 des
@@ -102,7 +219,7 @@ def test_reject_cancels_and_purges_payload(goal):
     assert out["current_goal"] is None, f"{goal}: goal non déverrouillé après refus"
 
 
-@pytest.mark.parametrize("goal", sorted(_DRAFT_PRESERVING_REJECT_GOALS))
+@pytest.mark.parametrize("goal", sorted(_DRAFT_BASED_CONFIRMATION_GOALS))
 def test_reject_preserves_the_draft_but_still_blocks_execution(goal):
     """Exception scopée à l'invariant ci-dessus : le payload survit
     intentionnellement (pour permettre une correction), mais I1/I2 restent

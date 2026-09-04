@@ -16,7 +16,10 @@ _POST_SUCCESS_SUGGESTIONS: Dict[str, str] = {
     ),
     "SALES_PLACE_BID": 'Vous pouvez suivre vos offres avec "mes enchères".',
     "STOCK_REGISTER_HARVEST": 'Vous pouvez maintenant mettre en vente avec "publier produit".',
-    "STOCK_RECORD_MOVEMENT": "Votre inventaire a été mis à jour.",
+    "STOCK_RECORD_MOVEMENT": 'Tapez "voir mon stock" pour le récapitulatif à jour.',
+    "STOCK_ADJUST": 'Tapez "voir mon stock" pour vérifier le nouveau total.',
+    "STOCK_REMOVE_PARTIAL": 'Tapez "voir mon stock" pour le récapitulatif à jour.',
+    "STOCK_DELETE": 'Tapez "ajouter un produit" pour enregistrer une nouvelle récolte.',
 }
 
 

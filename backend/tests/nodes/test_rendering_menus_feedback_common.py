@@ -405,6 +405,93 @@ class TestStatusComponent:
         assert result["kwargs"]["reason"] == "x"
 
 
+class TestListMenuComponent:
+    """Audit UX interactive 2026-08-27 : `list_menu_component` impose
+    désormais les contraintes structurelles WhatsApp/Twilio (titre 24c,
+    description 72c, bouton 20c, 10 options max) — rien ne les appliquait
+    avant nulle part dans la chaîne."""
+
+    def _options(self, n=2):
+        return [{"index": str(i), "label": f"Option {i}"} for i in range(1, n + 1)]
+
+    def test_builds_the_expected_shape(self):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        result = list_menu_component("Titre", self._options())
+        assert result["id"] == ["ag_ui", "ListMenu"]
+        assert result["kwargs"]["title"] == "Titre"
+        assert result["kwargs"]["button_text"] == "Voir les options"
+        assert len(result["kwargs"]["options"]) == 2
+
+    def test_no_options_returns_none(self):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        assert list_menu_component("Titre", []) is None
+
+    def test_more_than_ten_options_returns_none(self):
+        """Plafond dur Meta/Twilio — jamais de menu tronqué qui mentirait
+        sur le nombre d'options réel : le texte reste la bonne réponse."""
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        assert list_menu_component("Titre", self._options(11)) is None
+
+    def test_exactly_ten_options_is_accepted(self):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        result = list_menu_component("Titre", self._options(10))
+        assert result is not None
+        assert len(result["kwargs"]["options"]) == 10
+
+    def test_a_long_title_is_truncated_to_24_characters(self):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        long_title = "Un titre de menu vraiment beaucoup trop long pour WhatsApp"
+        result = list_menu_component(long_title, self._options())
+        assert len(result["kwargs"]["title"]) <= 24
+        assert result["kwargs"]["title"].endswith("…")
+
+    def test_a_long_option_label_is_truncated_without_cutting_a_word(self):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        options = [{"index": "1", "label": "Poussins allemand grande race reproducteurs"}]
+        result = list_menu_component("Titre", options)
+        label = result["kwargs"]["options"][0]["label"]
+        assert len(label) <= 24
+        assert label == "Poussins allemand…", label
+
+    def test_a_long_description_is_truncated_to_72_characters(self):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        options = [{
+            "index": "1", "label": "x",
+            "description": "d" * 100,
+        }]
+        result = list_menu_component("Titre", options)
+        assert len(result["kwargs"]["options"][0]["description"]) <= 72
+
+    def test_a_short_description_is_left_untouched(self):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        options = [{"index": "1", "label": "x", "description": "5900 tête"}]
+        result = list_menu_component("Titre", options)
+        assert result["kwargs"]["options"][0]["description"] == "5900 tête"
+
+    def test_no_description_key_when_absent_from_the_option(self):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        result = list_menu_component("Titre", self._options())
+        assert "description" not in result["kwargs"]["options"][0]
+
+    def test_a_long_button_text_is_truncated_to_20_characters(self):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        result = list_menu_component(
+            "Titre", self._options(), button_text="Un libellé de bouton bien trop long"
+        )
+        assert len(result["kwargs"]["button_text"]) <= 20
+
+    def test_value_is_preserved_when_present(self):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        options = [{"index": "1", "label": "x", "value": "product-42"}]
+        result = list_menu_component("Titre", options)
+        assert result["kwargs"]["options"][0]["value"] == "product-42"
+
+    def test_metadata_defaults_to_empty_dict(self):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import list_menu_component
+        result = list_menu_component("Titre", self._options())
+        assert result["kwargs"]["metadata"] == {}
+
+
 class TestResolveGoalForUi:
     def test_current_goal_wins(self):
         from agriconnect.graphs.agents.market_coach.nodes.rendering.common import resolve_goal_for_ui

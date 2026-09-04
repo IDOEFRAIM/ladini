@@ -28,7 +28,7 @@ Contexte agent :
 - expected_candidates : {expected_candidates}
 - suspended_task : {suspended_task}
 - panier_en_attente : {cart_pending}
-
+{selection_action_block}
 Message utilisateur (déjà nettoyé et traduit en français) :
 \"\"\"{normalized_text}\"\"\"
 

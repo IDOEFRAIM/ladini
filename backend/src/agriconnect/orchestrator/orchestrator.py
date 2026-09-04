@@ -137,6 +137,9 @@ class Orchestrator:
         force_role: bool = False,
         interactive_id: str | None = None,
         location_shared: bool = False,
+        location_outcome: str | None = None,
+        location_lat: float | None = None,
+        location_lon: float | None = None,
     ) -> Dict[str, Any]:
         workspace_id = (phone or "anonymous").strip()
         ws = await self.resolver.resolve(workspace_id, workspace_type)
@@ -153,6 +156,9 @@ class Orchestrator:
                     force_role=force_role,
                     interactive_id=interactive_id,
                     location_shared=location_shared,
+                    location_outcome=location_outcome,
+                    location_lat=location_lat,
+                    location_lon=location_lon,
                 ),
                 timeout=_AGENT_TIMEOUT_SECONDS,
             )
@@ -228,17 +234,59 @@ class Orchestrator:
         Ne construit RIEN de Twilio-spécifique ici (pas de ContentSid) : renvoie
         juste une intention sémantique que tasks.py mappe vers le bon template
         selon la config. `None` = texte simple.
+
+        Source UNIQUE de vérité pour l'UI générative (audit MCP/AGUI) :
+        ``ag_ui_component`` (construit par ``nodes/ui_engine.py`` à partir d'un
+        ``MenuRequest``) était auparavant écrit dans l'état du graphe puis
+        jamais lu par la couche d'envoi — tout menu construit via ce chemin
+        restait invisible pour l'utilisateur WhatsApp, qui ne recevait que
+        ``final_response`` en texte brut. On le traduit ici en premier ; le
+        cas ``CONFIRM`` (indépendant de ``ag_ui_component``) reste géré
+        ensuite tel quel.
         """
         if not isinstance(final, dict):
             return None
+
+        # ListMenu (recherche produit, catalogue, stock, sélection
+        # producteur...) : les composants interactifs `list_menu`/
+        # `list_picker` de Meta/Twilio sont désactivés (2026-08-27) — trop
+        # de blocages de template (erreurs 21656, schéma figé côté Console).
+        # `ag_ui_component` continue d'être construit par `nodes/ui_engine.py`
+        # (nécessaire pour `available_mapping`/`expected_candidates`, la
+        # sélection par numéro), mais N'EST PLUS traduit en indice
+        # interactif ici : `final_response` porte déjà le texte complet et
+        # PAGINÉ (voir `services/text_pagination.py`), donc renvoyer `None`
+        # fait retomber ce tour sur le texte brut chunké — jamais tronqué au
+        # milieu d'un élément grâce aux marqueurs `PAGE_BREAK` posés par les
+        # renderers (`nodes/rendering/success.py`,
+        # `services/domain/cart_service.py`). Les confirmations
+        # (QuickReplies, ci-dessous) restent interactives : elles ne
+        # dépendent d'aucun schéma de liste dynamique côté template.
+        ag_ui = final.get("ag_ui_component")
+
+        # QuickReplies (audit UX interactive 2026-08-27) : remplace
+        # FormConfirmation (nodes/confirmation_gate.py), un composant
+        # orphelin que rien ne lisait jamais — la confirmation Oui/Non
+        # retombait sur les flags status/response_strategy ci-dessous,
+        # déconnectés du composant que ce nœud construisait pour elle.
+        if isinstance(ag_ui, dict) and ag_ui.get("id") == ["ag_ui", "QuickReplies"]:
+            kwargs = ag_ui.get("kwargs") or {}
+            return {
+                "kind": "quick_reply",
+                "body": kwargs.get("body", ""),
+                "buttons": (kwargs.get("buttons") or [])[:3],
+            }
+
         strategy = str(final.get("response_strategy") or "").upper()
         status = str(final.get("status") or "").upper()
-        if (
-            final.get("waiting_for_confirmation")
-            or status == "WAITING_CONFIRMATION"
-            or strategy == "CONFIRMATION"
-        ):
-            # Confirmation binaire OUI/NON → boutons quick-reply.
+        # (2026-09-02, "no legacy shim") : `waiting_for_confirmation` retiré —
+        # les deux écrivains (market_coach/confirmation_gate.py, agents/
+        # forms.py) posent TOUJOURS `status`/`response_strategy` en même
+        # temps, déjà couverts ci-dessous ; c'était un 3e signal redondant.
+        if status == "WAITING_CONFIRMATION" or strategy == "CONFIRMATION":
+            # Filet de sécurité : confirmation binaire OUI/NON sans
+            # ag_ui_component QuickReplies (ex. checkpoint en vol produit
+            # avant ce correctif) → boutons quick-reply génériques.
             return {"kind": "confirm"}
         return None
 
@@ -256,6 +304,9 @@ class Orchestrator:
         force_role: bool = False,
         interactive_id: str | None = None,
         location_shared: bool = False,
+        location_outcome: str | None = None,
+        location_lat: float | None = None,
+        location_lon: float | None = None,
     ) -> Dict[str, Any]:
         config = {"configurable": {"thread_id": ws.workspace_id}}
         agent_metadata = {
@@ -270,10 +321,18 @@ class Orchestrator:
             # Clic interactif (bouton/liste WhatsApp) : amorce le bypass LLM de
             # input_interpreter. None pour un message texte classique.
             "interactive_selection": interactive_id or None,
-            # Position GPS reçue et DÉJÀ persistée ce tour (webhook, en tâche
-            # de fond) — signal purement conversationnel pour l'étape finale
-            # de l'onboarding (agents/onboarding.py::_step_collect_location).
+            # Position GPS reçue et DÉJÀ persistée ce tour (webhook, appel
+            # SYNCHRONE avant l'enqueue Celery depuis 2026-09-02 — voir
+            # core/location.py) — signal purement conversationnel pour
+            # l'étape finale de l'onboarding (agents/onboarding.py::_step_collect_location).
             "location_shared": bool(location_shared),
+            # Issue EXACTE de cette persistance — consommée directement par
+            # flows/buyer/gps_delivery_gate.py::resolve_gps_stage au lieu
+            # d'une relecture DB (élimine la course webhook/tâche + le repli
+            # silencieux sur une position périmée).
+            "location_outcome": location_outcome,
+            "location_lat": location_lat,
+            "location_lon": location_lon,
         }
         runtime = build_runtime()
         async with runtime as live_runtime:

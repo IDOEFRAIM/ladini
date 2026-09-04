@@ -240,6 +240,31 @@ class TestBaseStatus:
         result = rs(interpreted_event="NEW_TASK", status="WAITING_INPUT", expected_input="QUANTITY")
         assert result["response_strategy"] == "ASK_MISSING_FIELD"
 
+    def test_waiting_input_with_expected_input_none_string_sentinel_still_clarifies(self):
+        """Incident réel (2026-08-31) : un producteur enregistre une récolte
+        (STOCK_REGISTER_HARVEST, complété avec succès), reçoit la réponse
+        générique de fin de tour, puis répète un message similaire. `goal`
+        devient vide, `validator` répond légitimement `status="WAITING_INPUT"`
+        via son repli `if not goal:` (rien à demander) — mais
+        `expected_input` porte alors le SENTINELLE littéral `"NONE"` (chaîne
+        non vide, donc vraie en Python), pas `None`. Un check nu
+        (`... or expected_input`) confondait ce cas avec un vrai champ
+        manquant, escaladant à tort vers ASK_MISSING_FIELD — qui retombait
+        ensuite sur un `detected_intent`/`last_missing_field` périmés et
+        posait une question totalement incohérente (ex: un prix après un
+        enregistrement de récolte), dont la réponse de l'utilisateur était
+        ensuite silencieusement perdue. Doit rester CLARIFICATION quand rien
+        n'est réellement manquant, exactement comme le cas `expected_input=
+        None` déjà couvert par `test_default_fallback_is_clarification`."""
+        result = rs(
+            interpreted_event="ANSWER",
+            status="WAITING_INPUT",
+            expected_input="NONE",
+            missing_fields=[],
+            last_missing_field=None,
+        )
+        assert result["response_strategy"] == "CLARIFICATION"
+
     def test_default_fallback_is_clarification(self):
         result = rs(interpreted_event="NEW_TASK")
         assert result["response_strategy"] == "CLARIFICATION"

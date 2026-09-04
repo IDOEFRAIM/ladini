@@ -33,6 +33,20 @@ async def _run() -> dict:
             result["expired_count"],
             result.get("expired_order_ids"),
         )
+        # (2026-09-03, clôture escrow/IPN) : synchronise `PreorderDraft`
+        # pour chaque commande expirée — même gap que l'IPN Paydunya
+        # (`paydunya_ipn_task.py::_sync_preorder_draft`), même discipline
+        # best-effort (une commande hors du tunnel PREORDER n'a pas de
+        # draft correspondant, ce n'est jamais une erreur).
+        from agriconnect.graphs.agents.market_coach.flows.buyer.preorder_payment import (
+            apply_payment_expiry,
+        )
+
+        for order_id in result.get("expired_order_ids") or []:
+            try:
+                await apply_payment_expiry(str(order_id))
+            except Exception:
+                logger.exception("ORDER_EXPIRY_DRAFT_SYNC_FAILED | order_id=%s", order_id)
     return result
 
 

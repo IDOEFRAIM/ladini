@@ -105,13 +105,37 @@ class ForbiddenLLM:
 # =====================================================================
 
 class StubRuntime:
-    """Runtime minimal : LLM injectable + call_db qui enregistre les appels."""
+    """Runtime minimal : LLM injectable + call_db qui enregistre les appels.
+
+    `llm_gateway`/`profile_answer` (2026-09-02, ajout LLM Gateway) : miroir
+    de `MarketRuntime.llm_gateway`/`profile_answer` (utils.py) — TOUJOURS un
+    `LegacyOverrideGateway` qui appelle `self.llm` directement, JAMAIS le
+    vrai Gateway (registry/health Redis/circuit breaker). Indispensable :
+    des dizaines de tests injectent `StubRuntime(llm=ScriptedLLM(...))` et
+    s'attendent à un appel synchrone déterministe sans réseau — le vrai
+    Gateway interrogerait Redis à chaque décision de routage, ce qui violerait
+    la philosophie "AUCUN réseau" de toute cette suite (voir docstring de
+    fichier, tout en haut)."""
 
     def __init__(self, llm: Any = None, responses: Optional[Dict[str, Any]] = None) -> None:
         self.llm = llm
         self.model_answer = "test-model"
         self.calls: List[str] = []
         self._responses = responses or {}
+
+    @property
+    def profile_answer(self) -> Any:
+        from agriconnect.graphs.agents.market_coach.llm_gateway.types import LLMProfile
+
+        return LLMProfile.REASONING
+
+    @property
+    def llm_gateway(self) -> Any:
+        from agriconnect.graphs.agents.market_coach.llm_gateway import (
+            LegacyOverrideGateway,
+        )
+
+        return LegacyOverrideGateway(self.llm, lambda: self.model_answer)
 
     async def call_db(self, tool_name: str, **kwargs: Any) -> Any:
         self.calls.append(tool_name)
@@ -143,6 +167,44 @@ def forbidden_llm() -> ForbiddenLLM:
 # HELPERS D'ÉTAT
 # =====================================================================
 
+def _pending_interaction_patch_for_legacy_expected_input(expected_input: str) -> Dict[str, Any]:
+    """Traduit le raccourci de test `expected_input="PRODUCT"/"CONFIRMATION"/
+    "SELECTION"/...` vers une écriture RÉELLE de `pending_interaction` (refonte
+    architecturale 2026-09-02 — `PendingInteraction` est désormais la seule
+    source canonique lue par le runtime). `expected_input` reste lisible dans
+    les tests comme raccourci d'intention (plus court que construire l'objet
+    à la main), mais sans cette traduction un test qui l'utilise seul
+    figerait l'ANCIEN contrat au lieu du nouveau — voir
+    tests/interpreter/test_goal_planner_state_machine.py pour le précédent."""
+    from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+        InteractionKind,
+        clear_pending_interaction,
+        set_pending_interaction,
+    )
+    from agriconnect.graphs.agents.market_coach.core.slots import _EXPECTED_INPUT_MAP
+
+    category = str(expected_input or "NONE").upper().strip()
+    if category in ("", "NONE"):
+        return clear_pending_interaction("test_setup")
+    if category == "CONFIRMATION":
+        return set_pending_interaction(
+            InteractionKind.CONFIRM_ACTION, context_ref="confirmation"
+        )
+    if category == "SELECTION":
+        return set_pending_interaction(InteractionKind.SELECTION_MENU)
+    if category in ("OTP", "OTP_CODE"):
+        return set_pending_interaction(InteractionKind.VERIFY_OTP)
+    field_for_category = {v: k for k, v in reversed(list(_EXPECTED_INPUT_MAP.items()))}
+    field = field_for_category.get(category)
+    # Catégorie hors du registre canonique (ex: "ORDER_ID"/"CANCELLATION_REASON"/
+    # "UPDATE_FIELD", des mini-flows dédiés — voir core/pending_interaction.py::
+    # to_tunnel_category) : utilise directement le token en minuscule comme nom
+    # de champ, `to_tunnel_category` le retrouvera par repli symétrique.
+    return set_pending_interaction(
+        InteractionKind.ENTER_FIELD, field_name=field or category.lower()
+    )
+
+
 def make_state(**overrides: Any) -> Dict[str, Any]:
     """État MarketCoach minimal et VALIDE, surchargeable par mot-clé."""
     base: Dict[str, Any] = {
@@ -161,6 +223,15 @@ def make_state(**overrides: Any) -> Dict[str, Any]:
         "status": "",
     }
     base.update(overrides)
+    # Un appelant qui fixe `expected_input=` explicitement mais ne pose PAS
+    # `pending_interaction` lui-même obtient quand même un état cohérent avec
+    # le nouveau contrat — sans quoi ce test verrouillerait silencieusement
+    # l'ANCIEN comportement (lecture directe de `expected_input`, supprimée
+    # du runtime).
+    if "expected_input" in overrides and "pending_interaction" not in overrides:
+        base.update(
+            _pending_interaction_patch_for_legacy_expected_input(base["expected_input"])
+        )
     return base
 
 

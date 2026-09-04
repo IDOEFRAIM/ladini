@@ -1,29 +1,45 @@
-"""Buyer preorder workflow — draft → preflight recap → confirmation."""
+"""Buyer preorder workflow — draft → preflight recap → confirmation.
+
+(2026-09-03, migration transactionnelle PREORDER) : la logique métier du
+brouillon (création idempotente, confirmation, GPS, exécution, machine à
+état) vit désormais dans `domain/preorder_draft.py` +
+`flows/buyer/preorder_confirmation.py` — voir
+`docs/PREORDER_TRANSACTIONAL_MIGRATION_2026-09-03.md`. Ce module reste le
+point d'ENTRÉE du tunnel (compatibilité de routage avec `flow.py`,
+`graph_builder.py`) et gère ce qui n'appartient PAS au draft :
+collecte du panier avant qu'un draft n'existe, traduction d'un choix de
+menu numéroté (`resolved_id`) en signal pour le nouveau domaine (JAMAIS un
+contrôleur du workflow lui-même — mandat §7), et le cycle "ajouter d'autres
+produits" (retour au panier, hors du draft)."""
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-# =====================================================================
-# GPS DELIVERY GATE — implémentation partagée avec le flux gagnant
-# d'enchère (order_tracking.py::finalize_winner). Voir
-# [[precommande-architecture-consolidation-2026-08]] et
-# [[gps-delivery-burkina-faso-2026-08]].
-# =====================================================================
-from agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate import (
-    enter_gps_stage,
-    resolve_gps_stage,
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    set_pending_interaction,
 )
+from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+    CancelPreorderDraft,
+    PreorderDraft,
+    PreorderOutcome,
+    PreorderOutcomeKind,
+    apply_domain_action,
+)
+from agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation import (
+    apply_response_plan,
+    bootstrap_preorder_draft,
+    resolve_preorder_confirmation,
+)
+from agriconnect.graphs.agents.market_coach.domain.preorder_draft import build_response_plan
 from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
     SOURCE_TYPE_LABELS,
     CartDomainService,
 )
 from agriconnect.graphs.agents.market_coach.services.mcp.gateway import PreorderGateway
-from agriconnect.graphs.agents.market_coach.utils import (
-    MarketRuntime,
-    is_success_response,
-    llm_deviation_reply,
-)
+from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
+from agriconnect.services.database import preorder_draft_store
 
 from .helpers import (
     PREORDER_ACTION_OPTIONS,
@@ -34,7 +50,8 @@ from .helpers import (
 )
 
 # =====================================================================
-# PRE-FLIGHT RECAP
+# PRE-FLIGHT RECAP (rendu texte pur — inchangé, hors du problème d'autorité
+# multiple : prend cart/meta en ARGUMENTS, ne lit aucun état global)
 # =====================================================================
 
 
@@ -81,17 +98,6 @@ def build_preflight_recap(cart: List[Dict[str, Any]], meta: Dict[str, Any]) -> s
     return "\n".join(lines)
 
 
-def _preorder_confirm_prompt(items_count: int, meta: Dict[str, Any]) -> str:
-    """Écran de confirmation unique — remplace le doublon panier+récap :
-    le panier a déjà affiché items et total, inutile de tout réafficher ici."""
-    return (
-        f"✅ *Précommande prête* — {items_count} article(s), "
-        f"total *{meta.get('total_amount')} {meta.get('currency')}*.\n\n"
-        "_Répondez *OUI* pour confirmer, *NON* pour annuler, "
-        "ou ajoutez un autre produit._"
-    )
-
-
 # =====================================================================
 # PREORDER PHASE TRANSITION HELPER
 # =====================================================================
@@ -102,93 +108,56 @@ async def update_preorder_phase(
 ) -> Optional[Dict[str, Any]]:
     """Force deterministic preorder phase transitions.
 
-    Ensures CART ↔ PREORDER_DRAFTED ↔ CONFIRMED stay synchronized with goals.
-    Returns a state patch or None if no transition is needed.
-    """
+    (2026-09-03) Simplifié : `create_preorder` sait désormais faire
+    "bootstrap PUIS confirmer" en UN seul appel quand le goal l'exige
+    (voir sa docstring) — l'ancienne fabrication d'un état SYNTHÉTIQUE pour
+    appeler `create_preorder` deux fois de suite a disparu (moins de code,
+    pas un contournement en plus)."""
     from .helpers import CART_GOALS
 
     goal = str(state.get("current_goal") or "").upper().strip()
     preorder_flow: Dict[str, Any] = dict(state.get("preorder_workflow") or {})
     phase = str(preorder_flow.get("phase") or "CART").upper().strip()
-    working_snapshot = (state.get("working_memory") or {}).get("last_active_cart")
-    cart_has_items = bool(state.get("active_cart") or working_snapshot)
 
-    def _phase_patch(
-        new_phase: str, extra: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        p: Dict[str, Any] = {"phase": new_phase}
-        if preorder_flow.get("preorder_id"):
-            p["preorder_id"] = preorder_flow.get("preorder_id")
-        if extra:
-            p.update(extra)
-        return {"preorder_workflow": p}
+    def _phase_patch(new_phase: str) -> Dict[str, Any]:
+        return {"preorder_workflow": {"phase": new_phase}}
 
     if goal in CART_GOALS and phase != "CART":
         logger.info("update_preorder_phase: normalising back to CART phase")
         return _phase_patch("CART")
 
-    if goal == "BUYER_PREORDER_INIT" and phase == "CART":
-        logger.info("update_preorder_phase: INIT from CART -> draft")
+    if goal in {"BUYER_PREORDER_INIT", "BUYER_PREORDER_CONFIRM"}:
         return await create_preorder(state, mc_runtime)
-
-    if goal == "BUYER_PREORDER_CONFIRM":
-        if phase == "CART" and cart_has_items:
-            logger.info(
-                "update_preorder_phase: CONFIRM requested while CART — auto-drafting first"
-            )
-            draft_updates = await create_preorder(state, mc_runtime)
-            draft_flow = dict(draft_updates.get("preorder_workflow") or {})
-            draft_phase = str(draft_flow.get("phase") or "").upper()
-            if draft_phase != "PREORDER_DRAFTED":
-                return draft_updates
-
-            synthetic_state = dict(state)
-            synthetic_state["preorder_workflow"] = draft_flow
-            synthetic_payload = dict(
-                draft_updates.get("transaction_payload")
-                or state.get("transaction_payload")
-                or {}
-            )
-            synthetic_payload["resolved_id"] = "PREORDER_CONFIRM"
-            synthetic_payload.pop("selection_index", None)
-            synthetic_payload.pop("selected_value", None)
-            synthetic_state["transaction_payload"] = synthetic_payload
-            synthetic_state["active_cart"] = draft_updates.get(
-                "active_cart", state.get("active_cart")
-            )
-
-            confirm_updates = await create_preorder(synthetic_state, mc_runtime)
-            if "preorder_workflow" not in confirm_updates:
-                confirm_updates["preorder_workflow"] = draft_flow
-            return confirm_updates
-
-        if phase == "PREORDER_DRAFTED":
-            logger.info(
-                "update_preorder_phase: CONFIRM from PREORDER_DRAFTED -> confirm"
-            )
-            next_state = dict(state)
-            next_payload = dict(next_state.get("transaction_payload") or {})
-            next_payload["resolved_id"] = "PREORDER_CONFIRM"
-            next_payload.pop("selection_index", None)
-            next_payload.pop("selected_value", None)
-            next_state["transaction_payload"] = next_payload
-            return await create_preorder(next_state, mc_runtime)
 
     return None
 
 
 # =====================================================================
-# MAIN PREORDER WORKFLOW (3-PHASE)
+# MAIN PREORDER WORKFLOW
 # =====================================================================
 
 
 async def create_preorder(
     state: Dict[str, Any], mc_runtime: MarketRuntime
 ) -> Dict[str, Any]:
-    """Preorder workflow:
-    1. CART → PREORDER_DRAFTED : create MCP draft + show preflight recap.
-    2. PREORDER_DRAFTED + CONFIRM → CONFIRMED : confirm the preorder.
-    3. Secondary actions (ADD_MORE, CANCEL).
+    """Point d'entrée unique du tunnel précommande.
+
+    1. Traduit un signal de menu/goal (`resolved_id`, mandat §7 : SIGNAL
+       traduit ICI, jamais un contrôleur dispersé dans plusieurs branches)
+       en CANCEL/ADD_MORE explicites ou en `interpreted_event="CONFIRM"`.
+    2. CANCEL / ADD_MORE : orchestration pure, hors du draft (ADD_MORE ne
+       touche jamais le draft — mandat §8, `PreorderDraft.items` reste la
+       référence tant qu'aucun nouveau panier n'a été soumis).
+    3. Draft déjà actif (`state["preorder_draft"]` posé) : délègue
+       ENTIÈREMENT à `resolve_preorder_confirmation` — CONFIRM/UPDATE/
+       REJECT/GPS, SEULE autorité de mutation à partir de là.
+    4. Aucun draft actif : `bootstrap_preorder_draft` (création idempotente,
+       mandat §15). Si la MÊME sollicitation demandait aussi une
+       confirmation immédiate (ex: "confirme" envoyé directement depuis le
+       panier, sans étape de récap intermédiaire), enchaîne SANS état
+       synthétique : le draft vient d'être créé, sa cible de confirmation
+       est connue, `resolve_preorder_confirmation` est appelé sur cet état
+       fraîchement projeté.
     """
     goal = str(state.get("current_goal") or "").upper()
     payload: Dict[str, Any] = dict(state.get("transaction_payload") or {})
@@ -196,47 +165,33 @@ async def create_preorder(
     working_snapshot = (state.get("working_memory") or {}).get("last_active_cart")
     cart_source = state.get("active_cart") or working_snapshot or []
     cart: List[Dict[str, Any]] = list(cart_source)
-    preorder_flow: Dict[str, Any] = dict(state.get("preorder_workflow") or {})
-    phase = str(preorder_flow.get("phase") or "CART").upper().strip()
 
-    # --- Resolve action from selection index ---
+    # --- Traduction du signal (mandat §7) — PAS un contrôleur : une seule
+    # ligne de résolution, jamais rechecké ensuite pour décider une forme
+    # de réponse différente ailleurs dans ce fichier. ---
     resolved_id = payload.get("resolved_id")
     if not resolved_id:
-        selection_idx = payload.get("selection_index")
-        mapped_choice = preorder_choice_from_index(selection_idx)
+        mapped_choice = preorder_choice_from_index(payload.get("selection_index"))
         if mapped_choice:
             resolved_id = mapped_choice
-            payload["resolved_id"] = resolved_id
-        if selection_idx not in (None, ""):
-            payload.pop("selection_index", None)
     if goal == "BUYER_PREORDER_CONFIRM" and not resolved_id:
-        payload["resolved_id"] = "PREORDER_CONFIRM"
         resolved_id = "PREORDER_CONFIRM"
     if goal == "BUYER_CART_RESET" and not resolved_id:
-        payload["resolved_id"] = "PREORDER_CANCEL"
         resolved_id = "PREORDER_CANCEL"
+    resolved_id = str(resolved_id or "").upper()
+
+    cached_draft_dict = state.get("preorder_draft")
 
     # --- CANCEL ---
-    if str(resolved_id).upper() == "PREORDER_CANCEL":
-        logger.info("create_preorder: cancel requested — returning to CART")
-        return {
-            "status": "COMPLETED",
-            "response_strategy": "SUCCESS",
-            "final_response": "↩️ Précommande annulée. Votre panier est toujours disponible.",
-            "preorder_workflow": {"__reset__": True, "phase": "CART"},
-            "current_goal": "BUYER_VIEW_CART",
-            "transaction_payload": {"__reset__": True},
-            "working_memory": clear_active_goal(state),
-            "active_form": None,
-            "ag_ui_component": None,
-        }
+    if resolved_id == "PREORDER_CANCEL":
+        return await _cancel_preorder(state, cached_draft_dict, mc_runtime)
 
-    # --- ADD MORE ---
-    if str(resolved_id).upper() == "PREORDER_ADD_MORE":
+    # --- ADD MORE (retour au panier — n'AFFECTE PAS le draft, mandat §8) ---
+    if resolved_id == "PREORDER_ADD_MORE":
         logger.info("create_preorder: add more requested — back to CART")
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "PRODUCT",
+            **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="product"),
             "response_strategy": "ASK_MISSING_FIELD",
             "missing_fields": ["product"],
             "last_missing_field": "product",
@@ -246,373 +201,133 @@ async def create_preorder(
             "ag_ui_component": None,
         }
 
-    # --- PHASE 1: CART → PREORDER_DRAFTED ---
-    if phase == "CART":
-        if not cart:
-            return {
-                "status": "WAITING_INPUT",
-                "expected_input": "PRODUCT",
-                "response_strategy": "ASK_MISSING_FIELD",
-                "missing_fields": ["product"],
-                "last_missing_field": "product",
-                "preorder_workflow": {"phase": "CART"},
-                "current_goal": "BUYER_ADD_TO_CART",
-                "ag_ui_component": None,
-            }
+    # --- Draft déjà actif : délègue entièrement (mandat §3/§12) ---
+    if cached_draft_dict:
+        confirm_state = dict(state)
+        if resolved_id == "PREORDER_CONFIRM":
+            confirm_state["interpreted_event"] = "CONFIRM"
+        elif resolved_id == "PREORDER_CANCEL":  # défensif, déjà traité ci-dessus
+            confirm_state["interpreted_event"] = "REJECT"
+        return await resolve_preorder_confirmation(confirm_state, mc_runtime)
 
-        items_payload = [
-            {
-                "product_id": item.get("product_id"),
-                "name": item.get("name"),
-                "quantity": item.get("quantity"),
-                "unit": item.get("unit"),
-                "price": item.get("price"),
-                "producer_id": item.get("producer_id"),
-            }
-            for item in cart
-            if item.get("status") != "DRAFT"
-        ]
-        meta = CartDomainService.recompute_cart_meta(cart)
-
-        # Chantier résilience 2026-08 : sans ce try/except, une panne/timeout
-        # MCP remontait jusqu'au filet générique `_safe_node` (utils.py), qui
-        # évite bien le crash du tour mais laisse `preorder_workflow` dans sa
-        # phase courante — l'acheteur se retrouvait bloqué dans un état de
-        # précommande incohérent au tour suivant. On repositionne
-        # explicitement la phase sur CART : son panier est intact, il peut
-        # réessayer immédiatement.
-        try:
-            draft_res = await PreorderGateway(mc_runtime).create_draft(
-                buyer_phone=phone,
-                cart_items=items_payload,
-                payment_method=state.get("preferred_payment_method") or "CASH",
-                # `state["buyer_profile"]` n'existe nulle part dans le schéma
-                # d'état (aucun nœud ne l'écrit jamais) — c'était un lookup
-                # mort qui renvoyait toujours None. La zone du profil est
-                # chargée par profile_loader.py au niveau racine de l'état
-                # sous `zone_id` (voir core/state.py). Sans ce fix,
-                # `delivery_zone_id` était TOUJOURS None →
-                # create_preorder_draft se rabattait sur `user_obj.zone_id` en
-                # base, et échouait dès que cette valeur était absente, avec
-                # "Veuillez configurer votre zone de livraison" — même pour un
-                # acheteur dont la zone était bien connue de l'agent (juste
-                # jamais transmise).
-                delivery_zone_id=state.get("zone_id"),
-            )
-        except Exception as exc:
-            logger.error("create_preorder: create_draft a échoué: %s", exc)
-            return {
-                "status": "ERROR",
-                "response_strategy": "ERROR",
-                "final_response": (
-                    "Impossible de préparer votre précommande pour le moment. "
-                    "Votre panier est conservé — réessayez dans un instant."
-                ),
-                "preorder_workflow": {"phase": "CART"},
-                "ag_ui_component": None,
-            }
-
-        preorder_id = draft_res.get("preorder_id") or draft_res.get("id") or "DRAFT"
-        if (
-            not is_success_response(draft_res)
-            and str(draft_res.get("status") or "").lower() == "error"
-        ):
-            return {
-                "status": "ERROR",
-                "response_strategy": "ERROR",
-                "final_response": draft_res.get("message")
-                or "Impossible de créer le brouillon de précommande.",
-                "preorder_workflow": {"phase": "CART"},
-                "ag_ui_component": None,
-            }
-
+    # --- Aucun draft actif : collecte panier + bootstrap ---
+    if not cart:
         return {
             "status": "WAITING_INPUT",
-            "expected_input": "CONFIRMATION",
+            **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="product"),
             "response_strategy": "ASK_MISSING_FIELD",
-            "final_response": _preorder_confirm_prompt(len(items_payload), meta),
-            "preorder_workflow": {
-                "phase": "PREORDER_DRAFTED",
-                "preorder_id": str(preorder_id),
-                "total_amount": meta.get("total_amount"),
-                "items_count": len(items_payload),
-            },
-            "transaction_payload": {"resolved_id": None},
-            "current_goal": "BUYER_PREORDER_INIT",
-            "ag_ui_component": None,
-            "active_cart": cart,
-        }
-
-    # --- PHASE 2: PREORDER_DRAFTED → confirmation puis point GPS → CONFIRMED ---
-    if phase == "PREORDER_DRAFTED":
-        preorder_id = preorder_flow.get("preorder_id")
-        is_confirm = str(resolved_id).upper() == "PREORDER_CONFIRM"
-        location_shared = bool(state.get("location_shared"))
-        gps_stage = bool(preorder_flow.get("gps_stage"))
-
-        # --- Étape 2a : confirmer la précommande elle-même ---
-        if not gps_stage:
-            if not is_confirm:
-                meta = CartDomainService.recompute_cart_meta(cart)
-                prompt = _preorder_confirm_prompt(len(cart), meta)
-                # Un écart (question, hésitation, remarque) plutôt qu'un
-                # oui/non clair : reconnaître ce qui a été dit au lieu de
-                # rejouer le même écran mot pour mot — voir
-                # [[precommande-architecture-consolidation-2026-08]].
-                note = await llm_deviation_reply(
-                    mc_runtime,
-                    str(state.get("normalized_text") or ""),
-                    "confirmer la précommande en cours (oui/non)",
-                )
-                return {
-                    "status": "WAITING_INPUT",
-                    "expected_input": "CONFIRMATION",
-                    "response_strategy": "ASK_MISSING_FIELD",
-                    "final_response": f"{note}\n\n{prompt}" if note else prompt,
-                    "transaction_payload": {"resolved_id": None},
-                    "current_goal": "BUYER_PREORDER_INIT",
-                    "ag_ui_component": None,
-                    "active_cart": cart,
-                }
-
-            gate = await enter_gps_stage(mc_runtime, phone)
-            new_flow = dict(preorder_flow)
-            new_flow["gps_stage"] = True
-            new_flow["gps_default"] = gate["gps_default"]
-            return {
-                "status": "WAITING_INPUT",
-                "expected_input": "CONFIRMATION",
-                "response_strategy": "ASK_MISSING_FIELD",
-                "final_response": gate["prompt"],
-                "preorder_workflow": new_flow,
-                "transaction_payload": {"resolved_id": None},
-                "current_goal": "BUYER_PREORDER_INIT",
-                "ag_ui_component": None,
-                "active_cart": cart,
-            }
-
-        # --- Étape 2b : point GPS de livraison ---
-        resolution = await resolve_gps_stage(
-            mc_runtime,
-            phone,
-            location_shared=location_shared,
-            is_yes=is_confirm,
-            gps_default=preorder_flow.get("gps_default"),
-            user_text=str(state.get("normalized_text") or ""),
-        )
-        if resolution.resolved:
-            return await _execute_confirm(
-                state, mc_runtime, preorder_id, cart, resolution.lat, resolution.lon
-            )
-        return {
-            "status": "WAITING_INPUT",
-            "expected_input": "CONFIRMATION",
-            "response_strategy": "ASK_MISSING_FIELD",
-            "final_response": resolution.message,
+            "missing_fields": ["product"],
+            "last_missing_field": "product",
+            "preorder_workflow": {"phase": "CART"},
+            "current_goal": "BUYER_ADD_TO_CART",
             "ag_ui_component": None,
         }
 
-    # --- PHASE 3: Already CONFIRMED ---
-    if phase == "CONFIRMED":
-        order_number = preorder_flow.get("order_number") or "votre commande"
-        return {
-            "status": "COMPLETED",
-            "response_strategy": "SUCCESS",
-            "final_response": f"Votre précommande *{order_number}* est déjà confirmée. Tapez *mes commandes* pour le suivi.",
-            "ag_ui_component": None,
+    items_payload = [
+        {
+            "product_id": item.get("product_id"),
+            "name": item.get("name"),
+            "quantity": item.get("quantity"),
+            "unit": item.get("unit"),
+            "price": item.get("price"),
+            "producer_id": item.get("producer_id"),
+            # (2026-09-04, audit CART→CHECKOUT) : `tier_id` DOIT être transmis
+            # — sans lui, `create_preorder_draft` ne peut pas savoir que
+            # `quantity` ci-dessus est un NOMBRE DE PAQUETS (palier) plutôt
+            # qu'une quantité en unité de base, et traiterait TOUT article
+            # comme un produit à tarif unique (voir
+            # `services/database/buyer.py::create_preorder_draft`, section
+            # palier). Le serveur re-résout le palier lui-même à partir de ce
+            # seul id — jamais confiance au `price`/`unit` du panier
+            # au-delà de cet identifiant.
+            "tier_id": item.get("tier_id"),
         }
-
-    # Fallback
-    return {"status": "PLANNING", "ag_ui_component": None}
-
-
-async def _execute_confirm(
-    state: Dict[str, Any],
-    mc_runtime: MarketRuntime,
-    preorder_id: Any,
-    cart: List[Dict[str, Any]],
-    delivery_lat: Optional[float],
-    delivery_lon: Optional[float],
-) -> Dict[str, Any]:
-    """Confirme réellement la précommande (débit stock, statut CONFIRMED),
-    avec le point GPS de livraison résolu par le gate ci-dessus."""
-    phone = str(state.get("user_phone") or "")
-
-    from agriconnect.core.settings import settings
-
-    if settings.ESCROW_PAYMENT_ENABLED:
-        # Escrow (Paydunya) : on ne confirme plus directement — on génère
-        # la facture de paiement et on réserve la commande. La
-        # confirmation réelle (débit stock + statut CONFIRMED) n'arrive
-        # qu'à la réception de l'IPN, re-confirmée serveur-à-serveur
-        # auprès de Paydunya (voir EscrowMixin.mark_escrow_paid). Le point
-        # GPS résolu par le gate ci-dessus est threadé jusqu'ici (voir
-        # EscrowMixin.initiate_escrow_payment) — sans ça, une précommande
-        # payée via escrow serait livrée sans point de livraison.
-        from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
-            EscrowGateway,
-        )
-
-        # Chantier résilience 2026-08 : une panne Paydunya/MCP ne doit pas
-        # laisser l'acheteur bloqué — on le repositionne sur PREORDER_DRAFTED
-        # (brouillon intact, aucun stock débité) pour qu'il puisse relancer le
-        # paiement au tour suivant.
-        try:
-            escrow_res = await EscrowGateway(mc_runtime).initiate_escrow_payment(
-                buyer_phone=phone,
-                preorder_id=str(preorder_id),
-                delivery_lat=delivery_lat,
-                delivery_lon=delivery_lon,
-            )
-        except Exception as exc:
-            logger.error("_execute_confirm: initiate_escrow_payment a échoué: %s", exc)
-            return {
-                "status": "ERROR",
-                "response_strategy": "ERROR",
-                "final_response": (
-                    "Impossible de générer le lien de paiement pour le moment. "
-                    "Votre précommande est conservée — réessayez dans un instant."
-                ),
-                "preorder_workflow": {
-                    "phase": "PREORDER_DRAFTED",
-                    "preorder_id": preorder_id,
-                },
-                "ag_ui_component": None,
-            }
-
-        if (
-            not is_success_response(escrow_res)
-            and str(escrow_res.get("status") or "").lower() == "error"
-        ):
-            return {
-                "status": "ERROR",
-                "response_strategy": "ERROR",
-                "final_response": escrow_res.get("message")
-                or "Impossible de générer le lien de paiement.",
-                "preorder_workflow": {
-                    "phase": "PREORDER_DRAFTED",
-                    "preorder_id": preorder_id,
-                },
-                "ag_ui_component": None,
-            }
-
-        order_id = escrow_res.get("order_id") or preorder_id
-        order_number = escrow_res.get("order_number") or f"#CMD-{str(order_id)[:8]}"
-
-        return {
-            "status": "COMPLETED",
-            "response_strategy": "SUCCESS",
-            "final_response": escrow_res.get("message")
-            or (
-                f"Votre commande #{order_number} est réservée pendant "
-                f"{escrow_res.get('ttl_hours', 24)}h. Payez via ce lien sécurisé : "
-                f"{escrow_res.get('checkout_url')}"
-            ),
-            "preorder_workflow": {
-                "phase": "AWAITING_PAYMENT",
-                "preorder_id": str(order_id),
-                "order_number": order_number,
-            },
-            "last_order_summary": {
-                "order_id": str(order_id),
-                "order_number": order_number,
-                "total_amount": escrow_res.get("amount"),
-                "currency": escrow_res.get("currency"),
-                "items": cart,
-            },
-            "current_goal": None,
-            "goal_status": "COMPLETED",
-            "active_form": None,
-            "active_cart": [],
-            "transaction_payload": {"__reset__": True},
-            "draft_payload": {"__reset__": True},
-            "working_memory": clear_active_goal(state, clear_cart_snapshot=True),
-            "ag_ui_component": None,
-        }
-
-    # Paiement escrow désactivé (fournisseur Paydunya bloqué côté KYC) :
-    # confirmation directe, paiement à la livraison — comportement
-    # d'avant l'intégration escrow. Débite le stock immédiatement (voir
-    # confirm_preorder_draft), pas d'attente de webhook/IPN.
-    # Chantier résilience 2026-08 : même principe que les deux appels
-    # ci-dessus. Le brouillon reste intact côté serveur (aucun stock débité
-    # tant que confirm_draft n'a pas réussi), donc repositionner sur
-    # PREORDER_DRAFTED permet un simple "oui" au tour suivant pour réessayer.
-    try:
-        confirm_res = await PreorderGateway(mc_runtime).confirm_draft(
-            buyer_phone=phone,
-            preorder_id=str(preorder_id),
-            delivery_lat=delivery_lat,
-            delivery_lon=delivery_lon,
-        )
-    except Exception as exc:
-        logger.error("_execute_confirm: confirm_draft a échoué: %s", exc)
-        return {
-            "status": "ERROR",
-            "response_strategy": "ERROR",
-            "final_response": (
-                "Impossible de confirmer votre précommande pour le moment. "
-                "Elle est conservée — réessayez dans un instant."
-            ),
-            "preorder_workflow": {
-                "phase": "PREORDER_DRAFTED",
-                "preorder_id": preorder_id,
-            },
-            "ag_ui_component": None,
-        }
-
-    if (
-        not is_success_response(confirm_res)
-        and str(confirm_res.get("status") or "").lower() == "error"
-    ):
-        return {
-            "status": "ERROR",
-            "response_strategy": "ERROR",
-            "final_response": confirm_res.get("message")
-            or "Impossible de confirmer la précommande.",
-            "preorder_workflow": {
-                "phase": "PREORDER_DRAFTED",
-                "preorder_id": preorder_id,
-            },
-            "ag_ui_component": None,
-        }
-
-    order_id = confirm_res.get("order_id") or confirm_res.get("id") or preorder_id
-    order_number = confirm_res.get("order_number") or f"#CMD-{str(order_id)[:8]}"
+        for item in cart
+        if item.get("status") != "DRAFT"
+    ]
     meta = CartDomainService.recompute_cart_meta(cart)
+    bootstrap_patch = await bootstrap_preorder_draft(
+        state, mc_runtime, items_payload=items_payload, meta=meta
+    )
+    bootstrap_patch.setdefault("active_cart", cart)
 
+    if resolved_id != "PREORDER_CONFIRM" or bootstrap_patch.get("status") == "ERROR":
+        return bootstrap_patch
+
+    new_draft_dict = bootstrap_patch.get("preorder_draft")
+    if not new_draft_dict:
+        return bootstrap_patch
+
+    confirm_state = dict(state)
+    confirm_state.update(bootstrap_patch)
+    confirm_state["preorder_draft"] = new_draft_dict
+    confirm_state["interpreted_event"] = "CONFIRM"
+    confirm_state["pending_interaction"] = bootstrap_patch.get("pending_interaction")
+    return await resolve_preorder_confirmation(confirm_state, mc_runtime)
+
+
+async def _cancel_preorder(
+    state: Dict[str, Any],
+    cached_draft_dict: Optional[Dict[str, Any]],
+    mc_runtime: MarketRuntime,
+) -> Dict[str, Any]:
+    """Annulation explicite — si un draft est actif, transite RÉELLEMENT
+    vers `CANCELLED` (CAS PostgreSQL), pas seulement un reset local
+    (mandat §6 : `preorder_workflow` n'est plus l'autorité, `draft.status`
+    l'est)."""
+    if cached_draft_dict:
+        draft_id = cached_draft_dict.get("draft_id")
+        draft = await preorder_draft_store.load(draft_id) if draft_id else None
+        if draft is None:
+            draft = PreorderDraft.from_dict(cached_draft_dict)
+        if draft is not None:
+            outcome = apply_domain_action(draft, CancelPreorderDraft())
+            if outcome.draft is not None and outcome.draft.version != draft.version:
+                await preorder_draft_store.compare_and_swap(
+                    draft.draft_id, expected_version=draft.version, new_draft=outcome.draft
+                )
+            # (2026-09-04, audit Order(DRAFT) orphelin) : ferme l'`Order`
+            # Postgres sous-jacent en MÊME temps que le `PreorderDraft`
+            # applicatif — UNIQUEMENT sur la VRAIE première transition
+            # (`outcome.kind == CANCELLED`, même garde que le CAS ci-dessus :
+            # un double-CANCEL, cf. `apply_domain_action`, renvoie
+            # `DRAFT_FINALIZED` sans changer de version — idempotent, aucun
+            # second appel MCP). Best-effort explicite : un échec ici ne doit
+            # jamais faire échouer la confirmation d'annulation déjà actée
+            # côté `PreorderDraft` — journalisé bruyamment (même discipline
+            # DEGRADED que `cas_finalize` ailleurs dans ce module) pour rester
+            # visible, jamais silencieux.
+            if outcome.kind == PreorderOutcomeKind.CANCELLED and draft.order_id:
+                try:
+                    await PreorderGateway(mc_runtime).cancel_draft(
+                        buyer_phone=str(state.get("user_phone") or ""),
+                        preorder_id=draft.order_id,
+                        reason="buyer_cancelled_preorder_draft",
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "PREORDER_CANCEL_ORDER_SYNC_FAILED | draft_id=%s | order_id=%s | "
+                        "DEGRADED: Order Postgres reste DRAFT malgré PreorderDraft=CANCELLED | %s",
+                        draft.draft_id, draft.order_id, exc,
+                    )
+            plan = build_response_plan(outcome)
+            patch = apply_response_plan(plan)
+            patch.setdefault("current_goal", "BUYER_VIEW_CART")
+            patch.setdefault("working_memory", clear_active_goal(state))
+            patch.setdefault("active_form", None)
+            return patch
+
+    logger.info("create_preorder: cancel requested — returning to CART")
     return {
         "status": "COMPLETED",
         "response_strategy": "SUCCESS",
-        "final_response": (
-            f"✅ *Précommande confirmée !*\n\n"
-            f"📦 Référence : *{order_number}*\n"
-            f"💰 Total : {meta.get('total_amount')} {meta.get('currency')}\n"
-            f"📋 {len(cart)} article(s)\n"
-            f"💵 *Paiement à la livraison.*\n\n"
-            f"Les producteurs concernés ont été notifiés. "
-            f"Vous recevrez une confirmation de disponibilité sous peu.\n\n"
-            f"_Tapez *mes commandes* pour suivre votre commande._"
-        ),
-        "preorder_workflow": {
-            "phase": "CONFIRMED",
-            "preorder_id": str(order_id),
-            "order_number": order_number,
-        },
-        "last_order_summary": {
-            "order_id": str(order_id),
-            "order_number": order_number,
-            "total_amount": meta.get("total_amount"),
-            "currency": meta.get("currency"),
-            "items": cart,
-        },
-        "current_goal": None,
-        "goal_status": "COMPLETED",
-        "active_form": None,
-        "active_cart": [],
+        "final_response": "↩️ Précommande annulée. Votre panier est toujours disponible.",
+        "preorder_workflow": {"__reset__": True, "phase": "CART"},
+        "preorder_draft": None,
+        "current_goal": "BUYER_VIEW_CART",
         "transaction_payload": {"__reset__": True},
-        "draft_payload": {"__reset__": True},
-        "working_memory": clear_active_goal(state, clear_cart_snapshot=True),
+        "working_memory": clear_active_goal(state),
+        "active_form": None,
         "ag_ui_component": None,
     }
 

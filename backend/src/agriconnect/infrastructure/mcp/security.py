@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import hashlib
 import importlib
 import json
 import logging
@@ -21,7 +20,6 @@ from typing import (
     List,
     Optional,
     Protocol,
-    Tuple,
 )
 
 from pydantic import BaseModel, Field
@@ -36,13 +34,6 @@ class PermissionScope(str, Enum):
     DB_READ_ONLY = "DB_READ_ONLY"
     DB_DATA_WRITE = "DB_DATA_WRITE"
     DB_SCHEMA_MODIFY = "DB_SCHEMA_MODIFY"
-
-
-class RiskLevel(str, Enum):
-    LOW = "LOW"
-    MEDIUM = "MEDIUM"
-    HIGH = "HIGH"
-    CRITICAL = "CRITICAL"
 
 
 TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
@@ -139,6 +130,13 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "ensure_performance_indexes": PermissionScope.DB_SCHEMA_MODIFY,
     "adjust_stock": PermissionScope.DB_DATA_WRITE,
     "cancel_pending_order": PermissionScope.DB_DATA_WRITE,
+    # (2026-09-04, audit Order(DRAFT) orphelin PREORDER) : méthode déjà
+    # présente sur `BuyerMixin` — auto-exposée par introspection
+    # (`protocols/mcp/servers/h.py::EXPOSED_METHODS`), mais jamais autorisée
+    # ici (fail-closed, voir `infrastructure/mcp/runtime.py`) ni jamais
+    # appelée depuis la conversation (`_cancel_preorder` ne transitionnait
+    # que le `PreorderDraft` applicatif, jamais l'`Order` Postgres sous-jacent).
+    "cancel_preorder_draft": PermissionScope.DB_DATA_WRITE,
     "close_negotiation_session": PermissionScope.DB_DATA_WRITE,
     "confirm_preorder_draft": PermissionScope.DB_DATA_WRITE,
     "create_farm": PermissionScope.DB_DATA_WRITE,
@@ -257,22 +255,6 @@ def ensure_scopes_filled() -> None:
         _autofill_tool_scopes()
 
 
-TOOL_RISK_MAP: dict[str, RiskLevel] = {
-    "create_order": RiskLevel.HIGH,
-    "prepare_transaction_staging": RiskLevel.HIGH,
-    "commit_staged_transaction": RiskLevel.HIGH,
-    "migrate_schema": RiskLevel.CRITICAL,
-    "drop_table": RiskLevel.CRITICAL,
-    "alter_table": RiskLevel.CRITICAL,
-    "search_agronomy_docs": RiskLevel.LOW,
-    "search_past_interactions": RiskLevel.LOW,
-    # Escrow (Paydunya) — argent bloqué/débloqué, mérite le même niveau de
-    # vigilance que la création de commande / staging transactionnel.
-    "initiate_escrow_payment": RiskLevel.HIGH,
-    "verify_delivery_otp": RiskLevel.HIGH,
-    "mark_escrow_paid": RiskLevel.HIGH,
-}
-
 SENSITIVE_COLUMNS = frozenset(
     {
         "password_hash",
@@ -314,7 +296,6 @@ class MCPToolMeta(BaseModel):
     name: str
     server: MCPServerKind
     scope: PermissionScope
-    risk: RiskLevel
     description: str = ""
     timeout_seconds: float = Field(default=15.0, ge=0.1)
     retries: int = Field(default=1, ge=0, le=5)
@@ -334,6 +315,28 @@ class ToolExecutionEnvelope(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
     error: str = ""
     meta: ToolExecutionMeta
+
+
+def _normalize_tool_output(data: Any) -> dict:
+    """Normalise une réponse brute d'outil vers un dict exploitable.
+
+    Extrait de l'ancien ``MCPPermissionClient._normalize_output`` (audit
+    MCP/AGUI 2026-08-26 — ce moteur de risque était du code mort en
+    production, mais CETTE méthode était appelée par
+    ``ToolExecutionPolicy.execute``, le chemin réellement actif). Fonction
+    module-level pour ne plus dépendre d'une classe supprimée.
+    """
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, str):
+        try:
+            parsed = json.loads(data)
+            return parsed if isinstance(parsed, dict) else {"result": parsed}
+        except Exception:
+            return {"result": data}
+    if isinstance(data, (list, tuple)):
+        return {"items": list(data)}
+    return {"result": str(data)}
 
 
 class ToolRateLimiter:
@@ -422,7 +425,7 @@ class ToolExecutionPolicy:
         try:
             raw = await asyncio.wait_for(handler(**arguments), timeout=timeout)
 
-            normalized = MCPPermissionClient._normalize_output(raw)
+            normalized = _normalize_tool_output(raw)
             elapsed = round((time.monotonic() - start) * 1000, 1)
             envelope = ToolExecutionEnvelope(
                 ok=True,
@@ -531,7 +534,6 @@ class MCPToolRegistry:
                 name=name,
                 server=MCPServerKind.DB,
                 scope=scope,
-                risk=TOOL_RISK_MAP.get(name, RiskLevel.MEDIUM),
                 timeout_seconds=90.0,
                 retries=1,
             )
@@ -556,15 +558,35 @@ class MCPToolRegistry:
     def sync_discovered_tools(
         self, server: MCPServerKind, discovered: Iterable[dict[str, Any]]
     ) -> None:
+        """Enregistre les outils découverts dynamiquement — fail-closed.
+
+        Audit MCP/AGUI 2026-08-26 : attribuait auparavant `DB_DATA_WRITE`
+        par défaut à tout outil absent de `TOOL_SCOPE_MAP`, une posture
+        fail-OPEN isolée dans un fichier par ailleurs délibérément
+        fail-closed (voir `_autofill_tool_scopes`, qui ne fait que loguer
+        et refuse). Un outil non cartographié n'est désormais PAS
+        enregistré du tout — `has_tool()`/`get_tool()` le traitent comme
+        inconnu, et tout appelant (ex: `MCPManager.call_tool`) le rejette
+        en amont plutôt que de lui accorder implicitement des privilèges
+        d'écriture.
+        """
         for item in discovered:
             name = str(item.get("name")).strip()
             if not name or name in self._tools:
                 continue
+            scope = TOOL_SCOPE_MAP.get(name)
+            if scope is None:
+                logger.warning(
+                    "MCP_SCOPE_GAP | outil découvert '%s' absent de TOOL_SCOPE_MAP "
+                    "— non enregistré (fail-closed) tant qu'un scope explicite "
+                    "n'est pas déclaré.",
+                    name,
+                )
+                continue
             self._tools[name] = MCPToolMeta(
                 name=name,
                 server=server,
-                scope=PermissionScope.DB_DATA_WRITE,
-                risk=RiskLevel.MEDIUM,
+                scope=scope,
                 description=str(item.get("description")),
                 timeout_seconds=30.0,
                 retries=1,
@@ -609,222 +631,30 @@ class HostBlockedError(Exception):
         )
 
 
-class PermissionDecision(BaseModel):
-    allowed: bool
-    decision: str
-    reason: str
-    scope: PermissionScope
-    risk: RiskLevel
-
-
-class MCPPermissionClient:
-    def __init__(
-        self,
-        backend: Any,
-        session_id: str = "unknown",
-        maintenance_mode: bool = False,
-        hitl_callback: Optional[Callable[..., Coroutine[Any, Any, bool]]] = None,
-        registry: Optional[MCPToolRegistry] = None,
-    ) -> None:
-        self._backend = backend
-        self.session_id = session_id
-        self.maintenance_mode = maintenance_mode
-        self._hitl_callback = hitl_callback
-        self._registry = registry or get_registry()
-
-    async def call_tool(self, tool_name: str, arguments) -> Any:
-        arguments = arguments or {}
-        args_hash = self._hash_args(arguments)
-        t0 = time.monotonic()
-
-        if not self._registry.has_tool(tool_name):
-            raise PermissionDenied(tool_name, "Tool not registered in registry")
-
-        decision = self._check_permission(tool_name, arguments)
-        if not decision.allowed:
-            if decision.decision == "HITL_REQUIRED":
-                approved = await self._request_hitl(
-                    tool_name, arguments, decision.reason
-                )
-                if not approved:
-                    raise PermissionDenied(tool_name, decision.reason)
-            else:
-                raise PermissionDenied(tool_name, decision.reason)
-
-        result = await self._backend.call_tool(tool_name, arguments)
-        result = self._normalize_output(self._mask_sensitive(result))
-        logger.info(
-            "AUDIT|%s",
-            json.dumps(
-                {
-                    "timestamp": time.time(),
-                    "session_id": self.session_id,
-                    "tool_name": tool_name,
-                    "arguments_hash": args_hash,
-                    "decision": "ALLOW",
-                    "duration_ms": round((time.monotonic() - t0) * 1000, 1),
-                },
-                ensure_ascii=False,
-            ),
-        )
-        return result
-
-    async def execute(
-        self, tool_name: str, arguments: Dict[str, Any] | None = None
-    ) -> Any:
-        return await self.call_tool(tool_name, arguments)
-
-    def list_tools(self) -> list[dict]:
-        return self._registry.list_tools()
-
-    def _check_permission(
-        self, tool_name: str, arguments: Optional[Dict[str, Any]] = None
-    ) -> PermissionDecision:
-        meta = self._registry.get_tool(tool_name)
-        scope = (
-            meta.scope
-            if meta
-            else TOOL_SCOPE_MAP.get(tool_name, PermissionScope.DB_DATA_WRITE)
-        )
-        risk = meta.risk if meta else TOOL_RISK_MAP.get(tool_name, RiskLevel.MEDIUM)
-
-        if arguments:
-            suspicious, reason = self._scan_arguments_for_risk(arguments)
-            if suspicious:
-                return PermissionDecision(
-                    allowed=False,
-                    decision="HITL_REQUIRED",
-                    reason=reason,
-                    scope=scope,
-                    risk=RiskLevel.CRITICAL,
-                )
-
-        if scope == PermissionScope.DB_SCHEMA_MODIFY:
-            if self.maintenance_mode:
-                return PermissionDecision(
-                    allowed=True,
-                    decision="ALLOW",
-                    reason="maintenance",
-                    scope=scope,
-                    risk=risk,
-                )
-            return PermissionDecision(
-                allowed=False,
-                decision="DENY",
-                reason="Schema modification denied",
-                scope=scope,
-                risk=risk,
-            )
-
-        if scope == PermissionScope.DB_READ_ONLY:
-            return PermissionDecision(
-                allowed=True,
-                decision="ALLOW",
-                reason="read-only",
-                scope=scope,
-                risk=risk,
-            )
-
-        if risk in (RiskLevel.HIGH, RiskLevel.CRITICAL):
-            return PermissionDecision(
-                allowed=False,
-                decision="HITL_REQUIRED",
-                reason="Human confirmation required",
-                scope=scope,
-                risk=risk,
-            )
-
-        return PermissionDecision(
-            allowed=True,
-            decision="ALLOW",
-            reason="write-allowed",
-            scope=scope,
-            risk=risk,
-        )
-
-    async def _request_hitl(
-        self, tool_name: str, args: Dict[str, Any], reason: str
-    ) -> bool:
-        if self._hitl_callback is None:
-            return False
-        try:
-            return await self._hitl_callback(tool_name, args, reason)
-        except Exception:
-            return False
-
-    def _mask_sensitive(self, data: Any, seen: Optional[set[int]] = None) -> Any:
-        if seen is None:
-            seen = set()
-        obj_id = id(data)
-        if obj_id in seen:
-            return "***RECURSION***"
-        seen.add(obj_id)
-        if isinstance(data, dict):
-            return {
-                k: (
-                    "***MASKED***"
-                    if k.lower() in SENSITIVE_COLUMNS
-                    else self._mask_sensitive(v, seen)
-                )
-                for k, v in data.items()
-            }
-        if isinstance(data, list):
-            return [self._mask_sensitive(x, seen) for x in data]
-        if isinstance(data, str):
-            try:
-                parsed = json.loads(data)
-                if isinstance(parsed, (dict, list)):
-                    return self._mask_sensitive(parsed, seen)
-            except Exception:
-                pass
-        return data
-
-    def _scan_arguments_for_risk(self, arguments: Dict[str, Any]) -> Tuple[bool, str]:
-        json_blob = json.dumps(arguments, default=str, ensure_ascii=False)
-        if any(pattern.search(json_blob) for pattern in SQL_INJECTION_REGEX):
-            return True, "sql_pattern_detected"
-        for key, value in arguments.items():
-            if isinstance(value, str) and len(value) > 4000:
-                return True, f"arg_{key}_too_large"
-            if "sql" in key.lower():
-                return True, f"arg_{key}_sql_key"
-        return False, "ok"
-
-    @staticmethod
-    def _normalize_output(data: Any) -> dict:
-        if isinstance(data, dict):
-            return data
-        if isinstance(data, str):
-            try:
-                parsed = json.loads(data)
-                return parsed if isinstance(parsed, dict) else {"result": parsed}
-            except Exception:
-                return {"result": data}
-        if isinstance(data, (list, tuple)):
-            return {"items": list(data)}
-        return {"result": str(data)}
-
-    @staticmethod
-    def _hash_args(arguments: Dict[str, Any]) -> str:
-        return hashlib.sha256(
-            json.dumps(arguments, sort_keys=True, default=str).encode()
-        ).hexdigest()[:16]
-
-
 class PreflightResult:
-    def __init__(
-        self, passed: bool, reason: str = "", risk_override: Optional[RiskLevel] = None
-    ):
+    def __init__(self, passed: bool, reason: str = ""):
         self.passed = passed
         self.reason = reason
-        self.risk_override = risk_override
 
     def __bool__(self) -> bool:
         return self.passed
 
 
 class MCPPermissionHostApp:
-    def __init__(self, client: MCPPermissionClient, block_raw_sql: bool = True) -> None:
+    """Préfiltre de sécurité (injection SQL, SQL brut, chemins sensibles).
+
+    Point d'application RÉEL en production via ``infrastructure/mcp/runtime.py
+    ::AgriDBMCPServer._run_preflight`` (instancié avec ``client=None`` — seul
+    ``_preflight_scan``/``_suggest_fix`` sont utilisés, jamais ``.execute()``).
+    ``client`` n'est donc plus typé sur une classe de décision de risque
+    (l'ancien ``MCPPermissionClient``, supprimé — audit MCP/AGUI 2026-08-26 :
+    ce moteur de risque à trois niveaux n'était jamais câblé sur aucun chemin
+    de production, voir ``nodes/confirmation_gate.py`` pour le VRAI point de
+    confirmation humaine). ``.execute()`` reste utilisable avec n'importe quel
+    objet duck-typé exposant ``call_tool(name, arguments)``.
+    """
+
+    def __init__(self, client: Any = None, block_raw_sql: bool = True) -> None:
         self._client = client
         self._block_raw_sql = block_raw_sql
         self._sql_re = SQL_INJECTION_REGEX
@@ -861,7 +691,15 @@ class MCPPermissionHostApp:
                 return PreflightResult(False, "Raw SQL is forbidden")
             for rx in self._file_re:
                 if rx.search(val):
-                    return PreflightResult(True, risk_override=RiskLevel.CRITICAL)
+                    # Motif de fichier sensible détecté (ex: .env, id_rsa) —
+                    # laissé passer (ce n'est pas forcément malveillant : un
+                    # nom de fichier légitime peut matcher), mais journalisé
+                    # pour investigation a posteriori plutôt que bloqué à tort.
+                    logger.warning(
+                        "PREFLIGHT_SENSITIVE_FILE_PATTERN | tool=%s | pattern=%s",
+                        tool_name,
+                        rx.pattern,
+                    )
         return PreflightResult(True)
 
     def _suggest_fix(self, tool_name: str, reason: str) -> str:
@@ -1004,52 +842,17 @@ class MCPManager:
             "db_tools": self.registry.list_tools(MCPServerKind.DB),
         }
 
-
-class ShieldHub:
-    def __init__(self, session_id: str = "unknown") -> None:
-        self.registry = get_registry()
-        self.manager = MCPManager(registry=self.registry)
-        self._shield = MCPPermissionClient(
-            backend=self.manager, session_id=session_id, registry=self.registry
-        )
-        self.session = MCPSessionManager(
-            host=MCPPermissionHostApp(client=self._shield), session_id=session_id
-        )
-
-    async def call(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
-        await self.manager.ensure_ready()
-        meta = self.registry.get_tool(tool_name)
-        if meta is None:
-            raise ValueError(f"Unknown MCP tool: {tool_name}")
-        if meta.scope == PermissionScope.DB_READ_ONLY:
-            return await self.session.safe_read(tool_name, arguments)
-        return await self.session.execute(tool_name, arguments)
-
-    async def list_tools(self) -> dict[str, list[dict]]:
-        return await self.manager.list_tools()
-
-
-class MCPShield:
-    def __init__(self, session_id: str = "unknown") -> None:
-        self._hub = ShieldHub(session_id=session_id)
-
-    async def authorize_and_call(
-        self, tool_name: str, arguments: Dict[str, Any]
-    ) -> Any:
-        return await self._hub.call(tool_name, arguments)
-
-    async def list_allowed_tools(self) -> dict[str, list[dict]]:
-        return await self._hub.list_tools()
-
-
-class UnifiedMCPClient:
-    def __init__(self, session_id: str = "unknown") -> None:
-        self._hub = ShieldHub(session_id=session_id)
-
-    async def call_tool(
-        self, tool_name: str, arguments: Dict[str, Any] | None = None
-    ) -> Any:
-        return await self._hub.call(tool_name, arguments or {})
-
-    async def list_tools(self) -> dict[str, list[dict]]:
-        return await self._hub.list_tools()
+# NOTE (audit MCP/AGUI 2026-08-26) : `ShieldHub` / `MCPShield` /
+# `UnifiedMCPClient` ont été supprimés — ce sous-arbre construisait un moteur
+# de décision de risque à trois niveaux (`RiskLevel`, `TOOL_RISK_MAP`,
+# `HITL_REQUIRED`) dont le SEUL appelant dans tout le dépôt était un script de
+# test manuel (`infrastructure/mcp/main.py`, adapté pour utiliser
+# `AgriDBMCPServer` directement — voir ce fichier). Le chemin RÉELLEMENT
+# emprunté par chaque appel d'outil de l'agent
+# (`AgriDBMCPServer.call_tool`) n'a jamais consulté ce moteur : il applique
+# uniquement `TOOL_SCOPE_MAP` (fail-closed) + `MCPPermissionHostApp`
+# (préflight SQL/fichiers, toujours actif ci-dessus). Le garder aurait
+# perpétué l'illusion d'un garde-fou de confirmation à risque au niveau
+# protocole MCP qui n'a jamais existé en production. Le VRAI point de
+# confirmation humaine (HITL) est `nodes/confirmation_gate.py`, en amont de
+# tout appel d'outil, dans le graphe de l'agent.

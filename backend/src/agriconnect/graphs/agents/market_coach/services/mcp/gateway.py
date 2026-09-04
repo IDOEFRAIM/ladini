@@ -300,13 +300,20 @@ class PreorderGateway(_BaseGateway):
         cart_items: Any,
         payment_method: str = "CASH",
         delivery_zone_id: Any = None,
+        idempotency_key: Any = None,
     ) -> Dict[str, Any]:
+        # (2026-09-03, migration PREORDER, mandat §15) : clé d'idempotence
+        # CLIENT — réutilise `mcp_idempotency_store` (RÉELLEMENT dédupliqué
+        # côté serveur depuis le chantier PROCUREMENT, pas une abstraction
+        # de façade) pour qu'un retry avec le MÊME panier/acheteur ne crée
+        # pas un second `Order(status=DRAFT)`.
         return await self._call(
             "create_preorder_draft",
             buyer_phone=buyer_phone,
             cart_items=cart_items,
             payment_method=payment_method,
             delivery_zone_id=delivery_zone_id,
+            idempotency_key=idempotency_key,
         )
 
     async def confirm_draft(
@@ -315,6 +322,7 @@ class PreorderGateway(_BaseGateway):
         preorder_id: str,
         delivery_lat: Any = None,
         delivery_lon: Any = None,
+        idempotency_key: Any = None,
     ) -> Dict[str, Any]:
         return await self._call(
             "confirm_preorder_draft",
@@ -322,6 +330,26 @@ class PreorderGateway(_BaseGateway):
             preorder_id=preorder_id,
             delivery_lat=delivery_lat,
             delivery_lon=delivery_lon,
+            idempotency_key=idempotency_key,
+        )
+
+    async def cancel_draft(
+        self,
+        buyer_phone: str,
+        preorder_id: str,
+        reason: Any = None,
+        target_status: str = "CANCELLED",
+    ) -> Dict[str, Any]:
+        # (2026-09-04, audit Order(DRAFT) orphelin PREORDER) : ferme
+        # l'`Order` Postgres sous-jacent en même temps que le `PreorderDraft`
+        # applicatif — `target_status="SUPERSEDED"` pour le cycle "ajouter
+        # d'autres produits" (voir `cancel_preorder_draft`, services/database/buyer.py).
+        return await self._call(
+            "cancel_preorder_draft",
+            buyer_phone=buyer_phone,
+            preorder_id=preorder_id,
+            reason=reason,
+            target_status=target_status,
         )
 
     async def reserve_future_offer(
@@ -427,6 +455,7 @@ class EscrowGateway(_BaseGateway):
         preorder_id: str,
         delivery_lat: Optional[float] = None,
         delivery_lon: Optional[float] = None,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         args: Dict[str, Any] = {
             "buyer_phone": buyer_phone.strip(),
@@ -435,6 +464,8 @@ class EscrowGateway(_BaseGateway):
         if delivery_lat is not None and delivery_lon is not None:
             args["delivery_lat"] = delivery_lat
             args["delivery_lon"] = delivery_lon
+        if idempotency_key is not None:
+            args["idempotency_key"] = idempotency_key
         return await self._call("initiate_escrow_payment", **args)
 
     async def verify_delivery_otp(

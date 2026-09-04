@@ -6,6 +6,11 @@ from typing import Any, Dict, List, Optional, Union
 from sqlalchemy import and_, desc, func, select
 
 from agriconnect.domain.models import Order, OrderItem, Product
+from agriconnect.graphs.agents.market_coach.domain.pricing_tiers import (
+    PricingTierError,
+    tiers_to_dicts,
+    validate_pricing_tiers,
+)
 
 from .base import BaseMixin
 from .common import clean_text, positive_float
@@ -63,6 +68,7 @@ class ProductMixin(BaseMixin):
         quantity: Optional[float] = None,
         name: Optional[str] = None,
         unit: Optional[str] = None,
+        pricing_tiers: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         Met à jour partiellement un produit du catalogue : prix, quantité, nom
@@ -111,6 +117,19 @@ class ProductMixin(BaseMixin):
                 if clean_unit:
                     product.unit = clean_unit.upper()
                     changed.append("unité")
+            if pricing_tiers is not None:
+                # Valide contre l'unité de base FINALE (nouvelle si fournie
+                # dans cette même mise à jour, sinon celle déjà en base) —
+                # `product.unit` a déjà été réassigné ci-dessus si `unit`
+                # était fourni.
+                try:
+                    validated_tiers = validate_pricing_tiers(
+                        pricing_tiers, product.unit
+                    )
+                except PricingTierError as exc:
+                    return {"status": "error", "message": str(exc)}
+                product.pricing_tiers = tiers_to_dicts(validated_tiers) or None
+                changed.append("tarifs multiples")
 
             if not changed:
                 return {

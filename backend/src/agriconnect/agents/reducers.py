@@ -72,7 +72,19 @@ def merge_dict(old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
       whatever the interrupting goal accumulated in the meantime — a single
       node return can't both wipe `old` and set new content otherwise,
       since a second write in the same super-step isn't possible).
-    - Otherwise: recursive merge (nested dicts = merge, lists = concat, scalars = overwrite).
+    - Otherwise: recursive merge (nested dicts = merge, lists = REPLACED
+      entirely — same rule as the module-level `replace_list` reducer,
+      see module docstring — scalars = overwrite).
+
+    Real incident (2026-08-30): `transaction_payload` (a `merge_dict`
+    channel) grew a `pricing_tiers` list. Concatenating it here (as this
+    function used to do for any list nested in a dict) meant every turn
+    that merely re-returned the SAME 2 tiers (unrelated re-render, a
+    repeated user message, an UPDATE correction) doubled the list forever —
+    a producer's 2-tier offer turned into dozens of duplicate lines in the
+    confirmation summary within a few turns. A list value returned by a
+    node is the FULL current value, exactly like a scalar — it must replace,
+    never accumulate.
     """
     if new is None or (isinstance(new, dict) and not new):
         return old if old is not None else {}
@@ -83,8 +95,6 @@ def merge_dict(old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
         existing = merged.get(key)
         if isinstance(value, dict) and isinstance(existing, dict):
             merged[key] = merge_dict(existing, value)
-        elif isinstance(value, list) and isinstance(existing, list):
-            merged[key] = existing + value
         else:
             merged[key] = value
     return merged

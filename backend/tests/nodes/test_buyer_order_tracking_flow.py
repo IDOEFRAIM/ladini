@@ -13,6 +13,10 @@ import time
 import pytest
 
 from tests.conftest import StubRuntime, make_state, run
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    get_pending_interaction,
+    to_tunnel_category,
+)
 
 
 def rt(responses=None):
@@ -165,7 +169,7 @@ class TestListOrders:
             "mapping": {"a": "order-1", "b": "order-2"},
         }})
         result = run(list_orders(state, runtime))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
         assert result["available_mapping"] == {"1": "order-1", "2": "order-2"}
         assert len(result["pending_menu"].options) == 2
 
@@ -278,13 +282,13 @@ class TestCancelOrder:
     def test_no_order_id_asks_for_it(self):
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import cancel_order
         result = run(cancel_order(make_state(user_phone="+2260"), rt()))
-        assert result["expected_input"] == "ORDER_ID"
+        assert to_tunnel_category(get_pending_interaction(result)) == "ORDER_ID"
 
     def test_no_reason_asks_for_it(self):
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import cancel_order
         state = make_state(user_phone="+2260", transaction_payload={"order_id": "o1"})
         result = run(cancel_order(state, rt()))
-        assert result["expected_input"] == "CANCELLATION_REASON"
+        assert to_tunnel_category(get_pending_interaction(result)) == "CANCELLATION_REASON"
 
     def test_gateway_exception_is_caught_and_falls_through_to_not_found(self, monkeypatch):
         from agriconnect.graphs.agents.market_coach.flows.buyer import order_tracking as mod
@@ -367,7 +371,7 @@ class TestListBuyerAuctions:
             {"auction_id": "a2", "product": "riz", "status": "CLOSED", "bid_count": 1},
         ]}})
         result = run(list_buyer_auctions(state, runtime))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
         assert "propositions" in result["final_response"]
         assert "proposition" in result["final_response"]
         assert result["available_mapping"] == {"1": "a1", "2": "a2"}
@@ -447,7 +451,7 @@ class TestCheckAuctionStatus:
     def test_no_auction_id_asks_for_selection(self):
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import check_auction_status
         result = run(check_auction_status(make_state(), rt()))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
         assert result["response_strategy"] == "ASK_MISSING_FIELD"
 
     def test_auction_id_resolved_via_selection_index_and_mapping(self):
@@ -480,7 +484,7 @@ class TestCheckAuctionStatus:
             "auction": {"product": "mais", "status": "OPEN"},
         }})
         result = run(check_auction_status(state, runtime))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
         assert result["working_memory"]["winner_auction_id"] == "a1"
         assert result["transaction_payload"]["auction_id"] == "a1"
         assert result["available_mapping"] == {"1": "b1", "2": "b2"}
@@ -569,7 +573,7 @@ class TestConfirmWinnerSelection:
     def test_no_bid_id_asks_for_selection(self):
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import confirm_winner_selection
         result = run(confirm_winner_selection(make_state(), rt()))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
 
     def test_bid_id_from_mapping_via_selection_index(self):
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import confirm_winner_selection
@@ -580,7 +584,7 @@ class TestConfirmWinnerSelection:
         )
         runtime = rt({"get_auction_bids": {"bids": [{"bid_id": "b1", "producer": "Awa", "price": 250}], "auction": {"product": "mais"}}})
         result = run(confirm_winner_selection(state, runtime))
-        assert result["expected_input"] == "CONFIRMATION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
         assert "Awa" in result["final_response"]
         assert "mais" in result["final_response"]
         assert result["working_memory"]["pending_winner_bid"] == "b1"
@@ -638,7 +642,7 @@ class TestFinalizeWinner:
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import finalize_winner
         state = make_state(working_memory={"pending_winner_bid": "b1"}, normalized_text="peut-etre")
         result = run(finalize_winner(state, rt()))
-        assert result["expected_input"] == "CONFIRMATION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
 
     def test_ambiguous_reply_with_an_llm_available_gets_an_adaptive_note(self):
         """Bug réel (2026-08-14) : une réponse ambiguë au "confirmez-vous le
@@ -799,7 +803,12 @@ class TestFinalizeWinnerGpsStage:
         assert seen["delivery_lat"] == 12.35
         assert seen["delivery_lon"] == -1.5
 
-    def test_sharing_a_new_location_at_the_gps_stage_re_reads_it_and_executes(self, monkeypatch):
+    def test_sharing_a_new_location_at_the_gps_stage_executes_with_it(self, monkeypatch):
+        """(2026-09-02, refonte GPS) : `location_lat`/`location_lon` sont
+        désormais résolus SYNCHRONE côté webhook (avant l'enqueue Celery) et
+        transmis tels quels dans le state — plus de relecture DB
+        (`get_user_by_phone`) ici, qui pouvait courir avant l'écriture
+        réelle. Voir core/location.py."""
         import agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking as mod
 
         seen: Dict[str, Any] = {}
@@ -816,10 +825,12 @@ class TestFinalizeWinnerGpsStage:
         state = make_state(
             working_memory={"pending_winner_bid": "b1", "winner_gps_stage": True},
             location_shared=True,
+            location_outcome="NEW_LOCATION_ACCEPTED",
+            location_lat=13.0,
+            location_lon=-2.0,
             user_phone="+2260",
         )
-        runtime = rt({"get_user_by_phone": {"status": "success", "data": {"latitude": 13.0, "longitude": -2.0}}})
-        result = run(mod.finalize_winner(state, runtime))
+        result = run(mod.finalize_winner(state, rt()))
 
         assert result["status"] == "COMPLETED"
         assert seen["delivery_lat"] == 13.0
@@ -936,7 +947,7 @@ class TestOrderTrackingResolver:
             working_memory={"winner_auction_id": "a1"},
         )
         result = run(order_tracking_resolver(state, rt()))
-        assert result["expected_input"] == "CONFIRMATION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
 
     def test_auction_id_without_bid_id_routes_to_check_auction_status(self):
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import order_tracking_resolver
@@ -959,7 +970,7 @@ class TestOrderTrackingResolver:
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import order_tracking_resolver
         state = make_state(current_goal="BUYER_CANCEL_ORDER", user_phone="+2260")
         result = run(order_tracking_resolver(state, rt()))
-        assert result["expected_input"] == "ORDER_ID"
+        assert to_tunnel_category(get_pending_interaction(result)) == "ORDER_ID"
 
     @pytest.mark.parametrize("goal", ["BUYER_LIST_AUCTIONS", "MARKET_MY_REQUESTS"])
     def test_list_auctions_goals_route_correctly(self, goal):
@@ -973,7 +984,7 @@ class TestOrderTrackingResolver:
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import order_tracking_resolver
         state = make_state(current_goal="BUYER_CHECK_AUCTION_STATUS")
         result = run(order_tracking_resolver(state, rt()))
-        assert result["expected_input"] == "SELECTION"
+        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
 
     def test_unknown_goal_defaults_to_list_orders(self):
         from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import order_tracking_resolver

@@ -71,7 +71,9 @@ class TestPendingBidPhotoTakesPriority:
 
         run(mod._process(PHONE, "https://twilio/media", "image/jpeg"))
 
-        link_bid.assert_awaited_once_with(PHONE, "bid-1", "https://x/uploaded.jpg")
+        link_bid.assert_awaited_once_with(
+            PHONE, "bid-1", "https://x/uploaded.jpg", message_sid=None
+        )
         assert resolve_called["count"] == 0, "le catalogue produit ne doit pas être consulté"
 
 
@@ -98,7 +100,9 @@ class TestPendingAuctionPhotoTakesPriorityOverProductCatalog:
 
         run(mod._process(PHONE, "https://twilio/media", "image/jpeg"))
 
-        link_auction.assert_awaited_once_with(PHONE, "auction-1", "https://x/uploaded.jpg")
+        link_auction.assert_awaited_once_with(
+            PHONE, "auction-1", "https://x/uploaded.jpg", message_sid=None
+        )
         assert resolve_called["count"] == 0
 
 

@@ -30,6 +30,10 @@ import re
 from typing import Any, Dict, List, Optional
 
 from agriconnect.core.formatting import fmt_num as _fmt_num
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    set_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
@@ -339,7 +343,7 @@ async def browse_auctions(
 
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "response_strategy": "SELECTION_MENU",
         "final_response": menu,
         "available_mapping": mapping,
@@ -413,7 +417,7 @@ async def ask_bid_price(
 
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "PRICE",
+        **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="price"),
         "response_strategy": "ASK_MISSING_FIELD",
         "current_goal": "MARKET_BROWSE_REQUESTS",
         "final_response": msg,
@@ -475,7 +479,7 @@ async def recap_bid(
 
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "CONFIRMATION",
+        **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
         "response_strategy": "ASK_MISSING_FIELD",
         "current_goal": "MARKET_BROWSE_REQUESTS",
         "final_response": msg,
@@ -659,7 +663,7 @@ async def track_my_bids(
 
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "SELECTION",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "response_strategy": "SELECTION_MENU",
         "current_goal": "MARKET_GET_MY_PROPOSALS",
         "final_response": menu_text,
@@ -723,7 +727,7 @@ async def ask_modify_price(
 
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "PRICE",
+        **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="price"),
         "response_strategy": "ASK_MISSING_FIELD",
         "current_goal": "MARKET_GET_MY_PROPOSALS",
         "final_response": msg,
@@ -773,7 +777,7 @@ async def recap_modify_price(
 
     return {
         "status": "WAITING_INPUT",
-        "expected_input": "CONFIRMATION",
+        **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
         "response_strategy": "ASK_MISSING_FIELD",
         "current_goal": "MARKET_GET_MY_PROPOSALS",
         "final_response": msg,

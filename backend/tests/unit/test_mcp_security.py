@@ -261,16 +261,14 @@ class TestMCPToolRegistry:
         items = reg.list_tools(server=MCPServerKind.DB)
         assert all(i["server"] == "db" for i in items)
 
-    def test_sync_discovered_tools_adds_only_new_names(self):
+    def test_sync_discovered_tools_never_overwrites_an_already_known_tool(self):
         from agriconnect.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
         reg = MCPToolRegistry()
         before = reg.get_tool("get_user_profile")
         reg.sync_discovered_tools(MCPServerKind.DB, [
             {"name": "get_user_profile", "description": "SHOULD NOT OVERWRITE"},
-            {"name": "brand_new_tool", "description": "a fresh tool"},
         ])
         assert reg.get_tool("get_user_profile") is before, "un outil déjà connu ne doit jamais être réécrasé"
-        assert reg.has_tool("brand_new_tool") is True
 
     def test_sync_discovered_tools_skips_blank_names(self):
         from agriconnect.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
@@ -278,6 +276,54 @@ class TestMCPToolRegistry:
         count_before = len(reg._tools)
         reg.sync_discovered_tools(MCPServerKind.DB, [{"name": "", "description": "x"}])
         assert len(reg._tools) == count_before
+
+    def test_sync_discovered_tools_never_grants_write_privileges_to_an_unmapped_tool(self):
+        """Chantier fail-closed (2026-08-27) : `sync_discovered_tools`
+        attribuait auparavant `DB_DATA_WRITE` par défaut à tout outil absent
+        de `TOOL_SCOPE_MAP` — une posture fail-OPEN isolée. Un outil
+        totalement inconnu ne doit désormais RECEVOIR AUCUN privilège, pas
+        même en lecture : il ne doit tout simplement pas être enregistré."""
+        from agriconnect.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
+        reg = MCPToolRegistry()
+        count_before = len(reg._tools)
+        reg.sync_discovered_tools(MCPServerKind.DB, [
+            {"name": "brand_new_tool", "description": "a fresh, unmapped tool"},
+        ])
+        assert reg.has_tool("brand_new_tool") is False
+        assert reg.get_tool("brand_new_tool") is None
+        assert len(reg._tools) == count_before, "aucune entrée ne doit être créée pour un outil non cartographié"
+
+    def test_sync_discovered_tools_logs_a_warning_for_an_unmapped_tool(self, caplog):
+        import logging
+        from agriconnect.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
+
+        reg = MCPToolRegistry()
+        with caplog.at_level(logging.WARNING, logger="MCP.Core.Security"):
+            reg.sync_discovered_tools(MCPServerKind.DB, [
+                {"name": "brand_new_tool", "description": "a fresh, unmapped tool"},
+            ])
+        assert any(
+            "brand_new_tool" in r.message and "MCP_SCOPE_GAP" in r.message
+            for r in caplog.records
+        )
+
+    def test_sync_discovered_tools_registers_a_newly_discovered_but_mapped_tool_with_its_declared_scope(self):
+        """Non-régression : un outil absent du registre à l'instanciation
+        (ex: ajouté à TOOL_SCOPE_MAP après coup, ou registre reconstruit
+        avant que `register_defaults` n'ait tourné) mais déjà déclaré dans
+        TOOL_SCOPE_MAP doit être enregistré avec SON scope réel, pas un
+        DB_DATA_WRITE générique."""
+        from agriconnect.infrastructure.mcp.security import (
+            MCPToolRegistry, MCPServerKind, PermissionScope,
+        )
+        reg = MCPToolRegistry()
+        del reg._tools["get_user_profile"]  # simule un outil pas encore synchronisé
+        reg.sync_discovered_tools(MCPServerKind.DB, [
+            {"name": "get_user_profile", "description": "profil utilisateur"},
+        ])
+        meta = reg.get_tool("get_user_profile")
+        assert meta is not None
+        assert meta.scope == PermissionScope.DB_READ_ONLY
 
 
 class TestGetRegistry:
@@ -312,232 +358,38 @@ class TestExceptionMessages:
 
 
 # =====================================================================
-# MCPPermissionClient — le cœur de la décision d'autorisation
+# _normalize_tool_output — utilisée par ToolExecutionPolicy.execute (chemin
+# RÉELLEMENT actif en production). Extraite de l'ancien
+# MCPPermissionClient._normalize_output lors de la suppression du moteur de
+# décision de risque orphelin (audit MCP/AGUI 2026-08-26 — voir NOTE dans
+# security.py juste après MCPManager, et nodes/confirmation_gate.py pour le
+# VRAI point de confirmation humaine).
 # =====================================================================
 
-class TestMCPPermissionClientCheckPermission:
-    def _client(self, maintenance_mode=False):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient
-        return MCPPermissionClient(backend=None, maintenance_mode=maintenance_mode)
-
-    def test_schema_modify_denied_outside_maintenance(self):
-        client = self._client(maintenance_mode=False)
-        decision = client._check_permission("drop_table", {})
-        assert decision.allowed is False
-        assert decision.decision == "DENY"
-
-    def test_schema_modify_allowed_in_maintenance_mode(self):
-        client = self._client(maintenance_mode=True)
-        decision = client._check_permission("drop_table", {})
-        assert decision.allowed is True
-
-    def test_read_only_always_allowed(self):
-        client = self._client()
-        decision = client._check_permission("get_user_profile", {})
-        assert decision.allowed is True
-        assert decision.decision == "ALLOW"
-
-    def test_high_risk_write_requires_hitl(self):
-        client = self._client()
-        decision = client._check_permission("create_order", {})
-        assert decision.allowed is False
-        assert decision.decision == "HITL_REQUIRED"
-
-    def test_critical_risk_write_requires_hitl(self):
-        client = self._client()
-        decision = client._check_permission("mark_escrow_paid", {})
-        assert decision.decision == "HITL_REQUIRED"
-
-    def test_medium_risk_write_is_allowed_without_hitl(self):
-        client = self._client()
-        decision = client._check_permission("create_product", {})
-        assert decision.allowed is True
-        assert decision.decision == "ALLOW"
-
-    def test_suspicious_arguments_force_hitl_even_for_read_only(self):
-        client = self._client()
-        decision = client._check_permission("get_user_profile", {"q": "DROP TABLE users"})
-        assert decision.allowed is False
-        assert decision.decision == "HITL_REQUIRED"
-        assert decision.risk.value == "CRITICAL"
-
-
-class TestScanArgumentsForRisk:
-    def _client(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient
-        return MCPPermissionClient(backend=None)
-
-    @pytest.mark.parametrize("payload", [
-        "DROP TABLE users",
-        "delete from orders",
-        "1 OR 1=1",
-        "UNION SELECT * FROM users",
-        "'; TRUNCATE users; --",
-        "ALTER TABLE users ADD COLUMN x",
-    ])
-    def test_detects_sql_injection_patterns(self, payload):
-        client = self._client()
-        suspicious, reason = client._scan_arguments_for_risk({"q": payload})
-        assert suspicious is True
-        assert reason == "sql_pattern_detected"
-
-    def test_normal_business_text_is_not_flagged(self):
-        client = self._client()
-        suspicious, _ = client._scan_arguments_for_risk({"product": "tomates fraiches, 200kg"})
-        assert suspicious is False
-
-    def test_oversized_argument_value_is_flagged(self):
-        client = self._client()
-        suspicious, reason = client._scan_arguments_for_risk({"notes": "a" * 5000})
-        assert suspicious is True
-        assert "too_large" in reason
-
-    def test_key_containing_sql_is_flagged(self):
-        client = self._client()
-        suspicious, reason = client._scan_arguments_for_risk({"raw_sql_query": "select id"})
-        assert suspicious is True
-        assert "sql_key" in reason
-
-
-class TestMaskSensitive:
-    def _client(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient
-        return MCPPermissionClient(backend=None)
-
-    def test_masks_known_sensitive_keys_case_insensitively(self):
-        client = self._client()
-        masked = client._mask_sensitive({"Password": "hunter2", "PASSWORD_HASH": "abc", "product": "mais"})
-        assert masked["Password"] == "***MASKED***"
-        assert masked["PASSWORD_HASH"] == "***MASKED***"
-        assert masked["product"] == "mais"
-
-    def test_masks_recursively_through_nested_structures(self):
-        client = self._client()
-        masked = client._mask_sensitive({"user": {"email": "a@b.com", "orders": [{"token": "t1"}]}})
-        assert masked["user"]["email"] == "***MASKED***"
-        assert masked["user"]["orders"][0]["token"] == "***MASKED***"
-
-    def test_parses_and_masks_json_encoded_strings(self):
-        client = self._client()
-        masked = client._mask_sensitive('{"api_key": "secret123"}')
-        assert masked["api_key"] == "***MASKED***"
-
-    def test_non_json_string_passes_through_unchanged(self):
-        client = self._client()
-        assert client._mask_sensitive("just some text") == "just some text"
-
-    def test_recursion_guard_prevents_infinite_loop_on_circular_refs(self):
-        client = self._client()
-        circular: dict = {"product": "mais"}
-        circular["self"] = circular
-        masked = client._mask_sensitive(circular)
-        assert masked["self"] == "***RECURSION***"
-
-
-class TestNormalizeOutput:
+class TestNormalizeToolOutput:
     def test_dict_passes_through(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient
-        assert MCPPermissionClient._normalize_output({"a": 1}) == {"a": 1}
+        from agriconnect.infrastructure.mcp.security import _normalize_tool_output
+        assert _normalize_tool_output({"a": 1}) == {"a": 1}
 
     def test_valid_json_string_is_parsed(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient
-        assert MCPPermissionClient._normalize_output('{"a": 1}') == {"a": 1}
+        from agriconnect.infrastructure.mcp.security import _normalize_tool_output
+        assert _normalize_tool_output('{"a": 1}') == {"a": 1}
 
     def test_non_dict_json_string_is_wrapped(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient
-        assert MCPPermissionClient._normalize_output('[1, 2]') == {"result": [1, 2]}
+        from agriconnect.infrastructure.mcp.security import _normalize_tool_output
+        assert _normalize_tool_output('[1, 2]') == {"result": [1, 2]}
 
     def test_invalid_json_string_is_wrapped_as_result(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient
-        assert MCPPermissionClient._normalize_output("not json at all") == {"result": "not json at all"}
+        from agriconnect.infrastructure.mcp.security import _normalize_tool_output
+        assert _normalize_tool_output("not json at all") == {"result": "not json at all"}
 
     def test_list_is_wrapped_under_items(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient
-        assert MCPPermissionClient._normalize_output([1, 2, 3]) == {"items": [1, 2, 3]}
+        from agriconnect.infrastructure.mcp.security import _normalize_tool_output
+        assert _normalize_tool_output([1, 2, 3]) == {"items": [1, 2, 3]}
 
     def test_other_scalar_falls_back_to_str_result(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient
-        assert MCPPermissionClient._normalize_output(42) == {"result": "42"}
-
-
-class TestHashArgs:
-    def test_deterministic_regardless_of_key_order(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient
-        h1 = MCPPermissionClient._hash_args({"a": 1, "b": 2})
-        h2 = MCPPermissionClient._hash_args({"b": 2, "a": 1})
-        assert h1 == h2
-        assert len(h1) == 16
-
-    def test_different_arguments_hash_differently(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient
-        assert MCPPermissionClient._hash_args({"a": 1}) != MCPPermissionClient._hash_args({"a": 2})
-
-
-class TestMCPPermissionClientCallTool:
-    class _Backend:
-        def __init__(self, result=None, raises=None):
-            self._result = result if result is not None else {"ok": True}
-            self._raises = raises
-
-        async def call_tool(self, name, arguments):
-            if self._raises:
-                raise self._raises
-            return self._result
-
-    def test_unregistered_tool_raises_permission_denied(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient, PermissionDenied
-        client = MCPPermissionClient(backend=self._Backend())
-        with pytest.raises(PermissionDenied):
-            run(client.call_tool("totally_unknown_tool", {}))
-
-    def test_denied_scope_raises_permission_denied(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient, PermissionDenied
-        client = MCPPermissionClient(backend=self._Backend())
-        with pytest.raises(PermissionDenied):
-            run(client.call_tool("drop_table", {}))
-
-    def test_hitl_required_and_approved_proceeds(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient
-
-        async def approve(tool_name, args, reason):
-            return True
-
-        client = MCPPermissionClient(backend=self._Backend(result={"order_id": "o1"}), hitl_callback=approve)
-        result = run(client.call_tool("create_order", {"qty": 5}))
-        assert result == {"order_id": "o1"}
-
-    def test_hitl_required_and_rejected_raises_permission_denied(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient, PermissionDenied
-
-        async def reject(tool_name, args, reason):
-            return False
-
-        client = MCPPermissionClient(backend=self._Backend(), hitl_callback=reject)
-        with pytest.raises(PermissionDenied):
-            run(client.call_tool("create_order", {}))
-
-    def test_hitl_with_no_callback_registered_denies(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient, PermissionDenied
-        client = MCPPermissionClient(backend=self._Backend(), hitl_callback=None)
-        with pytest.raises(PermissionDenied):
-            run(client.call_tool("create_order", {}))
-
-    def test_hitl_callback_exception_is_treated_as_rejection(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient, PermissionDenied
-
-        async def boom(tool_name, args, reason):
-            raise RuntimeError("callback exploded")
-
-        client = MCPPermissionClient(backend=self._Backend(), hitl_callback=boom)
-        with pytest.raises(PermissionDenied):
-            run(client.call_tool("create_order", {}))
-
-    def test_successful_read_only_call_masks_and_returns_result(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient
-        client = MCPPermissionClient(backend=self._Backend(result={"phone": "+2260", "email": "a@b.com"}))
-        result = run(client.call_tool("get_user_profile", {}))
-        assert result["email"] == "***MASKED***"
-        assert result["phone"] == "+2260"
+        from agriconnect.infrastructure.mcp.security import _normalize_tool_output
+        assert _normalize_tool_output(42) == {"result": "42"}
 
 
 # =====================================================================
@@ -556,17 +408,25 @@ class TestPreflightResult:
 # =====================================================================
 
 class TestMCPPermissionHostApp:
-    def _host(self, backend_result=None, backend_raises=None):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient, MCPPermissionHostApp
+    def _host(self, backend_result=None, backend_raises=None, deny_reason=None):
+        """``client`` est un simple objet duck-typé (``call_tool``), pas
+        l'ancien ``MCPPermissionClient`` (supprimé — audit MCP/AGUI
+        2026-08-26). ``MCPPermissionHostApp`` reste actif en production
+        (``runtime.py::_run_preflight``, toujours avec ``client=None`` — seul
+        ``_preflight_scan``/``_suggest_fix`` y sont utilisés) ; ces tests
+        couvrent en plus le pass-through de ``.execute()`` vers un client
+        arbitraire, pour n'importe quel appelant qui en fournirait un."""
+        from agriconnect.infrastructure.mcp.security import MCPPermissionHostApp, PermissionDenied
 
-        class _Backend:
+        class _FakeClient:
             async def call_tool(self, name, arguments):
+                if deny_reason:
+                    raise PermissionDenied(name, deny_reason)
                 if backend_raises:
                     raise backend_raises
                 return backend_result if backend_result is not None else {"ok": True}
 
-        client = MCPPermissionClient(backend=_Backend())
-        return MCPPermissionHostApp(client=client)
+        return MCPPermissionHostApp(client=_FakeClient())
 
     def test_sql_injection_in_arguments_is_blocked_before_reaching_the_client(self):
         from agriconnect.infrastructure.mcp.security import HostBlockedError
@@ -581,14 +441,13 @@ class TestMCPPermissionHostApp:
             run(host.execute("get_user_profile", {"q": "SELECT * FROM users WHERE id=1"}))
 
     def test_raw_sql_block_can_be_disabled(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionClient, MCPPermissionHostApp
+        from agriconnect.infrastructure.mcp.security import MCPPermissionHostApp
 
-        class _Backend:
+        class _FakeClient:
             async def call_tool(self, name, arguments):
                 return {"ok": True}
 
-        client = MCPPermissionClient(backend=_Backend())
-        host = MCPPermissionHostApp(client=client, block_raw_sql=False)
+        host = MCPPermissionHostApp(client=_FakeClient(), block_raw_sql=False)
         result = run(host.execute("get_user_profile", {"q": "SELECT * FROM users WHERE id=1"}))
         assert result == {"ok": True}
 
@@ -599,7 +458,7 @@ class TestMCPPermissionHostApp:
 
     def test_permission_denied_from_client_is_wrapped_as_host_blocked(self):
         from agriconnect.infrastructure.mcp.security import HostBlockedError
-        host = self._host()
+        host = self._host(deny_reason="Schema modification denied")
         with pytest.raises(HostBlockedError):
             run(host.execute("drop_table", {}))
 
@@ -785,88 +644,8 @@ class TestMCPManager:
         assert "db_tools" in result
         assert isinstance(result["db_tools"], list)
 
-
-# =====================================================================
-# ShieldHub / MCPShield / UnifiedMCPClient — façades haut niveau
-# =====================================================================
-
-class TestShieldHub:
-    def test_unknown_tool_raises_value_error(self):
-        from agriconnect.infrastructure.mcp.security import ShieldHub
-        hub = ShieldHub()
-        with pytest.raises(ValueError):
-            run(hub.call("totally_ghost_tool_xyz", {}))
-
-    def test_read_only_tool_routes_through_safe_read(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.security import ShieldHub
-
-        hub = ShieldHub()
-        calls = []
-        monkeypatch.setattr(hub.session, "safe_read", _record_and_return(calls, "safe_read"))
-        monkeypatch.setattr(hub.session, "execute", _record_and_return(calls, "execute"))
-        run(hub.manager.ensure_ready())
-        run(hub.call("get_user_profile", {}))
-        assert calls == ["safe_read"]
-
-    def test_write_tool_routes_through_execute(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.security import ShieldHub
-
-        hub = ShieldHub()
-        calls = []
-        monkeypatch.setattr(hub.session, "safe_read", _record_and_return(calls, "safe_read"))
-        monkeypatch.setattr(hub.session, "execute", _record_and_return(calls, "execute"))
-        run(hub.manager.ensure_ready())
-        run(hub.call("create_product", {}))
-        assert calls == ["execute"]
-
-    def test_list_tools_delegates_to_manager(self):
-        from agriconnect.infrastructure.mcp.security import ShieldHub
-        hub = ShieldHub()
-        result = run(hub.list_tools())
-        assert "db_tools" in result
-
-
-def _record_and_return(calls, label):
-    async def _fake(tool_name, arguments=None):
-        calls.append(label)
-        return {"ok": True}
-    return _fake
-
-
-class TestMCPShieldAndUnifiedClient:
-    def test_mcp_shield_authorize_and_call_delegates_to_hub(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.security import MCPShield
-
-        shield = MCPShield()
-        calls = []
-        monkeypatch.setattr(shield._hub, "call", _record_call(calls))
-        run(shield.authorize_and_call("get_user_profile", {"a": 1}))
-        assert calls == [("get_user_profile", {"a": 1})]
-
-    def test_mcp_shield_list_allowed_tools_delegates_to_hub(self):
-        from agriconnect.infrastructure.mcp.security import MCPShield
-        shield = MCPShield()
-        result = run(shield.list_allowed_tools())
-        assert "db_tools" in result
-
-    def test_unified_client_call_tool_defaults_arguments_to_empty_dict(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.security import UnifiedMCPClient
-
-        client = UnifiedMCPClient()
-        calls = []
-        monkeypatch.setattr(client._hub, "call", _record_call(calls))
-        run(client.call_tool("get_user_profile", None))
-        assert calls == [("get_user_profile", {})]
-
-    def test_unified_client_list_tools_delegates_to_hub(self):
-        from agriconnect.infrastructure.mcp.security import UnifiedMCPClient
-        client = UnifiedMCPClient()
-        result = run(client.list_tools())
-        assert "db_tools" in result
-
-
-def _record_call(calls):
-    async def _fake(tool_name, arguments):
-        calls.append((tool_name, arguments))
-        return {"ok": True}
-    return _fake
+# NOTE (audit MCP/AGUI 2026-08-26) : la suite `TestShieldHub` /
+# `TestMCPShieldAndUnifiedClient` a été retirée avec `ShieldHub` / `MCPShield`
+# / `UnifiedMCPClient` (infrastructure/mcp/security.py) — ces façades
+# n'étaient jamais empruntées en production, voir la NOTE laissée dans
+# security.py à l'endroit exact de leur suppression.

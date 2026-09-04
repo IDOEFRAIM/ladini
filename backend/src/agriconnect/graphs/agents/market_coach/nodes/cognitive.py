@@ -3,6 +3,12 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    clear_pending_interaction,
+    get_pending_interaction,
+    to_tunnel_category,
+)
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from agriconnect.graphs.agents.market_coach.nodes.response_handlers import (
     _label_for_field,
@@ -72,12 +78,13 @@ async def cognitive_guard(
     event = str(state.get("interpreted_event") or "").upper()
     detected_intent = str(state.get("detected_intent") or "UNKNOWN").upper()
     confidence = float(state.get("interpreter_confidence") or 0.0)
-    expected_input = str(state.get("expected_input") or "NONE").upper()
+    pending = get_pending_interaction(state)
+    expected_input = to_tunnel_category(pending)
     current_goal = state.get("current_goal")
     payload = dict(state.get("transaction_payload") or {})
     text_lower = (state.get("normalized_text") or state.get("user_query") or "").lower()
     retry_count = int(state.get("retry_count") or 0)
-    in_tunnel = bool(current_goal and expected_input not in {"NONE", ""})
+    in_tunnel = bool(current_goal and pending.kind != InteractionKind.NONE)
 
     user_role = str(state.get("forced_role") or state.get("user_role") or "").upper()
 
@@ -160,6 +167,17 @@ async def cognitive_guard(
                 "pending_modify_bid",
                 "update_phase", "update_cycle_id", "update_product_id",
                 "update_pending",
+                # (2026-09-02) Même bug, côté acheteur : `winner_gps_stage`
+                # (flows/buyer/order_tracking.py) est la même famille de
+                # mini-état auto-suffisant que bid_phase/update_phase
+                # ci-dessus — jamais touchée par ce reset avant ce correctif,
+                # alors que `current_goal` l'est. Un abandon de tunnel en
+                # pleine étape GPS gagnant-enchère laissait ce flag actif :
+                # relancer plus tard le suivi de commande retombait
+                # directement sur l'étape GPS sans qu'aucun `pending_interaction`
+                # actif ne l'explique (voir aussi `preorder_workflow.gps_stage`
+                # ci-dessous, même classe de bug, incident réel +22601479800).
+                "winner_gps_stage",
             )
             working_memory = dict(state.get("working_memory") or {})
             for key in stale_wm_keys:
@@ -170,6 +188,21 @@ async def cognitive_guard(
                     "current_goal": None,
                     "goal_status": "IDLE",
                     "status": "WAITING_INPUT",
+                    # (2026-09-02) Symétrique à `stale_wm_keys` ci-dessus, mais
+                    # `preorder_workflow` (flows/buyer/preorder.py) est un
+                    # champ top-level `merge_dict` (BuyerContext), pas une clé
+                    # de `working_memory` — donc hors de portée de la boucle
+                    # au-dessus. `gps_stage`/`gps_default` sont la même
+                    # famille de mini-état auto-suffisant que `bid_phase` :
+                    # sans ce reset, un tunnel abandonné en pleine étape GPS
+                    # précommande laisse `gps_stage=True` collé indéfiniment
+                    # (merge_dict ne l'efface jamais tout seul), alors que
+                    # `pending_interaction` (PROVIDE_LOCATION), lui, est bien
+                    # effacé par `clear_pending_interaction` ci-dessous — les
+                    # deux DOIVENT tomber ensemble, sinon `create_preorder`
+                    # retombe sur `resolve_gps_stage` à la reprise sans aucun
+                    # `pending_interaction` actif pour le justifier.
+                    "preorder_workflow": {"gps_stage": None, "gps_default": None},
                     # merge_dict-reduced fields: a plain {} is a NO-OP under
                     # merge_dict (agents/reducers.py) — it PRESERVES the old
                     # value instead of clearing it. Only {"__reset__": True}
@@ -183,12 +216,11 @@ async def cognitive_guard(
                     "missing_fields": [],
                     "completed_fields": [],
                     "last_missing_field": None,
-                    "expected_input": "NONE",
                     "expected_candidates": [],
                     "available_mapping": {},
                     "retry_count": 0,
-                    "waiting_for_confirmation": False,
                     "confirmation_summary": None,
+                    **clear_pending_interaction("tunnel_abandoned_max_retries"),
                     "selected_tool": None,
                     "selected_tool_args": {"__reset__": True},
                     "execution_result": {"__reset__": True},
@@ -305,11 +337,11 @@ async def cognitive_orchestrator(
     event = str(state.get("interpreted_event") or "").upper()
     intent = str(state.get("detected_intent") or "UNKNOWN").upper()
     current_goal = str(state.get("current_goal") or "").upper()
-    expected_input = str(state.get("expected_input") or "NONE").upper()
+    pending = get_pending_interaction(state)
     strategy = str(state.get("response_strategy") or "").upper()
     confidence = float(state.get("interpreter_confidence") or 0.0)
     competition = list(state.get("intent_competition") or [])
-    in_tunnel = bool(current_goal and expected_input not in {"", "NONE"})
+    in_tunnel = bool(current_goal and pending.kind != InteractionKind.NONE)
 
     phase = "perceive"
     next_step = "continue"

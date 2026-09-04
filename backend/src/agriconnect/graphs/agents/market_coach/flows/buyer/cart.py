@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    clear_pending_interaction,
+    set_pending_interaction,
+)
+from agriconnect.graphs.agents.market_coach.domain.selection_actions import (
+    ActionType,
+    build_selection_context,
+    parse_raw_action,
+    validate_action,
+)
 from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
     CartDomainService,
     ProductLookupUnavailable,
@@ -11,6 +22,7 @@ from agriconnect.graphs.agents.market_coach.services.domain.cart_service import 
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
     llm_deviation_reply,
+    slot_has_value,
 )
 
 from .helpers import (
@@ -26,6 +38,380 @@ from .preorder import create_preorder
 # =====================================================================
 # CART MANAGEMENT NODE
 # =====================================================================
+
+
+def _fresh_unit_this_turn(state: Dict[str, Any]) -> Any:
+    """Unité écrite dans le message de CE tour, jamais celle du payload fusionné.
+
+    Audit 2026-09-01 : `transaction_payload` est un canal `merge_dict` — l'unité
+    de la demande initiale ("30 L de lait") y survit indéfiniment. La passer
+    comme `buyer_unit` sur une réponse de NOMBRE DE PAQUETS ferait refuser un
+    "3" pourtant parfaitement valide, alors que c'est justement un "30 litres"
+    tapé MAINTENANT qu'il faut refuser (voir
+    domain/pricing_tiers.py::classify_pack_count_unit).
+    """
+    return (state.get("extracted_entities") or {}).get("unit")
+
+
+def _tier_menu_working_memory_patch(state: Dict[str, Any]) -> Dict[str, Any]:
+    """`working_memory` patch to attach to every tier-menu WAITING_INPUT
+    response — see `nodes/memory.py`'s `mapping_kind` protection.
+
+    Real incident (2026-08-30): a bare numeric reply to the tier menu was
+    silently resolved by memory.py's GENERIC selection machinery against a
+    STALE `menu_snapshot_id`/`available_mapping_kind` left over from an
+    EARLIER, unrelated menu in the same conversation (e.g. a vendor list
+    shown much earlier) — that stale resolution path popped
+    `selection_index` from the payload before `cart_management` ever got a
+    chance to read it, so the tier menu re-displayed forever with no error.
+    Claiming `available_mapping_kind="pricing_tier"` explicitly (now a
+    protected kind in memory.py, alongside `product_vendor`) AND wiping any
+    stale `menu_snapshot_id`/`available_mapping` closes this off completely,
+    regardless of what an earlier menu in this same conversation left behind.
+    """
+    wm = dict(state.get("working_memory") or {})
+    wm["available_mapping_kind"] = "pricing_tier"
+    wm["menu_snapshot_id"] = None
+    return wm
+
+
+def _build_tier_menu_response(
+    state: Dict[str, Any],
+    tiers: List[Dict[str, Any]],
+    display_name: str,
+    product_id: Any,
+    ctx_product_name: str,
+    vendor_selection_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Construit le state patch complet d'un menu de paliers en attente —
+    utilisé par les DEUX branches (multi-vendeurs et vendeur unique) de
+    `cart_management`.
+
+    Faille C (audit 2026-09-01) : cette construction (texte du menu,
+    `tier_selection_context`, synchronisation `working_memory`) était
+    dupliquée aux deux sites d'affichage — tout ajout futur à l'un des deux
+    sans le reporter à l'autre aurait pu rouvrir la fuite de contexte/menu
+    périmé déjà corrigée une fois (voir `_tier_menu_working_memory_patch`).
+    Un seul point de construction rend cette désynchronisation impossible.
+    """
+    tier_lines = "\n".join(
+        f"{i}️⃣ {t.get('quantity')} {t.get('unit')}"
+        + (f" ({t['packaging']})" if t.get("packaging") else "")
+        + f" — {t.get('price')} FCFA"
+        for i, t in enumerate(tiers, start=1)
+    )
+    return {
+        "status": "WAITING_INPUT",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
+        "response_strategy": "ASK_MISSING_FIELD",
+        "final_response": (
+            f"📦 *{display_name}* propose plusieurs conditionnements :\n"
+            f"{tier_lines}\n\nLequel voulez-vous ? "
+            "(le nombre que vous avez donné comptera comme le "
+            "nombre de paquets de ce conditionnement)"
+        ),
+        "tier_selection_context": {
+            "product_id": product_id,
+            # (2026-08-31) `product_name` — PAS `product_id` — est la clé
+            # d'identité fiable pour retrouver ce contexte plus tard :
+            # `product_id` peut légitimement varier entre deux recherches
+            # catalogue du MÊME produit (voir l'incident réel 2026-08-30).
+            "product_name": str(ctx_product_name or "").strip().lower(),
+            "tiers": tiers,
+        },
+        "vendor_selection_context": vendor_selection_context,
+        "working_memory": _tier_menu_working_memory_patch(state),
+        "available_mapping": {},
+        "ag_ui_component": None,
+    }
+
+
+def _tier_resolved_patch(
+    state: Dict[str, Any],
+    tiers: List[Dict[str, Any]],
+    ctx_product_name: Any,
+    product_id: Any,
+    resolved_tier_id: Any,
+) -> Dict[str, Any]:
+    """Patch d'état pour l'entrée en `WAITING_FOR_PACKAGE_COUNT`.
+
+    Audit 2026-09-01 : ces deux branches posaient `tier_selection_context =
+    None` dès qu'un palier était résolu. Conséquences vérifiées :
+
+    1. **Aucun changement d'avis possible.** Une fois le palier figé, la liste
+       des paliers n'existait plus nulle part côté état — ni `cart_management`
+       ni le prompt de l'interpréteur (`tier_menu_context`) ne pouvaient
+       résoudre "finalement je prends le bidon de 5 L", qui retombait alors en
+       simple quantité (→ 5 paquets du MAUVAIS palier).
+    2. **`available_mapping_kind` restait bloqué sur `"pricing_tier"`** — un
+       menu périmé qui continuait à protéger `selection_index` bien après la
+       fermeture du menu.
+
+    On garde donc le contexte, ESTAMPILLÉ `resolved_tier_id` : le menu ne se
+    réaffiche plus (cf. le garde `resolved_tier_id` côté affichage) mais la
+    liste reste résoluble pour une re-sélection EXPLICITE. Un chiffre nu, lui,
+    reste un nombre de paquets — seul un `selected_value` (palier désigné sans
+    ambiguïté) peut rouvrir le choix.
+    """
+    wm = dict(state.get("working_memory") or {})
+    wm["available_mapping_kind"] = None
+    wm["menu_snapshot_id"] = None
+    patch: Dict[str, Any] = {"working_memory": wm}
+    if not resolved_tier_id or not tiers:
+        patch["tier_selection_context"] = None
+        return patch
+    patch["tier_selection_context"] = {
+        "product_id": product_id,
+        "product_name": str(ctx_product_name or "").strip().lower(),
+        "tiers": tiers,
+        "resolved_tier_id": resolved_tier_id,
+    }
+    return patch
+
+
+# =====================================================================
+# CONTRAT D'ACTION STRUCTURÉE — EXÉCUTEUR UNIQUE (2026-09-01)
+# =====================================================================
+# Voir domain/selection_actions.py pour le pourquoi. Ce bloc est LA seule
+# porte d'entrée qui consomme `agent_action` : quand il résout complètement
+# le tour (renvoie un patch non-None), TOUT le reste de `cart_management`
+# (résolution `selection_index`/`selected_value`, heuristiques de purge de
+# quantité héritée...) est court-circuité pour ce tour — un seul chemin
+# d'exécution, jamais deux interprétations concurrentes du même message.
+# Quand il renvoie `None` (aucune action structurée valide cette fois — LLM
+# dégradé, formulation hors contrat), `cart_management` retombe sur ses
+# heuristiques historiques : ce filet de sécurité n'est PAS supprimé.
+
+_ACTION_PAYLOAD_FIELDS = (
+    "agent_action",
+    "action_producer_id",
+    "action_pricing_tier_id",
+    "action_package_count",
+    "action_quantity",
+    "action_unit",
+)
+
+
+def _clear_action_fields(payload: Dict[str, Any]) -> None:
+    """`transaction_payload` est un canal `merge_dict` : une clé absente de
+    `new` ne supprime rien de `old` (voir `agents/reducers.py::merge_dict`).
+    Une action structurée consommée doit donc être explicitement mise à
+    `None`, sans quoi elle survivrait et se ferait ré-interpréter comme
+    périmée au tour suivant — même discipline que `selection_index`/
+    `selected_value` ailleurs dans ce fichier."""
+    for key in _ACTION_PAYLOAD_FIELDS:
+        payload[key] = None
+
+
+async def _execute_selection_action(
+    state: Dict[str, Any],
+    mc_runtime: MarketRuntime,
+    payload: Dict[str, Any],
+    cart: List[Dict[str, Any]],
+    cart_service: CartDomainService,
+    phone: str,
+    product_name: Any,
+) -> Optional[Dict[str, Any]]:
+    """INTERPRÉTATION (déjà faite par routing.py) → VALIDATION → EXÉCUTION.
+
+    Ne fait JAMAIS confiance à l'action proposée : `validate_action`
+    re-vérifie l'id référencé contre le contexte RECONSTRUIT ici-même, à cet
+    instant précis — jamais contre une liste potentiellement périmée que le
+    LLM/FastPath aurait pu voir à un tour antérieur.
+    """
+    raw = parse_raw_action(payload)
+    if raw is None:
+        return None
+
+    context = build_selection_context(state)
+    action = validate_action(raw, context)
+    # Consommée qu'elle soit valide ou non — un `agent_action` rejeté ne doit
+    # jamais rester dans le payload pour être ré-essayé au tour suivant
+    # contre un contexte qui aura changé entre-temps.
+    _clear_action_fields(payload)
+
+    if action is None:
+        logger.warning(
+            "cart_management: agent_action %r rejected against context "
+            "expected_action=%s (producer_ids=%s tier_ids=%s)",
+            raw.get("action"),
+            context.expected_action,
+            context.producer_ids(),
+            context.tier_ids(),
+        )
+        return None
+
+    vendor_ctx = dict(state.get("vendor_selection_context") or {})
+    tier_ctx = dict(state.get("tier_selection_context") or {})
+
+    if action.action == ActionType.SELECT_PRODUCER:
+        vendors_list = vendor_ctx.get("vendors") or []
+        chosen = next(
+            (
+                v
+                for v in vendors_list
+                if isinstance(v, dict)
+                and str(v.get("producer_id")) == action.producer_id
+            ),
+            None,
+        )
+        if chosen is None:
+            return None
+        vendor_ctx["chosen_vendor"] = chosen
+        vendor_ctx.pop("resolved_tier_id", None)
+        payload["product"] = chosen.get("name") or product_name
+        display_name = chosen.get("name") or product_name
+
+        raw_tiers = chosen.get("pricing_tiers")
+        if isinstance(raw_tiers, list) and raw_tiers:
+            return _build_tier_menu_response(
+                state,
+                raw_tiers,
+                display_name,
+                chosen.get("product_id"),
+                chosen.get("name") or "",
+                vendor_ctx,
+            )
+
+        vendor_label = chosen.get("vendor_name") or "ce producteur"
+        unit_hint = chosen.get("unit") or "KG"
+        price_hint = chosen.get("price")
+        price_info = f" (prix : {price_hint} FCFA/{unit_hint})" if price_hint else ""
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(InteractionKind.ENTER_QUANTITY, field_name="quantity"),
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": (
+                f"👤 Vous avez choisi *{vendor_label}* pour *{display_name}*"
+                f"{price_info}.\n\n📦 Quelle quantité souhaitez-vous ?\n"
+                f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._"
+            ),
+            "transaction_payload": payload,
+            "vendor_selection_context": vendor_ctx,
+            "tier_selection_context": None,
+            "ag_ui_component": None,
+        }
+
+    if action.action == ActionType.SELECT_PRICING_TIER:
+        chosen_vendor = vendor_ctx.get("chosen_vendor")
+        raw_tiers = tier_ctx.get("tiers")
+        if not isinstance(raw_tiers, list) or not raw_tiers:
+            raw_tiers = (
+                chosen_vendor.get("pricing_tiers")
+                if isinstance(chosen_vendor, dict)
+                else None
+            ) or []
+        tier = next(
+            (
+                t
+                for t in raw_tiers
+                if isinstance(t, dict)
+                and str(t.get("tier_id")) == action.pricing_tier_id
+            ),
+            None,
+        )
+        if tier is None:
+            return None
+
+        vendor_ctx["resolved_tier_id"] = action.pricing_tier_id
+        # Option 1 (audit 2026-09-01, "aucune conversion silencieuse quantité
+        # globale → nombre de paquets") : toute quantité/unité donnée AVANT
+        # ou PENDANT la sélection du palier ("je veux 30 L de lait", puis "2")
+        # décrit une intention pré-palier, jamais un nombre de paquets déjà
+        # répondu — la purger ici est ce qui force la question explicite
+        # "combien de bidons ?" juste en dessous, au lieu de la réutiliser en
+        # silence. `agent_action`/`action_*` étant PAR CONSTRUCTION le seul
+        # contenu utile de ce tour (voir la règle prompt "jamais quantity/unit
+        # en plus d'un agent_action"), aucune quantité légitime de CE tour ne
+        # peut être perdue par cette purge.
+        payload["quantity"] = None
+        payload["unit"] = None
+        vendor_ctx["requested_quantity"] = None
+        vendor_ctx["requested_unit"] = None
+        product_id = tier_ctx.get("product_id") or (
+            chosen_vendor.get("product_id") if isinstance(chosen_vendor, dict) else None
+        )
+        product_label = tier_ctx.get("product_name") or (
+            str((chosen_vendor or {}).get("name") or product_name or "")
+            .strip()
+            .lower()
+        )
+        tier_selection_context = {
+            "product_id": product_id,
+            "product_name": product_label,
+            "tiers": raw_tiers,
+            "resolved_tier_id": action.pricing_tier_id,
+        }
+        vendor_label = (
+            chosen_vendor.get("vendor_name")
+            if isinstance(chosen_vendor, dict)
+            else None
+        ) or "ce producteur"
+        tier_label = f"{tier.get('quantity')} {tier.get('unit')}" + (
+            f" ({tier['packaging']})" if tier.get("packaging") else ""
+        )
+        switch_ack = ""
+        if context.active_tier_id and context.active_tier_id != action.pricing_tier_id:
+            switch_ack = "🔁 Changement de conditionnement pris en compte : "
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(InteractionKind.ENTER_QUANTITY, field_name="quantity"),
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": (
+                f"{switch_ack}✅ Vous avez choisi *{tier_label}* chez "
+                f"*{vendor_label}* ({tier.get('price')} FCFA).\n\n"
+                f"📦 Combien de *{tier_label}* souhaitez-vous ?"
+            ),
+            "transaction_payload": payload,
+            "vendor_selection_context": vendor_ctx,
+            "tier_selection_context": tier_selection_context,
+            # Le palier est RÉSOLU (on demande le nombre de paquets, pas un
+            # nouveau choix) — contrairement à `_build_tier_menu_response`
+            # (qui AFFICHE le menu et doit revendiquer `available_mapping_kind
+            # = "pricing_tier"`), rien ici ne doit plus protéger un menu
+            # numéroté déjà refermé. Même discipline que `_tier_resolved_patch`.
+            "working_memory": {
+                **dict(state.get("working_memory") or {}),
+                "available_mapping_kind": None,
+                "menu_snapshot_id": None,
+            },
+            "ag_ui_component": None,
+        }
+
+    if action.action == ActionType.SET_PACKAGE_COUNT:
+        chosen_vendor = vendor_ctx.get("chosen_vendor")
+        if not isinstance(chosen_vendor, dict) or not context.active_tier_id:
+            return None
+        return await cart_service.add_to_cart_with_ref(
+            phone,
+            str(product_name),
+            action.package_count,
+            chosen_vendor,
+            cart,
+            state,
+            # Un `package_count` validé par le contrat est PAR CONSTRUCTION
+            # sans dimension (voir domain/selection_actions.py::validate_action)
+            # — jamais une unité héritée d'un tour antérieur.
+            buyer_unit=None,
+            tier_id=context.active_tier_id,
+        )
+
+    if action.action == ActionType.SET_QUANTITY:
+        chosen_vendor = vendor_ctx.get("chosen_vendor")
+        if not isinstance(chosen_vendor, dict):
+            return None
+        return await cart_service.add_to_cart_with_ref(
+            phone,
+            str(product_name),
+            action.quantity,
+            chosen_vendor,
+            cart,
+            state,
+            buyer_unit=action.unit,
+            tier_id=None,
+        )
+
+    return None
 
 
 async def cart_management(
@@ -158,6 +544,22 @@ async def cart_management(
             }
         )
 
+    # --- CONTRAT D'ACTION STRUCTURÉE (2026-09-01) ---
+    # Priorité absolue sur toute la mécanique historique ci-dessous : quand
+    # routing.py (LLM ou FastPath) a produit un `agent_action` pour CE tour,
+    # c'est l'UNIQUE interprétation retenue — voir
+    # domain/selection_actions.py et le bloc `_execute_selection_action`
+    # au-dessus. Ne s'active que si le tunnel producteur/palier/paquets est
+    # réellement actif (`vendor_selection_context` présent) ; sinon aucune
+    # action structurée n'a de sens et on ne paie même pas le coût de la
+    # construire.
+    if state.get("vendor_selection_context"):
+        action_patch = await _execute_selection_action(
+            state, mc_runtime, payload, cart, cart_service, phone, product_name
+        )
+        if action_patch is not None:
+            return _with_base(action_patch)
+
     # --- VENDOR SELECTION: check if returning from vendor menu ---
     #
     # Bug réel (2026-08-17) : ce bloc vivait APRÈS le garde "Missing product
@@ -195,7 +597,46 @@ async def cart_management(
         selection_idx = payload.get("selection_index")
         vendor_switched = False
 
-        if selection_idx is not None:
+        # (2026-08-30) Incident réel : une sélection de PALIER en cours
+        # (`tier_selection_context` actif pour CE produit) se faisait
+        # intercepter ici — le code de sélection VENDEUR consommait
+        # aveuglément `selection_index` en le validant contre la liste des
+        # VENDEURS (souvent un seul élément), renvoyant "Numéro invalide"
+        # dès que l'index dépassait 1. Le vendeur est déjà figé à ce stade
+        # (`chosen_vendor` déjà résolu) — un `selection_index` reçu pendant
+        # que le palier est en attente appartient au menu de PALIERS, jamais
+        # au menu vendeur. Voir le bloc de résolution de palier plus bas.
+        _tier_ctx_pending = state.get("tier_selection_context")
+        # (2026-08-31) Incident réel : un palier ne peut être légitimement
+        # "en attente" QUE si un vendeur a DÉJÀ été résolu sur un tour
+        # précédent (`chosen_vendor` déjà présent dans le contexte
+        # persisté) — un menu de paliers n'existe structurellement pas tant
+        # qu'aucun vendeur n'a été choisi. Sans ce garde, un
+        # `tier_selection_context` PÉRIMÉ (laissé par un achat précédent
+        # d'un produit totalement différent, ex: "lait" avant "poulets" —
+        # canal `replace_value`, jamais effacé implicitement) empêchait à
+        # tort la résolution du `selection_index` reçu pour CHOISIR un
+        # vendeur, faisant échouer toute la sélection.
+        # (2026-09-01) `tier_selection_context` survit désormais APRÈS la
+        # résolution du palier (estampillé `resolved_tier_id`, voir
+        # `_tier_resolved_patch`) pour permettre un changement d'avis. Un
+        # contexte ainsi résolu n'attend PLUS de réponse : il ne doit donc plus
+        # bloquer la résolution d'un `selection_index` destiné au menu VENDEUR
+        # (régression sinon : "changer de producteur" cassé pendant toute la
+        # phase nombre-de-paquets).
+        _tier_selection_pending = (
+            bool(_tier_ctx_pending)
+            and not (
+                isinstance(_tier_ctx_pending, dict) and _tier_ctx_pending.get("__reset__")
+            )
+            and not (
+                isinstance(_tier_ctx_pending, dict)
+                and _tier_ctx_pending.get("resolved_tier_id")
+            )
+            and isinstance(chosen_vendor, dict)
+        )
+
+        if selection_idx is not None and not _tier_selection_pending:
             vendors_list = vendor_ctx_payload.get("vendors") or []
             try:
                 idx = int(selection_idx) - 1
@@ -204,7 +645,16 @@ async def cart_management(
             if 0 <= idx < len(vendors_list):
                 chosen_vendor = vendors_list[idx]
                 vendor_ctx_payload["chosen_vendor"] = chosen_vendor
-                payload.pop("selection_index", None)
+                # `transaction_payload` est un canal `merge_dict` : un
+                # `payload.pop(...)` local ne se propage PAS à l'état
+                # persisté (une clé absente de `new` ne supprime rien de
+                # `old`, voir `agents/reducers.py::merge_dict`) — seule une
+                # affectation explicite à `None` "efface" réellement la clé
+                # au tour suivant. Incident réel (2026-08-30) : un
+                # `selection_index` ainsi "popé" mais jamais vraiment effacé
+                # survivait dans l'état persisté et se faisait ré-consommer
+                # au tour suivant comme un index producteur périmé.
+                payload["selection_index"] = None
                 if chosen_vendor:
                     payload["product"] = chosen_vendor.get("name") or product_name
                     product_name = payload["product"]
@@ -241,7 +691,7 @@ async def cart_management(
                 return _with_base(
                     {
                         "status": "WAITING_INPUT",
-                        "expected_input": "SELECTION",
+                        **set_pending_interaction(InteractionKind.SELECTION_MENU),
                         "response_strategy": "ASK_MISSING_FIELD",
                         "final_response": "Numéro invalide. Choisissez un producteur dans la liste ci-dessus, ou tapez *annuler*.",
                         "ag_ui_component": None,
@@ -256,6 +706,196 @@ async def cart_management(
                 f"(*{chosen_vendor.get('price')} FCFA/{chosen_vendor.get('unit') or 'KG'}*).\n\n"
             )
 
+        # --- TIER SELECTION (2026-08-30, voir domain/pricing_tiers.py) ---
+        # Le produit choisi propose plusieurs paliers de prix/conditionnement
+        # → il faut savoir LEQUEL avant d'ajouter au panier. Même pattern que
+        # la sélection producteur ci-dessus : un contexte dédié
+        # `tier_selection_context` survit tant que le palier n'est pas
+        # choisi. La `quantity` déjà donnée par l'acheteur (ex: "3") est
+        # réinterprétée comme le NOMBRE DE PAQUETS du palier retenu, jamais
+        # une quantité en unité de base.
+        selected_tier_id = None
+        vendor_tiers: List[Dict[str, Any]] = []
+        if chosen_vendor is not None and isinstance(chosen_vendor, dict):
+            raw_tiers = chosen_vendor.get("pricing_tiers")
+            if isinstance(raw_tiers, list) and raw_tiers:
+                vendor_tiers = raw_tiers
+
+        # (2026-08-30, refonte "palier avant quantité") : un palier peut déjà
+        # avoir été résolu sur un tour PRÉCÉDENT — celui où on a demandé la
+        # quantité APRÈS avoir montré le menu de paliers (voir la branche
+        # "Vendor chosen but no quantity" plus bas, qui persiste
+        # `resolved_tier_id` sur `vendor_ctx_payload` pour ce cas exact).
+        # Priorité absolue : jamais re-demander/re-résoudre le palier si on
+        # l'a déjà.
+        _persisted_tier_id = vendor_ctx_payload.get("resolved_tier_id")
+        if _persisted_tier_id and any(
+            t.get("tier_id") == _persisted_tier_id for t in vendor_tiers
+        ):
+            selected_tier_id = _persisted_tier_id
+
+        # (2026-08-30) Incident réel : matcher par `product_id` re-résolu à
+        # chaque tour (une recherche catalogue FRAÎCHE, voir plus bas) s'est
+        # avéré fragile en prod — plusieurs produits de test "lait" au même
+        # prix pouvaient faire varier l'ordre des résultats d'un appel à
+        # l'autre, cassant la comparaison et laissant le menu de paliers se
+        # réafficher indéfiniment. `tier_selection_context` porte déjà la
+        # liste EXACTE des paliers affichés au tour précédent — on lui fait
+        # confiance directement plutôt que de re-matcher sur un identifiant
+        # susceptible d'avoir changé entre deux recherches.
+        tier_ctx = state.get("tier_selection_context")
+        tier_ctx_active = bool(tier_ctx) and not (
+            isinstance(tier_ctx, dict) and tier_ctx.get("__reset__")
+        )
+        # (2026-08-31) Incident réel : `tier_selection_context` est un canal
+        # `replace_value` — RIEN ne l'efface tant qu'aucun code ne le
+        # réécrit explicitement. Un palier laissé par un achat PRÉCÉDENT et
+        # déjà validé (produit totalement différent, ex: "lait") survivait
+        # ainsi et se faisait réutiliser ici pour LE PRODUIT ACTUEL (ex:
+        # "poulets") dès qu'un vendeur était choisi — menu de paliers avec
+        # les données de l'ANCIEN produit affiché sous le nom du nouveau.
+        # Comparaison par NOM (jamais `product_id`, voir le commentaire
+        # "incident réel 2026-08-30" plus haut sur l'instabilité
+        # d'ordonnancement entre deux recherches du MÊME produit) : ne faire
+        # confiance à `tier_ctx` que s'il porte bien le nom DU PRODUIT
+        # ACTUELLEMENT résolu.
+        if tier_ctx_active and isinstance(tier_ctx, dict):
+            ctx_product_name = str(tier_ctx.get("product_name") or "").strip().lower()
+            chosen_product_name = (
+                str(chosen_vendor.get("name") or "").strip().lower()
+                if isinstance(chosen_vendor, dict)
+                else ""
+            )
+            if not ctx_product_name or ctx_product_name != chosen_product_name:
+                tier_ctx_active = False
+        if tier_ctx_active and isinstance(tier_ctx, dict):
+            ctx_tiers = tier_ctx.get("tiers")
+            if isinstance(ctx_tiers, list) and ctx_tiers:
+                vendor_tiers = ctx_tiers
+        # Distingue un palier résolu CE tour-ci (via `_persisted_tier_id`
+        # plus haut, un tour ANTÉRIEUR où la question "combien de X ?" a
+        # déjà été posée explicitement) d'un palier qui vient tout juste
+        # d'être choisi maintenant — voir le garde anti-conversion-
+        # silencieuse juste après ce bloc.
+        _tier_freshly_resolved = False
+
+        # --- RE-SÉLECTION EXPLICITE D'UN PALIER (audit 2026-09-01) ---
+        # "2" puis "finalement je prends le bidon de 5 L" : sans ce bloc, la
+        # deuxième phrase retombait en simple quantité (repro : 5 PAQUETS du
+        # palier 10 L, soit 50 L / 4500 FCFA — le contraire de ce qui est
+        # demandé). Seul un `selected_value` (le LLM a reconnu un palier
+        # PRÉCIS de la liste, cf. règle 4bis du prompt) peut rouvrir le choix :
+        # un chiffre nu reste un nombre de paquets, jamais un index de menu, à
+        # ce stade de la machine à états.
+        tier_switched = False
+        if tier_ctx_active and isinstance(tier_ctx, dict) and selected_tier_id:
+            _reselect_val = payload.get("selected_value")
+            if (
+                _reselect_val
+                and _reselect_val != selected_tier_id
+                and any(t.get("tier_id") == _reselect_val for t in vendor_tiers)
+            ):
+                logger.info(
+                    "cart_management: tier re-selection %s -> %s",
+                    selected_tier_id,
+                    _reselect_val,
+                )
+                selected_tier_id = _reselect_val
+                _tier_freshly_resolved = True
+                tier_switched = True
+                payload["selected_value"] = None
+                vendor_ctx_payload["resolved_tier_id"] = selected_tier_id
+                _new_tier = next(
+                    (t for t in vendor_tiers if t.get("tier_id") == selected_tier_id),
+                    {},
+                )
+                switch_ack += (
+                    "🔁 Changement de conditionnement pris en compte : "
+                    f"*{_new_tier.get('quantity')} {_new_tier.get('unit')}*"
+                    + (
+                        f" ({_new_tier['packaging']})"
+                        if _new_tier.get("packaging")
+                        else ""
+                    )
+                    + f" — {_new_tier.get('price')} FCFA.\n\n"
+                )
+
+        if tier_ctx_active and isinstance(tier_ctx, dict) and not selected_tier_id:
+            # `selected_value` (2026-08-30, refonte "LLM pilote la sélection
+            # de palier") : le mapping sémantique texte libre → palier est
+            # maintenant fait par le LLM lui-même (voir la liste des paliers
+            # injectée dans son prompt, `interpreter/routing.py`) — porte
+            # directement le `tier_id` retenu. On ne fait ici QUE valider
+            # que cet id correspond bien à un palier de la liste ACTUELLEMENT
+            # affichée avant de le faire confiance (jamais un id inventé).
+            tier_sel_val = payload.get("selected_value")
+            if tier_sel_val and any(
+                t.get("tier_id") == tier_sel_val for t in vendor_tiers
+            ):
+                selected_tier_id = tier_sel_val
+                _tier_freshly_resolved = True
+                # `merge_dict` ne supprime pas une clé absente de `new` —
+                # voir le commentaire détaillé plus haut dans ce fichier
+                # (résolution vendeur). Affectation explicite à `None`.
+                payload["selected_value"] = None
+            tier_sel_idx = payload.get("selection_index")
+            if selected_tier_id is None and tier_sel_idx is not None:
+                try:
+                    t_idx = int(tier_sel_idx) - 1
+                except (TypeError, ValueError):
+                    t_idx = -1
+                if 0 <= t_idx < len(vendor_tiers):
+                    selected_tier_id = vendor_tiers[t_idx].get("tier_id")
+                    _tier_freshly_resolved = True
+                    payload["selection_index"] = None
+
+        # Option 1 (audit 2026-09-01, "aucune conversion silencieuse
+        # quantité globale → nombre de paquets") : incident réel vérifié —
+        # un acheteur ayant donné "30 litre" AVANT même de voir le menu de
+        # paliers se voyait facturer 30 BIDONS de 10L (300L, 27000 FCFA) au
+        # lieu des ~3 bidons attendus, la quantité globale pré-palier étant
+        # silencieusement réutilisée comme nombre de paquets. Un palier tout
+        # juste résolu CE tour ne peut faire confiance à `quantity` que si
+        # elle a été donnée CE MÊME tour (ex: "3 bidons de 10L" en un seul
+        # message) — jamais une quantité héritée d'un tour antérieur au
+        # choix du palier. Sinon on l'ignore : la branche "quantité manquante"
+        # juste en dessous pose alors explicitement la question du nombre de
+        # paquets pour CE conditionnement précis.
+        if _tier_freshly_resolved and selected_tier_id:
+            _fresh_qty_this_turn = (state.get("extracted_entities") or {}).get(
+                "quantity"
+            )
+            if not slot_has_value(_fresh_qty_this_turn):
+                quantity = None
+                payload["quantity"] = None
+                vendor_ctx_payload["requested_quantity"] = None
+
+        if vendor_tiers and not selected_tier_id:
+            display_name = (
+                chosen_vendor.get("name") if isinstance(chosen_vendor, dict) else None
+            ) or product_name
+            # Incident réel (2026-08-30) : `chosen_vendor` n'était résolu QUE
+            # dans la copie locale `vendor_ctx_payload` (via selection_index
+            # ci-dessus) — jamais renvoyé dans le patch d'état. Le tour
+            # SUIVANT (réponse au menu de paliers) retrouvait donc un
+            # `vendor_selection_context` SANS `chosen_vendor`, ce qui faisait
+            # échouer les deux gardes "chosen_vendor is not None" plus bas
+            # dans ce même bloc, tombait hors de `vendor_ctx_active` et
+            # relançait une recherche vendeur fraîche — ré-affichant le menu
+            # PRODUCTEUR à la place du menu de paliers, en boucle.
+            return _with_base(
+                _build_tier_menu_response(
+                    state,
+                    vendor_tiers,
+                    display_name,
+                    chosen_vendor.get("product_id")
+                    if isinstance(chosen_vendor, dict)
+                    else None,
+                    chosen_vendor.get("name") if isinstance(chosen_vendor, dict) else "",
+                    vendor_ctx_payload,
+                )
+            )
+
         # Vendor chosen + quantity available → add to cart directly
         if chosen_vendor is not None and product_name and quantity not in (None, "", 0):
             add_patch = await cart_service.add_to_cart_with_ref(
@@ -265,7 +905,12 @@ async def cart_management(
                 chosen_vendor,
                 cart,
                 state,
-                buyer_unit=payload.get("unit"),
+                buyer_unit=(
+                    _fresh_unit_this_turn(state)
+                    if selected_tier_id
+                    else payload.get("unit")
+                ),
+                tier_id=selected_tier_id,
             )
             if switch_ack and add_patch.get("final_response"):
                 add_patch["final_response"] = switch_ack + str(add_patch["final_response"])
@@ -286,13 +931,38 @@ async def cart_management(
                 if n_vendors > 1
                 else ""
             )
-            base_question = (
-                f"{switch_ack}"
-                f"👤 Vous avez choisi *{vendor_label}* pour *{product_name}*{price_info}.\n\n"
-                f"📦 Quelle quantité souhaitez-vous ?\n"
-                f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._\n"
-                f"{switch_hint}"
-            )
+            # (2026-08-30, refonte "palier avant quantité") : si un palier
+            # est déjà résolu à ce stade, la question DOIT porter sur ce
+            # conditionnement précis ("combien de bidons de 10L ?"), jamais
+            # une quantité générique — et le palier doit être PERSISTÉ sur
+            # `vendor_ctx_payload` (`resolved_tier_id`) pour que le tour
+            # suivant (la réponse quantité) le retrouve directement au lieu
+            # de re-résoudre/re-afficher le menu de paliers.
+            chosen_tier = None
+            if selected_tier_id:
+                chosen_tier = next(
+                    (t for t in vendor_tiers if t.get("tier_id") == selected_tier_id),
+                    None,
+                )
+                vendor_ctx_payload["resolved_tier_id"] = selected_tier_id
+            if chosen_tier:
+                tier_label = f"{chosen_tier.get('quantity')} {chosen_tier.get('unit')}" + (
+                    f" ({chosen_tier['packaging']})" if chosen_tier.get("packaging") else ""
+                )
+                base_question = (
+                    f"{switch_ack}"
+                    f"👤 Vous avez choisi *{vendor_label}* — conditionnement *{tier_label}*"
+                    f" ({chosen_tier.get('price')} FCFA).\n\n"
+                    f"📦 Combien de *{tier_label}* souhaitez-vous ?"
+                )
+            else:
+                base_question = (
+                    f"{switch_ack}"
+                    f"👤 Vous avez choisi *{vendor_label}* pour *{product_name}*{price_info}.\n\n"
+                    f"📦 Quelle quantité souhaitez-vous ?\n"
+                    f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._\n"
+                    f"{switch_hint}"
+                )
             # Chantier résilience 2026-08 (volet acheteur) : c'est LE point
             # le plus souvent atteint en pratique (vendor_selection_context
             # persiste d'un tour à l'autre) — même correctif que le miroir
@@ -301,31 +971,63 @@ async def cart_management(
             # et ce chemin est réatteint sur une VRAIE déviation (vendeur
             # déjà choisi, quantité toujours absente).
             note = None
-            if event in {"UNKNOWN", "OUT_OF_SCOPE"} and user_text.strip() and not vendor_switched:
+            if (
+                event in {"UNKNOWN", "OUT_OF_SCOPE"}
+                and user_text.strip()
+                and not vendor_switched
+                and not tier_switched
+            ):
                 note = await llm_deviation_reply(
                     mc_runtime, user_text, f"répondre à : quelle quantité de {product_name} souhaitez-vous ?",
                 )
             return _with_base(
                 {
                     "status": "WAITING_INPUT",
-                    "expected_input": "QUANTITY",
+                    **set_pending_interaction(InteractionKind.ENTER_QUANTITY, field_name="quantity"),
                     "response_strategy": "ASK_MISSING_FIELD",
                     "final_response": f"{note}\n\n{base_question}" if note else base_question,
+                    # Incident réel (2026-08-30, refonte "palier avant
+                    # quantité") : `payload` a pu se faire retirer
+                    # `selection_index`/`selected_value` PLUS HAUT dans ce
+                    # même appel (résolution du palier, ou du vendeur) —
+                    # mais cette branche ne renvoyait jamais `payload` mis à
+                    # jour comme `transaction_payload`. Le canal persisté
+                    # (merge_dict) gardait donc l'ANCIEN `selection_index`,
+                    # qui se faisait ré-interpréter comme une sélection
+                    # VENDEUR (ou re-consommer par erreur) au tour suivant —
+                    # "Numéro invalide" ou un changement de vendeur fantôme.
                     "transaction_payload": payload,
                     "vendor_selection_context": vendor_ctx_payload,
+                    **_tier_resolved_patch(
+                        state,
+                        vendor_tiers,
+                        chosen_vendor.get("name")
+                        if isinstance(chosen_vendor, dict)
+                        else product_name,
+                        chosen_vendor.get("product_id")
+                        if isinstance(chosen_vendor, dict)
+                        else None,
+                        selected_tier_id,
+                    ),
                     "ag_ui_component": None,
                 }
             )
 
-    # --- Missing product or quantity ---
-    if not product_name or quantity in (None, "", 0):
+    # --- Missing product ---
+    # (2026-08-30, refonte "palier avant quantité") : la quantité n'est
+    # PLUS un pré-requis pour lancer la recherche catalogue — sinon
+    # l'acheteur ne peut jamais découvrir qu'un produit a plusieurs
+    # conditionnements avant d'avoir déjà donné un chiffre à l'aveugle.
+    # Seul le produit est requis ici ; la recherche ci-dessous détermine
+    # elle-même si un palier doit être demandé avant la quantité.
+    if not product_name:
         draft_snapshot = capture_cart_draft(state, payload)
 
-        if product_name or quantity not in (None, "", 0):
+        if quantity not in (None, "", 0):
             draft_item = {
                 "product_id": "DRAFT",
-                "name": str(product_name) if product_name else "EN ATTENTE",
-                "quantity": float(quantity) if quantity not in (None, "", 0) else 0.0,
+                "name": "EN ATTENTE",
+                "quantity": float(quantity),
                 "unit": str(payload.get("unit") or "KG"),
                 "price": 0.0,
                 "line_total": 0.0,
@@ -338,17 +1040,14 @@ async def cart_management(
             ]
             cart.append(draft_item)
 
-        missing_field_name = "product" if not product_name else "quantity"
-        expected = "PRODUCT" if not product_name else "QUANTITY"
-
         vendor_ctx = state.get("vendor_selection_context")
         return _with_base(
             {
                 "status": "WAITING_INPUT",
-                "expected_input": expected,
+                **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="product"),
                 "response_strategy": "ASK_MISSING_FIELD",
-                "missing_fields": [missing_field_name],
-                "last_missing_field": missing_field_name,
+                "missing_fields": ["product"],
+                "last_missing_field": "product",
                 "transaction_payload": payload,
                 "draft_payload": draft_snapshot
                 or state.get("draft_payload")
@@ -417,7 +1116,7 @@ async def cart_management(
                 "current_goal": None,
                 "draft_payload": {"__reset__": True},
                 "vendor_selection_context": {"__reset__": True},
-                "expected_input": None,
+                **clear_pending_interaction("no_vendor_available"),
                 "ag_ui_component": None,
             }
         )
@@ -435,7 +1134,7 @@ async def cart_management(
         )
         return _with_base(state_patch)
 
-    # Single vendor — add directly if quantity known, else ask
+    # Single vendor
     ref = vendors[0]
     vendor_label = ref.get("vendor_name") or "un producteur"
     unit_hint = ref.get("unit") or "KG"
@@ -444,6 +1143,100 @@ async def cart_management(
     payload["product"] = product_name
     extras_hint = additional_products_hint(payload, state)
 
+    # --- TIER RESOLUTION FIRST (2026-08-30, refonte "palier avant quantité") ---
+    # Incident réel signalé par l'utilisateur : le système demandait une
+    # quantité à l'aveugle AVANT même de révéler qu'il existe plusieurs
+    # conditionnements — l'acheteur ne pouvait pas savoir à quoi son
+    # chiffre allait s'appliquer. Le palier doit être choisi D'ABORD, la
+    # quantité (nombre de paquets de CE palier) ensuite. Même mécanique de
+    # résolution que la branche multi-vendeurs ci-dessus — voir
+    # domain/pricing_tiers.py.
+    single_selected_tier_id = None
+    single_vendor_tiers = ref.get("pricing_tiers") or []
+    # Même principe que la branche multi-vendeurs ci-dessus : on fait
+    # confiance à `tier_selection_context` (la liste EXACTE déjà affichée),
+    # pas à un re-matching par product_id sur une recherche fraîche — voir
+    # le commentaire détaillé plus haut dans ce fichier.
+    tier_ctx = state.get("tier_selection_context")
+    tier_ctx_active = bool(tier_ctx) and not (
+        isinstance(tier_ctx, dict) and tier_ctx.get("__reset__")
+    )
+    # (2026-08-31) Incident réel — voir le commentaire détaillé sur la
+    # branche multi-vendeurs plus haut dans ce fichier : `tier_ctx` peut
+    # appartenir à un produit totalement différent, déjà acheté sur un tour
+    # précédent (canal `replace_value`, jamais effacé implicitement). Ne
+    # faire confiance qu'au palier du produit ACTUELLEMENT résolu — par NOM
+    # (jamais `product_id`, instable entre deux recherches du même produit,
+    # voir le commentaire "incident réel 2026-08-30" plus haut).
+    if tier_ctx_active and isinstance(tier_ctx, dict):
+        ctx_product_name = str(tier_ctx.get("product_name") or "").strip().lower()
+        current_product_name = str(ref.get("name") or product_name or "").strip().lower()
+        if not ctx_product_name or ctx_product_name != current_product_name:
+            tier_ctx_active = False
+    if tier_ctx_active and isinstance(tier_ctx, dict):
+        ctx_tiers = tier_ctx.get("tiers")
+        if isinstance(ctx_tiers, list) and ctx_tiers:
+            single_vendor_tiers = ctx_tiers
+        # (2026-09-01) Un contexte estampillé `resolved_tier_id` décrit un
+        # palier DÉJÀ choisi (voir `_tier_resolved_patch`) : si le tour retombe
+        # ici parce que le contexte vendeur a été perdu, le menu ne doit pas se
+        # réafficher — le choix tient toujours.
+        _persisted = tier_ctx.get("resolved_tier_id")
+        if _persisted and any(
+            t.get("tier_id") == _persisted for t in single_vendor_tiers
+        ):
+            single_selected_tier_id = _persisted
+        tier_sel_val = payload.get("selected_value")
+        if tier_sel_val and any(
+            t.get("tier_id") == tier_sel_val for t in single_vendor_tiers
+        ):
+            single_selected_tier_id = tier_sel_val
+            # `merge_dict` ne supprime pas une clé absente de `new` —
+            # affectation explicite à `None`, voir le commentaire détaillé
+            # plus haut dans ce fichier (résolution vendeur).
+            payload["selected_value"] = None
+        tier_sel_idx = payload.get("selection_index")
+        if single_selected_tier_id is None and tier_sel_idx is not None:
+            try:
+                t_idx = int(tier_sel_idx) - 1
+            except (TypeError, ValueError):
+                t_idx = -1
+            if 0 <= t_idx < len(single_vendor_tiers):
+                single_selected_tier_id = single_vendor_tiers[t_idx].get("tier_id")
+                payload["selection_index"] = None
+
+    if (
+        isinstance(single_vendor_tiers, list)
+        and single_vendor_tiers
+        and not single_selected_tier_id
+    ):
+        # Montre le menu de paliers immédiatement — QUE la quantité soit
+        # déjà connue (donnée dans le même message) ou pas encore.
+        # Seed `vendor_selection_context` avec `chosen_vendor` déjà résolu
+        # (vendeur unique, pas d'ambiguïté) : le tour SUIVANT (réponse au
+        # menu de paliers) route alors par le bloc `vendor_ctx_active`
+        # ci-dessus, qui possède DÉJÀ toute la mécanique de résolution/
+        # persistance de palier (`resolved_tier_id`, récupération de
+        # `requested_quantity`) — pas de duplication de cette logique ici.
+        return _with_base(
+            _build_tier_menu_response(
+                state,
+                single_vendor_tiers,
+                ref.get("name") or product_name,
+                ref.get("product_id"),
+                ref.get("name") or product_name,
+                {
+                    "product": product_name,
+                    "vendors": [ref],
+                    "chosen_vendor": ref,
+                    "requested_quantity": quantity,
+                    "requested_unit": payload.get("unit"),
+                    "available_mapping_kind": "product_vendor",
+                },
+            )
+        )
+
+    # --- QUANTITY (produit sans palier, ou palier déjà résolu) ---
     if quantity in (None, "", 0):
         vendor_ctx_seed = {
             "product": product_name,
@@ -453,12 +1246,29 @@ async def cart_management(
             "requested_unit": None,
             "available_mapping_kind": "product_vendor",
         }
-        base_question = (
-            f"✅ *{product_name}* est disponible chez *{vendor_label}*{price_info}.\n\n"
-            f"📦 Quelle quantité souhaitez-vous ?\n"
-            f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._"
-            + extras_hint
-        )
+        chosen_tier = None
+        if single_selected_tier_id:
+            chosen_tier = next(
+                (t for t in single_vendor_tiers if t.get("tier_id") == single_selected_tier_id),
+                None,
+            )
+            vendor_ctx_seed["resolved_tier_id"] = single_selected_tier_id
+        if chosen_tier:
+            tier_label = f"{chosen_tier.get('quantity')} {chosen_tier.get('unit')}" + (
+                f" ({chosen_tier['packaging']})" if chosen_tier.get("packaging") else ""
+            )
+            base_question = (
+                f"✅ *{product_name}* — conditionnement *{tier_label}* chez *{vendor_label}*"
+                f" ({chosen_tier.get('price')} FCFA).\n\n"
+                f"📦 Combien de *{tier_label}* souhaitez-vous ?"
+            )
+        else:
+            base_question = (
+                f"✅ *{product_name}* est disponible chez *{vendor_label}*{price_info}.\n\n"
+                f"📦 Quelle quantité souhaitez-vous ?\n"
+                f"💡 _Exemples : 50 {unit_hint.lower()}, 2 sacs, 100 kg..._"
+                + extras_hint
+            )
         # Chantier résilience 2026-08 (volet acheteur) : ce final_response
         # est précalculé et posé directement sur l'état — comme les tunnels
         # producteur, ça court-circuite le "reuse du final_response
@@ -478,18 +1288,31 @@ async def cart_management(
         return _with_base(
             {
                 "status": "WAITING_INPUT",
-                "expected_input": "QUANTITY",
+                **set_pending_interaction(InteractionKind.ENTER_QUANTITY, field_name="quantity"),
                 "response_strategy": "ASK_MISSING_FIELD",
                 "final_response": f"{note}\n\n{base_question}" if note else base_question,
                 "transaction_payload": payload,
                 "vendor_selection_context": vendor_ctx_seed,
+                **_tier_resolved_patch(
+                    state,
+                    single_vendor_tiers,
+                    ref.get("name") or product_name,
+                    ref.get("product_id"),
+                    single_selected_tier_id,
+                ),
                 "ag_ui_component": None,
             }
         )
+
     return _with_base(
         await cart_service.add_to_cart_with_ref(
             phone, str(product_name), quantity, ref, cart, state,
-            buyer_unit=payload.get("unit"),
+            buyer_unit=(
+                _fresh_unit_this_turn(state)
+                if single_selected_tier_id
+                else payload.get("unit")
+            ),
+            tier_id=single_selected_tier_id,
         )
     )
 

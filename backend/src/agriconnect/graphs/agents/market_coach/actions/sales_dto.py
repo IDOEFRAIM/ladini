@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
@@ -18,6 +18,13 @@ class SalesUpdateProductPayload(BaseModel):
     quantity: Optional[float] = None
     name: Optional[str] = None
     unit: Optional[str] = None
+    # (2026-08-30) permet d'éditer/remplacer les paliers d'un produit déjà
+    # publié — jusqu'ici SALES_UPDATE_PRODUCT ne touchait QUE les champs
+    # scalaires, sans aucun moyen de corriger `pricing_tiers` après coup.
+    # Validé et structuré par `domain/pricing_tiers.py::validate_pricing_tiers`
+    # au moment de l'écriture (voir `services/database/producer.py`), jamais
+    # ici — cette couche ne fait que transporter la liste brute.
+    pricing_tiers: Optional[List[Dict[str, Any]]] = None
 
     model_config = ConfigDict(extra="ignore")
 
@@ -79,6 +86,12 @@ class SalesUpdateProductPayload(BaseModel):
             payload_keys=("unit",),
             entity_keys=("unit",),
         )
+        tiers_raw = coalesce_entity_value(
+            payload,
+            entity,
+            payload_keys=("pricing_tiers",),
+            entity_keys=("pricing_tiers",),
+        )
 
         return cls(
             product_id=str(product_id),
@@ -90,6 +103,11 @@ class SalesUpdateProductPayload(BaseModel):
             unit=(
                 str(unit_raw).strip() if unit_raw not in _EMPTY_SLOT_VALUES else None
             ),
+            pricing_tiers=(
+                tiers_raw
+                if isinstance(tiers_raw, list) and tiers_raw
+                else None
+            ),
         )
 
 
@@ -100,6 +118,12 @@ class SalesPublishProductPayload(BaseModel):
     price: float
     description: Optional[str] = None
     category_label: Optional[str] = None
+    # Déclinaisons de prix/conditionnement (2026-08-27) — voir
+    # domain/catalog/models.py::Product.pricing_tiers. `unit` y reste
+    # LITTÉRAL (jamais uppercasé/normalisé ici, contrairement au `unit`
+    # racine ci-dessus) : ce champ n'existe QUE pour préserver exactement ce
+    # que l'utilisateur a dit.
+    pricing_tiers: Optional[List[Dict[str, Any]]] = None
 
     model_config = ConfigDict(extra="ignore")
 
@@ -136,6 +160,11 @@ class SalesPublishProductPayload(BaseModel):
 
         unit_value = payload.get("unit")
 
+        raw_tiers = payload.get("pricing_tiers")
+        clean_tiers: Optional[List[Dict[str, Any]]] = None
+        if isinstance(raw_tiers, list) and raw_tiers:
+            clean_tiers = [tier for tier in raw_tiers if isinstance(tier, dict)] or None
+
         return cls(
             product=str(product_raw),
             quantity=quantity_value,
@@ -145,6 +174,7 @@ class SalesPublishProductPayload(BaseModel):
             price=price_value,
             description=payload.get("description"),
             category_label=payload.get("category_label"),
+            pricing_tiers=clean_tiers,
         )
 
 

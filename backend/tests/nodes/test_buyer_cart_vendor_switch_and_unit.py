@@ -19,6 +19,10 @@ from __future__ import annotations
 
 import pytest
 
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    get_pending_interaction,
+    to_tunnel_category,
+)
 from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
 from tests.conftest import StubRuntime, make_state, run
 
@@ -117,7 +121,7 @@ class TestAddToCartUnitHandling:
             buyer_unit="SAC",
         ))
         assert result["status"] == "WAITING_INPUT"
-        assert result["expected_input"] == "QUANTITY"
+        assert to_tunnel_category(get_pending_interaction(result)) == "QUANTITY"
         assert "kg" in result["final_response"].lower()
 
 

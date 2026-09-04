@@ -93,7 +93,17 @@ def _build_initial_state(query: str, context: Dict[str, Any]) -> MarketAgentStat
         "goal_stack": list(context.get("goal_stack") or []),
         "goal_status": "ACTIVE",
         # 6. EXPECTATION
-        "expected_input": context.get("expected_input") or "NONE",
+        # (2026-09-02, "no legacy shim") : `expected_input`/`waiting_for_
+        # confirmation` supprimés du contrat — `pending_interaction` (champ
+        # DURABLE, core/state_profile.py) survit déjà nativement via le
+        # checkpoint LangGraph/Workspace normal (ws.metadata[LANGGRAPH_STATE_KEY]),
+        # SANS reconstruction manuelle ici. Cette section les reconstruisait
+        # depuis une COPIE parallèle (le snapshot compact `ws.metadata`
+        # top-level, `workspace/metadata.py::ALLOWED_METADATA_KEYS`) — une
+        # 2e source de vérité redondante avec le checkpoint, exactement ce
+        # que la refonte élimine. `waiting_for_confirmation` n'a d'ailleurs
+        # JAMAIS fait partie d'ALLOWED_METADATA_KEYS : cette ligne était déjà
+        # morte (toujours False) avant même cette suppression.
         "last_agent_question": context.get("last_agent_question"),
         "expected_candidates": list(context.get("expected_candidates") or []),
         # 7. MEMORY
@@ -114,7 +124,6 @@ def _build_initial_state(query: str, context: Dict[str, Any]) -> MarketAgentStat
         "interruption_payload": {},
         "suspended_payload": {},
         # 10. CONFIRMATION
-        "waiting_for_confirmation": bool(context.get("waiting_for_confirmation")),
         "is_certified": False,
         "execution_authorized": False,
         "execution_result": {},

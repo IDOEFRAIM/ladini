@@ -10,8 +10,6 @@ __all__ = [
     "MCPServerApp",
     "MCPToolSpec",
     "MCPTransportConfig",
-    "ShieldHub",
-    "UnifiedMCPClient",
     "mcp",
     "runtime",
 ]
@@ -50,8 +48,4 @@ def __getattr__(name: str) -> Any:
         return {"AgriDBMCPServer": AgriDBMCPServer, "mcp": mcp, "runtime": runtime}[
             name
         ]
-    if name in {"ShieldHub", "UnifiedMCPClient"}:
-        from agriconnect.infrastructure.mcp.security import ShieldHub, UnifiedMCPClient
-
-        return {"ShieldHub": ShieldHub, "UnifiedMCPClient": UnifiedMCPClient}[name]
     raise AttributeError(name)

@@ -25,6 +25,9 @@ from sqlalchemy.orm import selectinload
 from agriconnect.core.formatting import fmt_num as _fmt_num
 from agriconnect.core.settings import settings
 from agriconnect.domain.models import Order, OrderItem, Producer, Product, User
+from agriconnect.graphs.agents.market_coach.domain.pricing_tiers import (
+    resolve_stock_debit,
+)
 from agriconnect.services.payments.paydunya_client import PaydunyaClient, PaydunyaError
 
 from .base import BaseMixin
@@ -248,19 +251,23 @@ class EscrowMixin(BaseMixin):
                 )
                 continue
             requested = float(item.quantity or 0.0)
+            # Voir domain/pricing_tiers.py — quantité en unité de BASE à
+            # débiter, distincte de `requested` (nombre de paquets/palier)
+            # dès qu'un `tier_id` est impliqué.
+            stock_debit = resolve_stock_debit(item)
             available = float(product.quantity_for_sale or 0.0)
-            if available < requested:
+            if available < stock_debit:
                 insufficient.append(
                     {
                         "product_id": str(product.id),
                         "name": product.name,
-                        "requested": requested,
+                        "requested": stock_debit,
                         "available": available,
                         "unit": (product.unit or "KG").upper(),
                     }
                 )
                 continue
-            product.quantity_for_sale = available - requested
+            product.quantity_for_sale = available - stock_debit
             running_total += float(item.price_at_sale or 0.0) * requested
 
         if insufficient:
@@ -454,6 +461,52 @@ class EscrowMixin(BaseMixin):
                 for o in rows
             ],
         }
+
+    async def mark_escrow_payment_failed(self, invoice_token: str) -> Dict[str, Any]:
+        """(2026-09-03, clôture escrow/IPN) : Paydunya re-confirme une
+        facture "cancelled" (rejet explicite, distinct d'une simple
+        expiration TTL — voir ``expire_pending_payments``). Avant ce
+        correctif, ce cas n'écrivait RIEN nulle part (``Order.payment_status``
+        restait ``PENDING`` indéfiniment) — un trou de cohérence réel entre
+        ``Order`` et l'intention utilisateur, jamais visible ni côté
+        acheteur ni côté support.
+
+        Même garde-fous que ``mark_escrow_paid`` : ``SELECT...FOR UPDATE``
+        + idempotence explicite (rejouer le même IPN "cancelled" ne
+        ré-annule rien de plus)."""
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+
+        order = await current_session.scalar(
+            select(Order)
+            .where(Order.paydunya_invoice_token == invoice_token)
+            .with_for_update()
+        )
+        if not order:
+            raise BusinessRuleException(
+                "Commande introuvable pour ce token de paiement.",
+                reason="order_not_found",
+            )
+
+        if str(order.payment_status or "").upper() in {"ESCROWED", "PAID_OUT"}:
+            # Le paiement a en réalité DÉJÀ été confirmé ailleurs (course
+            # entre deux IPN contradictoires, ou rejeu tardif d'un
+            # "cancelled" périmé) — ne JAMAIS régresser un paiement acquis.
+            # Mandat RÈGLE ABSOLUE : ne transforme jamais un succès en échec
+            # sans preuve — ici la preuve (ESCROWED/PAID_OUT) dit le
+            # contraire du "cancelled" reçu, donc ce dernier est ignoré.
+            return {"status": "success", "order_id": str(order.id), "already_processed": True}
+
+        if str(order.payment_status or "").upper() == "CANCELLED":
+            return {"status": "success", "order_id": str(order.id), "already_processed": True}
+
+        order.payment_status = "CANCELLED"
+        order.status = "CANCELLED"
+        order.cancellation_role = "PAYMENT_PROVIDER_REJECTED"
+        await current_session.flush()
+
+        return {"status": "success", "order_id": str(order.id), "already_processed": False}
 
     async def expire_pending_payments(self) -> Dict[str, Any]:
         """Cron (``workers/crons/order_expiry.py``) : annule les commandes dont

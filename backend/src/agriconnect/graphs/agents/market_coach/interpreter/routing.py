@@ -19,6 +19,11 @@ import re as _re
 from string import Template
 from typing import Any, Dict, List, Optional
 
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    get_pending_interaction,
+    to_tunnel_category,
+)
 from agriconnect.graphs.agents.market_coach.core.slots import (
     SLOT_FILLING_INPUTS,
     get_slot_hint,
@@ -32,6 +37,15 @@ from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
 # confus au lieu d'une bascule propre OU d'une continuation propre.
 from agriconnect.graphs.agents.market_coach.core.tunnel_manager import (
     INTERRUPTION_CONFIDENCE_THRESHOLD,
+)
+from agriconnect.graphs.agents.market_coach.domain.pricing_tiers import (
+    pending_pack_count_tier,
+)
+from agriconnect.graphs.agents.market_coach.domain.selection_actions import (
+    ActionType,
+    build_selection_context,
+    fast_path_action,
+    tier_menu_prompt_block,
 )
 from agriconnect.graphs.agents.market_coach.interpreter.entities import (
     _fallback_quantity_unit_from_text,
@@ -49,6 +63,9 @@ from agriconnect.graphs.agents.market_coach.interpreter.intent import (
     INTENT_CONFIG,
     INTENT_ROLE,
 )
+from agriconnect.graphs.agents.market_coach.interpreter.interpreter_result import (
+    InterpreterResult,
+)
 from agriconnect.graphs.agents.market_coach.interpreter.prompts import (
     INTERPRETER_USER_PROMPT,
 )
@@ -56,7 +73,10 @@ from agriconnect.graphs.agents.market_coach.services.domain.product_validation i
     _validate_and_sanitize_product,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+    extract_deterministic_pricing_tiers,
     extract_unit_only_from_text,
+    parse_compound_quantity,
+    parse_quantity_unit_from_text,
     scan_number_candidates,
 )
 from agriconnect.graphs.agents.market_coach.utils import (
@@ -65,6 +85,27 @@ from agriconnect.graphs.agents.market_coach.utils import (
 )
 
 logger = logging.getLogger("AgriConnect.Market.InterpreterRouting")
+
+# =====================================================================
+# CONFIRMATION KEYWORDS — filet déterministe (voir _interpret_fast_path)
+# Vocabulaire fermé, EXACT MATCH uniquement sur texte normalisé — reprend
+# mot pour mot les exemples déjà documentés dans le prompt LLM ci-dessous
+# (§ "CONFIRM"/"REJECT"), jamais une liste inventée séparément.
+# =====================================================================
+_CONFIRM_EXACT_PHRASES = frozenset(
+    {
+        "oui", "ok", "okay", "d'accord", "daccord", "je confirme",
+        "je suis d'accord", "je suis daccord", "c'est bon", "cest bon",
+        "ca va", "ça va", "parfait", "vas-y", "vasy", "valide", "confirmer",
+        "confirme", "confirmé", "yes",
+    }
+)
+_REJECT_EXACT_PHRASES = frozenset(
+    {
+        "non", "annule", "annuler", "stop", "pas d'accord", "pas daccord",
+        "je ne confirme pas", "je refuse", "no",
+    }
+)
 
 # =====================================================================
 # ROLE-BASED INTENT FILTERING (anti-cross-pollution AG-UI)
@@ -86,6 +127,17 @@ COMMON_INTENTS: frozenset = frozenset(
 _init_intent_to_goal_map(PRODUCER_INTENTS, BUYER_INTENTS, COMMON_INTENTS)
 
 
+# Intents confirmés non-utilisés en production (2026-08-30, revue coût LLM —
+# voir [[pricing-tiers-litre-fastpath-bug-2026-08]] round 6 : le catalogue
+# unifié ~1700 tokens contribuait à saturer le quota Groq 8000 TPM/modèle sur
+# un seul appel interpréteur). Retirés du catalogue vu par le LLM — donc plus
+# jamais CLASSABLES depuis un message utilisateur — mais INTENT_CONFIG /
+# actions/agro.py /finance.py/system.py restent intacts (pas de suppression de
+# code, juste de surface de classification) au cas où un appel programmatique
+# interne les utiliserait encore ailleurs.
+_DISABLED_INTENT_PREFIXES: frozenset = frozenset({"AGRO_", "FINANCE_", "SYSTEM_"})
+
+
 def allowed_intents_for_role(role: str) -> frozenset:
     """Retourne l'ensemble des intentions reconnaissables par l'interpréteur.
 
@@ -102,7 +154,12 @@ def allowed_intents_for_role(role: str) -> frozenset:
             "Intents missing INTENT_ROLE entry (defaulting to PRODUCER): %s",
             sorted(missing),
         )
-    return PRODUCER_INTENTS | BUYER_INTENTS | COMMON_INTENTS | frozenset(missing)
+    all_intents = PRODUCER_INTENTS | BUYER_INTENTS | COMMON_INTENTS | frozenset(missing)
+    return frozenset(
+        intent
+        for intent in all_intents
+        if not any(intent.startswith(p) for p in _DISABLED_INTENT_PREFIXES)
+    )
 
 
 # Goal de CRÉATION (pas encore persisté, en attente de CONFIRMATION) → intent
@@ -150,12 +207,23 @@ Ta sortie OBLIGATOIRE est un JSON strict avec EXACTEMENT ces clés :
       "zone": "<str|null>",
       "farm_name": "<str|null>",
       "price_unit": "<KG|TONNE|SAC|PANIER|null>",
+      "pricing_tiers": [{"quantity": <float>, "unit": "<str>", "price": <float>, "packaging": "<str|null>"}, ...],
       "selection_index": <int|null>,
       "selected_value": "<str|null>",
       "movement_type": "<IN|OUT|null>",
-      "reason": "<str|null>"
+      "reason": "<str|null>",
+      "agent_action": "<SELECT_PRODUCER|SELECT_PRICING_TIER|SET_PACKAGE_COUNT|SET_QUANTITY|null>",
+      "action_producer_id": "<str|null>",
+      "action_pricing_tier_id": "<str|null>",
+      "action_package_count": <float|null>,
+      "action_quantity": <float|null>,
+      "action_unit": "<str|null>"
   }
 }
+
+Les 6 champs `agent_action`/`action_*` ne sont utilisés QUE quand le contexte
+agent fournit un bloc `action_structuree_attendue` (voir règle 4bis) — sinon
+laisse-les tous `null`.
 
 ═══════════════════════════════════════════════════════════════
 CATALOGUE OFFICIEL DES INTENTIONS POUR $role_label (CONTRAT FERMÉ) :
@@ -188,6 +256,33 @@ RÈGLES STRICTES DE CLASSIFICATION :
    - S'il ajoute un nouveau produit (« ajoute 10 kg de riz ») → NEW_TASK.
    Ne renvoie JAMAIS UNKNOWN pour un simple accord/refus dans ce contexte.
 
+1ter. **RÉPONSE À UN MENU DE SÉLECTION ACTIF (CRITIQUE, PRIORITÉ MAXIMALE)** :
+   si le contexte agent indique `expected_input = SELECTION`, l'acheteur
+   vient de voir une liste numérotée (paliers, producteurs, commandes,
+   options de menu...) et répond à CE choix précis — jamais une nouvelle
+   recherche ni un message hors-sujet. Tout message qui exprime un choix, un
+   ordre ou un chiffre (« le deuxième », « la seconde option », « le 2 »,
+   « je prends le premier », « le gros bidon », un chiffre nu, une
+   description qui correspond clairement à une des options listées) DOIT
+   être classé :
+   - `interpreted_event` = `SELECTION` (le cas général) ou `ANSWER` (si le
+     choix se formule comme une réponse directe à la question posée, ex:
+     une quantité rattachée au choix) — jamais `UNKNOWN`, jamais
+     `NEW_TASK`, jamais `OUT_OF_SCOPE` pour ce genre de message.
+   - `interpreter_confidence >= 0.90`.
+   - `detected_intent` = l'intention ACTIVE en cours (`current_goal` fourni
+     dans le contexte agent ci-dessus) — jamais `UNKNOWN` : le tunnel est
+     déjà ouvert sur cette intention, la réponse au menu en fait partie
+     intégrante, pas une nouvelle classification.
+   - L'entité choisie va dans `extracted_entities.selection_index` (chiffre
+     ou ordinal — position 1-indexée dans la liste) OU
+     `extracted_entities.selected_value` (texte/description), jamais les
+     deux, selon la règle 4 ci-dessous (anti-hallucination d'IDs).
+   Ne bascule JAMAIS vers un intent générique de nouvelle demande (ex:
+   BUYER_REQUEST) ni vers `NEW_TASK` tant que `expected_input = SELECTION` :
+   une réponse à un menu de choix n'est structurellement PAS une nouvelle
+   recherche, même si sa formulation ressemble à une phrase d'achat libre.
+
 2. **Extraction des entités (OBLIGATOIRE)** :
    - Tu dois copier TOUT nom de culture/produit détecté (tomates, maïs, riz, oignons...) dans `extracted_entities.product`.
    - Si un mot suit "de", "du", "des", "d'" après une quantité ou une unité, considère-le comme un candidat produit et renseigne `product`.
@@ -218,6 +313,51 @@ RÈGLES STRICTES DE CLASSIFICATION :
 4. **ANTI-HALLUCINATION D'IDS** : Tu n'inventes jamais d'ID technique. Si choix de l'IHM :
    - chiffre pur ou ordinal ("le 2ème", "option 1") → `selection_index` (int).
    - nom propre ou texte ("l'offre de Diallo") → `selected_value` (str).
+
+4bis. **CONTRAT D'ACTION STRUCTURÉE (CRITIQUE, PRIORITÉ ABSOLUE sur la règle 4
+   ci-dessus)** : si le contexte agent fournit un bloc
+   `action_structuree_attendue` (voir juste après ce message), le tunnel
+   d'achat attend UNE action précise parmi `SELECT_PRODUCER`,
+   `SELECT_PRICING_TIER`, `SET_PACKAGE_COUNT`, `SET_QUANTITY` — la ligne
+   "ACTION ATTENDUE" du bloc te dit LAQUELLE. Tu n'inventes JAMAIS une autre
+   action que celle-ci ou `SELECT_PRICING_TIER` (seule action toujours
+   autorisée en plus, pour un changement d'avis explicite pendant
+   `SET_PACKAGE_COUNT` — voir plus bas). Ceci REMPLACE `selection_index`/
+   `selected_value` pour ce message : n'utilise PAS ces deux champs ici.
+   - `extracted_entities.agent_action` = le nom EXACT de l'action choisie
+     (string, une des 4 valeurs ci-dessus).
+   - `SELECT_PRODUCER` → `extracted_entities.action_producer_id` = le
+     `producer_id` EXACT listé dans le bloc, copié tel quel — jamais un id
+     que tu inventes, jamais un id d'une AUTRE liste.
+   - `SELECT_PRICING_TIER` → `extracted_entities.action_pricing_tier_id` =
+     le `pricing_tier_id` EXACT listé. Un message comme "le premier, c'est
+     à dire 5 L" ou "le bidon de 5 L" ou "celui à 450 FCFA" doit être mappé
+     sémantiquement à EXACTEMENT UN palier de la liste fournie.
+   - `SET_PACKAGE_COUNT` → `extracted_entities.action_package_count` = le
+     NOMBRE DE PAQUETS (float). **Un chiffre nu à cette étape EST ce
+     nombre** — ne le confonds JAMAIS avec un index de menu ni avec une
+     quantité en unité de mesure. Exception : si l'acheteur désigne
+     EXPLICITEMENT un AUTRE conditionnement de la liste ("finalement le
+     bidon de 5 L"), retourne plutôt `SELECT_PRICING_TIER` avec le nouveau
+     `pricing_tier_id`.
+   - `SET_QUANTITY` → `extracted_entities.action_quantity` (float) et,
+     seulement si littéralement écrite dans CE message,
+     `extracted_entities.action_unit`.
+   - Si le message ne correspond CLAIREMENT à aucune option listée (aucun
+     `agent_action` fiable) → `interpreted_event` = `UNKNOWN`,
+     `detected_intent` = `UNKNOWN`, n'invente rien. Ne classe JAMAIS ce
+     message comme une nouvelle tâche (`NEW_TASK`) tant que ce bloc est
+     actif, même si sa formulation ressemble à une nouvelle recherche
+     produit.
+   - **N'ajoute JAMAIS `quantity`/`unit`/`selection_index`/`selected_value`
+     en plus d'un `agent_action`** — même si le message contient un nombre
+     qui a servi à identifier l'option (ex: "5 L" dans "le premier, c'est à
+     dire 5 L" identifie le PALIER, ce n'est pas une quantité d'achat
+     séparée). Faire les deux à la fois a produit un incident réel
+     (2026-09-01) : le palier ET une fausse quantité de 5 étaient tous deux
+     remplis pour le même "5 L", créant une contradiction que le code
+     devait ensuite arbitrer à l'aveugle. Un seul champ, jamais deux
+     interprétations concurrentes du même message.
 
 5. **Segmentation stricte des quantités** :
    - "product" doit être un libellé pur (ex: "tomates"), SANS chiffres ni unités.
@@ -254,6 +394,20 @@ RÈGLES STRICTES DE CLASSIFICATION :
      tonnes de produit au prix de 10000 FCFA/kg" → quantity=200.0, unit=
      "TONNE", price=10000.0, price_unit="KG".
 
+5bis. **PLUSIEURS TARIFS/CONDITIONNEMENTS POUR UN MÊME PRODUIT (CRITIQUE — jamais
+   d'écrasement)** : si l'utilisateur donne PLUSIEURS couples quantité+unité+prix
+   pour le MÊME produit (ex: "500f le demi-litre en sachet et 600f le bidon",
+   "5000 FCFA le sac de 50kg ou 600 FCFA le kg au détail"), NE GARDE PAS
+   seulement le dernier ou le premier : liste CHAQUE déclinaison comme un objet
+   distinct dans `pricing_tiers` — `quantity`/`unit`/`price` pour cette
+   déclinaison précise, `packaging` pour le conditionnement s'il est mentionné
+   ("sachet", "bidon", "sac"...) sinon `null`. `unit` y suit EXACTEMENT la même
+   règle d'or que ci-dessus (lecture littérale du mot employé — "demi-litre"
+   reste "demi-litre", "L" reste "L", jamais reformulé, arrondi ou converti
+   vers une autre unité comme "SAC"/"KG"). Quand il n'y a qu'UN SEUL tarif
+   dans le message, laisse `pricing_tiers` à `[]` (les champs `quantity`/
+   `unit`/`price` racine suffisent, pas de duplication).
+
 6. **NORMALISATION STRICTE DES DATES (OBLIGATOIRE)** :
    - L'année de référence est **2026**.
    - Toute date, estimation de disponibilité ou de récolte formulée en langage naturel (ex: "29 octobre", "fin octobre", "demain", "dans 3 jours") doit être **impérativement convertie au format ISO standard : YYYY-MM-DD**.
@@ -264,72 +418,11 @@ RÈGLES STRICTES DE CLASSIFICATION :
 
 7. Tu réponds UNIQUEMENT le JSON, sans markdown, sans explication.
 
-EXEMPLES OBLIGATOIRES (FORMAT STRICT) :
-Input: "50kg de patates pour le 29 octobre"
-Output: {
-  "interpreted_event": "NEW_TASK",
-  "detected_intent": "DECLARE_CROP_CYCLE",
-  "interpreter_confidence": 0.95,
-  "validation_status": "VALID",
-  "extracted_entities": {
-      "product": "patates",
-      "additional_products": [],
-      "quantity": 50.0,
-      "unit": "KG",
-      "price": null,
-      "estimated_available_at": "2026-10-29",
-      "expected_harvest_date": null,
-      "zone": null,
-      "selection_index": null,
-      "selected_value": null,
-      "movement_type": null,
-      "reason": null
-  }
-}
-
-Input: "20 tomates"
-Output: {
-  "interpreted_event": "NEW_TASK",
-  "detected_intent": "DECLARE_CROP_CYCLE",
-  "interpreter_confidence": 0.85,
-  "validation_status": "INVALID_MISSING_UNIT",
-  "extracted_entities": {
-      "product": "tomates",
-      "additional_products": [],
-      "quantity": 20.0,
-      "unit": null,
-      "price": null,
-      "estimated_available_at": null,
-      "expected_harvest_date": null,
-      "zone": null,
-      "selection_index": null,
-      "selected_value": null,
-      "movement_type": null,
-      "reason": null
-  }
-}
-
-Input: "je cherche des œufs et de la laitue dans ma région"
-Output: {
-  "interpreted_event": "NEW_TASK",
-  "detected_intent": "BUYER_REQUEST",
-  "interpreter_confidence": 0.9,
-  "validation_status": "VALID",
-  "extracted_entities": {
-      "product": "œufs",
-      "additional_products": ["laitue"],
-      "quantity": null,
-      "unit": null,
-      "price": null,
-      "estimated_available_at": null,
-      "expected_harvest_date": null,
-      "zone": null,
-      "selection_index": null,
-      "selected_value": null,
-      "movement_type": null,
-      "reason": null
-  }
-}
+EXEMPLES OBLIGATOIRES (FORMAT STRICT — champs omis ci-dessous = null/[],
+le schéma complet est déjà donné plus haut, ne le redemande pas) :
+"50kg de patates pour le 29 octobre" → {"interpreted_event":"NEW_TASK","detected_intent":"DECLARE_CROP_CYCLE","interpreter_confidence":0.95,"validation_status":"VALID","extracted_entities":{"product":"patates","quantity":50.0,"unit":"KG","estimated_available_at":"2026-10-29"}}
+"20 tomates" → {"interpreted_event":"NEW_TASK","detected_intent":"DECLARE_CROP_CYCLE","interpreter_confidence":0.85,"validation_status":"INVALID_MISSING_UNIT","extracted_entities":{"product":"tomates","quantity":20.0,"unit":null}}
+"je cherche des œufs et de la laitue dans ma région" → {"interpreted_event":"NEW_TASK","detected_intent":"BUYER_REQUEST","interpreter_confidence":0.9,"validation_status":"VALID","extracted_entities":{"product":"œufs","additional_products":["laitue"]}}
 """)
 
 
@@ -378,6 +471,7 @@ def _interpret_fast_path(
     text: str,
     *,
     skip_numeric_shortcut: bool = False,
+    llm_available: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Court-circuite le LLM uniquement pour les actions structurelles pures d'AG-UI.
 
@@ -387,7 +481,10 @@ def _interpret_fast_path(
     message en contexte) ; ce raccourci ne doit plus servir que de repli
     quand le LLM est indisponible.
     """
-    expected = state.get("expected_input")
+    # (2026-09-02, "no legacy shim") : source unique, dérivée de
+    # `pending_interaction` — un seul point de traduction pour toutes les
+    # comparaisons plus bas dans cette fonction.
+    expected = to_tunnel_category(get_pending_interaction(state))
     clean = text.strip().lower()
     working = state.get("working_memory") or {}
     locked_goal = (
@@ -398,6 +495,46 @@ def _interpret_fast_path(
 
     if not clean:
         return None
+
+    # (2026-09-02, validation réelle — mandat §16) : filet déterministe pour
+    # un vocabulaire FERMÉ, court, quasi-universel d'accord/refus pendant une
+    # CONFIRM_ACTION (`PendingInteraction`, source canonique — voir `expected`
+    # ci-dessus, dérivé de `to_tunnel_category`). Le LLM reste PRIMAIRE et
+    # documente déjà ce même vocabulaire dans son propre prompt (voir plus
+    # haut : "oui, ok, d'accord, c'est bon, confirmer...") — ceci n'ajoute
+    # AUCUN mot que le LLM ne devrait pas déjà reconnaître, c'est un filet de
+    # fiabilité pour le non-déterminisme MoE connu de Groq (même phrase,
+    # même température=0.0, classification qui varie d'un appel à l'autre —
+    # observé en prod), PAS une résolution d'intention "compliquée" ni une
+    # tentative de deviner une sélection en langage libre (§17 : "ne pas
+    # ajouter de regex spécifiques" reste respecté — ce n'est pas une regex,
+    # c'est une égalité stricte sur un texte NORMALISÉ, pas une correspondance
+    # partielle risquant un faux positif sur une phrase plus longue).
+    if expected == "CONFIRMATION":
+        _bare = clean.strip(" .!?,;: ")
+        if _bare in _CONFIRM_EXACT_PHRASES:
+            return {
+                "interpreted_event": "CONFIRM",
+                "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+                "interpreter_confidence": 0.99,
+                "extracted_entities": {},
+                "raw_analysis": {"path": "fast_path_confirmation_keyword"},
+            }
+        if _bare in _REJECT_EXACT_PHRASES:
+            return {
+                "interpreted_event": "REJECT",
+                "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+                "interpreter_confidence": 0.99,
+                "extracted_entities": {},
+                "raw_analysis": {"path": "fast_path_confirmation_keyword"},
+            }
+
+    # WAITING_FOR_PACKAGE_COUNT (audit 2026-09-01) : un palier est déjà résolu
+    # et on attend son NOMBRE DE PAQUETS. Le même texte "2" ne veut pas dire la
+    # même chose selon l'état — index de palier sous SELECTION, nombre de
+    # paquets ici — et un nombre de paquets n'a JAMAIS d'unité. Voir
+    # domain/pricing_tiers.py::pending_pack_count_tier (source unique).
+    pack_count_tier = pending_pack_count_tier(state)
 
     # Correction chiffrée pendant la CONFIRMATION ("j'ai plutôt 795 kg", "non
     # j'ai 795 kg" sur un récap déjà affiché) : un nombre typé sans ambiguïté
@@ -428,6 +565,48 @@ def _interpret_fast_path(
             for c in scan_number_candidates(clean)
         ]
 
+        # Multi-tarifs ("25 L à 500 fcfa ET 40 L à 900 fcfa") : 2+ nombres
+        # accolés à une devise. Ce fast-path déterministe ne sait produire
+        # QU'UNE paire quantité/prix — le forcer ici pickait arbitrairement le
+        # premier nombre "près d'une devise" comme LE prix (incident réel
+        # 2026-08-29 : "25" pris pour le prix, écrasant la vraie valeur, le
+        # 2e tarif disparaissant purement et simplement). Dès que 2+ candidats
+        # portent une devise à proximité, c'est structurellement un cas
+        # `pricing_tiers` — on laisse la main au LLM (qui sait les regrouper,
+        # voir règle 5bis du prompt) plutôt que de deviner.
+        # Cette garde vaut aussi bien pour une réponse directe (PRICE/QUANTITY,
+        # `skip_numeric_shortcut`) que pour une CORRECTION pendant la
+        # confirmation (`_confirmation_correction`, ex: le producteur répète
+        # ses paliers tarifaires après un récap déjà faux) — dans les deux
+        # cas, 2+ nombres près d'une devise ne peuvent être résolus qu'en
+        # perdant de l'information si on force une seule paire ici.
+        _currency_candidates = [c for c in candidates if c["near_currency"]]
+        if (
+            (skip_numeric_shortcut or (_confirmation_correction and llm_available))
+            and len(_currency_candidates) >= 2
+        ):
+            # Avant de laisser la main au LLM (peu fiable ici — voir
+            # `extract_deterministic_pricing_tiers`, incident 2026-08-30 : la
+            # MÊME phrase a produit `pricing_tiers` correctement une fois puis
+            # échoué la fois suivante, même modèle/température=0.0, non-
+            # déterminisme MoE connu côté Groq) : tente le parseur
+            # déterministe. S'il livre un résultat SANS AMBIGUÏTÉ, on n'a même
+            # plus besoin d'appeler le LLM pour ce message — plus rapide ET
+            # fiable à 100%. S'il échoue (structure non reconnue), on laisse
+            # la main au LLM comme avant (`return None`).
+            deterministic_tiers = extract_deterministic_pricing_tiers(text)
+            if deterministic_tiers:
+                return {
+                    "interpreted_event": (
+                        "UPDATE" if expected == "CONFIRMATION" else "ANSWER"
+                    ),
+                    "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+                    "interpreter_confidence": 0.98,
+                    "extracted_entities": {"pricing_tiers": deterministic_tiers},
+                    "raw_analysis": {"path": "fast_path_deterministic_pricing_tiers"},
+                }
+            return None
+
         # Réponse composée non-ambiguë ("775 kg d'oignon et le kg coûte 175
         # fcfa") : un nombre porte une unité de poids/comptage SANS devise à
         # proximité (quantité), un AUTRE porte une devise à proximité (prix) —
@@ -449,9 +628,25 @@ def _interpret_fast_path(
             and _price_candidate is not None
             and _qty_candidate is not _price_candidate
         ):
+            _qty_value: Any = _qty_candidate["value"]
+            _qty_unit: Any = _qty_candidate["unit"]
+            # Quantité COMPOSÉE ("2 tonnes et 250 kg") : incident réel
+            # (2026-09-03) — `_qty_candidate` ci-dessus ne retient que la
+            # PREMIÈRE paire quantité+unité rencontrée ; sur "je suis prêt à
+            # payer 250 fcfa le kg et je veux 2 tonnes et 250 kg", la
+            # quantité totale restait figée à "2 TONNE" à travers plusieurs
+            # tours, y compris après une correction explicite de
+            # l'utilisateur. `parse_compound_quantity` filtre déjà le nombre
+            # du prix (son unité, "fcfa", n'est pas une unité reconnue) et ne
+            # somme que les paires réellement convertibles en KG — neutre
+            # (même résultat que `_qty_candidate`) quand le texte ne porte
+            # qu'une seule quantité.
+            _compound = parse_compound_quantity(text)
+            if _compound.unit == "KG" and _compound.quantity not in (None, _qty_value):
+                _qty_value, _qty_unit = _compound.quantity, _compound.unit
             compound_entities: Dict[str, Any] = {
-                "quantity": _qty_candidate["value"],
-                "unit": _qty_candidate["unit"],
+                "quantity": _qty_value,
+                "unit": _qty_unit,
                 "price": _price_candidate["value"],
             }
             if _price_candidate["unit"]:
@@ -471,13 +666,26 @@ def _interpret_fast_path(
             # devine pas — on laisse la main au LLM (`return None` plus bas)
             # plutôt que de risquer d'écraser le mauvais champ.
             if _qty_candidate is not None and _price_candidate is None:
+                # Même correctif de quantité composée que ci-dessus — une
+                # correction pendant la confirmation ("non j'ai dit 2 tonnes
+                # et 250 kg") passe par CETTE branche (pas de prix mentionné
+                # dans le message de correction) et souffrait du même
+                # tronquage à la première paire.
+                _qty_value = _qty_candidate["value"]
+                _qty_unit = _qty_candidate["unit"]
+                _compound = parse_compound_quantity(text)
+                if _compound.unit == "KG" and _compound.quantity not in (
+                    None,
+                    _qty_value,
+                ):
+                    _qty_value, _qty_unit = _compound.quantity, _compound.unit
                 return {
                     "interpreted_event": _event_type,
                     "detected_intent": str(locked_goal or "UNKNOWN").upper(),
                     "interpreter_confidence": 0.98,
                     "extracted_entities": {
-                        "quantity": _qty_candidate["value"],
-                        "unit": _qty_candidate["unit"],
+                        "quantity": _qty_value,
+                        "unit": _qty_unit,
                     },
                     "raw_analysis": {
                         "path": "fast_path_confirmation_correction",
@@ -522,6 +730,26 @@ def _interpret_fast_path(
 
         if skip_numeric_shortcut and _unambiguous_single is None:
             candidates = []
+
+        # WAITING_FOR_PACKAGE_COUNT (audit 2026-09-01) : un nombre PORTANT UNE
+        # UNITÉ ne peut pas être un nombre de paquets ("30 litres", "le bidon
+        # de 5 L", "3 bidons de 10 L"). Le résoudre ici en `quantity` était la
+        # cause racine du cas reproduit "30 litres → 30 bidons = 27 000 FCFA",
+        # et empêchait tout changement d'avis de palier ("finalement le bidon
+        # de 5 L" devenait 5 paquets du palier 10 L). Ce chemin déterministe
+        # n'a donc rien de valide à produire : on laisse le LLM trancher — lui
+        # seul reçoit la liste des paliers (`tier_menu_context`) et sait
+        # distinguer une re-sélection d'un nombre de paquets. Quand aucun LLM
+        # n'est disponible, on garde l'extraction : le domaine
+        # (cart_service/pricing_tiers) refuse alors explicitement l'unité au
+        # lieu de la convertir en silence — jamais d'ajout au panier erroné.
+        if (
+            pack_count_tier is not None
+            and expected == "QUANTITY"
+            and llm_available
+            and any(c["unit"] for c in candidates)
+        ):
+            return None
 
         if candidates:
             if expected == "QUANTITY":
@@ -569,6 +797,16 @@ def _interpret_fast_path(
                 if slot == "quantity":
                     if mapped_unit:
                         entities["unit"] = mapped_unit
+                    elif pack_count_tier is not None:
+                        # WAITING_FOR_PACKAGE_COUNT : un nombre de paquets est
+                        # SANS DIMENSION. Le repli d'unité ci-dessous relit le
+                        # payload FUSIONNÉ, qui porte encore l'unité de la
+                        # demande initiale ("30 L de lait", donnée AVANT même
+                        # que les paliers soient affichés) — il fabriquait donc
+                        # `unit="LITRE"` sur un simple "3", exactement l'héritage
+                        # toxique que la séparation quantité/paquet doit
+                        # empêcher. Voir domain/pricing_tiers.py.
+                        pass
                     else:
                         payload = state.get("transaction_payload") or {}
                         fallback_unit = (
@@ -652,6 +890,18 @@ def _interpret_fast_path(
                 "raw_analysis": {"path": "fast_path_selection_index"},
             }
 
+    # Ex-Fast-path 1bis (sélection de palier en texte libre, regex
+    # ordinaux/quantité+unité) SUPPRIMÉ (2026-08-30, refonte "LLM pilote la
+    # sélection de palier") : cassait à chaque variation de formulation.
+    # Une réponse en texte libre pendant un menu de paliers actif retombe
+    # maintenant vers le LLM comme n'importe quel autre message — mais
+    # INFORMÉ cette fois : la liste des paliers actifs (avec leurs vrais
+    # `tier_id`) est injectée dans son prompt (`tier_menu_context`, voir
+    # plus bas dans ce fichier et `interpreter/prompts.py`), avec une règle
+    # explicite de ne jamais inventer un id. `cart.py` reste le seul juge :
+    # il valide que le `selected_value` renvoyé correspond bien à un
+    # `tier_id` de la liste actuellement affichée avant de l'utiliser.
+
     # Ex-Fast-path 2 (extraction numérique PRICE/QUANTITY) SUPPRIMÉ : c'était un
     # DOUBLON, moins capable, du bloc numérique EN TÊTE de cette fonction (qui
     # gère déjà compound quantité+prix, valeur unique non ambiguë, correction
@@ -664,6 +914,49 @@ def _interpret_fast_path(
     # SEUL chemin d'extraction numérique existe désormais (le bloc en tête).
 
     return None
+
+
+# =====================================================================
+# CONTRAT D'ACTION STRUCTURÉE — producteur / palier / nombre de paquets
+# (2026-09-01, voir domain/selection_actions.py pour le pourquoi complet)
+# =====================================================================
+
+_ACTION_EVENT: Dict[ActionType, str] = {
+    ActionType.SELECT_PRODUCER: "SELECTION",
+    ActionType.SELECT_PRICING_TIER: "SELECTION",
+    ActionType.SET_PACKAGE_COUNT: "ANSWER",
+    ActionType.SET_QUANTITY: "ANSWER",
+}
+
+
+def _selection_action_output(
+    raw: Dict[str, Any], locked_goal: Any, path: str
+) -> Dict[str, Any]:
+    """Traduit une action structurée BRUTE (pas encore validée — la
+    validation contre le contexte courant est le travail de `cart.py`, pas
+    de l'interpréteur, voir la séparation interprétation/exécution) en sortie
+    `input_interpreter` standard. Une seule fonction pour les DEUX sources
+    (FastPath déterministe et LLM) : elles produisent un contrat identique,
+    jamais deux formats concurrents."""
+    action: ActionType = raw["action"]
+    entities: Dict[str, Any] = {"agent_action": action.value}
+    if raw.get("producer_id"):
+        entities["action_producer_id"] = raw["producer_id"]
+    if raw.get("pricing_tier_id"):
+        entities["action_pricing_tier_id"] = raw["pricing_tier_id"]
+    if raw.get("package_count") is not None:
+        entities["action_package_count"] = raw["package_count"]
+    if raw.get("quantity") is not None:
+        entities["action_quantity"] = raw["quantity"]
+    if raw.get("unit"):
+        entities["action_unit"] = raw["unit"]
+    return {
+        "interpreted_event": _ACTION_EVENT[action],
+        "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+        "interpreter_confidence": 0.98,
+        "extracted_entities": entities,
+        "raw_analysis": {"path": path},
+    }
 
 
 # =====================================================================
@@ -707,7 +1000,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
     role_up = str(role or "PRODUCER").upper().strip()
     allowed = allowed_intents_for_role(role_up)
 
-    async def input_interpreter(
+    async def _input_interpreter_impl(
         state: MarketAgentState, mc_runtime: MarketRuntime
     ) -> Dict[str, Any]:
         text = state.get("normalized_text") or state.get("user_query") or ""
@@ -724,7 +1017,10 @@ def make_input_interpreter(role: str = "PRODUCER"):
                     if isinstance(content, str) and content.strip():
                         text = content.strip()
                         break
-        expected_input = state.get("expected_input")
+        # (2026-09-02, "no legacy shim") : source unique, dérivée de
+        # `pending_interaction` — un seul point de traduction pour toutes les
+        # comparaisons/le prompt LLM plus bas dans cette fonction.
+        expected_input = to_tunnel_category(get_pending_interaction(state))
         onboarding_active = bool(state.get("is_onboarding"))
         working = state.get("working_memory") or {}
         locked_goal = (
@@ -791,6 +1087,27 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 "raw_analysis": {"path": source, "role": role_up},
             }
 
+        # 0.5 CONTRAT D'ACTION STRUCTURÉE (2026-09-01) : reconstruit à chaque
+        # tour, JAMAIS depuis un canal générique périmé (voir
+        # domain/selection_actions.py, incident "LE PREMIER, C'EST À DIRE
+        # 5 L" — `expected_candidates` gardait la liste PRODUCTEUR alors que
+        # le menu de paliers était déjà affiché). Tant que ce tunnel est
+        # actif, c'est l'UNIQUE grille de lecture du message — avant même le
+        # FastPath générique et l'appel LLM classique ci-dessous.
+        selection_context = (
+            None if onboarding_active else build_selection_context(state)
+        )
+        if selection_context is not None and selection_context.expected_action:
+            fp_raw = fast_path_action(text, selection_context)
+            if fp_raw is not None:
+                logger.info(
+                    "[Interpreter SelectionAction] fast-path %s",
+                    fp_raw["action"].value,
+                )
+                return _selection_action_output(
+                    fp_raw, locked_goal, "fast_path_selection_action"
+                )
+
         # 1. Traitement prioritaire par Fast-path structurel rigide
         # Le LLM reste la source PRIORITAIRE pour extraire quantity+unit ET
         # price+price_unit ensemble (schéma JSON déjà instruit, voir
@@ -812,6 +1129,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 {**state, "forced_role": role_up},
                 text,
                 skip_numeric_shortcut=_skip_numeric_shortcut,
+                llm_available=llm is not None,
             )
         )
         if fast is not None:
@@ -880,6 +1198,19 @@ def make_input_interpreter(role: str = "PRODUCER"):
             and _cart_phase == "CART"
             and bool(state.get("active_cart"))
         )
+        # (2026-09-01, contrat d'action structurée) : `selection_context` a
+        # déjà été reconstruit en tête de fonction (étape 0.5, JAMAIS depuis
+        # un canal générique périmé — voir domain/selection_actions.py). On
+        # ne fait que le rendre en texte pour le prompt ici.
+        _selection_block = (
+            tier_menu_prompt_block(selection_context) if selection_context else ""
+        )
+        selection_action_block = (
+            f"- action_structuree_attendue :\n{_selection_block}\n"
+            if _selection_block
+            else ""
+        )
+
         user_prompt = INTERPRETER_USER_PROMPT.format(
             current_goal=state.get("current_goal") or "AUCUN",
             expected_input=_exp_input,
@@ -889,41 +1220,50 @@ def make_input_interpreter(role: str = "PRODUCER"):
             or "—",
             suspended_task=_suspended_task,
             cart_pending="OUI" if cart_pending else "non",
+            selection_action_block=selection_action_block,
             normalized_text=text,
         )
 
-        # 4. Appel LLM d'analyse sémantique et contextuelle
-        # Timeout de sécurité (Phase 4) : un appel Groq suspendu ici gelait le
-        # tour ENTIER jusqu'au timeout global orchestrateur (45s). TimeoutError
-        # est capturé par le except ci-dessous → fallback UNKNOWN propre.
-        _requested_model = getattr(
-            mc_runtime, "model_answer", "llama-3.3-70b-versatile"
+        # 4. Appel LLM d'analyse sémantique et contextuelle — via le LLM
+        # Gateway (2026-09-02) : plus de nom de modèle en dur ni de
+        # `asyncio.wait_for` local, le Gateway porte son propre budget par
+        # profil (settings.LLM_REASONING_BUDGET_SECONDS) et gère lui-même le
+        # repli inter-modèle/inter-provider + le disjoncteur partagé (Redis)
+        # — voir `graphs/agents/market_coach/llm_gateway/`. Le comportement
+        # visible (timeout → UNKNOWN dégradé) est inchangé, juste plus résilient.
+        from agriconnect.graphs.agents.market_coach.llm_gateway import (
+            resolve_gateway,
+            resolve_profile,
         )
+
+        _gateway = resolve_gateway(mc_runtime)
+        _profile = resolve_profile(mc_runtime)
+        _requested_model = _gateway.primary_model_name(_profile)
         try:
-            completion = await asyncio.wait_for(
-                asyncio.to_thread(
-                    lambda: llm.chat.completions.create(
-                        model=_requested_model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        response_format={"type": "json_object"},
-                        temperature=0.0,
-                    )
-                ),
-                timeout=15.0,
+            from agriconnect.core.telemetry import get_trace_id
+
+            completion = await _gateway.complete(
+                profile=_profile,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                request_id=get_trace_id(),
+                agent_node="input_interpreter",
             )
             parsed = json.loads(completion.choices[0].message.content or "{}")
-            # Repli transparent (get_llm.py, GROQ_RATE_LIMIT_FALLBACK) : sur un
-            # 429 le wrapper HTTP réessaie avec un modèle plus faible SANS que
-            # l'appelant ici ne le sache — `completion.model` (champ standard de
-            # la réponse) est le SEUL moyen de le détecter après coup. Utilisé
-            # plus bas pour ne durcir le garde-fou anti-hallucination
-            # (`nodes/memory.py::_EXPECTED_INPUT_ALLOWED_FIELDS`) QUE quand ce
-            # modèle dégradé a effectivement répondu — le modèle principal, lui,
-            # suit déjà l'instruction du prompt d'extraire plusieurs champs à la
-            # fois sans halluciner (voir RÈGLE 5 du prompt système).
+            # Repli transparent (Gateway : fallback inter-candidat, OU
+            # get_llm.py::GROQ_RATE_LIMIT_FALLBACK en interne au candidat
+            # choisi) : `completion.model` (champ standard de la réponse) est
+            # le SEUL moyen de détecter après coup qu'un modèle différent du
+            # primaire a répondu. Utilisé plus bas pour ne durcir le
+            # garde-fou anti-hallucination (`nodes/memory.py::
+            # _EXPECTED_INPUT_ALLOWED_FIELDS`) QUE quand ce modèle dégradé a
+            # effectivement répondu — le modèle principal, lui, suit déjà
+            # l'instruction du prompt d'extraire plusieurs champs à la fois
+            # sans halluciner (voir RÈGLE 5 du prompt système).
             _actual_model = getattr(completion, "model", None)
             # Inconnu (attribut absent) : on ne peut pas prouver que le modèle
             # principal a répondu — on reste prudent (comme avant ce fix).
@@ -931,18 +1271,19 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 _actual_model != _requested_model
             )
         except Exception as exc:
-            # Dégradation attendue (timeout, 429/5xx Groq) : WARNING, pas de
-            # traceback — bruit de log inutile pour un cas déjà géré par le
-            # fallback UNKNOWN ci-dessous. Réserver ERROR+exc_info aux échecs
-            # non anticipés (bug de parsing JSON, etc.).
-            is_expected = isinstance(exc, (asyncio.TimeoutError, TimeoutError))
-            if not is_expected:
-                try:
-                    from groq import APIStatusError, APITimeoutError
+            # Dégradation attendue (Gateway épuisé : tous les candidats du
+            # profil ont échoué/étaient indisponibles dans le budget) :
+            # WARNING, pas de traceback — bruit de log inutile pour un cas
+            # déjà géré par le fallback UNKNOWN ci-dessous. Réserver
+            # ERROR+exc_info aux échecs non anticipés (bug de parsing JSON,
+            # exception hors du chemin LLM, etc.).
+            from agriconnect.graphs.agents.market_coach.llm_gateway import (
+                LLMGatewayExhausted,
+            )
 
-                    is_expected = isinstance(exc, (APIStatusError, APITimeoutError))
-                except ImportError:
-                    pass
+            is_expected = isinstance(
+                exc, (LLMGatewayExhausted, asyncio.TimeoutError, TimeoutError)
+            )
             if is_expected:
                 logger.warning(
                     "Interpreter LLM indisponible (%s) — forcing UNKNOWN", exc
@@ -1183,7 +1524,37 @@ def make_input_interpreter(role: str = "PRODUCER"):
 
         # FALLBACK numérique : si le LLM a manqué la quantité, la regex la comble
         # (jamais l'inverse — on n'écrase pas une valeur que le LLM a fournie).
-        _adjacent = _fallback_quantity_unit_from_text(text) or {}
+        #
+        # (2026-09-01, contrat d'action structurée) : ce repli est SUSPENDU
+        # dès que ce tour produit un `agent_action` (voir
+        # domain/selection_actions.py + règle 4bis du prompt système). Un
+        # nombre+unité dans le MÊME message qu'une action structurée ("le
+        # premier, c'est à dire 5 L") décrit l'OPTION choisie, jamais une
+        # quantité d'achat séparée — c'est exactement l'incident réel
+        # (2026-09-01) qui a motivé ce contrat : `selection_index=1` (→
+        # palier 5 L, correct) ET `quantity=5.0` (le même "5 L" recapté comme
+        # quantité) cohabitaient dans le même tour, et le code en aval
+        # faisait ensuite confiance à ce 5.0 comme un nombre de paquets déjà
+        # répondu. Couvre les 4 types d'action, pas seulement le palier —
+        # remplace l'ancien garde `_tier_pick_this_turn`, spécifique au seul
+        # `selected_value`.
+        # `selected_value`/`selection_index` : filet legacy — un LLM qui, en
+        # dépit du prompt, répond encore dans l'ancien format pendant que le
+        # tunnel producteur/palier est actif (`selection_context.expected_action`)
+        # doit bénéficier de la MÊME suspension, sinon le "10 L" de "je veux
+        # celui de 10 L" repeuple `quantity`/`unit` en marge du contrat.
+        _legacy_pick_this_turn = bool(
+            remapped_entities.get("selected_value")
+            or remapped_entities.get("selection_index")
+        ) and bool(selection_context and selection_context.expected_action)
+        _structured_action_this_turn = (
+            bool(remapped_entities.get("agent_action")) or _legacy_pick_this_turn
+        )
+        _adjacent = (
+            {}
+            if _structured_action_this_turn
+            else (_fallback_quantity_unit_from_text(text) or {})
+        )
         fallback_applied = False
         for key, value in _adjacent.items():
             if key not in remapped_entities and value not in (None, "", [], {}):
@@ -1238,6 +1609,46 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 )
                 remapped_entities.pop("unit", None)
 
+        # ── QUANTITÉ COMPOSÉE (incident réel 2026-09-03) : « 2 tonnes et
+        # 250 kg » — le LLM a renvoyé quantity=2/unit=TONNE, silencieusement
+        # tronqué le "et 250 kg". `parse_compound_quantity` (services/domain/
+        # quantity_unit.py) existe précisément pour ce motif — somme en KG
+        # quand ≥2 paires quantité+unité toutes convertibles (KG/TONNE) sont
+        # présentes dans le texte — mais n'était câblée à AUCUN site
+        # d'extraction réel jusqu'ici (code mort, seulement testé en
+        # isolation). Même principe que la garde anti-ancrage d'unité
+        # ci-dessus : le texte de l'utilisateur prime sur une extraction LLM
+        # possiblement partielle — pas seulement pour combler un trou, mais
+        # pour CORRIGER une valeur déjà posée quand le texte porte
+        # explicitement plusieurs paires. Neutre si le texte ne contient
+        # qu'une seule paire ou des unités non convertibles (bascule vers
+        # `parse_quantity_unit_from_text`, résultat alors identique au
+        # simple, donc aucune correction n'est appliquée) ; suspendu comme
+        # le reste pendant une action structurée (menu palier/sélection).
+        if not _structured_action_this_turn:
+            _compound = parse_compound_quantity(text)
+            if (
+                _compound.unit == "KG"
+                and _compound.quantity is not None
+                and (
+                    remapped_entities.get("quantity") != _compound.quantity
+                    or remapped_entities.get("unit") != _compound.unit
+                )
+            ):
+                _single = parse_quantity_unit_from_text(text)
+                if _compound.quantity != _single.quantity:
+                    logger.warning(
+                        "[Interpreter] Quantité composée détectée dans le texte "
+                        "('%s' → %.1f KG) — retenue contre LLM=%r/%r (anti-troncature).",
+                        text,
+                        _compound.quantity,
+                        remapped_entities.get("quantity"),
+                        remapped_entities.get("unit"),
+                    )
+                    remapped_entities["quantity"] = _compound.quantity
+                    remapped_entities["unit"] = _compound.unit
+                    fallback_applied = True
+
         if "product" in remapped_entities:
             validated_product = await _validate_and_sanitize_product(
                 remapped_entities.get("product"), mc_runtime
@@ -1260,6 +1671,32 @@ def make_input_interpreter(role: str = "PRODUCER"):
             if raw_intent == "UNKNOWN" and locked_goal:
                 raw_intent = str(locked_goal).upper()
 
+        # Repli symétrique, INCONDITIONNEL cette fois (pas seulement en repli
+        # modèle dégradé ci-dessus) : incident réel (2026-08-30) — pour un
+        # message multi-tarifs ("25 L à 500 fcfa et 40 L à 900 fcfa") en
+        # réponse à PRICE, le LLM (modèle NON dégradé) extrayait correctement
+        # `pricing_tiers` MAIS classait quand même l'événement en UNKNOWN/
+        # OUT_OF_SCOPE — probablement parce qu'aucune valeur `price` scalaire
+        # unique ne "répond" littéralement à la question posée. Sans repli,
+        # `memory_update` ne fusionne rien (gardé par `interpreter_event in
+        # {ANSWER, UPDATE}`), et l'agent boucle indéfiniment sur la même
+        # question de prix malgré une extraction pourtant réussie. Un
+        # `pricing_tiers` non-vide EST une réponse exploitable au slot
+        # PRICE/QUANTITY/CONFIRMATION, quel que soit le jugement du LLM sur
+        # l'événement.
+        if raw_event in {"UNKNOWN", "OUT_OF_SCOPE"} and expected_input in {
+            "QUANTITY",
+            "PRICE",
+            "CONFIRMATION",
+        }:
+            _tiers = remapped_entities.get("pricing_tiers")
+            if isinstance(_tiers, list) and any(
+                isinstance(t, dict) for t in _tiers
+            ):
+                raw_event = "UPDATE" if expected_input == "CONFIRMATION" else "ANSWER"
+                if raw_intent == "UNKNOWN" and locked_goal:
+                    raw_intent = str(locked_goal).upper()
+
         return {
             "interpreted_event": raw_event,
             "detected_intent": raw_intent,
@@ -1273,6 +1710,19 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 "degraded_model": _degraded_model_used,
             },
         }
+
+    async def input_interpreter(
+        state: MarketAgentState, mc_runtime: MarketRuntime
+    ) -> Dict[str, Any]:
+        """Point de passage UNIQUE (mandat §9-13) : tout ce que produit
+        `_input_interpreter_impl` — fast-path déterministe, bypass
+        interactif, onboarding, repli dégradé, ou appel LLM — est converti
+        en `InterpreterResult` avant de devenir un patch d'état. C'est ce
+        qui rend un `UNKNOWN` sans `UnknownReason` structurellement
+        impossible, plutôt que dépendant de la discipline de chaque `return`
+        interne (~15 points de sortie distincts dans l'implémentation)."""
+        raw = await _input_interpreter_impl(state, mc_runtime)
+        return InterpreterResult.from_legacy_dict(raw).to_state_patch()
 
     return input_interpreter
 
@@ -1290,11 +1740,17 @@ def make_route_after_validator(role: str = "PRODUCER"):
         """Détermine le prochain nœud du graphe en fonction de l'état de l'IHM."""
         interpreted_event = state.get("interpreted_event")
         missing_fields = state.get("missing_fields") or []
-        expected_input = str(state.get("expected_input") or "NONE").upper().strip()
+        # (2026-09-02, "no legacy shim") : source unique, dérivée de
+        # `pending_interaction`.
+        expected_input = to_tunnel_category(get_pending_interaction(state))
         strategy = str(state.get("response_strategy") or "").upper().strip()
 
+        # (2026-09-02, "no legacy shim") : source UNIQUE — plus de lecture
+        # directe de `waiting_for_confirmation`. `status=="WAITING_CONFIRMATION"`
+        # reste un signal légitime et DISTINCT (statut machine-à-états du
+        # tour, pas "qu'attend-on de l'utilisateur") — conservé tel quel.
         if (
-            state.get("waiting_for_confirmation")
+            get_pending_interaction(state).kind == InteractionKind.CONFIRM_ACTION
             or state.get("status") == "WAITING_CONFIRMATION"
         ):
             logger.info(

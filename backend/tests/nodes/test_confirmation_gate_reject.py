@@ -1,17 +1,29 @@
 """`nodes/confirmation_gate.py` — décision d'approbation avant écriture DB.
 
-Priorité à la régression production (2026-08) : un REJECT ("non") pendant la
-confirmation d'un appel d'offres (PROCUREMENT_CREATE_REQUEST) effaçait tout
-le brouillon (produit/quantité/prix), empêchant toute correction — le tour
-suivant ("plafond 400") arrivait sans contexte et tombait sur le message
-générique "je n'ai pas bien saisi". Le fix est scopé : SEUL le REJECT change
-de comportement pour ce goal ; CONFIRM (et donc l'écriture réelle via
-l'exécuteur générique) est totalement inchangé.
+Historique (2026-08) : un REJECT ("non") pendant la confirmation d'un appel
+d'offres (PROCUREMENT_CREATE_REQUEST) effaçait tout le brouillon
+(produit/quantité/prix), empêchant toute correction. Corrigé une 1re fois de
+façon scopée (préserver `transaction_payload` pour ce seul goal), puis
+remplacé de fond en comble (2026-09-03, refonte transactionnelle) : ce goal
+délègue désormais entièrement à un `ProcurementDraft` canonique et versionné
+(domain/procurement_draft.py) — voir `TestProcurementRejectPreservesTheDraft`
+et `TestConfirmPathAuthorizesExecution` ci-dessous pour le comportement
+actuel. Idem pour `SALES_PUBLISH_PRODUCT` depuis 2026-09-04 (migration
+SALES, `domain/sales_publish_draft.py`). Les goals PAS ENCORE migrés
+(`SALES_UPDATE_PRODUCT`, panier, stock...) restent inchangés, couverts par
+`TestGenericRejectStillFullyResets`.
 """
 from __future__ import annotations
 
 import pytest
 
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    get_pending_interaction,
+    to_tunnel_category,
+)
+from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+    ProcurementDraft,
+)
 from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import confirmation_gate
 from tests.conftest import make_state, run
 
@@ -91,7 +103,7 @@ class TestGenericRejectStillFullyResets:
         régresser silencieusement les nombreux autres flows qui dépendent de
         ce reset total sur REJECT (vente, panier, stock...)."""
         result = gate(
-            current_goal="SALES_PUBLISH_PRODUCT",
+            current_goal="SALES_UPDATE_PRODUCT",
             transaction_payload={"product": "mais", "price": 250, "quantity": 100},
             expected_input="CONFIRMATION",
             waiting_for_confirmation=True,
@@ -115,85 +127,146 @@ class TestGenericRejectStillFullyResets:
 
 
 # =====================================================================
-# REJECT — PROCUREMENT_CREATE_REQUEST (brouillon préservé)
+# REJECT — PROCUREMENT_CREATE_REQUEST (2026-09-03, refonte transactionnelle)
+#
+# `confirmation_gate` ne gère plus ce goal via le mécanisme générique
+# confirmation_summary/transaction_payload — il DÉLÈGUE entièrement à
+# `domain/procurement_draft.py` (voir `_DRAFT_BASED_CONFIRMATION_GOALS` dans
+# nodes/confirmation_gate.py). Le brouillon est maintenant un
+# `ProcurementDraft` canonique, versionné : un REJECT pendant la
+# confirmation ("non") ne touche JAMAIS aux champs du draft — seule la
+# cible de confirmation (`PendingInteraction.target`) tombe, invitant une
+# correction. Remplace les anciens tests qui vérifiaient la préservation de
+# `transaction_payload` par le mécanisme générique (root cause exacte de
+# l'incident `quantity_display` figé : deux représentations indépendantes
+# du même fait métier — voir domain/procurement_draft.py, docstring).
 # =====================================================================
 
 class TestProcurementRejectPreservesTheDraft:
-    def test_reject_does_not_clear_current_goal(self):
-        result = gate(
-            current_goal="PROCUREMENT_CREATE_REQUEST",
-            transaction_payload={"product": "carottes", "price": 300, "quantity": 500},
-            expected_input="CONFIRMATION",
-            waiting_for_confirmation=True,
-            interpreted_event="REJECT",
+    def _draft_confirmation_state(self, **overrides):
+        draft = ProcurementDraft.new(
+            draft_id="d1", product="carottes", quantity=500, unit="KG", price=300
         )
+        state = make_state(
+            current_goal="PROCUREMENT_CREATE_REQUEST",
+            procurement_draft=draft.to_dict(),
+            interpreted_event="REJECT",
+            **overrides,
+        )
+        state["pending_interaction"] = {
+            "kind": "CONFIRM_ACTION",
+            "target": {"draft_id": draft.draft_id, "draft_version": draft.version},
+        }
+        return state, draft
+
+    def test_reject_does_not_clear_current_goal(self):
+        state, _ = self._draft_confirmation_state()
+        result = run(confirmation_gate(state, None))
         assert "current_goal" not in result, "ne doit pas être touché — préservé via merge_dict"
 
-    def test_reject_does_not_reset_transaction_payload(self):
-        result = gate(
-            current_goal="PROCUREMENT_CREATE_REQUEST",
-            transaction_payload={"product": "carottes", "price": 300, "quantity": 500},
-            expected_input="CONFIRMATION",
-            waiting_for_confirmation=True,
-            interpreted_event="REJECT",
-        )
-        assert "transaction_payload" not in result
+    def test_reject_preserves_every_draft_field_unchanged(self):
+        state, draft = self._draft_confirmation_state()
+        result = run(confirmation_gate(state, None))
+        preserved = ProcurementDraft.from_dict(result["procurement_draft"])
+        assert preserved.product == draft.product
+        assert preserved.quantity == draft.quantity
+        assert preserved.price == draft.price
+        assert preserved.version == draft.version, "un REJECT ne bump jamais la version"
 
-    def test_reject_clears_only_confirmation_bookkeeping(self):
-        result = gate(
-            current_goal="PROCUREMENT_CREATE_REQUEST",
-            transaction_payload={"product": "carottes", "price": 300, "quantity": 500},
-            expected_input="CONFIRMATION",
-            waiting_for_confirmation=True,
-            confirmation_summary="ancien récap",
-            interpreted_event="REJECT",
-        )
-        assert result["waiting_for_confirmation"] is False
-        assert result["confirmation_summary"] is None
-        assert result["expected_input"] == "NONE"
+    def test_reject_clears_only_the_confirmation_target(self):
+        state, _ = self._draft_confirmation_state()
+        result = run(confirmation_gate(state, None))
+        assert to_tunnel_category(get_pending_interaction(result)) == "NONE"
         assert result["status"] == "PLANNING"
-        assert result["is_certified"] is False
-        assert result["execution_authorized"] is False
 
     def test_reject_invites_a_correction_in_the_message(self):
-        result = gate(
-            current_goal="PROCUREMENT_CREATE_REQUEST",
-            transaction_payload={"product": "carottes", "price": 300, "quantity": 500},
-            expected_input="CONFIRMATION",
-            waiting_for_confirmation=True,
-            interpreted_event="REJECT",
-        )
+        state, _ = self._draft_confirmation_state()
+        result = run(confirmation_gate(state, None))
         assert "modifier" in result["final_response"]
         assert "annuler" in result["final_response"]
 
 
 # =====================================================================
-# CONFIRM — chemin inchangé pour TOUS les goals, y compris procurement
+# CONFIRM — draft canonique, y compris la création de la 1re version
 # =====================================================================
 
-class TestConfirmPathIsUntouched:
-    def test_procurement_confirm_still_authorizes_execution_normally(self):
-        """Le fix ne touche QUE REJECT — CONFIRM (et donc l'écriture réelle
-        via l'exécuteur générique, ex. create_auction) doit rester identique."""
-        result = gate(
+class TestConfirmPathAuthorizesExecution:
+    def test_procurement_confirm_authorizes_execution(self, monkeypatch):
+        # `claim_once` réel tape Redis (SET-NX) — un draft_id/version déjà
+        # réclamé par un run de test antérieur (ou un autre test de ce
+        # fichier) y apparaîtrait comme déjà confirmé. Forcé à toujours
+        # gagner ici : ce test vérifie la TRANSITION D'ÉTAT du nœud, pas le
+        # claim lui-même (voir tests/architecture/
+        # test_procurement_draft_transactional_contract.py pour
+        # l'idempotence/la concurrence, qui contrôlent `claim` explicitement).
+        import agriconnect.graphs.agents.market_coach.domain.procurement_draft as pd_mod
+
+        monkeypatch.setattr(pd_mod, "claim_once", lambda key: True)
+        draft = ProcurementDraft.new(
+            draft_id="d1", product="carottes", quantity=500, unit="KG", price=300
+        )
+        state = make_state(
             current_goal="PROCUREMENT_CREATE_REQUEST",
-            transaction_payload={"product": "carottes", "price": 300, "quantity": 500},
-            expected_input="CONFIRMATION",
-            waiting_for_confirmation=True,
+            procurement_draft=draft.to_dict(),
             interpreted_event="CONFIRM",
         )
+        state["pending_interaction"] = {
+            "kind": "CONFIRM_ACTION",
+            "target": {"draft_id": draft.draft_id, "draft_version": draft.version},
+        }
+        result = run(confirmation_gate(state, None))
         assert result["is_certified"] is True
         assert result["execution_authorized"] is True
         assert result["status"] == "EXECUTING"
+        assert result["transaction_payload"]["product"] == "carottes"
 
-    def test_first_pass_raises_a_normal_confirmation_summary(self):
+    def test_bootstrap_creates_draft_v1_from_the_completed_collection_payload(self):
+        """1re fois que ce goal atteint ce nœud, `transaction_payload`
+        complet, aucun `procurement_draft` encore posé : la v1 canonique est
+        créée ICI — remplace l'ancien `_build_confirmation_summary(goal,
+        payload)` générique pour ce goal précis."""
         result = gate(
             current_goal="PROCUREMENT_CREATE_REQUEST",
             transaction_payload={"product": "carottes", "price": 300, "quantity": 500, "unit": "TONNE"},
         )
-        assert result["waiting_for_confirmation"] is True
+        assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
         assert result["response_strategy"] == "CONFIRMATION"
-        assert "carottes" in result["confirmation_summary"]
+        assert "carottes" in result["final_response"]
+        draft = ProcurementDraft.from_dict(result["procurement_draft"])
+        assert draft.version == 1
+        assert draft.product == "carottes"
+
+    def test_bootstrap_is_a_no_op_while_fields_are_still_missing(self):
+        """Tant que la collecte n'est pas complète, ce nœud ne crée aucun
+        draft — le mécanisme générique de collecte (validator/
+        ASK_MISSING_FIELD) gère ce tour exactement comme avant. Seule
+        exception (2026-09-03, chaos I1/I2) : `execution_authorized`/
+        `is_certified` sont explicitement forcés à False dans le patch —
+        défense contre un état amont hostile qui les aurait forgés à True
+        pendant que la collecte est encore en cours (voir
+        `tests/chaos/test_state_machine_invariants.py::
+        test_no_write_executes_without_explicit_confirm_draft_based_goal`)."""
+        result = gate(
+            current_goal="PROCUREMENT_CREATE_REQUEST",
+            transaction_payload={"product": "carottes"},  # price/quantity/unit manquants
+        )
+        assert result == {"execution_authorized": False, "is_certified": False}
+
+    def test_the_rendered_summary_can_never_be_stale_by_construction(self):
+        """Remplace l'ancien test de régression 'le prompt LLM utilise le
+        payload frais, pas le résumé stocké périmé' : ce bug de classe
+        entière est désormais IMPOSSIBLE pour ce goal — il n'existe plus
+        de `confirmation_summary` stocké séparément à désynchroniser,
+        `render_summary()` est TOUJOURS recalculé depuis le draft courant
+        (mandat §8 : « confirmation_summary = render(draft) »)."""
+        draft_v1 = ProcurementDraft.new(
+            draft_id="d1", product="champignons", quantity=35, unit="UNITE", price=950
+        )
+        draft_v2 = draft_v1.with_updates(quantity=40)
+        assert draft_v1.render_summary() != draft_v2.render_summary()
+        assert "35" in draft_v1.render_summary()
+        assert "40" in draft_v2.render_summary()
+        assert "35" not in draft_v2.render_summary()
 
 
 # =====================================================================
@@ -261,7 +334,7 @@ class TestPostRejectRoutingRoundTrip:
 class TestDeviationDuringConfirmationGetsAnAdaptiveReply:
     def test_a_question_during_confirmation_gets_an_llm_generated_note(self):
         state = make_state(
-            current_goal="SALES_PUBLISH_PRODUCT",
+            current_goal="SALES_UPDATE_PRODUCT",
             transaction_payload={"product": "mais", "price": 250, "quantity": 100},
             expected_input="CONFIRMATION",
             waiting_for_confirmation=True,
@@ -284,7 +357,7 @@ class TestDeviationDuringConfirmationGetsAnAdaptiveReply:
         tout le reste de ce fichier), on retombe sur le comportement
         historique — pas de note, juste le récap réaffiché."""
         state = make_state(
-            current_goal="SALES_PUBLISH_PRODUCT",
+            current_goal="SALES_UPDATE_PRODUCT",
             transaction_payload={"product": "mais", "price": 250, "quantity": 100},
             expected_input="CONFIRMATION",
             waiting_for_confirmation=True,
@@ -304,9 +377,24 @@ class TestDeviationDuringConfirmationGetsAnAdaptiveReply:
         PRÉCÉDENT, donc encore "35 KG"), pas du payload à jour. Le LLM
         répondait alors "pouvez-vous reformuler ?" juste avant d'afficher un
         récap DÉJÀ corrigé. Voir
-        [[precommande-architecture-consolidation-2026-08]] Round 8."""
+        [[precommande-architecture-consolidation-2026-08]] Round 8.
+
+        (2026-09-03) : ce goal était `PROCUREMENT_CREATE_REQUEST` à
+        l'origine — migré vers `SALES_PUBLISH_PRODUCT` (même mécanisme
+        générique confirmation_summary/transaction_payload) car
+        PROCUREMENT_CREATE_REQUEST délègue désormais à un
+        `ProcurementDraft` canonique où cette classe de bug est devenue
+        structurellement impossible.
+
+        (2026-09-04, migration SALES) : re-migré vers `SALES_UPDATE_PRODUCT`
+        — `SALES_PUBLISH_PRODUCT` délègue À SON TOUR désormais à un
+        `SalesPublishDraft` canonique (même garantie structurelle que
+        PROCUREMENT, voir `test_sales_publish_draft_anti_regression.py`) —
+        ce test-ci continue de verrouiller la garantie pour le mécanisme
+        générique, toujours utilisé par les goals pas encore migrés
+        (`SALES_UPDATE_PRODUCT`, `DECLARE_CROP_CYCLE`, panier, stock...)."""
         state = make_state(
-            current_goal="PROCUREMENT_CREATE_REQUEST",
+            current_goal="SALES_UPDATE_PRODUCT",
             transaction_payload={"product": "champignons", "quantity": 35, "unit": "UNITE", "price": 950},
             expected_input="CONFIRMATION",
             waiting_for_confirmation=True,
@@ -326,15 +414,52 @@ class TestDeviationDuringConfirmationGetsAnAdaptiveReply:
     def test_render_confirmation_places_the_note_before_the_recap(self):
         from agriconnect.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
         from agriconnect.graphs.agents.market_coach.nodes.rendering.common import RenderContext
+        from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+            InteractionKind,
+            set_pending_interaction,
+        )
 
         state = {
             "confirmation_summary": "Vente de mais — 100 kg à 250 FCFA/kg",
+            "confirmation_summary_goal": "SALES_UPDATE_PRODUCT",
+            "confirmation_summary_payload": {},
             "confirmation_deviation_note": "Je comprends ta question, laisse-moi t'expliquer.",
+            # (2026-09-02) Signal canonique requis par render_confirmation
+            # depuis la refonte G-1 — voir core/pending_interaction.py.
+            "pending_interaction": set_pending_interaction(
+                InteractionKind.CONFIRM_ACTION,
+                goal="SALES_UPDATE_PRODUCT",
+                context_ref="confirmation",
+            )["pending_interaction"],
         }
         ctx = RenderContext(
             state=state, mc_runtime=None, strategy="CONFIRMATION", status="WAITING_CONFIRMATION",
-            goal="SALES_PUBLISH_PRODUCT", payload={}, salutation="",
+            goal="SALES_UPDATE_PRODUCT", payload={}, salutation="",
         )
         result = run(render_confirmation(ctx))
         text = result["final_response"]
         assert text.index("Je comprends") < text.index("Voici le récapitulatif")
+        assert "Vente de mais" in text
+
+
+# =====================================================================
+# Incident réel (2026-08-27) : "je commande des chèvres, la confirmation
+# parle de champignons" — `confirmation_summary` doit toujours être posé
+# avec le GOAL et le PAYLOAD ayant servi à le construire, pour que
+# `nodes/rendering/confirm.py::render_confirmation` puisse détecter un
+# résumé périmé (voir test_rendering_ask_and_confirm.py pour le rendu).
+# =====================================================================
+
+class TestConfirmationGateStampsSummaryProvenance:
+    def test_a_fresh_confirmation_stamps_the_goal_and_payload_alongside_the_summary(self):
+        payload = {"product": "chevres", "quantity": 21, "unit": "UNITE", "price": 55000}
+        result = gate(
+            current_goal="BUYER_PREORDER_INIT",
+            transaction_payload=payload,
+            expected_input="CONFIRMATION",
+            waiting_for_confirmation=False,
+            interpreted_event="NEW_TASK",
+        )
+        assert result["confirmation_summary_goal"] == "BUYER_PREORDER_INIT"
+        assert result["confirmation_summary_payload"] == payload
+        assert "confirmation_summary" in result and result["confirmation_summary"]

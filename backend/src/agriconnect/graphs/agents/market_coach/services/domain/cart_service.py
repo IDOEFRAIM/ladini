@@ -6,6 +6,10 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    InteractionKind,
+    set_pending_interaction,
+)
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
@@ -25,8 +29,23 @@ from agriconnect.graphs.agents.market_coach.utils import (
     is_success_response,
     unwrap_tool_envelope,
 )
+from agriconnect.graphs.agents.market_coach.services.text_pagination import (
+    paginate_item_blocks,
+)
 from agriconnect.services.search_results_cache import (
     store_results as _store_search_photo_results,
+)
+
+from agriconnect.graphs.agents.market_coach.domain.order_policy import (
+    validate_minimum_order_quantity,
+)
+from agriconnect.graphs.agents.market_coach.domain.pricing_tiers import (
+    PACK_UNIT_CONTENT,
+    PACK_UNIT_FOREIGN,
+    PricingTierError,
+    classify_pack_count_unit,
+    compute_line,
+    resolve_tier,
 )
 
 from .buyer_common import SUPPORT_FOOTER, with_support_footer
@@ -127,7 +146,11 @@ class CartDomainService:
         seen_ids: set[str] = set()
         for item in results:
             pid = str(item.get("id") or "")
-            producer_id = item.get("producer_id") or item.get("vendor_id") or ""
+            # Cast str obligatoire : asyncpg renvoie souvent un uuid.UUID brut
+            # pour les colonnes UUID — non casté ici, cette valeur finissait
+            # telle quelle dans MenuOption.value (typé Optional[str]), un
+            # contrat que le dataclass ne fait pas respecter à l'exécution.
+            producer_id = str(item.get("producer_id") or item.get("vendor_id") or "")
             key = f"{pid}:{producer_id}"
             if key in seen_ids:
                 continue
@@ -167,6 +190,14 @@ class CartDomainService:
                     # Voir services/search_results_cache.py — permet à l'acheteur
                     # de demander "photos <numéro>" pour un producteur du menu.
                     "images": item.get("images") or [],
+                    "pricing_tiers": item.get("pricing_tiers"),
+                    # (2026-09-02) Seuil minimum de commande — politique
+                    # PLATEFORME portée par le type de produit (SubCategory),
+                    # jamais par ce vendeur/produit précis. Voir
+                    # domain/order_policy.py. Simple passage de contexte :
+                    # `add_to_cart_with_ref` est le SEUL endroit qui décide.
+                    "minimum_order_quantity": item.get("minimum_order_quantity"),
+                    "minimum_order_unit": item.get("minimum_order_unit"),
                 }
             )
         return vendors, len(vendors) > 1
@@ -180,7 +211,8 @@ class CartDomainService:
         post_hint: Optional[str] = None,
         phone: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], MenuRequest]:
-        lines = [f"🔍 *Producteurs disponibles pour « {product_name} » :*\n"]
+        header = f"🔍 *Producteurs disponibles pour « {product_name} » :*"
+        item_blocks: List[str] = []
         options: List[MenuOption] = []
         photo_entries: Dict[str, Dict[str, Any]] = {}
 
@@ -202,7 +234,7 @@ class CartDomainService:
                 f"{v['vendor_name']}{zone_info} — {v['price']} FCFA/{v['unit']}"
                 f"{qty_info}{source_tag}"
             )
-            lines.append(f"*{i}.* {label}")
+            item_blocks.append(f"*{i}.* {label}")
             options.append(
                 MenuOption(
                     index=str(i), label=label, value=v.get("producer_id") or str(i)
@@ -214,7 +246,7 @@ class CartDomainService:
                 "images": v.get("images") or [],
             }
 
-        lines.append(render_selection_prompt(noun="producteur"))
+        item_blocks.append(render_selection_prompt(noun="producteur"))
         # Même mécanisme que le catalogue de recherche brut
         # (nodes/rendering/success.py) — voir services/search_results_cache.py.
         # Numérotation PARTAGÉE avec la sélection de producteur ci-dessus
@@ -223,12 +255,15 @@ class CartDomainService:
         # jamais un chiffre seul.
         if phone and any(entry["images"] for entry in photo_entries.values()):
             _store_search_photo_results(str(phone), photo_entries)
-            lines.append(
+            item_blocks.append(
                 "📸 Tapez *photos <numéro>* pour voir des photos d'un producteur."
             )
         if post_hint:
-            lines.append(post_hint.strip())
-        menu_text = "\n".join(lines)
+            item_blocks.append(post_hint.strip())
+        # Pagination (incident 2026-08-27) : une recherche produit avec
+        # beaucoup de producteurs disponibles produisait un texte non borné
+        # — voir services/text_pagination.py.
+        menu_text = paginate_item_blocks(header, item_blocks)
 
         menu = MenuRequest(
             title=f"Choix producteur — {product_name}",
@@ -248,11 +283,24 @@ class CartDomainService:
 
         state_patch: Dict[str, Any] = {
             "status": "WAITING_INPUT",
-            "expected_input": "SELECTION",
+            **set_pending_interaction(InteractionKind.SELECTION_MENU),
             "response_strategy": "SELECTION_MENU",
             "final_response": menu_text,
             "ag_ui_component": None,
             "vendor_selection_context": vendor_context,
+            # Incident réel (2026-08-31) : ce menu producteur seed toujours
+            # un `vendor_selection_context` FRAIS pour LE produit recherché
+            # (ex: "poulets"), mais ne touchait jamais `tier_selection_context`
+            # — un palier laissé par un achat PRÉCÉDENT, totalement différent
+            # et déjà validé (ex: "lait", 5L/10L bidon), survivait alors dans
+            # ce canal `replace_value` (rien ne l'efface tant que personne ne
+            # le réécrit explicitement) et se faisait réutiliser au tour
+            # suivant dès qu'un vendeur était choisi — affichant un menu de
+            # paliers avec les DONNÉES DE L'ANCIEN PRODUIT sous le nom du
+            # nouveau. Toute recherche fraîche invalide structurellement tout
+            # palier en attente d'un produit différent : jamais de report
+            # implicite entre deux recherches.
+            "tier_selection_context": None,
             "pending_menu": menu,
         }
         return state_patch, menu
@@ -322,11 +370,34 @@ class CartDomainService:
             elif line.get("notification_status") == "RESPONDED":
                 notification_badge = " ✅"
 
-            lines.append(
-                f"\n*{i}. {line.get('name')}* ({source_label}){vendor_info}{notification_badge}\n"
-                f"   {_fmt_num(line.get('quantity'))} {line.get('unit')} × {_fmt_num(line.get('price'))} = "
-                f"*{_fmt_num(line.get('line_total'))} FCFA*"
-            )
+            # Ligne à palier : `quantity` est un NOMBRE DE PAQUETS et `unit`
+            # l'unité du CONTENU — les afficher accolés ("30 L × 900") laissait
+            # croire à 30 litres alors qu'il s'agit de 30 bidons. On rend le
+            # conditionnement explicite et on rappelle la quantité totale.
+            if line.get("tier_id") and line.get("base_unit_quantity") is not None:
+                packaging_lbl = line.get("packaging") or "paquet"
+                tier_qty = line.get("tier_quantity")
+                pack_lbl = (
+                    f"{packaging_lbl} de {_fmt_num(tier_qty)} {line.get('unit')}"
+                    if tier_qty is not None
+                    else packaging_lbl
+                )
+                measure = (
+                    f"{_fmt_num(line.get('base_unit_quantity'))} {line.get('unit')}"
+                )
+                lines.append(
+                    f"\n*{i}. {line.get('name')}* ({source_label}){vendor_info}{notification_badge}\n"
+                    f"   {_fmt_num(line.get('quantity'))} × {pack_lbl} "
+                    f"({_fmt_num(line.get('price'))} FCFA) = "
+                    f"*{_fmt_num(line.get('line_total'))} FCFA*\n"
+                    f"   _Quantité totale : {measure}_"
+                )
+            else:
+                lines.append(
+                    f"\n*{i}. {line.get('name')}* ({source_label}){vendor_info}{notification_badge}\n"
+                    f"   {_fmt_num(line.get('quantity'))} {line.get('unit')} × {_fmt_num(line.get('price'))} = "
+                    f"*{_fmt_num(line.get('line_total'))} FCFA*"
+                )
             options.append(
                 {
                     "index": str(i),
@@ -369,6 +440,7 @@ class CartDomainService:
         cart: List[Dict[str, Any]],
         state: Dict[str, Any],
         buyer_unit: Optional[str] = None,
+        tier_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         try:
             qty = float(quantity)
@@ -378,7 +450,7 @@ class CartDomainService:
         if qty <= 0:
             return {
                 "status": "WAITING_INPUT",
-                "expected_input": "QUANTITY",
+                **set_pending_interaction(InteractionKind.ENTER_QUANTITY, field_name="quantity"),
                 "response_strategy": "ASK_MISSING_FIELD",
                 "missing_fields": ["quantity"],
                 "final_response": (
@@ -387,6 +459,104 @@ class CartDomainService:
                 ),
                 "ag_ui_component": None,
             }
+
+        # (2026-08-30) Sélection d'un palier de prix/conditionnement — voir
+        # domain/pricing_tiers.py. `qty` devient alors un NOMBRE DE PAQUETS
+        # du palier choisi (ex: "3" -> 3 bidons de 10L), jamais une quantité
+        # en unité de base : la conversion d'unité juste en dessous (pensée
+        # pour une quantité flate) ne s'applique donc PAS ici.
+        selected_tier = None
+        tier_pack_count: Optional[int] = None
+        computed_line = None
+        if tier_id:
+            try:
+                selected_tier = resolve_tier(ref.get("pricing_tiers"), tier_id)
+            except PricingTierError as exc:
+                return {
+                    "status": "WAITING_INPUT",
+                    **set_pending_interaction(InteractionKind.ENTER_QUANTITY, field_name="quantity"),
+                    "response_strategy": "ASK_MISSING_FIELD",
+                    "final_response": f"⚠️ {exc}",
+                    "ag_ui_component": None,
+                }
+
+            # Faille A (audit 2026-09-01) : `buyer_unit` (l'unité écrite dans le
+            # message de CE tour — jamais celle du payload fusionné, voir
+            # flows/buyer/cart.py::_fresh_unit_this_turn) était totalement
+            # ignoré sur cette branche. Un `qty` sur un palier est un NOMBRE DE
+            # PAQUETS, sans dimension : toute unité de MESURE écrite par
+            # l'acheteur signifie qu'il a répondu autre chose qu'un nombre de
+            # paquets. On refuse et on redemande — jamais de conversion
+            # silencieuse (pas de "30 L → 3 bidons" automatique, règle métier
+            # explicite). Voir domain/pricing_tiers.py::classify_pack_count_unit
+            # pour les trois verdicts et leurs cas limites ("3 sacs" sur un
+            # palier "sac de 50 KG" = 3 paquets, pas un refus).
+            tier_unit = (
+                normalize_unit(selected_tier.unit)
+                or str(selected_tier.unit or "").upper()
+            )
+            unit_verdict = classify_pack_count_unit(selected_tier, buyer_unit)
+            if unit_verdict in (PACK_UNIT_CONTENT, PACK_UNIT_FOREIGN):
+                vendor_label = ref.get("vendor_name") or "ce producteur"
+                packaging_lbl = selected_tier.packaging or tier_unit.lower()
+                requested_lbl = str(
+                    normalize_unit(buyer_unit) or buyer_unit or ""
+                ).lower()
+                # Unité LITTÉRALE du palier ("L"), pas sa forme normalisée
+                # ("LITRE") : le message doit reprendre mot pour mot le
+                # libellé déjà affiché dans le menu.
+                tier_lbl = f"{selected_tier.quantity:g} {selected_tier.unit}"
+                if unit_verdict == PACK_UNIT_CONTENT:
+                    detail = (
+                        f"⚠️ *{_fmt_num(qty)} {requested_lbl}*, c'est une quantité "
+                        f"totale — or ce conditionnement se commande par "
+                        f"*{packaging_lbl}* de *{tier_lbl}*.\n\n"
+                        f"📦 Combien de *{packaging_lbl}* de *{tier_lbl}* "
+                        "souhaitez-vous ? _(répondez par un nombre, ex : 3)_"
+                    )
+                else:
+                    detail = (
+                        f"⚠️ Ce conditionnement de *{ref.get('name') or product_name}* "
+                        f"chez *{vendor_label}* est vendu par *{packaging_lbl}* de "
+                        f"*{tier_lbl}*, pas en {requested_lbl}. Combien de "
+                        f"*{packaging_lbl}* souhaitez-vous ?"
+                    )
+                return {
+                    "status": "WAITING_INPUT",
+                    **set_pending_interaction(InteractionKind.ENTER_QUANTITY, field_name="quantity"),
+                    "response_strategy": "ASK_MISSING_FIELD",
+                    "final_response": detail,
+                    "ag_ui_component": None,
+                }
+
+            # Faille B (audit 2026-09-01) : `int(qty)` tronquait
+            # silencieusement les décimales ("2.5" -> 2 paquets, sans
+            # avertir l'acheteur). On rejette explicitement au lieu de
+            # deviner.
+            if not float(qty).is_integer():
+                packaging_lbl = selected_tier.packaging or "paquets"
+                return {
+                    "status": "WAITING_INPUT",
+                    **set_pending_interaction(InteractionKind.ENTER_QUANTITY, field_name="quantity"),
+                    "response_strategy": "ASK_MISSING_FIELD",
+                    "final_response": (
+                        f"⚠️ Merci d'indiquer un nombre ENTIER de "
+                        f"*{packaging_lbl}* (ex : 2, pas {qty:g})."
+                    ),
+                    "ag_ui_component": None,
+                }
+
+            try:
+                tier_pack_count = int(qty)
+                computed_line = compute_line(selected_tier, tier_pack_count)
+            except PricingTierError as exc:
+                return {
+                    "status": "WAITING_INPUT",
+                    **set_pending_interaction(InteractionKind.ENTER_QUANTITY, field_name="quantity"),
+                    "response_strategy": "ASK_MISSING_FIELD",
+                    "final_response": f"⚠️ {exc}",
+                    "ag_ui_component": None,
+                }
 
         # Bug réel (2026-08-17) : cette listing est vendue dans SON unité
         # (`ref["unit"]`, ex: TONNE), mais l'acheteur peut avoir donné une
@@ -397,24 +567,97 @@ class CartDomainService:
         # une équivalence universelle existe (KG<->TONNE) ; sinon on ne
         # devine jamais — on redemande explicitement dans l'unité vendue.
         ref_unit = normalize_unit(ref.get("unit")) or str(ref.get("unit") or "KG").upper()
-        requested_unit = normalize_unit(buyer_unit) if buyer_unit else None
-        if requested_unit and requested_unit != ref_unit:
-            converted = convert_quantity(qty, requested_unit, ref_unit)
-            if converted is None:
-                vendor_label = ref.get("vendor_name") or "ce producteur"
-                return {
-                    "status": "WAITING_INPUT",
-                    "expected_input": "QUANTITY",
-                    "response_strategy": "ASK_MISSING_FIELD",
-                    "final_response": (
-                        f"⚠️ *{ref.get('name') or product_name}* chez *{vendor_label}* est vendu "
-                        f"en *{ref_unit}*, pas en {requested_unit.lower()}. "
-                        f"Merci d'indiquer la quantité directement en {ref_unit.lower()} "
-                        f"(ex : 50 {ref_unit.lower()})."
-                    ),
-                    "ag_ui_component": None,
-                }
-            qty = converted
+        if selected_tier is None:
+            requested_unit = normalize_unit(buyer_unit) if buyer_unit else None
+            if requested_unit and requested_unit != ref_unit:
+                converted = convert_quantity(qty, requested_unit, ref_unit)
+                if converted is None:
+                    vendor_label = ref.get("vendor_name") or "ce producteur"
+                    return {
+                        "status": "WAITING_INPUT",
+                        **set_pending_interaction(InteractionKind.ENTER_QUANTITY, field_name="quantity"),
+                        "response_strategy": "ASK_MISSING_FIELD",
+                        "final_response": (
+                            f"⚠️ *{ref.get('name') or product_name}* chez *{vendor_label}* est vendu "
+                            f"en *{ref_unit}*, pas en {requested_unit.lower()}. "
+                            f"Merci d'indiquer la quantité directement en {ref_unit.lower()} "
+                            f"(ex : 50 {ref_unit.lower()})."
+                        ),
+                        "ag_ui_component": None,
+                    }
+                qty = converted
+
+        # --- SEUIL MINIMUM DE COMMANDE (2026-09-02, politique plateforme) ---
+        # Voir domain/order_policy.py. AVANT la vérification de stock (même
+        # ordre que le reste du pipeline : quantité finale → règles métier →
+        # stock) et pour LES DEUX flows, palier ET tarif unique — jamais
+        # dérivé du prix ni de `pricing_tiers`. `total_quantity` est déjà la
+        # quantité RÉELLE en unité de base (`computed_line.base_unit_quantity`
+        # pour un palier — jamais `package_count` seul, voir règle 9 du
+        # cahier des charges — sinon `qty` telle quelle), exactement la même
+        # valeur que celle envoyée à la vérification de stock juste en
+        # dessous.
+        total_quantity_for_policy = (
+            computed_line.base_unit_quantity if computed_line is not None else qty
+        )
+        minimum_check = validate_minimum_order_quantity(
+            minimum_order_quantity=ref.get("minimum_order_quantity"),
+            minimum_order_unit=ref.get("minimum_order_unit"),
+            total_quantity=total_quantity_for_policy,
+            total_unit=ref_unit,
+        )
+        if not minimum_check.passed:
+            display_name = ref.get("name") or product_name
+            if minimum_check.reason == "UNIT_INCOMPATIBLE":
+                msg = (
+                    f"⚠️ Le seuil minimum de commande pour *{display_name}* est "
+                    f"défini en *{minimum_check.minimum_unit}*, incompatible avec "
+                    f"*{ref_unit}*. Merci d'indiquer votre quantité en "
+                    f"{str(minimum_check.minimum_unit or '').lower()}."
+                )
+            else:
+                min_qty = minimum_check.minimum_in_total_unit
+                base_msg = (
+                    f"⚠️ La quantité minimale pour *{display_name}* est de "
+                    f"*{min_qty:g} {ref_unit}*.\n\n"
+                    f"Votre commande actuelle représente *{total_quantity_for_policy:g} "
+                    f"{ref_unit}*."
+                )
+                if selected_tier is not None:
+                    # Produit à palier : le nombre de PAQUETS reste la seule
+                    # unité de réponse valide (voir domain/pricing_tiers.py —
+                    # aucune conversion automatique quantité totale <->
+                    # paquets, règle "pas de tetris"). On calcule combien de
+                    # paquets suffiraient, à titre indicatif seulement — la
+                    # question reste "combien de paquets ?", jamais "combien
+                    # de KG ?".
+                    packaging_lbl = selected_tier.packaging or "paquets"
+                    min_packs = -(-min_qty // selected_tier.quantity)  # ceil
+                    msg = (
+                        f"{base_msg}\n\n"
+                        f"📦 Combien de *{packaging_lbl}* de "
+                        f"*{selected_tier.quantity:g} {selected_tier.unit}* "
+                        f"souhaitez-vous ? _(il en faut au moins {min_packs:g} "
+                        f"pour atteindre le minimum)_"
+                    )
+                else:
+                    msg = (
+                        f"{base_msg}\n\n"
+                        f"Veuillez augmenter la quantité à au moins {min_qty:g} "
+                        f"{ref_unit.lower()} pour continuer."
+                    )
+            # Conserve le contexte (produit/vendeur/palier déjà résolus) —
+            # règle 25/27 : jamais de réinitialisation du tunnel, jamais de
+            # complément automatique de la quantité. On redemande simplement
+            # la quantité (ou le nombre de paquets, pour un palier — la
+            # question reste scopée exactement comme avant ce refus).
+            return {
+                "status": "WAITING_INPUT",
+                **set_pending_interaction(InteractionKind.ENTER_QUANTITY, field_name="quantity"),
+                "response_strategy": "ASK_MISSING_FIELD",
+                "final_response": msg,
+                "ag_ui_component": None,
+            }
 
         source_type = str(ref.get("source_type") or "DIRECT").upper()
         if source_type == "FUTURE":
@@ -468,9 +711,15 @@ class CartDomainService:
             }
 
         resolved_pid = ref.get("product_id") or ref.get("id")
+        # La disponibilité se vérifie toujours en unité de BASE du produit —
+        # `computed_line.base_unit_quantity` (déjà convertie) quand un palier
+        # est choisi, sinon `qty` telle quelle (comportement inchangé).
+        stock_check_qty = (
+            computed_line.base_unit_quantity if computed_line is not None else qty
+        )
         check = await StockGateway(self.mc_runtime).validate_stock_availability(
             product_id=resolved_pid,
-            quantity=qty,
+            quantity=stock_check_qty,
             unit=ref.get("unit"),
             buyer_phone=phone,
         )
@@ -518,10 +767,24 @@ class CartDomainService:
                     or f"Le produit « {display_name} » n'existe plus dans le catalogue."
                 )
             elif available is not None:
+                # Audit 2026-09-01 : ce message comparait la disponibilité (en
+                # unité de BASE) au `qty` brut — qui, sur un palier, est un
+                # NOMBRE DE PAQUETS. D'où des refus absurdes du type "seulement
+                # 500 LITRE disponible(s) sur 60 LITRE demandé(s)" pour 60
+                # bidons de 10 L (= 600 L). Les deux membres doivent être dans
+                # la même unité : `stock_check_qty` est exactement la quantité
+                # réellement demandée en unité de base.
+                pack_detail = ""
+                if selected_tier is not None and tier_pack_count is not None:
+                    packaging_lbl = selected_tier.packaging or "paquet"
+                    pack_detail = (
+                        f" _({tier_pack_count} {packaging_lbl} de "
+                        f"{selected_tier.quantity:g} {selected_tier.unit})_"
+                    )
                 msg = (
                     f"📉 Stock insuffisant pour « *{display_name}* » : "
                     f"seulement *{_fmt_num(available)} {unit_lbl}* disponible(s) sur "
-                    f"*{_fmt_num(qty)} {unit_lbl}* demandé(s)."
+                    f"*{_fmt_num(stock_check_qty)} {unit_lbl}* demandé(s){pack_detail}."
                 )
             else:
                 # Envelope/technical error — do not pretend it's a stock shortage.
@@ -543,14 +806,17 @@ class CartDomainService:
                 }
             )
             payload_seed = {"product": display_name}
-            if qty:
-                payload_seed["quantity"] = qty
+            # Même correction : l'appel d'offres proposé en repli doit porter la
+            # quantité RÉELLE en unité de base (`unit` ci-dessous), pas un
+            # nombre de paquets qui y serait relu comme des litres/kilos.
+            if stock_check_qty:
+                payload_seed["quantity"] = stock_check_qty
             if ref.get("unit"):
                 payload_seed["unit"] = ref.get("unit")
 
             return {
                 "status": "WAITING_INPUT",
-                "expected_input": "CONFIRMATION",
+                **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
                 "response_strategy": "ASK_MISSING_FIELD",
                 "final_response": msg
                 + ("\n\n💡 Des alternatives sont disponibles." if recos else "")
@@ -564,30 +830,62 @@ class CartDomainService:
                 "transaction_payload": payload_seed,
             }
 
-        price = float(check.get("unit_price") or ref.get("price") or 0.0)
-        line: Dict[str, Any] = {
-            "product_id": ref.get("product_id") or ref.get("id"),
-            "name": ref.get("name") or product_name,
-            "quantity": qty,
-            "unit": str(check.get("unit") or ref.get("unit") or "KG"),
-            "price": price,
-            "line_total": round(price * qty, 2),
-            "producer_id": ref.get("producer_id") or check.get("producer_id"),
-            "vendor_name": ref.get("vendor_name"),
-            "source_type": source_type,
-            "is_auction": ref.get("is_auction", False),
-            "status": "VALIDATED",
-            "notification_id": None,
-            "notification_status": None,
-        }
+        if selected_tier is not None and computed_line is not None:
+            # Palier choisi : `quantity` reste le NOMBRE DE PAQUETS (affichage
+            # acheteur), `base_unit_quantity` porte la valeur réelle à débiter
+            # du stock (voir domain/pricing_tiers.py::resolve_stock_debit).
+            price = selected_tier.price
+            line: Dict[str, Any] = {
+                "product_id": ref.get("product_id") or ref.get("id"),
+                "name": ref.get("name") or product_name,
+                "quantity": tier_pack_count,
+                "unit": selected_tier.unit,
+                "packaging": selected_tier.packaging,
+                "tier_id": selected_tier.tier_id,
+                # Contenu d'UN paquet — nécessaire au rendu ("3 × bidon de
+                # 10 L"), qui sinon ne peut pas distinguer le nombre de paquets
+                # de la quantité en unité de base.
+                "tier_quantity": selected_tier.quantity,
+                "base_unit_quantity": computed_line.base_unit_quantity,
+                "price": price,
+                "line_total": round(computed_line.price_total, 2),
+                "producer_id": ref.get("producer_id") or check.get("producer_id"),
+                "vendor_name": ref.get("vendor_name"),
+                "source_type": source_type,
+                "is_auction": ref.get("is_auction", False),
+                "status": "VALIDATED",
+                "notification_id": None,
+                "notification_status": None,
+            }
+        else:
+            price = float(check.get("unit_price") or ref.get("price") or 0.0)
+            line = {
+                "product_id": ref.get("product_id") or ref.get("id"),
+                "name": ref.get("name") or product_name,
+                "quantity": qty,
+                "unit": str(check.get("unit") or ref.get("unit") or "KG"),
+                "price": price,
+                "line_total": round(price * qty, 2),
+                "producer_id": ref.get("producer_id") or check.get("producer_id"),
+                "vendor_name": ref.get("vendor_name"),
+                "source_type": source_type,
+                "is_auction": ref.get("is_auction", False),
+                "status": "VALIDATED",
+                "notification_id": None,
+                "notification_status": None,
+            }
 
+        # La notification producteur doit décrire la demande dans l'unité de
+        # BASE du produit (celle de son stock) — `qty` est un nombre de paquets
+        # dès qu'un palier est choisi, et l'associer à `line["unit"]` (l'unité
+        # du CONTENU du palier) produisait "60 L" pour 60 bidons de 10 L.
         notification_payload = {
             "producer_id": str(line.get("producer_id") or ""),
             "buyer_phone": phone,
             "product_id": str(line.get("product_id") or ""),
             "product_name": str(line.get("name") or ""),
-            "quantity": qty,
-            "unit": line.get("unit"),
+            "quantity": stock_check_qty,
+            "unit": ref_unit if selected_tier is not None else line.get("unit"),
             "source_type": source_type,
         }
 
@@ -622,6 +920,7 @@ class CartDomainService:
             "draft_payload": {"__reset__": True},
             "transaction_payload": {"__reset__": True},
             "vendor_selection_context": None,
+            "tier_selection_context": None,
         }
         response.update(render)
         return response
