@@ -82,7 +82,7 @@ class _FakeSelectWinningBidSession:
     async def execute(self, stmt):
         if isinstance(stmt, _UpdateStmt):
             self.update_statements.append(stmt)
-            return types.SimpleNamespace(rowcount=0)
+            return types.SimpleNamespace(rowcount=0, scalars=lambda: types.SimpleNamespace(all=lambda: []))
         if self._row is None:
             return types.SimpleNamespace(fetchone=lambda: None)
         # 1er appel non-UPDATE == la requête SELECT principale ; tout appel

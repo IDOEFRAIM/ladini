@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+from agriconnect.domain.quantity_unit import (
     convert_quantity,
     normalize_unit,
 )

@@ -54,13 +54,44 @@ def _safe(tool_name: str):
 
 
 def _compute_exposed_methods() -> list[str]:
+    """Outils MCP = introspection ∩ ALLOW-LIST EXPLICITE.
+
+    (2026-09-05, Phase 8 — durcissement de l'exposition MCP) : cette
+    fonction exposait auparavant TOUTE méthode async publique de
+    `AgriDatabaseService`. Ajouter une méthode créait donc un outil, et
+    seule l'absence de scope dans `TOOL_SCOPE_MAP` l'empêchait d'être
+    appelée — un modèle opt-out qui a produit quatre failles distinctes
+    de la même racine (voir `infrastructure/mcp/exposure.py`).
+
+    L'exposition est désormais **opt-in** : seuls les noms déclarés dans
+    `MCP_EXPOSED_TOOLS` deviennent des outils. Une méthode publique
+    ajoutée demain n'est visible nulle part tant qu'un développeur ne l'a
+    pas explicitement décidée.
+
+    L'intersection est volontaire (plutôt que d'exposer la liste telle
+    quelle) : elle garantit qu'un nom mal orthographié ou une méthode
+    supprimée ne produit jamais un outil fantôme — la dérive est détectée
+    par `tests/architecture/test_mcp_exposure_allowlist.py`.
+    """
+    from agriconnect.infrastructure.mcp.exposure import MCP_EXPOSED_TOOLS
+
     methods: set[str] = set()
     for name, member in inspect.getmembers(DatabaseService):
         if name.startswith("_"):
             continue
         if inspect.iscoroutinefunction(member):
             methods.add(name)
-    return sorted(methods)
+
+    exposed = methods & MCP_EXPOSED_TOOLS
+    unknown = MCP_EXPOSED_TOOLS - methods
+    if unknown:
+        logger.warning(
+            "MCP allow-list: %d nom(s) déclaré(s) sans méthode correspondante "
+            "(dérive à corriger) : %s",
+            len(unknown),
+            ", ".join(sorted(unknown)),
+        )
+    return sorted(exposed)
 
 
 EXPOSED_METHODS = _compute_exposed_methods()

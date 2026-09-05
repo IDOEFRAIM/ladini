@@ -377,6 +377,24 @@ class PreorderDraft:
                     f"   Quantité : {item.get('quantity')} {item.get('unit')}\n"
                     f"   Prix unitaire : {item.get('price')} FCFA"
                 )
+        # (2026-09-05, Phase 6A) : un panier couvrant plusieurs producteurs
+        # produit une commande PAR producteur (chacun livre et encaisse sa
+        # part séparément). L'acheteur doit le savoir AVANT de confirmer —
+        # sans quoi le récapitulatif annoncerait une commande là où il y en
+        # aura deux. Projection pure, dérivée des items déjà présents.
+        producer_count = len(
+            {
+                str(item.get("producer_id"))
+                for item in self.items
+                if item.get("producer_id")
+            }
+        )
+        if producer_count > 1:
+            lines.append(
+                f"\nℹ️ _Vos articles proviennent de {producer_count} producteurs : "
+                f"cela fera {producer_count} commandes distinctes, chacune livrée "
+                "et payée séparément. Une seule confirmation suffit._"
+            )
         lines.append(f"\n💰 *TOTAL : {self.total_amount} {self.currency}*")
         return "\n".join(lines)
 

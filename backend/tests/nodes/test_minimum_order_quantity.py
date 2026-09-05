@@ -19,7 +19,7 @@ from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
-from agriconnect.graphs.agents.market_coach.domain.order_policy import (
+from agriconnect.domain.order_policy import (
     validate_minimum_order_quantity,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (

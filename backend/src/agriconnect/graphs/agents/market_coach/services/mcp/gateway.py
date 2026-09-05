@@ -249,6 +249,18 @@ class ProductGateway(_BaseGateway):
             **fields,
         )
 
+    # (2026-09-04, Product Completeness Phase 2) : `delete_product` existait
+    # déjà côté DB, complète et sûre (verrou FOR UPDATE, contrôle de
+    # propriété, refus si commandes actives, archivage doux si historique de
+    # commandes, suppression physique sinon) — mais AUCUN chemin
+    # conversationnel ne l'atteignait : un producteur ne pouvait donc jamais
+    # retirer un produit de son catalogue. Ce wrapper est la seule pièce qui
+    # manquait côté agent.
+    async def delete_product(self, phone: str, product_id: str) -> Dict[str, Any]:
+        return await self._call(
+            "delete_product", phone=phone.strip(), product_id=product_id
+        )
+
 
 # ── Negotiation ────────────────────────────────────────────────────
 
@@ -386,6 +398,38 @@ class OrderTrackingGateway(_BaseGateway):
             order_id=order_id,
             phone=phone,
             reason=reason,
+        )
+
+    # (2026-09-04, clôture F1 — paiement à la livraison) : lecture "mes
+    # commandes" côté PRODUCTEUR — déjà auditée/corrigée séparément
+    # (exclusion DRAFT/SUPERSEDED, inclusion des commandes RFQ), réutilisée
+    # ici telle quelle pour résoudre QUELLE commande le producteur vise
+    # (jamais "la dernière", voir `flows/producer/flow.py::_resolve_order_for_delivery_payment`).
+    async def get_producer_orders(self, phone: str, status: str = "") -> Dict[str, Any]:
+        kwargs: Dict[str, Any] = {"phone": phone.strip()}
+        if status:
+            kwargs["status"] = status
+        return await self._call("get_producer_orders", **kwargs)
+
+    # (2026-09-04, Phase 5 — décision produit #1) : symétrique producteur de
+    # `cancel_pending_order` côté acheteur.
+    async def cancel_confirmed_order(
+        self, producer_phone: str, order_id: str, reason: str = ""
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "cancel_confirmed_order",
+            producer_phone=producer_phone.strip(),
+            order_id=order_id,
+            reason=reason,
+        )
+
+    async def confirm_delivery_and_payment(
+        self, producer_phone: str, order_id: str
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "confirm_delivery_and_payment",
+            producer_phone=producer_phone.strip(),
+            order_id=order_id,
         )
 
 

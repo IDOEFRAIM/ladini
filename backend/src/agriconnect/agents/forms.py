@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+from agriconnect.domain.quantity_unit import (
     default_unit_for_product,
     extract_unit_only_from_text,
     parse_compound_quantity,

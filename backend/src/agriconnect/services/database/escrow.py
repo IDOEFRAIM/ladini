@@ -25,7 +25,7 @@ from sqlalchemy.orm import selectinload
 from agriconnect.core.formatting import fmt_num as _fmt_num
 from agriconnect.core.settings import settings
 from agriconnect.domain.models import Order, OrderItem, Producer, Product, User
-from agriconnect.graphs.agents.market_coach.domain.pricing_tiers import (
+from agriconnect.domain.pricing_tiers import (
     resolve_stock_debit,
 )
 from agriconnect.services.payments.paydunya_client import PaydunyaClient, PaydunyaError

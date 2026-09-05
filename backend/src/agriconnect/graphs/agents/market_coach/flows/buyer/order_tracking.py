@@ -522,7 +522,11 @@ async def cancel_order(
             "response_strategy": "SUCCESS",
             "final_response": (
                 f"⚠️ {msg}\n\n"
-                f"Seules les commandes *en attente* (⏳) peuvent être annulées.\n"
+                # (2026-09-04, audit produit post-F1-F4) : `cancel_pending_order`
+                # accepte désormais aussi les commandes CONFIRMÉES (pas
+                # seulement PENDING) — copie alignée sur le garde réel.
+                f"Seules les commandes *en attente* ou *confirmées, pas encore "
+                f"livrées* peuvent être annulées.\n"
                 f"_Souhaitez-vous voir le statut actuel de cette commande ?_"
             ),
             "order_tracking_context": _tracking_ctx_patch(order_id),

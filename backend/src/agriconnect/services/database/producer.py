@@ -24,6 +24,7 @@ from agriconnect.domain.models import (
     MarketOffer,
     Order,
     OrderItem,
+    OrderStatusHistory,
     Producer,
     Product,
     Stock,
@@ -32,8 +33,9 @@ from agriconnect.domain.models import (
     User,
 )
 
-from agriconnect.graphs.agents.market_coach.domain.pricing_tiers import (
+from agriconnect.domain.pricing_tiers import (
     PricingTierError,
+    resolve_stock_debit,
     tiers_to_dicts,
     validate_pricing_tiers,
 )
@@ -1495,6 +1497,391 @@ class ProducerMgmtMixin(BaseMixin):
             "formatted_menu": "\n".join(menu_lines),
             "mapping": mapping,
             "data": payload,
+        }
+
+    # ─── SECTION 4bis : CLÔTURE PAIEMENT-À-LA-LIVRAISON (2026-09-04) ─────
+    async def confirm_delivery_and_payment(
+        self, producer_phone: str, order_id: str
+    ) -> Dict[str, Any]:
+        """Le producteur confirme, en UN SEUL geste, avoir livré la commande
+        ET reçu le paiement en espèces (politique produit actuelle :
+        paiement à la livraison, aucun paiement en ligne — voir
+        `docs/F1_PAYMENT_DELIVERY_CLOSURE_2026-09-04.md`).
+
+        Décision produit explicite (pas une supposition) : reprend
+        EXACTEMENT le précédent déjà établi par `record_sale` — un seul
+        acteur (le producteur), un seul geste, jamais deux déclarations
+        séparées pour un même évènement physique (l'échange marchandise↔
+        argent a lieu au MÊME instant en paiement à la livraison). Nouveau
+        contrat pour une commande RÉELLEMENT en attente (créée par
+        `select_winning_bid` ou `confirm_preorder_draft`), contrairement à
+        `record_sale` qui journalise une vente déjà conclue hors-app.
+
+        S'applique UNIQUEMENT aux commandes en paiement à la livraison
+        (`payment_status == "PENDING"`, `status == "CONFIRMED"`) — une
+        commande escrow (`ESCROWED`/`PAID_OUT`) n'entre JAMAIS dans ce
+        chemin, son cycle est géré exclusivement par
+        `EscrowMixin.verify_delivery_otp` (chemin non touché, mandat §9).
+
+        Statuts réutilisés tels quels (aucun nouvel enum inventé) :
+        `Order.status="COMPLETED"` (déjà écrit par `record_sale`, déjà
+        étiqueté côté lecture — `ORDER_STATUS_MAP`/`status_icons`),
+        `payment_status="PAID"` (idem `record_sale`),
+        `delivery_status="DELIVERED"` (déjà écrit par
+        `EscrowMixin.verify_delivery_otp`).
+        """
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+
+        try:
+            o_uuid = uuid.UUID(str(order_id))
+        except (TypeError, ValueError):
+            raise BusinessRuleException(
+                "Identifiant de commande invalide.", reason="invalid_order_id"
+            ) from None
+
+        _, producer_obj = await self.get_producer_profile(phone=producer_phone)
+
+        # Verrou EXCLUSIF sur l'Order dès la première lecture — même
+        # discipline que `select_winning_bid`/`confirm_preorder_draft`
+        # (audités cette session) : jamais de fenêtre entre lecture et
+        # écriture, une double confirmation concurrente doit se sérialiser
+        # ici, pas produire un état incohérent.
+        order = await current_session.scalar(
+            select(Order).where(Order.id == o_uuid).with_for_update()
+        )
+        if not order:
+            raise BusinessRuleException(
+                "Commande introuvable.", reason="order_not_found"
+            )
+
+        # Appartenance producteur — UNIFIÉE sur les DEUX origines réelles
+        # d'une Order dans ce produit (jamais les deux à la fois) :
+        # PREORDER (`OrderItem`→`Product.producer_id`) ou RFQ
+        # (`Order.winning_bid_id`→`Bid.producer_id`, voir l'audit
+        # AUCTION/BID — `select_winning_bid` ne crée jamais d'`OrderItem`).
+        owns_via_items = (
+            await current_session.scalar(
+                select(OrderItem.id)
+                .join(Product, Product.id == OrderItem.product_id)
+                .where(
+                    OrderItem.order_id == o_uuid,
+                    Product.producer_id == producer_obj.id,
+                )
+                .limit(1)
+            )
+        ) is not None
+        owns_via_bid = False
+        if not owns_via_items and order.winning_bid_id:
+            owns_via_bid = (
+                await current_session.scalar(
+                    select(Bid.id).where(
+                        Bid.id == order.winning_bid_id,
+                        Bid.producer_id == producer_obj.id,
+                    )
+                )
+            ) is not None
+        if not owns_via_items and not owns_via_bid:
+            raise BusinessRuleException(
+                "Commande introuvable ou non autorisée.", reason="not_owner"
+            )
+
+        # Idempotence — un second appel (double-tap, retry) ne doit JAMAIS
+        # re-déclencher la transition ni renvoyer une erreur brute : outcome
+        # explicite, même discipline que le reste du produit.
+        if str(order.status or "").upper() == "COMPLETED":
+            return {
+                "status": "success",
+                "outcome": "ALREADY_COMPLETED",
+                "order_id": str(order.id),
+                "message": (
+                    f"Commande #{str(order.id)[:8].upper()} déjà marquée "
+                    "livrée et payée."
+                ),
+            }
+
+        if str(order.payment_status or "").upper() != "PENDING":
+            raise BusinessRuleException(
+                "Cette commande n'est pas en paiement à la livraison "
+                f"(statut paiement={order.payment_status}) — utilisez la "
+                "confirmation de livraison par code si elle est en escrow.",
+                reason="not_pay_at_delivery",
+            )
+        if str(order.status or "").upper() != "CONFIRMED":
+            raise BusinessRuleException(
+                "Cette commande n'est pas dans un état permettant la "
+                f"clôture (statut={order.status}).",
+                reason="order_not_confirmed",
+            )
+
+        # Transition atomique — les trois champs sont posés dans LE MÊME
+        # appel Python, jamais un `order.status = "COMPLETED"` isolé qui
+        # contournerait payment/delivery (mandat §4/§10) : le statut
+        # terminal est la CONSÉQUENCE directe des deux autres, jamais un
+        # raccourci séparé.
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        order.delivery_status = "DELIVERED"
+        order.payment_status = "PAID"
+        order.status = "COMPLETED"
+        order.confirmed_at = now
+
+        # Traçabilité — réutilise `OrderStatusHistory`, déjà la convention
+        # de ce dépôt (voir `services/database/order_service.py`), jamais
+        # une nouvelle table. Une entrée par axe métier (mandat §16).
+        for status_type, from_status, to_status in (
+            ("DELIVERY", "PENDING", "DELIVERED"),
+            ("PAYMENT", "PENDING", "PAID"),
+            ("ORDER", "CONFIRMED", "COMPLETED"),
+        ):
+            current_session.add(
+                OrderStatusHistory(
+                    id=uuid.uuid4(),
+                    order_id=order.id,
+                    status_type=status_type,
+                    from_status=from_status,
+                    to_status=to_status,
+                    actor_id=producer_obj.id,
+                    note="payment_at_delivery",
+                )
+            )
+
+        # Notification acheteur — même pattern Outbox déjà éprouvé 3 fois
+        # cette session (jamais un envoi synchrone en pleine transaction),
+        # MÊME transaction que la commande : si le commit échoue, la notif
+        # n'est pas enfilée non plus. Le producteur, lui, reçoit sa réponse
+        # de façon SYNCHRONE (valeur de retour ci-dessous) — il est l'acteur
+        # qui vient d'agir, pas un tiers à notifier de façon asynchrone.
+        buyer_row = (
+            await current_session.execute(
+                select(User.phone)
+                .join(BuyerProfile, BuyerProfile.user_id == User.id)
+                .where(BuyerProfile.id == order.buyer_id)
+                .limit(1)
+            )
+        ).first()
+        buyer_phone = buyer_row[0] if buyer_row else None
+        if buyer_phone:
+            from agriconnect.workers.outbox import templates as _outbox_templates
+            from agriconnect.workers.repositories import outbox_repo as _outbox_repo
+
+            await _outbox_repo.enqueue(
+                current_session,
+                [
+                    {
+                        "channel": "WHATSAPP",
+                        "recipient_phone": buyer_phone,
+                        "template_key": _outbox_templates.ORDER_COMPLETED_AT_DELIVERY_BUYER,
+                        "payload": {
+                            "order_number": str(order.id)[:8].upper(),
+                            "amount": float(order.total_amount or 0.0),
+                            "currency": order.currency or "XOF",
+                        },
+                        "dedupe_key": f"ORDER_COMPLETED:{order.id}",
+                    }
+                ],
+            )
+
+        await current_session.flush()
+
+        order_ref = str(order.id)[:8].upper()
+        amount_txt = _fmt_num(order.total_amount)
+        return {
+            "status": "success",
+            "outcome": "COMPLETED",
+            "order_id": str(order.id),
+            "message": (
+                f"✅ Commande #{order_ref} clôturée : livraison confirmée et "
+                f"paiement de {amount_txt} {order.currency or 'XOF'} reçu à "
+                "la livraison."
+            ),
+        }
+
+    async def cancel_confirmed_order(
+        self, producer_phone: str, order_id: str, reason: str = ""
+    ) -> Dict[str, Any]:
+        """Le producteur annule une commande `CONFIRMED` qu'il ne peut pas
+        honorer (rupture, aléa de production, erreur de saisie).
+
+        Décision produit #1 (voir
+        `docs/PRODUCT_DECISION_REGISTER_2026-09-04.md`) : **symétrie stricte
+        du chemin acheteur** (`BuyerMixin.cancel_pending_order`). Avant ce
+        correctif, `CONFIRMED` était le SEUL état du produit sans sortie
+        pour le producteur : ne pouvant ni livrer ni se rétracter, il devait
+        demander à l'acheteur d'annuler — un contournement hors-app.
+
+        Tout ce qui est mécanique est repris à l'identique de l'existant,
+        rien n'est inventé :
+        - propriété résolue sur les DEUX origines réelles d'une commande
+          (`OrderItem`→`Product.producer_id` pour un préorder,
+          `Order.winning_bid_id`→`Bid.producer_id` pour une RFQ) — même
+          résolution que `confirm_delivery_and_payment` ;
+        - verrou `FOR UPDATE` dès la première lecture : sérialise
+          proprement contre `confirm_delivery_and_payment` (qui exige le
+          MÊME `CONFIRMED`) et contre l'annulation acheteur — le premier à
+          committer gagne, l'autre retombe sur son propre garde ;
+        - recrédit du stock via `resolve_stock_debit`, exactement comme
+          côté acheteur (no-op pour une commande RFQ, qui n'a jamais
+          d'`OrderItem`) ;
+        - `Order.cancellation_role = "PRODUCER"` (colonne existante, déjà
+          renseignée `"BUYER"` par l'autre chemin) ;
+        - motif LIBRE journalisé dans `delivery_desc`, aucune taxonomie
+          inventée ;
+        - aucun remboursement : le paiement a lieu À LA LIVRAISON, rien
+          n'a été encaissé.
+
+        NON implémenté délibérément (décisions produit distinctes, cf. le
+        registre) : aucune limite anti-abus producteur (le compteur
+        `MAX_CANCELLATIONS` existant est spécifique à l'acheteur), et
+        aucune réouverture de l'enchère pour une commande d'origine RFQ
+        (le chemin acheteur ne la rouvre pas davantage).
+        """
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+
+        try:
+            o_uuid = uuid.UUID(str(order_id))
+        except (TypeError, ValueError):
+            raise BusinessRuleException(
+                "Identifiant de commande invalide.", reason="invalid_order_id"
+            ) from None
+
+        _, producer_obj = await self.get_producer_profile(phone=producer_phone)
+
+        order = await current_session.scalar(
+            select(Order)
+            .options(selectinload(Order.items).joinedload(OrderItem.product))
+            .where(Order.id == o_uuid)
+            .with_for_update()
+        )
+        if not order:
+            raise BusinessRuleException(
+                "Commande introuvable.", reason="order_not_found"
+            )
+
+        owns_via_items = (
+            await current_session.scalar(
+                select(OrderItem.id)
+                .join(Product, Product.id == OrderItem.product_id)
+                .where(
+                    OrderItem.order_id == o_uuid,
+                    Product.producer_id == producer_obj.id,
+                )
+                .limit(1)
+            )
+        ) is not None
+        owns_via_bid = False
+        if not owns_via_items and order.winning_bid_id:
+            owns_via_bid = (
+                await current_session.scalar(
+                    select(Bid.id).where(
+                        Bid.id == order.winning_bid_id,
+                        Bid.producer_id == producer_obj.id,
+                    )
+                )
+            ) is not None
+        if not owns_via_items and not owns_via_bid:
+            raise BusinessRuleException(
+                "Commande introuvable ou non autorisée.", reason="not_owner"
+            )
+
+        # Idempotence — un second appel (double-tap, retry) ne re-déclenche
+        # jamais la transition NI le recrédit de stock, et ne renvoie pas une
+        # erreur brute : même discipline que `confirm_delivery_and_payment`.
+        order_status_up = str(order.status or "").upper()
+        if order_status_up == "CANCELLED":
+            return {
+                "status": "success",
+                "outcome": "ALREADY_CANCELLED",
+                "order_id": str(order.id),
+                "message": (
+                    f"Commande #{str(order.id)[:8].upper()} déjà annulée."
+                ),
+            }
+        if order_status_up != "CONFIRMED":
+            raise BusinessRuleException(
+                "Seule une commande confirmée et non encore livrée peut être "
+                f"annulée (statut actuel : {order.status}).",
+                reason="order_not_confirmed",
+            )
+
+        # Restitution du stock — identique au chemin acheteur. Boucle vide
+        # (donc sans effet, correctement) pour une commande RFQ.
+        for item in order.items or []:
+            if item.product:
+                product = await current_session.scalar(
+                    select(Product)
+                    .where(Product.id == item.product_id)
+                    .with_for_update()
+                )
+                if product:
+                    product.quantity_for_sale += resolve_stock_debit(item)
+
+        normalized_reason = str(reason or "").strip() or None
+        order.status = "CANCELLED"
+        order.cancellation_role = "PRODUCER"
+        if normalized_reason:
+            existing_desc = order.delivery_desc or ""
+            reason_log = f"[CancelReason] {normalized_reason}"
+            order.delivery_desc = (
+                f"{existing_desc}\n{reason_log}" if existing_desc else reason_log
+            )
+
+        current_session.add(
+            OrderStatusHistory(
+                id=uuid.uuid4(),
+                order_id=order.id,
+                status_type="ORDER",
+                from_status="CONFIRMED",
+                to_status="CANCELLED",
+                actor_id=producer_obj.id,
+                note="cancelled_by_producer",
+            )
+        )
+
+        # Notification acheteur — miroir exact de la notification producteur
+        # posée par `cancel_pending_order`. Outbox, MÊME transaction.
+        buyer_row = (
+            await current_session.execute(
+                select(User.phone)
+                .join(BuyerProfile, BuyerProfile.user_id == User.id)
+                .where(BuyerProfile.id == order.buyer_id)
+                .limit(1)
+            )
+        ).first()
+        buyer_phone = buyer_row[0] if buyer_row else None
+        if buyer_phone:
+            from agriconnect.workers.outbox import templates as _outbox_templates
+            from agriconnect.workers.repositories import outbox_repo as _outbox_repo
+
+            await _outbox_repo.enqueue(
+                current_session,
+                [
+                    {
+                        "channel": "WHATSAPP",
+                        "recipient_phone": buyer_phone,
+                        "template_key": _outbox_templates.ORDER_CANCELLED_BY_PRODUCER_BUYER,
+                        "payload": {
+                            "order_number": str(order.id)[:8].upper(),
+                            "reason": normalized_reason or "",
+                        },
+                        "dedupe_key": f"ORDER_CANCELLED_BUYER:{order.id}",
+                    }
+                ],
+            )
+
+        await current_session.flush()
+
+        return {
+            "status": "success",
+            "outcome": "CANCELLED",
+            "order_id": str(order.id),
+            "message": (
+                f"❌ Commande #{str(order.id)[:8].upper()} annulée. "
+                "L'acheteur en est informé."
+                + (f"\n📝 Motif : {normalized_reason}" if normalized_reason else "")
+            ),
         }
 
     async def update_production_visibility(

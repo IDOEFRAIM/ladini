@@ -45,7 +45,18 @@ class TestValidatorNeverAsksForIds:
         assert r.get("response_strategy") == "CLARIFICATION"
         assert r.get("status") == "COMPLETED", "le tour doit se terminer proprement"
 
-    @pytest.mark.parametrize("goal", ["MARKET_GET_REQUEST_DETAIL", "PROCUREMENT_SELECT_WINNER"])
+    @pytest.mark.parametrize("goal", [
+        "MARKET_GET_REQUEST_DETAIL", "PROCUREMENT_SELECT_WINNER",
+        # (2026-09-04, Product Completeness Phase 2) : mêmes impasses,
+        # réintroduites par des chantiers récents. `PRODUCER_CONFIRM_DELIVERY_PAYMENT`
+        # (F1) et `SALES_UNPUBLISH_PRODUCT` déclarent un `required` d'UUID
+        # (`order_id`/`product_id`) résolu par un résolveur dédié
+        # (`_resolve_order_for_delivery_payment`/`_resolve_product_for_unpublish`) —
+        # sans l'entrée `_RESOLVER_PASSTHROUGH`, `missing_fields` non vide
+        # faisait retomber le routeur sur `to_strategy` et le résolveur
+        # n'était JAMAIS atteint : le producteur se voyait réclamer un UUID.
+        "PRODUCER_CONFIRM_DELIVERY_PAYMENT", "SALES_UNPUBLISH_PRODUCT",
+    ])
     def test_goals_with_resolver_pass_through_to_it(self, goal):
         """Ces goals ONT un résolveur (menu de sélection) : le validateur ne
         doit PAS bloquer avant de l'atteindre."""

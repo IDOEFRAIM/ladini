@@ -354,3 +354,77 @@ def prep_sales_list_orders(
     result = service.list_orders(command)
     tool_name = ToolResolver.resolve_name(result.tool_id or "get_producer_orders")
     return tool_name, dict(result.tool_args)
+
+
+@register_action("PRODUCER_CONFIRM_DELIVERY_PAYMENT", mode="WRITE")
+def prep_confirm_delivery_and_payment(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
+    """Clôture F1 (paiement à la livraison, 2026-09-04) — pas de
+    Command/Payload DTO dédié : l'action ne porte qu'UN champ
+    (`order_id`, déjà résolu par
+    `flows/producer/flow.py::_resolve_order_for_delivery_payment` avant
+    d'atteindre ce point), la machinerie DTO complète des autres actions
+    SALES serait disproportionnée ici."""
+    context = DomainContext.from_state(state)
+    if not context.phone:
+        raise ValueError(
+            "Le numéro de téléphone du producteur est requis pour confirmer une livraison."
+        )
+    order_id = payload.get("order_id")
+    if not order_id:
+        raise ValueError("Identifiant de commande manquant.")
+    tool_name = ToolResolver.resolve_name("confirm_delivery_and_payment")
+    return tool_name, {"producer_phone": context.phone, "order_id": str(order_id)}
+
+
+@register_action("PRODUCER_CANCEL_ORDER", mode="WRITE")
+def prep_producer_cancel_order(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
+    """Annulation producteur d'une commande confirmée (Phase 5, décision
+    produit #1). Même sobriété que `prep_confirm_delivery_and_payment` :
+    `order_id` est déjà résolu par
+    `flows/producer/flow.py::_resolve_order_for_cancellation`, et le motif
+    reste du texte LIBRE (aucune taxonomie inventée — cf. le registre de
+    décisions). Toute la règle métier vit dans
+    `services/database/producer.py::cancel_confirmed_order`."""
+    context = DomainContext.from_state(state)
+    if not context.phone:
+        raise ValueError(
+            "Le numéro de téléphone du producteur est requis pour annuler une commande."
+        )
+    order_id = payload.get("order_id")
+    if not order_id:
+        raise ValueError("Identifiant de commande manquant.")
+    reason = payload.get("reason") or payload.get("cancel_reason") or ""
+    tool_name = ToolResolver.resolve_name("cancel_confirmed_order")
+    return tool_name, {
+        "producer_phone": context.phone,
+        "order_id": str(order_id),
+        "reason": str(reason).strip(),
+    }
+
+
+@register_action("SALES_UNPUBLISH_PRODUCT", mode="WRITE")
+def prep_sales_unpublish_product(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
+    """Retrait d'un produit du catalogue (Product Completeness Phase 2,
+    2026-09-04). Même sobriété volontaire que
+    `prep_confirm_delivery_and_payment` ci-dessus : un seul champ
+    (`product_id`, déjà résolu par
+    `flows/producer/flow.py::_resolve_product_for_unpublish`). Toute la
+    règle métier (refus si commandes actives, archivage doux vs suppression
+    physique) vit dans `services/database/product.py::delete_product` —
+    jamais réimplémentée ici."""
+    context = DomainContext.from_state(state)
+    if not context.phone:
+        raise ValueError(
+            "Le numéro de téléphone du producteur est requis pour retirer un produit."
+        )
+    product_id = payload.get("product_id")
+    if not product_id:
+        raise ValueError("Identifiant de produit manquant.")
+    tool_name = ToolResolver.resolve_name("delete_product")
+    return tool_name, {"phone": context.phone, "product_id": str(product_id)}

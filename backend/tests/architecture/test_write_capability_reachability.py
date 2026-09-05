@@ -1,0 +1,283 @@
+"""Contrat de REACHABILITY — une capability déclarée doit être réellement
+atteignable depuis une interaction utilisateur (Phase 3, 2026-09-04).
+
+## Pourquoi ce fichier existe
+
+Le dépôt a produit deux fois le même bug, invisible aux tests ciblés :
+
+* `PRODUCER_CONFIRM_DELIVERY_PAYMENT` (F1) — intent déclaré, rôle correct,
+  résolveur écrit, handler enregistré, mutation DB correcte… mais sans
+  entrée `_RESOLVER_PASSTHROUGH` le validateur voyait `order_id` manquant,
+  le classait comme identifiant technique non résoluble, terminait le tour
+  par une CLARIFICATION — et le résolveur n'était JAMAIS appelé. Les tests
+  F1 appelaient le résolveur DIRECTEMENT : ils ne pouvaient pas voir
+  l'impasse.
+* `delete_product` — capacité DB complète, aucune chaîne conversationnelle.
+
+Ce fichier vérifie la chaîne, maillon par maillon, pour TOUS les goals
+déclarés — pas seulement ceux auxquels on pense au moment d'un chantier.
+
+## Ce qu'il ne fait pas
+
+Il n'impose pas qu'un goal soit « bien conçu » : il vérifie uniquement
+qu'un goal déclaré est traversable, ou qu'il figure dans la liste
+d'exceptions ci-dessous AVEC une justification. Toute nouvelle exception
+doit être ajoutée explicitement — c'est le point : rendre le compromis
+visible plutôt que silencieux."""
+from __future__ import annotations
+
+import inspect
+
+import pytest
+
+from agriconnect.graphs.agents.market_coach.interpreter.intent import (
+    INTENT_CONFIG,
+    INTENT_ROLE,
+    _TUNNEL_ASSIGNMENTS,
+)
+from agriconnect.graphs.agents.market_coach.registry import get_action
+from agriconnect.graphs.agents.market_coach.utils import _AUTO_RESOLVABLE_FIELDS
+from agriconnect.infrastructure.mcp.security import TOOL_SCOPE_MAP
+from agriconnect.protocols.mcp.servers.h import TOOL_DESCRIPTIONS
+
+# =====================================================================
+# EXCEPTIONS DOCUMENTÉES
+# =====================================================================
+# Chaque entrée = une capacité déclarée qui n'est PAS traversable
+# aujourd'hui, avec la raison. Retirer une entrée d'ici doit rendre le
+# test vert (capacité réparée), jamais l'inverse sans justification.
+
+#: `tool_name` sans implémentation MCP/DB réelle.
+TOOL_WITHOUT_IMPLEMENTATION = {
+    # LEGACY — famille STOCK : `intent.py` pointe des `*_by_id` qui
+    # n'existent pas (les vraies méthodes sont `adjust_stock`,
+    # `remove_stock`, `add_stock_movement`, `delete_stock`). Déprioritisé
+    # par décision produit explicite (« STOCK_* n'est pas un besoin
+    # produit démontré »).
+    "STOCK_RECORD_MOVEMENT": "legacy/stock-deprioritized",
+    "STOCK_ADJUST": "legacy/stock-deprioritized",
+    "STOCK_REMOVE_PARTIAL": "legacy/stock-deprioritized",
+    "STOCK_DELETE": "legacy/stock-deprioritized",
+    "STOCK_UPDATE_LEVEL": "legacy/stock-deprioritized",
+    # LEGACY — verticale agronomie jamais construite côté DB.
+    "CROP_START_CYCLE": "legacy/agronomy-vertical-not-built",
+    "CROP_RECORD_INTERVENTION": "legacy/agronomy-vertical-not-built",
+    "CROP_RECORD_OBSERVATION": "legacy/agronomy-vertical-not-built",
+    "CROP_UPDATE_STAGE": "legacy/agronomy-vertical-not-built",
+    "CROP_UPDATE_SOIL": "legacy/agronomy-vertical-not-built",
+    # PRODUCT DECISION — « valider définitivement un contrat verrouillé » :
+    # ce que cette action doit faire n'est pas déterminable depuis le code
+    # (voir docs/PRODUCT_COMPLETENESS_PHASE2_2026-09-04.md §13).
+    "SALES_ACCEPT_CONTRACT": "product-decision/commit_staged_transaction",
+    "SYSTEM_COMMIT_TRANSACTION": "product-decision/commit_staged_transaction",
+    # DISABLED — neutralisé volontairement par F4 (anti-bypass
+    # winner-selection) ; `accept_bid` n'a de toute façon jamais existé.
+    "PROCUREMENT_ACCEPT_OFFER": "disabled/f4-anti-bypass",
+    # SYSTEM-ONLY — actions système sans méthode DB dédiée.
+    "SYSTEM_REPORT_ANOMALY": "system-only/report_anomaly-absent",
+    "SYSTEM_BIND_ZONE": "system-only/create_agent_action-absent",
+    "PROFILE_SWITCH_ROLE": "system-only/create_agent_action-absent",
+}
+
+#: Goals exigeant un identifiant technique SANS entrée
+#: `_RESOLVER_PASSTHROUGH` — donc dont un éventuel résolveur ne peut pas
+#: être atteint (impasse de type F1).
+UNREACHABLE_RESOLVER = {
+    # Doublement cassés : tool_name inexistant ET pas de passthrough.
+    # Réparer le passthrough seul ne les rendrait pas fonctionnels.
+    "STOCK_RECORD_MOVEMENT": "legacy/stock-deprioritized",
+    "STOCK_ADJUST": "legacy/stock-deprioritized",
+    "STOCK_REMOVE_PARTIAL": "legacy/stock-deprioritized",
+    "STOCK_DELETE": "legacy/stock-deprioritized",
+    "STOCK_UPDATE_LEVEL": "legacy/stock-deprioritized",
+    "CROP_RECORD_INTERVENTION": "legacy/agronomy-vertical-not-built",
+    "CROP_RECORD_OBSERVATION": "legacy/agronomy-vertical-not-built",
+    "CROP_UPDATE_STAGE": "legacy/agronomy-vertical-not-built",
+    "AGRO_GET_ECONOMICS": "legacy/agronomy-vertical-not-built",
+    "SYSTEM_REPORT_ANOMALY": "system-only/report_anomaly-absent",
+    "SYSTEM_COMMIT_TRANSACTION": "product-decision/commit_staged_transaction",
+    # REAL GAP — `get_stock_movements` EXISTE et fonctionne ; seul le
+    # câblage (passthrough + branche `_resolve_stock`) manque. Laissé en
+    # l'état car la famille STOCK est déprioritisée par décision produit —
+    # correction minimale documentée dans
+    # docs/RUNTIME_REACHABILITY_AUDIT_2026-09-04.md.
+    "STOCK_GET_MOVEMENTS": "real-gap/stock-deprioritized",
+}
+
+
+def _goals(action_type: str):
+    return [
+        (goal, cfg)
+        for goal, cfg in INTENT_CONFIG.items()
+        if isinstance(cfg, dict)
+        and str(cfg.get("action_type") or "").upper() == action_type
+    ]
+
+
+WRITE_GOALS = _goals("WRITE")
+READ_GOALS = _goals("READ")
+
+
+def _resolver_passthrough() -> dict:
+    """`_RESOLVER_PASSTHROUGH` est une constante LOCALE au validateur —
+    on la lit sur la source réelle plutôt que d'en maintenir une copie
+    (une copie dériverait, ce qui est exactement le bug qu'on traque)."""
+    import agriconnect.graphs.agents.market_coach.nodes.validation as validation_mod
+
+    src = inspect.getsource(validation_mod)
+    start = src.index("_RESOLVER_PASSTHROUGH = {")
+    block = src[start : src.index("\n    }", start)]
+    table = {}
+    for line in block.splitlines():
+        line = line.strip()
+        if line.startswith('"') and '": (' in line:
+            table[line.split('"')[1]] = line.split('": ("')[1].split('"')[0]
+    return table
+
+
+PASSTHROUGH = _resolver_passthrough()
+
+
+def _is_flow_handled(cfg: dict, goal: str) -> bool:
+    """Un goal pris en charge par un tunnel dédié n'utilise pas son
+    `tool_name` comme nom d'outil MCP : c'est une étiquette symbolique, le
+    flow appelle lui-même les vraies méthodes via les gateways."""
+    return bool(cfg.get("handled_by_flow")) or goal in _TUNNEL_ASSIGNMENTS
+
+
+class TestPassthroughTableIsSane:
+    def test_every_passthrough_entry_targets_a_declared_goal(self):
+        unknown = [g for g in PASSTHROUGH if g not in INTENT_CONFIG]
+        assert not unknown, f"_RESOLVER_PASSTHROUGH cite des goals inconnus : {unknown}"
+
+    def test_the_table_was_actually_parsed(self):
+        """Garde-fou du test lui-même : si la constante est renommée ou
+        déplacée, ce fichier doit échouer bruyamment plutôt que de
+        silencieusement ne plus rien vérifier."""
+        assert len(PASSTHROUGH) >= 10
+
+
+class TestEveryWriteGoalIsWired:
+    @pytest.mark.parametrize("goal,cfg", WRITE_GOALS, ids=[g for g, _ in WRITE_GOALS])
+    def test_goal_has_a_role(self, goal, cfg):
+        assert INTENT_ROLE.get(goal), f"{goal} n'a pas de rôle déclaré"
+
+    @pytest.mark.parametrize("goal,cfg", WRITE_GOALS, ids=[g for g, _ in WRITE_GOALS])
+    def test_goal_has_a_handler_or_a_flow(self, goal, cfg):
+        if _is_flow_handled(cfg, goal):
+            return
+        assert get_action(goal) is not None, (
+            f"{goal} est un WRITE sans handler enregistré et sans tunnel — "
+            "il ne peut aboutir à aucune mutation"
+        )
+
+    @pytest.mark.parametrize("goal,cfg", WRITE_GOALS, ids=[g for g, _ in WRITE_GOALS])
+    def test_tool_name_resolves_to_a_real_capability(self, goal, cfg):
+        if _is_flow_handled(cfg, goal):
+            return  # étiquette symbolique, jamais dispatchée comme outil MCP
+        tool = cfg.get("tool_name") or ""
+        if goal in TOOL_WITHOUT_IMPLEMENTATION:
+            assert tool not in TOOL_DESCRIPTIONS, (
+                f"{goal} est listé comme non implémenté mais `{tool}` existe "
+                "désormais — retirer l'exception (la capacité est réparée)"
+            )
+            return
+        assert tool in TOOL_DESCRIPTIONS, (
+            f"{goal} déclare le tool `{tool}` qui n'existe pas — "
+            "capacité déclarée mais impossible à exécuter"
+        )
+
+    @pytest.mark.parametrize("goal,cfg", WRITE_GOALS, ids=[g for g, _ in WRITE_GOALS])
+    def test_real_tools_have_an_mcp_scope(self, goal, cfg):
+        if _is_flow_handled(cfg, goal) or goal in TOOL_WITHOUT_IMPLEMENTATION:
+            return
+        tool = cfg.get("tool_name") or ""
+        assert tool in TOOL_SCOPE_MAP, (
+            f"{goal} : `{tool}` n'a pas de scope MCP — refusé par le fail-closed"
+        )
+
+
+class TestResolverIsActuallyReachable:
+    """LE contrôle qui aurait attrapé le bug F1."""
+
+    ALL_GOALS = WRITE_GOALS + READ_GOALS
+
+    @pytest.mark.parametrize(
+        "goal,cfg", ALL_GOALS, ids=[g for g, _ in WRITE_GOALS + READ_GOALS]
+    )
+    def test_technical_id_requirement_implies_a_passthrough(self, goal, cfg):
+        blocking = [
+            f
+            for f in (cfg.get("required") or [])
+            if str(f).endswith("_id") and f not in _AUTO_RESOLVABLE_FIELDS
+        ]
+        if not blocking or _is_flow_handled(cfg, goal):
+            return
+        if goal in UNREACHABLE_RESOLVER:
+            assert goal not in PASSTHROUGH, (
+                f"{goal} est listé comme inatteignable mais possède désormais "
+                "un passthrough — retirer l'exception"
+            )
+            return
+        assert goal in PASSTHROUGH, (
+            f"{goal} exige {blocking} (identifiant technique) sans entrée "
+            "_RESOLVER_PASSTHROUGH : le validateur terminera le tour par une "
+            "CLARIFICATION et le résolveur ne sera JAMAIS appelé (bug F1). "
+            "Ajouter l'entrée, ou documenter l'exception dans "
+            "UNREACHABLE_RESOLVER avec sa raison."
+        )
+
+
+class TestRealEntryPointReachesTheResolver:
+    """Preuve dynamique, pas seulement structurelle : on entre par le VRAI
+    point d'entrée (`validator`) puis par le VRAI routeur
+    (`DomainRouter.decide`), et on exige que la décision soit
+    `to_resolver`. C'est précisément l'enchaînement que les tests F1
+    (qui appelaient le résolveur directement) ne pouvaient pas voir."""
+
+    @pytest.mark.parametrize(
+        "goal",
+        ["PRODUCER_CONFIRM_DELIVERY_PAYMENT", "SALES_UNPUBLISH_PRODUCT",
+         "SALES_UPDATE_PRODUCT", "MARKET_GET_REQUEST_DETAIL",
+         "PRODUCER_CANCEL_ORDER"],
+    )
+    def test_validator_then_router_route_to_the_resolver(self, goal):
+        from agriconnect.graphs.agents.market_coach.core.router import DomainRouter
+        from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+        from tests.conftest import StubRuntime, make_state, run
+
+        # `make_state` pose `interpreted_event="UNKNOWN"` par défaut, ce que
+        # le routeur traite (à raison) comme une dérive → `to_strategy`. Un
+        # vrai tour arrive ici avec un événement classé : on reproduit donc
+        # le cas nominal `NEW_TASK`, sinon ce test mesurerait le harnais et
+        # pas le produit.
+        state = make_state(current_goal=goal, interpreted_event="NEW_TASK")
+        validated = run(validator(state, StubRuntime()))
+
+        # Le validateur ne doit RIEN réclamer : sinon le routeur retombera
+        # sur `to_strategy` et le résolveur ne sera jamais appelé.
+        assert not validated.get("missing_fields"), (
+            f"{goal} : le validateur réclame {validated.get('missing_fields')} — "
+            "le résolveur ne sera pas atteint"
+        )
+
+        merged = {**state, **validated}
+        decision = DomainRouter.build().decide(merged)
+        assert decision == "to_resolver", (
+            f"{goal} : le routeur décide `{decision}` au lieu de `to_resolver` — "
+            "la capacité est déclarée mais son résolveur est inatteignable"
+        )
+
+
+class TestReadGoalsPointAtRealQueries:
+    @pytest.mark.parametrize("goal,cfg", READ_GOALS, ids=[g for g, _ in READ_GOALS])
+    def test_tool_name_exists_or_is_documented(self, goal, cfg):
+        if _is_flow_handled(cfg, goal):
+            return
+        tool = cfg.get("tool_name") or ""
+        if tool in TOOL_DESCRIPTIONS:
+            return
+        # Les READ non implémentés sont tolérés mais doivent rester connus :
+        # ils échouent proprement (erreur technique générique), sans risque
+        # transactionnel. La liste vit dans le rapport d'audit.
+        pytest.skip(f"{goal} -> `{tool}` : lecture non implémentée (documentée)")

@@ -154,6 +154,29 @@ INTENT_CONFIG = {
             "unit": "unité (optionnel)",
         },
     },
+    # (2026-09-04, Product Completeness Phase 2) : RETRAIT d'un produit du
+    # catalogue. La méthode DB `delete_product` (services/database/product.py)
+    # existait déjà, complète et sûre — verrou FOR UPDATE, contrôle de
+    # propriété, REFUS si des commandes actives existent, archivage doux
+    # (`is_available=False`, historique préservé) si le produit a déjà été
+    # commandé, suppression physique seulement s'il n'a jamais servi. Aucun
+    # goal ne l'atteignait : un producteur ne pouvait donc JAMAIS retirer un
+    # produit épuisé/erroné de son catalogue, alors que les acheteurs, eux,
+    # continuaient de le voir. Le `product_id` est résolu conversationnellement
+    # (`flows/producer/flow.py::_resolve_product_for_unpublish`), jamais
+    # demandé comme UUID brut — voir aussi `nodes/validation.py`
+    # (`_RESOLVER_PASSTHROUGH`).
+    "SALES_UNPUBLISH_PRODUCT": {
+        "tool_name": "delete_product",
+        "required": ["product_id"],
+        "action_type": "WRITE",
+        "requires_farm": False,
+        "lifecycle_mode": "UPDATE",
+        "label": "Retrait d'un produit de mon catalogue de vente",
+        "label_map": {
+            "product_id": "référence du produit à retirer",
+        },
+    },
     # Mise à jour d'une PRODUCTION FUTURE / lot (MarketOffer), distincte du
     # produit catalogue ci-dessus. Permet de corriger prix, quantité, NOM
     # (product), unité, date de disponibilité ou type (culture/élevage) d'un lot
@@ -191,6 +214,50 @@ INTENT_CONFIG = {
         "label": "Confirmation de livraison par code secret (débloque le paiement séquestré)",
         "label_map": {
             "otp_code": "code de livraison à 4 chiffres",
+        },
+    },
+    # (2026-09-04, clôture F1 — paiement à la livraison) : NE couvre PAS le
+    # même cas que PRODUCER_CONFIRM_DELIVERY_OTP ci-dessus (réservé aux
+    # commandes escrow — `payment_status` déjà `ESCROWED`, code secret déjà
+    # émis). Ce goal couvre les commandes en paiement CASH à la livraison
+    # (`payment_status="PENDING"`, aucun paiement en ligne) — RFQ gagnées
+    # (`select_winning_bid`) ou préorder confirmé hors-escrow
+    # (`confirm_preorder_draft`). Pas de tunnel dédié
+    # (`handled_by_flow` absent) : passe par le mécanisme GÉNÉRIQUE
+    # confirmation_gate/mcp_tool_executor, même précédent que
+    # `SALES_RECORD_DIRECT` — la résolution de QUELLE commande est visée
+    # (jamais "la dernière commande") vit dans
+    # `flows/producer/flow.py::_resolve_order_for_delivery_payment`.
+    # (2026-09-04, Phase 5 — décision produit #1) : le producteur annule une
+    # commande CONFIRMÉE qu'il ne peut pas honorer. `CONFIRMED` était le SEUL
+    # état du produit sans sortie côté producteur : ne pouvant ni livrer ni se
+    # rétracter, il devait demander à l'acheteur d'annuler. Symétrie stricte
+    # du chemin acheteur (`BUYER_CANCEL_ORDER`) — aucun nouveau statut, aucun
+    # remboursement (paiement à la livraison). `order_id` est résolu
+    # conversationnellement (`_resolve_order_for_cancellation`), jamais
+    # demandé comme UUID — voir `_RESOLVER_PASSTHROUGH` dans
+    # `nodes/validation.py`.
+    "PRODUCER_CANCEL_ORDER": {
+        "tool_name": "cancel_confirmed_order",
+        "required": ["order_id"],
+        "action_type": "WRITE",
+        "requires_farm": False,
+        "lifecycle_mode": "UPDATE",
+        "label": "Annulation d'une commande que je ne peux pas honorer",
+        "label_map": {
+            "order_id": "numéro de la commande à annuler",
+            "reason": "motif (rupture, aléa de production…)",
+        },
+    },
+    "PRODUCER_CONFIRM_DELIVERY_PAYMENT": {
+        "tool_name": "confirm_delivery_and_payment",
+        "required": ["order_id"],
+        "action_type": "WRITE",
+        "requires_farm": False,
+        "lifecycle_mode": "UPDATE",
+        "label": "Confirmation de livraison et paiement reçu à la livraison (cash, sans escrow)",
+        "label_map": {
+            "order_id": "numéro de la commande",
         },
     },
     # =======================================================================
@@ -916,8 +983,11 @@ INTENT_ROLE = {
     "SALES_ACCEPT_CONTRACT": "PRODUCER",
     "SALES_GET_CATALOG": "PRODUCER",
     "SALES_UPDATE_PRODUCT": "PRODUCER",
+    "SALES_UNPUBLISH_PRODUCT": "PRODUCER",
     "SALES_UPDATE_PRODUCTION": "PRODUCER",
     "PRODUCER_CONFIRM_DELIVERY_OTP": "PRODUCER",
+    "PRODUCER_CONFIRM_DELIVERY_PAYMENT": "PRODUCER",
+    "PRODUCER_CANCEL_ORDER": "PRODUCER",
     "MARKET_GET_MY_PROPOSALS": "PRODUCER",
     # PROCUREMENT — buyer
     "PROCUREMENT_CREATE_REQUEST": "BUYER",

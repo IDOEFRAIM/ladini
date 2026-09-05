@@ -29,7 +29,7 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuRequest,
 )
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
-from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+from agriconnect.domain.quantity_unit import (
     parse_quantity_unit_from_text as _parse_qty_unit,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment import (
@@ -39,6 +39,7 @@ from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
     AuctionGateway,
     EscrowGateway,
     FarmGateway,
+    OrderTrackingGateway,
     ProductGateway,
     StockGateway,
 )
@@ -527,6 +528,350 @@ async def _resolve_stock(
                 for i, c in enumerate(candidates, start=1)
             ],
             kind="stock",
+            preformatted_text=menu,
+        ),
+    }
+
+
+# =====================================================================
+# CLÔTURE PAIEMENT-À-LA-LIVRAISON (2026-09-04)
+# =====================================================================
+
+
+async def _resolve_order_for_delivery_payment(
+    mc_runtime: MarketRuntime, phone: str, payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Résout QUELLE commande le producteur vise pour
+    `confirm_delivery_and_payment` — jamais "la dernière commande" (mandat
+    §20 : un message comme "c'est payé" ne doit jamais muter une commande
+    choisie par un simple `ORDER BY created_at DESC`). Même gabarit exact
+    que `_resolve_stock` ci-dessus : auto-sélection si un seul candidat
+    ACTIONNABLE existe, résolution par `selection_index` sur une réponse à
+    un menu déjà affiché, sinon un nouveau menu numéroté strict.
+
+    Ne montre QUE les commandes réellement actionnables par cette action
+    précise — `status=="CONFIRMED"` ET `payment_status=="PENDING"` (jamais
+    une commande déjà `COMPLETED`, ni une commande escrow `ESCROWED`/
+    `PAID_OUT`, qui ne relève JAMAIS de ce chemin, voir
+    `services/database/producer.py::confirm_delivery_and_payment`).
+    Réutilise `get_producer_orders` tel quel (déjà audité/corrigé) plutôt
+    que d'ajouter un paramètre de filtre supplémentaire : le filtrage
+    `payment_status` se fait ici, côté conversation, sur les données déjà
+    renvoyées.
+    """
+    if not phone:
+        return {
+            "status": "ERROR",
+            "validation_errors": ["missing_user_phone"],
+            "response_strategy": "ERROR",
+            "final_response": "Numéro de téléphone introuvable, impossible d'accéder à vos commandes.",
+            "ag_ui_component": None,
+        }
+
+    gw = OrderTrackingGateway(mc_runtime)
+    result = await gw.get_producer_orders(phone=str(phone), status="CONFIRMED")
+    all_orders = result.get("data") or []
+    candidates = [
+        o
+        for o in all_orders
+        if str(o.get("payment_status") or "").upper() == "PENDING"
+    ]
+
+    if not candidates:
+        return {
+            "status": "ERROR",
+            "validation_errors": ["no_order_pending_payment_at_delivery"],
+            "response_strategy": "ERROR",
+            "final_response": (
+                "Aucune commande confirmée n'est actuellement en attente de "
+                "livraison/paiement à la livraison."
+            ),
+            "ag_ui_component": None,
+        }
+
+    chosen = None
+    if len(candidates) == 1:
+        chosen = candidates[0]
+    else:
+        idx = payload.get("selection_index")
+        try:
+            idx_int = int(idx) if idx is not None else None
+        except (TypeError, ValueError):
+            idx_int = None
+        if idx_int is not None and 1 <= idx_int <= len(candidates):
+            chosen = candidates[idx_int - 1]
+
+    if chosen:
+        order_id = chosen.get("order_id")
+        new_payload = dict(payload)
+        new_payload["order_id"] = str(order_id)
+        new_payload.pop("selection_index", None)
+        new_payload.pop("selected_value", None)
+        return {
+            "status": "PLANNING",
+            "transaction_payload": new_payload,
+            "ag_ui_component": None,
+        }
+
+    # Plus d'une commande éligible : menu de sélection strict — jamais de
+    # choix implicite.
+    mapping: Dict[str, str] = {}
+    lines = ["📦 *Plusieurs commandes en attente. Choisissez le bon numéro :*"]
+    options: List[MenuOption] = []
+    for i, o in enumerate(candidates, start=1):
+        ref = o.get("reference") or str(o.get("order_id") or "")[:8].upper()
+        amount = o.get("total_amount")
+        currency = o.get("currency") or "XOF"
+        buyer = o.get("buyer_name") or "Acheteur"
+        label = f"#{ref} — {amount} {currency} ({buyer})"
+        lines.append(f"{i}. {label}")
+        mapping[str(i)] = str(o.get("order_id"))
+        options.append(MenuOption(index=str(i), label=label, value=mapping[str(i)]))
+
+    menu = "\n".join(lines)
+    return {
+        "status": "WAITING_INPUT",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
+        "response_strategy": "SELECTION_MENU",
+        "final_response": menu,
+        "ag_ui_component": None,
+        "pending_menu": MenuRequest(
+            title="Commandes en attente de livraison/paiement",
+            options=options,
+            kind="order_delivery_payment",
+            preformatted_text=menu,
+        ),
+    }
+
+
+# =====================================================================
+# ANNULATION PRODUCTEUR D'UNE COMMANDE CONFIRMÉE (2026-09-04, Phase 5)
+# =====================================================================
+
+
+async def _resolve_order_for_cancellation(
+    mc_runtime: MarketRuntime, phone: str, payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Résout QUELLE commande le producteur veut annuler.
+
+    Même gabarit exact que `_resolve_order_for_delivery_payment` (dont ce
+    flux est le pendant « je ne peux pas honorer ») : auto-sélection s'il
+    n'y a qu'une commande annulable, résolution par `selection_index` sur
+    une réponse à un menu déjà affiché, sinon menu numéroté strict —
+    jamais de choix implicite sur une action destructrice. La confirmation
+    explicite est ensuite assurée par le `confirmation_gate` générique.
+
+    Candidates = exactement les mêmes que pour la clôture livraison/
+    paiement (`status=="CONFIRMED"` ET `payment_status=="PENDING"`) : une
+    commande escrow ne relève jamais de ce chemin, et une commande déjà
+    `COMPLETED`/`CANCELLED` n'est plus annulable.
+    """
+    if not phone:
+        return {
+            "status": "ERROR",
+            "validation_errors": ["missing_user_phone"],
+            "response_strategy": "ERROR",
+            "final_response": "Numéro de téléphone introuvable, impossible d'accéder à vos commandes.",
+            "ag_ui_component": None,
+        }
+
+    gw = OrderTrackingGateway(mc_runtime)
+    result = await gw.get_producer_orders(phone=str(phone), status="CONFIRMED")
+    all_orders = result.get("data") or []
+    candidates = [
+        o
+        for o in all_orders
+        if str(o.get("payment_status") or "").upper() == "PENDING"
+    ]
+
+    if not candidates:
+        return {
+            "status": "ERROR",
+            "validation_errors": ["no_cancellable_order"],
+            "response_strategy": "ERROR",
+            "final_response": (
+                "Aucune commande confirmée en attente de livraison — il n'y a "
+                "rien à annuler."
+            ),
+            "ag_ui_component": None,
+        }
+
+    chosen = None
+    if len(candidates) == 1:
+        chosen = candidates[0]
+    else:
+        idx = payload.get("selection_index")
+        try:
+            idx_int = int(idx) if idx is not None else None
+        except (TypeError, ValueError):
+            idx_int = None
+        if idx_int is not None and 1 <= idx_int <= len(candidates):
+            chosen = candidates[idx_int - 1]
+
+    if chosen:
+        new_payload = dict(payload)
+        new_payload["order_id"] = str(chosen.get("order_id"))
+        new_payload.pop("selection_index", None)
+        new_payload.pop("selected_value", None)
+        return {
+            "status": "PLANNING",
+            "transaction_payload": new_payload,
+            "ag_ui_component": None,
+        }
+
+    mapping: Dict[str, str] = {}
+    options: List[MenuOption] = []
+    lines = ["❌ *Quelle commande souhaitez-vous annuler ? Indiquez le numéro :*"]
+    for i, o in enumerate(candidates, start=1):
+        ref = o.get("reference") or str(o.get("order_id") or "")[:8].upper()
+        amount = o.get("total_amount")
+        currency = o.get("currency") or "XOF"
+        buyer = o.get("buyer_name") or "Acheteur"
+        label = f"#{ref} — {amount} {currency} ({buyer})"
+        lines.append(f"{i}. {label}")
+        mapping[str(i)] = str(o.get("order_id"))
+        options.append(MenuOption(index=str(i), label=label, value=mapping[str(i)]))
+
+    menu = "\n".join(lines)
+    return {
+        "status": "WAITING_INPUT",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
+        "response_strategy": "SELECTION_MENU",
+        "final_response": menu,
+        "available_mapping": mapping,
+        "ag_ui_component": None,
+        "pending_menu": MenuRequest(
+            title="Commandes annulables",
+            options=options,
+            kind="order_cancellation",
+            preformatted_text=menu,
+        ),
+    }
+
+
+# =====================================================================
+# RETRAIT D'UN PRODUIT DU CATALOGUE (2026-09-04)
+# =====================================================================
+
+
+async def _resolve_product_for_unpublish(
+    mc_runtime: MarketRuntime, phone: str, payload: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Résout QUEL produit le producteur veut retirer de son catalogue.
+
+    Même gabarit exact que `_resolve_stock` /
+    `_resolve_order_for_delivery_payment` : auto-sélection s'il n'y a qu'un
+    seul produit, résolution par `selection_index` sur une réponse à un menu
+    déjà affiché, sinon menu numéroté strict — jamais de choix implicite
+    ("mon dernier produit") sur une action destructrice. La confirmation
+    explicite est assurée ensuite par `confirmation_gate` générique, et
+    toute la règle métier (refus si commandes actives, archivage doux si
+    historique, suppression physique sinon) reste dans
+    `services/database/product.py::delete_product`.
+    """
+    if not phone:
+        return {
+            "status": "ERROR",
+            "validation_errors": ["missing_user_phone"],
+            "response_strategy": "ERROR",
+            "final_response": "Numéro de téléphone introuvable, impossible d'accéder à votre catalogue.",
+            "ag_ui_component": None,
+        }
+
+    try:
+        result = await ProductGateway(mc_runtime).get_my_products(str(phone))
+    except Exception as exc:
+        logger.error("SALES_UNPUBLISH_PRODUCT: get_my_products a échoué: %s", exc)
+        return {
+            "status": "ERROR",
+            "validation_errors": ["catalog_unavailable"],
+            "response_strategy": "ERROR",
+            "final_response": "Impossible de charger votre catalogue pour le moment. Réessayez dans un instant.",
+            "ag_ui_component": None,
+        }
+
+    raw_items = (result or {}).get("data") or []
+    # `get_my_products` est une lecture PARTAGÉE (menu de modification,
+    # historique) : elle renvoie volontairement TOUT, y compris les produits
+    # déjà archivés (`is_available=False`, cf. `delete_product`) et les
+    # produits fantômes créés par `record_sale` pour ancrer une vente
+    # directe. On filtre donc ici, côté conversation — jamais en modifiant la
+    # lecture partagée — pour ne proposer que ce qui est réellement retirable
+    # (même approche que `_resolve_order_for_delivery_payment`).
+    items = [
+        it
+        for it in raw_items
+        if isinstance(it, dict) and it.get("is_available", True)
+    ] if isinstance(raw_items, list) else []
+    if not items:
+        return {
+            "status": "ERROR",
+            "validation_errors": ["empty_catalog"],
+            "response_strategy": "ERROR",
+            "final_response": "Aucun produit publié dans votre catalogue — il n'y a rien à retirer.",
+            "ag_ui_component": None,
+        }
+
+    chosen = None
+    if len(items) == 1:
+        chosen = items[0]
+    else:
+        idx = payload.get("selection_index")
+        try:
+            idx_int = int(idx) if idx is not None else None
+        except (TypeError, ValueError):
+            idx_int = None
+        if idx_int is not None and 1 <= idx_int <= len(items):
+            chosen = items[idx_int - 1]
+
+    if chosen:
+        product_id = chosen.get("id") or chosen.get("product_id")
+        if not product_id:
+            return {
+                "status": "ERROR",
+                "validation_errors": ["product_not_resolved"],
+                "response_strategy": "ERROR",
+                "final_response": "Erreur technique de résolution du produit.",
+                "ag_ui_component": None,
+            }
+        new_payload = dict(payload)
+        new_payload["product_id"] = str(product_id)
+        new_payload.pop("selection_index", None)
+        new_payload.pop("selected_value", None)
+        return {
+            "status": "PLANNING",
+            "transaction_payload": new_payload,
+            "ag_ui_component": None,
+        }
+
+    mapping: Dict[str, str] = {}
+    options: List[MenuOption] = []
+    lines = ["🗑️ *Quel produit souhaitez-vous retirer ? Indiquez le numéro :*"]
+    for i, it in enumerate(items, start=1):
+        pid = str(it.get("id") or it.get("product_id") or "")
+        if not pid:
+            continue
+        name = it.get("name") or "Produit"
+        qty = it.get("quantity_for_sale") or it.get("quantity")
+        unit = str(it.get("unit") or "KG").upper()
+        qty_str = f" — {qty} {unit}" if qty not in (None, "") else ""
+        label = f"{name}{qty_str}"
+        lines.append(f"{i}. *{name}*{qty_str}")
+        mapping[str(i)] = pid
+        options.append(MenuOption(index=str(i), label=label, value=pid))
+
+    menu = "\n".join(lines)
+    return {
+        "status": "WAITING_INPUT",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
+        "response_strategy": "SELECTION_MENU",
+        "final_response": menu,
+        "available_mapping": mapping,
+        "ag_ui_component": None,
+        "pending_menu": MenuRequest(
+            title="Produits de mon catalogue",
+            options=options,
+            kind="catalog_product",
             preformatted_text=menu,
         ),
     }
@@ -1560,6 +1905,13 @@ async def producer_context_resolver(
             mc_runtime, str(phone), payload, working, raw_text, event
         )
 
+    # 2c-bis. Retrait d'un produit du catalogue (2026-09-04, Product
+    #     Completeness Phase 2) : résout QUEL produit est visé, puis laisse
+    #     confirmation_gate/mcp_tool_executor génériques exécuter
+    #     `delete_product` (dont toute la règle métier vit côté DB).
+    if goal == "SALES_UNPUBLISH_PRODUCT" and not payload.get("product_id"):
+        return await _resolve_product_for_unpublish(mc_runtime, str(phone), payload)
+
     # 2d. Escrow (Paydunya) : le producteur transmet le code de livraison à
     #     4 chiffres pour débloquer ses fonds — flux auto-suffisant à un
     #     seul échange (voir _resolve_delivery_otp).
@@ -1575,6 +1927,17 @@ async def producer_context_resolver(
     # 3. Validation finale du contrat (cas où le producteur doit désigner un bid précis)
     if goal == "SALES_ACCEPT_CONTRACT" and not payload.get("bid_id"):
         return await _resolve_bid(mc_runtime, str(phone), payload)
+
+    # 3bis. Clôture paiement-à-la-livraison (2026-09-04) — résout QUELLE
+    # commande est visée (jamais "la dernière", mandat §20) avant de
+    # tomber sur confirmation_gate/mcp_tool_executor génériques.
+    if goal == "PRODUCER_CONFIRM_DELIVERY_PAYMENT" and not payload.get("order_id"):
+        return await _resolve_order_for_delivery_payment(mc_runtime, str(phone), payload)
+
+    # 3ter. Annulation producteur d'une commande confirmée (Phase 5) — même
+    # résolution de cible que ci-dessus, jamais "la dernière commande".
+    if goal == "PRODUCER_CANCEL_ORDER" and not payload.get("order_id"):
+        return await _resolve_order_for_cancellation(mc_runtime, str(phone), payload)
 
     # 4. Gestion des stocks physiques (mouvements / ajustements / suppressions partielles)
     if goal in {
@@ -1611,5 +1974,8 @@ __all__ = [
     "_resolve_my_bids",
     "_resolve_bid",
     "_resolve_stock",
+    "_resolve_order_for_delivery_payment",
+    "_resolve_order_for_cancellation",
+    "_resolve_product_for_unpublish",
     "producer_context_resolver",
 ]

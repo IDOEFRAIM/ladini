@@ -185,6 +185,21 @@ SCHEMA_COLUMN_DDL = (
     # créée avant cette colonne) : comportement historique inchangé.
     "ALTER TABLE marketplace.order_items ADD COLUMN IF NOT EXISTS tier_id TEXT",
     "ALTER TABLE marketplace.order_items ADD COLUMN IF NOT EXISTS base_unit_quantity NUMERIC(14,3)",
+    # Corrélation de checkout (2026-09-05, Phase 6A — « une commande par
+    # producteur ») : un panier contenant des produits de plusieurs
+    # producteurs produit désormais UNE commande par producteur, toutes
+    # marquées du même `checkout_group_id`. Ce n'est PAS un nouveau cycle de
+    # vie transactionnel — chaque commande reste totalement indépendante
+    # après confirmation ; la colonne sert uniquement à retrouver, confirmer
+    # et présenter ensemble les commandes issues d'un même checkout.
+    # NULLABLE et jamais rétro-remplie : toute commande antérieure (y compris
+    # les anciennes multi-producteurs, volontairement conservées telles
+    # quelles — voir docs/MULTI_PRODUCER_ORDER_DECISION_2026-09-05.md §18)
+    # garde NULL, ce qui se lit « groupe d'une seule commande » et reproduit
+    # exactement le comportement historique.
+    "ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS checkout_group_id UUID",
+    "CREATE INDEX IF NOT EXISTS ix_orders_checkout_group "
+    "ON marketplace.orders (checkout_group_id) WHERE checkout_group_id IS NOT NULL",
 )
 
 

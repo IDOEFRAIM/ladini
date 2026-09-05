@@ -79,6 +79,14 @@ class _CapturingSession:
                 return product
         return None
 
+    async def execute(self, _stmt):
+        # (2026-09-04, F2) : `confirm_preorder_draft` résout désormais le(s)
+        # téléphone(s) producteur pour la notification post-confirmation —
+        # aucun producteur simulé dans ce test (pas son objet), la requête
+        # ne renvoie donc rien : la branche notification ne s'active pas,
+        # ce qui reste hors du périmètre de CE test (verrouillage/ordre).
+        return types.SimpleNamespace(first=lambda: None)
+
     async def flush(self):
         pass
 
@@ -95,7 +103,10 @@ def _service(session):
 
 
 def _product(pid, qty=1000.0):
-    return types.SimpleNamespace(id=pid, name=f"Produit-{str(pid)[:4]}", quantity_for_sale=qty, unit="KG")
+    return types.SimpleNamespace(
+        id=pid, name=f"Produit-{str(pid)[:4]}", quantity_for_sale=qty, unit="KG",
+        producer_id=None,  # hors périmètre de ce test (verrouillage/ordre, pas notification F2)
+    )
 
 
 class TestConfirmPreorderDraftLocksOrderAndProducts:
@@ -124,10 +135,12 @@ class TestConfirmPreorderDraftLocksOrderAndProducts:
         product_b = _product(pid_b)
 
         item_b = types.SimpleNamespace(
-            product_id=pid_b, quantity=5.0, price_at_sale=100.0, base_unit_quantity=None
+            product_id=pid_b, quantity=5.0, price_at_sale=100.0, base_unit_quantity=None,
+            product=product_b,
         )
         item_a = types.SimpleNamespace(
-            product_id=pid_a, quantity=5.0, price_at_sale=100.0, base_unit_quantity=None
+            product_id=pid_a, quantity=5.0, price_at_sale=100.0, base_unit_quantity=None,
+            product=product_a,
         )
         order = types.SimpleNamespace(
             id=uuid.uuid4(),
@@ -139,6 +152,11 @@ class TestConfirmPreorderDraftLocksOrderAndProducts:
             subtotal=0.0,
             total_amount=0.0,
             currency="XOF",
+            # (2026-09-05, Phase 6A) commande hors checkout groupé : la
+            # garantie anti-deadlock testée ici doit valoir AUSSI pour une
+            # commande seule (le tri porte désormais sur l'union des
+            # articles du groupe, qui vaut ici exactement cette commande).
+            checkout_group_id=None,
         )
         session = _CapturingSession(
             order=order, products_by_id={pid_a: product_a, pid_b: product_b}

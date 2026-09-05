@@ -12,16 +12,16 @@ import re as _re
 from typing import Any, Dict, Optional
 
 from agriconnect.graphs.agents.market_coach.core.slots import build_remap_dict
-from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+from agriconnect.domain.quantity_unit import (
     UNIT_SYNONYMS as _CANONICAL_UNIT_SYNONYMS,
 )
-from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+from agriconnect.domain.quantity_unit import (
     normalize_unit as _normalize_unit_impl,
 )
-from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+from agriconnect.domain.quantity_unit import (
     normalize_unit_token as _normalize_unit_token_impl,
 )
-from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+from agriconnect.domain.quantity_unit import (
     parse_quantity_unit_from_text,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment import (

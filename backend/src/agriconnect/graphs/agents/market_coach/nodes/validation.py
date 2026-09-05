@@ -206,6 +206,22 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
         # demandés comme UUID brut à l'utilisateur.
         "SALES_UPDATE_PRODUCTION": ("cycle_id", []),
         "SALES_UPDATE_PRODUCT": ("product_id", []),
+        # (2026-09-04, Product Completeness Phase 2) : MÊME impasse que celle
+        # décrite juste au-dessus, réintroduite par le chantier F1 —
+        # `PRODUCER_CONFIRM_DELIVERY_PAYMENT` déclare `required=["order_id"]`
+        # et possède bien un résolveur dédié
+        # (`flows/producer/flow.py::_resolve_order_for_delivery_payment`),
+        # mais sans cette entrée le validateur bloquait AVANT lui en
+        # réclamant un UUID de commande que le producteur ne peut pas
+        # connaître (`missing_fields` non vide -> le routeur retombait sur
+        # `to_strategy`, le résolveur n'était JAMAIS atteint). Idem pour
+        # `SALES_UNPUBLISH_PRODUCT` (`_resolve_product_for_unpublish`).
+        "PRODUCER_CONFIRM_DELIVERY_PAYMENT": ("order_id", []),
+        "SALES_UNPUBLISH_PRODUCT": ("product_id", []),
+        # (2026-09-04, Phase 5) : idem pour l'annulation producteur —
+        # `_resolve_order_for_cancellation` affiche la liste des commandes
+        # annulables, l'UUID n'est jamais demandé.
+        "PRODUCER_CANCEL_ORDER": ("order_id", []),
     }
     passthrough = _RESOLVER_PASSTHROUGH.get(goal_upper)
     if passthrough:

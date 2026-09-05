@@ -38,7 +38,7 @@ from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
 from agriconnect.graphs.agents.market_coach.core.tunnel_manager import (
     INTERRUPTION_CONFIDENCE_THRESHOLD,
 )
-from agriconnect.graphs.agents.market_coach.domain.pricing_tiers import (
+from agriconnect.graphs.agents.market_coach.domain.tier_interaction import (
     pending_pack_count_tier,
 )
 from agriconnect.graphs.agents.market_coach.domain.selection_actions import (
@@ -72,7 +72,7 @@ from agriconnect.graphs.agents.market_coach.interpreter.prompts import (
 from agriconnect.graphs.agents.market_coach.services.domain.product_validation import (
     _validate_and_sanitize_product,
 )
-from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+from agriconnect.domain.quantity_unit import (
     extract_deterministic_pricing_tiers,
     extract_unit_only_from_text,
     parse_compound_quantity,
@@ -137,6 +137,80 @@ _init_intent_to_goal_map(PRODUCER_INTENTS, BUYER_INTENTS, COMMON_INTENTS)
 # interne les utiliserait encore ailleurs.
 _DISABLED_INTENT_PREFIXES: frozenset = frozenset({"AGRO_", "FINANCE_", "SYSTEM_"})
 
+# (2026-09-04, Phase 4 — alignement catalogue/produit) : goals DÉPRÉCIÉS
+# individuellement. Même mécanisme que les préfixes ci-dessus (retirés du
+# catalogue vu par le LLM, donc jamais classables depuis un message
+# utilisateur) — `INTENT_CONFIG`, les handlers et les services restent
+# INTACTS, aucun code métier n'est supprimé.
+#
+# Critère unique d'entrée dans cette liste : le goal est atteignable par un
+# utilisateur mais ne peut PAS aboutir à un résultat métier réel — soit son
+# `tool_name` ne correspond à aucun outil MCP existant (audit de
+# reachability Phase 3), soit son handler est volontairement neutralisé.
+# Autrement dit : ce sont des « faux boutons » conversationnels.
+# Justification détaillée par goal : docs/PRODUCT_INTENT_SCOPE_2026-09-04.md
+_DEPRECATED_INTENTS: frozenset = frozenset(
+    {
+        # — Agronomie de suivi (interventions, stades, sol) : AUCUNE méthode
+        # DB correspondante (`log_intervention`, `add_growth_log`,
+        # `add_crop_growth_stage`, `update_soil_profile`, `create_crop_cycle`
+        # n'existent nulle part). La capacité « culture » réellement
+        # supportée est `DECLARE_CROP_CYCLE` -> `declare_future_production`,
+        # qui reste exposée.
+        "CROP_START_CYCLE",
+        "CROP_RECORD_INTERVENTION",
+        "CROP_RECORD_OBSERVATION",
+        "CROP_UPDATE_STAGE",
+        "CROP_UPDATE_SOIL",
+        # — Écritures d'inventaire : les vraies méthodes existent
+        # (`adjust_stock`, `remove_stock`, `delete_stock`,
+        # `add_stock_movement`) mais `intent.py` pointe des variantes
+        # `*_by_id` inexistantes. NON recâblées : décision produit explicite
+        # de ne pas exposer un ledger d'inventaire tant que son lien avec
+        # les ventes (qui débitent `Product.quantity_for_sale`, jamais
+        # `Stock`) n'est pas défini.
+        "STOCK_RECORD_MOVEMENT",
+        "STOCK_ADJUST",
+        "STOCK_REMOVE_PARTIAL",
+        "STOCK_DELETE",
+        "STOCK_UPDATE_LEVEL",
+        # — `get_farm_stocks` n'existe pas ; `STOCK_GET_SUMMARY`
+        # (`get_stocks`) couvre déjà la consultation et reste exposé.
+        "STOCK_GET_DETAIL",
+        # — Seul cas de la famille dont l'outil FONCTIONNE
+        # (`get_stock_movements`) : il ne manquait que le câblage
+        # (`_RESOLVER_PASSTHROUGH` + branche `_resolve_stock`), soit ~2
+        # lignes. Déprécié malgré tout par COHÉRENCE : un historique de
+        # mouvements n'a de sens que si les mouvements sont enregistrables
+        # et corrigeables, or `STOCK_RECORD_MOVEMENT`/`STOCK_ADJUST` sont
+        # justement hors catalogue. À ré-exposer d'un bloc avec le reste du
+        # ledger si la décision produit va dans ce sens.
+        "STOCK_GET_MOVEMENTS",
+        # — Lectures sans implémentation. `MARKET_SNAPSHOT_ZONAL` est un
+        # doublon strict de `MARKET_SNAPSHOT` (`get_market_snapshot`, même
+        # `required=['zone']`), qui reste exposé : aucune capacité perdue.
+        "MARKET_SNAPSHOT_ZONAL",
+        "SEARCH_NEARBY",  # `get_all_zone_market_overview` absent ; exige lat/lon jamais saisis
+        "DASHBOARD_PRODUCER",  # `get_producer_dashboard` absent, aucun agrégat équivalent
+        "PROFILE_GET_TRUST",  # `get_trust_score` absent
+        "PROFILE_GET_CONTEXT",  # `get_user_context` absent — enrichissement interne, pas une action utilisateur
+        # — Bascule de rôle : écrit une ligne `agent_actions` inerte que
+        # RIEN ne consomme (prouvé : tests/evals/blocked/PROFILE_SWITCH_ROLE.md),
+        # et son `create_agent_action` n'existe pas non plus comme outil.
+        "PROFILE_SWITCH_ROLE",
+        # — « Contrat verrouillé » : aucune entité Contract/StagedTransaction
+        # n'existe dans le dépôt, `commit_staged_transaction` non plus.
+        # Décision produit requise avant toute implémentation.
+        "SALES_ACCEPT_CONTRACT",
+        # — Winner-selection hors tunnel : handlers volontairement neutralisés
+        # par F4 (anti-bypass). Ils restaient CLASSABLES, donc un utilisateur
+        # pouvait encore les atteindre pour ne récolter qu'une erreur
+        # technique — ils sortent maintenant aussi du catalogue.
+        "PROCUREMENT_SELECT_WINNER",
+        "PROCUREMENT_ACCEPT_OFFER",
+    }
+)
+
 
 def allowed_intents_for_role(role: str) -> frozenset:
     """Retourne l'ensemble des intentions reconnaissables par l'interpréteur.
@@ -159,6 +233,7 @@ def allowed_intents_for_role(role: str) -> frozenset:
         intent
         for intent in all_intents
         if not any(intent.startswith(p) for p in _DISABLED_INTENT_PREFIXES)
+        and intent not in _DEPRECATED_INTENTS
     )
 
 

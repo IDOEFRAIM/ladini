@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Union
 from sqlalchemy import and_, desc, func, select
 
 from agriconnect.domain.models import Order, OrderItem, Product
-from agriconnect.graphs.agents.market_coach.domain.pricing_tiers import (
+from agriconnect.domain.pricing_tiers import (
     PricingTierError,
     tiers_to_dicts,
     validate_pricing_tiers,

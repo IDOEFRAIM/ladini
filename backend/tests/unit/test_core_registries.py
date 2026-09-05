@@ -18,7 +18,7 @@ from agriconnect.graphs.agents.market_coach.core.slots import (
     expected_input_for_field,
     is_blocking_slot,
 )
-from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+from agriconnect.domain.quantity_unit import (
     UNIT_SYNONYMS,
     normalize_unit,
     parse_quantity_unit_from_text,

@@ -23,6 +23,35 @@ ESCROW_PAYMENT_SECURED_PRODUCER = "ESCROW_PAYMENT_SECURED_PRODUCER"
 # escrow existants.
 ESCROW_PAYMENT_FAILED_BUYER = "ESCROW_PAYMENT_FAILED_BUYER"
 ESCROW_PAYMENT_EXPIRED_BUYER = "ESCROW_PAYMENT_EXPIRED_BUYER"
+# (2026-09-04, clôture F1 — paiement à la livraison) : le producteur
+# déclare, en un seul geste, avoir livré ET été payé en espèces
+# (`ProducerMgmtMixin.confirm_delivery_and_payment`) — l'acheteur n'est
+# jamais notifié de cette clôture autrement (contrairement au chemin
+# escrow, il n'a rien payé en ligne à confirmer avant).
+ORDER_COMPLETED_AT_DELIVERY_BUYER = "ORDER_COMPLETED_AT_DELIVERY_BUYER"
+# (2026-09-04, F2 — notification producteur préorder direct) : miroir de
+# `ESCROW_PAYMENT_SECURED_PRODUCER` pour le chemin SANS escrow
+# (`ESCROW_PAYMENT_ENABLED=False`, `BuyerMixin.confirm_preorder_draft`) —
+# jamais "paiement reçu" (rien n'a été payé en ligne), uniquement "nouvelle
+# commande confirmée, payable à la livraison".
+PREORDER_CONFIRMED_PRODUCER = "PREORDER_CONFIRMED_PRODUCER"
+# (2026-09-04, F3 — producteur perdant une enchère) : voir
+# `AuctionMixin.select_winning_bid`.
+AUCTION_LOST_PRODUCER = "AUCTION_LOST_PRODUCER"
+# (2026-09-04, audit produit post-F1-F4 — fermeture du gap
+# `BUYER_CANCEL_ORDER` structurellement inatteignable) : le producteur
+# n'était jusqu'ici jamais informé quand un acheteur annule une commande
+# déjà `CONFIRMED` (`BuyerMixin.cancel_pending_order`) — il ne l'apprenait
+# qu'en tentant, plus tard, une clôture livraison/paiement qui échouerait
+# silencieusement de son point de vue.
+ORDER_CANCELLED_BY_BUYER_PRODUCER = "ORDER_CANCELLED_BY_BUYER_PRODUCER"
+# (2026-09-04, Phase 5 — décision produit #1) : miroir du template
+# ci-dessus dans l'autre sens. Le producteur ne pouvait pas se rétracter
+# après `CONFIRMED` ; désormais si, et l'acheteur doit l'apprendre
+# autrement qu'en attendant une livraison qui ne viendra pas. Ne parle
+# JAMAIS de remboursement : le paiement a lieu à la livraison, rien n'a
+# été encaissé.
+ORDER_CANCELLED_BY_PRODUCER_BUYER = "ORDER_CANCELLED_BY_PRODUCER_BUYER"
 
 
 def _render_auction_invite(p: Dict[str, Any]) -> str:
@@ -129,6 +158,63 @@ def _render_escrow_payment_expired_buyer(p: Dict[str, Any]) -> str:
     )
 
 
+def _render_order_completed_at_delivery_buyer(p: Dict[str, Any]) -> str:
+    order_number = str(p.get("order_number") or "")
+    amount = _fmt_num(p.get("amount"))
+    currency = str(p.get("currency") or "FCFA")
+    return (
+        f"✅ *Commande #{order_number} livrée et payée !*\n\n"
+        f"Le producteur a confirmé avoir remis votre commande et reçu "
+        f"*{amount} {currency}* à la livraison. Transaction clôturée — merci "
+        "de votre confiance !"
+    )
+
+
+def _render_preorder_confirmed_producer(p: Dict[str, Any]) -> str:
+    order_number = str(p.get("order_number") or "")
+    amount = _fmt_num(p.get("amount"))
+    currency = str(p.get("currency") or "FCFA")
+    return (
+        f"🛒 *Nouvelle commande confirmée !* #{order_number} — "
+        f"*{amount} {currency}*.\n\n"
+        "💵 Paiement à la livraison (pas de paiement en ligne pour cette "
+        "commande).\n"
+        "📦 Préparez la commande. Une fois livrée et payée, tapez "
+        "*mes commandes* pour la clôturer."
+    )
+
+
+def _render_auction_lost_producer(p: Dict[str, Any]) -> str:
+    product = p.get("product") or "ce produit"
+    return (
+        f"📋 Votre offre pour *{product}* n'a pas été retenue cette fois — "
+        "un autre producteur a été choisi.\n\n"
+        "💡 Tapez *mes appels d'offres* pour voir d'autres opportunités."
+    )
+
+
+def _render_order_cancelled_by_buyer_producer(p: Dict[str, Any]) -> str:
+    order_number = str(p.get("order_number") or "")
+    return (
+        f"❌ *Commande annulée* — #{order_number}\n\n"
+        "L'acheteur a annulé cette commande avant livraison. Aucune action "
+        "de votre part n'est nécessaire."
+    )
+
+
+def _render_order_cancelled_by_producer_buyer(p: Dict[str, Any]) -> str:
+    order_number = str(p.get("order_number") or "")
+    reason = str(p.get("reason") or "").strip()
+    reason_line = f"\n📝 Motif indiqué : {reason}" if reason else ""
+    return (
+        f"❌ *Commande annulée par le producteur* — #{order_number}"
+        f"{reason_line}\n\n"
+        "Le producteur ne peut finalement pas honorer cette commande. "
+        "Vous n'avez rien payé : le règlement se fait à la livraison.\n"
+        "🔎 Tapez *chercher <produit>* pour trouver un autre vendeur."
+    )
+
+
 _RENDERERS = {
     AUCTION_INVITE_PRODUCER: _render_auction_invite,
     NEW_PRODUCT_ALERT_BUYER: _render_new_product_alert,
@@ -138,6 +224,11 @@ _RENDERERS = {
     ESCROW_PAYMENT_SECURED_PRODUCER: _render_escrow_payment_secured_producer,
     ESCROW_PAYMENT_FAILED_BUYER: _render_escrow_payment_failed_buyer,
     ESCROW_PAYMENT_EXPIRED_BUYER: _render_escrow_payment_expired_buyer,
+    ORDER_COMPLETED_AT_DELIVERY_BUYER: _render_order_completed_at_delivery_buyer,
+    PREORDER_CONFIRMED_PRODUCER: _render_preorder_confirmed_producer,
+    AUCTION_LOST_PRODUCER: _render_auction_lost_producer,
+    ORDER_CANCELLED_BY_BUYER_PRODUCER: _render_order_cancelled_by_buyer_producer,
+    ORDER_CANCELLED_BY_PRODUCER_BUYER: _render_order_cancelled_by_producer_buyer,
 }
 
 

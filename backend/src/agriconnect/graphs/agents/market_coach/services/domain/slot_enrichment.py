@@ -21,13 +21,13 @@ from agriconnect.graphs.agents.market_coach.llm_gateway import (
     resolve_gateway,
     resolve_profile,
 )
-from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+from agriconnect.domain.quantity_unit import (
     extract_unit_only_from_text as _extract_unit_only,
 )
-from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+from agriconnect.domain.quantity_unit import (
     is_livestock_product as _is_livestock_product,
 )
-from agriconnect.graphs.agents.market_coach.services.domain.quantity_unit import (
+from agriconnect.domain.quantity_unit import (
     parse_quantity_unit_from_text as _parse_qty_unit,
 )
 

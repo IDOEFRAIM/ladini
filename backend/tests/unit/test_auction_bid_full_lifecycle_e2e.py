@@ -105,7 +105,7 @@ class _FakeSelectWinningBidSession:
 
     async def execute(self, stmt):
         if isinstance(stmt, self._UpdateStmt):
-            return types.SimpleNamespace(rowcount=0)
+            return types.SimpleNamespace(rowcount=0, scalars=lambda: types.SimpleNamespace(all=lambda: []))
         if not self._select_served:
             self._select_served = True
             row = self._row

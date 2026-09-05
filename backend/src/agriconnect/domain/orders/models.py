@@ -143,6 +143,12 @@ class Order(Base):
     expected_fulfillment_date = Column(DateTime)
     preorder_converted_at = Column(DateTime)
     confirmed_at = Column(DateTime)
+    # (2026-09-05, Phase 6A) Corrélation de checkout — une commande par
+    # producteur. NULL = commande hors checkout groupé (RFQ, vente directe)
+    # OU commande antérieure à ce modèle (grandfathering) : dans les deux cas
+    # « groupe d'une seule commande ». Ne porte AUCUN état : chaque commande
+    # garde son propre cycle de vie après confirmation.
+    checkout_group_id = Column(PG_UUID(as_uuid=True), nullable=True)
     auction_id = Column(
         PG_UUID(as_uuid=True), ForeignKey("marketplace.auctions.id"), unique=True
     )

@@ -76,7 +76,26 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "remove_stock": PermissionScope.DB_DATA_WRITE,
     "record_sale": PermissionScope.DB_DATA_WRITE,
     "add_expense": PermissionScope.DB_DATA_WRITE,
-    "update_order_status": PermissionScope.DB_DATA_WRITE,
+    # (2026-09-05, Phase 6B — audit des mutations prenant `order_id` seul) :
+    # `update_order_status` RETIRÉ de la carte des scopes, donc désormais
+    # refusé par le fail-closed de `runtime.py::call_tool`.
+    #
+    # `ProducerMgmtMixin.update_order_status(order_id, new_status,
+    # payment_status)` écrit `Order.status` ET `Order.payment_status` à des
+    # valeurs ARBITRAIRES, sans AUCUN contrôle de propriété (ni téléphone, ni
+    # producteur, ni acheteur) et sans garde de statut. Elle contournait donc
+    # entièrement les garanties construites autour de la clôture
+    # (`confirm_delivery_and_payment`), de l'annulation producteur
+    # (`cancel_confirmed_order`) et de l'annulation acheteur
+    # (`cancel_pending_order`) — n'importe quelle commande pouvait être
+    # marquée PAID/COMPLETED/CANCELLED par un appelant MCP quelconque.
+    #
+    # Recherche exhaustive : ZÉRO appelant dans tout le dépôt (seuls cette
+    # entrée et un commentaire la mentionnaient). La méthode elle-même n'est
+    # pas supprimée (pas de suppression de code métier sans nécessité) — elle
+    # est simplement rendue inatteignable. Verrouillé par
+    # `tests/architecture/test_order_mutations_require_ownership.py`.
+    # "update_order_status": PermissionScope.DB_DATA_WRITE,
     "update_farm": PermissionScope.DB_DATA_WRITE,
     "register_surplus_offer": PermissionScope.DB_DATA_WRITE,
     "upsert_user_context_state": PermissionScope.DB_DATA_WRITE,
@@ -95,9 +114,26 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     # Escrow (Paydunya) — explicite plutôt que de laisser le guess automatique
     # décider, vu la sensibilité (argent bloqué / débloqué).
     "initiate_escrow_payment": PermissionScope.DB_DATA_WRITE,
-    "mark_escrow_paid": PermissionScope.DB_DATA_WRITE,
     "verify_delivery_otp": PermissionScope.DB_DATA_WRITE,
-    "expire_pending_payments": PermissionScope.DB_DATA_WRITE,
+    # (2026-09-05, Phase 7 — audit final des mutations exposées) : ces deux
+    # opérations sont SYSTÈME, jamais conversationnelles, et leurs appelants
+    # réels n'utilisent PAS MCP :
+    #   - `mark_escrow_paid(invoice_token)` : appelée directement via
+    #     `AgriDatabaseService()` par la tâche IPN Paydunya
+    #     (`flows/buyer/preorder_payment.py::reconcile_invoice`, déclenchée
+    #     par `workers/payments/paydunya_ipn_task.py`). Exposée en MCP, elle
+    #     permettait de déclarer un paiement reçu (`payment_status=ESCROWED`
+    #     + notifications) sans passer par le fournisseur de paiement.
+    #   - `expire_pending_payments()` : cron, appelée directement par
+    #     `workers/crons/order_expiry.py`. Exposée en MCP, elle permettait
+    #     d'expirer/annuler EN MASSE les commandes en attente de paiement,
+    #     sans aucun acteur ni périmètre.
+    # Aucune des deux n'a de contrôle de propriété (par nature : l'une
+    # s'authentifie par le token d'invoice, l'autre est un balayage global).
+    # Retirées de la carte des scopes -> refusées par le fail-closed de
+    # `runtime.py::call_tool`. Les appels système, eux, sont inchangés.
+    # "mark_escrow_paid": PermissionScope.DB_DATA_WRITE,
+    # "expire_pending_payments": PermissionScope.DB_DATA_WRITE,
     "list_producer_escrowed_orders": PermissionScope.DB_READ_ONLY,
     # --- Audit 2026-08 : outils exposés (auto-découverts via
     # `h.py::_compute_exposed_methods`) mais jusqu'ici absents d'ici, donc
@@ -138,6 +174,9 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     # que le `PreorderDraft` applicatif, jamais l'`Order` Postgres sous-jacent).
     "cancel_preorder_draft": PermissionScope.DB_DATA_WRITE,
     "close_negotiation_session": PermissionScope.DB_DATA_WRITE,
+    # (2026-09-04, clôture F1 — paiement à la livraison) : nouvelle méthode
+    # sur `ProducerMgmtMixin`.
+    "confirm_delivery_and_payment": PermissionScope.DB_DATA_WRITE,
     "confirm_preorder_draft": PermissionScope.DB_DATA_WRITE,
     "create_farm": PermissionScope.DB_DATA_WRITE,
     "create_preorder_draft": PermissionScope.DB_DATA_WRITE,
@@ -151,6 +190,13 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "update_geo_location": PermissionScope.DB_DATA_WRITE,
     "update_negotiation_offer": PermissionScope.DB_DATA_WRITE,
     "update_product_price_and_qty": PermissionScope.DB_DATA_WRITE,
+    # (2026-09-04, Product Completeness Phase 2) : retrait d'un produit du
+    # catalogue — `SALES_UNPUBLISH_PRODUCT`. Sans cette entrée, le
+    # fail-closed du TOOL_SCOPE_MAP refuserait l'appel.
+    "delete_product": PermissionScope.DB_DATA_WRITE,
+    # (2026-09-04, Phase 5 — décision produit #1) : annulation producteur
+    # d'une commande confirmée.
+    "cancel_confirmed_order": PermissionScope.DB_DATA_WRITE,
     "update_production_fields": PermissionScope.DB_DATA_WRITE,
 }
 

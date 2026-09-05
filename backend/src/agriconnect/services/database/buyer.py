@@ -8,10 +8,10 @@ from sqlalchemy import case, desc, func, literal, or_, select, update
 from sqlalchemy.orm import joinedload, selectinload
 
 from agriconnect.core.formatting import fmt_num as _fmt_num
-from agriconnect.graphs.agents.market_coach.domain.order_policy import (
+from agriconnect.domain.order_policy import (
     validate_minimum_order_quantity,
 )
-from agriconnect.graphs.agents.market_coach.domain.pricing_tiers import (
+from agriconnect.domain.pricing_tiers import (
     PricingTierError,
     compute_line,
     resolve_stock_debit,
@@ -21,6 +21,7 @@ from agriconnect.graphs.agents.market_coach.domain.pricing_tiers import (
 # Import des modèles alignés sur le schéma
 from agriconnect.domain.models import (
     Auction,
+    Bid,
     BuyerProfile,
     BuyerType,
     Delivery,
@@ -304,6 +305,19 @@ class BuyerMixin(BaseMixin):
                     # substring strict qui bloquait l'agent sur une faute de frappe.
                     fuzzy_match(Product.name, clean_product),
                     Product.quantity_for_sale > 0,
+                    # (2026-09-04, Product Completeness Phase 2) : `is_available`
+                    # est DÉJÀ le drapeau « ne fait pas partie du catalogue
+                    # public » — posé par `product.py::delete_product`
+                    # (archivage d'un produit retiré, historique préservé) ET
+                    # par `marketplace.py::record_sale` (produit fantôme créé
+                    # pour ancrer une vente directe). Jusqu'ici la recherche
+                    # acheteur ne l'interrogeait pas : ces lignes n'étaient
+                    # exclues QUE par `quantity_for_sale > 0`, donc une simple
+                    # mise à jour de quantité (`SALES_UPDATE_PRODUCT`, qui ne
+                    # regarde pas ce drapeau) ressuscitait silencieusement un
+                    # produit retiré. Colonne `nullable=False, default=True` —
+                    # aucun risque d'exclure des lignes legacy.
+                    Product.is_available.is_(True),
                 )
                 .order_by("priority", Product.price.asc())
                 .limit(limit)
@@ -762,6 +776,15 @@ class BuyerMixin(BaseMixin):
                 "SHIPPED": "🚛 En cours de route",
                 "PICKED_UP": "📍 Arrivée au point de collecte",
                 "DELIVERED": "📦 Livrée avec succès",
+                # (2026-09-04, clôture F1 — paiement à la livraison) : gap
+                # réel comblé ici — `Order.status="COMPLETED"` (déjà utilisé
+                # par `record_sale`, désormais aussi par
+                # `confirm_delivery_and_payment`) n'avait AUCUNE entrée ici,
+                # contrairement à `order_tracking.py::ORDER_STATUS_MAP` qui
+                # l'a déjà (incohérence entre les deux surfaces de lecture,
+                # mandat §18) — retombait sur le repli générique
+                # `f"🔄 Status: {order.status}"`.
+                "COMPLETED": "✅ Livrée et payée à la livraison",
                 "CANCELLED": "❌ Annulée",
             }
 
@@ -832,7 +855,26 @@ class BuyerMixin(BaseMixin):
     async def cancel_pending_order(
         self, order_id: str, phone: str, reason: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Annule une commande PENDING et recrédite les stocks des produits associés."""
+        """Annule une commande et recrédite les stocks des produits associés.
+
+        (2026-09-04, audit produit post-F1-F4 — "BUYER_CANCEL_ORDER, un
+        goal réellement câblé, jamais atteignable") : GAP RÉEL fermé ici —
+        malgré son nom, cette fonction ne guardait QUE `status=="PENDING"`.
+        Recherche exhaustive : AUCUN chemin conversationnel vivant ne crée
+        jamais un `Order` à ce statut (`"PENDING"` n'est que le défaut de
+        colonne, systématiquement écrasé — `create_preorder_draft` pose
+        `"DRAFT"`, `select_winning_bid` pose `"CONFIRMED"` directement).
+        `BUYER_CANCEL_ORDER` était donc un goal déclaré, routé, avec un
+        handler réel — mais qui échouait TOUJOURS pour toute commande
+        qu'un acheteur voudrait réellement annuler. Le garde couvre
+        désormais aussi `"CONFIRMED"` (le statut RÉEL d'une commande pas
+        encore clôturée) — jamais `"DRAFT"` (chemin dédié,
+        `cancel_preorder_draft`), jamais `"COMPLETED"`/`"CANCELLED"`
+        (verrous FOR UPDATE déjà en place, sérialise proprement contre
+        `confirm_delivery_and_payment`, F1, qui exige exactement le MÊME
+        statut `"CONFIRMED"` — le premier à committer gagne, l'autre
+        retombe sur son propre garde, jamais un état incohérent).
+        """
         current_session = self.session
         if not current_session:
             raise BusinessRuleException("Session indisponible.")
@@ -851,13 +893,18 @@ class BuyerMixin(BaseMixin):
 
         if not order:
             raise BusinessRuleException("Commande introuvable ou non autorisée.")
-        if order.status.upper() != "PENDING":
+        order_status_up = order.status.upper()
+        if order_status_up not in ("PENDING", "CONFIRMED"):
             raise BusinessRuleException(
                 f"Impossible d'annuler une commande déjà en statut : {order.status}.",
-                reason="not_pending",
+                reason="not_cancellable",
             )
+        was_confirmed = order_status_up == "CONFIRMED"
 
-        # Restitution physique des stocks aux producteurs
+        # Restitution physique des stocks aux producteurs — vide (donc
+        # sans effet, correctement) pour une commande RFQ : `select_winning_bid`
+        # ne crée jamais d'`OrderItem` (voir l'audit Auction/Bid), aucun
+        # stock catalogue n'est débité à la confirmation d'une telle commande.
         for item in order.items:
             if item.product:
                 prod_stmt = (
@@ -881,6 +928,61 @@ class BuyerMixin(BaseMixin):
                 order.delivery_desc = (
                     f"{existing_desc}\n{reason_log}" if existing_desc else reason_log
                 )
+
+        # Notification producteur(s) — UNIQUEMENT si la commande était déjà
+        # `CONFIRMED` (un producteur ne "sait" qu'une commande PENDING
+        # existe de toute façon — cas structurellement mort, voir
+        # docstring). Même résolution dual-origine que
+        # `ProducerMgmtMixin.confirm_delivery_and_payment` (F1) : PREORDER
+        # via `OrderItem`→`Product.producer_id`, RFQ via
+        # `Order.winning_bid_id`→`Bid.producer_id`. Outbox, même
+        # transaction, jamais un envoi direct.
+        if was_confirmed:
+            producer_phones: set[str] = set()
+            for item in order.items or []:
+                if item.product and item.product.producer_id:
+                    prod_row = (
+                        await current_session.execute(
+                            select(User.phone)
+                            .join(Producer, Producer.user_id == User.id)
+                            .where(Producer.id == item.product.producer_id)
+                            .limit(1)
+                        )
+                    ).first()
+                    if prod_row and prod_row[0]:
+                        producer_phones.add(prod_row[0])
+            if order.winning_bid_id and not producer_phones:
+                bid_prod_row = (
+                    await current_session.execute(
+                        select(User.phone)
+                        .join(Producer, Producer.user_id == User.id)
+                        .join(Bid, Bid.producer_id == Producer.id)
+                        .where(Bid.id == order.winning_bid_id)
+                        .limit(1)
+                    )
+                ).first()
+                if bid_prod_row and bid_prod_row[0]:
+                    producer_phones.add(bid_prod_row[0])
+
+            if producer_phones:
+                from agriconnect.workers.outbox import templates as _outbox_templates
+                from agriconnect.workers.repositories import outbox_repo as _outbox_repo
+
+                order_number = str(order.id)[:8].upper()
+                await _outbox_repo.enqueue(
+                    current_session,
+                    [
+                        {
+                            "channel": "WHATSAPP",
+                            "recipient_phone": phone_,
+                            "template_key": _outbox_templates.ORDER_CANCELLED_BY_BUYER_PRODUCER,
+                            "payload": {"order_number": order_number},
+                            "dedupe_key": f"ORDER_CANCELLED_PRODUCER:{order.id}:{phone_}",
+                        }
+                        for phone_ in producer_phones
+                    ],
+                )
+
         await current_session.flush()
 
         # Anti-abus : au-delà de MAX_CANCELLATIONS annulations acheteur, on
@@ -889,8 +991,16 @@ class BuyerMixin(BaseMixin):
             current_session, profile_obj.id, user_obj
         )
 
+        # Message précis : une commande issue d'un appel d'offres (RFQ/Auction)
+        # n'a jamais débité de stock catalogue (aucun `OrderItem`) — ne pas
+        # prétendre une restitution qui n'a pas eu lieu.
+        stock_note = (
+            " Les stocks ont été restitués aux agriculteurs."
+            if order.items
+            else ""
+        )
         base_msg = (
-            f"❌ La commande #{str(order.id)[:8].upper()} a été annulée. Les stocks ont été restitués aux agriculteurs."
+            f"❌ La commande #{str(order.id)[:8].upper()} a été annulée.{stock_note}"
             + (f"\n📝 Raison : {normalized_reason}" if normalized_reason else "")
         )
         if blocked_now:
@@ -1403,27 +1513,57 @@ class BuyerMixin(BaseMixin):
                 tzinfo=None
             )
 
-        new_order = Order(
-            id=uuid.uuid4(),
-            buyer_id=profile_obj.id,
-            zone_id=zone_uuid,
-            customer_name=getattr(profile_obj, "establishment_name", None)
-            or user_obj.name,
-            customer_phone=normalize_phone(buyer_phone, required=False),
-            total_amount=0.0,
-            subtotal=0.0,
-            status="DRAFT",
-            payment_status="PENDING",
-            delivery_status="PENDING",
-            payment_method="CASH",
-            source="WHATSAPP",
-            order_type="PREORDER",
-            is_agent_order=True,
-            expected_fulfillment_date=fulfillment_dt,
-            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
-        )
-        current_session.add(new_order)
-        await current_session.flush()
+        # (2026-09-05, Phase 6A — « une commande par producteur ») : un panier
+        # peut légitimement mélanger plusieurs producteurs (le vendeur est
+        # choisi PAR PRODUIT, cf. `cart_service.resolve_product_vendors`).
+        # Jusqu'ici tout atterrissait dans UNE commande, alors que la
+        # responsabilité (livrer, encaisser, annuler) est PAR PRODUCTEUR : un
+        # producteur pouvait donc clôturer ou annuler la part d'un autre.
+        # Désormais une commande par producteur, toutes corrélées par
+        # `checkout_group_id` — ce qui rend les contrôles de propriété
+        # existants (`confirm_delivery_and_payment`, `cancel_confirmed_order`)
+        # corrects PAR CONSTRUCTION, sans le moindre correctif chez eux.
+        # `checkout_group_id` ne porte AUCUN état : après confirmation, chaque
+        # commande vit sa vie indépendamment.
+        checkout_group_id = uuid.uuid4()
+        orders_by_producer: Dict[str, Order] = {}
+        totals_by_producer: Dict[str, float] = {}
+
+        async def _order_for_producer(producer_id: Any) -> Order:
+            """Commande du producteur, créée à la première ligne RETENUE.
+
+            Créée tardivement (après validation de la ligne) pour ne jamais
+            produire de commande vide si tous les articles d'un producteur
+            sont écartés (palier périmé, seuil minimum non atteint)."""
+            key = str(producer_id or "")
+            existing = orders_by_producer.get(key)
+            if existing is not None:
+                return existing
+            order = Order(
+                id=uuid.uuid4(),
+                buyer_id=profile_obj.id,
+                zone_id=zone_uuid,
+                customer_name=getattr(profile_obj, "establishment_name", None)
+                or user_obj.name,
+                customer_phone=normalize_phone(buyer_phone, required=False),
+                total_amount=0.0,
+                subtotal=0.0,
+                status="DRAFT",
+                payment_status="PENDING",
+                delivery_status="PENDING",
+                payment_method="CASH",
+                source="WHATSAPP",
+                order_type="PREORDER",
+                is_agent_order=True,
+                expected_fulfillment_date=fulfillment_dt,
+                checkout_group_id=checkout_group_id,
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+            current_session.add(order)
+            await current_session.flush()
+            orders_by_producer[key] = order
+            totals_by_producer[key] = 0.0
+            return order
 
         running_total = 0.0
         summary_items: List[str] = []
@@ -1455,9 +1595,11 @@ class BuyerMixin(BaseMixin):
                 continue
 
             tier_id = item.get("tier_id")
+            # `order_id` n'est PAS posé ici : la commande du producteur n'est
+            # créée qu'une fois la ligne définitivement retenue (voir
+            # `_order_for_producer`), pour ne jamais créer de commande vide.
             order_item_kwargs: Dict[str, Any] = {
                 "id": uuid.uuid4(),
-                "order_id": new_order.id,
                 "product_id": product.id,
             }
 
@@ -1588,35 +1730,83 @@ class BuyerMixin(BaseMixin):
                         continue
 
             running_total += line_total
+            producer_key = str(product.producer_id or "")
+            target_order = await _order_for_producer(product.producer_id)
+            order_item_kwargs["order_id"] = target_order.id
+            totals_by_producer[producer_key] = (
+                totals_by_producer.get(producer_key, 0.0) + line_total
+            )
             current_session.add(OrderItem(**order_item_kwargs))
 
-        if not summary_items:
+        if not summary_items or not orders_by_producer:
             raise BusinessRuleException(
                 "Aucun article valide dans le panier pour la précommande.",
                 reason="no_valid_items",
             )
 
-        new_order.subtotal = running_total
-        new_order.total_amount = running_total
+        # Total PAR COMMANDE — jamais le total du checkout : le producteur A
+        # ne doit jamais voir (ni encaisser) le montant du producteur B.
+        for producer_key, order in orders_by_producer.items():
+            order_total = round(totals_by_producer.get(producer_key, 0.0), 2)
+            order.subtotal = order_total
+            order.total_amount = order_total
         await current_session.flush()
+
+        # Commande PRIMAIRE = première créée. Elle porte l'identité du
+        # brouillon (`PreorderDraft.order_id`, colonne `preorder_drafts.order_id`)
+        # pour que toute la machinerie CAS/idempotence/reprise existante
+        # continue de fonctionner à l'identique. Le groupe complet voyage à
+        # côté, dans `order_ids`.
+        ordered_orders = list(orders_by_producer.values())
+        primary_order = ordered_orders[0]
+        orders_payload = [
+            {
+                "order_id": str(o.id),
+                "order_number": str(o.id)[:8].upper(),
+                "producer_id": producer_key or None,
+                "total_amount": float(o.total_amount or 0.0),
+                "items": [
+                    it
+                    for it in resolved_items
+                    if str(it.get("producer_id") or "") == producer_key
+                ],
+            }
+            for producer_key, o in orders_by_producer.items()
+        ]
+
+        if len(orders_payload) > 1:
+            breakdown = " · ".join(
+                f"{len(o['items'])} article(s) → {_fmt_num(o['total_amount'])} FCFA"
+                for o in orders_payload
+            )
+            message = (
+                f"📝 Précommande brouillon créée — {len(summary_items)} article(s) "
+                f"répartis en {len(orders_payload)} commandes (une par producteur) : "
+                f"{breakdown}. Total {_fmt_num(running_total)} FCFA."
+            )
+        else:
+            message = (
+                f"📝 Précommande brouillon créée — {len(summary_items)} article(s), "
+                f"total estimé {running_total} FCFA."
+            )
 
         return {
             "status": "success",
-            "order_id": str(new_order.id),
-            "preorder_id": str(new_order.id),
-            "order_number": str(new_order.id)[:8].upper(),
+            "order_id": str(primary_order.id),
+            "preorder_id": str(primary_order.id),
+            "order_number": str(primary_order.id)[:8].upper(),
             "order_type": "PREORDER",
+            "checkout_group_id": str(checkout_group_id),
+            "order_ids": [str(o.id) for o in ordered_orders],
+            "orders": orders_payload,
             "subtotal": running_total,
             "total_amount": running_total,
-            "currency": new_order.currency or "XOF",
+            "currency": primary_order.currency or "XOF",
             "items_count": len(summary_items),
             "items": resolved_items,
             "summary": ", ".join(summary_items),
             "unresolved_items": unresolved,
-            "message": (
-                f"📝 Précommande brouillon créée — {len(summary_items)} article(s), "
-                f"total estimé {running_total} FCFA."
-            ),
+            "message": message,
         }
 
     async def initiate_negotiation_session(
@@ -1908,9 +2098,43 @@ class BuyerMixin(BaseMixin):
                 reason="not_draft",
             )
 
+        # (2026-09-05, Phase 6A) : confirmation GROUPÉE — un checkout mixte a
+        # produit une commande par producteur, l'acheteur ne confirme qu'UNE
+        # fois. On récupère ici les commandes sœurs (même `checkout_group_id`,
+        # même acheteur, encore `DRAFT`). Verrou `FOR UPDATE` et ordre
+        # déterministe par `id` : deux confirmations concurrentes du même
+        # groupe se sérialisent au lieu de s'entrelacer.
+        # Commande sans groupe (mono-producteur, RFQ, ou commande antérieure
+        # à ce modèle) : le groupe vaut exactement `[order]`, comportement
+        # historique strictement inchangé.
+        group_orders: List[Order] = [order]
+        if order.checkout_group_id is not None:
+            siblings = (
+                (
+                    await current_session.execute(
+                        select(Order)
+                        .options(selectinload(Order.items).joinedload(OrderItem.product))
+                        .where(
+                            Order.checkout_group_id == order.checkout_group_id,
+                            Order.buyer_id == profile_obj.id,
+                            Order.id != order.id,
+                            func.upper(Order.status) == "DRAFT",
+                        )
+                        .order_by(Order.id)
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .unique()
+                .all()
+            )
+            group_orders.extend(siblings)
+        group_orders.sort(key=lambda o: str(o.id))
+
         # Vérification / débit stock atomique par produit
         insufficient: List[Dict[str, Any]] = []
         running_total = 0.0
+        totals_by_order: Dict[str, float] = {str(o.id): 0.0 for o in group_orders}
 
         # (2026-09-04, audit CART→CHECKOUT) : tri déterministe par
         # `product_id` AVANT tout `FOR UPDATE` — même garde-fou anti-deadlock
@@ -1925,9 +2149,19 @@ class BuyerMixin(BaseMixin):
         # corruption de données, mais un échec évitable au lieu d'une simple
         # sérialisation. Réutilise le motif déjà PROUVÉ ailleurs dans ce
         # fichier, aucune nouvelle primitive.
-        sorted_items = sorted(order.items or [], key=lambda it: str(it.product_id or ""))
+        # Le tri porte sur l'UNION des articles du groupe (pas commande par
+        # commande) : c'est l'ordre d'acquisition des verrous `Product` qui
+        # doit être global pour conserver la garantie anti-deadlock.
+        sorted_items = sorted(
+            (
+                (item, o)
+                for o in group_orders
+                for item in (o.items or [])
+            ),
+            key=lambda pair: str(pair[0].product_id or ""),
+        )
 
-        for item in sorted_items:
+        for item, item_order in sorted_items:
             if not item.product_id:
                 continue
 
@@ -1962,7 +2196,13 @@ class BuyerMixin(BaseMixin):
                 continue
 
             product.quantity_for_sale = available - stock_debit
-            running_total += float(item.price_at_sale or 0.0) * requested
+            line_total = float(item.price_at_sale or 0.0) * requested
+            running_total += line_total
+            # Chaque montant est imputé à SA commande — le total d'un
+            # producteur n'inclut jamais les lignes d'un autre.
+            totals_by_order[str(item_order.id)] = (
+                totals_by_order.get(str(item_order.id), 0.0) + line_total
+            )
 
         if insufficient:
             raise BusinessRuleException(
@@ -1972,26 +2212,108 @@ class BuyerMixin(BaseMixin):
             )
 
         # Postgres column is TIMESTAMP WITHOUT TIME ZONE → store naive UTC
-        order.preorder_converted_at = datetime.now(timezone.utc).replace(tzinfo=None)
-        order.status = "CONFIRMED"
-        order.payment_status = order.payment_status or "PENDING"
-        order.subtotal = running_total
-        order.total_amount = running_total
-        if delivery_lat is not None and delivery_lon is not None:
-            order.gps_lat = delivery_lat
-            order.gps_lng = delivery_lon
+        converted_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        for grp_order in group_orders:
+            grp_order.preorder_converted_at = converted_at
+            grp_order.status = "CONFIRMED"
+            grp_order.payment_status = grp_order.payment_status or "PENDING"
+            grp_total = round(totals_by_order.get(str(grp_order.id), 0.0), 2)
+            grp_order.subtotal = grp_total
+            grp_order.total_amount = grp_total
+            if delivery_lat is not None and delivery_lon is not None:
+                grp_order.gps_lat = delivery_lat
+                grp_order.gps_lng = delivery_lon
         await current_session.flush()
+
+        # (2026-09-04, F2 — notification producteur préorder direct) : GAP
+        # RÉEL fermé ici — ce chemin (paiement à la livraison,
+        # `ESCROW_PAYMENT_ENABLED=False`) n'enfilait AUCUNE notification
+        # producteur, contrairement au chemin escrow
+        # (`EscrowMixin.mark_escrow_paid`, déclenché par l'IPN, notifie déjà
+        # via `ESCROW_PAYMENT_SECURED_PRODUCER`). Réutilise EXACTEMENT le
+        # même motif de collecte multi-producteurs (un panier peut contenir
+        # des articles de plusieurs producteurs, chacun notifié une seule
+        # fois — `dedupe_key` scopé par `(order.id, phone)`, même convention
+        # que l'escrow) — jamais "paiement reçu" (rien n'a été payé en
+        # ligne ici) : un nouveau template dédié au paiement à la livraison,
+        # jamais le template escrow réutilisé à tort.
+        from agriconnect.workers.outbox import templates as _outbox_templates
+        from agriconnect.workers.repositories import outbox_repo as _outbox_repo
+
+        # (2026-09-05, Phase 6A) : une notification PAR COMMANDE, portant le
+        # montant de CETTE commande. Un producteur ne reçoit donc jamais le
+        # total du checkout d'un autre. La collecte reste multi-producteurs
+        # par commande pour couvrir les commandes ANCIENNES (antérieures au
+        # split, volontairement conservées telles quelles — grandfathering).
+        entries: List[Dict[str, Any]] = []
+        for grp_order in group_orders:
+            grp_number = str(grp_order.id)[:8].upper()
+            grp_phones: set[str] = set()
+            for item in grp_order.items or []:
+                if item.product and item.product.producer_id:
+                    prod_row = (
+                        await current_session.execute(
+                            select(User.phone)
+                            .join(Producer, Producer.user_id == User.id)
+                            .where(Producer.id == item.product.producer_id)
+                            .limit(1)
+                        )
+                    ).first()
+                    if prod_row and prod_row[0]:
+                        grp_phones.add(prod_row[0])
+            entries.extend(
+                {
+                    "channel": "WHATSAPP",
+                    "recipient_phone": phone,
+                    "template_key": _outbox_templates.PREORDER_CONFIRMED_PRODUCER,
+                    "payload": {
+                        "order_number": grp_number,
+                        "amount": float(grp_order.total_amount or 0.0),
+                        "currency": grp_order.currency or "XOF",
+                    },
+                    "dedupe_key": f"PREORDER_CONFIRMED_PRODUCER:{grp_order.id}:{phone}",
+                }
+                for phone in grp_phones
+            )
+
+        if entries:
+            await _outbox_repo.enqueue(current_session, entries)
+
+        order_number = str(order.id)[:8].upper()
+        confirmed_payload = [
+            {
+                "order_id": str(o.id),
+                "order_number": str(o.id)[:8].upper(),
+                "total_amount": float(o.total_amount or 0.0),
+            }
+            for o in group_orders
+        ]
+        if len(group_orders) > 1:
+            detail = " · ".join(
+                f"#{o['order_number']} {_fmt_num(o['total_amount'])} FCFA"
+                for o in confirmed_payload
+            )
+            message = (
+                f"✅ Précommande confirmée — {len(group_orders)} commandes "
+                f"(une par producteur) : {detail}. "
+                f"Total {_fmt_num(running_total)} {order.currency or 'XOF'}. "
+                "Chaque producteur vous livrera et encaissera sa part séparément."
+            )
+        else:
+            message = (
+                f"✅ Précommande confirmée. Commande #{order_number} "
+                f"pour {float(order.total_amount or 0.0)} {order.currency or 'XOF'}."
+            )
 
         return {
             "status": "success",
             "order_id": str(order.id),
-            "order_number": str(order.id)[:8].upper(),
+            "order_number": order_number,
             "total_amount": float(order.total_amount or 0.0),
+            "checkout_total": round(running_total, 2),
+            "orders": confirmed_payload,
             "currency": order.currency or "XOF",
-            "message": (
-                f"✅ Précommande confirmée. Commande #{str(order.id)[:8].upper()} "
-                f"pour {float(order.total_amount or 0.0)} {order.currency or 'XOF'}."
-            ),
+            "message": message,
         }
 
     async def cancel_preorder_draft(
@@ -2039,21 +2361,72 @@ class BuyerMixin(BaseMixin):
                 reason="not_draft",
             )
 
-        order.status = target_status
-        if target_status == "CANCELLED":
-            order.cancellation_role = "BUYER"
-        if reason:
-            order.delivery_desc = (
-                order.delivery_desc or ""
-            ) + f"\n[CancelReason] {reason}"
+        # (2026-09-05, Phase 7 — audit « outils acceptant un statut
+        # arbitraire ») : `target_status` était écrit TEL QUEL dans
+        # `Order.status`. Les appelants légitimes ne passent que
+        # `"CANCELLED"` ou `"SUPERSEDED"`, mais cette méthode est exposée
+        # comme outil MCP : un appelant direct pouvait faire passer SON
+        # brouillon à n'importe quel statut (`"COMPLETED"` par exemple),
+        # sans confirmation, sans débit de stock ni paiement. Liste blanche
+        # explicite — même classe de faille que `update_order_status`.
+        target_status = str(target_status or "").upper()
+        if target_status not in ("CANCELLED", "SUPERSEDED"):
+            raise BusinessRuleException(
+                "Statut cible non autorisé pour l'abandon d'un brouillon "
+                f"(reçu : {target_status}).",
+                reason="invalid_target_status",
+            )
+
+        # (2026-09-05, Phase 6A) : un checkout mixte a produit une commande
+        # par producteur — abandonner le brouillon doit les emporter TOUTES,
+        # sinon les commandes sœurs resteraient `DRAFT` orphelines (exactement
+        # le problème fermé par l'audit Order(DRAFT) orphelin). Sans groupe
+        # (mono-producteur, RFQ, commande antérieure) : une seule commande,
+        # comportement historique inchangé.
+        group_orders: List[Order] = [order]
+        if order.checkout_group_id is not None:
+            siblings = (
+                (
+                    await current_session.execute(
+                        select(Order)
+                        .where(
+                            Order.checkout_group_id == order.checkout_group_id,
+                            Order.buyer_id == profile_obj.id,
+                            Order.id != order.id,
+                            func.upper(Order.status) == "DRAFT",
+                        )
+                        .order_by(Order.id)
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .unique()
+                .all()
+            )
+            group_orders.extend(siblings)
+
+        for grp_order in group_orders:
+            grp_order.status = target_status
+            if target_status == "CANCELLED":
+                grp_order.cancellation_role = "BUYER"
+            if reason:
+                grp_order.delivery_desc = (
+                    grp_order.delivery_desc or ""
+                ) + f"\n[CancelReason] {reason}"
         await current_session.flush()
 
         verb = "annulée" if target_status == "CANCELLED" else "remplacée"
+        if len(group_orders) > 1:
+            refs = ", ".join(f"#{str(o.id)[:8].upper()}" for o in group_orders)
+            message = f"❌ Précommande {verb} — {len(group_orders)} commandes : {refs}."
+        else:
+            message = f"❌ Précommande #{str(order.id)[:8].upper()} {verb}."
         return {
             "status": "success",
             "order_id": str(order.id),
+            "order_ids": [str(o.id) for o in group_orders],
             "order_status": target_status,
-            "message": f"❌ Précommande #{str(order.id)[:8].upper()} {verb}.",
+            "message": message,
         }
 
     async def update_negotiation_offer(

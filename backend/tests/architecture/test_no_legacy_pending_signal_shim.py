@@ -59,7 +59,7 @@ class TestGoalPlannerDerivesExpectedInputFromPendingInteractionOnly(object):
 
 class TestPricingTiersPackageCountGateUsesPendingInteractionKind:
     def test_pending_pack_count_tier_no_longer_compares_the_raw_string(self):
-        from agriconnect.graphs.agents.market_coach.domain.pricing_tiers import (
+        from agriconnect.graphs.agents.market_coach.domain.tier_interaction import (
             pending_pack_count_tier,
         )
 

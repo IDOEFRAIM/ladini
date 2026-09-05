@@ -1473,16 +1473,29 @@ class AuctionMixin(BaseMixin):
 
         # 1b. Toutes les autres offres de cette enchère sont désormais perdues.
         #     Sans cela, un producteur non retenu resterait « En attente » à vie.
+        # `RETURNING Bid.producer_id` (2026-09-04, F3) : LA décision métier
+        # elle-même (quelles offres viennent RÉELLEMENT de basculer PENDING/
+        # WINNING → LOST) devient directement la liste des producteurs à
+        # notifier — jamais une requête séparée, jamais une supposition sur
+        # QUI a perdu. `Bid.status.in_(["PENDING", "WINNING"])` exclut déjà
+        # structurellement les offres `WITHDRAWN` (retirées volontairement,
+        # jamais notifiées "vous avez perdu") ET toute offre déjà `LOST`
+        # (rejeu). Un producteur ne peut porter qu'UNE offre par enchère
+        # (`bids_auction_producer_unique`) — un seul `producer_id` par
+        # perdant, jamais de doublon à dédupliquer davantage ici.
         now_loss = datetime.now()
-        await current_session.execute(
-            update(Bid)
-            .where(
-                Bid.auction_id == auction.id,
-                Bid.id != bid.id,
-                Bid.status.in_(["PENDING", "WINNING"]),
+        loser_rows = (
+            await current_session.execute(
+                update(Bid)
+                .where(
+                    Bid.auction_id == auction.id,
+                    Bid.id != bid.id,
+                    Bid.status.in_(["PENDING", "WINNING"]),
+                )
+                .values(status="LOST", is_winner=False, updated_at=now_loss)
+                .returning(Bid.producer_id)
             )
-            .values(status="LOST", is_winner=False, updated_at=now_loss)
-        )
+        ).scalars().all()
 
         # 2. Calcul financier & Instanciation de l'accord commercial officiel (Order)
         total = float(bid.offered_price * auction.quantity)
@@ -1503,34 +1516,62 @@ class AuctionMixin(BaseMixin):
         current_session.add(new_order)
         await current_session.flush()
 
-        # Notifie le producteur gagnant via l'outbox (même transaction que la
-        # commande : si le commit échoue, la notif n'est pas non plus enfilée).
+        # Notifie le producteur gagnant ET les producteurs perdants via
+        # l'outbox (même transaction que la commande : si le commit échoue,
+        # aucune notif n'est enfilée non plus — ni gagnant ni perdants).
         # Dispatché en ~30s (cron outbox-dispatch) — pas synchrone mais quasi
-        # temps réel. dedupe_key sur new_order.id : jamais deux fois pour le
-        # même deal même si select_winning_bid est rejoué.
-        notified = False
-        if prod_phone:
-            from agriconnect.workers.outbox import templates as _outbox_templates
-            from agriconnect.workers.repositories import outbox_repo as _outbox_repo
+        # temps réel. dedupe_key sur new_order.id (gagnant) / (auction.id,
+        # producer_id) (perdants) : jamais deux fois pour le même évènement
+        # même si `select_winning_bid` est rejoué (le garde `auction.status
+        # != "OPEN"` ci-dessus empêche de toute façon un rejeu d'atteindre
+        # ce point — la clé de dédoublonnage reste une défense en
+        # profondeur, même convention que le reste de ce fichier).
+        from agriconnect.workers.outbox import templates as _outbox_templates
+        from agriconnect.workers.repositories import outbox_repo as _outbox_repo
 
-            await _outbox_repo.enqueue(
-                current_session,
-                [
-                    {
-                        "channel": "WHATSAPP",
-                        "recipient_phone": prod_phone,
-                        "template_key": _outbox_templates.AUCTION_WON_PRODUCER,
-                        "payload": {
-                            "product": sub_cat.name,
-                            "quantity": float(auction.quantity),
-                            "unit": auction.unit,
-                            "total": total,
-                        },
-                        "dedupe_key": f"AUCTION_WON:{new_order.id}",
-                    }
-                ],
+        notified = False
+        entries: List[Dict[str, Any]] = []
+        if prod_phone:
+            entries.append(
+                {
+                    "channel": "WHATSAPP",
+                    "recipient_phone": prod_phone,
+                    "template_key": _outbox_templates.AUCTION_WON_PRODUCER,
+                    "payload": {
+                        "product": sub_cat.name,
+                        "quantity": float(auction.quantity),
+                        "unit": auction.unit,
+                        "total": total,
+                    },
+                    "dedupe_key": f"AUCTION_WON:{new_order.id}",
+                }
             )
             notified = True
+
+        loser_producer_ids = [pid for pid in loser_rows if pid]
+        if loser_producer_ids:
+            loser_phone_rows = (
+                await current_session.execute(
+                    select(Producer.id, User.phone)
+                    .join(User, User.id == Producer.user_id)
+                    .where(Producer.id.in_(loser_producer_ids))
+                )
+            ).all()
+            for loser_producer_id, loser_phone in loser_phone_rows:
+                if not loser_phone:
+                    continue
+                entries.append(
+                    {
+                        "channel": "WHATSAPP",
+                        "recipient_phone": loser_phone,
+                        "template_key": _outbox_templates.AUCTION_LOST_PRODUCER,
+                        "payload": {"product": sub_cat.name},
+                        "dedupe_key": f"AUCTION_LOST:{auction.id}:{loser_producer_id}",
+                    }
+                )
+
+        if entries:
+            await _outbox_repo.enqueue(current_session, entries)
 
         clean_prod_name = prod_name or "Producteur Anonyme"
         producer_status_line = (
