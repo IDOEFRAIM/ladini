@@ -28,6 +28,9 @@ from agriconnect.graphs.agents.market_coach.llm_gateway.alerting import (
     NotificationService,
     build_notifier,
 )
+from agriconnect.graphs.agents.market_coach.llm_gateway.availability import (
+    is_candidate_usable,
+)
 from agriconnect.graphs.agents.market_coach.llm_gateway.circuit_breaker import (
     CircuitBreaker,
     Decision,
@@ -57,9 +60,30 @@ _SAFETY_MARGIN_SECONDS = 0.5
 
 class LLMGatewayExhausted(RuntimeError):
     """Tous les candidats éligibles pour ce profil ont échoué, étaient
-    indisponibles (circuit OPEN) ou le budget global était épuisé. Les nodes
-    métier attrapent cette exception exactement comme ils attrapaient avant
-    un timeout/erreur SDK direct — même repli UNKNOWN/dégradé, cause unique."""
+    indisponibles (circuit OPEN / config manquante) ou le budget global était
+    épuisé. Les nodes métier attrapent cette exception exactement comme ils
+    attrapaient avant un timeout/erreur SDK direct — même repli
+    UNKNOWN/dégradé, cause unique.
+
+    `reason` (2026-09-05, §11/§12 du brief incident) distingue POURQUOI la
+    chaîne de repli est vide, pour que l'appelant sache s'il a un sens
+    d'essayer un second appel LLM (ex: `clarification_node`) ou non :
+
+        ALL_CANDIDATES_UNAVAILABLE : aucune tentative réseau n'a eu lieu —
+            chaque candidat était structurellement inutilisable (identifiant
+            manquant) ou déjà en disjoncteur OPEN. Un second appel sur LA
+            MÊME chaîne échouera pour EXACTEMENT la même raison — inutile.
+        ALL_ATTEMPTS_FAILED : au moins un candidat a réellement été appelé
+            et a échoué (transitoire/config découverte à l'appel).
+        BUDGET_EXHAUSTED : le budget global du tour s'est épuisé avant même
+            la première tentative viable.
+        NO_CANDIDATES_CONFIGURED : le profil n'a aucun candidat déclaré en
+            configuration — panne de configuration, pas d'exécution.
+    """
+
+    def __init__(self, message: str, *, reason: str = "ALL_ATTEMPTS_FAILED"):
+        super().__init__(message)
+        self.reason = reason
 
 
 class LLMGateway:
@@ -117,13 +141,15 @@ class LLMGateway:
         if not candidates:
             raise LLMGatewayExhausted(
                 f"Aucun candidat configuré pour profile={profile.value} "
-                f"(structured_output_required={structured_required})"
+                f"(structured_output_required={structured_required})",
+                reason="NO_CANDIDATES_CONFIGURED",
             )
 
         primary_key = candidates[0].key
         budget_seconds = self._budget_for(profile)
         deadline = time.monotonic() + budget_seconds
         attempt = 0
+        budget_exhausted_before_any_attempt = False
         last_exc: Optional[BaseException] = None
 
         for candidate in candidates:
@@ -136,7 +162,26 @@ class LLMGateway:
                     budget_seconds,
                     candidate.key,
                 )
+                if attempt == 0:
+                    budget_exhausted_before_any_attempt = True
                 break
+
+            # Pré-check de configuration (§6/§7, incident 2026-09-05) — AVANT
+            # le disjoncteur : un candidat structurellement inutilisable
+            # (identifiant manquant pour CE provider) n'a jamais eu de
+            # "santé" à consulter, et ne doit jamais générer d'appel réseau
+            # juste pour le découvrir (voir `availability.py`). Ne touche
+            # PAS au disjoncteur/health — ce n'est pas une panne, c'est une
+            # impossibilité structurelle connue à l'avance.
+            availability = is_candidate_usable(candidate, self._settings)
+            if not availability.usable:
+                logger.info(
+                    "LLM_CALL | profile=%s candidate=%s attempt=skip reason=%s",
+                    profile.value,
+                    candidate.key,
+                    availability.reason,
+                )
+                continue
 
             circuit_decision = self._circuit.decide(candidate)
             if circuit_decision.decision == Decision.SKIP:
@@ -198,9 +243,25 @@ class LLMGateway:
             )
             return completion
 
+        if attempt == 0:
+            exhausted_reason = (
+                "BUDGET_EXHAUSTED"
+                if budget_exhausted_before_any_attempt
+                else "ALL_CANDIDATES_UNAVAILABLE"
+            )
+        else:
+            exhausted_reason = "ALL_ATTEMPTS_FAILED"
+        logger.warning(
+            "LLM_GATEWAY_EXHAUSTED | profile=%s reason=%s attempts=%d/%d",
+            profile.value,
+            exhausted_reason,
+            attempt,
+            len(candidates),
+        )
         raise LLMGatewayExhausted(
             f"Tous les candidats du profil {profile.value} ont échoué ou "
-            f"étaient indisponibles (budget={budget_seconds}s)."
+            f"étaient indisponibles (budget={budget_seconds}s).",
+            reason=exhausted_reason,
         ) from last_exc
 
     def primary_model_name(self, profile: LLMProfile) -> Optional[str]:
@@ -328,7 +389,9 @@ class LLMGateway:
         is_timeout = isinstance(exc, (asyncio.TimeoutError, TimeoutError))
 
         if error_class == ErrorClass.CONFIG:
-            self._health.mark_config_error(candidate, str(exc))
+            self._health.mark_config_error(
+                candidate, str(exc), cooldown_seconds=self._circuit.cooldown_seconds
+            )
             self._safe_alert(
                 candidate,
                 lambda: self._incident_dedup.should_notify_open(candidate.key),
@@ -520,7 +583,9 @@ def _default_client_for_provider(provider: str) -> Any:
         return _GroqAdapter(get_openai_compatible_sdk())
     if provider == "bedrock_native":
         return _BedrockAdapter(get_bedrock_client())
-    raise LLMGatewayExhausted(f"Provider inconnu: {provider!r}")
+    raise LLMGatewayExhausted(
+        f"Provider inconnu: {provider!r}", reason="PROVIDER_UNKNOWN"
+    )
 
 
 class LegacyOverrideGateway:

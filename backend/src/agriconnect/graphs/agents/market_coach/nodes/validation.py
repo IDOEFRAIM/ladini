@@ -16,6 +16,7 @@ from agriconnect.graphs.agents.market_coach.core.goals import BUYER_CART_GOALS
 from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     clear_pending_interaction,
+    get_pending_interaction,
     set_pending_interaction,
 )
 from agriconnect.graphs.agents.market_coach.core.slots import (
@@ -103,13 +104,30 @@ def _apply_slot_defaults(
     remaining = []
     for f in missing:
         slot_def = get_slot(f)
-        if slot_def and slot_def.default_value is not None:
-            payload[f] = slot_def.default_value
+        default: Any = None
+        if slot_def is not None:
+            # `default_factory` d'abord : un défaut qui DÉPEND d'un autre slot
+            # déjà collecté (ex. l'unité dépend de la nature du produit) ne
+            # peut pas être une constante — figé, il devient une affirmation
+            # sans preuve qui gagne ensuite contre la réalité (incident réel
+            # 2026-09-08 : "KG" figé sur des poulets). Voir core/slots.py.
+            if slot_def.default_factory is not None:
+                try:
+                    default = slot_def.default_factory(payload)
+                except Exception as exc:  # défaut jamais bloquant
+                    logger.warning(
+                        "[Validator] default_factory(%s) a échoué : %s", f, exc
+                    )
+                    default = None
+            if default is None:
+                default = slot_def.default_value
+        if default is not None:
+            payload[f] = default
             logger.info(
                 "[Validator] %s: %s missing — defaulting to %s",
                 goal_upper,
                 f,
-                slot_def.default_value,
+                default,
             )
         else:
             remaining.append(f)
@@ -428,7 +446,23 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
         "proactive_hint": None,
         "final_response": None,
         "ag_ui_component": None,
-        **clear_pending_interaction("validated_complete"),
     }
+    # Incident réel (2026-09-07) : ce nœud tourne AUSSI sur le tour où
+    # l'acheteur/producteur RÉPOND à une confirmation déjà posée ("j'accepte",
+    # "ok") — tous les champs requis sont par définition déjà remplis à ce
+    # stade, donc cette branche "validated_complete" s'exécute exactement
+    # comme pour n'importe quel autre tour "prêt à avancer". Effacer
+    # `pending_interaction` ici (CONFIRM_ACTION posé par `confirmation_gate`
+    # au tour précédent) AVANT que `confirmation_gate` ne le relise plus bas
+    # dans le MÊME tour lui faisait perdre toute trace qu'une confirmation
+    # était en attente — `awaiting_confirmation` retombait à False malgré
+    # `event=="CONFIRM"`, `confirmation_gate` re-construisait un récap
+    # FRAIS au lieu d'exécuter, posant une NOUVELLE `CONFIRM_ACTION` — boucle
+    # infinie ("Confirmez-vous ?" en écho à chaque "j'accepte"). Seul
+    # `confirmation_gate` (via `resolve_pending_interaction()`/REJECT) a
+    # l'autorité pour clore un CONFIRM_ACTION déjà actif ; ce nœud ne doit
+    # jamais le faire à sa place.
+    if get_pending_interaction(state).kind != InteractionKind.CONFIRM_ACTION:
+        result.update(clear_pending_interaction("validated_complete"))
 
     return _finalize_validator_response(state, result)

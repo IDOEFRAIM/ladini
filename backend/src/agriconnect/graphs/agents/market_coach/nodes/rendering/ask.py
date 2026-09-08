@@ -171,11 +171,49 @@ async def render_ask_missing_field(ctx: RenderContext) -> Dict[str, Any]:
         state.get("normalized_text") or state.get("user_query") or ""
     ).strip()
     if event in {"UNKNOWN", "OUT_OF_SCOPE"} and user_text:
-        note = await llm_deviation_reply(
-            ctx.mc_runtime, user_text, f"répondre à : {label}"
-        )
-        if note:
-            question = f"{note}\n\n{question}"
+        # Incident réel (2026-09-08) : "Merci pour l'information, vous avez
+        # indiqué 4000 poulets 🙏" ... suivi immédiatement de "J'ai juste
+        # besoin de quantité disponible" — l'agent ACCUSE RÉCEPTION d'une
+        # donnée qu'il n'a jamais enregistrée, puis la redemande.
+        #
+        # Cause : `UNKNOWN` recouvre DEUX situations opposées.
+        #   1. UNKNOWN sémantique — le LLM a tourné et n'a sincèrement pas su
+        #      classer ("vous me tiendrez informé ?"). Une note adaptative est
+        #      alors exactement ce qu'il faut : c'est le cas pour lequel ce
+        #      bloc a été écrit.
+        #   2. UNKNOWN technique — l'interpréteur était INDISPONIBLE (quota
+        #      429 / tous candidats épuisés) et `routing.py` a FORCÉ UNKNOWN
+        #      (`raw_analysis.path="llm_crash"` → `unknown_reason=
+        #      TECHNICAL_FAILURE`). Le message n'a alors jamais été analysé :
+        #      "4000" n'a JAMAIS été extrait ni stocké. Générer une note via
+        #      un SECOND appel LLM sur le texte brut produit précisément le
+        #      mensonge observé — la note, elle, voit bien "4000 poulets" et
+        #      l'acquitte poliment, alors que le slot est resté vide.
+        #
+        # Distinction déjà matérialisée par `unknown_reason` et déjà
+        # consommée par `clarification_node` pour la même raison (voir
+        # docs/LLM_GATEWAY_FAILURE_RECOVERY_2026-09-05.md §3.4) — ce renderer
+        # générique, lui, ne l'avait jamais reçue. On ne rappelle donc PAS la
+        # Gateway qui vient d'échouer sur CE tour (appel réseau pur perte), et
+        # on dit honnêtement que le message n'a pas pu être pris en compte
+        # plutôt que de faire semblant.
+        if str(state.get("unknown_reason") or "").upper() == "TECHNICAL_FAILURE":
+            logger.info(
+                "[AskRenderer] LLM indisponible ce tour "
+                "(unknown_reason=TECHNICAL_FAILURE) — aucune note de déviation "
+                "générée, avis honnête à la place"
+            )
+            question = (
+                "🔧 Je n'ai pas pu analyser votre message (service "
+                "momentanément indisponible) — il n'a donc pas été pris en "
+                f"compte.\n\n{question}"
+            )
+        else:
+            note = await llm_deviation_reply(
+                ctx.mc_runtime, user_text, f"répondre à : {label}"
+            )
+            if note:
+                question = f"{note}\n\n{question}"
 
     if candidates:
         ag_component = list_menu_component(

@@ -67,13 +67,15 @@ class HealthRegistry:
 
     def is_available(self, candidate: ModelCandidate) -> bool:
         """CLOSED ou cooldown expiré (implicitement HALF_OPEN-eligible) → True.
-        OPEN avec cooldown non expiré → False (skip, aucun appel réseau)."""
+        OPEN (ou CONFIG_ERROR — même cooldown depuis 2026-09-05, voir
+        `mark_config_error`) avec cooldown non expiré → False (skip, aucun
+        appel réseau)."""
         record = self.get(candidate.key)
+        now = time.time()
         if record.config_error:
-            return False
+            return bool(record.cooldown_until and now >= record.cooldown_until)
         if record.state != CircuitState.OPEN:
             return True
-        now = time.time()
         return bool(record.cooldown_until and now >= record.cooldown_until)
 
     def percentiles(self, candidate_key: str) -> dict:
@@ -114,15 +116,31 @@ class HealthRegistry:
             ),
         )
 
-    def mark_config_error(self, candidate: ModelCandidate, message: str) -> HealthRecord:
+    def mark_config_error(
+        self,
+        candidate: ModelCandidate,
+        message: str,
+        *,
+        cooldown_seconds: float = 30.0,
+    ) -> HealthRecord:
         """CONFIG_ERROR (§15) : désactive le candidat sans le compter comme une
-        panne transitoire — jamais retenté automatiquement (voir registry.py,
-        qui filtre les candidats `config_error=True` hors rotation)."""
+        panne transitoire — jamais retenté DANS L'IMMÉDIAT (pas de tempête de
+        401/404 répétés).
+
+        `cooldown_seconds` (2026-09-05, incident réel — un token expiré et un
+        modèle décommissionné sont restés `config_error=True` en Redis
+        pendant des heures, aucun chemin de retour tant que personne ne
+        vidait la clé à la main ou n'attendait le TTL de 7 jours) : fixe
+        `cooldown_until` comme pour un OPEN ordinaire, pour que
+        `CircuitBreaker.decide()` puisse retenter un probe HALF_OPEN une
+        fois le cooldown écoulé — RÉUTILISE le mécanisme de probe déjà en
+        place (§9 "ne pas reconstruire le disjoncteur"), ne l'invente pas."""
 
         def _apply(rec: HealthRecord) -> HealthRecord:
             rec.config_error = True
             rec.config_error_message = message[:500]
             rec.state = CircuitState.OPEN
+            rec.cooldown_until = time.time() + cooldown_seconds
             return rec
 
         record = self._update(candidate.key, _apply)
@@ -146,12 +164,21 @@ class HealthRegistry:
             if rec.consecutive_successes >= max(1, half_open_probes):
                 rec.state = CircuitState.CLOSED
                 rec.cooldown_until = None
+                # Recovery (2026-09-05) : un probe HALF_OPEN réussi après une
+                # CONFIG_ERROR (token rotaté, modèle republié...) doit
+                # RÉELLEMENT rouvrir le candidat — sans ce reset, `decide()`
+                # skiperait à nouveau indéfiniment sur `record.config_error`
+                # malgré `state=CLOSED`.
+                rec.config_error = False
+                rec.config_error_message = None
         elif rec.state == CircuitState.OPEN:
             # Un appel a réussi alors qu'on pensait le circuit OPEN (ex: le
             # cooldown venait d'expirer et ce candidat a été essayé directement) :
             # traiter comme une reprise, fermer le circuit.
             rec.state = CircuitState.CLOSED
             rec.cooldown_until = None
+            rec.config_error = False
+            rec.config_error_message = None
         return rec
 
     def _apply_failure(

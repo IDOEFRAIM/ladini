@@ -1380,12 +1380,25 @@ def make_input_interpreter(role: str = "PRODUCER"):
                     degraded["extracted_entities"].get("product"),
                 )
                 return degraded
+            # `gateway_reason` (2026-09-05, incident "je veux voir les
+            # enchères" → UNKNOWN générique) : distingue POURQUOI la Gateway
+            # a été épuisée — voir `LLMGatewayExhausted.reason`. N'affecte
+            # PAS `unknown_reason` (déjà `TECHNICAL_FAILURE` pour ce `path`,
+            # voir `interpreter_result.py::_UNKNOWN_REASON_BY_PATH`) — c'est
+            # une information SUPPLÉMENTAIRE pour l'observabilité et pour
+            # `clarification_node`, qui l'utilise pour ne jamais retenter un
+            # second appel LLM voué au même échec (§11 du brief incident).
+            gateway_reason = getattr(exc, "reason", None)
             return {
                 "interpreted_event": "UNKNOWN",
                 "detected_intent": "UNKNOWN",
                 "interpreter_confidence": 0.0,
                 "extracted_entities": {},
-                "raw_analysis": {"path": "llm_crash", "error": str(exc)},
+                "raw_analysis": {
+                    "path": "llm_crash",
+                    "error": str(exc),
+                    "gateway_reason": gateway_reason,
+                },
             }
 
         # 5. Normalisation sémantique et gardes-fous anti-dérive

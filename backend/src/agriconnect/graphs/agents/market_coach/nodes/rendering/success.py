@@ -1016,9 +1016,25 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
             # `confirm` du dernier tour). Le payload passé au gabarit doit
             # d'abord se rabattre sur form_data, avec les valeurs non-vides
             # de `payload` en priorité (le plus récent des deux).
+            #
+            # Récidive réelle (2026-09-07, STOCK_REGISTER_HARVEST) : "Récolte
+            # enregistrée pour 0  pour votre demande" — MÊME classe de bug,
+            # goal SANS form_data cette fois. Root cause précise : `add_stock`
+            # a bien reçu quantity=6000 (confirmé — l'écriture DB est
+            # correcte), mais `state_cleaner_node` tourne AVANT `final_response`
+            # (edge réel : response_strategy -> state_cleaner -> final_response)
+            # et efface `transaction_payload` dès que `status=="COMPLETED"`
+            # (reset terminal-goal, `{"__reset__": True}`) — `payload` ici est
+            # donc déjà vide au moment du rendu, quel que soit le goal.
+            # `confirmation_summary_payload` (posé par `confirmation_gate` au
+            # tour où le récap a été affiché, JAMAIS effacé par ce reset
+            # terminal) est le snapshot figé qui survit — seconde source de
+            # repli, pour tout goal transactionnel qui n'utilise pas form_data.
             form_data = state.get("form_data") or {}
+            confirmed_payload = state.get("confirmation_summary_payload") or {}
             effective_payload = {
                 **form_data,
+                **confirmed_payload,
                 **{k: v for k, v in payload.items() if v not in (None, "", [], {})},
             }
             text_output = _transactional_fallback_text(

@@ -111,6 +111,34 @@ async def clarification_node(
     if _detect_disambiguation_candidates(text.lower(), user_role):
         return {}
 
+    # ── LLM indisponible CE TOUR (2026-09-05, incident "je veux voir les
+    # enchères" → UNKNOWN puis clarification identique) ────────────────
+    # `input_interpreter` a déjà tenté le LLM Gateway et a échoué avec une
+    # panne d'infrastructure (`unknown_reason=TECHNICAL_FAILURE` — voir
+    # `interpreter/interpreter_result.py`, panne AUTH/tous providers
+    # indisponibles/budget épuisé). Retenter ICI le même Gateway, sur le
+    # même tour, ne peut logiquement qu'échouer À NOUVEAU pour la même
+    # raison (§11 du brief incident) : c'est un appel réseau pur perte,
+    # ET c'est ce qui produisait le double log "mêmes providers, mêmes
+    # failures" observé en prod. Repli déterministe honnête à la place —
+    # jamais "je n'ai pas bien saisi" pour une panne technique (§12/§15) :
+    # c'est un mensonge sur la cause, l'utilisateur n'a rien mal formulé.
+    if str(state.get("unknown_reason") or "").upper() == "TECHNICAL_FAILURE":
+        logger.info(
+            "[ClarificationNode] LLM déjà indisponible ce tour "
+            "(unknown_reason=TECHNICAL_FAILURE) — repli déterministe, "
+            "aucun second appel Gateway"
+        )
+        return {
+            "final_response": (
+                "🔧 Notre assistant intelligent est momentanément "
+                "indisponible. Réessayez dans quelques instants — vos "
+                "commandes et votre panier restent intacts."
+            ),
+            "response_strategy": "CLARIFICATION",
+            "ag_ui_component": None,
+        }
+
     # Try LLM-powered clarification
     llm = getattr(mc_runtime, "llm", None)
     if llm is None:

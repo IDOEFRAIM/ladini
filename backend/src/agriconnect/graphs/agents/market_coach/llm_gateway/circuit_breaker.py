@@ -54,11 +54,34 @@ class CircuitBreaker:
         self._half_open_probes = half_open_probes
         self._probe_lock_seconds = probe_lock_seconds
 
+    @property
+    def cooldown_seconds(self) -> float:
+        return self._cooldown_seconds
+
     def decide(self, candidate: ModelCandidate) -> CircuitDecision:
         record = self._health.get(candidate.key)
 
         if record.config_error:
-            return CircuitDecision(Decision.SKIP, "CONFIG_ERROR")
+            # Recovery (2026-09-05, incident réel — un candidat CONFIG_ERROR
+            # restait bloqué indéfiniment, aucun chemin de retour hors TTL
+            # Redis 7 jours ou intervention manuelle) : RÉUTILISE le même
+            # cooldown/verrou de probe qu'un OPEN ordinaire
+            # (`mark_config_error` fixe désormais `cooldown_until`) — motif
+            # de SKIP distinct pour l'observabilité tant que le cooldown
+            # n'est pas écoulé, mais AUCUNE nouvelle mécanique.
+            now = time.time()
+            cooldown_elapsed = bool(
+                record.cooldown_until and now >= record.cooldown_until
+            )
+            if not cooldown_elapsed:
+                return CircuitDecision(Decision.SKIP, "CONFIG_ERROR")
+            acquired = self._health.try_acquire_probe_lock(
+                candidate.key, self._probe_lock_seconds
+            )
+            if not acquired:
+                return CircuitDecision(Decision.SKIP, "PROBE_IN_PROGRESS")
+            self._health.transition_to_half_open(candidate)
+            return CircuitDecision(Decision.PROBE, "HALF_OPEN_PROBE_AFTER_CONFIG_ERROR")
 
         if record.state == CircuitState.CLOSED:
             return CircuitDecision(Decision.ATTEMPT, "CLOSED")

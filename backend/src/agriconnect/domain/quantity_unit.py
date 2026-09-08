@@ -196,15 +196,93 @@ def convert_quantity(quantity: float, from_unit: str, to_unit: str) -> Optional[
     return quantity * from_kg / to_kg
 
 
+#: Apostrophes (droite et typographique) marquant une ÉLISION française.
+_ELISION_CHARS = ("'", "’")
+
+
 def extract_unit_only_from_text(text: str) -> Optional[str]:
     """Try to find a standalone unit token in *text* (no quantity required)."""
     if not text:
         return None
     for match in _UNIT_ONLY_RE.finditer(text):
+        # Incident réel (2026-09-08) : « c'est 3000 f l'unité » (= prix À LA
+        # PIÈCE) était lu comme `unit=LITRE`. `_UNIT_ONLY_RE` découpe sur les
+        # frontières de mot et l'apostrophe n'en fait pas partie : « l'unité »
+        # produit donc DEUX tokens, « l » et « unité » — et « l » isolé est le
+        # symbole du litre dans `UNIT_SYNONYMS`. Même piège pour « t' »
+        # (« t'as ») qui vaut TONNE. Un token collé à une apostrophe est un
+        # ARTICLE ÉLIDÉ (l', d', j', n', t'…), jamais une unité : on le saute.
+        if match.end() < len(text) and text[match.end()] in _ELISION_CHARS:
+            continue
         mapped = UNIT_SYNONYMS.get(normalize_unit_token(match.group(1)))
         if mapped:
             return mapped
     return None
+
+
+def resolve_product_unit(
+    product: Any,
+    current_unit: Any = None,
+    text_unit: Any = None,
+) -> Optional[str]:
+    """AUTORITÉ UNIQUE : quelle unité pour ce produit ?
+
+    ## Le problème que cette fonction existe pour supprimer
+
+    L'unité était décidée par CINQ écrivains successifs (interpréteur,
+    héritage `stable_entities`, enrichissement texte, règle élevage, défaut
+    du registre de slots), chacun gardé par un `if unité est vide`. La
+    précédence réelle était donc « le PREMIER qui écrit gagne » — c'est-à-dire
+    l'ordre d'exécution dans le graphe, pas la fiabilité de la source. Un
+    défaut aveugle « KG », posé sans la moindre preuve, gagnait ainsi
+    DÉFINITIVEMENT contre la nature du produit : incident réel (2026-09-08),
+    « Vente de 6500 KG de poulets » — des poulets se comptent à la tête, et
+    l'utilisateur avait écrit « poulets » deux fois. La règle élevage→TETE
+    existait pourtant, mais ne pouvait que COMBLER un vide, jamais CORRIGER
+    une valeur déjà posée.
+
+    ## La règle
+
+    Précédence par FIABILITÉ de la source, jamais par ordre d'exécution :
+
+    1. `text_unit` — l'utilisateur a écrit l'unité noir sur blanc.
+    2. NATURE DU PRODUIT, en CORRECTION — `current_unit` est une unité de
+       MASSE alors que le produit est un animal compté à la tête : c'est
+       physiquement impossible, donc c'est `current_unit` qui a tort, quelle
+       qu'en soit la provenance.
+    3. `current_unit` — déjà posée et plausible : on n'y touche pas.
+    4. NATURE DU PRODUIT, en DÉFAUT — rien de connu : TETE pour un élevage,
+       `None` sinon (à l'appelant de demander plutôt que de deviner).
+
+    ## Périmètre assumé
+
+    Cette fonction décide « quelle unité pour CE produit », pas « l'utilisateur
+    est-il en train de corriger son unité ». La correction explicite en cours
+    de conversation reste la propriété de `interpreter/routing.py` (garde
+    anti-ancrage texte>LLM) et de `nodes/memory.py::_apply_slot` (qui purge le
+    prix en cascade quand l'unité change — un prix « 3000/KG » ne survit pas à
+    un passage en SAC). Les appelants ne fournissent donc `text_unit` que
+    lorsqu'ils sont légitimes à trancher ce point.
+    """
+    if text_unit:
+        canonical = normalize_unit(text_unit)
+        if canonical:
+            return canonical
+
+    natural = "TETE" if is_livestock_product(product) else None
+
+    if current_unit not in (None, "", [], {}):
+        # `normalize_unit` renvoie None pour une unité inconnue du registre —
+        # on préserve alors la valeur telle quelle plutôt que de détruire une
+        # donnée utilisateur qu'on ne sait simplement pas interpréter.
+        current_canonical = (
+            normalize_unit(current_unit) or str(current_unit).strip().upper()
+        )
+        if natural and current_canonical in _UNIT_TO_KG:
+            return natural
+        return current_canonical
+
+    return natural
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +308,7 @@ _SCAN_UNIT_RE = re.compile(
     r"(?<![a-zàâäéèêëïîôöùûüÿçA-ZÀÂÄÉÈÊËÏÎÔÖÙÛÜŸÇ])"
     r"(k|kg|kgs|kilo|kilogramme|kilogrammes|ton|tons|tone|tones|tonne|tonnes|t|"
     r"sac|sacs|sachet|sachets|panier|paniers|tete|têtes|tetes|unite|unité|unites|unités|"
-    r"l|litre|litres)\b"
+    r"l|litre|litres)\b(?!['’])"
 )
 _SCAN_CURRENCY_RE = re.compile(
     r"(?<![a-zàâäéèêëïîôöùûüÿçA-ZÀÂÄÉÈÊËÏÎÔÖÙÛÜŸÇ])(fcfa|cfa|francs?|balles?)\b"
@@ -506,4 +584,5 @@ __all__ = [
     "LIVESTOCK_PRODUCT_KEYWORDS",
     "is_livestock_product",
     "default_unit_for_product",
+    "resolve_product_unit",
 ]

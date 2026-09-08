@@ -469,7 +469,25 @@ async def goal_planner(
         return _with_goal_metadata(updates)
 
     # RÈGLE 1bis — TUNNEL LOCKING (Maintien des formulaires d'IHM)
-    if event in {"CONFIRM", "SELECTION", "ANSWER", "UPDATE"}:
+    #
+    # Incident réel (2026-09-08) : cette règle s'appliquait au SEUL vu de
+    # l'événement, SANS vérifier qu'un tunnel existe réellement à verrouiller.
+    # « j'ai 6000 poulets » (hors tunnel) était classé
+    # `event=ANSWER intent=STOCK_REGISTER_HARVEST current_goal=None` — la
+    # règle réaffectait alors `current_goal = None` (soit : rien), JETAIT
+    # l'intention pourtant correctement détectée, et le tour finissait en
+    # « Je n'ai pas bien saisi ». Une minute plus tard, « je veux vendre mes
+    # poulets » — situation identique (aucun tunnel, intention sûre) —
+    # fonctionnait, uniquement parce que le LLM avait cette fois étiqueté
+    # l'événement `NEW_TASK` (RÈGLE 5) au lieu d'`ANSWER`. Or cette
+    # étiquette n'est pas fiable par nature : une phrase qui ÉNONCE une
+    # donnée (« j'ai 6000 poulets ») ressemble légitimement à une réponse de
+    # slot. Faire dépendre l'accès à TOUTE la machine à états d'un label que
+    # le LLM ne peut pas trancher de façon déterministe est structurellement
+    # fragile — d'où le garde `current_goal` ici : « verrouiller le tunnel »
+    # n'a de sens que s'il y a un tunnel. Sans tunnel, ANSWER/UPDATE
+    # retombent sur la RÈGLE 5, qui sait promouvoir l'intention en goal.
+    if current_goal and event in {"CONFIRM", "SELECTION", "ANSWER", "UPDATE"}:
         updates["current_goal"] = current_goal
         updates["goal_status"] = "ACTIVE"
         updates["working_memory"] = _lock(current_goal)
@@ -666,7 +684,20 @@ async def goal_planner(
         return _with_goal_metadata(updates)
 
     # RÈGLE 5 — NEW_TASK (Instanciation et purge des champs AG-UI)
-    if event == "NEW_TASK":
+    #
+    # (2026-09-08) `ANSWER`/`UPDATE` SANS tunnel actif entrent ici aussi —
+    # voir le garde ajouté en RÈGLE 1bis. Hors tunnel, « répondre » ou
+    # « corriger » n'a aucun référent : il n'y a rien à quoi répondre. Le
+    # seul contenu exploitable du tour est alors l'intention détectée, et la
+    # traiter comme une nouvelle tâche est la SEULE lecture cohérente — le
+    # même traitement que RÈGLE 5 applique déjà à `NEW_TASK`, réutilisé tel
+    # quel (purge transactionnelle + verrou incluses), jamais dupliqué.
+    # `CONFIRM`/`SELECTION` restent volontairement EXCLUS : « oui » ou « 2 »
+    # sans rien à confirmer ni menu affiché ne portent aucune intention
+    # métier — les promouvoir inventerait une tâche que l'utilisateur n'a
+    # pas demandée. Si `detected_intent` n'est pas mappable (UNKNOWN), rien
+    # n'est promu et le tour retombe sur le repli par défaut, inchangé.
+    if event == "NEW_TASK" or (not current_goal and event in {"ANSWER", "UPDATE"}):
         new_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
         if new_goal:
             updates["current_goal"] = new_goal

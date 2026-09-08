@@ -22,6 +22,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, Optional, Tuple
 
+from agriconnect.domain.quantity_unit import default_unit_for_product
+
 # ---------------------------------------------------------------------------
 # Slot Definition
 # ---------------------------------------------------------------------------
@@ -39,6 +41,14 @@ class SlotDefinition:
     example_fr: str = ""
     auto_resolvable: bool = False
     default_value: Optional[Any] = field(default=None, hash=False, compare=False)
+    #: Défaut CALCULÉ à partir du payload déjà collecté, quand une constante
+    #: ne peut pas être honnête. Prioritaire sur `default_value`.
+    #: Motivation (incident réel 2026-09-08) : le slot `unit` portait
+    #: `default_value="KG"` — une affirmation posée SANS AUCUNE PREUVE, qui
+    #: gagnait ensuite définitivement contre la nature réelle du produit
+    #: (« Vente de 6500 KG de poulets » : un poulet se compte à la tête).
+    #: Un défaut qui dépend d'un autre slot doit être calculé, jamais figé.
+    default_factory: Optional[Any] = field(default=None, hash=False, compare=False)
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +104,13 @@ SLOT_REGISTRY: Tuple[SlotDefinition, ...] = (
         blocking=False,
         label_fr="unité",
         example_fr="KG, SAC, TONNE…",
-        default_value="KG",
+        # `default_value="KG"` (aveugle) remplacé le 2026-09-08 : voir
+        # `default_factory` ci-dessus. `default_unit_for_product` renvoie
+        # exactement "KG" pour une culture — comportement inchangé — et
+        # "TETE" pour un animal d'élevage, qui ne se pèse pas.
+        default_factory=lambda payload: default_unit_for_product(
+            payload.get("product")
+        ),
     ),
     SlotDefinition(
         canonical="price",

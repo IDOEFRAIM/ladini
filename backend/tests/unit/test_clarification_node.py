@@ -126,3 +126,41 @@ class TestClarificationNodeTriggerConditions:
             "user_role": "BUYER",
         }, rt))
         assert result == {}
+
+
+class TestTechnicalFailureSkipsASecondWastedLlmCall:
+    """Incident réel (2026-09-05) : « je veux voir les enchères » → Gateway
+    épuisée dans `input_interpreter` (2 candidats 401, repli refusé) →
+    UNKNOWN → `clarification_node` retentait EXACTEMENT les mêmes providers
+    → mêmes échecs → réponse générique. Corrigé : `unknown_reason=
+    TECHNICAL_FAILURE` (posé par `input_interpreter`/`InterpreterResult`)
+    court-circuite le second appel — repli déterministe honnête à la place."""
+
+    def test_technical_failure_never_calls_the_llm_and_returns_an_honest_degraded_message(self):
+        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        rt = _runtime("ne devrait jamais apparaître — le LLM ne doit pas être appelé")
+        result = run(clarification_node({
+            "interpreted_event": "UNKNOWN", "expected_input": "NONE",
+            "current_goal": None, "normalized_text": "je veux voir les enchères",
+            "user_role": "PRODUCER", "unknown_reason": "TECHNICAL_FAILURE",
+        }, rt))
+        assert result["response_strategy"] == "CLARIFICATION"
+        assert "indisponible" in result["final_response"].lower()
+        # Jamais le mensonge "je n'ai pas bien saisi" pour une panne
+        # d'infrastructure (§12/§15 du brief incident) :
+        assert "bien saisi" not in result["final_response"].lower()
+        assert rt.llm.calls == 0, "le LLM ne doit JAMAIS être appelé une 2e fois pour rien"
+
+    def test_a_genuine_ambiguous_unknown_still_calls_the_llm_as_before(self):
+        """Non-régression : seul `TECHNICAL_FAILURE` court-circuite l'appel —
+        une vraie ambiguïté de contenu (`AMBIGUOUS`, ou absent) garde son
+        comportement adaptatif existant."""
+        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        rt = _runtime("Salut ! Je peux t'aider à vendre ou acheter.")
+        result = run(clarification_node({
+            "interpreted_event": "UNKNOWN", "expected_input": "NONE",
+            "current_goal": None, "normalized_text": "bonjour ça va ?",
+            "user_role": "PRODUCER", "unknown_reason": "AMBIGUOUS",
+        }, rt))
+        assert result["final_response"] == "Salut ! Je peux t'aider à vendre ou acheter."
+        assert rt.llm.calls == 1

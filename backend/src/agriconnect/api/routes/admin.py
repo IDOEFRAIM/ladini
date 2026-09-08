@@ -17,6 +17,9 @@ from fastapi import APIRouter, Header, HTTPException, Response
 
 from agriconnect.core.settings import settings
 from agriconnect.graphs.agents.market_coach.llm_gateway import get_llm_gateway
+from agriconnect.graphs.agents.market_coach.llm_gateway.availability import (
+    is_candidate_usable,
+)
 from agriconnect.graphs.agents.market_coach.llm_gateway.types import CircuitState, LLMProfile
 
 router = APIRouter()
@@ -57,8 +60,17 @@ async def llm_health(x_admin_token: str | None = Header(default=None)):
         for candidate in candidates:
             record = health.get(candidate.key)
             state = record.state
-            available = state != CircuitState.OPEN or (
-                record.cooldown_until is not None and now >= record.cooldown_until
+            # Pré-check §7 (2026-09-05) : un candidat peut être `CLOSED`
+            # (jamais tenté, disjoncteur "sain" en apparence) tout en étant
+            # STRUCTURELLEMENT sauté à chaque tour (identifiant manquant) —
+            # sans cette vérification, ce endpoint mentirait en le
+            # présentant comme `selected`/disponible. Ne lit et n'expose
+            # JAMAIS la valeur de l'identifiant — seulement le booléen/raison
+            # (§26 "sans afficher de secrets").
+            availability = is_candidate_usable(candidate, settings)
+            available = availability.usable and (
+                state != CircuitState.OPEN
+                or (record.cooldown_until is not None and now >= record.cooldown_until)
             )
             if not record.config_error and available and selected is None:
                 selected = candidate.key
@@ -72,6 +84,9 @@ async def llm_health(x_admin_token: str | None = Header(default=None)):
                     "state": state.value,
                     "config_error": record.config_error,
                     "config_error_message": record.config_error_message,
+                    "availability": (
+                        "OK" if availability.usable else (availability.reason or "UNAVAILABLE")
+                    ),
                     "consecutive_failures": record.consecutive_failures,
                     "consecutive_successes": record.consecutive_successes,
                     "total_requests": record.total_requests,
@@ -88,11 +103,13 @@ async def llm_health(x_admin_token: str | None = Header(default=None)):
                     "last_success_at": record.last_success_at,
                     "last_failure_at": record.last_failure_at,
                 }
-            provider_states.setdefault(candidate.provider, []).append(
-                candidates_payload[candidate.key]["state"]
-                if not record.config_error
-                else "CONFIG_ERROR"
-            )
+            if record.config_error:
+                provider_state = "CONFIG_ERROR"
+            elif not availability.usable:
+                provider_state = "CONFIG_MISSING"
+            else:
+                provider_state = candidates_payload[candidate.key]["state"]
+            provider_states.setdefault(candidate.provider, []).append(provider_state)
 
         profile_status = (
             "HEALTHY"
@@ -107,11 +124,12 @@ async def llm_health(x_admin_token: str | None = Header(default=None)):
             "status": profile_status,
         }
 
+    _DOWN_STATES = ("OPEN", "CONFIG_ERROR", "CONFIG_MISSING")
     providers_payload = {
         provider: (
             "DOWN"
-            if all(s in ("OPEN", "CONFIG_ERROR") for s in states)
-            else ("DEGRADED" if any(s in ("OPEN", "CONFIG_ERROR") for s in states) else "HEALTHY")
+            if all(s in _DOWN_STATES for s in states)
+            else ("DEGRADED" if any(s in _DOWN_STATES for s in states) else "HEALTHY")
         )
         for provider, states in provider_states.items()
     }

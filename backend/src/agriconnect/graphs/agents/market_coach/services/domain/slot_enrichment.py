@@ -30,6 +30,9 @@ from agriconnect.domain.quantity_unit import (
 from agriconnect.domain.quantity_unit import (
     parse_quantity_unit_from_text as _parse_qty_unit,
 )
+from agriconnect.domain.quantity_unit import (
+    resolve_product_unit as _resolve_product_unit,
+)
 
 logger = get_logger("AgriConnect.MarketCoach.SlotEnrichment")
 
@@ -404,17 +407,30 @@ async def enrich_payload_from_text(
                         }
                     )
 
-    if payload.get("unit") in (None, "", [], {}) and text:
-        unit_from_text = extract_unit_only(text)
-        if unit_from_text:
-            payload["unit"] = unit_from_text
-
-    # Livestock (poussins, moutons, bœufs…) are counted per head, never weighed.
-    # Default their unit to TÊTE so it isn't silently coerced to KG downstream.
-    if payload.get("unit") in (None, "", [], {}) and _is_livestock_product(
-        payload.get("product")
-    ):
-        payload["unit"] = "TETE"
+    # ── UNITÉ : décision centralisée ──────────────────────────────────
+    # Voir `domain/quantity_unit.py::resolve_product_unit` — autorité UNIQUE,
+    # précédence par FIABILITÉ de la source et non par ordre d'exécution.
+    # Ces deux règles vivaient ici sous forme de `if unité est vide`, ce qui
+    # les rendait incapables de CORRIGER quoi que ce soit : un « KG » posé
+    # plus tôt par un défaut aveugle gagnait définitivement contre la nature
+    # du produit (incident réel 2026-09-08, « 6500 KG de poulets »).
+    #
+    # `text_unit` n'est proposé que si aucune unité n'est encore posée : la
+    # correction explicite en cours de conversation reste la propriété de
+    # `interpreter/routing.py` (garde anti-ancrage) et de
+    # `nodes/memory.py::_apply_slot` (qui purge le prix en cascade quand
+    # l'unité change) — voir « Périmètre assumé » du docstring de l'autorité.
+    resolved_unit = _resolve_product_unit(
+        payload.get("product"),
+        current_unit=payload.get("unit"),
+        text_unit=(
+            extract_unit_only(text)
+            if text and payload.get("unit") in (None, "", [], {})
+            else None
+        ),
+    )
+    if resolved_unit:
+        payload["unit"] = resolved_unit
 
     if payload.get("surface") in (None, "", [], {}) and text:
         surface_value = extract_surface_from_text(text)

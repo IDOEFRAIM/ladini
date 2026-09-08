@@ -166,12 +166,31 @@ def get_groq_sdk(force_refresh: bool = False) -> Any:
         _GROQ_SDK_SINGLETON = _MockGroqClient()
         return _GROQ_SDK_SINGLETON
 
-    provider = (getattr(settings, "LLM_PROVIDER", "groq") or "groq").strip().lower()
-    if provider not in {"groq", "default", "auto"}:
-        raise RuntimeError(
-            "get_groq_sdk() n'est disponible que lorsque LLM_PROVIDER=groq (ou auto)."
-        )
-
+    # Incident réel (2026-09-05) : ce garde comparait `LLM_PROVIDER` (qui ne
+    # gouverne QUE le client LEGACY unique construit par `get_llm()` — voir
+    # sa docstring) avant de construire le client Groq — alors que
+    # `llm_gateway/gateway.py::_default_client_for_provider` appelle CETTE
+    # fonction directement pour n'importe quel candidat `groq:*` de la chaîne
+    # de repli, INDÉPENDAMMENT de `LLM_PROVIDER` (Modèle A, chaque candidat
+    # porte son propre provider — voir `llm_gateway/registry.py`). Avec
+    # `LLM_PROVIDER=bedrock`, ce garde levait pour la moindre tentative du
+    # candidat de repli `groq:llama-3.3-70b-versatile`, alors même que
+    # `GROQ_API_KEY` était valide — la seule vraie question. Résultat observé
+    # en prod : "je veux voir les enchères" → 2 candidats bedrock_gateway en
+    # 401 (token expiré) PUIS le repli groq refusé par CE garde, classé
+    # `application_error` (pas de fragment CONFIG reconnu dans son message) →
+    # tous les candidats "épuisés" → UNKNOWN générique, alors qu'un repli
+    # groq valide existait et n'a jamais été essayé.
+    #
+    # Second appelant touché par le même garde, silencieux celui-là : la
+    # branche `LLM_PROVIDER=bedrock` de `get_llm()` (~ligne 826) construit
+    # déjà un `fallback_client = get_groq_sdk()` pour son propre repli
+    # inter-provider — ce garde le faisait échouer AUSSI, avalé par son
+    # `except Exception` local, rendant ce fallback documenté totalement
+    # inopérant dès que `LLM_PROVIDER != groq`.
+    #
+    # La seule vraie condition d'utilisabilité de Groq est l'identifiant —
+    # vérifiée juste en dessous. `LLM_PROVIDER` n'a plus voix ici.
     api_key = settings.llm_api_key
     if not api_key:
         raise RuntimeError(
@@ -357,8 +376,23 @@ def _is_bedrock_throttling_error(exc: Exception) -> bool:
 
 
 def _fallback_model_for(requested_model: str) -> Optional[str]:
-    """Modèle de repli à quota TPD séparé, ou None si aucun repli pertinent
-    (déjà sur le modèle rapide, ou modèle demandé inconnu)."""
+    """Modèle de repli à quota TPD séparé sur CE MÊME client Groq, ou None si
+    aucun repli pertinent (déjà sur le modèle rapide, modèle demandé inconnu,
+    ou repli structurellement invalide pour Groq).
+
+    Incident réel (2026-09-07) : `settings.LLM_MODEL` est un réglage legacy,
+    partagé avec la config multi-provider du LLM Gateway
+    (`llm_gateway/gateway.py`, candidats `provider:model` indépendants —
+    voir `docs/LLM_GATEWAY_FAILURE_RECOVERY_2026-09-05.md`). Un `.env` de
+    production avait fini par y stocker un ID au format Bedrock
+    ("qwen.qwen3-32b", notation par POINTS — voir le catalogue Bedrock,
+    jamais par slash) au lieu d'un ID Groq ("qwen/qwen3.6-27b", notation par
+    SLASH) — ce repli, exécuté directement sur le SDK Groq, tentait alors ce
+    modèle inexistant côté Groq (404 `model_not_found`), cassant tout appel
+    LLM du tour (onboarding, interprétation) dès qu'un simple 429 survenait.
+    Un ID contenant un point mais aucun slash est structurellement un modèle
+    Bedrock, jamais un modèle Groq valide — on n'y tente jamais de repli.
+    """
     try:
         from agriconnect.core.settings import settings
 
@@ -366,6 +400,16 @@ def _fallback_model_for(requested_model: str) -> Optional[str]:
     except Exception:
         fast_model = ""
     if not fast_model or requested_model == fast_model:
+        return None
+    if "." in fast_model and "/" not in fast_model:
+        logger.warning(
+            "GROQ_FALLBACK_MODEL_REJECTED | requested=%s configured_fallback=%s "
+            "reason=looks_like_bedrock_model_id (notation par points, "
+            "jamais valide sur Groq) — repli ignoré, LLM_MODEL doit être "
+            "un ID Groq (notation slash)",
+            requested_model,
+            fast_model,
+        )
         return None
     return fast_model
 

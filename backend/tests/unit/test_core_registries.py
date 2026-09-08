@@ -16,6 +16,7 @@ from agriconnect.graphs.agents.market_coach.core.slots import (
     build_remap_dict,
     build_alias_mirrors,
     expected_input_for_field,
+    get_slot,
     is_blocking_slot,
 )
 from agriconnect.domain.quantity_unit import (
@@ -27,6 +28,7 @@ from agriconnect.domain.quantity_unit import (
     scan_number_candidates,
     is_livestock_product,
     default_unit_for_product,
+    resolve_product_unit,
 )
 
 
@@ -166,6 +168,82 @@ class TestQuantityUnit:
         for crop in ("tomates", "maïs", "riz", "oignons"):
             assert is_livestock_product(crop) is False
             assert default_unit_for_product(crop) == "KG"
+
+    def test_an_elided_article_is_never_read_as_a_unit(self):
+        """Incident réel (2026-09-08) : « c'est 3000 f l'unité » (= prix À LA
+        PIÈCE) était lu comme `unit=LITRE`. L'apostrophe n'étant pas une
+        frontière de mot pour la regex, « l'unité » produit deux tokens, et
+        « l » isolé vaut LITRE dans la table de synonymes. Même piège pour
+        « t' » (= TONNE)."""
+        assert extract_unit_only_from_text("c'est 3000 f l'unite") != "LITRE"
+        assert extract_unit_only_from_text("c'est 3000 f l'unité") != "LITRE"
+        assert extract_unit_only_from_text("t'as combien") != "TONNE"
+        # Apostrophe typographique aussi.
+        assert extract_unit_only_from_text("3000 f l’unité") != "LITRE"
+
+    def test_a_real_litre_is_still_detected(self):
+        """Non-régression : le garde d'élision ne doit pas rendre le litre
+        indétectable — c'est un vrai symbole d'unité en usage (lait)."""
+        assert extract_unit_only_from_text("je vends 25 l de lait") == "LITRE"
+        assert extract_unit_only_from_text("des bidons de 10 litres") == "LITRE"
+
+
+class TestUnitAuthority:
+    """`resolve_product_unit` — autorité UNIQUE sur « quelle unité pour ce
+    produit ».
+
+    Problème général qu'elle supprime (incident réel 2026-09-08, « Vente de
+    6500 KG de poulets ») : l'unité était décidée par cinq écrivains
+    successifs, chacun gardé par un `if unité est vide`. La précédence réelle
+    était donc « le premier qui écrit gagne » — l'ordre d'exécution dans le
+    graphe, pas la fiabilité de la source. Un défaut aveugle « KG » battait
+    ainsi définitivement la nature du produit."""
+
+    def test_a_mass_unit_on_livestock_is_corrected_not_preserved(self):
+        """LE cas du bug : un KG déjà posé sur des poulets doit être CORRIGÉ.
+        Un animal vivant ne se pèse pas au kilo pour être vendu à la pièce."""
+        assert resolve_product_unit("poulets", current_unit="KG") == "TETE"
+        assert resolve_product_unit("moutons", current_unit="TONNE") == "TETE"
+
+    def test_a_plausible_unit_on_livestock_is_left_alone(self):
+        """La correction ne vise QUE la contradiction physique (masse), pas
+        toute unité inattendue : « 20 sacs de poussins » reste du domaine du
+        possible, ce n'est pas à cette fonction d'en juger."""
+        assert resolve_product_unit("poulets", current_unit="SAC") == "SAC"
+
+    def test_user_written_unit_always_wins(self):
+        assert resolve_product_unit("poulets", current_unit="KG", text_unit="sacs") == "SAC"
+        assert resolve_product_unit("mais", current_unit="KG", text_unit="tonnes") == "TONNE"
+
+    def test_livestock_default_when_nothing_is_known(self):
+        assert resolve_product_unit("poussins") == "TETE"
+
+    def test_crops_are_untouched(self):
+        """Non-régression : rien ne change pour une culture — ni correction,
+        ni défaut inventé (c'est au validateur de demander/défaulter)."""
+        assert resolve_product_unit("mais", current_unit="KG") == "KG"
+        assert resolve_product_unit("tomates", current_unit="TONNE") == "TONNE"
+        assert resolve_product_unit("tomates") is None
+
+    def test_an_unknown_unit_is_preserved_never_destroyed(self):
+        """Une unité hors registre est une donnée utilisateur qu'on ne sait
+        pas interpréter — jamais une raison de l'effacer."""
+        assert resolve_product_unit("tomates", current_unit="CAGEOT") == "CAGEOT"
+
+
+class TestUnitSlotDefaultIsProductAware:
+    """Le défaut du slot `unit` était la constante « KG », posée sans aucune
+    preuve — c'est elle qui gagnait ensuite contre la nature du produit."""
+
+    def test_livestock_defaults_to_head(self):
+        slot = get_slot("unit")
+        assert slot.default_value is None, "plus de constante aveugle"
+        assert slot.default_factory({"product": "poulets"}) == "TETE"
+
+    def test_crop_default_is_unchanged(self):
+        slot = get_slot("unit")
+        assert slot.default_factory({"product": "maïs"}) == "KG"
+        assert slot.default_factory({}) == "KG"
 
 
 class TestNumberScanner:

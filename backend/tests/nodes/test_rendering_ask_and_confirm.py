@@ -73,6 +73,84 @@ class TestRenderAskMissingField:
         result = run(render_ask_missing_field(c))
         assert result["final_response"] == "Déjà calculé"
 
+
+class TestTechnicalFailureNeverFakesAnAcknowledgement:
+    """Incident réel (2026-09-08, log de production) :
+
+        User  : « j'ai 4000 poulets »   (tunnel SALES_PUBLISH_PRODUCT,
+                                         champ manquant = quantité)
+        Agent : « Merci pour l'information, vous avez indiqué 4000 poulets 🙏
+                  […] J'ai juste besoin de quantité disponible »
+
+    L'interpréteur était INDISPONIBLE ce tour-là (429 Groq, tous candidats
+    épuisés → `routing.py` force UNKNOWN avec `raw_analysis.path="llm_crash"`
+    → `unknown_reason=TECHNICAL_FAILURE`). Le « 4000 » n'a donc JAMAIS été
+    extrait ni stocké — mais la note de déviation, générée par un SECOND
+    appel LLM sur le texte brut, l'a poliment acquitté... juste avant que le
+    formulaire redemande cette même quantité. L'agent affirmait avoir
+    enregistré ce qu'il venait de perdre."""
+
+    def _deviation_spy(self, monkeypatch, returns="NOTE_LLM_ADAPTATIVE"):
+        import agriconnect.graphs.agents.market_coach.nodes.rendering.ask as ask_mod
+
+        calls = []
+
+        async def _fake_deviation(runtime, user_text, context_hint, **kw):
+            calls.append(user_text)
+            return returns
+
+        monkeypatch.setattr(ask_mod, "llm_deviation_reply", _fake_deviation)
+        return calls
+
+    def test_technical_failure_says_so_honestly_and_calls_no_llm(self, monkeypatch):
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.ask import (
+            render_ask_missing_field,
+        )
+
+        calls = self._deviation_spy(monkeypatch)
+        c = ctx(
+            current_goal="SALES_PUBLISH_PRODUCT",
+            final_response=None,
+            missing_fields=["quantity"],
+            interpreted_event="UNKNOWN",
+            unknown_reason="TECHNICAL_FAILURE",
+            normalized_text="j ai 4000 poulets",
+        )
+        result = run(render_ask_missing_field(c))
+
+        assert calls == [], (
+            "aucun second appel LLM ne doit être tenté : la Gateway vient "
+            "d'échouer sur CE tour"
+        )
+        assert "NOTE_LLM_ADAPTATIVE" not in result["final_response"]
+        assert "n'a donc pas été pris en compte" in result["final_response"], (
+            "l'agent doit dire honnêtement que le message n'a pas été traité"
+        )
+        assert "Merci pour l'information" not in result["final_response"]
+
+    def test_semantic_unknown_still_gets_its_adaptive_note(self, monkeypatch):
+        """Non-régression : quand le LLM a RÉELLEMENT tourné et n'a
+        sincèrement pas su classer le message, la note adaptative reste le
+        bon comportement — c'est le cas pour lequel ce bloc existe."""
+        from agriconnect.graphs.agents.market_coach.nodes.rendering.ask import (
+            render_ask_missing_field,
+        )
+
+        calls = self._deviation_spy(monkeypatch)
+        c = ctx(
+            current_goal="SALES_PUBLISH_PRODUCT",
+            final_response=None,
+            missing_fields=["quantity"],
+            interpreted_event="UNKNOWN",
+            unknown_reason="AMBIGUOUS",
+            normalized_text="vous me tiendrez informé ?",
+        )
+        result = run(render_ask_missing_field(c))
+
+        assert calls == ["vous me tiendrez informé ?"]
+        assert "NOTE_LLM_ADAPTATIVE" in result["final_response"]
+        assert "pas été pris en compte" not in result["final_response"]
+
     def test_an_unknown_event_gets_an_adaptive_note_before_the_question(self):
         """Bug réel (2026-08-14) : ce nœud générique rend TOUT champ manquant
         pour TOUS les goals (appel d'offres, vente, stock...) — "Quels sont

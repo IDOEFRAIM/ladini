@@ -407,12 +407,27 @@ class Settings(BaseSettings):
     # (provider ∈ {groq, bedrock_gateway, bedrock_native}). Vide = candidat absent.
     # Défauts alignés sur les valeurs déjà en prod au moment de l'introduction
     # de cette Gateway (aucune valeur inventée) :
+    #
+    # Incident réel (2026-09-05) : Groq a décommissionné `llama-3.1-8b-instant`
+    # et `llama-3.3-70b-versatile` le 2026-06-17 (tiers gratuit/développeur —
+    # voir console.groq.com/docs/deprecations) — HTTP 404 "does not exist or
+    # you do not have access to it", classé CONFIG par
+    # `llm_gateway/error_classification.py`, disjoncteur ouvert en
+    # permanence. Remplacés par les remplacements RECOMMANDÉS PAR GROQ,
+    # confirmés existants sous ces IDs exacts (console.groq.com/docs/model/
+    # openai/gpt-oss-120b, .../openai/gpt-oss-20b) : `openai/gpt-oss-120b`
+    # (repli de `llama-3.3-70b-versatile`) et `openai/gpt-oss-20b` (repli de
+    # `llama-3.1-8b-instant`). Choix délibéré de la variante 120b (pas
+    # `qwen/qwen3.6-27b`, l'autre repli recommandé par Groq) pour le profil
+    # REASONING : même famille de modèle que `bedrock_gateway:openai.gpt-oss-120b`
+    # (FALLBACK_1) — une vraie redondance multi-provider sur le MÊME modèle,
+    # pas seulement un repli "au cas où" vers un modèle différent.
     LLM_FAST_PRIMARY: str = "bedrock_gateway:qwen.qwen3-32b"
-    LLM_FAST_FALLBACK_1: str = "groq:llama-3.1-8b-instant"
+    LLM_FAST_FALLBACK_1: str = "groq:openai/gpt-oss-20b"
     LLM_FAST_FALLBACK_2: str = ""
     LLM_REASONING_PRIMARY: str = "bedrock_gateway:deepseek.v3.2"
     LLM_REASONING_FALLBACK_1: str = "bedrock_gateway:openai.gpt-oss-120b"
-    LLM_REASONING_FALLBACK_2: str = "groq:llama-3.3-70b-versatile"
+    LLM_REASONING_FALLBACK_2: str = "groq:openai/gpt-oss-120b"
     # --- Réconciliation PROCUREMENT (2026-09-03, phase 1 recovery) ---
     # Fenêtre au-delà de laquelle un `ProcurementDraft` `EXECUTING` est
     # considéré bloqué (crash probable) plutôt qu'en cours de traitement

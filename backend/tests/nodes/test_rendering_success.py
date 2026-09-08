@@ -465,6 +465,32 @@ class TestRenderSuccess:
         result = run(render_success(c))
         assert "riz" in result["final_response"]
         assert "10" in result["final_response"]
+
+    def test_the_transactional_fallback_uses_confirmation_summary_payload_when_payload_is_empty(self):
+        """Récidive réelle (2026-09-07) : "✅ Mamadou, Récolte enregistrée
+        pour 0  pour votre demande." pour STOCK_REGISTER_HARVEST — même
+        classe de bug que le 2026-08-14 ci-dessus, mais ce goal n'utilise
+        pas `form_data`. Root cause précise : l'écriture DB (`add_stock`)
+        avait bien reçu quantity=6000 — `state_cleaner_node` efface
+        `transaction_payload` (`{"__reset__": True}`) dès que
+        `status=="COMPLETED"`, et tourne AVANT `final_response` (edge réel :
+        response_strategy -> state_cleaner -> final_response). Le gabarit
+        transactionnel doit donc se rabattre sur
+        `confirmation_summary_payload` (posé par `confirmation_gate` au tour
+        du récap, jamais effacé par ce reset terminal) quand
+        `transaction_payload` est vide."""
+        c = ctx(
+            current_goal="STOCK_REGISTER_HARVEST",
+            execution_result={"status": "success"},
+            transaction_payload={},
+            confirmation_summary_payload={
+                "product": "poulets", "quantity": 6000, "unit": "UNITE",
+            },
+        )
+        result = run(render_success(c))
+        assert "poulets" in result["final_response"]
+        assert "6000" in result["final_response"]
+        assert "pour 0" not in result["final_response"]
         assert "votre demande" not in result["final_response"]
         assert "pour 0" not in result["final_response"]
 

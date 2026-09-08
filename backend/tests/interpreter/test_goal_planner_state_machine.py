@@ -228,6 +228,85 @@ class TestRule1bisTunnelLocking:
         assert r["goal_status"] == "ACTIVE"
         assert r["working_memory"]["active_goal"] == "SALES_PUBLISH_PRODUCT"
 
+    def test_an_answer_inside_a_tunnel_never_purges_the_payload(self):
+        """Non-régression du garde ajouté le 2026-09-08 : une réponse DANS un
+        tunnel doit continuer à passer par la RÈGLE 1bis (verrouillage), et
+        surtout JAMAIS retomber en RÈGLE 5, qui purge tout l'état
+        transactionnel — ce serait catastrophique en plein slot-filling."""
+        r = gp(
+            interpreted_event="ANSWER",
+            detected_intent="STOCK_REGISTER_HARVEST",
+            current_goal="SALES_PUBLISH_PRODUCT",
+            expected_input="QUANTITY",
+            transaction_payload={"product": "poulets", "quantity": 4000},
+            working_memory={"active_goal": "SALES_PUBLISH_PRODUCT"},
+        )
+        assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
+        assert "transaction_payload" not in r, (
+            "RÈGLE 1bis ne doit RIEN purger — un ANSWER en tunnel n'est pas "
+            "une nouvelle tâche"
+        )
+
+
+class TestGoalLessSlotEventsArePromotedNotDropped:
+    """Incident réel (2026-09-08, log de production) :
+
+        User  : « j'ai 6000 poulets »
+        Agent : « Je n'ai pas bien saisi. »
+
+    Le LLM avait pourtant correctement classé
+    `intent=STOCK_REGISTER_HARVEST` — mais avec `event=ANSWER` et
+    `current_goal=None`. La RÈGLE 1bis (« maintien du tunnel ») s'appliquait
+    au seul vu de l'événement, sans vérifier qu'un tunnel existe : elle
+    réaffectait `current_goal = None` et jetait l'intention. Une minute plus
+    tard, « je veux vendre mes poulets » — même situation, aucun tunnel,
+    intention sûre — fonctionnait, uniquement parce que le LLM avait
+    étiqueté `NEW_TASK`. Faire dépendre l'accès à toute la machine à états
+    d'un label que le LLM ne peut pas trancher de façon fiable (une phrase
+    qui ÉNONCE une donnée ressemble légitimement à une réponse de slot) est
+    structurellement fragile."""
+
+    @pytest.mark.parametrize("event", ["ANSWER", "UPDATE"])
+    def test_a_goal_less_slot_event_with_a_real_intent_becomes_a_new_task(self, event):
+        r = gp(
+            interpreted_event=event,
+            detected_intent="STOCK_REGISTER_HARVEST",
+            current_goal=None,
+            expected_input="NONE",
+        )
+        assert r["current_goal"] == "STOCK_REGISTER_HARVEST", (
+            "hors tunnel, une intention détectée avec certitude ne doit "
+            "JAMAIS être jetée — c'est le seul contenu exploitable du tour"
+        )
+        assert r["goal_status"] == "ACTIVE"
+        assert r["working_memory"]["active_goal"] == "STOCK_REGISTER_HARVEST"
+
+    @pytest.mark.parametrize("event", ["CONFIRM", "SELECTION"])
+    def test_confirm_and_selection_without_a_tunnel_never_invent_a_goal(self, event):
+        """« oui » ou « 2 » sans rien à confirmer ni menu affiché ne portent
+        aucune intention métier — les promouvoir inventerait une tâche que
+        l'utilisateur n'a pas demandée."""
+        r = gp(
+            interpreted_event=event,
+            detected_intent="STOCK_REGISTER_HARVEST",
+            current_goal=None,
+            expected_input="NONE",
+        )
+        assert r["current_goal"] is None
+        assert r["response_strategy"] == "CLARIFICATION"
+
+    def test_a_goal_less_answer_with_no_mappable_intent_is_unchanged(self):
+        """Repli par défaut préservé : sans intention exploitable, il n'y a
+        rien à promouvoir — le tour reste une clarification, comme avant."""
+        r = gp(
+            interpreted_event="ANSWER",
+            detected_intent="UNKNOWN",
+            current_goal=None,
+            expected_input="NONE",
+        )
+        assert r["current_goal"] is None
+        assert r["response_strategy"] == "CLARIFICATION"
+
 
 # =====================================================================
 # RÈGLE 1ter — PERSISTANCE PAR DÉFAUT (UNKNOWN)
