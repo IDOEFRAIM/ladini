@@ -901,9 +901,12 @@ _canonicalize_intent_config()
 #            (routage post-validator). Les frozensets de goals sont DÉRIVÉS
 #            de ce champ dans `core/goals.py` — ne jamais les redéfinir à la
 #            main ailleurs (même pattern anti-drift que GOALS_NEEDING_FARM_ID).
-# `breakout` : intent de navigation autorisé à interrompre un tunnel actif
-#              (TunnelManager.CRITICAL_BREAKOUT_INTENTS + goal_planner
-#              _NAVIGATION_INTENTS sont dérivés de ce flag).
+# `breakout` : intent de navigation autorisé à interrompre un tunnel actif.
+#              `core/goals.py::NAVIGATION_BREAKOUT_GOALS` en est dérivé et
+#              en est la SOURCE UNIQUE ; depuis 2026-09-09 (Bloc 2,
+#              Invariant A) son unique consommateur décisionnel est
+#              `nodes/cognitive.py::cognitive_guard` — `TunnelManager` ne
+#              connaît plus cette liste du tout.
 # L'assignation via boucle échoue fort (KeyError) si un intent disparaît du
 # catalogue — c'est voulu : la dérive est détectée à l'import, pas en prod.
 # =======================================================================
@@ -1085,11 +1088,21 @@ INTENT_DOMAIN = {
 # to render pedagogical AG-UI ListMenu prompts when the LLM confidence
 # is low or when multiple plausible intents could match.
 #
+# (2026-09-08, clôture Bloc 1, mandat §21) : schéma canonique — `options`
+# est la SEULE source des intents candidats. Un champ `candidates` séparé
+# existait auparavant (liste redondante, toujours identique à l'ordre des
+# intents dans `options` sur les 8 entrées de ce catalogue) et a été
+# retiré : `nodes/semantic_disambiguation.py::extract_disambiguation_intents`
+# est le point UNIQUE qui dérive la liste d'intents depuis `options`,
+# consommé aussi bien pour construire le menu que pour peupler
+# `intent_competition` (`nodes/cognitive.py`).
+#
 # Each entry: trigger_key → {
-#     "candidates": [intent, ...],        # ≥ 2 alternatives
 #     "title": str,                        # question shown to user
-#     "options": [(intent, label), ...],   # pedagogical labels
+#     "options": [(intent, label), ...],   # intents candidats + libellés
 #     "lexical_hints": [substring, ...],   # raw text triggers (post-normalize)
+#     "pedagogical_hint": str,             # optional, extra context line
+#     "roles": [str, ...],                 # optional, informational only
 # }
 # =======================================================================
 INTENT_DISAMBIGUATION = {
@@ -1111,7 +1124,6 @@ INTENT_DISAMBIGUATION = {
     # contrairement à MarketOffer (estimated_available_at/expected_harvest_date,
     # preorder_enabled). Voir [[future-production-preorder-loop]].
     "STOCK_OR_SALES_DECLARATION": {
-        "candidates": ["SALES_PUBLISH_PRODUCT", "DECLARE_CROP_CYCLE"],
         "title": "C'est prêt à vendre maintenant, ou pas encore ?",
         "pedagogical_hint": (
             "💡 Des poussins, jeunes animaux, semis ou plants en cours de croissance "
@@ -1182,11 +1194,6 @@ INTENT_DISAMBIGUATION = {
     # semantic_disambiguation._detect_disambiguation_candidates) laisserait
     # sinon STOCK_OR_SALES_DECLARATION perdre face à un "vendre" trop court.
     "SELLER_HUB": {
-        "candidates": [
-            "SALES_PUBLISH_PRODUCT",
-            "DECLARE_CROP_CYCLE",
-            "MARKET_BROWSE_REQUESTS",
-        ],
         "title": "🧑‍🌾 Espace Vendeur — que souhaitez-vous faire ?",
         "options": [
             ("SALES_PUBLISH_PRODUCT", "📦 Publier un produit disponible maintenant"),
@@ -1211,7 +1218,6 @@ INTENT_DISAMBIGUATION = {
     },
     # "J'ai vendu 100kg" — already happened
     "STOCK_OR_SALE_RECORDING": {
-        "candidates": ["SALES_RECORD_DIRECT", "STOCK_REMOVE_PARTIAL"],
         "title": "Voulez-vous enregistrer une vente ou une simple sortie de stock ?",
         "options": [
             (
@@ -1234,7 +1240,6 @@ INTENT_DISAMBIGUATION = {
     },
     # "Je cherche du mais" — buy via auction or just look at catalog
     "BUY_VS_BROWSE": {
-        "candidates": ["BUYER_REQUEST", "PROCUREMENT_CREATE_REQUEST"],
         "title": "Voulez-vous consulter le catalogue ou lancer un appel d'offres ?",
         "options": [
             (
@@ -1255,7 +1260,6 @@ INTENT_DISAMBIGUATION = {
     },
     # "Le maïs est à combien" — multiple market lookups
     "MARKET_PRICE_LOOKUP": {
-        "candidates": ["MARKET_SNAPSHOT", "MARKET_SNAPSHOT_ZONAL", "VALIDATE_PRICE"],
         "title": "Quel type de prix recherchez-vous ?",
         "options": [
             ("MARKET_SNAPSHOT", "📊 Prix actuel près de chez vous"),
@@ -1265,7 +1269,6 @@ INTENT_DISAMBIGUATION = {
         "lexical_hints": ["combien", "prix du", "prix actuel", "cours du"],
     },
     "RESUME_TUNNEL": {
-        "candidates": ["BUYER_PREORDER_INIT", "BUYER_VIEW_CART"],
         "title": "Souhaitez-vous reprendre votre commande en attente ?",
         "options": [
             ("BUYER_PREORDER_INIT", "✅ Finaliser la commande"),
@@ -1289,12 +1292,6 @@ INTENT_DISAMBIGUATION = {
         # (statut / liste / annulation d'une commande PASSÉE), sans aucune
         # issue vers ce qu'il cherchait réellement. Voir SALES_LIST_ORDERS
         # (`tool_name=get_producer_orders`, PRODUCER, intent.py).
-        "candidates": [
-            "BUYER_CHECK_ORDER_STATUS",
-            "BUYER_LIST_ORDERS",
-            "BUYER_CANCEL_ORDER",
-            "SALES_LIST_ORDERS",
-        ],
         "title": "Que souhaitez-vous faire concernant vos commandes ?",
         "options": [
             (
@@ -1325,7 +1322,6 @@ INTENT_DISAMBIGUATION = {
     # l'option 1. Vocabulaire harmonisé : "appel d'offres" partout, plus jamais
     # "enchère" (terme réservé en interne, jamais montré à l'utilisateur).
     "AUCTION_TRACKING_INTENT": {
-        "candidates": ["BUYER_LIST_AUCTIONS", "BUYER_CHECK_AUCTION_STATUS"],
         "title": "Que souhaitez-vous faire concernant vos appels d'offres ?",
         "options": [
             ("BUYER_LIST_AUCTIONS", "📋 Voir mes appels d'offres (tous statuts)"),

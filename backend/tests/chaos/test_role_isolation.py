@@ -140,12 +140,22 @@ class TestIdentityPinning:
 def test_unknown_role_collapses_deterministically(garbage_role):
     """`normalize_role` reste utilisé LIVE (routage UI par défaut, choix de
     workspace). Rupture prévenue : un rôle forgé/inconnu qui obtiendrait un
-    comportement HYBRIDE ou instable. Contrat : tout rôle non-BUYER
-    s'effondre sur PRODUCER, de façon déterministe."""
+    comportement HYBRIDE ou instable.
+
+    (2026-09-08, refonte responsabilités des nœuds d'entrée, mandat §3) :
+    le contrat a changé DÉLIBÉRÉMENT — "tout rôle non-BUYER s'effondre sur
+    PRODUCER" était exactement le défaut silencieux interdit par le mandat
+    ("Actuellement, toute valeur inconnue tombe sur PRODUCER. Cela est
+    interdit."). Un rôle non reconnu retourne désormais "UNKNOWN", tout
+    aussi déterministe (même entrée → même sortie, jamais hybride) mais
+    honnête sur le fait qu'aucun rôle n'a pu être établi — les appelants
+    qui ont besoin d'une valeur concrète (ex: sélection du graphe compilé)
+    décident explicitement de leur propre repli (voir
+    `core/graph_builder.py::build_graph`)."""
     from agriconnect.graphs.roles import normalize_role
 
     norm = normalize_role(garbage_role)
-    assert norm in {"BUYER", "PRODUCER"}
+    assert norm in {"BUYER", "PRODUCER", "UNKNOWN"}
     assert normalize_role(garbage_role) == norm, "non déterministe d'un appel à l'autre"
 
 

@@ -47,7 +47,77 @@ def _runtime(text: str = "Bien sûr, je t'aide !") -> object:
     return type("RT", (), {"llm": llm, "model_answer": "test-model"})()
 
 
+class TestClarificationNodeDoesNotRecomputeDisambiguationPolicy:
+    """(2026-09-08, correction topologique du bloc conversationnel, mandat
+    §15) : `clarification_node` ne décide plus lui-même s'il faut
+    désambiguïser — cette précédence (DISAMBIGUATE gagne sur CLARIFY quand
+    les deux seraient éligibles) est maintenant arbitrée UNE fois, en
+    amont, par `cognitive_guard` (voir `nodes/cognitive.py::
+    _classify_nominal_action`) : les deux actions sont mutuellement
+    exclusives AVANT même que ce nœud ne soit invoqué. `clarification_node`
+    n'a donc plus besoin de consulter `disambiguation_candidate` pour
+    s'effacer — il fait simplement confiance à `cognitive_decision.action`."""
+
+    def test_module_no_longer_imports_detect_disambiguation_candidates(self):
+        import agriconnect.graphs.agents.market_coach.nodes.clarification as mod
+        assert not hasattr(mod, "_detect_disambiguation_candidates")
+
+    def test_a_bare_disambiguation_candidate_no_longer_makes_this_node_defer(self):
+        """Non-régression du RETRAIT (mandat §15) : avant ce correctif, la
+        seule PRÉSENCE de `disambiguation_candidate` dans l'état suffisait
+        à faire taire ce nœud, même si `cognitive_guard` avait par ailleurs
+        décidé CLARIFY (ex: le candidat provient d'un tour précédent resté
+        dans l'état). Ce garde était une SECONDE policy de précédence,
+        redondante avec celle — maintenant unique — de `cognitive_guard`.
+        Preuve : avec `cognitive_decision.action == "CLARIFY"` ET un
+        `disambiguation_candidate` présent, ce nœud RENDS bel et bien
+        (cognitive_guard ne pose jamais les deux à la fois en pratique,
+        mais ce nœud ne doit plus s'appuyer là-dessus pour décider)."""
+        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        rt = _runtime("Salut ! Je peux t'aider.")
+        result = run(clarification_node({
+            "interpreted_event": "UNKNOWN", "expected_input": "NONE",
+            "current_goal": None, "normalized_text": "j'ai des tomates",
+            "user_role": "PRODUCER",
+            "cognitive_decision": {"action": "CLARIFY"},
+            "disambiguation_candidate": {"id": "trigger1", "candidates": ["A", "B"]},
+        }, rt))
+        assert result["final_response"] == "Salut ! Je peux t'aider."
+        assert rt.llm.calls == 1
+
+    def test_no_cognitive_decision_at_all_is_a_safe_no_op(self):
+        """Garde-fou de compatibilité restant (mandat §15, "garder
+        uniquement les garde-fous indispensables") : sans
+        `cognitive_decision` du tout (checkpoint pré-déploiement, appel
+        direct hors graphe), ce nœud ne devine rien et ne rend rien."""
+        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        rt = _runtime("ne devrait jamais apparaître — le LLM ne doit pas être appelé")
+        result = run(clarification_node({
+            "interpreted_event": "UNKNOWN", "expected_input": "NONE",
+            "current_goal": None, "normalized_text": "j'ai des tomates",
+            "user_role": "PRODUCER",
+            "disambiguation_candidate": {"id": "trigger1", "candidates": ["A", "B"]},
+        }, rt))
+        assert result == {}
+        assert rt.llm.calls == 0
+
+
 class TestClarificationNodeTriggerConditions:
+    """(2026-09-08, correction topologique du bloc conversationnel, mandat
+    §15) : ce nœud ne décide plus lui-même « faut-il clarifier ? » — il
+    fait confiance à `cognitive_decision.action`, posé par `cognitive_guard`
+    (voir sa docstring). Les scénarios ci-dessous qui attendent un VRAI
+    rendu passent donc désormais explicitement `cognitive_decision:
+    {"action": "CLARIFY"}` — exactement ce que `cognitive_guard` aurait
+    décidé pour ces mêmes états (event ∈ {OUT_OF_SCOPE, UNKNOWN, REJECT},
+    rien en attente, aucun goal actif ; voir
+    `nodes/cognitive.py::_classify_nominal_action`). Les scénarios qui
+    n'attendent AUCUN rendu (goal actif, event CONFIRM...) n'ont
+    volontairement PAS ce champ : `cognitive_guard` ne déciderait jamais
+    CLARIFY pour eux, donc ce nœud ne serait jamais invoqué dans le graphe
+    réel — le garde-fou de compatibilité (action non reconnue -> `{}`)
+    couvre ce cas défensivement, sans recalcul."""
+
     def test_out_of_scope_without_a_tunnel_triggers_the_llm(self):
         from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = _runtime("Salut ! Je peux t'aider à vendre ou acheter.")
@@ -55,6 +125,7 @@ class TestClarificationNodeTriggerConditions:
             "interpreted_event": "OUT_OF_SCOPE", "expected_input": "NONE",
             "current_goal": None, "normalized_text": "bonjour ça va ?",
             "user_role": "PRODUCER",
+            "cognitive_decision": {"action": "CLARIFY"},
         }, rt))
         assert result["final_response"] == "Salut ! Je peux t'aider à vendre ou acheter."
         assert result["response_strategy"] == "CLARIFICATION"
@@ -69,13 +140,17 @@ class TestClarificationNodeTriggerConditions:
             "interpreted_event": "REJECT", "expected_input": "NONE",
             "current_goal": None, "normalized_text": "non",
             "user_role": "BUYER",
+            "cognitive_decision": {"action": "CLARIFY"},
         }, rt))
         assert result["final_response"] == "Pas de souci ! Dis-moi ce que tu veux faire."
 
     def test_a_reject_with_an_active_tunnel_does_not_trigger_this_node(self):
         """Volontaire : quand un goal est actif, confirmation_gate.py /
         render_recovery gèrent déjà ce REJECT avec leur propre logique
-        adaptée — ce nœud ne doit pas s'en mêler (double traitement)."""
+        adaptée — `cognitive_guard` ne déciderait jamais CLARIFY ici (un
+        goal est actif), donc ce nœud ne serait jamais invoqué en pratique ;
+        prouvé ici en l'appelant SANS `cognitive_decision` (garde-fou de
+        compatibilité, pas une double policy)."""
         from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = _runtime("ne devrait jamais apparaître")
         result = run(clarification_node({
@@ -107,6 +182,23 @@ class TestClarificationNodeTriggerConditions:
         }, rt))
         assert result["final_response"] == "On repart de zéro, dis-moi ce dont tu as besoin."
 
+    def test_recover_active_tunnel_is_always_a_no_op_here(self):
+        """(2026-09-08, correction topologique) : preuve directe du
+        pass-through documenté dans `clarification_node` — la relance
+        RECOVERY est entièrement rendue par `response_strategy.py` depuis
+        `cognitive_action` seul, ce nœud n'a RIEN à produire pour cette
+        action, même avec un LLM disponible et prêt à répondre."""
+        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        rt = _runtime("ne devrait jamais apparaître")
+        result = run(clarification_node({
+            "interpreted_event": "UNKNOWN", "expected_input": "QUANTITY",
+            "current_goal": "SALES_PUBLISH_PRODUCT",
+            "cognitive_decision": {"action": "recover_active_tunnel"},
+            "normalized_text": "bla bla", "user_role": "PRODUCER",
+        }, rt))
+        assert result == {}
+        assert rt.llm.calls == 0
+
     def test_a_confirm_event_never_triggers_this_node(self):
         from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = _runtime("ne devrait jamais apparaître")
@@ -124,6 +216,7 @@ class TestClarificationNodeTriggerConditions:
             "interpreted_event": "REJECT", "expected_input": "NONE",
             "current_goal": None, "normalized_text": "non",
             "user_role": "BUYER",
+            "cognitive_decision": {"action": "CLARIFY"},
         }, rt))
         assert result == {}
 
@@ -143,6 +236,7 @@ class TestTechnicalFailureSkipsASecondWastedLlmCall:
             "interpreted_event": "UNKNOWN", "expected_input": "NONE",
             "current_goal": None, "normalized_text": "je veux voir les enchères",
             "user_role": "PRODUCER", "unknown_reason": "TECHNICAL_FAILURE",
+            "cognitive_decision": {"action": "CLARIFY"},
         }, rt))
         assert result["response_strategy"] == "CLARIFICATION"
         assert "indisponible" in result["final_response"].lower()
@@ -161,6 +255,7 @@ class TestTechnicalFailureSkipsASecondWastedLlmCall:
             "interpreted_event": "UNKNOWN", "expected_input": "NONE",
             "current_goal": None, "normalized_text": "bonjour ça va ?",
             "user_role": "PRODUCER", "unknown_reason": "AMBIGUOUS",
+            "cognitive_decision": {"action": "CLARIFY"},
         }, rt))
         assert result["final_response"] == "Salut ! Je peux t'aider à vendre ou acheter."
         assert rt.llm.calls == 1

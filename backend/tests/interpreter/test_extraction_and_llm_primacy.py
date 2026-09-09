@@ -306,6 +306,42 @@ class TestNoFrozenListHijack:
         r = run(interp(st, rt))
         assert r["detected_intent"] == "SALES_PUBLISH_PRODUCT"
 
+    def test_dual_role_allows_buying_intent_for_a_producer(self):
+        """(revue de validation, 2026-09-08) : symétrique du test
+        ci-dessus — un utilisateur PRODUCER (donc le graphe compilé
+        PRODUCER, `make_input_interpreter("PRODUCER")`) doit pouvoir
+        déclencher une intention BUYER sans filtrage. Preuve DIRECTE de
+        l'exemple obligatoire du mandat de revue : "user_role=PRODUCER,
+        message='je veux acheter 20 kg de tomates' → BUYER_REQUEST"."""
+        interp = make_input_interpreter("PRODUCER")
+        rt = StubRuntime(llm=ScriptedLLM({
+            "interpreted_event": "NEW_TASK",
+            "detected_intent": "BUYER_REQUEST",
+            "interpreter_confidence": 0.93,
+            "extracted_entities": {"product": "tomates", "quantity": 20.0, "unit": "KG"},
+        }))
+        st = make_state(
+            normalized_text="je veux acheter 20 kg de tomates",
+            expected_input="NONE",
+            user_role="PRODUCER",
+        )
+        r = run(interp(st, rt))
+        assert r["detected_intent"] == "BUYER_REQUEST"
+
+    def test_interpreter_prompt_catalog_is_role_independent(self):
+        """Preuve statique complémentaire : le catalogue d'intentions
+        injecté dans le prompt LLM est identique quel que soit le rôle
+        (plus de filtrage `allowed_intents_for_role` dans
+        `_build_dynamic_interpreter_prompt`)."""
+        from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+            _build_dynamic_interpreter_prompt,
+        )
+        producer_prompt = _build_dynamic_interpreter_prompt("PRODUCER")
+        buyer_prompt = _build_dynamic_interpreter_prompt("BUYER")
+        assert producer_prompt == buyer_prompt
+        assert "BUYER_REQUEST" in producer_prompt
+        assert "SALES_PUBLISH_PRODUCT" in producer_prompt
+
 
 # =====================================================================
 # DÉTECTION DU MODÈLE DÉGRADÉ — signale à nodes/memory.py qu'un repli

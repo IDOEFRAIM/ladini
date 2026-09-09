@@ -2,6 +2,9 @@ import asyncio
 from typing import Any, Dict
 
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
+from agriconnect.graphs.agents.market_coach.core.conversation_decision import (
+    ConversationAction,
+)
 from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     get_pending_interaction,
@@ -9,9 +12,6 @@ from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
 from agriconnect.graphs.agents.market_coach.llm_gateway import (
     resolve_gateway,
     resolve_profile,
-)
-from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import (
-    _detect_disambiguation_candidates,
 )
 from agriconnect.graphs.agents.market_coach.utils import MarketRuntime
 
@@ -33,30 +33,48 @@ def _sanitize_for_prompt(text: str) -> str:
     return clean[:_MAX_USER_TEXT_IN_PROMPT]
 
 
-async def clarification_node(
-    state: Dict[str, Any], mc_runtime: MarketRuntime
-) -> Dict[str, Any]:
-    """Noeud de clarification pédagogique.
+def has_out_of_tunnel_location_error(state: Dict[str, Any]) -> bool:
+    """Prédicat structurel PARTAGÉ (2026-09-08, correction topologique du
+    bloc conversationnel) : « ce tour porte-t-il un point GPS hors-tunnel
+    en échec (hors zone / erreur de persistance) qui doit être signalé,
+    quel que soit l'état du goal/pending par ailleurs ? »
 
-    Activé quand :
-    - L'événement est OUT_OF_SCOPE ou UNKNOWN sans tunnel actif
-    - Le cognitive_guard a décidé d'abandonner un tunnel
-
-    Utilise le LLM pour générer une réponse contextualisée, chaleureuse
-    et pédagogique plutôt qu'un message d'erreur froid.
-    """
-    event = str(state.get("interpreted_event") or "").upper()
-    current_goal = state.get("current_goal")
+    Extrait de `_render_out_of_tunnel_location_outcome` ci-dessous pour que
+    `cognitive_guard` (désormais seul propriétaire de la décision
+    conversationnelle, voir sa docstring) puisse router vers ce nœud SANS
+    dupliquer la connaissance du domaine GPS lui-même (les valeurs
+    `LOCATION_OUT_OF_ZONE`/`LOCATION_PERSISTENCE_ERROR`, le rôle de
+    `PROVIDE_LOCATION`) — un SEUL endroit connaît ces constantes, les deux
+    appelants importent seulement ce booléen. Le message à afficher, lui,
+    reste ICI (dette GPS non auditée, voir docstring ci-dessous, toujours
+    valable)."""
     pending_kind = get_pending_interaction(state).kind
-    nothing_pending = pending_kind == InteractionKind.NONE
-    cognitive = state.get("cognitive_decision") or {}
-    cognitive_action = cognitive.get("action", "")
-    user_role = str(state.get("user_role") or "PRODUCER").upper()
-    user_name = state.get("user_name", "")
-    text = state.get("normalized_text") or state.get("user_query") or ""
+    location_outcome = str(state.get("location_outcome") or "").upper()
+    return (
+        bool(state.get("location_shared"))
+        and location_outcome in {"LOCATION_OUT_OF_ZONE", "LOCATION_PERSISTENCE_ERROR"}
+        and pending_kind != InteractionKind.PROVIDE_LOCATION
+    )
 
-    # --- LOCATION OUTCOME (précédence — 2026-09-02, "un seul propriétaire
-    # de la réponse") --------------------------------------------------
+
+def _render_out_of_tunnel_location_outcome(state: Dict[str, Any]) -> Dict[str, Any]:
+    """(2026-09-08, mandat §10 : dette explicitement assumée, pas déplacée)
+    — la gestion de `LOCATION_OUT_OF_ZONE`/`LOCATION_PERSISTENCE_ERROR` est
+    une responsabilité de DOMAINE (GPS/livraison) mal placée dans un nœud
+    de clarification générique. Elle reste ICI, encapsulée dans ce helper
+    clairement nommé, PARCE QUE les flows GPS (`flows/buyer/
+    gps_delivery_gate.py`, `core/location.py`) n'ont pas encore été
+    inspectés dans ce chantier — le mandat interdit explicitement
+    d'inventer leur futur propriétaire sans les auditer. Ne PAS
+    généraliser ce helper à d'autres domaines ; le déplacer dès que les
+    flows GPS seront audités.
+
+    Retourne `{}` si aucun cas GPS hors-tunnel n'est applicable (le nœud
+    appelant poursuit alors son propre traitement)."""
+    location_outcome = str(state.get("location_outcome") or "").upper()
+    if not has_out_of_tunnel_location_error(state):
+        return {}
+
     # Un point GPS partagé HORS d'une étape GPS active (aucun
     # `PendingInteraction.PROVIDE_LOCATION` en cours — quand c'est le cas,
     # `flows/buyer/gps_delivery_gate.py::resolve_gps_stage` s'en charge
@@ -68,47 +86,87 @@ async def clarification_node(
     # dépendance LLM) : c'est une simple traduction d'un contrat de
     # domaine déjà fermé (`core/location.py::LocationOutcome`), pas une
     # interprétation de langage libre.
-    location_outcome = str(state.get("location_outcome") or "").upper()
-    if (
-        bool(state.get("location_shared"))
-        and location_outcome in {"LOCATION_OUT_OF_ZONE", "LOCATION_PERSISTENCE_ERROR"}
-        and pending_kind != InteractionKind.PROVIDE_LOCATION
-    ):
-        if location_outcome == "LOCATION_OUT_OF_ZONE":
-            message = (
-                "📍 Cette position semble se trouver hors de notre zone de "
-                "livraison (Burkina Faso) — rien n'a été enregistré."
-            )
-        else:
-            message = (
-                "Un souci technique a empêché l'enregistrement de ce point "
-                "GPS. Vous pouvez le repartager si besoin."
-            )
-        return {
-            "final_response": message,
-            "response_strategy": "CLARIFICATION",
-            "ag_ui_component": None,
-        }
+    if location_outcome == "LOCATION_OUT_OF_ZONE":
+        message = (
+            "📍 Cette position semble se trouver hors de notre zone de "
+            "livraison (Burkina Faso) — rien n'a été enregistré."
+        )
+    else:
+        message = (
+            "Un souci technique a empêché l'enregistrement de ce point "
+            "GPS. Vous pouvez le repartager si besoin."
+        )
+    return {
+        "final_response": message,
+        "response_strategy": "CLARIFICATION",
+        "ag_ui_component": None,
+    }
 
-    # Only intervene on specific conditions. `not current_goal` is
-    # deliberate for OUT_OF_SCOPE/UNKNOWN/REJECT : when a goal IS active,
-    # the tunnel-specific renderers (nodes/rendering/ask.py::render_ask_missing_field,
-    # feedback.py::render_recovery) already generate their own adaptive
-    # reply for the same deviation — this node only needs to cover the
-    # "nothing active" case, which response_strategy.py routes to
-    # CLARIFICATION for OUT_OF_SCOPE/UNKNOWN, REJECT, and tunnel abandonment
-    # alike. REJECT was added after finding it fell through to the generic
-    # "Je n'ai pas bien saisi" fallback with no chance at an adaptive reply
-    # (a stray "non" with nothing pending). See
-    # [[precommande-architecture-consolidation-2026-08]].
-    needs_clarification = (
-        event in {"OUT_OF_SCOPE", "UNKNOWN", "REJECT"}
-        and nothing_pending
-        and not current_goal
-    ) or cognitive_action == "abandon_tunnel_max_retries"
-    if not needs_clarification:
+
+async def clarification_node(
+    state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Dict[str, Any]:
+    """Noeud de clarification — EXÉCUTEUR d'une décision déjà prise.
+
+    Ce nœud ne décide jamais « faut-il clarifier ? » — cette question
+    appartient exclusivement à `cognitive_guard` (voir sa docstring et
+    `nodes/routing.py::_route_after_cognitive_guard`). Le graphe compilé
+    n'atteint ce nœud que par DEUX actions :
+
+    - CLARIFY — hors-tunnel sans rien d'actif (OUT_OF_SCOPE/UNKNOWN/REJECT),
+      ou point GPS hors-tunnel en échec (`has_out_of_tunnel_location_error`,
+      priorité absolue) ;
+    - ABANDON_ACTIVE_GOAL — tunnel abandonné après trop d'échecs ;
+      `response_strategy` est déjà à "CLARIFICATION" avant ce nœud (posé
+      par `core/conversation_reset.py`) — ce nœud l'ENRICHIT d'un message
+      LLM contextualisé s'il peut, sans quoi le récap générique déjà posé
+      suffit (voir `_route_after_clarification`, `core/graph_builder.py`).
+
+    RECOVER_ACTIVE_GOAL ne passe PLUS par ici (2026-09-08, clôture Bloc 1,
+    mandat §29) : prouvé no-op structurel pour cette action (la relance
+    RECOVERY est entièrement rendue par `interpreter/strategy.py` depuis
+    `cognitive_action` seul), `nodes/routing.py::_COGNITIVE_ACTION_ROUTES`
+    route désormais cette action DIRECTEMENT vers `response_strategy`. Le
+    early-return ci-dessous reste un garde-fou de compatibilité (appel
+    direct hors graphe, test) — plus jamais exercé par le graphe compilé.
+
+    Ce nœud choisit seulement QUEL message produire (GPS déterministe /
+    panne technique déterministe / LLM pédagogique), jamais SI un message
+    est dû.
+    """
+    cognitive = state.get("cognitive_decision") or {}
+    cognitive_action = cognitive.get("action", "")
+    # (2026-09-08, mandat §10) : plus de défaut PRODUCER — voir
+    # graphs/roles.py::normalize_role, même correctif.
+    user_role = str(state.get("user_role") or "").upper()
+    user_name = state.get("user_name", "")
+    text = state.get("normalized_text") or state.get("user_query") or ""
+
+    # --- LOCATION OUTCOME (précédence — 2026-09-02, "un seul propriétaire
+    # de la réponse") — encapsulé, voir docstring de
+    # `_render_out_of_tunnel_location_outcome` pour la justification.
+    # Reste un check DIRECT (pas seulement `action=="CLARIFY"`) : c'est la
+    # garantie structurelle que le message GPS prime même si un futur appel
+    # de ce nœud omettait de re-vérifier `cognitive_action` en amont.
+    location_patch = _render_out_of_tunnel_location_outcome(state)
+    if location_patch:
+        return location_patch
+
+    # Garde-fou de compatibilité (appel direct hors graphe compilé) — voir
+    # docstring : RECOVER_ACTIVE_GOAL n'atteint plus jamais ce nœud via le
+    # graphe réel.
+    if cognitive_action == ConversationAction.RECOVER_ACTIVE_GOAL:
         return {}
-    if _detect_disambiguation_candidates(text.lower(), user_role):
+
+    # Garde-fou de compatibilité : ce nœud ne rend un message QUE pour les
+    # deux décisions qui l'exigent. Toute autre valeur (contrat non
+    # respecté par l'appelant — invocation directe hors graphe compilé,
+    # test unitaire, futur bug de routage) est un no-op sûr plutôt qu'un
+    # rendu inventé sans mandat.
+    if cognitive_action not in {
+        ConversationAction.CLARIFY,
+        ConversationAction.ABANDON_ACTIVE_GOAL,
+    }:
         return {}
 
     # ── LLM indisponible CE TOUR (2026-09-05, incident "je veux voir les
@@ -155,7 +213,7 @@ async def clarification_node(
     )
 
     context_parts = []
-    if cognitive_action == "abandon_tunnel_max_retries":
+    if cognitive_action == ConversationAction.ABANDON_ACTIVE_GOAL:
         context_parts.append(
             "L'opération précédente a été annulée car je n'arrivais pas à comprendre."
         )
@@ -165,7 +223,10 @@ async def clarification_node(
     prompt = (
         f"Tu es un assistant commercial agricole WhatsApp au Burkina Faso.\n"
         f"Ton style : coach amical, encourageant, patient.\n"
-        f"L'utilisateur ({user_name or 'un producteur'}, rôle {user_role}) "
+        # (2026-09-08, mandat §10 "double rôle") : ne plus présumer
+        # "producteur" par défaut — un même utilisateur peut acheter ET
+        # vendre, quel que soit son rôle de profil enregistré.
+        f"L'utilisateur ({user_name or 'vous'}, rôle {user_role or 'non précisé'}) "
         f"a envoyé un message que tu ne comprends pas.\n"
         f"{'  '.join(context_parts)}\n\n"
         f"Tu peux l'aider à : {capabilities}.\n"

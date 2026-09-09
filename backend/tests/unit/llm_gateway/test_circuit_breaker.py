@@ -7,6 +7,7 @@ scénario complet bout-en-bout avec la Gateway."""
 
 from __future__ import annotations
 
+import json
 import time
 
 from tests.unit.llm_gateway.conftest import make_fake_redis
@@ -17,8 +18,11 @@ from agriconnect.graphs.agents.market_coach.llm_gateway.circuit_breaker import (
 )
 from agriconnect.graphs.agents.market_coach.llm_gateway.health_registry import (
     HealthRegistry,
+    _key,
 )
 from agriconnect.graphs.agents.market_coach.llm_gateway.types import (
+    CircuitState,
+    HealthRecord,
     LLMProfile,
     ModelCandidate,
 )
@@ -145,3 +149,27 @@ class TestConfigErrorAlwaysSkipped:
 
         for _ in range(3):
             assert breaker.decide(candidate).decision == Decision.SKIP
+
+    def test_a_legacy_config_error_record_without_cooldown_grants_a_probe(self):
+        """Incident réel (2026-09-09) : un candidat Bedrock (clé API
+        expirée, classé CONFIG_ERROR) est resté SKIP pour toujours parce que
+        l'enregistrement Redis avait `cooldown_until=None` — legacy, créé
+        avant que `mark_config_error` ne pose systématiquement ce champ.
+        Aucun probe n'était plus jamais tenté, même des jours après que la
+        clé a été renouvelée. Un `cooldown_until` absent doit être traité
+        comme déjà écoulé (probe immédiat), jamais comme un blocage
+        permanent — voir `HealthRecord.cooldown_elapsed`."""
+        store: dict = {}
+        breaker = _breaker(store)
+        candidate = _candidate()
+        legacy_record = HealthRecord(
+            state=CircuitState.OPEN,
+            config_error=True,
+            config_error_message="Error code: 401 - invalid_api_key: expired token",
+            cooldown_until=None,
+        )
+        redis = make_fake_redis(store)
+        redis.set(_key(candidate.key), json.dumps(legacy_record.to_dict()))
+
+        decision = breaker.decide(candidate)
+        assert decision.decision == Decision.PROBE

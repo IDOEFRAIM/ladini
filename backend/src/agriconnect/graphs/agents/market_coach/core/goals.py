@@ -140,6 +140,54 @@ def _validate_goal_drift() -> None:
 _validate_goal_drift()
 
 
+# =====================================================================
+# REFINEMENT — relation goal générique ↔ goal spécialisé (2026-09-09,
+# audit Bloc 2, Blocker A). Relocalisé depuis `nodes/memory.py` (son seul
+# appelant) : `core/goals.py` est déjà la source unique des RELATIONS entre
+# goals (tunnels, breakout) — cette relation de refinement en est une de
+# plus, et vivre ici lui garantit de ne JAMAIS être recopiée dans un second
+# nœud (`goal_planner` n'a AUCUNE logique de refinement équivalente —
+# vérifié par audit — donc il n'y avait pas de divergence réelle à
+# corriger, seulement une dispersion à prévenir).
+# =====================================================================
+
+BUYER_REQUEST_SPECIALIZATIONS: FrozenSet[str] = frozenset(
+    {
+        "BUYER_ADD_TO_CART",
+        "BUYER_VIEW_CART",
+        "BUYER_PREORDER_INIT",
+        "BUYER_PREORDER_CONFIRM",
+        "BUYER_NEGOTIATE_PRICE",
+        "BUYER_CHECK_ORDER_STATUS",
+        "BUYER_LIST_ORDERS",
+        "BUYER_CANCEL_ORDER",
+        "BUYER_LIST_AUCTIONS",
+        "BUYER_CHECK_AUCTION_STATUS",
+        "BUYER_CART_RESET",
+    }
+)
+
+
+def is_goal_refinement(previous: str, incoming: str) -> bool:
+    """``BUYER_REQUEST`` → ``BUYER_ADD_TO_CART`` (et symétriquement) est une
+    spécialisation, pas un vrai changement de goal.
+
+    ``context_resolver`` (flows buyer/producer, hors périmètre) fait le pont
+    entre l'intention générique ``BUYER_REQUEST`` classée par
+    l'interpréteur et le goal transactionnel précis (panier, précommande,
+    négociation) qu'un tour ultérieur résout. Cette transition ne doit
+    JAMAIS déclencher une purge du payload déjà collecté — seul
+    ``nodes/memory.py`` en a besoin (déclenchée sur un changement de
+    ``payload["intent"]``, pas sur un changement de ``current_goal`` — voir
+    sa docstring d'appel), mais la relation elle-même est une propriété du
+    CATALOGUE de goals, pas de ce nœud."""
+    if previous == "BUYER_REQUEST" and incoming in BUYER_REQUEST_SPECIALIZATIONS:
+        return True
+    if incoming == "BUYER_REQUEST" and previous in BUYER_REQUEST_SPECIALIZATIONS:
+        return True
+    return False
+
+
 __all__ = [
     "BUYER_CART_GOALS",
     "BUYER_PREORDER_GOALS",
@@ -151,4 +199,6 @@ __all__ = [
     "PRODUCER_UPDATE_GOALS",
     "PRODUCER_ESCROW_GOALS",
     "NAVIGATION_BREAKOUT_GOALS",
+    "BUYER_REQUEST_SPECIALIZATIONS",
+    "is_goal_refinement",
 ]

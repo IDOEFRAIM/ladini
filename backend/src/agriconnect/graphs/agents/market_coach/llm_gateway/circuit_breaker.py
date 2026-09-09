@@ -68,11 +68,13 @@ class CircuitBreaker:
             # cooldown/verrou de probe qu'un OPEN ordinaire
             # (`mark_config_error` fixe désormais `cooldown_until`) — motif
             # de SKIP distinct pour l'observabilité tant que le cooldown
-            # n'est pas écoulé, mais AUCUNE nouvelle mécanique.
+            # n'est pas écoulé, mais AUCUNE nouvelle mécanique. Un
+            # `cooldown_until` absent (enregistrement legacy, incident
+            # 2026-09-09) compte comme écoulé — voir
+            # `HealthRecord.cooldown_elapsed` — jamais comme un blocage
+            # permanent.
             now = time.time()
-            cooldown_elapsed = bool(
-                record.cooldown_until and now >= record.cooldown_until
-            )
+            cooldown_elapsed = record.cooldown_elapsed(now)
             if not cooldown_elapsed:
                 return CircuitDecision(Decision.SKIP, "CONFIG_ERROR")
             acquired = self._health.try_acquire_probe_lock(
@@ -91,7 +93,7 @@ class CircuitBreaker:
         # rester HALF_OPEN entre l'acquisition du verrou et l'écriture du
         # résultat par le probe en cours ailleurs.
         now = time.time()
-        cooldown_elapsed = bool(record.cooldown_until and now >= record.cooldown_until)
+        cooldown_elapsed = record.cooldown_elapsed(now)
         if not cooldown_elapsed:
             return CircuitDecision(Decision.SKIP, "OPEN_COOLDOWN")
 

@@ -623,7 +623,7 @@ def _transactional_fallback_text(
     succès" — `goal` ici vient de `resolve_goal_for_ui`
     (`nodes/rendering/common.py`), une résolution TOLÉRANTE conçue pour un
     badge d'UI ("jamais UNKNOWN"), qui retombe en cascade sur
-    `working_memory.active_goal`/`locked_intent`/`suspended_goal`/
+    `working_memory.active_goal`/`suspended_goal`/
     `detected_intent` dès que `current_goal` est vidé (ce que
     `mcp_tool_executor` fait systématiquement à la complétion) — l'un de ces
     champs peut porter un goal PÉRIMÉ d'une tentative précédente abandonnée

@@ -51,7 +51,16 @@ class TestGoalPlannerDerivesExpectedInputFromPendingInteractionOnly(object):
         )
 
         src = _source(goal_planner)
-        assert 'expected_input = to_tunnel_category(get_pending_interaction(state))' in src
+        # (2026-09-09, audit Bloc 2, Blocker B) : `get_pending_interaction(state)`
+        # est maintenant capturé UNE fois dans une variable locale — réutilisée
+        # par `to_tunnel_category(...)` (expected_input) ET par la RÈGLE 0bis
+        # (détection du menu de désambiguïsation, `.context_ref`) — plutôt
+        # que rappelé une seconde fois pour ce second besoin. L'invariant
+        # structurel (un seul appel au résolveur canonique, jamais une
+        # lecture legacy directe) est inchangé, seule la forme littérale a
+        # changé pour partager le même résultat entre deux usages.
+        assert src.count("get_pending_interaction(state)") == 1
+        assert "expected_input = to_tunnel_category(pending_interaction)" in src
         # Plus aucune lecture DIRECTE de `state.get("expected_input")` pour
         # initialiser la variable de décision locale.
         assert 'expected_input = state.get("expected_input")' not in src

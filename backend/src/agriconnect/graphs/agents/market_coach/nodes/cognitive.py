@@ -3,19 +3,34 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
+from agriconnect.graphs.agents.market_coach.core.conversation_decision import (
+    ConversationAction,
+)
+from agriconnect.graphs.agents.market_coach.core.goals import (
+    NAVIGATION_BREAKOUT_GOALS,
+)
+from agriconnect.graphs.agents.market_coach.core.conversation_reset import (
+    reset_abandoned_conversation_context,
+)
+from agriconnect.graphs.agents.market_coach.core.tunnel_manager import (
+    INTERRUPTION_CONFIDENCE_THRESHOLD,
+)
 from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
-    clear_pending_interaction,
     get_pending_interaction,
     to_tunnel_category,
 )
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
+from agriconnect.graphs.agents.market_coach.nodes.clarification import (
+    has_out_of_tunnel_location_error,
+)
 from agriconnect.graphs.agents.market_coach.nodes.response_handlers import (
     _label_for_field,
 )
 from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import (
     _DISAMBIGUATION_CONFIDENCE_THRESHOLD,
     _detect_disambiguation_candidates,
+    extract_disambiguation_intents,
 )
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
@@ -63,18 +78,138 @@ def _entity_carry_forward(
     return entities if carried else None
 
 
-def _should_trigger_disambiguation(
-    competition: List[Dict[str, Any]],
+def _classify_nominal_action(
+    *,
+    event: str,
+    current_goal: Optional[str],
+    already_expecting: bool,
+    text_lower: str,
+    detected_intent: str,
     confidence: float,
-) -> bool:
-    intents = {str(c.get("intent")) for c in competition if c.get("intent")}
-    return len(intents) > 1 and confidence < _DISAMBIGUATION_CONFIDENCE_THRESHOLD
+    entry: Optional[Dict[str, Any]],
+    state: Dict[str, Any],
+) -> tuple[str, str]:
+    """Sous-classifie le tour NOMINAL (ni interruption, ni recovery/abandon
+    de tunnel — ces trois-là ont déjà retourné plus haut dans
+    `cognitive_guard`) en l'une des 4 actions restantes du vocabulaire
+    `ConversationDecision` : CLARIFY, DISAMBIGUATE, CONTINUE_ACTIVE_GOAL,
+    START_OR_PLAN_GOAL.
+
+    (2026-09-08, correction topologique du bloc conversationnel, mandat
+    §2-§14) : ces conditions étaient AUPARAVANT dispersées et recalculées
+    indépendamment par les nœuds d'exécution eux-mêmes —
+    `clarification_node::needs_clarification` (clause générique) et
+    `semantic_disambiguation` (son propre garde de désambiguïsation) — sur
+    un edge FIXE qui les visitait tous les deux à chaque tour, même
+    nominal. Elles sont ici reproduites À L'IDENTIQUE (mêmes seuils, même
+    ordre de priorité), pas réinventées : la topologie change (une seule
+    décision, un seul routeur trivial en aval), la décision elle-même ne
+    change pas.
+
+    Priorité (identique à l'ordre de préséance qu'appliquaient les anciens
+    nœuds d'exécution) :
+        1. GPS hors-tunnel en échec — priorité ABSOLUE, inconditionnelle
+           (ancien comportement : vérifié en tête de `clarification_node`,
+           AVANT même son propre garde `needs_clarification`) ;
+        2. Désambiguïsation lexicale légitime — le LLM n'a pas tranché
+           avec confiance (ancien garde de `semantic_disambiguation`) ;
+        3. Clarification générique — hors-tunnel, événement incompréhensible
+           (ancienne 1ère clause de `needs_clarification` ; la clause
+           `abandon_tunnel_max_retries` est traitée par sa PROPRE branche,
+           plus haut dans `cognitive_guard`, jamais ici) ;
+        4. Nominal : CONTINUE_ACTIVE_GOAL si un goal est verrouillé,
+           START_OR_PLAN_GOAL sinon.
+
+    Dette assumée (mandat §12, "InterpreterResult.alternatives si
+    disponible") : `InterpreterResult` (interpreter/interpreter_result.py)
+    n'expose PAS de champ `alternatives` aujourd'hui — seul le repli
+    lexical `_detect_disambiguation_candidates` alimente `entry`. Ce hook
+    n'est pas inventé ici (mandat : ne pas construire une architecture non
+    demandée) ; documenté comme extension future possible.
+    """
+    if has_out_of_tunnel_location_error(state):
+        return ConversationAction.CLARIFY, "location_out_of_tunnel"
+
+    disambiguation_eligible = (
+        event in {"NEW_TASK", "UNKNOWN"}
+        and not already_expecting
+        and bool(text_lower)
+        and not (
+            detected_intent not in ("", "UNKNOWN")
+            and confidence >= _DISAMBIGUATION_CONFIDENCE_THRESHOLD
+        )
+        and entry is not None
+        # (mandat §21/§22) : compte les intents CANONIQUES (via le même
+        # helper que la construction du menu), pas la longueur brute
+        # d'`options` — une option malformée (sans `intent`) ne doit pas
+        # compter comme un candidat valide.
+        and len(extract_disambiguation_intents(entry)) >= 2
+    )
+    if disambiguation_eligible:
+        return ConversationAction.DISAMBIGUATE, "lexical_disambiguation_candidate"
+
+    if (
+        event in {"OUT_OF_SCOPE", "UNKNOWN", "REJECT"}
+        and not already_expecting
+        and not current_goal
+    ):
+        return ConversationAction.CLARIFY, "out_of_scope_or_unknown_without_tunnel"
+
+    if current_goal:
+        return ConversationAction.CONTINUE_ACTIVE_GOAL, "structured_reply_within_active_goal"
+    return ConversationAction.START_OR_PLAN_GOAL, "new_task_or_no_active_goal"
 
 
 async def cognitive_guard(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
 ) -> Dict[str, Any]:
+    """Garde-fou conversationnel — PROPRIÉTAIRE UNIQUE de la décision de
+    transition du tour (2026-09-08, correction topologique du bloc
+    conversationnel).
+
+    Question posée : « étant donné `InterpreterResult` (event/intent/
+    confidence/entities) et le contexte conversationnel courant
+    (goal verrouillé, interaction en attente, historique de retries), quelle
+    transition doit suivre ce tour ? » La réponse est écrite dans
+    `cognitive_decision` (réutilisation du champ existant, PAS un second
+    canal concurrent — voir mandat §3) sous la forme :
+
+        {"action": <str>, "reason": <str>, "confidence": <float>, ...}
+
+    `action` est l'unique clé lue par le routeur en aval
+    (`nodes/routing.py::_route_after_cognitive_guard`, TRIVIAL : un
+    `dict.get` puis un mapping direct — il ne recalcule NI l'intent, NI la
+    confiance, NI l'ambiguïté, NI les retries, NI l'interruption). Valeurs
+    possibles, avec leur destination réelle dans le graphe compilé :
+
+        START_OR_PLAN_GOAL          -> goal_planner
+        CONTINUE_ACTIVE_GOAL        -> goal_planner
+        INTERRUPT_ACTIVE_GOAL       -> goal_planner
+        DISAMBIGUATE                -> semantic_disambiguation
+        CLARIFY                     -> clarification_node
+        recover_active_tunnel       -> clarification_node
+        abandon_tunnel_max_retries  -> clarification_node
+
+    Les deux derniers noms restent en minuscules/historiques
+    DÉLIBÉRÉMENT (mandat §3) : `interpreter/strategy.py::response_strategy`
+    (hors périmètre de ce chantier) compare CES chaînes littérales pour
+    décider `RECOVERY`/`CLARIFICATION` — les renommer casserait ce
+    consommateur sans le refondre. `INTERRUPT_ACTIVE_GOAL` (ex-
+    `suspend_current_goal`) a, à l'inverse, été renommé librement : recherche
+    exhaustive faite, AUCUN autre module ne consommait cette chaîne (voir
+    rapport de refonte, section "Qui décide / qui exécute / qui route").
+
+    (2026-09-08, revue de validation, §11 — historique, résolu par ce
+    correctif) : ce nœud calculait déjà le CANDIDAT de désambiguïsation
+    (`disambiguation_candidate`) mais ne décidait pas lui-même "faut-il
+    désambiguïser ?" — cette décision vivait dans
+    `nodes/semantic_disambiguation.py` (son propre seuil de confiance). Ce
+    n'était PAS un bug de duplication (un seul endroit décidait), mais un
+    propriétaire différent de celui de la topologie cible. C'est corrigé
+    ici : voir `_classify_nominal_action` pour le détail phase par phase
+    ce nœud (interruption, recovery, abandon — inchangés par ce
+    correctif)."""
     event = str(state.get("interpreted_event") or "").upper()
     detected_intent = str(state.get("detected_intent") or "UNKNOWN").upper()
     confidence = float(state.get("interpreter_confidence") or 0.0)
@@ -85,8 +220,18 @@ async def cognitive_guard(
     text_lower = (state.get("normalized_text") or state.get("user_query") or "").lower()
     retry_count = int(state.get("retry_count") or 0)
     in_tunnel = bool(current_goal and pending.kind != InteractionKind.NONE)
+    # Distinct de `in_tunnel` : vrai dès qu'UNE interaction est en attente,
+    # même sans goal verrouillé (ex: DISAMBIGUATION_PENDING). Même
+    # définition que l'ancien `already_expecting` de
+    # `semantic_disambiguation`/`nothing_pending` de `clarification_node`
+    # (négation) — un seul calcul désormais, consulté par
+    # `_classify_nominal_action`.
+    already_expecting = pending.kind != InteractionKind.NONE
 
-    user_role = str(state.get("forced_role") or state.get("user_role") or "").upper()
+    # (2026-09-08, P1-5 audit architectural) : `forced_role` supprimé — ce
+    # canal n'a jamais existé (voir interpreter/routing.py), la branche
+    # gauche de ce `or` était morte.
+    user_role = str(state.get("user_role") or "").upper()
 
     updates: Dict[str, Any] = {}
     decision: Dict[str, Any] = {
@@ -99,9 +244,20 @@ async def cognitive_guard(
     }
     competition: List[Dict[str, Any]] = []
 
+    # (2026-09-08, mandat §9 : "une seule décision, un seul propriétaire")
+    # `cognitive_guard` calcule le candidat de désambiguïsation UNE fois ;
+    # `clarification_node`/`semantic_disambiguation` le CONSULTENT au lieu
+    # de rappeler `_detect_disambiguation_candidates` chacun de leur côté
+    # (avant ce correctif : jusqu'à 3 recalculs indépendants du même texte,
+    # sans garantie qu'ils restent d'accord entre eux).
     entry = _detect_disambiguation_candidates(text_lower, user_role)
+    updates["disambiguation_candidate"] = entry
     if entry:
-        for intent_key in entry.get("candidates") or []:
+        # (2026-09-08, clôture Bloc 1, mandat §21/§22) : `options` est la
+        # SEULE source canonique des intents candidats — un ancien champ
+        # `candidates` séparé (redondant, retiré du catalogue
+        # `INTENT_DISAMBIGUATION`) n'est plus lu ici.
+        for intent_key, _label in extract_disambiguation_intents(entry):
             competition.append(
                 {
                     "intent": intent_key,
@@ -123,19 +279,105 @@ async def cognitive_guard(
         updates["extracted_entities"] = carried_entities
         decision["entity_carry_forward"] = True
 
+    # (2026-09-08, refonte responsabilités des nœuds d'entrée, mandat §7 —
+    # "amélioration obligatoire") : cette interruption ne vérifiait AUCUNE
+    # confiance — une intention concurrente classée à confiance quasi
+    # nulle suspendait quand même aveuglément un tunnel fiable en cours.
+    # Seuil aligné sur celui déjà utilisé pour la désambiguïsation
+    # (`_DISAMBIGUATION_CONFIDENCE_THRESHOLD`, cohérence intentionnelle
+    # avec le reste de l'interpréteur/policy) : sous ce seuil, l'intention
+    # concurrente reste journalisée dans `intent_competition` (visible
+    # pour un futur déclenchement de désambiguïsation) mais NE casse PAS
+    # le tunnel actif.
+    # (2026-09-09, Bloc 2 passe finale — Invariant A : UN SEUL propriétaire
+    # de « le goal actif est-il interrompu ? ») : le breakout de navigation
+    # critique (`NAVIGATION_BREAKOUT_GOALS`, source unique `core/goals.py`,
+    # dérivée du flag `breakout` d'INTENT_CONFIG) était jusqu'ici décidé par
+    # `TunnelManager`, en aval, SANS que ce nœud soit consulté — donc une
+    # intention de navigation à confiance 0.2 pouvait casser un tunnel que
+    # CE nœud venait explicitement de refuser d'interrompre. Deux autorités
+    # sur la même question. La décision est désormais prise ICI, et ICI
+    # seulement ; `TunnelManager` ne garde que les invariants STRUCTURELS
+    # (OTP inviolable), c.-à-d. le droit d'INTERDIRE une transition, jamais
+    # celui d'en choisir une (voir sa docstring de classe).
+    #
+    # Pourquoi le breakout ignore le seuil de confiance : ce n'est pas une
+    # intention métier concurrente à arbitrer, c'est une demande de
+    # NAVIGATION ("voir mon panier", "mes commandes"). La refuser piège
+    # l'utilisateur dans un tunnel dont il demande explicitement à sortir —
+    # incident réel 2026-07-17, voir [[market-coach-turn-boundary-state]].
     if (
         current_goal
         and event == "NEW_TASK"
         and detected_intent not in {"UNKNOWN", str(current_goal).upper()}
+        and (
+            detected_intent in NAVIGATION_BREAKOUT_GOALS
+            or confidence >= _DISAMBIGUATION_CONFIDENCE_THRESHOLD
+        )
     ):
+        interrupt_reason = (
+            "critical_navigation_breakout"
+            if detected_intent in NAVIGATION_BREAKOUT_GOALS
+            else "competing_intent_high_confidence"
+        )
         updates.update(
             {
                 "interpreted_event": "INTERRUPTION",
                 "intent_competition": competition,
-                "cognitive_decision": {**decision, "action": "suspend_current_goal"},
+                "cognitive_decision": {
+                    **decision,
+                    # (2026-09-08, correction topologique) : renommé depuis
+                    # `suspend_current_goal` — recherche exhaustive faite,
+                    # AUCUN lecteur externe (response_strategy.py signale
+                    # l'interruption via `interpreted_event=="INTERRUPTION"`
+                    # ci-dessus, pas via ce nom). Renommage donc sans risque,
+                    # vers le vocabulaire canonique du mandat §3.
+                    "action": ConversationAction.INTERRUPT_ACTIVE_GOAL,
+                    "reason": interrupt_reason,
+                },
             }
         )
         return updates
+
+    # (2026-09-09, Bloc 2 passe finale — Invariant A, fermeture complète) :
+    # `input_interpreter` (Bloc 1, GELÉ) peut lui aussi émettre
+    # `interpreted_event="INTERRUPTION"` — quand l'utilisateur dévie pendant
+    # une SELECTION/CONFIRMATION avec une confiance >= 0.60 (voir
+    # `interpreter/routing.py`). Cet événement ne passait par AUCUNE
+    # décision de ce nœud : il filait jusqu'à `TunnelManager`, qui
+    # appliquait alors son PROPRE seuil — un second décideur, invisible
+    # ici. Ce nœud RATIFIE désormais explicitement ces interruptions.
+    #
+    # La ratification réutilise EXACTEMENT le critère déjà appliqué en
+    # amont (`INTERRUPTION_CONFIDENCE_THRESHOLD`, le seuil de
+    # l'interpréteur ET celui historique de `TunnelManager`) : le
+    # comportement utilisateur est donc inchangé — ce n'est pas un nouveau
+    # jugement, c'est la reprise formelle d'une décision jusqu'ici
+    # implicite, pour qu'UNE seule autorité approuve toute interruption
+    # réellement appliquée. Une interruption NON ratifiée ici (confiance
+    # sous le seuil) reste soumise, en aval, au refus de `TunnelManager` —
+    # les deux verdicts concordent par construction (même seuil), sans
+    # contradiction possible.
+    if current_goal and event == "INTERRUPTION":
+        if (
+            detected_intent in NAVIGATION_BREAKOUT_GOALS
+            or confidence >= INTERRUPTION_CONFIDENCE_THRESHOLD
+        ):
+            updates.update(
+                {
+                    "intent_competition": competition,
+                    "cognitive_decision": {
+                        **decision,
+                        "action": ConversationAction.INTERRUPT_ACTIVE_GOAL,
+                        "reason": (
+                            "critical_navigation_breakout"
+                            if detected_intent in NAVIGATION_BREAKOUT_GOALS
+                            else "ratified_upstream_interruption"
+                        ),
+                    },
+                }
+            )
+            return updates
 
     # Un partage de position WhatsApp natif n'a pas de texte à classifier —
     # l'interprète LLM renvoie donc systématiquement event=UNKNOWN pour ces
@@ -150,90 +392,24 @@ async def cognitive_guard(
                 "[CognitiveGuard] Max retries reached for goal=%s — abandoning tunnel",
                 current_goal,
             )
-            # Chantier résilience 2026-08 : les mini machines à états
-            # auto-suffisantes (flows/producer/auctions.py::bid_phase,
-            # flows/producer/flow.py::update_phase) vivent EXCLUSIVEMENT dans
-            # working_memory, jamais touché par le reset ci-dessous avant ce
-            # correctif. Un abandon de tunnel en plein milieu (ex: bid_phase=
-            # "CONFIRM") laissait ces clés stales — relancer le même goal peu
-            # après (MARKET_BROWSE_REQUESTS / SALES_UPDATE_PRODUCTION /
-            # SALES_UPDATE_PRODUCT) relisait alors une phase/un id périmé et
-            # pouvait réafficher un récap obsolète au lieu de redémarrer
-            # proprement. current_goal étant remis à None juste en dessous
-            # (donc plus aucun tunnel actif), ces clés n'ont plus aucune
-            # raison de survivre non plus.
-            stale_wm_keys = (
-                "bid_phase", "pending_bid_auction", "pending_bid_price",
-                "pending_modify_bid",
-                "update_phase", "update_cycle_id", "update_product_id",
-                "update_pending",
-                # (2026-09-02) Même bug, côté acheteur : `winner_gps_stage`
-                # (flows/buyer/order_tracking.py) est la même famille de
-                # mini-état auto-suffisant que bid_phase/update_phase
-                # ci-dessus — jamais touchée par ce reset avant ce correctif,
-                # alors que `current_goal` l'est. Un abandon de tunnel en
-                # pleine étape GPS gagnant-enchère laissait ce flag actif :
-                # relancer plus tard le suivi de commande retombait
-                # directement sur l'étape GPS sans qu'aucun `pending_interaction`
-                # actif ne l'explique (voir aussi `preorder_workflow.gps_stage`
-                # ci-dessous, même classe de bug, incident réel +22601479800).
-                "winner_gps_stage",
-            )
-            working_memory = dict(state.get("working_memory") or {})
-            for key in stale_wm_keys:
-                working_memory[key] = None
-
+            # (2026-09-08, refonte responsabilités des nœuds d'entrée,
+            # mandat §7) : `cognitive_guard` DÉCIDE de l'abandon (seuil de
+            # retry dépassé) mais n'a plus besoin de connaître le détail
+            # des mini-machines à états (`bid_phase`/`update_phase`/
+            # `winner_gps_stage`/`preorder_workflow.gps_stage`...) ni du
+            # nettoyage de `transaction_payload`/`selected_tool`/
+            # `execution_result` — voir `core/conversation_reset.py` pour
+            # l'historique complet de chaque champ réinitialisé (comportement
+            # inchangé, seule l'organisation du code a bougé).
             updates.update(
-                {
-                    "current_goal": None,
-                    "goal_status": "IDLE",
-                    "status": "WAITING_INPUT",
-                    # (2026-09-02) Symétrique à `stale_wm_keys` ci-dessus, mais
-                    # `preorder_workflow` (flows/buyer/preorder.py) est un
-                    # champ top-level `merge_dict` (BuyerContext), pas une clé
-                    # de `working_memory` — donc hors de portée de la boucle
-                    # au-dessus. `gps_stage`/`gps_default` sont la même
-                    # famille de mini-état auto-suffisant que `bid_phase` :
-                    # sans ce reset, un tunnel abandonné en pleine étape GPS
-                    # précommande laisse `gps_stage=True` collé indéfiniment
-                    # (merge_dict ne l'efface jamais tout seul), alors que
-                    # `pending_interaction` (PROVIDE_LOCATION), lui, est bien
-                    # effacé par `clear_pending_interaction` ci-dessous — les
-                    # deux DOIVENT tomber ensemble, sinon `create_preorder`
-                    # retombe sur `resolve_gps_stage` à la reprise sans aucun
-                    # `pending_interaction` actif pour le justifier.
-                    "preorder_workflow": {"gps_stage": None, "gps_default": None},
-                    # merge_dict-reduced fields: a plain {} is a NO-OP under
-                    # merge_dict (agents/reducers.py) — it PRESERVES the old
-                    # value instead of clearing it. Only {"__reset__": True}
-                    # actually empties the field. Writing plain {} here was
-                    # the root cause of quantity/product/price from an
-                    # abandoned goal silently surviving into the next goal's
-                    # transaction_payload (current_goal was correctly reset
-                    # to None, but the stale data underneath it was not).
-                    "transaction_payload": {"__reset__": True},
-                    "stable_entities": {"__reset__": True},
-                    "missing_fields": [],
-                    "completed_fields": [],
-                    "last_missing_field": None,
-                    "expected_candidates": [],
-                    "available_mapping": {},
-                    "retry_count": 0,
-                    "confirmation_summary": None,
-                    **clear_pending_interaction("tunnel_abandoned_max_retries"),
-                    "selected_tool": None,
-                    "selected_tool_args": {"__reset__": True},
-                    "execution_result": {"__reset__": True},
-                    "ag_ui_component": None,
-                    "response_strategy": "CLARIFICATION",
-                    "intent_competition": competition,
-                    "cognitive_decision": {
+                reset_abandoned_conversation_context(
+                    state,
+                    intent_competition=competition,
+                    cognitive_decision={
                         **decision,
-                        "action": "abandon_tunnel_max_retries",
+                        "reason": "unknown_event_in_tunnel_max_retries",
                     },
-                    "proactive_hint": "L'opération a été annulée. Dites-moi ce que vous souhaitez faire.",
-                    "working_memory": working_memory,
-                }
+                )
             )
             return updates
 
@@ -261,7 +437,8 @@ async def cognitive_guard(
                 "intent_competition": competition,
                 "cognitive_decision": {
                     **decision,
-                    "action": "recover_active_tunnel",
+                    "action": ConversationAction.RECOVER_ACTIVE_GOAL,
+                    "reason": "unknown_event_in_tunnel_retry",
                     "retry": retry_count + 1,
                 },
             }
@@ -286,8 +463,8 @@ async def cognitive_guard(
             updates["proactive_hint"] = hint
 
     # Le compteur d'échecs mesure des échecs CONSÉCUTIFS, pas cumulés sur
-    # toute la durée du tunnel : dès que ce tour a été compris (on atteint la
-    # branche "continue"), on repart de zéro. Sans ça, un utilisateur qui
+    # toute la durée du tunnel : dès que ce tour a été compris (on atteint
+    # cette section nominale), on repart de zéro. Sans ça, un utilisateur qui
     # bute deux fois, se fait comprendre, puis bute une seule fois de plus se
     # faisait éjecter de son opération — alors qu'il progressait. Vérifié par
     # simulation avant/après (scénario UNKNOWN, UNKNOWN, ANSWER, UNKNOWN :
@@ -295,106 +472,41 @@ async def cognitive_guard(
     if in_tunnel and retry_count:
         updates["retry_count"] = 0
 
+    # (2026-09-08, correction topologique du bloc conversationnel) : AVANT
+    # ce correctif, cette section posait inconditionnellement
+    # `action: "continue"` — voir docstring de `cognitive_guard` pour
+    # l'historique complet. `_classify_nominal_action` tranche maintenant
+    # RÉELLEMENT entre CLARIFY / DISAMBIGUATE / CONTINUE_ACTIVE_GOAL /
+    # START_OR_PLAN_GOAL, avec les mêmes conditions que les nœuds d'exécution
+    # appliquaient auparavant chacun de leur côté.
+    action, reason = _classify_nominal_action(
+        event=event,
+        current_goal=current_goal,
+        already_expecting=already_expecting,
+        text_lower=text_lower,
+        detected_intent=detected_intent,
+        confidence=confidence,
+        entry=entry,
+        state=state,
+    )
     updates.update(
         {
             "intent_competition": competition,
-            "cognitive_decision": {**decision, "action": "continue"},
+            "cognitive_decision": {**decision, "action": action, "reason": reason},
         }
+    )
+    logger.debug(
+        "[CognitiveGuard] event=%s intent=%s goal=%s confidence=%.2f action=%s reason=%s",
+        event,
+        detected_intent,
+        current_goal,
+        confidence,
+        action,
+        reason,
     )
     return updates
 
 
-async def cognitive_orchestrator(
-    state: Dict[str, Any],
-    mc_runtime: MarketRuntime,
-) -> Dict[str, Any]:
-    if state.get("is_onboarding"):
-        event = str(state.get("interpreted_event") or "").upper()
-        intent = str(state.get("detected_intent") or "UNKNOWN").upper()
-        confidence = float(state.get("interpreter_confidence") or 0.0)
-        return {
-            "cognitive_decision": {
-                "phase": "reason",
-                "next_step": "onboarding",
-                "reason": "onboarding",
-                "loop": [
-                    "perceive",
-                    "think",
-                    "decide",
-                    "act",
-                    "observe",
-                    "reason",
-                    "retry",
-                ],
-                "event": event,
-                "intent": intent,
-                "current_goal": None,
-                "confidence": confidence,
-            },
-            "should_replan": False,
-        }
-
-    event = str(state.get("interpreted_event") or "").upper()
-    intent = str(state.get("detected_intent") or "UNKNOWN").upper()
-    current_goal = str(state.get("current_goal") or "").upper()
-    pending = get_pending_interaction(state)
-    strategy = str(state.get("response_strategy") or "").upper()
-    confidence = float(state.get("interpreter_confidence") or 0.0)
-    competition = list(state.get("intent_competition") or [])
-    in_tunnel = bool(current_goal and pending.kind != InteractionKind.NONE)
-
-    phase = "perceive"
-    next_step = "continue"
-    reason = "nominal"
-
-    if strategy in {"CLARIFICATION", "RECOVERY"}:
-        phase = "reason"
-        next_step = "respond"
-        reason = strategy.lower()
-    elif event == "INTERRUPTION":
-        phase = "decide"
-        next_step = "replan"
-        reason = "interruption"
-    elif _should_trigger_disambiguation(competition, confidence):
-        phase = "think"
-        next_step = "clarify"
-        reason = "intent_competition"
-    elif in_tunnel and (
-        event in {"ANSWER", "UPDATE", "SELECTION", "CONFIRM", "REJECT"}
-        or bool(state.get("location_shared"))
-    ):
-        phase = "act"
-        next_step = "continue_tunnel"
-        reason = "active_goal"
-    elif intent == "UNKNOWN" and event in {"UNKNOWN", "OUT_OF_SCOPE"}:
-        phase = "reason"
-        next_step = "clarify"
-        reason = "unknown_intent"
-
-    return {
-        "cognitive_decision": {
-            "phase": phase,
-            "next_step": next_step,
-            "reason": reason,
-            "loop": [
-                "perceive",
-                "think",
-                "decide",
-                "act",
-                "observe",
-                "reason",
-                "retry",
-            ],
-            "event": event,
-            "intent": intent,
-            "current_goal": current_goal or None,
-            "confidence": confidence,
-        },
-        "should_replan": next_step == "replan",
-    }
-
-
 __all__ = [
     "cognitive_guard",
-    "cognitive_orchestrator",
 ]

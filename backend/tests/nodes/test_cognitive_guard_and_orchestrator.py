@@ -1,16 +1,28 @@
 """`nodes/cognitive.py` — garde-fou cognitif (protection de tunnel, abandon
-après N échecs, report d'entités stables) + orchestrateur (phase du cycle
-perceive→think→decide→act→observe→reason)."""
-from __future__ import annotations
+après N échecs, report d'entités stables).
 
-import pytest
+(2026-09-08, refonte responsabilités des nœuds d'entrée, mandat §8) :
+`cognitive_orchestrator` a été SUPPRIMÉ (nœud ET fonction) — sa
+classification perceive/think/decide/act/observe/reason ne pilotait AUCUNE
+transition réelle du graphe (voir `core/graph_builder.py` et
+`tests/architecture/test_cognitive_decisions_are_consumed_or_removed.py`,
+qui verrouillait déjà cette preuve). `TestCognitiveOrchestrator`
+ci-dessous a été retirée en conséquence — ce n'est pas une régression non
+couverte, c'est la suppression documentée d'un test sur du code
+intentionnellement supprimé.
+
+(2026-09-08, revue de validation du bloc refondu, même jour) :
+`_should_trigger_disambiguation` supprimée à son tour — trouvée SANS
+AUCUN appelant en production (seul `cognitive_orchestrator`, déjà mort,
+l'appelait) lors de l'audit exhaustif du périmètre `disambiguation_candidate`
+(voir docstring de `cognitive_guard`). `TestShouldTriggerDisambiguation`
+retirée pour la même raison que `TestCognitiveOrchestrator` ci-dessus."""
+from __future__ import annotations
 
 from agriconnect.graphs.agents.market_coach.nodes.cognitive import (
     _build_proactive_hint,
     _entity_carry_forward,
-    _should_trigger_disambiguation,
     cognitive_guard,
-    cognitive_orchestrator,
 )
 from tests.conftest import make_state, run
 
@@ -78,25 +90,15 @@ class TestEntityCarryForward:
         assert _entity_carry_forward(state, "SALES_PUBLISH_PRODUCT", True) is None
 
 
-# =====================================================================
-# _should_trigger_disambiguation
-# =====================================================================
+class TestShouldTriggerDisambiguationRemoved:
+    """Preuve négative directe (revue de validation) : la fonction ne doit
+    plus exister EN CODE — pas seulement inutilisée mais encore présente
+    en dormance (même discipline que `should_replan`,
+    tests/architecture/test_cognitive_decisions_are_consumed_or_removed.py)."""
 
-class TestShouldTriggerDisambiguation:
-    def test_multiple_intents_low_confidence_triggers(self):
-        competition = [{"intent": "A"}, {"intent": "B"}]
-        assert _should_trigger_disambiguation(competition, 0.5) is True
-
-    def test_multiple_intents_high_confidence_does_not_trigger(self):
-        competition = [{"intent": "A"}, {"intent": "B"}]
-        assert _should_trigger_disambiguation(competition, 0.9) is False
-
-    def test_single_intent_never_triggers(self):
-        competition = [{"intent": "A"}, {"intent": "A"}]
-        assert _should_trigger_disambiguation(competition, 0.1) is False
-
-    def test_empty_competition_never_triggers(self):
-        assert _should_trigger_disambiguation([], 0.1) is False
+    def test_should_trigger_disambiguation_does_not_exist_anymore(self):
+        import agriconnect.graphs.agents.market_coach.nodes.cognitive as mod
+        assert not hasattr(mod, "_should_trigger_disambiguation")
 
 
 # =====================================================================
@@ -104,22 +106,54 @@ class TestShouldTriggerDisambiguation:
 # =====================================================================
 
 class TestCognitiveGuardInterruption:
-    def test_new_task_with_different_intent_suspends_the_current_goal(self):
+    def test_new_task_with_different_intent_and_high_confidence_suspends_the_current_goal(self):
+        """(2026-09-08, mandat §7 "amélioration obligatoire") : l'interruption
+        exige désormais une confiance suffisante — voir le test symétrique
+        `test_new_task_with_different_intent_but_low_confidence_does_not_interrupt`
+        ci-dessous pour le cas AVANT correctif (interrompait aveuglément)."""
         state = make_state(
             current_goal="SALES_PUBLISH_PRODUCT",
             interpreted_event="NEW_TASK",
             detected_intent="BUYER_REQUEST",
+            interpreter_confidence=0.95,
             expected_input="QUANTITY",
         )
         result = run(cognitive_guard(state, None))
         assert result["interpreted_event"] == "INTERRUPTION"
-        assert result["cognitive_decision"]["action"] == "suspend_current_goal"
+        assert result["cognitive_decision"]["action"] == "INTERRUPT_ACTIVE_GOAL"
+
+    def test_new_task_with_different_intent_but_low_confidence_does_not_interrupt(self):
+        """Bug réel corrigé (2026-09-08) : AVANT ce correctif, cette
+        interruption ne vérifiait AUCUNE confiance — une intention
+        concurrente classée à confiance quasi nulle cassait quand même un
+        tunnel fiable en cours (mandat §7 : "une intention concurrente
+        faible ne doit pas casser un tunnel fiable")."""
+        state = make_state(
+            current_goal="SALES_PUBLISH_PRODUCT",
+            interpreted_event="NEW_TASK",
+            detected_intent="BUYER_REQUEST",
+            interpreter_confidence=0.2,
+            expected_input="QUANTITY",
+        )
+        result = run(cognitive_guard(state, None))
+        assert result.get("interpreted_event") != "INTERRUPTION"
+        assert result["cognitive_decision"]["action"] != "INTERRUPT_ACTIVE_GOAL"
+        # L'intention concurrente reste journalisée pour observabilité /
+        # future désambiguïsation, même si elle ne casse pas le tunnel.
+        sources = [c["intent"] for c in result["intent_competition"]]
+        assert "BUYER_REQUEST" in sources
 
     def test_new_task_with_the_same_intent_as_current_goal_does_not_interrupt(self):
+        """(revue de validation, scénario C du mandat) : confiance HAUTE
+        explicite — la non-interruption doit venir du fait que l'intention
+        est la MÊME que le goal actif, pas d'un repli sur le seuil de
+        confiance par défaut (sinon ce test ne prouverait rien de plus que
+        le test "low_confidence" ci-dessous)."""
         state = make_state(
             current_goal="SALES_PUBLISH_PRODUCT",
             interpreted_event="NEW_TASK",
             detected_intent="SALES_PUBLISH_PRODUCT",
+            interpreter_confidence=0.97,
             expected_input="QUANTITY",
         )
         result = run(cognitive_guard(state, None))
@@ -130,6 +164,7 @@ class TestCognitiveGuardInterruption:
             current_goal="SALES_PUBLISH_PRODUCT",
             interpreted_event="NEW_TASK",
             detected_intent="UNKNOWN",
+            interpreter_confidence=0.97,
             expected_input="QUANTITY",
         )
         result = run(cognitive_guard(state, None))
@@ -233,9 +268,16 @@ class TestCognitiveGuardUnknownInTunnel:
         assert result["pending_interaction"] is None
 
     def test_unknown_event_outside_a_tunnel_does_not_trigger_this_branch(self):
+        """(2026-09-08, correction topologique du bloc conversationnel) :
+        ce scénario ne déclenche toujours PAS la branche recovery/abandon
+        (`in_tunnel` est faux, `current_goal` absent) — mais il n'est plus
+        classé en `"continue"` muet : `event=UNKNOWN` + rien en attente +
+        aucun goal actif est EXACTEMENT la condition de clarification
+        générique (ex-1ère clause de `clarification_node::
+        needs_clarification`), désormais décidée ici. Voir mandat §8."""
         state = make_state(current_goal=None, interpreted_event="UNKNOWN", expected_input="NONE")
         result = run(cognitive_guard(state, None))
-        assert result["cognitive_decision"]["action"] == "continue"
+        assert result["cognitive_decision"]["action"] == "CLARIFY"
 
     def test_a_shared_location_in_tunnel_is_not_treated_as_an_unknown_event(self):
         """Bug réel (2026-08-13) : un partage de position WhatsApp natif n'a
@@ -255,7 +297,7 @@ class TestCognitiveGuardUnknownInTunnel:
             location_shared=True,
         )
         result = run(cognitive_guard(state, None))
-        assert result["cognitive_decision"]["action"] == "continue"
+        assert result["cognitive_decision"]["action"] == "CONTINUE_ACTIVE_GOAL"
         assert result.get("response_strategy") != "RECOVERY"
         assert "current_goal" not in result, "le tunnel ne doit pas être touché"
 
@@ -268,7 +310,7 @@ class TestCognitiveGuardUnknownInTunnel:
             location_shared=True,
         )
         result = run(cognitive_guard(state, None))
-        assert result["cognitive_decision"]["action"] == "continue"
+        assert result["cognitive_decision"]["action"] == "CONTINUE_ACTIVE_GOAL"
         assert result.get("response_strategy") != "CLARIFICATION"
 
 
@@ -294,95 +336,75 @@ class TestCognitiveGuardEntityCarryAndProgress:
         )
         result = run(cognitive_guard(state, None))
         assert "conversation_progress" in result
-        assert result["cognitive_decision"]["action"] == "continue"
+        assert result["cognitive_decision"]["action"] == "CONTINUE_ACTIVE_GOAL"
 
     def test_lexical_disambiguation_candidates_are_added_to_competition(self, monkeypatch):
+        """(2026-09-08, clôture Bloc 1, mandat §21/§22) : `options` est
+        désormais la SEULE source des intents candidats — `entry["candidates"]`
+        (retiré du catalogue `INTENT_DISAMBIGUATION`) ne serait plus lu même
+        s'il était présent ici."""
         import agriconnect.graphs.agents.market_coach.nodes.cognitive as mod
 
         monkeypatch.setattr(
             mod, "_detect_disambiguation_candidates",
-            lambda text, role: {"id": "trigger1", "candidates": ["INTENT_A", "INTENT_B"]},
+            lambda text, role: {
+                "id": "trigger1",
+                "options": [("INTENT_A", "Option A"), ("INTENT_B", "Option B")],
+            },
         )
         state = make_state(interpreted_event="NEW_TASK", detected_intent="UNKNOWN")
         result = run(cognitive_guard(state, None))
         sources = [c["source"] for c in result["intent_competition"]]
         assert "lexical_disambiguation" in sources
+        intents = {c["intent"] for c in result["intent_competition"] if c["source"] == "lexical_disambiguation"}
+        assert intents == {"INTENT_A", "INTENT_B"}
 
-    def test_default_action_is_continue_with_no_special_context(self):
+    def test_default_action_is_start_or_plan_goal_with_no_special_context(self):
+        """(2026-09-08, correction topologique) : renommé — un NEW_TASK
+        sans goal actif, sans ambiguïté ni clarification à faire, est
+        désormais classé START_OR_PLAN_GOAL (ex-"continue" muet)."""
         state = make_state(current_goal=None, interpreted_event="NEW_TASK", detected_intent="UNKNOWN")
         result = run(cognitive_guard(state, None))
-        assert result["cognitive_decision"]["action"] == "continue"
+        assert result["cognitive_decision"]["action"] == "START_OR_PLAN_GOAL"
 
 
 # =====================================================================
-# cognitive_orchestrator
+# disambiguation_candidate — source unique consultée par clarification_node
+# et semantic_disambiguation (mandat §9, 2026-09-08)
 # =====================================================================
 
-class TestCognitiveOrchestrator:
-    def test_onboarding_state_short_circuits(self):
-        state = make_state(is_onboarding=True, interpreted_event="NEW_TASK")
-        result = run(cognitive_orchestrator(state, None))
-        assert result["cognitive_decision"]["next_step"] == "onboarding"
-        assert result["should_replan"] is False
-
-    def test_clarification_strategy_maps_to_respond(self):
-        state = make_state(response_strategy="CLARIFICATION")
-        result = run(cognitive_orchestrator(state, None))
-        assert result["cognitive_decision"]["phase"] == "reason"
-        assert result["cognitive_decision"]["next_step"] == "respond"
-
-    def test_recovery_strategy_maps_to_respond(self):
-        state = make_state(response_strategy="RECOVERY")
-        result = run(cognitive_orchestrator(state, None))
-        assert result["cognitive_decision"]["next_step"] == "respond"
-
-    def test_interruption_event_maps_to_replan(self):
-        state = make_state(interpreted_event="INTERRUPTION")
-        result = run(cognitive_orchestrator(state, None))
-        assert result["cognitive_decision"]["phase"] == "decide"
-        assert result["cognitive_decision"]["next_step"] == "replan"
-        assert result["should_replan"] is True
-
-    def test_intent_competition_triggers_clarify(self):
+class TestDisambiguationCandidatePrecomputed:
+    def test_no_lexical_match_yields_none(self):
         state = make_state(
-            intent_competition=[{"intent": "A"}, {"intent": "B"}],
-            interpreter_confidence=0.3,
+            normalized_text="bonjour comment allez-vous",
+            interpreted_event="NEW_TASK",
+            detected_intent="UNKNOWN",
         )
-        result = run(cognitive_orchestrator(state, None))
-        assert result["cognitive_decision"]["next_step"] == "clarify"
-        assert result["cognitive_decision"]["reason"] == "intent_competition"
+        result = run(cognitive_guard(state, None))
+        assert result["disambiguation_candidate"] is None
 
-    @pytest.mark.parametrize("event", ["ANSWER", "UPDATE", "SELECTION", "CONFIRM", "REJECT"])
-    def test_active_tunnel_events_continue_the_tunnel(self, event):
-        state = make_state(current_goal="SALES_PUBLISH_PRODUCT", expected_input="QUANTITY", interpreted_event=event)
-        result = run(cognitive_orchestrator(state, None))
-        assert result["cognitive_decision"]["next_step"] == "continue_tunnel"
+    def test_lexical_match_is_exposed_on_every_branch_not_only_continue(self, monkeypatch):
+        """L'abandon de tunnel (max retries) passe par un chemin de retour
+        anticipé différent de la branche "continue" — le candidat doit être
+        posé AVANT toute branche, pas seulement sur le chemin nominal."""
+        import agriconnect.graphs.agents.market_coach.nodes.cognitive as mod
 
-    def test_a_shared_location_in_tunnel_continues_the_tunnel_even_with_event_unknown(self):
-        """Un partage de position n'a pas d'event classifiable (event=UNKNOWN)
-        mais doit quand même atteindre le resolver — voir
-        [[gps-delivery-burkina-faso-2026-08]]."""
+        monkeypatch.setattr(
+            mod, "_detect_disambiguation_candidates",
+            lambda text, role: {
+                "id": "trigger1",
+                "options": [("INTENT_A", "Option A"), ("INTENT_B", "Option B")],
+            },
+        )
         state = make_state(
-            current_goal="BUYER_PREORDER_INIT",
-            expected_input="CONFIRMATION",
+            current_goal="SALES_PUBLISH_PRODUCT",
             interpreted_event="UNKNOWN",
-            location_shared=True,
+            expected_input="QUANTITY",
+            retry_count=2,
         )
-        result = run(cognitive_orchestrator(state, None))
-        assert result["cognitive_decision"]["next_step"] == "continue_tunnel"
-        assert result["cognitive_decision"]["reason"] == "active_goal"
-
-    @pytest.mark.parametrize("event", ["UNKNOWN", "OUT_OF_SCOPE"])
-    def test_unknown_intent_without_a_tunnel_clarifies(self, event):
-        state = make_state(interpreted_event=event, detected_intent="UNKNOWN", current_goal=None)
-        result = run(cognitive_orchestrator(state, None))
-        assert result["cognitive_decision"]["phase"] == "reason"
-        assert result["cognitive_decision"]["next_step"] == "clarify"
-        assert result["cognitive_decision"]["reason"] == "unknown_intent"
-
-    def test_nominal_case_continues(self):
-        state = make_state(interpreted_event="NEW_TASK", detected_intent="SALES_PUBLISH_PRODUCT", current_goal=None)
-        result = run(cognitive_orchestrator(state, None))
-        assert result["cognitive_decision"]["next_step"] == "continue"
-        assert result["cognitive_decision"]["reason"] == "nominal"
-        assert result["should_replan"] is False
+        result = run(cognitive_guard(state, None))
+        assert result["cognitive_decision"]["action"] == "abandon_tunnel_max_retries"
+        assert result["disambiguation_candidate"] == {
+            "id": "trigger1",
+            "options": [("INTENT_A", "Option A"), ("INTENT_B", "Option B")],
+        }

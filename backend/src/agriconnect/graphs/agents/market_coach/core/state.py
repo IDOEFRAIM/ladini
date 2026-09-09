@@ -101,6 +101,11 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
 
     normalized_text: Annotated[str, replace_value]
 
+    # (2026-09-08, refonte input_normalizer) : signal EXPLICITE — plus de
+    # troncature silencieuse (mandat §4). True quand `_MAX_INPUT_LEN` a été
+    # dépassé sur le texte brut ou normalisé.
+    input_truncated: Annotated[bool, replace_value]
+
     detected_language: Annotated[str, replace_value]
 
     translated_text: Annotated[str, replace_value]
@@ -119,8 +124,19 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
 
     session_id: Annotated[str, replace_value]
 
-    role: Annotated[str, replace_value]
-
+    # (2026-09-08, purge redondance) : `role` (doublon exact de `user_role`,
+    # écrit une seule fois par `role_guard.py` comme défaut initial puis
+    # JAMAIS mis à jour ensuite — contrairement à `user_role`, rafraîchi à
+    # chaque chargement de profil par `input_normalizer`/`profile_loader`)
+    # retiré du contrat. Risque réel qu'il posait : `domain/model.py::
+    # DomainContext.from_state` lisait `state.get("role") or state.get(
+    # "user_role")` — un `or` qui privilégiait TOUJOURS la valeur figée de
+    # `role_guard` (souvent "PRODUCER" par défaut) sur la valeur réellement à
+    # jour de `user_role`, silencieusement, sans qu'aucun test ne puisse le
+    # détecter (les deux sont identiques au 1er tour, seul un rôle corrigé
+    # PLUS TARD dans la conversation révélait l'écart). `user_role` est
+    # désormais l'UNIQUE champ — un site qui a besoin du rôle courant le lit
+    # directement, plus de second nom à tenir synchronisé.
     user_role: Annotated[str, replace_value]
 
     user_name: Annotated[Optional[str], replace_value]
@@ -154,15 +170,75 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # ================================================================
 
     security_status: Annotated[
-        Literal["SAFE", "SUSPICIOUS", "WARNING", "SCAM_DETECTED", "BLOCKED"],
+        Literal[
+            "SAFE",
+            "SUSPICIOUS",
+            "WARNING",
+            "SCAM_DETECTED",
+            "BLOCKED",
+            "ACCOUNT_BLOCKED",
+            "PROHIBITED_PRODUCT",
+            "PROFILE_UNAVAILABLE",
+            "PROMPT_INJECTION_DETECTED",
+        ],
         replace_value,
     ]
 
     security_reason: Annotated[Optional[str], replace_value]
 
+    # (2026-09-08, revue de validation du bloc refondu, Invariant C) :
+    # décision fermée écrite par CHAQUE exécution de `security_moderation`
+    # (voir `nodes/security_moderation.py::SecurityDecision`) — LE champ
+    # que `nodes/routing.py::_route_after_security` doit lire en priorité,
+    # un routeur trivial sans reclassification. EPHEMERAL, recalculé
+    # chaque tour (security_moderation s'exécute inconditionnellement).
+    security_decision: Annotated[
+        Optional[Literal["ALLOW", "BLOCK", "RESTRICT"]], replace_value
+    ]
+
+    # (2026-09-08, clôture Bloc 1, mandat §6 — "formaliser la dette security
+    # fail-open") : `security_moderation` reste délibérément FAIL-OPEN sur
+    # panne externe (account gate indisponible, timeout de modération) —
+    # jamais bloquer un utilisateur sain pour une panne technique. Avant ce
+    # correctif, cette dégradation ne vivait que dans un log (`logger.
+    # warning`), invisible au reste du graphe/à l'observabilité. `True`
+    # signifie : ce tour a été autorisé (ALLOW) malgré une vérification de
+    # sécurité incomplète. NON branché vers `mcp_tool_executor` — un ALLOW
+    # conversationnel dégradé ne vaut PAS autorisation d'exécuter une
+    # mutation sensible ; cette distinction reste une dette explicite,
+    # reprise lors de l'audit confirmation/executor (Bloc transactionnel).
+    # EPHEMERAL comme `security_decision` : recalculé chaque tour.
+    security_degraded: Annotated[Optional[bool], replace_value]
+    security_degraded_reason: Annotated[
+        Optional[Literal["ACCOUNT_GATE_UNAVAILABLE", "MODERATION_TIMEOUT", "MODERATION_UNAVAILABLE"]],
+        replace_value,
+    ]
+
     trust_score: Annotated[Optional[float], replace_value]
 
     requires_human: Annotated[bool, replace_value]
+
+    # (2026-09-08, P1-4 audit architectural) : trace forensique du message
+    # bloqué pour injection de prompt (`input_normalizer.py`) — le blocage
+    # LUI-MÊME fonctionne déjà pleinement via `security_status=
+    # "PROMPT_INJECTION_DETECTED"` (déclaré ci-dessus, consommé par
+    # `nodes/routing.py::_SECURITY_BLOCKING`) ; ce champ n'était que le
+    # TEXTE BRUT de la tentative, supprimé silencieusement par le graphe
+    # compilé — perdu pour toute revue de sécurité a posteriori sur le
+    # checkpoint. Déclaré, jamais un nouveau comportement inventé (aucun
+    # nouveau lecteur ajouté ici).
+    blocked_user_query: Annotated[Optional[str], replace_value]
+
+    # (2026-09-08, P1-4 audit architectural) : `_safe_node` (utils.py) les
+    # pose sur toute exception de nœud non rattrapée — supprimés
+    # silencieusement par le graphe compilé, motif de crash visible
+    # SEULEMENT dans les logs serveur, jamais dans le checkpoint persisté.
+    # `technical_details` = `str(exc)` BRUT : jamais destiné à un affichage
+    # utilisateur direct (fuite d'information potentielle) — déclarés pour
+    # survivre au checkpoint à des fins de diagnostic/observabilité
+    # (Langfuse, revue manuelle), pas pour un nouveau rendu.
+    error_message: Annotated[Optional[str], replace_value]
+    technical_details: Annotated[Optional[str], replace_value]
 
     # ================================================================
     # 4. INTERPRETER OUTPUT
@@ -184,9 +260,28 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
 
     validation_status: Annotated[Optional[str], replace_value]
 
+    # (2026-09-08, P1-3 audit architectural) : `interpreter/strategy.py`
+    # (garde-fou de PLUS HAUTE PRIORITÉ de la fonction) lit ces deux champs
+    # en RACINE d'état — `services/domain/slot_enrichment.py` les écrivait
+    # dans `transaction_payload`, une adresse différente, jamais déclarée
+    # nulle part. `nodes/memory.py` (seul appelant) relaie désormais
+    # explicitement vers cette adresse racine. EPHEMERAL, mono-tour — la
+    # décision « forcer une clarification » ne doit jamais survivre au tour
+    # qui l'a produite.
+    slot_enrichment_force_clarification: Annotated[Optional[bool], replace_value]
+    clarification_reasons: Annotated[Optional[List[str]], replace_value]
+
     extracted_entities: Annotated[Dict[str, Any], merge_dict]
 
     raw_analysis: Annotated[Dict[str, Any], merge_dict]
+
+    # (2026-09-08, refonte responsabilités des nœuds d'entrée, mandat §9) :
+    # candidat de désambiguïsation lexicale calculé UNE fois par
+    # `cognitive_guard` (source unique) — `clarification_node` et
+    # `semantic_disambiguation` le consultent au lieu de recalculer chacun
+    # `_detect_disambiguation_candidates` indépendamment. EPHEMERAL,
+    # mono-tour : ne doit jamais survivre au tour qui l'a produit.
+    disambiguation_candidate: Annotated[Optional[Dict[str, Any]], replace_value]
 
     intent_competition: Annotated[List[Dict[str, Any]], replace_list]
 
@@ -276,6 +371,23 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # jamais une seconde source de vérité indépendante.
     preorder_draft: Annotated[Optional[Dict[str, Any]], replace_value]
 
+    # (2026-09-08, P0-1 audit architectural) : `domain/sales_publish_draft.py
+    # ::SalesPublishDraft` sérialisé — MÊME contrat que `procurement_draft`/
+    # `preorder_draft` ci-dessus (`replace_value`, jamais `merge_dict`).
+    # `nodes/confirmation_gate.py` l'écrit (bootstrap v1 + relecture),
+    # `flows/producer/sales_confirmation.py` et
+    # `flows/producer/sales_execution_finalizer.py` le lisent — ce champ
+    # existait déjà à ces 3 sites, mais N'ÉTAIT DÉCLARÉ NULLE PART : LangGraph
+    # supprime silencieusement toute clé absente du schéma d'état à la
+    # traversée du graphe COMPILÉ (jamais lors d'un appel direct de nœud avec
+    # `dict.update`, ce qui a caché le bug à tous les tests existants).
+    # Conséquence en production : `SALES_PUBLISH_PRODUCT` recréait un
+    # brouillon v1 (nouvelle ligne DB) à CHAQUE tour au lieu de progresser
+    # vers la confirmation — la question « Confirmez-vous ? » ne pouvait
+    # jamais être résolue. Voir
+    # docs/MARKET_COACH_GRAPH_ARCHITECTURE_REVIEW_2026-09-08.md §P0-1.
+    sales_publish_draft: Annotated[Optional[Dict[str, Any]], replace_value]
+
     last_agent_question: Annotated[Optional[str], replace_value]
 
     expected_candidates: Annotated[List[str], replace_list]
@@ -297,6 +409,21 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     volatile_entities: Annotated[Dict[str, Any], merge_dict]
 
     available_mapping: Annotated[Dict[str, str], replace_value]
+
+    # (2026-09-09, audit ui_engine — clôture UI_ENGINE) : écrit par
+    # `nodes/ui_engine.py` (seul écrivain) depuis l'introduction du menu
+    # snapshot, mais JAMAIS déclaré ici — même classe de bug que P0-1
+    # (`sales_publish_draft`, voir plus haut) : LangGraph supprimait
+    # silencieusement ce champ à la traversée du graphe COMPILÉ. Sans
+    # conséquence fonctionnelle observée jusqu'ici UNIQUEMENT parce que le
+    # lecteur réel (`nodes/memory.py`) lit la copie
+    # `working_memory["menu_snapshot_id"]`, jamais celle-ci — voir le
+    # COMPATIBILITY_SHIM documenté dans `nodes/ui_engine.py`. Déclaré
+    # maintenant pour que ce top-level devienne la source CANONIQUE réelle
+    # (au lieu d'une écriture qui ne survivait jamais). DURABLE comme
+    # `available_mapping`/`expected_candidates` : doit survivre jusqu'au
+    # tour où l'utilisateur répond au menu.
+    menu_snapshot_id: Annotated[Optional[str], replace_value]
 
     pending_cleanup: Annotated[Optional[Dict[str, Any]], replace_value]
 
@@ -439,7 +566,14 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
 
     is_locked: Annotated[bool, replace_value]
 
-    should_replan: Annotated[bool, replace_value]
+    # (2026-09-08, P1-1 audit architectural) `should_replan` supprimé —
+    # dérivé de `cognitive_decision.next_step`, sans AUCUN lecteur nulle
+    # part (contrairement à `cognitive_decision` lui-même, dont la clé
+    # `action` pilote `interpreter/strategy.py`/`nodes/clarification.py`).
+    # `cognitive_orchestrator` (qui produisait `next_step`) a depuis été
+    # supprimé À SON TOUR (nœud ET fonction, revue de validation du
+    # 2026-09-08 le même jour) — voir `core/graph_builder.py` en tête de
+    # fichier pour l'historique complet.
 
     should_interrupt: Annotated[bool, replace_value]
 
@@ -466,6 +600,45 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # Voir `flows/buyer/state.py` et `flows/producer/state.py`.
 
 
+def resolve_current_goal(state: Dict[str, Any]) -> Optional[str]:
+    """Résout le goal métier RÉELLEMENT en cours pour CE tour (2026-09-08,
+    purge de redondance).
+
+    `current_goal` est remis à `None` entre certains tours tant qu'aucun
+    tunnel/confirmation/champ n'est explicitement en attente (voir
+    `nodes/cleanup.py::post_response_cleanup`, `_keep_goal_channel`) —
+    `working_memory.active_goal` sert alors de mémoire de secours, purgée
+    séparément, à la terminaison RÉELLE du goal (voir
+    `nodes/cleaner.py::state_cleaner_node`).
+
+    Point de résolution UNIQUE : avant cette centralisation, la chaîne
+    `state.get("current_goal") or working_memory.get("active_goal")`
+    était recopiée indépendamment dans 6 fichiers (`core/router.py` ×2,
+    `interpreter/strategy.py`, `interpreter/routing.py` ×2,
+    `interpreter/goal_planner.py`) — plus un 3ᵉ alias désormais retiré,
+    `working_memory.locked_intent`, qui dupliquait `active_goal` à
+    l'IDENTIQUE sur chacun de ses ~15 sites d'écriture (jamais une seule
+    divergence trouvée à l'audit — un pur doublon, pas une donnée
+    distincte). Une chaîne recopiée plusieurs fois est un risque de dérive
+    par construction (un site oublié lors d'une future correction) ; un
+    seul point de résolution l'élimine structurellement.
+
+    Distinct de `nodes/rendering/common.py::resolve_goal_for_ui` — CE
+    dernier ajoute délibérément des replis supplémentaires
+    (`suspended_goal`, `detected_intent`) pour ne JAMAIS renvoyer `None`
+    dans un badge d'UI ; cette fonction-ci reste stricte (peut renvoyer
+    `None`) pour la logique métier (routage, machine à états)."""
+    if not isinstance(state, dict):
+        return None
+    goal = state.get("current_goal")
+    if goal:
+        return goal
+    working_memory = state.get("working_memory")
+    if isinstance(working_memory, dict):
+        return working_memory.get("active_goal")
+    return None
+
+
 __all__ = [
     "MarketAgentState",
     "BuyerContext",
@@ -475,4 +648,5 @@ __all__ = [
     "replace_list",
     "merge_dict",
     "_KEEP",
+    "resolve_current_goal",
 ]

@@ -79,6 +79,28 @@ CART_TUNNEL_KINDS = frozenset(
 )
 
 
+#: (2026-09-09, audit Bloc 2, fermeture Blocker B) : ancien pseudo-goal posé
+#: dans `current_goal` pour marquer « en attente de désambiguïsation »,
+#: avant l'existence de ce module. `goal_planner`/`memory_update` ne le
+#: lisent plus JAMAIS pour décider quoi que ce soit — seul
+#: `pending_interaction.kind == SELECTION_MENU and .context_ref ==
+#: "intent_disambiguation"` fait foi (source unique, cette classe). Cette
+#: constante ne survit que comme valeur ÉCRITE dans `current_goal`, en
+#: SORTIE, pendant le tour où le menu de désambiguïsation est ré-affiché
+#: (sélection invalide/absente) — preuve exacte du lecteur qui empêche sa
+#: suppression complète : `validator` (gelé) traite tout goal absent
+#: d'`INTENT_CONFIG` comme un no-op inoffensif (required=[], la réponse déjà
+#: posée par goal_planner — `response_strategy="SELECTION_MENU"` — survit
+#: intacte) ; `current_goal=None` a un comportement DIFFÉRENT et cassant
+#: dans `validator` (branche `if not goal` → force
+#: `response_strategy="CLARIFICATION"`, écrase le menu AG-UI). Vérifié
+#: empiriquement en chaînant goal_planner → memory_update → validator sur
+#: ce scénario avant ce correctif — voir
+#: tests/interpreter/test_goal_planner_state_machine.py
+#: (TestRule0bisDisambiguation) et tests/nodes/test_memory_stale_menu_snapshot.py.
+DISAMBIGUATION_MENU_GOAL_SHIM = "DISAMBIGUATION_PENDING"
+
+
 class InteractionStatus(str, Enum):
     ACTIVE = "ACTIVE"
     RESOLVED = "RESOLVED"
@@ -408,6 +430,7 @@ __all__ = [
     "InteractionStatus",
     "PendingInteraction",
     "CART_TUNNEL_KINDS",
+    "DISAMBIGUATION_MENU_GOAL_SHIM",
     "set_pending_interaction",
     "clear_pending_interaction",
     "resolve_pending_interaction",

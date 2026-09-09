@@ -87,7 +87,6 @@ def resolve_goal_for_ui(state: Dict[str, Any]) -> Optional[str]:
     candidates = [
         state.get("current_goal"),
         working.get("active_goal"),
-        working.get("locked_intent"),
         state.get("suspended_goal"),
         state.get("detected_intent"),
     ]

@@ -3,10 +3,17 @@ from typing import Any, Dict, Optional
 
 from agriconnect.core.logger import get_logger
 from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    CART_TUNNEL_KINDS,
+    DISAMBIGUATION_MENU_GOAL_SHIM,
+    InteractionKind,
     get_pending_interaction,
     to_tunnel_category,
 )
-from agriconnect.graphs.agents.market_coach.core.slots import build_alias_mirrors
+from agriconnect.graphs.agents.market_coach.core.goals import is_goal_refinement
+from agriconnect.graphs.agents.market_coach.core.slots import (
+    build_alias_mirrors,
+    fields_for_expected_input,
+)
 from agriconnect.graphs.agents.market_coach.core.state_compaction import (
     build_compaction_patch,
 )
@@ -18,6 +25,7 @@ from agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment impo
 )
 from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
     menu_snapshot_store,
+    snapshot_belongs_to_active_menu,
 )
 from agriconnect.graphs.agents.market_coach.utils import (
     MarketRuntime,
@@ -57,8 +65,20 @@ _PRIMARY_CANONICAL_UNITS = {"KG", "TONNE", "SAC", "UNITE", "PANIER", "TETE"}
 # expected_input (slot précis en cours) → champs canoniques qu'une réponse
 # ANSWER à ce slot a le droit de modifier. Tout le reste est du bruit/une
 # hallucination LLM et doit être ignoré — voir le garde-fou dans `memory_update`.
-_EXPECTED_INPUT_ALLOWED_FIELDS: Dict[str, frozenset] = {
-    "PRODUCT": frozenset({"product", "product_id"}),
+#
+# (2026-09-09, audit Bloc 2, Blocker D) : la base de chaque catégorie est
+# désormais DÉRIVÉE de `core/slots.py::fields_for_expected_input` (source
+# unique, réciproque de `expected_input_for_field` déjà utilisé partout
+# ailleurs) plutôt que recopiée à la main — une copie manuelle avait dérivé
+# du registre : `production_type` (PRODUCT) et `surface` (QUANTITY) sont
+# bien mappés dans `core/slots.py` mais étaient ABSENTS de cette allowlist,
+# donc une réponse dégradée au slot EXACTEMENT demandé ("c'est une culture" /
+# "2 hectares") se faisait jeter par son propre garde-fou anti-hallucination.
+# Seuls les champs COMPAGNONS qui ne sont pas eux-mêmes des "slots"
+# interrogeables (identifiants techniques résolus, structure de tarifs,
+# contrat d'action structuré) restent des extras à la main ci-dessous.
+_EXPECTED_INPUT_EXTRA_FIELDS: Dict[str, frozenset] = {
+    "PRODUCT": frozenset({"product_id"}),
     # `pricing_tiers` (2026-08-29) : un repli sur modèle dégradé (fréquent —
     # voir GROQ_RATE_LIMIT_FALLBACK) filtrait tout champ hors de cet
     # allowlist pour le slot en cours — un producteur répondant avec
@@ -75,19 +95,35 @@ _EXPECTED_INPUT_ALLOWED_FIELDS: Dict[str, frozenset] = {
     # même question — sans cette entrée, un repli sur modèle Groq dégradé
     # (429) aurait silencieusement jeté ces champs, rouvrant exactement
     # l'incident que ce contrat corrige.
+    # `unit` (2026-09-09, régression réelle trouvée après déploiement du
+    # Blocker D) : `core/slots.py::_EXPECTED_INPUT_MAP` classe le CHAMP
+    # `unit` dans sa PROPRE catégorie ("UNIT"), distincte de "QUANTITY" —
+    # `fields_for_expected_input("QUANTITY")` ne le renvoie donc jamais. Mais
+    # une réponse à « quelle quantité ? » porte quasi-systématiquement les
+    # DEUX ensemble ("600 L", "50 kg") — retirer `unit` d'ici (fait par
+    # erreur en simplifiant la table vers la dérivation automatique) faisait
+    # jeter l'unité de CHAQUE réponse quantité en repli dégradé (incident
+    # réel : "j'ai 600 l" → `unit='LITRE'` journalé "hors-sujet ignoré").
+    # Relation FIGÉE ici volontairement (impossible à dériver de
+    # `_EXPECTED_INPUT_MAP`, qui répond à une question différente : "à quelle
+    # catégorie appartient CE champ", pas "quels champs accompagnent
+    # légitimement CETTE catégorie").
     "QUANTITY": frozenset(
         {
-            "quantity", "unit", "pricing_tiers",
+            "unit",
+            "pricing_tiers",
             "agent_action", "action_producer_id", "action_pricing_tier_id",
             "action_package_count", "action_quantity", "action_unit",
         }
     ),
-    "PRICE": frozenset({"price", "price_unit", "pricing_tiers"}),
-    "UNIT": frozenset({"unit"}),
-    "LOCATION": frozenset({"zone"}),
-    "DATE": frozenset({"estimated_available_at", "expected_harvest_date"}),
-    "FARM_NAME": frozenset({"farm_name"}),
-    "MOVEMENT_TYPE": frozenset({"movement_type"}),
+    "PRICE": frozenset({"price_unit", "pricing_tiers"}),
+}
+_EXPECTED_INPUT_ALLOWED_FIELDS: Dict[str, frozenset] = {
+    category: fields_for_expected_input(category) | _EXPECTED_INPUT_EXTRA_FIELDS.get(category, frozenset())
+    for category in (
+        "PRODUCT", "QUANTITY", "PRICE", "UNIT", "LOCATION", "DATE",
+        "FARM_NAME", "MOVEMENT_TYPE",
+    )
 }
 
 # _ALIAS_MIRRORS is now derived from core/slots.py (single source of truth).
@@ -118,34 +154,12 @@ _UNIT_CASCADE_FIELDS = ("price",)
 _CANONICAL_SLOT_ORDER = ("product", "quantity", "unit", "price", "zone")
 
 
-_BUYER_REQUEST_SPECIALIZATIONS = frozenset(
-    {
-        "BUYER_ADD_TO_CART",
-        "BUYER_VIEW_CART",
-        "BUYER_PREORDER_INIT",
-        "BUYER_PREORDER_CONFIRM",
-        "BUYER_NEGOTIATE_PRICE",
-        "BUYER_CHECK_ORDER_STATUS",
-        "BUYER_LIST_ORDERS",
-        "BUYER_CANCEL_ORDER",
-        "BUYER_LIST_AUCTIONS",
-        "BUYER_CHECK_AUCTION_STATUS",
-        "BUYER_CART_RESET",
-    }
-)
-
-
-def _is_goal_refinement(previous: str, incoming: str) -> bool:
-    """BUYER_REQUEST → BUYER_ADD_TO_CART is a specialization, not a real change.
-
-    The context_resolver bridges BUYER_REQUEST into specific goals (cart,
-    preorder, negotiation). This must NOT trigger a payload reset.
-    """
-    if previous == "BUYER_REQUEST" and incoming in _BUYER_REQUEST_SPECIALIZATIONS:
-        return True
-    if incoming == "BUYER_REQUEST" and previous in _BUYER_REQUEST_SPECIALIZATIONS:
-        return True
-    return False
+# (2026-09-09, audit Bloc 2, Blocker A) : `_is_goal_refinement`/la liste des
+# spécialisations BUYER_REQUEST ont été relocalisées dans `core/goals.py`
+# (source unique des RELATIONS entre goals — tunnels, breakout, et
+# maintenant refinement) — ce nœud en reste le seul appelant, mais la
+# RELATION elle-même est une propriété du catalogue de goals, pas de ce
+# nœud. Voir `core/goals.py::is_goal_refinement` pour le contrat complet.
 
 
 def _mirror_aliases(container: Dict[str, Any]) -> None:
@@ -183,6 +197,19 @@ def _resolve_unit_value(value: Any) -> Optional[str]:
     if canonical in _PRIMARY_CANONICAL_UNITS:
         return canonical
     return None
+
+
+#: Kinds d'interaction qui signifient « une sélection est réellement
+#: attendue ce tour-ci » — seule situation où le filet de secours
+#: `menu_snapshot_store` a le droit de résoudre une réponse numérique
+#: (micro-passe finale 2026-09-09, Sujet A). Voir
+#: `services/menu_snapshot.py::snapshot_belongs_to_active_menu` pour la
+#: justification de l'ensemble exact.
+_SELECTION_PENDING_KINDS = frozenset({InteractionKind.SELECTION_MENU}) | CART_TUNNEL_KINDS
+
+
+def _selection_is_pending(state: Dict[str, Any]) -> bool:
+    return get_pending_interaction(state).kind in _SELECTION_PENDING_KINDS
 
 
 async def memory_update(
@@ -427,7 +454,7 @@ async def memory_update(
         and previous_intent != incoming_intent
         and not onboarding_active
     ):
-        if not _is_goal_refinement(previous_intent, incoming_intent):
+        if not is_goal_refinement(previous_intent, incoming_intent):
             _record_correction("intent", previous_intent, incoming_intent)
             if not form_completed:
                 _reset_payload("intent_change")
@@ -438,7 +465,7 @@ async def memory_update(
     # FAILLE 1 — Sanctuarise the active business goal.
     # Never overwrite an active tunnel goal with None/UNKNOWN because the user replied briefly ("1", "ok", "oui").
     incoming_goal = state.get("current_goal")
-    previous_goal = working.get("active_goal") or working.get("locked_intent")
+    previous_goal = working.get("active_goal")
     in_tunnel = bool(previous_goal and expected_input not in {"", "NONE"})
     if (
         previous_goal
@@ -683,10 +710,34 @@ async def memory_update(
     normalized_text = str(
         state.get("normalized_text") or state.get("user_query") or ""
     ).strip()
+    _force_clarification = False
+    _clarification_reasons = None
     if normalized_text and current_goal:
         payload = await enrich_payload_from_text(
             payload, normalized_text, current_goal, mc_runtime
         )
+        # (2026-09-08, P1-3 audit architectural) : `enrich_payload_from_text`
+        # pose ce drapeau DANS `payload` (transaction_payload, un canal
+        # `merge_dict` conçu pour des données de SLOT conversationnelles —
+        # produit/quantité/prix), mais `interpreter/strategy.py` le lit en
+        # adresse RACINE (`state.get(...)`). Deux adresses différentes : ce
+        # garde-fou de plus haute priorité de `response_strategy` — celui qui
+        # doit forcer une clarification quand l'extraction LLM structurée a
+        # explicitement échoué (`SlotValidationError`) — n'a jamais pu se
+        # déclencher. Fix côté LECTEUR implicite : ce nœud (seul appelant de
+        # `enrich_payload_from_text`) relaie le drapeau vers la RACINE de
+        # l'état, où `strategy.py` le cherche déjà — jamais une 2e source de
+        # vérité, juste le seul point de transit corrigé. Laisser le
+        # drapeau DANS `payload` aurait aussi été un risque en soi : ce dict
+        # alimente `lookup_arg_value` (résolution d'arguments MCP) et le
+        # récapitulatif de confirmation — un booléen de contrôle interne n'a
+        # rien à y faire.
+        _force_clarification = bool(
+            payload.pop("slot_enrichment_force_clarification", False)
+        )
+        # Même mésadresse, même correctif — `strategy.py:52` relit
+        # `clarification_reasons` depuis la RACINE de l'état lui aussi.
+        _clarification_reasons = payload.pop("clarification_reasons", None)
 
     # --- AG-UI: free-text resolution of ListMenu labels ---
     user_free_text = (
@@ -721,7 +772,20 @@ async def memory_update(
     mapping = state.get("available_mapping") or {}
     mapping_kind = working.get("available_mapping_kind")
     session_id = str(state.get("session_id") or state.get("user_phone") or "")
-    snapshot_id = working.get("menu_snapshot_id") or state.get("menu_snapshot_id")
+    # (2026-09-09, audit Bloc 2) : `state["menu_snapshot_id"]` est désormais la
+    # source CANONIQUE déclarée (voir core/state.py, fix ui_engine 2026-09-09)
+    # — `ui_engine.py` l'écrit en top-level ET dans `working_memory` (double
+    # écriture délibérée, voir son COMPATIBILITY_SHIM). Le P1-4 ci-dessus
+    # (2026-09-08) avait raison de constater que le top-level n'était alors
+    # JAMAIS déclaré dans le schéma LangGraph — LangGraph le supprimait donc
+    # silencieusement à la traversée du graphe compilé (classe de bug P0-1),
+    # rendant `working_memory` la seule copie qui survivait en pratique. Ce
+    # n'est plus vrai depuis la déclaration du champ : on lit le canonique en
+    # premier, `working_memory` reste un LEGACY FALLBACK pour tout état
+    # persisté avant ce changement (checkpoints existants qui n'ont que la
+    # copie working_memory) — retirable une fois qu'aucun checkpoint actif ne
+    # peut plus en dépendre.
+    snapshot_id = state.get("menu_snapshot_id") or working.get("menu_snapshot_id")
 
     if sel_idx is not None or sel_val is not None:
         resolved_id = None
@@ -733,9 +797,39 @@ async def memory_update(
         if resolved_id is None and snapshot_id:
             selection_token = sel_idx if sel_idx is not None else sel_val
             try:
-                resolved_id = menu_snapshot_store.resolve(
-                    session_id, snapshot_id, selection_token
+                # (2026-09-09, Bloc 2 passe finale — Invariant B) : le
+                # fallback snapshot n'est autorisé que si le snapshot est
+                # PROUVÉ appartenir au menu ACTIF — voir
+                # `services/menu_snapshot.py::snapshot_belongs_to_active_menu`
+                # pour la preuve d'identité et pourquoi le seul `kind` ne
+                # suffisait pas (deux menus successifs du même type
+                # partagent leur kind). Sinon : on NE résout PAS (la
+                # sélection reste non résolue et le tour retombe sur la
+                # clarification/le ré-affichage en aval) — jamais une valeur
+                # issue d'un menu qui n'est plus à l'écran.
+                snapshot = menu_snapshot_store.get(session_id, snapshot_id)
+                belongs, identity_reason = snapshot_belongs_to_active_menu(
+                    snapshot,
+                    active_mapping=mapping,
+                    active_kind=mapping_kind,
+                    selection_is_pending=_selection_is_pending(state),
                 )
+                if belongs:
+                    resolved_id = snapshot.mapping.get(str(selection_token))
+                elif snapshot is not None:
+                    logger.warning(
+                        "[MemoryUpdate] Snapshot périmé ignoré (%s) : menu "
+                        "actif kind=%s / %d entrée(s), snapshot=%s kind=%s / "
+                        "%d entrée(s) (session=%s) — sélection NON résolue "
+                        "plutôt que mélangée entre deux menus différents.",
+                        identity_reason,
+                        mapping_kind,
+                        len(mapping or {}),
+                        snapshot_id,
+                        snapshot.kind,
+                        len(snapshot.mapping or {}),
+                        session_id,
+                    )
             except Exception as snap_exc:
                 logger.warning(
                     "[MemoryUpdate] menu_snapshot_store.resolve failed (snapshot=%s token=%s): %s",
@@ -887,9 +981,14 @@ async def memory_update(
     working["last_confidence"] = float(state.get("interpreter_confidence") or 0.0)
     entity_count = sum(1 for v in payload.values() if slot_has_value(v))
     working["payload_richness"] = entity_count
-    if current_goal and current_goal != "DISAMBIGUATION_PENDING":
+    # (2026-09-09, audit Bloc 2, Blocker B) : `DISAMBIGUATION_MENU_GOAL_SHIM`
+    # n'est plus une clé de contrôle de flux nulle part dans ce nœud — seule
+    # exclusion nécessaire ici, pour ne jamais verrouiller un tunnel autour
+    # de ce pseudo-goal de sortie (voir core/pending_interaction.py pour le
+    # contrat complet, et goal_planner.py::_lock qui applique la même garde
+    # côté planner).
+    if current_goal and current_goal != DISAMBIGUATION_MENU_GOAL_SHIM:
         working["active_goal"] = current_goal
-        working["locked_intent"] = current_goal
         working["step_index"] = 0
 
     existing_draft = (
@@ -976,5 +1075,36 @@ async def memory_update(
     compaction_patch = build_compaction_patch(state, tracking_strategy="drop")
     if compaction_patch:
         result.update(compaction_patch)
+
+    if _force_clarification:
+        result["slot_enrichment_force_clarification"] = True
+        if _clarification_reasons:
+            result["clarification_reasons"] = _clarification_reasons
+
+    # --- Convergence FastPath / chemin complet (2026-09-09, micro-passe
+    # finale Bloc 2, Sujet B) -------------------------------------------
+    # Divergence RÉELLE prouvée par le harness d'équivalence : sur un tour
+    # FastPath (`input_interpreter -> memory_update`, `goal_planner` sauté),
+    # `goal_status` conserve sa valeur d'entrée ; sur le chemin complet, la
+    # RÈGLE 1bis du planner l'écrit à "ACTIVE". Contrairement à `status` —
+    # que `validator` réécrit sur TOUTES ses branches de retour, donc
+    # normalisé avant tout lecteur — `goal_status` n'est réécrit par
+    # `validator` que sur 2 branches sur 5 : la divergence SURVIT jusqu'à
+    # `nodes/cleaner.py`, où elle change un résultat MÉTIER (`goal_status`
+    # vide => `draft_payload` réinitialisé ; "ACTIVE" => brouillon panier
+    # préservé).
+    #
+    # Ce garde n'est PAS une décision de cycle de vie (elle reste chez
+    # `goal_planner`/`validator`) : c'est une invariante de cohérence
+    # d'état — « un goal actif ne peut pas avoir de statut de goal vide » —
+    # appliquée uniquement quand le champ est ABSENT/VIDE, jamais par
+    # écrasement d'une valeur existante (WAITING_INPUT/COMPLETED/... sont
+    # laissés intacts).
+    if result.get("current_goal") or state.get("current_goal"):
+        effective_goal_status = str(
+            result.get("goal_status", state.get("goal_status")) or ""
+        ).strip()
+        if not effective_goal_status:
+            result["goal_status"] = "ACTIVE"
 
     return result

@@ -56,7 +56,15 @@ class MenuRequest:
         kind: Catégorie sémantique du menu (``"cart"``, ``"auction"``,
               ``"bid"``, ``"stock"``, ``"preorder_action"``,
               ``"negotiation"``, etc.). Propagé dans le metadata AG-UI
-              et dans ``working_memory.available_mapping_kind``.
+              et dans ``working_memory.available_mapping_kind``. Contrat
+              (2026-09-09, audit ui_engine) : ce champ identifie le TYPE du
+              mapping actuellement actif — il ne doit jamais survivre à un
+              menu DIFFÉRENT avec une ancienne valeur. ``ui_engine`` le
+              réécrit intégralement à CHAQUE menu rendu (jamais de fusion
+              partielle) ; un flow qui abandonne un menu sans en montrer un
+              nouveau reste responsable de nettoyer explicitement toute
+              valeur stale (voir ``flows/buyer/cart.py`` pour l'exemple
+              existant — hors périmètre de cet audit).
         metadata: Paires clé-valeur supplémentaires injectées dans le
                   metadata du composant AG-UI (ex: ``preorder_id``).
         preformatted_text: Texte WhatsApp déjà formaté à utiliser comme
@@ -69,6 +77,37 @@ class MenuRequest:
     kind: str = "generic"
     metadata: Dict[str, Any] = field(default_factory=dict)
     preformatted_text: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        """Validation à la construction (2026-09-09, audit ui_engine, mandat
+        §25) : un `MenuRequest` implique TOUJOURS une sélection valide — la
+        validation appartient ICI, pas dispersée dans `ui_engine`. Rejette
+        UNIQUEMENT ce qui produirait un mapping structurellement AMBIGU
+        (index dupliqué/vide, valeur métier vide) — ne rejette PAS les
+        labels dupliqués (légitimes : ex. le même nom de produit chez deux
+        vendeurs différents, distingués par leur seul index)."""
+        if not self.options:
+            raise ValueError(
+                "MenuRequest sans options : rien à sélectionner (0 option)"
+            )
+        seen_indices: set[str] = set()
+        for opt in self.options:
+            if not str(opt.index or "").strip():
+                raise ValueError(
+                    f"MenuRequest option avec un index vide (label={opt.label!r})"
+                )
+            if opt.index in seen_indices:
+                raise ValueError(
+                    f"MenuRequest avec un index dupliqué {opt.index!r} — "
+                    "mapping ambigu (deux options se disputeraient la même "
+                    "sélection numérique)"
+                )
+            seen_indices.add(opt.index)
+            if opt.value is not None and not str(opt.value).strip():
+                raise ValueError(
+                    f"MenuRequest option index={opt.index!r} a une valeur "
+                    "métier explicitement vide"
+                )
 
     # ------------------------------------------------------------------
     # Helpers de construction rapide

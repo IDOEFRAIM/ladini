@@ -4,19 +4,75 @@ Assemble le StateGraph LangGraph à partir des nœuds partagés (`shared_core`),
 de l'interpréteur role-aware (`interpreter_routing`) et du Context Resolver
 spécifique au rôle (`producer_flow` ou `buyer_flow`).
 
-Architecture du graphe (14 nœuds) :
-    input_normalizer → security_moderation → input_interpreter
-    → cognitive_guard → cognitive_orchestrator → clarification_node → semantic_disambiguation
+Architecture du graphe :
+    input_normalizer → security_moderation
+      ├── BLOCK/RESTRICT → response_strategy
+      └── ALLOW → session_bootstrap
+                    ├── UNAVAILABLE → response_strategy
+                    ├── ONBOARDING → onboarding_node
+                    └── READY → input_interpreter
+                                  ├── to_memory_fast (FastPathPolicy) → memory_update
+                                  └── to_cognitive → cognitive_guard
+                                        ├── CLARIFY/recover/abandon → clarification_node
+                                        │                               ├── réponse terminale → response_strategy
+                                        │                               └── no-op → goal_planner
+                                        ├── DISAMBIGUATE → semantic_disambiguation
+                                        │                    ├── menu construit → response_strategy
+                                        │                    └── no-op (compat) → goal_planner
+                                        └── START_OR_PLAN_GOAL/CONTINUE_ACTIVE_GOAL/
+                                            INTERRUPT_ACTIVE_GOAL → goal_planner
     → goal_planner → memory_update → validator
     → context_resolver → confirmation_gate → mcp_tool_executor
     → response_strategy → final_response → END
 
-Le `clarification_node` est un pass-through silencieux sauf quand l'événement
-est OUT_OF_SCOPE/UNKNOWN sans tunnel actif : il génère alors une réponse
-pédagogique via LLM et court-circuite vers response_strategy.
+(2026-09-08, refonte responsabilités des nœuds d'entrée) :
+    - `role_guard` a été SUPPRIMÉ comme nœud — le rôle de profil ne décide
+      plus jamais du domaine métier courant (double-rôle : un utilisateur
+      peut acheter ET vendre dans la même conversation). Son unique
+      responsabilité résiduelle (rôle par défaut) est reprise par
+      `session_bootstrap`, avec `graphs.roles.normalize_role` qui ne
+      retourne plus jamais "PRODUCER" par défaut pour une valeur inconnue.
+    - `session_bootstrap` est un nœud technique (pas une "philosophie" de
+      dialogue) qui amorce la session (profil/onboarding/fermes) — voir sa
+      docstring pour la justification de son existence et la dette
+      assumée qu'il représente.
+    - `cognitive_orchestrator` a été SUPPRIMÉ comme nœud — sa
+      classification (`phase`/`next_step`/`reason`) ne pilotait AUCUNE
+      transition réelle du graphe (preuve dans l'historique de
+      `nodes/cognitive.py`) ; c'était une 2e source de vérité décorative.
 
-Le `semantic_disambiguation` court-circuite vers `response_strategy` QUE si
-l'intention LLM est ambiguë ET qu'un déclencheur lexical matche.
+(2026-09-08, correction topologique du bloc d'entrée) : `session_bootstrap`
+a été déplacé APRÈS `security_moderation` (et non plus avant
+`input_normalizer`) — un profil/contexte utilisateur ne doit jamais être
+chargé avant que l'entrée soit canonicalisée et jugée sûre. Nouvel ordre :
+`input_normalizer → security_moderation → [ALLOW] → session_bootstrap`.
+`session_bootstrap` est désormais lui-même un nœud décisionnel (voir
+`nodes/routing.py::_route_after_session_bootstrap`) : un nouvel
+utilisateur (`ONBOARDING`) est routé directement vers `onboarding_node`
+SANS jamais passer par `input_interpreter`/`cognitive_guard` (0 appel LLM
+inutile) ; un profil indisponible (`UNAVAILABLE`) court-circuite vers
+`response_strategy` au même titre qu'un blocage de sécurité.
+
+(2026-09-08, correction topologique du bloc CONVERSATIONNEL,
+`cognitive_guard`→`clarification_node`→`semantic_disambiguation`) :
+`cognitive_guard` est désormais le PROPRIÉTAIRE UNIQUE de la décision de
+transition du tour (`ConversationDecision`, champ `cognitive_decision` —
+voir sa docstring pour le contrat complet et la liste exhaustive des
+actions). AVANT ce correctif, un edge FIXE envoyait CHAQUE tour — y
+compris les plus nominaux ("je veux vendre 2 tonnes de maïs", confiance
+0.97) — visiter `clarification_node` PUIS `semantic_disambiguation` avant
+d'atteindre enfin `goal_planner`, chacun recalculant SA PROPRE version de
+"faut-il intervenir ?" depuis l'état brut. `clarification_node` et
+`semantic_disambiguation` sont maintenant des EXÉCUTEURS : ils ne sont
+atteints que lorsque `cognitive_guard` a explicitement décidé CLARIFY (ou
+`recover_active_tunnel`/`abandon_tunnel_max_retries`) ou DISAMBIGUATE —
+jamais pour un tour nominal, qui va directement à `goal_planner`.
+
+Le `clarification_node` choisit seulement QUEL message produire (GPS
+déterministe / panne technique déterministe / LLM pédagogique) — jamais SI
+un message est dû. Le `semantic_disambiguation` construit le menu depuis le
+candidat précalculé par `cognitive_guard` (`disambiguation_candidate`) —
+il ne redécide plus lui-même si l'intention est ambiguë.
 """
 
 from __future__ import annotations
@@ -30,10 +86,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from agriconnect.graphs.agents.market_coach.core.goals import BUYER_CART_GOALS
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
-    InteractionKind,
-    get_pending_interaction,
-)
 from agriconnect.graphs.agents.market_coach.core.policies import get_fast_path_policy
 from agriconnect.graphs.agents.market_coach.core.router import get_domain_router
 from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
@@ -62,10 +114,7 @@ from agriconnect.graphs.agents.market_coach.nodes.clarification import (
 )
 from agriconnect.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
 from agriconnect.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
-from agriconnect.graphs.agents.market_coach.nodes.cognitive import (
-    cognitive_guard,
-    cognitive_orchestrator,
-)
+from agriconnect.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
 from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
     confirmation_gate,
 )
@@ -83,12 +132,16 @@ from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
 from agriconnect.graphs.agents.market_coach.nodes.response_handlers import (
     final_response,
 )
-from agriconnect.graphs.agents.market_coach.nodes.role_guard import make_role_guard
+from agriconnect.graphs.agents.market_coach.nodes.session_bootstrap import (
+    session_bootstrap,
+)
 from agriconnect.graphs.agents.market_coach.nodes.routing import (
+    _route_after_cognitive_guard,
     _route_after_confirmation,
-    _route_after_executor,
+    _route_after_mcp_executor,
     _route_after_resolver,
     _route_after_security,
+    _route_after_session_bootstrap,
 )
 from agriconnect.graphs.agents.market_coach.nodes.security_moderation import (
     security_moderation,
@@ -135,54 +188,84 @@ def _route_after_planner(state: MarketAgentState) -> str:
 
 
 def _route_after_clarification(state: MarketAgentState) -> str:
-    """Routage post-clarification.
+    """Routage post-clarification (2026-09-08, clôture Bloc 1, mandat
+    §16/§28/§29).
 
-    Court-circuite vers response_strategy si :
-    - Le clarification_node a généré une réponse pédagogique (CLARIFICATION + final_response)
-    - Le cognitive_guard a décidé RECOVERY ou CLARIFICATION avec tunnel abandonné
-    Sinon : continue vers semantic_disambiguation.
-    """
+    `clarification_node` n'est plus atteint QUE par 2 actions :
+    - CLARIFY : ce nœud décide seul s'il produit un message (GPS
+      déterministe / panne technique / LLM pédagogique) ;
+    - ABANDON_ACTIVE_GOAL : `response_strategy` est déjà posé à
+      "CLARIFICATION" par `reset_abandoned_conversation_context` AVANT que
+      ce nœud ne s'exécute — il ne fait qu'éventuellement l'ENRICHIR d'un
+      message LLM contextualisé.
+
+    (RECOVER_ACTIVE_GOAL ne passe plus par ici du tout — voir
+    `nodes/routing.py::_COGNITIVE_ACTION_ROUTES`, routé directement vers
+    `response_strategy`.)
+
+    Un seul signal suffit donc désormais : `response_strategy=="CLARIFICATION"`
+    couvre les 3 sous-cas (CLARIFY réussi, ABANDON avec message LLM, ABANDON
+    SANS message LLM — le reset l'a déjà posé). Absence de ce signal ==
+    `clarification_node` n'a rien produit pour un CLARIFY générique (LLM
+    indisponible, aucun cas GPS/technique) : le tour continue vers
+    `goal_planner`, comme avant ce correctif."""
     strategy = str(state.get("response_strategy") or "").upper()
-    # Clarification or Recovery already decided — short-circuit to response
-    if strategy in {"CLARIFICATION", "RECOVERY"} and state.get("final_response"):
-        return "to_strategy"
-    # Cognitive guard set RECOVERY without final_response — still short-circuit
-    if strategy == "RECOVERY":
-        return "to_strategy"
-    return "to_disambiguation"
-
-
-def _route_after_disambiguation(state: MarketAgentState) -> str:
-    """Routage post-désambiguïsation.
-
-    Si le nœud a déclenché un menu (`current_goal == DISAMBIGUATION_PENDING`),
-    on saute le goal_planner et on rend la réponse à l'utilisateur. Sinon le
-    nœud était un pass-through silencieux et on continue le flow nominal.
-    """
-    if (
-        state.get("current_goal") == "DISAMBIGUATION_PENDING"
-        and get_pending_interaction(state).kind == InteractionKind.SELECTION_MENU
-        and state.get("response_strategy") == "SELECTION_MENU"
-    ):
+    if strategy == "CLARIFICATION":
         return "to_strategy"
     return "to_planner"
 
 
-def _route_after_cognitive(state: MarketAgentState) -> str:
-    """Route prioritaire vers le nœud d'onboarding lorsque nécessaire."""
-    if state.get("is_onboarding"):
-        return "to_onboarding"
-    return "to_clarification"
+def _route_after_farm_guard(state: MarketAgentState) -> str:
+    """P0-2 (audit architectural 2026-09-08) : `ensure_farm_node` a 6 issues
+    distinctes (no-op, succès silencieux, sélection multi-fermes,
+    clarification READ-sans-ferme, refus d'auto-provisioning, échec de
+    création) mais un edge FIXE vers `confirmation_gate` les traitait toutes
+    de façon identique — écrasant `final_response`/`pending_interaction`
+    dès qu'une décision utilisateur (menu, clarification) venait d'être
+    posée. Preuve : `flows/producer/farm_logic.py::_extract_farm_id` +
+    branche multi-fermes existaient déjà, correctement écrites — la
+    topologie seule les rendait inatteignables.
+
+    Discriminant : `ensure_farm_node` ne pose `final_response` QUE quand il
+    a lui-même tranché le tour (les 4 issues bloquantes) — jamais sur le
+    no-op ({}) ni sur le succès silencieux (farm_id résolu, juste
+    transaction_payload/stable_entities mis à jour). C'est un signal plus
+    fiable qu'un `if goal in FARM_CRITICAL_GOALS` dupliqué ici : ce nœud
+    reste l'UNIQUE propriétaire de sa propre décision.
+    """
+    if not state.get("final_response"):
+        # No-op ou farm_id résolu silencieusement — poursuit vers la
+        # confirmation, comportement inchangé pour le cas nominal.
+        return "to_confirmation"
+    working = state.get("working_memory") or {}
+    if working.get("available_mapping_kind") == "farm":
+        # Sélection multi-fermes : passe par ui_engine comme tout autre menu
+        # (pass-through sûr en l'absence de `pending_menu` — voir sa
+        # docstring — ce nœud ne construit pas de MenuRequest ici, mais la
+        # convergence topologique reste correcte et cohérente avec les
+        # autres producteurs de menu du graphe).
+        return "to_ui"
+    # Clarification READ-sans-ferme, refus d'auto-provisioning, échec de
+    # création : le tour est déjà conclu par ce nœud, direction le rendu.
+    return "to_response"
 
 
-def _make_route_after_interpreter(role: str):
+def _make_route_after_interpreter():
     """Conditional router after input_interpreter.
 
     Delegates to FastPathPolicy — new tunnel goals are added to the policy
     registry in core/policies.py, not here. Refonte double-rôle : le graphe
     est désormais unique (tunnels acheteur toujours présents), donc la
     politique la plus permissive (`for_buyer`, superset strict de
-    `for_producer`) s'applique quel que soit le paramètre `role` reçu.
+    `for_producer`) s'applique inconditionnellement.
+
+    (2026-09-08, correction topologique du bloc d'entrée, mandat §14) : ce
+    routeur recevait encore un paramètre `role` — mort depuis la refonte
+    double-rôle (ce docstring l'expliquait déjà avant ce correctif) : AUCUN
+    appelant ni branche ne le lit, `get_fast_path_policy` est appelé en dur
+    avec `"BUYER"`. Paramètre et argument d'appel retirés localement (seul
+    site concerné, `core/graph_builder.py`) — pas un comportement nouveau,
+    juste une dépendance morte de moins.
     """
     policy = get_fast_path_policy("BUYER")
     return policy.route
@@ -206,6 +289,19 @@ def build_graph(
 
     Returns:
         L'application LangGraph compilée et prête à `ainvoke()`.
+
+    (2026-09-08, correction topologique du bloc d'entrée, mandat §15) : la
+    topologie compilée pour PRODUCER et pour BUYER est désormais
+    STRICTEMENT identique (refonte double-rôle : plus aucun edge/nœud
+    conditionné par `role_up` dans ce fichier — `_make_route_after_
+    interpreter` vient d'ailleurs de perdre son dernier paramètre `role`
+    mort, voir sa docstring). Compiler DEUX graphes par rôle n'a donc plus
+    de justification structurelle connue — dette probable, pas démantelée
+    ici (hors périmètre de cette correction, §17 du mandat : ce chantier ne
+    touche que le bloc d'entrée). `role_up` reste néanmoins consommé par
+    `make_input_interpreter(role_up)`/`get_domain_router(role_up)` (hors
+    périmètre audité), donc pas encore prouvé totalement mort au niveau du
+    graphe entier — seulement au niveau de CE fichier.
     """
     role_up = normalize_role(role)
     if role_up not in {"PRODUCER", "BUYER"}:
@@ -246,12 +342,11 @@ def build_graph(
 
     # Injection sécurisée de mc_runtime via _safe_node
     node_specs = [
-        ("role_guard", make_role_guard(role_up)),
+        ("session_bootstrap", session_bootstrap),
         ("input_normalizer", input_normalizer),
         ("security_moderation", security_moderation),
         ("input_interpreter", input_interpreter),
         ("cognitive_guard", cognitive_guard),
-        ("cognitive_orchestrator", cognitive_orchestrator),
         ("clarification_node", clarification_node),
         ("semantic_disambiguation", semantic_disambiguation),
         ("goal_planner", goal_planner),
@@ -284,47 +379,107 @@ def build_graph(
     for name, fn in node_specs:
         workflow.add_node(name, partial(_safe_node(fn, name), mc_runtime=mc_runtime))
 
-    workflow.set_entry_point("role_guard")
+    workflow.set_entry_point("input_normalizer")
 
     # Liens du graphe de dialogue
-    workflow.add_edge("role_guard", "input_normalizer")
+    # (2026-09-08, correction topologique du bloc d'entrée) : `input_normalizer`
+    # ne doit plus jamais être décisionnel métier — il canonicalise l'entrée
+    # AVANT toute décision de sécurité ou d'amorçage de session. Cet edge
+    # reste fixe : voir sa docstring de module.
     workflow.add_edge("input_normalizer", "security_moderation")
 
+    # `security_moderation` ne route plus DIRECTEMENT vers `input_interpreter`
+    # sur ALLOW : une entrée autorisée doit d'abord passer par
+    # `session_bootstrap` (chargement profil/onboarding, voir
+    # `_route_after_session_bootstrap`) avant d'atteindre l'interpréteur.
+    # `security_moderation` reste un routeur trivial (Invariant C) — seule sa
+    # cible ALLOW change de nom.
     workflow.add_conditional_edges(
         "security_moderation",
         _route_after_security,
-        {"to_interpreter": "input_interpreter", "to_strategy": "response_strategy"},
+        {"to_bootstrap": "session_bootstrap", "to_strategy": "response_strategy"},
     )
 
-    route_after_interpreter = _make_route_after_interpreter(role_up)
+    # `session_bootstrap` est désormais un vrai nœud décisionnel (plus un
+    # simple relais fixe vers `input_normalizer`, qui s'exécute maintenant
+    # EN AMONT) : profil indisponible -> réponse d'erreur déjà préparée par
+    # le nœud ; onboarding requis -> `onboarding_node` SANS jamais passer
+    # par `input_interpreter`/`cognitive_guard` (aucun appel LLM inutile
+    # pour un nouvel utilisateur) ; sinon -> `input_interpreter` nominal.
+    workflow.add_conditional_edges(
+        "session_bootstrap",
+        _route_after_session_bootstrap,
+        {
+            "to_interpreter": "input_interpreter",
+            "to_onboarding": "onboarding_node",
+            "to_strategy": "response_strategy",
+        },
+    )
+
+    route_after_interpreter = _make_route_after_interpreter()
     workflow.add_conditional_edges(
         "input_interpreter",
         route_after_interpreter,
         {"to_cognitive": "cognitive_guard", "to_memory_fast": "memory_update"},
     )
 
-    workflow.add_edge("cognitive_guard", "cognitive_orchestrator")
-
+    # (2026-09-08, correction topologique du bloc CONVERSATIONNEL) :
+    # `cognitive_guard` est désormais le PROPRIÉTAIRE UNIQUE de la décision
+    # de transition du tour — voir sa docstring pour le contrat complet
+    # `ConversationDecision` et la liste exhaustive des actions possibles.
+    # Le routeur (`_route_after_cognitive_guard`, `nodes/routing.py`) reste
+    # TRIVIAL : une lecture de `cognitive_decision.action`, un mapping
+    # direct, aucune reclassification. La branche onboarding qui vivait ICI
+    # AVANT le correctif du bloc d'ENTRÉE (2026-09-08, plus tôt le même
+    # jour) reste retirée pour la même raison qu'alors : `session_bootstrap`
+    # tranche cette décision bien plus en amont.
     workflow.add_conditional_edges(
-        "cognitive_orchestrator",
-        _route_after_cognitive,
-        {"to_onboarding": "onboarding_node", "to_clarification": "clarification_node"},
-    )
-
-    workflow.add_conditional_edges(
-        "clarification_node",
-        _route_after_clarification,
+        "cognitive_guard",
+        _route_after_cognitive_guard,
         {
+            "to_planner": "goal_planner",
             "to_disambiguation": "semantic_disambiguation",
+            "to_clarification": "clarification_node",
+            # (2026-09-08, clôture Bloc 1, mandat §29) : RECOVER_ACTIVE_GOAL
+            # route directement vers response_strategy — clarification_node
+            # est un no-op structurel prouvé pour cette action (voir
+            # `nodes/clarification.py` + son test dédié) : response_strategy
+            # construit déjà toute la réponse RECOVERY depuis
+            # `cognitive_action` seul.
             "to_strategy": "response_strategy",
         },
     )
 
+    # (2026-09-08, correction topologique du bloc conversationnel, mandat
+    # §16/§28) : `to_disambiguation` RETIRÉ de ce mapping — `cognitive_guard`
+    # route désormais DIRECTEMENT vers `semantic_disambiguation` quand il
+    # décide DISAMBIGUATE (edge ci-dessus). `clarification_node` n'a donc
+    # plus que deux issues réelles : une réponse terminale (CLARIFY réussi,
+    # ou ABANDON avec message LLM), ou — repli non-nominal si le LLM échoue
+    # pendant un ABANDON (voir `_route_after_clarification`) — la poursuite
+    # du flow vers `goal_planner`.
     workflow.add_conditional_edges(
-        "semantic_disambiguation",
-        _route_after_disambiguation,
-        {"to_planner": "goal_planner", "to_strategy": "response_strategy"},
+        "clarification_node",
+        _route_after_clarification,
+        {
+            "to_planner": "goal_planner",
+            "to_strategy": "response_strategy",
+        },
     )
+
+    # (2026-09-08, clôture Bloc 1, mandat §24) : edge FIXE — `to_planner` a
+    # été RETIRÉ. Preuve : `semantic_disambiguation` n'est atteint QUE via
+    # `cognitive_guard --DISAMBIGUATE-->`, et cette décision exige déjà
+    # `disambiguation_candidate` présent avec ≥2 options valides (voir
+    # `nodes/cognitive.py::_classify_nominal_action`) — le no-op de
+    # `semantic_disambiguation` (repli de compatibilité épuisé) est donc
+    # structurellement INATTEIGNABLE depuis le graphe compilé nominal. S'il
+    # se produisait quand même (violation de contrat, checkpoint corrompu),
+    # `semantic_disambiguation` le journalise désormais comme CONTRACT
+    # VIOLATION (voir sa docstring) et son patch vide traverse
+    # `response_strategy`, qui applique son propre repli générique — jamais
+    # un crash, jamais un aiguillage silencieux vers `goal_planner` non plus.
+    workflow.add_edge("semantic_disambiguation", "response_strategy")
 
     workflow.add_conditional_edges(
         "goal_planner",
@@ -359,12 +514,15 @@ def build_graph(
     workflow.add_edge("negotiation_gate", "ui_engine")
     workflow.add_edge("order_tracking_node", "ui_engine")
 
+    # (2026-09-08, P2-1 audit architectural) : "to_strategy" -> "to_ui" —
+    # ce label menait déjà à `ui_engine`, jamais `response_strategy` ; le
+    # nom trompait la lecture du graphe (logs, diagnostic, maintenance).
     workflow.add_conditional_edges(
         "context_resolver",
         _route_after_resolver,
         {
             "to_confirmation": "confirmation_gate",
-            "to_strategy": "ui_engine",
+            "to_ui": "ui_engine",
             "to_farm_guard": "ensure_farm_node",
         },
     )
@@ -372,7 +530,16 @@ def build_graph(
     # ui_engine transforme pending_menu → ag_ui_component puis passe à response_strategy
     workflow.add_edge("ui_engine", "response_strategy")
 
-    workflow.add_edge("ensure_farm_node", "confirmation_gate")
+    # (2026-09-08, P0-2) : edge fixe remplacé — voir _route_after_farm_guard.
+    workflow.add_conditional_edges(
+        "ensure_farm_node",
+        _route_after_farm_guard,
+        {
+            "to_confirmation": "confirmation_gate",
+            "to_ui": "ui_engine",
+            "to_response": "response_strategy",
+        },
+    )
 
     workflow.add_conditional_edges(
         "confirmation_gate",
@@ -380,25 +547,33 @@ def build_graph(
         {"to_executor": "mcp_tool_executor", "to_strategy": "response_strategy"},
     )
 
+    # (2026-09-08, P2-2 audit architectural) : `_route_after_executor` ne
+    # retournait qu'UNE seule valeur possible (`"to_strategy"`) — un
+    # conditional edge à une seule issue n'est sémantiquement qu'un
+    # `add_edge`, avec le coût cognitif d'un branchement en plus. Fonction
+    # supprimée (voir nodes/routing.py).
+    #
+    # (2026-09-08, P2-3 audit architectural) : le chaînage no-op
+    # `mcp_tool_executor → procurement_finalizer → sales_finalizer →
+    # response_strategy` (chaque finalizer se protégeant par son propre
+    # garde interne "draft absent -> {}") est remplacé par une VRAIE
+    # sélection au niveau du routeur — `_route_after_mcp_executor` (voir
+    # nodes/routing.py) — sur le même signal que chaque garde interne
+    # utilisait déjà (présence de `procurement_draft`/`sales_publish_draft`,
+    # ni l'un ni l'autre touché par `mcp_tool_executor`). Un draft ne peut
+    # être QUE PROCUREMENT ou SALES pour un tour donné (goals disjoints) :
+    # au plus UN finalizer s'exécute par tour, les deux convergent ensuite
+    # vers response_strategy.
     workflow.add_conditional_edges(
         "mcp_tool_executor",
-        _route_after_executor,
-        {"to_strategy": "procurement_execution_finalizer"},
+        _route_after_mcp_executor,
+        {
+            "to_procurement_finalizer": "procurement_execution_finalizer",
+            "to_sales_finalizer": "sales_execution_finalizer",
+            "to_response": "response_strategy",
+        },
     )
-    # (2026-09-03, clôture du pipeline transactionnel) : nœud inséré entre
-    # l'exécuteur générique et response_strategy — no-op immédiat pour tout
-    # tour hors PROCUREMENT_CREATE_REQUEST (voir sa docstring). Renommer la
-    # cible `_route_after_executor` "to_strategy" plutôt que d'ajouter une
-    # branche dédiée : `_route_after_executor` ne retourne qu'UNE seule
-    # valeur possible aujourd'hui, donc pas de risque de contourner ce nœud.
-    #
-    # (2026-09-04, migration SALES) : `sales_execution_finalizer` CHAÎNÉ
-    # juste après — même raisonnement, no-op immédiat pour tout tour hors
-    # SALES_PUBLISH_PRODUCT. Un draft ne peut être QUE PROCUREMENT ou SALES
-    # pour un tour donné (goals disjoints), donc au plus UN des deux nœuds
-    # fait réellement quelque chose par tour — coût négligeable pour
-    # l'autre, même précédent que le nœud précédent.
-    workflow.add_edge("procurement_execution_finalizer", "sales_execution_finalizer")
+    workflow.add_edge("procurement_execution_finalizer", "response_strategy")
     workflow.add_edge("sales_execution_finalizer", "response_strategy")
 
     workflow.add_edge("response_strategy", "state_cleaner")
@@ -1168,7 +1343,7 @@ async def demo_producer_future_production_conversation() -> None:
     # ── Confirmation utilisateur + exécution ───────────────────────────
     print("\n🧑 Producteur : Oui c'est bon, confirme")
     # post_response_cleanup a effacé current_goal (EPHEMERAL — normalement
-    # restauré par goal_planner depuis working_memory.locked_intent en début
+    # restauré par goal_planner depuis working_memory.active_goal en début
     # de tour réel ; ce harnais court-circuite goal_planner, donc on le
     # rétablit ici à la main).
     state["current_goal"] = "DECLARE_CROP_CYCLE"

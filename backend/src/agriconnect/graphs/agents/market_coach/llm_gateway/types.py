@@ -93,6 +93,22 @@ class HealthRecord:
     cooldown_until: Optional[float] = None  # epoch seconds
     recent_latencies_ms: list = field(default_factory=list)
 
+    def cooldown_elapsed(self, now: float) -> bool:
+        """True si le cooldown est écoulé — OU s'il n'a jamais été fixé.
+
+        Incident réel (2026-09-09) : un enregistrement Redis avec
+        `state=OPEN`/`config_error=True` mais `cooldown_until=None` (créé
+        avant l'introduction de ce champ, ou par un futur bug qui oublierait
+        de le poser) restait bloqué en SKIP éternellement — l'ancien test
+        `bool(cooldown_until and now >= cooldown_until)` traite `None` comme
+        "jamais écoulé", donc plus AUCUN probe n'était jamais retenté (candidat
+        Bedrock resté hors service des jours après que la vraie cause — une
+        clé API expirée — a été corrigée). Un `cooldown_until` absent est une
+        absence d'information, jamais la preuve d'une impossibilité
+        permanente : on le traite comme déjà écoulé (éligible à un probe
+        immédiat), jamais comme un verrou infini."""
+        return self.cooldown_until is None or now >= self.cooldown_until
+
     def to_dict(self) -> dict:
         d = dict(self.__dict__)
         d["state"] = self.state.value

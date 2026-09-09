@@ -69,14 +69,16 @@ class HealthRegistry:
         """CLOSED ou cooldown expiré (implicitement HALF_OPEN-eligible) → True.
         OPEN (ou CONFIG_ERROR — même cooldown depuis 2026-09-05, voir
         `mark_config_error`) avec cooldown non expiré → False (skip, aucun
-        appel réseau)."""
+        appel réseau). Voir `HealthRecord.cooldown_elapsed` (incident
+        2026-09-09) : un `cooldown_until` absent compte comme écoulé, jamais
+        comme un blocage permanent."""
         record = self.get(candidate.key)
         now = time.time()
         if record.config_error:
-            return bool(record.cooldown_until and now >= record.cooldown_until)
+            return record.cooldown_elapsed(now)
         if record.state != CircuitState.OPEN:
             return True
-        return bool(record.cooldown_until and now >= record.cooldown_until)
+        return record.cooldown_elapsed(now)
 
     def percentiles(self, candidate_key: str) -> dict:
         record = self.get(candidate_key)

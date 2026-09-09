@@ -101,7 +101,7 @@ class TestTunnelEscapeHatchIsReachable:
             retry_count=2,
         )
         result = run(cognitive_guard(state, None))
-        assert result["cognitive_decision"]["action"] == "continue"
+        assert result["cognitive_decision"]["action"] == "CONTINUE_ACTIVE_GOAL"
         assert result["retry_count"] == 0
 
     def test_a_progressing_user_is_never_ejected(self):
@@ -126,7 +126,7 @@ class TestTunnelEscapeHatchIsReachable:
         incrémenter le compteur ni déclencher l'abandon."""
         state = self._stuck_state(retry_count=5, location_shared=True)
         result = run(cognitive_guard(state, None))
-        assert result["cognitive_decision"]["action"] == "continue"
+        assert result["cognitive_decision"]["action"] == "CONTINUE_ACTIVE_GOAL"
         # Un partage GPS est un tour LÉGITIME : il ne doit ni abandonner le
         # tunnel, ni faire monter le compteur d'échecs (le remettre à 0 est
         # au contraire le comportement voulu — c'est un tour réussi).

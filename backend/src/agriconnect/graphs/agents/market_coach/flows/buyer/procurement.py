@@ -110,7 +110,6 @@ def build_procurement_escalation(
 
     wm = dict(working_memory)
     wm["active_goal"] = "PROCUREMENT_CREATE_REQUEST"
-    wm["locked_intent"] = "PROCUREMENT_CREATE_REQUEST"
     # None-overwrite : `working_memory` est réduit par `merge_dict` — un pop
     # sur le patch retourné ne supprime RIEN (l'ancienne valeur est conservée).
     # `buyer_request_waiting_choice` resté à True piégeait l'acheteur dans

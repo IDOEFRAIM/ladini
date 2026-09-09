@@ -108,12 +108,22 @@ _EPHEMERAL_REPLACE_FIELDS = {
     "execution_authorized": False,
     "is_certified": False,
     "is_locked": False,
-    "should_replan": False,
     "should_interrupt": False,
     "interruption_detected": False,
     "interruption_type": None,
     "security_reason": None,
     "requires_human": False,
+    # (2026-09-08, P1-4 audit architectural) : `replace_value` — une clé
+    # ABSENTE du patch d'un nœud qui n'a pas crashé/bloqué ce tour laisse la
+    # valeur ANCIENNE inchangée (contrairement à `merge_dict`, rien ne
+    # "vide" implicitement un `replace_value`). Sans ce reset explicite, le
+    # message d'un crash ou le texte d'une tentative d'injection resterait
+    # collé dans l'état pour TOUS les tours suivants, réussis ou non —
+    # maintenant qu'ils sont déclarés (donc RÉELLEMENT persistés par le
+    # graphe compilé), cette hygiène de fin de tour devient nécessaire.
+    "blocked_user_query": None,
+    "error_message": None,
+    "technical_details": None,
     "pending_menu": None,
     "reply_audio_url": None,
     "proactive_hint": None,
@@ -132,6 +142,18 @@ _EPHEMERAL_REPLACE_FIELDS = {
     "location_outcome": None,
     "location_lat": None,
     "location_lon": None,
+    # (2026-09-08, P1-4 audit architectural) : consommés UNE FOIS par
+    # `rendering/success.py` dans le tour même où `ensure_farm_node` les
+    # produit — voir core/state_profile.py (déclarés EPHEMERAL). Sans ce
+    # reset, un avertissement "j'ai configuré votre ferme" pourrait
+    # ressurgir sur un tour ultérieur sans rapport.
+    "auto_farm_notice": None,
+    "error_creating_farm": False,
+    # (2026-09-08, P1-3 audit architectural) : voir core/state.py — décision
+    # mono-tour, ne doit jamais survivre pour influencer un tour ultérieur
+    # sans rapport.
+    "slot_enrichment_force_clarification": None,
+    "clarification_reasons": None,
 }
 
 

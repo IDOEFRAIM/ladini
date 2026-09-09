@@ -8,14 +8,18 @@ c'est la garantie centrale de tout le LLM Gateway (§11 : jamais un
 
 from __future__ import annotations
 
+import json
+
 from tests.conftest import run
 from tests.unit.llm_gateway.conftest import make_fake_redis
 
 from agriconnect.graphs.agents.market_coach.llm_gateway.health_registry import (
     HealthRegistry,
+    _key,
 )
 from agriconnect.graphs.agents.market_coach.llm_gateway.types import (
     CircuitState,
+    HealthRecord,
     LLMProfile,
     ModelCandidate,
 )
@@ -86,6 +90,30 @@ class TestRecordSuccessAndFailure:
         assert registry.is_available(candidate) is False
         # Jamais compté dans consecutive_failures — pas une panne transitoire.
         assert record.consecutive_failures == 0
+
+    def test_a_legacy_config_error_record_without_cooldown_is_immediately_retriable(
+        self,
+    ):
+        """Incident réel (2026-09-09) : un candidat Bedrock est resté bloqué
+        en CONFIG_ERROR (clé API expirée) — mais l'enregistrement Redis
+        persisté avait `cooldown_until=None` (créé avant que
+        `mark_config_error` ne pose systématiquement ce champ). `bool(None
+        and ...)` valait toujours `False` -> plus JAMAIS de probe, même des
+        jours après que la clé a été renouvelée. `cooldown_until=None` doit
+        se comporter comme "déjà écoulé", jamais comme un verrou permanent —
+        voir `HealthRecord.cooldown_elapsed`."""
+        redis = make_fake_redis()
+        registry = HealthRegistry(redis_client=redis)
+        candidate = _candidate()
+        legacy_record = HealthRecord(
+            state=CircuitState.OPEN,
+            config_error=True,
+            config_error_message="Error code: 401 - invalid_api_key: expired token",
+            cooldown_until=None,
+        )
+        redis.set(_key(candidate.key), json.dumps(legacy_record.to_dict()))
+
+        assert registry.is_available(candidate) is True
 
 
 class TestPercentiles:

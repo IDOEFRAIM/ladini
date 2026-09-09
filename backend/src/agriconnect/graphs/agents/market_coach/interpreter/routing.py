@@ -1,9 +1,18 @@
 """Market — Interpreter & Routing.
 
 Centralise l'appel LLM d'interprétation et le routage post-validator.
-Le prompt système est construit dynamiquement à partir de `INTENT_CONFIG`
-filtré par rôle (PRODUCER / BUYER) afin d'éviter qu'un LLM ne propose
-une intention inappropriée pour le profil utilisateur.
+Le prompt système est construit dynamiquement à partir du catalogue
+COMPLET de `INTENT_CONFIG` — PAS filtré par rôle (PRODUCER/BUYER).
+
+(2026-09-08, refonte responsabilités des nœuds d'entrée, mandat §6) : ce
+module filtrait auparavant le catalogue par rôle (compile-time, via
+`allowed_intents_for_role`), empêchant par construction qu'un utilisateur
+PRODUCER déclenche une intention BUYER (et réciproquement) — violation
+directe du principe double-rôle (un même utilisateur peut acheter ET
+vendre dans la même conversation). Le filtrage a été retiré du prompt LLM
+ET du clamp post-LLM ; `role`/`user_role` ne reste qu'un signal SECONDAIRE
+(repli dégradé sans LLM, `cart_pending`, logs) — jamais une restriction
+structurelle de ce que le LLM peut reconnaître.
 
 Entity normalisation lives in ``interpreter/entities.py``.
 Product validation lives in ``services/domain/product_validation.py``.
@@ -28,7 +37,10 @@ from agriconnect.graphs.agents.market_coach.core.slots import (
     SLOT_FILLING_INPUTS,
     get_slot_hint,
 )
-from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
+from agriconnect.graphs.agents.market_coach.core.state import (
+    MarketAgentState,
+    resolve_current_goal,
+)
 
 # Source UNIQUE du seuil de confiance de rupture d'intention. L'interpréteur
 # (ici) et tunnel_manager (goal_planner) DOIVENT utiliser exactement le même :
@@ -507,19 +519,22 @@ _UNIFIED_PROMPT_CACHE_KEY = "UNIFIED"
 def _build_dynamic_interpreter_prompt(role: str = "PRODUCER") -> str:
     """Construit le prompt système avec le catalogue COMPLET des intentions.
 
-    Refonte double-rôle : le paramètre `role` n'a plus d'effet sur le contenu
-    (conservé pour compat de signature) — chaque utilisateur peut vendre ET
-    acheter, donc l'interpréteur doit reconnaître les deux familles d'intents
-    dans le même message, sans filtrage préalable.
+    (2026-09-08, mandat §6 "moteur de compréhension, pas orchestrateur") :
+    le paramètre `role` n'a plus d'effet sur le contenu — CORRECTIF réel,
+    pas seulement un commentaire : ce filtrage `allowed_intents_for_role`
+    survivait encore ici malgré un commentaire déjà présent prétendant le
+    contraire, empêchant par exemple un PRODUCTEUR de voir son message
+    classé BUYER_REQUEST (catalogue LLM amputé des intents achat). Chaque
+    utilisateur peut vendre ET acheter dans la même conversation ; le rôle
+    de profil ne doit plus filtrer STRUCTURELLEMENT les intentions
+    disponibles (`user_role` reste lisible comme contexte secondaire par
+    ailleurs, ex. `cart_pending` plus bas dans ce module).
     """
     if _UNIFIED_PROMPT_CACHE_KEY in _PROMPT_CACHE:
         return _PROMPT_CACHE[_UNIFIED_PROMPT_CACHE_KEY]
 
-    allowed = allowed_intents_for_role(role)
     intent_lines: List[str] = []
     for intent_key, config in INTENT_CONFIG.items():
-        if intent_key not in allowed:
-            continue
         label = config.get("label", intent_key)
         required = config.get("required") or []
         req_str = ", ".join(required) if required else "aucun"
@@ -561,12 +576,7 @@ def _interpret_fast_path(
     # comparaisons plus bas dans cette fonction.
     expected = to_tunnel_category(get_pending_interaction(state))
     clean = text.strip().lower()
-    working = state.get("working_memory") or {}
-    locked_goal = (
-        state.get("current_goal")
-        or working.get("active_goal")
-        or working.get("locked_intent")
-    )
+    locked_goal = resolve_current_goal(state)
 
     if not clean:
         return None
@@ -1071,9 +1081,14 @@ def _degraded_fallback(role_up: str, text: str) -> Optional[Dict[str, Any]]:
 
 
 def make_input_interpreter(role: str = "PRODUCER"):
-    """Crée un nœud `input_interpreter` configuré pour un rôle donné (AG-UI)."""
+    """Crée un nœud `input_interpreter`.
+
+    (2026-09-08, mandat §6) : `role` ne sert plus qu'à des usages
+    SECONDAIRES (repli dégradé sans LLM, signal `cart_pending`, logs) —
+    plus jamais à filtrer structurellement quelles intentions le LLM/le
+    fast-path peuvent produire (voir `_build_dynamic_interpreter_prompt`
+    ci-dessus, même correctif)."""
     role_up = str(role or "PRODUCER").upper().strip()
-    allowed = allowed_intents_for_role(role_up)
 
     async def _input_interpreter_impl(
         state: MarketAgentState, mc_runtime: MarketRuntime
@@ -1097,12 +1112,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # comparaisons/le prompt LLM plus bas dans cette fonction.
         expected_input = to_tunnel_category(get_pending_interaction(state))
         onboarding_active = bool(state.get("is_onboarding"))
-        working = state.get("working_memory") or {}
-        locked_goal = (
-            state.get("current_goal")
-            or working.get("active_goal")
-            or working.get("locked_intent")
-        )
+        locked_goal = resolve_current_goal(state)
 
         # ── 0. BYPASS INTERACTIF (zéro token) ──────────────────────────
         # Un message interactif WhatsApp (bouton quick-reply / ligne de liste)
@@ -1197,11 +1207,20 @@ def make_input_interpreter(role: str = "PRODUCER"):
         _skip_numeric_shortcut = (
             expected_input in ("PRICE", "QUANTITY") and llm is not None
         )
+        # (2026-09-08, P1-5 audit architectural) : `forced_role` supprimé —
+        # `_interpret_fast_path` ne l'a JAMAIS lu (recherche exhaustive dans
+        # ce module : aucune autre occurrence), et ce dict local n'était de
+        # toute façon jamais retourné comme patch de nœud — `forced_role` ne
+        # pouvait donc PAS non plus survivre comme canal d'état pour
+        # `nodes/cognitive.py`/`nodes/semantic_disambiguation.py`, qui le
+        # lisaient (`state.get("forced_role") or state.get("user_role")`,
+        # branche gauche morte). Code mort des deux côtés — supprimé plutôt
+        # que déclaré, faute de preuve qu'il soit nécessaire.
         fast = (
             None
             if onboarding_active
             else _interpret_fast_path(
-                {**state, "forced_role": role_up},
+                state,
                 text,
                 skip_numeric_shortcut=_skip_numeric_shortcut,
                 llm_available=llm is not None,
@@ -1407,11 +1426,22 @@ def make_input_interpreter(role: str = "PRODUCER"):
             raw_event = "ANSWER"
 
         raw_intent = str(parsed.get("detected_intent") or "UNKNOWN").upper().strip()
-        if raw_intent != "UNKNOWN" and raw_intent not in allowed:
+        # (2026-09-08, mandat §6, correctif réel) : le clamp vérifiait AVANT
+        # `raw_intent not in allowed_intents_for_role(role_up)` — un
+        # sous-ensemble filtré PAR RÔLE de profil, forçant UNKNOWN toute
+        # intention BUYER classée par un utilisateur sur le graphe compilé
+        # PRODUCER (et réciproquement), même quand le LLM avait correctement
+        # compris le message (mandat §6/§3 : le rôle ne doit plus décider
+        # structurellement quelles intentions sont atteignables). La garde
+        # anti-hallucination RESTE — mandat §6 : "conserver ... règles
+        # anti-hallucination" — mais vérifie désormais contre le catalogue
+        # COMPLET (`INTENT_CONFIG`), pas contre un sous-ensemble par rôle :
+        # un intent qui n'existe nulle part dans le catalogue est toujours
+        # rejeté, un intent valide d'un autre "rôle" ne l'est plus.
+        if raw_intent != "UNKNOWN" and raw_intent not in INTENT_CONFIG:
             logger.warning(
-                "LLM a retourné une intention hors-périmètre %s pour le rôle %s — ignoré",
+                "LLM a halluciné une intention hors catalogue: %s — ignoré",
                 raw_intent,
-                role_up,
             )
             raw_intent = "UNKNOWN"
 
@@ -1486,12 +1516,29 @@ def make_input_interpreter(role: str = "PRODUCER"):
             raw_intent not in {"UNKNOWN", _locked_goal_upper}
             and confidence >= INTERRUPTION_CONFIDENCE_THRESHOLD
         )
+        # (2026-09-08, correction finale Bloc 1, mandat §13 "ANSWER contenant
+        # changement de produit") : le garde ci-dessous ne couvrait que le
+        # sens NEW_TASK -> ANSWER (rabaissement annulé si le produit/goal
+        # diffère). Il ne couvrait PAS le sens inverse : un LLM peut classer
+        # DIRECTEMENT un message comme ANSWER (le prompt ne distingue pas
+        # "réponse au slot" de "nouveau produit glissé dans la même phrase")
+        # alors que le produit/l'intention a changé. Par CONTRAT, ANSWER
+        # signifie "continuation du même goal, sans arbitrage" — c'est ce que
+        # `cognitive_guard`/`tunnel_manager` supposent en aval (ANSWER ne
+        # déclenche jamais d'interruption/clarification/désambiguïsation, par
+        # construction). Un ANSWER qui porte en réalité une bascule de
+        # produit/intention doit donc être promu en NEW_TASK, exactement
+        # comme si le LLM l'avait classé ainsi dès le départ — sinon la
+        # bascule est silencieusement absorbée dans l'ancien goal (le vrai
+        # bug que ce garde corrige, symétrique à celui déjà en place).
         if (
             expected_input in SLOT_FILLING_INPUTS
-            and raw_event == "NEW_TASK"
-            and not _is_different_product
-            and not _is_different_goal
+            and raw_event in {"NEW_TASK", "ANSWER"}
+            and (_is_different_product or _is_different_goal)
         ):
+            raw_event = "NEW_TASK"
+            confidence = max(confidence, 0.9)
+        elif expected_input in SLOT_FILLING_INPUTS and raw_event == "NEW_TASK":
             raw_event = "ANSWER"
         elif _is_different_product or _is_different_goal:
             # Preuve structurelle forte (produit différent OU intention

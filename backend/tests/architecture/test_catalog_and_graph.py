@@ -160,14 +160,29 @@ class TestGraphWiring:
     def test_routers_never_return_an_undeclared_branch(self):
         """Un routeur renvoyant une clé non déclarée provoque un KeyError runtime."""
         declared = {
-            "_route_after_clarification": {"to_disambiguation", "to_strategy"},
-            "_route_after_cognitive": {"to_clarification", "to_onboarding"},
+            # (2026-09-08, correction topologique du bloc conversationnel) :
+            # "to_disambiguation" retiré — `cognitive_guard` route
+            # désormais DIRECTEMENT vers `semantic_disambiguation` sur
+            # DISAMBIGUATE, `clarification_node` ne relaie plus jamais
+            # vers ce nœud (voir `_route_after_clarification`).
+            "_route_after_clarification": {"to_planner", "to_strategy"},
             "_route_after_confirmation": {"to_executor", "to_strategy"},
             "_route_after_disambiguation": {"to_planner", "to_strategy"},
-            "_route_after_executor": {"to_strategy"},
             "_route_after_planner": {"to_memory", "to_strategy"},
-            "_route_after_resolver": {"to_confirmation", "to_farm_guard", "to_strategy"},
-            "_route_after_security": {"to_interpreter", "to_strategy"},
+            "_route_after_resolver": {"to_confirmation", "to_farm_guard", "to_ui"},
+            # (2026-09-08, correction topologique du bloc d'entrée) : ALLOW
+            # route désormais vers `session_bootstrap`, plus directement
+            # `input_interpreter` — voir `_route_after_session_bootstrap`.
+            "_route_after_security": {"to_bootstrap", "to_strategy"},
+            "_route_after_session_bootstrap": {
+                "to_interpreter", "to_onboarding", "to_strategy",
+            },
+            # (2026-09-08, P0-2 audit architectural)
+            "_route_after_farm_guard": {"to_confirmation", "to_ui", "to_response"},
+            # (2026-09-08, P2-3 audit architectural)
+            "_route_after_mcp_executor": {
+                "to_procurement_finalizer", "to_sales_finalizer", "to_response",
+            },
         }
         root = pathlib.Path(__file__).resolve().parents[2] / "src/agriconnect/graphs/agents/market_coach"
         found: dict[str, set[str]] = {}

@@ -19,7 +19,7 @@ Design principles
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional
 
 logger = logging.getLogger("AgriConnect.Market.BuyerContexts")
 
@@ -301,6 +301,41 @@ class NegotiationContext:
 
 
 # ---------------------------------------------------------------------------
+# WinnerGpsWorkflowState (P2-4, audit architectural 2026-09-08)
+# ---------------------------------------------------------------------------
+
+
+class WinnerGpsWorkflowState:
+    """Contrat typé de la mini machine à états `winner_gps_stage`
+    (`flows/buyer/order_tracking.py::finalize_winner`) — même famille que
+    `bid_phase`/`update_phase` côté producteur
+    (`flows/producer/contexts.py`) : confirmation du gagnant d'enchère PUIS
+    étape GPS de livraison, portée exclusivement par `working_memory`.
+
+    Seule ``winner_gps_stage`` est celle historiquement réinitialisée par
+    `nodes/cognitive.py` lors d'un abandon de tunnel (incident réel
+    +22601479800, voir [[gps-delivery-burkina-faso-2026-08]]) — `KEYS` ne
+    reprend délibérément que cette clé pour ne rien changer au comportement
+    existant (P2-4 est un contrat de lecture, pas une extension de portée)."""
+
+    KEYS: FrozenSet[str] = frozenset({"winner_gps_stage"})
+
+    def __init__(self, working_memory: Dict[str, Any]) -> None:
+        self._wm = working_memory or {}
+
+    @classmethod
+    def from_state(cls, state: Dict[str, Any]) -> "WinnerGpsWorkflowState":
+        return cls(state.get("working_memory") or {})
+
+    @property
+    def is_active(self) -> bool:
+        return bool(self._wm.get("winner_gps_stage"))
+
+    def reset_patch(self) -> Dict[str, Any]:
+        return {key: None for key in self.KEYS}
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -308,4 +343,5 @@ __all__ = [
     "VendorSelectionState",
     "PreorderPhase",
     "NegotiationContext",
+    "WinnerGpsWorkflowState",
 ]

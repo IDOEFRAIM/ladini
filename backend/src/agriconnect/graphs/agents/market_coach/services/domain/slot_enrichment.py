@@ -3,6 +3,35 @@
 Centralises all heuristic and LLM-based extraction that was previously
 scattered across validator.py.  Called by the SlotResolver (memory_update)
 as the single enrichment pass before validation.
+
+Classification par comportement (2026-09-09, audit Bloc 2, Blocker C) —
+`memory_update` n'est PAS zero-LLM à cause de ce module, et c'est documenté
+ici explicitement plutôt que prétendu autrement :
+
+- NORMALIZATION / DETERMINISTIC ENRICHMENT (0 LLM, légitimement downstream) :
+  `extract_quantity_unit_from_text`, `extract_unit_only`,
+  `extract_production_type_from_text`, `extract_surface_from_text`,
+  `extract_future_datetime_from_text`, la résolution d'unité via
+  `domain/quantity_unit.py::resolve_product_unit`.
+- VALIDATION (sanitize la SORTIE du LLM ci-dessous, jamais l'entrée
+  utilisateur) : `SlotExtractionPayload`.
+- LLM EXTRACTION — `LEGACY_SLOT_RECOVERY` borné, la seule exception réelle :
+  `llm_extract_quantity_unit`, appelé UNIQUEMENT pour `BUYER_ADD_TO_CART`,
+  UNIQUEMENT si `quantity`/`unit` manquent encore après l'extraction primaire
+  de `input_interpreter` (Bloc 1) + le repli déterministe ci-dessus, ou si
+  `product` porte un artefact de parsing connu. Pourquoi ce second appel
+  existe (au lieu d'être absorbé par `input_interpreter`) : réparation
+  ciblée d'une limite connue de l'extraction primaire sur les réponses
+  composées ("5kg de tomates à 200f" mal segmentées) — PAS une
+  réinterprétation de l'intention (`SlotExtractionPayload` n'expose que
+  quantity/unit/product ; tout le reste renvoyé par le LLM est
+  silencieusement ignoré par construction Pydantic — voir
+  tests/unit/test_slot_enrichment_llm_recovery.py). Ne remplace jamais une
+  valeur DÉJÀ explicite (fill-if-missing, sauf `product` quand il est
+  positivement identifié comme un artefact — `product_is_dirty`). Absorber
+  cette réparation dans `input_interpreter` nécessiterait de rouvrir Bloc 1
+  (gelé) — documenté comme modification future, non entreprise ici sans
+  validation explicite.
 """
 
 from __future__ import annotations
@@ -381,6 +410,15 @@ async def enrich_payload_from_text(
             u in product_str.lower() for u in ["kg", "tonne", "sac", "panier"]
         )
 
+        # (2026-09-09, audit Bloc 2, Blocker C) : ce second appel LLM est un
+        # LEGACY_SLOT_RECOVERY borné — jamais une réinterprétation de
+        # l'intention (`SlotExtractionPayload` n'a que 3 champs :
+        # quantity/unit/product, tout le reste renvoyé par le LLM est
+        # silencieusement ignoré par construction Pydantic) — appelé
+        # UNIQUEMENT si l'extraction primaire (input_interpreter) + le repli
+        # déterministe ci-dessus n'ont toujours pas rempli quantity/unit, ou
+        # si `product` porte un artefact de parsing connu (un nombre/une
+        # unité capturés par erreur comme nom de produit).
         if (
             _needs_structured_extraction(payload, ("quantity", "unit"))
             or product_is_dirty
@@ -399,13 +437,37 @@ async def enrich_payload_from_text(
                 )
             else:
                 if llm_extracted:
-                    payload.update(
-                        {
-                            k: v
-                            for k, v in llm_extracted.items()
-                            if v not in (None, "", 0, [], {})
-                        }
-                    )
+                    for key, value in llm_extracted.items():
+                        if value in (None, "", 0, [], {}):
+                            continue
+                        if key == "product":
+                            # `product` est le SEUL champ pour lequel un
+                            # écrasement est légitime : `product_is_dirty`
+                            # signifie que la valeur déjà en place est un
+                            # artefact de parsing CONNU-MAUVAIS (ex: "5kg"
+                            # capturé comme nom de produit), pas une donnée
+                            # explicite de l'utilisateur à protéger.
+                            if product_is_dirty or payload.get(key) in (
+                                None,
+                                "",
+                                0,
+                                [],
+                                {},
+                            ):
+                                payload[key] = value
+                            continue
+                        # quantity/unit : bug réel corrigé ici (avant ce
+                        # correctif, `payload.update(...)` écrasait
+                        # inconditionnellement) — `_needs_structured_
+                        # extraction` se déclenche dès que L'UN des deux
+                        # manque, donc l'AUTRE peut déjà être une valeur
+                        # EXPLICITE de l'utilisateur (ex: quantity=500 déjà
+                        # posée, unit manquant) : ce repli ne doit jamais la
+                        # remplacer, même si le LLM en renvoie une différente
+                        # — même politique fill-if-missing que la regex
+                        # déterministe plus haut dans cette fonction.
+                        if payload.get(key) in (None, "", 0, [], {}):
+                            payload[key] = value
 
     # ── UNITÉ : décision centralisée ──────────────────────────────────
     # Voir `domain/quantity_unit.py::resolve_product_unit` — autorité UNIQUE,

@@ -93,18 +93,36 @@ class TestA_MemoryUpdateNeverMutatesTheDraft:
 
     def test_no_source_file_writes_procurement_draft_except_the_two_authorized_ones(self):
         """Balayage source : seuls `nodes/confirmation_gate.py` (bootstrap
-        v1) et `flows/buyer/procurement_confirmation.py` (toute mutation
-        suivante) ont le droit d'assigner `procurement_draft` dans un patch
-        d'état. Un 3e écrivain serait une 2e autorité."""
+        v1) et `flows/buyer/procurement_confirmation.py` (toute mutation de
+        CONTENU suivante) ont le droit d'assigner un DRAFT (dict/valeur) à
+        `procurement_draft` dans un patch d'état. Un 3e écrivain de CONTENU
+        serait une 2e autorité.
+
+        Exception délibérée (2026-09-09, audit Bloc 2) : réassigner
+        `procurement_draft` à `None` (jamais un contenu) est une opération de
+        LIFECYCLE — « ce draft n'a plus cours, cette instance transactionnelle
+        est abandonnée » — pas une mutation de son contenu. `goal_planner.py`
+        le fait dans `_purge_transaction_state()` exactement au même titre
+        que `draft_payload`/`vendor_selection_context`/... : un vrai
+        changement de goal invalide tout draft en cours, sinon un draft déjà
+        FINALISÉ (PUBLISHED/EXECUTED/...) reste posé dans l'état et bloque la
+        PROCHAINE tentative, sans rapport, du même type de transaction (bug
+        réel observé en production sur `sales_publish_draft`, symétrique ici
+        pour `procurement_draft`). La regex ci-dessous ne flag donc qu'une
+        assignation à autre chose que `None` littéral."""
         root = Path("src/agriconnect/graphs/agents/market_coach")
         authorized = {"confirmation_gate.py", "procurement_confirmation.py"}
+        lifecycle_reset_authorized = {"goal_planner.py"}
         offenders = []
         for path in root.rglob("*.py"):
             if path.name in authorized or "test" in path.name:
                 continue
             text = path.read_text(encoding="utf-8")
-            if re.search(r'["\']procurement_draft["\']\s*:', text):
-                offenders.append(str(path))
+            for match in re.finditer(r'["\']procurement_draft["\']\s*:\s*(\w+)', text):
+                value_token = match.group(1)
+                if path.name in lifecycle_reset_authorized and value_token == "None":
+                    continue
+                offenders.append(f"{path}::{value_token}")
         assert offenders == [], f"écrivain(s) non autorisé(s) de procurement_draft : {offenders}"
 
 

@@ -351,11 +351,11 @@ def test_terminal_goal_flushes_transaction_state():
             "status": terminal,
             "current_goal": "SALES_PUBLISH_PRODUCT",
             "transaction_payload": {"product": "maïs", "quantity": 225},
-            "working_memory": {"active_goal": "SALES_PUBLISH_PRODUCT", "locked_intent": "SALES_PUBLISH_PRODUCT"},
+            "working_memory": {"active_goal": "SALES_PUBLISH_PRODUCT"},
         }, None))
         assert patch.get("transaction_payload") == {"__reset__": True}, terminal
         wm = patch.get("working_memory") or {}
-        assert wm.get("active_goal") is None and wm.get("locked_intent") is None, terminal
+        assert wm.get("active_goal") is None, terminal
 
 
 def test_error_or_failed_goal_leaves_a_one_turn_hint_for_the_clarification_fallback():

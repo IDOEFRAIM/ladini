@@ -288,7 +288,7 @@ class TestPostRejectRoutingRoundTrip:
             expected_input="CONFIRMATION",
             waiting_for_confirmation=True,
             interpreted_event="REJECT",
-            working_memory={"active_goal": "PROCUREMENT_CREATE_REQUEST", "locked_intent": "PROCUREMENT_CREATE_REQUEST"},
+            working_memory={"active_goal": "PROCUREMENT_CREATE_REQUEST"},
         )
         # Simule le merge_dict du reducer : les champs non retournés par le
         # patch (current_goal, transaction_payload, working_memory) survivent
@@ -296,7 +296,7 @@ class TestPostRejectRoutingRoundTrip:
         next_turn_state = {
             "current_goal": "PROCUREMENT_CREATE_REQUEST",
             "transaction_payload": {"product": "carottes", "price": 300, "quantity": 500},
-            "working_memory": {"active_goal": "PROCUREMENT_CREATE_REQUEST", "locked_intent": "PROCUREMENT_CREATE_REQUEST"},
+            "working_memory": {"active_goal": "PROCUREMENT_CREATE_REQUEST"},
             "missing_fields": [],
             "interpreted_event": "UPDATE",  # l'utilisateur corrige le prix
             **soft_rejected_state,
@@ -317,7 +317,7 @@ class TestPostRejectRoutingRoundTrip:
             active_form="AUCTION_CREATE",
             form_data={"product": "carottes", "unit": "KG"},
             transaction_payload={"product": "carottes", "price": 50_000_000, "quantity": 500},
-            working_memory={"active_goal": "PROCUREMENT_CREATE_REQUEST", "locked_intent": "PROCUREMENT_CREATE_REQUEST"},
+            working_memory={"active_goal": "PROCUREMENT_CREATE_REQUEST"},
         )
         result = run(buyer_request_resolver(state, StubRuntime()))
         assert result["active_form"] == "AUCTION_CREATE"

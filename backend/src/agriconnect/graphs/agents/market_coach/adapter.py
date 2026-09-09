@@ -134,7 +134,6 @@ def _build_initial_state(query: str, context: Dict[str, Any]) -> MarketAgentStat
         # 13. SYSTEM FLAGS
         "status": "START",
         "is_locked": False,
-        "should_replan": False,
         "should_interrupt": False,
     }
     return state

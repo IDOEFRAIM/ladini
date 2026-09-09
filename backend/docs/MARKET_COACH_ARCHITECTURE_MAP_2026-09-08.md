@@ -77,7 +77,7 @@ graph TD
 
 | # | Nœud | Fichier | Rôle |
 |---|---|---|---|
-| 1 | `role_guard` | `nodes/role_guard.py` | Renseigne `role`/`user_role` par défaut. Depuis la refonte double-rôle : **plus un contrôle d'accès**, juste une valeur d'affichage. |
+| 1 | `role_guard` | `nodes/role_guard.py` | Renseigne `user_role` par défaut (2026-09-08 : ne pose plus le doublon `role`, voir addendum en fin de document). Depuis la refonte double-rôle : **plus un contrôle d'accès**, juste une valeur d'affichage. |
 | 2 | `input_normalizer` | `nodes/input_normalizer.py` | Normalise le texte, durcit contre l'injection de prompt, charge le profil utilisateur (MCP), déclenche l'onboarding si nouvel utilisateur, transcrit l'audio. |
 | 3 | `security_moderation` | `nodes/security_moderation.py` | Gate compte bloqué/banni + détection produit interdit (termes cachés en cache 300s côté client). |
 | 4 | `input_interpreter` | `interpreter/routing.py::make_input_interpreter` | LLM (via LLM Gateway) + ~15 fast-paths déterministes. Produit `interpreted_event`/`detected_intent`/`extracted_entities` — **converti systématiquement** via `InterpreterResult` avant de devenir un patch d'état (aucun `UNKNOWN` sans `unknown_reason`). |
@@ -419,3 +419,30 @@ market_coach/
 - L'orchestrateur (webhook Twilio, Celery, `WorkspaceCheckpointer`) — hors périmètre.
 - Les tests (`backend/tests/`) — riches et à consulter en complément (souvent le meilleur moyen de comprendre le comportement ATTENDU d'un nœud).
 - Une relecture ligne-à-ligne de `actions/*_dto.py` (DTOs Pydantic répétitifs, pattern homogène déjà décrit §10) et de `domain/*.py` au-delà des signatures listées §11 — le pattern Command+Service y est uniforme, se référer à un fichier lu en profondeur (`procurement_draft.py`, entièrement documenté §9) pour le détail d'implémentation exact.
+
+## 16. Addendum (2026-09-08, plus tard le même jour) — purge de 2 redondances d'état
+
+Suite à un retour direct de l'utilisateur ("des redondances comme `role or user_role`, on refait des OR partout") : audit complet + correction. Détail dans `STATE_REDUNDANCY_PURGE_2026-09-08.md`. Résumé :
+
+- **`state["role"]`** (doublon figé de `user_role`, jamais rafraîchi après le 1er tour) **retiré** de `MarketAgentState` — `user_role` est désormais l'unique champ. `domain/model.py::DomainContext.from_state` ne lit plus que `user_role` (le `or state.get("role")` privilégiait à tort la valeur figée sur la valeur à jour).
+- **`working_memory["locked_intent"]`** (doublon EXACT de `working_memory["active_goal"]` — audité sur ~16 sites d'écriture, aucune divergence trouvée) **retiré**. La chaîne `state.get("current_goal") or working_memory.get("active_goal") or working_memory.get("locked_intent")`, recopiée indépendamment dans 9 fichiers, est remplacée par un point de résolution UNIQUE : `core/state.py::resolve_current_goal(state)`.
+- Bonus découvert en testant le fix : `DomainContext.from_state` avait un bug de longue date (`str(x) or None` renvoie la CHAÎNE `"None"`, jamais le `None` Python, pour tout champ absent) — corrigé pour tous ses champs (`user_id`/`phone`/`role`/`language`/`region`/`organization`/`tenant`/`timezone`), pas seulement `role`.
+- 0 régression (suite complète re-vérifiée, mêmes 6 échecs préexistants sans rapport).
+
+Les tables §2/§3 ci-dessus ont été mises à jour pour refléter l'état actuel — le reste du document (topologie, `PendingInteraction`, `INTENT_CONFIG`, routing, drafts...) reste inchangé et à jour.
+
+## 17. Addendum (2026-09-08, plus tard le même jour) — refonte des responsabilités des nœuds d'entrée
+
+Refonte incrémentale et prudente (mandat dédié, périmètre STRICT : `normalize_role`/`role_guard`/`input_normalizer`/`security_moderation`/`input_interpreter`/`cognitive_guard`/`cognitive_orchestrator`/`clarification_node`/`semantic_disambiguation`/`confirmation_gate` uniquement — aucun autre nœud/flow non audité n'a été refondu). Rapport complet livré séparément (`NODE_RESPONSIBILITIES_REFACTOR_2026-09-08.md`). Résumé des changements qui modifient la topologie du §2 :
+
+- **`role_guard` supprimé** comme nœud. `graphs/roles.py::normalize_role` ne retourne plus jamais `PRODUCER` par défaut pour une valeur inconnue/absente — retourne `UNKNOWN`, déterministe.
+- **`session_bootstrap` (nouveau nœud technique)** reprend, à l'identique, la responsabilité résiduelle de `role_guard` (rôle par défaut) ET le chargement profil/fermes/onboarding qui vivait dans `input_normalizer` — encapsulation assumée et documentée (aucun autre point d'ancrage sûr n'existe dans le périmètre audité ; `orchestrator.py` fait déjà une partie de ce travail en amont pour les producteurs, mais reste la seule source réelle pour les acheteurs).
+- **`input_normalizer` purifié** : ne fait plus QUE la normalisation de texte (durcissement, Unicode/whitespace, `input_truncated` explicite, `turn_count`, transcription audio). Ne détecte plus l'injection de prompt, ne remplace plus jamais le texte utilisateur par un faux prompt système, ne charge plus le profil, ne gère plus l'onboarding ni le tunnel.
+- **`security_moderation`** devient le propriétaire UNIQUE de la décision de sécurité conversationnelle — la détection d'injection de contexte (regex) y a été déplacée comme SIGNAL, jamais un remplacement du texte. Bug latent corrigé au passage : le blocage sur injection ne routait pas correctement vers la stratégie de réponse avant ce correctif (`nodes/routing.py::_SECURITY_BLOCKING` ne contenait pas `PROMPT_INJECTION_DETECTED` malgré un commentaire prétendant le contraire).
+- **`input_interpreter`** : le filtrage structurel des intentions par rôle (`allowed_intents_for_role`) a été retiré du prompt LLM ET du clamp post-LLM — un utilisateur PRODUCER peut désormais déclencher une intention BUYER (et réciproquement) sans que le rôle de profil ne l'en empêche. La garde anti-hallucination (intent hors `INTENT_CONFIG`) est conservée.
+- **`cognitive_guard`** : bug réel corrigé — l'interruption d'un tunnel actif sur nouvelle tâche ne vérifiait AUCUNE confiance ; un seuil (`_DISAMBIGUATION_CONFIDENCE_THRESHOLD`) a été ajouté. Le calcul du candidat de désambiguïsation lexicale (`_detect_disambiguation_candidates`) est désormais fait UNE fois ici (`disambiguation_candidate`, nouveau champ EPHEMERAL) et consulté par `clarification_node`/`semantic_disambiguation` au lieu d'être recalculé indépendamment par chacun. Le reset détaillé d'un tunnel abandonné a été extrait vers `core/conversation_reset.py::reset_abandoned_conversation_context`.
+- **`cognitive_orchestrator` supprimé** (nœud ET fonction) — sa classification `phase`/`next_step`/`reason` ne pilotait aucune transition réelle (déjà documenté, jamais corrigé avant ce chantier).
+- **`semantic_disambiguation`** : bug réel corrigé — `confidence = state.get("interpreter_confidence") or 1.0` faisait qu'une confiance ABSENTE devenait maximale ; corrigé en `or 0.0`.
+- **`confirmation_gate`** : non modifié (mandat : préserver, ses voisins transactionnels n'ont pas été audités).
+
+Nouveaux champs `MarketAgentState` : `input_truncated` (EPHEMERAL), `disambiguation_candidate` (EPHEMERAL). Le §2 (topologie) et le §3 (contrat d'état) ci-dessus ne reflètent PAS encore ces changements — se référer à `NODE_RESPONSIBILITIES_REFACTOR_2026-09-08.md` pour le détail avant/après complet.

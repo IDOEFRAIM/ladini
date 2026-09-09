@@ -5,7 +5,6 @@ from typing import Any, Dict, List, Optional
 from agriconnect.graphs.agents.market_coach.core.base import get_node_logger
 from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
-    get_pending_interaction,
     set_pending_interaction,
 )
 from agriconnect.graphs.agents.market_coach.interpreter.intent import (
@@ -57,64 +56,107 @@ def _detect_disambiguation_candidates(
     return None
 
 
+def extract_disambiguation_intents(entry: Dict[str, Any]) -> List[tuple[str, str]]:
+    """Point UNIQUE de lecture des intents candidats d'une entrée
+    `INTENT_DISAMBIGUATION` (2026-09-08, clôture Bloc 1, mandat §21/§22).
+
+    Schéma canonique : `entry["options"]` est la SEULE source — un ancien
+    champ `candidates` (liste d'intents nue, redondante avec `options`) a
+    été retiré du catalogue. `options` accepte deux formes historiques,
+    normalisées ici en `(intent, label)` :
+        - tuple/list : `(intent, label)` ;
+        - dict       : `{"intent": ..., "label": ...}`.
+    `cognitive_guard` (pour `intent_competition`) et ce module (pour
+    construire le menu) appellent tous les deux CE helper — plus de
+    seconde lecture indépendante de `options` qui pourrait diverger."""
+    pairs: List[tuple[str, str]] = []
+    for opt in entry.get("options") or []:
+        if isinstance(opt, (tuple, list)) and len(opt) >= 2:
+            intent_key, label = opt[0], opt[1]
+        elif isinstance(opt, dict):
+            intent_key, label = opt.get("intent"), opt.get("label")
+        else:
+            continue
+        if not intent_key:
+            continue
+        pairs.append((str(intent_key), str(label or intent_key)))
+    return pairs
+
+
 async def semantic_disambiguation(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
 ) -> Dict[str, Any]:
-    """Render a pedagogical AG-UI list when intent detection is ambiguous."""
-    event = str(state.get("interpreted_event") or "").upper()
-    confidence = float(state.get("interpreter_confidence") or 1.0)
-    # (2026-09-02, "no legacy shim") : plus de lecture de `expected_input` —
-    # un `pending_interaction` déjà actif (n'importe quel kind) signifie
-    # qu'un autre mécanisme attend déjà une réponse précise ; ne pas
-    # superposer un second menu de désambiguïsation par-dessus.
-    already_expecting = get_pending_interaction(state).kind != InteractionKind.NONE
+    """Render un menu AG-UI de désambiguïsation — EXÉCUTEUR d'une décision
+    déjà prise par `cognitive_guard`.
+
+    (2026-09-08, correction topologique du bloc conversationnel, mandat
+    §12/§14) : ce nœud ne décide plus lui-même « faut-il désambiguïser ? ».
+    Avant ce correctif, il recalculait ICI son propre jeu de conditions
+    (event ∈ {NEW_TASK, UNKNOWN}, absence de `pending_interaction` actif,
+    seuil de confiance LLM) — une SECONDE policy de désambiguïsation,
+    potentiellement en désaccord avec celle que `cognitive_guard` applique
+    pour DÉCIDER de router ici (voir sa docstring, section DISAMBIGUATE).
+    Le graphe compilé n'atteint plus ce nœud QUE via
+    `cognitive_decision.action == "DISAMBIGUATE"`
+    (`nodes/routing.py::_route_after_cognitive_guard`), qui a déjà vérifié
+    l'intégralité de ces conditions AVANT de router ici — les revérifier
+    serait dupliquer la même décision à deux endroits (source d'écarts
+    futurs, exactement la classe de bug que ce chantier corrige).
+
+    Reste ICI, et seulement ICI (exécution, pas décision) :
+    - la construction du menu à partir du candidat précalculé
+      (`disambiguation_candidate`, contrat : voir `cognitive_guard`) ;
+    - le repli de compatibilité si ce champ est absent (ancien checkpoint
+      persisté avant ce déploiement — voir ci-dessous) ;
+    - le garde-fou structurel `len(options) >= 2` (un menu à one option
+      n'a pas de sens, quel que soit l'appelant) ;
+    - le stash des entités déjà extraites, le pending_interaction, le menu
+      AG-UI — dette de rendu explicitement NON reprise dans ce chantier
+      (mandat §14 : "ne pas refondre ces dettes sans goal_planner/
+      memory_update").
+    """
+    # (2026-09-08, P1-5 audit architectural) : `forced_role` supprimé — ce
+    # canal n'a jamais existé (voir interpreter/routing.py).
+    role_upper = str(state.get("user_role") or "").upper().strip()
     text_lower = (state.get("normalized_text") or state.get("user_query") or "").lower()
 
-    if event not in {"NEW_TASK", "UNKNOWN"}:
-        return {}
-    if already_expecting or not text_lower:
-        return {}
-
-    role_upper = (
-        str(state.get("forced_role") or state.get("user_role") or "").upper().strip()
-    )
-
-    # LE LLM DÉCIDE EN PREMIER. S'il a classé l'intention de façon SPÉCIFIQUE et
-    # CONFIANTE, on ne lui superpose PAS un menu de désambiguïsation : il a déjà
-    # répondu à la question que ce menu poserait.
-    #
-    # Le garde précédent était INOPÉRANT : `confidence >= seuil AND
-    # len(candidates) < 2` — or TOUTE entrée de INTENT_DISAMBIGUATION a ≥ 2
-    # candidats (c'est la définition d'un menu), donc la seconde condition était
-    # toujours fausse et la sortie anticipée ne se déclenchait JAMAIS. Résultat :
-    # des indices lexicaux FIGÉS et très larges ("j'ai", "combien", "statut",
-    # "besoin de"…) détournaient systématiquement une classification LLM sûre
-    # vers un menu — observé en prod avec `conf=0.90 trigger=
-    # STOCK_OR_SALES_DECLARATION` : le producteur savait ce qu'il voulait, le
-    # LLM l'avait compris, et on lui demandait quand même de choisir.
-    #
-    # On ne désambiguïse donc plus que dans le cas où c'est LÉGITIME : le LLM
-    # n'a pas su trancher (UNKNOWN) ou n'est pas assez sûr de lui.
-    detected_intent = str(state.get("detected_intent") or "").upper().strip()
-    if (
-        detected_intent not in ("", "UNKNOWN")
-        and confidence >= _DISAMBIGUATION_CONFIDENCE_THRESHOLD
-    ):
-        logger.info(
-            "[Disambiguation] SKIP — le LLM a tranché (intent=%s conf=%.2f ≥ %.2f)",
-            detected_intent,
-            confidence,
-            _DISAMBIGUATION_CONFIDENCE_THRESHOLD,
-        )
-        return {}
-
-    entry = _detect_disambiguation_candidates(text_lower, role_upper)
+    # Repli de compatibilité (mandat §13) : `disambiguation_candidate` est
+    # calculé INCONDITIONNELLEMENT par `cognitive_guard` à chaque tour
+    # depuis 2026-09-08 (champ EPHEMERAL, jamais persisté d'un tour à
+    # l'autre — voir `core/state_profile.py`) donc ce repli n'a en pratique
+    # aucun lecteur légitime SAUF un appel de ce nœud hors du graphe
+    # compilé (test unitaire direct, script). Conservé néanmoins : le coût
+    # est nul (un seul appel lexical local, déjà existant) et il évite un
+    # menu vide silencieux si un futur appelant oubliait de précalculer ce
+    # champ avant de router ici.
+    entry = state.get("disambiguation_candidate")
     if not entry:
-        return {}
+        logger.debug(
+            "[Disambiguation] disambiguation_candidate absent — repli de "
+            "compatibilité sur le calcul lexical local"
+        )
+        entry = _detect_disambiguation_candidates(text_lower, role_upper)
 
-    options = entry.get("options") or []
-    if len(options) < 2:
+    intents = extract_disambiguation_intents(entry) if entry else []
+    if len(intents) < 2:
+        # (2026-09-08, clôture Bloc 1, mandat §25) : ce nœud n'est atteint
+        # QUE via `cognitive_decision.action == "DISAMBIGUATE"`, décision
+        # qui exige DÉJÀ un candidat avec ≥2 options valides (voir
+        # `nodes/cognitive.py::_classify_nominal_action`). Arriver ici sans
+        # candidat exploitable est donc structurellement IMPOSSIBLE dans le
+        # graphe compilé nominal — sauf violation de contrat (checkpoint
+        # corrompu, appel direct hors graphe). Logué en ERROR : silencieux
+        # avant ce correctif, désormais observable.
+        if (state.get("cognitive_decision") or {}).get("action") == "DISAMBIGUATE":
+            logger.error(
+                "[Disambiguation] CONTRACT VIOLATION — action=DISAMBIGUATE mais "
+                "aucun candidat exploitable (disambiguation_candidate=%r, "
+                "intents résolus=%d) — cognitive_guard a laissé passer une "
+                "décision DISAMBIGUATE invalide.",
+                entry,
+                len(intents),
+            )
         return {}
 
     title = entry.get("title") or "Que souhaitez-vous faire exactement ?"
@@ -125,31 +167,19 @@ async def semantic_disambiguation(
     if pedagogical_intro:
         lines.append(f"\n{pedagogical_intro}\n")
 
-    for i, opt in enumerate(options, start=1):
-        if isinstance(opt, (tuple, list)) and len(opt) >= 2:
-            intent_key, label = opt[0], opt[1]
-        elif isinstance(opt, dict):
-            intent_key, label = opt.get("intent"), opt.get("label")
-        else:
-            continue
-        if not intent_key:
-            continue
-        mapping[str(i)] = str(intent_key)
-        labels.append(str(label or intent_key))
-        intent_label = (INTENT_CONFIG.get(str(intent_key)) or {}).get("label", "")
+    for i, (intent_key, label) in enumerate(intents, start=1):
+        mapping[str(i)] = intent_key
+        labels.append(label)
+        intent_label = (INTENT_CONFIG.get(intent_key) or {}).get("label", "")
         if intent_label and intent_label != label:
-            lines.append(f"{i}. *{label or intent_key}* — {intent_label}")
+            lines.append(f"{i}. *{label}* — {intent_label}")
         else:
-            lines.append(f"{i}. {label or intent_key}")
-
-    if len(mapping) < 2:
-        return {}
+            lines.append(f"{i}. {label}")
 
     lines.append("\nRépondez simplement par le numéro de votre choix.")
     logger.info(
-        "[Disambiguation] event=%s conf=%.2f trigger=%s candidates=%d",
-        event,
-        confidence,
+        "[Disambiguation] action=%s trigger=%s candidates=%d",
+        (state.get("cognitive_decision") or {}).get("action"),
         entry.get("id"),
         len(mapping),
     )

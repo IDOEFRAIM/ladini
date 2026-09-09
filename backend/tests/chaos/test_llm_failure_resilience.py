@@ -83,6 +83,11 @@ def test_clarification_llm_crash_returns_empty_patch(runtime_with, crashing_llm)
         "current_goal": None,
         "normalized_text": "gloubiboulga zorglub",
         "user_role": "PRODUCER",
+        # (2026-09-08, correction topologique du bloc conversationnel) :
+        # ce nœud fait désormais confiance à `cognitive_decision.action`
+        # (posé par `cognitive_guard`) au lieu de recalculer lui-même
+        # "faut-il clarifier ?" — voir sa docstring.
+        "cognitive_decision": {"action": "CLARIFY"},
     }, rt))
     assert isinstance(result, dict)
     assert crashing_llm.calls == 1, "le chemin LLM n'a pas été atteint — test inopérant"

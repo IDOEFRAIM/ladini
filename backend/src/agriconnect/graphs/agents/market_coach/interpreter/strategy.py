@@ -19,6 +19,7 @@ from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
     to_tunnel_category,
 )
 from agriconnect.graphs.agents.market_coach.core.slots import SLOT_FILLING_INPUTS
+from agriconnect.graphs.agents.market_coach.core.state import resolve_current_goal
 
 logger = logging.getLogger("AgriConnect.Market.IntentRouter")
 
@@ -27,12 +28,7 @@ async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
     """Routeur AG-UI agentic — détermine la stratégie de réponse en tenant
     compte de la décision cognitive, de la progression, et du contexte."""
     status = str(state.get("status") or "").upper().strip()
-    working = state.get("working_memory") or {}
-    current_goal = (
-        state.get("current_goal")
-        or working.get("active_goal")
-        or working.get("locked_intent")
-    )
+    current_goal = resolve_current_goal(state)
     # (2026-09-02, "no legacy shim") : source UNIQUE — dérivé de
     # `pending_interaction`, plus jamais lu directement depuis l'état. Un
     # seul point de traduction : toutes les comparaisons plus bas

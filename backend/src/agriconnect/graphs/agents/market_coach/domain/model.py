@@ -6,6 +6,22 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional
 from agriconnect.graphs.agents.market_coach.actions.tooling import ToolId
 
 
+def _opt_str(value: Any) -> Optional[str]:
+    """Convertit en `str` non-vide, ou `None` — jamais la chaîne littérale
+    "None" (2026-09-08, bug réel découvert en corrigeant la redondance
+    `role`/`user_role`, voir `from_state` ci-dessous). `str(value) or None`
+    est TOUJOURS vrai pour `value=None` (`str(None) == "None"`, une chaîne
+    NON VIDE, donc truthy) : chaque champ optionnel de `DomainContext`
+    prenait silencieusement la valeur "None" (texte) plutôt que `None`
+    (Python) quand la donnée source était absente — un `if context.phone:`
+    en aval aurait alors vu une valeur PRÉSENTE (la chaîne "None") pour une
+    identité en réalité manquante."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 @dataclass(frozen=True)
 class DomainContext:
     """Immutable snapshot of the business context for a single action.
@@ -32,15 +48,19 @@ class DomainContext:
             str(p).strip() for p in (permissions or ()) if p
         )
         return cls(
-            user_id=str(state.get("user_id")) or None,
-            phone=str(state.get("user_phone")) or None,
-            role=str(state.get("role") or state.get("user_role")) or None,
-            language=str(state.get("language") or state.get("locale")) or None,
-            region=str(state.get("region") or state.get("zone")) or None,
-            organization=str(state.get("organization")) or None,
+            user_id=_opt_str(state.get("user_id")),
+            phone=_opt_str(state.get("user_phone")),
+            # (2026-09-08) `state.get("role")` retiré — c'était un doublon
+            # figé de `user_role` (jamais rafraîchi après le 1er tour, voir
+            # `core/state.py`) qui pouvait gagner à tort sur la valeur à
+            # jour via un `or`. `user_role` est l'unique source.
+            role=_opt_str(state.get("user_role")),
+            language=_opt_str(state.get("language") or state.get("locale")),
+            region=_opt_str(state.get("region") or state.get("zone")),
+            organization=_opt_str(state.get("organization")),
             permissions=perms,
-            tenant=str(state.get("tenant")) or None,
-            timezone=str(state.get("timezone")) or None,
+            tenant=_opt_str(state.get("tenant")),
+            timezone=_opt_str(state.get("timezone")),
         )
 
 

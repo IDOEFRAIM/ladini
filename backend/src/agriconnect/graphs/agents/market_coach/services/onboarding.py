@@ -41,9 +41,20 @@ def resolve_onboarding_state(state: Dict[str, Any], updates: Dict[str, Any]) -> 
 
     if onboarding_active:
         updates["is_onboarding"] = True
-        updates["interpreted_event"] = "ONBOARDING_INPUT"
-        updates["detected_intent"] = "ONBOARDING"
-        updates["interpreter_confidence"] = 1.0
+        # (2026-09-08, revue de validation du bloc refondu) : ne plus écrire
+        # `interpreted_event`/`detected_intent`/`interpreter_confidence` —
+        # ce sont les 3 champs du CONTRAT DE SORTIE d'`input_interpreter`
+        # (voir `interpreter/routing.py::_emit_onboarding`), qui les
+        # réécrit de toute façon INCONDITIONNELLEMENT sur les 3 chemins
+        # onboarding (no_llm/llm_crash/llm_success — voir
+        # `_input_interpreter_impl`, branches `onboarding_active`). Cette
+        # fonction (appelée par `session_bootstrap`, en AMONT
+        # d'`input_interpreter` dans le graphe) écrivait donc une valeur
+        # 100% redondante, toujours écrasée avant la fin du tour — un cas
+        # concret du "session_bootstrap empiète sur l'interprétation
+        # d'intention" identifié lors de la revue de validation. Seul
+        # `is_onboarding` (contexte utilisateur, pas interprétation) reste
+        # écrit ici.
         updates.setdefault("status", "WAITING_INPUT")
     else:
         updates["is_onboarding"] = False

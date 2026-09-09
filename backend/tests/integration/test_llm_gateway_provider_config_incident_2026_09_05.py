@@ -298,7 +298,20 @@ class TestTotalOutageNeverProducesASecondWastedLlmCall:
         calls_to_groq_before_clarification = len(groq_client.calls)
 
         # Le tour continue : le state final (fusionné) atteint clarification_node.
-        merged_state = {**state, **interpreter_result}
+        # (2026-09-08, correction topologique du bloc conversationnel) : dans
+        # le graphe réel, `cognitive_guard` s'exécute entre les deux et
+        # décide CLARIFY pour cet état (event=UNKNOWN, rien en attente,
+        # aucun goal actif — voir `nodes/cognitive.py::
+        # _classify_nominal_action`) ; `clarification_node` lui fait
+        # désormais confiance au lieu de recalculer. Ce test appelant les
+        # deux nœuds directement (hors graphe compilé, pour isoler la
+        # Gateway), la décision est injectée ici pour rester représentative
+        # du tour réel.
+        merged_state = {
+            **state,
+            **interpreter_result,
+            "cognitive_decision": {"action": "CLARIFY"},
+        }
         clarification_result = run(clarification_node(merged_state, rt))
 
         assert clarification_result["response_strategy"] == "CLARIFICATION"

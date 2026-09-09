@@ -1,23 +1,29 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Optional, Set
 
-from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
+from agriconnect.graphs.agents.market_coach.core.state import (
+    MarketAgentState,
+    resolve_current_goal,
+)
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from agriconnect.graphs.agents.market_coach.utils import CANONICAL_TRANSACTION_FIELDS
 
-_MAX_CHAT_HISTORY = 4
 _ACTIVE_GOAL_STATES = frozenset(
     {"ACTIVE", "WAITING_INPUT", "WAITING_CONFIRMATION", "EXECUTING"}
 )
 _EPHEMERAL_WORKING_KEYS = ("payload_richness", "last_confidence", "step_index")
 _ONBOARDING_TRANSACTION_FIELDS = frozenset({"name", "zone_name", "zone_id", "phone"})
 
-
-def _trim_history(items: Any, limit: int) -> Optional[List[Any]]:
-    if isinstance(items, list) and len(items) > limit:
-        return items[-limit:]
-    return None
+# (2026-09-08, P1-4 audit architectural) : `chat_history`/`_trim_history`
+# supprimés — recherche exhaustive dans `src/agriconnect` : AUCUN nœud du
+# graphe n'écrit jamais de contenu réel sous cette clé (seul
+# `workspace/checkpointer.py::_SHRINKABLE_CHANNELS` la mentionne, comme
+# nom générique "sûr à réduire sous pression mémoire" — pas une preuve
+# d'écriture active). Ce bloc était un no-op permanent : `_trim_history`
+# ne retournait jamais qu'un `None` silencieusement absorbé par le garde
+# `if trimmed_history is not None`. Gardait la FAUSSE promesse d'un
+# historique borné à 4 entrées alors que rien ne le peuple.
 
 
 def _goal_slot_fields(state: MarketAgentState) -> Set[str]:
@@ -30,12 +36,7 @@ def _goal_slot_fields(state: MarketAgentState) -> Set[str]:
     keeps the transaction payload intact across the confirmation boundary while
     still pruning unrelated extraction noise.
     """
-    goal = str(
-        state.get("current_goal")
-        or (state.get("working_memory") or {}).get("active_goal")
-        or (state.get("working_memory") or {}).get("locked_intent")
-        or ""
-    ).upper()
+    goal = str(resolve_current_goal(state) or "").upper()
     cfg = INTENT_CONFIG.get(goal)
     if not cfg:
         return set()
@@ -92,10 +93,6 @@ async def state_cleaner_node(
     if working_patch:
         patch["working_memory"] = working
 
-    trimmed_history = _trim_history(state.get("chat_history"), _MAX_CHAT_HISTORY)
-    if trimmed_history is not None:
-        patch["chat_history"] = trimmed_history
-
     # ── Terminal-goal reset ──────────────────────────────────────────
     # When a goal finishes this turn (status COMPLETED/FAILED/ERROR), the
     # whole transaction payload and goal-tracking memory must be flushed so
@@ -127,6 +124,11 @@ async def state_cleaner_node(
         # runs AFTER state_cleaner) needs it to render the tool output.
         # It is properly reset by post_response_cleanup instead.
         patch["form_data"] = {"__reset__": True}
+        # (2026-09-08, P1-4 audit architectural) : garde anti-double-tentative
+        # de création de ferme — n'a de sens que pour LE goal farm-critique en
+        # cours. Le laisser vivre après COMPLETED/FAILED/ERROR bloquerait à
+        # tort une future tentative légitime sur un AUTRE goal.
+        patch["farm_creation_attempted"] = False
         # NOTE: current_goal is NOT reset here — final_response needs it
         # for _resolve_goal_for_ui (e.g. distinguish READ vs WRITE goals
         # for the fallback message). Reset by post_response_cleanup.
@@ -152,7 +154,6 @@ async def state_cleaner_node(
         wm_terminal = dict(patch.get("working_memory") or working)
         for key in (
             "active_goal",
-            "locked_intent",
             "pending_goal",
             "buyer_request_waiting_choice",
             "buyer_request_catalog_checked",

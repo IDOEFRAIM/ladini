@@ -30,6 +30,9 @@ from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
 )
 from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from agriconnect.domain.quantity_unit import (
+    extract_unit_only_from_text as _extract_unit_only,
+)
+from agriconnect.domain.quantity_unit import (
     parse_quantity_unit_from_text as _parse_qty_unit,
 )
 from agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment import (
@@ -1065,6 +1068,20 @@ def _parse_update_correction(text: str, *, allow_type_date: bool) -> Dict[str, A
     price = _extract_price_correction(text)
     if price is not None:
         fields["price"] = price
+        # (2026-09-09) Incident réel : "non c'est 3500 FCFA PAR UNITE" ne
+        # changeait jamais le suffixe du récap (resté "/KG") — cette
+        # fonction n'extrayait qu'un NOMBRE de prix, jamais l'unité DE PRIX
+        # elle-même quand elle accompagne le prix sans quantité ("500 kg"
+        # aurait déjà été capté par `_extract_quantity_correction` ci-dessus
+        # ; ici on ne comble QUE le cas où l'utilisateur reprécise la base
+        # du prix seule, ex: "par unité"/"à l'unité"/"le kg"). `unit` est le
+        # SEUL champ que `_format_pending_recap` affiche (prix ET quantité
+        # partagent le même suffixe dans ce récap) — ne pas écraser une
+        # unité déjà extraite par la quantité dans CE MÊME message.
+        if "unit" not in fields:
+            price_unit = _extract_unit_only(text)
+            if price_unit:
+                fields["unit"] = price_unit
     name = _extract_name_correction(text)
     if name:
         fields["product"] = name
@@ -1151,7 +1168,6 @@ async def _resolve_cycle_for_update(
             "update_phase": None,
             "update_pending": None,
             "active_goal": None,
-            "locked_intent": None,
             "available_mapping_kind": None,
         }
 
@@ -1172,7 +1188,6 @@ async def _resolve_cycle_for_update(
                     "update_phase": "CONFIRM",
                     "update_pending": pending,
                     "active_goal": "SALES_UPDATE_PRODUCTION",
-                    "locked_intent": "SALES_UPDATE_PRODUCTION",
                 },
                 "ag_ui_component": None,
             }
@@ -1251,7 +1266,6 @@ async def _resolve_cycle_for_update(
                 "update_phase": "CONFIRM",
                 "update_pending": pending,
                 "active_goal": "SALES_UPDATE_PRODUCTION",
-                "locked_intent": "SALES_UPDATE_PRODUCTION",
             },
             "ag_ui_component": None,
         }
@@ -1300,7 +1314,6 @@ async def _resolve_cycle_for_update(
                     "update_cycle_id": str(cycle_id),
                     "update_phase": "COLLECT",
                     "active_goal": "SALES_UPDATE_PRODUCTION",
-                    "locked_intent": "SALES_UPDATE_PRODUCTION",
                     "available_mapping_kind": None,
                 },
                 "final_response": f"{note}\n\n{base_question}" if note else base_question,
@@ -1319,7 +1332,6 @@ async def _resolve_cycle_for_update(
                 "update_phase": "CONFIRM",
                 "update_pending": pending,
                 "active_goal": "SALES_UPDATE_PRODUCTION",
-                "locked_intent": "SALES_UPDATE_PRODUCTION",
                 "available_mapping_kind": None,
             },
             "ag_ui_component": None,
@@ -1394,7 +1406,6 @@ async def _resolve_cycle_for_update(
         "working_memory": {
             **working,
             "active_goal": "SALES_UPDATE_PRODUCTION",
-            "locked_intent": "SALES_UPDATE_PRODUCTION",
             "available_mapping_kind": "cycle",
             "update_phase": "SELECT",
             "update_pending": None,
@@ -1448,7 +1459,6 @@ async def _resolve_product_for_update(
             "update_phase": None,
             "update_pending": None,
             "active_goal": None,
-            "locked_intent": None,
             "available_mapping_kind": None,
         }
 
@@ -1469,7 +1479,6 @@ async def _resolve_product_for_update(
                     "update_phase": "CONFIRM",
                     "update_pending": pending,
                     "active_goal": "SALES_UPDATE_PRODUCT",
-                    "locked_intent": "SALES_UPDATE_PRODUCT",
                 },
                 "ag_ui_component": None,
             }
@@ -1542,7 +1551,6 @@ async def _resolve_product_for_update(
                 "update_phase": "CONFIRM",
                 "update_pending": pending,
                 "active_goal": "SALES_UPDATE_PRODUCT",
-                "locked_intent": "SALES_UPDATE_PRODUCT",
             },
             "ag_ui_component": None,
         }
@@ -1581,7 +1589,6 @@ async def _resolve_product_for_update(
                     "update_product_id": str(product_id),
                     "update_phase": "COLLECT",
                     "active_goal": "SALES_UPDATE_PRODUCT",
-                    "locked_intent": "SALES_UPDATE_PRODUCT",
                     "available_mapping_kind": None,
                 },
                 "final_response": f"{note}\n\n{base_question}" if note else base_question,
@@ -1600,7 +1607,6 @@ async def _resolve_product_for_update(
                 "update_phase": "CONFIRM",
                 "update_pending": pending,
                 "active_goal": "SALES_UPDATE_PRODUCT",
-                "locked_intent": "SALES_UPDATE_PRODUCT",
                 "available_mapping_kind": None,
             },
             "ag_ui_component": None,
@@ -1669,7 +1675,6 @@ async def _resolve_product_for_update(
         "working_memory": {
             **working,
             "active_goal": "SALES_UPDATE_PRODUCT",
-            "locked_intent": "SALES_UPDATE_PRODUCT",
             "available_mapping_kind": "catalog_product",
             "update_phase": "SELECT",
             "update_pending": None,
@@ -1722,7 +1727,6 @@ async def _resolve_delivery_otp(
             "working_memory": {
                 **working,
                 "active_goal": "PRODUCER_CONFIRM_DELIVERY_OTP",
-                "locked_intent": "PRODUCER_CONFIRM_DELIVERY_OTP",
             },
             "final_response": (
                 "📦 Quel est le code de livraison à 4 chiffres transmis par l'acheteur ?\n"
@@ -1749,7 +1753,7 @@ async def _resolve_delivery_otp(
             "status": "COMPLETED",
             "response_strategy": "ERROR",
             "final_response": "Impossible de vérifier le code pour le moment. Réessayez dans un instant.",
-            "working_memory": {**working, "active_goal": None, "locked_intent": None},
+            "working_memory": {**working, "active_goal": None},
             "ag_ui_component": None,
             **resolve_pending_interaction(),
         }
@@ -1766,7 +1770,6 @@ async def _resolve_delivery_otp(
             "working_memory": {
                 **working,
                 "active_goal": "PRODUCER_CONFIRM_DELIVERY_OTP",
-                "locked_intent": "PRODUCER_CONFIRM_DELIVERY_OTP",
             },
             "ag_ui_component": None,
             **set_pending_interaction(
@@ -1779,7 +1782,7 @@ async def _resolve_delivery_otp(
         "response_strategy": "SUCCESS",
         "final_response": (result or {}).get("message")
         or "✅ Code valide ! Livraison confirmée. Vos fonds sont débloqués.",
-        "working_memory": {**working, "active_goal": None, "locked_intent": None},
+        "working_memory": {**working, "active_goal": None},
         "transaction_payload": {"__reset__": True},
         "ag_ui_component": None,
         **resolve_pending_interaction(),

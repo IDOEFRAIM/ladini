@@ -184,6 +184,31 @@ class TestParseUpdateCorrection:
         from agriconnect.graphs.agents.market_coach.flows.producer.flow import _parse_update_correction
         assert _parse_update_correction("bonjour", allow_type_date=True) == {}
 
+    def test_price_correction_with_a_per_unit_basis_updates_the_display_unit(self):
+        """Incident réel (2026-09-09, WhatsApp) : "nonnn c est 3500 FCFA PAR
+        UNITE" en réponse à un récap affichant "3500 FCFA/KG" laissait le
+        récap totalement inchangé — `_extract_price_correction` extrayait le
+        prix mais rien ne captait "PAR UNITE" comme base de prix, et
+        `_format_pending_recap` affiche toujours `unit` (jamais un champ
+        `price_unit` séparé, qui n'existe pas dans ce mini-flow)."""
+        from agriconnect.graphs.agents.market_coach.flows.producer.flow import _parse_update_correction
+        fields = _parse_update_correction(
+            "nonnn c est 3500 FCFA PAR UNITE", allow_type_date=False
+        )
+        assert fields["price"] == 3500.0
+        assert fields["unit"] == "UNITE"
+
+    def test_per_unit_price_basis_never_overrides_an_explicit_quantity_unit(self):
+        """Un message qui donne À LA FOIS une quantité typée et une base de
+        prix ne doit jamais laisser la base de prix écraser l'unité de la
+        quantité (ce mini-flow n'a qu'un seul champ `unit` affiché pour les
+        deux — la quantité, plus précise, doit gagner)."""
+        from agriconnect.graphs.agents.market_coach.flows.producer.flow import _parse_update_correction
+        fields = _parse_update_correction(
+            "500 kg, prix 3500 fcfa l'unite", allow_type_date=False
+        )
+        assert fields["unit"] == "KG"
+
 
 class TestFormatPendingRecap:
     def test_includes_all_provided_fields(self):

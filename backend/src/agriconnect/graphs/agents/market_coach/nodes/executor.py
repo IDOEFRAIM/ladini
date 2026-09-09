@@ -742,7 +742,6 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
             wm_reset = dict(state.get("working_memory") or {})
             for key in (
                 "active_goal",
-                "locked_intent",
                 "recent_corrections",
                 "buyer_request_waiting_choice",
                 "buyer_request_catalog_checked",

@@ -297,7 +297,6 @@ def clear_active_goal(
     """Return a working_memory patch with the goal/lock cleared."""
     working = dict(state.get("working_memory") or {})
     working["active_goal"] = None
-    working["locked_intent"] = None
     if clear_cart_snapshot:
         # None-overwrite OBLIGATOIRE : `working_memory` est réduit par
         # `merge_dict`, donc RETIRER (pop) une clé du patch retourné ne la

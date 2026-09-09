@@ -38,11 +38,13 @@ logger = logging.getLogger("AgriConnect.Market.TunnelManager")
 #: Minimum LLM confidence to allow a NEW_TASK / INTERRUPTION to break a soft tunnel.
 INTERRUPTION_CONFIDENCE_THRESHOLD: float = 0.60
 
-#: Intents that always break through any tunnel regardless of confidence.
-#: Dérivé du flag `breakout` d'INTENT_CONFIG — source : core/goals.py.
-from agriconnect.graphs.agents.market_coach.core.goals import (  # noqa: E402
-    NAVIGATION_BREAKOUT_GOALS as CRITICAL_BREAKOUT_INTENTS,
-)
+# (2026-09-09, Bloc 2 passe finale — Invariant A) : l'import de
+# `NAVIGATION_BREAKOUT_GOALS` a été RETIRÉ de ce module. La liste reste
+# définie une seule fois (`core/goals.py`, dérivée du flag `breakout`
+# d'INTENT_CONFIG) et n'a plus qu'UN consommateur décisionnel :
+# `nodes/cognitive.py`. La conserver ici en aurait fait une seconde copie
+# consultée par une seconde autorité — exactement ce que cette passe
+# élimine.
 
 #: expected_input values where NEW_TASK can break the tunnel (soft slots).
 #: Les slots-champs (PRODUCT/PRICE/QUANTITY/UNIT/LOCATION/DATE/FARM_NAME)
@@ -119,17 +121,13 @@ class TunnelManager:
     ----------
     interruption_threshold:
         Confidence floor (0–1) to allow an interruption during a soft slot.
-    critical_breakout_intents:
-        Set of intent keys that always trigger a clean switch, ignoring the threshold.
     """
 
     def __init__(
         self,
         interruption_threshold: float = INTERRUPTION_CONFIDENCE_THRESHOLD,
-        critical_breakout_intents: Optional[FrozenSet[str]] = None,
     ) -> None:
         self._threshold = interruption_threshold
-        self._critical = critical_breakout_intents or CRITICAL_BREAKOUT_INTENTS
 
     # ------------------------------------------------------------------
     # Primary decision method
@@ -142,6 +140,8 @@ class TunnelManager:
         incoming_event: str,
         incoming_intent: str,
         confidence: float,
+        *,
+        policy_approved: bool = False,
     ) -> TunnelDecision:
         """Evaluate whether to stay in the active tunnel or switch.
 
@@ -151,6 +151,14 @@ class TunnelManager:
             incoming_event:  The ``interpreted_event`` produced by the interpreter.
             incoming_intent: The ``detected_intent`` produced by the interpreter.
             confidence:      LLM confidence score [0.0 – 1.0].
+            policy_approved: True quand `cognitive_guard` — PROPRIÉTAIRE
+                             UNIQUE de la décision d'interruption depuis
+                             2026-09-09 — a explicitement approuvé cette
+                             transition (`cognitive_decision.action ==
+                             INTERRUPT_ACTIVE_GOAL`). Ce nœud n'a alors plus
+                             à juger la confiance : il ne lui reste qu'à
+                             faire respecter les invariants STRUCTURELS
+                             (OTP), c.-à-d. INTERDIRE, jamais choisir.
 
         Returns:
             :class:`TunnelDecision` with the recommended action.
@@ -179,30 +187,58 @@ class TunnelManager:
                 stay_in_tunnel=True, allow_interrupt=False, reason="always_unbreakable"
             )
 
-        # Critical navigation intents always break through — including hard
-        # slots like CONFIRMATION. Checked BEFORE the hard-slot gate below:
-        # otherwise a broken/empty confirmation recap traps the user forever,
-        # since CONFIRMATION used to be blocked unconditionally regardless of
-        # intent or confidence (bug fixed 2026-07-17, see
-        # [[market-coach-turn-boundary-state]]).
-        if intent_upper in self._critical:
-            logger.info(
-                "[TunnelManager] Critical intent '%s' breaks tunnel '%s'",
-                intent_upper,
-                current_goal,
-            )
-            return TunnelDecision(
-                stay_in_tunnel=False, allow_interrupt=True, reason="critical_intent"
-            )
+        # (2026-09-09, Bloc 2 passe finale — Invariant A) : le branchement
+        # « intention de navigation critique » a été RETIRÉ d'ici. Il
+        # décidait, en aval et sans consulter personne, de casser un tunnel
+        # que `cognitive_guard` venait éventuellement de refuser
+        # d'interrompre — deux autorités sur la même question. La décision
+        # vit désormais dans `nodes/cognitive.py` (seuil de confiance OU
+        # breakout de navigation, `NAVIGATION_BREAKOUT_GOALS`), qui émet
+        # `interpreted_event="INTERRUPTION"` + `cognitive_decision.action=
+        # INTERRUPT_ACTIVE_GOAL` ; `goal_planner` relaie cette approbation
+        # ici via `policy_approved=True`. Ce nœud ne CHOISIT plus aucune
+        # transition : il ne fait qu'interdire (OTP) ou laisser passer.
+        # Comportement utilisateur inchangé, y compris le cas du récap de
+        # confirmation cassé/vide (bug 2026-07-17,
+        # [[market-coach-turn-boundary-state]]) : `policy_approved` traverse
+        # les slots durs exactement comme le faisait `critical_intent`.
 
         # Remaining hard slots (CONFIRMATION, or a custom blocking slot):
-        # only a high-confidence INTERRUPTION/NEW_TASK can break through —
-        # never silently, but never unconditionally either.
+        # only a high-confidence INTERRUPTION can break through — never
+        # silently, but never unconditionally either.
+        #
+        # (2026-09-09, audit Bloc 2 — élimination de décision dupliquée) :
+        # NEW_TASK n'est PLUS un événement éligible ici (il l'était avant,
+        # au même seuil que INTERRUPTION). `cognitive_guard` (Bloc 1, gelé)
+        # est le SEUL propriétaire de la décision « cette intention
+        # concurrente est-elle assez confiante pour interrompre ? » — voir
+        # nodes/cognitive.py, seuil `_DISAMBIGUATION_CONFIDENCE_THRESHOLD`
+        # (0.85). Il ne réécrit `interpreted_event` en `"INTERRUPTION"` QUE
+        # s'il approuve l'interruption ; si l'événement atteint ce nœud
+        # encore étiqueté `"NEW_TASK"`, c'est que `cognitive_guard` a
+        # explicitement REFUSÉ d'interrompre (confiance insuffisante, ou
+        # intention non distincte du goal courant). Un second seuil ICI
+        # (0.60, plus bas) pouvait annuler ce refus pour toute confiance
+        # dans l'intervalle [0.60, 0.85) — deux autorités contradictoires
+        # décidant de la même question avec des seuils différents. Seule
+        # une intention de « breakout » critique (ci-dessus, indépendante
+        # de la confiance — `cognitive_guard` ne la connaît pas du tout)
+        # garde le droit de casser un slot dur ou souple sans passer par
+        # `cognitive_guard`.
         if is_blocking_slot(exp_upper) or exp_upper in HARD_EXPECTED_INPUTS:
-            if (
-                event_upper in {"INTERRUPTION", "NEW_TASK"}
-                and confidence >= self._threshold
-            ):
+            if policy_approved:
+                logger.info(
+                    "[TunnelManager] Hard slot '%s' interrupted: approuvé par "
+                    "cognitive_guard (intent=%s)",
+                    exp_upper,
+                    intent_upper,
+                )
+                return TunnelDecision(
+                    stay_in_tunnel=False,
+                    allow_interrupt=True,
+                    reason="policy_approved_interruption",
+                )
+            if event_upper == "INTERRUPTION" and confidence >= self._threshold:
                 logger.info(
                     "[TunnelManager] Hard slot '%s' interrupted: intent=%s conf=%.2f >= %.2f",
                     exp_upper,
@@ -219,8 +255,18 @@ class TunnelManager:
                 stay_in_tunnel=True, allow_interrupt=False, reason="hard_slot"
             )
 
-        # INTERRUPTION event: honour if confidence meets threshold.
+        # INTERRUPTION event: honour it — `cognitive_guard` already applied
+        # the confidence gate before emitting this event (see note above).
+        # The threshold check here is a harmless redundant confirmation for
+        # any INTERRUPTION not produced by cognitive_guard's own gate (e.g.
+        # a future caller), never a second real decision in practice.
         if event_upper == "INTERRUPTION":
+            if policy_approved:
+                return TunnelDecision(
+                    stay_in_tunnel=False,
+                    allow_interrupt=True,
+                    reason="policy_approved_interruption",
+                )
             if confidence >= self._threshold:
                 logger.info(
                     "[TunnelManager] INTERRUPTION allowed: intent=%s conf=%.2f >= %.2f",
@@ -244,21 +290,9 @@ class TunnelManager:
                 reason="interruption_low_confidence",
             )
 
-        # NEW_TASK during a *soft* slot: allow if confidence is sufficient.
-        if event_upper == "NEW_TASK" and exp_upper in SOFT_EXPECTED_INPUTS:
-            if confidence >= self._threshold:
-                logger.info(
-                    "[TunnelManager] NEW_TASK during soft slot '%s': intent=%s conf=%.2f",
-                    exp_upper,
-                    intent_upper,
-                    confidence,
-                )
-                return TunnelDecision(
-                    stay_in_tunnel=False,
-                    allow_interrupt=True,
-                    reason="new_task_soft_slot",
-                )
-
+        # NEW_TASK (soft or hard slot): `cognitive_guard` already declined to
+        # escalate it to INTERRUPTION — stay locked. See note above the
+        # hard-slot branch for the full rationale.
         # Default: stay locked in the active tunnel.
         return TunnelDecision(
             stay_in_tunnel=True, allow_interrupt=False, reason="default_lock"
@@ -368,7 +402,6 @@ __all__ = [
     "TunnelManager",
     "tunnel_manager",
     "INTERRUPTION_CONFIDENCE_THRESHOLD",
-    "CRITICAL_BREAKOUT_INTENTS",
     "SOFT_EXPECTED_INPUTS",
     "HARD_EXPECTED_INPUTS",
 ]

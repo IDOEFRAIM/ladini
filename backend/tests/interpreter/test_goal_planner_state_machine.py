@@ -33,77 +33,118 @@ def gp(**overrides):
 # =====================================================================
 
 class TestRule0bisDisambiguation:
+    """(2026-09-09, audit Bloc 2, fermeture Blocker B) : le déclencheur de
+    cette règle n'est plus `current_goal == "DISAMBIGUATION_PENDING"` — c'est
+    désormais EXCLUSIVEMENT `pending_interaction.kind == SELECTION_MENU and
+    .context_ref == "intent_disambiguation"` (voir
+    `core/pending_interaction.py::DISAMBIGUATION_MENU_GOAL_SHIM`). Ces tests
+    posent donc `pending_interaction` directement au lieu du raccourci
+    `expected_input="SELECTION"` (qui ne poserait pas `context_ref`).
+    `current_goal`, lui, porte maintenant le VRAI business goal antérieur (ou
+    `None`) — jamais plus un pseudo-goal en entrée."""
+
+    @staticmethod
+    def _disambiguation_pending_interaction(**overrides) -> dict:
+        base = {
+            "kind": "SELECTION_MENU",
+            "goal": None,
+            "field": None,
+            "context_ref": "intent_disambiguation",
+            "candidates": [],
+            "created_at": 0.0,
+            "status": "ACTIVE",
+            "target": None,
+        }
+        base.update(overrides)
+        return base
+
     def test_confident_new_task_overrides_the_pending_menu(self):
         """Une intention confiante en cours de désambiguïsation prend le dessus
         SANS attendre la sélection du menu."""
         r = gp(
-            current_goal="DISAMBIGUATION_PENDING",
+            current_goal=None,
             interpreted_event="NEW_TASK",
             detected_intent="SALES_PUBLISH_PRODUCT",
-            working_memory={"disambiguation_pending": True},
+            pending_interaction=self._disambiguation_pending_interaction(),
         )
         assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
         assert r["goal_status"] == "ACTIVE"
-        assert r["working_memory"]["disambiguation_pending"] is False
         assert r["transaction_payload"] == {"__reset__": True}, "purge transactionnelle attendue"
 
     def test_interruption_overriding_menu_marks_interruption_detected(self):
         r = gp(
-            current_goal="DISAMBIGUATION_PENDING",
+            current_goal=None,
             interpreted_event="INTERRUPTION",
             detected_intent="BUYER_REQUEST",
-            working_memory={"disambiguation_pending": True},
+            pending_interaction=self._disambiguation_pending_interaction(),
             user_role="BUYER",
         )
         assert r["current_goal"] == "BUYER_REQUEST"
         assert r["interruption_detected"] is True
 
+    def test_previous_real_business_goal_survives_while_menu_is_pending(self):
+        """(Blocker B) Si la désambiguïsation a interrompu un tunnel réel
+        (`current_goal` porte encore ce goal, PAS un pseudo-goal), une
+        intention confiante concurrente doit quand même pouvoir le
+        remplacer — la présence d'un vrai goal antérieur ne doit jamais
+        bloquer la résolution du menu."""
+        r = gp(
+            current_goal="SALES_PUBLISH_PRODUCT",
+            interpreted_event="NEW_TASK",
+            detected_intent="BUYER_REQUEST",
+            pending_interaction=self._disambiguation_pending_interaction(),
+        )
+        assert r["current_goal"] == "BUYER_REQUEST"
+
     def test_selection_by_index_resolves_to_mapped_goal(self):
         r = gp(
-            current_goal="DISAMBIGUATION_PENDING",
+            current_goal=None,
             interpreted_event="SELECTION",
             extracted_entities={"selection_index": 1},
             available_mapping={"1": "SALES_PUBLISH_PRODUCT", "2": "DECLARE_CROP_CYCLE"},
-            working_memory={"disambiguation_pending": True},
+            pending_interaction=self._disambiguation_pending_interaction(),
         )
         assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
         assert get_pending_interaction(r).kind == InteractionKind.NONE
-        assert r["working_memory"]["disambiguation_pending"] is False
 
     def test_selection_by_text_value_resolves(self):
         """`selected_value` est cherché comme CLÉ de la mappe (pas comme
         valeur) — ex: le texte que l'utilisateur a tapé/cliqué."""
         r = gp(
-            current_goal="DISAMBIGUATION_PENDING",
+            current_goal=None,
             interpreted_event="SELECTION",
             extracted_entities={"selected_value": "vente"},
             available_mapping={"vente": "SALES_PUBLISH_PRODUCT"},
-            working_memory={"disambiguation_pending": True},
+            pending_interaction=self._disambiguation_pending_interaction(),
         )
         assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
 
     def test_invalid_selection_index_keeps_menu_active(self):
         """Un index hors de la mappe ne fait PAS s'effondrer le tunnel — le
-        menu reste affiché pour une nouvelle tentative."""
+        menu reste affiché pour une nouvelle tentative. `current_goal` en
+        sortie porte le shim de compatibilité `validator` (jamais lu pour le
+        contrôle de flux — voir `pending_interaction` ci-dessous, qui est le
+        SEUL signal qui redéclenchera cette règle au tour suivant)."""
         r = gp(
-            current_goal="DISAMBIGUATION_PENDING",
+            current_goal=None,
             interpreted_event="SELECTION",
             extracted_entities={"selection_index": 99},
             available_mapping={"1": "SALES_PUBLISH_PRODUCT"},
-            working_memory={"disambiguation_pending": True},
+            pending_interaction=self._disambiguation_pending_interaction(),
         )
         assert r["current_goal"] == "DISAMBIGUATION_PENDING"
         assert get_pending_interaction(r).kind == InteractionKind.SELECTION_MENU
+        assert get_pending_interaction(r).context_ref == "intent_disambiguation"
         assert r["response_strategy"] == "SELECTION_MENU"
 
     def test_no_selection_yet_keeps_menu_active(self):
         r = gp(
-            current_goal="DISAMBIGUATION_PENDING",
+            current_goal=None,
             interpreted_event="UNKNOWN",
-            working_memory={"disambiguation_pending": True},
+            pending_interaction=self._disambiguation_pending_interaction(),
         )
         assert r["current_goal"] == "DISAMBIGUATION_PENDING"
-        assert r["working_memory"]["disambiguation_pending"] is True
+        assert get_pending_interaction(r).context_ref == "intent_disambiguation"
 
     def test_stale_mapping_is_rebuilt_from_trigger_id(self):
         """Régression : un `available_mapping` périmé (d'un AUTRE menu affiché
@@ -117,27 +158,29 @@ class TestRule0bisDisambiguation:
         first_candidate = entry["options"][0][0]
 
         r = gp(
-            current_goal="DISAMBIGUATION_PENDING",
+            current_goal=None,
             interpreted_event="SELECTION",
             extracted_entities={"selection_index": 1},
             available_mapping={"1": "UN_GOAL_PERIME_SANS_RAPPORT"},
-            working_memory={"disambiguation_pending": True, "disambiguation_trigger_id": trigger_id},
+            working_memory={"disambiguation_trigger_id": trigger_id},
+            pending_interaction=self._disambiguation_pending_interaction(),
         )
         assert r["current_goal"] == first_candidate
 
-    def test_disambiguation_pending_pseudo_goal_is_restored_across_turns(self):
-        """`post_response_cleanup` remet `current_goal` à None entre deux
-        tours mais laisse survivre `working_memory.disambiguation_pending` —
-        c'est ce flag qui doit reconstituer le pseudo-goal
-        DISAMBIGUATION_PENDING ici, sinon la réponse de l'utilisateur au menu
-        ("2") arrive avec `current_goal=None` et la RÈGLE 0bis ne se
-        déclenche jamais (menu réaffiché en boucle)."""
+    def test_pending_interaction_is_the_sole_cross_turn_signal_no_working_memory_flag_needed(self):
+        """(Blocker B) Avant ce correctif, `working_memory.disambiguation_pending`
+        devait reconstituer le pseudo-goal car `current_goal` seul ne
+        survivait pas de façon fiable. `pending_interaction` étant DURABLE
+        nativement (voir nodes/cleanup.py::keep_selection_channel), la
+        résolution doit fonctionner SANS ce flag — `current_goal=None` et
+        `working_memory={}` (aucune trace du flag legacy)."""
         r = gp(
             current_goal=None,
             interpreted_event="SELECTION",
             extracted_entities={"selection_index": 1},
             available_mapping={"1": "SALES_PUBLISH_PRODUCT"},
-            working_memory={"disambiguation_pending": True},
+            working_memory={},
+            pending_interaction=self._disambiguation_pending_interaction(),
         )
         assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
 
@@ -147,12 +190,12 @@ class TestRule0bisDisambiguation:
         sélection structurée), cette intention prime sur le ré-affichage du
         menu — évite de forcer un utilisateur déjà clair à choisir un numéro."""
         r = gp(
-            current_goal="DISAMBIGUATION_PENDING",
+            current_goal=None,
             interpreted_event="ANSWER",
             detected_intent="SALES_PUBLISH_PRODUCT",
             extracted_entities={},
             available_mapping={"1": "DECLARE_CROP_CYCLE"},
-            working_memory={"disambiguation_pending": True},
+            pending_interaction=self._disambiguation_pending_interaction(),
         )
         assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
 
@@ -168,16 +211,30 @@ class TestRule0bisDisambiguation:
             {"options": [{"intent": "SALES_PUBLISH_PRODUCT"}, {"intent": "DECLARE_CROP_CYCLE"}]},
         )
         r = gp(
-            current_goal="DISAMBIGUATION_PENDING",
+            current_goal=None,
             interpreted_event="SELECTION",
             extracted_entities={"selection_index": 1},
             available_mapping={},
-            working_memory={
-                "disambiguation_pending": True,
-                "disambiguation_trigger_id": "TEST_TRIGGER_DICT_FORM",
-            },
+            working_memory={"disambiguation_trigger_id": "TEST_TRIGGER_DICT_FORM"},
+            pending_interaction=self._disambiguation_pending_interaction(),
         )
         assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
+
+    def test_a_cart_selection_menu_never_triggers_disambiguation_resolution(self):
+        """Garde-fou de non-confusion : un AUTRE menu `SELECTION_MENU`
+        (ex: sélection panier générique, `context_ref` différent) ne doit
+        jamais être traité comme une désambiguïsation d'intention, même si
+        `current_goal` est vide et qu'un `available_mapping` existe."""
+        r = gp(
+            current_goal=None,
+            interpreted_event="SELECTION",
+            extracted_entities={"selection_index": 1},
+            available_mapping={"1": "SALES_PUBLISH_PRODUCT"},
+            pending_interaction=self._disambiguation_pending_interaction(
+                context_ref="some_other_menu"
+            ),
+        )
+        assert r["current_goal"] != "SALES_PUBLISH_PRODUCT"
 
 
 # =====================================================================
@@ -331,7 +388,25 @@ class TestRule1terDefaultPersistence:
 # =====================================================================
 
 class TestRule1quaterNewTaskDuringSlot:
-    def test_confident_new_task_on_soft_slot_switches_and_pushes_stack(self):
+    """(2026-09-09, audit Bloc 2) : `cognitive_guard` (Bloc 1, gelé) est
+    l'UNIQUE autorité qui décide si une intention concurrente est assez
+    confiante pour interrompre — voir nodes/cognitive.py,
+    `_DISAMBIGUATION_CONFIDENCE_THRESHOLD` (0.85). Il ne promeut
+    `interpreted_event` en `"INTERRUPTION"` QUE s'il approuve. Si goal_planner
+    reçoit encore `"NEW_TASK"` ici, c'est que `cognitive_guard` a DÉJÀ refusé
+    — aucune confiance, même 1.0, ne doit pouvoir renverser ce refus (c'était
+    le bug : un second seuil, plus bas, ici même, contredisait le premier).
+    Seule une intention de « breakout » critique (liste fermée, indépendante
+    de la confiance — voir core/goals.py::NAVIGATION_BREAKOUT_GOALS) garde le
+    droit de casser le tunnel sans repasser par `cognitive_guard`."""
+
+    def test_high_confidence_new_task_on_soft_slot_still_stays_locked(self):
+        """Anti-régression du bug trouvé à l'audit : ce scénario est
+        INATTEIGNABLE en production (confiance 0.9 >= 0.85 aurait déjà fait
+        promouvoir l'événement en "INTERRUPTION" par cognitive_guard) — mais
+        si goal_planner le reçoit quand même tel quel (ex. appel direct,
+        test, régression de la promotion), il ne doit PAS improviser sa
+        propre décision d'interruption à partir de la confiance seule."""
         r = gp(
             interpreted_event="NEW_TASK",
             detected_intent="BUYER_REQUEST",
@@ -340,10 +415,8 @@ class TestRule1quaterNewTaskDuringSlot:
             expected_input="PRODUCT",       # slot SOFT
             working_memory={"active_goal": "SALES_PUBLISH_PRODUCT"},
         )
-        assert r["current_goal"] == "BUYER_REQUEST"
-        assert r["goal_stack"] == ["SALES_PUBLISH_PRODUCT"]
-        assert r["suspended_goal"] == "SALES_PUBLISH_PRODUCT"
-        assert r["transaction_payload"] == {"__reset__": True}
+        assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
+        assert r["goal_status"] == "WAITING_INPUT"
 
     def test_low_confidence_new_task_stays_locked(self):
         r = gp(
@@ -357,17 +430,41 @@ class TestRule1quaterNewTaskDuringSlot:
         assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
         assert r["goal_status"] == "WAITING_INPUT"
 
-    def test_new_task_on_hard_slot_never_switches_at_low_confidence(self):
-        """CONFIRMATION est un slot dur : seule une confiance suffisante casse."""
+    def test_new_task_on_hard_slot_never_switches_regardless_of_confidence(self):
+        """CONFIRMATION est un slot dur : NEW_TASK ne le casse plus jamais
+        (seule une INTERRUPTION déjà approuvée par cognitive_guard, ou une
+        intention de breakout critique, le pourrait — voir les classes
+        dédiées)."""
         r = gp(
             interpreted_event="NEW_TASK",
             detected_intent="BUYER_REQUEST",
-            interpreter_confidence=0.30,
+            interpreter_confidence=0.99,
             current_goal="SALES_PUBLISH_PRODUCT",
             expected_input="CONFIRMATION",
             working_memory={"active_goal": "SALES_PUBLISH_PRODUCT"},
         )
         assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
+
+    def test_a_breakout_intent_alone_no_longer_switches_the_goal_here(self):
+        """(2026-09-09, Bloc 2 passe finale — Invariant A) : contrat CHANGE.
+        Le planner ne decide plus JAMAIS d'interrompre : atteindre cette
+        regle avec `event == "NEW_TASK"` prouve que `cognitive_guard` a
+        refuse l'interruption (sinon l'evenement serait "INTERRUPTION").
+        Une intention de breakout presentee directement au planner, sans
+        decision amont, ne casse donc plus rien — comportement VOULU, pas
+        une perte : le chemin reel (cognitive_guard -> goal_planner) est
+        prouve de bout en bout dans
+        `tests/architecture/test_interruption_ownership.py`."""
+        r = gp(
+            interpreted_event="NEW_TASK",
+            detected_intent="BUYER_VIEW_CART",
+            interpreter_confidence=0.0,
+            current_goal="SALES_PUBLISH_PRODUCT",
+            expected_input="PRODUCT",
+            working_memory={"active_goal": "SALES_PUBLISH_PRODUCT"},
+        )
+        assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
+        assert "suspended_goal" not in r
 
 
 # =====================================================================
@@ -572,6 +669,27 @@ class TestRule5NewTask:
             current_goal=None,
         )
         assert r["response_strategy"] == "CLARIFICATION"
+
+    def test_purge_clears_stale_finalized_transactional_drafts(self):
+        """Bug réel en production (2026-09-09) : un `SALES_PUBLISH_PRODUCT`
+        déjà PUBLISHED pour un produit A restait dans `sales_publish_draft`
+        (jamais purgé nulle part) — une nouvelle demande de publication pour
+        un produit B, sans rapport, réutilisait ce draft déjà finalisé
+        (`confirmation_gate.py` recharge inconditionnellement tout draft
+        présent) et se heurtait à "Cette publication est déjà publiée —
+        rien à modifier ici." au lieu de démarrer une publication propre.
+        Même schéma partagé par `procurement_draft`/`preorder_draft`."""
+        r = gp(
+            interpreted_event="NEW_TASK",
+            detected_intent="SALES_PUBLISH_PRODUCT",
+            current_goal=None,
+            sales_publish_draft={"draft_id": "stale-a", "status": "PUBLISHED"},
+            procurement_draft={"draft_id": "stale-b", "status": "EXECUTED"},
+            preorder_draft={"draft_id": "stale-c", "status": "EXECUTED"},
+        )
+        assert r["sales_publish_draft"] is None
+        assert r["procurement_draft"] is None
+        assert r["preorder_draft"] is None
 
 
 # =====================================================================

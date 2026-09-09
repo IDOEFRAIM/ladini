@@ -259,7 +259,41 @@ _EXPECTED_INPUT_MAP: Dict[str, str] = {
     # `expected_input=NONE` : aucun indice de slot pour l'interpréteur et slot
     # non ré-interrogeable. Détecté par tests/architecture.
     "movement_type": "MOVEMENT_TYPE",
+    # (2026-09-09, audit Bloc 2, Blocker D) : `DECLARE_CROP_CYCLE` le requiert
+    # (voir interpreter/intent.py) et `domain/agro.py`/rendering le
+    # consomment déjà — absent d'ici, il retombait sur `expected_input=NONE`
+    # ET, plus grave, était absent de `nodes/memory.py::
+    # _EXPECTED_INPUT_ALLOWED_FIELDS["DATE"]` alors qu'il y était pourtant
+    # référencé À LA MAIN (double dérive) : la table dérivée
+    # (`fields_for_expected_input`, plus bas) le couvre maintenant par
+    # construction, plus de copie manuelle qui peut décrocher.
+    "expected_harvest_date": "DATE",
 }
+
+# ---------------------------------------------------------------------------
+# Reverse lookup — quels CHAMPS sont légitimement attendus pour une catégorie
+# `expected_input` donnée (2026-09-09, audit Bloc 2, Blocker D). Dérivé de
+# `_EXPECTED_INPUT_MAP` ci-dessus (même source, sens inverse) — évite que
+# `nodes/memory.py::_EXPECTED_INPUT_ALLOWED_FIELDS` maintienne sa propre
+# copie manuelle susceptible de dériver (c'était le cas : `production_type`
+# et `surface` mappent bien vers PRODUCT/QUANTITY ci-dessus mais étaient
+# absents de l'allowlist à la main dans memory.py — une réponse dégradée au
+# slot production_type/surface EXACTEMENT demandé se faisait donc
+# silencieusement jeter par son propre garde-fou anti-hallucination).
+_EXPECTED_INPUT_TO_FIELDS: Dict[str, FrozenSet[str]] = {}
+for _field_name, _category in _EXPECTED_INPUT_MAP.items():
+    _EXPECTED_INPUT_TO_FIELDS[_category] = _EXPECTED_INPUT_TO_FIELDS.get(
+        _category, frozenset()
+    ) | {_field_name}
+del _field_name, _category
+
+
+def fields_for_expected_input(category: str) -> FrozenSet[str]:
+    """Réciproque de `expected_input_for_field` : l'ensemble des champs
+    canoniques légitimement répondus quand cette catégorie `expected_input`
+    est celle actuellement en attente. Source unique — voir
+    `_EXPECTED_INPUT_MAP` ci-dessus."""
+    return _EXPECTED_INPUT_TO_FIELDS.get(str(category or "").upper().strip(), frozenset())
 
 # Ensemble CANONIQUE des `expected_input` qui représentent un CHAMP MÉTIER à
 # collecter auprès de l'utilisateur (« soft slots » : on peut y re-demander le
@@ -353,6 +387,7 @@ __all__ = [
     "is_blocking_slot",
     "get_slot_hint",
     "expected_input_for_field",
+    "fields_for_expected_input",
     "field_priority",
     "build_remap_dict",
     "build_alias_mirrors",

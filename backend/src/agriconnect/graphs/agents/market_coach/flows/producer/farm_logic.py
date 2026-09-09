@@ -168,10 +168,29 @@ async def ensure_farm_node(
         except Exception as exc:  # pragma: no cover - log only
             logger.error("[AutoFarm] get_or_create_farm a échoué: %s", exc)
             updates["error_creating_farm"] = True
+            updates["status"] = "WAITING_INPUT"
+            updates["response_strategy"] = "CLARIFICATION"
+            updates["final_response"] = (
+                "Je n'ai pas pu configurer votre exploitation pour le moment. "
+                "Réessayez dans un instant, ou précisez le nom d'une exploitation "
+                "existante."
+            )
             return updates
 
     if not farm_id:
+        # (P0-2, audit architectural 2026-09-08) : ce cas ne posait jusqu'ici
+        # NI `status` NI `final_response` — l'edge fixe vers `confirmation_gate`
+        # laissait alors passer un tour sans farm_id résolu, sans jamais
+        # informer l'utilisateur. Symétrique avec la branche d'exception
+        # ci-dessus : même échec (aucun id obtenu), même traitement.
         updates["error_creating_farm"] = True
+        updates["status"] = "WAITING_INPUT"
+        updates["response_strategy"] = "CLARIFICATION"
+        updates["final_response"] = (
+            "Je n'ai pas pu configurer votre exploitation pour le moment. "
+            "Réessayez dans un instant, ou précisez le nom d'une exploitation "
+            "existante."
+        )
         return updates
 
     payload["farm_id"] = farm_id

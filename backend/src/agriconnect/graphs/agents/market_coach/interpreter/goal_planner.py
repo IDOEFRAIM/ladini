@@ -11,11 +11,16 @@ import re as _re
 from typing import Any, Dict, Optional
 
 from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    DISAMBIGUATION_MENU_GOAL_SHIM,
     InteractionKind,
     clear_pending_interaction,
     get_pending_interaction,
     set_pending_interaction,
     to_tunnel_category,
+)
+from agriconnect.graphs.agents.market_coach.core.state import resolve_current_goal
+from agriconnect.graphs.agents.market_coach.core.conversation_decision import (
+    ConversationAction,
 )
 from agriconnect.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
 from agriconnect.graphs.agents.market_coach.interpreter.intent import (
@@ -39,7 +44,10 @@ logger = logging.getLogger("AgriConnect.Market.GoalPlanner")
 
 # Verrous de tunnel propres au goal_planner (≠ clés de menu). L'union purgée
 # sur REJECT = ces verrous + tout l'état de menu/sélection (importé ci-dessus).
-_TUNNEL_LOCK_KEYS = ("active_goal", "locked_intent", "step_index")
+# (2026-09-08) `locked_intent` retiré — pur doublon de `active_goal`, écrit à
+# l'identique sur CHAQUE site (audit : aucune divergence trouvée nulle part
+# dans le repo) — voir `core/state.py::resolve_current_goal`.
+_TUNNEL_LOCK_KEYS = ("active_goal", "step_index")
 _GOAL_LOCK_CLEAR_KEYS = (*_TUNNEL_LOCK_KEYS, *_MENU_SELECTION_KEYS, *_MENU_CACHE_KEYS)
 
 
@@ -48,7 +56,12 @@ _GOAL_LOCK_CLEAR_KEYS = (*_TUNNEL_LOCK_KEYS, *_MENU_SELECTION_KEYS, *_MENU_CACHE
 INTENT_TO_GOAL_MAP: Dict[str, str] = {}
 
 # Alias de compat — source canonique : core/goals.py (flag `breakout`
-# d'INTENT_CONFIG). Même ensemble que TunnelManager.CRITICAL_BREAKOUT_INTENTS.
+# d'INTENT_CONFIG). Re-export SANS decision : depuis 2026-09-09 (Bloc 2,
+# Invariant A) le SEUL consommateur decisionnel de cet ensemble est
+# `nodes/cognitive.py` (interruption). Ici il ne sert qu'a `interpreter/
+# routing.py::make_route_after_validator`, qui l'importe depuis ce module
+# pour un usage DIFFERENT (tolerance aux missing_fields sur un goal de
+# navigation), jamais pour decider d'une interruption.
 from agriconnect.graphs.agents.market_coach.core.goals import (  # noqa: E402
     NAVIGATION_BREAKOUT_GOALS as _NAVIGATION_INTENTS,
 )
@@ -171,22 +184,7 @@ async def goal_planner(
     event = str(state.get("interpreted_event") or "UNKNOWN").upper()
     detected_intent = str(state.get("detected_intent") or "UNKNOWN").upper()
     working = state.get("working_memory") or {}
-    current_goal = (
-        state.get("current_goal")
-        or working.get("active_goal")
-        or working.get("locked_intent")
-    )
-    # Restauration du pseudo-goal DISAMBIGUATION_PENDING entre deux tours.
-    # `_lock` (plus bas) refuse volontairement de verrouiller ce pseudo-goal dans
-    # working_memory.active_goal, et post_response_cleanup remet current_goal à
-    # None. Résultat : la réponse de l'utilisateur au menu ("2") arrivait avec
-    # current_goal=None → la RÈGLE 0bis ne se déclenchait pas → menu ré-affiché en
-    # boucle ("Que souhaitez-vous choisir ?"). Le flag working_memory
-    # .disambiguation_pending, lui, SURVIT (keep_selection_channel dans cleanup) :
-    # on s'en sert pour reconstituer le pseudo-goal et laisser la RÈGLE 0bis
-    # résoudre la sélection.
-    if not current_goal and working.get("disambiguation_pending"):
-        current_goal = "DISAMBIGUATION_PENDING"
+    current_goal = resolve_current_goal(state)
     # (2026-09-02, refonte "no legacy shim") : `expected_input` n'est plus lu
     # depuis `state` — dérivé de `pending_interaction`, seule source
     # canonique, via `to_tunnel_category` (traduction vers le vocabulaire
@@ -194,7 +192,29 @@ async def goal_planner(
     # Un seul point de traduction : tout le reste de cette fonction (in_tunnel,
     # libellés de statut, les deux appels tunnel_manager.evaluate ci-dessous)
     # consomme cette même variable, plus jamais `state.get("expected_input")`.
-    expected_input = to_tunnel_category(get_pending_interaction(state))
+    pending_interaction = get_pending_interaction(state)
+    expected_input = to_tunnel_category(pending_interaction)
+    # (2026-09-09, audit Bloc 2, fermeture Blocker B) : la RÈGLE 0bis
+    # ci-dessous se déclenche désormais EXCLUSIVEMENT sur ce signal —
+    # `pending_interaction` (DURABLE, survit nativement au checkpoint, voir
+    # nodes/cleanup.py::keep_selection_channel) — jamais plus sur un pseudo-
+    # goal écrit dans `current_goal`. Avant ce correctif, `current_goal`
+    # servait de DEUXIÈME canal pour la même information (« une
+    # désambiguïsation est en cours »), avec son propre mécanisme de
+    # restauration cross-tour (`working_memory.disambiguation_pending`) —
+    # une source de vérité concurrente à `pending_interaction`, exactement
+    # la classe de fragmentation que ce module a éliminée pour tout le
+    # reste (voir docstring de `core/pending_interaction.py`). Conséquence
+    # positive : `current_goal` porte maintenant, PENDANT la désambiguïsation,
+    # le vrai business goal antérieur (celui du tunnel interrompu pour
+    # déclencher le menu), ou `None` s'il n'y en avait aucun — plus jamais un
+    # pseudo-goal, sauf dans le patch de SORTIE du cas "sélection toujours en
+    # attente" ci-dessous (shim de compatibilité `validator`, documenté sur
+    # `DISAMBIGUATION_MENU_GOAL_SHIM`).
+    in_disambiguation_menu = (
+        pending_interaction.kind == InteractionKind.SELECTION_MENU
+        and pending_interaction.context_ref == "intent_disambiguation"
+    )
     goal_stack = list(state.get("goal_stack") or [])
     in_tunnel = bool(current_goal and expected_input and expected_input != "NONE")
     text = (
@@ -236,9 +256,8 @@ async def goal_planner(
         goal: Optional[str], extra: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         wm = dict(working)
-        if goal and goal != "DISAMBIGUATION_PENDING":
+        if goal and goal != DISAMBIGUATION_MENU_GOAL_SHIM:
             wm["active_goal"] = goal
-            wm["locked_intent"] = goal
             wm.setdefault("step_index", 0)
         if extra:
             wm.update(extra)
@@ -290,6 +309,28 @@ async def goal_planner(
             "active_form": None,
             "form_step": None,
             "form_data": {"__reset__": True},
+            # (2026-09-09, bug réel en production — audit Bloc 2) : les 3
+            # drafts transactionnels (`replace_value`, jamais `merge_dict` —
+            # voir core/state.py) n'étaient JAMAIS purgés ici. Incident
+            # confirmé : un `SALES_PUBLISH_PRODUCT` déjà mené à terme
+            # (`sales_publish_draft.status == PUBLISHED`) pour un produit A
+            # restait posé dans l'état ; une nouvelle demande de publication,
+            # sans rapport, pour un produit B ("je veux vendre mon lait")
+            # atteignait `confirmation_gate.py::_resolve_sales_draft_based_
+            # confirmation`, qui réutilise INCONDITIONNELLEMENT tout draft
+            # déjà présent (`if state.get("sales_publish_draft") is not
+            # None: ...`, sans jamais vérifier qu'il correspond au produit en
+            # cours) — la tentative pour B se heurtait au draft FINALISÉ de A
+            # ("Cette publication est déjà publiée — rien à modifier ici.").
+            # Même schéma partagé par `procurement_draft`/`preorder_draft`
+            # (voir `confirmation_gate.py::_resolve_draft_based_confirmation`,
+            # strictement le même `if ... is not None: reuse` sans contrôle
+            # de correspondance) — les trois sont donc purgés symétriquement
+            # ici, au même titre que `draft_payload`/`vendor_selection_context`
+            # ci-dessus, sur tout VRAI changement de goal.
+            "procurement_draft": None,
+            "preorder_draft": None,
+            "sales_publish_draft": None,
             # (2026-09-02) Politique d'invalidation centralisée (mandat §8) :
             # un switch de goal/intention efface aussi le discriminant
             # canonique — sans ceci, un `pending_interaction` persisté
@@ -303,14 +344,7 @@ async def goal_planner(
     ) -> Dict[str, Any]:
         target_goal = goal_hint
         if target_goal is None:
-            target_goal = payload.get("current_goal")
-            if not target_goal:
-                wm_payload = payload.get("working_memory") or {}
-                target_goal = (
-                    wm_payload.get("active_goal")
-                    or wm_payload.get("locked_intent")
-                    or state.get("current_goal")
-                )
+            target_goal = resolve_current_goal(payload) or state.get("current_goal")
         goal_key = str(target_goal or "").upper().strip()
         cfg = INTENT_CONFIG.get(goal_key, {})
         lifecycle = str(cfg.get("lifecycle_mode") or "").upper().strip()
@@ -323,12 +357,12 @@ async def goal_planner(
         return payload
 
     # RÈGLE 0bis — RÉSOLUTION DE DÉSAMBIGUÏSATION
-    if current_goal == "DISAMBIGUATION_PENDING":
+    if in_disambiguation_menu:
         override_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
         if (
             event in {"INTERRUPTION", "NEW_TASK"}
             and override_goal
-            and override_goal != "DISAMBIGUATION_PENDING"
+            and override_goal != DISAMBIGUATION_MENU_GOAL_SHIM
         ):
             logger.info(
                 "[Disambiguation Override] event=%s intent=%s -> current_goal=%s",
@@ -395,7 +429,7 @@ async def goal_planner(
         if (
             resolved_intent is None
             and detected_intent in INTENT_TO_GOAL_MAP
-            and detected_intent not in {"", "UNKNOWN", "DISAMBIGUATION_PENDING"}
+            and detected_intent not in {"", "UNKNOWN", DISAMBIGUATION_MENU_GOAL_SHIM}
         ):
             resolved_intent = detected_intent
 
@@ -425,12 +459,16 @@ async def goal_planner(
                 resolved_intent,
             )
         # Sélection invalide ou pas encore reçue : on garde le menu actif.
-        updates["current_goal"] = "DISAMBIGUATION_PENDING"
+        # `current_goal` ci-dessous n'est PLUS le signal qui redéclenchera
+        # cette règle au tour suivant (c'est `pending_interaction`,
+        # réaffirmé juste en dessous, qui en est responsable) — c'est
+        # désormais un pur shim de compatibilité pour `validator`/
+        # `DomainRouter` (gelés), voir `DISAMBIGUATION_MENU_GOAL_SHIM`.
+        updates["current_goal"] = DISAMBIGUATION_MENU_GOAL_SHIM
         updates["goal_status"] = "WAITING_INPUT"
         updates.update(
             set_pending_interaction(
                 InteractionKind.SELECTION_MENU,
-                goal="DISAMBIGUATION_PENDING",
                 context_ref="intent_disambiguation",
             )
         )
@@ -513,35 +551,15 @@ async def goal_planner(
         and event == "NEW_TASK"
         and expected_input not in (None, "", "NONE")
     ):
-        confidence = float(state.get("interpreter_confidence") or 0.0)
-        td = tunnel_manager.evaluate(
-            current_goal=current_goal,
-            expected_input=expected_input,
-            incoming_event=event,
-            incoming_intent=detected_intent,
-            confidence=confidence,
-        )
-        if td.allow_interrupt:
-            new_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
-            if new_goal:
-                if current_goal:
-                    goal_stack.append(current_goal)
-                updates["current_goal"] = new_goal
-                updates["goal_status"] = "ACTIVE"
-                updates["interruption_detected"] = True
-                updates["suspended_goal"] = current_goal
-                updates["suspended_payload"] = state.get("transaction_payload") or {}
-                updates["goal_stack"] = goal_stack
-                updates["working_memory"] = _lock(new_goal)
-                updates.update(_purge_transaction_state())
-                logger.info(
-                    "[GoalPlanner] TunnelManager allowed NEW_TASK switch: %s → %s (reason=%s)",
-                    current_goal,
-                    new_goal,
-                    td.reason,
-                )
-                return _with_goal_metadata(updates)
-        # Tunnel stays locked — re-assert current goal.
+        # (2026-09-09, Bloc 2 passe finale — Invariant A) : ce bloc
+        # interrogeait `tunnel_manager.evaluate()` pour savoir s'il pouvait
+        # basculer de goal. Il ne le fait plus : atteindre CE point avec
+        # `event == "NEW_TASK"` signifie par construction que
+        # `cognitive_guard` — seul propriétaire de la décision — a REFUSÉ
+        # d'interrompre (s'il avait approuvé, il aurait réécrit l'événement
+        # en "INTERRUPTION", traité par la RÈGLE 4). Réinterroger un second
+        # arbitre ici ne pouvait que contredire ce refus. Le planner APPLIQUE
+        # la décision : tunnel verrouillé.
         updates["current_goal"] = current_goal
         updates["detected_intent"] = str(current_goal).upper()
         updates["goal_status"] = "WAITING_INPUT"
@@ -577,12 +595,27 @@ async def goal_planner(
     # RÈGLE 4 — INTERRUPTION (Suspension d'un workflow IHM en cours)
     if event == "INTERRUPTION":
         confidence = float(state.get("interpreter_confidence") or 0.0)
+        # (2026-09-09, Bloc 2 passe finale — Invariant A) : `policy_approved`
+        # relaie la décision DÉJÀ prise par `cognitive_guard`
+        # (`cognitive_decision.action == INTERRUPT_ACTIVE_GOAL`) — le planner
+        # ne la rejuge pas, il la transmet. `TunnelManager` ne conserve alors
+        # que son droit d'INTERDICTION structurelle (OTP inviolable).
+        # Une INTERRUPTION produite AILLEURS que par `cognitive_guard`
+        # (`input_interpreter` en émet une lors d'une dérive pendant
+        # SELECTION/CONFIRMATION, Bloc 1 gelé) arrive ici avec
+        # `policy_approved=False` : elle reste soumise au seuil de confiance
+        # historique de `TunnelManager`, comportement inchangé.
+        policy_approved = (
+            str((state.get("cognitive_decision") or {}).get("action") or "")
+            == ConversationAction.INTERRUPT_ACTIVE_GOAL
+        )
         td = tunnel_manager.evaluate(
             current_goal=current_goal,
             expected_input=expected_input,
             incoming_event=event,
             incoming_intent=detected_intent,
             confidence=confidence,
+            policy_approved=policy_approved,
         )
         new_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
         # `allow_interrupt` protège un tunnel ACTIF d'un déraillement. S'il n'y

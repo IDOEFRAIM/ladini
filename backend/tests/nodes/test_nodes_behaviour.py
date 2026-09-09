@@ -14,9 +14,7 @@ from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
 from agriconnect.graphs.agents.market_coach.nodes.validation import validator
 from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
 from agriconnect.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
-from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import (
-    semantic_disambiguation,
-)
+from agriconnect.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
 from agriconnect.graphs.agents.market_coach.flows.buyer.helpers import (
     clear_active_goal,
     detect_cart_action,
@@ -329,7 +327,16 @@ class TestPrimaryModelMultiSlotFilling:
 class TestDisambiguation:
     """Bug : le garde de confiance était inopérant (`conf >= s AND
     len(candidats) < 2`, or toute entrée a >= 2 candidats) — des indices
-    lexicaux figés détournaient TOUJOURS une classification LLM sûre."""
+    lexicaux figés détournaient TOUJOURS une classification LLM sûre.
+
+    (2026-09-08, correction topologique du bloc conversationnel) : cette
+    décision (« faut-il désambiguïser ? ») a été DÉPLACÉE de
+    `semantic_disambiguation` (devenu un pur exécuteur, voir
+    `tests/nodes/test_semantic_disambiguation.py`) vers `cognitive_guard`,
+    son nouveau et unique propriétaire (`nodes/cognitive.py::
+    _classify_nominal_action`). Ces 3 scénarios — préservés à l'identique,
+    seule la cible de `_run` a changé — vérifient maintenant
+    `cognitive_decision.action` plutôt qu'un menu déjà construit."""
 
     def _run(self, text, intent, conf):
         st = make_state(
@@ -337,7 +344,7 @@ class TestDisambiguation:
             expected_input="NONE", normalized_text=text,
             detected_intent=intent, user_role="PRODUCER",
         )
-        return run(semantic_disambiguation(st, None))
+        return run(cognitive_guard(st, None))
 
     @pytest.mark.parametrize("text,intent", [
         ("j ai 200 kg de tomates a vendre", "SALES_PUBLISH_PRODUCT"),
@@ -345,15 +352,15 @@ class TestDisambiguation:
     ])
     def test_confident_llm_is_not_overridden_by_menu(self, text, intent):
         r = self._run(text, intent, 0.90)
-        assert r == {} or r.get("current_goal") != "DISAMBIGUATION_PENDING"
+        assert r["cognitive_decision"]["action"] != "DISAMBIGUATE"
 
     def test_uncertain_llm_still_gets_a_menu(self):
         r = self._run("j ai 200 kg de tomates", "SALES_PUBLISH_PRODUCT", 0.55)
-        assert r.get("current_goal") == "DISAMBIGUATION_PENDING"
+        assert r["cognitive_decision"]["action"] == "DISAMBIGUATE"
 
     def test_unknown_intent_still_gets_a_menu(self):
         r = self._run("j ai des trucs", "UNKNOWN", 0.30)
-        assert r.get("current_goal") == "DISAMBIGUATION_PENDING"
+        assert r["cognitive_decision"]["action"] == "DISAMBIGUATE"
 
 
 # =====================================================================

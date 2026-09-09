@@ -44,6 +44,7 @@ _FIELDS: Tuple[FieldSpec, ...] = (
     # ── 1. RAW INPUT LAYER ────────────────────────────────────────
     FieldSpec("user_query", FieldLifecycle.DURABLE),
     FieldSpec("normalized_text", FieldLifecycle.EPHEMERAL, reset_value=None),
+    FieldSpec("input_truncated", FieldLifecycle.EPHEMERAL, reset_value=False),
     FieldSpec("detected_language", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec("translated_text", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec("audio_file_path", FieldLifecycle.EPHEMERAL, reset_value=None),
@@ -52,7 +53,6 @@ _FIELDS: Tuple[FieldSpec, ...] = (
     # ── 2. USER / SESSION CONTEXT ─────────────────────────────────
     FieldSpec("user_phone", FieldLifecycle.DURABLE),
     FieldSpec("session_id", FieldLifecycle.DURABLE),
-    FieldSpec("role", FieldLifecycle.DURABLE),
     FieldSpec("user_role", FieldLifecycle.DURABLE),
     FieldSpec("user_name", FieldLifecycle.DURABLE),
     FieldSpec("zone_name", FieldLifecycle.DURABLE),
@@ -70,14 +70,30 @@ _FIELDS: Tuple[FieldSpec, ...] = (
     # ── 3. SECURITY / TRUST ───────────────────────────────────────
     FieldSpec("security_status", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec("security_reason", FieldLifecycle.EPHEMERAL, reset_value=None),
+    FieldSpec("security_decision", FieldLifecycle.EPHEMERAL, reset_value=None),
+    # (2026-09-08, clôture Bloc 1, mandat §6) — voir core/state.py.
+    FieldSpec("security_degraded", FieldLifecycle.EPHEMERAL, reset_value=None),
+    FieldSpec("security_degraded_reason", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec("trust_score", FieldLifecycle.DURABLE),
     FieldSpec("requires_human", FieldLifecycle.EPHEMERAL, reset_value=False),
+    # (2026-09-08, P1-4 audit architectural) — voir core/state.py.
+    FieldSpec("blocked_user_query", FieldLifecycle.EPHEMERAL, reset_value=None),
+    FieldSpec("error_message", FieldLifecycle.EPHEMERAL, reset_value=None),
+    FieldSpec("technical_details", FieldLifecycle.EPHEMERAL, reset_value=None),
     # ── 4. INTERPRETER OUTPUT ─────────────────────────────────────
     FieldSpec("interpreted_event", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec("unknown_reason", FieldLifecycle.EPHEMERAL, reset_value=None),
+    FieldSpec("disambiguation_candidate", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec("detected_intent", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec("interpreter_confidence", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec("validation_status", FieldLifecycle.EPHEMERAL, reset_value=None),
+    # (2026-09-08, P1-3 audit architectural) — voir core/state.py.
+    FieldSpec(
+        "slot_enrichment_force_clarification",
+        FieldLifecycle.EPHEMERAL,
+        reset_value=None,
+    ),
+    FieldSpec("clarification_reasons", FieldLifecycle.EPHEMERAL, reset_value=None),
     FieldSpec(
         "extracted_entities", FieldLifecycle.EPHEMERAL, reset_value={"__reset__": True}
     ),
@@ -117,6 +133,21 @@ _FIELDS: Tuple[FieldSpec, ...] = (
     FieldSpec("procurement_draft", FieldLifecycle.DURABLE),
     # (2026-09-03, migration PREORDER) — même raison que procurement_draft.
     FieldSpec("preorder_draft", FieldLifecycle.DURABLE),
+    # (2026-09-08, P0-1 audit architectural) — même raison que
+    # procurement_draft/preorder_draft. Voir core/state.py pour l'incident.
+    FieldSpec("sales_publish_draft", FieldLifecycle.DURABLE),
+    # (2026-09-08, P1-4 audit architectural) : DURABLE — doit survivre au
+    # tour SUIVANT pour empêcher une seconde tentative de création tant que
+    # le même goal farm-critique n'est pas résolu. Nettoyé explicitement au
+    # goal_completed (voir nodes/cleaner.py — même bloc que
+    # transaction_payload/stable_entities), pas par un TTL générique.
+    FieldSpec("farm_creation_attempted", FieldLifecycle.DURABLE),
+    # `auto_farm_notice`/`error_creating_farm` : consommés UNE FOIS par
+    # `rendering/success.py` dans le MÊME tour où `ensure_farm_node` les
+    # produit — aucune raison de survivre au-delà, EPHEMERAL (comme
+    # `execution_result`, reset par post_response_cleanup après rendu).
+    FieldSpec("auto_farm_notice", FieldLifecycle.EPHEMERAL, reset_value=None),
+    FieldSpec("error_creating_farm", FieldLifecycle.EPHEMERAL, reset_value=False),
     FieldSpec("last_agent_question", FieldLifecycle.DURABLE),
     FieldSpec("expected_candidates", FieldLifecycle.DURABLE),
     FieldSpec("last_missing_field", FieldLifecycle.DURABLE),
@@ -129,6 +160,8 @@ _FIELDS: Tuple[FieldSpec, ...] = (
         "volatile_entities", FieldLifecycle.EPHEMERAL, reset_value={"__reset__": True}
     ),
     FieldSpec("available_mapping", FieldLifecycle.DURABLE),
+    # (2026-09-09, audit ui_engine) — voir core/state.py.
+    FieldSpec("menu_snapshot_id", FieldLifecycle.DURABLE),
     FieldSpec("pending_cleanup", FieldLifecycle.EPHEMERAL, reset_value=None),
     # ── 8. SLOT TRACKING ──────────────────────────────────────────
     FieldSpec("required_fields", FieldLifecycle.DERIVED, reset_value=[]),
@@ -179,7 +212,7 @@ _FIELDS: Tuple[FieldSpec, ...] = (
     # ── 13. SYSTEM FLAGS ──────────────────────────────────────────
     FieldSpec("status", FieldLifecycle.DURABLE),
     FieldSpec("is_locked", FieldLifecycle.EPHEMERAL, reset_value=False),
-    FieldSpec("should_replan", FieldLifecycle.EPHEMERAL, reset_value=False),
+    # (2026-09-08, P1-1) `should_replan` supprimé — voir core/state.py.
     FieldSpec("should_interrupt", FieldLifecycle.EPHEMERAL, reset_value=False),
     # ── 14. SLOT-FILLING (DRY form engine) ────────────────────────
     FieldSpec("active_form", FieldLifecycle.DURABLE),

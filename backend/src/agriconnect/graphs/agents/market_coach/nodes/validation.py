@@ -156,9 +156,7 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
 
     working_memory = state.get("working_memory") or {}
 
-    previous_goal = working_memory.get("active_goal") or working_memory.get(
-        "locked_intent"
-    )
+    previous_goal = working_memory.get("active_goal")
     prev_goal_upper = str(previous_goal or "").upper()
     goal_changed = bool(previous_goal and goal and prev_goal_upper != goal_upper)
 

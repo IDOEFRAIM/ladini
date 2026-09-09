@@ -42,6 +42,7 @@ from agriconnect.graphs.agents.market_coach.core.goals import (
     PRODUCER_RESOLVER_GOALS,
     PRODUCER_UPDATE_GOALS,
 )
+from agriconnect.graphs.agents.market_coach.core.state import resolve_current_goal
 from agriconnect.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
 from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
     DomainResult,
@@ -123,13 +124,8 @@ def _goal_domain(state: Dict[str, Any]) -> str:
     référence ; un goal "BOTH" (profil, utilitaires) ou inconnu retombe sur
     PRODUCER, comme le faisait `graphs.roles.normalize_role` (fail-open).
     """
-    working_memory = state.get("working_memory") or {}
     goal = str(
-        state.get("current_goal")
-        or working_memory.get("active_goal")
-        or working_memory.get("locked_intent")
-        or state.get("detected_intent")
-        or ""
+        resolve_current_goal(state) or state.get("detected_intent") or ""
     ).upper()
     return "BUYER" if INTENT_ROLE.get(goal) == "BUYER" else "PRODUCER"
 
@@ -163,16 +159,25 @@ class DomainRouter:
     # ----------------------------------------------------------------
 
     def decide(self, state: Dict[str, Any]) -> str:
-        working_memory = state.get("working_memory") or {}
         goal = str(
-            state.get("current_goal")
-            or working_memory.get("active_goal")
-            or working_memory.get("locked_intent")
-            or state.get("detected_intent")
-            or ""
+            resolve_current_goal(state) or state.get("detected_intent") or ""
         ).upper()
 
         status = str(state.get("status") or "").upper()
+
+        # (2026-09-08, P1-2 audit architectural) : un tour `COMPLETED` par
+        # `validator` lui-même (SEULE occurrence réelle : la branche
+        # `blocking_technical_id` de nodes/validation.py — identifiant
+        # technique manquant sans résolveur, `final_response`/
+        # `response_strategy` déjà posés, `pending_interaction=None`) doit
+        # être terminal dans la TOPOLOGIE, pas seulement dans l'intention du
+        # code qui l'a produit. Vérifié AVANT la boucle des règles — un état
+        # réellement terminal ne doit jamais être doublé par une règle qui
+        # matcherait le même goal pour un autre statut, sans quoi ce garde
+        # ne protégerait que le cas non couvert par une règle (le seul
+        # reproduit par l'audit), pas la propriété générale.
+        if status == "COMPLETED":
+            return "to_strategy"
 
         for rule in self._rules:
             if goal not in rule.goals:
