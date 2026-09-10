@@ -7,7 +7,6 @@ from sqlalchemy import desc, func, select
 
 from ladini.domain.models import (
     Expense,
-    Farm,
     Order,
     OrderItem,
     Producer,

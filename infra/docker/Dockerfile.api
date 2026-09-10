@@ -27,23 +27,29 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install "poetry==${POETRY_VERSION}"
 
 WORKDIR /app/backend
-# Copie SEULEMENT le manifeste d'abord → le layer d'install des deps reste en
-# cache Docker tant que pyproject.toml ne change pas (le code applicatif
-# change à chaque commit, les deps beaucoup plus rarement).
-COPY backend/pyproject.toml backend/poetry.toml* ./
+# Copie SEULEMENT les manifestes d'abord → le layer d'install des deps reste en
+# cache Docker tant que pyproject.toml / poetry.lock ne changent pas (le code
+# applicatif change à chaque commit, les deps beaucoup plus rarement).
+#
+# (2026-09-11) `poetry.lock` était ABSENT de ce COPY : `poetry install`
+# résolvait donc les versions à neuf à CHAQUE build (non reproductible, et
+# potentiellement différent du lock testé en CI). Ajouté.
+COPY backend/pyproject.toml backend/poetry.lock backend/poetry.toml* ./
 # --mount=type=cache : cache Poetry/pip PERSISTANT entre builds (BuildKit),
 # distinct du cache de layer Docker — accélère un `poetry install` même
 # quand pyproject.toml change (deps déjà téléchargées restent en cache).
+#
+# `--only main` : le groupe `dev` (ruff, mypy, pytest*, deptry) n'entre JAMAIS
+# dans l'image de production.
+#
+# (2026-09-11) Le `pip install "opentelemetry-* prometheus-client langfuse"`
+# qui suivait a été SUPPRIMÉ : ces 6 paquets sont désormais déclarés dans
+# `pyproject.toml` (versions verrouillées par `poetry.lock`), donc installés
+# par `poetry install`. Le `pip install` flottant les réinstallait par-dessus
+# à des versions non verrouillées — build non reproductible.
 RUN --mount=type=cache,target=/root/.cache/pypoetry \
     --mount=type=cache,target=/root/.cache/pip \
-    poetry install --no-root --only main \
-    && pip install \
-        "opentelemetry-sdk>=1.27" \
-        "opentelemetry-exporter-otlp-proto-grpc>=1.27" \
-        "opentelemetry-instrumentation-fastapi>=0.48b0" \
-        "opentelemetry-instrumentation-celery>=0.48b0" \
-        "prometheus-client>=0.21" \
-        "langfuse"
+    poetry install --no-root --only main
 
 # ── Runtime ──────────────────────────────────────────────────────────
 FROM python:3.11-slim AS runtime

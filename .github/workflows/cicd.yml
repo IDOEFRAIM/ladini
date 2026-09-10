@@ -42,7 +42,17 @@ jobs:
             ${{ runner.os }}-poetry-
 
       - name: Install dependencies
+        # défaut = main + groupe `dev` (ruff, mypy, pytest*, deptry).
+        # L'image de prod, elle, fait `poetry install --only main`.
         run: poetry install --no-root
+
+      - name: Vérifier la cohérence pyproject / poetry.lock
+        run: poetry check --lock
+
+      - name: Audit des dépendances (deptry — unused / missing / misplaced)
+        # Bloquant : on veut zéro dépendance déclarée-mais-inutilisée (purge
+        # 2026-09-11). Voir docs/DEPENDENCY_AUDIT_2026-09-11.md.
+        run: poetry run deptry src
 
       - name: Run linter (Ruff)
         run: poetry run ruff check src
@@ -82,7 +92,9 @@ jobs:
         with:
           fetch-depth: 0
       - name: Vérifier les migrations de cette PR
-        run: ./scripts/check_migrations.sh "${{ github.event.pull_request.base.sha || 'HEAD~1' }}" HEAD
+        # `bash …` plutôt que `./…` : robuste même si un checkout perd le bit +x
+        # (le bit est bien positionné dans git, ceinture + bretelles).
+        run: bash scripts/check_migrations.sh "${{ github.event.pull_request.base.sha || 'HEAD~1' }}" HEAD
 
   # Valide que les 3 images se CONSTRUISENT encore + que le compose prod est
   # cohérent. Ne pousse rien (`push: false`).
