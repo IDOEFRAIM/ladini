@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 
 def _patch_build_graph(monkeypatch, side_effect=None):
-    import agriconnect.graphs.factory as factory_mod
+    import ladini.graphs.factory as factory_mod
     calls = []
 
     def _fake_build_graph(**kwargs):
@@ -19,7 +19,7 @@ def _patch_build_graph(monkeypatch, side_effect=None):
 
 class TestGraphFactory:
     def test_builds_a_graph_on_first_call(self, monkeypatch):
-        from agriconnect.graphs.factory import GraphFactory
+        from ladini.graphs.factory import GraphFactory
         calls = _patch_build_graph(monkeypatch)
         factory = GraphFactory()
         rt, cp = object(), object()
@@ -29,7 +29,7 @@ class TestGraphFactory:
         assert calls[0]["role"] == "PRODUCER"
 
     def test_caches_the_graph_for_identical_role_runtime_and_checkpointer(self, monkeypatch):
-        from agriconnect.graphs.factory import GraphFactory
+        from ladini.graphs.factory import GraphFactory
         calls = _patch_build_graph(monkeypatch)
         factory = GraphFactory()
         rt, cp = object(), object()
@@ -39,7 +39,7 @@ class TestGraphFactory:
         assert len(calls) == 1
 
     def test_role_is_normalized_for_cache_key_purposes(self, monkeypatch):
-        from agriconnect.graphs.factory import GraphFactory
+        from ladini.graphs.factory import GraphFactory
         calls = _patch_build_graph(monkeypatch)
         factory = GraphFactory()
         rt, cp = object(), object()
@@ -49,7 +49,7 @@ class TestGraphFactory:
         assert len(calls) == 1
 
     def test_different_role_produces_a_different_cached_graph(self, monkeypatch):
-        from agriconnect.graphs.factory import GraphFactory
+        from ladini.graphs.factory import GraphFactory
         calls = _patch_build_graph(monkeypatch)
         factory = GraphFactory()
         rt, cp = object(), object()
@@ -59,7 +59,7 @@ class TestGraphFactory:
         assert len(calls) == 2
 
     def test_different_runtime_identity_produces_a_different_cached_graph(self, monkeypatch):
-        from agriconnect.graphs.factory import GraphFactory
+        from ladini.graphs.factory import GraphFactory
         calls = _patch_build_graph(monkeypatch)
         factory = GraphFactory()
         cp = object()
@@ -69,7 +69,7 @@ class TestGraphFactory:
         assert len(calls) == 2
 
     def test_missing_runtime_or_checkpointer_is_never_cached(self, monkeypatch):
-        from agriconnect.graphs.factory import GraphFactory
+        from ladini.graphs.factory import GraphFactory
         calls = _patch_build_graph(monkeypatch)
         factory = GraphFactory()
         factory.get_graph("PRODUCER")
@@ -78,7 +78,7 @@ class TestGraphFactory:
         assert factory._cache == {}
 
     def test_missing_checkpointer_only_is_never_cached(self, monkeypatch):
-        from agriconnect.graphs.factory import GraphFactory
+        from ladini.graphs.factory import GraphFactory
         calls = _patch_build_graph(monkeypatch)
         factory = GraphFactory()
         rt = object()
@@ -87,7 +87,7 @@ class TestGraphFactory:
         assert len(calls) == 2
 
     def test_clear_empties_the_cache(self, monkeypatch):
-        from agriconnect.graphs.factory import GraphFactory
+        from ladini.graphs.factory import GraphFactory
         calls = _patch_build_graph(monkeypatch)
         factory = GraphFactory()
         rt, cp = object(), object()
@@ -97,7 +97,7 @@ class TestGraphFactory:
         assert len(calls) == 2
 
     def test_extra_kwargs_are_forwarded_to_build_graph(self, monkeypatch):
-        from agriconnect.graphs.factory import GraphFactory
+        from ladini.graphs.factory import GraphFactory
         calls = _patch_build_graph(monkeypatch)
         factory = GraphFactory()
         llm, mcp = object(), object()

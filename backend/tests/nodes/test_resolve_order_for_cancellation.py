@@ -29,7 +29,7 @@ def _order(order_id, *, payment_status="PENDING", **overrides):
 
 
 def _resolver():
-    from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+    from ladini.graphs.agents.market_coach.flows.producer.flow import (
         _resolve_order_for_cancellation,
     )
 

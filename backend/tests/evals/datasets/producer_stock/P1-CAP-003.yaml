@@ -6,9 +6,9 @@ tags: [dual_role_capability, positive_capability, supersedes_P0-SEC-003]
 grounding:
   status: PROVEN_BY_CODE
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/nodes/executor.py:513-519 — explicit, named 'refonte double-rôle' (dual-role refactor) comment: 'le blocage par rôle de session a été retiré ici — tout utilisateur peut déclencher un outil producteur OU acheteur selon le goal classé pour CE tour... La sécurité sur les actions sensibles... se fait désormais par ownership au niveau de la méthode DB elle-même... pas par un rôle global figé.'"
-    - "backend/src/agriconnect/graphs/agents/market_coach/core/router.py:192-203 — resolve() dispatches to buyer_context_resolver or producer_context_resolver based on _goal_domain(state) (the GOAL's domain), not a fixed session role."
-    - "backend/src/agriconnect/graphs/agents/market_coach/nodes/role_guard.py:8-25 — role_guard no longer blocks; only sets a default display role."
+    - "backend/src/ladini/graphs/agents/market_coach/nodes/executor.py:513-519 — explicit, named 'refonte double-rôle' (dual-role refactor) comment: 'le blocage par rôle de session a été retiré ici — tout utilisateur peut déclencher un outil producteur OU acheteur selon le goal classé pour CE tour... La sécurité sur les actions sensibles... se fait désormais par ownership au niveau de la méthode DB elle-même... pas par un rôle global figé.'"
+    - "backend/src/ladini/graphs/agents/market_coach/core/router.py:192-203 — resolve() dispatches to buyer_context_resolver or producer_context_resolver based on _goal_domain(state) (the GOAL's domain), not a fixed session role."
+    - "backend/src/ladini/graphs/agents/market_coach/nodes/role_guard.py:8-25 — role_guard no longer blocks; only sets a default display role."
     - "THIS SESSION, real execution: STOCK_REGISTER_HARVEST issued from a BUYER-workspace_type persona reached and called add_stock successfully (run_extra.py::drive_P1_CAP_003)."
   supersedes_note: >
     P0-SEC-003 (removed from datasets/security_redteam/) asserted that a

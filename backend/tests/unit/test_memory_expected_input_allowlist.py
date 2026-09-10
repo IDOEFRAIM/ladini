@@ -21,7 +21,7 @@ from typing import Any, Dict
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.nodes.memory import (
+from ladini.graphs.agents.market_coach.nodes.memory import (
     _EXPECTED_INPUT_ALLOWED_FIELDS,
     memory_update,
 )

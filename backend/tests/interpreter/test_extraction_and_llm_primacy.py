@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+from ladini.graphs.agents.market_coach.interpreter.routing import (
     _interpret_fast_path,
     make_input_interpreter,
 )
@@ -333,7 +333,7 @@ class TestNoFrozenListHijack:
         injecté dans le prompt LLM est identique quel que soit le rôle
         (plus de filtrage `allowed_intents_for_role` dans
         `_build_dynamic_interpreter_prompt`)."""
-        from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+        from ladini.graphs.agents.market_coach.interpreter.routing import (
             _build_dynamic_interpreter_prompt,
         )
         producer_prompt = _build_dynamic_interpreter_prompt("PRODUCER")

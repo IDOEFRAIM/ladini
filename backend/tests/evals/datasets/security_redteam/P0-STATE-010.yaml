@@ -6,8 +6,8 @@ tags: [cross_user_state_corruption, multi_turn]
 grounding:
   status: PROVEN_BY_CODE
   evidence:
-    - "backend/src/agriconnect/workspace/store.py:79 — _SELECT_FOR_UPDATE locks per-workspace_id row. Two different phones resolve to two independently-locked rows — the bug class this scenario targets (data ending up in the wrong workspace) is a resolution bug, not a race condition, and is fully exercised by interleaved SEQUENTIAL turns."
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/cart.py:280-330 — cart add/view are local state (state['active_cart']/working_memory.last_active_cart), no MCP tool exists for either operation."
+    - "backend/src/ladini/workspace/store.py:79 — _SELECT_FOR_UPDATE locks per-workspace_id row. Two different phones resolve to two independently-locked rows — the bug class this scenario targets (data ending up in the wrong workspace) is a resolution bug, not a race condition, and is fully exercised by interleaved SEQUENTIAL turns."
+    - "backend/src/ladini/graphs/agents/market_coach/flows/buyer/cart.py:280-330 — cart add/view are local state (state['active_cart']/working_memory.last_active_cart), no MCP tool exists for either operation."
 
 participants:
   - {id: A, role: BUYER, phone: "+22670000010", workspace_type: buyer}

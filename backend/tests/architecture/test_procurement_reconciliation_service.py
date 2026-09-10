@@ -23,13 +23,13 @@ from tests.unit.test_mcp_idempotency import (
     _install_fake_db as _install_fake_idempotency_db,
 )
 
-from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ProcurementDraft,
     ProcurementDraftStatus,
     execution_key,
 )
-from agriconnect.services.database import mcp_idempotency_store, procurement_draft_store
-from agriconnect.services.reconciliation import procurement_reconciliation_service as svc
+from ladini.services.database import mcp_idempotency_store, procurement_draft_store
+from ladini.services.reconciliation import procurement_reconciliation_service as svc
 
 
 def _executing_draft(draft_id: str = "recon1") -> ProcurementDraft:
@@ -50,7 +50,7 @@ class TestFindStaleExecutingCandidates:
     def test_uses_the_configured_threshold_not_a_hardcoded_one(self, monkeypatch):
         """Mandat §1.2 : pas de timeout métier codé en dur — dérivé de
         `settings.PROCUREMENT_EXECUTING_STALE_SECONDS`."""
-        from agriconnect.core.settings import settings
+        from ladini.core.settings import settings
 
         draft_table, _ = _install(monkeypatch)
         executing = _executing_draft("cand1")

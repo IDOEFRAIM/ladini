@@ -18,21 +18,21 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
-from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
+from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
+from ladini.graphs.agents.market_coach.interpreter.goal_planner import (
     goal_planner,
 )
-from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+from ladini.graphs.agents.market_coach.interpreter.routing import (
     make_input_interpreter,
 )
-from agriconnect.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
-from agriconnect.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
-from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
-from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+from ladini.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
+from ladini.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
+from ladini.graphs.agents.market_coach.nodes.memory import memory_update
+from ladini.graphs.agents.market_coach.nodes.validation import validator
 from tests.conftest import StubRuntime, run
 from tests.integration.test_tier_selection_full_node_chain import apply_patch
 
@@ -92,7 +92,7 @@ def _base_state(text: str) -> Dict[str, Any]:
 
 class TestTierBeforeQuantitySingleVendor:
     def test_product_only_message_shows_tier_menu_before_asking_quantity(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
 
         async def _fake_resolve_vendors(self, phone, product_name):
             return [_tiered_vendor()], False
@@ -122,7 +122,7 @@ class TestTierBeforeQuantitySingleVendor:
         )
 
     def test_digit_reply_asks_quantity_referencing_the_chosen_tier_then_completes(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
 
         async def _fake_resolve_vendors(self, phone, product_name):
             return [_tiered_vendor()], False
@@ -185,7 +185,7 @@ class TestTierBeforeQuantitySingleVendor:
         `test_tier_menu_context_is_actually_injected_into_the_llm_prompt`
         for that) — it proves the DOWNSTREAM handling of an LLM-resolved
         ordinal is correct."""
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
         from tests.conftest import ScriptedLLM
 
         async def _fake_resolve_vendors(self, phone, product_name):
@@ -240,7 +240,7 @@ class TestTierBeforeQuantitySingleVendor:
         — la quantité globale pré-palier ne doit plus JAMAIS être réutilisée
         silencieusement comme nombre de paquets ; le système doit reposer
         explicitement la question ("Combien de bidons de 10L ?")."""
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
 
         async def _fake_resolve_vendors(self, phone, product_name):
             return [_tiered_vendor()], False
@@ -297,7 +297,7 @@ class TestTierBeforeQuantitySingleVendor:
 
 class TestTierBeforeQuantityMultiVendor:
     def test_full_sequence_product_pick_vendor_pick_tier_then_quantity(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
 
         async def _fake_resolve_vendors(self, phone, product_name):
             return [_tiered_vendor(), _other_vendor()], True
@@ -373,8 +373,8 @@ class TestValidatorRouterDoesNotBlockTheReorder:
     the layer the earlier tests in this file skipped."""
 
     def test_product_only_message_routes_to_cart_and_shows_tier_menu(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
-        from agriconnect.graphs.agents.market_coach.core.router import DomainRouter
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
+        from ladini.graphs.agents.market_coach.core.router import DomainRouter
 
         async def _fake_resolve_vendors(self, phone, product_name):
             return [_tiered_vendor()], False
@@ -425,7 +425,7 @@ class TestTierTunnelFsmLock:
     def test_unmatched_free_text_llm_response_stays_in_tunnel_with_no_purge(
         self, monkeypatch
     ):
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
         from tests.conftest import ScriptedLLM
 
         async def _fake_resolve_vendors(self, phone, product_name):

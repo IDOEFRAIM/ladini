@@ -23,14 +23,14 @@ intact jusqu'à `confirmation_gate` et que la confirmation aboutit bien à
 `EXECUTING`."""
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     get_pending_interaction,
 )
-from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
     confirmation_gate,
 )
-from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+from ladini.graphs.agents.market_coach.nodes.validation import validator
 from tests.conftest import make_state, run
 
 
@@ -98,6 +98,36 @@ class TestValidatorDoesNotStealAnActiveConfirmation:
             "a resolved confirmation must never leave CONFIRM_ACTION active "
             "for the next turn"
         )
+
+    def test_validator_leaves_provide_location_intact_during_the_gps_stage(self):
+        """Incident réel (2026-09-10) : boucle précommande. Un
+        `PROVIDE_LOCATION` posé par `gps_delivery_gate` pendant l'étape
+        livraison était effacé par la branche 'validated_complete' du
+        validator dès le tour suivant — `resolve_preorder_confirmation` relit
+        `state["pending_interaction"]` BRUT, ne voyait plus l'étape GPS, et
+        ré-affichait le récap au lieu de la relance GPS. Comme
+        `CONFIRM_ACTION`, cette interaction est gate-owned."""
+        state = make_state(
+            current_goal="BUYER_PREORDER_INIT",
+            interpreted_event="UNKNOWN",
+            status="WAITING_INPUT",
+            transaction_payload={},
+            pending_interaction={
+                "kind": "PROVIDE_LOCATION",
+                "goal": "BUYER_PREORDER_INIT",
+                "field": None,
+                "context_ref": "confirmation",
+                "candidates": [],
+                "created_at": 0.0,
+                "status": "ACTIVE",
+                "target": {"draft_id": "d-1", "draft_version": 1},
+            },
+        )
+
+        result = run(validator(state, mc_runtime=None))
+
+        merged = {**state, **result}
+        assert get_pending_interaction(merged).kind == InteractionKind.PROVIDE_LOCATION
 
     def test_a_non_confirm_answer_still_clears_pending_interaction_as_before(self):
         """Non-regression: the normal slot-filling path (no confirmation in

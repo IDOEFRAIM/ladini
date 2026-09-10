@@ -25,7 +25,7 @@ class TestNoBusinessModuleSendsDirectly:
     `services/twilio_sender.py`/`services/whatsapp/` (transport primitives,
     appelées UNIQUEMENT par le dispatcher) — jamais dans un node/flow/domain."""
 
-    _SRC = Path(__file__).resolve().parents[2] / "src" / "agriconnect"
+    _SRC = Path(__file__).resolve().parents[2] / "src" / "ladini"
     _FORBIDDEN_DIRS = ("graphs/agents/market_coach/nodes", "graphs/agents/market_coach/flows",
                        "graphs/agents/market_coach/domain", "graphs/agents/market_coach/interpreter")
     _SEND_PATTERNS = re.compile(r"\.messages\.create\(|send_whatsapp_media\(|send_whatsapp_message\(")
@@ -61,8 +61,8 @@ class TestMediaSharesTheSameIdempotenceAsText:
     def test_a_retry_of_the_same_event_does_not_resend_an_already_sent_image(
         self, monkeypatch
     ):
-        import agriconnect.api.response_dispatch as mod
-        import agriconnect.core.idempotency as idempotency_mod
+        import ladini.api.response_dispatch as mod
+        import ladini.core.idempotency as idempotency_mod
 
         monkeypatch.setattr(idempotency_mod, "_client", _FakeRedis())
         sent_media = []
@@ -86,8 +86,8 @@ class TestMediaSharesTheSameIdempotenceAsText:
     def test_a_text_and_image_multipart_plan_sends_both_but_a_retry_sends_neither(
         self, monkeypatch
     ):
-        import agriconnect.api.response_dispatch as mod
-        import agriconnect.core.idempotency as idempotency_mod
+        import ladini.api.response_dispatch as mod
+        import ladini.core.idempotency as idempotency_mod
 
         monkeypatch.setattr(idempotency_mod, "_client", _FakeRedis())
         monkeypatch.setattr(mod.settings, "MESSAGING_PROVIDER", "twilio", raising=False)
@@ -130,8 +130,8 @@ class TestMediaSharesTheSameIdempotenceAsText:
         seul gagnant envoie réellement l'image."""
         import threading
 
-        import agriconnect.api.response_dispatch as mod
-        import agriconnect.core.idempotency as idempotency_mod
+        import ladini.api.response_dispatch as mod
+        import ladini.core.idempotency as idempotency_mod
 
         class _ThreadSafeFakeRedis:
             def __init__(self):

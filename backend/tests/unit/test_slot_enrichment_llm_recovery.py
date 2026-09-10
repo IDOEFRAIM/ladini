@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
+from ladini.graphs.agents.market_coach.nodes.memory import memory_update
 from tests.conftest import ForbiddenLLM, ScriptedLLM, StubRuntime, make_state, run
 
 

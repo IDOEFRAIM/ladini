@@ -7,7 +7,7 @@ grounding:
   status: PROVEN_BY_CODE
   evidence:
     - "backend/tests/unit/test_buyer_fuzzy_match_safety.py — real production incident (2026-08-14): 'oeufs' fuzzy-matched 'Bœuf' at 486 000 FCFA/head; _is_confident_product_match('oeufs','Bœuf') is False, confirmed by regression test."
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/cart.py:299-329 — confident_vendors = [v for v in vendors if v.get('match_confident', True)] runs BEFORE the 'if not vendors'/'if has_multiple' branches. A filtered-to-empty candidate list falls through to the existing 'produit introuvable' response — cart mutation is structurally unreachable for a filtered-out low-confidence match, not merely empirically absent in one test."
+    - "backend/src/ladini/graphs/agents/market_coach/flows/buyer/cart.py:299-329 — confident_vendors = [v for v in vendors if v.get('match_confident', True)] runs BEFORE the 'if not vendors'/'if has_multiple' branches. A filtered-to-empty candidate list falls through to the existing 'produit introuvable' response — cart mutation is structurally unreachable for a filtered-out low-confidence match, not merely empirically absent in one test."
   correction_note: >
     Original Wave 1 version asserted must_not_execute: [add_to_cart] — invalid,
     add_to_cart is not an MCP tool (see P1-BUYER-004 grounding note). Removed;

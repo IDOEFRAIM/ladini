@@ -14,8 +14,8 @@ import json
 
 import pytest
 
-from agriconnect.workspace.checkpointer import WorkspaceCheckpointer, _SerializedValue
-from agriconnect.workspace.models import Workspace
+from ladini.workspace.checkpointer import WorkspaceCheckpointer, _SerializedValue
+from ladini.workspace.models import Workspace
 from tests.conftest import run
 
 
@@ -514,7 +514,7 @@ class TestMalformedShapeGuards:
         enc = _SerializedValue.encode(cp.serde, checkpoint)
         ns = {"buyer": {"checkpoints": {"cp1": {"checkpoint": dataclasses.asdict(enc)}}}}
 
-        import agriconnect.workspace.checkpointer as ckpt_module
+        import ladini.workspace.checkpointer as ckpt_module
         original_dumps = ckpt_module.json.dumps
 
         def _boom(value, *args, **kwargs):
@@ -639,7 +639,7 @@ class TestPruneForPersistence:
         # contient encore le canal éphémère volumineux à élaguer.
         cp, _ = make_checkpointer()
         cp.attach_workspace(Workspace(workspace_id="phone-1", agent_state={"namespaces": {}}))
-        monkeypatch.setattr("agriconnect.workspace.checkpointer._MAX_PERSISTED_BYTES", 500)
+        monkeypatch.setattr("ladini.workspace.checkpointer._MAX_PERSISTED_BYTES", 500)
         big_history = [{"role": "user", "content": "x" * 200} for _ in range(20)]
         checkpoint = make_checkpoint(channel_values={
             "current_goal": "SALES_PUBLISH_PRODUCT",
@@ -657,7 +657,7 @@ class TestPruneForPersistence:
         PROTÉGÉ, ex: `working_memory`), le dernier recours (wipe complet des
         namespaces) doit s'activer — mais SEULEMENT dans ce cas extrême."""
         cp, _ = make_checkpointer()
-        monkeypatch.setattr("agriconnect.workspace.checkpointer._MAX_PERSISTED_BYTES", 100)
+        monkeypatch.setattr("ladini.workspace.checkpointer._MAX_PERSISTED_BYTES", 100)
         checkpoint = make_checkpoint(channel_values={
             "working_memory": {"active_goal": "X", "leaked": "y" * 5000},
         })
@@ -678,7 +678,7 @@ class TestPruneForPersistence:
         perdu). Maintenant il est simplement retiré, et la continuité du
         tunnel survit."""
         cp, _ = make_checkpointer()
-        monkeypatch.setattr("agriconnect.workspace.checkpointer._MAX_PERSISTED_BYTES", 2000)
+        monkeypatch.setattr("ladini.workspace.checkpointer._MAX_PERSISTED_BYTES", 2000)
         checkpoint = make_checkpoint(channel_values={
             # Durables : doivent SURVIVRE.
             "current_goal": "BUYER_PREORDER_INIT",
@@ -709,7 +709,7 @@ class TestPruneForPersistence:
         illisible. Ils doivent survivre au palier 3 même s'ils ne figurent
         évidemment pas dans la liste des champs durables."""
         cp, _ = make_checkpointer()
-        monkeypatch.setattr("agriconnect.workspace.checkpointer._MAX_PERSISTED_BYTES", 2000)
+        monkeypatch.setattr("ladini.workspace.checkpointer._MAX_PERSISTED_BYTES", 2000)
         checkpoint = make_checkpoint(channel_values={
             "current_goal": "BUYER_PREORDER_INIT",
             "__start__": {"internal": True},

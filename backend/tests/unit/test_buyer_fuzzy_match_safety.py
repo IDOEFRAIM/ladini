@@ -10,7 +10,7 @@ partageant assez de trigrammes pour franchir le seuil, sans être le même
 produit. Voir [[buyer-search-fuzzy-match-safety-2026-08]]."""
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
+from ladini.graphs.agents.market_coach.services.domain.cart_service import (
     _is_confident_product_match,
 )
 

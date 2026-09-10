@@ -15,14 +15,14 @@ seulement sur ce qu'il en fait.
 """
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
-from agriconnect.domain.order_policy import (
+from ladini.domain.order_policy import (
     validate_minimum_order_quantity,
 )
-from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
+from ladini.graphs.agents.market_coach.services.domain.cart_service import (
     CartDomainService,
 )
 from tests.conftest import StubRuntime, run
@@ -260,7 +260,7 @@ class TestPreorderFutureOffersAlsoRespectTheThreshold:
     catalogue direct."""
 
     def test_future_offer_reservation_below_minimum_is_rejected(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as m
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as m
 
         async def _fake_reserve(self, **kwargs):
             raise AssertionError(

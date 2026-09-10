@@ -6,10 +6,10 @@ from __future__ import annotations
 import inspect
 import re
 
-import agriconnect.graphs.agents.market_coach.domain.sales_publish_draft as sales_draft_mod
-import agriconnect.graphs.agents.market_coach.flows.producer.sales_confirmation as sales_confirm_mod
-import agriconnect.graphs.agents.market_coach.flows.producer.sales_execution_finalizer as sales_finalizer_mod
-import agriconnect.graphs.agents.market_coach.nodes.confirmation_gate as confirmation_gate_mod
+import ladini.graphs.agents.market_coach.domain.sales_publish_draft as sales_draft_mod
+import ladini.graphs.agents.market_coach.flows.producer.sales_confirmation as sales_confirm_mod
+import ladini.graphs.agents.market_coach.flows.producer.sales_execution_finalizer as sales_finalizer_mod
+import ladini.graphs.agents.market_coach.nodes.confirmation_gate as confirmation_gate_mod
 
 
 def _code_only(source: str) -> str:
@@ -94,6 +94,6 @@ class TestNoNewIdempotencyPrimitive:
         `core/confirmation_target.py`, jamais une 4e copie locale."""
         code = _code_only(inspect.getsource(sales_draft_mod))
         assert "class ConfirmationTarget" not in code
-        assert "from agriconnect.graphs.agents.market_coach.core.confirmation_target import" in inspect.getsource(
+        assert "from ladini.graphs.agents.market_coach.core.confirmation_target import" in inspect.getsource(
             sales_draft_mod
         )

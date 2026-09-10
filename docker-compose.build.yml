@@ -1,0 +1,38 @@
+# ═════════════════════════════════════════════════════════════════════
+# docker-compose.build.yml — OVERLAY DE BUILD (jamais utilisé en production)
+#
+# `docker-compose.prod.yml` ne fait que TIRER des images immuables. Cet
+# overlay rajoute les instructions `build:` — utilisé UNIQUEMENT par :
+#   - la CI (job `release`), pour construire puis pousser au registry ;
+#   - un dev qui veut reconstruire localement avant de pousser.
+#
+#   Build local des 3 images :
+#     export RELEASE_VERSION=dev
+#     docker compose -f docker-compose.prod.yml -f docker-compose.build.yml build
+#
+#   La PRODUCTION n'utilise JAMAIS ce fichier (voir scripts/deploy.sh : il
+#   n'appelle que `pull` + `up`, jamais `build`).
+# ═════════════════════════════════════════════════════════════════════
+
+services:
+  mcp:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.mcp
+      args:
+        API_IMAGE: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/agriconnect}/ladini-api:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.api
+
+  worker:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile.worker
+      args:
+        API_IMAGE: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/agriconnect}/ladini-api:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+
+  # `beat` et `flower` réutilisent des images déjà construites ci-dessus
+  # (ladini-worker / ladini-api) — aucun `build:` propre.

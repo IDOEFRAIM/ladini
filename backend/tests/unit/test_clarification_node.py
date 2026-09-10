@@ -59,7 +59,7 @@ class TestClarificationNodeDoesNotRecomputeDisambiguationPolicy:
     s'effacer — il fait simplement confiance à `cognitive_decision.action`."""
 
     def test_module_no_longer_imports_detect_disambiguation_candidates(self):
-        import agriconnect.graphs.agents.market_coach.nodes.clarification as mod
+        import ladini.graphs.agents.market_coach.nodes.clarification as mod
         assert not hasattr(mod, "_detect_disambiguation_candidates")
 
     def test_a_bare_disambiguation_candidate_no_longer_makes_this_node_defer(self):
@@ -73,7 +73,7 @@ class TestClarificationNodeDoesNotRecomputeDisambiguationPolicy:
         `disambiguation_candidate` présent, ce nœud RENDS bel et bien
         (cognitive_guard ne pose jamais les deux à la fois en pratique,
         mais ce nœud ne doit plus s'appuyer là-dessus pour décider)."""
-        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        from ladini.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = _runtime("Salut ! Je peux t'aider.")
         result = run(clarification_node({
             "interpreted_event": "UNKNOWN", "expected_input": "NONE",
@@ -90,7 +90,7 @@ class TestClarificationNodeDoesNotRecomputeDisambiguationPolicy:
         uniquement les garde-fous indispensables") : sans
         `cognitive_decision` du tout (checkpoint pré-déploiement, appel
         direct hors graphe), ce nœud ne devine rien et ne rend rien."""
-        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        from ladini.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = _runtime("ne devrait jamais apparaître — le LLM ne doit pas être appelé")
         result = run(clarification_node({
             "interpreted_event": "UNKNOWN", "expected_input": "NONE",
@@ -119,7 +119,7 @@ class TestClarificationNodeTriggerConditions:
     couvre ce cas défensivement, sans recalcul."""
 
     def test_out_of_scope_without_a_tunnel_triggers_the_llm(self):
-        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        from ladini.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = _runtime("Salut ! Je peux t'aider à vendre ou acheter.")
         result = run(clarification_node({
             "interpreted_event": "OUT_OF_SCOPE", "expected_input": "NONE",
@@ -134,7 +134,7 @@ class TestClarificationNodeTriggerConditions:
         """Bug réel (2026-08-14) : un "non" sans rien en attente tombait sur
         le fallback générique sans jamais essayer une réponse contextuelle —
         contrairement à OUT_OF_SCOPE/UNKNOWN dans le même contexte."""
-        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        from ladini.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = _runtime("Pas de souci ! Dis-moi ce que tu veux faire.")
         result = run(clarification_node({
             "interpreted_event": "REJECT", "expected_input": "NONE",
@@ -151,7 +151,7 @@ class TestClarificationNodeTriggerConditions:
         goal est actif), donc ce nœud ne serait jamais invoqué en pratique ;
         prouvé ici en l'appelant SANS `cognitive_decision` (garde-fou de
         compatibilité, pas une double policy)."""
-        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        from ladini.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = _runtime("ne devrait jamais apparaître")
         result = run(clarification_node({
             "interpreted_event": "REJECT", "expected_input": "CONFIRMATION",
@@ -162,7 +162,7 @@ class TestClarificationNodeTriggerConditions:
 
     def test_an_unknown_event_with_an_active_tunnel_does_not_trigger_this_node(self):
         """Volontaire : couvert par render_ask_missing_field/render_recovery."""
-        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        from ladini.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = _runtime("ne devrait jamais apparaître")
         result = run(clarification_node({
             "interpreted_event": "UNKNOWN", "expected_input": "PRICE",
@@ -172,7 +172,7 @@ class TestClarificationNodeTriggerConditions:
         assert result == {}
 
     def test_abandoned_tunnel_triggers_the_llm_regardless_of_event(self):
-        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        from ladini.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = _runtime("On repart de zéro, dis-moi ce dont tu as besoin.")
         result = run(clarification_node({
             "interpreted_event": "UNKNOWN", "expected_input": "PRICE",
@@ -188,7 +188,7 @@ class TestClarificationNodeTriggerConditions:
         RECOVERY est entièrement rendue par `response_strategy.py` depuis
         `cognitive_action` seul, ce nœud n'a RIEN à produire pour cette
         action, même avec un LLM disponible et prêt à répondre."""
-        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        from ladini.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = _runtime("ne devrait jamais apparaître")
         result = run(clarification_node({
             "interpreted_event": "UNKNOWN", "expected_input": "QUANTITY",
@@ -200,7 +200,7 @@ class TestClarificationNodeTriggerConditions:
         assert rt.llm.calls == 0
 
     def test_a_confirm_event_never_triggers_this_node(self):
-        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        from ladini.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = _runtime("ne devrait jamais apparaître")
         result = run(clarification_node({
             "interpreted_event": "CONFIRM", "expected_input": "NONE",
@@ -210,7 +210,7 @@ class TestClarificationNodeTriggerConditions:
         assert result == {}
 
     def test_no_llm_available_returns_an_empty_patch_not_a_crash(self):
-        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        from ladini.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = type("RT", (), {"llm": None})()
         result = run(clarification_node({
             "interpreted_event": "REJECT", "expected_input": "NONE",
@@ -230,7 +230,7 @@ class TestTechnicalFailureSkipsASecondWastedLlmCall:
     court-circuite le second appel — repli déterministe honnête à la place."""
 
     def test_technical_failure_never_calls_the_llm_and_returns_an_honest_degraded_message(self):
-        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        from ladini.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = _runtime("ne devrait jamais apparaître — le LLM ne doit pas être appelé")
         result = run(clarification_node({
             "interpreted_event": "UNKNOWN", "expected_input": "NONE",
@@ -249,7 +249,7 @@ class TestTechnicalFailureSkipsASecondWastedLlmCall:
         """Non-régression : seul `TECHNICAL_FAILURE` court-circuite l'appel —
         une vraie ambiguïté de contenu (`AMBIGUOUS`, ou absent) garde son
         comportement adaptatif existant."""
-        from agriconnect.graphs.agents.market_coach.nodes.clarification import clarification_node
+        from ladini.graphs.agents.market_coach.nodes.clarification import clarification_node
         rt = _runtime("Salut ! Je peux t'aider à vendre ou acheter.")
         result = run(clarification_node({
             "interpreted_event": "UNKNOWN", "expected_input": "NONE",

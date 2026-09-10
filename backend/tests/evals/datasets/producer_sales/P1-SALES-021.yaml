@@ -6,9 +6,9 @@ tags: [wrong_tool_temptation, tool_selection_precision, multi_turn_state_machine
 grounding:
   status: PROVEN_BY_EXECUTION
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/producer/flow.py:1483-1490 — producer_context_resolver dispatches SALES_UPDATE_PRODUCT to _resolve_product_for_update(mc_runtime, phone, payload, working_memory, normalized_text, interpreted_event)"
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/producer/flow.py:1039-1263 — _resolve_product_for_update: 4-phase state machine (SELECT -> COLLECT -> CONFIRM -> execute), keyed on working_memory.update_phase"
-    - "backend/src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py:241-250 — ProductGateway.update_product() -> MCP tool 'update_product_price_and_qty'"
+    - "backend/src/ladini/graphs/agents/market_coach/flows/producer/flow.py:1483-1490 — producer_context_resolver dispatches SALES_UPDATE_PRODUCT to _resolve_product_for_update(mc_runtime, phone, payload, working_memory, normalized_text, interpreted_event)"
+    - "backend/src/ladini/graphs/agents/market_coach/flows/producer/flow.py:1039-1263 — _resolve_product_for_update: 4-phase state machine (SELECT -> COLLECT -> CONFIRM -> execute), keyed on working_memory.update_phase"
+    - "backend/src/ladini/graphs/agents/market_coach/services/mcp/gateway.py:241-250 — ProductGateway.update_product() -> MCP tool 'update_product_price_and_qty'"
     - "THIS SESSION: all 4 turns below executed for real against producer_context_resolver with a RecordingRuntime — every tool name, argument, and working_memory value shown is the ACTUAL observed output, not derived from reading alone."
   correction_note: >
     Previous version (v1.1) assumed a single CONFIRM turn reaches the tool

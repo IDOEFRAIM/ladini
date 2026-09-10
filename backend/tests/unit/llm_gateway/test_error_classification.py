@@ -12,10 +12,10 @@ from __future__ import annotations
 import asyncio
 import json
 
-from agriconnect.graphs.agents.market_coach.llm_gateway.error_classification import (
+from ladini.graphs.agents.market_coach.llm_gateway.error_classification import (
     classify_llm_error,
 )
-from agriconnect.graphs.agents.market_coach.llm_gateway.types import ErrorClass
+from ladini.graphs.agents.market_coach.llm_gateway.types import ErrorClass
 
 
 class TestTransientErrors:

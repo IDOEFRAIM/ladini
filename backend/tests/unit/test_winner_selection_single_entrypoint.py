@@ -30,12 +30,12 @@ import inspect
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.actions import procure as procure_actions
-from agriconnect.graphs.agents.market_coach.interpreter.intent import (
+from ladini.graphs.agents.market_coach.actions import procure as procure_actions
+from ladini.graphs.agents.market_coach.interpreter.intent import (
     INTENT_CONFIG,
     _TUNNEL_ASSIGNMENTS,
 )
-from agriconnect.graphs.agents.market_coach.registry import get_action
+from ladini.graphs.agents.market_coach.registry import get_action
 
 
 class TestGenericExecutorCanNeverReachSelectWinningBid:
@@ -99,7 +99,7 @@ class TestExactlyTwoLegitimateCallSitesExistInTheWholeCodebase:
     def test_only_order_tracking_and_negotiation_call_the_gateway_method(self):
         import re
 
-        from agriconnect.graphs.agents.market_coach.flows.buyer import (
+        from ladini.graphs.agents.market_coach.flows.buyer import (
             negotiation as negotiation_mod,
             order_tracking as order_tracking_mod,
         )

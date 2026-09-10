@@ -19,7 +19,7 @@ l'appelait) lors de l'audit exhaustif du périmètre `disambiguation_candidate`
 retirée pour la même raison que `TestCognitiveOrchestrator` ci-dessus."""
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.nodes.cognitive import (
+from ladini.graphs.agents.market_coach.nodes.cognitive import (
     _build_proactive_hint,
     _entity_carry_forward,
     cognitive_guard,
@@ -97,7 +97,7 @@ class TestShouldTriggerDisambiguationRemoved:
     tests/architecture/test_cognitive_decisions_are_consumed_or_removed.py)."""
 
     def test_should_trigger_disambiguation_does_not_exist_anymore(self):
-        import agriconnect.graphs.agents.market_coach.nodes.cognitive as mod
+        import ladini.graphs.agents.market_coach.nodes.cognitive as mod
         assert not hasattr(mod, "_should_trigger_disambiguation")
 
 
@@ -239,7 +239,7 @@ class TestCognitiveGuardUnknownInTunnel:
         efface jamais). Reprendre le même goal plus tard retombait alors sur
         `resolve_gps_stage` sans aucun `pending_interaction` actif pour le
         justifier — exactement la désynchronisation observée en prod."""
-        from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+        from ladini.graphs.agents.market_coach.core.pending_interaction import (
             InteractionKind,
             set_pending_interaction,
         )
@@ -343,7 +343,7 @@ class TestCognitiveGuardEntityCarryAndProgress:
         désormais la SEULE source des intents candidats — `entry["candidates"]`
         (retiré du catalogue `INTENT_DISAMBIGUATION`) ne serait plus lu même
         s'il était présent ici."""
-        import agriconnect.graphs.agents.market_coach.nodes.cognitive as mod
+        import ladini.graphs.agents.market_coach.nodes.cognitive as mod
 
         monkeypatch.setattr(
             mod, "_detect_disambiguation_candidates",
@@ -387,7 +387,7 @@ class TestDisambiguationCandidatePrecomputed:
         """L'abandon de tunnel (max retries) passe par un chemin de retour
         anticipé différent de la branche "continue" — le candidat doit être
         posé AVANT toute branche, pas seulement sur le chemin nominal."""
-        import agriconnect.graphs.agents.market_coach.nodes.cognitive as mod
+        import ladini.graphs.agents.market_coach.nodes.cognitive as mod
 
         monkeypatch.setattr(
             mod, "_detect_disambiguation_candidates",

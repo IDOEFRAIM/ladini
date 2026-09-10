@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.core.graph_builder import build_graph
+from ladini.graphs.agents.market_coach.core.graph_builder import build_graph
 
 
 def _compiled_edges(role: str):

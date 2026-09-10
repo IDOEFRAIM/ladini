@@ -24,8 +24,8 @@ nothing stale left to misresolve against.
 """
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
-from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
+from ladini.graphs.agents.market_coach.nodes.memory import memory_update
+from ladini.graphs.agents.market_coach.services.menu_snapshot import (
     menu_snapshot_store,
 )
 from tests.conftest import StubRuntime, make_state, run
@@ -355,7 +355,7 @@ class TestSnapshotIdentityHelper:
         return menu_snapshot_store.save("session-helper", dict(mapping), kind=kind)
 
     def test_absent_snapshot_is_refused(self):
-        from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
+        from ladini.graphs.agents.market_coach.services.menu_snapshot import (
             snapshot_belongs_to_active_menu,
         )
         ok, reason = snapshot_belongs_to_active_menu(
@@ -367,7 +367,7 @@ class TestSnapshotIdentityHelper:
         assert ok is False and reason == "snapshot_absent"
 
     def test_same_kind_but_different_mapping_is_refused(self):
-        from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
+        from ladini.graphs.agents.market_coach.services.menu_snapshot import (
             snapshot_belongs_to_active_menu,
         )
         snap = self._snap({"1": "A1", "2": "A2"})
@@ -380,7 +380,7 @@ class TestSnapshotIdentityHelper:
         assert ok is False and reason == "mapping_identity_mismatch"
 
     def test_identical_mapping_is_accepted(self):
-        from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
+        from ladini.graphs.agents.market_coach.services.menu_snapshot import (
             snapshot_belongs_to_active_menu,
         )
         snap = self._snap({"1": "A1"})
@@ -393,7 +393,7 @@ class TestSnapshotIdentityHelper:
         assert ok is True and reason == "snapshot_is_active_menu"
 
     def test_without_active_mapping_the_kind_still_filters(self):
-        from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
+        from ladini.graphs.agents.market_coach.services.menu_snapshot import (
             snapshot_belongs_to_active_menu,
         )
         snap = self._snap({"1": "A1"}, kind="stock")
@@ -406,7 +406,7 @@ class TestSnapshotIdentityHelper:
         assert ok is False and reason == "kind_mismatch"
 
     def test_without_active_mapping_a_matching_kind_is_the_sole_source(self):
-        from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
+        from ladini.graphs.agents.market_coach.services.menu_snapshot import (
             snapshot_belongs_to_active_menu,
         )
         snap = self._snap({"1": "A1"}, kind="stock")
@@ -557,7 +557,7 @@ class TestSnapshotFallbackRequiresAnActiveSelection:
         """La condition PRÉALABLE : même un snapshot parfaitement cohérent
         (mapping identique, kind identique) est refusé si aucune sélection
         n'est attendue ce tour-ci."""
-        from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
+        from ladini.graphs.agents.market_coach.services.menu_snapshot import (
             snapshot_belongs_to_active_menu,
         )
         snap = menu_snapshot_store.save(

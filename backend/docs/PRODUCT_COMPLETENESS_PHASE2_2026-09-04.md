@@ -4,7 +4,7 @@
 
 Phase 1 concluait « 9/11 journeys complets, 0 P0, 2 P1 ». Cette phase a
 posé une question plus dure : **quelles actions un buyer ou un producer
-s'attend raisonnablement à pouvoir faire, mais qu'AgriConnect ne permet pas
+s'attend raisonnablement à pouvoir faire, mais qu'Ladini ne permet pas
 réellement de terminer ?** — en remontant chaque capacité de l'intent
 jusqu'à l'état terminal, et en refusant de déclarer COMPLETE une capacité
 au motif qu'une fonction en porte le nom.
@@ -192,7 +192,7 @@ UUID que l'utilisateur ne peut pas connaître […] Impasse conversationnelle »
 Les tests F1 validaient le résolveur **en l'appelant directement**, jamais la
 chaîne validateur → routeur → résolveur : le bug était invisible.
 
-**Fichiers/fonctions** : [validation.py](../src/agriconnect/graphs/agents/market_coach/nodes/validation.py) (`_RESOLVER_PASSTHROUGH`).
+**Fichiers/fonctions** : [validation.py](../src/ladini/graphs/agents/market_coach/nodes/validation.py) (`_RESOLVER_PASSTHROUGH`).
 
 **Business impact** : aucune commande RFQ ni préorder non-escrow ne pouvait
 être clôturée conversationnellement — c'est-à-dire que le gap E1, censé
@@ -219,7 +219,7 @@ produit épuisé ou erroné, que les acheteurs continuaient de voir.
 type de gap qu'un audit « la fonction existe donc la capacité existe »
 manque systématiquement.
 
-**Fichiers/fonctions** : [intent.py](../src/agriconnect/graphs/agents/market_coach/interpreter/intent.py) (`SALES_UNPUBLISH_PRODUCT`), [sales.py](../src/agriconnect/graphs/agents/market_coach/actions/sales.py) (`prep_sales_unpublish_product`), [flow.py](../src/agriconnect/graphs/agents/market_coach/flows/producer/flow.py) (`_resolve_product_for_unpublish`), [gateway.py](../src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py) (`ProductGateway.delete_product`), [security.py](../src/agriconnect/infrastructure/mcp/security.py), [validation.py](../src/agriconnect/graphs/agents/market_coach/nodes/validation.py).
+**Fichiers/fonctions** : [intent.py](../src/ladini/graphs/agents/market_coach/interpreter/intent.py) (`SALES_UNPUBLISH_PRODUCT`), [sales.py](../src/ladini/graphs/agents/market_coach/actions/sales.py) (`prep_sales_unpublish_product`), [flow.py](../src/ladini/graphs/agents/market_coach/flows/producer/flow.py) (`_resolve_product_for_unpublish`), [gateway.py](../src/ladini/graphs/agents/market_coach/services/mcp/gateway.py) (`ProductGateway.delete_product`), [security.py](../src/ladini/infrastructure/mcp/security.py), [validation.py](../src/ladini/graphs/agents/market_coach/nodes/validation.py).
 
 **Fixable sans décision produit ?** Oui — toute la politique métier était
 déjà encodée dans `delete_product` ; rien n'a été redécidé, rien n'a été
@@ -265,7 +265,7 @@ code.
 
 ## 13. P2
 
-- **P2-1 — Produit archivé ressuscitable — CORRIGÉ.** La recherche acheteur ne filtrait que `quantity_for_sale > 0`, jamais `is_available`. Un produit archivé (ou un produit fantôme créé par `record_sale`) redevenait donc visible dès qu'une quantité était remise. Corrigé dans [buyer.py](../src/agriconnect/services/database/buyer.py) (`search_products`) + filtrage des archivés dans le menu de retrait. Devenu réellement atteignable **par** P1-4, d'où sa correction immédiate.
+- **P2-1 — Produit archivé ressuscitable — CORRIGÉ.** La recherche acheteur ne filtrait que `quantity_for_sale > 0`, jamais `is_available`. Un produit archivé (ou un produit fantôme créé par `record_sale`) redevenait donc visible dès qu'une quantité était remise. Corrigé dans [buyer.py](../src/ladini/services/database/buyer.py) (`search_products`) + filtrage des archivés dans le menu de retrait. Devenu réellement atteignable **par** P1-4, d'où sa correction immédiate.
 - **P2-2 — `SALES_ACCEPT_CONTRACT` / `SYSTEM_COMMIT_TRANSACTION` : BROKEN.** Les deux goals résolvent `commit_staged_transaction`, un `tool_name` **sans aucune méthode DB** (vérifié sur tout `src/`, y compris `ToolResolver` qui n'a aucun override en production). `SalesService.accept_contract` retourne ce `tool_id` inconditionnellement. Reachability faible (`bid_id`/`staging_id` = UUID rarement fournis spontanément), échec propre via le catch-all de l'exécuteur. **Non corrigé** : ce que « valider définitivement un contrat verrouillé » doit faire n'est pas déterminable depuis le code — même famille de décision que P1-2, et le mandat interdit d'inventer.
 
 ## 14. P3

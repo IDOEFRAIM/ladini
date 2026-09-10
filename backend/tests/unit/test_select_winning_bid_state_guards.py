@@ -37,8 +37,8 @@ from sqlalchemy.sql.dml import Update as _UpdateStmt
 
 from tests.conftest import run
 
-from agriconnect.services.database.auction import AuctionMixin
-from agriconnect.services.database.errors import BusinessRuleException
+from ladini.services.database.auction import AuctionMixin
+from ladini.services.database.errors import BusinessRuleException
 
 
 def _bid(**overrides):

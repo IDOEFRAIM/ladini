@@ -22,7 +22,7 @@ from tests.conftest import run
 
 class TestRunAsync:
     def test_falls_back_to_asyncio_run_without_a_persistent_loop(self):
-        from agriconnect.workers.runtime import run_async
+        from ladini.workers.runtime import run_async
 
         async def _coro():
             return 42
@@ -31,7 +31,7 @@ class TestRunAsync:
 
     def test_uses_the_persistent_worker_loop_when_available(self, monkeypatch):
         import asyncio
-        import agriconnect.workers.runtime as runtime_module
+        import ladini.workers.runtime as runtime_module
 
         persistent_loop = asyncio.new_event_loop()
         try:
@@ -44,7 +44,7 @@ class TestRunAsync:
 
             monkeypatch.setattr(persistent_loop, "run_until_complete", _spy)
 
-            import agriconnect.api.tasks as tasks_module
+            import ladini.api.tasks as tasks_module
             monkeypatch.setattr(tasks_module, "_loop", persistent_loop, raising=False)
 
             async def _coro():
@@ -59,7 +59,7 @@ class TestRunAsync:
 
 class TestWorkerSession:
     def test_raises_when_sessionmaker_is_unavailable(self, monkeypatch):
-        import agriconnect.workers.runtime as runtime_module
+        import ladini.workers.runtime as runtime_module
 
         monkeypatch.setattr(runtime_module, "get_sessionmaker", lambda: None)
 
@@ -85,8 +85,8 @@ class TestWorkerSession:
         return lambda: session_factory
 
     def test_commits_on_success_and_publishes_the_context_var(self, monkeypatch):
-        import agriconnect.workers.runtime as runtime_module
-        from agriconnect.services.database.base_service import db_session_ctx
+        import ladini.workers.runtime as runtime_module
+        from ladini.services.database.base_service import db_session_ctx
 
         fake_session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
         monkeypatch.setattr(runtime_module, "get_sessionmaker", self._fake_sessionmaker(fake_session))
@@ -105,7 +105,7 @@ class TestWorkerSession:
         assert db_session_ctx.get() is None, "le ContextVar doit être remis à None après le bloc"
 
     def test_rolls_back_and_reraises_on_exception(self, monkeypatch):
-        import agriconnect.workers.runtime as runtime_module
+        import ladini.workers.runtime as runtime_module
 
         fake_session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
         monkeypatch.setattr(runtime_module, "get_sessionmaker", self._fake_sessionmaker(fake_session))
@@ -138,25 +138,25 @@ class _FakeExecResult:
 
 class TestOutboxRepo:
     def test_backoff_delay_clamps_at_the_last_tier_for_high_attempt_counts(self):
-        from agriconnect.workers.repositories.outbox_repo import backoff_delay, _BACKOFF_MINUTES
+        from ladini.workers.repositories.outbox_repo import backoff_delay, _BACKOFF_MINUTES
         from datetime import timedelta
         assert backoff_delay(999) == timedelta(minutes=_BACKOFF_MINUTES[-1])
 
     def test_backoff_delay_clamps_at_the_first_tier_for_zero_or_negative(self):
-        from agriconnect.workers.repositories.outbox_repo import backoff_delay, _BACKOFF_MINUTES
+        from ladini.workers.repositories.outbox_repo import backoff_delay, _BACKOFF_MINUTES
         from datetime import timedelta
         assert backoff_delay(0) == timedelta(minutes=_BACKOFF_MINUTES[0])
         assert backoff_delay(-5) == timedelta(minutes=_BACKOFF_MINUTES[0])
 
     def test_enqueue_returns_zero_without_hitting_the_session_on_empty_entries(self):
-        from agriconnect.workers.repositories.outbox_repo import enqueue
+        from ladini.workers.repositories.outbox_repo import enqueue
 
         session = SimpleNamespace(execute=AsyncMock())
         assert run(enqueue(session, [])) == 0
         session.execute.assert_not_awaited()
 
     def test_enqueue_returns_the_count_of_rows_actually_inserted(self):
-        from agriconnect.workers.repositories.outbox_repo import enqueue
+        from ladini.workers.repositories.outbox_repo import enqueue
 
         session = SimpleNamespace(execute=AsyncMock(return_value=_FakeExecResult(all_rows=[(1,), (2,)])))
         count = run(enqueue(session, [{"dedupe_key": "a"}, {"dedupe_key": "b"}]))
@@ -164,7 +164,7 @@ class TestOutboxRepo:
         session.execute.assert_awaited_once()
 
     def test_claim_due_marks_claimed_rows_as_sending_and_flushes(self):
-        from agriconnect.workers.repositories.outbox_repo import claim_due
+        from ladini.workers.repositories.outbox_repo import claim_due
 
         rows = [SimpleNamespace(id=1, status="PENDING"), SimpleNamespace(id=2, status="PENDING")]
         session = SimpleNamespace(
@@ -176,13 +176,13 @@ class TestOutboxRepo:
         session.flush.assert_awaited_once()
 
     def test_mark_sent_noop_when_row_missing(self):
-        from agriconnect.workers.repositories.outbox_repo import mark_sent
+        from ladini.workers.repositories.outbox_repo import mark_sent
 
         session = SimpleNamespace(get=AsyncMock(return_value=None))
         run(mark_sent(session, "ghost-id"))  # ne doit pas lever
 
     def test_mark_sent_sets_status_and_clears_last_error(self):
-        from agriconnect.workers.repositories.outbox_repo import mark_sent
+        from ladini.workers.repositories.outbox_repo import mark_sent
 
         row = SimpleNamespace(status="SENDING", sent_at=None, attempts=2, last_error="prev fail")
         session = SimpleNamespace(get=AsyncMock(return_value=row))
@@ -193,13 +193,13 @@ class TestOutboxRepo:
         assert row.last_error is None
 
     def test_mark_failed_noop_when_row_missing(self):
-        from agriconnect.workers.repositories.outbox_repo import mark_failed
+        from ladini.workers.repositories.outbox_repo import mark_failed
 
         session = SimpleNamespace(get=AsyncMock(return_value=None))
         run(mark_failed(session, "ghost-id", error="x"))  # ne doit pas lever
 
     def test_mark_failed_reschedules_with_backoff_below_max_attempts(self):
-        from agriconnect.workers.repositories.outbox_repo import mark_failed
+        from ladini.workers.repositories.outbox_repo import mark_failed
 
         row = SimpleNamespace(status="SENDING", attempts=1, max_attempts=5, last_error=None, next_attempt_at=None)
         session = SimpleNamespace(get=AsyncMock(return_value=row))
@@ -210,7 +210,7 @@ class TestOutboxRepo:
         assert row.next_attempt_at is not None
 
     def test_mark_failed_declares_dead_at_max_attempts(self):
-        from agriconnect.workers.repositories.outbox_repo import mark_failed
+        from ladini.workers.repositories.outbox_repo import mark_failed
 
         row = SimpleNamespace(status="SENDING", attempts=4, max_attempts=5, last_error=None, next_attempt_at=None)
         session = SimpleNamespace(get=AsyncMock(return_value=row))
@@ -218,7 +218,7 @@ class TestOutboxRepo:
         assert row.status == "DEAD"
 
     def test_mark_failed_truncates_overly_long_error_messages(self):
-        from agriconnect.workers.repositories.outbox_repo import mark_failed
+        from ladini.workers.repositories.outbox_repo import mark_failed
 
         row = SimpleNamespace(status="SENDING", attempts=1, max_attempts=5, last_error=None, next_attempt_at=None)
         session = SimpleNamespace(get=AsyncMock(return_value=row))
@@ -232,7 +232,7 @@ class TestOutboxRepo:
 
 class TestSolicitationRepo:
     def test_fetch_auctions_to_solicit_returns_scalars(self):
-        from agriconnect.workers.repositories.solicitation_repo import fetch_auctions_to_solicit
+        from ladini.workers.repositories.solicitation_repo import fetch_auctions_to_solicit
 
         auctions = [SimpleNamespace(id="a1"), SimpleNamespace(id="a2")]
         session = SimpleNamespace(execute=AsyncMock(return_value=_FakeExecResult(scalars_rows=auctions)))
@@ -240,7 +240,7 @@ class TestSolicitationRepo:
         assert result == auctions
 
     def test_upsert_auction_solicitations_returns_empty_without_hitting_db_on_no_producers(self):
-        from agriconnect.workers.repositories.solicitation_repo import upsert_auction_solicitations
+        from ladini.workers.repositories.solicitation_repo import upsert_auction_solicitations
 
         session = SimpleNamespace(execute=AsyncMock())
         auction = SimpleNamespace(id="a1", sub_category_id="sc1", target_zone_id=None)
@@ -254,7 +254,7 @@ class TestSolicitationRepo:
         contrainte d'idempotence sur `(auction_id, target_producer_id)`. Il
         doit apparaître dans `skipped` avec une raison explicite (chantier
         traçabilité 2026-08-24), pas juste disparaître silencieusement."""
-        from agriconnect.workers.repositories.solicitation_repo import upsert_auction_solicitations
+        from ladini.workers.repositories.solicitation_repo import upsert_auction_solicitations
 
         session = SimpleNamespace(execute=AsyncMock())
         auction = SimpleNamespace(id="a1", sub_category_id="sc1", target_zone_id=None)
@@ -268,7 +268,7 @@ class TestSolicitationRepo:
         session.execute.assert_not_awaited()
 
     def test_upsert_auction_solicitations_returns_newly_created_rows(self):
-        from agriconnect.workers.repositories.solicitation_repo import upsert_auction_solicitations
+        from ladini.workers.repositories.solicitation_repo import upsert_auction_solicitations
 
         session = SimpleNamespace(execute=AsyncMock(return_value=_FakeExecResult(all_rows=[("sol-1", "prod-1")])))
         auction = SimpleNamespace(id="a1", sub_category_id="sc1", target_zone_id="z1")
@@ -284,7 +284,7 @@ class TestSolicitationRepo:
         sollicité) — ce producteur doit apparaître dans `skipped`, pas juste
         se traduire par un compteur `solicitations_created` inférieur au
         nombre de producteurs sans aucune explication."""
-        from agriconnect.workers.repositories.solicitation_repo import upsert_auction_solicitations
+        from ladini.workers.repositories.solicitation_repo import upsert_auction_solicitations
 
         # Un seul des deux producteurs revient dans `RETURNING` : l'autre a
         # été ignoré par ON CONFLICT DO NOTHING (déjà sollicité).
@@ -296,7 +296,7 @@ class TestSolicitationRepo:
         assert result["skipped"] == [{"producer_id": "prod-2", "reason": "already_solicited"}]
 
     def test_upsert_offer_solicitations_returns_empty_on_no_buyers(self):
-        from agriconnect.workers.repositories.solicitation_repo import upsert_offer_solicitations
+        from ladini.workers.repositories.solicitation_repo import upsert_offer_solicitations
 
         session = SimpleNamespace(execute=AsyncMock())
         result = run(upsert_offer_solicitations(
@@ -306,7 +306,7 @@ class TestSolicitationRepo:
         session.execute.assert_not_awaited()
 
     def test_upsert_offer_solicitations_filters_buyers_without_an_id(self):
-        from agriconnect.workers.repositories.solicitation_repo import upsert_offer_solicitations
+        from ladini.workers.repositories.solicitation_repo import upsert_offer_solicitations
 
         session = SimpleNamespace(execute=AsyncMock())
         result = run(upsert_offer_solicitations(
@@ -317,7 +317,7 @@ class TestSolicitationRepo:
         session.execute.assert_not_awaited()
 
     def test_upsert_offer_solicitations_returns_newly_created_rows(self):
-        from agriconnect.workers.repositories.solicitation_repo import upsert_offer_solicitations
+        from ladini.workers.repositories.solicitation_repo import upsert_offer_solicitations
 
         session = SimpleNamespace(execute=AsyncMock(return_value=_FakeExecResult(all_rows=[("sol-9", "buy-9")])))
         result = run(upsert_offer_solicitations(
@@ -327,14 +327,14 @@ class TestSolicitationRepo:
         assert result == [{"solicitation_id": "sol-9", "buyer_id": "buy-9"}]
 
     def test_mark_notified_noop_on_empty_ids(self):
-        from agriconnect.workers.repositories.solicitation_repo import mark_notified
+        from ladini.workers.repositories.solicitation_repo import mark_notified
 
         session = SimpleNamespace(execute=AsyncMock())
         run(mark_notified(session, []))
         session.execute.assert_not_awaited()
 
     def test_mark_notified_executes_the_update(self):
-        from agriconnect.workers.repositories.solicitation_repo import mark_notified
+        from ladini.workers.repositories.solicitation_repo import mark_notified
 
         session = SimpleNamespace(execute=AsyncMock())
         run(mark_notified(session, ["sol-1", "sol-2"]))
@@ -347,7 +347,7 @@ class TestSolicitationRepo:
 
 class TestTargeting:
     def test_producers_for_auction_short_circuits_without_a_sub_category(self):
-        from agriconnect.workers.automation.targeting import producers_for_auction
+        from ladini.workers.automation.targeting import producers_for_auction
 
         session = SimpleNamespace(execute=AsyncMock())
         result = run(producers_for_auction(session, sub_category_id=None, target_zone_id=None))
@@ -355,7 +355,7 @@ class TestTargeting:
         session.execute.assert_not_awaited()
 
     def test_producers_for_auction_falls_back_to_user_name_when_no_business_name(self):
-        from agriconnect.workers.automation.targeting import producers_for_auction
+        from ladini.workers.automation.targeting import producers_for_auction
 
         class _MappingResult:
             def mappings(self_inner):
@@ -371,7 +371,7 @@ class TestTargeting:
         assert result[1]["display_name"] == "Ferme Bio"
 
     def test_buyers_in_zone_for_category_short_circuits_without_a_zone(self):
-        from agriconnect.workers.automation.targeting import buyers_in_zone_for_category
+        from ladini.workers.automation.targeting import buyers_in_zone_for_category
 
         session = SimpleNamespace(execute=AsyncMock())
         result = run(buyers_in_zone_for_category(session, zone_id=None))
@@ -379,7 +379,7 @@ class TestTargeting:
         session.execute.assert_not_awaited()
 
     def test_buyers_in_zone_for_category_defaults_display_name_when_unnamed(self):
-        from agriconnect.workers.automation.targeting import buyers_in_zone_for_category
+        from ladini.workers.automation.targeting import buyers_in_zone_for_category
 
         class _MappingResult:
             def mappings(self_inner):

@@ -30,7 +30,7 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
 # --timeout-graceful-shutdown 30 : laisse les appels d'outils MCP en vol
 # (potentiellement un aller-retour DB + logique métier) se terminer avant
 # coupure — doit rester <= stop_grace_period côté compose.
-CMD ["uvicorn", "agriconnect.protocols.mcp.servers.http_server:app", \
+CMD ["uvicorn", "ladini.protocols.mcp.servers.http_server:app", \
      "--host", "0.0.0.0", "--port", "8003", "--workers", "1", \
      "--loop", "uvloop", "--http", "httptools", \
      "--timeout-graceful-shutdown", "30"]

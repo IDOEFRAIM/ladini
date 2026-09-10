@@ -76,8 +76,8 @@ def generate_answer(question: str, profile_text: str) -> str:
 
 
 def build_ui():
-    with gr.Blocks(title="AgriConnect — Formation") as demo:
-        gr.Markdown("# AgriConnect — Formation (Gradio UI)")
+    with gr.Blocks(title="Ladini — Formation") as demo:
+        gr.Markdown("# Ladini — Formation (Gradio UI)")
         with gr.Row():
             q = gr.Textbox(label="Question", placeholder="Posez votre question agricole ici...", lines=2)
         with gr.Row():

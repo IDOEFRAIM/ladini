@@ -21,7 +21,7 @@ class _FakeRedis:
 
 class TestBidPhotoTarget:
     def test_set_then_pop_round_trip(self, monkeypatch):
-        import agriconnect.services.pending_photo_target as mod
+        import ladini.services.pending_photo_target as mod
         fake = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake)
 
@@ -29,7 +29,7 @@ class TestBidPhotoTarget:
         assert mod.pop_pending_bid_photo("+22670000001") == "bid-1"
 
     def test_pop_is_single_use(self, monkeypatch):
-        import agriconnect.services.pending_photo_target as mod
+        import ladini.services.pending_photo_target as mod
         fake = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake)
 
@@ -38,14 +38,14 @@ class TestBidPhotoTarget:
         assert mod.pop_pending_bid_photo("+22670000001") is None
 
     def test_pop_with_nothing_set_returns_none(self, monkeypatch):
-        import agriconnect.services.pending_photo_target as mod
+        import ladini.services.pending_photo_target as mod
         fake = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake)
 
         assert mod.pop_pending_bid_photo("+22670000001") is None
 
     def test_set_with_no_phone_or_id_is_a_no_op(self, monkeypatch):
-        import agriconnect.services.pending_photo_target as mod
+        import ladini.services.pending_photo_target as mod
         fake = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake)
 
@@ -56,7 +56,7 @@ class TestBidPhotoTarget:
 
 class TestAuctionPhotoTarget:
     def test_set_then_pop_round_trip(self, monkeypatch):
-        import agriconnect.services.pending_photo_target as mod
+        import ladini.services.pending_photo_target as mod
         fake = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake)
 
@@ -64,7 +64,7 @@ class TestAuctionPhotoTarget:
         assert mod.pop_pending_auction_photo("+22670000001") == "auction-1"
 
     def test_bid_and_auction_markers_are_independent(self, monkeypatch):
-        import agriconnect.services.pending_photo_target as mod
+        import ladini.services.pending_photo_target as mod
         fake = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake)
 
@@ -77,7 +77,7 @@ class TestAuctionPhotoTarget:
 
 class TestResilience:
     def test_a_write_failure_never_raises(self, monkeypatch):
-        import agriconnect.services.pending_photo_target as mod
+        import ladini.services.pending_photo_target as mod
 
         class _Broken:
             def setex(self, *a, **kw):
@@ -87,7 +87,7 @@ class TestResilience:
         mod.set_pending_bid_photo("+22670000001", "bid-1")  # ne doit pas lever
 
     def test_a_read_failure_returns_none(self, monkeypatch):
-        import agriconnect.services.pending_photo_target as mod
+        import ladini.services.pending_photo_target as mod
 
         class _Broken:
             def get(self, *a, **kw):

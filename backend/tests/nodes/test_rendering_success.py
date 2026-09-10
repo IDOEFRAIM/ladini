@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.nodes.rendering.common import RenderContext
-from agriconnect.graphs.agents.market_coach.nodes.rendering.success import (
+from ladini.graphs.agents.market_coach.nodes.rendering.common import RenderContext
+from ladini.graphs.agents.market_coach.nodes.rendering.success import (
     _format_future_cycle_line,
     _render_buyer_catalog_sections,
     _render_catalog_section,
@@ -98,9 +98,11 @@ class TestRenderFarmSections:
         de 4 messages) par `api/tasks.py::_chunk_whatsapp_body`. Le rendu
         doit désormais poser des marqueurs PAGE_BREAK entre pages d'au plus
         5 éléments, jamais au milieu d'un élément."""
-        from agriconnect.graphs.agents.market_coach.nodes.rendering.success import (
-            PAGE_BREAK,
+        from ladini.graphs.agents.market_coach.nodes.rendering.success import (
             _STOCK_LIST_MAX_ITEMS_PER_PAGE,
+        )
+        from ladini.graphs.agents.market_coach.services.text_pagination import (
+            PAGE_BREAK,
         )
 
         stocks = [
@@ -118,7 +120,7 @@ class TestRenderFarmSections:
             assert page.count("️⃣") <= _STOCK_LIST_MAX_ITEMS_PER_PAGE
 
     def test_pagination_never_cuts_an_item_in_half(self):
-        from agriconnect.graphs.agents.market_coach.nodes.rendering.success import PAGE_BREAK
+        from ladini.graphs.agents.market_coach.services.text_pagination import PAGE_BREAK
 
         stocks = [
             {"item_name": f"produit{i}", "quantity": 10, "unit": "kg", "stock_id": f"s{i}"}
@@ -132,7 +134,7 @@ class TestRenderFarmSections:
             assert f"produit{i} : 10 KG" in text.replace(PAGE_BREAK, "\n")
 
     def test_a_small_stock_has_no_page_markers(self):
-        from agriconnect.graphs.agents.market_coach.nodes.rendering.success import PAGE_BREAK
+        from ladini.graphs.agents.market_coach.services.text_pagination import PAGE_BREAK
 
         text, _options = _render_farm_sections(
             {"f1": {"farm_name": "Ferme A", "stocks": [{"item_name": "mais", "quantity": 10, "unit": "kg", "stock_id": "s1"}]}}
@@ -508,7 +510,7 @@ class TestRenderSuccess:
         assert "riz" not in result["final_response"]
 
     def test_search_results_with_photos_get_a_view_hint_and_are_cached(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+        import ladini.graphs.agents.market_coach.nodes.rendering.success as success_mod
 
         captured = {}
         monkeypatch.setattr(
@@ -529,7 +531,7 @@ class TestRenderSuccess:
         assert captured["entries"] == {"1": {"id": "p1", "name": "mais", "images": ["https://x/a.jpg"]}}
 
     def test_search_results_without_any_photo_get_no_hint(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+        import ladini.graphs.agents.market_coach.nodes.rendering.success as success_mod
 
         monkeypatch.setattr(success_mod, "_store_search_photo_results", lambda phone, entries: None)
         c = ctx(
@@ -543,7 +545,7 @@ class TestRenderSuccess:
         assert "photos <numéro>" not in result["final_response"]
 
     def test_future_only_results_are_not_cached(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+        import ladini.graphs.agents.market_coach.nodes.rendering.success as success_mod
 
         called = {"count": 0}
         monkeypatch.setattr(
@@ -812,7 +814,7 @@ class TestAuctionAndBidPhotoHooks:
     """Voir mémoire projet "auction-bid-photos"."""
 
     def test_placing_a_bid_sets_a_pending_photo_target_and_adds_a_hint(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+        import ladini.graphs.agents.market_coach.nodes.rendering.success as success_mod
 
         captured = {}
         monkeypatch.setattr(
@@ -831,7 +833,7 @@ class TestAuctionAndBidPhotoHooks:
         assert "photo" in result["final_response"].lower()
 
     def test_creating_an_auction_sets_a_pending_photo_target_and_adds_a_hint(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+        import ladini.graphs.agents.market_coach.nodes.rendering.success as success_mod
 
         captured = {}
         monkeypatch.setattr(
@@ -850,7 +852,7 @@ class TestAuctionAndBidPhotoHooks:
         assert "photo" in result["final_response"].lower()
 
     def test_a_bid_list_with_photos_is_cached_and_gets_a_hint(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+        import ladini.graphs.agents.market_coach.nodes.rendering.success as success_mod
 
         captured = {}
         monkeypatch.setattr(
@@ -876,7 +878,7 @@ class TestAuctionAndBidPhotoHooks:
         assert captured["entries"]["2"]["images"] == []
 
     def test_a_bid_list_without_any_photo_gets_no_hint(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+        import ladini.graphs.agents.market_coach.nodes.rendering.success as success_mod
         monkeypatch.setattr(success_mod, "_store_search_photo_results", lambda phone, entries: None)
 
         c = ctx(
@@ -893,7 +895,7 @@ class TestAuctionAndBidPhotoHooks:
         assert "photos <numéro>" not in result["final_response"]
 
     def test_producer_auctions_listing_with_reference_photos_is_cached(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+        import ladini.graphs.agents.market_coach.nodes.rendering.success as success_mod
 
         captured = {}
         monkeypatch.setattr(
@@ -917,7 +919,7 @@ class TestAuctionAndBidPhotoHooks:
         assert captured["entries"]["1"]["id"] == "a1"
 
     def test_own_bids_listing_with_photos_is_cached(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.nodes.rendering.success as success_mod
+        import ladini.graphs.agents.market_coach.nodes.rendering.success as success_mod
 
         captured = {}
         monkeypatch.setattr(

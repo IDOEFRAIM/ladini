@@ -20,7 +20,7 @@ WORKDIR /app/backend/src
 # Pas de port exposé (le worker ne sert pas de HTTP).
 # Healthcheck : ping applicatif Celery (le worker répond au broker).
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD celery -A agriconnect.api.celery_app inspect ping -d "celery@$(hostname)" || exit 1
+    CMD celery -A ladini.api.celery_app inspect ping -d "celery@$(hostname)" || exit 1
 
 # --- Tuning Celery : charge 100% I/O-bound (appels LLM Groq, MCP HTTP,
 # webhooks WhatsApp/Twilio, requêtes DB via pgbouncer) — AUCUNE tâche
@@ -65,7 +65,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 #   quand certaines tâches (appel LLM lent) durent bien plus longtemps que
 #   d'autres. Sans ça, un enfant peut se retrouver à accumuler une file
 #   pendant qu'un autre est libre.
-CMD ["celery", "-A", "agriconnect.api.celery_app", "worker", \
+CMD ["celery", "-A", "ladini.api.celery_app", "worker", \
      "--loglevel=info", "-Ofair", \
      "--concurrency=4", "--pool=prefork", \
      "--max-tasks-per-child=200", "--max-memory-per-child=450000"]

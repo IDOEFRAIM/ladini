@@ -11,7 +11,7 @@ from typing import Any, Dict
 
 from tests.conftest import run
 
-from agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate import (
+from ladini.graphs.agents.market_coach.flows.buyer.gps_delivery_gate import (
     _GPS_FIRST_TIME_PROMPT,
     _GPS_HABITUAL_PROMPT,
     _GPS_TEXT_REMINDER,
@@ -19,7 +19,7 @@ from agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate import
     resolve_gps_stage,
 )
 
-_MODULE = "agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate"
+_MODULE = "ladini.graphs.agents.market_coach.flows.buyer.gps_delivery_gate"
 
 
 class _RuntimeNoLLM:

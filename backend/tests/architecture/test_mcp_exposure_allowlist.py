@@ -26,13 +26,13 @@ import os
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
-from agriconnect.infrastructure.mcp.exposure import MCP_EXPOSED_TOOLS
-from agriconnect.infrastructure.mcp.security import TOOL_SCOPE_MAP
-from agriconnect.protocols.mcp.servers.h import EXPOSED_METHODS, TOOL_DESCRIPTIONS
-from agriconnect.services.database.d import AgriDatabaseService
+from ladini.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
+from ladini.infrastructure.mcp.exposure import MCP_EXPOSED_TOOLS
+from ladini.infrastructure.mcp.security import TOOL_SCOPE_MAP
+from ladini.protocols.mcp.servers.h import EXPOSED_METHODS, TOOL_DESCRIPTIONS
+from ladini.services.database.d import AgriDatabaseService
 
-SRC = os.path.join("src", "agriconnect")
+SRC = os.path.join("src", "ladini")
 INVOCATION_HELPERS = {"_call", "call_tool", "call_db", "invoke_tool"}
 
 
@@ -77,7 +77,7 @@ class TestExposureIsOptIn:
         """Simule l'ajout d'une méthode publique async : elle ne doit
         apparaître dans AUCUN outil sans décision explicite. C'est
         exactement le défaut structurel que cette phase supprime."""
-        from agriconnect.protocols.mcp.servers import h
+        from ladini.protocols.mcp.servers import h
 
         class _ServiceWithNewMethod(AgriDatabaseService):  # pragma: no cover
             async def newly_added_dangerous_mutation(self, order_id: str):

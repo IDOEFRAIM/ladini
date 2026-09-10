@@ -30,4 +30,4 @@ COPY backend/sources /app/backend/sources
 RUN useradd -m -u 10001 appuser && chown -R appuser:appuser /app
 USER appuser
 
-CMD ["python", "-m", "agriconnect.domain.ingestion.worker", "--mode", "harvest", "--max-queue-items", "0"]
+CMD ["python", "-m", "ladini.domain.ingestion.worker", "--mode", "harvest", "--max-queue-items", "0"]

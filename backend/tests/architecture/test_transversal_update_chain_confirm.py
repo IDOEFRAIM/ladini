@@ -32,14 +32,14 @@ from tests.architecture.test_preorder_draft_persistence import (
     _draft as _preorder_draft,
 )
 
-from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ConfirmationTarget,
     ConfirmProcurementDraft,
     ProcurementDraftStatus,
     ProcurementOutcomeKind,
     apply_domain_action as apply_procurement_action,
 )
-from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     ConfirmPreorderDraft,
     PreorderDraftStatus,
     PreorderOutcomeKind,

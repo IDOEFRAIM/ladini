@@ -6,7 +6,7 @@ tags: [empty_result, edge_case]
 grounding:
   status: PROVEN_BY_CODE
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/cart.py:309-329 — the 'if not vendors' branch (true zero-match, reached when the raw search returns nothing at all — distinct from P0-BIZ-007's case, where results existed but were filtered out by the confidence check)"
+    - "backend/src/ladini/graphs/agents/market_coach/flows/buyer/cart.py:309-329 — the 'if not vendors' branch (true zero-match, reached when the raw search returns nothing at all — distinct from P0-BIZ-007's case, where results existed but were filtered out by the confidence check)"
 
 persona: {role: BUYER, description: "Acheteur", phone: "+22670000043"}
 workspace_type: buyer

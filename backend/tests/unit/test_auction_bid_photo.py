@@ -42,7 +42,7 @@ class _FakeSession:
 
 
 def _bid_service(bid, producer_id):
-    from agriconnect.services.database.auction import AuctionMixin
+    from ladini.services.database.auction import AuctionMixin
 
     class _Svc(AuctionMixin):
         def __init__(self, session):
@@ -61,7 +61,7 @@ def _bid_service(bid, producer_id):
 
 
 def _auction_service(auction, buyer_id):
-    from agriconnect.services.database.auction import AuctionMixin
+    from ladini.services.database.auction import AuctionMixin
 
     class _Svc(AuctionMixin):
         def __init__(self, session):

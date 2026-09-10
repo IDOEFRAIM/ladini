@@ -12,8 +12,8 @@ import pytest
 from tests.conftest import make_state, run
 from tests.architecture.test_sales_publish_draft_persistence import _draft, _install_fake_db
 
-from agriconnect.graphs.agents.market_coach.core.confirmation_target import ConfirmationTarget
-from agriconnect.graphs.agents.market_coach.domain.sales_publish_draft import (
+from ladini.graphs.agents.market_coach.core.confirmation_target import ConfirmationTarget
+from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
     CancelSalesPublishDraft,
     ConfirmSalesPublishDraft,
     NoSalesPublishAction,
@@ -26,10 +26,10 @@ from agriconnect.graphs.agents.market_coach.domain.sales_publish_draft import (
     check_confirmation_target_invariant,
     resolve_domain_action,
 )
-from agriconnect.graphs.agents.market_coach.flows.producer.sales_confirmation import (
+from ladini.graphs.agents.market_coach.flows.producer.sales_confirmation import (
     resolve_sales_confirmation,
 )
-from agriconnect.services.database import sales_publish_draft_store as store_mod
+from ladini.services.database import sales_publish_draft_store as store_mod
 
 _ALWAYS_CLAIM = lambda key: True  # noqa: E731
 
@@ -153,8 +153,8 @@ class TestConfirmationTargetInvariantChecker:
 
 class TestNodeLevelConfirmAuthorizesExecution:
     def test_the_node_resolves_pending_interaction_on_confirm(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.domain.sales_publish_draft as sd_mod
-        from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+        import ladini.graphs.agents.market_coach.domain.sales_publish_draft as sd_mod
+        from ladini.graphs.agents.market_coach.core.pending_interaction import (
             InteractionKind,
             get_pending_interaction,
         )
@@ -189,7 +189,7 @@ class TestRealThreadConcurrencyUpdateAndConfirm:
         (CONFIRM retombe alors STALE_TARGET), soit CONFIRM gagne (UPDATE
         retombe alors DRAFT_FINALIZED, le draft n'étant plus DRAFT) —
         JAMAIS les deux ne réussissent, jamais une double exécution."""
-        import agriconnect.graphs.agents.market_coach.domain.sales_publish_draft as sd_mod
+        import ladini.graphs.agents.market_coach.domain.sales_publish_draft as sd_mod
 
         monkeypatch.setattr(sd_mod, "claim_once", _ALWAYS_CLAIM)
         _install_fake_db(monkeypatch)

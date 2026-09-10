@@ -20,16 +20,16 @@ from __future__ import annotations
 from typing import Any, Dict
 
 # Import obligatoire : peuple INTENT_TO_GOAL_MAP consommé par goal_planner.
-import agriconnect.graphs.agents.market_coach.interpreter.routing  # noqa: F401
-from agriconnect.graphs.agents.market_coach.core.conversation_decision import (
+import ladini.graphs.agents.market_coach.interpreter.routing  # noqa: F401
+from ladini.graphs.agents.market_coach.core.conversation_decision import (
     ConversationAction,
 )
-from agriconnect.graphs.agents.market_coach.core.goals import (
+from ladini.graphs.agents.market_coach.core.goals import (
     NAVIGATION_BREAKOUT_GOALS,
 )
-from agriconnect.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
-from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import goal_planner
-from agriconnect.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
+from ladini.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
+from ladini.graphs.agents.market_coach.interpreter.goal_planner import goal_planner
+from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
 from tests.conftest import make_state, run
 
 

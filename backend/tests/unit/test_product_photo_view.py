@@ -20,7 +20,7 @@ from tests.conftest import run
 
 class TestSendWhatsappMedia:
     def test_passes_the_media_url_and_an_explicit_timeout(self, monkeypatch):
-        import agriconnect.services.twilio_sender as ts
+        import ladini.services.twilio_sender as ts
 
         seen = {}
 
@@ -43,11 +43,11 @@ class TestSendWhatsappMedia:
         assert seen["timeout"] == ts._TIMEOUT_S
 
     def test_returns_none_without_a_media_url(self, monkeypatch):
-        import agriconnect.services.twilio_sender as ts
+        import ladini.services.twilio_sender as ts
         assert ts.send_whatsapp_media("+22668815299", "", "légende") is None
 
     def test_returns_none_and_does_not_raise_on_twilio_failure(self, monkeypatch):
-        import agriconnect.services.twilio_sender as ts
+        import ladini.services.twilio_sender as ts
 
         class _FailingClient:
             def __init__(self, sid, token, http_client=None):
@@ -60,7 +60,7 @@ class TestSendWhatsappMedia:
 
     def test_masks_the_recipient_number_in_logs(self, monkeypatch, caplog):
         import logging
-        import agriconnect.services.twilio_sender as ts
+        import ladini.services.twilio_sender as ts
 
         class _FakeClient:
             def __init__(self, sid, token, http_client=None):
@@ -69,7 +69,7 @@ class TestSendWhatsappMedia:
                 )()
 
         monkeypatch.setattr(ts, "Client", _FakeClient)
-        with caplog.at_level(logging.INFO, logger="AgriConnect.TwilioSender"):
+        with caplog.at_level(logging.INFO, logger="Ladini.TwilioSender"):
             ts.send_whatsapp_media("+22668815299", "https://x/a.jpg")
         assert "+22668815299" not in caplog.text
         assert "***5299" in caplog.text
@@ -81,7 +81,7 @@ class TestFindProductByName:
         pytest.importorskip("celery", reason="product_photo_task imports api.celery_app -> celery.Celery")
 
     def _patch_products(self, monkeypatch, products):
-        from agriconnect.services.database.d import AgriDatabaseService
+        from ladini.services.database.d import AgriDatabaseService
         # `AgriDatabaseService.__getattribute__` (d.py) mémorise le wrapper
         # @transactional dans un cache DE CLASSE (`_DISPATCH_CACHE`, clé
         # "nom:is_write"), rempli une seule fois pour tout le process. Sans
@@ -103,7 +103,7 @@ class TestFindProductByName:
         # cas en CI/test), ça lève "Database sessionmaker unavailable". Même
         # technique que `test_workers_runtime_and_repos.py::TestWorkerSession
         # ._fake_sessionmaker`, ciblée sur le bon module.
-        import agriconnect.services.database.base_service as base_service_module
+        import ladini.services.database.base_service as base_service_module
 
         class _CM:
             async def __aenter__(self_inner):
@@ -115,13 +115,13 @@ class TestFindProductByName:
         monkeypatch.setattr(base_service_module, "get_sessionmaker", lambda: (lambda: _CM()))
 
     def test_no_products_at_all(self, monkeypatch):
-        from agriconnect.workers.media.product_photo_task import _find_product_by_name
+        from ladini.workers.media.product_photo_task import _find_product_by_name
         self._patch_products(monkeypatch, [])
         result = run(_find_product_by_name("+22670000001", "maïs"))
         assert result == {"none": True}
 
     def test_exact_name_match_is_resolved(self, monkeypatch):
-        from agriconnect.workers.media.product_photo_task import _find_product_by_name
+        from ladini.workers.media.product_photo_task import _find_product_by_name
         products = [
             {"id": "1", "name": "Maïs", "images": ["https://x/a.jpg"]},
             {"id": "2", "name": "Tomates", "images": []},
@@ -131,14 +131,14 @@ class TestFindProductByName:
         assert result["resolved"]["id"] == "1"
 
     def test_a_typo_still_resolves_via_fuzzy_matching(self, monkeypatch):
-        from agriconnect.workers.media.product_photo_task import _find_product_by_name
+        from ladini.workers.media.product_photo_task import _find_product_by_name
         products = [{"id": "1", "name": "Tomates", "images": []}]
         self._patch_products(monkeypatch, products)
         result = run(_find_product_by_name("+22670000001", "tomate"))
         assert result["resolved"]["id"] == "1"
 
     def test_an_unrelated_query_is_reported_as_not_found_with_the_catalog_listed(self, monkeypatch):
-        from agriconnect.workers.media.product_photo_task import _find_product_by_name
+        from ladini.workers.media.product_photo_task import _find_product_by_name
         products = [{"id": "1", "name": "Maïs", "images": []}, {"id": "2", "name": "Tomates", "images": []}]
         self._patch_products(monkeypatch, products)
         result = run(_find_product_by_name("+22670000001", "voitures"))
@@ -150,7 +150,7 @@ class TestFindProductByName:
         des quantités différentes (300kg, 245kg, 456kg) ne doit jamais voir
         `_find_product_by_name` en choisir un au hasard — les trois doivent
         remonter comme un lot ambigu à trancher."""
-        from agriconnect.workers.media.product_photo_task import _find_product_by_name
+        from ladini.workers.media.product_photo_task import _find_product_by_name
         products = [
             {"id": "1", "name": "maïs", "quantity_for_sale": 300, "unit": "KG", "images": []},
             {"id": "2", "name": "maïs", "quantity_for_sale": 245, "unit": "KG", "images": []},
@@ -163,7 +163,7 @@ class TestFindProductByName:
         assert {p["id"] for p in result["ambiguous"]} == {"1", "2", "3"}
 
     def test_a_single_batch_among_same_named_ones_is_not_ambiguous(self, monkeypatch):
-        from agriconnect.workers.media.product_photo_task import _find_product_by_name
+        from ladini.workers.media.product_photo_task import _find_product_by_name
         products = [{"id": "1", "name": "maïs", "quantity_for_sale": 300, "unit": "KG", "images": []}]
         self._patch_products(monkeypatch, products)
         result = run(_find_product_by_name("+22670000001", "maïs"))

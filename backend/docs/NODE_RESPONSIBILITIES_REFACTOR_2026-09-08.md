@@ -116,23 +116,23 @@ Le reste du graphe (`goal_planner` → ... → `END`) est topologiquement inchan
 ## C. Fichiers modifiés — liste exacte et justification
 
 **Créés :**
-- `src/agriconnect/graphs/agents/market_coach/nodes/session_bootstrap.py` — nouveau nœud technique (rôle par défaut + profil/onboarding/fermes + bookkeeping tunnel), extrait d'`input_normalizer`/`role_guard`.
-- `src/agriconnect/graphs/agents/market_coach/core/conversation_reset.py` — helper `reset_abandoned_conversation_context`, extrait de `cognitive_guard`.
+- `src/ladini/graphs/agents/market_coach/nodes/session_bootstrap.py` — nouveau nœud technique (rôle par défaut + profil/onboarding/fermes + bookkeeping tunnel), extrait d'`input_normalizer`/`role_guard`.
+- `src/ladini/graphs/agents/market_coach/core/conversation_reset.py` — helper `reset_abandoned_conversation_context`, extrait de `cognitive_guard`.
 - `tests/nodes/test_session_bootstrap.py` — couverture du nouveau nœud (reprend, à l'identique, les tests qui vivaient dans `test_input_normalizer.py` avant le déplacement).
 - `tests/unit/test_normalize_role.py` — contrat `normalize_role` exigé par le mandat.
 
 **Modifiés :**
-- `src/agriconnect/graphs/roles.py` — `normalize_role` ne retourne plus jamais "PRODUCER" par défaut.
-- `src/agriconnect/graphs/agents/market_coach/core/graph_builder.py` — retrait `role_guard`/`cognitive_orchestrator`, ajout `session_bootstrap`, rewiring de `_route_after_cognitive`.
-- `src/agriconnect/graphs/agents/market_coach/core/state.py` — nouveaux champs `input_truncated`, `disambiguation_candidate` ; `security_status` Literal étendu.
-- `src/agriconnect/graphs/agents/market_coach/core/state_profile.py` — déclaration EPHEMERAL des deux nouveaux champs.
-- `src/agriconnect/graphs/agents/market_coach/nodes/input_normalizer.py` — réécrit, purifié.
-- `src/agriconnect/graphs/agents/market_coach/nodes/security_moderation.py` — détection d'injection ajoutée, `SecurityDecision`, wrapper de log.
-- `src/agriconnect/graphs/agents/market_coach/nodes/cognitive.py` — seuil de confiance sur l'interruption, `disambiguation_candidate`, extraction du reset d'abandon, suppression de `cognitive_orchestrator`.
-- `src/agriconnect/graphs/agents/market_coach/nodes/clarification.py` — consultation du candidat précalculé, encapsulation GPS, suppression du biais "producteur".
-- `src/agriconnect/graphs/agents/market_coach/nodes/semantic_disambiguation.py` — correctif `confidence or 0.0`, consultation du candidat précalculé.
-- `src/agriconnect/graphs/agents/market_coach/nodes/routing.py` — `"PROMPT_INJECTION_DETECTED"` ajouté à `_SECURITY_BLOCKING`.
-- `src/agriconnect/graphs/agents/market_coach/interpreter/routing.py` — retrait du filtrage par rôle (prompt + clamp), garde anti-hallucination reformulée contre le catalogue complet.
+- `src/ladini/graphs/roles.py` — `normalize_role` ne retourne plus jamais "PRODUCER" par défaut.
+- `src/ladini/graphs/agents/market_coach/core/graph_builder.py` — retrait `role_guard`/`cognitive_orchestrator`, ajout `session_bootstrap`, rewiring de `_route_after_cognitive`.
+- `src/ladini/graphs/agents/market_coach/core/state.py` — nouveaux champs `input_truncated`, `disambiguation_candidate` ; `security_status` Literal étendu.
+- `src/ladini/graphs/agents/market_coach/core/state_profile.py` — déclaration EPHEMERAL des deux nouveaux champs.
+- `src/ladini/graphs/agents/market_coach/nodes/input_normalizer.py` — réécrit, purifié.
+- `src/ladini/graphs/agents/market_coach/nodes/security_moderation.py` — détection d'injection ajoutée, `SecurityDecision`, wrapper de log.
+- `src/ladini/graphs/agents/market_coach/nodes/cognitive.py` — seuil de confiance sur l'interruption, `disambiguation_candidate`, extraction du reset d'abandon, suppression de `cognitive_orchestrator`.
+- `src/ladini/graphs/agents/market_coach/nodes/clarification.py` — consultation du candidat précalculé, encapsulation GPS, suppression du biais "producteur".
+- `src/ladini/graphs/agents/market_coach/nodes/semantic_disambiguation.py` — correctif `confidence or 0.0`, consultation du candidat précalculé.
+- `src/ladini/graphs/agents/market_coach/nodes/routing.py` — `"PROMPT_INJECTION_DETECTED"` ajouté à `_SECURITY_BLOCKING`.
+- `src/ladini/graphs/agents/market_coach/interpreter/routing.py` — retrait du filtrage par rôle (prompt + clamp), garde anti-hallucination reformulée contre le catalogue complet.
 - `tests/nodes/test_cognitive_guard_and_orchestrator.py` — retrait de `TestCognitiveOrchestrator` (code supprimé), tests de confiance ajoutés, tests `disambiguation_candidate` ajoutés.
 - `tests/nodes/test_input_normalizer.py` — réécrit pour le nœud purifié.
 - `tests/nodes/test_security_moderation.py` — tests d'injection ajoutés (déplacés depuis `test_input_normalizer.py`).

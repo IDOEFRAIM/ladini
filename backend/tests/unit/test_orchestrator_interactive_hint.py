@@ -11,7 +11,7 @@ WhatsApp (texte brut sans les boutons/liste). Ces tests verrouillent que
 ``_interactive_hint`` traduit désormais ``ag_ui_component`` en premier."""
 from __future__ import annotations
 
-from agriconnect.orchestrator.orchestrator import Orchestrator
+from ladini.orchestrator.orchestrator import Orchestrator
 
 
 class TestInteractiveHintReadsAgUiComponent:

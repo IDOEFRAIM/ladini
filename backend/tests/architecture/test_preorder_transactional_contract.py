@@ -14,7 +14,7 @@ import pytest
 from tests.conftest import make_state, run
 from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
 
-from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     ConfirmationTarget,
     ConfirmPreorderDraft,
     PreorderDraft,
@@ -23,10 +23,10 @@ from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
     UpdatePreorderDraft,
     apply_domain_action,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation import (
+from ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation import (
     resolve_preorder_confirmation,
 )
-from agriconnect.services.database import preorder_draft_store as store_mod
+from ladini.services.database import preorder_draft_store as store_mod
 
 _ALWAYS_CLAIM = lambda key: True  # noqa: E731
 
@@ -38,7 +38,7 @@ class TestInvariantA_PreorderWorkflowNeverMutatesCanonicalStateDirectly:
         `items`, ou tout autre champ que `apply_response_plan` déciderait
         lui-même (mandat §6 : dérivé de `draft.status`, pas une autorité)."""
         import inspect
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation as mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation as mod
 
         source = inspect.getsource(mod.apply_response_plan) + inspect.getsource(mod._phase_projection)
         code_only = re.sub(r'""".*?"""', "", source, flags=re.DOTALL)
@@ -53,7 +53,7 @@ class TestInvariantB_ResolvedIdDoesNotControlRouting:
         """`resolve_domain_action` ne connaît QUE `interpreted_event` —
         `resolved_id` n'existe même pas dans sa signature (mandat §7)."""
         import inspect
-        from agriconnect.graphs.agents.market_coach.domain import preorder_draft as pd_mod
+        from ladini.graphs.agents.market_coach.domain import preorder_draft as pd_mod
 
         sig = inspect.signature(pd_mod.resolve_domain_action)
         assert "resolved_id" not in sig.parameters
@@ -65,7 +65,7 @@ class TestInvariantB_ResolvedIdDoesNotControlRouting:
         (menu numéroté traduit par `preorder.py`, ou reconnaissance directe)
         — le domaine voit exactement le même événement, jamais une branche
         dédiée à `resolved_id`."""
-        from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+        from ladini.graphs.agents.market_coach.domain.preorder_draft import (
             resolve_domain_action,
         )
 
@@ -81,8 +81,8 @@ class TestInvariantC_ActiveCartCannotDivergeFromDraftItems:
         `active_cart` — seul `draft.items` alimente le récap et
         `last_order_summary` une fois qu'un draft existe."""
         import inspect
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation as mod
-        from agriconnect.graphs.agents.market_coach.domain import preorder_draft as pd_mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation as mod
+        from ladini.graphs.agents.market_coach.domain import preorder_draft as pd_mod
 
         source = inspect.getsource(mod.apply_response_plan)
         source += inspect.getsource(pd_mod.PreorderDraft.render_summary)
@@ -152,7 +152,7 @@ class TestInvariantH_DoubleConfirmExecutesExactlyOnce:
 
 class TestInvariantI_ConcurrentUpdateConfirmNeverExecutesAStaleVersion:
     def test_real_threads_racing_update_and_confirm_yield_at_most_one_execution(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.domain.preorder_draft as pd_mod
+        import ladini.graphs.agents.market_coach.domain.preorder_draft as pd_mod
 
         table = _install_fake_db(monkeypatch)
         monkeypatch.setattr(pd_mod, "claim_once", lambda key: True)
@@ -218,7 +218,7 @@ class TestInvariantI_ConcurrentUpdateConfirmNeverExecutesAStaleVersion:
 
 class TestInvariantJ_CreateRetryNeverCreatesADoubleDraft:
     def test_the_same_idempotency_key_is_stable_for_the_same_cart_and_buyer(self):
-        from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+        from ladini.graphs.agents.market_coach.domain.preorder_draft import (
             cart_fingerprint,
             creation_key,
         )
@@ -229,7 +229,7 @@ class TestInvariantJ_CreateRetryNeverCreatesADoubleDraft:
         assert key1 == key2
 
     def test_a_different_cart_produces_a_different_key(self):
-        from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+        from ladini.graphs.agents.market_coach.domain.preorder_draft import (
             cart_fingerprint,
             creation_key,
         )

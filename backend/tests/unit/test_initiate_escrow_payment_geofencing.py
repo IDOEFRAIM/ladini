@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.services.database.errors import BusinessRuleException
+from ladini.services.database.errors import BusinessRuleException
 from tests.conftest import run
 
 
 def _service():
-    from agriconnect.services.database.escrow import EscrowMixin
+    from ladini.services.database.escrow import EscrowMixin
 
     class _Svc(EscrowMixin):
         @property

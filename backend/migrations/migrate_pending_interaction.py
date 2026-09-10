@@ -32,14 +32,14 @@ import logging
 
 from sqlalchemy import text
 
-from agriconnect.core.database import get_db
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.core.database import get_db
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     legacy_confirmation_bridge,
 )
-from agriconnect.workspace.checkpointer import WorkspaceCheckpointer
-from agriconnect.workspace.store import WorkspaceStore
+from ladini.workspace.checkpointer import WorkspaceCheckpointer
+from ladini.workspace.store import WorkspaceStore
 
-logger = logging.getLogger("AgriConnect.MigratePendingInteraction")
+logger = logging.getLogger("Ladini.MigratePendingInteraction")
 logging.basicConfig(level=logging.INFO)
 
 SELECT_WORKSPACE_IDS = "SELECT workspace_id FROM agri_workspaces"

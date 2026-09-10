@@ -1,5 +1,5 @@
 """
-Backend src AgriConnect — Architecture Monolithique Modulaire.
+Backend src Ladini — Architecture Monolithique Modulaire.
 
 Couches (de bas en haut) :
   core/          → Fondations (settings, database, logger, security)

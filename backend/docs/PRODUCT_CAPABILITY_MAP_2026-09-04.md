@@ -1,6 +1,6 @@
 # PRODUCT CAPABILITY MAP — 2026-09-04
 
-Cartographie des capacités RÉELLES d'AgriConnect, construite en remontant
+Cartographie des capacités RÉELLES d'Ladini, construite en remontant
 la chaîne complète pour chaque capacité :
 
 ```

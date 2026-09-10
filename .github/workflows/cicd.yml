@@ -1,18 +1,21 @@
-# GitHub Actions CI — Lint & Tests
-#
-# Portée volontairement réduite : monolith Poetry sous `backend/` (`agriconnect`),
-# déployé via `docker-compose.prod.yml` + `deploy-prod.sh` sur hôte Docker.
-#
-# Le déploiement reste manuel/SSH via `deploy-prod.sh` — rien ici ne pousse en prod.
-
+# ═════════════════════════════════════════════════════════════════════
+# CI — bloque une PR/branche cassée AVANT le merge. NE DÉPLOIE RIEN et
+# NE POUSSE RIEN au registry (voir release.yml pour le build-once, deploy.yml
+# pour le déploiement à approbation humaine).
+# ═════════════════════════════════════════════════════════════════════
 name: CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  # Une PR qui pousse 3 commits d'affilée : seul le dernier run survit.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -21,43 +24,37 @@ jobs:
     defaults:
       run:
         working-directory: backend
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install Poetry
         run: pipx install poetry
 
-      - name: Cache Poetry packages
-        uses: actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: ~/.cache/pypoetry
-          # Utilisation de poetry.lock pour figer le cache de manière déterministe
           key: ${{ runner.os }}-poetry-${{ hashFiles('backend/poetry.lock') }}
           restore-keys: |
             ${{ runner.os }}-poetry-
 
       - name: Install dependencies
-        # Réinstalle l'environnement exact défini dans pyproject.toml / poetry.lock
         run: poetry install --no-root
 
       - name: Run linter (Ruff)
-        # Exécute ruff à travers poetry (si configuré dans pyproject.toml)
         run: poetry run ruff check src
-        continue-on-error: true
 
       - name: Run type checker (mypy)
-        # Exécute mypy à travers poetry (lit la section [tool.mypy] de pyproject.toml)
         run: poetry run mypy src
         continue-on-error: true
 
       - name: Run tests
+        env:
+          SANDBOX_MODE: "true"
+          MOCK_EXTERNAL_APIS: "true"
         run: poetry run pytest tests --cov=src --cov-report=xml
 
       - name: Upload coverage
@@ -65,3 +62,87 @@ jobs:
         with:
           file: backend/coverage.xml
           fail_ci_if_error: false
+
+      - name: Audit des dépendances (pip-audit)
+        run: |
+          pipx install pip-audit
+          poetry export -f requirements.txt --without-hashes -o /tmp/requirements.txt || \
+            poetry run pip freeze > /tmp/requirements.txt
+          pip-audit -r /tmp/requirements.txt
+        continue-on-error: true
+
+  # Garde EXPAND/CONTRACT (§11) — bloque une migration destructive dans la
+  # MÊME release que le code qui en dépend encore. Voir le script pour la
+  # liste des motifs interdits et comment marquer une contraction validée.
+  migration-safety:
+    name: Migration safety (expand/contract)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Vérifier les migrations de cette PR
+        run: ./scripts/check_migrations.sh "${{ github.event.pull_request.base.sha || 'HEAD~1' }}" HEAD
+
+  # Valide que les 3 images se CONSTRUISENT encore + que le compose prod est
+  # cohérent. Ne pousse rien (`push: false`).
+  docker-build:
+    name: Validation des images Docker + compose
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ci-${{ github.sha }}
+      REGISTRY: local
+      IMAGE_NAMESPACE: ladini
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.api
+          tags: local/ladini/ladini-api:${{ env.RELEASE_VERSION }}
+          push: false
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            RELEASE_VERSION=${{ env.RELEASE_VERSION }}
+            GIT_SHA=${{ github.sha }}
+
+      - name: Build image worker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.worker
+          tags: local/ladini/ladini-worker:${{ env.RELEASE_VERSION }}
+          push: false
+          load: true
+          build-args: |
+            API_IMAGE=local/ladini/ladini-api:${{ env.RELEASE_VERSION }}
+
+      - name: Build image mcp
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.mcp
+          tags: local/ladini/ladini-mcp:${{ env.RELEASE_VERSION }}
+          push: false
+          load: true
+          build-args: |
+            API_IMAGE=local/ladini/ladini-api:${{ env.RELEASE_VERSION }}
+
+      - name: Valider docker-compose.prod.yml (config résolue)
+        run: |
+          cp .env.example .env
+          # RELEASE_VERSION vient de l'env du job. Le compose PROD ne doit PAS
+          # contenir de clé `build:` (build-once) — on l'assert.
+          docker compose -f docker-compose.prod.yml config --quiet
+          if docker compose -f docker-compose.prod.yml config | grep -qE '^\s+build:'; then
+            echo "::error::docker-compose.prod.yml contient une directive build: — interdit (build-once)."
+            exit 1
+          fi
+          # L'overlay de build doit rester valide lui aussi.
+          docker compose -f docker-compose.prod.yml -f docker-compose.build.yml config --quiet
+          rm -f .env

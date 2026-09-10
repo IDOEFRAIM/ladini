@@ -89,7 +89,7 @@ def drive_P1_SALES_021() -> ScenarioResult:
         },
         "update_product_price_and_qty": {"status": "success", "message": "Produit mis à jour."},
     })
-    from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+    from ladini.graphs.agents.market_coach.flows.producer.flow import (
         producer_context_resolver,
     )
     state = _base_state(
@@ -153,7 +153,7 @@ def _drive_finalize_winner(scenario_id: str, grounding: str, bid_id: str, phone:
         "get_user_by_phone": gps_share_runtime_response(lat, lon),
         "select_winning_bid": {"status": "success", "summary_buyer": "Offre retenue, commande créée."},
     })
-    from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
+    from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import (
         finalize_winner,
     )
     state = _base_state(
@@ -231,7 +231,7 @@ def drive_P1_NEG_006() -> ScenarioResult:
         ]},
         "select_winning_bid": {"status": "success", "summary_buyer": "Offre acceptée, livraison en cours."},
     })
-    from agriconnect.graphs.agents.market_coach.flows.buyer.negotiation import (
+    from ladini.graphs.agents.market_coach.flows.buyer.negotiation import (
         negotiation_gate,
     )
     state = _base_state(

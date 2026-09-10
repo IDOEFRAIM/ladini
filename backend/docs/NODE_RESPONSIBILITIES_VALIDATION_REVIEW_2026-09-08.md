@@ -47,7 +47,7 @@ documentée, pas un bug — pas de duplication). Un vrai mort-code
   repli complet vers `FarmGateway.list_farms()` avec persistance dans le
   même champ DURABLE.
 - **`working_memory.active_tunnel_label` retiré** — code MORT (recherche
-  exhaustive : zéro lecteur dans tout `src/agriconnect`), même classe de
+  exhaustive : zéro lecteur dans tout `src/ladini`), même classe de
   bug que `working_memory.turn_count` déjà purgé lors du chantier
   précédent.
 
@@ -250,24 +250,24 @@ mis au jour de la dette de contrat (state ownership) et du code mort.
 ## C. Modifications réellement faites
 
 **Modifiés :**
-- `src/agriconnect/graphs/agents/market_coach/nodes/session_bootstrap.py`
+- `src/ladini/graphs/agents/market_coach/nodes/session_bootstrap.py`
   — retrait `preload_farms` + `active_tunnel_label`, docstring mise à jour.
-- `src/agriconnect/graphs/agents/market_coach/services/onboarding.py` —
+- `src/ladini/graphs/agents/market_coach/services/onboarding.py` —
   retrait de l'écriture `interpreted_event`/`detected_intent`/
   `interpreter_confidence`.
-- `src/agriconnect/graphs/agents/market_coach/nodes/security_moderation.py`
+- `src/ladini/graphs/agents/market_coach/nodes/security_moderation.py`
   — nouveau champ `security_decision` (calculé sur l'état effectif, pas
   seulement le patch).
-- `src/agriconnect/graphs/agents/market_coach/nodes/routing.py` —
+- `src/ladini/graphs/agents/market_coach/nodes/routing.py` —
   `_route_after_security` lit `security_decision` en priorité.
-- `src/agriconnect/graphs/agents/market_coach/core/state.py` — nouveaux
+- `src/ladini/graphs/agents/market_coach/core/state.py` — nouveaux
   champs `security_decision` ; commentaire stale corrigé.
-- `src/agriconnect/graphs/agents/market_coach/core/state_profile.py` —
+- `src/ladini/graphs/agents/market_coach/core/state_profile.py` —
   déclaration EPHEMERAL de `security_decision`.
-- `src/agriconnect/graphs/agents/market_coach/nodes/cognitive.py` —
+- `src/ladini/graphs/agents/market_coach/nodes/cognitive.py` —
   suppression de `_should_trigger_disambiguation` (code mort) + docstring
   explicite sur la propriété de la décision DISAMBIGUATE.
-- `src/agriconnect/graphs/agents/market_coach/interpreter/routing.py` —
+- `src/ladini/graphs/agents/market_coach/interpreter/routing.py` —
   docstring de module corrigée (stale).
 
 **Créés :**

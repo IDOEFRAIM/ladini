@@ -28,7 +28,7 @@ success, state mutation), and the parts of Final Quality that are
 deterministic (groundedness against the trace, not LLM-judged claims).
 
 No LLM calls, no real database, no real MCP transport. Uses REAL node/flow
-functions from `agriconnect.graphs.agents.market_coach`, imported and called
+functions from `ladini.graphs.agents.market_coach`, imported and called
 directly — never mocked at the node/flow level. Only the bottom-most `call_db`
 boundary (the exact point where `_BaseGateway._call` hands off to
 `mc_runtime.call_db`, see services/mcp/gateway.py:46-48) is a recording
@@ -239,19 +239,19 @@ async def _run_generic_chain(
     premised on role blocking gets an HONEST result reflecting current code,
     not an assumed one.
     """
-    from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+    from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
         confirmation_gate,
     )
-    from agriconnect.graphs.agents.market_coach.nodes.executor import (
+    from ladini.graphs.agents.market_coach.nodes.executor import (
         mcp_tool_executor,
     )
-    from agriconnect.graphs.agents.market_coach.nodes.response_handlers import (
+    from ladini.graphs.agents.market_coach.nodes.response_handlers import (
         final_response,
     )
-    from agriconnect.graphs.agents.market_coach.nodes.role_guard import (
+    from ladini.graphs.agents.market_coach.nodes.role_guard import (
         make_role_guard,
     )
-    from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+    from ladini.graphs.agents.market_coach.nodes.validation import validator
 
     if with_role_guard:
         role_guard = make_role_guard(role)
@@ -264,12 +264,12 @@ async def _run_generic_chain(
         return state
 
     if role == "PRODUCER":
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             producer_context_resolver,
         )
         r = await producer_context_resolver(state, runtime)
     else:
-        from agriconnect.graphs.agents.market_coach.flows.buyer.flow import (
+        from ladini.graphs.agents.market_coach.flows.buyer.flow import (
             buyer_context_resolver,
         )
         r = await buyer_context_resolver(state, runtime)
@@ -311,10 +311,10 @@ async def _run_off_topic_during_confirmation(
     CONFIRM/REJECT — exercises confirmation_gate's deviation-note branch
     (nodes/confirmation_gate.py:161-209) directly, matching P0-SEC-001.
     """
-    from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+    from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
         confirmation_gate,
     )
-    from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+    from ladini.graphs.agents.market_coach.nodes.validation import validator
 
     v = await validator(state, runtime)
     state.update(v)
@@ -322,12 +322,12 @@ async def _run_off_topic_during_confirmation(
         return state
 
     if role == "PRODUCER":
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             producer_context_resolver,
         )
         r = await producer_context_resolver(state, runtime)
     else:
-        from agriconnect.graphs.agents.market_coach.flows.buyer.flow import (
+        from ladini.graphs.agents.market_coach.flows.buyer.flow import (
             buyer_context_resolver,
         )
         r = await buyer_context_resolver(state, runtime)

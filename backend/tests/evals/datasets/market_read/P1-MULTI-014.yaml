@@ -7,7 +7,7 @@ grounding:
   status: PROVEN_BY_REGRESSION
   evidence:
     - "backend/tests/unit/test_additional_products_hint.py — flows/buyer/helpers.py::additional_products_hint: when a message mentions multiple products, the interpreter puts only the FIRST in 'product' and lists the rest in 'additional_products'; the user is informed of what was set aside."
-    - "backend/src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py:234-236 — ProductGateway.search_products, PROVEN"
+    - "backend/src/ladini/graphs/agents/market_coach/services/mcp/gateway.py:234-236 — ProductGateway.search_products, PROVEN"
 
 persona: {role: BUYER, description: "Acheteur", phone: "+22670000033"}
 workspace_type: buyer

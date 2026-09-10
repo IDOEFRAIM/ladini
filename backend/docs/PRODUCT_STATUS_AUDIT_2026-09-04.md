@@ -42,7 +42,7 @@ ce qu'il a trouvé (section 1, Journey C/G).
 
 **Root cause exacte** : `BuyerMixin.cancel_pending_order` gardait `order.status.upper() != "PENDING": raise BusinessRuleException(reason="not_pending")`. Recherche exhaustive sur TOUTE la session (chaque chemin de création de commande audité) : **aucun chemin conversationnel vivant ne pose jamais ce statut** — `"PENDING"` n'est que le défaut de colonne SQLAlchemy, systématiquement écrasé (`create_preorder_draft` pose `"DRAFT"`, `select_winning_bid` pose `"CONFIRMED"` directement, `record_sale` pose `"COMPLETED"` directement). Seul le chemin confirmé-mort `finalize_multi_order` créait jamais une commande `PENDING`.
 
-**Fichier(s)** : [buyer.py](../src/agriconnect/services/database/buyer.py) (`cancel_pending_order`), [order_tracking.py](../src/agriconnect/graphs/agents/market_coach/flows/buyer/order_tracking.py) (`cancel_order`), [templates.py](../src/agriconnect/workers/outbox/templates.py).
+**Fichier(s)** : [buyer.py](../src/ladini/services/database/buyer.py) (`cancel_pending_order`), [order_tracking.py](../src/ladini/graphs/agents/market_coach/flows/buyer/order_tracking.py) (`cancel_order`), [templates.py](../src/ladini/workers/outbox/templates.py).
 
 **Fonction(s)** : `BuyerMixin.cancel_pending_order`, `flows/buyer/order_tracking.py::cancel_order`.
 
@@ -63,7 +63,7 @@ ce qu'il a trouvé (section 1, Journey C/G).
 
 **Root cause exacte** : recherche exhaustive (`reject_order`/`producer_cancel`/`refuse_order`/tout goal `PRODUCER_*CANCEL*` dans `interpreter/intent.py`) : **zéro résultat**. `withdraw_bid` (le seul mécanisme d'annulation côté producteur) exige `Bid.status == "PENDING"` — donc n'existe QUE PRÉ-sélection. Une fois une commande `CONFIRMED` (catalogue préorder OU RFQ gagné), **aucune action conversationnelle ne permet au producteur de se rétracter** s'il ne peut finalement pas honorer la commande (rupture de stock imprévue, aléa de production, etc.).
 
-**Fichier(s)** : aucun fichier de production concerné — c'est une ABSENCE structurelle, pas un bug de code. Point de comparaison : [buyer.py](../src/agriconnect/services/database/buyer.py)`::cancel_pending_order` (symétrique acheteur, maintenant fonctionnel, §P1-1) vs [producer.py](../src/agriconnect/services/database/producer.py) (aucune méthode équivalente).
+**Fichier(s)** : aucun fichier de production concerné — c'est une ABSENCE structurelle, pas un bug de code. Point de comparaison : [buyer.py](../src/ladini/services/database/buyer.py)`::cancel_pending_order` (symétrique acheteur, maintenant fonctionnel, §P1-1) vs [producer.py](../src/ladini/services/database/producer.py) (aucune méthode équivalente).
 
 **Chemin utilisateur concerné** : tout producteur ayant une commande `CONFIRMED` qu'il ne peut pas honorer.
 

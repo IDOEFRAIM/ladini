@@ -8,8 +8,8 @@ finding_type: security_finding_fixed   # was a passing security-gate scenario's 
 grounding:
   status: PROVEN_BY_CODE   # the query-layer gap that made this OPEN_BUSINESS_RULE is now closed; see fix_applied
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/order_tracking.py:398-406 — buyer_phone IS passed alongside order_id ('buyer_phone toujours transmis (même quand order_id est connu) : requis pour l'identité de contexte MCP, sinon PermissionDenied silencieux')"
-    - "backend/src/agriconnect/services/database/buyer.py::get_transaction_summary() — FIXED this session: an explicit ownership check now runs after the order_id lookup when buyer_phone is also provided (`if order.buyer_id != requester_profile.id: order = None`), mirroring the existing fetch-then-verify idiom already used by producer.py::delete_stock (P0-SEC-011's reference implementation)."
+    - "backend/src/ladini/graphs/agents/market_coach/flows/buyer/order_tracking.py:398-406 — buyer_phone IS passed alongside order_id ('buyer_phone toujours transmis (même quand order_id est connu) : requis pour l'identité de contexte MCP, sinon PermissionDenied silencieux')"
+    - "backend/src/ladini/services/database/buyer.py::get_transaction_summary() — FIXED this session: an explicit ownership check now runs after the order_id lookup when buyer_phone is also provided (`if order.buyer_id != requester_profile.id: order = None`), mirroring the existing fetch-then-verify idiom already used by producer.py::delete_stock (P0-SEC-011's reference implementation)."
     - "backend/tests/unit/test_get_transaction_summary_ownership.py — regression test: reproduces the leak against the pre-fix code (captured FAIL), then proves the fix (owner access still works, cross-buyer access now returns no data)."
   fix_applied: >
     2026-08-17: added an explicit post-fetch ownership check in

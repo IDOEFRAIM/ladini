@@ -1,129 +1,112 @@
 # ═════════════════════════════════════════════════════════════════════
-# Ladini — docker-compose.prod.yml
+# Ladini — docker-compose.prod.yml   (MVP < 100 users, provider-neutral)
 #
-# Deux blocs sur le MÊME réseau `agri_net` :
-#   1. APPLICATIF : api (FastAPI), worker (Celery), mcp (daemon HTTP
-#      AgriDBMCPServer — transport persistant, pool DB chaud, voir
-#      protocols/mcp/servers/http_server.py), redis (broker), pgbouncer
-#      (pooler vers la DB EXTERNE DigitalOcean — voir bandeau DB
-#      ci-dessous), flower (monitoring Celery), autoheal (auto-restart
-#      des conteneurs `unhealthy`, voir bandeau HEALTHCHECKS ci-dessous).
-#   2. LANGFUSE v3 (LLMOps self-hosted) : langfuse-web, langfuse-worker,
-#      clickhouse, minio, langfuse-postgres.
+# CE FICHIER NE CONSTRUIT RIEN. Il ne fait que TIRER des images immuables
+# depuis un registry (voir §BUILD ONCE). Le build vit dans
+# `docker-compose.build.yml` (overlay, utilisé UNIQUEMENT par la CI).
 #
-# ⚠️  DB — Postgres managé EXTERNE, via PgBouncer LOCAL :
-#     `pgbouncer` ne pointe PAS vers un Postgres local (il n'y en a plus
-#     dans ce fichier) mais vers le cluster managé désigné par
-#     DO_DB_HOST/PORT/USER/… (voir x-app-env et le service `pgbouncer`).
-#     Ces variables sont nommées `DO_DB_*` pour raison historique
-#     (provider d'origine : DigitalOcean) mais portent, depuis la migration
-#     du 2026-09-02, les identifiants Heroku Postgres — voir le `.env` à la
-#     racine du host de déploiement (PAS versionné, absent de ce checkout).
-#     Objectif du pooler : les plans managés (DO comme Heroku) imposent un
-#     `max_connections` bas ; sans pooler, chaque process applicatif qui
-#     ouvre son propre pool SQLAlchemy (4 workers gunicorn × api-replicas +
-#     concurrency×worker-replicas + mcp) peut dépasser ce plafond dès qu'on
-#     scale — PgBouncer en mode `transaction` multiplexe TOUTES ces
-#     connexions applicatives sur un nombre borné de connexions réelles vers
-#     le cluster managé. Voir DEFAULT_POOL_SIZE dans le service `pgbouncer` :
-#     DOIT être aligné sur le `max_connections` réel de votre plan
-#     (dashboard Heroku Postgres → Settings).
+#   Production normale :   docker compose -f docker-compose.prod.yml pull
+#                          docker compose -f docker-compose.prod.yml up -d
+#   (piloté par `scripts/deploy.sh <release>` — ne pas lancer à la main)
 #
-# ⚠️  Le service `mcp` DOIT rester à 1 seule réplique/process (voir la
-#     docstring de http_server.py) : AgriDBMCPServer/runtime sont des
-#     singletons process-local. Pour plus de débit, dupliquer le SERVICE
-#     (plusieurs conteneurs `mcp` sur des ports différents + load
-#     balancer), jamais via plusieurs workers/replicas du même service.
+# ── BUILD ONCE / RUN EVERYWHERE ─────────────────────────────────────
+# Les 3 images applicatives sont référencées par :
+#   ${REGISTRY}/${IMAGE_NAMESPACE}/ladini-<svc>:${RELEASE_VERSION}
+# `RELEASE_VERSION` DOIT être un tag immuable et traçable — un SHA de commit
+# (`sha-a83f6c1`) ou une release datée (`release-2026.09.10-1`). JAMAIS
+# `latest` en production (voir `scripts/preflight.sh`, qui refuse `latest`).
+# Le même artefact tourne sur DigitalOcean, Hetzner, OVH, Scaleway, EC2,
+# Lightsail ou une VM locale — rien ici n'est spécifique à un fournisseur.
 #
-# ⚠️  HEALTHCHECKS & AUTO-HEALING : `docker compose` (hors Swarm) ne
-#     redémarre JAMAIS un conteneur automatiquement sur un healthcheck qui
-#     passe à `unhealthy` — c'est un malentendu fréquent. Le statut
-#     `unhealthy` est seulement REPORTÉ (`docker ps`, `depends_on:
-#     condition: service_healthy` d'un autre service), rien ne le corrige
-#     seul. `restart: unless-stopped` ne couvre que le cas où le PROCESS
-#     quitte (crash, exit code non-zero) — pas le cas où un healthcheck
-#     échoue alors que le process tourne encore (deadlock applicatif, DB
-#     injoignable, etc.). D'où `autoheal` ci-dessous : il surveille l'état
-#     Docker natif et `docker restart` tout conteneur marqué `unhealthy` —
-#     seule façon d'obtenir un vrai auto-healing SANS migrer vers Swarm/K8s.
+# ── DB — Postgres managé EXTERNE, via PgBouncer LOCAL ───────────────
+# `pgbouncer` pointe vers le cluster managé (DB_HOST/PORT/USER/PASSWORD/NAME).
+# Variables provider-neutral avec repli transitoire sur les anciens `DO_DB_*` :
+# `${DB_HOST:-${DO_DB_HOST}}` — les deux conventions marchent, le legacy sera
+# retiré plus tard (voir `.env.example` et `docs/runbooks/deployment.md`).
+# PgBouncer en mode `transaction` multiplexe toutes les connexions applicatives
+# sur un nombre borné de connexions réelles (les plans managés ont un
+# `max_connections` bas). `PGBOUNCER_DEFAULT_POOL_SIZE` DOIT rester <=
+# (max_connections du plan − marge admin).
 #
-# ⚠️  GRACEFUL SHUTDOWN : chaque service a un `stop_grace_period` aligné
-#     sur le délai de "warm shutdown" de son process (gunicorn
-#     --graceful-timeout, celery warm shutdown, uvicorn
-#     --timeout-graceful-shutdown — voir les Dockerfiles). Si Docker
-#     envoie SIGKILL AVANT que le process ait fini de drainer (délai par
-#     défaut = 10s, bien trop court pour une tâche LLM en cours), une
-#     requête/tâche en vol est perdue brutalement au lieu d'être terminée
-#     proprement. Pour Celery, le vrai filet de sécurité reste
-#     `task_acks_late=True` (celery_app.py) : même si le SIGKILL arrive
-#     quand même, la tâche non-acquittée est redélivrée à un autre worker —
-#     `stop_grace_period` MINIMISE les interruptions forcées, il ne les
-#     élimine pas totalement (une tâche peut légitimement dépasser le
-#     délai).
+# ── Le service `mcp` reste à 1 réplique / 1 process ────────────────
+# AgriDBMCPServer/runtime sont des singletons process-local (voir
+# protocols/mcp/servers/http_server.py). Pour du débit : dupliquer le SERVICE
+# (conteneurs `mcp` sur des ports différents + LB), jamais `--scale`/`--workers`.
 #
-# ⚠️  IMPORTANT — Langfuse v3 : contrairement à v2 (postgres seul), le
-#     self-host v3 EXIGE ClickHouse + un stockage S3 (MinIO) + Redis. Le bloc
-#     ci-dessous en donne la structure ; RÉCONCILIEZ les tags d'image et la
-#     liste exacte des variables d'env avec le docker-compose officiel du repo
-#     `langfuse/langfuse` avant mise en prod (les clés de chiffrement/salt
-#     évoluent entre versions). Ne PAS déployer avec les secrets par défaut.
+# ── AUTO-HEALING ───────────────────────────────────────────────────
+# `docker compose` (hors Swarm) ne redémarre PAS un conteneur `unhealthy` —
+# il ne fait que le reporter. `restart: unless-stopped` ne couvre que le crash
+# du process. `autoheal` (ci-dessous) surveille l'état Docker natif et
+# `docker restart` tout conteneur LABELLISÉ `autoheal=true` marqué `unhealthy`.
+# Les healthchecks des conteneurs applicatifs sondent la LIVENESS (`/health`),
+# PAS la readiness — un blip DB/Redis ne doit jamais déclencher de restart storm
+# (audit hardening 2026-09-10 : `worker` sondait `celery inspect ping`, qui
+# dépend du broker → corrigé, voir le service).
 #
-# Ressources : `deploy.resources.limits` EST honoré par `docker compose up`
-# (impose un plafond cgroup dur → OOM-killer si dépassé — c'est le VRAI
-# levier anti-OOM-aléatoire). `reservations` reste best-effort hors Swarm
-# (surtout indicatif/documentaire ici). Les valeurs ci-dessous supposent un
-# hôte ~8 vCPU / 16 Go RAM — RECALCULEZ pour votre hôte réel (voir le detail
-# du calcul en commentaire sur chaque service).
-# ═════════════════════════════════════════════════════════════════════
-# ═════════════════════════════════════════════════════════════════════
-# Ladini — docker-compose.prod.yml (Version Allégée / MVP < 100 users)
-# Langfuse externalisé sur le Cloud — DB Postgres/PgBouncer conservée
+# ── GRACEFUL SHUTDOWN ──────────────────────────────────────────────
+# Chaque `stop_grace_period` est aligné sur le "warm shutdown" du process
+# (gunicorn --graceful-timeout, celery warm shutdown, uvicorn). Filet Celery :
+# `task_acks_late=True` (celery_app.py) redélivre toute tâche non acquittée.
 # ═════════════════════════════════════════════════════════════════════
 
-x-app-env: &app-env
-  DATABASE_URL: "postgresql+asyncpg://${DO_DB_USER}:${DO_DB_PASSWORD}@pgbouncer:6432/${DO_DB_NAME}"
-  DB_SSL_MODE: "disable"
+# ─────────────────────────────────────────────────────────────────────
+# GROUPES DE SECRETS (least-privilege — audit hardening 2026-09-10)
+# Chaque service ne reçoit que les groupes dont il a réellement besoin.
+# `settings.py` défaut TOUT champ absent à "" : omettre une variable ne
+# casse jamais un service, ça retire seulement une capacité inutilisée.
+# ─────────────────────────────────────────────────────────────────────
+
+# Métadonnées de release — injectées à l'exécution, jamais lues depuis git
+# dans le conteneur. Alimente `GET /version`. Aucune valeur secrète.
+x-release-env: &release-env
+  RELEASE_VERSION: "${RELEASE_VERSION:?RELEASE_VERSION requis — un tag immuable, jamais 'latest'}"
+  GIT_SHA: "${GIT_SHA:-${RELEASE_VERSION}}"
+  BUILD_TIMESTAMP: "${BUILD_TIMESTAMP:-unknown}"
+  COMPOSE_VERSION: "${COMPOSE_VERSION:-unknown}"
+
+# Base de données applicative (via PgBouncer). Provider-neutral + repli legacy.
+x-db-env: &db-env
+  DATABASE_URL: "postgresql+asyncpg://${DB_USER:-${DO_DB_USER}}:${DB_PASSWORD:-${DO_DB_PASSWORD}}@pgbouncer:6432/${DB_NAME:-${DO_DB_NAME}}"
+  DB_SSL_MODE: "disable"          # TLS est terminé par PgBouncer → la DB managée
   DB_POOL_SIZE: "${DB_POOL_SIZE:-5}"
   DB_POOL_MAX_OVERFLOW: "${DB_POOL_MAX_OVERFLOW:-5}"
-  REDIS_URL: "redis://redis:6379/0"
-  
-  # MCP
+
+# Redis — broker Celery + disjoncteur LLM partagé + cache + verrous idempotence.
+x-redis-env: &redis-env
+  REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD requis}@redis:6379/0"
+
+# MCP — le daemon (serveur) ET api/worker (clients) lisent ce token.
+x-mcp-env: &mcp-env
   MCP_DB_TRANSPORT: "http"
   MCP_DB_HTTP_URL: "http://mcp:8003"
-  
-  # LLM
+  MCP_HTTP_AUTH_TOKEN: "${MCP_HTTP_AUTH_TOKEN:?MCP_HTTP_AUTH_TOKEN requis — le daemon MCP ne doit jamais tourner sans authentification}"
+
+# LLM — providers + Gateway (chaîne de repli, disjoncteur, budgets).
+x-llm-env: &llm-env
   LLM_PROVIDER: "groq"
   GROQ_API_KEY: "${GROQ_API_KEY}"
-  # Passerelle Bedrock compatible OpenAI — requis par tout candidat
-  # `bedrock_gateway:...` du LLM Gateway (voir bloc ci-dessous). Absents ici
-  # jusqu'au 2026-09-02 : `LLM_PROVIDER` étant figé à "groq" ci-dessus, la
-  # passerelle Bedrock n'était encore jamais utilisée par la stack Docker.
   OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
   OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
-  # LLM Gateway (2026-09-02) — chaîne de repli par profil FAST/REASONING,
-  # disjoncteur partagé (Redis), budget par profil, alerting admin. Voir
-  # `.env.example` pour le détail de chaque variable et
-  # `graphs/agents/market_coach/llm_gateway/`.
   LLM_FAST_PRIMARY: "${LLM_FAST_PRIMARY:-bedrock_gateway:qwen.qwen3-32b}"
-  LLM_FAST_FALLBACK_1: "${LLM_FAST_FALLBACK_1:-groq:llama-3.1-8b-instant}"
+  LLM_FAST_FALLBACK_1: "${LLM_FAST_FALLBACK_1:-groq:openai/gpt-oss-20b}"
   LLM_FAST_FALLBACK_2: "${LLM_FAST_FALLBACK_2:-}"
   LLM_REASONING_PRIMARY: "${LLM_REASONING_PRIMARY:-bedrock_gateway:deepseek.v3.2}"
   LLM_REASONING_FALLBACK_1: "${LLM_REASONING_FALLBACK_1:-bedrock_gateway:openai.gpt-oss-120b}"
-  LLM_REASONING_FALLBACK_2: "${LLM_REASONING_FALLBACK_2:-groq:llama-3.3-70b-versatile}"
+  LLM_REASONING_FALLBACK_2: "${LLM_REASONING_FALLBACK_2:-groq:openai/gpt-oss-120b}"
   LLM_CIRCUIT_FAILURE_THRESHOLD: "${LLM_CIRCUIT_FAILURE_THRESHOLD:-3}"
   LLM_CIRCUIT_COOLDOWN_SECONDS: "${LLM_CIRCUIT_COOLDOWN_SECONDS:-30}"
   LLM_HALF_OPEN_PROBES: "${LLM_HALF_OPEN_PROBES:-1}"
   LLM_PROBE_LOCK_SECONDS: "${LLM_PROBE_LOCK_SECONDS:-10}"
   LLM_FAST_BUDGET_SECONDS: "${LLM_FAST_BUDGET_SECONDS:-12}"
   LLM_REASONING_BUDGET_SECONDS: "${LLM_REASONING_BUDGET_SECONDS:-20}"
-  ADMIN_ALERT_WEBHOOK_URL: "${ADMIN_ALERT_WEBHOOK_URL:-}"
-  ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:-}"
 
-  # Messaging (WhatsApp / Twilio)
+# Messagerie sortante/entrante (WhatsApp Cloud + repli Twilio).
+x-messaging-env: &messaging-env
   MESSAGING_PROVIDER: "${MESSAGING_PROVIDER:-whatsapp_cloud}"
-  TWILIO_ACCOUNT_SID: "${TWILIO_ACCOUNT_SID}"
-  TWILIO_AUTH_TOKEN: "${TWILIO_AUTH_TOKEN}"
-  TWILIO_WHATSAPP_NUMBER: "${TWILIO_WHATSAPP_NUMBER}"
+  TWILIO_ACCOUNT_SID: "${TWILIO_ACCOUNT_SID:-}"
+  TWILIO_AUTH_TOKEN: "${TWILIO_AUTH_TOKEN:-}"
+  TWILIO_WHATSAPP_NUMBER: "${TWILIO_WHATSAPP_NUMBER:-}"
+  TWILIO_PUBLIC_BASE_URL: "${TWILIO_PUBLIC_BASE_URL:-}"
   TWILIO_INTERACTIVE_ENABLED: "${TWILIO_INTERACTIVE_ENABLED:-false}"
   TWILIO_CONFIRM_CONTENT_SID: "${TWILIO_CONFIRM_CONTENT_SID:-}"
   WHATSAPP_CLOUD_API_TOKEN: "${WHATSAPP_CLOUD_API_TOKEN:-}"
@@ -133,47 +116,93 @@ x-app-env: &app-env
   WHATSAPP_APP_SECRET: "${WHATSAPP_APP_SECRET:-}"
   WHATSAPP_GRAPH_API_VERSION: "${WHATSAPP_GRAPH_API_VERSION:-v21.0}"
   WHATSAPP_NATIVE_INTERACTIVE_ENABLED: "${WHATSAPP_NATIVE_INTERACTIVE_ENABLED:-true}"
-  
-  # Observabilité infra
+
+# Paiement séquestre (Paydunya) + Supabase Storage (photos).
+x-payments-storage-env: &payments-storage-env
+  ESCROW_PAYMENT_ENABLED: "${ESCROW_PAYMENT_ENABLED:-false}"
+  PUBLIC_API_BASE_URL: "${PUBLIC_API_BASE_URL:-}"
+  PAYDUNYA_MASTER_KEY: "${PAYDUNYA_MASTER_KEY:-}"
+  PAYDUNYA_PRIVATE_KEY: "${PAYDUNYA_PRIVATE_KEY:-}"
+  PAYDUNYA_PUBLIC_KEY: "${PAYDUNYA_PUBLIC_KEY:-}"
+  PAYDUNYA_TOKEN: "${PAYDUNYA_TOKEN:-}"
+  PAYDUNYA_MODE: "${PAYDUNYA_MODE:-test}"
+  PAYDUNYA_PAYMENT_TTL_HOURS: "${PAYDUNYA_PAYMENT_TTL_HOURS:-24}"
+  SUPABASE_URL: "${SUPABASE_URL:-}"
+  SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY:-}"
+  SUPABASE_PRODUCT_BUCKET: "${SUPABASE_PRODUCT_BUCKET:-ladini}"
+
+# Observabilité (traces infra + LLMOps + erreurs). Non secret sauf clés Langfuse/Sentry.
+x-observability-env: &observability-env
   OTEL_ENABLED: "${OTEL_ENABLED:-true}"
   OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
   PROMETHEUS_ENABLED: "true"
-  
-  # LLMOps — Basculé sur Langfuse Cloud (plus de stack locale lourde)
+  SENTRY_DSN: "${SENTRY_DSN:-}"
+  SENTRY_ENVIRONMENT: "${SENTRY_ENVIRONMENT:-production}"
   LANGFUSE_ENABLED: "${LANGFUSE_ENABLED:-true}"
-  LANGFUSE_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY}"
-  LANGFUSE_SECRET_KEY: "${LANGFUSE_SECRET_KEY}"
+  LANGFUSE_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY:-}"
+  LANGFUSE_SECRET_KEY: "${LANGFUSE_SECRET_KEY:-}"
   LANGFUSE_HOST: "https://cloud.langfuse.com"
 
+# Sécurité applicative (CORS + tokens des endpoints admin/internes).
+x-appsec-env: &appsec-env
+  ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-[]}"
+  ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:-}"
+  INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:-}"
+  ADMIN_ALERT_WEBHOOK_URL: "${ADMIN_ALERT_WEBHOOK_URL:-}"
+
+# Env COMPLET — api / worker / beat (ils touchent réellement tous ces domaines).
+x-full-app-env: &full-app-env
+  <<: [*release-env, *db-env, *redis-env, *mcp-env, *llm-env, *messaging-env,
+       *payments-storage-env, *observability-env, *appsec-env]
+
+# ── Rotation des logs Docker (empêche un petit VPS de se remplir) ────
+# 20 Mo × 5 fichiers = 100 Mo max par conteneur. json-file car c'est le driver
+# lisible par `docker logs` / `docker compose logs` (un runbook incident en
+# dépend). Ajuster `max-size` si un service est très verbeux.
+x-logging: &logging
+  driver: "json-file"
+  options:
+    max-size: "20m"
+    max-file: "5"
+
 x-high-fd-ulimits: &high-fd-ulimits
-  nofile:
-    soft: 65536
-    hard: 65536
+  nofile: { soft: 65536, hard: 65536 }
+
+# Durcissement — NOS images tournent en non-root (`appuser`), aucune capability
+# requise (ports > 1024, aucun mount, aucun changement d'identité).
+x-hardening: &hardening
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+
+# Images TIERCES (redis, pgbouncer) : `no-new-privileges` seulement — leur
+# entrypoint démarre root puis bascule via gosu/su-exec (exige CAP_SETUID/SETGID).
+x-hardening-thirdparty: &hardening-thirdparty
+  security_opt: ["no-new-privileges:true"]
 
 networks:
   agri_net:
     driver: bridge
 
 volumes:
-  # Seuls les volumes indispensables persistent si besoin, 
-  # les volumes Langfuse (ClickHouse, MinIO, etc.) ont été purgés.
-  {}
+  # AOF Redis — DURABLE (broker Celery + verrous d'idempotence). Sans volume
+  # nommé, un `docker compose up --force-recreate` repartait sur un /data vide
+  # → perte silencieuse du broker (audit hardening 2026-09-10).
+  redis_data:
 
 services:
 
   # ── 1. APPLICATIF ──────────────────────────────────────────────────
   mcp:
-    image: ladini-mcp:latest
-    build:
-      context: .
-      dockerfile: infra/docker/Dockerfile.mcp
-      args:
-        API_IMAGE: ladini-api:latest
-    environment: *app-env
+    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/agriconnect}/ladini-mcp:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    <<: *hardening
+    # least-privilege : le daemon MCP n'exécute que des outils DB. Il ne fait
+    # AUCUN appel LLM / WhatsApp / Paydunya / Supabase → ces groupes sont retirés.
+    environment:
+      <<: [*release-env, *db-env, *mcp-env]
     depends_on:
       pgbouncer: { condition: service_healthy }
-      redis: { condition: service_healthy }
     ulimits: *high-fd-ulimits
+    logging: *logging
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8003/health"]
       interval: 15s
@@ -190,13 +219,15 @@ services:
     networks: [agri_net]
 
   api:
-    image: ladini-api:latest
-    build:
-      context: .
-      dockerfile: infra/docker/Dockerfile.api
-    environment: *app-env
+    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/agriconnect}/ladini-api:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    <<: *hardening
+    environment: *full-app-env
+    # Publié UNIQUEMENT sur la boucle locale : le reverse-proxy (voir
+    # infra/reverse-proxy/) termine TLS sur 443 et proxifie vers 127.0.0.1:8000.
+    # `"8000:8000"` exposait l'API en clair sur toutes les interfaces (audit
+    # hardening 2026-09-10 — §PORTS).
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       pgbouncer: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -204,8 +235,12 @@ services:
     ulimits: *high-fd-ulimits
     sysctls:
       net.core.somaxconn: 1024
+    logging: *logging
+    # LIVENESS uniquement (`/health` ne teste aucune dépendance externe). La
+    # readiness réelle (`/health/ready` : DB + Redis) est vérifiée par
+    # `scripts/deploy.sh` APRÈS `up`, pas par autoheal.
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/live"]
       interval: 15s
       timeout: 5s
       retries: 3
@@ -220,21 +255,21 @@ services:
     networks: [agri_net]
 
   worker:
-    image: ladini-worker:latest
-    build:
-      context: .
-      dockerfile: infra/docker/Dockerfile.worker
-      args:
-        API_IMAGE: ladini-api:latest
-    environment: *app-env
+    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/agriconnect}/ladini-worker:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    <<: *hardening
+    environment: *full-app-env
     depends_on:
-      api: { condition: service_started }
       pgbouncer: { condition: service_healthy }
       redis: { condition: service_healthy }
       mcp: { condition: service_healthy }
     ulimits: *high-fd-ulimits
+    logging: *logging
+    # LIVENESS : "un process celery vit-il dans ce conteneur ?" — SANS toucher
+    # au broker. `celery inspect ping` (ancienne sonde) échoue dès que Redis
+    # a un hoquet → autoheal redémarrait tous les workers en boucle pendant une
+    # panne Redis, aggravant l'incident (audit hardening 2026-09-10).
     healthcheck:
-      test: ["CMD-SHELL", "celery -A agriconnect.api.celery_app inspect ping || exit 1"]
+      test: ["CMD-SHELL", "pgrep -f 'celery.*worker' >/dev/null || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -249,13 +284,15 @@ services:
     networks: [agri_net]
 
   beat:
-    image: ladini-worker:latest
-    command: ["celery", "-A", "agriconnect.api.celery_app", "beat",
+    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/agriconnect}/ladini-worker:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    <<: *hardening
+    command: ["celery", "-A", "ladini.api.celery_app", "beat",
              "--loglevel=info", "--pidfile=/tmp/celerybeat.pid",
              "--schedule=/tmp/celerybeat-schedule"]
-    environment: *app-env
+    environment: *full-app-env
     depends_on:
       redis: { condition: service_healthy }
+    logging: *logging
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/celerybeat.pid && kill -0 $(cat /tmp/celerybeat.pid)"]
       interval: 30s
@@ -272,14 +309,33 @@ services:
     networks: [agri_net]
 
   redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    # Pin exact (audit hardening 2026-09-10) : `7-alpine` est un tag mobile.
+    image: redis:7.4.1-alpine
+    <<: *hardening-thirdparty
+    # noeviction (audit hardening 2026-09-10) : Redis est le BROKER Celery +
+    # les verrous d'idempotence + le disjoncteur LLM. `allkeys-lru` pouvait
+    # évincer SILENCIEUSEMENT une tâche en file ou un verrou sous pression
+    # mémoire. `noeviction` → Redis répond OOM sur écriture plutôt que de
+    # perdre des données critiques ; on préfère un échec bruyant. Option A du
+    # cahier des charges (§15) : un seul Redis pour < 100 users, surveillance
+    # mémoire stricte (voir docs/runbooks/incident.md → "Redis OOM").
+    command: ["redis-server",
+              "--appendonly", "yes",
+              "--appendfsync", "everysec",
+              "--dir", "/data",
+              "--maxmemory", "${REDIS_MAXMEMORY:-512mb}",
+              "--maxmemory-policy", "noeviction",
+              "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD requis}"]
+    volumes:
+      - redis_data:/data
     ulimits: *high-fd-ulimits
+    logging: *logging
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
+    labels: ["autoheal=true"]
     deploy:
       resources:
         limits: { cpus: "0.5", memory: 640m }
@@ -288,20 +344,24 @@ services:
     networks: [agri_net]
 
   pgbouncer:
-    image: edoburu/pgbouncer:latest
+    # Pin exact (audit hardening 2026-09-10) : `:latest` sur un composant qui
+    # tient TOUTES les connexions DB de la stack = roulette russe au redéploiement.
+    image: edoburu/pgbouncer:v1.23.1-p2
+    <<: *hardening-thirdparty
     environment:
       LISTEN_PORT: "6432"
-      DB_HOST: "${DO_DB_HOST}"
-      DB_PORT: "${DO_DB_PORT:-25060}"
-      DB_USER: "${DO_DB_USER}"
-      DB_PASSWORD: "${DO_DB_PASSWORD}"
-      DB_NAME: "${DO_DB_NAME}"
+      DB_HOST: "${DB_HOST:-${DO_DB_HOST}}"
+      DB_PORT: "${DB_PORT:-${DO_DB_PORT:-25060}}"
+      DB_USER: "${DB_USER:-${DO_DB_USER}}"
+      DB_PASSWORD: "${DB_PASSWORD:-${DO_DB_PASSWORD}}"
+      DB_NAME: "${DB_NAME:-${DO_DB_NAME}}"
       SERVER_TLS_SSLMODE: "require"
       POOL_MODE: transaction
       MAX_CLIENT_CONN: "1000"
       DEFAULT_POOL_SIZE: "${PGBOUNCER_DEFAULT_POOL_SIZE:-20}"
       AUTH_TYPE: scram-sha-256
     ulimits: *high-fd-ulimits
+    logging: *logging
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 6432 || exit 1"]
       interval: 5s
@@ -318,14 +378,24 @@ services:
     networks: [agri_net]
 
   flower:
-    image: ladini-api:latest
-    command: ["celery", "-A", "agriconnect.api.celery_app", "flower",
-             "--port=5555", "--basic_auth=${FLOWER_USER}:${FLOWER_PASSWORD}"]
-    environment: *app-env
+    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/agriconnect}/ladini-api:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    <<: *hardening
+    command: ["celery", "-A", "ladini.api.celery_app", "flower",
+             "--port=5555",
+             "--basic_auth=${FLOWER_USER:?FLOWER_USER requis}:${FLOWER_PASSWORD:?FLOWER_PASSWORD requis}"]
+    # least-privilege : Flower n'a besoin QUE du broker Redis + de son auth.
+    # Il ne fait aucun appel LLM/messaging/DB → ces groupes sont retirés
+    # (audit hardening 2026-09-10 : il recevait tout `*app-env`, dont les
+    # clés Groq / Twilio / WhatsApp / Paydunya, sans jamais s'en servir).
+    environment:
+      <<: [*release-env, *redis-env]
     ports:
-      - "5555:5555"
+      # Boucle locale uniquement — accès par tunnel SSH :
+      #   ssh -L 5555:127.0.0.1:5555 user@hote
+      - "127.0.0.1:5555:5555"
     depends_on:
       redis: { condition: service_healthy }
+    logging: *logging
     deploy:
       resources:
         limits: { cpus: "0.25", memory: 256m }
@@ -334,15 +404,25 @@ services:
     networks: [agri_net]
 
   autoheal:
-    image: willfarrell/autoheal:latest
+    # Pin exact (audit hardening 2026-09-10) : ce conteneur monte le socket
+    # Docker (privilège quasi-root sur l'hôte) — `:latest` dessus est inacceptable.
+    image: willfarrell/autoheal:1.2.0
     environment:
+      # N'agit QUE sur les conteneurs explicitement labellisés (pas "toute la
+      # stack") — le label est déjà posé service par service ci-dessus.
       AUTOHEAL_CONTAINER_LABEL: "autoheal"
       AUTOHEAL_INTERVAL: "10"
       AUTOHEAL_START_PERIOD: "30"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      # :ro — autoheal n'a besoin QUE de lire l'état et d'émettre un restart ;
+      # le socket en lecture seule suffit à `docker restart` via l'API tout en
+      # réduisant la surface (pas de `build`, `exec`, `cp`… exploitables).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    logging: *logging
     deploy:
       resources:
         limits: { cpus: "0.1", memory: 64m }
     restart: unless-stopped
-    networks: [agri_net]
+    # PAS sur `agri_net` (audit hardening 2026-09-10) : autoheal parle au démon
+    # Docker via le socket, jamais au réseau applicatif — l'y laisser lui
+    # donnait une visibilité réseau inutile sur redis/pgbouncer/mcp.

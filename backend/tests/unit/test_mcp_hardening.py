@@ -34,22 +34,22 @@ class TestPreflightGateIsEnforced:
         `allowed` qui a rendu la porte inopérante. Si `PreflightResult`
         gagnait un jour un attribut `allowed`, ce test rappellerait qu'un
         appelant historique s'y est déjà fié à tort."""
-        from agriconnect.infrastructure.mcp.security import PreflightResult
+        from ladini.infrastructure.mcp.security import PreflightResult
         pf = PreflightResult(False, "raison")
         assert hasattr(pf, "passed")
         assert not hasattr(pf, "allowed")
 
     def test_sql_injection_in_arguments_is_blocked_before_execution(self):
-        from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer
-        from agriconnect.infrastructure.mcp.security import HostBlockedError
+        from ladini.infrastructure.mcp.runtime import AgriDBMCPServer
+        from ladini.infrastructure.mcp.security import HostBlockedError
 
         srv = AgriDBMCPServer()
         with pytest.raises(HostBlockedError):
             run(srv.call_tool("create_order", {"phone": "+2260", "note": "DROP TABLE users"}))
 
     def test_raw_sql_payload_is_blocked_before_execution(self):
-        from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer
-        from agriconnect.infrastructure.mcp.security import HostBlockedError
+        from ladini.infrastructure.mcp.runtime import AgriDBMCPServer
+        from ladini.infrastructure.mcp.security import HostBlockedError
 
         srv = AgriDBMCPServer()
         with pytest.raises(HostBlockedError):
@@ -60,8 +60,8 @@ class TestPreflightGateIsEnforced:
         création ne doit pas se payer par le blocage d'appels normaux. Le
         préflight ne doit pas lever `HostBlockedError` ici (un échec DB en
         aval est attendu et sans rapport)."""
-        from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer
-        from agriconnect.infrastructure.mcp.security import HostBlockedError
+        from ladini.infrastructure.mcp.runtime import AgriDBMCPServer
+        from ladini.infrastructure.mcp.security import HostBlockedError
 
         srv = AgriDBMCPServer()
         try:
@@ -82,16 +82,16 @@ class TestProductPhotoTool:
     s'exécuter sans jamais être bloqué par la porte de sécurité."""
 
     def test_add_product_photo_is_exposed_as_an_mcp_tool(self):
-        from agriconnect.protocols.mcp.servers.h import TOOL_HANDLERS
+        from ladini.protocols.mcp.servers.h import TOOL_HANDLERS
         assert "add_product_photo" in TOOL_HANDLERS
 
     def test_add_product_photo_has_an_explicit_write_scope(self):
-        from agriconnect.infrastructure.mcp.security import TOOL_SCOPE_MAP, PermissionScope
+        from ladini.infrastructure.mcp.security import TOOL_SCOPE_MAP, PermissionScope
         assert TOOL_SCOPE_MAP.get("add_product_photo") == PermissionScope.DB_DATA_WRITE
 
     def test_add_product_photo_resolves_and_dispatches_without_being_blocked(self):
-        from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer
-        from agriconnect.infrastructure.mcp.security import HostBlockedError, PermissionDenied
+        from ladini.infrastructure.mcp.runtime import AgriDBMCPServer
+        from ladini.infrastructure.mcp.security import HostBlockedError, PermissionDenied
 
         srv = AgriDBMCPServer()
         try:
@@ -112,45 +112,45 @@ class TestProductPhotoTool:
 
 class TestLogMasking:
     def test_otp_code_is_fully_redacted(self):
-        from agriconnect.infrastructure.mcp.utils import mask_log_args
+        from ladini.infrastructure.mcp.utils import mask_log_args
         assert mask_log_args({"otp_code": "1234"})["otp_code"] == "***"
 
     @pytest.mark.parametrize("key", [
         "phone", "user_phone", "producer_phone", "buyer_phone", "_caller_phone",
     ])
     def test_phone_variants_are_partially_masked(self, key):
-        from agriconnect.infrastructure.mcp.utils import mask_log_args
+        from ladini.infrastructure.mcp.utils import mask_log_args
         masked = mask_log_args({key: "+22668815299"})[key]
         assert masked == "***5299"
         assert "2266881" not in masked
 
     def test_business_fields_are_left_readable_for_debugging(self):
-        from agriconnect.infrastructure.mcp.utils import mask_log_args
+        from ladini.infrastructure.mcp.utils import mask_log_args
         masked = mask_log_args({"product": "carottes", "quantity": 500, "price": 300})
         assert masked == {"product": "carottes", "quantity": 500, "price": 300}
 
     def test_nested_envelopes_are_masked_too(self):
         """Les outils reçoivent souvent une enveloppe `data={...}` — le
         masquage doit descendre dedans, sinon le secret fuit d'un cran."""
-        from agriconnect.infrastructure.mcp.utils import mask_log_args
+        from ladini.infrastructure.mcp.utils import mask_log_args
         masked = mask_log_args({"data": {"otp_code": "9999", "phone": "+22670000001"}})
         assert masked["data"]["otp_code"] == "***"
         assert masked["data"]["phone"] == "***0001"
 
     def test_masking_never_mutates_the_caller_payload(self):
         """Le masquage sert au LOG : muter l'original casserait l'appel réel."""
-        from agriconnect.infrastructure.mcp.utils import mask_log_args
+        from ladini.infrastructure.mcp.utils import mask_log_args
         original = {"otp_code": "1234", "phone": "+22668815299"}
         mask_log_args(original)
         assert original == {"otp_code": "1234", "phone": "+22668815299"}
 
     def test_depth_limit_stops_pathological_nesting(self):
-        from agriconnect.infrastructure.mcp.utils import mask_log_args
+        from ladini.infrastructure.mcp.utils import mask_log_args
         deep: dict = {"a": {"b": {"c": {"d": {"e": "trop profond"}}}}}
         assert mask_log_args(deep)  # borné, ne boucle pas
 
     def test_cyclic_structure_does_not_hang_the_logger(self):
-        from agriconnect.infrastructure.mcp.utils import mask_log_args
+        from ladini.infrastructure.mcp.utils import mask_log_args
         cyclic: dict = {"phone": "+22668815299"}
         cyclic["self"] = cyclic
         assert mask_log_args(cyclic)["phone"] == "***5299"
@@ -192,7 +192,7 @@ def http_app_client():
     daemon démarre une fois et sert tous les tours ensuite.
     """
     from fastapi.testclient import TestClient
-    import agriconnect.protocols.mcp.servers.http_server as hs
+    import ladini.protocols.mcp.servers.http_server as hs
 
     with TestClient(hs.app) as client:
         yield client
@@ -204,7 +204,7 @@ def http_client(http_app_client, monkeypatch):
     CHAQUE requête par `require_auth` (jamais mis en cache au démarrage),
     donc le faire varier par test via `monkeypatch` reste sûr même avec un
     client/app partagé pour tout le fichier."""
-    from agriconnect.core.settings import settings
+    from ladini.core.settings import settings
 
     monkeypatch.setattr(settings, "MCP_HTTP_AUTH_TOKEN", "secret-de-test", raising=False)
     return http_app_client, {"Authorization": "Bearer secret-de-test"}
@@ -238,7 +238,7 @@ class TestHttpDaemonAuth:
         process — `require_auth` lit `MCP_HTTP_AUTH_TOKEN` à CHAQUE requête,
         pas seulement au lifespan, donc ce test n'a pas besoin de relancer
         le daemon pour le vérifier)."""
-        from agriconnect.core.settings import settings
+        from ladini.core.settings import settings
 
         monkeypatch.setattr(settings, "MCP_HTTP_AUTH_TOKEN", "", raising=False)
         assert _jsonrpc_call(http_app_client, "tools/list", {}).status_code == 200
@@ -295,7 +295,7 @@ class TestHttpDaemonInputValidation:
 
 class TestTechnicalErrorsNeverLeak:
     def test_http_call_failure_returns_a_sanitized_message(self, http_client, monkeypatch):
-        import agriconnect.protocols.mcp.servers.http_server as hs
+        import ladini.protocols.mcp.servers.http_server as hs
 
         async def _boom(name, arguments=None, **kw):
             raise RuntimeError('relation "orders" does not exist LINE 1: SELECT * FROM orders')
@@ -313,8 +313,8 @@ class TestTechnicalErrorsNeverLeak:
     def test_business_errors_still_reach_the_caller_intact(self, http_client, monkeypatch):
         """La sanitisation ne doit pas rendre l'agent aveugle : un échec
         métier explicite doit traverser mot pour mot."""
-        import agriconnect.protocols.mcp.servers.http_server as hs
-        from agriconnect.services.database.errors import BusinessRuleException
+        import ladini.protocols.mcp.servers.http_server as hs
+        from ladini.services.database.errors import BusinessRuleException
 
         async def _business(name, arguments=None, **kw):
             raise BusinessRuleException("Stock insuffisant : il reste 12 KG")
@@ -324,7 +324,17 @@ class TestTechnicalErrorsNeverLeak:
         # Le SDK MCP valide les arguments contre le JSON Schema déclaré
         # AVANT d'atteindre call_tool — `add_stock` exige farm_id/item_name/
         # quantity, sans quoi la requête est rejetée en amont du mock.
-        args = {"farm_id": "f1", "item_name": "tomates", "quantity": 10}
+        # `producer_phone` est requis depuis l'audit sécurité agent 2026-09-10
+        # (contrôle de propriété sur `farm_id` — voir
+        # `BaseMixin._assert_farm_owned_by`). Le schéma JSON exposé par MCP est
+        # dérivé de la signature : l'omettre fait rejeter l'appel EN AMONT du
+        # handler, donc avant le mock que ce test veut exercer.
+        args = {
+            "farm_id": "f1",
+            "item_name": "tomates",
+            "quantity": 10,
+            "producer_phone": "+22670000001",
+        }
         r = _jsonrpc_call(client, "tools/call", headers, params={"name": "add_stock", "arguments": args})
 
         body = _sse_json_result(r)
@@ -344,7 +354,7 @@ def _sse_json_result(response):
     def test_tool_wrapper_sanitizes_technical_failures(self):
         """`h.py::_safe` interpolait l'exception brute — 2e surface de fuite
         décrite dans `services/database/errors.py`."""
-        from agriconnect.protocols.mcp.servers.h import _safe
+        from ladini.protocols.mcp.servers.h import _safe
 
         @_safe("some_tool")
         async def _boom():
@@ -356,7 +366,7 @@ def _sse_json_result(response):
         assert "bids_pkey" not in result["message"]
 
     def test_tool_wrapper_no_longer_exposes_internal_exception_class_names(self):
-        from agriconnect.protocols.mcp.servers.h import _safe
+        from ladini.protocols.mcp.servers.h import _safe
 
         @_safe("some_tool")
         async def _boom():
@@ -365,8 +375,8 @@ def _sse_json_result(response):
         assert "error_type" not in run(_boom())
 
     def test_tool_wrapper_keeps_business_messages_intact(self):
-        from agriconnect.protocols.mcp.servers.h import _safe
-        from agriconnect.services.database.errors import BusinessRuleException
+        from ladini.protocols.mcp.servers.h import _safe
+        from ladini.services.database.errors import BusinessRuleException
 
         @_safe("some_tool")
         async def _business():
@@ -392,7 +402,7 @@ class TestExternalCallsAreBounded:
         assert TwilioHttpClient().timeout is None
 
     def test_main_sender_passes_an_explicit_timeout(self, monkeypatch):
-        import agriconnect.services.twilio_sender as ts
+        import ladini.services.twilio_sender as ts
 
         seen = {}
 
@@ -410,7 +420,7 @@ class TestExternalCallsAreBounded:
 
     def test_outbox_channel_passes_an_explicit_timeout(self, monkeypatch):
         import twilio.rest
-        from agriconnect.workers.outbox.channels.whatsapp import WhatsAppChannel, _TWILIO_TIMEOUT_S
+        from ladini.workers.outbox.channels.whatsapp import WhatsAppChannel, _TWILIO_TIMEOUT_S
 
         seen = {}
 
@@ -427,7 +437,7 @@ class TestExternalCallsAreBounded:
 
     def test_sender_masks_the_recipient_number_in_logs(self, monkeypatch, caplog):
         import logging
-        import agriconnect.services.twilio_sender as ts
+        import ladini.services.twilio_sender as ts
 
         class _FakeClient:
             def __init__(self, sid, token, http_client=None):
@@ -436,7 +446,7 @@ class TestExternalCallsAreBounded:
                 )()
 
         monkeypatch.setattr(ts, "Client", _FakeClient)
-        with caplog.at_level(logging.INFO, logger="AgriConnect.TwilioSender"):
+        with caplog.at_level(logging.INFO, logger="Ladini.TwilioSender"):
             ts.send_whatsapp_message("+22668815299", "bonjour")
         assert "+22668815299" not in caplog.text
         assert "***5299" in caplog.text

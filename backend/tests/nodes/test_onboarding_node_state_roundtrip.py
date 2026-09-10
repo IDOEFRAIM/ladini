@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from agriconnect.graphs.agents.market_coach.flows.common.onboarding import onboarding_node
+from ladini.graphs.agents.market_coach.flows.common.onboarding import onboarding_node
 from tests.conftest import run
 
 
@@ -43,7 +43,7 @@ def _patch_llm_extract(monkeypatch, outputs):
         base.update(outputs[i])
         return base
 
-    import agriconnect.graphs.agents.market_coach.flows.common.onboarding as mod
+    import ladini.graphs.agents.market_coach.flows.common.onboarding as mod
     monkeypatch.setattr(mod, "_llm_extract_onboarding_all", _fake)
 
 

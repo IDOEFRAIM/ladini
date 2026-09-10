@@ -3,7 +3,7 @@
 ## Vue d'ensemble
 
 ```
-agriconnect/agents/           ← NOYAU PARTAGÉ (DRY)
+ladini/agents/           ← NOYAU PARTAGÉ (DRY)
 ├── __init__.py               ← Exports publics
 ├── dispatcher.py             ← Intent→Action dispatch + execution avec fallback
 ├── gateway.py                ← DataGateway unifiée (MCP → DB fallback)

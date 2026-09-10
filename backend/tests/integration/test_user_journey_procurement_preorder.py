@@ -53,30 +53,30 @@ from tests.architecture.test_preorder_draft_persistence import (
     _install_fake_db as _install_fake_preorder_db,
 )
 
-from agriconnect.core.settings import settings
-from agriconnect.graphs.agents.market_coach.core.router import DomainRouter
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.core.settings import settings
+from ladini.graphs.agents.market_coach.core.router import DomainRouter
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
 )
-from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ProcurementDraftStatus,
 )
-from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     PreorderDraftStatus,
 )
-from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
     confirmation_gate,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.procurement_execution_finalizer import (
+from ladini.graphs.agents.market_coach.flows.buyer.procurement_execution_finalizer import (
     finalize_procurement_execution,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.preorder import (
+from ladini.graphs.agents.market_coach.flows.buyer.preorder import (
     create_preorder,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.preorder_payment import (
+from ladini.graphs.agents.market_coach.flows.buyer.preorder_payment import (
     apply_payment_outcome,
 )
-from agriconnect.services.database import procurement_draft_store, preorder_draft_store
+from ladini.services.database import procurement_draft_store, preorder_draft_store
 
 
 class TestProcurementUserJourney:

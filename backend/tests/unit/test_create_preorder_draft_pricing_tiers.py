@@ -30,8 +30,8 @@ import pytest
 
 from tests.conftest import run
 
-from agriconnect.services.database.buyer import BuyerMixin
-from agriconnect.services.database.errors import BusinessRuleException
+from ladini.services.database.buyer import BuyerMixin
+from ladini.services.database.errors import BusinessRuleException
 
 
 def _fake_buyer_profile():

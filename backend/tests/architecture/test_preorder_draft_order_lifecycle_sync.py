@@ -38,12 +38,12 @@ from tests.architecture.test_preorder_draft_persistence import _draft, _install_
 from tests.conftest import make_state, run
 from tests.evals.runners.harness import RecordingRuntime
 
-from agriconnect.graphs.agents.market_coach.domain.preorder_draft import PreorderDraftStatus
-from agriconnect.graphs.agents.market_coach.flows.buyer import preorder as preorder_mod
-from agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation import (
+from ladini.graphs.agents.market_coach.domain.preorder_draft import PreorderDraftStatus
+from ladini.graphs.agents.market_coach.flows.buyer import preorder as preorder_mod
+from ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation import (
     bootstrap_preorder_draft,
 )
-from agriconnect.services.database import preorder_draft_store as store_mod
+from ladini.services.database import preorder_draft_store as store_mod
 
 CART = [
     {

@@ -17,8 +17,8 @@ avec le VRAI goal reproduit par l'audit (`STOCK_UPDATE_LEVEL`,
 `_RESOLVER_PASSTHROUGH`)."""
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.core.router import DomainRouter
-from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+from ladini.graphs.agents.market_coach.core.router import DomainRouter
+from ladini.graphs.agents.market_coach.nodes.validation import validator
 from tests.conftest import make_state, run
 
 

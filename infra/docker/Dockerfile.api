@@ -48,8 +48,24 @@ RUN --mount=type=cache,target=/root/.cache/pypoetry \
 # ── Runtime ──────────────────────────────────────────────────────────
 FROM python:3.11-slim AS runtime
 
+# Métadonnées de release (hardening DevOps 2026-09-10) — passées par la CI
+# (`--build-arg`). Bakées dans l'ENV pour que `GET /version` réponde même si
+# le compose oublie de les injecter, et dans les LABEL OCI pour `docker inspect`.
+ARG RELEASE_VERSION=unknown
+ARG GIT_SHA=unknown
+ARG BUILD_TIMESTAMP=unknown
+
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app/backend/src
+    PYTHONPATH=/app/backend/src \
+    RELEASE_VERSION=${RELEASE_VERSION} \
+    GIT_SHA=${GIT_SHA} \
+    BUILD_TIMESTAMP=${BUILD_TIMESTAMP}
+
+LABEL org.opencontainers.image.title="ladini-api" \
+      org.opencontainers.image.source="https://github.com/IDOEFRAIM/AgriConnect" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.version="${RELEASE_VERSION}" \
+      org.opencontainers.image.created="${BUILD_TIMESTAMP}"
 
 # libpq5 : client Postgres runtime (asyncpg/psycopg2 en ont besoin).
 # curl : HEALTHCHECK. tini : PID 1 propre — reap les processus zombies
@@ -95,7 +111,7 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # aléatoires en prod que rien côté appli n'explique).
 # --graceful-timeout 30 : doit rester <= stop_grace_period côté compose
 # (sinon Docker envoie SIGKILL avant que gunicorn ait fini de drainer).
-CMD ["gunicorn", "agriconnect.api.main:app", \
+CMD ["gunicorn", "ladini.api.main:app", \
      "-k", "uvicorn.workers.UvicornWorker", \
      "-w", "4", "--bind", "0.0.0.0:8000", \
      "--worker-tmp-dir", "/dev/shm", \

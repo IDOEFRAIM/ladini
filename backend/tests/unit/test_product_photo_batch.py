@@ -50,7 +50,7 @@ def _patch_worker_session(monkeypatch):
     `db_session_ctx`, ce qui fait aussi passer les appels @transactional
     imbriqués (`AgriDatabaseService...`, déjà mockés séparément) par le
     chemin "session existante" sans re-vérifier le sessionmaker."""
-    import agriconnect.workers.runtime as runtime_module
+    import ladini.workers.runtime as runtime_module
 
     fake_session = AsyncMock()
 
@@ -74,7 +74,7 @@ def _patch_add_product_photo(monkeypatch, **mock_kwargs) -> AsyncMock:
     héritent silencieusement du mock du premier (bug constaté : 2 tests
     "faux positifs" avant ce fix — le code de production est correct, c'est
     le mocking qui était trompé par le cache)."""
-    from agriconnect.services.database.d import AgriDatabaseService
+    from ladini.services.database.d import AgriDatabaseService
 
     AgriDatabaseService._DISPATCH_CACHE.pop("add_product_photo:False", None)
     AgriDatabaseService._DISPATCH_CACHE.pop("add_product_photo:True", None)
@@ -85,12 +85,12 @@ def _patch_add_product_photo(monkeypatch, **mock_kwargs) -> AsyncMock:
 
 class TestAskOrAccumulate:
     def test_first_ambiguous_photo_creates_the_pending_state_and_sends_the_menu(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         fake_redis = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake_redis)
         sent = AsyncMock()
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        monkeypatch.setattr("ladini.api.tasks.send_confirmation_text", sent)
 
         run(mod._ask_or_accumulate(PHONE, CANDIDATES, "https://x/a.jpg"))
 
@@ -100,12 +100,12 @@ class TestAskOrAccumulate:
         assert pending["product_ids"] == ["1", "2"]
 
     def test_a_second_ambiguous_photo_accumulates_without_resending_the_menu(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         fake_redis = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake_redis)
         sent = AsyncMock()
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        monkeypatch.setattr("ladini.api.tasks.send_confirmation_text", sent)
 
         run(mod._ask_or_accumulate(PHONE, CANDIDATES, "https://x/a.jpg"))
         run(mod._ask_or_accumulate(PHONE, CANDIDATES, "https://x/b.jpg"))
@@ -115,11 +115,11 @@ class TestAskOrAccumulate:
         assert pending["image_urls"] == ["https://x/a.jpg", "https://x/b.jpg"]
 
     def test_a_third_photo_keeps_accumulating(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         fake_redis = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake_redis)
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", AsyncMock())
+        monkeypatch.setattr("ladini.api.tasks.send_confirmation_text", AsyncMock())
 
         for url in ("https://x/a.jpg", "https://x/b.jpg", "https://x/c.jpg"):
             run(mod._ask_or_accumulate(PHONE, CANDIDATES, url))
@@ -130,7 +130,7 @@ class TestAskOrAccumulate:
 
 class TestResolvePendingLinksTheWholeBatch:
     def test_resolving_links_every_accumulated_photo_in_one_confirmation(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         fake_redis = _FakeRedis()
         key = mod.pending_photo_key(PHONE)
@@ -140,7 +140,7 @@ class TestResolvePendingLinksTheWholeBatch:
         })
         monkeypatch.setattr(mod, "_redis", lambda: fake_redis)
         sent = AsyncMock()
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        monkeypatch.setattr("ladini.api.tasks.send_confirmation_text", sent)
         add_photo = _patch_add_product_photo(
             monkeypatch, return_value={"status": "success", "data": {"name": "maïs"}},
         )
@@ -156,14 +156,14 @@ class TestResolvePendingLinksTheWholeBatch:
         assert key not in fake_redis.store
 
     def test_a_single_photo_batch_uses_the_singular_wording(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         fake_redis = _FakeRedis()
         key = mod.pending_photo_key(PHONE)
         fake_redis.store[key] = json.dumps({"image_urls": ["https://x/a.jpg"], "product_ids": ["1", "2"]})
         monkeypatch.setattr(mod, "_redis", lambda: fake_redis)
         sent = AsyncMock()
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        monkeypatch.setattr("ladini.api.tasks.send_confirmation_text", sent)
         _patch_add_product_photo(
             monkeypatch, return_value={"status": "success", "data": {"name": "maïs"}},
         )
@@ -177,14 +177,14 @@ class TestResolvePendingLinksTheWholeBatch:
     def test_legacy_single_url_pending_entries_are_still_handled(self, monkeypatch):
         """Compat rétro : une entrée Redis encore au format mono-photo
         (créée avant ce fix, pas encore expirée) doit rester résoluble."""
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         fake_redis = _FakeRedis()
         key = mod.pending_photo_key(PHONE)
         fake_redis.store[key] = json.dumps({"image_url": "https://x/legacy.jpg", "product_ids": ["1", "2"]})
         monkeypatch.setattr(mod, "_redis", lambda: fake_redis)
         sent = AsyncMock()
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        monkeypatch.setattr("ladini.api.tasks.send_confirmation_text", sent)
         add_photo = _patch_add_product_photo(
             monkeypatch, return_value={"status": "success", "data": {"name": "maïs"}},
         )
@@ -196,12 +196,12 @@ class TestResolvePendingLinksTheWholeBatch:
         assert add_photo.await_args.kwargs["image_url"] == "https://x/legacy.jpg"
 
     def test_no_pending_state_reports_expiry(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         fake_redis = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake_redis)
         sent = AsyncMock()
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        monkeypatch.setattr("ladini.api.tasks.send_confirmation_text", sent)
 
         run(mod._resolve_pending(PHONE, "1"))
 
@@ -211,29 +211,29 @@ class TestFormatCandidateLabel:
     / 3. maïs" quand un producteur publie plusieurs lots du même nom."""
 
     def test_includes_quantity_and_unit_when_present(self):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
         product = {"name": "maïs", "quantity_for_sale": 300, "unit": "KG"}
         assert mod._format_candidate_label(0, product) == "1. maïs (300 KG)"
 
     def test_falls_back_to_the_bare_name_without_a_quantity(self):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
         product = {"name": "maïs"}
         assert mod._format_candidate_label(0, product) == "1. maïs"
 
     def test_index_drives_the_displayed_number(self):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
         product = {"name": "tomates", "quantity_for_sale": 10, "unit": "KG"}
         assert mod._format_candidate_label(2, product) == "3. tomates (10 KG)"
 
 
 class TestAskWhichBatchToView:
     def test_sends_a_menu_and_stores_the_pending_selection(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         fake_redis = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake_redis)
         sent = AsyncMock()
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        monkeypatch.setattr("ladini.api.tasks.send_confirmation_text", sent)
 
         batches = [
             {"id": "1", "name": "maïs", "quantity_for_sale": 300, "unit": "KG"},
@@ -250,8 +250,8 @@ class TestAskWhichBatchToView:
 
 class TestResolvePendingView:
     def test_resolves_the_chosen_batch_and_sends_its_photos(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
-        from agriconnect.services.database.d import AgriDatabaseService
+        import ladini.workers.media.product_photo_task as mod
+        from ladini.services.database.d import AgriDatabaseService
 
         fake_redis = _FakeRedis()
         key = mod.pending_view_key(PHONE)
@@ -276,7 +276,7 @@ class TestResolvePendingView:
             return "SM1"
 
         monkeypatch.setattr(
-            "agriconnect.services.twilio_sender.send_whatsapp_media", _fake_send_media,
+            "ladini.services.twilio_sender.send_whatsapp_media", _fake_send_media,
         )
         _patch_worker_session(monkeypatch)
 
@@ -286,12 +286,12 @@ class TestResolvePendingView:
         assert key not in fake_redis.store
 
     def test_an_expired_selection_is_reported(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         fake_redis = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake_redis)
         sent = AsyncMock()
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        monkeypatch.setattr("ladini.api.tasks.send_confirmation_text", sent)
 
         run(mod._resolve_pending_view(PHONE, "1"))
 

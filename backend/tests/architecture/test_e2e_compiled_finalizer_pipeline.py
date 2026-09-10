@@ -31,30 +31,30 @@ from functools import partial
 import pytest
 from langgraph.graph import END, StateGraph
 
-from agriconnect.graphs.agents.market_coach.core.confirmation_target import (
+from ladini.graphs.agents.market_coach.core.confirmation_target import (
     ConfirmationTarget,
 )
-from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+from ladini.graphs.agents.market_coach.core.state import MarketAgentState
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ConfirmProcurementDraft,
     ProcurementDraft,
     ProcurementDraftStatus,
     apply_domain_action as apply_procurement_action,
 )
-from agriconnect.graphs.agents.market_coach.domain.sales_publish_draft import (
+from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
     ConfirmSalesPublishDraft,
     SalesPublishDraft,
     SalesPublishDraftStatus,
     apply_domain_action as apply_sales_action,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.procurement_execution_finalizer import (
+from ladini.graphs.agents.market_coach.flows.buyer.procurement_execution_finalizer import (
     finalize_procurement_execution,
 )
-from agriconnect.graphs.agents.market_coach.flows.producer.sales_execution_finalizer import (
+from ladini.graphs.agents.market_coach.flows.producer.sales_execution_finalizer import (
     finalize_sales_publish_execution,
 )
-from agriconnect.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
-from agriconnect.graphs.agents.market_coach.nodes.routing import (
+from ladini.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
+from ladini.graphs.agents.market_coach.nodes.routing import (
     _route_after_mcp_executor,
 )
 from tests.conftest import StubRuntime, run

@@ -23,17 +23,17 @@ from __future__ import annotations
 
 from tests.conftest import make_state, run
 
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     get_pending_interaction,
 )
-from agriconnect.graphs.agents.market_coach.core.router import _cart_guard
-from agriconnect.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
-from agriconnect.graphs.agents.market_coach.domain.selection_actions import (
+from ladini.graphs.agents.market_coach.core.router import _cart_guard
+from ladini.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
+from ladini.graphs.agents.market_coach.domain.selection_actions import (
     ActionType,
     build_selection_context,
 )
-from agriconnect.graphs.agents.market_coach.interpreter.strategy import (
+from ladini.graphs.agents.market_coach.interpreter.strategy import (
     response_strategy,
 )
 
@@ -135,7 +135,7 @@ class TestReportedConversationNoLongerBypassesToConfirmation:
         assert context.expected_action == ActionType.SET_PACKAGE_COUNT
         assert context.active_tier_id == "tier-10l"
 
-        from agriconnect.graphs.agents.market_coach.domain.selection_actions import (
+        from ladini.graphs.agents.market_coach.domain.selection_actions import (
             fast_path_action,
         )
 

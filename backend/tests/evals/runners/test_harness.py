@@ -3,7 +3,7 @@
 Two kinds of tests here:
   1. Synthetic — tiny fixture YAML written to tmp_path, testing the
      validation primitives in isolation (does NOT touch the real 35
-     scenario files, does NOT call any agriconnect node/flow code).
+     scenario files, does NOT call any ladini node/flow code).
   2. Real-dataset — formalizes the ad-hoc checks run manually in the prior
      phase (YAML validity, unique scenario_id, valid gate enum, blocked
      scenarios absent from datasets/) as actual pytest assertions against

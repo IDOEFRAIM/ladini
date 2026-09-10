@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock
 
 from tests.conftest import run
 
-from agriconnect.core.location import LocationOutcome, persist_shared_location
+from ladini.core.location import LocationOutcome, persist_shared_location
 
 PHONE = "+22670000001"
 
@@ -33,13 +33,13 @@ class _FakeSession:
 
 
 def _patch_update_geo_location(monkeypatch, result: dict):
-    from agriconnect.services.database.auth import AuthMixin
+    from ladini.services.database.auth import AuthMixin
 
     monkeypatch.setattr(
         AuthMixin, "update_geo_location", AsyncMock(return_value=result)
     )
     monkeypatch.setattr(
-        "agriconnect.core.database.get_sessionmaker",
+        "ladini.core.database.get_sessionmaker",
         lambda: (lambda: _FakeSession()),
     )
 
@@ -89,7 +89,7 @@ class TestPersistSharedLocation:
 
     def test_a_missing_sessionmaker_never_raises(self, monkeypatch):
         monkeypatch.setattr(
-            "agriconnect.core.database.get_sessionmaker", lambda: None
+            "ladini.core.database.get_sessionmaker", lambda: None
         )
 
         outcome, message = run(persist_shared_location(PHONE, 12.37, -1.52))
@@ -97,14 +97,14 @@ class TestPersistSharedLocation:
         assert outcome == LocationOutcome.LOCATION_PERSISTENCE_ERROR
 
     def test_an_unexpected_exception_never_propagates(self, monkeypatch):
-        from agriconnect.services.database.auth import AuthMixin
+        from ladini.services.database.auth import AuthMixin
 
         async def _boom(*args, **kwargs):
             raise RuntimeError("infra down")
 
         monkeypatch.setattr(AuthMixin, "update_geo_location", _boom)
         monkeypatch.setattr(
-            "agriconnect.core.database.get_sessionmaker",
+            "ladini.core.database.get_sessionmaker",
             lambda: (lambda: _FakeSession()),
         )
 

@@ -1,4 +1,4 @@
-"""Socle commun à TOUTE la suite de tests AgriConnect.
+"""Socle commun à TOUTE la suite de tests Ladini.
 
 Philosophie (identique à tests/chaos) : AUCUN réseau, AUCUN LLM réel, AUCUNE
 base de données. Tout ce qui sort du process est simulé par des doublures
@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-# Rendre `agriconnect` importable sans installation editable.
+# Rendre `ladini` importable sans installation editable.
 _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -125,13 +125,13 @@ class StubRuntime:
 
     @property
     def profile_answer(self) -> Any:
-        from agriconnect.graphs.agents.market_coach.llm_gateway.types import LLMProfile
+        from ladini.graphs.agents.market_coach.llm_gateway.types import LLMProfile
 
         return LLMProfile.REASONING
 
     @property
     def llm_gateway(self) -> Any:
-        from agriconnect.graphs.agents.market_coach.llm_gateway import (
+        from ladini.graphs.agents.market_coach.llm_gateway import (
             LegacyOverrideGateway,
         )
 
@@ -176,12 +176,12 @@ def _pending_interaction_patch_for_legacy_expected_input(expected_input: str) ->
     à la main), mais sans cette traduction un test qui l'utilise seul
     figerait l'ANCIEN contrat au lieu du nouveau — voir
     tests/interpreter/test_goal_planner_state_machine.py pour le précédent."""
-    from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+    from ladini.graphs.agents.market_coach.core.pending_interaction import (
         InteractionKind,
         clear_pending_interaction,
         set_pending_interaction,
     )
-    from agriconnect.graphs.agents.market_coach.core.slots import _EXPECTED_INPUT_MAP
+    from ladini.graphs.agents.market_coach.core.slots import _EXPECTED_INPUT_MAP
 
     category = str(expected_input or "NONE").upper().strip()
     if category in ("", "NONE"):

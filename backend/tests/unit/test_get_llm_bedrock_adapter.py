@@ -10,15 +10,15 @@ from __future__ import annotations
 
 import importlib
 
-# `import agriconnect.core.get_llm as get_llm_mod` is unreliable here:
-# `agriconnect/core/__init__.py` does `from .llm import get_llm` (a thin
+# `import ladini.core.get_llm as get_llm_mod` is unreliable here:
+# `ladini/core/__init__.py` does `from .llm import get_llm` (a thin
 # re-export shim), which — because the package attribute name "get_llm"
 # collides with the submodule name "get_llm" — overwrites
-# `agriconnect.core.get_llm` (normally auto-bound to the submodule on
+# `ladini.core.get_llm` (normally auto-bound to the submodule on
 # import) with the FUNCTION instead. `importlib.import_module` bypasses the
 # package attribute entirely and returns the real module from `sys.modules`.
-get_llm_mod = importlib.import_module("agriconnect.core.get_llm")
-from agriconnect.core.get_llm import (
+get_llm_mod = importlib.import_module("ladini.core.get_llm")
+from ladini.core.get_llm import (
     _BedrockAdapter,
     _is_bedrock_throttling_error,
     get_llm,
@@ -132,7 +132,7 @@ class TestBedrockAdapterMessageTranslation:
 
 class TestBedrockThrottlingFallback:
     def test_falls_back_to_the_fast_model_on_throttling(self, monkeypatch):
-        from agriconnect.core.settings import settings
+        from ladini.core.settings import settings
 
         monkeypatch.setattr(settings, "LLM_MODEL", "fast-model")
 
@@ -208,7 +208,7 @@ class TestGetLlmProviderDispatch:
     def test_bedrock_without_openai_base_url_uses_native_boto3_adapter(
         self, monkeypatch
     ):
-        from agriconnect.core.settings import settings
+        from ladini.core.settings import settings
 
         self._reset_singletons(monkeypatch)
         monkeypatch.setattr(settings, "LLM_PROVIDER", "bedrock")
@@ -227,7 +227,7 @@ class TestGetLlmProviderDispatch:
     def test_bedrock_with_openai_base_url_prefers_the_openai_compatible_gateway(
         self, monkeypatch
     ):
-        from agriconnect.core.settings import settings
+        from ladini.core.settings import settings
 
         self._reset_singletons(monkeypatch)
         monkeypatch.setattr(settings, "LLM_PROVIDER", "bedrock")
@@ -246,12 +246,12 @@ class TestGetLlmProviderDispatch:
 
         client = get_llm()
 
-        from agriconnect.core.get_llm import _GroqAdapter
+        from ladini.core.get_llm import _GroqAdapter
 
         assert isinstance(client, _GroqAdapter)
 
     def test_groq_provider_is_the_default_and_unchanged(self, monkeypatch):
-        from agriconnect.core.settings import settings
+        from ladini.core.settings import settings
 
         self._reset_singletons(monkeypatch)
         monkeypatch.setattr(settings, "LLM_PROVIDER", "groq")
@@ -259,14 +259,14 @@ class TestGetLlmProviderDispatch:
 
         client = get_llm()
 
-        from agriconnect.core.get_llm import _GroqAdapter
+        from ladini.core.get_llm import _GroqAdapter
 
         assert isinstance(client, _GroqAdapter)
 
     def test_mock_external_apis_short_circuits_bedrock_to_the_mock_client(
         self, monkeypatch
     ):
-        from agriconnect.core.settings import settings
+        from ladini.core.settings import settings
 
         self._reset_singletons(monkeypatch)
         monkeypatch.setattr(settings, "LLM_PROVIDER", "bedrock")

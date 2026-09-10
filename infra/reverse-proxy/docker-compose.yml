@@ -1,0 +1,44 @@
+# ═════════════════════════════════════════════════════════════════════
+# Reverse proxy — stack séparée du compose applicatif (cycle de vie
+# indépendant : on redéploie l'appli sans toucher au proxy/TLS).
+#
+#   cd infra/reverse-proxy
+#   cp .env.example .env   &&   $EDITOR .env      # PUBLIC_DOMAIN, ACME_EMAIL
+#   docker compose up -d
+#
+# Rejoint le réseau `agri_net` créé par docker-compose.prod.yml (external),
+# donc `reverse_proxy api:8000` résout le conteneur `api`.
+# ═════════════════════════════════════════════════════════════════════
+services:
+  caddy:
+    image: caddy:2.8-alpine        # pin exact — pas de :latest
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"             # HTTP/3
+    environment:
+      PUBLIC_DOMAIN: "${PUBLIC_DOMAIN:?PUBLIC_DOMAIN requis (ex: api.ladini.com)}"
+      ACME_EMAIL: "${ACME_EMAIL:?ACME_EMAIL requis (contact Let's Encrypt)}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data           # certificats — DURABLE, ne pas purger
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    security_opt: ["no-new-privileges:true"]
+    networks: [agri_net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  agri_net:
+    external: true               # créé par docker-compose.prod.yml

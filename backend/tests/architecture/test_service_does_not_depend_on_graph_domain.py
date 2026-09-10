@@ -16,10 +16,10 @@ graphs/agents/market_coach/services/domain/quantity_unit.py
 
 Ces trois modules sont PURS (aucune dépendance à LangGraph, au
 `PendingInteraction`, au `ResponsePlan`, au LLM, au routage ni au rendu)
-et sont désormais sous `agriconnect.domain`, accessible aux deux couches :
+et sont désormais sous `ladini.domain`, accessible aux deux couches :
 
 ```
-        agriconnect.domain   (règles métier partagées)
+        ladini.domain   (règles métier partagées)
            ↙            ↘
      services/          graphs/
 ```
@@ -38,7 +38,7 @@ import os
 
 import pytest
 
-SRC = os.path.join("src", "agriconnect")
+SRC = os.path.join("src", "ladini")
 
 #: Modules extraits en Phase 9 — plus aucune couche basse ne doit les
 #: importer depuis `graphs`.
@@ -122,9 +122,9 @@ class TestSharedDomainStaysIndependent:
         path = os.path.join(SRC, "domain", f"{module}.py")
         bad = []
         for mod in _imported_modules(path):
-            if not mod.startswith("agriconnect"):
+            if not mod.startswith("ladini"):
                 continue
-            tail = mod[len("agriconnect."):]
+            tail = mod[len("ladini."):]
             if tail.split(".")[0] in self.FORBIDDEN:
                 bad.append(mod)
         assert not bad, f"{module} dépend d'une couche interdite : {bad}"

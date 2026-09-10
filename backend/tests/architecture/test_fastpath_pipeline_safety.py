@@ -42,13 +42,13 @@ from typing import Any, Dict
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.core.goals import ALL_BUYER_TUNNEL_GOALS
-from agriconnect.graphs.agents.market_coach.core.policies import FastPathPolicy
-from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+from ladini.graphs.agents.market_coach.core.goals import ALL_BUYER_TUNNEL_GOALS
+from ladini.graphs.agents.market_coach.core.policies import FastPathPolicy
+from ladini.graphs.agents.market_coach.interpreter.routing import (
     make_input_interpreter,
 )
-from agriconnect.graphs.agents.market_coach.nodes import cognitive as cognitive_mod
-from agriconnect.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
+from ladini.graphs.agents.market_coach.nodes import cognitive as cognitive_mod
+from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
 from tests.conftest import make_state, run
 
 _TUNNEL_GOAL = "BUYER_PREORDER_INIT"

@@ -23,7 +23,7 @@ def rt(responses=None):
 
 class TestLowConfidenceMatchIsTreatedAsNotFound:
     def test_does_not_reserve_and_falls_back_to_the_not_found_flow(self):
-        from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
+        from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
         state = make_state(
             user_phone="+2260",
             current_goal="BUYER_ADD_TO_CART",
@@ -47,7 +47,7 @@ class TestLowConfidenceMatchIsTreatedAsNotFound:
         """Non-régression : seuls les matches trigram-only sont écartés — un
         match avec une vraie relation textuelle (substring) continue de
         fonctionner normalement."""
-        from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
+        from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
         state = make_state(
             user_phone="+2260",
             current_goal="BUYER_ADD_TO_CART",
@@ -74,7 +74,7 @@ class TestConfidentMatchIsUnaffected:
         """Non-régression : le chemin rapide existant (produit reconnu avec
         certitude + quantité déjà connue) doit continuer à fonctionner sans
         étape superflue."""
-        from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
+        from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
         state = make_state(
             user_phone="+2260",
             current_goal="BUYER_ADD_TO_CART",

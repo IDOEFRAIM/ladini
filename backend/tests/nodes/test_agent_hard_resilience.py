@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
-from agriconnect.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
+from ladini.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
+from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
 from tests.conftest import make_state, run
 
 
@@ -146,7 +146,7 @@ class TestCatalogOutageIsNeverReportedAsMissingProduct:
     inutile pour un produit pourtant en stock."""
 
     def _boom_service(self, monkeypatch, module):
-        from agriconnect.graphs.agents.market_coach.services.domain import cart_service as cs
+        from ladini.graphs.agents.market_coach.services.domain import cart_service as cs
 
         async def _boom(self, phone, product_name):
             raise cs.ProductLookupUnavailable("mcp down")
@@ -154,7 +154,7 @@ class TestCatalogOutageIsNeverReportedAsMissingProduct:
         monkeypatch.setattr(cs.CartDomainService, "resolve_product_vendors", _boom)
 
     def test_cart_reports_a_technical_outage_not_an_empty_catalog(self, monkeypatch):
-        from agriconnect.graphs.agents.market_coach.flows.buyer import cart as mod
+        from ladini.graphs.agents.market_coach.flows.buyer import cart as mod
 
         self._boom_service(monkeypatch, mod)
         state = make_state(
@@ -167,7 +167,7 @@ class TestCatalogOutageIsNeverReportedAsMissingProduct:
         assert "n'est pas disponible dans notre catalogue" not in text
 
     def test_procurement_reports_a_technical_outage_not_an_empty_catalog(self, monkeypatch):
-        from agriconnect.graphs.agents.market_coach.flows.buyer import procurement as mod
+        from ladini.graphs.agents.market_coach.flows.buyer import procurement as mod
 
         self._boom_service(monkeypatch, mod)
         state = make_state(
@@ -182,8 +182,8 @@ class TestCatalogOutageIsNeverReportedAsMissingProduct:
     def test_a_genuinely_empty_catalog_still_says_so(self, monkeypatch):
         """Non-régression : le vrai « aucun vendeur » garde son message
         d'origine — on ne masque pas les catalogues réellement vides."""
-        from agriconnect.graphs.agents.market_coach.flows.buyer import cart as mod
-        from agriconnect.graphs.agents.market_coach.services.domain import cart_service as cs
+        from ladini.graphs.agents.market_coach.flows.buyer import cart as mod
+        from ladini.graphs.agents.market_coach.services.domain import cart_service as cs
 
         async def _empty(self, phone, product_name):
             return [], False
@@ -208,8 +208,8 @@ class TestPreorderNetworkFailuresKeepTheBuyerUnstuck:
     }]
 
     def test_draft_creation_failure_returns_the_buyer_to_the_cart(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder as mod
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder as mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
 
         class _Boom:
             def __init__(self, rt):
@@ -244,12 +244,12 @@ class TestPreorderNetworkFailuresKeepTheBuyerUnstuck:
         vers `EXECUTION_UNKNOWN` (jamais un faux échec ni un faux succès),
         exactement la même doctrine que PROCUREMENT — voir
         `domain/preorder_draft.py::adapt_mcp_result`."""
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder as mod
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
-        import agriconnect.graphs.agents.market_coach.domain.preorder_draft as pd_mod
-        from agriconnect.core.settings import settings
-        from agriconnect.graphs.agents.market_coach.domain.preorder_draft import PreorderDraft
-        from agriconnect.services.database import preorder_draft_store as store_mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder as mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
+        import ladini.graphs.agents.market_coach.domain.preorder_draft as pd_mod
+        from ladini.core.settings import settings
+        from ladini.graphs.agents.market_coach.domain.preorder_draft import PreorderDraft
+        from ladini.services.database import preorder_draft_store as store_mod
         from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
 
         monkeypatch.setattr(settings, "ESCROW_PAYMENT_ENABLED", False)

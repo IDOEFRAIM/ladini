@@ -1,6 +1,6 @@
-"""`protocols/mcp/servers/db_server.py::AgriConnectMCPEntryPoint` — audit
+"""`protocols/mcp/servers/db_server.py::LadiniMCPEntryPoint` — audit
 MCP/AGUI 2026-08-27, Tâche 4 : sépare explicitement les lectures pures
-(Resources, adressables par URI ``agriconnect://catalog/{name}``) des
+(Resources, adressables par URI ``ladini://catalog/{name}``) des
 actions (Tools). Avant ce chantier, `_PUBLIC_CATALOG_TOOLS`
 (`infrastructure/mcp/runtime.py`) existait déjà mais n'était raccordé à
 aucun transport MCP — un host ne pouvait pas les découvrir sans invoquer un
@@ -9,7 +9,7 @@ Tool générique.
 Ce module importe `db_server.py`, qui redirige stdout/stderr vers
 `server_debug.log` UNIQUEMENT quand il est lancé comme process réel (voir
 `if __name__ == "__main__"` dans le fichier) — un simple `import` ou une
-instanciation de `AgriConnectMCPEntryPoint` ne touchent ni stdout/stderr ni
+instanciation de `LadiniMCPEntryPoint` ne touchent ni stdout/stderr ni
 le système de fichiers. `test_importing_the_module_has_no_side_effects`
 verrouille explicitement cette propriété : une régression ici casserait
 silencieusement toute la suite de tests (stdout redirigé de façon
@@ -25,8 +25,8 @@ from tests.conftest import run
 
 
 def _entry():
-    import agriconnect.protocols.mcp.servers.db_server as mod
-    return mod.AgriConnectMCPEntryPoint()
+    import ladini.protocols.mcp.servers.db_server as mod
+    return mod.LadiniMCPEntryPoint()
 
 
 class TestImportHasNoSideEffects:
@@ -34,7 +34,7 @@ class TestImportHasNoSideEffects:
         before_stdout = sys.stdout
         before_stderr = sys.stderr
 
-        import agriconnect.protocols.mcp.servers.db_server as mod  # noqa: F401
+        import ladini.protocols.mcp.servers.db_server as mod  # noqa: F401
 
         assert sys.stdout is before_stdout, "l'import a redirigé stdout"
         assert sys.stderr is before_stderr, "l'import a redirigé stderr"
@@ -51,13 +51,13 @@ class TestImportHasNoSideEffects:
 
 class TestListResources:
     def test_lists_every_public_catalog_tool_as_a_resource(self):
-        from agriconnect.infrastructure.mcp.runtime import _PUBLIC_CATALOG_TOOLS
+        from ladini.infrastructure.mcp.runtime import _PUBLIC_CATALOG_TOOLS
 
         entry = _entry()
         resources = run(entry._list_resources())
 
         uris = {str(r.uri) for r in resources}
-        expected = {f"agriconnect://catalog/{name}" for name in _PUBLIC_CATALOG_TOOLS}
+        expected = {f"ladini://catalog/{name}" for name in _PUBLIC_CATALOG_TOOLS}
         assert uris == expected
 
     def test_each_resource_carries_a_name_and_a_description(self):
@@ -93,7 +93,7 @@ class TestReadResource:
 
         entry.backend.call_tool = _fake_call_tool
 
-        raw = run(entry._read_resource("agriconnect://catalog/get_available_zones"))
+        raw = run(entry._read_resource("ladini://catalog/get_available_zones"))
         payload = json.loads(raw)
         assert payload == {"status": "success", "data": [{"id": "z1", "label": "Ouagadougou"}]}
 
@@ -106,7 +106,7 @@ class TestReadResource:
             return {"status": "success", "data": [{"label": "Bobo-Dioulasso — région Ouest"}]}
 
         entry.backend.call_tool = _fake_call_tool
-        raw = run(entry._read_resource("agriconnect://catalog/get_available_zones"))
+        raw = run(entry._read_resource("ladini://catalog/get_available_zones"))
         assert "Bobo-Dioulasso" in raw
         assert "\\u" not in raw
 
@@ -115,12 +115,12 @@ class TestReadResource:
         atteignable via le chemin Resource, même en connaissant son URI."""
         entry = _entry()
         with pytest.raises(ValueError, match="Resource inconnue"):
-            run(entry._read_resource("agriconnect://catalog/create_order"))
+            run(entry._read_resource("ladini://catalog/create_order"))
 
     def test_rejects_a_completely_unknown_uri(self):
         entry = _entry()
         with pytest.raises(ValueError, match="Resource inconnue"):
-            run(entry._read_resource("agriconnect://catalog/totally_made_up"))
+            run(entry._read_resource("ladini://catalog/totally_made_up"))
 
     def test_a_valid_uri_never_reaches_the_backend_when_rejected(self):
         """Le rejet doit avoir lieu AVANT tout appel backend — pas de fuite
@@ -134,5 +134,5 @@ class TestReadResource:
 
         entry.backend.call_tool = _spy_call_tool
         with pytest.raises(ValueError):
-            run(entry._read_resource("agriconnect://catalog/drop_table"))
+            run(entry._read_resource("ladini://catalog/drop_table"))
         assert calls == [], "le backend n'aurait jamais dû être appelé"

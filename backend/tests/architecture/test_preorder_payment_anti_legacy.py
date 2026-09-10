@@ -7,9 +7,9 @@ from __future__ import annotations
 import inspect
 import re
 
-import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_payment as payment_mod
-import agriconnect.services.reconciliation.preorder_reconciliation_service as recon_mod
-import agriconnect.workers.payments.paydunya_ipn_task as ipn_mod
+import ladini.graphs.agents.market_coach.flows.buyer.preorder_payment as payment_mod
+import ladini.services.reconciliation.preorder_reconciliation_service as recon_mod
+import ladini.workers.payments.paydunya_ipn_task as ipn_mod
 
 
 def _code_only(source: str) -> str:
@@ -23,8 +23,8 @@ class TestPaymentNeverConfusedWithConfirmation:
         pouvoir déclencher `apply_payment_outcome` — vérifie qu'aucun
         fichier `flows/buyer/preorder.py`/`preorder_confirmation.py`
         (les 2 points d'entrée conversationnels) ne l'importe."""
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder as preorder_mod
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation as confirm_mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder as preorder_mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation as confirm_mod
 
         for mod in (preorder_mod, confirm_mod):
             code = _code_only(inspect.getsource(mod))
@@ -38,7 +38,7 @@ class TestPaymentNeverConfusedWithConfirmation:
         conversationnelle directement — vérifié en s'assurant que le
         webhook/la tâche Celery n'importent aucun module `flows/`/`nodes/`
         du graphe LangGraph."""
-        import agriconnect.api.routes.paydunya_webhook as webhook_mod
+        import ladini.api.routes.paydunya_webhook as webhook_mod
 
         for mod in (webhook_mod, ipn_mod):
             code = _code_only(inspect.getsource(mod))

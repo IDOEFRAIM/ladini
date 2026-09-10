@@ -35,13 +35,13 @@ from __future__ import annotations
 from tests.conftest import make_state, run
 from tests.architecture.test_sales_publish_draft_persistence import _install_fake_db
 
-from agriconnect.graphs.agents.market_coach.domain.sales_publish_draft import (
+from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
     SalesPublishDraftStatus,
 )
-from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
     confirmation_gate,
 )
-from agriconnect.services.database import sales_publish_draft_store
+from ladini.services.database import sales_publish_draft_store
 
 
 class TestHistoricalDisplayExecutionMismatchCannotReoccur:
@@ -76,7 +76,7 @@ class TestHistoricalDisplayExecutionMismatchCannotReoccur:
         # `sales_publish_draft` déjà posé (voir dispatch) : simule le
         # 2e tour réel en appelant directement le résolveur, comme le ferait
         # `_resolve_sales_draft_based_confirmation`.
-        from agriconnect.graphs.agents.market_coach.flows.producer.sales_confirmation import (
+        from ladini.graphs.agents.market_coach.flows.producer.sales_confirmation import (
             resolve_sales_confirmation,
         )
 
@@ -140,13 +140,13 @@ class TestHistoricalDisplayExecutionMismatchCannotReoccur:
 
         # Jamais l'inverse : A/B ne sont PLUS atteignables — une tentative de
         # confirmer A ou B (cible périmée) est rejetée, jamais exécutée.
-        from agriconnect.graphs.agents.market_coach.domain.sales_publish_draft import (
+        from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
             ConfirmSalesPublishDraft,
             SalesPublishDraft,
             SalesPublishOutcomeKind,
             apply_domain_action,
         )
-        from agriconnect.graphs.agents.market_coach.core.confirmation_target import (
+        from ladini.graphs.agents.market_coach.core.confirmation_target import (
             ConfirmationTarget,
         )
 

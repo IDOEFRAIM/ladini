@@ -56,7 +56,7 @@ class _StubSession:
 
 
 def _service(order, *, resolved_buyer_profile_id):
-    from agriconnect.services.database.buyer import BuyerMixin
+    from ladini.services.database.buyer import BuyerMixin
 
     class _Svc(BuyerMixin):
         @property

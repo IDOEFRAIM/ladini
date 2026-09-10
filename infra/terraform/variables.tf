@@ -25,7 +25,7 @@ variable "environment" {
 variable "bucket_name" {
   description = "Raw ingestion S3 bucket name"
   type        = string
-  default     = "agriconnect-ingestion-raw"
+  default     = "ladini-ingestion-raw"
 }
 
 variable "pdf_links_queue_name" {
@@ -55,13 +55,13 @@ variable "ingestion_dlq_name" {
 variable "scrapers_ecr_repo_name" {
   description = "ECR repository name for scrapers/downloader image"
   type        = string
-  default     = "agriconnect-scrapers"
+  default     = "ladini-scrapers"
 }
 
 variable "ingestion_ecr_repo_name" {
   description = "ECR repository name for ingestion image"
   type        = string
-  default     = "agriconnect-ingestion"
+  default     = "ladini-ingestion"
 }
 
 variable "image_tag" {
@@ -124,13 +124,13 @@ variable "db_secret_arn" {
 variable "downloader_lambda_function_name" {
   description = "Lambda function name for PDF downloader"
   type        = string
-  default     = "agriconnect-pdf-downloader"
+  default     = "ladini-pdf-downloader"
 }
 
 variable "downloader_lambda_source_dir" {
   description = "Folder containing downloader lambda source code"
   type        = string
-  default     = "../../backend/src/agriconnect/services/scraper/scrapers/lambdas/pdf_downloader"
+  default     = "../../backend/src/ladini/services/scraper/scrapers/lambdas/pdf_downloader"
 }
 
 variable "downloader_lambda_timeout" {

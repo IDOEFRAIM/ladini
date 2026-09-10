@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agriconnect.graphs.agents.market_coach.llm_gateway.registry import ModelRegistry
-from agriconnect.graphs.agents.market_coach.llm_gateway.types import LLMProfile
+from ladini.graphs.agents.market_coach.llm_gateway.registry import ModelRegistry
+from ladini.graphs.agents.market_coach.llm_gateway.types import LLMProfile
 
 
 def _settings(**overrides) -> SimpleNamespace:

@@ -1,6 +1,6 @@
-# Terraform - Agriconnect Pipeline
+# Terraform - Ladini Pipeline
 
-Ce dossier déploie l'infrastructure AWS du pipeline Agriconnect :
+Ce dossier déploie l'infrastructure AWS du pipeline Ladini :
 - Scrapers (ECS Fargate)
 - Downloader PDF (Lambda + SQS)
 - Ingestion Worker (ECS Fargate)
@@ -46,7 +46,7 @@ $env:TF_VAR_aws_access_key = "AKIA..."
 $env:TF_VAR_aws_secret_key = "..."
 $env:TF_VAR_aws_region = "eu-west-3"
 $env:TF_VAR_vpc_id = "vpc-xxxxxxxx"
-$env:TF_VAR_db_secret_arn = "arn:aws:secretsmanager:eu-west-3:123456789012:secret:agriconnect/db-xxxxx"
+$env:TF_VAR_db_secret_arn = "arn:aws:secretsmanager:eu-west-3:123456789012:secret:ladini/db-xxxxx"
 ```
 
 Pour `public_subnet_ids`, il est plus simple d'utiliser `terraform.tfvars`.
@@ -67,11 +67,11 @@ terraform apply -auto-approve
 
 - Les images ECR référencées par `image_tag` doivent exister avant le démarrage ECS.
 - Le code Lambda est empaqueté automatiquement depuis :
-  - `../../backend/src/agriconnect/services/scraper/scrapers/lambdas/pdf_downloader`
+  - `../../backend/src/ladini/services/scraper/scrapers/lambdas/pdf_downloader`
 - Les services ECS sont configurés avec `assign_public_ip = true` et des subnets publics.
 
 ## Sécurité
 
 - Tous les rôles IAM sont séparés par usage (execution/task/lambda/ingestion).
 - Les permissions sont limitées aux ressources nécessaires du pipeline.
-- Toutes les ressources taggables portent `Project = Agriconnect`.
+- Toutes les ressources taggables portent `Project = Ladini`.

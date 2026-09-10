@@ -6,8 +6,8 @@ tags: [confirmation_bypass, sales_publish]
 grounding:
   status: PROVEN_BY_CODE
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/actions/sales.py:193 — tool_name = ToolResolver.resolve_name(result.tool_id or 'create_product')"
-    - "backend/src/agriconnect/graphs/agents/market_coach/nodes/confirmation_gate.py:161-209 — non-CONFIRM/REJECT branch preserves goal/payload, rebuilds a fresh summary + deviation note, falls through to re-raise the SAME waiting_for_confirmation shape"
+    - "backend/src/ladini/graphs/agents/market_coach/actions/sales.py:193 — tool_name = ToolResolver.resolve_name(result.tool_id or 'create_product')"
+    - "backend/src/ladini/graphs/agents/market_coach/nodes/confirmation_gate.py:161-209 — non-CONFIRM/REJECT branch preserves goal/payload, rebuilds a fresh summary + deviation note, falls through to re-raise the SAME waiting_for_confirmation shape"
 
 persona: {role: PRODUCER, description: "Producteur maraîcher, zone Bobo-Dioulasso", phone: "+22670000001"}
 workspace_type: producer

@@ -54,25 +54,25 @@ from tests.architecture.test_preorder_draft_persistence import (
 )
 from tests.integration.test_tier_selection_full_node_chain import apply_patch
 
-from agriconnect.core.settings import settings
-from agriconnect.graphs.agents.market_coach.core.router import DomainRouter
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.core.settings import settings
+from ladini.graphs.agents.market_coach.core.router import DomainRouter
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
-from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     PreorderDraftStatus,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
-from agriconnect.graphs.agents.market_coach.flows.buyer.preorder import create_preorder
-from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
+from ladini.graphs.agents.market_coach.flows.buyer.preorder import create_preorder
+from ladini.graphs.agents.market_coach.interpreter.routing import (
     make_input_interpreter,
 )
-from agriconnect.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
-from agriconnect.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
-from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
-from agriconnect.graphs.agents.market_coach.nodes.validation import validator
-from agriconnect.services.database import preorder_draft_store
+from ladini.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
+from ladini.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
+from ladini.graphs.agents.market_coach.nodes.memory import memory_update
+from ladini.graphs.agents.market_coach.nodes.validation import validator
+from ladini.services.database import preorder_draft_store
 
 TIERS = [
     {"tier_id": "t5", "quantity": 5.0, "unit": "L", "price": 500.0,
@@ -91,7 +91,7 @@ def _tiered_vendor() -> Dict[str, Any]:
 
 
 def _patch_vendors(monkeypatch, vendor: Dict[str, Any]) -> None:
-    import agriconnect.graphs.agents.market_coach.services.domain.cart_service as m
+    import ladini.graphs.agents.market_coach.services.domain.cart_service as m
 
     async def _fake(self, phone, product_name):
         return [vendor], False

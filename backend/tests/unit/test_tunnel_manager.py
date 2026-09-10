@@ -12,7 +12,7 @@ critique (déterministe, indépendante de la confiance) ou un événement
 `INTERRUPTION` déjà approuvé en amont peuvent casser un tunnel actif."""
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.core.tunnel_manager import (
+from ladini.graphs.agents.market_coach.core.tunnel_manager import (
     TunnelManager,
     tunnel_manager,
 )

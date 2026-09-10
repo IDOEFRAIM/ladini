@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.core.get_llm import _strip_think_block, _GroqAdapter
+from ladini.core.get_llm import _strip_think_block, _GroqAdapter
 
 
 class _Msg:

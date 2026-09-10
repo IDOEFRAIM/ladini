@@ -15,7 +15,7 @@ maintenant réception avant de rejouer leur texte figé :
 from __future__ import annotations
 
 from tests.conftest import StubRuntime, make_state, run
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
@@ -80,7 +80,7 @@ class TestCartQuantityAskDeviation:
         }
 
     def test_unknown_event_deviation_gets_an_adaptive_note(self):
-        from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
+        from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
 
         state = make_state(
             current_goal="BUYER_ADD_TO_CART",
@@ -97,7 +97,7 @@ class TestCartQuantityAskDeviation:
     def test_answer_event_does_not_call_the_llm(self):
         """Sur l'entrée fraîche (produit tout juste résolu, event pas classé
         UNKNOWN/OUT_OF_SCOPE), pas d'appel LLM inutile."""
-        from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
+        from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
 
         class _BoomLLM(_StubLLM):
             def create(self, **kwargs):
@@ -122,7 +122,7 @@ class TestCartQuantityAskDeviation:
 
 class TestNegotiationCounterPriceDeviation:
     def test_unparsed_price_gets_an_adaptive_note(self):
-        import agriconnect.graphs.agents.market_coach.flows.buyer.negotiation as mod
+        import ladini.graphs.agents.market_coach.flows.buyer.negotiation as mod
 
         state = make_state(normalized_text="je ne sais pas combien proposer honnêtement")
         runtime = rt_with_llm("Pas de souci, un montant approximatif suffit pour démarrer.")
@@ -136,7 +136,7 @@ class TestNegotiationCounterPriceDeviation:
 
 class TestNegotiationMenuDeviation:
     def test_unresolved_action_gets_an_adaptive_note(self):
-        import agriconnect.graphs.agents.market_coach.flows.buyer.negotiation as mod
+        import ladini.graphs.agents.market_coach.flows.buyer.negotiation as mod
 
         state = make_state(normalized_text="attendez c'est quoi la différence entre les options ?")
         runtime = rt_with_llm("Bonne question — chaque option agit différemment sur votre offre.")

@@ -6,11 +6,11 @@ pour les goals qui y transitent ; ce test verrouille sa garde CONFIRM
 explicite (`event == "CONFIRM"`, jamais un défaut permissif)."""
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
     confirmation_gate,
 )
 from tests.conftest import make_state, run
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     set_pending_interaction,
 )

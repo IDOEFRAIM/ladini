@@ -6,7 +6,7 @@ module-level partagé par toute la suite, voir
 `tests/nodes/test_memory_stale_menu_snapshot.py` pour le même principe)."""
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
+from ladini.graphs.agents.market_coach.services.menu_snapshot import (
     MenuSnapshotStore,
 )
 

@@ -6,7 +6,7 @@ tags: [happy_path, harvest_registration]
 grounding:
   status: PATTERN_CONSISTENT
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/intent.py — STOCK_REGISTER_HARVEST tool_name='add_stock', required=[product, quantity, farm_id], requires_farm=True, non-tunnel"
+    - "backend/src/ladini/graphs/agents/market_coach/interpreter/intent.py — STOCK_REGISTER_HARVEST tool_name='add_stock', required=[product, quantity, farm_id], requires_farm=True, non-tunnel"
     - "Dispatch pattern (non-tunnel -> registry -> tool matches INTENT_CONFIG label) PROVEN for other non-tunnel intents this session; actions/stock.py's STOCK_REGISTER_HARVEST handler not individually re-traced."
 
 persona: {role: PRODUCER, description: "Producteur, nouvelle récolte", phone: "+22670000035"}

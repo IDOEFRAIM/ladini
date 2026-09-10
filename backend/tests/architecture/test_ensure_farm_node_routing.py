@@ -17,11 +17,11 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from agriconnect.graphs.agents.market_coach.core.graph_builder import (
+from ladini.graphs.agents.market_coach.core.graph_builder import (
     _route_after_farm_guard,
 )
-from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.flows.producer.farm_logic import (
+from ladini.graphs.agents.market_coach.core.state import MarketAgentState
+from ladini.graphs.agents.market_coach.flows.producer.farm_logic import (
     ensure_farm_node,
 )
 from tests.conftest import StubRuntime, run

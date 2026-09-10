@@ -11,10 +11,10 @@ import logging
 
 from sqlalchemy import text
 
-from agriconnect.core.database import get_db
-from agriconnect.workspace.metadata import filter_metadata_dict
+from ladini.core.database import get_db
+from ladini.workspace.metadata import filter_metadata_dict
 
-logger = logging.getLogger("AgriConnect.MetadataPurge")
+logger = logging.getLogger("Ladini.MetadataPurge")
 logging.basicConfig(level=logging.INFO)
 
 SELECT_ALL = "SELECT workspace_id, metadata FROM agri_workspaces"

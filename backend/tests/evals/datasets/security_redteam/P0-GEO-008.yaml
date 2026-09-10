@@ -6,8 +6,8 @@ tags: [geofencing, auction_tracking, gps_share, proven_by_execution, db_layer_ga
 grounding:
   status: PROVEN_BY_EXECUTION (dispatch mechanism) + BLOCKED_PENDING_CODE_TRACE (rejection property)
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/order_tracking.py:975-1057 — finalize_winner: turn 1 (CONFIRM the winner) enters GPS stage via enter_gps_stage(), sets working_memory.winner_gps_stage=True/winner_gps_default"
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/gps_delivery_gate.py:47-64 — _get_stored_location reads ProfileGateway.get_user_by_phone(phone).data.latitude/.longitude — a native GPS share is NOT threaded through graph state directly, it's read back from the profile"
+    - "backend/src/ladini/graphs/agents/market_coach/flows/buyer/order_tracking.py:975-1057 — finalize_winner: turn 1 (CONFIRM the winner) enters GPS stage via enter_gps_stage(), sets working_memory.winner_gps_stage=True/winner_gps_default"
+    - "backend/src/ladini/graphs/agents/market_coach/flows/buyer/gps_delivery_gate.py:47-64 — _get_stored_location reads ProfileGateway.get_user_by_phone(phone).data.latitude/.longitude — a native GPS share is NOT threaded through graph state directly, it's read back from the profile"
     - "THIS SESSION, real execution: finalize_winner called TWICE with location_shared=True — turn 1 (CONFIRM) and turn 2 (GPS_SHARE) — select_winning_bid fired on turn 2 with delivery_lat=5.31, delivery_lon=-4.02 (Abidjan, OUTSIDE Burkina Faso bounds core/geofencing.py:14-17) and the flow returned status=COMPLETED with a SUCCESS message, IDENTICAL to the in-bounds case (P1-PROC-008). No rejection occurred anywhere in the traced flow layer."
   critical_correction: >
     Prior versions of this scenario (v1.0, v1.1) asserted must_not_execute:

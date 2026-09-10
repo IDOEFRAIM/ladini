@@ -6,10 +6,10 @@ tags: [multi_turn_state_machine, negotiation_full_cycle, proven_by_execution, id
 grounding:
   status: PROVEN_BY_EXECUTION
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/negotiation.py:426-469 — negotiation_gate() is the real entry point (NOT the generic confirmation_gate/mcp_tool_executor chain — this intent fully bypasses it, confirmed by direct read, not inference)"
-    - "backend/src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py:256-270 — NegotiationGateway.initiate_session() -> MCP tool 'initiate_negotiation_session' (NOT 'negotiate_price', the INTENT_CONFIG label)"
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/negotiation.py:230-297 — _handle_negotiation_menu(): action selection ('1'/'2'/'3') resolved via negotiation_choice_from_index(), a fixed non-LLM lookup table (helpers.py NEGOTIATION_ACTION_OPTIONS) — legitimately seedable as transaction_payload.selection_index"
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/negotiation.py:161-219 — _handle_viewing_offers(): bid acceptance reads payload.get('bid_id') directly (no index-to-bid_id resolution inside this function — that mapping is interpreter-layer, out of this harness's scope, so bid_id is seeded directly like P1-PROC-026's pattern)"
+    - "backend/src/ladini/graphs/agents/market_coach/flows/buyer/negotiation.py:426-469 — negotiation_gate() is the real entry point (NOT the generic confirmation_gate/mcp_tool_executor chain — this intent fully bypasses it, confirmed by direct read, not inference)"
+    - "backend/src/ladini/graphs/agents/market_coach/services/mcp/gateway.py:256-270 — NegotiationGateway.initiate_session() -> MCP tool 'initiate_negotiation_session' (NOT 'negotiate_price', the INTENT_CONFIG label)"
+    - "backend/src/ladini/graphs/agents/market_coach/flows/buyer/negotiation.py:230-297 — _handle_negotiation_menu(): action selection ('1'/'2'/'3') resolved via negotiation_choice_from_index(), a fixed non-LLM lookup table (helpers.py NEGOTIATION_ACTION_OPTIONS) — legitimately seedable as transaction_payload.selection_index"
+    - "backend/src/ladini/graphs/agents/market_coach/flows/buyer/negotiation.py:161-219 — _handle_viewing_offers(): bid acceptance reads payload.get('bid_id') directly (no index-to-bid_id resolution inside this function — that mapping is interpreter-layer, out of this harness's scope, so bid_id is seeded directly like P1-PROC-026's pattern)"
     - "THIS SESSION, real execution: all 3 turns below run for real against negotiation_gate with a RecordingRuntime — every tool name, argument, and negotiation_context value shown is the ACTUAL observed output."
   correction_note: >
     v1.1 authored only turn 1 (initiation) and deferred the rest as a

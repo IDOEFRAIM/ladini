@@ -30,7 +30,7 @@ import pytest
 
 from tests.conftest import run
 
-from agriconnect.services.database.auction import AuctionMixin
+from ladini.services.database.auction import AuctionMixin
 
 
 def _fake_producer_profile():

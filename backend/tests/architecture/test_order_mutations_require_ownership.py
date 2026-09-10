@@ -18,9 +18,31 @@ import inspect
 
 import pytest
 
-from agriconnect.infrastructure.mcp.security import TOOL_SCOPE_MAP
-from agriconnect.services.database.buyer import BuyerMixin
-from agriconnect.services.database.producer import ProducerMgmtMixin
+from ladini.infrastructure.mcp.security import TOOL_SCOPE_MAP
+from ladini.services.database.buyer import BuyerMixin
+from ladini.services.database.producer import ProducerMgmtMixin
+
+
+def _is_prose(grep_line: str, symbol: str) -> bool:
+    """`git grep -n` renvoie "chemin:numéro:contenu" — seul le CONTENU compte.
+
+    Ces deux gardes cherchent des APPELANTS ; une simple MENTION du nom dans
+    du texte n'en est pas un. Deux tests étaient rouges en permanence à cause
+    de ça (audit 2026-09-10) : `infrastructure/mcp/exposure.py` documente
+    dans sa docstring, en puces Markdown, les outils dangereux — dont ces
+    deux-là. Un test de garde qui échoue toujours n'apprend plus rien à
+    personne : il apprend juste à ignorer sa propre alerte.
+
+    Deux critères, tous deux non ambigus :
+      - la ligne commence par un marqueur de commentaire ou de puce ;
+      - le symbole apparaît entre backticks. Le backtick n'est PAS une
+        syntaxe Python valide : entouré de backticks, un nom est forcément
+        de la documentation, jamais un appel.
+    """
+    content = grep_line.split(":", 2)[-1].strip()
+    if content.startswith(("#", '"', "*", "-", ">")):
+        return True
+    return f"`{symbol}`" in content
 
 
 class TestOrderStateMutationsAreOwnershipChecked:
@@ -68,17 +90,11 @@ class TestOrderStateMutationsAreOwnershipChecked:
             ["git", "grep", "-n", "update_order_status", "--", "src/*.py", "src/**/*.py"],
             capture_output=True, text=True,
         )
-        def _is_comment(grep_line: str) -> bool:
-            # `git grep -n` → "chemin:numéro:contenu" ; seul le CONTENU compte,
-            # et une simple mention en commentaire n'est pas un appel.
-            content = grep_line.split(":", 2)[-1].strip()
-            return content.startswith("#") or content.startswith('"')
-
         callers = [
             line
             for line in result.stdout.splitlines()
             if "def update_order_status" not in line
-            and not _is_comment(line)
+            and not _is_prose(line, "update_order_status")
             and "security.py" not in line
             and "marketplace.py" not in line
         ]
@@ -123,8 +139,8 @@ class TestNoExposedToolAcceptsAnArbitraryStatus:
         statut, il doit être ajouté ici APRÈS avoir été validé."""
         import inspect as _inspect
 
-        from agriconnect.protocols.mcp.servers.h import TOOL_DESCRIPTIONS
-        from agriconnect.services.database.d import AgriDatabaseService
+        from ladini.protocols.mcp.servers.h import TOOL_DESCRIPTIONS
+        from ladini.services.database.d import AgriDatabaseService
 
         offenders = []
         for tool in sorted(TOOL_DESCRIPTIONS):
@@ -176,11 +192,11 @@ class TestOneNewOrderOneProducer:
         }
         expected = {
             # le checkout groupé (Phase 6A) — regroupe par producteur
-            "src/agriconnect/services/database/buyer.py",
+            "src/ladini/services/database/buyer.py",
             # record_sale : UN produit du producteur lui-même
-            "src/agriconnect/services/database/marketplace.py",
+            "src/ladini/services/database/marketplace.py",
             # OrderService : code mort confirmé (zéro appelant)
-            "src/agriconnect/services/database/order_service.py",
+            "src/ladini/services/database/order_service.py",
         }
         assert sites <= expected, (
             f"Nouveau site de création d'`OrderItem` : {sites - expected}. "
@@ -202,7 +218,7 @@ class TestOneNewOrderOneProducer:
             line
             for line in result.stdout.splitlines()
             if "async def finalize_multi_order" not in line
-            and not line.split(":", 2)[-1].strip().startswith("#")
+            and not _is_prose(line, "finalize_multi_order")
         ]
         assert not real_callers, (
             "finalize_multi_order est désormais appelée — elle produit une "
@@ -212,7 +228,7 @@ class TestOneNewOrderOneProducer:
 
 class TestAuctionOrdersRemainMonoProducer:
     def test_auction_path_creates_no_order_items_and_one_winning_bid(self):
-        from agriconnect.services.database.auction import AuctionMixin
+        from ladini.services.database.auction import AuctionMixin
 
         source = inspect.getsource(AuctionMixin.select_winning_bid)
         assert "OrderItem(" not in source

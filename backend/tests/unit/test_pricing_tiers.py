@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.domain.pricing_tiers import (
+from ladini.domain.pricing_tiers import (
     ComputedLine,
     PricingTier,
     PricingTierError,

@@ -3,7 +3,7 @@
 (distinct du catalogue de recherche brut, voir test_rendering_success.py)."""
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.services.domain.cart_service import CartDomainService
+from ladini.graphs.agents.market_coach.services.domain.cart_service import CartDomainService
 
 
 def _svc():
@@ -28,7 +28,7 @@ def _vendor(vendor_name="Ferme Koné", images=None, product_id="p1"):
 
 class TestBuildProductSelectionMenuPhotos:
     def test_a_hint_is_added_and_results_are_cached_when_a_vendor_has_photos(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as mod
 
         captured = {}
         monkeypatch.setattr(
@@ -47,7 +47,7 @@ class TestBuildProductSelectionMenuPhotos:
         assert captured["entries"]["2"]["images"] == []
 
     def test_no_hint_and_no_cache_write_when_no_vendor_has_photos(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as mod
 
         called = {"count": 0}
         monkeypatch.setattr(
@@ -64,7 +64,7 @@ class TestBuildProductSelectionMenuPhotos:
         assert called["count"] == 0
 
     def test_no_phone_means_no_cache_write_but_menu_still_renders(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as mod
 
         called = {"count": 0}
         monkeypatch.setattr(
@@ -79,7 +79,7 @@ class TestBuildProductSelectionMenuPhotos:
         assert "Ferme Koné" in state_patch["final_response"]
 
     def test_existing_post_hint_still_appears_after_the_photo_hint(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as mod
         monkeypatch.setattr(mod, "_store_search_photo_results", lambda phone, entries: None)
 
         vendors = [_vendor("Ferme Koné", images=["https://x/a.jpg"])]
@@ -94,7 +94,7 @@ class TestBuildProductSelectionMenuPhotos:
 class TestResolveProductVendorsImages:
     def test_images_pass_through_from_search_results(self, monkeypatch):
         from unittest.mock import AsyncMock
-        import agriconnect.graphs.agents.market_coach.services.mcp.gateway as gw
+        import ladini.graphs.agents.market_coach.services.mcp.gateway as gw
 
         monkeypatch.setattr(
             gw.ProductGateway, "search_products",
@@ -120,7 +120,7 @@ class TestResolveProductVendorsImages:
         l'exécution — puis dans `content_variables` envoyées à Twilio."""
         import uuid
         from unittest.mock import AsyncMock
-        import agriconnect.graphs.agents.market_coach.services.mcp.gateway as gw
+        import ladini.graphs.agents.market_coach.services.mcp.gateway as gw
 
         raw_uuid = uuid.uuid4()
         monkeypatch.setattr(

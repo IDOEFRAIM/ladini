@@ -6,9 +6,9 @@ tags: [multi_step_transaction, gps_delivery_gate, preorder_state_machine]
 grounding:
   status: PROVEN_BY_CODE
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/preorder.py:100-406 — 3-phase state machine CART -> PREORDER_DRAFTED -> CONFIRMED, GPS gate mandatory between draft and confirm"
-    - "backend/src/agriconnect/services/mcp/gateway.py:296-325 — create_preorder_draft / confirm_preorder_draft literal tool names"
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/cart.py:280-330 — cart adds are local state, no MCP tool"
+    - "backend/src/ladini/graphs/agents/market_coach/flows/buyer/preorder.py:100-406 — 3-phase state machine CART -> PREORDER_DRAFTED -> CONFIRMED, GPS gate mandatory between draft and confirm"
+    - "backend/src/ladini/services/mcp/gateway.py:296-325 — create_preorder_draft / confirm_preorder_draft literal tool names"
+    - "backend/src/ladini/graphs/agents/market_coach/flows/buyer/cart.py:280-330 — cart adds are local state, no MCP tool"
   correction_note: >
     Original Wave 1 version asserted tool_calls: [add_to_cart, add_to_cart,
     init_preorder, confirm_preorder] — three of four names do not exist, and

@@ -20,20 +20,20 @@ import logging
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.core.conversation_decision import (
+from ladini.graphs.agents.market_coach.core.conversation_decision import (
     ConversationAction,
 )
-from agriconnect.graphs.agents.market_coach.core.graph_builder import (
+from ladini.graphs.agents.market_coach.core.graph_builder import (
     _route_after_clarification,
 )
-from agriconnect.graphs.agents.market_coach.nodes.clarification import (
+from ladini.graphs.agents.market_coach.nodes.clarification import (
     clarification_node,
 )
-from agriconnect.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
-from agriconnect.graphs.agents.market_coach.nodes.routing import (
+from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
+from ladini.graphs.agents.market_coach.nodes.routing import (
     _route_after_cognitive_guard,
 )
-from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import (
+from ladini.graphs.agents.market_coach.nodes.semantic_disambiguation import (
     semantic_disambiguation,
 )
 from tests.conftest import make_state, run
@@ -146,7 +146,7 @@ class TestConversationDecisionInvariants:
     """Item 40 — invariants de propriété, indépendants des intents précis."""
 
     def test_disambiguate_always_has_at_least_two_valid_candidates(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.nodes.cognitive as mod
+        import ladini.graphs.agents.market_coach.nodes.cognitive as mod
 
         monkeypatch.setattr(
             mod,

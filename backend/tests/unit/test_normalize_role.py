@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.roles import normalize_role
+from ladini.graphs.roles import normalize_role
 
 
 class TestNormalizeRole:

@@ -27,7 +27,7 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
+from ladini.graphs.agents.market_coach.core.state import MarketAgentState
 
 
 def _build_probe_graph(field: str, value: Any):
@@ -124,7 +124,7 @@ class TestThreeRegistriesAgree:
     def test_each_transactional_draft_is_declared_and_durable(self, field):
         import typing
 
-        from agriconnect.graphs.agents.market_coach.core.state_profile import (
+        from ladini.graphs.agents.market_coach.core.state_profile import (
             FieldLifecycle,
             get_field_spec,
         )

@@ -2,8 +2,8 @@
 maintient l'état de tunnel (`tunnel_locked`) à jour à chaque tour."""
 from __future__ import annotations
 
-from agriconnect.workspace.models import Workspace
-from agriconnect.workspace.resolver import WorkspaceResolver
+from ladini.workspace.models import Workspace
+from ladini.workspace.resolver import WorkspaceResolver
 from tests.conftest import run
 
 
@@ -93,6 +93,6 @@ class TestWorkspaceResolverStaleMetadata:
 
 class TestWorkspaceResolverDefaultStore:
     def test_default_constructor_builds_a_real_workspace_store(self):
-        from agriconnect.workspace.store import WorkspaceStore
+        from ladini.workspace.store import WorkspaceStore
         resolver = WorkspaceResolver()
         assert isinstance(resolver.store, WorkspaceStore)

@@ -16,7 +16,7 @@ import pytest
 
 
 def _tasks_module(monkeypatch, *, interactive_enabled=True, list_sid="HXlist", confirm_sid="HXconfirm"):
-    import agriconnect.api.response_dispatch as mod
+    import ladini.api.response_dispatch as mod
 
     monkeypatch.setattr(mod, "Client", MagicMock(return_value=SimpleNamespace()))
     monkeypatch.setattr(mod.settings, "TWILIO_ACCOUNT_SID", "sid", raising=False)
@@ -37,20 +37,20 @@ class TestSanitizeContentVariables:
     non casté, ex. `producer_id` UUID ou `price` float)."""
 
     def test_ints_and_floats_are_stringified(self):
-        import agriconnect.api.response_dispatch as mod
+        import ladini.api.response_dispatch as mod
 
         out = mod.sanitize_content_variables({"1": 175.0, "2": 3, "3": "déjà str"})
         assert out == {"1": "175.0", "2": "3", "3": "déjà str"}
         assert all(isinstance(v, str) for v in out.values())
 
     def test_none_becomes_empty_string_not_dropped(self):
-        import agriconnect.api.response_dispatch as mod
+        import ladini.api.response_dispatch as mod
 
         out = mod.sanitize_content_variables({"1": None, "2": "x"})
         assert out == {"1": "", "2": "x"}
 
     def test_non_string_keys_are_stringified_too(self):
-        import agriconnect.api.response_dispatch as mod
+        import ladini.api.response_dispatch as mod
 
         out = mod.sanitize_content_variables({1: "a", 2: "b"})
         assert out == {"1": "a", "2": "b"}
@@ -58,7 +58,7 @@ class TestSanitizeContentVariables:
     def test_send_whatsapp_message_sanitizes_before_json_dumps(self, monkeypatch):
         """Bout-en-bout : `send_whatsapp_message` ne doit jamais laisser une
         valeur non-string atteindre `json.dumps` pour `content_variables`."""
-        import agriconnect.api.response_dispatch as mod
+        import ladini.api.response_dispatch as mod
 
         create_spy = MagicMock(return_value=SimpleNamespace(sid="SM1"))
         client = SimpleNamespace(messages=SimpleNamespace(create=create_spy))
@@ -135,8 +135,8 @@ class TestChunkWhatsappBodyPageBreak:
     doit les privilégier sur le découpage aveugle par caractère."""
 
     def test_page_break_markers_produce_one_chunk_per_page(self, monkeypatch):
-        import agriconnect.api.response_dispatch as mod
-        from agriconnect.graphs.agents.market_coach.nodes.rendering.success import (
+        import ladini.api.response_dispatch as mod
+        from ladini.graphs.agents.market_coach.services.text_pagination import (
             PAGE_BREAK,
         )
 
@@ -146,8 +146,8 @@ class TestChunkWhatsappBodyPageBreak:
         assert chunks == ["page un", "page deux", "page trois"]
 
     def test_a_page_break_marker_never_leaks_into_the_sent_text(self, monkeypatch):
-        import agriconnect.api.response_dispatch as mod
-        from agriconnect.graphs.agents.market_coach.nodes.rendering.success import (
+        import ladini.api.response_dispatch as mod
+        from ladini.graphs.agents.market_coach.services.text_pagination import (
             PAGE_BREAK,
         )
 
@@ -156,14 +156,14 @@ class TestChunkWhatsappBodyPageBreak:
             assert PAGE_BREAK not in chunk
 
     def test_a_body_without_page_breaks_behaves_as_before(self, monkeypatch):
-        import agriconnect.api.response_dispatch as mod
+        import ladini.api.response_dispatch as mod
 
         chunks = mod._chunk_whatsapp_body("juste du texte")
         assert chunks == ["juste du texte"]
 
     def test_an_oversized_page_is_still_re_chunked_by_char_limit(self, monkeypatch):
-        import agriconnect.api.response_dispatch as mod
-        from agriconnect.graphs.agents.market_coach.nodes.rendering.success import (
+        import ladini.api.response_dispatch as mod
+        from ladini.graphs.agents.market_coach.services.text_pagination import (
             PAGE_BREAK,
         )
 
@@ -224,7 +224,7 @@ class TestSendViaTwilioPlainText:
         assert send_spy.call_args.kwargs.get("content_sid") is None
 
     def test_missing_twilio_config_raises_before_any_send_attempt(self, monkeypatch):
-        import agriconnect.api.response_dispatch as mod
+        import ladini.api.response_dispatch as mod
 
         monkeypatch.setattr(mod.settings, "TWILIO_ACCOUNT_SID", "", raising=False)
         with pytest.raises(RuntimeError, match="Twilio configuration incomplete"):

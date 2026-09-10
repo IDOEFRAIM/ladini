@@ -6,7 +6,7 @@ tags: [happy_path, expense_logging]
 grounding:
   status: PATTERN_CONSISTENT
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/intent.py — FINANCE_LOG_EXPENSE non-tunnel, tool_name='add_expense', required=[price, farm_id]"
+    - "backend/src/ladini/graphs/agents/market_coach/interpreter/intent.py — FINANCE_LOG_EXPENSE non-tunnel, tool_name='add_expense', required=[price, farm_id]"
     - "Dispatch pattern for non-tunnel intents PROVEN elsewhere (see P1-STOCK-001); actions/finance.py's own handler not individually re-traced."
 
 persona: {role: PRODUCER, description: "Producteur", phone: "+22670000034"}

@@ -855,7 +855,7 @@ export type Order = InferModel<typeof orders>;
 export type OrderItem = InferModel<typeof orderItems>;
 export type Warehouse = InferModel<typeof warehouses>;
 // marketplace schema proxy       /**
- * DRIZZLE RELATIONS — AgriConnect v3
+ * DRIZZLE RELATIONS — Ladini v3
  * ══════════════════════════════════════════════════════════════════════════
  * All relations are defined centrally here to:
  *   1. Avoid circular import issues between schema files

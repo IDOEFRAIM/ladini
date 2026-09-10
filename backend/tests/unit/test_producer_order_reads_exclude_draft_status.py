@@ -34,7 +34,7 @@ import pytest
 
 from tests.conftest import run
 
-from agriconnect.services.database.producer import ProducerMgmtMixin
+from ladini.services.database.producer import ProducerMgmtMixin
 
 
 def _fake_producer_profile():

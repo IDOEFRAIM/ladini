@@ -11,16 +11,16 @@ import pathlib
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.interpreter.intent import (
+from ladini.graphs.agents.market_coach.interpreter.intent import (
     INTENT_CONFIG, INTENT_ROLE, INTENT_DISAMBIGUATION,
 )
-from agriconnect.graphs.agents.market_coach.core.slots import _EXPECTED_INPUT_MAP
-from agriconnect.graphs.agents.market_coach.core.goals import (
+from ladini.graphs.agents.market_coach.core.slots import _EXPECTED_INPUT_MAP
+from ladini.graphs.agents.market_coach.core.goals import (
     ALL_BUYER_TUNNEL_GOALS, PRODUCER_RESOLVER_GOALS, PRODUCER_UPDATE_GOALS,
     PRODUCER_ESCROW_GOALS, NAVIGATION_BREAKOUT_GOALS,
 )
-from agriconnect.graphs.agents.market_coach.registry import load_all_actions, iter_actions
-from agriconnect.graphs.agents.market_coach.core.base import validate_config_drift
+from ladini.graphs.agents.market_coach.registry import load_all_actions, iter_actions
+from ladini.graphs.agents.market_coach.core.base import validate_config_drift
 
 load_all_actions()
 REGISTERED = {intent for intent, _ in iter_actions()}
@@ -119,7 +119,7 @@ class TestGraphWiring:
         # `mc_runtime=object()` évite `build_runtime()` -> `get_llm()` (exige
         # un vrai GROQ_API_KEY) : ce test inspecte la TOPOLOGIE compilée,
         # jamais l'exécution du graphe.
-        from agriconnect.graphs.agents.market_coach.core.graph_builder import build_graph
+        from ladini.graphs.agents.market_coach.core.graph_builder import build_graph
         return build_graph(role="PRODUCER", mc_runtime=object()).get_graph()
 
     def _edges(self, g):
@@ -184,7 +184,7 @@ class TestGraphWiring:
                 "to_procurement_finalizer", "to_sales_finalizer", "to_response",
             },
         }
-        root = pathlib.Path(__file__).resolve().parents[2] / "src/agriconnect/graphs/agents/market_coach"
+        root = pathlib.Path(__file__).resolve().parents[2] / "src/ladini/graphs/agents/market_coach"
         found: dict[str, set[str]] = {}
         for p in root.rglob("*.py"):
             if "__pycache__" in str(p):
@@ -206,21 +206,21 @@ class TestNoDuplicatedSourceOfTruth:
     « par nœud » du projet. On verrouille l'unicité des plus sensibles."""
 
     def test_production_type_vocabulary_is_shared(self):
-        from agriconnect.graphs.agents.market_coach.interpreter.entities import _PRODUCTION_TYPE_WORDS
-        from agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment import (
+        from ladini.graphs.agents.market_coach.interpreter.entities import _PRODUCTION_TYPE_WORDS
+        from ladini.graphs.agents.market_coach.services.domain.slot_enrichment import (
             PRODUCTION_TYPE_WORDS,
         )
         assert _PRODUCTION_TYPE_WORDS is PRODUCTION_TYPE_WORDS
 
     def test_ephemeral_working_keys_are_shared(self):
-        from agriconnect.graphs.agents.market_coach.nodes.cleaner import _EPHEMERAL_WORKING_KEYS as A
-        from agriconnect.graphs.agents.market_coach.nodes.memory import _EPHEMERAL_WORKING_KEYS as B
+        from ladini.graphs.agents.market_coach.nodes.cleaner import _EPHEMERAL_WORKING_KEYS as A
+        from ladini.graphs.agents.market_coach.nodes.memory import _EPHEMERAL_WORKING_KEYS as B
         assert set(A) == set(B)
 
     def test_confirmation_summary_has_a_single_builder(self):
         """`rendering/confirm.py` doit déléguer, pas re-formater à sa façon."""
         p = (pathlib.Path(__file__).resolve().parents[2]
-             / "src/agriconnect/graphs/agents/market_coach/nodes/rendering/confirm.py")
+             / "src/ladini/graphs/agents/market_coach/nodes/rendering/confirm.py")
         src = p.read_text(encoding="utf-8")
         assert "build_confirmation_summary" in src
         assert "def _build_summary" not in src, "un constructeur de récap concurrent est réapparu"

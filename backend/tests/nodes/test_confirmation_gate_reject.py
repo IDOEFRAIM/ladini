@@ -17,14 +17,14 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
-from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ProcurementDraft,
 )
-from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import confirmation_gate
+from ladini.graphs.agents.market_coach.nodes.confirmation_gate import confirmation_gate
 from tests.conftest import make_state, run
 
 
@@ -199,7 +199,7 @@ class TestConfirmPathAuthorizesExecution:
         # claim lui-même (voir tests/architecture/
         # test_procurement_draft_transactional_contract.py pour
         # l'idempotence/la concurrence, qui contrôlent `claim` explicitement).
-        import agriconnect.graphs.agents.market_coach.domain.procurement_draft as pd_mod
+        import ladini.graphs.agents.market_coach.domain.procurement_draft as pd_mod
 
         monkeypatch.setattr(pd_mod, "claim_once", lambda key: True)
         draft = ProcurementDraft.new(
@@ -280,7 +280,7 @@ class TestPostRejectRoutingRoundTrip:
     routage qui manquait dans le bug production."""
 
     def test_router_sends_the_soft_rejected_state_back_to_the_resolver(self):
-        from agriconnect.graphs.agents.market_coach.core.router import get_domain_router
+        from ladini.graphs.agents.market_coach.core.router import get_domain_router
 
         soft_rejected_state = gate(
             current_goal="PROCUREMENT_CREATE_REQUEST",
@@ -308,7 +308,7 @@ class TestPostRejectRoutingRoundTrip:
         """Le tour suivant (une correction de prix) doit ré-entrer dans le
         formulaire d'appel d'offres au lieu d'être traité comme un nouveau
         message sans contexte."""
-        from agriconnect.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement import buyer_request_resolver
         from tests.conftest import StubRuntime
 
         state = make_state(
@@ -412,9 +412,9 @@ class TestDeviationDuringConfirmationGetsAnAdaptiveReply:
         assert "35 KG" not in prompt_text
 
     def test_render_confirmation_places_the_note_before_the_recap(self):
-        from agriconnect.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
-        from agriconnect.graphs.agents.market_coach.nodes.rendering.common import RenderContext
-        from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
+        from ladini.graphs.agents.market_coach.nodes.rendering.common import RenderContext
+        from ladini.graphs.agents.market_coach.core.pending_interaction import (
             InteractionKind,
             set_pending_interaction,
         )

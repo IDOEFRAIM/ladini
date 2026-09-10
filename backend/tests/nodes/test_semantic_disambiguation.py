@@ -11,7 +11,7 @@ l'EXÉCUTION : donné un `disambiguation_candidate` déjà posé, ce nœud
 construit-il correctement le menu, sans re-décider quoi que ce soit ?"""
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import (
+from ladini.graphs.agents.market_coach.nodes.semantic_disambiguation import (
     semantic_disambiguation,
 )
 from tests.conftest import make_state, run
@@ -62,7 +62,7 @@ class TestSemanticDisambiguationTrustsThePrecomputedCandidate:
         `cognitive_guard`."""
         import inspect
 
-        import agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation as mod
+        import ladini.graphs.agents.market_coach.nodes.semantic_disambiguation as mod
 
         source = inspect.getsource(mod.semantic_disambiguation)
         assert "already_expecting" not in source

@@ -7,17 +7,17 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.services.ui.confirmation_summary import (
+from ladini.graphs.agents.market_coach.services.ui.confirmation_summary import (
     build_confirmation_summary,
 )
-from agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment import (
+from ladini.graphs.agents.market_coach.services.domain.slot_enrichment import (
     enrich_payload_from_text,
     extract_production_type_from_text,
     extract_future_datetime_from_text,
     extract_surface_from_text,
 )
-from agriconnect.graphs.agents.market_coach.interpreter.contracts import enforce_contract
-from agriconnect.graphs.agents.market_coach.utils import (
+from ladini.graphs.agents.market_coach.interpreter.contracts import enforce_contract
+from ladini.graphs.agents.market_coach.utils import (
     _normalize_quantity_to_kg,
     canonical_unit_label,
     normalize_slot_keys,

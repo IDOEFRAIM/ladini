@@ -7,8 +7,8 @@
 Exhaustive repo-wide search:
 
 ```
-grep "action_type.*PROFILE_SWITCH_ROLE" src/agriconnect/**   -> 1 file: domain/profile.py (the CREATOR only)
-grep "update_action_status"              src/agriconnect/**   -> 1 file: infrastructure/mcp/security.py
+grep "action_type.*PROFILE_SWITCH_ROLE" src/ladini/**   -> 1 file: domain/profile.py (the CREATOR only)
+grep "update_action_status"              src/ladini/**   -> 1 file: infrastructure/mcp/security.py
                                                                   (TOOL_SCOPE_MAP declaration only —
                                                                   never actually invoked anywhere)
 ```

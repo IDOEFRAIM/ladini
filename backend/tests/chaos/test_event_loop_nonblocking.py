@@ -27,7 +27,7 @@ def test_llm_question_generation_does_not_block_loop(runtime_with):
     en direct sur la boucle — pendant les ~1-3s d'un appel Groq réel, aucun
     autre message ne serait traité par le worker. Preuve dynamique : le
     heartbeat doit continuer de battre PENDANT l'appel bloquant simulé."""
-    from agriconnect.graphs.agents.market_coach.nodes.rendering.ask import (
+    from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
         generate_llm_question,
     )
 
@@ -62,7 +62,7 @@ def test_parallel_llm_calls_overlap_not_serialize():
     recouvrement — sinon la latence croît linéairement avec la charge."""
     import time as _time
 
-    from agriconnect.graphs.agents.market_coach.nodes.rendering.ask import (
+    from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
         generate_llm_question,
     )
 
@@ -90,7 +90,7 @@ def test_executor_transient_backoff_does_not_block_loop():
     """Rupture prévenue : un backoff de retry implémenté en time.sleep au
     lieu d'asyncio.sleep — pendant l'attente, le worker entier serait gelé.
     Le heartbeat doit battre pendant les retries de l'exécuteur."""
-    from agriconnect.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
+    from ladini.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
 
     class _SlowFail:
         calls = 0

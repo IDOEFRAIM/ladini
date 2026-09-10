@@ -22,10 +22,10 @@ from typing import Any, Dict
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.interpreter.strategy import (
+from ladini.graphs.agents.market_coach.interpreter.strategy import (
     response_strategy,
 )
-from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
+from ladini.graphs.agents.market_coach.nodes.memory import memory_update
 from tests.conftest import StubRuntime, make_state, run
 
 
@@ -35,7 +35,7 @@ class TestMemoryUpdateRelaysTheFlagToStateRoot:
         `SlotValidationError` (ex: le LLM a halluciné "kg" comme produit,
         incident réel documenté dans ce module) — le drapeau doit atteindre
         la racine de l'état, pas seulement `transaction_payload`."""
-        import agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment as se_mod
+        import ladini.graphs.agents.market_coach.services.domain.slot_enrichment as se_mod
 
         async def _raise_validation_error(mc_runtime, text):
             raise se_mod.SlotValidationError("42 kg' n'est pas un produit valide")
@@ -91,7 +91,7 @@ class TestFullChainMemoryUpdateThenResponseStrategy:
     réimplémentation de la logique de l'une ou l'autre."""
 
     def test_the_guard_actually_fires_end_to_end(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.services.domain.slot_enrichment as se_mod
+        import ladini.graphs.agents.market_coach.services.domain.slot_enrichment as se_mod
 
         async def _raise_validation_error(mc_runtime, text):
             raise se_mod.SlotValidationError("quantité illisible")

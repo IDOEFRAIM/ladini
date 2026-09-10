@@ -39,8 +39,8 @@ def _patch_worker_session(monkeypatch, module) -> None:
 
 class TestOrderExpiryCron:
     def test_run_returns_the_service_result(self, monkeypatch):
-        import agriconnect.workers.crons.order_expiry as mod
-        import agriconnect.services.database.d as db_mod
+        import ladini.workers.crons.order_expiry as mod
+        import ladini.services.database.d as db_mod
 
         _patch_worker_session(monkeypatch, mod)
         fake_service = SimpleNamespace(expire_pending_payments=AsyncMock(
@@ -52,8 +52,8 @@ class TestOrderExpiryCron:
         assert result == {"expired_count": 2, "expired_order_ids": ["o1", "o2"]}
 
     def test_run_with_zero_expired_does_not_crash(self, monkeypatch):
-        import agriconnect.workers.crons.order_expiry as mod
-        import agriconnect.services.database.d as db_mod
+        import ladini.workers.crons.order_expiry as mod
+        import ladini.services.database.d as db_mod
 
         _patch_worker_session(monkeypatch, mod)
         fake_service = SimpleNamespace(expire_pending_payments=AsyncMock(return_value={"expired_count": 0}))
@@ -62,7 +62,7 @@ class TestOrderExpiryCron:
         assert run(mod._run()) == {"expired_count": 0}
 
     def test_celery_task_reraises_on_failure(self, monkeypatch):
-        import agriconnect.workers.crons.order_expiry as mod
+        import ladini.workers.crons.order_expiry as mod
 
         async def _boom():
             raise ValueError("db unreachable")
@@ -78,7 +78,7 @@ class TestOrderExpiryCron:
 
 class TestAuctionSolicitationCron:
     def test_run_delegates_to_the_automation_service_and_returns_its_report(self, monkeypatch):
-        import agriconnect.workers.crons.auction_solicitation as mod
+        import ladini.workers.crons.auction_solicitation as mod
 
         _patch_worker_session(monkeypatch, mod)
         fake_report = SimpleNamespace(as_dict=lambda: {"auctions": 3})
@@ -90,7 +90,7 @@ class TestAuctionSolicitationCron:
         fake_service.run.assert_awaited_once_with(batch_size=50)
 
     def test_celery_task_reraises_on_failure(self, monkeypatch):
-        import agriconnect.workers.crons.auction_solicitation as mod
+        import ladini.workers.crons.auction_solicitation as mod
 
         async def _boom(batch_size):
             raise RuntimeError("automation crashed")
@@ -106,7 +106,7 @@ class TestAuctionSolicitationCron:
 
 class TestProximityMatchingCron:
     def test_run_delegates_and_returns_its_report(self, monkeypatch):
-        import agriconnect.workers.crons.proximity_matching as mod
+        import ladini.workers.crons.proximity_matching as mod
 
         _patch_worker_session(monkeypatch, mod)
         fake_report = SimpleNamespace(as_dict=lambda: {"offers": 5})
@@ -118,7 +118,7 @@ class TestProximityMatchingCron:
         fake_service.run.assert_awaited_once_with(batch_size=50, recent_days=3)
 
     def test_celery_task_reraises_on_failure(self, monkeypatch):
-        import agriconnect.workers.crons.proximity_matching as mod
+        import ladini.workers.crons.proximity_matching as mod
 
         async def _boom(batch_size, recent_days):
             raise RuntimeError("matching crashed")
@@ -134,7 +134,7 @@ class TestProximityMatchingCron:
 
 class TestOutboxDispatchCron:
     def test_run_delegates_to_the_dispatcher_and_returns_its_report(self, monkeypatch):
-        import agriconnect.workers.crons.outbox_dispatch as mod
+        import ladini.workers.crons.outbox_dispatch as mod
 
         fake_report = SimpleNamespace(as_dict=lambda: {"sent": 4})
         fake_dispatcher = SimpleNamespace(run=AsyncMock(return_value=fake_report))
@@ -145,7 +145,7 @@ class TestOutboxDispatchCron:
         fake_dispatcher.run.assert_awaited_once_with(batch_size=25)
 
     def test_celery_task_reraises_on_failure(self, monkeypatch):
-        import agriconnect.workers.crons.outbox_dispatch as mod
+        import ladini.workers.crons.outbox_dispatch as mod
 
         async def _boom(batch_size):
             raise RuntimeError("dispatch crashed")
@@ -161,9 +161,9 @@ class TestOutboxDispatchCron:
 
 class TestPaydunyaIpnTask:
     def test_confirm_failure_returns_an_error_status_without_touching_the_db(self, monkeypatch):
-        import agriconnect.workers.payments.paydunya_ipn_task as mod
-        import agriconnect.services.payments.paydunya_client as client_mod
-        import agriconnect.services.database.d as db_mod
+        import ladini.workers.payments.paydunya_ipn_task as mod
+        import ladini.services.payments.paydunya_client as client_mod
+        import ladini.services.database.d as db_mod
 
         class _FakeError(Exception):
             pass
@@ -179,9 +179,9 @@ class TestPaydunyaIpnTask:
         fake_service.mark_escrow_paid.assert_not_awaited()
 
     def test_non_completed_status_is_ignored_without_touching_the_db(self, monkeypatch):
-        import agriconnect.workers.payments.paydunya_ipn_task as mod
-        import agriconnect.services.payments.paydunya_client as client_mod
-        import agriconnect.services.database.d as db_mod
+        import ladini.workers.payments.paydunya_ipn_task as mod
+        import ladini.services.payments.paydunya_client as client_mod
+        import ladini.services.database.d as db_mod
 
         fake_client = SimpleNamespace(confirm_invoice=AsyncMock(return_value={"status": "pending"}))
         monkeypatch.setattr(client_mod, "PaydunyaClient", lambda: fake_client)
@@ -205,11 +205,11 @@ class TestPaydunyaIpnTask:
         `PreorderReconciliationService` (mandat §26) — `paydunya_ipn_task.py`
         n'est plus qu'un fin wrapper Celery autour. `worker_session` est
         donc patché sur le module RÉEL qui l'ouvre désormais."""
-        import agriconnect.workers.payments.paydunya_ipn_task as mod
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_payment as payment_mod
-        import agriconnect.services.payments.paydunya_client as client_mod
-        import agriconnect.services.database.d as db_mod
-        import agriconnect.services.database.preorder_draft_store as store_mod
+        import ladini.workers.payments.paydunya_ipn_task as mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder_payment as payment_mod
+        import ladini.services.payments.paydunya_client as client_mod
+        import ladini.services.database.d as db_mod
+        import ladini.services.database.preorder_draft_store as store_mod
 
         _patch_worker_session(monkeypatch, payment_mod)
         # Aucun `PreorderDraft` ne correspond à cet `order_id` dans ce test
@@ -230,7 +230,7 @@ class TestPaydunyaIpnTask:
         fake_service.mark_escrow_paid.assert_awaited_once_with("token-3")
 
     def test_celery_task_retries_on_unexpected_exception(self, monkeypatch):
-        import agriconnect.workers.payments.paydunya_ipn_task as mod
+        import ladini.workers.payments.paydunya_ipn_task as mod
 
         async def _boom(invoice_token):
             raise RuntimeError("unexpected crash")
@@ -246,7 +246,7 @@ class TestPaydunyaIpnTask:
 
 class TestAuctionAutomationService:
     def _service(self, monkeypatch, *, auctions, producers, created, skipped=None, session=None):
-        import agriconnect.workers.automation.auction_automation_service as mod
+        import ladini.workers.automation.auction_automation_service as mod
 
         session = session or SimpleNamespace()
         monkeypatch.setattr(mod.solicitation_repo, "fetch_auctions_to_solicit", AsyncMock(return_value=auctions))
@@ -352,7 +352,7 @@ class TestAuctionAutomationService:
             monkeypatch, auctions=[auction], producers=producers, created=[], skipped=skipped
         )
 
-        with caplog.at_level(logging.INFO, logger="AgriConnect.Workers.AuctionAutomation"):
+        with caplog.at_level(logging.INFO, logger="Ladini.Workers.AuctionAutomation"):
             report = run(service.run())
 
         assert report.producers_targeted == 2
@@ -377,7 +377,7 @@ class TestAuctionAutomationService:
         session.scalar.assert_awaited_once()
 
     def test_num_returns_none_for_non_numeric_values(self):
-        from agriconnect.workers.automation.auction_automation_service import _num
+        from ladini.workers.automation.auction_automation_service import _num
         assert _num("not-a-number") is None
         assert _num(None) is None
         assert _num("42.5") == 42.5
@@ -389,7 +389,7 @@ class TestAuctionAutomationService:
 
 class TestProximityMatchingService:
     def _service(self, monkeypatch, *, rows, created):
-        import agriconnect.workers.automation.proximity_matching_service as mod
+        import ladini.workers.automation.proximity_matching_service as mod
 
         session = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(all=lambda: rows)))
         monkeypatch.setattr(mod, "buyers_in_zone_for_category", AsyncMock(return_value=[{"buyer_id": "b1", "user_id": "u1", "phone": "+2260"}]))
@@ -420,7 +420,7 @@ class TestProximityMatchingService:
         mod.solicitation_repo.mark_notified.assert_awaited_once_with(service.session, ["sol-1"])
 
     def test_buyer_without_phone_is_skipped(self, monkeypatch):
-        import agriconnect.workers.automation.proximity_matching_service as mod
+        import ladini.workers.automation.proximity_matching_service as mod
         offer = SimpleNamespace(id="o1", sub_category_id="sc1", product_label="Tomates", price_per_unit=250, unit="kg")
         session = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(all=lambda: [(offer, "z1", "Ferme Bio")])))
         monkeypatch.setattr(mod, "buyers_in_zone_for_category", AsyncMock(return_value=[{"buyer_id": "b1", "user_id": "u1", "phone": None}]))
@@ -434,7 +434,7 @@ class TestProximityMatchingService:
         mod.outbox_repo.enqueue.assert_not_awaited()
 
     def test_one_failing_offer_does_not_abort_the_whole_batch(self, monkeypatch):
-        import agriconnect.workers.automation.proximity_matching_service as mod
+        import ladini.workers.automation.proximity_matching_service as mod
         good = SimpleNamespace(id="o-good", sub_category_id="sc1", product_label="Maïs", price_per_unit=100, unit="kg")
         bad = SimpleNamespace(id="o-bad", sub_category_id="sc1", product_label="Riz", price_per_unit=100, unit="kg")
         rows = [(bad, "z1", "P1"), (good, "z1", "P2")]
@@ -464,7 +464,7 @@ class TestProximityMatchingService:
         mod.outbox_repo.enqueue.assert_not_awaited()
 
     def test_num_returns_none_for_non_numeric_values(self):
-        from agriconnect.workers.automation.proximity_matching_service import _num
+        from ladini.workers.automation.proximity_matching_service import _num
         assert _num("not-a-number") is None
         assert _num(None) is None
         assert _num("42.5") == 42.5

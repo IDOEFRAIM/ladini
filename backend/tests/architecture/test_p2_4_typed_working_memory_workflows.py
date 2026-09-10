@@ -16,10 +16,10 @@ est STRICTEMENT INCHANGÉ (mêmes clés qu'avant le refactor) ; (2) les classes
 elles-mêmes lisent correctement `working_memory`."""
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.flows.buyer.contexts import (
+from ladini.graphs.agents.market_coach.flows.buyer.contexts import (
     WinnerGpsWorkflowState,
 )
-from agriconnect.graphs.agents.market_coach.flows.producer.contexts import (
+from ladini.graphs.agents.market_coach.flows.producer.contexts import (
     BidWorkflowState,
     ProducerUpdateWorkflowState,
 )
@@ -103,7 +103,7 @@ class TestCognitiveGuardTunnelAbandonStillClearsTheSameKeys:
     moins qu'avant le refactor P2-4."""
 
     def test_all_stale_keys_cleared_on_tunnel_abandon(self):
-        from agriconnect.graphs.agents.market_coach.nodes.cognitive import (
+        from ladini.graphs.agents.market_coach.nodes.cognitive import (
             cognitive_guard,
         )
 

@@ -6,7 +6,7 @@ tags: [pending_winner_bid, finalize_winner, state_machine]
 grounding:
   status: PROVEN_BY_CODE
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/order_tracking.py:975 (finalize_winner), 1183-1191 (dispatch gate: working_memory.pending_winner_bid + goal in AUCTION_TRACKING_GOALS + CONFIRM/REJECT/GPS-share)"
+    - "backend/src/ladini/graphs/agents/market_coach/flows/buyer/order_tracking.py:975 (finalize_winner), 1183-1191 (dispatch gate: working_memory.pending_winner_bid + goal in AUCTION_TRACKING_GOALS + CONFIRM/REJECT/GPS-share)"
   note: "Higher-value replacement for the original RESUME_TUNNEL stub — exercises the exact mechanism P0-GEO-008/P1-PROC-008 depend on, from a clean (non-adversarial) angle: a bid selected via the numbered menu, then explicitly REJECTED (not confirmed)."
 
 persona: {role: BUYER, description: "Acheteur, sélectionne une offre via le menu puis se ravise", phone: "+22670000041"}

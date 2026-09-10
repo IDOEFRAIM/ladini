@@ -17,8 +17,8 @@ from typing import Any, Dict
 import pytest
 from langgraph.graph import END, StateGraph
 
-from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.nodes.routing import (
+from ladini.graphs.agents.market_coach.core.state import MarketAgentState
+from ladini.graphs.agents.market_coach.nodes.routing import (
     _route_after_mcp_executor,
 )
 from tests.conftest import make_state

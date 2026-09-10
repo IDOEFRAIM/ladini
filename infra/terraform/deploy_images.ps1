@@ -1,9 +1,9 @@
 param(
     [string]$Region = "eu-west-3",
     [string]$ImageTag = "latest",
-    [string]$ClusterName = "agriconnect-cluster-dev",
-    [string]$ScraperServiceName = "agriconnect-scraper-service-dev",
-    [string]$IngestionServiceName = "agriconnect-ingestion-service-dev",
+    [string]$ClusterName = "ladini-cluster-dev",
+    [string]$ScraperServiceName = "ladini-scraper-service-dev",
+    [string]$IngestionServiceName = "ladini-ingestion-service-dev",
     [switch]$DryRun
 )
 
@@ -41,8 +41,8 @@ if (-not $DryRun) {
 }
 
 if ($DryRun) {
-    $ScraperRepo = "875180007527.dkr.ecr.$Region.amazonaws.com/agriconnect-scrapers-dev"
-    $IngestionRepo = "875180007527.dkr.ecr.$Region.amazonaws.com/agriconnect-ingestion-dev"
+    $ScraperRepo = "875180007527.dkr.ecr.$Region.amazonaws.com/ladini-scrapers-dev"
+    $IngestionRepo = "875180007527.dkr.ecr.$Region.amazonaws.com/ladini-ingestion-dev"
 }
 
 $Registry = ($ScraperRepo -split "/")[0]
@@ -52,16 +52,16 @@ Invoke-Step -Description "Login ECR ($Registry)" -Action {
 }
 
 Invoke-Step -Description "Build image Scraper" -Action {
-    docker build -f (Join-Path $DockerDir "Dockerfile.scraper") -t "agriconnect-scraper-local:$ImageTag" $RepoRoot
+    docker build -f (Join-Path $DockerDir "Dockerfile.scraper") -t "ladini-scraper-local:$ImageTag" $RepoRoot
 }
 
 Invoke-Step -Description "Build image Ingestion" -Action {
-    docker build -f (Join-Path $DockerDir "Dockerfile.ingestion") -t "agriconnect-ingestion-local:$ImageTag" $RepoRoot
+    docker build -f (Join-Path $DockerDir "Dockerfile.ingestion") -t "ladini-ingestion-local:$ImageTag" $RepoRoot
 }
 
 Invoke-Step -Description "Tag images for ECR" -Action {
-    docker tag "agriconnect-scraper-local:$ImageTag" "${ScraperRepo}:$ImageTag"
-    docker tag "agriconnect-ingestion-local:$ImageTag" "${IngestionRepo}:$ImageTag"
+    docker tag "ladini-scraper-local:$ImageTag" "${ScraperRepo}:$ImageTag"
+    docker tag "ladini-ingestion-local:$ImageTag" "${IngestionRepo}:$ImageTag"
 }
 
 Invoke-Step -Description "Push Scraper image" -Action {

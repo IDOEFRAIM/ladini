@@ -6,7 +6,7 @@ tags: [disambiguation, dual_role]
 grounding:
   status: PROVEN_BY_CODE
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/intent.py — INTENT_DISAMBIGUATION['ORDER_TRACKING_INTENT']: candidates=[BUYER_CHECK_ORDER_STATUS, BUYER_LIST_ORDERS, BUYER_CANCEL_ORDER, SALES_LIST_ORDERS], lexical_hints include 'ma commande', 'mes commandes', 'où est', 'statut'"
+    - "backend/src/ladini/graphs/agents/market_coach/interpreter/intent.py — INTENT_DISAMBIGUATION['ORDER_TRACKING_INTENT']: candidates=[BUYER_CHECK_ORDER_STATUS, BUYER_LIST_ORDERS, BUYER_CANCEL_ORDER, SALES_LIST_ORDERS], lexical_hints include 'ma commande', 'mes commandes', 'où est', 'statut'"
     - "Tool bindings: get_transaction_summary (order_tracking.py:406), get_buyer_orders_dashboard (order_tracking.py:238), cancel_pending_order (order_tracking.py:481-483) — all PROVEN this session"
   note: >
     Per P0-SEC-004's finding, the BUYER_CHECK_ORDER_STATUS branch of this

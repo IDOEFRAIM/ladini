@@ -18,7 +18,7 @@ class _BoomGateway:
 
 class TestFetchAndShowBidsResilience:
     def test_a_gateway_exception_is_caught_and_resets_the_negotiation_context(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.flows.buyer.negotiation as mod
+        import ladini.graphs.agents.market_coach.flows.buyer.negotiation as mod
 
         class _Boom(_BoomGateway):
             async def get_auction_bids(self, **kwargs):
@@ -35,7 +35,7 @@ class TestFetchAndShowBidsResilience:
 
 class TestHandleCounterPriceResilience:
     def test_a_gateway_exception_is_caught_and_resets_the_negotiation_context(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.flows.buyer.negotiation as mod
+        import ladini.graphs.agents.market_coach.flows.buyer.negotiation as mod
 
         class _Boom(_BoomGateway):
             async def update_offer(self, **kwargs):
@@ -52,7 +52,7 @@ class TestHandleCounterPriceResilience:
 
 class TestHandleViewingOffersResilience:
     def test_a_gateway_exception_is_caught_and_resets_the_negotiation_context(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.flows.buyer.negotiation as mod
+        import ladini.graphs.agents.market_coach.flows.buyer.negotiation as mod
 
         class _Boom(_BoomGateway):
             async def select_winning_bid(self, **kwargs):
@@ -72,7 +72,7 @@ class TestHandleNegotiationMenuResilience:
         """Même en échec technique côté serveur, l'utilisateur ne doit
         jamais rester bloqué sans porte de sortie — le tunnel se ferme côté
         état quoi qu'il arrive."""
-        import agriconnect.graphs.agents.market_coach.flows.buyer.negotiation as mod
+        import ladini.graphs.agents.market_coach.flows.buyer.negotiation as mod
 
         class _Boom(_BoomGateway):
             async def close_session(self, **kwargs):

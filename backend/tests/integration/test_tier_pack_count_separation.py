@@ -26,17 +26,17 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
-from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
+from ladini.graphs.agents.market_coach.interpreter.routing import (
     make_input_interpreter,
 )
-from agriconnect.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
-from agriconnect.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
-from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
-from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+from ladini.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
+from ladini.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
+from ladini.graphs.agents.market_coach.nodes.memory import memory_update
+from ladini.graphs.agents.market_coach.nodes.validation import validator
 from tests.conftest import ScriptedLLM, StubRuntime, run
 from tests.integration.test_tier_selection_full_node_chain import apply_patch
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
@@ -78,7 +78,7 @@ def _runtime(available: float = 500.0, ok: bool = True) -> StubRuntime:
 
 
 def _patch_vendors(monkeypatch, vendor: Dict[str, Any]) -> None:
-    import agriconnect.graphs.agents.market_coach.services.domain.cart_service as m
+    import ladini.graphs.agents.market_coach.services.domain.cart_service as m
 
     async def _fake(self, phone, product_name):
         return [vendor], False
@@ -296,7 +296,7 @@ class TestStockValidation:
     """Cas G : 60 paquets × 10 L = 600 L > 500 L disponibles."""
 
     def test_pack_count_exceeding_stock_is_refused_with_coherent_numbers(self):
-        from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
+        from ladini.graphs.agents.market_coach.services.domain.cart_service import (
             CartDomainService,
         )
 

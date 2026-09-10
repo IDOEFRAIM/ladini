@@ -38,16 +38,16 @@ from tests.unit.test_mcp_idempotency import (
     _install_fake_db as _install_fake_idempotency_db,
 )
 
-from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ProcurementDraft,
     ProcurementDraftStatus,
     execution_key,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.procurement_confirmation import (
+from ladini.graphs.agents.market_coach.flows.buyer.procurement_confirmation import (
     resolve_procurement_confirmation,
 )
-from agriconnect.services.database import mcp_idempotency_store, procurement_draft_store
-from agriconnect.services.reconciliation import procurement_reconciliation_service as recon_svc
+from ladini.services.database import mcp_idempotency_store, procurement_draft_store
+from ladini.services.reconciliation import procurement_reconciliation_service as recon_svc
 
 
 def _install(monkeypatch):
@@ -200,7 +200,7 @@ class TestRedisUnavailableDuringConfirm:
         autoriser (équivalent exact d'un Redis mort) et en montrant qu'une
         course RÉELLE entre deux CONFIRM est quand même tranchée une seule
         fois par la version."""
-        import agriconnect.graphs.agents.market_coach.domain.procurement_draft as pd_mod
+        import ladini.graphs.agents.market_coach.domain.procurement_draft as pd_mod
 
         _install(monkeypatch)
         # Simule Redis down : claim_once ne protège plus rien (fail-open).
@@ -254,7 +254,7 @@ class TestConfirmAndReconciliationRaceConcurrently:
         traite le MÊME draft (déjà EXECUTING). Aucun des deux chemins ne
         doit re-déclencher `create_auction`, et la ligne finale doit être
         cohérente — protégés par le MÊME CAS, sans nouveau verrou."""
-        import agriconnect.graphs.agents.market_coach.domain.procurement_draft as pd_mod
+        import ladini.graphs.agents.market_coach.domain.procurement_draft as pd_mod
 
         draft_table, idem_table = _install(monkeypatch)
         monkeypatch.setattr(pd_mod, "claim_once", lambda key: True)

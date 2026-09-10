@@ -33,19 +33,19 @@ import inspect
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.interpreter.intent import (
+from ladini.graphs.agents.market_coach.interpreter.intent import (
     INTENT_CONFIG,
     _TUNNEL_ASSIGNMENTS,
 )
-from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+from ladini.graphs.agents.market_coach.interpreter.routing import (
     _DEPRECATED_INTENTS,
     _DISABLED_INTENT_PREFIXES,
     allowed_intents_for_role,
 )
-from agriconnect.graphs.agents.market_coach.registry import get_action
-from agriconnect.graphs.agents.market_coach.utils import _AUTO_RESOLVABLE_FIELDS
-from agriconnect.infrastructure.mcp.security import TOOL_SCOPE_MAP
-from agriconnect.protocols.mcp.servers.h import TOOL_DESCRIPTIONS
+from ladini.graphs.agents.market_coach.registry import get_action
+from ladini.graphs.agents.market_coach.utils import _AUTO_RESOLVABLE_FIELDS
+from ladini.infrastructure.mcp.security import TOOL_SCOPE_MAP
+from ladini.protocols.mcp.servers.h import TOOL_DESCRIPTIONS
 
 EXPOSED = sorted(allowed_intents_for_role("PRODUCER"))
 
@@ -62,7 +62,7 @@ def _is_flow_handled(goal) -> bool:
 
 
 def _passthrough_table() -> dict:
-    import agriconnect.graphs.agents.market_coach.nodes.validation as validation_mod
+    import ladini.graphs.agents.market_coach.nodes.validation as validation_mod
 
     src = inspect.getsource(validation_mod)
     start = src.index("_RESOLVER_PASSTHROUGH = {")

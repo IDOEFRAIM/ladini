@@ -37,13 +37,13 @@ from typing import Any, Dict, Tuple
 
 import pytest
 
-import agriconnect.graphs.agents.market_coach.interpreter.routing  # noqa: F401
-from agriconnect.graphs.agents.market_coach.core.policies import get_fast_path_policy
-from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import goal_planner
-from agriconnect.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
-from agriconnect.graphs.agents.market_coach.nodes.cleaner import _ACTIVE_GOAL_STATES
-from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
-from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+import ladini.graphs.agents.market_coach.interpreter.routing  # noqa: F401
+from ladini.graphs.agents.market_coach.core.policies import get_fast_path_policy
+from ladini.graphs.agents.market_coach.interpreter.goal_planner import goal_planner
+from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
+from ladini.graphs.agents.market_coach.nodes.cleaner import _ACTIVE_GOAL_STATES
+from ladini.graphs.agents.market_coach.nodes.memory import memory_update
+from ladini.graphs.agents.market_coach.nodes.validation import validator
 from tests.conftest import StubRuntime, make_state, run
 
 BUSINESS_FIELDS = (
@@ -63,7 +63,7 @@ CONTROL_STRICT = (
 #: FastPath conserve la valeur d'entrée ("WAITING_INPUT" laissé par le
 #: `validator` du tour précédent) là où le planner écrit "ACTIVE" (RÈGLE
 #: 1bis). Recherche EXHAUSTIVE des lecteurs de `goal_status` dans
-#: `src/agriconnect` (pas seulement `market_coach/` — un 3ᵉ lecteur y a été
+#: `src/ladini` (pas seulement `market_coach/` — un 3ᵉ lecteur y a été
 #: trouvé grâce à ce test) : exactement TROIS —
 #:   * `nodes/cleaner.py`  : `goal_status in _ACTIVE_GOAL_STATES` ;
 #:   * `nodes/memory.py`   : `goal_status == "COMPLETED"` ;
@@ -331,7 +331,7 @@ class TestConvergenceWithPreExistingControlState:
         """Régression EXACTE trouvée par cette passe : `goal_status` vide
         (FastPath) vs "ACTIVE" (planner) faisait réinitialiser
         `draft_payload` par `nodes/cleaner.py` sur le seul FastPath."""
-        from agriconnect.graphs.agents.market_coach.nodes.cleaner import (
+        from ladini.graphs.agents.market_coach.nodes.cleaner import (
             state_cleaner_node,
         )
 
@@ -366,7 +366,7 @@ class TestStatusIsNormalisedByValidator:
         import ast
         import inspect
 
-        from agriconnect.graphs.agents.market_coach.nodes import validation
+        from ladini.graphs.agents.market_coach.nodes import validation
 
         source = inspect.getsource(validation.validator)
         tree = ast.parse(source.lstrip())
@@ -383,7 +383,7 @@ class TestStatusIsNormalisedByValidator:
     def test_validator_never_reads_status_or_goal_status(self):
         import inspect
 
-        from agriconnect.graphs.agents.market_coach.nodes import validation
+        from ladini.graphs.agents.market_coach.nodes import validation
 
         source = inspect.getsource(validation.validator)
         assert 'get("status")' not in source
@@ -415,7 +415,7 @@ class TestGoalStatusEquivalenceClassIsConsumerSafe:
     inoffensive pour ses DEUX seuls lecteurs — testé, pas expliqué."""
 
     def _cleaner_draft(self, goal_status):
-        from agriconnect.graphs.agents.market_coach.nodes.cleaner import (
+        from ladini.graphs.agents.market_coach.nodes.cleaner import (
             state_cleaner_node,
         )
 
@@ -456,7 +456,7 @@ class TestGoalStatusEquivalenceClassIsConsumerSafe:
         ci-dessus ne couvre plus le contrat et ce test casse."""
         import pathlib
 
-        root = pathlib.Path(__file__).resolve().parents[2] / "src" / "agriconnect"
+        root = pathlib.Path(__file__).resolve().parents[2] / "src" / "ladini"
         readers = set()
         for path in root.rglob("*.py"):
             text = path.read_text(encoding="utf-8", errors="ignore")
@@ -492,8 +492,8 @@ class TestCognitiveDecisionIsObservabilityOnlyForFastPathTurns:
     def test_the_two_readers_only_branch_on_recovery_or_abandon_literals(self):
         import inspect
 
-        from agriconnect.graphs.agents.market_coach.interpreter import strategy
-        from agriconnect.graphs.agents.market_coach.nodes import clarification
+        from ladini.graphs.agents.market_coach.interpreter import strategy
+        from ladini.graphs.agents.market_coach.nodes import clarification
 
         for module, fn in (
             (strategy, strategy.response_strategy),

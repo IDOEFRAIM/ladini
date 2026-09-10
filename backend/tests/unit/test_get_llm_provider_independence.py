@@ -14,12 +14,12 @@ from unittest.mock import patch
 
 import pytest
 
-# `import agriconnect.core.get_llm as get_llm_mod` est peu fiable : le nom
+# `import ladini.core.get_llm as get_llm_mod` est peu fiable : le nom
 # `get_llm` est à la fois le module ET une fonction qu'il définit, et
-# `agriconnect.core` réexporte cette dernière — voir le même commentaire
+# `ladini.core` réexporte cette dernière — voir le même commentaire
 # dans `tests/unit/test_get_llm_circuit_breaker.py`. `importlib` seul donne
 # le vrai module.
-_MOD = importlib.import_module("agriconnect.core.get_llm")
+_MOD = importlib.import_module("ladini.core.get_llm")
 
 
 @pytest.fixture(autouse=True)
@@ -46,7 +46,7 @@ class TestGroqSdkIgnoresLlmProviderSetting:
             LLM_PROVIDER=llm_provider,
             llm_api_key="sk-real-groq-key",
         )
-        with patch("agriconnect.core.settings.settings", fake_settings):
+        with patch("ladini.core.settings.settings", fake_settings):
             with patch("groq.Groq") as mock_groq_cls:
                 mock_groq_cls.return_value = object()
                 client = _MOD.get_groq_sdk(force_refresh=True)
@@ -63,7 +63,7 @@ class TestGroqSdkIgnoresLlmProviderSetting:
             LLM_PROVIDER="groq",
             llm_api_key="",
         )
-        with patch("agriconnect.core.settings.settings", fake_settings):
+        with patch("ladini.core.settings.settings", fake_settings):
             with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
                 _MOD.get_groq_sdk(force_refresh=True)
 
@@ -82,7 +82,7 @@ class TestBedrockFallbackClientNowActuallyWorks:
             OPENAI_API_KEY="sk-gateway-key",
             llm_api_key="sk-real-groq-key",
         )
-        with patch("agriconnect.core.settings.settings", fake_settings):
+        with patch("ladini.core.settings.settings", fake_settings):
             with patch("openai.OpenAI") as mock_openai_cls, patch(
                 "groq.Groq"
             ) as mock_groq_cls:

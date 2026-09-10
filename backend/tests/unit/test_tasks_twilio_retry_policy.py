@@ -31,8 +31,8 @@ import pytest
 
 @pytest.fixture()
 def tasks_mod(monkeypatch):
-    import agriconnect.api.response_dispatch as dispatch_mod
-    import agriconnect.api.tasks as mod
+    import ladini.api.response_dispatch as dispatch_mod
+    import ladini.api.tasks as mod
 
     loop = asyncio.new_event_loop()
 
@@ -50,7 +50,7 @@ def tasks_mod(monkeypatch):
 
 @pytest.fixture()
 def dispatch_mod():
-    import agriconnect.api.response_dispatch as mod
+    import ladini.api.response_dispatch as mod
 
     return mod
 

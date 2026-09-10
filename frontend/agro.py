@@ -16,8 +16,8 @@ from typing import Optional
 import requests
 import asyncio
 
-# Removed: from agriconnect.agents.formation_agro import FormationAgro
-from agriconnect.graphs.nodes.formation import FormationCoach, FormationConfig
+# Removed: from ladini.agents.formation_agro import FormationAgro
+from ladini.graphs.nodes.formation import FormationCoach, FormationConfig
 from futur.rag.retriever import AgileRetriever
 
 logging.basicConfig(
@@ -91,7 +91,7 @@ async def run():
         shield = LocalShield()
         # Ensure we have an LLM available (via env vars)
         try:
-            from agriconnect.core.get_llm import get_llm
+            from ladini.core.get_llm import get_llm
             llm = get_llm()
             if not llm:
                 logging.warning("No LLM available (GROQ_API_KEY missing?). FormationCoach may fail.")

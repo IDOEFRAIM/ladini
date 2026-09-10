@@ -21,8 +21,8 @@ valeur ajoutée, juste une seconde clé à tenir synchronisée)."""
 
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.core.state import resolve_current_goal
-from agriconnect.graphs.agents.market_coach.domain.model import DomainContext
+from ladini.graphs.agents.market_coach.core.state import resolve_current_goal
+from ladini.graphs.agents.market_coach.domain.model import DomainContext
 
 
 class TestRoleFieldNoLongerShadowsUserRole:
@@ -46,7 +46,7 @@ class TestRoleFieldNoLongerShadowsUserRole:
 
 class TestRoleGuardNoLongerWritesTheRedundantKey:
     def test_role_guard_only_sets_user_role(self):
-        from agriconnect.graphs.agents.market_coach.nodes.role_guard import (
+        from ladini.graphs.agents.market_coach.nodes.role_guard import (
             make_role_guard,
         )
         from tests.conftest import run
@@ -57,7 +57,7 @@ class TestRoleGuardNoLongerWritesTheRedundantKey:
         assert "role" not in patch
 
     def test_role_guard_does_not_overwrite_an_already_set_user_role(self):
-        from agriconnect.graphs.agents.market_coach.nodes.role_guard import (
+        from ladini.graphs.agents.market_coach.nodes.role_guard import (
             make_role_guard,
         )
         from tests.conftest import run

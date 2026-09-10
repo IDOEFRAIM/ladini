@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "agriconnect-backend"
+name = "ladini-backend"
 version = "1.0.0"
 description = "Event-Driven Modular Monolith - Agriculture AI Assistant"
 authors = ["IDOEFRAIM <idoefraimtanka@gmail.com>"]
@@ -7,7 +7,7 @@ license = "MIT"
 readme = "README.md"
 
 packages = [
-    { include = "agriconnect", from = "src" }
+    { include = "ladini", from = "src" }
 ]
 
 [tool.poetry.dependencies]
@@ -127,7 +127,7 @@ select = ["E", "F", "I", "B"]
 ignore = ["E501"] # Ignore la longueur de ligne stricte si formatée par ailleurs
 
 [tool.ruff.lint.isort]
-known-first-party = ["src", "agriconnect"]
+known-first-party = ["src", "ladini"]
 
 # ==========================================
 # Configuration Mypy

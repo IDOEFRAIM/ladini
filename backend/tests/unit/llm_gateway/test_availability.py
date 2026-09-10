@@ -6,10 +6,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from agriconnect.graphs.agents.market_coach.llm_gateway.availability import (
+from ladini.graphs.agents.market_coach.llm_gateway.availability import (
     is_candidate_usable,
 )
-from agriconnect.graphs.agents.market_coach.llm_gateway.types import (
+from ladini.graphs.agents.market_coach.llm_gateway.types import (
     LLMProfile,
     ModelCandidate,
 )

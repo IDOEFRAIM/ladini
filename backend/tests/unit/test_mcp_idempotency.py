@@ -18,8 +18,8 @@ import pytest
 
 from tests.conftest import run
 
-from agriconnect.services.database import mcp_idempotency_store as store_mod
-from agriconnect.services.database.mcp_idempotency_store import IdempotencyOutcome
+from ladini.services.database import mcp_idempotency_store as store_mod
+from ladini.services.database.mcp_idempotency_store import IdempotencyOutcome
 
 
 # =====================================================================
@@ -266,8 +266,8 @@ class TestCallToolIdempotencyWiring:
     _TOOL_NAME = "get_user_by_phone"  # déjà autorisé (voir test_mcp_hardening.py)
 
     def _install(self, monkeypatch, *, claim_outcome, stored_result=None, handler=None, call_counter=None):
-        import agriconnect.infrastructure.mcp.runtime as runtime_mod
-        from agriconnect.services.database.mcp_idempotency_store import IdempotencyClaim
+        import ladini.infrastructure.mcp.runtime as runtime_mod
+        from ladini.services.database.mcp_idempotency_store import IdempotencyClaim
 
         async def _fake_claim(key, tool, request_hash):
             return IdempotencyClaim(outcome=claim_outcome, stored_result=stored_result)
@@ -296,8 +296,8 @@ class TestCallToolIdempotencyWiring:
         return completed, failed
 
     def test_claimed_success_calls_the_handler_once_and_marks_completed(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer
-        from agriconnect.services.database.mcp_idempotency_store import IdempotencyOutcome
+        from ladini.infrastructure.mcp.runtime import AgriDBMCPServer
+        from ladini.services.database.mcp_idempotency_store import IdempotencyOutcome
 
         call_count = {"n": 0}
 
@@ -321,8 +321,8 @@ class TestCallToolIdempotencyWiring:
         assert result == {"auction_id": "auc-1"}
 
     def test_claimed_handler_failure_marks_failed_and_reraises(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer
-        from agriconnect.services.database.mcp_idempotency_store import IdempotencyOutcome
+        from ladini.infrastructure.mcp.runtime import AgriDBMCPServer
+        from ladini.services.database.mcp_idempotency_store import IdempotencyOutcome
 
         async def handler(**kwargs):
             raise RuntimeError("stock insuffisant")
@@ -342,8 +342,8 @@ class TestCallToolIdempotencyWiring:
         assert failed["called"] is True
 
     def test_replay_never_calls_the_handler_and_returns_the_stored_result(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer
-        from agriconnect.services.database.mcp_idempotency_store import IdempotencyOutcome
+        from ladini.infrastructure.mcp.runtime import AgriDBMCPServer
+        from ladini.services.database.mcp_idempotency_store import IdempotencyOutcome
 
         call_count = {"n": 0}
 
@@ -368,8 +368,8 @@ class TestCallToolIdempotencyWiring:
         assert result == {"auction_id": "auc-original"}
 
     def test_conflict_never_calls_the_handler_and_raises_explicitly(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer
-        from agriconnect.services.database.mcp_idempotency_store import IdempotencyOutcome
+        from ladini.infrastructure.mcp.runtime import AgriDBMCPServer
+        from ladini.services.database.mcp_idempotency_store import IdempotencyOutcome
 
         call_count = {"n": 0}
 
@@ -391,8 +391,8 @@ class TestCallToolIdempotencyWiring:
     def test_in_progress_never_calls_the_handler_and_raises_a_transient_marked_error(
         self, monkeypatch
     ):
-        from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer
-        from agriconnect.services.database.mcp_idempotency_store import IdempotencyOutcome
+        from ladini.infrastructure.mcp.runtime import AgriDBMCPServer
+        from ladini.services.database.mcp_idempotency_store import IdempotencyOutcome
 
         call_count = {"n": 0}
 
@@ -415,8 +415,8 @@ class TestCallToolIdempotencyWiring:
         """DB de dédup injoignable : exécute quand même (best-effort, même
         discipline que le reste du chantier) plutôt que de bloquer tout le
         flux procurement pour une panne d'observabilité annexe."""
-        from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer
-        from agriconnect.services.database.mcp_idempotency_store import IdempotencyOutcome
+        from ladini.infrastructure.mcp.runtime import AgriDBMCPServer
+        from ladini.services.database.mcp_idempotency_store import IdempotencyOutcome
 
         call_count = {"n": 0}
 
@@ -443,8 +443,8 @@ class TestCallToolIdempotencyWiring:
     def test_no_idempotency_key_bypasses_the_mechanism_entirely(self, monkeypatch):
         """No-op garanti pour les 15+ outils qui ne posent jamais de clé —
         aucun appel à `claim`/`complete`/`fail`."""
-        import agriconnect.infrastructure.mcp.runtime as runtime_mod
-        from agriconnect.infrastructure.mcp.runtime import AgriDBMCPServer
+        import ladini.infrastructure.mcp.runtime as runtime_mod
+        from ladini.infrastructure.mcp.runtime import AgriDBMCPServer
 
         claim_calls = {"n": 0}
 

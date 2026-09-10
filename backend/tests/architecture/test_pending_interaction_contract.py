@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from tests.conftest import make_state, run
 
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     CART_TUNNEL_KINDS,
     InteractionKind,
     check_invariants,
@@ -149,7 +149,7 @@ class TestUnknownNeverSilentlyBypasses:
     `core/tunnel_manager.py::TunnelManager.is_cart_routeable`."""
 
     def test_a_live_selection_tunnel_forces_cart_routing_even_with_missing_fields(self):
-        from agriconnect.graphs.agents.market_coach.core.tunnel_manager import (
+        from ladini.graphs.agents.market_coach.core.tunnel_manager import (
             tunnel_manager,
         )
 
@@ -211,7 +211,7 @@ class TestResolvedInteractionNeverStaysActive:
 
 class TestSerializationRoundTrip:
     def test_a_confirm_action_survives_a_to_dict_from_dict_round_trip(self):
-        from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+        from ladini.graphs.agents.market_coach.core.pending_interaction import (
             PendingInteraction,
         )
 
@@ -229,7 +229,7 @@ class TestSerializationRoundTrip:
         assert restored.candidates == original.candidates
 
     def test_a_corrupted_or_unknown_kind_degrades_to_none_rather_than_crashing(self):
-        from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+        from ladini.graphs.agents.market_coach.core.pending_interaction import (
             PendingInteraction,
         )
 

@@ -1,6 +1,6 @@
-# ARCHITECTURE_SPEC.md — AgriConnect Backend
+# ARCHITECTURE_SPEC.md — Ladini Backend
 
-**Périmètre** : `backend/src/agriconnect/**` (Python). Exclus : `.venv`, `__pycache__`, `.pytest_cache`, `tests/`, `migrations/`. Le sous-système `graphs/agents/market_coach/` (LangGraph, ~95 fichiers) est traité en détail séparé (§3.B) vu son volume.
+**Périmètre** : `backend/src/ladini/**` (Python). Exclus : `.venv`, `__pycache__`, `.pytest_cache`, `tests/`, `migrations/`. Le sous-système `graphs/agents/market_coach/` (LangGraph, ~95 fichiers) est traité en détail séparé (§3.B) vu son volume.
 **Non couvert** : `frontend/`, `infra/`, `bin/`, `scripts/` (hors scope backend Python).
 
 ---
@@ -10,7 +10,7 @@
 ## 1.1 Arborescence exacte
 
 ```
-backend/src/agriconnect/
+backend/src/ladini/
 ├── main.py                          # FastAPI factory alternative (NON utilisée en prod, voir §5.5)
 ├── agents/
 │   ├── __init__.py                  # re-exports
@@ -215,7 +215,7 @@ class AgentRequest(BaseModel):
 ## 2.3 `core/settings.py` — `class Settings(BaseSettings)` (extrait, champs saillants)
 ```
 APP_NAME, APP_VERSION, DEBUG: bool, HOST, PORT: int, ALLOWED_ORIGINS: list[str]
-LLM_PROVIDER="groq", AGRICONNECT_APIKEY, GROQ_API_KEY, LLM_MODEL="llama-3.1-8b-instant",
+LLM_PROVIDER="groq", LADINI_APIKEY, GROQ_API_KEY, LLM_MODEL="llama-3.1-8b-instant",
 LLM_MODEL_REASONING="llama-3.3-70b-versatile", LLM_TEMPERATURE: float=0.0, ROUTING_MAP: dict[str,str]
 AZURE_OPENAI_API_KEY/ENDPOINT/DEPLOYMENT_NAME/API_VERSION
 DATABASE_URL, DO_DATABASE_URL, DB_SSL_MODE="require", DB_POOL_SIZE=20, DB_POOL_MAX_OVERFLOW=20, DB_POOL_TIMEOUT=60.0
@@ -451,8 +451,8 @@ class MCPTransportConfig:
     grpc_target: Optional[str] = None
     grpc_tls: bool = False
     grpc_metadata: Mapping[str,str] = field(default_factory=dict)
-    grpc_list_tools_method: str = "/agriconnect.mcp.MCP/ListTools"
-    grpc_call_tool_method: str = "/agriconnect.mcp.MCP/CallTool"
+    grpc_list_tools_method: str = "/ladini.mcp.MCP/ListTools"
+    grpc_call_tool_method: str = "/ladini.mcp.MCP/CallTool"
     stdio_log_path: Optional[str] = None
 ```
 
@@ -521,9 +521,9 @@ Externe : Twilio (indirect via routes), OTel, Prometheus.
 ### `api/celery_app.py`
 ```python
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-celery_app = Celery("agriconnect_worker", broker=REDIS_URL, backend=REDIS_URL,
-    include=["agriconnect.api.tasks", "agriconnect.workers.crons.auction_solicitation",
-             "agriconnect.workers.crons.proximity_matching", "agriconnect.workers.crons.outbox_dispatch"])
+celery_app = Celery("ladini_worker", broker=REDIS_URL, backend=REDIS_URL,
+    include=["ladini.api.tasks", "ladini.workers.crons.auction_solicitation",
+             "ladini.workers.crons.proximity_matching", "ladini.workers.crons.outbox_dispatch"])
 ```
 Config : `task_acks_late=True, worker_prefetch_multiplier=1, task_serializer="json", task_time_limit=600, result_expires=3600, beat_schedule=BEAT_SCHEDULE`.
 Externe : Redis (broker+backend), env `REDIS_URL`.
@@ -583,7 +583,7 @@ Externe : PostgreSQL (asyncpg).
 
 ### `core/telemetry.py`
 ```python
-def init_telemetry(service_name: str = "agriconnect") -> None
+def init_telemetry(service_name: str = "ladini") -> None
 def instrument_fastapi(app: Any) -> None
 def instrument_celery() -> None
 def new_trace_id() -> str
@@ -609,7 +609,7 @@ class _GroqAdapter:
         def create(self, **kwargs)   # intercepte + record_generation()
 def get_llm(llm_client: Optional[Any] = None) -> Optional[Any]
 ```
-Externe : Groq API (`GROQ_API_KEY`/`AGRICONNECT_APIKEY`).
+Externe : Groq API (`GROQ_API_KEY`/`LADINI_APIKEY`).
 
 ### `orchestrator/orchestrator.py` — **point d'entrée métier unique**
 ```python
@@ -1047,7 +1047,7 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     expected_input: Literal["PRODUCT","PRICE","QUANTITY","UNIT","CONFIRMATION","SELECTION","LOCATION","DATE","NONE"]
     # ... reducers par champ: replace_value (scalaire), replace_list (liste), merge_dict (dict shallow)
 ```
-Reducers importés depuis **`agriconnect.agents.reducers`** (EXTERNE au sous-arbre `market_coach/`) — pas un `reducers.py` local.
+Reducers importés depuis **`ladini.agents.reducers`** (EXTERNE au sous-arbre `market_coach/`) — pas un `reducers.py` local.
 
 **`core/state_profile.py`** — cycle de vie des champs :
 ```python
@@ -1650,7 +1650,7 @@ Beat (BEAT_SCHEDULE, 3 entrées)
 > **✅ PHASE 4 EXÉCUTÉE (2026-07-21) — Performance & robustesse.**
 > **(a) Timeouts LLM** : les 3 sites `asyncio.to_thread` sans `wait_for` sont couverts — `interpreter/routing.py::input_interpreter` (**15s** — le site critique : un appel Groq suspendu y gelait le tour entier jusqu'au timeout orchestrateur 45s ; `TimeoutError` retombe sur le fallback UNKNOWN existant), `utils.py::_llm_extract_onboarding_all` (10s), `nodes/clarification.py` (8s). Les autres sites (`slot_enrichment`, `rendering/ask.py`) avaient déjà leur `wait_for`. Audit : aucun appel LLM bloquant hors `to_thread` dans le graphe ; `services/memory/{profile_extractor,episodic_memory}` font des appels sync directs mais hors chemin de graphe (consommés lazy par mcp/context).
 > **(b) Cache client termes interdits** : `nodes/security_moderation.py::_get_prohibited_terms_cached` (TTL 300s, aligné sur le cache serveur du ModerationMixin) — économise un aller-retour MCP (stdio inter-processus) PAR MESSAGE ; secours sur cache périmé si le fetch échoue. Le gate compte (`get_account_status`) reste volontairement NON caché (un ban doit s'appliquer au message suivant).
-> **(c) §5.19 clos** : `AGRICONNECT_EAGER_IMPORTS=1` force l'import eager de `d.py` + 10 mixins dans `services/database/__init__.py` (fail-fast CI ; démontré : attrape le `rapidfuzz` manquant à l'import au lieu du premier accès en prod). À poser dans la CI et le smoke de démarrage.
+> **(c) §5.19 clos** : `LADINI_EAGER_IMPORTS=1` force l'import eager de `d.py` + 10 mixins dans `services/database/__init__.py` (fail-fast CI ; démontré : attrape le `rapidfuzz` manquant à l'import au lieu du premier accès en prod). À poser dans la CI et le smoke de démarrage.
 > **(d) Audit N+1 resolvers** : aucun N+1 détecté dans `market_coach/` (profondeur 3 lignes) — seule boucle await trouvée : retry ×2 de `profile_loader` (légitime). Vérifié : cache 6 messages→1 fetch avec détection intacte, fallback périmé, graphes BUYER/PRODUCER compilés.
 
 > **✅ PHASE 3 EXÉCUTÉE (2026-07-21) — UX conversationnelle : découpage du rendu.**
@@ -1667,38 +1667,38 @@ Beat (BEAT_SCHEDULE, 3 entrées)
 > **✅ PHASE 0 EXÉCUTÉE (2026-07-21)** — Résolu : §5.1 (`protocols/core.py` recréé en version minimale : `CorrelationCtx`/`TraceCategory`/`TraceStep`/`TraceEnvelope`/`CachePolicy`/`ClientCapabilities`), §5.2 (imports `Base` redirigés vers `domain.orm_base`, shim mort retiré de `core/database.py`), §5.3 (`voice.py` supprimé, zéro appelant), §5.4 (`order.py::OrderMixin` supprimé), §5.5 (`main.py` racine supprimé + entrée `.gitignore`), §5.6 (`services/__init__.py` assaini, `AgriDatabaseService` lazy réel), §5.7/§5.8/§5.9 (doublons `utils.py` supprimés : `_detect_disambiguation_candidates`, `_build_proactive_hint`, `build_confirmation_summary`, `friendly_missing` ; `_compute_progress` unifié dans `utils.py` — bug de dénominateur `pct` corrigé — importé par `cognitive.py` et `validation.py`), §5.10 (`route_after_validator` + `_has_minimum_cart_payload` supprimés de `router.py` ; **NOTE : `DefaultDomainRouter.resolve()` est VIVANT** — c'est le `context_resolver` réel câblé par `graph_builder.py:237`), §5.11 (partiel : `nodes/routing.py::_route_after_planner` supprimé ; câblage de `contract_validation` reporté en Phase 2), §5.13 (`waste/` supprimé + export lazy `graph` retiré du `__init__` ; branche `onboarding_node` corrigée vers `flows.common.onboarding`). Tests zombies supprimés (`test_voice.py`, `test_imports.py`, `test_database.py` — visaient `db_handler`/`formation`/`sentinelle`/`a2a`, disparus) ; `test_market_coach_registration_flow.py`/`test_market_registration_fixes.py` réparés (`core.state` + `adapter`). Restent ouverts : §5.11 (câblage contracts), §5.12, §5.14–§5.19.
 
 ## 5.1 `protocols/ag_ui/renderer.py` — import cassé, module inutilisable
-**Fichier** : `backend/src/agriconnect/protocols/ag_ui/renderer.py` (ligne d'import, en tête de fichier).
-**Problème** : `from agriconnect.protocols.core import (ClientCapabilities, TraceCategory, TraceEnvelope)` — `agriconnect/protocols/core.py` **n'existe pas** dans l'arbre source (seul un `.pyc` orphelin subsiste dans `__pycache__`). Toute tentative d'import de ce module lève `ModuleNotFoundError`.
+**Fichier** : `backend/src/ladini/protocols/ag_ui/renderer.py` (ligne d'import, en tête de fichier).
+**Problème** : `from ladini.protocols.core import (ClientCapabilities, TraceCategory, TraceEnvelope)` — `ladini/protocols/core.py` **n'existe pas** dans l'arbre source (seul un `.pyc` orphelin subsiste dans `__pycache__`). Toute tentative d'import de ce module lève `ModuleNotFoundError`.
 **Impact** : `WhatsAppRenderer`, `WebRenderer`, `SMSRenderer` sont inutilisables ; `protocols/ag_ui/__init__.py` qui re-exporte tout le module échouera aussi si `renderer.py` y est importé en dur.
 **À faire** : soit restaurer `protocols/core.py` (retrouver `ClientCapabilities`/`TraceCategory`/`TraceEnvelope` dans l'historique git), soit retirer la dépendance et inline ces types localement dans `renderer.py`.
 
 ## 5.2 `infrastructure/mcp/context.py` + `services/memory/{user_profile,episodic_memory}.py` — imports cassés
 **Fichiers** :
-- `backend/src/agriconnect/infrastructure/mcp/context.py` (import lazy `agriconnect.protocols.core.CachePolicy`).
-- `backend/src/agriconnect/services/memory/user_profile.py` (import `from agriconnect.services.database.model import Base`).
-- `backend/src/agriconnect/services/memory/episodic_memory.py` (même import).
-**Problème** : `agriconnect.services.database.model` n'existe pas (seul un `.pyc` orphelin). `UserFarmProfileModel(Base)` et `EpisodicMemoryModel(Base)` ne peuvent pas être définis.
-**Impact** : tout import de `agriconnect.services.memory` échoue → `ContextOptimizer`/`ProfileExtractor` inutilisables, et `infrastructure/mcp/context.py::MCPContextServer` (qui les importe en lazy) casse dès qu'on appelle `build_context`/`enrich_state`.
-**À faire** : restaurer `services/database/model.py` (probablement un alias vers `domain.orm_base.Base`) ou rediriger l'import vers `agriconnect.domain.orm_base.Base`.
+- `backend/src/ladini/infrastructure/mcp/context.py` (import lazy `ladini.protocols.core.CachePolicy`).
+- `backend/src/ladini/services/memory/user_profile.py` (import `from ladini.services.database.model import Base`).
+- `backend/src/ladini/services/memory/episodic_memory.py` (même import).
+**Problème** : `ladini.services.database.model` n'existe pas (seul un `.pyc` orphelin). `UserFarmProfileModel(Base)` et `EpisodicMemoryModel(Base)` ne peuvent pas être définis.
+**Impact** : tout import de `ladini.services.memory` échoue → `ContextOptimizer`/`ProfileExtractor` inutilisables, et `infrastructure/mcp/context.py::MCPContextServer` (qui les importe en lazy) casse dès qu'on appelle `build_context`/`enrich_state`.
+**À faire** : restaurer `services/database/model.py` (probablement un alias vers `domain.orm_base.Base`) ou rediriger l'import vers `ladini.domain.orm_base.Base`.
 
 ## 5.3 `graphs/agents/common/voice.py` — import cassé
-**Fichier** : `backend/src/agriconnect/graphs/agents/common/voice.py`, classe `VoiceAgent`.
-**Problème** : `from agriconnect.services.voice_engine import VoiceEngine` — `services/voice_engine.py` n'existe pas dans l'arbre scanné.
+**Fichier** : `backend/src/ladini/graphs/agents/common/voice.py`, classe `VoiceAgent`.
+**Problème** : `from ladini.services.voice_engine import VoiceEngine` — `services/voice_engine.py` n'existe pas dans l'arbre scanné.
 **À faire** : soit implémenter `services/voice_engine.py`, soit supprimer `VoiceAgent` si la fonctionnalité vocale n'est plus utilisée (vérifier appelants avant suppression).
 
 ## 5.4 `services/database/order.py::OrderMixin` — mort, non câblé dans le MRO
-**Fichier** : `backend/src/agriconnect/services/database/order.py`.
+**Fichier** : `backend/src/ladini/services/database/order.py`.
 **Problème** : `OrderMixin` définit `get_order_details`/`run_order_status_hooks` mais n'apparaît PAS dans la liste MRO de `AgriDatabaseService` (`services/database/d.py`). Ces méthodes ne sont donc jamais accessibles via le dispatcher MCP.
 **À faire** : soit ajouter `OrderMixin` au MRO de `d.py` si ces méthodes sont nécessaires, soit supprimer le fichier s'il est réellement mort (vérifier qu'`OrderService` dans `order_service.py` ne couvre pas déjà ce besoin — c'est probable vu le doublon de nommage).
 
 ## 5.5 `main.py` / `api/routes/__init__.py` — double point d'entrée FastAPI, l'un mort
-**Fichiers** : `backend/src/agriconnect/main.py`, `backend/src/agriconnect/api/routes/__init__.py`.
+**Fichiers** : `backend/src/ladini/main.py`, `backend/src/ladini/api/routes/__init__.py`.
 **Problème** : `main.py` définit un `app = FastAPI(...)` alternatif qui monte `from .api.routes import router` — mais `api/routes/__init__.py` est **vide** (pas de `router` défini). `main.py` planterait à l'exécution (`ImportError: cannot import name 'router'`) ou monterait un routeur vide selon la résolution exacte. La vraie app de prod est `api/main.py` (montée via `api/server.py`, lancée par gunicorn/uvicorn).
 **À faire** : supprimer `main.py` (dead code, source de confusion) OU le réparer pour pointer vers les vrais routers (`api.routes.market`, `api.routes.twilio_webhook`) s'il doit être conservé comme point d'entrée alternatif.
 
 ## 5.6 `services/__init__.py` — référence à un symbole jamais défini
-**Fichier** : `backend/src/agriconnect/services/__init__.py`.
-**Problème** : `__all__ = ["AgriDatabase", "AgriDatabaseService"]` mais `AgriDatabase` n'est ni défini ni importé nulle part dans le fichier ni dans le package scanné. `from agriconnect.services import AgriDatabase` lèvera `ImportError`.
+**Fichier** : `backend/src/ladini/services/__init__.py`.
+**Problème** : `__all__ = ["AgriDatabase", "AgriDatabaseService"]` mais `AgriDatabase` n'est ni défini ni importé nulle part dans le fichier ni dans le package scanné. `from ladini.services import AgriDatabase` lèvera `ImportError`.
 **À faire** : retirer `"AgriDatabase"` de `__all__`, ou l'importer/aliaser correctement si un tel symbole doit exister (probablement une confusion avec `AgriDatabaseService`).
 
 ## 5.7 Duplication : deux scanners de désambiguïsation lexicale
@@ -1733,25 +1733,25 @@ Beat (BEAT_SCHEDULE, 3 entrées)
 ## 5.13 `waste/graph.py`, `waste/market.py` — code mort probable, à vérifier avant suppression
 **Fichiers** : `graphs/agents/market_coach/waste/graph.py`, `graphs/agents/market_coach/waste/market.py`.
 **Problème** : le nom du dossier (`waste/`) et son emplacement parallèle aux arbres actifs (`flows/`, `nodes/`) suggèrent un prototype périmé, dans la même veine que `flows/buyer/flow_backup.py` (confirmé mort, zéro importeur, session du 2026-07-21).
-**À faire** : `grep -rn "waste\." backend/src/agriconnect/graphs/agents/market_coach/ --include="*.py"` pour confirmer zéro importeur, puis supprimer si confirmé.
+**À faire** : `grep -rn "waste\." backend/src/ladini/graphs/agents/market_coach/ --include="*.py"` pour confirmer zéro importeur, puis supprimer si confirmé.
 
-## 5.14 `agriconnect.agents.reducers` — emplacement contre-intuitif des reducers LangGraph
+## 5.14 `ladini.agents.reducers` — emplacement contre-intuitif des reducers LangGraph
 **Fichiers concernés** : `graphs/agents/market_coach/core/state.py`, `flows/producer/state.py`, `flows/buyer/state.py`.
-**Problème** : ces trois fichiers importent `merge_dict`, `replace_value`, `replace_list`, `load_snapshot`, `_KEEP` depuis `agriconnect.agents.reducers` — un module **hors** du sous-arbre `market_coach/`, alors que toute la logique de state (`MarketAgentState`, `BuyerContext`, `ProducerContext`) est locale à `market_coach/`. Ce n'est pas un bug fonctionnel mais une dépendance architecturale surprenante (un futur refactor qui déplacerait `market_coach/` risquerait de casser cet import sans qu'il soit évident où chercher).
-**À faire** : documenter explicitement cette dépendance croisée dans le README de `market_coach/` (ou envisager de rapatrier `reducers.py` dans `market_coach/core/` si aucun autre agent ne les utilise — vérifier `grep -rn "agents.reducers" backend/src/agriconnect/` pour les autres consommateurs avant de déplacer).
+**Problème** : ces trois fichiers importent `merge_dict`, `replace_value`, `replace_list`, `load_snapshot`, `_KEEP` depuis `ladini.agents.reducers` — un module **hors** du sous-arbre `market_coach/`, alors que toute la logique de state (`MarketAgentState`, `BuyerContext`, `ProducerContext`) est locale à `market_coach/`. Ce n'est pas un bug fonctionnel mais une dépendance architecturale surprenante (un futur refactor qui déplacerait `market_coach/` risquerait de casser cet import sans qu'il soit évident où chercher).
+**À faire** : documenter explicitement cette dépendance croisée dans le README de `market_coach/` (ou envisager de rapatrier `reducers.py` dans `market_coach/core/` si aucun autre agent ne les utilise — vérifier `grep -rn "agents.reducers" backend/src/ladini/` pour les autres consommateurs avant de déplacer).
 
 ## 5.15 Commentaires contradictoires sur `update_order_status`
-**Fichier** : `backend/src/agriconnect/services/database/producer.py::ProducerMgmtMixin.update_order_status`.
+**Fichier** : `backend/src/ladini/services/database/producer.py::ProducerMgmtMixin.update_order_status`.
 **Problème** : le rapport d'extraction note des commentaires inline contradictoires quant à savoir si cette méthode (sans verrou explicite) ou une autre version avec `with_for_update` est la version "vivante". Risque de race condition sur mise à jour concurrente du statut de commande si la mauvaise version est celle réellement appelée par le dispatcher MRO.
 **À faire** : auditer `services/database/d.py`'s MRO pour confirmer laquelle des deux implémentations est résolue en premier (ordre MRO Python : premier mixin dans la liste qui définit la méthode gagne), ajouter le verrou `with_for_update` sur celle qui est effectivement active si elle ne l'a pas.
 
 ## 5.16 `services/database/README.md` — dérive documentation/code
-**Fichier** : `backend/src/agriconnect/services/database/README.md` (1138 lignes).
+**Fichier** : `backend/src/ladini/services/database/README.md` (1138 lignes).
 **Problème** : ce README documente en détail l'architecture (dispatcher MRO, `@transactional`, table map) mais son exactitude vs. le code actuel n'a été vérifiée que partiellement lors de cette extraction — il mentionne déjà lui-même au moins 2 situations de code mort/piège MRO en interne.
 **À faire** : lors du prochain refactor de `services/database/`, relire ce README en parallèle du code et corriger les deux sections signalées comme obsolètes par le README lui-même.
 
 ## 5.17 `agents/task_handler.py` — FSM parallèle non intégrée
-**Fichier** : `backend/src/agriconnect/agents/task_handler.py`.
+**Fichier** : `backend/src/ladini/agents/task_handler.py`.
 **Problème** : `TaskHandler`/`AgentState`/`GoalState` forment une FSM Pydantic complète avec circuit-breaker, mais rien dans le graphe LangGraph MarketCoach ne semble l'utiliser directement pour piloter le flux principal — `nodes/executor.py::mcp_tool_executor` instancie un `TaskHandler` pour un "pre-check" WRITE seulement (usage partiel), pas pour tout le cycle de vie décrit par cette classe.
 **À faire** : clarifier si `TaskHandler` est un vestige d'une architecture antérieure (pré-LangGraph) à supprimer, ou un mécanisme de sécurité à documenter/renforcer explicitement dans `executor.py`.
 
@@ -1760,8 +1760,8 @@ Beat (BEAT_SCHEDULE, 3 entrées)
 **Vérification recommandée** : confirmer que `_SECURITY_BLOCKING = frozenset({SCAM_DETECTED, ACCOUNT_BLOCKED, PROHIBITED_PRODUCT, PROFILE_UNAVAILABLE})` reste synchronisé avec les valeurs de `security_status` effectivement posées par `nodes/security_moderation.py` (`_blocked_patch`, `_check_account_gate`, `_check_prohibited`) — toute nouvelle valeur de statut ajoutée dans `security_moderation.py` sans mise à jour de ce frozenset créerait une fuite de sécurité silencieuse (message bloqué en apparence mais routé vers l'interprète).
 
 ## 5.19 Registre `services/database/__init__.py` — lazy import fragile
-**Fichier** : `backend/src/agriconnect/services/database/__init__.py`.
-**Problème** : `from agriconnect.core.database import get_db` + `def __getattr__(name)` pour import lazy de `AgriDatabaseService`. Ce pattern masque les erreurs d'import de `d.py` (et de ses 10 mixins) jusqu'au premier accès à l'attribut plutôt qu'à l'import du package — un mixin cassé (ex: `moderation.py` avec une faute de frappe) ne sera détecté qu'à l'exécution, pas au démarrage.
+**Fichier** : `backend/src/ladini/services/database/__init__.py`.
+**Problème** : `from ladini.core.database import get_db` + `def __getattr__(name)` pour import lazy de `AgriDatabaseService`. Ce pattern masque les erreurs d'import de `d.py` (et de ses 10 mixins) jusqu'au premier accès à l'attribut plutôt qu'à l'import du package — un mixin cassé (ex: `moderation.py` avec une faute de frappe) ne sera détecté qu'à l'exécution, pas au démarrage.
 **À faire** : envisager un import eager derrière un flag de test/CI pour détecter les régressions de mixin au build plutôt qu'en prod.
 
 ---

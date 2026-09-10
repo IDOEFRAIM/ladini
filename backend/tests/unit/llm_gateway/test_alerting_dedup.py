@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from tests.unit.llm_gateway.conftest import make_fake_redis
 
-from agriconnect.graphs.agents.market_coach.llm_gateway.alerting import (
+from ladini.graphs.agents.market_coach.llm_gateway.alerting import (
     IncidentDeduplicator,
     LLMIncidentAlert,
     LogOnlyNotifier,

@@ -1,4 +1,4 @@
-# AgriConnect Evaluation Engineering — Golden Dataset
+# Ladini Evaluation Engineering — Golden Dataset
 
 Behavioral evaluation scenarios for the Market Agent as a system (understanding →
 orchestration → execution → final quality → safety). Companion to the Evaluation
@@ -7,7 +7,7 @@ file).
 
 **A minimal execution harness now exists** under `runners/` (`harness.py`,
 `run_batch.py`, `run_p0.py`, `run_extra.py`, `test_harness.py`) — it calls REAL
-`agriconnect` node/flow functions directly, recording only the bottom-most MCP
+`ladini` node/flow functions directly, recording only the bottom-most MCP
 `call_db` boundary as a test double. It deliberately **bypasses the LLM
 interpreter** (same as the rest of this repo's own test suite), so it cannot
 exercise intent classification / entity extraction / prompt-injection routing —

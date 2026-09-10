@@ -25,18 +25,18 @@ def _clean_langfuse_env(monkeypatch):
 class TestLangfuseHostAlias:
     def test_langfuse_base_url_is_read_into_langfuse_host(self, monkeypatch, _clean_langfuse_env):
         monkeypatch.setenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
-        from agriconnect.core.settings import Settings
+        from ladini.core.settings import Settings
 
         assert Settings().LANGFUSE_HOST == "https://cloud.langfuse.com"
 
     def test_legacy_langfuse_host_still_works(self, monkeypatch, _clean_langfuse_env):
         monkeypatch.setenv("LANGFUSE_HOST", "https://self-hosted.example.com")
-        from agriconnect.core.settings import Settings
+        from ladini.core.settings import Settings
 
         assert Settings().LANGFUSE_HOST == "https://self-hosted.example.com"
 
     def test_default_is_the_docker_internal_host_when_neither_is_set(self, monkeypatch, _clean_langfuse_env):
-        from agriconnect.core.settings import Settings
+        from ladini.core.settings import Settings
 
         # `_env_file=None` : ignore le `.env` du dépôt (qui déclare
         # LANGFUSE_BASE_URL) pour isoler le comportement par défaut du champ.

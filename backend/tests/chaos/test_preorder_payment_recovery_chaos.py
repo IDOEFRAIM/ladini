@@ -34,21 +34,21 @@ from tests.conftest import make_state, run
 from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
 from tests.unit.test_mcp_idempotency import _install_fake_db as _install_fake_idempotency_db
 
-from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     PaymentOutcomeKind,
     PreorderDraft,
     PreorderDraftStatus,
     adapt_payment_outcome,
     execution_key,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation import (
+from ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation import (
     resolve_preorder_confirmation,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.preorder_payment import (
+from ladini.graphs.agents.market_coach.flows.buyer.preorder_payment import (
     apply_payment_outcome,
 )
-from agriconnect.services.database import mcp_idempotency_store, preorder_draft_store
-from agriconnect.services.reconciliation import preorder_reconciliation_service as svc
+from ladini.services.database import mcp_idempotency_store, preorder_draft_store
+from ladini.services.reconciliation import preorder_reconciliation_service as svc
 
 
 def _install(monkeypatch):
@@ -163,7 +163,7 @@ class TestReconciliationConcurrencyOnAwaitingPayment:
         # client Paydunya répondant "completed" -> on court-circuite ces 2
         # dépendances externes (déjà testées séparément), pour isoler ICI
         # la seule question posée : la concurrence sur la PERSISTANCE.
-        import agriconnect.services.reconciliation.preorder_reconciliation_service as svc_mod
+        import ladini.services.reconciliation.preorder_reconciliation_service as svc_mod
 
         async def _fake_find_invoice_token(order_id):
             return "token-awaiting-race"
@@ -172,7 +172,7 @@ class TestReconciliationConcurrencyOnAwaitingPayment:
             return {"status": "success", "order_id": awaiting.order_id, "already_processed": False}
 
         monkeypatch.setattr(svc_mod, "_find_invoice_token", _fake_find_invoice_token)
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_payment as payment_mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder_payment as payment_mod
 
         monkeypatch.setattr(payment_mod, "reconcile_invoice", _fake_reconcile_invoice)
 

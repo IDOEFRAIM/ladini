@@ -56,7 +56,7 @@ class _FakeSession:
 
 
 def _service(product, producer_id):
-    from agriconnect.services.database.product import ProductMixin
+    from ladini.services.database.product import ProductMixin
 
     class _Svc(ProductMixin):
         def __init__(self, session, producer_id):
@@ -150,7 +150,7 @@ class TestAddProductPhotoOwnership:
         assert "introuvable" in result["message"].lower()
 
     def test_no_producer_profile_returns_a_business_error_not_a_crash(self):
-        from agriconnect.services.database.product import ProductMixin
+        from ladini.services.database.product import ProductMixin
 
         class _NoProducerSvc(ProductMixin):
             @property

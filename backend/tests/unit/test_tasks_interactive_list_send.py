@@ -14,8 +14,8 @@ from tests.conftest import run
 
 class TestSendViaWhatsAppCloudListMenu:
     def _patched(self, monkeypatch, *, native_enabled: bool = True):
-        import agriconnect.api.response_dispatch as mod
-        from agriconnect.services.whatsapp import cloud_api_client as wa
+        import ladini.api.response_dispatch as mod
+        from ladini.services.whatsapp import cloud_api_client as wa
 
         monkeypatch.setattr(wa, "is_configured", lambda: True)
         monkeypatch.setattr(mod.settings, "WHATSAPP_NATIVE_INTERACTIVE_ENABLED", native_enabled)
@@ -56,7 +56,7 @@ class TestSendViaWhatsAppCloudListMenu:
         """Non-régression : la désactivation de `list_menu` ne doit pas
         affecter le chemin de confirmation (boutons), qui reste interactif."""
         mod, send_list, _send_text = self._patched(monkeypatch)
-        from agriconnect.services.whatsapp import cloud_api_client as wa
+        from ladini.services.whatsapp import cloud_api_client as wa
 
         send_buttons = AsyncMock(return_value="wamid.btn1")
         monkeypatch.setattr(wa, "send_interactive_buttons", send_buttons)

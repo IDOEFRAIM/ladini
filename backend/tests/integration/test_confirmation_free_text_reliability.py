@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     set_pending_interaction,
 )
-from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+from ladini.graphs.agents.market_coach.interpreter.routing import (
     _interpret_fast_path,
 )
 from tests.conftest import make_state
@@ -180,7 +180,7 @@ class TestFastPathSharesTheExactSameContractAsTheLlm:
     def test_the_fast_path_result_converts_through_interpreter_result_identically_to_an_llm_dict(
         self,
     ):
-        from agriconnect.graphs.agents.market_coach.interpreter.interpreter_result import (
+        from ladini.graphs.agents.market_coach.interpreter.interpreter_result import (
             InterpreterResult,
         )
 

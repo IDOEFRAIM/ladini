@@ -21,19 +21,19 @@ PHONE = "+22670000001"
 
 class TestSendSearchResultPhotos:
     def test_a_cached_entry_with_photos_sends_them(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         monkeypatch.setattr(
-            "agriconnect.services.search_results_cache.load_results",
+            "ladini.services.search_results_cache.load_results",
             lambda phone: {"1": {"id": "p1", "name": "maïs", "images": ["https://x/a.jpg"]}},
         )
         sent_media = []
         monkeypatch.setattr(
-            "agriconnect.services.twilio_sender.send_whatsapp_media",
+            "ladini.services.twilio_sender.send_whatsapp_media",
             lambda phone, url, caption="": sent_media.append((phone, url, caption)) or "SM1",
         )
         sent = AsyncMock()
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        monkeypatch.setattr("ladini.api.tasks.send_confirmation_text", sent)
 
         run(mod._send_search_result_photos(PHONE, "1"))
 
@@ -44,14 +44,14 @@ class TestSendSearchResultPhotos:
         le fil d'une commande en cours (constaté en usage réel — "on perd le
         fil"). Photo + rappel partent désormais dans UN SEUL ResponsePlan
         multipart (voir docstring de `_send_search_result_photos`)."""
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         monkeypatch.setattr(
-            "agriconnect.services.search_results_cache.load_results",
+            "ladini.services.search_results_cache.load_results",
             lambda phone: {"2": {"id": "p1", "name": "maïs", "images": ["https://x/a.jpg"]}},
         )
         monkeypatch.setattr(
-            "agriconnect.services.twilio_sender.send_whatsapp_media",
+            "ladini.services.twilio_sender.send_whatsapp_media",
             lambda phone, url, caption="": "SM1",
         )
         captured = {}
@@ -62,13 +62,13 @@ class TestSendSearchResultPhotos:
                 return []
 
         monkeypatch.setattr(
-            "agriconnect.api.response_dispatch.get_dispatcher",
+            "ladini.api.response_dispatch.get_dispatcher",
             lambda: _CapturingDispatcher(),
         )
 
         run(mod._send_search_result_photos(PHONE, "2"))
 
-        from agriconnect.api.response_dispatch import ImageResponse, TextResponse
+        from ladini.api.response_dispatch import ImageResponse, TextResponse
 
         plan = captured["plan"]
         assert isinstance(plan.items[0], ImageResponse)
@@ -78,37 +78,37 @@ class TestSendSearchResultPhotos:
         assert "continuer" in reminder.text
 
     def test_an_unknown_index_reports_invalid(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         monkeypatch.setattr(
-            "agriconnect.services.search_results_cache.load_results",
+            "ladini.services.search_results_cache.load_results",
             lambda phone: {"1": {"id": "p1", "name": "maïs", "images": []}},
         )
         sent = AsyncMock()
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        monkeypatch.setattr("ladini.api.tasks.send_confirmation_text", sent)
 
         run(mod._send_search_result_photos(PHONE, "9"))
 
         assert "Numéro invalide" in sent.await_args.args[1]
 
     def test_no_cached_search_reports_expiry(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         monkeypatch.setattr(
-            "agriconnect.services.search_results_cache.load_results", lambda phone: None,
+            "ladini.services.search_results_cache.load_results", lambda phone: None,
         )
         sent = AsyncMock()
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        monkeypatch.setattr("ladini.api.tasks.send_confirmation_text", sent)
 
         run(mod._send_search_result_photos(PHONE, "1"))
 
         assert "recherche" in sent.await_args.args[1]
 
     def test_a_result_with_no_photo_says_so(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         monkeypatch.setattr(
-            "agriconnect.services.search_results_cache.load_results",
+            "ladini.services.search_results_cache.load_results",
             lambda phone: {"1": {"id": "p1", "name": "tomates", "images": []}},
         )
         captured = {}
@@ -119,7 +119,7 @@ class TestSendSearchResultPhotos:
                 return []
 
         monkeypatch.setattr(
-            "agriconnect.api.response_dispatch.get_dispatcher",
+            "ladini.api.response_dispatch.get_dispatcher",
             lambda: _CapturingDispatcher(),
         )
 

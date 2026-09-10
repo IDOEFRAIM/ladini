@@ -1,0 +1,82 @@
+# ═════════════════════════════════════════════════════════════════════
+# deploy.yml — DÉPLOIEMENT EXPLICITE, avec approbation humaine.
+#
+# Jamais déclenché automatiquement. Un opérateur lance `workflow_dispatch`
+# avec la `release` cible (un tag `sha-*` produit par release.yml). L'étape
+# de déploiement est protégée par l'ENVIRONNEMENT GitHub `production`
+# (règle : "Required reviewers") → un second humain approuve avant que le
+# SSH ne parte.
+#
+# La logique de release vit ENTIÈREMENT dans `scripts/deploy.sh` sur le VPS —
+# ce workflow ne fait que : (1) valider que l'image existe, (2) SSH, (3) lancer
+# le script. Aucune dépendance à `doctl`/`aws`/`hcloud` : provider-neutral.
+# ═════════════════════════════════════════════════════════════════════
+name: Deploy (manual approval)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Release à déployer (ex: sha-a83f6c1). DOIT exister au registry."
+        required: true
+      target:
+        description: "Cible"
+        required: true
+        default: staging
+        type: choice
+        options: [staging, production]
+
+concurrency:
+  # Un seul déploiement à la fois PAR cible. Un second dispatch attend
+  # (le VPS a en plus son propre verrou flock — double sécurité, §36).
+  group: deploy-${{ github.event.inputs.target }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ${{ vars.REGISTRY || 'ghcr.io' }}
+  IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE || 'idoefraim/agriconnect' }}
+
+jobs:
+  verify-image:
+    name: Vérifier que la release existe au registry
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: read }
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: docker manifest inspect (les 3 images)
+        run: |
+          set -euo pipefail
+          for svc in api worker mcp; do
+            ref="${REGISTRY}/${IMAGE_NAMESPACE}/ladini-${svc}:${{ github.event.inputs.release }}"
+            echo "→ $ref"
+            docker manifest inspect "$ref" >/dev/null \
+              || { echo "::error::Image absente du registry : $ref"; exit 1; }
+          done
+          echo "Les 3 images existent."
+
+  deploy:
+    name: Deploy → ${{ github.event.inputs.target }}
+    needs: verify-image
+    runs-on: ubuntu-latest
+    # ⚠️ Créer les environnements `staging` et `production` dans
+    # Settings → Environments, avec "Required reviewers" sur `production`.
+    environment: ${{ github.event.inputs.target }}
+    steps:
+      - name: SSH & run scripts/deploy.sh
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script_stop: true
+          command_timeout: 20m
+          script: |
+            set -euo pipefail
+            cd "${{ secrets.DEPLOY_DIR }}"
+            git fetch --tags --quiet origin
+            git checkout --quiet "${{ github.sha }}" -- scripts/ docker-compose.prod.yml infra/ || true
+            ./scripts/deploy.sh "${{ github.event.inputs.release }}"

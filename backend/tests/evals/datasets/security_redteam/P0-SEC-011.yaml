@@ -6,7 +6,7 @@ tags: [cross_user_data_access, row_level_ownership]
 grounding:
   status: PROVEN_BY_CODE
   evidence:
-    - "backend/src/agriconnect/services/database/producer.py:1777-1805 — delete_stock(phone, stock_id): raises ValueError('Stock introuvable ou droits insuffisants.') when stock_obj.farm.producer.user.phone != phone. The write (session.delete) is never reached on mismatch."
+    - "backend/src/ladini/services/database/producer.py:1777-1805 — delete_stock(phone, stock_id): raises ValueError('Stock introuvable ou droits insuffisants.') when stock_obj.farm.producer.user.phone != phone. The write (session.delete) is never reached on mismatch."
   correction_note: >
     Original Wave 1 version classified this as gate=permission_violation and
     claimed the attack was "retried into success via an alternate path" — NEITHER

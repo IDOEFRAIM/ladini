@@ -16,18 +16,18 @@ import pytest
 from tests.conftest import run
 from tests.unit.llm_gateway.conftest import make_fake_redis
 
-from agriconnect.graphs.agents.market_coach.llm_gateway.circuit_breaker import (
+from ladini.graphs.agents.market_coach.llm_gateway.circuit_breaker import (
     CircuitBreaker,
 )
-from agriconnect.graphs.agents.market_coach.llm_gateway.gateway import (
+from ladini.graphs.agents.market_coach.llm_gateway.gateway import (
     LLMGateway,
     LLMGatewayExhausted,
 )
-from agriconnect.graphs.agents.market_coach.llm_gateway.health_registry import (
+from ladini.graphs.agents.market_coach.llm_gateway.health_registry import (
     HealthRegistry,
 )
-from agriconnect.graphs.agents.market_coach.llm_gateway.registry import ModelRegistry
-from agriconnect.graphs.agents.market_coach.llm_gateway.types import LLMProfile
+from ladini.graphs.agents.market_coach.llm_gateway.registry import ModelRegistry
+from ladini.graphs.agents.market_coach.llm_gateway.types import LLMProfile
 
 
 # ── Fakes locaux ─────────────────────────────────────────────────────
@@ -112,7 +112,7 @@ def _make_gateway(*, provider_clients: Dict[str, Any], settings=None, store=None
     # tester le comportement du Gateway sans dépendre de groq/bedrock réels,
     # on monkeypatch temporairement la liste connue le temps de charger le
     # registry. Plus simple : construire les ModelCandidate directement.
-    from agriconnect.graphs.agents.market_coach.llm_gateway.types import ModelCandidate
+    from ladini.graphs.agents.market_coach.llm_gateway.types import ModelCandidate
 
     def _parse(raw, profile):
         provider, _, model = raw.partition(":")
@@ -158,7 +158,7 @@ def _make_gateway(*, provider_clients: Dict[str, Any], settings=None, store=None
     def client_factory(provider: str):
         return provider_clients[provider]
 
-    from agriconnect.graphs.agents.market_coach.llm_gateway.alerting import (
+    from ladini.graphs.agents.market_coach.llm_gateway.alerting import (
         IncidentDeduplicator,
     )
 
@@ -238,7 +238,7 @@ class TestCircuitOpenSkipsDirectlyNoNetworkCall:
 
 class TestStructuredOutputCapability:
     def test_a_candidate_without_structured_output_is_skipped_when_required(self):
-        from agriconnect.graphs.agents.market_coach.llm_gateway.types import ModelCandidate
+        from ladini.graphs.agents.market_coach.llm_gateway.types import ModelCandidate
 
         client_a = _ScriptedClient(_always_succeeds)
         client_b = _ScriptedClient(_always_succeeds)
@@ -332,7 +332,7 @@ class TestProviderAvailabilityPrecheck:
         """Un candidat structurellement inutilisable n'a jamais eu de
         "santé" à dégrader — ce n'est pas une panne, c'est une
         impossibilité connue à l'avance (§7)."""
-        from agriconnect.graphs.agents.market_coach.llm_gateway.types import (
+        from ladini.graphs.agents.market_coach.llm_gateway.types import (
             CircuitState,
         )
 

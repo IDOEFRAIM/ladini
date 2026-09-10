@@ -51,7 +51,7 @@ class TestIdentityPinning:
 
     @pytest.mark.parametrize("param_name", ["phone", "user_phone"])
     def test_phone_param_ignores_payload_override(self, param_name):
-        from agriconnect.graphs.agents.market_coach.services.mcp.schema_resolver import (
+        from ladini.graphs.agents.market_coach.services.mcp.schema_resolver import (
             lookup_arg_value,
         )
         state = self._state()
@@ -64,7 +64,7 @@ class TestIdentityPinning:
 
     @pytest.mark.parametrize("param_name", ["producer_id", "user_id"])
     def test_producer_id_param_ignores_payload_override(self, param_name):
-        from agriconnect.graphs.agents.market_coach.services.mcp.schema_resolver import (
+        from ladini.graphs.agents.market_coach.services.mcp.schema_resolver import (
             lookup_arg_value,
         )
         state = self._state()
@@ -81,7 +81,7 @@ class TestIdentityPinning:
         """Quand `state["user_id"]` (UUID déjà résolu par le profil chargé en
         amont) est disponible, il prime — et reste, comme le phone, immunisé
         au payload."""
-        from agriconnect.graphs.agents.market_coach.services.mcp.schema_resolver import (
+        from ladini.graphs.agents.market_coach.services.mcp.schema_resolver import (
             lookup_arg_value,
         )
         state = self._state(user_id="real-uuid-session")
@@ -93,7 +93,7 @@ class TestIdentityPinning:
         `create_product`) : même avec un `producer_id` forgé dans le payload
         ET dans `extracted_entities`, l'argument résolu envoyé à l'outil MCP
         reste celui de la session."""
-        from agriconnect.graphs.agents.market_coach.services.mcp.schema_resolver import (
+        from ladini.graphs.agents.market_coach.services.mcp.schema_resolver import (
             build_resolved_tool_args,
         )
         schema = {
@@ -124,7 +124,7 @@ class TestIdentityPinning:
     def test_pii_is_masked_in_logs(self):
         """Défense en profondeur complémentaire : même si l'identité pinnée
         finit dans un log d'audit, elle n'y apparaît jamais en clair."""
-        from agriconnect.graphs.agents.market_coach.services.mcp.schema_resolver import (
+        from ladini.graphs.agents.market_coach.services.mcp.schema_resolver import (
             mask_pii_args,
         )
         masked = mask_pii_args({"producer_id": self.SESSION_PHONE, "product": "maïs"})
@@ -152,7 +152,7 @@ def test_unknown_role_collapses_deterministically(garbage_role):
     qui ont besoin d'une valeur concrète (ex: sélection du graphe compilé)
     décident explicitement de leur propre repli (voir
     `core/graph_builder.py::build_graph`)."""
-    from agriconnect.graphs.roles import normalize_role
+    from ladini.graphs.roles import normalize_role
 
     norm = normalize_role(garbage_role)
     assert norm in {"BUYER", "PRODUCER", "UNKNOWN"}
@@ -177,7 +177,7 @@ class TestUnifiedGraphTopology:
         # `mc_runtime=object()` évite `build_runtime()` -> `get_llm()` (exige
         # un vrai GROQ_API_KEY) : ces tests inspectent la TOPOLOGIE compilée,
         # jamais l'exécution du graphe.
-        from agriconnect.graphs.agents.market_coach.core.graph_builder import build_graph
+        from ladini.graphs.agents.market_coach.core.graph_builder import build_graph
 
         def node_ids(role):
             g = build_graph(role=role, mc_runtime=object()).get_graph()
@@ -190,7 +190,7 @@ class TestUnifiedGraphTopology:
         )
 
     def test_all_tunnel_nodes_exist_for_any_role(self):
-        from agriconnect.graphs.agents.market_coach.core.graph_builder import build_graph
+        from ladini.graphs.agents.market_coach.core.graph_builder import build_graph
 
         required_tunnel_nodes = {"cart_management", "negotiation_gate", "order_tracking_node"}
         for role in ("PRODUCER", "BUYER"):
@@ -204,12 +204,12 @@ class TestUnifiedGraphTopology:
         tunnel buyer vers le pipeline générique (confirmation/exécuteur) au
         lieu de son nœud dédié — le tunnel perdrait sa machine à états
         (phases panier, négociation) et re-poserait les questions en boucle."""
-        from agriconnect.graphs.agents.market_coach.core.goals import (
+        from ladini.graphs.agents.market_coach.core.goals import (
             BUYER_AUCTION_TRACKING_GOALS,
             BUYER_NEGOTIATION_GOALS,
             BUYER_ORDER_TRACKING_GOALS,
         )
-        from agriconnect.graphs.agents.market_coach.core.router import get_domain_router
+        from ladini.graphs.agents.market_coach.core.router import get_domain_router
 
         router = get_domain_router("BUYER")
         state = lambda g: {"current_goal": g, "status": "PROCESSING", "working_memory": {}}
@@ -235,7 +235,7 @@ def test_prefix_based_role_gate_is_confirmed_dead_code():
     import pathlib
     import re
 
-    root = pathlib.Path(__file__).resolve().parents[2] / "src" / "agriconnect"
+    root = pathlib.Path(__file__).resolve().parents[2] / "src" / "ladini"
     live_callers = []
     for p in root.rglob("*.py"):
         if "__pycache__" in str(p) or p.name == "roles.py":

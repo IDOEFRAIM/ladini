@@ -2,7 +2,7 @@
 de livraison GPS."""
 from __future__ import annotations
 
-from agriconnect.core.geofencing import is_within_burkina_faso
+from ladini.core.geofencing import is_within_burkina_faso
 
 
 class TestIsWithinBurkinaFaso:

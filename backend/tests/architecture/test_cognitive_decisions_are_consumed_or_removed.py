@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "agriconnect" / "graphs" / "agents" / "market_coach"
+SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "ladini" / "graphs" / "agents" / "market_coach"
 
 
 def _iter_py_files():
@@ -110,8 +110,8 @@ class TestCognitiveOrchestratorFieldsHaveNoRoutingReader:
         avoir emporté ce mécanisme réellement utile avec elle."""
         import inspect
 
-        from agriconnect.graphs.agents.market_coach.interpreter import strategy
-        from agriconnect.graphs.agents.market_coach.nodes import clarification
+        from ladini.graphs.agents.market_coach.interpreter import strategy
+        from ladini.graphs.agents.market_coach.nodes import clarification
 
         strategy_src = inspect.getsource(strategy.response_strategy)
         clarification_src = inspect.getsource(clarification.clarification_node)
@@ -126,7 +126,7 @@ class TestCognitiveOrchestratorFieldsHaveNoRoutingReader:
         # plutôt que la chaîne nue. `response_strategy.py`, hors périmètre,
         # garde la comparaison littérale historique.
         assert "ConversationAction.ABANDON_ACTIVE_GOAL" in clarification_src
-        from agriconnect.graphs.agents.market_coach.core.conversation_decision import (
+        from ladini.graphs.agents.market_coach.core.conversation_decision import (
             ConversationAction,
         )
 
@@ -157,7 +157,7 @@ class TestCognitiveGuardRoutingHistory:
 
     def test_route_after_cognitive_no_longer_exists(self):
         """L'ORIGINAL routeur onboarding-only reste mort — pas de résurgence."""
-        from agriconnect.graphs.agents.market_coach.core import graph_builder
+        from ladini.graphs.agents.market_coach.core import graph_builder
 
         assert not hasattr(graph_builder, "_route_after_cognitive")
 
@@ -176,7 +176,7 @@ class TestCognitiveGuardHasTheFullConversationalRouting:
         été ajoutée — RECOVER_ACTIVE_GOAL route directement vers
         `response_strategy`, `clarification_node` étant un no-op structurel
         prouvé pour cette action (voir `nodes/clarification.py`)."""
-        from agriconnect.graphs.agents.market_coach.core.graph_builder import (
+        from ladini.graphs.agents.market_coach.core.graph_builder import (
             build_graph,
         )
 

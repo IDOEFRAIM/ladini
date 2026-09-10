@@ -7,7 +7,7 @@ prix pour un tout autre produit. Voir
 [[precommande-architecture-consolidation-2026-08]]."""
 from __future__ import annotations
 
-from agriconnect.services.database.category import _is_confident_category_match
+from ladini.services.database.category import _is_confident_category_match
 
 
 class TestIsConfidentCategoryMatch:

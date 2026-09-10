@@ -20,11 +20,11 @@ import pytest
 
 from tests.conftest import run
 
-from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     PreorderDraft,
     PreorderDraftStatus,
 )
-from agriconnect.services.database import preorder_draft_store as store_mod
+from ladini.services.database import preorder_draft_store as store_mod
 
 
 class _FakeDraftTable:

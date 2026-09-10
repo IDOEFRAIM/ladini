@@ -12,20 +12,20 @@ from typing import Any, Dict
 
 import pytest
 
-from agriconnect.core.settings import settings
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.core.settings import settings
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
-from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     PreorderDraft,
     PreorderDraftStatus,
 )
-from agriconnect.services.database import preorder_draft_store as store_mod
+from ladini.services.database import preorder_draft_store as store_mod
 from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
 from tests.conftest import make_state, run
 
-_GATE_MODULE = "agriconnect.graphs.agents.market_coach.flows.buyer.gps_delivery_gate"
+_GATE_MODULE = "ladini.graphs.agents.market_coach.flows.buyer.gps_delivery_gate"
 
 CART = [{
     "product_id": "p1", "name": "tomates", "quantity": 55,
@@ -34,7 +34,7 @@ CART = [{
 
 
 def _mod():
-    import agriconnect.graphs.agents.market_coach.flows.buyer.preorder as mod
+    import ladini.graphs.agents.market_coach.flows.buyer.preorder as mod
     return mod
 
 
@@ -132,7 +132,7 @@ class TestPreorderGpsGate:
         # (`preorder_confirm:abc123draft:1`) est réutilisée par PLUSIEURS
         # tests de cette classe : neutralisé ici pour éviter une collision
         # entre exécutions (même principe que les tests PROCUREMENT).
-        import agriconnect.graphs.agents.market_coach.domain.preorder_draft as pd_mod
+        import ladini.graphs.agents.market_coach.domain.preorder_draft as pd_mod
         monkeypatch.setattr(pd_mod, "claim_once", lambda key: True)
         draft = _draft(draft_id="abc123draft", order_id="abc123")
         run(store_mod.insert(draft, conversation_id="+22670000000"))
@@ -207,10 +207,10 @@ class TestPreorderGpsGate:
                 return {"status": "success", "order_id": "order1", "order_number": "ORD1"}
 
         monkeypatch.setattr(
-            "agriconnect.graphs.agents.market_coach.services.mcp.gateway.EscrowGateway",
+            "ladini.graphs.agents.market_coach.services.mcp.gateway.EscrowGateway",
             _CapturingEscrowGateway,
         )
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
         monkeypatch.setattr(pc_mod, "EscrowGateway", _CapturingEscrowGateway)
 
         state = self._confirmed_no_location_state(
@@ -248,7 +248,7 @@ class TestPreorderGpsGate:
                 seen.update(kwargs)
                 return {"status": "success", "order_id": "order1", "order_number": "ORD1"}
 
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
         monkeypatch.setattr(pc_mod, "EscrowGateway", _CapturingEscrowGateway)
 
         state = self._confirmed_no_location_state(monkeypatch)
@@ -284,7 +284,7 @@ class TestPreorderGpsGate:
                 seen.update(kwargs)
                 return {"status": "success", "order_id": "order1", "order_number": "ORD1"}
 
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
         monkeypatch.setattr(pc_mod, "PreorderGateway", _CapturingGateway)
 
         state = self._confirmed_no_location_state(monkeypatch)

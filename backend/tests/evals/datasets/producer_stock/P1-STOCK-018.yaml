@@ -6,7 +6,7 @@ tags: [happy_path, deletion, contrast_case]
 grounding:
   status: PROVEN_BY_CODE
   evidence:
-    - "backend/src/agriconnect/services/database/producer.py:1777-1805 — delete_stock(phone, stock_id): own-phone branch (stock_obj.farm.producer.user.phone == phone) proceeds to session.delete(stock_obj)"
+    - "backend/src/ladini/services/database/producer.py:1777-1805 — delete_stock(phone, stock_id): own-phone branch (stock_obj.farm.producer.user.phone == phone) proceeds to session.delete(stock_obj)"
   note: "Positive contrast case to P0-SEC-011 (which tests the mismatched-phone rejection branch of this exact function)."
 
 persona: {role: PRODUCER, description: "Producteur, supprime une ligne de stock erronée", phone: "+22670000036"}

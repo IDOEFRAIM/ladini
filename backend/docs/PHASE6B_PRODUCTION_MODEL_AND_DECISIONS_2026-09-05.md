@@ -145,7 +145,7 @@ aucun `OrderItem`, référence un seul `winning_bid_id`, n'utilise pas
 ### P3
 
 1. Le tableau de bord acheteur ne relie pas visuellement les commandes d'un même checkout (§8).
-2. `src/agriconnect/services/database/README.md` décrit encore `finalize_multi_order` comme le chemin de checkout — documentation périmée, aggravée par le nouveau modèle. Aucun impact runtime.
+2. `src/ladini/services/database/README.md` décrit encore `finalize_multi_order` comme le chemin de checkout — documentation périmée, aggravée par le nouveau modèle. Aucun impact runtime.
 3. Code mort connu et inchangé : `OrderService`, `DeliveryMixin`, `product_service.py`, `finalize_multi_order`, `update_production_visibility`.
 
 ## 13. Tests

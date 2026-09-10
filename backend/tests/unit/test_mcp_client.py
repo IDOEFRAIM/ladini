@@ -23,13 +23,13 @@ from tests.conftest import run
 
 class TestTransportConfigFromSettings:
     def test_stdio_requires_an_entrypoint(self):
-        from agriconnect.infrastructure.mcp.client import MCPTransportConfig
+        from ladini.infrastructure.mcp.client import MCPTransportConfig
         settings = SimpleNamespace(MCP_DB_TRANSPORT="stdio", MCP_DB_STDIO_ENTRYPOINT="")
         with pytest.raises(ValueError, match="MCP_DB_STDIO_ENTRYPOINT"):
             MCPTransportConfig.from_settings(settings)
 
     def test_stdio_auto_fills_pythonpath_from_base_dir(self):
-        from agriconnect.infrastructure.mcp.client import MCPTransportConfig
+        from ladini.infrastructure.mcp.client import MCPTransportConfig
         settings = SimpleNamespace(
             MCP_DB_TRANSPORT="stdio",
             MCP_DB_STDIO_ENTRYPOINT="/srv/mcp/server.py",
@@ -45,7 +45,7 @@ class TestTransportConfigFromSettings:
         assert cfg.stdio_env["PYTHONPATH"] == "/srv/app"
 
     def test_stdio_log_path_prefers_log_dir_over_base_dir(self):
-        from agriconnect.infrastructure.mcp.client import MCPTransportConfig
+        from ladini.infrastructure.mcp.client import MCPTransportConfig
         settings = SimpleNamespace(
             MCP_DB_TRANSPORT="stdio",
             MCP_DB_STDIO_ENTRYPOINT="/srv/mcp/server.py",
@@ -60,7 +60,7 @@ class TestTransportConfigFromSettings:
         assert "var" in cfg.stdio_log_path and "log" in cfg.stdio_log_path
 
     def test_http_derives_url_from_host_and_port_when_unset(self):
-        from agriconnect.infrastructure.mcp.client import MCPTransportConfig
+        from ladini.infrastructure.mcp.client import MCPTransportConfig
         settings = SimpleNamespace(
             MCP_DB_TRANSPORT="http", MCP_DB_HTTP_URL="",
             MCP_DB_SERVER_HOST="db-mcp", MCP_DB_SERVER_PORT=9001,
@@ -70,7 +70,7 @@ class TestTransportConfigFromSettings:
         assert cfg.http_base_url == "http://db-mcp:9001"
 
     def test_http_uses_explicit_url_when_set(self):
-        from agriconnect.infrastructure.mcp.client import MCPTransportConfig
+        from ladini.infrastructure.mcp.client import MCPTransportConfig
         settings = SimpleNamespace(
             MCP_DB_TRANSPORT="http", MCP_DB_HTTP_URL="https://mcp.internal",
             MCP_DB_HTTP_HEADERS={"X-Api-Key": "k"},
@@ -80,13 +80,13 @@ class TestTransportConfigFromSettings:
         assert cfg.http_headers == {"X-Api-Key": "k"}
 
     def test_grpc_requires_a_target(self):
-        from agriconnect.infrastructure.mcp.client import MCPTransportConfig
+        from ladini.infrastructure.mcp.client import MCPTransportConfig
         settings = SimpleNamespace(MCP_DB_TRANSPORT="grpc", MCP_DB_GRPC_TARGET="")
         with pytest.raises(ValueError, match="MCP_DB_GRPC_TARGET"):
             MCPTransportConfig.from_settings(settings)
 
     def test_grpc_builds_config_with_defaults(self):
-        from agriconnect.infrastructure.mcp.client import MCPTransportConfig
+        from ladini.infrastructure.mcp.client import MCPTransportConfig
         settings = SimpleNamespace(
             MCP_DB_TRANSPORT="grpc", MCP_DB_GRPC_TARGET="mcp:50051",
             MCP_DB_GRPC_TLS=True, MCP_DB_GRPC_METADATA={"a": "b"},
@@ -97,7 +97,7 @@ class TestTransportConfigFromSettings:
         assert cfg.grpc_metadata == {"a": "b"}
 
     def test_unsupported_transport_raises(self):
-        from agriconnect.infrastructure.mcp.client import MCPTransportConfig
+        from ladini.infrastructure.mcp.client import MCPTransportConfig
         settings = SimpleNamespace(MCP_DB_TRANSPORT="carrier_pigeon")
         with pytest.raises(ValueError, match="Unsupported MCP transport"):
             MCPTransportConfig.from_settings(settings)
@@ -113,8 +113,8 @@ class TestTransportConfigFromSettings:
 
 class TestHttpMCPAdapter:
     def test_connect_raises_without_fastmcp_installed(self, monkeypatch):
-        import agriconnect.infrastructure.mcp.client as client_mod
-        from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
+        import ladini.infrastructure.mcp.client as client_mod
+        from ladini.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
 
         monkeypatch.setattr(client_mod, "Client", None)
         adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url="http://x"))
@@ -122,8 +122,8 @@ class TestHttpMCPAdapter:
             run(adapter.connect())
 
     def test_connect_requires_a_base_url(self, monkeypatch):
-        import agriconnect.infrastructure.mcp.client as client_mod
-        from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
+        import ladini.infrastructure.mcp.client as client_mod
+        from ladini.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
 
         monkeypatch.setattr(client_mod, "Client", _FakeFastMCPClient)
         adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url=None))
@@ -134,8 +134,8 @@ class TestHttpMCPAdapter:
         """Le daemon n'expose plus qu'un unique endpoint `/mcp` (Streamable
         HTTP) — vérifie que l'URL construite pointe bien dessus, y compris
         quand `http_base_url` porte un slash final."""
-        import agriconnect.infrastructure.mcp.client as client_mod
-        from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
+        import ladini.infrastructure.mcp.client as client_mod
+        from ladini.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
 
         monkeypatch.setattr(client_mod, "Client", _FakeFastMCPClient)
 
@@ -157,7 +157,7 @@ class TestHttpMCPAdapter:
         assert adapter._client is None
 
     def test_list_tools_and_call_tool_require_a_connected_client(self):
-        from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
         adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url="http://x"))
         with pytest.raises(RuntimeError, match="Client HTTP MCP non initialisé"):
             run(adapter.list_tools())
@@ -165,14 +165,14 @@ class TestHttpMCPAdapter:
             run(adapter.call_tool("t", {}))
 
     def test_list_tools_and_call_tool_delegate_once_connected(self):
-        from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
         adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url="http://x"))
         adapter._client = _FakeFastMCPClient(transport=None)
         assert run(adapter.list_tools()) == [{"name": "t1"}]
         assert run(adapter.call_tool("t1", {"a": 1})) == {"name": "t1", "arguments": {"a": 1}}
 
     def test_close_is_a_noop_without_a_connected_client(self):
-        from agriconnect.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import HttpMCPAdapter, MCPTransportConfig
         adapter = HttpMCPAdapter(MCPTransportConfig(kind="http", http_base_url="http://x"))
         run(adapter.close())  # ne doit pas lever
 
@@ -214,14 +214,14 @@ def _install_fake_grpc(monkeypatch, channel):
 
 class TestGrpcMCPAdapter:
     def test_connect_requires_a_target(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
         _install_fake_grpc(monkeypatch, _FakeGrpcChannel())
         adapter = GrpcMCPAdapter(MCPTransportConfig(kind="grpc", grpc_target=None))
         with pytest.raises(ValueError, match="grpc_target"):
             run(adapter.connect())
 
     def test_connect_uses_insecure_channel_by_default(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
         channel = _FakeGrpcChannel()
         _install_fake_grpc(monkeypatch, channel)
         adapter = GrpcMCPAdapter(MCPTransportConfig(kind="grpc", grpc_target="mcp:1", grpc_tls=False))
@@ -229,7 +229,7 @@ class TestGrpcMCPAdapter:
         assert adapter._channel is channel
 
     def test_connect_uses_secure_channel_with_tls(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
         channel = _FakeGrpcChannel()
         _install_fake_grpc(monkeypatch, channel)
         adapter = GrpcMCPAdapter(MCPTransportConfig(kind="grpc", grpc_target="mcp:1", grpc_tls=True))
@@ -237,13 +237,13 @@ class TestGrpcMCPAdapter:
         assert adapter._channel is channel
 
     def test_stub_without_a_channel_raises(self):
-        from agriconnect.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
         adapter = GrpcMCPAdapter(MCPTransportConfig(kind="grpc", grpc_target="mcp:1"))
         with pytest.raises(RuntimeError, match="Canal gRPC non initialisé"):
             adapter._stub("/method")
 
     def test_list_tools_unwraps_tools_key(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
         channel = _FakeGrpcChannel(response={"tools": [{"name": "t1"}]})
         _install_fake_grpc(monkeypatch, channel)
         adapter = GrpcMCPAdapter(MCPTransportConfig(kind="grpc", grpc_target="mcp:1"))
@@ -251,7 +251,7 @@ class TestGrpcMCPAdapter:
         assert run(adapter.list_tools()) == [{"name": "t1"}]
 
     def test_list_tools_returns_empty_list_on_unexpected_shape(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
         channel = _FakeGrpcChannel(response={"unexpected": "shape"})
         _install_fake_grpc(monkeypatch, channel)
         adapter = GrpcMCPAdapter(MCPTransportConfig(kind="grpc", grpc_target="mcp:1"))
@@ -259,7 +259,7 @@ class TestGrpcMCPAdapter:
         assert run(adapter.list_tools()) == []
 
     def test_call_tool_returns_the_raw_response(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
         channel = _FakeGrpcChannel(response={"result": "ok"})
         _install_fake_grpc(monkeypatch, channel)
         adapter = GrpcMCPAdapter(MCPTransportConfig(kind="grpc", grpc_target="mcp:1"))
@@ -267,7 +267,7 @@ class TestGrpcMCPAdapter:
         assert run(adapter.call_tool("t1", {"a": 1})) == {"result": "ok"}
 
     def test_close_closes_the_channel(self, monkeypatch):
-        from agriconnect.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import GrpcMCPAdapter, MCPTransportConfig
         channel = _FakeGrpcChannel()
         _install_fake_grpc(monkeypatch, channel)
         adapter = GrpcMCPAdapter(MCPTransportConfig(kind="grpc", grpc_target="mcp:1"))
@@ -301,8 +301,8 @@ class _FakeFastMCPClient:
 
 class TestFastMCPProcessAdapter:
     def test_connect_raises_without_fastmcp_installed(self, monkeypatch, tmp_path):
-        import agriconnect.infrastructure.mcp.client as client_mod
-        from agriconnect.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
+        import ladini.infrastructure.mcp.client as client_mod
+        from ladini.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
 
         monkeypatch.setattr(client_mod, "Client", None)
         adapter = FastMCPProcessAdapter(MCPTransportConfig(kind="stdio", stdio_script="anything.py"))
@@ -310,8 +310,8 @@ class TestFastMCPProcessAdapter:
             run(adapter.connect())
 
     def test_connect_raises_when_script_is_missing(self, monkeypatch, tmp_path):
-        import agriconnect.infrastructure.mcp.client as client_mod
-        from agriconnect.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
+        import ladini.infrastructure.mcp.client as client_mod
+        from ladini.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
 
         monkeypatch.setattr(client_mod, "Client", _FakeFastMCPClient)
         missing = tmp_path / "does_not_exist.py"
@@ -320,8 +320,8 @@ class TestFastMCPProcessAdapter:
             run(adapter.connect())
 
     def test_connect_success_wires_the_client_and_transport(self, monkeypatch, tmp_path):
-        import agriconnect.infrastructure.mcp.client as client_mod
-        from agriconnect.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
+        import ladini.infrastructure.mcp.client as client_mod
+        from ladini.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
 
         script = tmp_path / "server.py"
         script.write_text("# fake mcp server")
@@ -346,7 +346,7 @@ class TestFastMCPProcessAdapter:
         assert adapter._client is None
 
     def test_list_tools_and_call_tool_require_a_connected_client(self):
-        from agriconnect.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
         adapter = FastMCPProcessAdapter(MCPTransportConfig(kind="stdio", stdio_script="x.py"))
         with pytest.raises(RuntimeError, match="Client FastMCP non initialisé"):
             run(adapter.list_tools())
@@ -354,7 +354,7 @@ class TestFastMCPProcessAdapter:
             run(adapter.call_tool("t", {}))
 
     def test_list_tools_and_call_tool_delegate_once_connected(self):
-        from agriconnect.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import FastMCPProcessAdapter, MCPTransportConfig
         adapter = FastMCPProcessAdapter(MCPTransportConfig(kind="stdio", stdio_script="x.py"))
         adapter._client = _FakeFastMCPClient(transport=None)
         assert run(adapter.list_tools()) == [{"name": "t1"}]
@@ -401,7 +401,7 @@ class _FakeAdapter:
 
 
 def _client_with_fake_adapter(monkeypatch, adapter):
-    from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
+    from ladini.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
     client = AgriMCPClient(MCPTransportConfig(kind="stdio", stdio_script="x.py"))
     monkeypatch.setattr(client, "_create_adapter", lambda: adapter)
     return client
@@ -452,7 +452,7 @@ class TestAgriMCPClientLifecycle:
         run(client.close())
 
     def test_create_adapter_dispatches_by_kind(self):
-        from agriconnect.infrastructure.mcp.client import (
+        from ladini.infrastructure.mcp.client import (
             AgriMCPClient, MCPTransportConfig, FastMCPProcessAdapter, HttpMCPAdapter, GrpcMCPAdapter,
         )
         assert isinstance(AgriMCPClient(MCPTransportConfig(kind="stdio"))._create_adapter(), FastMCPProcessAdapter)
@@ -464,7 +464,7 @@ class TestAgriMCPClientLifecycle:
         transports passent désormais par `fastmcp.Client` — les handlers
         elicitation/progress/message doivent être câblés sur les deux, pas
         seulement sur le transport stdio historique."""
-        from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
         client = AgriMCPClient(MCPTransportConfig(kind="http", http_base_url="http://x"))
         adapter = client._create_adapter()
         assert adapter._elicitation_handler == client._handle_elicitation
@@ -472,7 +472,7 @@ class TestAgriMCPClientLifecycle:
         assert adapter._message_handler == client._handle_message
 
     def test_create_adapter_unknown_kind_raises(self):
-        from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
         client = AgriMCPClient(MCPTransportConfig(kind="carrier_pigeon"))
         with pytest.raises(ValueError, match="Unsupported MCP transport kind"):
             client._create_adapter()
@@ -516,7 +516,7 @@ class TestAgriMCPClientLifecycle:
         déclencher une reconnexion automatique — sans ça, une session MCP
         silencieusement coupée reste inutilisable jusqu'au prochain crash."""
         import asyncio
-        import agriconnect.infrastructure.mcp.client as client_mod
+        import ladini.infrastructure.mcp.client as client_mod
 
         monkeypatch.setattr(client_mod.AgriMCPClient, "_WATCHDOG_INTERVAL_S", 0.01)
         adapter = _FakeAdapter()
@@ -577,7 +577,7 @@ class TestAgriMCPClientToolsCache:
         assert cached == client._tools_cache
 
     def test_refresh_tools_without_a_connected_adapter_raises(self):
-        from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
         client = AgriMCPClient(MCPTransportConfig(kind="stdio"))
         with pytest.raises(RuntimeError, match="Client non connecté"):
             run(client.refresh_tools())
@@ -589,7 +589,7 @@ class TestAgriMCPClientToolsCache:
         ({}, "tool"),
     ])
     def test_normalize_tool_descriptor_shapes(self, tool, expected_name):
-        from agriconnect.infrastructure.mcp.client import AgriMCPClient
+        from ladini.infrastructure.mcp.client import AgriMCPClient
         normalized = AgriMCPClient._normalize_tool_descriptor(tool)
         assert normalized["type"] == "function"
         assert normalized["function"]["name"] == expected_name
@@ -598,18 +598,18 @@ class TestAgriMCPClientToolsCache:
 
 class TestAgriMCPClientSanitizeArguments:
     def test_drops_none_values(self):
-        from agriconnect.infrastructure.mcp.client import AgriMCPClient
+        from ladini.infrastructure.mcp.client import AgriMCPClient
         assert AgriMCPClient._sanitize_arguments({"a": 1, "b": None}) == {"a": 1}
 
     def test_non_dict_input_becomes_empty_dict(self):
-        from agriconnect.infrastructure.mcp.client import AgriMCPClient
+        from ladini.infrastructure.mcp.client import AgriMCPClient
         assert AgriMCPClient._sanitize_arguments("not-a-dict") == {}
         assert AgriMCPClient._sanitize_arguments(None) == {}
 
 
 class TestAgriMCPClientCallTool:
     def test_raises_without_a_connected_adapter(self):
-        from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
         client = AgriMCPClient(MCPTransportConfig(kind="stdio"))
         with pytest.raises(RuntimeError, match="Client non connecté"):
             run(client.call_tool("t", {}))
@@ -801,7 +801,7 @@ class TestAgriMCPClientIdempotencyKey:
 
 class TestAgriMCPClientHandlers:
     def test_handle_elicitation_declines_by_default(self):
-        from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig, ElicitResult
+        from ladini.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig, ElicitResult
         client = AgriMCPClient(MCPTransportConfig(kind="stdio"))
         result = run(client._handle_elicitation("msg", None, None, None))
         if ElicitResult:
@@ -810,7 +810,7 @@ class TestAgriMCPClientHandlers:
             assert result is None
 
     def test_handle_progress_does_not_raise(self):
-        from agriconnect.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
+        from ladini.infrastructure.mcp.client import AgriMCPClient, MCPTransportConfig
         client = AgriMCPClient(MCPTransportConfig(kind="stdio"))
         run(client._handle_progress(1.0, 10.0, "working"))
         run(client._handle_progress(1.0, None, None))

@@ -30,15 +30,15 @@ import inspect
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.interpreter.intent import (
+from ladini.graphs.agents.market_coach.interpreter.intent import (
     INTENT_CONFIG,
     INTENT_ROLE,
     _TUNNEL_ASSIGNMENTS,
 )
-from agriconnect.graphs.agents.market_coach.registry import get_action
-from agriconnect.graphs.agents.market_coach.utils import _AUTO_RESOLVABLE_FIELDS
-from agriconnect.infrastructure.mcp.security import TOOL_SCOPE_MAP
-from agriconnect.protocols.mcp.servers.h import TOOL_DESCRIPTIONS
+from ladini.graphs.agents.market_coach.registry import get_action
+from ladini.graphs.agents.market_coach.utils import _AUTO_RESOLVABLE_FIELDS
+from ladini.infrastructure.mcp.security import TOOL_SCOPE_MAP
+from ladini.protocols.mcp.servers.h import TOOL_DESCRIPTIONS
 
 # =====================================================================
 # EXCEPTIONS DOCUMENTÉES
@@ -122,7 +122,7 @@ def _resolver_passthrough() -> dict:
     """`_RESOLVER_PASSTHROUGH` est une constante LOCALE au validateur —
     on la lit sur la source réelle plutôt que d'en maintenir une copie
     (une copie dériverait, ce qui est exactement le bug qu'on traque)."""
-    import agriconnect.graphs.agents.market_coach.nodes.validation as validation_mod
+    import ladini.graphs.agents.market_coach.nodes.validation as validation_mod
 
     src = inspect.getsource(validation_mod)
     start = src.index("_RESOLVER_PASSTHROUGH = {")
@@ -242,8 +242,8 @@ class TestRealEntryPointReachesTheResolver:
          "PRODUCER_CANCEL_ORDER"],
     )
     def test_validator_then_router_route_to_the_resolver(self, goal):
-        from agriconnect.graphs.agents.market_coach.core.router import DomainRouter
-        from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+        from ladini.graphs.agents.market_coach.core.router import DomainRouter
+        from ladini.graphs.agents.market_coach.nodes.validation import validator
         from tests.conftest import StubRuntime, make_state, run
 
         # `make_state` pose `interpreted_event="UNKNOWN"` par défaut, ce que

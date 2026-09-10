@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
+from ladini.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
 )

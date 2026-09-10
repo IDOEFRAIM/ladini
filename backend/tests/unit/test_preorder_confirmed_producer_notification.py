@@ -20,8 +20,8 @@ import pytest
 
 from tests.conftest import run
 
-from agriconnect.services.database.buyer import BuyerMixin
-from agriconnect.services.database.errors import BusinessRuleException
+from ladini.services.database.buyer import BuyerMixin
+from ladini.services.database.errors import BusinessRuleException
 
 
 async def _async_return(value):

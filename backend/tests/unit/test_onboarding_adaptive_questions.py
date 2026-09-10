@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional
 
 from tests.conftest import run
 
-from agriconnect.agents.onboarding import (
+from ladini.agents.onboarding import (
     OnboardingState,
     OnboardingStep,
     run_onboarding_step,
@@ -62,7 +62,7 @@ class TestAdaptiveQuestionHandling:
             None,
             llm_extract_all=_extractor(
                 is_question=True,
-                reply="AgriConnect connecte producteurs et acheteurs par WhatsApp, sur mesure pour toi patron !",
+                reply="Ladini connecte producteurs et acheteurs par WhatsApp, sur mesure pour toi patron !",
             ),
         ))
         assert "sur mesure pour toi patron" in result.response_text
@@ -81,7 +81,7 @@ class TestAdaptiveQuestionHandling:
             None,
             llm_extract_all=_extractor(is_question=True, reply=None),
         ))
-        assert "AgriConnect" in result.response_text
+        assert "Ladini" in result.response_text
         assert "connecte directement producteurs" in result.response_text
 
     def test_normal_onboarding_data_does_not_trigger_any_explanation(self):
@@ -92,7 +92,7 @@ class TestAdaptiveQuestionHandling:
             None,
             llm_extract_all=_extractor(name="Awa", role="PRODUCER"),
         ))
-        assert "AgriConnect" not in result.response_text
+        assert "Ladini" not in result.response_text
         assert ob_state.name == "Awa"
         assert ob_state.role == "PRODUCER"
 

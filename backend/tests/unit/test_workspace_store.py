@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agriconnect.workspace.models import Workspace
-from agriconnect.workspace.store import (
+from ladini.workspace.models import Workspace
+from ladini.workspace.store import (
     WorkspaceStore,
     _decode_state_blob,
     _encode_state_blob,
@@ -123,7 +123,7 @@ class _FakeSession:
 
 
 def _install_fake_get_db(monkeypatch, session):
-    import agriconnect.workspace.store as store_mod
+    import ladini.workspace.store as store_mod
 
     class _CM:
         async def __aenter__(self_inner):
@@ -170,7 +170,7 @@ class TestWorkspaceStoreGet:
         assert ws.agent_state == {"current_goal": "X"}
 
     def test_legacy_state_under_metadata_key_is_used_as_fallback(self, monkeypatch):
-        from agriconnect.workspace.metadata import LANGGRAPH_STATE_KEY
+        from ladini.workspace.metadata import LANGGRAPH_STATE_KEY
         row = {
             "workspace_id": "phone-1", "workspace_type": "producer", "active_goal": "",
             "active_form": None, "locked_agent": None,
@@ -257,7 +257,7 @@ class TestWorkspaceStoreSave:
         assert json.loads(params["metadata"]) == {}
 
     def test_oversized_state_after_compression_is_truncated(self, monkeypatch):
-        import agriconnect.workspace.store as store_mod
+        import ladini.workspace.store as store_mod
         monkeypatch.setattr(store_mod, "_MAX_STATE_BYTES", 100)
         session = _FakeSession(results=[_FakeResult(), _FakeResult(), _FakeResult(), _FakeResult(scalar_value=None)])
         _install_fake_get_db(monkeypatch, session)
@@ -276,7 +276,7 @@ class TestWorkspaceStoreSave:
         assert run(store.save(ws)) is False
 
     def test_legacy_state_under_metadata_key_is_used_when_agent_state_empty(self, monkeypatch):
-        from agriconnect.workspace.metadata import LANGGRAPH_STATE_KEY
+        from ladini.workspace.metadata import LANGGRAPH_STATE_KEY
         session = _FakeSession(results=[_FakeResult(), _FakeResult(), _FakeResult(), _FakeResult(scalar_value=None)])
         _install_fake_get_db(monkeypatch, session)
         store = WorkspaceStore()

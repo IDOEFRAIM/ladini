@@ -1,4 +1,4 @@
-"""Executes the P0 set against REAL agriconnect code.
+"""Executes the P0 set against REAL ladini code.
 
 Run from backend/:
     PYTHONIOENCODING=utf-8 .venv/Scripts/python.exe -m tests.evals.runners.run_p0
@@ -94,7 +94,7 @@ def drive_P0_SEC_001() -> ScenarioResult:
 # =====================================================================
 
 async def _reject_flow(state: Dict[str, Any], rt: RecordingRuntime) -> Dict[str, Any]:
-    from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import confirmation_gate
+    from ladini.graphs.agents.market_coach.nodes.confirmation_gate import confirmation_gate
     state["interpreted_event"] = "REJECT"
     c = await confirmation_gate(state, rt)
     state.update(c)
@@ -172,7 +172,7 @@ def drive_P0_SEC_004() -> ScenarioResult:
             },
         },
     })
-    from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import check_order_status
+    from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import check_order_status
     state = _base_state(
         user_phone="+22670000004", user_role="BUYER", role="BUYER",
         current_goal="BUYER_CHECK_ORDER_STATUS",
@@ -258,7 +258,7 @@ def drive_P0_SEC_006() -> ScenarioResult:
     rt = RecordingRuntime(responses={
         "confirm_preorder_draft": Exception("simulated MCP failure"),
     })
-    from agriconnect.graphs.agents.market_coach.flows.buyer.preorder import create_preorder
+    from ladini.graphs.agents.market_coach.flows.buyer.preorder import create_preorder
     state = _base_state(
         user_phone="+22670000006", user_role="BUYER", role="BUYER",
         current_goal="BUYER_PREORDER_CONFIRM",
@@ -268,7 +268,7 @@ def drive_P0_SEC_006() -> ScenarioResult:
         location_shared=False,  # is_confirm=True + location_shared=False -> resolve_gps_stage's "oui au point par défaut" branch (reads gps_default), NOT the native-share branch (which reads a stored profile location via get_user_by_phone and doesn't consult gps_default at all)
     )
     res.state_before = dict(state)
-    from agriconnect.graphs.agents.market_coach.services.mcp.gateway import MCPCallError
+    from ladini.graphs.agents.market_coach.services.mcp.gateway import MCPCallError
     raised_mcp_error = False
     try:
         r = run(create_preorder(state, rt))
@@ -317,7 +317,7 @@ def drive_P0_BIZ_007() -> ScenarioResult:
             ],
         },
     })
-    from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
+    from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
     state = _base_state(
         user_phone="+22670000007", user_role="BUYER", role="BUYER",
         current_goal="BUYER_REQUEST",
@@ -353,7 +353,7 @@ def drive_P0_BIZ_007() -> ScenarioResult:
 
 def drive_P0_STATE_010() -> ScenarioResult:
     res = _result("P0-STATE-010", "PROVEN_BY_CODE")
-    from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
+    from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
 
     rt_a = RecordingRuntime(responses={"search_products": {"status": "success", "results": [
         {"id": "p1", "name": "Tomates", "price": 300, "unit": "KG", "vendor": {"name": "F1"}, "producer_id": "f1"},

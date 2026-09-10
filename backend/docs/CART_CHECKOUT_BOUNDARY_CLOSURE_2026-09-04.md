@@ -109,7 +109,7 @@ code MORT, jamais appelée depuis le vrai chemin MCP (déjà identifié par
 l'audit précédent). Un panier composé avant qu'un admin ne relève le seuil
 pouvait ainsi produire une précommande en dessous du minimum EN VIGUEUR.
 
-**Correctif** ([buyer.py](../src/agriconnect/services/database/buyer.py))
+**Correctif** ([buyer.py](../src/ladini/services/database/buyer.py))
 — `create_preorder_draft` revalide désormais chaque article contre
 `SubCategory` (même requête, même fonction pure que la référence morte) ;
 un article qui échoue est écarté (jamais sous-facturé) et journalisé dans
@@ -201,7 +201,7 @@ persisté) — zéro divergence.
 
 ## J. Web ↔ Agent
 
-Ce dépôt (`AgriConnect/`) ne contient PAS l'application web (`frontend/`
+Ce dépôt (`Ladini/`) ne contient PAS l'application web (`frontend/`
 local n'est qu'un prototype Gradio Python + un schéma Drizzle, aucun code
 panier). L'app web réelle (`frontag`, référencée par la mémoire de session
 précédente pour `orderPolicy.ts`) est un dépôt SÉPARÉ, hors de portée de

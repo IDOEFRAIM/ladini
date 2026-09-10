@@ -1,6 +1,6 @@
 # MARKET COACH — CARTOGRAPHIE COMPLÈTE
 
-_Généré le 2026-09-08 par lecture exhaustive de `backend/src/agriconnect/graphs/agents/market_coach/` (~130 fichiers, ~35 000 lignes). Objectif : donner une vue précise et vérifiée du fonctionnement réel de l'agent — pas une doc aspirationnelle — pour accélérer le diagnostic des bugs récurrents._
+_Généré le 2026-09-08 par lecture exhaustive de `backend/src/ladini/graphs/agents/market_coach/` (~130 fichiers, ~35 000 lignes). Objectif : donner une vue précise et vérifiée du fonctionnement réel de l'agent — pas une doc aspirationnelle — pour accélérer le diagnostic des bugs récurrents._
 
 ---
 
@@ -12,14 +12,14 @@ Chaque section cite les fichiers réels (`chemin/fichier.py:ligne` quand pertine
 
 ## 1. Vue d'ensemble
 
-`market_coach` est un agent conversationnel WhatsApp (LangGraph `StateGraph`) qui sert **à la fois** les producteurs et les acheteurs de la marketplace agricole AgriConnect — **un seul graphe compilé**, pas un par rôle (refonte double-rôle, 2026-09-02+) : n'importe quel utilisateur peut vendre ET acheter dans la même conversation, le domaine (BUYER/PRODUCER) étant résolu **par goal**, jamais par une session figée.
+`market_coach` est un agent conversationnel WhatsApp (LangGraph `StateGraph`) qui sert **à la fois** les producteurs et les acheteurs de la marketplace agricole Ladini — **un seul graphe compilé**, pas un par rôle (refonte double-rôle, 2026-09-02+) : n'importe quel utilisateur peut vendre ET acheter dans la même conversation, le domaine (BUYER/PRODUCER) étant résolu **par goal**, jamais par une session figée.
 
 ```
 Entrée WhatsApp (Twilio) → orchestrator (hors market_coach) → build_graph(role, ...) → StateGraph.ainvoke(state)
 → 14+ nœuds séquentiels/conditionnels → final_response → WorkspaceCheckpointer (persistance) → réponse WhatsApp
 ```
 
-Point d'entrée module : [`adapter.py`](../src/agriconnect/graphs/agents/market_coach/adapter.py) (`MarketCoach.handle()` / `get_agent_graph()`), mais le graphe lui-même est assemblé par [`core/graph_builder.py::build_graph()`](../src/agriconnect/graphs/agents/market_coach/core/graph_builder.py:191).
+Point d'entrée module : [`adapter.py`](../src/ladini/graphs/agents/market_coach/adapter.py) (`MarketCoach.handle()` / `get_agent_graph()`), mais le graphe lui-même est assemblé par [`core/graph_builder.py::build_graph()`](../src/ladini/graphs/agents/market_coach/core/graph_builder.py:191).
 
 ---
 
@@ -116,7 +116,7 @@ Ces mini-machines à états vivent **exclusivement dans `working_memory`** — c
 
 ## 3. Le contrat d'état — `MarketAgentState`
 
-Source unique : [`core/state.py`](../src/agriconnect/graphs/agents/market_coach/core/state.py) (hérite de `BuyerContext` + `ProducerContext`). ~90 champs, chacun `Annotated[Type, reducer]` :
+Source unique : [`core/state.py`](../src/ladini/graphs/agents/market_coach/core/state.py) (hérite de `BuyerContext` + `ProducerContext`). ~90 champs, chacun `Annotated[Type, reducer]` :
 
 - **`replace_value`** : la nouvelle valeur écrase l'ancienne (y compris `None` — un reset explicite).
 - **`replace_list`** : remplacement intégral, jamais d'accumulation silencieuse.
@@ -148,7 +148,7 @@ Un champ multi-tour qui manque à UN SEUL de ces 3 registres ne survit pas — b
 
 ## 4. Le moteur d'expectation — `PendingInteraction`
 
-**Fichier central pour tout bug de type « l'agent répond à côté »** : [`core/pending_interaction.py`](../src/agriconnect/graphs/agents/market_coach/core/pending_interaction.py).
+**Fichier central pour tout bug de type « l'agent répond à côté »** : [`core/pending_interaction.py`](../src/ladini/graphs/agents/market_coach/core/pending_interaction.py).
 
 Avant cette refonte (2026-09-02), 6 signaux concurrents encodaient la même notion (« qu'attend-on de l'utilisateur ce tour ? ») sans registre unique — cause directe d'un bug réel classique : une réponse à un menu de paliers actif classée `UNKNOWN` par l'interprète retombait sur un `expected_input=="CONFIRMATION"` PÉRIMÉ d'un tour précédent.
 

@@ -287,12 +287,12 @@ de l'existant. Livré :
 
 | Fichier | Changement |
 |---|---|
-| [common.py](../src/agriconnect/services/database/common.py) | `SCHEMA_COLUMN_DDL` : `checkout_group_id UUID` + index partiel — additif et idempotent, convention du dépôt (pas d'Alembic) |
-| [models.py](../src/agriconnect/domain/orders/models.py) | `Order.checkout_group_id`, nullable, **sans état** |
-| [buyer.py](../src/agriconnect/services/database/buyer.py) `create_preorder_draft` | regroupement par `product.producer_id` ; une `Order(DRAFT)` par producteur, créée **tardivement** (à la première ligne retenue) pour ne jamais produire de commande vide ; total **par commande** ; réponse enrichie (`checkout_group_id`, `order_ids`, `orders`) |
+| [common.py](../src/ladini/services/database/common.py) | `SCHEMA_COLUMN_DDL` : `checkout_group_id UUID` + index partiel — additif et idempotent, convention du dépôt (pas d'Alembic) |
+| [models.py](../src/ladini/domain/orders/models.py) | `Order.checkout_group_id`, nullable, **sans état** |
+| [buyer.py](../src/ladini/services/database/buyer.py) `create_preorder_draft` | regroupement par `product.producer_id` ; une `Order(DRAFT)` par producteur, créée **tardivement** (à la première ligne retenue) pour ne jamais produire de commande vide ; total **par commande** ; réponse enrichie (`checkout_group_id`, `order_ids`, `orders`) |
 | `confirm_preorder_draft` | confirmation **groupée** : commandes sœurs chargées `FOR UPDATE` dans un ordre déterministe, tri anti-deadlock étendu à l'**union** des articles du groupe, total et notification **par commande** |
 | `cancel_preorder_draft` | abandon du brouillon = abandon de **tout** le groupe (sinon commandes sœurs `DRAFT` orphelines) |
-| [preorder_draft.py](../src/agriconnect/graphs/agents/market_coach/domain/preorder_draft.py) `render_summary` | prévient l'acheteur **avant** confirmation qu'un panier mixte fera N commandes (projection pure) |
+| [preorder_draft.py](../src/ladini/graphs/agents/market_coach/domain/preorder_draft.py) `render_summary` | prévient l'acheteur **avant** confirmation qu'un panier mixte fera N commandes (projection pure) |
 
 **Non modifiés, volontairement** : `confirm_delivery_and_payment` (F1) et
 `cancel_confirmed_order` (Phase 5). Leur contrôle de propriété

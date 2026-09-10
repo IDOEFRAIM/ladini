@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.core.get_llm import _GroqAdapter, _fallback_model_for
+from ladini.core.get_llm import _GroqAdapter, _fallback_model_for
 
 
 class _RateLimitError(Exception):
@@ -71,25 +71,25 @@ class _Completion:
 
 class TestFallbackModelForRejectsBedrockStyleIds:
     def test_dot_notation_without_slash_is_rejected(self, monkeypatch):
-        from agriconnect.core.settings import settings
+        from ladini.core.settings import settings
 
         monkeypatch.setattr(settings, "LLM_MODEL", "qwen.qwen3-32b")
         assert _fallback_model_for("openai/gpt-oss-120b") is None
 
     def test_slash_notation_groq_model_is_still_a_valid_fallback(self, monkeypatch):
-        from agriconnect.core.settings import settings
+        from ladini.core.settings import settings
 
         monkeypatch.setattr(settings, "LLM_MODEL", "qwen/qwen3.6-27b")
         assert _fallback_model_for("openai/gpt-oss-120b") == "qwen/qwen3.6-27b"
 
     def test_same_model_requested_yields_no_fallback(self, monkeypatch):
-        from agriconnect.core.settings import settings
+        from ladini.core.settings import settings
 
         monkeypatch.setattr(settings, "LLM_MODEL", "qwen/qwen3.6-27b")
         assert _fallback_model_for("qwen/qwen3.6-27b") is None
 
     def test_empty_configured_fallback_yields_none(self, monkeypatch):
-        from agriconnect.core.settings import settings
+        from ladini.core.settings import settings
 
         monkeypatch.setattr(settings, "LLM_MODEL", "")
         assert _fallback_model_for("openai/gpt-oss-120b") is None
@@ -104,7 +104,7 @@ class TestGroqAdapterNeverRetriesWithABedrockStyleModel:
         original RateLimitError must propagate so the outer LLM Gateway's
         own candidate-fallback chain (a DIFFERENT, correctly-scoped
         mechanism) takes over instead."""
-        from agriconnect.core.settings import settings
+        from ladini.core.settings import settings
 
         monkeypatch.setattr(settings, "LLM_MODEL", "qwen.qwen3-32b")
 
@@ -121,7 +121,7 @@ class TestGroqAdapterNeverRetriesWithABedrockStyleModel:
     def test_rate_limit_with_a_valid_groq_fallback_still_recovers(self, monkeypatch):
         """Non-regression: the legitimate same-provider fallback (a real
         Groq model, separate TPD quota) must still work exactly as before."""
-        from agriconnect.core.settings import settings
+        from ladini.core.settings import settings
 
         monkeypatch.setattr(settings, "LLM_MODEL", "qwen/qwen3.6-27b")
 

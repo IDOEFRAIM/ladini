@@ -11,13 +11,13 @@ from tests.conftest import run
 from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
 from tests.unit.test_mcp_idempotency import _install_fake_db as _install_fake_idempotency_db
 
-from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     PreorderDraft,
     PreorderDraftStatus,
     execution_key,
 )
-from agriconnect.services.database import mcp_idempotency_store, preorder_draft_store
-from agriconnect.services.reconciliation import preorder_reconciliation_service as svc
+from ladini.services.database import mcp_idempotency_store, preorder_draft_store
+from ladini.services.reconciliation import preorder_reconciliation_service as svc
 
 
 def _install(monkeypatch):
@@ -33,7 +33,7 @@ def _executing_draft(draft_id: str = "recon1") -> PreorderDraft:
 
 class TestFindStaleCandidates:
     def test_uses_the_configured_threshold(self, monkeypatch):
-        from agriconnect.core.settings import settings
+        from ladini.core.settings import settings
 
         _install(monkeypatch)
         seen = {}

@@ -53,7 +53,7 @@ def _gps_stage_state(**wm_overrides) -> Dict[str, Any]:
 
 class TestPriceUnchangedExecutesNormally:
     def test_same_price_at_gps_resolution_executes_without_a_new_confirmation(self):
-        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
+        from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import (
             finalize_winner,
         )
 
@@ -83,7 +83,7 @@ class TestPriceChangedDuringGpsWindowIsCaughtNotSilentlyExecuted:
         approuvé, mise à jour producteur entre-temps (250 -> 300), la
         position GPS arrive ENFIN -> le système ne doit JAMAIS exécuter sur
         250, ni exécuter silencieusement sur 300 sans reprévenir l'acheteur."""
-        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
+        from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import (
             finalize_winner,
         )
 
@@ -114,7 +114,7 @@ class TestPriceChangedDuringGpsWindowIsCaughtNotSilentlyExecuted:
         """Suite du scénario ci-dessus : l'acheteur répond "oui" au NOUVEAU
         récap (300) -> exécution normale, au nouveau prix, plus de
         divergence."""
-        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
+        from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import (
             finalize_winner,
         )
 
@@ -134,7 +134,7 @@ class TestPriceChangedDuringGpsWindowIsCaughtNotSilentlyExecuted:
 
 class TestBidWithdrawnDuringGpsWindowIsRejectedCleanly:
     def test_a_bid_withdrawn_between_confirm_and_gps_never_executes(self):
-        from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
+        from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import (
             finalize_winner,
         )
 

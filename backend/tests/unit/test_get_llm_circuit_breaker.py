@@ -14,7 +14,7 @@ Ces tests couvrent le disjoncteur + le repli inter-provider ajoutés en
 réponse — sans réseau réel, avec des clients factices."""
 from __future__ import annotations
 
-from agriconnect.core.get_llm import (
+from ladini.core.get_llm import (
     _CircuitBreaker,
     _CircuitOpenError,
     _GroqAdapter,
@@ -83,14 +83,14 @@ class TestCircuitBreaker:
         assert cb.is_open is False  # only 2 consecutive since the reset
 
     def test_closes_again_after_cooldown_elapses(self, monkeypatch):
-        # `import agriconnect.core.get_llm as get_llm_mod` is unreliable —
-        # `agriconnect/core/__init__.py` re-exports the `get_llm` FUNCTION,
+        # `import ladini.core.get_llm as get_llm_mod` is unreliable —
+        # `ladini/core/__init__.py` re-exports the `get_llm` FUNCTION,
         # which shadows the submodule as a package attribute. See
         # `tests/unit/test_get_llm_bedrock_adapter.py` for the full
         # explanation. `importlib.import_module` bypasses it.
         import importlib
 
-        get_llm_mod = importlib.import_module("agriconnect.core.get_llm")
+        get_llm_mod = importlib.import_module("ladini.core.get_llm")
 
         fake_time = {"now": 1000.0}
         monkeypatch.setattr(get_llm_mod.time, "monotonic", lambda: fake_time["now"])

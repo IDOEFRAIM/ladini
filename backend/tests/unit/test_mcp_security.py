@@ -23,30 +23,30 @@ from tests.conftest import run
 
 class TestGuessScope:
     def test_read_prefixes_map_to_read_only(self):
-        from agriconnect.infrastructure.mcp.security import _guess_scope, PermissionScope
+        from ladini.infrastructure.mcp.security import _guess_scope, PermissionScope
         for name in ("get_thing", "list_things", "search_stuff", "fetch_x", "count_y"):
             assert _guess_scope(name) == PermissionScope.DB_READ_ONLY
 
     def test_schema_prefixes_map_to_schema_modify(self):
-        from agriconnect.infrastructure.mcp.security import _guess_scope, PermissionScope
+        from ladini.infrastructure.mcp.security import _guess_scope, PermissionScope
         for name in ("migrate_v2", "drop_index", "alter_column", "truncate_logs"):
             assert _guess_scope(name) == PermissionScope.DB_SCHEMA_MODIFY
 
     def test_unknown_prefix_defaults_to_write_fail_safe(self):
         """Un outil inconnu ne doit JAMAIS être auto-autorisé en lecture —
         le défaut fail-safe est écriture (soumis à scrutin), pas confiance."""
-        from agriconnect.infrastructure.mcp.security import _guess_scope, PermissionScope
+        from ladini.infrastructure.mcp.security import _guess_scope, PermissionScope
         assert _guess_scope("do_something_destructive") == PermissionScope.DB_DATA_WRITE
 
 
 class TestEnsureScopesFilled:
     def test_is_idempotent_and_does_not_raise(self):
-        from agriconnect.infrastructure.mcp.security import ensure_scopes_filled
+        from ladini.infrastructure.mcp.security import ensure_scopes_filled
         ensure_scopes_filled()
         ensure_scopes_filled()  # 2e appel : no-op silencieux
 
     def test_autofill_survives_a_broken_handlers_import(self, monkeypatch):
-        import agriconnect.infrastructure.mcp.security as sec
+        import ladini.infrastructure.mcp.security as sec
 
         monkeypatch.setattr(sec, "_scopes_filled", False)
         monkeypatch.setattr(
@@ -63,14 +63,14 @@ class TestEnsureScopesFilled:
 
 class TestToolRateLimiter:
     def test_allows_calls_under_the_limit(self):
-        from agriconnect.infrastructure.mcp.security import ToolRateLimiter
+        from ladini.infrastructure.mcp.security import ToolRateLimiter
         limiter = ToolRateLimiter(max_calls=3, window_seconds=60)
         for _ in range(3):
             allowed, _ = limiter.check("user:tool")
             assert allowed is True
 
     def test_denies_once_the_limit_is_reached(self):
-        from agriconnect.infrastructure.mcp.security import ToolRateLimiter
+        from ladini.infrastructure.mcp.security import ToolRateLimiter
         limiter = ToolRateLimiter(max_calls=2, window_seconds=60)
         limiter.check("k")
         limiter.check("k")
@@ -79,13 +79,13 @@ class TestToolRateLimiter:
         assert "rate_limit_exceeded" in reason
 
     def test_different_keys_have_independent_budgets(self):
-        from agriconnect.infrastructure.mcp.security import ToolRateLimiter
+        from ladini.infrastructure.mcp.security import ToolRateLimiter
         limiter = ToolRateLimiter(max_calls=1, window_seconds=60)
         assert limiter.check("a")[0] is True
         assert limiter.check("b")[0] is True
 
     def test_stale_events_are_evicted_from_the_sliding_window(self):
-        from agriconnect.infrastructure.mcp.security import ToolRateLimiter
+        from ladini.infrastructure.mcp.security import ToolRateLimiter
         limiter = ToolRateLimiter(max_calls=1, window_seconds=60)
         limiter.check("k")
         # Force l'horodatage du seul événement hors fenêtre.
@@ -94,7 +94,7 @@ class TestToolRateLimiter:
         assert allowed is True
 
     def test_prunes_stale_keys_once_max_keys_is_exceeded(self):
-        from agriconnect.infrastructure.mcp.security import ToolRateLimiter
+        from ladini.infrastructure.mcp.security import ToolRateLimiter
         limiter = ToolRateLimiter(max_calls=100, window_seconds=1, max_keys=128)
         for i in range(130):
             limiter.check(f"key-{i}")
@@ -107,7 +107,7 @@ class TestToolRateLimiter:
         assert isinstance(limiter._events, dict)
 
     def test_constructor_clamps_degenerate_values(self):
-        from agriconnect.infrastructure.mcp.security import ToolRateLimiter
+        from ladini.infrastructure.mcp.security import ToolRateLimiter
         limiter = ToolRateLimiter(max_calls=0, window_seconds=0, max_keys=0)
         assert limiter.max_calls == 1
         assert limiter.window_seconds == 1.0
@@ -120,17 +120,17 @@ class TestToolRateLimiter:
 
 class TestSanitizeArguments:
     def test_strips_null_bytes_and_surrounding_whitespace(self):
-        from agriconnect.infrastructure.mcp.security import ToolExecutionPolicy
+        from ladini.infrastructure.mcp.security import ToolExecutionPolicy
         result = ToolExecutionPolicy.sanitize_arguments({"x": "  hello\x00world  "})
         assert result["x"] == "helloworld"
 
     def test_truncates_overly_long_strings(self):
-        from agriconnect.infrastructure.mcp.security import ToolExecutionPolicy
+        from ladini.infrastructure.mcp.security import ToolExecutionPolicy
         result = ToolExecutionPolicy.sanitize_arguments({"x": "a" * 5000})
         assert len(result["x"]) == 4000
 
     def test_recurses_into_nested_dicts_and_lists(self):
-        from agriconnect.infrastructure.mcp.security import ToolExecutionPolicy
+        from ladini.infrastructure.mcp.security import ToolExecutionPolicy
         result = ToolExecutionPolicy.sanitize_arguments({
             "a": {"b": "  y\x00  "},
             "c": ["  z\x00  ", 5],
@@ -139,18 +139,18 @@ class TestSanitizeArguments:
         assert result["c"] == ["z", 5]
 
     def test_leaves_non_string_scalars_untouched(self):
-        from agriconnect.infrastructure.mcp.security import ToolExecutionPolicy
+        from ladini.infrastructure.mcp.security import ToolExecutionPolicy
         result = ToolExecutionPolicy.sanitize_arguments({"n": 42, "f": 3.14, "b": True, "none": None})
         assert result == {"n": 42, "f": 3.14, "b": True, "none": None}
 
 
 class TestEstimateTokens:
     def test_estimates_roughly_chars_over_four(self):
-        from agriconnect.infrastructure.mcp.security import ToolExecutionPolicy
+        from ladini.infrastructure.mcp.security import ToolExecutionPolicy
         assert ToolExecutionPolicy._estimate_tokens({"x": "abcd" * 10}) >= 1
 
     def test_returns_zero_on_unserializable_payload(self):
-        from agriconnect.infrastructure.mcp.security import ToolExecutionPolicy
+        from ladini.infrastructure.mcp.security import ToolExecutionPolicy
         circular: dict = {}
         circular["self"] = circular
         assert ToolExecutionPolicy._estimate_tokens(circular) == 0
@@ -158,7 +158,7 @@ class TestEstimateTokens:
 
 class TestToolExecutionPolicyExecute:
     def _policy(self):
-        from agriconnect.infrastructure.mcp.security import ToolExecutionPolicy, MCPToolRegistry
+        from ladini.infrastructure.mcp.security import ToolExecutionPolicy, MCPToolRegistry
         return ToolExecutionPolicy(registry=MCPToolRegistry(), max_calls_per_minute=1000)
 
     def test_success_path_returns_an_ok_envelope(self):
@@ -179,12 +179,12 @@ class TestToolExecutionPolicyExecute:
         async def slow_handler(**kwargs):
             await asyncio.sleep(10)
 
-        from agriconnect.infrastructure.mcp.security import ToolExecutionTimeout
+        from ladini.infrastructure.mcp.security import ToolExecutionTimeout
         with pytest.raises(ToolExecutionTimeout):
             run(policy.execute("get_user_profile", slow_handler, {}, timeout_seconds=0.01))
 
     def test_rate_limit_exceeded_raises_permission_denied(self):
-        from agriconnect.infrastructure.mcp.security import (
+        from ladini.infrastructure.mcp.security import (
             ToolExecutionPolicy, MCPToolRegistry, PermissionDenied,
         )
         policy = ToolExecutionPolicy(registry=MCPToolRegistry(), max_calls_per_minute=1)
@@ -209,28 +209,28 @@ class TestToolExecutionPolicyExecute:
 
 class TestGetExecutionPolicy:
     def test_returns_a_singleton(self, monkeypatch):
-        import agriconnect.infrastructure.mcp.security as sec
+        import ladini.infrastructure.mcp.security as sec
         monkeypatch.setattr(sec, "_GLOBAL_EXECUTION_POLICY", None)
         p1 = sec.get_execution_policy()
         p2 = sec.get_execution_policy()
         assert p1 is p2
 
     def test_applies_valid_json_timeout_overrides_from_env(self, monkeypatch):
-        import agriconnect.infrastructure.mcp.security as sec
+        import ladini.infrastructure.mcp.security as sec
         monkeypatch.setattr(sec, "_GLOBAL_EXECUTION_POLICY", None)
         monkeypatch.setenv("MCP_TOOL_TIMEOUT_OVERRIDES", '{"search_agronomy_docs": 42}')
         policy = sec.get_execution_policy()
         assert policy._overrides["search_agronomy_docs"] == 42.0
 
     def test_ignores_malformed_json_overrides_without_crashing(self, monkeypatch):
-        import agriconnect.infrastructure.mcp.security as sec
+        import ladini.infrastructure.mcp.security as sec
         monkeypatch.setattr(sec, "_GLOBAL_EXECUTION_POLICY", None)
         monkeypatch.setenv("MCP_TOOL_TIMEOUT_OVERRIDES", "{not-json")
         policy = sec.get_execution_policy()
         assert policy is not None
 
     def test_falls_back_to_default_timeout_on_invalid_env_value(self, monkeypatch):
-        import agriconnect.infrastructure.mcp.security as sec
+        import ladini.infrastructure.mcp.security as sec
         monkeypatch.setattr(sec, "_GLOBAL_EXECUTION_POLICY", None)
         monkeypatch.setenv("MCP_DEFAULT_TOOL_TIMEOUT", "not-a-float")
         policy = sec.get_execution_policy()
@@ -243,26 +243,26 @@ class TestGetExecutionPolicy:
 
 class TestMCPToolRegistry:
     def test_has_tool_and_get_tool(self):
-        from agriconnect.infrastructure.mcp.security import MCPToolRegistry
+        from ladini.infrastructure.mcp.security import MCPToolRegistry
         reg = MCPToolRegistry()
         assert reg.has_tool("get_user_profile") is True
         assert reg.has_tool("ghost_tool") is False
         assert reg.get_tool("ghost_tool") is None
 
     def test_list_tools_is_sorted_by_name(self):
-        from agriconnect.infrastructure.mcp.security import MCPToolRegistry
+        from ladini.infrastructure.mcp.security import MCPToolRegistry
         reg = MCPToolRegistry()
         names = [t["name"] for t in reg.list_tools()]
         assert names == sorted(names)
 
     def test_list_tools_filters_by_server(self):
-        from agriconnect.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
+        from ladini.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
         reg = MCPToolRegistry()
         items = reg.list_tools(server=MCPServerKind.DB)
         assert all(i["server"] == "db" for i in items)
 
     def test_sync_discovered_tools_never_overwrites_an_already_known_tool(self):
-        from agriconnect.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
+        from ladini.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
         reg = MCPToolRegistry()
         before = reg.get_tool("get_user_profile")
         reg.sync_discovered_tools(MCPServerKind.DB, [
@@ -271,7 +271,7 @@ class TestMCPToolRegistry:
         assert reg.get_tool("get_user_profile") is before, "un outil déjà connu ne doit jamais être réécrasé"
 
     def test_sync_discovered_tools_skips_blank_names(self):
-        from agriconnect.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
+        from ladini.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
         reg = MCPToolRegistry()
         count_before = len(reg._tools)
         reg.sync_discovered_tools(MCPServerKind.DB, [{"name": "", "description": "x"}])
@@ -283,7 +283,7 @@ class TestMCPToolRegistry:
         de `TOOL_SCOPE_MAP` — une posture fail-OPEN isolée. Un outil
         totalement inconnu ne doit désormais RECEVOIR AUCUN privilège, pas
         même en lecture : il ne doit tout simplement pas être enregistré."""
-        from agriconnect.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
+        from ladini.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
         reg = MCPToolRegistry()
         count_before = len(reg._tools)
         reg.sync_discovered_tools(MCPServerKind.DB, [
@@ -295,7 +295,7 @@ class TestMCPToolRegistry:
 
     def test_sync_discovered_tools_logs_a_warning_for_an_unmapped_tool(self, caplog):
         import logging
-        from agriconnect.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
+        from ladini.infrastructure.mcp.security import MCPToolRegistry, MCPServerKind
 
         reg = MCPToolRegistry()
         with caplog.at_level(logging.WARNING, logger="MCP.Core.Security"):
@@ -313,7 +313,7 @@ class TestMCPToolRegistry:
         avant que `register_defaults` n'ait tourné) mais déjà déclaré dans
         TOOL_SCOPE_MAP doit être enregistré avec SON scope réel, pas un
         DB_DATA_WRITE générique."""
-        from agriconnect.infrastructure.mcp.security import (
+        from ladini.infrastructure.mcp.security import (
             MCPToolRegistry, MCPServerKind, PermissionScope,
         )
         reg = MCPToolRegistry()
@@ -328,7 +328,7 @@ class TestMCPToolRegistry:
 
 class TestGetRegistry:
     def test_returns_a_singleton(self, monkeypatch):
-        import agriconnect.infrastructure.mcp.security as sec
+        import ladini.infrastructure.mcp.security as sec
         monkeypatch.setattr(sec, "_GLOBAL_REGISTRY", None)
         assert sec.get_registry() is sec.get_registry()
 
@@ -339,19 +339,19 @@ class TestGetRegistry:
 
 class TestExceptionMessages:
     def test_permission_denied_message(self):
-        from agriconnect.infrastructure.mcp.security import PermissionDenied
+        from ladini.infrastructure.mcp.security import PermissionDenied
         exc = PermissionDenied("create_order", "risky")
         assert "[SHIELD]" in str(exc)
         assert exc.tool_name == "create_order"
         assert exc.reason == "risky"
 
     def test_timeout_message(self):
-        from agriconnect.infrastructure.mcp.security import ToolExecutionTimeout
+        from ladini.infrastructure.mcp.security import ToolExecutionTimeout
         exc = ToolExecutionTimeout("get_orders", 5.0)
         assert "[TIMEOUT]" in str(exc)
 
     def test_host_blocked_message(self):
-        from agriconnect.infrastructure.mcp.security import HostBlockedError
+        from ladini.infrastructure.mcp.security import HostBlockedError
         exc = HostBlockedError("drop_table", "denied", "use maintenance mode")
         assert "[HOST]" in str(exc)
         assert "Suggestion" in str(exc)
@@ -368,27 +368,27 @@ class TestExceptionMessages:
 
 class TestNormalizeToolOutput:
     def test_dict_passes_through(self):
-        from agriconnect.infrastructure.mcp.security import _normalize_tool_output
+        from ladini.infrastructure.mcp.security import _normalize_tool_output
         assert _normalize_tool_output({"a": 1}) == {"a": 1}
 
     def test_valid_json_string_is_parsed(self):
-        from agriconnect.infrastructure.mcp.security import _normalize_tool_output
+        from ladini.infrastructure.mcp.security import _normalize_tool_output
         assert _normalize_tool_output('{"a": 1}') == {"a": 1}
 
     def test_non_dict_json_string_is_wrapped(self):
-        from agriconnect.infrastructure.mcp.security import _normalize_tool_output
+        from ladini.infrastructure.mcp.security import _normalize_tool_output
         assert _normalize_tool_output('[1, 2]') == {"result": [1, 2]}
 
     def test_invalid_json_string_is_wrapped_as_result(self):
-        from agriconnect.infrastructure.mcp.security import _normalize_tool_output
+        from ladini.infrastructure.mcp.security import _normalize_tool_output
         assert _normalize_tool_output("not json at all") == {"result": "not json at all"}
 
     def test_list_is_wrapped_under_items(self):
-        from agriconnect.infrastructure.mcp.security import _normalize_tool_output
+        from ladini.infrastructure.mcp.security import _normalize_tool_output
         assert _normalize_tool_output([1, 2, 3]) == {"items": [1, 2, 3]}
 
     def test_other_scalar_falls_back_to_str_result(self):
-        from agriconnect.infrastructure.mcp.security import _normalize_tool_output
+        from ladini.infrastructure.mcp.security import _normalize_tool_output
         assert _normalize_tool_output(42) == {"result": "42"}
 
 
@@ -398,7 +398,7 @@ class TestNormalizeToolOutput:
 
 class TestPreflightResult:
     def test_bool_reflects_passed(self):
-        from agriconnect.infrastructure.mcp.security import PreflightResult
+        from ladini.infrastructure.mcp.security import PreflightResult
         assert bool(PreflightResult(True)) is True
         assert bool(PreflightResult(False)) is False
 
@@ -416,7 +416,7 @@ class TestMCPPermissionHostApp:
         ``_preflight_scan``/``_suggest_fix`` y sont utilisés) ; ces tests
         couvrent en plus le pass-through de ``.execute()`` vers un client
         arbitraire, pour n'importe quel appelant qui en fournirait un."""
-        from agriconnect.infrastructure.mcp.security import MCPPermissionHostApp, PermissionDenied
+        from ladini.infrastructure.mcp.security import MCPPermissionHostApp, PermissionDenied
 
         class _FakeClient:
             async def call_tool(self, name, arguments):
@@ -429,19 +429,19 @@ class TestMCPPermissionHostApp:
         return MCPPermissionHostApp(client=_FakeClient())
 
     def test_sql_injection_in_arguments_is_blocked_before_reaching_the_client(self):
-        from agriconnect.infrastructure.mcp.security import HostBlockedError
+        from ladini.infrastructure.mcp.security import HostBlockedError
         host = self._host()
         with pytest.raises(HostBlockedError):
             run(host.execute("get_user_profile", {"q": "DROP TABLE users"}))
 
     def test_raw_sql_starting_string_is_blocked(self):
-        from agriconnect.infrastructure.mcp.security import HostBlockedError
+        from ladini.infrastructure.mcp.security import HostBlockedError
         host = self._host()
         with pytest.raises(HostBlockedError):
             run(host.execute("get_user_profile", {"q": "SELECT * FROM users WHERE id=1"}))
 
     def test_raw_sql_block_can_be_disabled(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionHostApp
+        from ladini.infrastructure.mcp.security import MCPPermissionHostApp
 
         class _FakeClient:
             async def call_tool(self, name, arguments):
@@ -457,7 +457,7 @@ class TestMCPPermissionHostApp:
         assert result == {"ok": True}
 
     def test_permission_denied_from_client_is_wrapped_as_host_blocked(self):
-        from agriconnect.infrastructure.mcp.security import HostBlockedError
+        from ladini.infrastructure.mcp.security import HostBlockedError
         host = self._host(deny_reason="Schema modification denied")
         with pytest.raises(HostBlockedError):
             run(host.execute("drop_table", {}))
@@ -482,7 +482,7 @@ class TestMCPPermissionHostApp:
         assert "create_order" in msg
 
     def test_flatten_strings_walks_nested_structures(self):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionHostApp
+        from ladini.infrastructure.mcp.security import MCPPermissionHostApp
         flat = MCPPermissionHostApp._flatten_strings({"a": "x", "b": ["y", {"c": "z"}]})
         assert set(flat) == {"x", "y", "z"}
 
@@ -494,7 +494,7 @@ class TestMCPPermissionHostApp:
         ("SELECT without secondary keyword", False),
     ])
     def test_looks_like_raw_sql(self, sql, expected):
-        from agriconnect.infrastructure.mcp.security import MCPPermissionHostApp
+        from ladini.infrastructure.mcp.security import MCPPermissionHostApp
         assert MCPPermissionHostApp._looks_like_raw_sql(sql) is expected
 
 
@@ -504,7 +504,7 @@ class TestMCPPermissionHostApp:
 
 class TestMCPSessionManager:
     def test_execute_and_safe_read_both_delegate_to_the_host(self):
-        from agriconnect.infrastructure.mcp.security import MCPSessionManager
+        from ladini.infrastructure.mcp.security import MCPSessionManager
 
         calls = []
 
@@ -525,8 +525,8 @@ class TestMCPSessionManager:
 
 class TestDBInProcessBackend:
     def test_unknown_tool_raises_value_error(self, monkeypatch):
-        import agriconnect.protocols.mcp.servers.h as handlers_mod
-        from agriconnect.infrastructure.mcp.security import DBInProcessBackend
+        import ladini.protocols.mcp.servers.h as handlers_mod
+        from ladini.infrastructure.mcp.security import DBInProcessBackend
 
         monkeypatch.setattr(handlers_mod, "TOOL_HANDLERS", {}, raising=False)
         backend = DBInProcessBackend()
@@ -534,8 +534,8 @@ class TestDBInProcessBackend:
             run(backend.call_tool("ghost_tool", {}))
 
     def test_json_string_result_is_parsed(self, monkeypatch):
-        import agriconnect.protocols.mcp.servers.h as handlers_mod
-        from agriconnect.infrastructure.mcp.security import DBInProcessBackend
+        import ladini.protocols.mcp.servers.h as handlers_mod
+        from ladini.infrastructure.mcp.security import DBInProcessBackend
 
         async def fake_tool(**kwargs):
             return '{"a": 1}'
@@ -545,8 +545,8 @@ class TestDBInProcessBackend:
         assert run(backend.call_tool("fake_tool", {})) == {"a": 1}
 
     def test_non_json_string_result_is_wrapped(self, monkeypatch):
-        import agriconnect.protocols.mcp.servers.h as handlers_mod
-        from agriconnect.infrastructure.mcp.security import DBInProcessBackend
+        import ladini.protocols.mcp.servers.h as handlers_mod
+        from ladini.infrastructure.mcp.security import DBInProcessBackend
 
         async def fake_tool(**kwargs):
             return "plain text"
@@ -556,8 +556,8 @@ class TestDBInProcessBackend:
         assert run(backend.call_tool("fake_tool", {})) == {"result": "plain text"}
 
     def test_dict_result_passes_through(self, monkeypatch):
-        import agriconnect.protocols.mcp.servers.h as handlers_mod
-        from agriconnect.infrastructure.mcp.security import DBInProcessBackend
+        import ladini.protocols.mcp.servers.h as handlers_mod
+        from ladini.infrastructure.mcp.security import DBInProcessBackend
 
         async def fake_tool(**kwargs):
             return {"already": "a dict"}
@@ -567,8 +567,8 @@ class TestDBInProcessBackend:
         assert run(backend.call_tool("fake_tool", {})) == {"already": "a dict"}
 
     def test_list_tools_reads_tool_descriptions(self, monkeypatch):
-        import agriconnect.protocols.mcp.servers.h as handlers_mod
-        from agriconnect.infrastructure.mcp.security import DBInProcessBackend
+        import ladini.protocols.mcp.servers.h as handlers_mod
+        from ladini.infrastructure.mcp.security import DBInProcessBackend
 
         monkeypatch.setattr(handlers_mod, "TOOL_DESCRIPTIONS", {"t1": "desc1"}, raising=False)
         backend = DBInProcessBackend()
@@ -581,7 +581,7 @@ class TestDBInProcessBackend:
 
 class TestMCPManager:
     def _manager(self, monkeypatch, *, list_tools_result=None, call_tool_side_effect=None):
-        from agriconnect.infrastructure.mcp.security import MCPManager, MCPToolRegistry, MCPServerKind
+        from ladini.infrastructure.mcp.security import MCPManager, MCPToolRegistry, MCPServerKind
 
         registry = MCPToolRegistry()
         manager = MCPManager(registry=registry)

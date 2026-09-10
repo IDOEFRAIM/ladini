@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ConfirmationTarget,
     ConfirmProcurementDraft,
     IllegalDraftTransition,
@@ -29,10 +29,10 @@ from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
     finalize_after_execution,
     resolve_domain_action,
 )
-from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
     confirmation_gate,
 )
-from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
+from ladini.graphs.agents.market_coach.nodes.memory import memory_update
 from tests.conftest import make_state, run, stub_runtime
 
 _ALWAYS_CLAIM = lambda key: True  # noqa: E731
@@ -110,7 +110,7 @@ class TestA_MemoryUpdateNeverMutatesTheDraft:
         réel observé en production sur `sales_publish_draft`, symétrique ici
         pour `procurement_draft`). La regex ci-dessous ne flag donc qu'une
         assignation à autre chose que `None` littéral."""
-        root = Path("src/agriconnect/graphs/agents/market_coach")
+        root = Path("src/ladini/graphs/agents/market_coach")
         authorized = {"confirmation_gate.py", "procurement_confirmation.py"}
         lifecycle_reset_authorized = {"goal_planner.py"}
         offenders = []
@@ -159,7 +159,7 @@ class TestB_ResponsePlanBuiltOnlyFromDomainOutcome:
         — la preuve structurelle qu'il ne réintroduit pas de décision
         métier : il n'importe même pas le type."""
         src = Path(
-            "src/agriconnect/graphs/agents/market_coach/flows/buyer/procurement_confirmation.py"
+            "src/ladini/graphs/agents/market_coach/flows/buyer/procurement_confirmation.py"
         ).read_text(encoding="utf-8")
         apply_fn = src.split("def apply_response_plan")[1].split("\ndef ")[0]
         # Retire la docstring (mention légitime en prose) avant de chercher
@@ -217,7 +217,7 @@ class TestD_ConcurrentWorkersProduceExactlyOneEffect:
         complet (confirmation_gate), pas seulement apply_domain_action —
         preuve que rien entre les deux n'introduit une 2e fenêtre de
         course."""
-        import agriconnect.graphs.agents.market_coach.domain.procurement_draft as pd_mod
+        import ladini.graphs.agents.market_coach.domain.procurement_draft as pd_mod
 
         claimed_keys: set = set()
         lock = threading.Lock()
@@ -304,7 +304,7 @@ class TestE_CrashAfterClaimLeavesAnHonestState:
         assert retry.kind == ProcurementOutcomeKind.ALREADY_EXECUTING
 
     def test_finalize_after_execution_can_only_be_called_once(self):
-        from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+        from ladini.graphs.agents.market_coach.domain.procurement_draft import (
             ProcurementExecutionResult,
         )
 
@@ -323,7 +323,7 @@ class TestE_CrashAfterClaimLeavesAnHonestState:
             finalize_after_execution(executed, ProcurementExecutionResult(success=True))
 
     def test_a_failed_execution_transitions_to_failed_not_a_silent_confirmed(self):
-        from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+        from ladini.graphs.agents.market_coach.domain.procurement_draft import (
             ProcurementExecutionResult,
         )
 
@@ -343,7 +343,7 @@ class TestE_CrashAfterClaimLeavesAnHonestState:
         savoir. `adapt_mcp_result` ne devine JAMAIS — tout ce qui n'est ni
         clairement COMPLETED ni clairement ERROR devient EXECUTION_UNKNOWN,
         jamais un faux EXECUTED ni un faux FAILED."""
-        from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+        from ladini.graphs.agents.market_coach.domain.procurement_draft import (
             adapt_mcp_result,
         )
 
@@ -383,7 +383,7 @@ class TestF_TransactionPayloadCannotDivergeFromTheDraft:
         state = make_state(current_goal="PROCUREMENT_CREATE_REQUEST", procurement_draft=draft.to_dict())
         state["interpreted_event"] = "CONFIRM"
         state["pending_interaction"] = {"kind": "CONFIRM_ACTION", "target": target.to_dict()}
-        import agriconnect.graphs.agents.market_coach.domain.procurement_draft as pd_mod
+        import ladini.graphs.agents.market_coach.domain.procurement_draft as pd_mod
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(pd_mod, "claim_once", _ALWAYS_CLAIM)
@@ -397,7 +397,7 @@ class TestF_TransactionPayloadCannotDivergeFromTheDraft:
         affectation de `transaction_payload` doit venir de
         `draft.execution_payload()`."""
         src = Path(
-            "src/agriconnect/graphs/agents/market_coach/flows/buyer/procurement_confirmation.py"
+            "src/ladini/graphs/agents/market_coach/flows/buyer/procurement_confirmation.py"
         ).read_text(encoding="utf-8")
         assignments = re.findall(r'patch\["transaction_payload"\]\s*=\s*(.+)', src)
         assert assignments == ["plan.draft.execution_payload()"], assignments
@@ -487,9 +487,9 @@ class TestSingleIdempotencyPrimitive:
         `api/response_dispatch.py::claim_response_item` doivent tous deux
         déléguer à `core/idempotency.py::claim_once` — même fonction Python,
         pas deux implémentations qui se ressemblent."""
-        import agriconnect.api.response_dispatch as dispatch_mod
-        import agriconnect.core.idempotency as idempotency_mod
-        import agriconnect.graphs.agents.market_coach.domain.procurement_draft as pd_mod
+        import ladini.api.response_dispatch as dispatch_mod
+        import ladini.core.idempotency as idempotency_mod
+        import ladini.graphs.agents.market_coach.domain.procurement_draft as pd_mod
 
         assert pd_mod.claim_once is idempotency_mod.claim_once
         assert not hasattr(dispatch_mod, "_redis_client"), (

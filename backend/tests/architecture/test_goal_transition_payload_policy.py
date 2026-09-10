@@ -32,9 +32,9 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-import agriconnect.graphs.agents.market_coach.interpreter.routing  # noqa: F401
-from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import goal_planner
-from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
+import ladini.graphs.agents.market_coach.interpreter.routing  # noqa: F401
+from ladini.graphs.agents.market_coach.interpreter.goal_planner import goal_planner
+from ladini.graphs.agents.market_coach.nodes.memory import memory_update
 from tests.conftest import StubRuntime, make_state, run
 
 
@@ -82,7 +82,7 @@ class TestContinueTransitionLosesNothing:
 class TestRefinementTransitionPreservesCompatibleSlots:
     def test_buyer_request_to_add_to_cart_is_recognized_as_refinement(self):
         """Propriété du catalogue vérifiée directement (source unique)."""
-        from agriconnect.graphs.agents.market_coach.core.goals import (
+        from ladini.graphs.agents.market_coach.core.goals import (
             is_goal_refinement,
         )
 

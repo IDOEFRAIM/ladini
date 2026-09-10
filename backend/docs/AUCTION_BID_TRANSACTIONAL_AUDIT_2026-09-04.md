@@ -214,7 +214,7 @@ complexifier sans invariant réel en jeu).
 transmis en suivi plutôt que tranché unilatéralement ici.**
 
 Fait établi (pas supposé) : la colonne a EXACTEMENT UN écrivain vivant dans
-tout `src/agriconnect` — `update_negotiation_offer`
+tout `src/ladini` — `update_negotiation_offer`
 (`services/database/buyer.py`), qui l'incrémente à chaque correction de
 prix d'une négociation acheteur-producteur. **Aucun lecteur nulle part** —
 ni comparaison optimistic-locking (cette fonction utilise déjà
@@ -227,7 +227,7 @@ Non tranché ici : ce dépôt n'utilise PAS Alembic (DDL idempotent à la
 main) — supprimer une colonne en production est une décision de surface
 schéma/reporting qui dépasse la portée d'un correctif de code, et rien ne
 garantit qu'aucun tableau de bord admin externe ne lit `auctions.version`
-directement en SQL (hors de ce qui est visible depuis `src/agriconnect`).
+directement en SQL (hors de ce qui est visible depuis `src/ladini`).
 Suggestion transmise séparément (`task_b35b6ddd`) avec une recommandation
 claire : au minimum retirer l'incrément mort-né, envisager la suppression
 de colonne si confirmé qu'aucun lecteur externe n'existe.
@@ -238,7 +238,7 @@ de colonne si confirmé qu'aucun lecteur externe n'existe.
    Rejetait uniquement `"CLOSED"` ; une enchère `EXPIRED`/`CANCELLED`
    restait sélectionnable → `Order` créé hors du cycle de vie actif.
    Corrigé : rejet de toute valeur `!= "OPEN"`, message dédié conservé
-   pour `CLOSED`. [`auction.py`](../src/agriconnect/services/database/auction.py)
+   pour `CLOSED`. [`auction.py`](../src/ladini/services/database/auction.py)
 2. **`select_winning_bid` — AUCUN garde sur le statut du bid.** Un bid
    `WITHDRAWN` (ou `LOST`) pouvait être désigné gagnant, créant une
    `Order` sur un engagement explicitement annulé par le producteur — le

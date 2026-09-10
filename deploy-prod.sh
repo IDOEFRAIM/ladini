@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═════════════════════════════════════════════════════════════════════
-# deploy-prod.sh — déploiement production AgriConnect (build + migrate + rolling)
+# deploy-prod.sh — déploiement production Ladini (build + migrate + rolling)
 #
 # Étapes :
 #   1. pull des dernières images de base + git pull (optionnel)
@@ -34,7 +34,10 @@ log "1/4 · git pull + pull des images de base…"
 if [ "${SKIP_GIT_PULL:-0}" != "1" ] && command -v git >/dev/null 2>&1; then
   git pull --ff-only || warn "git pull ignoré (repo non-git ou divergence)."
 fi
-${COMPOSE} pull redis pgbouncer clickhouse minio langfuse-web langfuse-worker langfuse-postgres autoheal || warn "pull partiel."
+# (audit 2026-09-10) La liste référençait encore clickhouse/minio/langfuse-*,
+# supprimés du compose lors du passage de Langfuse en Cloud ("Version
+# Allégée"). Seules les images TIERCES réellement définies sont pull-ables.
+${COMPOSE} pull redis pgbouncer autoheal || warn "pull partiel."
 
 # ── 2. Build ─────────────────────────────────────────────────────────
 log "2/4 · build des images api + worker…"
@@ -67,8 +70,22 @@ fi
 log "4/4 · bascule des services applicatifs…"
 
 # 4a. Dépendances (idempotent, ne coupe rien si déjà up).
-${COMPOSE} up -d redis pgbouncer flower \
-  clickhouse minio langfuse-postgres langfuse-web langfuse-worker
+#
+# (audit 2026-09-10) Deux bugs corrigés ici — c'était LE point de blocage du
+# déploiement :
+#   1. La liste citait clickhouse/minio/langfuse-* (supprimés du compose au
+#      passage de Langfuse en Cloud). `docker compose up` sort en erreur sur
+#      un service inconnu ET cette ligne n'a pas de garde `|| warn` — combiné
+#      au `set -Eeuo pipefail` du haut, TOUT le script avortait ici, avant la
+#      bascule worker/api. Le déploiement ne pouvait pas aboutir.
+#   2. `beat` et `autoheal` n'étaient démarrés NULLE PART. `beat` porte tous
+#      les crons Celery (sollicitations d'enchères/proximité + les 3 services
+#      de réconciliation PROCUREMENT/PREORDER/SALES) : sans lui, les drafts
+#      bloqués en EXECUTING ne sont jamais réconciliés. `autoheal` est le
+#      seul mécanisme qui redémarre un conteneur `unhealthy` hors Swarm (voir
+#      le bandeau du compose) : sans lui, un conteneur en deadlock y reste.
+#      Ni l'un ni l'autre n'a de dépendant qui les tirerait implicitement.
+${COMPOSE} up -d redis pgbouncer mcp flower beat autoheal
 
 # 4b. Worker : recréation sûre — les tâches en vol sont re-queue (acks_late=True
 #     dans celery_app.py), aucune perte. On attend qu'il redevienne healthy.

@@ -19,11 +19,11 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
+from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
 from tests.conftest import StubRuntime, make_state, run
 
 
@@ -55,7 +55,7 @@ ARSENE_KG = _vendor("Arsene TOUGMA", "KG", 10000, "PR-ARSENE", "P-ARS-K")
 
 class TestAddToCartUnitHandling:
     def test_buyer_unit_matching_the_listing_unit_is_unaffected(self):
-        from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
+        from ladini.graphs.agents.market_coach.services.domain.cart_service import (
             CartDomainService,
         )
         svc = CartDomainService(rt())
@@ -71,7 +71,7 @@ class TestAddToCartUnitHandling:
         priced per TONNE. Must convert 45 kg -> 0.045 TONNE, NOT apply 45
         directly against the TONNE price (which would silently 1000x the
         bill: 450 FCFA vs the wrong 450 000 FCFA)."""
-        from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
+        from ladini.graphs.agents.market_coach.services.domain.cart_service import (
             CartDomainService,
         )
         svc = CartDomainService(rt(responses={
@@ -93,7 +93,7 @@ class TestAddToCartUnitHandling:
         """Regression guard: when the buyer never states a unit (the common
         case — most messages are just a bare number), behavior must be
         IDENTICAL to before this fix."""
-        from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
+        from ladini.graphs.agents.market_coach.services.domain.cart_service import (
             CartDomainService,
         )
         svc = CartDomainService(rt(responses={
@@ -112,7 +112,7 @@ class TestAddToCartUnitHandling:
 
     def test_buyer_unit_with_no_universal_conversion_asks_for_clarification_instead_of_guessing(self):
         """SAC has no fixed kg-equivalent — must never silently guess."""
-        from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
+        from ladini.graphs.agents.market_coach.services.domain.cart_service import (
             CartDomainService,
         )
         svc = CartDomainService(rt())

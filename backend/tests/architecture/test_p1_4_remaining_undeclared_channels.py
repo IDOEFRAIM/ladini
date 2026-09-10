@@ -31,9 +31,9 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
-from agriconnect.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
+from ladini.graphs.agents.market_coach.core.state import MarketAgentState
+from ladini.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
+from ladini.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
 from tests.conftest import StubRuntime, make_state, run
 
 
@@ -102,7 +102,7 @@ class TestMenuSnapshotIdCanonicalSourceWithLegacyFallback:
     def test_memory_update_reads_both_the_canonical_and_legacy_copies(self):
         import inspect
 
-        from agriconnect.graphs.agents.market_coach.nodes import memory
+        from ladini.graphs.agents.market_coach.nodes import memory
 
         code_lines = [
             line
@@ -123,8 +123,8 @@ class TestMenuSnapshotIdCanonicalSourceWithLegacyFallback:
         snapshot store — seul chemin qui lit réellement `menu_snapshot_id`
         (le mapping direct, s'il est présent, court-circuite le snapshot
         entièrement, voir tests/nodes/test_memory_stale_menu_snapshot.py)."""
-        from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
-        from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
+        from ladini.graphs.agents.market_coach.nodes.memory import memory_update
+        from ladini.graphs.agents.market_coach.services.menu_snapshot import (
             menu_snapshot_store,
         )
         from tests.conftest import StubRuntime, make_state, run
@@ -164,8 +164,8 @@ class TestMenuSnapshotIdCanonicalSourceWithLegacyFallback:
         """Non-régression : un checkpoint créé AVANT la déclaration du champ
         canonique (qui n'a donc que la copie working_memory) doit continuer
         à résoudre ses sélections normalement."""
-        from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
-        from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
+        from ladini.graphs.agents.market_coach.nodes.memory import memory_update
+        from ladini.graphs.agents.market_coach.services.menu_snapshot import (
             menu_snapshot_store,
         )
         from tests.conftest import StubRuntime, make_state, run

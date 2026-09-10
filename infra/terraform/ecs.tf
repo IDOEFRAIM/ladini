@@ -1,23 +1,23 @@
-resource "aws_ecs_cluster" "agriconnect" {
-  name = "agriconnect-cluster-${var.environment}"
+resource "aws_ecs_cluster" "ladini" {
+  name = "ladini-cluster-${var.environment}"
   tags = local.common_tags
 }
 
 resource "aws_cloudwatch_log_group" "scraper" {
-  name              = "/ecs/agriconnect-scraper-${var.environment}"
+  name              = "/ecs/ladini-scraper-${var.environment}"
   retention_in_days = var.log_retention_days
   tags              = local.common_tags
 }
 
 resource "aws_cloudwatch_log_group" "ingestion" {
-  name              = "/ecs/agriconnect-ingestion-${var.environment}"
+  name              = "/ecs/ladini-ingestion-${var.environment}"
   retention_in_days = var.log_retention_days
   tags              = local.common_tags
 }
 
 resource "aws_security_group" "ecs_tasks" {
-  name        = "agriconnect-ecs-tasks-sg-${var.environment}"
-  description = "Security group for Agriconnect ECS tasks"
+  name        = "ladini-ecs-tasks-sg-${var.environment}"
+  description = "Security group for Ladini ECS tasks"
   vpc_id      = var.vpc_id
 
   egress {
@@ -31,7 +31,7 @@ resource "aws_security_group" "ecs_tasks" {
 }
 
 resource "aws_ecs_task_definition" "scraper" {
-  family                   = "agriconnect-scraper-${var.environment}"
+  family                   = "ladini-scraper-${var.environment}"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   cpu                      = var.scraper_task_cpu
@@ -62,7 +62,7 @@ resource "aws_ecs_task_definition" "scraper" {
 }
 
 resource "aws_ecs_task_definition" "ingestion" {
-  family                   = "agriconnect-ingestion-${var.environment}"
+  family                   = "ladini-ingestion-${var.environment}"
   network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
   cpu                      = var.ingestion_task_cpu
@@ -95,8 +95,8 @@ resource "aws_ecs_task_definition" "ingestion" {
 }
 
 resource "aws_ecs_service" "scraper" {
-  name            = "agriconnect-scraper-service-${var.environment}"
-  cluster         = aws_ecs_cluster.agriconnect.id
+  name            = "ladini-scraper-service-${var.environment}"
+  cluster         = aws_ecs_cluster.ladini.id
   task_definition = aws_ecs_task_definition.scraper.arn
   desired_count   = var.scraper_desired_count
   launch_type     = "FARGATE"
@@ -111,8 +111,8 @@ resource "aws_ecs_service" "scraper" {
 }
 
 resource "aws_ecs_service" "ingestion" {
-  name            = "agriconnect-ingestion-service-${var.environment}"
-  cluster         = aws_ecs_cluster.agriconnect.id
+  name            = "ladini-ingestion-service-${var.environment}"
+  cluster         = aws_ecs_cluster.ladini.id
   task_definition = aws_ecs_task_definition.ingestion.arn
   desired_count   = var.ingestion_desired_count
   launch_type     = "FARGATE"

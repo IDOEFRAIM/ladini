@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.interpreter.strategy import response_strategy
+from ladini.graphs.agents.market_coach.interpreter.strategy import response_strategy
 from tests.conftest import make_state, run
 
 

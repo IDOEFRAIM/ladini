@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
-from agriconnect.graphs.agents.market_coach.services.domain.cart_service import (
+from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
+from ladini.graphs.agents.market_coach.services.domain.cart_service import (
     CartDomainService,
 )
 from tests.conftest import StubRuntime, make_state, run
@@ -278,7 +278,7 @@ class TestTierSelectionContextIsARealStateChannel:
     est déjà couvert par TestCartManagementTierMenu ci-dessous."""
 
     def test_tier_selection_context_is_declared_alongside_vendor_selection_context(self):
-        from agriconnect.graphs.agents.market_coach.flows.buyer.state import (
+        from ladini.graphs.agents.market_coach.flows.buyer.state import (
             BuyerContext,
         )
 
@@ -293,7 +293,7 @@ class TestTierSelectionContextIsARealStateChannel:
         turn boundary in production even though the channel itself is
         correctly declared. Same fix `vendor_selection_context` already
         needed."""
-        from agriconnect.graphs.agents.market_coach.core.state_profile import (
+        from ladini.graphs.agents.market_coach.core.state_profile import (
             FieldLifecycle,
             get_field_spec,
         )
@@ -316,7 +316,7 @@ class TestCartManagementTierMenu:
             user_phone="+22670000001",
         )
         # Force the single-vendor path via a stubbed search result.
-        import agriconnect.graphs.agents.market_coach.flows.buyer.cart as cart_mod
+        import ladini.graphs.agents.market_coach.flows.buyer.cart as cart_mod
 
         async def _fake_resolve_vendors(self, phone, product_name):
             return [_tiered_vendor()], False
@@ -342,6 +342,35 @@ class TestCartManagementTierMenu:
         assert result["working_memory"]["available_mapping_kind"] == "pricing_tier"
         assert result["working_memory"]["menu_snapshot_id"] is None
         assert result["available_mapping"] == {}
+
+    def test_prefetched_vendors_skip_the_redundant_search_products_call(self):
+        """`buyer_request_resolver` already resolved the vendors this turn and
+        forwards them as `_prefetched_vendors` — `cart_management` must reuse
+        them instead of a second identical `search_products` (efficiency
+        finding). With no `search_products` stubbed and `resolve_product_vendors`
+        rigged to fail, the tier menu still renders iff the prefetch is honored."""
+        import ladini.graphs.agents.market_coach.flows.buyer.cart as cart_mod
+
+        async def _boom_resolve_vendors(self, phone, product_name):
+            raise AssertionError("resolve_product_vendors must not be called when prefetched")
+
+        state = make_state(
+            current_goal="BUYER_ADD_TO_CART",
+            interpreted_event="ANSWER",
+            transaction_payload={"product": "lait"},
+            user_phone="+22670000001",
+        )
+        state["_prefetched_vendors"] = [_tiered_vendor()]
+        orig = cart_mod.CartDomainService.resolve_product_vendors
+        cart_mod.CartDomainService.resolve_product_vendors = _boom_resolve_vendors
+        try:
+            result = run(cart_management(state, rt()))
+        finally:
+            cart_mod.CartDomainService.resolve_product_vendors = orig
+
+        assert result["status"] == "WAITING_INPUT"
+        assert "conditionnements" in result["final_response"]
+        assert result["tier_selection_context"]["tiers"] == _TIERS
 
     def test_second_turn_resolves_the_chosen_tier_and_asks_for_pack_count(self):
         """The exact reported live scenario: menu shown on turn 1 (quantity
@@ -423,7 +452,7 @@ class TestCartManagementTierMenu:
         different row/ID from a repeated search."""
         drifted_vendor = _tiered_vendor()
         drifted_vendor["product_id"] = "P-LAIT-DIFFERENT-ROW"  # simulates search drift
-        import agriconnect.graphs.agents.market_coach.flows.buyer.cart as cart_mod
+        import ladini.graphs.agents.market_coach.flows.buyer.cart as cart_mod
 
         async def _fake_resolve_vendors(self, phone, product_name):
             return [drifted_vendor], False

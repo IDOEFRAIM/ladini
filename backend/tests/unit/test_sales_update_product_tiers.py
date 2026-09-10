@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.actions.sales_dto import (
+from ladini.graphs.agents.market_coach.actions.sales_dto import (
     SalesUpdateProductPayload,
 )
-from agriconnect.graphs.agents.market_coach.actions.tooling import ToolId
-from agriconnect.graphs.agents.market_coach.domain.model import DomainContext
-from agriconnect.graphs.agents.market_coach.domain.sales import (
+from ladini.graphs.agents.market_coach.actions.tooling import ToolId
+from ladini.graphs.agents.market_coach.domain.model import DomainContext
+from ladini.graphs.agents.market_coach.domain.sales import (
     SalesService,
     SalesUpdateProductCommand,
 )

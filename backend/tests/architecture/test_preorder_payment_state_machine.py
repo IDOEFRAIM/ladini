@@ -12,7 +12,7 @@ import pytest
 from tests.conftest import run
 from tests.architecture.test_preorder_draft_persistence import _draft, _install_fake_db
 
-from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     IllegalDraftTransition,
     PaymentOutcomeKind,
     PreorderDraftStatus,
@@ -20,7 +20,7 @@ from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
     finalize_after_payment,
     finalize_after_payment_expiry,
 )
-from agriconnect.services.database import preorder_draft_store as store_mod
+from ladini.services.database import preorder_draft_store as store_mod
 
 
 def _awaiting_payment_draft(**fields):
@@ -98,7 +98,7 @@ class TestIpnOutOfOrder:
     """Mandat §8 — rejoue exactement les 2 scénarios demandés."""
 
     def test_pending_after_success_never_regresses_an_already_paid_draft(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_payment as pp_mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder_payment as pp_mod
 
         _install_fake_db(monkeypatch)
         run(store_mod.insert(_draft(draft_id="seq1", order_id="order-seq1"), conversation_id="c"))
@@ -130,7 +130,7 @@ class TestIpnOutOfOrder:
         assert final.status == PreorderDraftStatus.EXECUTED
 
     def test_duplicate_success_events_produce_exactly_one_mutation(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_payment as pp_mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder_payment as pp_mod
 
         _install_fake_db(monkeypatch)
         run(store_mod.insert(_draft(draft_id="seq2", order_id="order-seq2"), conversation_id="c"))
@@ -170,7 +170,7 @@ class TestConcurrentIpnDeliveries:
         """Mandat §7 : IPN identique reçu par deux workers simultanément ->
         exactement une transition. Réutilise le CAS déjà en place, aucun
         nouveau verrou."""
-        import agriconnect.graphs.agents.market_coach.flows.buyer.preorder_payment as pp_mod
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder_payment as pp_mod
 
         _install_fake_db(monkeypatch)
         run(store_mod.insert(_draft(draft_id="race1", order_id="order-race1"), conversation_id="c"))

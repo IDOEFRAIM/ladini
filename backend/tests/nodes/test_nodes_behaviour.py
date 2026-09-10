@@ -6,16 +6,16 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.agents.reducers import merge_dict
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.agents.reducers import merge_dict
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
-from agriconnect.graphs.agents.market_coach.nodes.validation import validator
-from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
-from agriconnect.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
-from agriconnect.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
-from agriconnect.graphs.agents.market_coach.flows.buyer.helpers import (
+from ladini.graphs.agents.market_coach.nodes.validation import validator
+from ladini.graphs.agents.market_coach.nodes.memory import memory_update
+from ladini.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
+from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
+from ladini.graphs.agents.market_coach.flows.buyer.helpers import (
     clear_active_goal,
     detect_cart_action,
 )

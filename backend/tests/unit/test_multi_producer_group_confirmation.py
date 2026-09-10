@@ -17,8 +17,8 @@ import pytest
 
 from tests.conftest import run
 
-from agriconnect.services.database.buyer import BuyerMixin
-from agriconnect.services.database.errors import BusinessRuleException
+from ladini.services.database.buyer import BuyerMixin
+from ladini.services.database.errors import BusinessRuleException
 
 
 async def _async_return(value):
@@ -127,7 +127,7 @@ def captured_outbox(monkeypatch):
         return len(entries)
 
     monkeypatch.setattr(
-        "agriconnect.workers.repositories.outbox_repo.enqueue", _fake_enqueue
+        "ladini.workers.repositories.outbox_repo.enqueue", _fake_enqueue
     )
     return captured
 

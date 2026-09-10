@@ -1,0 +1,57 @@
+# ═════════════════════════════════════════════════════════════════════
+# Reverse proxy Ladini — Caddy (TLS auto Let's Encrypt, HTTP→HTTPS).
+#
+# Provider-neutral : aucune dépendance DigitalOcean/AWS. Tourne dans son
+# propre docker-compose (infra/reverse-proxy/docker-compose.yml) et parle à
+# l'API via le réseau Docker partagé `agri_net`.
+#
+# Ce qu'il fait (§18) : TLS, redirection HTTP→HTTPS, en-têtes de sécurité
+# raisonnables, limite de taille de requête, timeouts. Rien d'autre —
+# l'API reste maîtresse de sa logique (webhooks signés, CORS, auth).
+# ═════════════════════════════════════════════════════════════════════
+
+{
+	# email pour Let's Encrypt (expiration de certificat, notifications)
+	email {$ACME_EMAIL}
+	# Décommenter pour tester sans consommer le quota LE :
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$PUBLIC_DOMAIN} {
+	encode zstd gzip
+
+	# Corps de requête borné — les webhooks WhatsApp/Twilio/Paydunya sont petits.
+	# Une photo passe par MediaUrl (Twilio) / media id (Meta), jamais en upload direct ici.
+	request_body {
+		max_size 2MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# Seuls les chemins réellement publics sont proxifiés. Tout le reste → 404.
+	@public path /api/webhook/* /api/webhooks/* /health /health/* /version
+	handle @public {
+		reverse_proxy api:8000 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+			# Laisse le temps à un tour d'agent long (LLM) de répondre, mais
+			# borne : au-delà, le client aura déjà timeout de toute façon.
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 30s
+			}
+		}
+	}
+
+	# /metrics, /admin/*, /api/market/* : JAMAIS exposés publiquement
+	# (scrape Prometheus et exploitation passent par le réseau interne / tunnel SSH).
+	handle {
+		respond "Not Found" 404
+	}
+}

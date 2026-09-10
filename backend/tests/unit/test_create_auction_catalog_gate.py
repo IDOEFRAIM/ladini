@@ -24,11 +24,12 @@ Ce fichier verrouille maintenant :
      `_get_or_create_sub_category_for_rfq`)."""
 from __future__ import annotations
 
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pytest
 
-from agriconnect.services.database.errors import BusinessRuleException
+from ladini.services.database.errors import BusinessRuleException
 from tests.conftest import run
 
 
@@ -73,7 +74,7 @@ class _FakeSession:
 
 
 def _service(*, scalar_values=None, subcategories=None, prohibited_terms=None):
-    from agriconnect.services.database.auction import AuctionMixin
+    from ladini.services.database.auction import AuctionMixin
 
     class _Svc(AuctionMixin):
         def __init__(self):
@@ -100,10 +101,18 @@ def _sub_category(name):
 
 
 async def _create(svc, product_query="riz"):
+    # Dates RELATIVES à aujourd'hui (audit 2026-09-10) : elles étaient figées
+    # ("2026-09-01" / "2026-09-05") et sont devenues du passé, si bien que
+    # `create_auction` rejetait l'appel sur « Date limite invalide » AVANT
+    # d'atteindre la résolution catalogue que ces 4 tests vérifient. Le test
+    # échouait donc pour une raison sans aucun rapport avec son objet — une
+    # bombe à retardement que la date d'exécution finit toujours par armer.
+    deadline = (date.today() + timedelta(days=7)).isoformat()
+    delivery_deadline = (date.today() + timedelta(days=11)).isoformat()
     return await svc.create_auction(
         phone="+22670000001", product_query=product_query, qty=10, unit="KG",
-        max_price=200, deadline="2026-09-01",
-        delivery_location="Ouagadougou", delivery_deadline="2026-09-05",
+        max_price=200, deadline=deadline,
+        delivery_location="Ouagadougou", delivery_deadline=delivery_deadline,
     )
 
 

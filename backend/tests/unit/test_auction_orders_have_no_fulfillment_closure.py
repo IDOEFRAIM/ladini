@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import re
 
-from agriconnect.services.database.escrow import EscrowMixin
+from ladini.services.database.escrow import EscrowMixin
 
 
 class TestNoFulfillmentClosureMechanismReachesAuctionOrders:
@@ -64,7 +64,7 @@ class TestNoFulfillmentClosureMechanismReachesAuctionOrders:
         `outerjoin`."""
         import inspect
 
-        from agriconnect.services.database.auction import AuctionMixin
+        from ladini.services.database.auction import AuctionMixin
 
         source = inspect.getsource(AuctionMixin.select_winning_bid)
         assert "OrderItem(" not in source
@@ -80,7 +80,7 @@ class TestNoConversationalGoalAdvancesAnAuctionOrderPastConfirmed:
         seule entrée liée à la livraison du catalogue entier
         (`PRODUCER_CONFIRM_DELIVERY_OTP` -> "producer_escrow") ne s'applique,
         par construction (test ci-dessus), qu'aux commandes AVEC OrderItem."""
-        from agriconnect.graphs.agents.market_coach.interpreter.intent import (
+        from ladini.graphs.agents.market_coach.interpreter.intent import (
             INTENT_CONFIG,
         )
 

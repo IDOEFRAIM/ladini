@@ -17,7 +17,7 @@ class _FakeRedis:
 
 class TestStoreAndLoadResults:
     def test_round_trip(self, monkeypatch):
-        import agriconnect.services.search_results_cache as mod
+        import ladini.services.search_results_cache as mod
         fake = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake)
 
@@ -27,14 +27,14 @@ class TestStoreAndLoadResults:
         assert loaded == {"1": {"id": "a", "name": "maïs", "images": ["https://x/a.jpg"]}}
 
     def test_load_returns_none_when_nothing_cached(self, monkeypatch):
-        import agriconnect.services.search_results_cache as mod
+        import ladini.services.search_results_cache as mod
         fake = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake)
 
         assert mod.load_results("+22670000001") is None
 
     def test_store_with_empty_entries_is_a_no_op(self, monkeypatch):
-        import agriconnect.services.search_results_cache as mod
+        import ladini.services.search_results_cache as mod
         fake = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake)
 
@@ -42,7 +42,7 @@ class TestStoreAndLoadResults:
         assert fake.store == {}
 
     def test_store_with_no_phone_is_a_no_op(self, monkeypatch):
-        import agriconnect.services.search_results_cache as mod
+        import ladini.services.search_results_cache as mod
         fake = _FakeRedis()
         monkeypatch.setattr(mod, "_redis", lambda: fake)
 
@@ -50,7 +50,7 @@ class TestStoreAndLoadResults:
         assert fake.store == {}
 
     def test_a_redis_failure_on_write_never_raises(self, monkeypatch):
-        import agriconnect.services.search_results_cache as mod
+        import ladini.services.search_results_cache as mod
 
         class _BrokenRedis:
             def setex(self, *a, **kw):
@@ -60,7 +60,7 @@ class TestStoreAndLoadResults:
         mod.store_results("+22670000001", {"1": {"id": "a"}})  # ne doit pas lever
 
     def test_a_redis_failure_on_read_returns_none(self, monkeypatch):
-        import agriconnect.services.search_results_cache as mod
+        import ladini.services.search_results_cache as mod
 
         class _BrokenRedis:
             def get(self, *a, **kw):
@@ -70,7 +70,7 @@ class TestStoreAndLoadResults:
         assert mod.load_results("+22670000001") is None
 
     def test_corrupt_json_returns_none(self, monkeypatch):
-        import agriconnect.services.search_results_cache as mod
+        import ladini.services.search_results_cache as mod
         fake = _FakeRedis()
         fake.store[mod.key_for("+22670000001")] = "not json"
         monkeypatch.setattr(mod, "_redis", lambda: fake)
@@ -78,5 +78,5 @@ class TestStoreAndLoadResults:
         assert mod.load_results("+22670000001") is None
 
     def test_key_is_namespaced_by_phone(self):
-        import agriconnect.services.search_results_cache as mod
+        import ladini.services.search_results_cache as mod
         assert mod.key_for("+22670000001") == "last_search_results:+22670000001"

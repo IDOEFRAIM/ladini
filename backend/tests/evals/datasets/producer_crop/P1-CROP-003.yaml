@@ -6,7 +6,7 @@ tags: [happy_path, disambiguation, livestock, future_production]
 grounding:
   status: PATTERN_CONSISTENT
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/intent.py — INTENT_DISAMBIGUATION['STOCK_OR_SALES_DECLARATION'] lexical_hints include 'poussin', 'poussins'; DECLARE_CROP_CYCLE required=[farm_id, production_type, product, quantity, estimated_available_at, price], non-tunnel"
+    - "backend/src/ladini/graphs/agents/market_coach/interpreter/intent.py — INTENT_DISAMBIGUATION['STOCK_OR_SALES_DECLARATION'] lexical_hints include 'poussin', 'poussins'; DECLARE_CROP_CYCLE required=[farm_id, production_type, product, quantity, estimated_available_at, price], non-tunnel"
     - "Dispatch pattern for non-tunnel intents PROVEN elsewhere (see P1-STOCK-001); DECLARE_CROP_CYCLE's own actions/agro.py handler not individually re-traced."
 
 persona: {role: PRODUCER, description: "Aviculteur", phone: "+22670000022"}

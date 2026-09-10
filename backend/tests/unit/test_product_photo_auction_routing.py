@@ -21,11 +21,11 @@ PHONE = "+22670000001"
 
 def _patch_download_and_upload(monkeypatch):
     monkeypatch.setattr(
-        "agriconnect.services.whatsapp.twilio_media.download_twilio_media",
+        "ladini.services.whatsapp.twilio_media.download_twilio_media",
         AsyncMock(return_value=(b"binary", "image/jpeg")),
     )
     monkeypatch.setattr(
-        "agriconnect.services.storage.supabase_storage.upload_product_photo",
+        "ladini.services.storage.supabase_storage.upload_product_photo",
         AsyncMock(return_value="https://x/uploaded.jpg"),
     )
 
@@ -36,7 +36,7 @@ def _patch_worker_session(monkeypatch):
     (le cas en CI/test), ça lève "Sessionmaker indisponible". Même technique
     que `test_workers_runtime_and_repos.py::TestWorkerSession
     ._fake_sessionmaker`."""
-    import agriconnect.workers.runtime as runtime_module
+    import ladini.workers.runtime as runtime_module
 
     class _CM:
         async def __aenter__(self_inner):
@@ -50,15 +50,15 @@ def _patch_worker_session(monkeypatch):
 
 class TestPendingBidPhotoTakesPriority:
     def test_a_pending_bid_photo_is_linked_instead_of_the_product_catalog(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         _patch_download_and_upload(monkeypatch)
         monkeypatch.setattr(
-            "agriconnect.services.pending_photo_target.pop_pending_bid_photo",
+            "ladini.services.pending_photo_target.pop_pending_bid_photo",
             lambda phone: "bid-1",
         )
         monkeypatch.setattr(
-            "agriconnect.services.pending_photo_target.pop_pending_auction_photo",
+            "ladini.services.pending_photo_target.pop_pending_auction_photo",
             lambda phone: None,
         )
         resolve_called = {"count": 0}
@@ -79,15 +79,15 @@ class TestPendingBidPhotoTakesPriority:
 
 class TestPendingAuctionPhotoTakesPriorityOverProductCatalog:
     def test_a_pending_auction_photo_is_linked_when_no_bid_is_pending(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         _patch_download_and_upload(monkeypatch)
         monkeypatch.setattr(
-            "agriconnect.services.pending_photo_target.pop_pending_bid_photo",
+            "ladini.services.pending_photo_target.pop_pending_bid_photo",
             lambda phone: None,
         )
         monkeypatch.setattr(
-            "agriconnect.services.pending_photo_target.pop_pending_auction_photo",
+            "ladini.services.pending_photo_target.pop_pending_auction_photo",
             lambda phone: "auction-1",
         )
         resolve_called = {"count": 0}
@@ -108,15 +108,15 @@ class TestPendingAuctionPhotoTakesPriorityOverProductCatalog:
 
 class TestBidTakesPriorityOverAuctionWhenBothPending:
     def test_bid_wins_when_both_markers_are_set(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         _patch_download_and_upload(monkeypatch)
         monkeypatch.setattr(
-            "agriconnect.services.pending_photo_target.pop_pending_bid_photo",
+            "ladini.services.pending_photo_target.pop_pending_bid_photo",
             lambda phone: "bid-1",
         )
         monkeypatch.setattr(
-            "agriconnect.services.pending_photo_target.pop_pending_auction_photo",
+            "ladini.services.pending_photo_target.pop_pending_auction_photo",
             lambda phone: "auction-1",
         )
         link_bid = AsyncMock()
@@ -132,21 +132,21 @@ class TestBidTakesPriorityOverAuctionWhenBothPending:
 
 class TestNoPendingTargetFallsBackToProductCatalog:
     def test_falls_back_to_the_historical_product_catalog_flow(self, monkeypatch):
-        import agriconnect.workers.media.product_photo_task as mod
+        import ladini.workers.media.product_photo_task as mod
 
         _patch_download_and_upload(monkeypatch)
         monkeypatch.setattr(
-            "agriconnect.services.pending_photo_target.pop_pending_bid_photo",
+            "ladini.services.pending_photo_target.pop_pending_bid_photo",
             lambda phone: None,
         )
         monkeypatch.setattr(
-            "agriconnect.services.pending_photo_target.pop_pending_auction_photo",
+            "ladini.services.pending_photo_target.pop_pending_auction_photo",
             lambda phone: None,
         )
         resolve = AsyncMock(return_value={"none": True})
         monkeypatch.setattr(mod, "_resolve_target_product", resolve)
         sent = AsyncMock()
-        monkeypatch.setattr("agriconnect.api.tasks.send_confirmation_text", sent)
+        monkeypatch.setattr("ladini.api.tasks.send_confirmation_text", sent)
         _patch_worker_session(monkeypatch)
 
         run(mod._process(PHONE, "https://twilio/media", "image/jpeg"))

@@ -51,8 +51,8 @@ class TestClaimSingleResponseIsAtomicUnderConcurrency:
     def test_ten_concurrent_claims_on_the_same_event_yield_exactly_one_winner(
         self, monkeypatch
     ):
-        import agriconnect.api.response_dispatch as tasks_mod
-        import agriconnect.core.idempotency as idempotency_mod
+        import ladini.api.response_dispatch as tasks_mod
+        import ladini.core.idempotency as idempotency_mod
 
         monkeypatch.setattr(idempotency_mod, "_client", _ThreadSafeFakeRedis())
 
@@ -77,8 +77,8 @@ class TestClaimSingleResponseIsAtomicUnderConcurrency:
     def test_two_different_events_each_get_their_own_independent_winner(
         self, monkeypatch
     ):
-        import agriconnect.api.response_dispatch as tasks_mod
-        import agriconnect.core.idempotency as idempotency_mod
+        import ladini.api.response_dispatch as tasks_mod
+        import ladini.core.idempotency as idempotency_mod
 
         monkeypatch.setattr(idempotency_mod, "_client", _ThreadSafeFakeRedis())
 
@@ -110,7 +110,7 @@ class TestWebhookDuplicateDeliveryProcessesOnce:
         (redelivery Twilio réelle, ou deux workers qui la reçoivent tous les
         deux) ne doit déclencher qu'UN SEUL traitement — la seconde livraison
         doit court-circuiter avant tout enqueue Celery."""
-        import agriconnect.api.routes.twilio_webhook as webhook_mod
+        import ladini.api.routes.twilio_webhook as webhook_mod
 
         # Vrai SETNX en mémoire (mono-thread ici, suffisant pour prouver la
         # LOGIQUE — l'atomicité de Redis lui-même n'est pas ce qui est testé).

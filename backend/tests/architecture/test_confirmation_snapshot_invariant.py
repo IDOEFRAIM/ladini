@@ -52,11 +52,11 @@ from tests.architecture.test_preorder_draft_persistence import (
     _draft as _preorder_draft,
 )
 
-from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     IllegalDraftTransition as ProcurementIllegalTransition,
     ProcurementDraftStatus,
 )
-from agriconnect.graphs.agents.market_coach.domain.preorder_draft import (
+from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     IllegalDraftTransition as PreorderIllegalTransition,
     PreorderDraftStatus,
 )
@@ -92,7 +92,7 @@ class TestProcurementConfirmationSnapshotIsFrozen:
         support) — recharger le draft par `draft_id` suffit à reconstituer
         le contenu EXACT confirmé, peu importe combien de temps a passé ou
         combien de transitions de statut ont suivi."""
-        from agriconnect.graphs.agents.market_coach.core.confirmation_target import (
+        from ladini.graphs.agents.market_coach.core.confirmation_target import (
             ConfirmationTarget,
         )
 
@@ -139,7 +139,7 @@ class TestPreorderConfirmationSnapshotIsFrozen:
         assert executed.items == v1.items
 
     def test_confirmation_target_plus_a_reload_answers_what_was_confirmed_unambiguously(self):
-        from agriconnect.graphs.agents.market_coach.core.confirmation_target import (
+        from ladini.graphs.agents.market_coach.core.confirmation_target import (
             ConfirmationTarget,
         )
 

@@ -29,7 +29,7 @@ import ast
 import inspect
 import pathlib
 
-from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+from ladini.graphs.agents.market_coach.interpreter.routing import (
     make_input_interpreter,
 )
 from tests.conftest import ScriptedLLM, StubRuntime, make_state, run
@@ -91,7 +91,7 @@ class TestRetryCountNotDuplicated:
     grep structurel (pas de faux positif possible : le nom est spécifique)."""
 
     def test_interpreter_routing_never_touches_retry_count(self):
-        import agriconnect.graphs.agents.market_coach.interpreter.routing as mod
+        import ladini.graphs.agents.market_coach.interpreter.routing as mod
 
         src = inspect.getsource(mod)
         assert "retry_count" not in src
@@ -106,7 +106,7 @@ class TestGoalLockOnlyValidatedOnTheLlmPath:
     def test_fast_path_branches_only_echo_locked_goal_as_intent(self):
         mod_path = (
             pathlib.Path(__file__).resolve().parents[2]
-            / "src/agriconnect/graphs/agents/market_coach/interpreter/routing.py"
+            / "src/ladini/graphs/agents/market_coach/interpreter/routing.py"
         )
         tree = ast.parse(mod_path.read_text(encoding="utf-8"))
         target = next(

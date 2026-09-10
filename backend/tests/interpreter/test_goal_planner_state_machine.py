@@ -11,12 +11,12 @@ import pytest
 
 # Importer `routing` déclenche `_init_intent_to_goal_map(...)` au chargement du
 # module — sans ça, `INTENT_TO_GOAL_MAP` (consommé par goal_planner) est vide.
-import agriconnect.graphs.agents.market_coach.interpreter.routing  # noqa: F401
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+import ladini.graphs.agents.market_coach.interpreter.routing  # noqa: F401
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     get_pending_interaction,
 )
-from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import goal_planner
+from ladini.graphs.agents.market_coach.interpreter.goal_planner import goal_planner
 from tests.conftest import make_state, run
 
 # La traduction `expected_input="PRODUCT"/"CONFIRMATION"/...` → écriture RÉELLE
@@ -150,7 +150,7 @@ class TestRule0bisDisambiguation:
         """Régression : un `available_mapping` périmé (d'un AUTRE menu affiché
         entre-temps) doit être écarté au profit du catalogue reconstruit
         depuis `disambiguation_trigger_id`."""
-        from agriconnect.graphs.agents.market_coach.interpreter.intent import (
+        from ladini.graphs.agents.market_coach.interpreter.intent import (
             INTENT_DISAMBIGUATION,
         )
         trigger_id = next(iter(INTENT_DISAMBIGUATION))
@@ -203,7 +203,7 @@ class TestRule0bisDisambiguation:
         """`INTENT_DISAMBIGUATION` options supportent aussi la forme dict
         (`{"intent": ...}`), en plus du tuple/liste utilisé par le catalogue
         actuel — chemin défensif à couvrir explicitement."""
-        import agriconnect.graphs.agents.market_coach.interpreter.goal_planner as gp_module
+        import ladini.graphs.agents.market_coach.interpreter.goal_planner as gp_module
 
         monkeypatch.setitem(
             gp_module.INTENT_DISAMBIGUATION,
@@ -693,6 +693,62 @@ class TestRule5NewTask:
 
 
 # =====================================================================
+# RÈGLE 4ter — CONFIRM ORPHELIN SUR UN PANIER NON VIDE
+# =====================================================================
+
+class TestRule4terOrphanCartConfirm:
+    """Incident réel (2026-09-09) : après l'ajout au panier, les nœuds de
+    nettoyage remettent `current_goal` à None ; « je valide » (CONFIRM /
+    intent UNKNOWN) retombait sur le menu générique alors que le panier
+    invitait explicitement à précommander."""
+
+    def test_orphan_confirm_with_active_cart_promotes_to_preorder_init(self):
+        r = gp(
+            interpreted_event="CONFIRM",
+            detected_intent="UNKNOWN",
+            current_goal=None,
+            expected_input="SELECTION",
+            active_cart=[{"product_id": "P1", "name": "lait", "quantity": 3}],
+        )
+        assert r["current_goal"] == "BUYER_PREORDER_INIT"
+        assert r["goal_status"] == "ACTIVE"
+        assert str(r.get("status") or "").upper() != "WAITING_INPUT"
+
+    def test_orphan_confirm_recovers_cart_from_working_memory_snapshot(self):
+        r = gp(
+            interpreted_event="CONFIRM",
+            detected_intent="UNKNOWN",
+            current_goal=None,
+            expected_input="NONE",
+            working_memory={"last_active_cart": [{"product_id": "P1", "name": "lait"}]},
+        )
+        assert r["current_goal"] == "BUYER_PREORDER_INIT"
+
+    def test_orphan_confirm_with_empty_cart_does_not_promote(self):
+        r = gp(
+            interpreted_event="CONFIRM",
+            detected_intent="UNKNOWN",
+            current_goal=None,
+            expected_input="SELECTION",
+            active_cart=[],
+        )
+        assert r.get("current_goal") != "BUYER_PREORDER_INIT"
+
+    def test_confirm_while_a_specific_field_is_pending_is_untouched(self):
+        """Un CONFIRM pendant qu'un champ précis (ex: CONFIRMATION d'un
+        autre tunnel) est attendu ne doit pas être détourné vers la
+        précommande."""
+        r = gp(
+            interpreted_event="CONFIRM",
+            detected_intent="UNKNOWN",
+            current_goal=None,
+            expected_input="CONFIRMATION",
+            active_cart=[{"product_id": "P1", "name": "lait"}],
+        )
+        assert r.get("current_goal") != "BUYER_PREORDER_INIT"
+
+
+# =====================================================================
 # REPLI PAR DÉFAUT
 # =====================================================================
 
@@ -811,37 +867,37 @@ class TestBuyerProductFallbackHelpers:
     chemin nominal (voir [[llm-decides-not-frozen-french-lists]])."""
 
     def test_extracts_meaningful_product_tokens(self):
-        from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
+        from ladini.graphs.agents.market_coach.interpreter.goal_planner import (
             _extract_buyer_product,
         )
         assert _extract_buyer_product("je veux des tomates fraiches") == "tomates fraiches"
 
     def test_empty_text_yields_no_product(self):
-        from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
+        from ladini.graphs.agents.market_coach.interpreter.goal_planner import (
             _extract_buyer_product,
         )
         assert _extract_buyer_product("") is None
 
     def test_only_filler_words_yields_no_product(self):
-        from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
+        from ladini.graphs.agents.market_coach.interpreter.goal_planner import (
             _extract_buyer_product,
         )
         assert _extract_buyer_product("je veux acheter") is None
 
     def test_looks_like_buyer_product_request_true_on_a_clear_hint(self):
-        from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
+        from ladini.graphs.agents.market_coach.interpreter.goal_planner import (
             _looks_like_buyer_product_request,
         )
         assert _looks_like_buyer_product_request("je veux des tomates fraiches") is True
 
     def test_looks_like_buyer_product_request_false_without_any_hint(self):
-        from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
+        from ladini.graphs.agents.market_coach.interpreter.goal_planner import (
             _looks_like_buyer_product_request,
         )
         assert _looks_like_buyer_product_request("bonjour comment allez vous") is False
 
     def test_looks_like_buyer_product_request_false_on_empty_text(self):
-        from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
+        from ladini.graphs.agents.market_coach.interpreter.goal_planner import (
             _looks_like_buyer_product_request,
         )
         assert _looks_like_buyer_product_request("") is False
@@ -850,13 +906,13 @@ class TestBuyerProductFallbackHelpers:
         """« Je veux suivre ma commande » a le hint « je veux » mais c'est du
         SUIVI (exclu), pas un acte d'achat — la garde `\\bcommande\\b` doit
         neutraliser le repli."""
-        from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
+        from ladini.graphs.agents.market_coach.interpreter.goal_planner import (
             _looks_like_buyer_product_request,
         )
         assert _looks_like_buyer_product_request("je veux suivre ma commande") is False
 
     def test_looks_like_buyer_product_request_false_when_only_filler_remains(self):
-        from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
+        from ladini.graphs.agents.market_coach.interpreter.goal_planner import (
             _looks_like_buyer_product_request,
         )
         assert _looks_like_buyer_product_request("je veux acheter") is False

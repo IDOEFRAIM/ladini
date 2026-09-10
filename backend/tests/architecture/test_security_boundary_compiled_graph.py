@@ -30,18 +30,18 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.nodes.input_normalizer import (
+from ladini.graphs.agents.market_coach.core.state import MarketAgentState
+from ladini.graphs.agents.market_coach.nodes.input_normalizer import (
     input_normalizer,
 )
-from agriconnect.graphs.agents.market_coach.nodes.routing import (
+from ladini.graphs.agents.market_coach.nodes.routing import (
     _route_after_security,
     _route_after_session_bootstrap,
 )
-from agriconnect.graphs.agents.market_coach.nodes.security_moderation import (
+from ladini.graphs.agents.market_coach.nodes.security_moderation import (
     security_moderation,
 )
-from agriconnect.graphs.agents.market_coach.nodes.session_bootstrap import (
+from ladini.graphs.agents.market_coach.nodes.session_bootstrap import (
     session_bootstrap,
 )
 from tests.conftest import StubRuntime
@@ -227,7 +227,7 @@ class TestAllowedEntryGoesThroughSessionBootstrapFirst:
         async def _boom(*_args, **_kwargs):
             raise RuntimeError("mcp down")
 
-        import agriconnect.graphs.agents.market_coach.nodes.session_bootstrap as sb_mod
+        import ladini.graphs.agents.market_coach.nodes.session_bootstrap as sb_mod
 
         monkeypatch.setattr(sb_mod, "load_user_profile", _boom)
 

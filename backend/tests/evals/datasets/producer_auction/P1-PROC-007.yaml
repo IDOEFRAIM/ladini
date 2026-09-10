@@ -6,8 +6,8 @@ tags: [happy_path, auction, two_sided]
 grounding:
   status: PROVEN_BY_CODE
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/intent.py — PROCUREMENT_CREATE_REQUEST non-tunnel, tool_name='create_auction'"
-    - "backend/src/agriconnect/graphs/agents/market_coach/actions/sales.py:223-231 — SALES_PLACE_BID -> place_bid, PROVEN"
+    - "backend/src/ladini/graphs/agents/market_coach/interpreter/intent.py — PROCUREMENT_CREATE_REQUEST non-tunnel, tool_name='create_auction'"
+    - "backend/src/ladini/graphs/agents/market_coach/actions/sales.py:223-231 — SALES_PLACE_BID -> place_bid, PROVEN"
 
 participants:
   - {id: BUYER1, role: BUYER, phone: "+22670000025", workspace_type: buyer}

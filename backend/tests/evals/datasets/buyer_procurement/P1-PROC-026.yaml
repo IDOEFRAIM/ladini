@@ -6,7 +6,7 @@ tags: [happy_path, direct_purchase]
 grounding:
   status: PATTERN_CONSISTENT
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/interpreter/intent.py — PROCUREMENT_ACCEPT_OFFER tool_name='accept_bid', required=[bid_id], non-tunnel"
+    - "backend/src/ladini/graphs/agents/market_coach/interpreter/intent.py — PROCUREMENT_ACCEPT_OFFER tool_name='accept_bid', required=[bid_id], non-tunnel"
     - "Dispatch pattern (non-tunnel -> registry -> tool matches INTENT_CONFIG label) PROVEN for other non-tunnel intents this session (create_product, select_winning_bid, place_bid, create_agent_action, add_stock). PROCUREMENT_ACCEPT_OFFER's own actions/procure.py handler NOT individually re-traced — explicitly PATTERN_CONSISTENT, not PROVEN_BY_CODE."
 
 persona: {role: BUYER, description: "Acheteur, achat direct catalogue", phone: "+22670000038"}

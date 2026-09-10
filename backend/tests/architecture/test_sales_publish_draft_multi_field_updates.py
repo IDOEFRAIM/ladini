@@ -12,8 +12,8 @@ import pytest
 
 from tests.architecture.test_sales_publish_draft_persistence import _draft
 
-from agriconnect.graphs.agents.market_coach.core.confirmation_target import ConfirmationTarget
-from agriconnect.graphs.agents.market_coach.domain.sales_publish_draft import (
+from ladini.graphs.agents.market_coach.core.confirmation_target import ConfirmationTarget
+from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
     ConfirmSalesPublishDraft,
     SalesPublishOutcomeKind,
     UpdateSalesPublishDraft,

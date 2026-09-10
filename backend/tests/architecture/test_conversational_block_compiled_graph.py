@@ -26,19 +26,19 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from agriconnect.graphs.agents.market_coach.core.goals import ALL_BUYER_TUNNEL_GOALS
-from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.nodes.clarification import (
+from ladini.graphs.agents.market_coach.core.goals import ALL_BUYER_TUNNEL_GOALS
+from ladini.graphs.agents.market_coach.core.state import MarketAgentState
+from ladini.graphs.agents.market_coach.nodes.clarification import (
     clarification_node,
 )
-from agriconnect.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
-from agriconnect.graphs.agents.market_coach.nodes.routing import (
+from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
+from ladini.graphs.agents.market_coach.nodes.routing import (
     _route_after_cognitive_guard,
 )
-from agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation import (
+from ladini.graphs.agents.market_coach.nodes.semantic_disambiguation import (
     semantic_disambiguation,
 )
-from agriconnect.graphs.agents.market_coach.core.graph_builder import (
+from ladini.graphs.agents.market_coach.core.graph_builder import (
     _route_after_clarification,
 )
 from tests.conftest import make_state, run
@@ -283,8 +283,8 @@ class TestDisambiguationCandidateComputedExactlyOnce:
 
     @pytest.mark.asyncio
     async def test_lexical_detection_runs_exactly_once_per_turn(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.nodes.cognitive as cognitive_mod
-        import agriconnect.graphs.agents.market_coach.nodes.semantic_disambiguation as disambig_mod
+        import ladini.graphs.agents.market_coach.nodes.cognitive as cognitive_mod
+        import ladini.graphs.agents.market_coach.nodes.semantic_disambiguation as disambig_mod
 
         real_fn = disambig_mod._detect_disambiguation_candidates
         calls = {"n": 0}

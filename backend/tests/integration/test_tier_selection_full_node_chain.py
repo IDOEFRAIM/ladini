@@ -22,15 +22,15 @@ from __future__ import annotations
 import typing
 from typing import Any, Dict
 
-from agriconnect.graphs.agents.market_coach.core.state import MarketAgentState
-from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
-from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+from ladini.graphs.agents.market_coach.core.state import MarketAgentState
+from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
+from ladini.graphs.agents.market_coach.interpreter.routing import (
     make_input_interpreter,
 )
-from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
-from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+from ladini.graphs.agents.market_coach.nodes.memory import memory_update
+from ladini.graphs.agents.market_coach.nodes.validation import validator
 from tests.conftest import StubRuntime, run
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     get_pending_interaction,
     set_pending_interaction,
@@ -92,7 +92,7 @@ def _tiered_vendor() -> Dict[str, Any]:
 
 class TestFullNodeChainTierSelection:
     def test_two_turns_through_real_nodes_resolves_the_tier(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
 
         async def _fake_resolve_vendors(self, phone, product_name):
             return [_tiered_vendor()], False
@@ -140,10 +140,10 @@ class TestFullNodeChainTierSelection:
         # Simulate the turn-boundary nodes that ALSO run for real (ui_engine,
         # response_strategy, state_cleaner, post_response_cleanup) — this is
         # exactly the part earlier node-level tests skipped entirely.
-        from agriconnect.graphs.agents.market_coach.nodes.cleaner import (
+        from ladini.graphs.agents.market_coach.nodes.cleaner import (
             state_cleaner_node,
         )
-        from agriconnect.graphs.agents.market_coach.nodes.cleanup import (
+        from ladini.graphs.agents.market_coach.nodes.cleanup import (
             post_response_cleanup,
         )
 
@@ -244,7 +244,7 @@ class TestFullNodeChainTierSelection:
         scripted LLM response using one of those ids resolves correctly
         end-to-end through cart_management, which independently validates
         the id against the live tier list before trusting it."""
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
         from tests.conftest import ScriptedLLM
 
         async def _fake_resolve_vendors(self, phone, product_name):
@@ -279,10 +279,10 @@ class TestFullNodeChainTierSelection:
         assert to_tunnel_category(get_pending_interaction(state)) == "SELECTION"
         assert state.get("tier_selection_context", {}).get("tiers")
 
-        from agriconnect.graphs.agents.market_coach.nodes.cleaner import (
+        from ladini.graphs.agents.market_coach.nodes.cleaner import (
             state_cleaner_node,
         )
-        from agriconnect.graphs.agents.market_coach.nodes.cleanup import (
+        from ladini.graphs.agents.market_coach.nodes.cleanup import (
             post_response_cleanup,
         )
 
@@ -347,7 +347,7 @@ class TestFullNodeChainTierSelection:
         (with real tier_ids) must be present in the user prompt sent to the
         LLM whenever a tier menu is active — this is what was missing
         during the "champignons" incident."""
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
         from tests.conftest import ScriptedLLM
 
         async def _fake_resolve_vendors(self, phone, product_name):
@@ -376,10 +376,10 @@ class TestFullNodeChainTierSelection:
         }
         state = apply_patch(state, run(cart_management(state, seed_runtime)))
 
-        from agriconnect.graphs.agents.market_coach.nodes.cleaner import (
+        from ladini.graphs.agents.market_coach.nodes.cleaner import (
             state_cleaner_node,
         )
-        from agriconnect.graphs.agents.market_coach.nodes.cleanup import (
+        from ladini.graphs.agents.market_coach.nodes.cleanup import (
             post_response_cleanup,
         )
 

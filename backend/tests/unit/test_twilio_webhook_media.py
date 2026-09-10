@@ -6,7 +6,7 @@ NB : ce module importe `twilio_webhook.py`, qui importe `api/tasks.py`
 `tests/unit/test_workers_crons_and_payments.py` / `tests/integration/`, il ne
 peut pas se collecter dans un environnement sans le paquet `celery` installé
 (pré-existant, sans rapport avec cette feature — voir la mémoire projet
-"test-suite-agriconnect").
+"test-suite-ladini").
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import pytest
 
 pytest.importorskip("celery", reason="webhook module imports api.tasks -> celery.signals")
 
-from agriconnect.api.routes.twilio_webhook import _extract_media
+from ladini.api.routes.twilio_webhook import _extract_media
 
 
 class TestExtractMedia:
@@ -73,7 +73,7 @@ class TestExtractMedia:
         assert _extract_media(form) is None
 
 
-from agriconnect.api.routes.twilio_webhook import _extract_view_photos_query
+from ladini.api.routes.twilio_webhook import _extract_view_photos_query
 
 
 class TestExtractViewPhotosQuery:

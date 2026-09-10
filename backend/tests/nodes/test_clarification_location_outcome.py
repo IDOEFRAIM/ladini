@@ -4,11 +4,11 @@ couvre l'autre cas). Voir `tests/unit/test_webhook_gps_single_response.py`
 pour la preuve jumelle côté webhook (qui, lui, n'envoie plus jamais rien)."""
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     set_pending_interaction,
 )
-from agriconnect.graphs.agents.market_coach.nodes.clarification import (
+from ladini.graphs.agents.market_coach.nodes.clarification import (
     clarification_node,
 )
 from tests.conftest import make_state, run

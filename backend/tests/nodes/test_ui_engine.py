@@ -11,19 +11,19 @@ import logging
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     get_pending_interaction,
 )
-from agriconnect.graphs.agents.market_coach.flows.common.menu_contracts import (
+from ladini.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
     MenuRequest,
 )
-from agriconnect.graphs.agents.market_coach.nodes.ui_engine import (
+from ladini.graphs.agents.market_coach.nodes.ui_engine import (
     _resolve_menu_session_key,
     ui_engine,
 )
-from agriconnect.graphs.agents.market_coach.services.menu_snapshot import (
+from ladini.graphs.agents.market_coach.services.menu_snapshot import (
     menu_snapshot_store,
 )
 from tests.conftest import make_state, run
@@ -283,7 +283,7 @@ class TestMenuSnapshotIdCanonicalSourceAndSync:
         from langgraph.checkpoint.memory import MemorySaver
         from langgraph.graph import END, StateGraph
 
-        from agriconnect.graphs.agents.market_coach.core.state import (
+        from ladini.graphs.agents.market_coach.core.state import (
             MarketAgentState,
         )
 
@@ -342,7 +342,7 @@ class TestMenuIsConsumedOnlyAfterSuccessfulMaterialization:
 class TestNoBusinessDecisionInUiEngine:
     def test_pending_interaction_goal_is_never_set(self):
         """Mandat §12-14 : recherche exhaustive faite, `PendingInteraction.goal`
-        n'a AUCUN lecteur réel dans `src/agriconnect` — ui_engine ne
+        n'a AUCUN lecteur réel dans `src/ladini` — ui_engine ne
         l'invente pas. L'identification du menu passe par `context_ref` +
         `menu_snapshot_id` + `available_mapping_kind`."""
         state = make_state(pending_menu=_menu(), current_goal="SALES_PUBLISH_PRODUCT")
@@ -371,7 +371,7 @@ class TestNoBusinessDecisionInUiEngine:
     def test_module_contains_no_role_based_branching(self):
         import inspect
 
-        import agriconnect.graphs.agents.market_coach.nodes.ui_engine as mod
+        import ladini.graphs.agents.market_coach.nodes.ui_engine as mod
 
         source = inspect.getsource(mod)
         assert "BUYER" not in source
@@ -386,7 +386,7 @@ class TestNoBusinessDecisionInUiEngine:
 
 class TestBuildAgUiComponentIsPure:
     def test_pure_function_never_touches_the_snapshot_store(self):
-        from agriconnect.graphs.agents.market_coach.nodes.ui_engine import (
+        from ladini.graphs.agents.market_coach.nodes.ui_engine import (
             _build_ag_ui_component,
         )
 
@@ -403,7 +403,7 @@ class TestBuildAgUiComponentIsPure:
 
 class TestCompiledGraphNeverLoopsBackFromUiEngine:
     def test_ui_engine_has_a_single_fixed_downstream_edge_to_response_strategy(self):
-        from agriconnect.graphs.agents.market_coach.core.graph_builder import (
+        from ladini.graphs.agents.market_coach.core.graph_builder import (
             build_graph,
         )
 
@@ -417,7 +417,7 @@ class TestCompiledGraphNeverLoopsBackFromUiEngine:
         (`cart_management`, `negotiation_gate`, `order_tracking_node`,
         `context_resolver`, `ensure_farm_node`) avant `END` — sinon un menu
         pourrait être régénéré/écrasé dans le MÊME tour."""
-        from agriconnect.graphs.agents.market_coach.core.graph_builder import (
+        from ladini.graphs.agents.market_coach.core.graph_builder import (
             build_graph,
         )
 

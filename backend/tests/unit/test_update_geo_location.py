@@ -30,7 +30,7 @@ class _FakeSession:
 
 
 def _service(user_id):
-    from agriconnect.services.database.auth import AuthMixin
+    from ladini.services.database.auth import AuthMixin
 
     class _Svc(AuthMixin):
         def __init__(self, session):

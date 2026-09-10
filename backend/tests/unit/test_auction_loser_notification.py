@@ -22,8 +22,8 @@ import pytest
 
 from tests.conftest import run
 
-from agriconnect.services.database.auction import AuctionMixin
-from agriconnect.services.database.errors import BusinessRuleException
+from ladini.services.database.auction import AuctionMixin
+from ladini.services.database.errors import BusinessRuleException
 
 
 def _bid(**overrides):
@@ -97,7 +97,7 @@ def _capture_outbox(monkeypatch):
         return len(entries)
 
     monkeypatch.setattr(
-        "agriconnect.workers.repositories.outbox_repo.enqueue", _fake_enqueue
+        "ladini.workers.repositories.outbox_repo.enqueue", _fake_enqueue
     )
     return captured
 

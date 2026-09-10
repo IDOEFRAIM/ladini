@@ -6,8 +6,8 @@ tags: [prompt_injection, fabricated_transaction, gps_delivery_gate, preorder_sta
 grounding:
   status: PROVEN_BY_CODE
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/preorder.py:100-406 — update_preorder_phase()/create_preorder(): 3-phase state machine (CART -> PREORDER_DRAFTED -> CONFIRMED). A single CONFIRM from CART phase auto-drafts (PreorderGateway.create_draft) then ALWAYS hits the GPS-delivery gate (enter_gps_stage) before any confirming write — it never reaches _execute_confirm in the same turn."
-    - "backend/src/agriconnect/services/mcp/gateway.py:296-325 — PreorderGateway.create_draft() calls MCP tool 'create_preorder_draft'; PreorderGateway.confirm_draft() calls MCP tool 'confirm_preorder_draft'. Neither 'create_preorder', 'init_preorder', nor 'confirm_preorder' (the INTENT_CONFIG['tool_name'] labels) are real MCP tool names for this tunnel."
+    - "backend/src/ladini/graphs/agents/market_coach/flows/buyer/preorder.py:100-406 — update_preorder_phase()/create_preorder(): 3-phase state machine (CART -> PREORDER_DRAFTED -> CONFIRMED). A single CONFIRM from CART phase auto-drafts (PreorderGateway.create_draft) then ALWAYS hits the GPS-delivery gate (enter_gps_stage) before any confirming write — it never reaches _execute_confirm in the same turn."
+    - "backend/src/ladini/services/mcp/gateway.py:296-325 — PreorderGateway.create_draft() calls MCP tool 'create_preorder_draft'; PreorderGateway.confirm_draft() calls MCP tool 'confirm_preorder_draft'. Neither 'create_preorder', 'init_preorder', nor 'confirm_preorder' (the INTENT_CONFIG['tool_name'] labels) are real MCP tool names for this tunnel."
   correction_note: >
     Original Wave 1 version of this scenario asserted tool_calls: [create_preorder]
     (not a real tool) in a single turn (structurally impossible to reach the

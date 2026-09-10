@@ -14,7 +14,7 @@ from tests.conftest import run
 
 class TestViewingOffersGpsAutoAttach:
     def test_accepting_a_bid_auto_attaches_the_buyers_default_location(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.flows.buyer.negotiation as mod
+        import ladini.graphs.agents.market_coach.flows.buyer.negotiation as mod
 
         seen: Dict[str, Any] = {}
 
@@ -31,7 +31,7 @@ class TestViewingOffersGpsAutoAttach:
 
         monkeypatch.setattr(mod, "AuctionGateway", _CapturingAuctionGateway)
         monkeypatch.setattr(
-            "agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking._get_stored_location",
+            "ladini.graphs.agents.market_coach.flows.buyer.order_tracking._get_stored_location",
             _fake_get_stored_location,
         )
 
@@ -49,7 +49,7 @@ class TestViewingOffersGpsAutoAttach:
     def test_accepting_a_bid_without_any_stored_location_still_succeeds(self, monkeypatch):
         """Non-régression : pas de point GPS connu -> la commande se crée
         quand même (comportement historique), juste sans coordonnées."""
-        import agriconnect.graphs.agents.market_coach.flows.buyer.negotiation as mod
+        import ladini.graphs.agents.market_coach.flows.buyer.negotiation as mod
 
         seen: Dict[str, Any] = {}
 
@@ -66,7 +66,7 @@ class TestViewingOffersGpsAutoAttach:
 
         monkeypatch.setattr(mod, "AuctionGateway", _CapturingAuctionGateway)
         monkeypatch.setattr(
-            "agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking._get_stored_location",
+            "ladini.graphs.agents.market_coach.flows.buyer.order_tracking._get_stored_location",
             _fake_get_stored_location,
         )
 

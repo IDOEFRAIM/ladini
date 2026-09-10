@@ -43,7 +43,7 @@ Le prix affiché devient une VALEUR comparable
 changé (prix différent, offre plus `PENDING`) au moment de l'exécution :
 **aucune exécution silencieuse** — nouveau récap sur l'état RÉEL, nouvelle
 confirmation explicite demandée. Si rien n'a changé : exécution normale,
-comme avant. [`order_tracking.py`](../src/agriconnect/graphs/agents/market_coach/flows/buyer/order_tracking.py)
+comme avant. [`order_tracking.py`](../src/ladini/graphs/agents/market_coach/flows/buyer/order_tracking.py)
 
 ## B. `Auction.version` — décision finale
 
@@ -72,7 +72,7 @@ ce dépôt.
    séparé et hors de portée d'audit ici) ne peut pas être exclu avec
    certitude depuis ce dépôt seul.
 3. La colonne est marquée `DEPRECATED / UNUSED` explicitement dans le
-   modèle ([`orders/models.py`](../src/agriconnect/domain/orders/models.py))
+   modèle ([`orders/models.py`](../src/ladini/domain/orders/models.py))
    avec la justification complète — pas une dette silencieuse.
 
 C'est un `REMOVE` du code mort + un `KEEP` documenté du schéma, jamais un
@@ -167,7 +167,7 @@ commande dans "mes commandes" — seule la notification Outbox ponctuelle
 sans aucun moyen de la retrouver ensuite en consultant ses commandes.
 Corrigé : troisième source de candidats, `Order.id` rejoint via
 `Order.winning_bid_id == Bid.id` filtré sur `Bid.producer_id`.
-[`producer.py`](../src/agriconnect/services/database/producer.py)
+[`producer.py`](../src/ladini/services/database/producer.py)
 
 `get_my_active_bids` (déjà audité précédemment, toujours correct) montre
 le statut `WON`/`LOST`/`WITHDRAWN` — désormais complété par la commande

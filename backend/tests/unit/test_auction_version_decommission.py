@@ -23,7 +23,7 @@ import uuid
 
 from tests.conftest import run
 
-from agriconnect.services.database.buyer import BuyerMixin
+from ladini.services.database.buyer import BuyerMixin
 
 
 def _buyer_profile():

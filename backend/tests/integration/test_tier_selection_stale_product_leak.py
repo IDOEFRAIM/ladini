@@ -21,11 +21,11 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
+from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
 from tests.conftest import StubRuntime, run
 
 
@@ -59,7 +59,7 @@ class TestStaleTierContextNeverLeaksAcrossProducts:
     def test_multi_vendor_search_resets_stale_tier_context(self, monkeypatch):
         """The exact live code path: a fresh multi-vendor search for a
         DIFFERENT, untiered product must not let an old tier menu survive."""
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
 
         async def _fake_resolve_vendors(self, phone, product_name):
             return [_poulets_vendor(), _poulets_vendor("P-POULETS-2")], True
@@ -155,7 +155,7 @@ class TestStaleTierContextNeverLeaksAcrossProducts:
     def test_single_vendor_path_ignores_a_stale_tier_context_for_a_different_product(
         self, monkeypatch
     ):
-        import agriconnect.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
+        import ladini.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
 
         async def _fake_resolve_vendors(self, phone, product_name):
             return [_poulets_vendor()], False

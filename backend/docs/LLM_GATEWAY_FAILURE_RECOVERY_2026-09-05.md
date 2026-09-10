@@ -72,7 +72,7 @@ que `LLM_PROVIDER != groq`.
 ### 3.1 `core/get_llm.py::get_groq_sdk()`
 
 Le garde `LLM_PROVIDER` est retiré. Seule condition restante :
-`settings.llm_api_key` (GROQ_API_KEY/AGRICONNECT_APIKEY) présent — la vraie
+`settings.llm_api_key` (GROQ_API_KEY/LADINI_APIKEY) présent — la vraie
 question. `LLM_PROVIDER` continue de gouverner **uniquement** le client
 legacy unique construit par `get_llm()` ; il n'a plus voix dans la
 construction d'un candidat individuel du Gateway.

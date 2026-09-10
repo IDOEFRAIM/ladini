@@ -63,6 +63,11 @@ backend/rag_db/
 app.log
 reports/
 orchestration_report.json
+# Rapport de coverage généré (pytest --cov-report=xml/json) — jamais commité,
+# 899 Ko de bruit régénérable à chaque run. Trouvé committé par erreur lors
+# de l'audit du 2026-09-10, supprimé directement (voir garbage/README.md).
+coverage.json
+coverage.xml
 
 # ============================
 # Docker
@@ -157,9 +162,9 @@ backend/_legacy/
 backend/_pycache__/
 backend/_.pytest_cache__/
 backend/.venv
-backend/src/agriconnect/graphs/agent_test/
-backend/src/agriconnect/worker.py
-backend/src/agriconnect/services/memory/
+backend/src/ladini/graphs/agent_test/
+backend/src/ladini/worker.py
+backend/src/ladini/services/memory/
 
 backend/src/future
 backend/AUDIT_MARKET_AGENTS.md
@@ -169,3 +174,9 @@ backend/.env
 backend/.env.example
 frontend/
 
+
+# ── Déploiement (état runtime sur le VPS, jamais versionné) ──────────
+deploy/releases/current
+deploy/releases/previous
+deploy/releases/history.log
+deploy/.deploy.lock

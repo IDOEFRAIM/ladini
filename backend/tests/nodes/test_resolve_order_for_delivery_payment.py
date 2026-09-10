@@ -7,7 +7,7 @@ strict — jamais un choix implicite, mandat §20)."""
 from __future__ import annotations
 
 from tests.conftest import StubRuntime, run
-from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
@@ -34,7 +34,7 @@ def _order(order_id, *, status="CONFIRMED", payment_status="PENDING", **override
 
 class TestResolveOrderForDeliveryPayment:
     def test_no_phone_returns_error(self):
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_order_for_delivery_payment,
         )
 
@@ -42,7 +42,7 @@ class TestResolveOrderForDeliveryPayment:
         assert result["status"] == "ERROR"
 
     def test_no_candidate_at_all_is_an_error(self):
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_order_for_delivery_payment,
         )
 
@@ -54,7 +54,7 @@ class TestResolveOrderForDeliveryPayment:
         """Une commande escrow (`payment_status="ESCROWED"`) revenant dans
         `get_producer_orders(status="CONFIRMED")` ne doit JAMAIS apparaître
         comme candidate — seul `verify_delivery_otp` la traite."""
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_order_for_delivery_payment,
         )
 
@@ -70,7 +70,7 @@ class TestResolveOrderForDeliveryPayment:
         assert "no_order_pending_payment_at_delivery" in result["validation_errors"]
 
     def test_single_candidate_autoresolves(self):
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_order_for_delivery_payment,
         )
 
@@ -87,7 +87,7 @@ class TestResolveOrderForDeliveryPayment:
         assert result["transaction_payload"]["order_id"] == "order-1"
 
     def test_multiple_candidates_without_selection_index_shows_a_menu(self):
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_order_for_delivery_payment,
         )
 
@@ -104,7 +104,7 @@ class TestResolveOrderForDeliveryPayment:
         assert result["pending_menu"] is not None
 
     def test_multiple_candidates_with_selection_index_resolves(self):
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_order_for_delivery_payment,
         )
 
@@ -128,7 +128,7 @@ class TestResolveOrderForDeliveryPayment:
         """Une commande escrow ET une commande cash toutes deux CONFIRMED :
         seule la seconde est proposée — jamais un mélange qui laisserait le
         producteur accidentellement clôturer une commande escrow ici."""
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_order_for_delivery_payment,
         )
 

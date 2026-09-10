@@ -1,0 +1,71 @@
+# ═════════════════════════════════════════════════════════════════════
+# Root .dockerignore — le contexte de build des 3 images est `.` (racine du
+# dépôt, voir infra/docker/Dockerfile.* : `COPY backend /app/backend`).
+#
+# Un .dockerignore n'est lu QU'À la racine du contexte de build. `backend/.dockerignore`
+# n'était donc jamais appliqué : chaque `docker build` envoyait au démon
+# ~800 Mo de providers Terraform Windows (.exe), le `.git`, les venvs, les
+# caches pytest, etc. → builds lents, images potentiellement polluées, et
+# risque de fuite (un `.env` traînant dans le contexte).
+# ═════════════════════════════════════════════════════════════════════
+
+# ── VCS / IDE ───────────────────────────────────────────────────────
+.git
+.gitignore
+.github
+.vscode
+.idea
+.DS_Store
+*.swp
+
+# ── Secrets — ne JAMAIS envoyer un .env dans le contexte de build ────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+ca-certificate.crt
+
+# ── Environnements Python / caches ──────────────────────────────────
+**/__pycache__
+**/*.py[cod]
+**/.venv
+**/venv
+**/env
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
+**/.cache
+**/htmlcov
+**/.coverage
+**/coverage.xml
+**/coverage.json
+
+# ── Infra non nécessaire au build applicatif ────────────────────────
+# 800 Mo de binaires providers Windows — jamais utile dans une image Linux.
+infra/terraform/.terraform
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.*
+infra/terraform/*.backup
+infra/terraform/*.zip
+infra/aws
+infra/providers
+deploy/releases
+
+# ── Docs / artefacts de dev ────────────────────────────────────────
+**/*.log
+docs
+*.md
+!backend/README.md
+node_modules
+dist
+build
+*.egg-info
+chroma_persist
+data/vector_store
+orchestration_report.json
+
+# ── Tests — exclus des images de PRODUCTION ─────────────────────────
+# (la CI teste dans un job séparé, sur le code source, pas dans l'image)
+backend/tests
+backend/src/ladini/futur

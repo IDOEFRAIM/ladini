@@ -14,7 +14,7 @@ Redis client (`api/response_dispatch.py` vs `core/idempotency.py`) a été
 supprimé — ces tests monkeypatchent donc le client PARTAGÉ."""
 from __future__ import annotations
 
-from agriconnect.api.response_dispatch import claim_response_item
+from ladini.api.response_dispatch import claim_response_item
 
 
 class _FakeRedis:
@@ -30,7 +30,7 @@ class _FakeRedis:
 
 class TestClaimResponseItem:
     def test_the_first_claim_for_an_item_key_succeeds(self, monkeypatch):
-        import agriconnect.core.idempotency as idempotency_mod
+        import ladini.core.idempotency as idempotency_mod
 
         monkeypatch.setattr(idempotency_mod, "_client", _FakeRedis())
         assert claim_response_item("SMxxx1:0") is True
@@ -39,14 +39,14 @@ class TestClaimResponseItem:
         """LE cas central : un retry Celery de la même tâche (même
         `event_id:index`) après un envoi déjà réussi ne doit jamais réclamer
         le droit d'envoyer une seconde fois."""
-        import agriconnect.core.idempotency as idempotency_mod
+        import ladini.core.idempotency as idempotency_mod
 
         monkeypatch.setattr(idempotency_mod, "_client", _FakeRedis())
         assert claim_response_item("SMxxx2:0") is True
         assert claim_response_item("SMxxx2:0") is False
 
     def test_different_item_keys_each_get_their_own_claim(self, monkeypatch):
-        import agriconnect.core.idempotency as idempotency_mod
+        import ladini.core.idempotency as idempotency_mod
 
         monkeypatch.setattr(idempotency_mod, "_client", _FakeRedis())
         assert claim_response_item("SMxxxA:0") is True
@@ -56,7 +56,7 @@ class TestClaimResponseItem:
         """Un appelant qui ne fournit pas d'identité (ex: ancien tour hors
         webhook) ne doit jamais être bloqué par cette garde — mieux vaut un
         doublon rarissime qu'une réponse jamais envoyée."""
-        import agriconnect.core.idempotency as idempotency_mod
+        import ladini.core.idempotency as idempotency_mod
 
         monkeypatch.setattr(idempotency_mod, "_client", _FakeRedis())
         assert claim_response_item(None) is True
@@ -65,7 +65,7 @@ class TestClaimResponseItem:
     def test_a_redis_outage_fails_open_rather_than_blocking_every_response(
         self, monkeypatch
     ):
-        import agriconnect.core.idempotency as idempotency_mod
+        import ladini.core.idempotency as idempotency_mod
 
         class _BrokenRedis:
             def set(self, *a, **k):
@@ -79,7 +79,7 @@ class TestClaimResponseItem:
         `domain/procurement_draft.py`'s confirmation claim partagent LA
         MÊME primitive mais des espaces de clés distincts (mandat §5) — pas
         deux mécanismes, un mécanisme + deux préfixes."""
-        import agriconnect.core.idempotency as idempotency_mod
+        import ladini.core.idempotency as idempotency_mod
 
         seen_keys = []
 

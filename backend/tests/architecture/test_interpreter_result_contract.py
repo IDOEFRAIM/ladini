@@ -9,7 +9,7 @@ porte TOUJOURS une `UnknownReason` explicite (jamais un fourre-tout muet).
 
 from __future__ import annotations
 
-from agriconnect.graphs.agents.market_coach.interpreter.interpreter_result import (
+from ladini.graphs.agents.market_coach.interpreter.interpreter_result import (
     InterpreterResult,
     UnknownReason,
 )
@@ -114,7 +114,7 @@ class TestRoutingUsesInterpreterResultAtTheOnlyExitPoint:
         JAMAIS être la fonction interne brute — sinon un futur `return` ajouté
         dans les ~15 points de sortie internes pourrait à nouveau produire un
         UNKNOWN sans raison, en contournant le point de conversion unique."""
-        from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+        from ladini.graphs.agents.market_coach.interpreter.routing import (
             make_input_interpreter,
         )
 

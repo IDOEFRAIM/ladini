@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ConfirmationTarget,
     ConfirmProcurementDraft,
     ProcurementDraft,
@@ -27,7 +27,7 @@ from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
     execution_key,
     finalize_after_execution,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.procurement_execution_finalizer import (
+from ladini.graphs.agents.market_coach.flows.buyer.procurement_execution_finalizer import (
     finalize_procurement_execution,
 )
 from tests.conftest import make_state, run
@@ -69,7 +69,7 @@ class TestSingleExecutionPath:
         voir `test_sales_publish_execution_pipeline_closure.py` pour
         l'audit symétrique côté SALES) — aucun autre nœud ne doit pouvoir
         déclencher directement `create_auction`."""
-        root = Path("src/agriconnect/graphs/agents/market_coach")
+        root = Path("src/ladini/graphs/agents/market_coach")
         authorized_substrings = ("procurement_confirmation.py", "sales_confirmation.py")
         offenders = []
         for path in root.rglob("*.py"):
@@ -89,7 +89,7 @@ class TestSingleExecutionPath:
         assert offenders == [], f"chemin(s) d'exécution non audité(s) : {offenders}"
 
     def test_create_auction_is_registered_for_exactly_one_goal(self):
-        from agriconnect.graphs.agents.market_coach.registry import get_action
+        from ladini.graphs.agents.market_coach.registry import get_action
 
         registration = get_action("PROCUREMENT_CREATE_REQUEST")
         assert registration is not None

@@ -13,11 +13,11 @@ import json
 from tests.conftest import run
 from tests.unit.llm_gateway.conftest import make_fake_redis
 
-from agriconnect.graphs.agents.market_coach.llm_gateway.health_registry import (
+from ladini.graphs.agents.market_coach.llm_gateway.health_registry import (
     HealthRegistry,
     _key,
 )
-from agriconnect.graphs.agents.market_coach.llm_gateway.types import (
+from ladini.graphs.agents.market_coach.llm_gateway.types import (
     CircuitState,
     HealthRecord,
     LLMProfile,

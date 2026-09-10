@@ -36,7 +36,7 @@ class TestCapabilityIsFullyWired:
     existe quand la chaîne complète est câblée."""
 
     def test_intent_declares_the_real_db_tool(self):
-        from agriconnect.graphs.agents.market_coach.interpreter.intent import (
+        from ladini.graphs.agents.market_coach.interpreter.intent import (
             INTENT_CONFIG,
             INTENT_ROLE,
         )
@@ -47,13 +47,13 @@ class TestCapabilityIsFullyWired:
         assert INTENT_ROLE["SALES_UNPUBLISH_PRODUCT"] == "PRODUCER"
 
     def test_action_handler_is_registered_and_resolves_the_tool(self):
-        from agriconnect.graphs.agents.market_coach.registry import get_action
+        from ladini.graphs.agents.market_coach.registry import get_action
 
         registration = get_action("SALES_UNPUBLISH_PRODUCT")
         assert registration is not None
         assert registration.is_write is True
 
-        from agriconnect.graphs.agents.market_coach.actions.sales import (
+        from ladini.graphs.agents.market_coach.actions.sales import (
             prep_sales_unpublish_product,
         )
 
@@ -64,10 +64,10 @@ class TestCapabilityIsFullyWired:
         assert args == {"phone": "+22670000001", "product_id": "p-1"}
 
     def test_gateway_and_mcp_scope_exist(self):
-        from agriconnect.graphs.agents.market_coach.services.mcp.gateway import (
+        from ladini.graphs.agents.market_coach.services.mcp.gateway import (
             ProductGateway,
         )
-        from agriconnect.infrastructure.mcp.security import TOOL_SCOPE_MAP
+        from ladini.infrastructure.mcp.security import TOOL_SCOPE_MAP
 
         assert hasattr(ProductGateway, "delete_product")
         # Fail-closed : sans entrée de scope, l'appel serait refusé.
@@ -77,7 +77,7 @@ class TestCapabilityIsFullyWired:
         """Régression de l'impasse conversationnelle : sans l'entrée
         `_RESOLVER_PASSTHROUGH`, le validateur réclamait `product_id`
         (un UUID) et le résolveur n'était jamais atteint."""
-        from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+        from ladini.graphs.agents.market_coach.nodes.validation import validator
         from tests.conftest import make_state
 
         result = run(
@@ -89,14 +89,14 @@ class TestCapabilityIsFullyWired:
 
 class TestResolveProductForUnpublish:
     def test_no_phone_returns_error(self):
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_product_for_unpublish,
         )
 
         assert run(_resolve_product_for_unpublish(rt(), "", {}))["status"] == "ERROR"
 
     def test_empty_catalog_is_a_clean_error_not_a_crash(self):
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_product_for_unpublish,
         )
 
@@ -105,7 +105,7 @@ class TestResolveProductForUnpublish:
         assert "empty_catalog" in result["validation_errors"]
 
     def test_single_product_is_auto_selected(self):
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_product_for_unpublish,
         )
 
@@ -119,7 +119,7 @@ class TestResolveProductForUnpublish:
     def test_several_products_never_pick_implicitly(self):
         """Action destructrice : jamais « le dernier produit » — un menu
         numéroté strict, comme `_resolve_stock`."""
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_product_for_unpublish,
         )
 
@@ -138,7 +138,7 @@ class TestResolveProductForUnpublish:
         assert result["available_mapping"] == {"1": "prod-1", "2": "prod-2"}
 
     def test_selection_index_resolves_the_right_product(self):
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_product_for_unpublish,
         )
 
@@ -161,7 +161,7 @@ class TestResolveProductForUnpublish:
         assert "selection_index" not in result["transaction_payload"]
 
     def test_out_of_range_selection_re_displays_the_menu(self):
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_product_for_unpublish,
         )
 
@@ -186,7 +186,7 @@ class TestArchivedProductsNeverResurface:
     producteur, NI dans la recherche acheteur."""
 
     def test_already_archived_products_are_not_offered_again(self):
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_product_for_unpublish,
         )
 
@@ -203,7 +203,7 @@ class TestArchivedProductsNeverResurface:
         assert result["transaction_payload"]["product_id"] == "prod-live"
 
     def test_catalog_with_only_archived_products_says_nothing_to_remove(self):
-        from agriconnect.graphs.agents.market_coach.flows.producer.flow import (
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_product_for_unpublish,
         )
 
@@ -220,7 +220,7 @@ class TestArchivedProductsNeverResurface:
         en vente. Preuve sur le SQL réellement compilé."""
         import inspect
 
-        from agriconnect.services.database.buyer import BuyerMixin
+        from ladini.services.database.buyer import BuyerMixin
 
         source = inspect.getsource(BuyerMixin.search_products)
         assert "Product.is_available.is_(True)" in source
@@ -235,7 +235,7 @@ class TestBusinessRuleStaysInTheDatabaseLayer:
     def test_agent_layer_contains_no_deletion_policy(self):
         import inspect
 
-        from agriconnect.graphs.agents.market_coach.flows.producer import flow
+        from ladini.graphs.agents.market_coach.flows.producer import flow
 
         raw = inspect.getsource(flow._resolve_product_for_unpublish)
         # Les commentaires CITENT volontairement la règle métier restée côté
@@ -261,7 +261,7 @@ class TestBusinessRuleStaysInTheDatabaseLayer:
         source réel : la garde `active_orders` doit rester en place)."""
         import inspect
 
-        from agriconnect.services.database.product import ProductMixin
+        from ladini.services.database.product import ProductMixin
 
         source = inspect.getsource(ProductMixin.delete_product)
         assert "active_count" in source

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+from ladini.graphs.agents.market_coach.interpreter.routing import (
     make_input_interpreter,
 )
 from tests.conftest import ScriptedLLM, StubRuntime, make_state, run

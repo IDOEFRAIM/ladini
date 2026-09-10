@@ -20,7 +20,7 @@ from tests.conftest import run
 from tests.architecture.test_preorder_draft_persistence import _install_fake_db
 from tests.evals.runners.harness import RecordingRuntime
 
-from agriconnect.graphs.agents.market_coach.flows.buyer.preorder_confirmation import (
+from ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation import (
     bootstrap_preorder_draft,
 )
 

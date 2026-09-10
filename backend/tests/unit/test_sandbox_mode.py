@@ -10,17 +10,17 @@ import logging
 
 import pytest
 
-from agriconnect.core.settings import Settings
+from ladini.core.settings import Settings
 
 
 def _get_llm_module():
-    """`agriconnect.core.get_llm` (le module) est shadowé par la fonction
-    `get_llm` ré-exportée dans `agriconnect/core/__init__.py` (`from .llm
+    """`ladini.core.get_llm` (le module) est shadowé par la fonction
+    `get_llm` ré-exportée dans `ladini/core/__init__.py` (`from .llm
     import get_llm` — même nom que le module) : `import
-    agriconnect.core.get_llm as x` peut résoudre `x` vers la FONCTION plutôt
+    ladini.core.get_llm as x` peut résoudre `x` vers la FONCTION plutôt
     que le module. `importlib.import_module` contourne ce piège en lisant
     directement `sys.modules`."""
-    return importlib.import_module("agriconnect.core.get_llm")
+    return importlib.import_module("ladini.core.get_llm")
 
 
 def _settings(**overrides):
@@ -73,7 +73,7 @@ class TestMockExternalApis:
 
     def test_get_groq_sdk_returns_a_mock_client_when_enabled(self, monkeypatch):
         get_llm_mod = _get_llm_module()
-        from agriconnect.core.settings import settings as live_settings
+        from ladini.core.settings import settings as live_settings
 
         monkeypatch.setattr(live_settings, "MOCK_EXTERNAL_APIS", True, raising=False)
         monkeypatch.setattr(get_llm_mod, "_GROQ_SDK_SINGLETON", None, raising=False)
@@ -83,7 +83,7 @@ class TestMockExternalApis:
 
     def test_mock_client_returns_empty_json_object_in_json_mode(self, monkeypatch):
         get_llm_mod = _get_llm_module()
-        from agriconnect.core.settings import settings as live_settings
+        from ladini.core.settings import settings as live_settings
 
         monkeypatch.setattr(live_settings, "MOCK_EXTERNAL_APIS", True, raising=False)
         monkeypatch.setattr(get_llm_mod, "_GROQ_SDK_SINGLETON", None, raising=False)
@@ -109,10 +109,10 @@ class TestMockExternalApis:
 
     def test_mock_client_never_requires_a_real_api_key(self, monkeypatch):
         get_llm_mod = _get_llm_module()
-        from agriconnect.core.settings import settings as live_settings
+        from ladini.core.settings import settings as live_settings
 
         monkeypatch.setattr(live_settings, "MOCK_EXTERNAL_APIS", True, raising=False)
-        monkeypatch.setattr(live_settings, "AGRICONNECT_APIKEY", "", raising=False)
+        monkeypatch.setattr(live_settings, "LADINI_APIKEY", "", raising=False)
         monkeypatch.setattr(live_settings, "GROQ_API_KEY", "", raising=False)
         monkeypatch.setattr(get_llm_mod, "_GROQ_SDK_SINGLETON", None, raising=False)
 

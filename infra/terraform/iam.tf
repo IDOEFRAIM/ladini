@@ -23,7 +23,7 @@ data "aws_iam_policy_document" "lambda_assume_role" {
 }
 
 resource "aws_iam_role" "ecs_execution_role" {
-  name               = "agriconnect-ecs-execution-role-${var.environment}"
+  name               = "ladini-ecs-execution-role-${var.environment}"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
   tags               = local.common_tags
 }
@@ -34,7 +34,7 @@ resource "aws_iam_role_policy_attachment" "ecs_execution_managed" {
 }
 
 resource "aws_iam_role" "scraper_task_role" {
-  name               = "agriconnect-scraper-task-role-${var.environment}"
+  name               = "ladini-scraper-task-role-${var.environment}"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
   tags               = local.common_tags
 }
@@ -48,13 +48,13 @@ data "aws_iam_policy_document" "scraper_task_policy_doc" {
 }
 
 resource "aws_iam_role_policy" "scraper_task_policy" {
-  name   = "agriconnect-scraper-task-policy-${var.environment}"
+  name   = "ladini-scraper-task-policy-${var.environment}"
   role   = aws_iam_role.scraper_task_role.id
   policy = data.aws_iam_policy_document.scraper_task_policy_doc.json
 }
 
 resource "aws_iam_role" "downloader_lambda_role" {
-  name               = "agriconnect-downloader-lambda-role-${var.environment}"
+  name               = "ladini-downloader-lambda-role-${var.environment}"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
   tags               = local.common_tags
 }
@@ -91,13 +91,13 @@ data "aws_iam_policy_document" "downloader_lambda_policy_doc" {
 }
 
 resource "aws_iam_role_policy" "downloader_lambda_policy" {
-  name   = "agriconnect-downloader-lambda-policy-${var.environment}"
+  name   = "ladini-downloader-lambda-policy-${var.environment}"
   role   = aws_iam_role.downloader_lambda_role.id
   policy = data.aws_iam_policy_document.downloader_lambda_policy_doc.json
 }
 
 resource "aws_iam_role" "ingestion_worker_task_role" {
-  name               = "agriconnect-ingestion-worker-task-role-${var.environment}"
+  name               = "ladini-ingestion-worker-task-role-${var.environment}"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
   tags               = local.common_tags
 }
@@ -143,7 +143,7 @@ data "aws_iam_policy_document" "ingestion_worker_policy_doc" {
 }
 
 resource "aws_iam_role_policy" "ingestion_worker_policy" {
-  name   = "agriconnect-ingestion-worker-policy-${var.environment}"
+  name   = "ladini-ingestion-worker-policy-${var.environment}"
   role   = aws_iam_role.ingestion_worker_task_role.id
   policy = data.aws_iam_policy_document.ingestion_worker_policy_doc.json
 }

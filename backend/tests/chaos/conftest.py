@@ -19,7 +19,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-# Rendre `agriconnect` importable sans installation editable.
+# Rendre `ladini` importable sans installation editable.
 _SRC = Path(__file__).resolve().parents[2] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -207,13 +207,13 @@ class _RuntimeShell:
 
     @property
     def profile_answer(self) -> Any:
-        from agriconnect.graphs.agents.market_coach.llm_gateway.types import LLMProfile
+        from ladini.graphs.agents.market_coach.llm_gateway.types import LLMProfile
 
         return LLMProfile.REASONING
 
     @property
     def llm_gateway(self) -> Any:
-        from agriconnect.graphs.agents.market_coach.llm_gateway import (
+        from ladini.graphs.agents.market_coach.llm_gateway import (
             LegacyOverrideGateway,
         )
 

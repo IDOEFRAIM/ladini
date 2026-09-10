@@ -54,15 +54,15 @@ accepté, jamais relue comme autoritative pour décider. PostgreSQL
 un compteur de version en CAS (`UPDATE ... WHERE version = :expected`).
 
 3 points de mutation, tous CAS-protégés :
-1. [confirmation_gate.py](../src/agriconnect/graphs/agents/market_coach/nodes/confirmation_gate.py) — `INSERT` du draft v1 (bootstrap).
-2. [procurement_confirmation.py](../src/agriconnect/graphs/agents/market_coach/flows/buyer/procurement_confirmation.py) — `compare_and_swap` après chaque `UPDATE`/`CONFIRM`/`REJECT`.
-3. [procurement_execution_finalizer.py](../src/agriconnect/graphs/agents/market_coach/flows/buyer/procurement_execution_finalizer.py) — `compare_and_swap` EXECUTING→EXECUTED/FAILED/EXECUTION_UNKNOWN.
+1. [confirmation_gate.py](../src/ladini/graphs/agents/market_coach/nodes/confirmation_gate.py) — `INSERT` du draft v1 (bootstrap).
+2. [procurement_confirmation.py](../src/ladini/graphs/agents/market_coach/flows/buyer/procurement_confirmation.py) — `compare_and_swap` après chaque `UPDATE`/`CONFIRM`/`REJECT`.
+3. [procurement_execution_finalizer.py](../src/ladini/graphs/agents/market_coach/flows/buyer/procurement_execution_finalizer.py) — `compare_and_swap` EXECUTING→EXECUTED/FAILED/EXECUTION_UNKNOWN.
 
 ---
 
 ## B. Persistance (schéma + CAS)
 
-Module : [services/database/procurement_draft_store.py](../src/agriconnect/services/database/procurement_draft_store.py).
+Module : [services/database/procurement_draft_store.py](../src/ladini/services/database/procurement_draft_store.py).
 
 ```sql
 CREATE TABLE IF NOT EXISTS marketplace.procurement_drafts (

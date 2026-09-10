@@ -27,10 +27,10 @@ import pytest
 
 from tests.conftest import run
 
-from agriconnect.domain.models import Order, OrderItem
-from agriconnect.services.database.buyer import BuyerMixin
-from agriconnect.services.database.errors import BusinessRuleException
-from agriconnect.services.database.producer import ProducerMgmtMixin
+from ladini.domain.models import Order, OrderItem
+from ladini.services.database.buyer import BuyerMixin
+from ladini.services.database.errors import BusinessRuleException
+from ladini.services.database.producer import ProducerMgmtMixin
 
 
 async def _async_return(value):
@@ -359,7 +359,7 @@ class TestAuctionOrdersAreUnaffected:
         `winning_bid_id`) — elles ne passent jamais par le split."""
         import inspect
 
-        from agriconnect.services.database import auction as auction_mod
+        from ladini.services.database import auction as auction_mod
 
         source = inspect.getsource(auction_mod)
         assert "OrderItem(" not in source
@@ -368,7 +368,7 @@ class TestAuctionOrdersAreUnaffected:
     def test_auction_orders_have_no_checkout_group(self):
         import inspect
 
-        from agriconnect.services.database.auction import AuctionMixin
+        from ladini.services.database.auction import AuctionMixin
 
         source = inspect.getsource(AuctionMixin.select_winning_bid)
         assert "checkout_group_id" not in source

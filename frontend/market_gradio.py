@@ -25,7 +25,7 @@ if BACKEND_SRC not in sys.path:
 import gradio as gr
 import requests
 
-from agriconnect.graphs.nodes.market_coach import MarketCoach, PRODUCER_ID
+from ladini.graphs.nodes.market_coach import MarketCoach, PRODUCER_ID
 
 
 # --- MCP adapter selection (prefer local MCP server sync API, fall back to mock) ---
@@ -45,7 +45,7 @@ class MockMCP:
 def get_mcp_client():
     # Try to use the in-process MCP server (AgriDBMCPServer) if available.
     try:
-        from agriconnect.protocols.mcp.infrastructure import AgriDBMCPServer, runtime
+        from ladini.protocols.mcp.infrastructure import AgriDBMCPServer, runtime
 
         server = AgriDBMCPServer()
 
@@ -134,8 +134,8 @@ def run_market_flow(user_text: str):
         return f"Error: {e}", tb, {}
 
 
-with gr.Blocks(title="AgriConnect MarketCoach Live Test") as demo:
-    gr.Markdown("# AgriConnect — MarketCoach Live Test (Gradio)")
+with gr.Blocks(title="Ladini MarketCoach Live Test") as demo:
+    gr.Markdown("# Ladini — MarketCoach Live Test (Gradio)")
     gr.Markdown(f"Test Producer ID: **{PRODUCER_ID}**")
 
     with gr.Row():

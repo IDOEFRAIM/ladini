@@ -60,4 +60,4 @@ COPY backend/sources /app/backend/sources
 RUN useradd -m -u 10001 appuser && chown -R appuser:appuser /app
 USER appuser
 
-CMD ["python", "-m", "agriconnect.services.scraper.run_scraper_service"]
+CMD ["python", "-m", "ladini.services.scraper.run_scraper_service"]

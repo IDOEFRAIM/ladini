@@ -40,15 +40,15 @@ import pytest
 
 from tests.conftest import make_state, run
 
-from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ProcurementDraft,
     ProcurementDraftStatus,
     ProcurementOutcomeKind,
 )
-from agriconnect.graphs.agents.market_coach.flows.buyer.procurement_confirmation import (
+from ladini.graphs.agents.market_coach.flows.buyer.procurement_confirmation import (
     resolve_procurement_confirmation,
 )
-from agriconnect.services.database import procurement_draft_store as store_mod
+from ladini.services.database import procurement_draft_store as store_mod
 
 
 # =====================================================================
@@ -356,7 +356,7 @@ class TestRealThreadConcurrencyAgainstCompareAndSwap:
         et un CONFIRM ciblant la MÊME version en même temps. Un seul des
         deux doit réussir sa transition ; l'autre doit se voir répondre
         `VERSION_CONFLICT`, jamais silencieusement écrasé."""
-        import agriconnect.graphs.agents.market_coach.domain.procurement_draft as pd_mod
+        import ladini.graphs.agents.market_coach.domain.procurement_draft as pd_mod
 
         table = _install_fake_db(monkeypatch)
         monkeypatch.setattr(pd_mod, "claim_once", lambda key: True)
@@ -430,7 +430,7 @@ class TestEndToEndThroughResolveProcurementConfirmation:
         "okay"), cette fois avec un store RÉELLEMENT joignable (le faux
         moteur) — preuve que la ligne PostgreSQL simulée reflète chaque
         étape, pas seulement l'état LangGraph."""
-        import agriconnect.graphs.agents.market_coach.domain.procurement_draft as pd_mod
+        import ladini.graphs.agents.market_coach.domain.procurement_draft as pd_mod
 
         _install_fake_db(monkeypatch)
         monkeypatch.setattr(pd_mod, "claim_once", lambda key: True)
@@ -478,7 +478,7 @@ class TestEndToEndThroughResolveProcurementConfirmation:
         assert persisted_after_repeat.status == ProcurementDraftStatus.EXECUTING
 
     def test_a_confirm_targeting_a_stale_persisted_version_is_rejected(self, monkeypatch):
-        import agriconnect.graphs.agents.market_coach.domain.procurement_draft as pd_mod
+        import ladini.graphs.agents.market_coach.domain.procurement_draft as pd_mod
 
         _install_fake_db(monkeypatch)
         monkeypatch.setattr(pd_mod, "claim_once", lambda key: True)
@@ -561,8 +561,8 @@ class TestStaleExecutingDetection:
         """Un `EXECUTED`/`FAILED` ancien n'est PAS un problème — seul
         `EXECUTING` bloqué en est un (les statuts terminaux ont déjà une
         issue tranchée)."""
-        import agriconnect.graphs.agents.market_coach.domain.procurement_draft as pd_mod
-        from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+        import ladini.graphs.agents.market_coach.domain.procurement_draft as pd_mod
+        from ladini.graphs.agents.market_coach.domain.procurement_draft import (
             ProcurementExecutionResult,
             finalize_after_execution,
         )
@@ -599,7 +599,7 @@ class TestDegradedModeNeverInventsAVersionConflict:
         ne doit jamais transformer ça en `VERSION_CONFLICT` (ce serait
         inventer une course qui n'a jamais eu lieu) ; il doit avancer en
         mode dégradé avec le résultat calculé en mémoire."""
-        import agriconnect.graphs.agents.market_coach.domain.procurement_draft as pd_mod
+        import ladini.graphs.agents.market_coach.domain.procurement_draft as pd_mod
 
         monkeypatch.setattr(store_mod, "get_sessionmaker", lambda: None)
         monkeypatch.setattr(pd_mod, "claim_once", lambda key: True)

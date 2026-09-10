@@ -27,8 +27,8 @@ import uuid
 
 from tests.conftest import run
 
-from agriconnect.services.database.auction import AuctionMixin
-from agriconnect.services.database.producer import ProducerMgmtMixin
+from ladini.services.database.auction import AuctionMixin
+from ladini.services.database.producer import ProducerMgmtMixin
 
 
 async def _async_return(value):
@@ -169,7 +169,7 @@ class TestRfqWinnerNotificationsThenFulfillment:
             return len(entries)
 
         monkeypatch.setattr(
-            "agriconnect.workers.repositories.outbox_repo.enqueue", _fake_enqueue
+            "ladini.workers.repositories.outbox_repo.enqueue", _fake_enqueue
         )
 
         buyer_phone = "+22670000099"

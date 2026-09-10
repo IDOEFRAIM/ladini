@@ -2,7 +2,7 @@
 
 > **Statut : PROPOSITION (aucune suppression appliquée).** À valider avant exécution.
 > Cible : pivot d'un système hybride *Conseil + Marketplace* vers une **marketplace transactionnelle pure** (Producteur → Acheteur).
-> Périmètre : `frontag/src/db/schema/` (Drizzle) + `agriconnect/domain/models.py` (SQLAlchemy) + `agriconnect/services/database/` + `agriconnect/core/database.py`.
+> Périmètre : `frontag/src/db/schema/` (Drizzle) + `ladini/domain/models.py` (SQLAlchemy) + `ladini/services/database/` + `ladini/core/database.py`.
 
 ---
 
@@ -258,14 +258,14 @@ export const farms = marketplaceSchema.table('farms', {
 
 ---
 
-## 3. Modèles alignés (`agriconnect/domain/models.py`)
+## 3. Modèles alignés (`ladini/domain/models.py`)
 
 ### 3.1 — `BaseMarketplaceModel` (contrainte DRY Pydantic v2)
 
 Un socle unique pour **tous** les DTO marketplace : conversion ORM→DTO en `from_attributes`, tolérance camelCase↔snake_case (frontend Drizzle ↔ backend), validation standardisée.
 
 ```python
-# agriconnect/domain/base_model.py
+# ladini/domain/base_model.py
 from __future__ import annotations
 from datetime import datetime
 from typing import Any
@@ -307,11 +307,11 @@ class BaseMarketplaceModel(BaseModel):
 ### 3.2 — DTO alignés 1-pour-1 sur les tables (extraits critiques)
 
 ```python
-# agriconnect/domain/dto/catalog.py
+# ladini/domain/dto/catalog.py
 from datetime import datetime
 from typing import Optional
 from pydantic import field_validator
-from agriconnect.domain.base_model import BaseMarketplaceModel
+from ladini.domain.base_model import BaseMarketplaceModel
 
 
 class FarmModel(BaseMarketplaceModel):
@@ -423,7 +423,7 @@ import functools
 from contextvars import ContextVar
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from agriconnect.services.database.engine import engine
+from ladini.services.database.engine import engine
 
 db_session_ctx: ContextVar[Optional[AsyncSession]] = ContextVar("db_session_ctx", default=None)
 
@@ -464,8 +464,8 @@ Exemple `ProductService` (le `@transactional` explicite remplace le `_READ_ONLY_
 ```python
 # services/database/product_service.py
 from sqlalchemy import select
-from agriconnect.domain.models import Product, MarketOffer
-from agriconnect.domain.dto.catalog import ProductModel, MarketOfferModel
+from ladini.domain.models import Product, MarketOffer
+from ladini.domain.dto.catalog import ProductModel, MarketOfferModel
 from .base_service import BaseService, transactional
 
 
@@ -510,9 +510,9 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import (
     AsyncEngine, AsyncSession, create_async_engine, async_sessionmaker,
 )
-from agriconnect.core.settings import settings
+from ladini.core.settings import settings
 
-logger = logging.getLogger("AgriConnect.Engine")
+logger = logging.getLogger("Ladini.Engine")
 
 
 class DatabaseEngine:
@@ -628,4 +628,4 @@ Non bloquant pour la refonte data, mais listé pour la cohérence du pivot :
 5. **`interpreter`/`core`** : passe 2 (intents, slots, compaction).
 6. Migration SQL `crop_cycles`→`market_offers` avec `ALTER TABLE ... RENAME` (préserve les données) + `RENAME COLUMN` sur `orders.crop_cycle_id`.
 
-Chaque étape est indépendamment testable ; la 1 et la 2 doivent atterrir dans le **même commit** pour garder frontag↔agriconnect synchrones.
+Chaque étape est indépendamment testable ; la 1 et la 2 doivent atterrir dans le **même commit** pour garder frontag↔ladini synchrones.

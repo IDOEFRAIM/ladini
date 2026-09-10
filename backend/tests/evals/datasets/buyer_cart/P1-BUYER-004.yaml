@@ -6,8 +6,8 @@ tags: [happy_path, search_then_add]
 grounding:
   status: PROVEN_BY_CODE
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py:234-236 — ProductGateway.search_products() -> MCP tool 'search_products'"
-    - "backend/src/agriconnect/graphs/agents/market_coach/flows/buyer/cart.py:280-330 — cart add is local state (state['active_cart']); NO MCP tool exists for it"
+    - "backend/src/ladini/graphs/agents/market_coach/services/mcp/gateway.py:234-236 — ProductGateway.search_products() -> MCP tool 'search_products'"
+    - "backend/src/ladini/graphs/agents/market_coach/flows/buyer/cart.py:280-330 — cart add is local state (state['active_cart']); NO MCP tool exists for it"
   correction_note: "Original Wave 1 version asserted tool_calls: [search_products, add_to_cart] — add_to_cart is not a real MCP tool. Removed, replaced with state_assertion."
 
 persona: {role: BUYER, description: "Acheteur", phone: "+22670000023"}

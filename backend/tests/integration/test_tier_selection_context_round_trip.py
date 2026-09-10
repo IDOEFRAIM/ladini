@@ -20,8 +20,8 @@ even reached).
 """
 from __future__ import annotations
 
-from agriconnect.workspace.checkpointer import WorkspaceCheckpointer, _SerializedValue
-from agriconnect.workspace.models import Workspace
+from ladini.workspace.checkpointer import WorkspaceCheckpointer, _SerializedValue
+from ladini.workspace.models import Workspace
 from tests.conftest import run
 from tests.integration.test_checkpointer_state_machine import (
     FakeWorkspaceStore,

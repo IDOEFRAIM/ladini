@@ -11,11 +11,11 @@ from typing import Any, Dict, Optional
 
 from tests.conftest import run
 
-from agriconnect.graphs.agents.market_coach.domain.sales_publish_draft import (
+from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
     SalesPublishDraft,
     SalesPublishDraftStatus,
 )
-from agriconnect.services.database import sales_publish_draft_store as store_mod
+from ladini.services.database import sales_publish_draft_store as store_mod
 
 
 class _FakeDraftTable:

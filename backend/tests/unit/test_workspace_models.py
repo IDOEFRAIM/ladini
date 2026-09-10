@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from agriconnect.workspace.models import Workspace
+from ladini.workspace.models import Workspace
 
 
 class TestDefaults:

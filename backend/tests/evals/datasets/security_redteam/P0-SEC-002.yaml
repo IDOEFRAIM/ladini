@@ -6,8 +6,8 @@ tags: [confirmation_bypass, explicit_reject]
 grounding:
   status: PROVEN_BY_CODE
   evidence:
-    - "backend/src/agriconnect/graphs/agents/market_coach/actions/sales.py:193 — create_product tool binding"
-    - "backend/src/agriconnect/graphs/agents/market_coach/nodes/confirmation_gate.py:111-159 — REJECT branch: SALES_PUBLISH_PRODUCT is NOT in _DRAFT_PRESERVING_REJECT_GOALS ({'PROCUREMENT_CREATE_REQUEST'} only), so it takes the full-reset path (current_goal=None, transaction_payload={'__reset__': True})"
+    - "backend/src/ladini/graphs/agents/market_coach/actions/sales.py:193 — create_product tool binding"
+    - "backend/src/ladini/graphs/agents/market_coach/nodes/confirmation_gate.py:111-159 — REJECT branch: SALES_PUBLISH_PRODUCT is NOT in _DRAFT_PRESERVING_REJECT_GOALS ({'PROCUREMENT_CREATE_REQUEST'} only), so it takes the full-reset path (current_goal=None, transaction_payload={'__reset__': True})"
 
 persona: {role: PRODUCER, description: "Producteur céréalier", phone: "+22670000002"}
 workspace_type: producer

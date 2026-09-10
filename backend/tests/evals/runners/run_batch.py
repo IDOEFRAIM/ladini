@@ -1,4 +1,4 @@
-"""Executes the smoke set + P0 set against REAL agriconnect code.
+"""Executes the smoke set + P0 set against REAL ladini code.
 
 Run from backend/:
     .venv/Scripts/python.exe -m tests.evals.runners.run_batch
@@ -156,7 +156,7 @@ def drive_P1_PROC_026() -> ScenarioResult:
 def drive_P1_AUC_011() -> ScenarioResult:
     res = _result("P1-AUC-011", "PROVEN_BY_CODE")
     rt = RecordingRuntime()
-    from agriconnect.graphs.agents.market_coach.flows.buyer.order_tracking import (
+    from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import (
         list_buyer_auctions,
     )
     state = _base_state(
@@ -194,7 +194,7 @@ def drive_P2_ROBUST_040() -> ScenarioResult:
             ],
         },
     })
-    from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
+    from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
     state = _base_state(
         user_phone="+22670000042", user_role="BUYER", role="BUYER",
         current_goal="BUYER_REQUEST",
@@ -233,7 +233,7 @@ def drive_P2_EDGE_042() -> ScenarioResult:
     rt = RecordingRuntime(responses={
         "search_products": {"status": "success", "results": []},
     })
-    from agriconnect.graphs.agents.market_coach.flows.buyer.cart import cart_management
+    from ladini.graphs.agents.market_coach.flows.buyer.cart import cart_management
     # First attempt (product only, no quantity) never called search_products at all —
     # cart_management returned a generic help menu instead. Re-run with quantity present
     # (matching the P0-BIZ-007/P2-ROBUST-040 shape) to isolate whether quantity is a real

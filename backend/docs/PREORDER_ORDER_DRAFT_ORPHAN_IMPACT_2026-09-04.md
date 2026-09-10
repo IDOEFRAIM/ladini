@@ -153,11 +153,11 @@ sont corrigés ensemble, sans nouveau système de réconciliation (section G).
 ## K. Code modifié
 
 **Write side — synchronisation `PreorderDraft` ↔ `Order`** :
-- [`security.py`](../src/agriconnect/infrastructure/mcp/security.py) — `cancel_preorder_draft` ajouté à `TOOL_SCOPE_MAP` (`DB_DATA_WRITE`).
-- [`buyer.py::cancel_preorder_draft`](../src/agriconnect/services/database/buyer.py) — nouveau paramètre `target_status: str = "CANCELLED"` (défaut inchangé, 100% rétrocompatible) ; `cancellation_role="BUYER"` posé UNIQUEMENT sur `target_status=="CANCELLED"` (jamais sur un remplacement).
-- [`gateway.py::PreorderGateway.cancel_draft`](../src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py) — nouvelle méthode, même convention que `confirm_draft`/`create_draft`.
-- [`preorder.py::_cancel_preorder`](../src/agriconnect/graphs/agents/market_coach/flows/buyer/preorder.py) — appelle désormais `cancel_draft(target_status="CANCELLED")` **uniquement** sur la VRAIE première transition (`outcome.kind == CANCELLED`, même garde que le CAS existant — un double-CANCEL ne redéclenche rien, idempotence naturelle). Best-effort explicite : un échec MCP est journalisé (`DEGRADED`) mais ne bloque JAMAIS la confirmation d'annulation déjà actée côté `PreorderDraft`.
-- [`preorder_confirmation.py::bootstrap_preorder_draft`](../src/agriconnect/graphs/agents/market_coach/flows/buyer/preorder_confirmation.py) — capture `old_order_id` avant la mise à jour ADD_MORE ; appelle `cancel_draft(target_status="SUPERSEDED")` sur l'ancien `order_id` **uniquement** si la mise à jour a réellement abouti (`kind != VERSION_CONFLICT` — protège le cas rare d'une course perdue face à un autre écrivain concurrent, voir section "Concurrence").
+- [`security.py`](../src/ladini/infrastructure/mcp/security.py) — `cancel_preorder_draft` ajouté à `TOOL_SCOPE_MAP` (`DB_DATA_WRITE`).
+- [`buyer.py::cancel_preorder_draft`](../src/ladini/services/database/buyer.py) — nouveau paramètre `target_status: str = "CANCELLED"` (défaut inchangé, 100% rétrocompatible) ; `cancellation_role="BUYER"` posé UNIQUEMENT sur `target_status=="CANCELLED"` (jamais sur un remplacement).
+- [`gateway.py::PreorderGateway.cancel_draft`](../src/ladini/graphs/agents/market_coach/services/mcp/gateway.py) — nouvelle méthode, même convention que `confirm_draft`/`create_draft`.
+- [`preorder.py::_cancel_preorder`](../src/ladini/graphs/agents/market_coach/flows/buyer/preorder.py) — appelle désormais `cancel_draft(target_status="CANCELLED")` **uniquement** sur la VRAIE première transition (`outcome.kind == CANCELLED`, même garde que le CAS existant — un double-CANCEL ne redéclenche rien, idempotence naturelle). Best-effort explicite : un échec MCP est journalisé (`DEGRADED`) mais ne bloque JAMAIS la confirmation d'annulation déjà actée côté `PreorderDraft`.
+- [`preorder_confirmation.py::bootstrap_preorder_draft`](../src/ladini/graphs/agents/market_coach/flows/buyer/preorder_confirmation.py) — capture `old_order_id` avant la mise à jour ADD_MORE ; appelle `cancel_draft(target_status="SUPERSEDED")` sur l'ancien `order_id` **uniquement** si la mise à jour a réellement abouti (`kind != VERSION_CONFLICT` — protège le cas rare d'une course perdue face à un autre écrivain concurrent, voir section "Concurrence").
 
 **Distinction `CANCELLED` vs `SUPERSEDED` (mandat §5/§10)** — assumée, pas
 arbitraire : un rejet acheteur explicite (`CANCEL`) reste `CANCELLED` ;
@@ -171,8 +171,8 @@ vient de v1" est déjà entièrement traçable via `draft_id` STABLE (seule
 plus.
 
 **Read side — filet de sécurité immédiat** :
-- [`buyer.py::get_buyer_orders_dashboard`](../src/agriconnect/services/database/buyer.py) — `.where(Order.status.notin_(["DRAFT", "SUPERSEDED"]))` ajouté à la requête d'historique complet.
-- [`buyer.py::get_transaction_summary`](../src/agriconnect/services/database/buyer.py) — même exclusion, **uniquement** sur la branche "dernière transaction par téléphone" (sans `order_id` explicite) ; un lookup par `order_id` explicite reste inchangé.
+- [`buyer.py::get_buyer_orders_dashboard`](../src/ladini/services/database/buyer.py) — `.where(Order.status.notin_(["DRAFT", "SUPERSEDED"]))` ajouté à la requête d'historique complet.
+- [`buyer.py::get_transaction_summary`](../src/ladini/services/database/buyer.py) — même exclusion, **uniquement** sur la branche "dernière transaction par téléphone" (sans `order_id` explicite) ; un lookup par `order_id` explicite reste inchangé.
 
 **Non touché, signalé séparément** (règle absolue §20) :
 `get_producer_orders` (`services/database/producer.py`, domaine SALES) a la

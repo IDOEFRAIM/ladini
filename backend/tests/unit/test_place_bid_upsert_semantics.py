@@ -20,7 +20,7 @@ import uuid
 
 from tests.conftest import run
 
-from agriconnect.services.database.auction import AuctionMixin
+from ladini.services.database.auction import AuctionMixin
 
 
 def _auction(**overrides):
@@ -123,7 +123,7 @@ class TestOneBidPerProducerPerAuction:
         """Un bid déjà WINNING/LOST/WITHDRAWN ne peut plus être "corrigé"
         par un nouvel appel `place_bid` — même producteur, même enchère,
         mais l'engagement est déjà tranché."""
-        from agriconnect.services.database.errors import BusinessRuleException
+        from ladini.services.database.errors import BusinessRuleException
         import pytest
 
         auction = _auction()

@@ -70,8 +70,8 @@ def _location_form(lat: float = 48.85, lon: float = 2.35) -> Dict[str, str]:
 
 class TestTwilioWebhookNeverOwnsTheGpsResponse:
     async def _run(self, monkeypatch, *, outcome_name: str):
-        import agriconnect.api.routes.twilio_webhook as webhook_mod
-        from agriconnect.core.location import LocationOutcome
+        import ladini.api.routes.twilio_webhook as webhook_mod
+        from ladini.core.location import LocationOutcome
 
         monkeypatch.setattr(webhook_mod.redis_client, "set", lambda *a, **k: True)
         monkeypatch.setattr(
@@ -99,7 +99,7 @@ class TestTwilioWebhookNeverOwnsTheGpsResponse:
         return delay_mock
 
     def test_out_of_zone_never_triggers_a_webhook_side_send(self, monkeypatch):
-        import agriconnect.api.routes.twilio_webhook as webhook_mod
+        import ladini.api.routes.twilio_webhook as webhook_mod
 
         # Le webhook n'importe même plus de fonction d'envoi — la preuve la
         # plus directe qu'il ne PEUT plus décider d'une réponse GPS.

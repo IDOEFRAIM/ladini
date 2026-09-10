@@ -1,6 +1,6 @@
 locals {
   common_tags = {
-    Project     = "Agriconnect"
+    Project     = "Ladini"
     Environment = var.environment
   }
 }

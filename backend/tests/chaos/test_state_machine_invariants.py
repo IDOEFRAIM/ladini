@@ -18,12 +18,12 @@ from conftest import RecordingRuntime, run
 # =====================================================================
 
 def _write_goals():
-    from agriconnect.graphs.agents.market_coach.core.base import _WRITE_GOALS
+    from ladini.graphs.agents.market_coach.core.base import _WRITE_GOALS
     return sorted(_WRITE_GOALS)
 
 
 def _read_goals():
-    from agriconnect.graphs.agents.market_coach.core.base import _READ_GOALS
+    from ladini.graphs.agents.market_coach.core.base import _READ_GOALS
     return sorted(_READ_GOALS)
 
 
@@ -45,7 +45,7 @@ def _read_goals():
 # l'audit transverse a précisément pour but de fermer. Importé directement
 # depuis `confirmation_gate.py` : une seule source de vérité, ne peut plus
 # dériver.
-from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
     _DRAFT_BASED_CONFIRMATION_GOALS,
 )
 
@@ -59,7 +59,7 @@ def test_no_write_executes_without_explicit_confirm(goal):
     le premier passage dans confirmation_gate doit parquer la transaction
     (WAITING_CONFIRMATION) avec execution_authorized=False — même si un
     état amont hostile prétend le contraire."""
-    from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+    from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
         confirmation_gate,
     )
 
@@ -82,7 +82,7 @@ def test_confirm_event_authorizes_exactly_once(goal):
     """Rupture prévenue : le « oui » de l'utilisateur ignoré (re-demande en
     boucle — bug historique du canal de confirmation). CONFIRM en attente
     de confirmation doit basculer en EXECUTING/authorized."""
-    from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+    from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
         confirmation_gate,
     )
 
@@ -104,7 +104,7 @@ def test_no_write_executes_without_explicit_confirm_draft_based_goal(goal):
     (a) collecte encore incomplète, (b) champs réunis, draft v1 bootstrapé
     — dans les DEUX cas, un `execution_authorized` forgé en amont doit être
     écrasé à False (voir le correctif ajouté dans `_resolve_draft_based_confirmation`)."""
-    from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+    from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
         confirmation_gate,
     )
 
@@ -146,13 +146,13 @@ _DRAFT_BASED_GOAL_FIXTURE = {
     # goal -> (state_key, draft_module_path, draft_class_name, extra_new_kwargs)
     "PROCUREMENT_CREATE_REQUEST": (
         "procurement_draft",
-        "agriconnect.graphs.agents.market_coach.domain.procurement_draft",
+        "ladini.graphs.agents.market_coach.domain.procurement_draft",
         "ProcurementDraft",
         {"product": "maïs", "quantity": 50.0, "unit": "KG", "price": 250.0, "price_unit": "KG"},
     ),
     "SALES_PUBLISH_PRODUCT": (
         "sales_publish_draft",
-        "agriconnect.graphs.agents.market_coach.domain.sales_publish_draft",
+        "ladini.graphs.agents.market_coach.domain.sales_publish_draft",
         "SalesPublishDraft",
         {"product": "maïs", "quantity": 50.0, "unit": "KG", "price": 250.0},
     ),
@@ -169,7 +169,7 @@ def test_confirm_event_authorizes_exactly_once_draft_based_goal(goal, monkeypatc
     `_DRAFT_BASED_GOAL_FIXTURE`, une table de données pas de code partagé)."""
     import importlib
 
-    from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+    from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
         confirmation_gate,
     )
 
@@ -203,7 +203,7 @@ def test_reject_cancels_and_purges_payload(goal):
     """Rupture prévenue : l'utilisateur dit « non » mais le payload survit et
     ré-alimente la transaction suivante (fuite inter-tunnel, source n°1 des
     bugs de re-ask). REJECT doit purger via le sentinel __reset__."""
-    from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+    from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
         confirmation_gate,
     )
 
@@ -224,7 +224,7 @@ def test_reject_preserves_the_draft_but_still_blocks_execution(goal):
     """Exception scopée à l'invariant ci-dessus : le payload survit
     intentionnellement (pour permettre une correction), mais I1/I2 restent
     absolus — jamais d'exécution/autorisation sur un REJECT, préservé ou non."""
-    from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+    from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
         confirmation_gate,
     )
 
@@ -246,7 +246,7 @@ def test_reads_never_blocked_by_confirmation(goal):
     """Symétrique anti-friction : une LECTURE ne doit JAMAIS exiger de
     confirmation (demander « confirmez-vous ? » pour voir son stock = UX
     insupportable sur WhatsApp). Auto-pass exigé pour tout READ."""
-    from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+    from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
         confirmation_gate,
     )
 
@@ -262,7 +262,7 @@ def test_executor_refuses_unauthorized_state_with_zero_db_calls():
     """Rupture prévenue : un chemin de graphe bugué (ou un état restauré
     corrompu) atteint l'exécuteur sans passer par confirmation_gate.
     L'exécuteur doit refuser ET ne jamais toucher la couche outil."""
-    from agriconnect.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
+    from ladini.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
 
     rt = RecordingRuntime()
     state = {
@@ -282,7 +282,7 @@ def test_executor_refuses_empty_goal():
     """Rupture prévenue : goal effacé par un nettoyage trop agressif juste
     avant l'exécution → l'exécuteur doit rendre ERROR propre (no_goal),
     jamais un RuntimeError de registry."""
-    from agriconnect.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
+    from ladini.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
 
     rt = RecordingRuntime()
     result = run(mcp_tool_executor(
@@ -301,7 +301,7 @@ def test_turn_boundary_resets_response_channel():
     « figée » — bug réel trouvé le 2026-07-21 : post_response_cleanup avait
     dérivé de CLEANABLE_AFTER_RESPONSE, jamais consommé). Le patch de fin de
     tour doit remettre à None TOUT le canal de réponse."""
-    from agriconnect.graphs.agents.market_coach.nodes.cleanup import (
+    from ladini.graphs.agents.market_coach.nodes.cleanup import (
         post_response_cleanup,
     )
 
@@ -324,7 +324,7 @@ def test_turn_boundary_preserves_confirmation_channel():
     """Rupture prévenue : le nettoyage de fin de tour qui efface le canal de
     confirmation pendant WAITING_CONFIRMATION — le « oui » du tour suivant
     ne déclencherait plus rien et la gate re-demanderait à l'infini."""
-    from agriconnect.graphs.agents.market_coach.nodes.cleanup import (
+    from ladini.graphs.agents.market_coach.nodes.cleanup import (
         post_response_cleanup,
     )
 
@@ -344,7 +344,7 @@ def test_terminal_goal_flushes_transaction_state():
     """Rupture prévenue : slots du goal terminé (quantity=225…) qui fuient
     dans la demande suivante sans rapport (« je veux des tomates » reprenant
     une enchère morte). Statut terminal ⇒ purge sentinel du payload."""
-    from agriconnect.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
+    from ladini.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
 
     for terminal in ("COMPLETED", "FAILED", "ERROR"):
         patch = run(state_cleaner_node({
@@ -364,7 +364,7 @@ def test_error_or_failed_goal_leaves_a_one_turn_hint_for_the_clarification_fallb
     inconnu — voir [[market-coach-turn-boundary-state]]. ERROR/FAILED
     laissent `last_terminated_goal` ; COMPLETED (succès, rien à excuser) ne
     le fait pas."""
-    from agriconnect.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
+    from ladini.graphs.agents.market_coach.nodes.cleaner import state_cleaner_node
 
     for terminal in ("ERROR", "FAILED"):
         patch = run(state_cleaner_node({
@@ -393,9 +393,9 @@ def test_goal_sets_and_registry_integrity():
     d'actions et les goal-sets — la classe de bugs que les Phases 1/2 ont
     éliminée. Ces validateurs lèvent à l'import ; on les exécute explicitement
     pour qu'un drift casse la CI ici, pas en prod."""
-    from agriconnect.graphs.agents.market_coach.core.base import validate_config_drift
-    from agriconnect.graphs.agents.market_coach.core.goals import _validate_goal_drift
-    from agriconnect.graphs.agents.market_coach.registry import validate_integrity
+    from ladini.graphs.agents.market_coach.core.base import validate_config_drift
+    from ladini.graphs.agents.market_coach.core.goals import _validate_goal_drift
+    from ladini.graphs.agents.market_coach.registry import validate_integrity
 
     validate_integrity()
     validate_config_drift()
@@ -406,7 +406,7 @@ def test_both_graphs_compile_with_dead_runtime():
     """Rupture prévenue : régression de câblage (nœud/edge manquant) qui ne
     se verrait qu'au premier message réel. Les DEUX graphes doivent compiler
     même avec un runtime minimal — c'est le smoke ultime de déploiement."""
-    from agriconnect.graphs.agents.market_coach.core.graph_builder import build_graph
+    from ladini.graphs.agents.market_coach.core.graph_builder import build_graph
 
     class _Dead:
         async def call_db(self, *a, **k):

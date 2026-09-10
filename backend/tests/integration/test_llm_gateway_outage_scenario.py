@@ -24,17 +24,17 @@ from typing import Any, Dict, List
 from tests.conftest import run
 from tests.unit.llm_gateway.conftest import make_fake_redis
 
-from agriconnect.graphs.agents.market_coach.llm_gateway.alerting import (
+from ladini.graphs.agents.market_coach.llm_gateway.alerting import (
     IncidentDeduplicator,
 )
-from agriconnect.graphs.agents.market_coach.llm_gateway.circuit_breaker import (
+from ladini.graphs.agents.market_coach.llm_gateway.circuit_breaker import (
     CircuitBreaker,
 )
-from agriconnect.graphs.agents.market_coach.llm_gateway.gateway import LLMGateway
-from agriconnect.graphs.agents.market_coach.llm_gateway.health_registry import (
+from ladini.graphs.agents.market_coach.llm_gateway.gateway import LLMGateway
+from ladini.graphs.agents.market_coach.llm_gateway.health_registry import (
     HealthRegistry,
 )
-from agriconnect.graphs.agents.market_coach.llm_gateway.types import (
+from ladini.graphs.agents.market_coach.llm_gateway.types import (
     CircuitState,
     LLMProfile,
     ModelCandidate,

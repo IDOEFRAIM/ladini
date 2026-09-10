@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.core.slots import (
+from ladini.graphs.agents.market_coach.core.slots import (
     SLOT_REGISTRY,
     SLOT_FILLING_INPUTS,
     resolve_canonical,
@@ -19,7 +19,7 @@ from agriconnect.graphs.agents.market_coach.core.slots import (
     get_slot,
     is_blocking_slot,
 )
-from agriconnect.domain.quantity_unit import (
+from ladini.domain.quantity_unit import (
     UNIT_SYNONYMS,
     normalize_unit,
     parse_quantity_unit_from_text,
@@ -88,7 +88,7 @@ class TestSlotRegistry:
         champs étaient canonicalisés par memory/routing mais PAS par
         validation/response.
         """
-        from agriconnect.graphs.agents.market_coach.utils import _CANONICAL_FIELD_ALIASES
+        from ladini.graphs.agents.market_coach.utils import _CANONICAL_FIELD_ALIASES
         assert _CANONICAL_FIELD_ALIASES == build_canonical_field_aliases()
 
     def test_slot_filling_inputs_derived_from_expected_input_map(self):
@@ -100,7 +100,7 @@ class TestSlotRegistry:
     def test_tunnel_soft_inputs_include_all_slot_fields(self):
         """tunnel_manager doit dériver du registre, sinon un slot devient
         non-interruptible sans qu'on s'en aperçoive."""
-        from agriconnect.graphs.agents.market_coach.core.tunnel_manager import SOFT_EXPECTED_INPUTS
+        from ladini.graphs.agents.market_coach.core.tunnel_manager import SOFT_EXPECTED_INPUTS
         assert SLOT_FILLING_INPUTS <= SOFT_EXPECTED_INPUTS
 
     def test_only_true_secrets_are_blocking(self):

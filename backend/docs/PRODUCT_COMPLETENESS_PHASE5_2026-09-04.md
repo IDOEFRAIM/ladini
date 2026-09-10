@@ -144,7 +144,7 @@ sortent du périmètre autorisé.
 | Statut par ligne | `OrderItem` **n'a aucune colonne de statut** — exige une migration de schéma |
 | Refuser la terminalisation d'une commande multi-producteurs | recréerait un état sans sortie — exactement l'anti-pattern éliminé depuis la Phase 1 |
 
-**PRODUCT_DECISION requise** : AgriConnect doit-il supporter une commande
+**PRODUCT_DECISION requise** : Ladini doit-il supporter une commande
 unique multi-producteurs, ou une commande par producteur ?
 
 ### P3 — Montant affiché au producteur sur une commande multi-producteurs
@@ -214,14 +214,14 @@ C'était le cas de `Order.CONFIRMED` côté producteur jusqu'à cette phase.
 ## 12. Implemented fixes
 
 Une seule capacité, la décision #1 :
-[producer.py](../src/agriconnect/services/database/producer.py) (`cancel_confirmed_order`),
-[intent.py](../src/agriconnect/graphs/agents/market_coach/interpreter/intent.py),
-[validation.py](../src/agriconnect/graphs/agents/market_coach/nodes/validation.py),
-[flow.py](../src/agriconnect/graphs/agents/market_coach/flows/producer/flow.py) (`_resolve_order_for_cancellation`),
-[sales.py](../src/agriconnect/graphs/agents/market_coach/actions/sales.py),
-[gateway.py](../src/agriconnect/graphs/agents/market_coach/services/mcp/gateway.py),
-[security.py](../src/agriconnect/infrastructure/mcp/security.py),
-[templates.py](../src/agriconnect/workers/outbox/templates.py) (`ORDER_CANCELLED_BY_PRODUCER_BUYER`).
+[producer.py](../src/ladini/services/database/producer.py) (`cancel_confirmed_order`),
+[intent.py](../src/ladini/graphs/agents/market_coach/interpreter/intent.py),
+[validation.py](../src/ladini/graphs/agents/market_coach/nodes/validation.py),
+[flow.py](../src/ladini/graphs/agents/market_coach/flows/producer/flow.py) (`_resolve_order_for_cancellation`),
+[sales.py](../src/ladini/graphs/agents/market_coach/actions/sales.py),
+[gateway.py](../src/ladini/graphs/agents/market_coach/services/mcp/gateway.py),
+[security.py](../src/ladini/infrastructure/mcp/security.py),
+[templates.py](../src/ladini/workers/outbox/templates.py) (`ORDER_CANCELLED_BY_PRODUCER_BUYER`).
 
 Aucun nouveau statut, aucune nouvelle table, aucune abstraction. Aucun des
 domaines protégés (Procurement, Preorder, Auction locking, F1/F2/F3/F4,

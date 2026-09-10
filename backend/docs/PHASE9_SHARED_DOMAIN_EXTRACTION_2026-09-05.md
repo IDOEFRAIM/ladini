@@ -66,9 +66,9 @@ deux seuls consommateurs (`interpreter/routing.py` et un test de contrat).
 ## 4. Modules moved
 
 ```
-graphs/agents/market_coach/domain/pricing_tiers.py         → agriconnect/domain/pricing_tiers.py
-graphs/agents/market_coach/domain/order_policy.py          → agriconnect/domain/order_policy.py
-graphs/agents/market_coach/services/domain/quantity_unit.py → agriconnect/domain/quantity_unit.py
+graphs/agents/market_coach/domain/pricing_tiers.py         → ladini/domain/pricing_tiers.py
+graphs/agents/market_coach/domain/order_policy.py          → ladini/domain/order_policy.py
+graphs/agents/market_coach/services/domain/quantity_unit.py → ladini/domain/quantity_unit.py
 ```
 
 Déplacements via `git mv` (historique conservé), imports réécrits
@@ -78,7 +78,7 @@ mécaniquement dans **31 fichiers** (`src/` + `tests/`).
 n'y a donc qu'une seule implémentation et aucun chemin d'import
 ambigu — vérifié par `test_no_duplicate_implementation_remains_under_graphs`.
 
-Cible retenue : `agriconnect.domain`, le paquet déjà dédié au métier
+Cible retenue : `ladini.domain`, le paquet déjà dédié au métier
 (modèles ORM + DTO). Son `__init__` documente désormais la règle de
 dépendance. Aucun nouveau paquet « shared/common » n'a été inventé.
 
@@ -115,7 +115,7 @@ services/reconciliation/*, agents/forms
 ## 7. After dependency graph
 
 ```
-                 agriconnect.domain
+                 ladini.domain
         (quantity_unit · order_policy · pricing_tiers)
                 ↙                     ↘
          services/                  graphs/
@@ -127,7 +127,7 @@ reste, volontairement :
     graphs/…/domain/{preorder,procurement,sales_publish}_draft
 ```
 
-`agriconnect.domain` n'importe **ni** `graphs`, **ni** `api`, **ni**
+`ladini.domain` n'importe **ni** `graphs`, **ni** `api`, **ni**
 `workers`, **ni** `infrastructure`, **ni** `protocols` — contrat testé.
 
 ## 8. Import-cycle impact
@@ -179,7 +179,7 @@ restent verts.
 |---|---|---|
 | `services/{*_draft_store, reconciliation} → graphs/…/*_draft` | P2 | assumée : les drafts sont conversationnels ; les scinder toucherait le chemin CAS durci |
 | Cycles restants (10) | P2 | dominés par l'Outbox transactionnel (`services ↔ workers`) et les gateways (`graphs ↔ services`) — coût de lisibilité, pas de risque |
-| Le paquet `agriconnect.domain` mélange désormais modèles ORM/DTO et règles pures | P3 | acceptable et documenté ; un sous-paquet `domain/rules/` serait cosmétique |
+| Le paquet `ladini.domain` mélange désormais modèles ORM/DTO et règles pures | P3 | acceptable et documenté ; un sous-paquet `domain/rules/` serait cosmétique |
 
 ---
 

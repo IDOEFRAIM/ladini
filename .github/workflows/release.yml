@@ -1,0 +1,138 @@
+# ═════════════════════════════════════════════════════════════════════
+# release.yml — BUILD ONCE. Sur push `main` (après merge d'une PR verte),
+# construit les 3 images UNE FOIS, les tague par SHA de commit (immuable),
+# les pousse sur GHCR, et publie un manifeste de release.
+#
+# La production ne construit JAMAIS d'image. Elle `pull` ces artefacts.
+# Registry provider-neutral : GHCR par défaut, surchargeable par les vars
+# repo `REGISTRY` / `IMAGE_NAMESPACE` (ECR, Docker Hub… sans toucher au YAML).
+# ═════════════════════════════════════════════════════════════════════
+name: Release (build & push images)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit/branche à builder (défaut : le ref courant)"
+        required: false
+
+concurrency:
+  # Un seul build de release à la fois ; les suivants attendent (pas d'annulation
+  # — on veut que chaque commit de main produise bien son image).
+  group: release-images
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ${{ vars.REGISTRY || 'ghcr.io' }}
+  IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE || 'idoefraim/agriconnect' }}
+
+jobs:
+  build-push:
+    name: Build & push (sha-${{ github.sha }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write        # push GHCR
+    outputs:
+      release_version: ${{ steps.meta.outputs.release_version }}
+      git_sha: ${{ steps.meta.outputs.git_sha }}
+      built_at: ${{ steps.meta.outputs.built_at }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.sha }}
+
+      - name: Compute release metadata
+        id: meta
+        run: |
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          echo "release_version=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "git_sha=$(git rev-parse HEAD)"     >> "$GITHUB_OUTPUT"
+          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 1. API — image de base. `latest` est poussé UNIQUEMENT comme alias de
+      #    confort humain ; la prod se verrouille toujours sur le tag `sha-*`.
+      - name: Build & push ladini-api
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.api
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/ladini-api:${{ steps.meta.outputs.release_version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/ladini-api:latest
+          build-args: |
+            RELEASE_VERSION=${{ steps.meta.outputs.release_version }}
+            GIT_SHA=${{ steps.meta.outputs.git_sha }}
+            BUILD_TIMESTAMP=${{ steps.meta.outputs.built_at }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      # 2. worker + mcp : `FROM ${API_IMAGE}` → on leur passe l'image api
+      #    tout juste poussée (pas de recompilation des deps).
+      - name: Build & push ladini-worker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.worker
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/ladini-worker:${{ steps.meta.outputs.release_version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/ladini-worker:latest
+          build-args: |
+            API_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/ladini-api:${{ steps.meta.outputs.release_version }}
+          cache-from: type=gha
+          provenance: false
+
+      - name: Build & push ladini-mcp
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.mcp
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/ladini-mcp:${{ steps.meta.outputs.release_version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/ladini-mcp:latest
+          build-args: |
+            API_IMAGE=${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/ladini-api:${{ steps.meta.outputs.release_version }}
+          cache-from: type=gha
+          provenance: false
+
+      # Manifeste de release — artefact téléchargeable + résumé du job. Permet
+      # de connaître "quelle release / quel SHA / quelle date" sans fouiller.
+      - name: Publish release manifest
+        run: |
+          mkdir -p out
+          cat > out/release.env <<EOF
+          RELEASE_VERSION=${{ steps.meta.outputs.release_version }}
+          GIT_SHA=${{ steps.meta.outputs.git_sha }}
+          BUILD_TIMESTAMP=${{ steps.meta.outputs.built_at }}
+          REGISTRY=${{ env.REGISTRY }}
+          IMAGE_NAMESPACE=${{ env.IMAGE_NAMESPACE }}
+          EOF
+          cp out/release.env "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          {
+            echo "## Release \`${{ steps.meta.outputs.release_version }}\`"
+            echo '```'
+            cat out/release.env
+            echo '```'
+            echo "Déployer :  \`./scripts/deploy.sh ${{ steps.meta.outputs.release_version }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest
+          path: out/release.env
+          retention-days: 90

@@ -2,16 +2,16 @@ param(
     [string]$Region = "eu-north-1",
     [string]$AccountId = "875180007527",
     [string]$ImageTag = "latest",
-    [string]$ScraperServiceName = "agriconnect-scrapers-service",
-    [string]$IngestionServiceName = "agriconnect-ingestion-service",
-    [string]$ClusterName = "agriconnect-cluster",
+    [string]$ScraperServiceName = "ladini-scrapers-service",
+    [string]$IngestionServiceName = "ladini-ingestion-service",
+    [string]$ClusterName = "ladini-cluster",
     [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
 
-$ScraperRepo = "$($AccountId).dkr.ecr.$Region.amazonaws.com/agriconnect-scrapers-dev"
-$IngestionRepo = "$($AccountId).dkr.ecr.$Region.amazonaws.com/agriconnect-ingestion-dev"
+$ScraperRepo = "$($AccountId).dkr.ecr.$Region.amazonaws.com/ladini-scrapers-dev"
+$IngestionRepo = "$($AccountId).dkr.ecr.$Region.amazonaws.com/ladini-ingestion-dev"
 
 Write-Host "Region: $Region"; Write-Host "Account: $AccountId"; Write-Host "ImageTag: $ImageTag"
 
@@ -29,12 +29,12 @@ $ScraperContext = $RepoRoot
 $IngestionContext = $RepoRoot
 
 Write-Host "Building scraper image..."
-ExecOrShow "docker build -f infra/docker/Dockerfile.scraper -t agriconnect-scrapers:$ImageTag `"$ScraperContext`""
-ExecOrShow "docker tag agriconnect-scrapers:$ImageTag ${ScraperRepo}:$ImageTag"
+ExecOrShow "docker build -f infra/docker/Dockerfile.scraper -t ladini-scrapers:$ImageTag `"$ScraperContext`""
+ExecOrShow "docker tag ladini-scrapers:$ImageTag ${ScraperRepo}:$ImageTag"
 
 Write-Host "Building ingestion image..."
-ExecOrShow "docker build -f infra/docker/Dockerfile.ingestion -t agriconnect-ingestion:$ImageTag `"$IngestionContext`""
-ExecOrShow "docker tag agriconnect-ingestion:$ImageTag ${IngestionRepo}:$ImageTag"
+ExecOrShow "docker build -f infra/docker/Dockerfile.ingestion -t ladini-ingestion:$ImageTag `"$IngestionContext`""
+ExecOrShow "docker tag ladini-ingestion:$ImageTag ${IngestionRepo}:$ImageTag"
 
 Write-Host "Pushing images to ECR..."
 ExecOrShow "docker push ${ScraperRepo}:$ImageTag"

@@ -21,7 +21,7 @@ def _source(fn) -> str:
 
 class TestConfirmationGateReadsOnlyPendingInteraction:
     def test_confirmation_gate_does_not_read_waiting_for_confirmation_as_a_condition(self):
-        from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+        from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
             confirmation_gate,
         )
 
@@ -36,7 +36,7 @@ class TestConfirmationGateReadsOnlyPendingInteraction:
 
 class TestRouteAfterValidatorFallbackReadsOnlyPendingInteraction:
     def test_fallback_router_does_not_read_waiting_for_confirmation_as_a_condition(self):
-        from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+        from ladini.graphs.agents.market_coach.interpreter.routing import (
             make_route_after_validator,
         )
 
@@ -46,7 +46,7 @@ class TestRouteAfterValidatorFallbackReadsOnlyPendingInteraction:
 
 class TestGoalPlannerDerivesExpectedInputFromPendingInteractionOnly(object):
     def test_goal_planner_assigns_expected_input_exactly_once_from_the_resolver(self):
-        from agriconnect.graphs.agents.market_coach.interpreter.goal_planner import (
+        from ladini.graphs.agents.market_coach.interpreter.goal_planner import (
             goal_planner,
         )
 
@@ -68,7 +68,7 @@ class TestGoalPlannerDerivesExpectedInputFromPendingInteractionOnly(object):
 
 class TestPricingTiersPackageCountGateUsesPendingInteractionKind:
     def test_pending_pack_count_tier_no_longer_compares_the_raw_string(self):
-        from agriconnect.graphs.agents.market_coach.domain.tier_interaction import (
+        from ladini.graphs.agents.market_coach.domain.tier_interaction import (
             pending_pack_count_tier,
         )
 

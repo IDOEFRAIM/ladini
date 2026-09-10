@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     CancelProcurementDraft,
     ConfirmationTarget,
     ConfirmProcurementDraft,
@@ -32,11 +32,11 @@ from agriconnect.graphs.agents.market_coach.domain.procurement_draft import (
     apply_domain_action,
     resolve_domain_action,
 )
-from agriconnect.graphs.agents.market_coach.nodes.confirmation_gate import (
+from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
     confirmation_gate,
 )
-from agriconnect.graphs.agents.market_coach.nodes.memory import memory_update
-from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+from ladini.graphs.agents.market_coach.nodes.memory import memory_update
+from ladini.graphs.agents.market_coach.interpreter.routing import (
     _interpret_fast_path,
 )
 from tests.conftest import make_state, run, stub_runtime
@@ -200,8 +200,8 @@ class TestInvariant5SuccessfulConfirmLeavesWaitingConfirmation:
         vérifie la TRANSITION D'ÉTAT du nœud, pas le claim lui-même (couvert
         par TestConfirmIsIdempotent/TestConcurrentConfirmClaim ci-dessus,
         qui contrôlent `claim` explicitement)."""
-        import agriconnect.graphs.agents.market_coach.domain.procurement_draft as pd_mod
-        from agriconnect.graphs.agents.market_coach.core.pending_interaction import (
+        import ladini.graphs.agents.market_coach.domain.procurement_draft as pd_mod
+        from ladini.graphs.agents.market_coach.core.pending_interaction import (
             InteractionKind,
             get_pending_interaction,
         )
@@ -248,7 +248,7 @@ class TestInvariant7DomainNeverComparesRawText:
         ne doivent apparaître comme littéral de comparaison dans le module
         domaine."""
         src = Path(
-            "src/agriconnect/graphs/agents/market_coach/domain/procurement_draft.py"
+            "src/ladini/graphs/agents/market_coach/domain/procurement_draft.py"
         ).read_text(encoding="utf-8")
         forbidden = re.compile(r'["\']( ?oui| ?okay| ?ok| ?d\'accord)["\']', re.IGNORECASE)
         matches = forbidden.findall(src)
@@ -262,7 +262,7 @@ class TestInvariant7DomainNeverComparesRawText:
 
 class TestNoConcurrentConfirmationEngine:
     def test_confirm_keywords_no_longer_exists_anywhere(self):
-        root = Path("src/agriconnect/graphs/agents/market_coach")
+        root = Path("src/ladini/graphs/agents/market_coach")
         hits = []
         for path in root.rglob("*.py"):
             text = path.read_text(encoding="utf-8")
@@ -413,7 +413,7 @@ class TestFullReportedScenario:
     def test_v1_then_v2_then_confirm_v2_then_repeat_confirm_does_not_reexecute(
         self, stub_runtime, monkeypatch
     ):
-        import agriconnect.graphs.agents.market_coach.domain.procurement_draft as pd_mod
+        import ladini.graphs.agents.market_coach.domain.procurement_draft as pd_mod
 
         # `claim_once` réel tape Redis — voir la note dans Invariant 5
         # ci-dessus. Ce scénario vérifie le CONTENU (versions, texte

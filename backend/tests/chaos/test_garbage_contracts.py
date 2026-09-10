@@ -50,7 +50,7 @@ def test_contract_garbage_battery(intent, payload, must_reject, bad_field):
     """Rupture prévenue : le LLM hallucine une valeur (quantité négative,
     prix nul, dict imbriqué) et elle atteint la base de données. Le contrat
     doit rejeter la VALEUR sans jamais lever, et tolérer l'ABSENCE."""
-    from agriconnect.graphs.agents.market_coach.interpreter.contracts import (
+    from ladini.graphs.agents.market_coach.interpreter.contracts import (
         enforce_contract,
     )
 
@@ -68,7 +68,7 @@ def test_nan_never_passes_gt_zero():
     """Rupture prévenue : float('nan') > 0 est False en Python mais certains
     chemins de coercition le laissent filtrer. NaN dans un montant = ligne
     comptable corrompue. Preuve dédiée, indépendante de la battery."""
-    from agriconnect.graphs.agents.market_coach.interpreter.contracts import (
+    from ladini.graphs.agents.market_coach.interpreter.contracts import (
         enforce_contract,
     )
     for bad in (float("nan"), float("inf"), float("-inf")):
@@ -96,7 +96,7 @@ def test_validator_rejects_garbage_without_crashing(payload, expect_error_fragme
     """Rupture prévenue : un payload corrompu traverse le validator et part
     en écriture. Attendu : WAITING_INPUT + validation_errors peuplés +
     aucune exception. Le tour suivant peut re-demander le champ."""
-    from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+    from ladini.graphs.agents.market_coach.nodes.validation import validator
 
     state = {
         "current_goal": "SALES_PUBLISH_PRODUCT",
@@ -115,7 +115,7 @@ def test_validator_rejects_garbage_without_crashing(payload, expect_error_fragme
 def test_validator_handles_completely_empty_state():
     """Rupture prévenue : état vide (workspace corrompu/tronqué à 480KB).
     Le validator doit rendre une demande de clarification, pas un KeyError."""
-    from agriconnect.graphs.agents.market_coach.nodes.validation import validator
+    from ladini.graphs.agents.market_coach.nodes.validation import validator
 
     out = run(validator({}, None))
     assert out["status"] == "WAITING_INPUT"
@@ -139,7 +139,7 @@ def test_validator_handles_completely_empty_state():
 def test_envelope_unwrap_hostile_shapes(raw, expected_status, expected_success):
     """Rupture prévenue : chaque forme d'enveloppe mal normalisée devient
     soit un faux succès (transaction fantôme) soit un crash de renderer."""
-    from agriconnect.graphs.agents.market_coach.utils import (
+    from ladini.graphs.agents.market_coach.utils import (
         is_success_response,
         unwrap_tool_envelope,
     )
@@ -162,7 +162,7 @@ def test_envelope_unwrap_never_corrupts_domain_shapes(untouched):
     """Rupture prévenue : ~20 consommateurs lisent result['data'] (listes
     domaine). Un unwrap trop zélé qui « déballe » un dict domaine détruirait
     ces réponses. Détection STRICTE exigée : identité préservée."""
-    from agriconnect.graphs.agents.market_coach.utils import unwrap_tool_envelope
+    from ladini.graphs.agents.market_coach.utils import unwrap_tool_envelope
 
     out = unwrap_tool_envelope(untouched)
     assert out is untouched, f"forme domaine corrompue: {untouched!r} → {out!r}"
@@ -184,7 +184,7 @@ def test_is_success_response_battery(res, expected):
     """Rupture prévenue : un faux positif ici déclenche un message de succès
     pour une transaction qui n'a PAS eu lieu — la pire trahison de confiance
     possible pour un producteur qui croit son produit publié."""
-    from agriconnect.graphs.agents.market_coach.utils import is_success_response
+    from ladini.graphs.agents.market_coach.utils import is_success_response
 
     assert bool(is_success_response(res)) is expected, f"{res!r}"
 
@@ -206,7 +206,7 @@ def test_ensure_dict_never_raises(raw):
     (apostrophes françaises « d'offres ») cassait le parsing naïf par
     remplacement de quotes — le message disparaissait silencieusement.
     Contrat : toujours un dict, jamais une exception."""
-    from agriconnect.graphs.agents.market_coach.utils import ensure_dict
+    from ladini.graphs.agents.market_coach.utils import ensure_dict
 
     out = ensure_dict(raw)
     assert isinstance(out, dict), f"{raw!r} → {type(out)}"
@@ -215,7 +215,7 @@ def test_ensure_dict_never_raises(raw):
 def test_ensure_dict_preserves_french_apostrophes():
     """Preuve dédiée du piège apostrophe : le message français doit survivre
     intact au dépliage (ast.literal_eval AVANT le nettoyage destructif)."""
-    from agriconnect.graphs.agents.market_coach.utils import ensure_dict
+    from ladini.graphs.agents.market_coach.utils import ensure_dict
 
     out = ensure_dict("{'status': 'error', 'message': \"Pas d'appel d'offres trouvé\"}")
     assert out.get("message") == "Pas d'appel d'offres trouvé", out

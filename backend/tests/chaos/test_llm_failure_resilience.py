@@ -24,7 +24,7 @@ def test_ask_question_survives_llm_500(runtime_with, crashing_llm):
     """Rupture prévenue : Groq renvoie 500 pendant la collecte d'un champ.
     Sans fallback, l'utilisateur ne recevrait AUCUNE question et le tunnel
     resterait muet. Le fallback statique doit sortir, sans exception."""
-    from agriconnect.graphs.agents.market_coach.nodes.rendering.ask import (
+    from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
         generate_llm_question,
     )
 
@@ -41,7 +41,7 @@ def test_ask_question_survives_llm_500(runtime_with, crashing_llm):
 def test_ask_question_survives_timeout(runtime_with):
     """Rupture prévenue : timeout réseau (asyncio.TimeoutError) — même contrat
     que le 500 : fallback statique, zéro exception."""
-    from agriconnect.graphs.agents.market_coach.nodes.rendering.ask import (
+    from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
         generate_llm_question,
     )
     import asyncio as _a
@@ -54,7 +54,7 @@ def test_ask_question_survives_timeout(runtime_with):
 def test_ask_question_survives_llm_none(runtime_with):
     """Rupture prévenue : runtime sans client LLM (démarrage dégradé,
     MCP_ALLOW_DEGRADED_START) — le rendu doit rester fonctionnel."""
-    from agriconnect.graphs.agents.market_coach.nodes.rendering.ask import (
+    from ladini.graphs.agents.market_coach.nodes.rendering.ask import (
         generate_llm_question,
     )
 
@@ -72,7 +72,7 @@ def test_clarification_llm_crash_returns_empty_patch(runtime_with, crashing_llm)
     doit rendre un patch vide (le fallback CLARIFICATION de final_response
     prendra le relais), jamais une exception qui tue le graphe. L'état force
     le chemin LLM : OUT_OF_SCOPE, aucun tunnel actif, aucun hint lexical."""
-    from agriconnect.graphs.agents.market_coach.nodes.clarification import (
+    from ladini.graphs.agents.market_coach.nodes.clarification import (
         clarification_node,
     )
 
@@ -113,7 +113,7 @@ def test_interpreter_never_raises_with_dead_llm(runtime_with, crashing_llm):
     contrat MINIMAL de l'interpréteur : toujours rendre un dict avec
     interpreted_event/detected_intent (UNKNOWN accepté), JAMAIS lever.
     Un raise ici = tour perdu pour l'utilisateur + retry Celery aveugle."""
-    from agriconnect.graphs.agents.market_coach.interpreter.routing import (
+    from ladini.graphs.agents.market_coach.interpreter.routing import (
         make_input_interpreter,
     )
 
@@ -162,7 +162,7 @@ def test_executor_db_down_retries_then_clean_error():
     Attendu : 2 tentatives (marqueur transitoire 'connection'), puis état
     ERROR avec message utilisateur TRADUIT (pas de stacktrace, pas de
     jargon), et l'historique d'exécution qui trace les 2 échecs."""
-    from agriconnect.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
+    from ladini.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
 
     rt = FailingDBRuntime(ConnectionError("connection refused (chaos)"))
     result = run(mcp_tool_executor(_authorized_write_state(), rt))
@@ -182,7 +182,7 @@ def test_executor_nontransient_error_fails_fast():
     """Rupture prévenue : erreur NON transitoire (violation d'intégrité).
     Retenter serait dangereux (double écriture) — attendu : 1 seule
     tentative puis ERROR propre."""
-    from agriconnect.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
+    from ladini.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
 
     rt = FailingDBRuntime(ValueError("duplicate key value violates unique constraint"))
     result = run(mcp_tool_executor(_authorized_write_state(), rt))
@@ -195,7 +195,7 @@ def test_executor_envelope_ko_is_domain_error():
     """Rupture prévenue : l'enveloppe {ok:False, data:{}} du shield MCP
     (PermissionDenied, préflight) arrivait historiquement jusqu'au renderer
     comme un faux succès vide. Attendu : ERROR immédiat, message traduit."""
-    from agriconnect.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
+    from ladini.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
 
     rt = EnvelopeDBRuntime(responses=[
         {"ok": False, "data": {}, "error": "PermissionDenied: missing_context_identity", "meta": {}},
@@ -228,7 +228,7 @@ class TestToolHistoryRawIsSizeCapped:
         }
 
     def test_a_large_response_is_compacted_but_keeps_diagnostic_fields(self):
-        from agriconnect.graphs.agents.market_coach.nodes.executor import (
+        from ladini.graphs.agents.market_coach.nodes.executor import (
             _compact_raw_for_history,
         )
 
@@ -242,7 +242,7 @@ class TestToolHistoryRawIsSizeCapped:
         assert len(str(compact)) < raw_size, "doit être significativement plus petit"
 
     def test_a_small_response_passes_through_unchanged(self):
-        from agriconnect.graphs.agents.market_coach.nodes.executor import (
+        from ladini.graphs.agents.market_coach.nodes.executor import (
             _compact_raw_for_history,
         )
 
@@ -252,7 +252,7 @@ class TestToolHistoryRawIsSizeCapped:
     def test_a_non_dict_result_passes_through_unchanged(self):
         """Défense : un résultat non-dict (déjà anormal) ne doit jamais faire
         planter la compaction — il doit simplement être laissé tel quel."""
-        from agriconnect.graphs.agents.market_coach.nodes.executor import (
+        from ladini.graphs.agents.market_coach.nodes.executor import (
             _compact_raw_for_history,
         )
 
@@ -263,7 +263,7 @@ class TestToolHistoryRawIsSizeCapped:
         """Rupture prévenue : sans cette compaction, un catalogue volumineux
         renvoyé par un outil MCP réel se retrouvait recopié tel quel dans
         `tool_execution_history`, gonflant le state persisté à chaque appel."""
-        from agriconnect.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
+        from ladini.graphs.agents.market_coach.nodes.executor import mcp_tool_executor
 
         rt = EnvelopeDBRuntime(responses=[self._catalog_response()])
         result = run(mcp_tool_executor(_authorized_write_state(), rt))
@@ -287,7 +287,7 @@ def test_groq_sdk_has_no_hidden_retry():
     un appel qui aurait réussi devenait un UNKNOWN forcé. max_retries=0 est
     donc un invariant de production."""
     import importlib
-    gl = importlib.import_module("agriconnect.core.get_llm")
+    gl = importlib.import_module("ladini.core.get_llm")
     src = inspect.getsource(gl.get_groq_sdk)
     assert "max_retries=0" in src, "retry SDK réactivé = conflit timeout garanti"
     assert "timeout=" in src, "timeout httpx absent = connexion pendue possible"
@@ -297,9 +297,9 @@ def test_llm_call_sites_are_threaded_and_bounded():
     """Rupture prévenue : un site d'appel LLM ajouté sans to_thread+wait_for
     bloque la boucle (tous les utilisateurs du worker) ou pend sans borne.
     Vérifie les 3 sites critiques du graphe."""
-    from agriconnect.graphs.agents.market_coach.interpreter import routing
-    from agriconnect.graphs.agents.market_coach.nodes.rendering import ask
-    from agriconnect.graphs.agents.market_coach.nodes import clarification
+    from ladini.graphs.agents.market_coach.interpreter import routing
+    from ladini.graphs.agents.market_coach.nodes.rendering import ask
+    from ladini.graphs.agents.market_coach.nodes import clarification
 
     for module in (routing, ask, clarification):
         src = inspect.getsource(module)
