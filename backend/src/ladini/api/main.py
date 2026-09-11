@@ -1,6 +1,8 @@
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,9 +21,62 @@ from ladini.core.settings import settings
 
 logger = logging.getLogger("Ladini.API")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Démarrage + arrêt de l'API — style `lifespan` moderne (2026-09-11,
+    remplace `@app.on_event("startup"/"shutdown")`, dépréciés par FastAPI :
+    `on_event` reste fonctionnel aujourd'hui mais n'est plus maintenu et sera
+    retiré ; `lifespan` est en plus strictement plus robuste — un seul
+    gestionnaire de contexte au lieu de deux callbacks séparés, donc pas de
+    risque qu'un futur ajout d'état partagé (ex: une ressource ouverte au
+    démarrage) désynchronise l'ordre start/stop. Tout le CODE des deux
+    anciens hooks est conservé à l'identique — seule la déclaration change.
+    """
+    # ── startup (avant `yield` — ex `_startup_telemetry`) ────────────
+    # Initialise OTel + Prometheus + Langfuse une fois au démarrage de l'API,
+    # puis instrumente FastAPI (spans automatiques par requête).
+    telemetry.init_telemetry(service_name="ladini-api")
+    telemetry.instrument_fastapi(app)
+
+    # (2026-09-02) Amorce le pool DB au démarrage — même correctif que
+    # `api/tasks.py::init_worker_process` pour le worker Celery (voir
+    # [[worker-warm-pool-cold-start]]), jamais appliqué au process API/webhook :
+    # `core/database.py::get_sessionmaker()` initialise le moteur PARESSEUSEMENT
+    # à la première requête qui le touche. Sans warm-up, la 1ère requête d'un
+    # process API tout juste démarré (déploiement, scaling, restart) paie la
+    # connexion à froid (handshake SSL DigitalOcean managed DB inclus) — si
+    # cette 1ère requête est justement `persist_shared_location` (webhook GPS,
+    # `core/location.py`), un simple ralentissement au démarrage peut se
+    # traduire par un faux `LOCATION_PERSISTENCE_ERROR` (except Exception large,
+    # jamais bloquant pour le webhook lui-même) présenté à l'utilisateur comme
+    # un problème permanent, alors que c'était un coût de démarrage à usage
+    # unique. Best-effort, jamais bloquant : un échec ici ne doit jamais
+    # empêcher l'API de démarrer.
+    try:
+        from ladini.api.tasks import _warmup_db
+
+        await _warmup_db()
+    except Exception as exc:
+        logger.warning("Warm-up DB au démarrage de l'API ignoré : %s", exc)
+
+    yield
+
+    # ── shutdown (après `yield` — ex `_shutdown_db`) ─────────────────
+    # Ferme proprement le pool SQLAlchemy/asyncpg pendant la fenêtre de
+    # graceful shutdown de gunicorn (SIGTERM → drain requêtes → ce hook —
+    # voir --graceful-timeout côté Dockerfile.api et stop_grace_period côté
+    # compose). Sans ça, les connexions au pooler DB restent ouvertes côté
+    # client jusqu'au SIGKILL du process, au lieu d'être libérées à temps.
+    from ladini.core.database import close_db
+
+    await close_db()
+
+
 app = FastAPI(
     title=" LADINI MarketCoach API",
     version="1.1.0",
+    lifespan=lifespan,
 )
 
 # CORS — piloté par `settings.ALLOWED_ORIGINS` (la valeur était auparavant
@@ -53,47 +108,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-async def _startup_telemetry() -> None:
-    # Initialise OTel + Prometheus + Langfuse une fois au démarrage de l'API,
-    # puis instrumente FastAPI (spans automatiques par requête).
-    telemetry.init_telemetry(service_name="ladini-api")
-    telemetry.instrument_fastapi(app)
-
-    # (2026-09-02) Amorce le pool DB au démarrage — même correctif que
-    # `api/tasks.py::init_worker_process` pour le worker Celery (voir
-    # [[worker-warm-pool-cold-start]]), jamais appliqué au process API/webhook :
-    # `core/database.py::get_sessionmaker()` initialise le moteur PARESSEUSEMENT
-    # à la première requête qui le touche. Sans warm-up, la 1ère requête d'un
-    # process API tout juste démarré (déploiement, scaling, restart) paie la
-    # connexion à froid (handshake SSL DigitalOcean managed DB inclus) — si
-    # cette 1ère requête est justement `persist_shared_location` (webhook GPS,
-    # `core/location.py`), un simple ralentissement au démarrage peut se
-    # traduire par un faux `LOCATION_PERSISTENCE_ERROR` (except Exception large,
-    # jamais bloquant pour le webhook lui-même) présenté à l'utilisateur comme
-    # un problème permanent, alors que c'était un coût de démarrage à usage
-    # unique. Best-effort, jamais bloquant : un échec ici ne doit jamais
-    # empêcher l'API de démarrer.
-    try:
-        from ladini.api.tasks import _warmup_db
-
-        await _warmup_db()
-    except Exception as exc:
-        logger.warning("Warm-up DB au démarrage de l'API ignoré : %s", exc)
-
-
-@app.on_event("shutdown")
-async def _shutdown_db() -> None:
-    # Ferme proprement le pool SQLAlchemy/asyncpg pendant la fenêtre de
-    # graceful shutdown de gunicorn (SIGTERM → drain requêtes → ce hook —
-    # voir --graceful-timeout côté Dockerfile.api et stop_grace_period côté
-    # compose). Sans ça, les connexions au pooler DB restent ouvertes côté
-    # client jusqu'au SIGKILL du process, au lieu d'être libérées à temps.
-    from ladini.core.database import close_db
-
-    await close_db()
 
 
 @app.middleware("http")
