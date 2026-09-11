@@ -32,7 +32,11 @@ jobs:
           python-version: '3.11'
 
       - name: Install Poetry
-        run: pipx install poetry
+        # Épinglé à la version qui a généré backend/poetry.lock (2026-09-11) —
+        # `poetry check --lock` peut se plaindre d'un lock "désynchronisé"
+        # entre deux versions majeures/mineures de Poetry qui sérialisent le
+        # lock différemment. Élimine cette variable.
+        run: pipx install poetry==2.2.1
 
       - uses: actions/cache@v4
         with:
@@ -97,7 +101,7 @@ jobs:
         run: bash scripts/check_migrations.sh "${{ github.event.pull_request.base.sha || 'HEAD~1' }}" HEAD
 
   # Valide que les 3 images se CONSTRUISENT encore + que le compose prod est
-  # cohérent. Ne pousse rien (`push: false`).
+  # cohérent. Ne pousse rien.
   docker-build:
     name: Validation des images Docker + compose
     runs-on: ubuntu-latest
@@ -107,43 +111,35 @@ jobs:
       IMAGE_NAMESPACE: ladini
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
 
+      # `docker build` PLAT (pas `docker/build-push-action` + buildx) —
+      # DÉLIBÉRÉ. `docker/setup-buildx-action` installe un builder
+      # `docker-container` dont le store d'images est ISOLÉ du démon Docker :
+      # même avec `load: true` sur l'image api, le build worker/mcp qui suit
+      # (`FROM local/ladini/ladini-api:…`) ne la retrouvait PAS et tentait de
+      # la PULL depuis Docker Hub → "pull access denied" (échec CI constaté
+      # 2026-09-11). Le builder par défaut des runners GitHub (`docker`
+      # driver, BuildKit natif ≥ Docker 23) partage le store du démon : une
+      # image construite est immédiatement visible comme base d'un build
+      # suivant. `# syntax=` et `--mount=type=cache` restent supportés.
       - name: Build image api
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: infra/docker/Dockerfile.api
-          tags: local/ladini/ladini-api:${{ env.RELEASE_VERSION }}
-          push: false
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: |
-            RELEASE_VERSION=${{ env.RELEASE_VERSION }}
-            GIT_SHA=${{ github.sha }}
+        run: |
+          docker build -f infra/docker/Dockerfile.api \
+            --build-arg RELEASE_VERSION="${RELEASE_VERSION}" \
+            --build-arg GIT_SHA="${{ github.sha }}" \
+            -t "local/${IMAGE_NAMESPACE}/ladini-api:${RELEASE_VERSION}" .
 
       - name: Build image worker
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: infra/docker/Dockerfile.worker
-          tags: local/ladini/ladini-worker:${{ env.RELEASE_VERSION }}
-          push: false
-          load: true
-          build-args: |
-            API_IMAGE=local/ladini/ladini-api:${{ env.RELEASE_VERSION }}
+        run: |
+          docker build -f infra/docker/Dockerfile.worker \
+            --build-arg API_IMAGE="local/${IMAGE_NAMESPACE}/ladini-api:${RELEASE_VERSION}" \
+            -t "local/${IMAGE_NAMESPACE}/ladini-worker:${RELEASE_VERSION}" .
 
       - name: Build image mcp
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: infra/docker/Dockerfile.mcp
-          tags: local/ladini/ladini-mcp:${{ env.RELEASE_VERSION }}
-          push: false
-          load: true
-          build-args: |
-            API_IMAGE=local/ladini/ladini-api:${{ env.RELEASE_VERSION }}
+        run: |
+          docker build -f infra/docker/Dockerfile.mcp \
+            --build-arg API_IMAGE="local/${IMAGE_NAMESPACE}/ladini-api:${RELEASE_VERSION}" \
+            -t "local/${IMAGE_NAMESPACE}/ladini-mcp:${RELEASE_VERSION}" .
 
       - name: Valider docker-compose.prod.yml (config résolue)
         run: |
