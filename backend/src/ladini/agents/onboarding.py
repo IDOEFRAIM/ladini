@@ -7,7 +7,7 @@ Design
 - Any slot can be updated at any moment, including after a confirmation
   prompt — a change re-triggers confirmation with the new summary.
 - ``step`` is derived from what is filled, not from a rigid sequence.
-"""
+"""         
 from __future__ import annotations
 
 import ast
