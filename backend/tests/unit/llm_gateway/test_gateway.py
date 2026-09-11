@@ -189,18 +189,34 @@ class TestPrimaryHealthy:
 
 class TestFallbackOnFailure:
     def test_primary_timeout_falls_back_to_the_next_candidate(self):
-        client_a = _ScriptedClient(_sleeps_then_succeeds(2.0))  # dépasse son timeout (2.0s défini par candidat)
+        # `client_a` dort 2.0s — EXACTEMENT son propre timeout (`timeout_seconds
+        # =2.0` dans `_make_gateway`/`_parse`). Corrigé 2026-09-11 (2e passe,
+        # CI toujours cassée après un premier correctif insuffisant) : cette
+        # égalité stricte fait de "le wait_for expire avant / après la fin du
+        # sleep" une VRAIE course — le gateway appelle le client via
+        # `asyncio.wait_for(asyncio.to_thread(...), timeout=2.0)`
+        # (gateway.py:292-293), donc l'issue dépend de la latence de
+        # dispatch du thread + de la granularité de l'horloge de LA MACHINE
+        # qui exécute le test. Sur ce poste (Windows), le timeout gagnait
+        # systématiquement ; sur le runner CI (Linux), le sleep de `client_a`
+        # se terminait parfois LÉGÈREMENT avant l'échéance du wait_for —
+        # `client_a` "réussissait" alors directement (son contenu factice est
+        # le MÊME `"{}"` que celui de `client_b`, donc la 1ʳᵉ assertion
+        # passait quand même) et `client_b` n'était jamais appelé
+        # (`len(client_b.calls) == 0`). Le 1er correctif (budget total porté
+        # à 8s) ne touchait PAS à cette course — le vrai problème n'était pas
+        # le budget GLOBAL mais l'égalité sleep == timeout au niveau d'UN
+        # candidat. Fix définitif : le sleep dépasse LARGEMENT (6.0s) le
+        # timeout du candidat (2.0s) — le wait_for expire alors de façon non
+        # ambiguë quels que soient la machine et son scheduler. `client_a`
+        # continue de "dormir" en arrière-plan dans son thread après
+        # l'abandon du wait_for (comportement normal de `asyncio.to_thread`,
+        # sans impact sur le test), mais son résultat n'est plus jamais
+        # utilisé. Budget total gardé à 8s (marge confortable pour
+        # `client_b` après les ~2s de timeout, largement au-dessus du seuil
+        # minimum viable `_MIN_VIABLE_SECONDS=1.5` de gateway.py).
+        client_a = _ScriptedClient(_sleeps_then_succeeds(6.0))
         client_b = _ScriptedClient(_always_succeeds)
-        # Budget volontairement LARGE (8s, pas le défaut 5s de _fake_settings) —
-        # corrigé 2026-09-11 (CI cassée, échec intermittent) : avec le budget
-        # par défaut, il ne restait que ~3s après le timeout de 2s de
-        # `client_a` pour décider de tenter `client_b` ; un runner CI chargé
-        # peut ajouter assez de latence d'ordonnancement pour repasser sous
-        # le seuil minimum viable et faire échouer le test SANS RAPPORT avec
-        # le comportement réellement testé (le fallback lui-même). Ce test
-        # vérifie « timeout -> bascule vers le candidat suivant », pas
-        # « le calcul de budget est exact à la milliseconde » — lui donner de
-        # la marge élimine le faux négatif sans affaiblir l'assertion.
         gw = _make_gateway(
             provider_clients={"provider_a": client_a, "provider_b": client_b},
             settings=_fake_settings(LLM_FAST_BUDGET_SECONDS=8.0),
