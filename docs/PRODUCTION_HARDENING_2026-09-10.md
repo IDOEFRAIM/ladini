@@ -122,7 +122,7 @@ Aucun nœud de l'agent (interpreter, guards, planner, executor, tunnels…) n'a
   │  RELEASE  (.github/workflows/release.yml)  — BUILD ONCE        │
   │   build api → worker → mcp                                     │
   │   tag  sha-<court>  (+ latest, alias humain)                   │
-  │   push  ghcr.io/idoefraim/agriconnect/ladini-*:sha-<court>     │
+  │   push  ghcr.io/idoefraim/ladini/ladini-*:sha-<court>     │
   │   artefact release-manifest (RELEASE_VERSION, GIT_SHA, …)      │
   └───────────────────────────────────────────────────────────────┘
     │  images immuables au registry

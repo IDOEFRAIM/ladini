@@ -27,7 +27,56 @@ Une release = un tag **immuable** : `sha-a83f6c1` (SHA de commit court) ou
 
 ---
 
-## 1. Déployer
+## Tester en local (poste de dev, pas un VPS)
+
+`docker-compose.prod.yml` exige `RELEASE_VERSION` (`:?…`) et suppose des
+images déjà publiées sur un registry — lancé TEL QUEL avec un simple
+`docker compose -f docker-compose.prod.yml up`, il échoue immédiatement
+("RELEASE_VERSION requis", ou une variable comme `REDIS_PASSWORD` qui
+"semble absente"). C'est voulu pour un VPS (build-once, §BUILD ONCE) mais ce
+n'est pas un point d'entrée pour du dev local — utilisez :
+
+```bash
+cp .env.example .env      # une seule fois ; remplissez les valeurs [REQUIS]
+./scripts/dev-up.sh       # build local (overlay docker-compose.build.yml) + up
+```
+
+Ce script :
+
+1. se place à la racine du dépôt (élimine la cause n°1 d'un `.env` "ignoré" :
+   lancer `docker compose` depuis un autre dossier — Compose charge `.env`
+   depuis le **répertoire courant**, pas depuis où pointe `-f`) ;
+2. crée `.env` depuis `.env.example` s'il est absent, et s'arrête pour que
+   vous le remplissiez (ne devine jamais de valeur à votre place) ;
+3. détecte un `.env` en UTF-16 (piège Bloc-notes Windows — Compose attend
+   de l'UTF-8) ;
+4. fixe `RELEASE_VERSION=dev` automatiquement (pas besoin d'y penser) ;
+5. lance `docker compose config` — la SEULE source de vérité sur ce que
+   Compose a réellement résolu — **avant** tout `build`/`up`, pour que
+   l'erreur exacte ("variable X manquante") sorte immédiatement ;
+6. affiche un diagnostic **présent/absent** pour chaque variable sensible
+   (`REDIS_PASSWORD`, `MCP_HTTP_AUTH_TOKEN`, `DATABASE_URL`, `GROQ_API_KEY`,
+   `FLOWER_USER`/`PASSWORD`) **sans jamais afficher leur valeur** — répond
+   directement à « je ne vois pas passer REDIS_PASSWORD » ;
+7. build les 3 images localement puis `up -d --wait`.
+
+```bash
+./scripts/dev-up.sh --no-build   # si les images sont déjà construites/pull
+./scripts/dev-up.sh --down       # arrêter la stack de dev
+```
+
+Si l'étape 5 échoue, l'erreur de Compose est affichée telle quelle — elle
+nomme la variable en cause. Cause la plus fréquente : une valeur `[REQUIS]`
+encore à `change_me…` dans `.env`, ou `.env` absent du dossier depuis lequel
+`docker compose` est réellement invoqué.
+
+**Ce script ne sert JAMAIS en production** — sur un VPS, c'est toujours
+`scripts/deploy.sh <release>` (§1 ci-dessous), qui tire une image déjà
+construite par la CI plutôt que d'en reconstruire une localement.
+
+---
+
+## 1. Déployer (VPS, release publiée)
 
 ### 1.a — depuis GitHub (recommandé, avec approbation)
 

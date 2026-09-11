@@ -50,39 +50,51 @@
 # ═════════════════════════════════════════════════════════════════════
 
 # ─────────────────────────────────────────────────────────────────────
-# GROUPES DE SECRETS (least-privilege — audit hardening 2026-09-10)
-# Chaque service ne reçoit que les groupes dont il a réellement besoin.
-# `settings.py` défaut TOUT champ absent à "" : omettre une variable ne
-# casse jamais un service, ça retire seulement une capacité inutilisée.
+# ENVIRONNEMENT DES SERVICES — least-privilege (audit hardening 2026-09-10)
+#
+# Écrit en LITÉRAL dans chaque service (chaque clé listée directement),
+# PAS via un merge YAML `<<:` sur une LISTE d'ancres (`<<: [*a, *b, …]`).
+#
+# (2026-09-12) Ce fichier utilisait initialement ~9 petites ancres par
+# domaine (release/db/redis/mcp/llm/messaging/payments/observability/appsec)
+# fusionnées via `<<: [*a, *b, …]` dans `x-full-app-env` et dans les services
+# `mcp`/`flower`. Un dev qui lançait `docker compose -f docker-compose.prod.yml
+# up` directement sur son poste ne recevait PAS `REDIS_PASSWORD` (ni les
+# autres variables) alors que `docker compose config` passait en CI. La
+# fusion d'un TABLEAU d'ancres sous une seule clé `<<` est correcte selon la
+# spec merge-key YAML, mais son support diffère entre implémentations — celle
+# utilisée pour valider ce fichier en CI (PyYAML, `.github/workflows/cicd.yml`)
+# n'est PAS celle de Docker Compose (compose-go) : un `config --quiet` qui
+# passe en CI ne prouve donc rien sur le comportement à l'exécution réelle.
+# Un littéral ne dépend d'AUCUN comportement de fusion — chaque variable est
+# directement visible, grep-able, et se comporte à l'identique sur toute
+# version de Compose. `settings.py` défaut TOUT champ absent à "" : omettre
+# une variable ne casse jamais un service, ça retire une capacité inutilisée
+# — c'est ce qui permet à `mcp`/`flower` de ne recevoir qu'un sous-ensemble.
 # ─────────────────────────────────────────────────────────────────────
 
-# Métadonnées de release — injectées à l'exécution, jamais lues depuis git
-# dans le conteneur. Alimente `GET /version`. Aucune valeur secrète.
-x-release-env: &release-env
+# Env COMPLET — api / worker / beat (ils touchent réellement tous ces domaines :
+# release, DB, Redis, MCP, LLM, messagerie, paiements/stockage, observabilité,
+# sécurité applicative). `mcp` et `flower` reçoivent un sous-ensemble littéral
+# équivalent, voir leurs services plus bas.
+x-full-app-env: &full-app-env
+  # release-env
   RELEASE_VERSION: "${RELEASE_VERSION:?RELEASE_VERSION requis — un tag immuable, jamais 'latest'}"
   GIT_SHA: "${GIT_SHA:-${RELEASE_VERSION}}"
   BUILD_TIMESTAMP: "${BUILD_TIMESTAMP:-unknown}"
   COMPOSE_VERSION: "${COMPOSE_VERSION:-unknown}"
-
-# Base de données applicative (via PgBouncer). Provider-neutral + repli legacy.
-x-db-env: &db-env
+  # db-env
   DATABASE_URL: "postgresql+asyncpg://${DB_USER:-${DO_DB_USER}}:${DB_PASSWORD:-${DO_DB_PASSWORD}}@pgbouncer:6432/${DB_NAME:-${DO_DB_NAME}}"
-  DB_SSL_MODE: "disable"          # TLS est terminé par PgBouncer → la DB managée
+  DB_SSL_MODE: "disable"
   DB_POOL_SIZE: "${DB_POOL_SIZE:-5}"
   DB_POOL_MAX_OVERFLOW: "${DB_POOL_MAX_OVERFLOW:-5}"
-
-# Redis — broker Celery + disjoncteur LLM partagé + cache + verrous idempotence.
-x-redis-env: &redis-env
+  # redis-env
   REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD requis}@redis:6379/0"
-
-# MCP — le daemon (serveur) ET api/worker (clients) lisent ce token.
-x-mcp-env: &mcp-env
+  # mcp-env
   MCP_DB_TRANSPORT: "http"
   MCP_DB_HTTP_URL: "http://mcp:8003"
   MCP_HTTP_AUTH_TOKEN: "${MCP_HTTP_AUTH_TOKEN:?MCP_HTTP_AUTH_TOKEN requis — le daemon MCP ne doit jamais tourner sans authentification}"
-
-# LLM — providers + Gateway (chaîne de repli, disjoncteur, budgets).
-x-llm-env: &llm-env
+  # llm-env
   LLM_PROVIDER: "groq"
   GROQ_API_KEY: "${GROQ_API_KEY}"
   OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
@@ -99,9 +111,7 @@ x-llm-env: &llm-env
   LLM_PROBE_LOCK_SECONDS: "${LLM_PROBE_LOCK_SECONDS:-10}"
   LLM_FAST_BUDGET_SECONDS: "${LLM_FAST_BUDGET_SECONDS:-12}"
   LLM_REASONING_BUDGET_SECONDS: "${LLM_REASONING_BUDGET_SECONDS:-20}"
-
-# Messagerie sortante/entrante (WhatsApp Cloud + repli Twilio).
-x-messaging-env: &messaging-env
+  # messaging-env
   MESSAGING_PROVIDER: "${MESSAGING_PROVIDER:-whatsapp_cloud}"
   TWILIO_ACCOUNT_SID: "${TWILIO_ACCOUNT_SID:-}"
   TWILIO_AUTH_TOKEN: "${TWILIO_AUTH_TOKEN:-}"
@@ -116,9 +126,7 @@ x-messaging-env: &messaging-env
   WHATSAPP_APP_SECRET: "${WHATSAPP_APP_SECRET:-}"
   WHATSAPP_GRAPH_API_VERSION: "${WHATSAPP_GRAPH_API_VERSION:-v21.0}"
   WHATSAPP_NATIVE_INTERACTIVE_ENABLED: "${WHATSAPP_NATIVE_INTERACTIVE_ENABLED:-true}"
-
-# Paiement séquestre (Paydunya) + Supabase Storage (photos).
-x-payments-storage-env: &payments-storage-env
+  # payments-storage-env
   ESCROW_PAYMENT_ENABLED: "${ESCROW_PAYMENT_ENABLED:-false}"
   PUBLIC_API_BASE_URL: "${PUBLIC_API_BASE_URL:-}"
   PAYDUNYA_MASTER_KEY: "${PAYDUNYA_MASTER_KEY:-}"
@@ -130,9 +138,7 @@ x-payments-storage-env: &payments-storage-env
   SUPABASE_URL: "${SUPABASE_URL:-}"
   SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY:-}"
   SUPABASE_PRODUCT_BUCKET: "${SUPABASE_PRODUCT_BUCKET:-ladini}"
-
-# Observabilité (traces infra + LLMOps + erreurs). Non secret sauf clés Langfuse/Sentry.
-x-observability-env: &observability-env
+  # observability-env
   OTEL_ENABLED: "${OTEL_ENABLED:-true}"
   OTEL_EXPORTER_OTLP_ENDPOINT: "${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
   PROMETHEUS_ENABLED: "true"
@@ -142,18 +148,11 @@ x-observability-env: &observability-env
   LANGFUSE_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY:-}"
   LANGFUSE_SECRET_KEY: "${LANGFUSE_SECRET_KEY:-}"
   LANGFUSE_HOST: "https://cloud.langfuse.com"
-
-# Sécurité applicative (CORS + tokens des endpoints admin/internes).
-x-appsec-env: &appsec-env
+  # appsec-env
   ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-[]}"
   ADMIN_API_TOKEN: "${ADMIN_API_TOKEN:-}"
   INTERNAL_API_TOKEN: "${INTERNAL_API_TOKEN:-}"
   ADMIN_ALERT_WEBHOOK_URL: "${ADMIN_ALERT_WEBHOOK_URL:-}"
-
-# Env COMPLET — api / worker / beat (ils touchent réellement tous ces domaines).
-x-full-app-env: &full-app-env
-  <<: [*release-env, *db-env, *redis-env, *mcp-env, *llm-env, *messaging-env,
-       *payments-storage-env, *observability-env, *appsec-env]
 
 # ── Rotation des logs Docker (empêche un petit VPS de se remplir) ────
 # 20 Mo × 5 fichiers = 100 Mo max par conteneur. json-file car c'est le driver
@@ -193,12 +192,24 @@ services:
 
   # ── 1. APPLICATIF ──────────────────────────────────────────────────
   mcp:
-    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/agriconnect}/ladini-mcp:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/ladini}/ladini-mcp:${RELEASE_VERSION:?RELEASE_VERSION requis}"
     <<: *hardening
     # least-privilege : le daemon MCP n'exécute que des outils DB. Il ne fait
     # AUCUN appel LLM / WhatsApp / Paydunya / Supabase → ces groupes sont retirés.
+    # Littéral (pas de merge `<<:` sur une LISTE d'ancres) — voir la note sur
+    # `x-full-app-env` plus haut.
     environment:
-      <<: [*release-env, *db-env, *mcp-env]
+      RELEASE_VERSION: "${RELEASE_VERSION:?RELEASE_VERSION requis — un tag immuable, jamais 'latest'}"
+      GIT_SHA: "${GIT_SHA:-${RELEASE_VERSION}}"
+      BUILD_TIMESTAMP: "${BUILD_TIMESTAMP:-unknown}"
+      COMPOSE_VERSION: "${COMPOSE_VERSION:-unknown}"
+      DATABASE_URL: "postgresql+asyncpg://${DB_USER:-${DO_DB_USER}}:${DB_PASSWORD:-${DO_DB_PASSWORD}}@pgbouncer:6432/${DB_NAME:-${DO_DB_NAME}}"
+      DB_SSL_MODE: "disable"
+      DB_POOL_SIZE: "${DB_POOL_SIZE:-5}"
+      DB_POOL_MAX_OVERFLOW: "${DB_POOL_MAX_OVERFLOW:-5}"
+      MCP_DB_TRANSPORT: "http"
+      MCP_DB_HTTP_URL: "http://mcp:8003"
+      MCP_HTTP_AUTH_TOKEN: "${MCP_HTTP_AUTH_TOKEN:?MCP_HTTP_AUTH_TOKEN requis — le daemon MCP ne doit jamais tourner sans authentification}"
     depends_on:
       pgbouncer: { condition: service_healthy }
     ulimits: *high-fd-ulimits
@@ -219,7 +230,7 @@ services:
     networks: [agri_net]
 
   api:
-    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/agriconnect}/ladini-api:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/ladini}/ladini-api:${RELEASE_VERSION:?RELEASE_VERSION requis}"
     <<: *hardening
     environment: *full-app-env
     # Publié UNIQUEMENT sur la boucle locale : le reverse-proxy (voir
@@ -255,7 +266,7 @@ services:
     networks: [agri_net]
 
   worker:
-    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/agriconnect}/ladini-worker:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/ladini}/ladini-worker:${RELEASE_VERSION:?RELEASE_VERSION requis}"
     <<: *hardening
     environment: *full-app-env
     depends_on:
@@ -284,7 +295,7 @@ services:
     networks: [agri_net]
 
   beat:
-    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/agriconnect}/ladini-worker:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/ladini}/ladini-worker:${RELEASE_VERSION:?RELEASE_VERSION requis}"
     <<: *hardening
     command: ["celery", "-A", "ladini.api.celery_app", "beat",
              "--loglevel=info", "--pidfile=/tmp/celerybeat.pid",
@@ -331,7 +342,7 @@ services:
     ulimits: *high-fd-ulimits
     logging: *logging
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD requis}", "--no-auth-warning", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -378,7 +389,7 @@ services:
     networks: [agri_net]
 
   flower:
-    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/agriconnect}/ladini-api:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/ladini}/ladini-api:${RELEASE_VERSION:?RELEASE_VERSION requis}"
     <<: *hardening
     command: ["celery", "-A", "ladini.api.celery_app", "flower",
              "--port=5555",
@@ -387,8 +398,14 @@ services:
     # Il ne fait aucun appel LLM/messaging/DB → ces groupes sont retirés
     # (audit hardening 2026-09-10 : il recevait tout `*app-env`, dont les
     # clés Groq / Twilio / WhatsApp / Paydunya, sans jamais s'en servir).
+    # Littéral (pas de merge `<<:` sur une LISTE d'ancres) — voir la note sur
+    # `x-full-app-env` plus haut.
     environment:
-      <<: [*release-env, *redis-env]
+      RELEASE_VERSION: "${RELEASE_VERSION:?RELEASE_VERSION requis — un tag immuable, jamais 'latest'}"
+      GIT_SHA: "${GIT_SHA:-${RELEASE_VERSION}}"
+      BUILD_TIMESTAMP: "${BUILD_TIMESTAMP:-unknown}"
+      COMPOSE_VERSION: "${COMPOSE_VERSION:-unknown}"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD requis}@redis:6379/0"
     ports:
       # Boucle locale uniquement — accès par tunnel SSH :
       #   ssh -L 5555:127.0.0.1:5555 user@hote

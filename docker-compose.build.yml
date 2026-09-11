@@ -20,7 +20,7 @@ services:
       context: .
       dockerfile: infra/docker/Dockerfile.mcp
       args:
-        API_IMAGE: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/agriconnect}/ladini-api:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+        API_IMAGE: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/ladini}/ladini-api:${RELEASE_VERSION:?RELEASE_VERSION requis}"
 
   api:
     build:
@@ -32,7 +32,7 @@ services:
       context: .
       dockerfile: infra/docker/Dockerfile.worker
       args:
-        API_IMAGE: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/agriconnect}/ladini-api:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+        API_IMAGE: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/ladini}/ladini-api:${RELEASE_VERSION:?RELEASE_VERSION requis}"
 
   # `beat` et `flower` réutilisent des images déjà construites ci-dessus
   # (ladini-worker / ladini-api) — aucun `build:` propre.

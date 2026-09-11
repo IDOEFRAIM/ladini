@@ -34,7 +34,7 @@ concurrency:
 
 env:
   REGISTRY: ${{ vars.REGISTRY || 'ghcr.io' }}
-  IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE || 'idoefraim/agriconnect' }}
+  IMAGE_NAMESPACE: ${{ vars.IMAGE_NAMESPACE || 'idoefraim/ladini' }}
 
 jobs:
   verify-image:
