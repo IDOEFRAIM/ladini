@@ -191,7 +191,20 @@ class TestFallbackOnFailure:
     def test_primary_timeout_falls_back_to_the_next_candidate(self):
         client_a = _ScriptedClient(_sleeps_then_succeeds(2.0))  # dépasse son timeout (2.0s défini par candidat)
         client_b = _ScriptedClient(_always_succeeds)
-        gw = _make_gateway(provider_clients={"provider_a": client_a, "provider_b": client_b})
+        # Budget volontairement LARGE (8s, pas le défaut 5s de _fake_settings) —
+        # corrigé 2026-09-11 (CI cassée, échec intermittent) : avec le budget
+        # par défaut, il ne restait que ~3s après le timeout de 2s de
+        # `client_a` pour décider de tenter `client_b` ; un runner CI chargé
+        # peut ajouter assez de latence d'ordonnancement pour repasser sous
+        # le seuil minimum viable et faire échouer le test SANS RAPPORT avec
+        # le comportement réellement testé (le fallback lui-même). Ce test
+        # vérifie « timeout -> bascule vers le candidat suivant », pas
+        # « le calcul de budget est exact à la milliseconde » — lui donner de
+        # la marge élimine le faux négatif sans affaiblir l'assertion.
+        gw = _make_gateway(
+            provider_clients={"provider_a": client_a, "provider_b": client_b},
+            settings=_fake_settings(LLM_FAST_BUDGET_SECONDS=8.0),
+        )
 
         completion = run(
             gw.complete(profile=LLMProfile.FAST, messages=[{"role": "user", "content": "hi"}])

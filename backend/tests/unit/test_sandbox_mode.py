@@ -23,6 +23,27 @@ def _get_llm_module():
     return importlib.import_module("ladini.core.get_llm")
 
 
+@pytest.fixture(autouse=True)
+def _no_ambient_sandbox_env(monkeypatch):
+    """Isole ce fichier de l'environnement RÉEL du process.
+
+    Corrigé (2026-09-11, CI cassée) : `Settings()` (pydantic-settings) lit
+    `os.environ` avec une priorité PLUS HAUTE que la valeur par défaut d'un
+    champ. Le job CI exporte `SANDBOX_MODE=true` / `MOCK_EXTERNAL_APIS=true`
+    pour TOUTE l'étape pytest (`.github/workflows/cicd.yml` — délibéré,
+    "environnement hermétique, aucun appel réseau réel" pour le RESTE de la
+    suite). Les tests `*_off_by_default` ci-dessous veulent vérifier le
+    DÉFAUT DU CHAMP pydantic, pas la valeur héritée de l'environnement du
+    job — sans cette garde ils passaient par hasard en local (aucune de ces
+    deux variables n'y est exportée) et échouaient à coup sûr en CI.
+    N'affecte PAS les tests qui passent `SANDBOX_MODE=True`/`False`
+    explicitement à `_settings()` : un kwarg de constructeur a toujours
+    priorité sur l'environnement, avec ou sans cette fixture.
+    """
+    monkeypatch.delenv("SANDBOX_MODE", raising=False)
+    monkeypatch.delenv("MOCK_EXTERNAL_APIS", raising=False)
+
+
 def _settings(**overrides):
     base = {
         "_env_file": None,

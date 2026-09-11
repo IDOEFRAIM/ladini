@@ -21,23 +21,51 @@ PHONE = "+22670000001"
 
 class TestSendSearchResultPhotos:
     def test_a_cached_entry_with_photos_sends_them(self, monkeypatch):
+        """Corrigé (2026-09-11, CI cassée) : ce test mockait
+        `twilio_sender.send_whatsapp_media`, un chemin que le code
+        n'emprunte plus — `_send_search_result_photos` construit un
+        `ResponsePlan` (ImageResponse + TextResponse de rappel) et passe
+        TOUJOURS par `get_dispatcher().dispatch(...)` (voir
+        `_photo_items_for_product`). Avec `MESSAGING_PROVIDER=whatsapp_cloud`
+        (défaut) et aucune config Cloud API en environnement CI, le
+        TextResponse de rappel atteignait le VRAI `_send_via_whatsapp_cloud`
+        et levait `RuntimeError: WhatsApp Cloud API configuration
+        incomplete` — masqué en local par un `backend/.env` de dev
+        contenant des identifiants, jamais présent en CI.
+
+        Fix : même patron que le test voisin
+        `test_viewing_a_photo_reminds_the_buyer_the_selection_number_still_works`
+        — intercepter au niveau du dispatcher (frontière stable, providers-
+        agnostique) plutôt que de mocker un envoi provider-spécifique."""
         import ladini.workers.media.product_photo_task as mod
 
         monkeypatch.setattr(
             "ladini.services.search_results_cache.load_results",
             lambda phone: {"1": {"id": "p1", "name": "maïs", "images": ["https://x/a.jpg"]}},
         )
-        sent_media = []
+
+        captured = {}
+
+        class _CapturingDispatcher:
+            async def dispatch(self, phone_number, plan):
+                captured["phone_number"] = phone_number
+                captured["plan"] = plan
+                return []
+
         monkeypatch.setattr(
-            "ladini.services.twilio_sender.send_whatsapp_media",
-            lambda phone, url, caption="": sent_media.append((phone, url, caption)) or "SM1",
+            "ladini.api.response_dispatch.get_dispatcher",
+            lambda: _CapturingDispatcher(),
         )
-        sent = AsyncMock()
-        monkeypatch.setattr("ladini.api.tasks.send_confirmation_text", sent)
 
         run(mod._send_search_result_photos(PHONE, "1"))
 
-        assert sent_media == [(PHONE, "https://x/a.jpg", "📸 maïs")]
+        from ladini.api.response_dispatch import ImageResponse
+
+        assert captured["phone_number"] == PHONE
+        photo = captured["plan"].items[0]
+        assert isinstance(photo, ImageResponse)
+        assert photo.url == "https://x/a.jpg"
+        assert photo.caption == "📸 maïs"
 
     def test_viewing_a_photo_reminds_the_buyer_the_selection_number_still_works(self, monkeypatch):
         """Rupture prévenue : consulter une photo ne doit jamais faire perdre
