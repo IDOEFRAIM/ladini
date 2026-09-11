@@ -126,9 +126,25 @@ check_resolved "FLOWER_USER/PASSWORD"                          'basic_auth=[^:]+
 log "Aucune valeur secrète n'a été affichée ci-dessus — seulement présent/absent."
 
 # ── 5. Build (overlay dev) + up ────────────────────────────────────
+# `api` DOIT être construit SEUL, en premier — jamais dans le même appel que
+# worker/mcp (2026-09-12, échec constaté en dev réel : "401 Unauthorized"
+# GHCR). `worker`/`mcp` font `FROM ${API_IMAGE}` où `API_IMAGE` vaut
+# `.../ladini-api:${RELEASE_VERSION}` — la MÊME chaîne que le tag `image:`
+# du service `api`. Un unique `docker compose build` (sans argument) lance
+# TOUS les services dans le MÊME bake Buildx : bake ne déduit PAS que ce
+# tag correspond à un AUTRE service en cours de construction dans ce même
+# graphe — il tente de le PULL depuis le registre (GHCR), échoue (l'image
+# `:dev` n'y existe pas, ou l'accès est privé). En construisant `api`
+# d'ABORD (son tag est alors posé dans le store Docker LOCAL), le second
+# appel pour worker/mcp trouve ce tag déjà présent localement et l'utilise
+# directement — Docker ne pull une base `FROM` que si elle est absente en
+# local. Même stratégie déjà appliquée à `.github/workflows/cicd.yml`
+# (job docker-build, avec `docker build` classique plutôt que compose).
 if [ "$DO_BUILD" = 1 ]; then
-  log "Build local des 3 images (RELEASE_VERSION=${RELEASE_VERSION})…"
-  "${DC[@]}" build
+  log "Build local — api d'abord (base de worker/mcp)…"
+  "${DC[@]}" build api
+  log "Build local — worker + mcp (utilisent l'image api tout juste construite, en local)…"
+  "${DC[@]}" build worker mcp
 fi
 
 log "docker compose up -d --wait…"
