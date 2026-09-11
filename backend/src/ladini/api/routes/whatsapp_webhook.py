@@ -32,9 +32,13 @@ from ladini.workspace.store import WorkspaceStore
 router = APIRouter()
 logger = logging.getLogger("Ladini.WhatsAppWebhook")
 
-# Statuts de livraison sortants à ignorer (accusés delivered/read/sent/failed) —
-# miroir de _DELIVERY_STATUSES dans twilio_webhook.py.
-_STATUS_EVENTS_TO_IGNORE = frozenset({"sent", "delivered", "read", "failed"})
+# Statuts de livraison sortants — miroir de _DELIVERY_STATUSES dans
+# twilio_webhook.py. `sent`/`delivered`/`read` ne déclenchent aucune action
+# (juste un accusé de réception attendu du flux normal). `failed` en est
+# retiré (voir `_log_failed_status` ci-dessous, 2026-09-11) : un wamid accepté
+# par l'API (HTTP 200) ne signifie JAMAIS "livré" — seul ce callback dit si
+# l'envoi a réellement échoué, et pourquoi.
+_STATUS_EVENTS_TO_IGNORE = frozenset({"sent", "delivered", "read"})
 
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
@@ -92,6 +96,54 @@ def _extract_location(
         return None
     address = loc.get("address") or loc.get("name") or None
     return lat, lon, address
+
+
+def _log_failed_status(st: Dict[str, Any]) -> None:
+    """Journalise un échec de LIVRAISON réel (2026-09-11 — étape 1 du
+    diagnostic « message marqué SENT mais jamais reçu »).
+
+    Un `POST /messages` qui répond 200 + un `wamid` (voir
+    `services/whatsapp/cloud_api_client.py::_post`) veut seulement dire
+    « Meta a accepté d'essayer » — jamais « livré ». La livraison réelle
+    (ou son échec) arrive ICI, en asynchrone, via ce callback `statuses`.
+    Avant ce correctif, `failed` était traité exactement comme
+    `delivered`/`read` (même branche `_STATUS_EVENTS_TO_IGNORE`, un simple
+    `logger.info` du mot "failed") — le tableau `errors` de Meta, qui porte
+    le VRAI motif (ex: code 131047 "Re-engagement message" = la fenêtre de
+    24h de conversation est dépassée — cas typique des notifications
+    proactives de l'Outbox : confirmation de commande, résultat d'enchère,
+    envoyées par un cron, pas en réponse immédiate à un message entrant),
+    n'était jamais lu. Ce webhook ne fait encore QUE journaliser : aucune
+    action corrective automatique (retry, template de secours...) — voir le
+    diagnostic complet avant de décider de l'étape 2.
+    """
+    wamid = str(st.get("id") or "").strip()
+    recipient = str(st.get("recipient_id") or "").strip()
+    errors = st.get("errors") or []
+    if not errors:
+        # Statut "failed" sans détail — arrive rarement, mais ne doit jamais
+        # passer inaperçu (c'est justement le trou qu'on comble ici).
+        logger.warning(
+            "WHATSAPP_DELIVERY_FAILED | wamid=%s | recipient=%s | "
+            "(Meta n'a fourni aucun détail d'erreur)",
+            wamid,
+            recipient,
+        )
+        return
+    for err in errors:
+        if not isinstance(err, dict):
+            continue
+        details = (err.get("error_data") or {}).get("details") or ""
+        logger.warning(
+            "WHATSAPP_DELIVERY_FAILED | wamid=%s | recipient=%s | "
+            "code=%s | title=%s | message=%s | details=%s",
+            wamid,
+            recipient,
+            err.get("code"),
+            err.get("title"),
+            err.get("message"),
+            details,
+        )
 
 
 def _extract_interactive_id(message: Dict[str, Any]) -> Optional[str]:
@@ -174,11 +226,13 @@ async def _handle_whatsapp_webhook(
         for change in entry.get("changes") or []:
             value = change.get("value") or {}
 
-            # --- Callbacks de statut (sent/delivered/read) : ignorés ---
+            # --- Callbacks de statut sortant ---
             statuses = value.get("statuses") or []
             for st in statuses:
                 st_type = str(st.get("status") or "").lower()
-                if st_type in _STATUS_EVENTS_TO_IGNORE:
+                if st_type == "failed":
+                    _log_failed_status(st)
+                elif st_type in _STATUS_EVENTS_TO_IGNORE:
                     logger.info("WHATSAPP_STATUS_CALLBACK ignoré | status=%s", st_type)
 
             messages = value.get("messages") or []
