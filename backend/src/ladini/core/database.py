@@ -6,6 +6,7 @@ Optimisé pour Digital Ocean Managed Databases et les serveurs MCP.
 import logging
 import ssl
 import threading
+import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Tuple
 
@@ -159,9 +160,23 @@ def _init_db_locked() -> None:
     # schema metadata during maintenance windows, which invalidates prepared
     # plans and triggers InvalidCachedStatementError. Let SQLAlchemy re-prepare
     # on demand for each execution instead of relying on server caches.
+    #
+    # `statement_cache_size=0` only stops asyncpg from REUSING a cached
+    # prepared statement — it still PREPARES one per execute, named from a
+    # sequential per-connection counter (`__asyncpg_stmt_N__`). We sit behind
+    # pgbouncer in `pool_mode: transaction` (docker-compose.prod.yml), where
+    # each asyncpg "connection" is a DIFFERENT physical backend per
+    # transaction: two unrelated asyncpg connections can independently reach
+    # the same counter value and both try to PREPARE that name on a backend
+    # that already has it from the other's earlier transaction ->
+    # `DuplicatePreparedStatementError` (observed in prod on worker warm-up
+    # and the outbox_dispatch cron). Fix (documented asyncpg+PgBouncer
+    # workaround): make the name generator globally unique (UUID) instead of
+    # a per-connection sequence, so no two connections can ever collide.
     connect_args = {
         "prepared_statement_cache_size": 0,
         "statement_cache_size": 0,
+        "prepared_statement_name_func": lambda: f"__asyncpg_{uuid.uuid4()}__",
     }
     # Only pass ssl when a context is present (asyncpg doesn't accept False)
     if ssl_context is not None:

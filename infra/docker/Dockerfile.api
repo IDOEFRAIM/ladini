@@ -81,10 +81,18 @@ LABEL org.opencontainers.image.title="ladini-api" \
 # fidèlement aux enfants (sans PID 1 dédié, le kernel n'installe AUCUN
 # handler de signal par défaut pour PID 1, ce qui peut faire ignorer un
 # `docker stop`/redéploiement jusqu'au SIGKILL).
+# procps (pgrep) : le HEALTHCHECK du service `worker` (docker-compose.prod.yml)
+# vérifie la présence du process Celery via `pgrep`, PAS via `celery inspect
+# ping` — un ping applicatif dépend du broker Redis, donc un hoquet Redis
+# faisait échouer TOUS les workers en même temps et autoheal les redémarrait
+# tous en boucle pendant l'incident (audit hardening 2026-09-10). `pgrep`
+# vient du paquet procps, absent de l'image de base — sans lui le
+# healthcheck échoue systématiquement avec "pgrep: not found" (conteneur
+# marqué unhealthy en permanence).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-        libpq5 curl tini ca-certificates \
+        libpq5 curl tini ca-certificates procps \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -m -u 10001 appuser
 

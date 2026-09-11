@@ -112,7 +112,28 @@ INTENT_CONFIG = {
         "required": [],
         "action_type": "READ",
         "requires_farm": False,
-        "label": "Consultation des commandes acheteurs liées à mes produits",
+        # (2026-09-11) Label CONTRASTÉ avec BUYER_LIST_ORDERS — un producteur
+        # qui tape "commandes reçues" se faisait classer BUYER_LIST_ORDERS
+        # (achats) par le LLM, les deux labels étant trop proches. Première
+        # correction (garder EN NOTE, ne pas répéter l'erreur) : simplement
+        # AJOUTER le mot "commandes" comme exemple explicite dans les DEUX
+        # labels a résolu ce cas mais en a introduit un nouveau — "je veux
+        # commandes des poulets" (faute de frappe pour "commander", une
+        # intention d'ACHAT neuve, pas une consultation d'historique) se
+        # faisait alors classer BUYER_LIST_ORDERS à cause du seul mot
+        # "commandes" présent dans le label. Leçon : ancrer sur la SÉMANTIQUE
+        # de l'intention (HISTORIQUE d'un fait déjà survenu vs NOUVELLE
+        # envie), jamais sur la présence d'un mot-clé isolé — le catalogue
+        # LLM (`_build_dynamic_interpreter_prompt`) n'affiche QUE ce `label`,
+        # c'est le SEUL levier de classification ici (aucun fast-path par
+        # mots-clés fixes dans `routing.py`, le LLM est la seule source de
+        # vérité).
+        "label": (
+            "Producteur/vendeur consulte l'HISTORIQUE des ventes DÉJÀ REÇUES "
+            "sur ses propres produits (une transaction déjà conclue par un "
+            "acheteur) — PAS ses propres achats, PAS une nouvelle envie "
+            "d'achat/vente. Ex: \"commandes reçues\", \"mes ventes\"."
+        ),
         "label_map": {
             "status": "statut ciblé (PENDING, CONFIRMED, ...)",
             "limit": "nombre maximum de commandes à afficher",
@@ -303,7 +324,19 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "handled_by_flow": True,
-        "label": "Demande acheteur — recherche catalogue avant appel d'offres",
+        # (2026-09-11) Ex: "je veux commander/acheter des poulets" — une
+        # NOUVELLE envie d'acquérir un produit, MÊME si le message contient
+        # le mot "commande(s)" (faute de frappe fréquente pour "commander").
+        # PAS BUYER_LIST_ORDERS/SALES_LIST_ORDERS (qui consultent un
+        # historique déjà existant) — voir leurs labels pour l'incident réel
+        # que ce contraste corrige (bug 2026-09-11 : "je veux commandes des
+        # poulets" classé à tort comme consultation de commandes passées).
+        "label": (
+            "Acheteur exprime une NOUVELLE envie d'acquérir un produit "
+            "maintenant (recherche catalogue avant appel d'offres) — même si "
+            "le message contient le mot \"commande(s)\" (ex: \"je veux "
+            "commander des poulets\")"
+        ),
         "label_map": {
             "product": "produit recherché",
             "quantity": "quantité souhaitée (optionnel)",
@@ -410,7 +443,19 @@ INTENT_CONFIG = {
         "action_type": "READ",
         "requires_farm": False,
         "handled_by_flow": True,
-        "label": "Consultation du tableau de bord des commandes en cours",
+        # (2026-09-11) Contraste avec SALES_LIST_ORDERS ET avec BUYER_REQUEST
+        # — voir le commentaire détaillé sur SALES_LIST_ORDERS (même
+        # incident : "je veux commandes des poulets", faute de frappe pour
+        # "commander", une NOUVELLE envie d'achat, se faisait classer ICI à
+        # cause du seul mot "commandes"). Le label ancre maintenant sur
+        # HISTORIQUE (fait déjà survenu) vs NOUVELLE envie, pas sur un mot.
+        "label": (
+            "Acheteur consulte l'HISTORIQUE de ses achats DÉJÀ passés (une "
+            "commande déjà existante) — PAS les ventes reçues sur ses "
+            "propres produits, PAS une nouvelle envie d'acheter/commander un "
+            "produit maintenant (ça, c'est BUYER_REQUEST). Ex: "
+            "\"mes commandes\", \"où est ma commande\"."
+        ),
         "label_map": {},
     },
     "BUYER_CANCEL_ORDER": {

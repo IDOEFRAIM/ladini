@@ -412,6 +412,18 @@ services:
       - "127.0.0.1:5555:5555"
     depends_on:
       redis: { condition: service_healthy }
+    # Override du HEALTHCHECK natif de l'image ladini-api (`curl .../health`
+    # sur :8000) : Flower ne lance pas l'app FastAPI et n'écoute pas sur 8000,
+    # il écoute sur :5555 avec basic auth — le healthcheck hérité échouait
+    # donc systématiquement (conteneur marqué unhealthy en boucle, restarts
+    # autoheal). On vérifie ici que Flower répond réellement (200 ou 401 =
+    # serveur up, l'auth n'est pas le sujet du healthcheck).
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:5555/ | grep -qE '^(200|401)$' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     logging: *logging
     deploy:
       resources:

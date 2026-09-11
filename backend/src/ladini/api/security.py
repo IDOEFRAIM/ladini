@@ -162,7 +162,8 @@ async def verify_twilio_signature(request: Request) -> None:
     params = {key: str(value) for key, value in form_data.items()}
 
     validator = RequestValidator(auth_token)
-    for url in _candidate_signed_urls(request):
+    candidates = _candidate_signed_urls(request)
+    for url in candidates:
         if validator.validate(url, params, signature):
             return
 
@@ -171,11 +172,19 @@ async def verify_twilio_signature(request: Request) -> None:
     # partait auparavant en ERROR avec `received_params` complet, déversant du
     # contenu utilisateur et des données personnelles dans les logs à chaque
     # tentative — y compris celles d'un attaquant qui choisit ce contenu.
+    #
+    # `candidates` (URLs, PAS des données utilisateur — schéma/hôte/chemin
+    # seulement) journalisé TEMPORAIREMENT (2026-09-11) pour diagnostiquer un
+    # incident réel de 403 intermittents malgré un `TWILIO_PUBLIC_BASE_URL`
+    # déjà correctement configuré — sans ça, aucun moyen de voir LEQUEL des
+    # 3 candidats a été tenté ni pourquoi aucun ne matche.
     logger.error(
-        "TWILIO_SIGNATURE_INVALID | path=%s | client=%s | param_keys=%s",
+        "TWILIO_SIGNATURE_INVALID | path=%s | client=%s | param_keys=%s | "
+        "candidates=%s",
         request.url.path,
         getattr(request.client, "host", "?"),
         sorted(params.keys()),
+        candidates,
     )
     raise HTTPException(status_code=403, detail="Signature Twilio invalide.")
 

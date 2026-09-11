@@ -117,7 +117,7 @@ _CAS_UPDATE_SQL = text(
 # la MÊME notion.
 _SELECT_STALE_EXECUTING_SQL = text(
     "SELECT draft_id, version, status, payload FROM marketplace.procurement_drafts "
-    "WHERE status = 'EXECUTING' AND updated_at < now() - (:older_than_seconds || ' seconds')::interval"
+    "WHERE status = 'EXECUTING' AND updated_at < now() - make_interval(secs => :older_than_seconds)"
 )
 
 

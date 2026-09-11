@@ -174,11 +174,18 @@ def _render_preorder_confirmed_producer(p: Dict[str, Any]) -> str:
     order_number = str(p.get("order_number") or "")
     amount = _fmt_num(p.get("amount"))
     currency = str(p.get("currency") or "FCFA")
+    items_summary = str(p.get("items_summary") or "").strip()
+    items_line = f"🛒 {items_summary}\n" if items_summary else ""
+    # (2026-09-11) Le producteur voit maintenant CE QUI a été commandé en
+    # premier — avant, seuls le code de commande et le montant étaient
+    # affichés ("Nouvelle commande confirmée ! #65280745 — 1000000 CFA"),
+    # ce qui ne dit rien de ce que l'acheteur veut réellement recevoir. Le
+    # code reste présent (référence pour "mes commandes"), mais en second.
     return (
-        f"🛒 *Nouvelle commande confirmée !* #{order_number} — "
-        f"*{amount} {currency}*.\n\n"
-        "💵 Paiement à la livraison (pas de paiement en ligne pour cette "
-        "commande).\n"
+        f"🛒 *Nouvelle commande !*\n"
+        f"{items_line}"
+        f"💵 Total : *{amount} {currency}* (paiement à la livraison)\n"
+        f"🆔 Référence : #{order_number}\n\n"
         "📦 Préparez la commande. Une fois livrée et payée, tapez "
         "*mes commandes* pour la clôturer."
     )

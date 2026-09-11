@@ -53,7 +53,7 @@ _CAS_UPDATE_SQL = text(
 )
 _SELECT_STALE_BY_STATUS_SQL = text(
     "SELECT draft_id, version, status, payload FROM marketplace.sales_publish_drafts "
-    "WHERE status = :status AND updated_at < now() - (:older_than_seconds || ' seconds')::interval"
+    "WHERE status = :status AND updated_at < now() - make_interval(secs => :older_than_seconds)"
 )
 
 

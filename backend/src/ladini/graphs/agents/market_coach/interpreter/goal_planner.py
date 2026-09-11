@@ -731,9 +731,20 @@ async def goal_planner(
     # cette lecture (CONFIRM + panier non vide → PREORDER) mais vit DANS
     # `cart_management`, qui n'est jamais atteint quand le planner court-
     # circuite vers `response_strategy`. On promeut donc ici vers
-    # `BUYER_PREORDER_INIT` : `_route_after_planner` (status="PLANNING", pas
-    # WAITING_INPUT) laisse alors le pipeline continuer jusqu'à
+    # `BUYER_PREORDER_CONFIRM` : `_route_after_planner` (status="PLANNING",
+    # pas WAITING_INPUT) laisse alors le pipeline continuer jusqu'à
     # `buyer_context_resolver`, qui sait ouvrir la précommande.
+    #
+    # (2026-09-11) Promu vers `BUYER_PREORDER_CONFIRM`, PAS `..._INIT` — ce
+    # `event=CONFIRM` porte une vraie intention de confirmation ("je valide
+    # le panier"), pas juste une ouverture de tunnel. Avec `..._INIT`,
+    # `create_preorder` (flows/buyer/preorder.py) ne dérive `resolved_id`
+    # que si `goal == "BUYER_PREORDER_CONFIRM"` (voir son garde dédié) : sans
+    # ça, le draft fraîchement créé (`bootstrap_preorder_draft`) s'arrêtait
+    # TOUJOURS sur un second « Confirmez-vous ? » redondant — l'utilisateur
+    # devait confirmer deux fois pour la même décision avant même d'arriver
+    # à l'étape GPS. `BUYER_PREORDER_CONFIRM` fait chaîner directement
+    # bootstrap → `resolve_preorder_confirmation` en un seul tour.
     _orphan_cart = state.get("active_cart") or working.get("last_active_cart") or []
     if (
         not current_goal
@@ -742,14 +753,14 @@ async def goal_planner(
         and str(expected_input or "NONE").upper() in {"NONE", "SELECTION"}
     ):
         logger.info(
-            "[GoalPlanner] orphan CONFIRM on non-empty cart (%d items) — promoting to BUYER_PREORDER_INIT",
+            "[GoalPlanner] orphan CONFIRM on non-empty cart (%d items) — promoting to BUYER_PREORDER_CONFIRM",
             len(_orphan_cart),
         )
-        updates["current_goal"] = "BUYER_PREORDER_INIT"
-        updates["detected_intent"] = "BUYER_PREORDER_INIT"
+        updates["current_goal"] = "BUYER_PREORDER_CONFIRM"
+        updates["detected_intent"] = "BUYER_PREORDER_CONFIRM"
         updates["goal_status"] = "ACTIVE"
-        updates["working_memory"] = _lock("BUYER_PREORDER_INIT")
-        return _with_goal_metadata(updates, "BUYER_PREORDER_INIT")
+        updates["working_memory"] = _lock("BUYER_PREORDER_CONFIRM")
+        return _with_goal_metadata(updates, "BUYER_PREORDER_CONFIRM")
 
     # RÈGLE 5 — NEW_TASK (Instanciation et purge des champs AG-UI)
     #

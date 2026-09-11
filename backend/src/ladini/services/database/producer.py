@@ -1478,10 +1478,32 @@ class ProducerMgmtMixin(BaseMixin):
             if not summary_items:
                 summary_items = cycle_context["product_name"] if cycle_context else "—"
 
+            # (2026-09-11) Localisation de livraison — signalée manquante par
+            # un producteur réel ("commandes reçues" ne donnait qu'un code +
+            # un montant, rien sur OÙ livrer). `Order.gps_lat`/`gps_lng` sont
+            # déjà chargés (colonnes brutes sur la ligne `Order` déjà
+            # sélectionnée ci-dessus, aucun join supplémentaire) — juste
+            # jamais lus jusqu'ici. Lien Google Maps universellement ouvrable
+            # (app ou navigateur) plutôt que des coordonnées brutes.
+            maps_link = (
+                f"https://maps.google.com/?q={order.gps_lat},{order.gps_lng}"
+                if order.gps_lat is not None and order.gps_lng is not None
+                else None
+            )
+            location_line = ""
+            if maps_link:
+                location_line = f"\n📍 Livraison : {maps_link}"
+            elif order.city or order.delivery_desc:
+                where = ", ".join(
+                    filter(None, [order.city, order.delivery_desc])
+                )
+                location_line = f"\n📍 Livraison : {where}"
+
             menu_lines.append(
                 f"\n*{idx}. {status_label}* · {amount_label}\n"
                 f"{summary_items}\n"
                 f"👤 {buyer_label} ({buyer_phone}) · Réf: #{order_code}"
+                f"{location_line}"
             )
             mapping[str(idx)] = str(order.id)
 
@@ -1490,6 +1512,11 @@ class ProducerMgmtMixin(BaseMixin):
                     "order_id": str(order.id),
                     "reference": order_code,
                     "status": status_value,
+                    "gps_lat": order.gps_lat,
+                    "gps_lng": order.gps_lng,
+                    "maps_link": maps_link,
+                    "city": order.city,
+                    "delivery_desc": order.delivery_desc,
                     "delivery_status": (order.delivery_status or "PENDING").upper(),
                     "payment_status": (order.payment_status or "PENDING").upper(),
                     "created_at": order.created_at.isoformat()

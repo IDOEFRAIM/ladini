@@ -222,6 +222,80 @@ async def _safe_gw_call(
 # 1. LIST ORDERS — Dashboard avec menu interactif
 # =====================================================================
 
+_SALE_STATUS_ICONS = {
+    "PENDING": "🟡",
+    "CONFIRMED": "🟢",
+    "COMPLETED": "✅",
+    "DELIVERED": "✅",
+    "IN_PROGRESS": "🔵",
+    "CANCELLED": "❌",
+    "FAILED": "❌",
+}
+
+
+async def _producer_sales_block(phone: str, mc_runtime: MarketRuntime) -> str:
+    """Résumé lecture-seule des VENTES du même numéro (mêmes personnes
+    peuvent acheter ET vendre sur Ladini) — signalé par un utilisateur réel :
+    "mes commandes" ne montrait QUE le mode acheteur, jamais les commandes
+    reçues sur ses propres produits qu'il doit préparer/livrer.
+
+    Rendu en PUCES, JAMAIS numéroté comme la liste acheteur ci-dessus : la
+    sélection numérique de ce tour (`available_mapping`) reste réservée aux
+    ACHATS — numéroter aussi les ventes créerait une ambiguïté réelle
+    ("2" viserait quel mapping, un achat ou une vente ?). `SALES_LIST_ORDERS`
+    (menu de désambiguïsation "commandes reçues", voir interpreter/intent.py)
+    reste le SEUL chemin pour agir sur une vente précise, avec sa propre
+    numérotation dédiée.
+
+    Retourne une chaîne vide (jamais None) si l'utilisateur n'a pas de profil
+    producteur ou aucune vente — `list_orders` peut alors concaténer le
+    résultat sans condition."""
+    result = await _safe_gw_call(mc_runtime, "get_producer_orders", phone=phone)
+    if not is_success_response(result):
+        return ""
+    sales = result.get("data") or []
+    if not sales:
+        return ""
+
+    shown, extra = sales[:5], len(sales) - 5
+    lines = ["\n📦 *Vos ventes à préparer/livrer :*"]
+    for sale in shown:
+        ref = sale.get("reference") or str(sale.get("order_id") or "")[:8].upper()
+        status = str(sale.get("status") or "PENDING").upper()
+        icon = _SALE_STATUS_ICONS.get(status, "🧾")
+        items_summary = ", ".join(
+            f"{it.get('product_name')} ({_fmt_num(it.get('quantity'))} "
+            f"{str(it.get('unit') or '').lower()})"
+            for it in (sale.get("items") or [])
+            if it.get("product_name")
+        ) or "—"
+        buyer = sale.get("buyer_name") or "Acheteur"
+        amount = _fmt_num(sale.get("total_amount"))
+        currency = sale.get("currency") or "XOF"
+        # (2026-09-11) Localisation de livraison — voir `get_producer_orders`
+        # (services/database/producer.py), qui expose maintenant `maps_link`
+        # (lien Google Maps si GPS connu) ou `city`/`delivery_desc` en repli.
+        # Signalé manquant par un producteur réel : sans ça, "où livrer ?"
+        # forçait à ouvrir l'app séparément.
+        location = (
+            sale.get("maps_link")
+            or ", ".join(filter(None, [sale.get("city"), sale.get("delivery_desc")]))
+            or None
+        )
+        location_line = f"\n   📍 {location}" if location else ""
+        lines.append(
+            f"\n• {icon} #{ref} — {items_summary}\n"
+            f"   👤 {buyer} · {amount} {currency}"
+            f"{location_line}"
+        )
+    if extra > 0:
+        lines.append(f"\n… et {extra} autre{'s' if extra > 1 else ''}.")
+    lines.append(
+        "\n_Tapez *commandes reçues* pour voir le détail d'une vente et la "
+        "gérer (numérotation distincte de la liste des achats ci-dessus)._"
+    )
+    return "\n".join(lines)
+
 
 async def list_orders(
     state: Dict[str, Any],
@@ -244,20 +318,42 @@ async def list_orders(
             return await check_order_status(synthetic, mc_runtime)
 
     result = await _safe_gw_call(mc_runtime, "get_buyer_orders_dashboard", phone=phone)
+    sales_block = await _producer_sales_block(phone, mc_runtime)
 
     if not is_success_response(result):
         return {
             "status": "COMPLETED",
             "response_strategy": "SUCCESS",
             "final_response": (
-                "📦 *Vos commandes*\n\n"
+                "🛒 *Vos achats*\n\n"
                 "Vous n'avez pas encore passé de commande sur Ladini."
+                + sales_block
                 + render_quick_actions(["chercher un produit", "mes appels d'offres"])
             ),
             "ag_ui_component": None,
         }
 
-    menu_text = result.get("formatted_menu") or "Vos commandes."
+    # (2026-09-11) `menu_text` DOIT être identique entre `final_response` et
+    # `pending_menu.preformatted_text` — voir `nodes/ui_engine.py::
+    # _merge_menu_text` : ce nœud ne déduplique QUE si les deux textes sont
+    # strictement équivalents une fois normalisés, sinon il les concatène
+    # (conçu pour le cas où le flow fournit un `final_response` COURT et
+    # laisse le menu détaillé dans `preformatted_text`). Ici les deux
+    # portaient un texte DIFFÉRENT (le footer de sélection n'était ajouté
+    # qu'à `final_response`), donc `_merge_menu_text` affichait tout le
+    # tableau de commandes DEUX FOIS — bug réel signalé par un utilisateur.
+    # Le footer fait maintenant partie de `menu_text` avant tout usage, à
+    # l'identique du pattern déjà correct dans `list_buyer_auctions` plus
+    # bas dans ce fichier. `sales_block` (ventes, calculé plus haut) est
+    # inclus ICI, dans `menu_text` lui-même — PAS ajouté séparément à
+    # `final_response` seul — pour la même raison : garder les deux textes
+    # strictement identiques.
+    menu_text = (
+        "🛒 *Vos achats (à recevoir) :*\n"
+        + (result.get("formatted_menu") or "Vos commandes.")
+        + render_selection_prompt(noun="commande")
+        + sales_block
+    )
     raw_mapping = result.get("mapping") or {}
     mapping = {
         str(i): str(oid)
@@ -278,7 +374,7 @@ async def list_orders(
         "status": "WAITING_INPUT",
         **set_pending_interaction(InteractionKind.SELECTION_MENU),
         "response_strategy": "SELECTION_MENU",
-        "final_response": menu_text + render_selection_prompt(noun="commande"),
+        "final_response": menu_text,
         "available_mapping": mapping,
         "expected_candidates": [
             f"Commande #{oid[:8].upper()}" for oid in mapping.values()

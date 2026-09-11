@@ -820,7 +820,10 @@ class BuyerMixin(BaseMixin):
 
             for idx, order in enumerate(orders, start=1):
                 items_summary = ", ".join(
-                    [f"{item.product.name} (x{item.quantity})" for item in order.items]
+                    [
+                        f"{item.product.name} (x{_fmt_num(item.quantity)})"
+                        for item in order.items
+                    ]
                 )
                 display_status = status_map.get(
                     order.status.upper(), f"🔄 Status: {order.status}"
@@ -830,15 +833,21 @@ class BuyerMixin(BaseMixin):
                 line = (
                     f"\n*{idx}. Commande #{str(order.id)[:8].upper()}* ({date_str})\n"
                     f"🛒 Articles : {items_summary}\n"
-                    f"💵 Total : *{order.total_amount} CFA*\n"
+                    f"💵 Total : *{_fmt_num(order.total_amount)} CFA*\n"
                     f"📊 État : {display_status}\n"
                 )
                 menu_lines.append(line)
                 mapping_cache[str(idx)] = str(order.id)
 
-            menu_lines.append(
-                "\n_Pour annuler une commande en attente, répondez avec le numéro correspondant._"
-            )
+            # (2026-09-11) Pas de footer "répondez avec le numéro..." ICI —
+            # `order_tracking.py::list_orders` (le SEUL appelant WhatsApp de
+            # cette méthode) ajoute déjà `render_selection_prompt(noun=
+            # "commande")`, un footer harmonisé partagé par tous les menus
+            # acheteur. En avoir un second ici produisait DEUX instructions
+            # de fin quasi identiques mais formulées différemment dans le
+            # même message ("répondez avec le numéro correspondant" ET
+            # "Répondez avec le numéro de votre commande, ou annuler pour
+            # quitter") — signalé comme confus par un utilisateur réel.
 
             return {
                 "status": "success",
@@ -2261,6 +2270,20 @@ class BuyerMixin(BaseMixin):
                     ).first()
                     if prod_row and prod_row[0]:
                         grp_phones.add(prod_row[0])
+            # (2026-09-11) `items_summary` : le producteur recevait jusqu'ici
+            # UNIQUEMENT un code de commande + un montant ("Nouvelle commande
+            # confirmée ! #65280745 — 1000000 CFA"), sans savoir CE QUE
+            # l'acheteur a commandé — signalé comme peu pertinent par un
+            # producteur réel (il doit ouvrir l'app pour savoir quoi
+            # préparer). On transmet donc le détail produit/quantité déjà
+            # chargé sur `grp_order.items` (mêmes lignes utilisées juste
+            # au-dessus pour résoudre les producteurs), formaté avec
+            # `_fmt_num` (jamais de quantité brute genre "50.000" ambigüe).
+            items_summary = ", ".join(
+                f"{item.product.name} (x{_fmt_num(item.quantity)})"
+                for item in (grp_order.items or [])
+                if item.product
+            ) or "articles divers"
             entries.extend(
                 {
                     "channel": "WHATSAPP",
@@ -2270,6 +2293,7 @@ class BuyerMixin(BaseMixin):
                         "order_number": grp_number,
                         "amount": float(grp_order.total_amount or 0.0),
                         "currency": grp_order.currency or "XOF",
+                        "items_summary": items_summary,
                     },
                     "dedupe_key": f"PREORDER_CONFIRMED_PRODUCER:{grp_order.id}:{phone}",
                 }
