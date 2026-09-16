@@ -52,6 +52,14 @@ ORDER_CANCELLED_BY_BUYER_PRODUCER = "ORDER_CANCELLED_BY_BUYER_PRODUCER"
 # JAMAIS de remboursement : le paiement a lieu à la livraison, rien n'a
 # été encaissé.
 ORDER_CANCELLED_BY_PRODUCER_BUYER = "ORDER_CANCELLED_BY_PRODUCER_BUYER"
+# (2026-09-13, confirmation explicite producteur) : une précommande directe
+# (paiement à la livraison) n'est plus `CONFIRMED` dès sa création — elle
+# entre en `PENDING_PRODUCER_CONFIRMATION` et le producteur doit
+# explicitement confirmer pouvoir l'honorer
+# (`ProducerMgmtMixin.confirm_order_by_producer`) avant que l'acheteur ne
+# soit rassuré que sa commande est réellement prise en charge. Miroir de
+# `ORDER_CANCELLED_BY_PRODUCER_BUYER` dans le sens positif.
+ORDER_CONFIRMED_BY_PRODUCER_BUYER = "ORDER_CONFIRMED_BY_PRODUCER_BUYER"
 
 
 def _render_auction_invite(p: Dict[str, Any]) -> str:
@@ -181,13 +189,19 @@ def _render_preorder_confirmed_producer(p: Dict[str, Any]) -> str:
     # affichés ("Nouvelle commande confirmée ! #65280745 — 1000000 CFA"),
     # ce qui ne dit rien de ce que l'acheteur veut réellement recevoir. Le
     # code reste présent (référence pour "mes commandes"), mais en second.
+    #
+    # (2026-09-13, confirmation explicite producteur) : cette commande n'est
+    # PLUS automatiquement acceptée à ce stade (`PENDING_PRODUCER_
+    # CONFIRMATION`, pas `CONFIRMED`) — le texte invite désormais à une
+    # action explicite plutôt qu'à simplement "préparer".
     return (
-        f"🛒 *Nouvelle commande !*\n"
+        f"🛒 *Nouvelle commande — confirmation requise*\n"
         f"{items_line}"
         f"💵 Total : *{amount} {currency}* (paiement à la livraison)\n"
         f"🆔 Référence : #{order_number}\n\n"
-        "📦 Préparez la commande. Une fois livrée et payée, tapez "
-        "*mes commandes* pour la clôturer."
+        "❓ Pouvez-vous honorer cette commande ?\n"
+        "👉 Tapez *confirmer* pour l'accepter (l'acheteur en sera informé), "
+        "ou *annuler* si vous ne pouvez pas."
     )
 
 
@@ -222,6 +236,16 @@ def _render_order_cancelled_by_producer_buyer(p: Dict[str, Any]) -> str:
     )
 
 
+def _render_order_confirmed_by_producer_buyer(p: Dict[str, Any]) -> str:
+    order_number = str(p.get("order_number") or "")
+    return (
+        f"✅ *Commande confirmée par le producteur* — #{order_number}\n\n"
+        "Le producteur a confirmé pouvoir honorer votre commande et va la "
+        "préparer. Vous payez à la livraison.\n"
+        "🔎 Tapez *mes commandes* pour suivre son statut."
+    )
+
+
 _RENDERERS = {
     AUCTION_INVITE_PRODUCER: _render_auction_invite,
     NEW_PRODUCT_ALERT_BUYER: _render_new_product_alert,
@@ -236,6 +260,7 @@ _RENDERERS = {
     AUCTION_LOST_PRODUCER: _render_auction_lost_producer,
     ORDER_CANCELLED_BY_BUYER_PRODUCER: _render_order_cancelled_by_buyer_producer,
     ORDER_CANCELLED_BY_PRODUCER_BUYER: _render_order_cancelled_by_producer_buyer,
+    ORDER_CONFIRMED_BY_PRODUCER_BUYER: _render_order_confirmed_by_producer_buyer,
 }
 
 

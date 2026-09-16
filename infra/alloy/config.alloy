@@ -1,0 +1,279 @@
+// ═════════════════════════════════════════════════════════════════════
+// Grafana Alloy — collecteur PAR HOST (Hetzner scale-out).
+//
+// Syntaxe River (langage natif d'Alloy — PAS le YAML de l'ancien
+// "Grafana Agent"). Un seul fichier, chargé par le conteneur `alloy`
+// (voir docker-compose.alloy.yml, stack séparée du compose applicatif —
+// même pattern que infra/reverse-proxy/).
+//
+// Ce fichier collecte 4 familles de signaux et les pousse vers Grafana
+// Cloud (jamais stockés localement — Alloy est un forwarder, pas un
+// backend) :
+//   1. Host (CPU/RAM/disk/net)      → prometheus.exporter.unix
+//   2. Conteneurs Docker (CPU/RAM)  → prometheus.exporter.cadvisor
+//   3. Logs des conteneurs Docker   → loki.source.docker
+//   4. Traces OTLP poussées par l'app → otelcol.receiver.otlp
+//
+// Composants INTÉGRÉS à Alloy (unix exporter, cadvisor) préférés à des
+// sidecars séparés (node-exporter, cAdvisor autonome) — un binaire de
+// moins à opérer/mettre à jour/exposer par host, cf. README §"pourquoi
+// pas node-exporter/cAdvisor séparés".
+//
+// SÉCURITÉ SOCKET DOCKER : Alloy ne touche JAMAIS /var/run/docker.sock
+// directement — il parle à `docker-socket-proxy` (tecnativa), qui
+// n'expose que les endpoints en LECTURE nécessaires aux stats/logs de
+// conteneurs (voir docker-compose.alloy.yml + README §"threat model").
+// ═════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────────────
+// 1. Host — CPU / RAM / disk / réseau (exporter Unix intégré à Alloy,
+//    équivalent de node_exporter sans conteneur séparé).
+// ─────────────────────────────────────────────────────────────────────
+prometheus.exporter.unix "host" {
+	// Collecteurs par défaut suffisent pour CPU/mem/disk/net — pas besoin
+	// d'activer des collecteurs exotiques (ex: `wifi`, `infiniband`) sur
+	// un VPS Hetzner standard.
+	disable_collectors = ["ipvs"]
+}
+
+prometheus.scrape "host" {
+	targets    = prometheus.exporter.unix.host.targets
+	forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+	// Le host ne change pas de forme en 1min — 30s suffit, évite de
+	// gonfler le volume de séries pour rien sur un scrape local.
+	scrape_interval = "30s"
+	job_name        = "integrations/unix"
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 2. Conteneurs Docker — CPU / RAM / restarts (composant cadvisor
+//    intégré à Alloy — PAS un sidecar cAdvisor séparé). Parle au démon
+//    Docker via le proxy en lecture seule, jamais le socket brut.
+// ─────────────────────────────────────────────────────────────────────
+prometheus.exporter.cadvisor "docker" {
+	docker_host          = "tcp://docker-socket-proxy:2375"
+	store_container_labels = true
+	// On ne veut QUE les conteneurs Docker (pas containerd/crio — cette
+	// stack ne tourne que sous Docker Compose).
+	docker_only = true
+}
+
+prometheus.scrape "docker" {
+	targets         = prometheus.exporter.cadvisor.docker.targets
+	forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+	scrape_interval = "30s"
+	job_name        = "integrations/cadvisor"
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 3. Scrape applicatif — endpoint /metrics exposé par le service `api`
+//    (voir backend/src/ladini/api/main.py::metrics + telemetry.py).
+//
+// SEUL `api` expose /metrics par SCRAPE : `mcp` n'a pas de route /metrics,
+// et `worker` (process Celery pur, sans serveur HTTP) ne peut structurellement
+// pas être scrapé (aucun port à interroger).
+//
+// (2026-09-17, follow-up pre-Hetzner — gap fermé) : les métriques
+// `ladini_llm_*`/`ladini_legacy_fallback_total` enregistrées côté WORKER
+// (record_generation()) n'empruntent donc jamais ce chemin scrape/pull —
+// elles partent en PUSH OTLP, même pipeline que les traces (voir section 5
+// ci-dessous, `otelcol.receiver.otlp.app`, désormais routé aussi vers
+// `metrics`, pas seulement `traces`). `core/telemetry.py` les émet en
+// double (Prometheus process-local, toujours scrapable ici pour `api` ;
+// OTel/OTLP, pour que `worker` — sans port — les pousse quand même).
+// Prometheus multiprocess mode (alternative) aurait exigé un serveur HTTP
+// dédié par worker ; rejeté au profit du pipeline déjà en place.
+//
+// Scrapé UNIQUEMENT via le réseau Docker interne `agri_net` (jamais
+// public — voir infra/reverse-proxy/Caddyfile, qui retourne 404 sur
+// /metrics côté public).
+// ─────────────────────────────────────────────────────────────────────
+prometheus.scrape "ladini_api" {
+	targets = [
+		{"__address__" = "api:8000", "service" = "ladini-api"},
+	]
+	metrics_path    = "/metrics"
+	scrape_interval = "15s"
+	job_name        = "ladini/api"
+	forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 3bis. Exporters tiers (infra/exporters/docker-compose.exporters.yml) —
+//    comblent des gaps que telemetry.py ne peut pas combler lui-même
+//    (composants tiers, pas du code applicatif) : profondeur de file
+//    Celery, santé Redis, saturation PgBouncer. Cibles optionnelles —
+//    Alloy logue juste des échecs de scrape si cette stack n'est pas
+//    déployée sur ce host, sans jamais bloquer les autres cibles.
+// ─────────────────────────────────────────────────────────────────────
+prometheus.scrape "celery_exporter" {
+	targets         = [{"__address__" = "celery-exporter:9808", "service" = "celery"}]
+	scrape_interval = "15s"
+	job_name        = "ladini/celery"
+	forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+prometheus.scrape "redis_exporter" {
+	targets         = [{"__address__" = "redis-exporter:9121", "service" = "redis"}]
+	scrape_interval = "30s"
+	job_name        = "ladini/redis"
+	forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+prometheus.scrape "pgbouncer_exporter" {
+	targets         = [{"__address__" = "pgbouncer-exporter:9127", "service" = "pgbouncer"}]
+	scrape_interval = "30s"
+	job_name        = "ladini/pgbouncer"
+	forward_to      = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 4. Logs des conteneurs Docker → Loki (via le socket proxy, jamais le
+//    socket brut — même raisonnement que cadvisor ci-dessus).
+// ─────────────────────────────────────────────────────────────────────
+discovery.docker "containers" {
+	host = "tcp://docker-socket-proxy:2375"
+}
+
+// Relabeling minimal : n'expose que le nom du conteneur et le nom du
+// service compose comme labels Loki — jamais de label à cardinalité
+// utilisateur (même discipline anti-cardinalité que Prometheus, cf.
+// telemetry.py — un label par conteneur/service reste borné, un label par
+// phone/user_id/conversation_id ne le serait pas).
+discovery.relabel "containers" {
+	targets = discovery.docker.containers.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/(.*)"
+		target_label  = "container"
+	}
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "compose_service"
+	}
+}
+
+loki.source.docker "containers" {
+	host             = "tcp://docker-socket-proxy:2375"
+	targets          = discovery.relabel.containers.output
+	forward_to       = [loki.process.redact.receiver]
+	relabel_rules    = discovery.relabel.containers.rules
+	refresh_interval = "10s"
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 4bis. Filet de sécurité PII/secrets (2026-09-17, follow-up pre-Hetzner).
+//
+// L'application rédige déjà ses propres logs au point de création (voir
+// backend/src/ladini/core/log_redaction.py) — CE n'est PAS le mécanisme
+// principal, c'est une DEUXIÈME barrière : si un log échappe un jour à la
+// rédaction applicative (dépendance tierce qui journalise directement,
+// nouveau site d'appel oublié, process qui ne passe pas par
+// `install_log_redaction()`), Alloy ne doit jamais l'expédier tel quel vers
+// Grafana Cloud. Volontairement PAS une regex monstre unique — 4 stages
+// ciblés, un motif chacun, faciles à auditer et à faire évoluer séparément.
+// Masquage COMPLET ici (pas de préfixe/suffixe conservé comme côté
+// application) : un filet de sécurité doit privilégier la perte de
+// corrélation à la moindre fuite résiduelle.
+// ─────────────────────────────────────────────────────────────────────
+loki.process "redact" {
+	forward_to = [loki.write.grafana_cloud.receiver]
+
+	// Numéros de téléphone internationaux (format WhatsApp/Twilio).
+	stage.replace {
+		expression = "\\+[0-9]{6,15}"
+		replace    = "+[PHONE_REDACTED]"
+	}
+
+	// Credentials dans une URL de connexion (redis://, rediss://,
+	// postgres(ql)(+driver)://) — garde le schéma, masque user:pass.
+	stage.replace {
+		expression = "(?i)(rediss?|postgres(?:ql)?(?:\\+\\w+)?)://[^:/@\\s]*:[^@\\s]+@"
+		replace    = "${1}://[REDACTED]@"
+	}
+
+	// "Bearer <token>" en texte libre (headers loggés bruts).
+	stage.replace {
+		expression = "(?i)\\bBearer\\s+[A-Za-z0-9\\-_.=]{8,}"
+		replace    = "Bearer [REDACTED]"
+	}
+
+	// Paires clé=valeur / clé: valeur dont le NOM de clé est sensible —
+	// mêmes familles de noms que le module applicatif (token/secret/
+	// password/api_key/credential/dsn/master|private|public key).
+	stage.replace {
+		expression = "(?i)\\b((?:[a-z_]*token|[a-z_]*secret|[a-z_]*password|[a-z_]*api[_-]?key|[a-z_]*apikey|[a-z_]*credential|dsn|master[_-]?key|private[_-]?key)\\b\\s*[=:]\\s*)([^\\s'\",;]+)"
+		replace    = "${1}[REDACTED]"
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 5. Récepteur OTLP — l'app pousse ses traces ICI (OTEL_EXPORTER_OTLP_
+//    ENDPOINT côté api/worker pointe vers `alloy:4317`, voir
+//    docker-compose.prod.yml x-full-app-env::OTEL_EXPORTER_OTLP_ENDPOINT).
+//    L'app n'a donc JAMAIS besoin des identifiants Grafana Cloud — Alloy
+//    est le seul composant qui les détient (voir README §"least privilege").
+// ─────────────────────────────────────────────────────────────────────
+otelcol.receiver.otlp "app" {
+	grpc {
+		endpoint = "0.0.0.0:4317"
+	}
+	http {
+		endpoint = "0.0.0.0:4318"
+	}
+	output {
+		traces = [otelcol.exporter.otlp.grafana_cloud.input]
+		// (2026-09-17, follow-up pre-Hetzner) — `metrics` ajouté : c'est la
+		// route d'arrivée des compteurs LLM émis par le WORKER (voir
+		// core/telemetry.py, section 3 ci-dessus) — sans elle, le worker
+		// pousserait ses métriques jusqu'ici pour rien, jetées faute de
+		// sortie configurée. Grafana Cloud accepte les métriques OTLP sur le
+		// même endpoint gateway que les traces (traduites en Mimir/
+		// Prometheus côté Grafana Cloud) — aucun nouvel endpoint/credential
+		// à ajouter.
+		metrics = [otelcol.exporter.otlp.grafana_cloud.input]
+	}
+}
+
+otelcol.auth.basic "grafana_cloud_otlp" {
+	username = env("GRAFANA_CLOUD_OTLP_INSTANCE_ID")
+	password = env("GRAFANA_CLOUD_API_KEY")
+}
+
+otelcol.exporter.otlp "grafana_cloud" {
+	client {
+		endpoint = env("GRAFANA_CLOUD_OTLP_ENDPOINT")
+		auth     = otelcol.auth.basic.grafana_cloud_otlp.handler
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 6. Sorties Grafana Cloud — remote_write (métriques) + loki.write (logs).
+//    TOUS les identifiants viennent de l'environnement du conteneur
+//    `alloy` (docker-compose.alloy.yml), JAMAIS en dur ici. Noms de
+//    variables alignés sur ceux générés par l'onboarding Alloy de Grafana
+//    Cloud (Connections > Add new connection > Alloy) — voir README pour
+//    récupérer les valeurs réelles.
+// ─────────────────────────────────────────────────────────────────────
+prometheus.remote_write "grafana_cloud" {
+	endpoint {
+		url = env("GRAFANA_CLOUD_PROMETHEUS_URL")
+
+		basic_auth {
+			username = env("GRAFANA_CLOUD_PROMETHEUS_USER")
+			password = env("GRAFANA_CLOUD_API_KEY")
+		}
+	}
+}
+
+loki.write "grafana_cloud" {
+	endpoint {
+		url = env("GRAFANA_CLOUD_LOKI_URL")
+
+		basic_auth {
+			username = env("GRAFANA_CLOUD_LOKI_USER")
+			password = env("GRAFANA_CLOUD_API_KEY")
+		}
+	}
+}

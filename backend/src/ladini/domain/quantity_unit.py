@@ -49,11 +49,11 @@ UNIT_SYNONYMS: Dict[str, str] = {
 VALID_UNITS = frozenset(UNIT_SYNONYMS.values())
 
 _QUANTITY_UNIT_RE = re.compile(
-    r"(?P<qty>\d[\d\s.,]*)\s*(?P<unit>[a-zA-ZÀ-ÖØ-öø-ÿ.]+)",
+    r"(?P<qty>\d[\d\s.,]*)\s*(?P<unit>[a-zA-ZÀ-ÖØ-öø-ÿ]+)",
     re.IGNORECASE,
 )
 
-_UNIT_ONLY_RE = re.compile(r"\b([a-zA-ZÀ-ÖØ-öø-ÿ.]{1,12})\b", re.IGNORECASE)
+_UNIT_ONLY_RE = re.compile(r"\b([a-zA-ZÀ-ÖØ-öø-ÿ]{1,12})\b", re.IGNORECASE)
 
 
 def normalize_unit_token(raw: str) -> str:
@@ -200,6 +200,14 @@ def convert_quantity(quantity: float, from_unit: str, to_unit: str) -> Optional[
 _ELISION_CHARS = ("'", "’")
 
 
+#: Symboles d'unité à UNE SEULE LETTRE (« l »=litre, « t »=tonne, « k »=kg) —
+#: lexicalement INDISCERNABLES d'un article élidé sans apostrophe (« l'unité »,
+#: « l'année », « t'as »…) une fois découpés en tokens par `_UNIT_ONLY_RE`, quel
+#: que soit le mot qui suit. Voir la garde par proximité dans
+#: `extract_unit_only_from_text`.
+_SINGLE_LETTER_UNIT_SYMBOLS = frozenset(k for k in UNIT_SYNONYMS if len(k) == 1)
+
+
 def extract_unit_only_from_text(text: str) -> Optional[str]:
     """Try to find a standalone unit token in *text* (no quantity required)."""
     if not text:
@@ -214,10 +222,38 @@ def extract_unit_only_from_text(text: str) -> Optional[str]:
         # ARTICLE ÉLIDÉ (l', d', j', n', t'…), jamais une unité : on le saute.
         if match.end() < len(text) and text[match.end()] in _ELISION_CHARS:
             continue
-        mapped = UNIT_SYNONYMS.get(normalize_unit_token(match.group(1)))
+        _folded = normalize_unit_token(match.group(1))
+        if _folded in _SINGLE_LETTER_UNIT_SYMBOLS:
+            # Incident réel (2026-09-15) : « L unite coute 425000 fcfa » —
+            # l'apostrophe de « l'unité » était simplement OMISE (faute de
+            # frappe WhatsApp courante), donc le garde ci-dessus (qui ne
+            # détecte qu'une apostrophe collée) ne voyait rien à sauter, et
+            # « L » isolé valait LITRE pour un producteur vendant des BOEUFS.
+            # Patcher le seul mot « unité » serait fragile : « l'année »,
+            # « l'animal », « t'inquiète »… sans apostrophe tombent dans le
+            # même piège, quel que soit le mot qui suit. La règle générale et
+            # robuste : un VRAI symbole d'une seule lettre s'écrit TOUJOURS
+            # collé à la quantité qu'il qualifie (« 25 L », « 10T »), jamais
+            # isolé ailleurs dans la phrase — on exige donc un CHIFFRE
+            # immédiatement avant (espaces mis à part), qu'importe le mot qui
+            # suit. Un article élidé n'a jamais de chiffre juste devant lui.
+            before = text[: match.start()].rstrip()
+            if not before or not before[-1].isdigit():
+                continue
+        mapped = UNIT_SYNONYMS.get(_folded)
         if mapped:
             return mapped
     return None
+
+
+#: Unités PHYSIQUEMENT IMPOSSIBLES pour un animal vivant — masse (on ne pèse
+#: pas un animal au kilo pour le vendre) et volume (un animal n'est pas un
+#: liquide). Volontairement PAS de conditionnement (SAC/PANIER) : un
+#: producteur qui vend « 20 sacs de poussins » (poussins en vrac) reste dans
+#: le domaine du possible — voir `test_a_plausible_unit_on_livestock_is_left
+#: _alone`, une décision de conception délibérée que la correction de la
+#: règle 2 de `resolve_product_unit` ne doit pas écraser.
+_LIVESTOCK_IMPOSSIBLE_UNITS = frozenset({"KG", "TONNE", "LITRE"})
 
 
 def resolve_product_unit(
@@ -247,9 +283,18 @@ def resolve_product_unit(
 
     1. `text_unit` — l'utilisateur a écrit l'unité noir sur blanc.
     2. NATURE DU PRODUIT, en CORRECTION — `current_unit` est une unité de
-       MASSE alors que le produit est un animal compté à la tête : c'est
-       physiquement impossible, donc c'est `current_unit` qui a tort, quelle
-       qu'en soit la provenance.
+       MASSE ou de VOLUME (`_LIVESTOCK_IMPOSSIBLE_UNITS` : KG, TONNE, LITRE)
+       alors que le produit est un animal compté à la tête : un animal
+       vivant ne se pèse ni ne se mesure en litres pour être vendu, donc
+       c'est `current_unit` qui a tort, quelle qu'en soit la provenance.
+       Incident réel (2026-09-15) : cette règle ne couvrait à l'origine QUE
+       KG/TONNE (`_UNIT_TO_KG`) — un « LITRE » posé pour des chèvres (par le
+       même défaut d'élision déjà corrigé ailleurs, ou toute autre source)
+       restait donc collé DÉFINITIVEMENT, jamais corrigé, puisque LITRE n'a
+       pas d'équivalent kg connu. Volontairement PAS de conditionnement
+       (SAC/PANIER) dans cette liste : « 20 sacs de poussins » reste
+       plausible, ce n'est pas à cette fonction d'en juger (voir
+       `test_a_plausible_unit_on_livestock_is_left_alone`).
     3. `current_unit` — déjà posée et plausible : on n'y touche pas.
     4. NATURE DU PRODUIT, en DÉFAUT — rien de connu : TETE pour un élevage,
        `None` sinon (à l'appelant de demander plutôt que de deviner).
@@ -278,7 +323,7 @@ def resolve_product_unit(
         current_canonical = (
             normalize_unit(current_unit) or str(current_unit).strip().upper()
         )
-        if natural and current_canonical in _UNIT_TO_KG:
+        if natural and current_canonical in _LIVESTOCK_IMPOSSIBLE_UNITS:
             return natural
         return current_canonical
 
@@ -374,7 +419,20 @@ def scan_number_candidates(text: str) -> "list[NumberCandidate]":
 # l'autre — inutilisable ici pour distinguer leurs rôles). Si UNE SEULE
 # clause est ambiguë (0 ou 2+ matches d'un type), la fonction entière renvoie
 # `None` — jamais de résultat partiel deviné.
-_TIER_CLAUSE_SPLIT_RE = re.compile(r"\bet\b|\bou\b|\bpuis\b|,|;", re.IGNORECASE)
+#
+# Incident réel (2026-09-14) : le découpage ne coupait QUE sur "et"/"ou"/
+# "puis"/","/";" — une fin de PHRASE ("... 20 L. prix : 3000fcfa/L ...")
+# n'en fait pas partie, donc une clause de QUANTITÉ ("30 bidons de 20 L")
+# et la PHRASE DE PRIX suivante ("prix : 3000fcfa/L") fusionnaient en une
+# seule clause à 2 nombres — associés à tort comme un tarif "20 L = 3000
+# FCFA" (alors que 3000 FCFA/L est un prix de RÉFÉRENCE global, sans lien
+# avec ce bidon précis, dont le vrai tarif de 50 000 FCFA était donné plus
+# loin). `\.(?:\s+|$)` coupe sur un point de fin de phrase (point suivi
+# d'un espace ou de fin de texte) sans toucher aux nombres décimaux
+# ("3.5", jamais suivi d'un espace immédiatement après le point).
+_TIER_CLAUSE_SPLIT_RE = re.compile(
+    r"\bet\b|\bou\b|\bpuis\b|,|;|\.(?:\s+|$)|\n", re.IGNORECASE
+)
 _TIER_QTY_UNIT_RE = re.compile(
     r"(\d+[\d\s,.]*)\s*"
     r"(kg|kgs|kilo|kilogramme|kilogrammes|tonnes?|tones?|tons?|"
@@ -402,6 +460,89 @@ def _parse_number(raw: str) -> Optional[float]:
         return None
 
 
+#: Motif "N <conditionnement> de/d' M <unité>" — ex: "60 bidons de 5 litres".
+#: Réutilise le vocabulaire de conditionnement et l'alternance d'unités déjà
+#: définis ci-dessus pour `extract_deterministic_pricing_tiers`.
+_PACKAGE_COUNT_UNIT_RE = re.compile(
+    r"(?P<count>\d[\d\s.,]*)\s*(?:" + "|".join(_TIER_PACKAGING_WORDS) + r")\b"
+    r"\s*(?:de|d['’])\s*"
+    r"(?P<qty>\d[\d\s.,]*)\s*"
+    r"(?P<unit>kg|kgs|kilo|kilogramme|kilogrammes|tonnes?|tones?|tons?|"
+    r"sacs?|sachets?|paniers?|t[êe]tes?|unit[ée]s?|litres?|l)\b",
+    re.IGNORECASE,
+)
+
+
+def parse_packaged_compound_quantity(text: str) -> QuantityUnitResult:
+    """Parse une quantité totale exprimée en paquets comptés d'un contenu,
+    ex: "60 bidons de 5 litres et 20 bidons de 20 litres" (total 700 litres).
+
+    Incident réel (2026-09-14) : `scan_number_candidates` (fenêtre de
+    `_SCAN_WINDOW` caractères, utilisée par le fast-path de
+    `interpreter/routing.py`) associe un nombre à n'importe quelle unité
+    trouvée à proximité, sans vérifier qu'elle lui est réellement ADJACENTE.
+    Sur le message ci-dessus, le "60" — un NOMBRE DE PAQUETS, sans dimension
+    propre — captait l'unité "litres" du bidon voisin, produisant
+    `quantity=60, unit=LITRE` au lieu du volume total réel (700 L) : le
+    second groupe "20 bidons de 20 litres" disparaissait purement et
+    simplement. Ce parseur reconnaît explicitement le motif "N
+    <conditionnement> de M <unité>", multiplie compte × contenu par clause
+    et somme les clauses — jamais de résultat partiel deviné : une clause
+    ambiguë (0 ou plusieurs correspondances) ou des unités mélangées entre
+    clauses annulent le résultat entier (retombe alors sur le comportement
+    existant, `parse_quantity_unit_from_text`/`scan_number_candidates`)."""
+    if not text:
+        return QuantityUnitResult()
+    # Jamais quand un PRIX est mentionné dans le texte : "1 bidon de 5 L
+    # coûte 10000 fcfa" matche EXACTEMENT le même motif conditionnement que
+    # "30 bidons de 20 L" (une vraie quantité de stock) — ce parseur ne sait
+    # pas distinguer les deux (incident réel 2026-09-14 : sommait à tort les
+    # deux clauses de PRIX comme des groupes de stock supplémentaires, total
+    # gonflé de 900 à 925 L). Dès qu'un prix apparaît, le message mélange
+    # quantité ET prix : structurellement du ressort du LLM (règle 5bis/
+    # 5ter du prompt système), jamais d'une somme aveugle de tout ce qui
+    # ressemble à un conditionnement.
+    if _TIER_PRICE_CURRENCY_RE.search(text):
+        return QuantityUnitResult()
+    clauses = [c.strip() for c in _TIER_CLAUSE_SPLIT_RE.split(text) if c.strip()]
+    if not clauses:
+        return QuantityUnitResult()
+
+    total = 0.0
+    unit_canonical: Optional[str] = None
+    matched_multiplier = False
+    for clause in clauses:
+        multiplier_match = _PACKAGE_COUNT_UNIT_RE.search(clause)
+        if multiplier_match:
+            count_val = _parse_number(multiplier_match.group("count"))
+            content_val = _parse_number(multiplier_match.group("qty"))
+            content_unit = UNIT_SYNONYMS.get(
+                normalize_unit_token(multiplier_match.group("unit"))
+            )
+            if count_val is None or content_val is None or content_unit is None:
+                return QuantityUnitResult()
+            if unit_canonical is None:
+                unit_canonical = content_unit
+            elif unit_canonical != content_unit:
+                return QuantityUnitResult()
+            total += count_val * content_val
+            matched_multiplier = True
+            continue
+
+        single = parse_quantity_unit_from_text(clause)
+        if single.quantity is None or single.unit is None:
+            continue
+        if unit_canonical is None:
+            unit_canonical = single.unit
+        elif unit_canonical != single.unit:
+            return QuantityUnitResult()
+        total += single.quantity
+
+    if matched_multiplier and unit_canonical and total > 0:
+        return QuantityUnitResult(quantity=total, unit=unit_canonical)
+    return QuantityUnitResult()
+
+
 def extract_deterministic_pricing_tiers(text: str) -> Optional[list]:
     """Construit `pricing_tiers` déterministement depuis *text*, ou `None`
     si une clause est ambiguë (jamais de résultat deviné à moitié).
@@ -420,6 +561,22 @@ def extract_deterministic_pricing_tiers(text: str) -> Optional[list]:
 
     tiers: list = []
     for clause in clauses:
+        # Un tarif est TOUJOURS "par UN conditionnement" ("le bidon de 5 L
+        # coûte 10 000 FCFA", "1 sac de 50 kg à 25 000 FCFA") — jamais "par
+        # groupe de N". Incident réel (2026-09-14) : même avec le découpage
+        # corrigé ci-dessus, une clause qui décrit un STOCK ("30 bidons de
+        # 20 L") reste structurellement identique à une clause de tarif (un
+        # nombre+unité) si un prix traîne n'importe où à proximité — mieux
+        # vaut refuser tout le résultat (jamais deviné à moitié) que produire
+        # un tarif fantôme "20 L = <prix sans rapport>". `_PACKAGE_COUNT_UNIT_RE`
+        # capture explicitement ce motif "N <conditionnement> de M <unité>" ;
+        # un compte ≠ 1 dans CETTE clause signale une quantité de stock, pas
+        # un prix unitaire.
+        _pack_match = _PACKAGE_COUNT_UNIT_RE.search(clause)
+        if _pack_match:
+            _pack_count = _parse_number(_pack_match.group("count"))
+            if _pack_count is not None and _pack_count != 1:
+                return None
         qty_matches = list(_TIER_QTY_UNIT_RE.finditer(clause))
         price_matches = list(_TIER_PRICE_CURRENCY_RE.finditer(clause))
         if len(qty_matches) != 1 or len(price_matches) != 1:
@@ -450,6 +607,60 @@ def extract_deterministic_pricing_tiers(text: str) -> Optional[list]:
     if len(tiers) < 2:
         return None
     return tiers
+
+
+def extract_single_pricing_tier_correction(text: str) -> Optional[Dict[str, Any]]:
+    """Extrait UN SEUL tarif décrit dans *text* — ex: "prix bidon de 20 L à
+    70 000 FCFA", lors d'une correction ciblant UN palier précis d'un produit
+    déjà multi-tarifs (2026-09-14, incident réel : un producteur voulant
+    corriger le tarif du bidon de 20L n'avait aucun moyen de le faire — le
+    flux de mise à jour catalogue ne connaissait QUE prix/quantité/nom/unité
+    scalaires, jamais `pricing_tiers`).
+
+    Contrairement à `extract_deterministic_pricing_tiers` (qui exige 2+
+    clauses car UNE seule paire quantité+prix est structurellement ambiguë
+    avec un prix simple — "500 FCFA" seul), une correction de palier cible
+    explicitement un tarif existant : exige exactement UNE paire
+    quantité+unité et UNE paire prix+devise dans le texte entier (pas de
+    découpage en clauses), sinon `None` — jamais de résultat deviné."""
+    if not text:
+        return None
+    qty_matches = list(_TIER_QTY_UNIT_RE.finditer(text))
+    price_matches = list(_TIER_PRICE_CURRENCY_RE.finditer(text))
+    if len(qty_matches) != 1 or len(price_matches) != 1:
+        return None
+    qty_val = _parse_number(qty_matches[0].group(1))
+    unit_raw = qty_matches[0].group(2)
+    price_val = _parse_number(price_matches[0].group(1))
+    if qty_val is None or price_val is None or qty_val <= 0 or price_val <= 0:
+        return None
+    packaging_match = _TIER_PACKAGING_RE.search(text)
+    return {
+        "quantity": qty_val,
+        "unit": unit_raw.strip(),
+        "price": price_val,
+        "packaging": packaging_match.group(1).lower() if packaging_match else None,
+    }
+
+
+def find_matching_tier_index(
+    tiers: "list", quantity: float, unit: str
+) -> Optional[int]:
+    """Retrouve l'index du tarif de *tiers* dont (quantité, unité) correspond
+    à (*quantity*, *unit*) — comparaison par unité CANONIQUE (accepte "L" ==
+    "litres") et quantité à 1e-6 près. `None` si aucune correspondance
+    unique (absente ou ambiguë) : jamais de choix arbitraire entre paliers."""
+    target_unit = normalize_unit(unit) or str(unit or "").strip().upper()
+    matches = [
+        i
+        for i, tier in enumerate(tiers or [])
+        if isinstance(tier, dict)
+        and (normalize_unit(tier.get("unit")) or str(tier.get("unit") or "").strip().upper())
+        == target_unit
+        and tier.get("quantity") is not None
+        and abs(float(tier["quantity"]) - float(quantity)) < 1e-6
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 # Livestock / poultry products are counted per head (TÊTE), never weighed in KG.
@@ -577,6 +788,10 @@ __all__ = [
     "QuantityUnitResult",
     "parse_quantity_unit_from_text",
     "parse_compound_quantity",
+    "parse_packaged_compound_quantity",
+    "extract_deterministic_pricing_tiers",
+    "extract_single_pricing_tier_correction",
+    "find_matching_tier_index",
     "convert_quantity",
     "extract_unit_only_from_text",
     "NumberCandidate",

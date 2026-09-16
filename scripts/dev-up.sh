@@ -26,7 +26,14 @@ cd "$ROOT"
 
 PROD_FILE="docker-compose.prod.yml"
 BUILD_FILE="docker-compose.build.yml"
+# (2026-09-16, chantier Hetzner scale-out) : `docker-compose.prod.yml` n'a
+# plus de Redis local (production exige un Redis externe partagé, §5/§20) —
+# ce script, réservé au dev local, rebranche l'overlay qui en fournit un.
+DEV_FILE="docker-compose.dev.yml"
 ENV_FILE="${ENV_FILE:-.env}"
+# Un seul node en dev : les 3 rôles (app/scheduler/admin) tournent ensemble
+# sur le même poste — voir docs/architecture/deployment-hetzner.md.
+PROFILES=(--profile app --profile scheduler --profile admin)
 
 log()  { printf '\033[1;32m[dev-up]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[dev-up][warn]\033[0m %s\n' "$*" >&2; }
@@ -50,7 +57,7 @@ docker compose version >/dev/null 2>&1 || die "docker compose (v2) introuvable �
 
 if [ "$MODE" = "down" ]; then
   log "Arrêt de la stack…"
-  docker compose -f "$PROD_FILE" -f "$BUILD_FILE" down
+  docker compose -f "$PROD_FILE" -f "$DEV_FILE" -f "$BUILD_FILE" "${PROFILES[@]}" down
   exit 0
 fi
 
@@ -87,11 +94,18 @@ fi
 
 # ── 2. RELEASE_VERSION — jamais requis manuellement en dev ────────
 export RELEASE_VERSION="${RELEASE_VERSION:-dev}"
+# `docker-compose.prod.yml` exige `REDIS_URL` (`:?…`, plus de défaut local
+# implicite — §5/§20) — cette interpolation est évaluée à l'analyse de CE
+# fichier, AVANT que `docker-compose.dev.yml` ne réécrive la clé pour de
+# vrai (Redis local, mot de passe inclus). Un simple bouche-trou suffit ici
+# pour passer l'analyse ; la valeur RÉELLEMENT utilisée par les conteneurs
+# vient de l'overlay dev, jamais de celle-ci.
+export REDIS_URL="${REDIS_URL:-redis://placeholder-overridden-by-docker-compose.dev.yml:6379/0}"
 export GIT_SHA="${GIT_SHA:-dev-local}"
 export BUILD_TIMESTAMP="${BUILD_TIMESTAMP:-$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)}"
 log "RELEASE_VERSION=${RELEASE_VERSION} (dev local — jamais poussé, jamais déployé avec ce tag)"
 
-DC=(docker compose --env-file "$ENV_FILE" -f "$PROD_FILE")
+DC=(docker compose --env-file "$ENV_FILE" -f "$PROD_FILE" -f "$DEV_FILE" "${PROFILES[@]}")
 [ "$DO_BUILD" = 1 ] && DC+=(-f "$BUILD_FILE")
 
 # ── 3. Résolution RÉELLE de la config — la seule vérité qui compte ─

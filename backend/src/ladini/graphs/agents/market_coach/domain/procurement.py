@@ -29,23 +29,6 @@ class ProcurementCreateRequestCommand:
     zone_name: Optional[str] = None
 
 
-@dataclass(frozen=True)
-class ProcurementSelectWinnerCommand:
-    """Immutable command for selecting a winning bid in an auction."""
-
-    phone: str
-    auction_id: str
-    bid_id: str
-
-
-@dataclass(frozen=True)
-class ProcurementAcceptOfferCommand:
-    """Immutable command for accepting a bid (direct buy)."""
-
-    phone: str
-    bid_id: str
-
-
 @dataclass
 class ProcurementService:
     """Business logic for procurement-related intents.
@@ -104,12 +87,3 @@ class ProcurementService:
 
         return DomainResult(tool_id=ToolId.CREATE_AUCTION, tool_args=args)
 
-    def select_winner(self, command: ProcurementSelectWinnerCommand) -> DomainResult:
-        bid_id = str(command.bid_id)
-        return DomainResult(
-            tool_id=ToolId.SELECT_WINNING_BID, tool_args={"bid_id": bid_id}
-        )
-
-    def accept_offer(self, command: ProcurementAcceptOfferCommand) -> DomainResult:
-        bid_id = str(command.bid_id)
-        return DomainResult(tool_id=ToolId.ACCEPT_BID, tool_args={"bid_id": bid_id})

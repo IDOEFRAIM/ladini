@@ -28,10 +28,24 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
 log "Rollback  ${CURRENT_RELEASE:-<inconnue>}  →  ${TARGET_RELEASE}"
 
 # ── Avertissement migration (best-effort) ────────────────────────
+# §BUG CORRIGÉ ICI (2026-09-16, follow-up pre-Hetzner, même classe que
+# node_deploy.sh/cluster_deploy.sh) : `CUR_SHA` retombait sur le littéral
+# "HEAD" si `$CURRENT_FILE` n'avait pas (ou plus) de champ GIT_SHA —
+# `migration_class_between` aurait alors diffé contre le HEAD local de LA
+# MACHINE QUI EXÉCUTE LE SCRIPT, jamais garanti de correspondre à la release
+# réellement en service. Sans SHA fiable, on ne devine JAMAIS — on force la
+# classification la plus prudente (MIGRATION_REQUIRES_MANUAL_RECOVERY),
+# cohérent avec le principe déjà affirmé ailleurs : "ne jamais promettre un
+# rollback automatique quand il est faux".
 if [ -f "${LADINI_ROOT}/backend/alembic.ini" ] && [ -n "$CURRENT_RELEASE" ]; then
-  CUR_SHA="$(read_release_field "$CURRENT_FILE" GIT_SHA 2>/dev/null || echo HEAD)"
-  TGT_SHA="$( { [ -f "$PREVIOUS_FILE" ] && read_release_field "$PREVIOUS_FILE" GIT_SHA; } 2>/dev/null || echo "$TARGET_RELEASE")"
-  CLASS="$(migration_class_between "$TGT_SHA" "$CUR_SHA" || echo MIGRATION_REQUIRES_MANUAL_RECOVERY)"
+  CUR_SHA="$(read_release_field "$CURRENT_FILE" GIT_SHA 2>/dev/null || true)"
+  TGT_SHA="$( { [ -f "$PREVIOUS_FILE" ] && read_release_field "$PREVIOUS_FILE" GIT_SHA; } 2>/dev/null || true)"
+  if [ -n "$CUR_SHA" ] && [ -n "$TGT_SHA" ]; then
+    CLASS="$(migration_class_between "$TGT_SHA" "$CUR_SHA" || echo MIGRATION_REQUIRES_MANUAL_RECOVERY)"
+  else
+    warn "   GIT_SHA manquant dans le manifeste de release (current ou previous) — classification impossible avec confiance."
+    CLASS="MIGRATION_REQUIRES_MANUAL_RECOVERY"
+  fi
   if [ "$CLASS" = "MIGRATION_REQUIRES_MANUAL_RECOVERY" ]; then
     warn "════════════════════════════════════════════════════════════════"
     warn " La release ${CURRENT_RELEASE} contient une migration DB NON"

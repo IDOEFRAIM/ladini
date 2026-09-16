@@ -61,12 +61,14 @@ class TestFastPathVsLlmBusinessEquivalence:
         fast_result = run(interp(self._state(), StubRuntime(llm=None)))
 
         # (b) LLM disponible, classification cohérente avec le même nombre.
+        # (2026-09-12, Phase C) : `expected_input=PRICE` route désormais
+        # vers le micro-prompt ACTIVE_SLOT — contrat `disposition`/
+        # `extracted_entities`/`confidence` (interpreter/active_slot_micro.py),
+        # plus l'ancien schéma unifié `interpreted_event`/`validation_status`.
         llm_payload = {
-            "interpreted_event": "ANSWER",
-            "detected_intent": "SALES_PUBLISH_PRODUCT",
-            "interpreter_confidence": 0.9,
-            "validation_status": "VALID",
+            "disposition": "ANSWER",
             "extracted_entities": {"price": 300.0},
+            "confidence": 0.9,
         }
         llm_result = run(
             interp(self._state(), StubRuntime(llm=ScriptedLLM(llm_payload)))

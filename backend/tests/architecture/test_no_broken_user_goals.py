@@ -1,12 +1,13 @@
 """AUCUN FAUX BOUTON — tout goal réellement exposé à l'utilisateur doit
-pouvoir aboutir (Phase 4, 2026-09-04).
+pouvoir aboutir (Phase 4, 2026-09-04 ; réécrit 2026-09-13, Deep Intent
+Architecture Cleanup).
 
 ## Le contrat
 
-Un goal « exposé » = présent dans `allowed_intents_for_role(...)`, donc
-décrit au LLM dans le prompt d'interprétation, donc **classifiable depuis
-un message utilisateur**. Pour chacun, ce fichier exige la chaîne
-minimale d'exécution :
+Un goal « exposé » = présent dans `_classifiable_intents()`, donc décrit au
+LLM dans le catalogue `new_task_v2`/prompt d'interprétation, donc
+**classifiable depuis un message utilisateur**. Pour chacun, ce fichier
+exige la chaîne minimale d'exécution :
 
 ```
 tool_name réellement exposé côté MCP        (sinon : « tool not found »)
@@ -17,16 +18,28 @@ identifiant technique requis ⇒ passthrough   (sinon : impasse F1)
 
 ## Différence avec `test_write_capability_reachability.py`
 
-Ce fichier-là décrit **tout le catalogue** (70 goals) et tolère des
-exceptions documentées : il sert à empêcher les régressions de câblage
-sur des capacités connues comme mortes ou en attente de décision.
+Ce fichier-là décrit **tout le catalogue** et tolère des exceptions
+documentées : il sert à empêcher les régressions de câblage sur des
+capacités connues comme mortes ou en attente de décision.
 
 Celui-ci ne regarde que ce que l'utilisateur peut réellement atteindre et
-**n'accepte aucune exception**. Un goal cassé n'a que deux issues : le
-réparer, ou le sortir du catalogue exposé (`_DEPRECATED_INTENTS` /
-`_DISABLED_INTENT_PREFIXES`, avec justification). C'est le critère de
-sortie de la Phase 4 : « tous les goals exposés correspondent à des
-fonctionnalités réelles du produit »."""
+**n'accepte aucune exception**.
+
+## Ce qui a changé (2026-09-13)
+
+Avant le Deep Intent Architecture Cleanup, `INTENT_CONFIG` contenait ~71
+entrées dont une trentaine étaient du legacy masqué (`_DISABLED_INTENT_PREFIXES`
+/ `_DEPRECATED_INTENTS`) : présentes dans le catalogue mais retirées de
+l'exposition LLM par un filtre séparé. Ce chantier a supprimé ce mécanisme de
+masquage : chaque entrée d'`INTENT_CONFIG` qui n'était pas un objectif
+utilisateur réel a été **architecturalement supprimée** (code, handler,
+domaine, mappings) plutôt que simplement cachée. `_classifiable_intents()`
+retourne donc désormais `frozenset(INTENT_CONFIG)` sans filtrage — un goal
+« exposé » et un goal « présent dans le catalogue » sont maintenant la même
+chose, par construction. Les anciennes classes `TestDeprecationIsHonest`
+(qui testait le mécanisme de masquage lui-même) n'ont plus d'objet et ont
+été retirées ; leurs invariants utiles sont repris ci-dessous sous une forme
+qui correspond à l'architecture actuelle."""
 from __future__ import annotations
 
 import inspect
@@ -38,16 +51,14 @@ from ladini.graphs.agents.market_coach.interpreter.intent import (
     _TUNNEL_ASSIGNMENTS,
 )
 from ladini.graphs.agents.market_coach.interpreter.routing import (
-    _DEPRECATED_INTENTS,
-    _DISABLED_INTENT_PREFIXES,
-    allowed_intents_for_role,
+    _classifiable_intents,
 )
 from ladini.graphs.agents.market_coach.registry import get_action
 from ladini.graphs.agents.market_coach.utils import _AUTO_RESOLVABLE_FIELDS
 from ladini.infrastructure.mcp.security import TOOL_SCOPE_MAP
 from ladini.protocols.mcp.servers.h import TOOL_DESCRIPTIONS
 
-EXPOSED = sorted(allowed_intents_for_role("PRODUCER"))
+EXPOSED = sorted(_classifiable_intents())
 
 
 def _cfg(goal):
@@ -89,8 +100,8 @@ class TestNoExposedGoalIsBroken:
         assert tool in TOOL_DESCRIPTIONS, (
             f"{goal} est proposé à l'utilisateur (catalogue LLM) mais son tool "
             f"`{tool}` n'existe pas : l'utilisateur récolterait une erreur "
-            "technique. Réparer le câblage, ou déprécier le goal dans "
-            "`_DEPRECATED_INTENTS` avec sa justification."
+            "technique. Réparer le câblage, ou supprimer le goal du "
+            "catalogue (`INTENT_CONFIG`) avec sa justification."
         )
 
     @pytest.mark.parametrize("goal", EXPOSED)
@@ -129,59 +140,43 @@ class TestNoExposedGoalIsBroken:
         )
 
 
-class TestDeprecationIsHonest:
-    def test_every_deprecated_goal_still_exists_in_the_catalogue(self):
-        """On déprécie l'EXPOSITION, jamais par suppression silencieuse :
-        `INTENT_CONFIG` doit rester la source de vérité du catalogue."""
-        unknown = sorted(g for g in _DEPRECATED_INTENTS if g not in INTENT_CONFIG)
-        assert not unknown, f"_DEPRECATED_INTENTS cite des goals inexistants : {unknown}"
+class TestCatalogueHasNoMaskingLeftover:
+    """Garde-fous structurels post-cleanup (spec Deep Intent Architecture
+    Cleanup §36) : le catalogue classifiable ne doit plus jamais réintroduire
+    le mécanisme de masquage supprimé le 2026-09-13, ni classer un goal sans
+    label ni consommateur."""
 
-    def test_no_deprecated_goal_is_still_exposed(self):
-        leaked = sorted(g for g in _DEPRECATED_INTENTS if g in EXPOSED)
-        assert not leaked, f"goals dépréciés encore exposés au LLM : {leaked}"
+    def test_classifiable_intents_is_the_full_catalogue(self):
+        """`_classifiable_intents()` ne filtre plus rien : toute nouvelle
+        divergence avec `INTENT_CONFIG` signalerait la réintroduction d'un
+        filtrage caché (role-based ou masquage legacy)."""
+        assert set(EXPOSED) == set(INTENT_CONFIG)
 
-    def test_deprecating_a_working_goal_is_flagged(self):
-        """Garde-fou inverse : si un goal déprécié redevient parfaitement
-        câblé, c'est probablement qu'il a été réparé — il doit alors être
-        ré-exposé, ou sa dépréciation re-justifiée explicitement."""
-        product_decisions = {
-            # Câblés mais volontairement hors catalogue.
-            "PROCUREMENT_SELECT_WINNER",  # F4 : handler neutralisé (anti-bypass)
-            # Outil réel (`get_stock_movements`), câblage manquant assumé :
-            # exposer un historique de mouvements alors que l'enregistrement
-            # et la correction de mouvements sont hors catalogue produirait
-            # une demi-capacité. Décision produit « ledger d'inventaire »
-            # (docs/PRODUCT_INTENT_SCOPE_2026-09-04.md §5).
-            "STOCK_GET_MOVEMENTS",
-        }
-        repaired = []
-        for goal in sorted(_DEPRECATED_INTENTS):
-            if goal in product_decisions or _is_flow_handled(goal):
-                continue
-            tool = _cfg(goal).get("tool_name") or ""
-            if tool in TOOL_DESCRIPTIONS:
-                repaired.append(f"{goal} -> {tool}")
-        assert not repaired, (
-            "ces goals dépréciés pointent désormais un outil RÉEL — les "
-            f"ré-exposer ou documenter pourquoi ils restent cachés : {repaired}"
+    @pytest.mark.parametrize("goal", EXPOSED)
+    def test_every_classifiable_intent_has_a_label(self, goal):
+        assert _cfg(goal).get("label"), f"{goal} : classifiable sans label"
+
+    @pytest.mark.parametrize("goal", EXPOSED)
+    def test_every_classifiable_intent_has_a_valid_consumer(self, goal):
+        """Un consommateur valide = un flow dédié, OU un handler
+        `@register_action` enregistré (READ comme WRITE)."""
+        if _is_flow_handled(goal):
+            return
+        assert get_action(goal) is not None, (
+            f"{goal} : classifiable mais sans flow dédié ni handler enregistré "
+            "— aucun code ne peut réellement l'exécuter"
         )
-
-    def test_the_exposed_catalogue_actually_shrank(self):
-        """Garde-fou du test lui-même : si le filtrage disparaît, ce fichier
-        doit échouer bruyamment plutôt que de ne plus rien vérifier."""
-        assert len(EXPOSED) < len(INTENT_CONFIG)
-        assert _DISABLED_INTENT_PREFIXES and _DEPRECATED_INTENTS
 
 
 class TestSupportedCapabilitiesStayExposed:
     """Réciproque du critère de sortie : les capacités réellement
     supportées doivent rester atteignables. Ce test échoue si une
-    dépréciation trop large emporte une fonctionnalité vivante."""
+    suppression trop large emporte une fonctionnalité vivante."""
 
     @pytest.mark.parametrize(
         "goal",
         [
-            "SEARCH_PRODUCTS",
+            "BUYER_REQUEST",
             "BUYER_ADD_TO_CART",
             "BUYER_VIEW_CART",
             "BUYER_PREORDER_INIT",
@@ -199,8 +194,8 @@ class TestSupportedCapabilitiesStayExposed:
             "SALES_RECORD_DIRECT",
             "SALES_LIST_ORDERS",
             "SALES_PLACE_BID",
-            "SALES_UPDATE_PRODUCTION",
-            "DECLARE_CROP_CYCLE",
+            "PRODUCTION_UPDATE_FUTURE",
+            "PRODUCTION_DECLARE_FUTURE",
             "PRODUCER_CONFIRM_DELIVERY_PAYMENT",
             "PRODUCER_CONFIRM_DELIVERY_OTP",
             "PRODUCER_CANCEL_ORDER",
@@ -212,5 +207,5 @@ class TestSupportedCapabilitiesStayExposed:
     def test_capability_is_still_reachable(self, goal):
         assert goal in EXPOSED, (
             f"{goal} est une capacité réellement supportée mais n'est plus "
-            "proposée à l'utilisateur — dépréciation trop large"
+            "proposée à l'utilisateur — suppression trop large"
         )

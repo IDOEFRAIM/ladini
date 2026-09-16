@@ -57,16 +57,18 @@ exprime un besoin produit. Les étapes clés et leurs implémentations sont :
    (`initiate_negotiation_session`), les relances (`update_negotiation_offer`) et
    la sélection gagnante (`select_winning_bid`). Chaque phase alimente
    `negotiation_context` pour reprendre la session avec menus dynamiques.
-5. **Gestion des enchères existantes** — `_resolve_received_bids` et
-   `_resolve_buyer_bid_pick` (procurement.py) offrent une navigation dans les
-   offres reçues sur les appels d'offres de l'acheteur. La liste des appels
-   d'offres eux-mêmes (`BUYER_LIST_AUCTIONS` / `MARKET_MY_REQUESTS` — même
-   fonctionnalité, fusionnée le 2026-07-21) est servie par
-   `list_buyer_auctions` dans `order_tracking.py` (voir point 6).
+5. **Gestion des enchères existantes** — la liste des appels d'offres de
+   l'acheteur (`BUYER_LIST_AUCTIONS` ; l'ancien doublon `MARKET_MY_REQUESTS`,
+   fusionné le 2026-07-21, a été supprimé le 2026-09-13, Deep Intent
+   Architecture Cleanup) est servie par `list_buyer_auctions` dans
+   `order_tracking.py` (voir point 6). `_resolve_received_bids` /
+   `_resolve_buyer_bid_pick` (procurement.py), exclusivement rattachées à
+   `MARKET_GET_REQUEST_DETAIL`/`PROCUREMENT_SELECT_WINNER`/
+   `PROCUREMENT_ACCEPT_OFFER` (tous supprimés le même jour), ont été retirées.
 6. **Suivi de commandes & appels d'offres** — `order_tracking_resolver` (fichier
    dédié) couvre les intents `BUYER_LIST_ORDERS`, `BUYER_CHECK_ORDER_STATUS`,
-   `BUYER_CANCEL_ORDER`, `BUYER_LIST_AUCTIONS`, `BUYER_CHECK_AUCTION_STATUS` et
-   `MARKET_MY_REQUESTS`, avec menus expirables et résumés humains
+   `BUYER_CANCEL_ORDER`, `BUYER_LIST_AUCTIONS` et `BUYER_CHECK_AUCTION_STATUS`,
+   avec menus expirables et résumés humains
    (`last_order_summary`, `order_tracking_context`).
 
 L’ensemble de ces étapes est orchestré par `buyer_context_resolver`, qui ne se

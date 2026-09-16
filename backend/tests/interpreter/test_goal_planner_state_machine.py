@@ -101,7 +101,7 @@ class TestRule0bisDisambiguation:
             current_goal=None,
             interpreted_event="SELECTION",
             extracted_entities={"selection_index": 1},
-            available_mapping={"1": "SALES_PUBLISH_PRODUCT", "2": "DECLARE_CROP_CYCLE"},
+            available_mapping={"1": "SALES_PUBLISH_PRODUCT", "2": "PRODUCTION_DECLARE_FUTURE"},
             pending_interaction=self._disambiguation_pending_interaction(),
         )
         assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
@@ -194,7 +194,7 @@ class TestRule0bisDisambiguation:
             interpreted_event="ANSWER",
             detected_intent="SALES_PUBLISH_PRODUCT",
             extracted_entities={},
-            available_mapping={"1": "DECLARE_CROP_CYCLE"},
+            available_mapping={"1": "PRODUCTION_DECLARE_FUTURE"},
             pending_interaction=self._disambiguation_pending_interaction(),
         )
         assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
@@ -208,7 +208,7 @@ class TestRule0bisDisambiguation:
         monkeypatch.setitem(
             gp_module.INTENT_DISAMBIGUATION,
             "TEST_TRIGGER_DICT_FORM",
-            {"options": [{"intent": "SALES_PUBLISH_PRODUCT"}, {"intent": "DECLARE_CROP_CYCLE"}]},
+            {"options": [{"intent": "SALES_PUBLISH_PRODUCT"}, {"intent": "PRODUCTION_DECLARE_FUTURE"}]},
         )
         r = gp(
             current_goal=None,
@@ -363,6 +363,121 @@ class TestGoalLessSlotEventsArePromotedNotDropped:
         )
         assert r["current_goal"] is None
         assert r["response_strategy"] == "CLARIFICATION"
+
+
+class TestOrphanCartConfirmPromotionIsScopedToBuyers:
+    """Incident réel #7 (2026-09-14, WhatsApp production, utilisateur
+    double-rôle) : cette promotion (panier ACHETEUR non vide + `CONFIRM`
+    orphelin → `BUYER_PREORDER_CONFIRM`) ne regardait jamais le rôle résolu
+    de CE tour, seulement la présence d'un panier — y compris un vieux
+    SNAPSHOT (`working_memory.last_active_cart`) periné de plusieurs jours.
+    Un producteur (aucun tunnel actif, "confirmer" classé
+    `event=CONFIRM`/`intent=UNKNOWN` faute d'intention reconnue) avec un tel
+    snapshot se retrouvait promu vers la confirmation de CE panier étranger
+    à sa demande.
+
+    Incident réel #11 (correction du correctif #7, même jour) : la première
+    version de ce garde bloquait TOUT rôle non-BUYER sans distinguer le
+    panier ACTUEL (`state["active_cart"]`, rempli CE MÊME tour) du vieux
+    snapshot — un producteur en train d'ACHETER ("je veux 9" → panier →
+    "okay" quelques secondes plus tard, panier fraîchement rempli) se
+    retrouvait à tort bloqué en clarification. Seul le repli sur le SNAPSHOT
+    reste restreint au rôle BUYER ; un panier ACTUEL non vide reste toujours
+    un signal légitime, quel que soit le rôle (un dual-rôle peut acheter ET
+    vendre)."""
+
+    def test_a_producer_role_orphan_confirm_never_resurrects_a_stale_snapshot_cart(self):
+        """Panier PÉRIMÉ (snapshot seulement, `active_cart` vide CE tour)."""
+        r = gp(
+            interpreted_event="CONFIRM",
+            detected_intent="UNKNOWN",
+            current_goal=None,
+            expected_input="NONE",
+            active_cart=[],
+            working_memory={"last_active_cart": [{"product": "riz", "quantity": 50}]},
+            user_role="PRODUCER",
+        )
+        assert r["current_goal"] is None
+        assert r["response_strategy"] == "CLARIFICATION"
+
+    def test_a_buyer_role_orphan_confirm_still_resumes_a_stale_snapshot_cart(self):
+        """Non-régression : le cas d'origine (2026-09-09) reste couvert
+        quand le rôle résolu de ce tour est bien BUYER."""
+        r = gp(
+            interpreted_event="CONFIRM",
+            detected_intent="UNKNOWN",
+            current_goal=None,
+            expected_input="NONE",
+            active_cart=[],
+            working_memory={"last_active_cart": [{"product": "riz", "quantity": 50}]},
+            user_role="BUYER",
+        )
+        assert r["current_goal"] == "BUYER_PREORDER_CONFIRM"
+
+    def test_a_producer_role_orphan_confirm_still_resumes_a_fresh_cart(self):
+        """Incident #11 : un panier ACTUEL (rempli CE MÊME tour, PAS un
+        snapshot périmé) reste un signal légitime même sous rôle PRODUCER —
+        un dual-rôle achetant activement ne doit jamais être bloqué."""
+        r = gp(
+            interpreted_event="CONFIRM",
+            detected_intent="UNKNOWN",
+            current_goal=None,
+            expected_input="NONE",
+            active_cart=[{"product": "boeufs", "quantity": 9}],
+            user_role="PRODUCER",
+        )
+        assert r["current_goal"] == "BUYER_PREORDER_CONFIRM"
+
+
+class TestConfirmDispositionCanCarryARealBreakoutIntent:
+    """Incident réel (2026-09-14, WhatsApp production) : après qu'une
+    interruption ait déjà été confirmée par la route SELECTION ("confirmer"
+    sans rapport avec le menu affiché), le classifieur de repli (legacy,
+    moins fiable que le micro-prompt NEW_TASK) retourne parfois
+    `disposition=CONFIRM` au lieu de `NEW_TASK` — MAIS avec le bon intent
+    identifié (`PRODUCER_CONFIRM_ORDER`), pas un intent inventé. Rejeter ce
+    résultat (RÈGLE 5 excluait `CONFIRM` sans distinction) renvoyait
+    l'utilisateur au tunnel périmé en boucle. Restreint aux intents déjà
+    vetés pour l'interruption (`NAVIGATION_BREAKOUT_GOALS`) — jamais un
+    intent arbitraire promu sur un simple "oui"."""
+
+    def test_confirm_with_a_distinct_breakout_intent_is_promoted(self):
+        r = gp(
+            interpreted_event="CONFIRM",
+            detected_intent="PRODUCER_CONFIRM_ORDER",
+            current_goal="BUYER_LIST_ORDERS",
+            expected_input="SELECTION",
+            normalized_text="confirmer",
+        )
+        assert r["current_goal"] == "PRODUCER_CONFIRM_ORDER"
+        assert r["goal_status"] == "ACTIVE"
+
+    def test_confirm_echoing_the_current_goal_itself_is_never_promoted(self):
+        """Le piège exact de l'incident précédent (contradiction
+        SELECTION/NEW_TASK) : `detected_intent == current_goal` ne doit
+        JAMAIS être traité comme une bascule — ce n'est pas un intent
+        distinct, c'est le tunnel actuel réémis tel quel."""
+        r = gp(
+            interpreted_event="CONFIRM",
+            detected_intent="BUYER_LIST_ORDERS",
+            current_goal="BUYER_LIST_ORDERS",
+            expected_input="SELECTION",
+            normalized_text="confirmer",
+        )
+        assert r["current_goal"] == "BUYER_LIST_ORDERS"
+
+    def test_confirm_with_a_non_breakout_intent_is_still_never_promoted(self):
+        """Le cas général (RÈGLE 5 historique) reste inchangé : un intent
+        qui n'est pas dans la liste vetée pour l'interruption ne doit
+        toujours pas être promu sur un simple CONFIRM."""
+        r = gp(
+            interpreted_event="CONFIRM",
+            detected_intent="STOCK_REGISTER_HARVEST",
+            current_goal="BUYER_LIST_ORDERS",
+            expected_input="SELECTION",
+            normalized_text="confirmer",
+        )
+        assert r["current_goal"] == "BUYER_LIST_ORDERS"
 
 
 # =====================================================================
@@ -702,15 +817,23 @@ class TestRule4terOrphanCartConfirm:
     intent UNKNOWN) retombait sur le menu générique alors que le panier
     invitait explicitement à précommander."""
 
-    def test_orphan_confirm_with_active_cart_promotes_to_preorder_init(self):
+    def test_orphan_confirm_with_active_cart_promotes_to_preorder_confirm(self):
+        # (2026-09-11) Promu vers BUYER_PREORDER_CONFIRM, pas ..._INIT — voir
+        # interpreter/goal_planner.py RÈGLE 4ter : un CONFIRM orphelin porte
+        # une vraie intention de confirmation, pas juste une ouverture de
+        # tunnel. Avec ..._INIT, `create_preorder` s'arrêtait TOUJOURS sur un
+        # second "Confirmez-vous ?" redondant après bootstrap du draft —
+        # l'utilisateur devait confirmer deux fois la même décision (bug réel
+        # signalé, corrigé en changeant le goal promu ici).
         r = gp(
             interpreted_event="CONFIRM",
             detected_intent="UNKNOWN",
             current_goal=None,
             expected_input="SELECTION",
             active_cart=[{"product_id": "P1", "name": "lait", "quantity": 3}],
+            user_role="BUYER",
         )
-        assert r["current_goal"] == "BUYER_PREORDER_INIT"
+        assert r["current_goal"] == "BUYER_PREORDER_CONFIRM"
         assert r["goal_status"] == "ACTIVE"
         assert str(r.get("status") or "").upper() != "WAITING_INPUT"
 
@@ -721,8 +844,9 @@ class TestRule4terOrphanCartConfirm:
             current_goal=None,
             expected_input="NONE",
             working_memory={"last_active_cart": [{"product_id": "P1", "name": "lait"}]},
+            user_role="BUYER",
         )
-        assert r["current_goal"] == "BUYER_PREORDER_INIT"
+        assert r["current_goal"] == "BUYER_PREORDER_CONFIRM"
 
     def test_orphan_confirm_with_empty_cart_does_not_promote(self):
         r = gp(

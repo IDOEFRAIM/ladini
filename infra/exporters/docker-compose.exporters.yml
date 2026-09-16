@@ -1,0 +1,83 @@
+# ═════════════════════════════════════════════════════════════════════
+# Exporters Prometheus tiers — stack séparée (même pattern que
+# infra/reverse-proxy/ et infra/alloy/ : cycle de vie indépendant).
+#
+# Comble 3 gaps de métriques que `backend/src/ladini/core/telemetry.py`
+# NE PEUT PAS combler lui-même (pas du code applicatif à instrumenter, ce
+# sont des composants tiers — Redis externe, PgBouncer, broker Celery) :
+#
+#   1. celery-exporter : profondeur de file / latence / échecs Celery.
+#      Consomme les ÉVÉNEMENTS Celery via le broker (Redis pub/sub) —
+#      PAS besoin que `worker` expose un endpoint HTTP (il n'en a aucun,
+#      voir infra/alloy/README.md §"gap connu"). C'est la manière standard
+#      d'obtenir `celery_queue_length`/`celery_task_*` sans toucher au code
+#      applicatif.
+#   2. redis_exporter : connectivité + santé du Redis externe partagé
+#      (REDIS_URL, docker-compose.prod.yml).
+#   3. pgbouncer_exporter : connectivité + saturation du pool PgBouncer
+#      local (service `pgbouncer`, docker-compose.prod.yml).
+#
+# Tous scrapés par Alloy (voir infra/alloy/config.alloy) — AUCUNE donnée
+# n'est stockée localement par ces exporters, ils exposent juste
+# /metrics en texte Prometheus le temps du scrape.
+#
+#   cd infra/exporters
+#   cp .env.example .env   &&   $EDITOR .env
+#   docker compose -f docker-compose.exporters.yml up -d
+# ═════════════════════════════════════════════════════════════════════
+
+networks:
+  agri_net:
+    external: true # créé par docker-compose.prod.yml — nécessaire pour
+    # atteindre redis (externe, via REDIS_URL)/pgbouncer/broker Celery, et
+    # pour qu'Alloy (même réseau) puisse scraper ces 3 exporters.
+
+services:
+  celery-exporter:
+    # Pin exact. ⚠ VÉRIFIER que ce tag est toujours le plus récent stable
+    # avant déploiement (non confirmé contre un registry en direct ici).
+    image: danihodovic/celery-exporter:0.11.4
+    command:
+      - "--broker-url=${CELERY_BROKER_URL_FOR_EXPORTER:?REDIS_URL/CELERY_BROKER_URL requis — voir .env.example}"
+      - "--listen-address=0.0.0.0:9808"
+    ports: [] # jamais de port hôte publié — scrape via agri_net uniquement
+    networks: [agri_net]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128m }
+    restart: unless-stopped
+
+  redis-exporter:
+    # Pin exact.
+    image: oliver006/redis_exporter:v1.66.0
+    environment:
+      REDIS_ADDR: "${REDIS_URL:?REDIS_URL requis — même Redis externe que l'appli, voir docker-compose.prod.yml}"
+    networks: [agri_net]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { cpus: "0.1", memory: 64m }
+    restart: unless-stopped
+
+  pgbouncer-exporter:
+    # Pin exact.
+    image: prometheuscommunity/pgbouncer-exporter:v0.8.0
+    command:
+      - "--pgBouncer.connectionString=${PGBOUNCER_EXPORTER_DSN:?DSN PgBouncer requis (pgbouncer:6432/pgbouncer), voir .env.example}"
+      - "--web.listen-address=:9127"
+    networks: [agri_net] # doit atteindre le conteneur `pgbouncer` (docker-compose.prod.yml, profil `app`)
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { cpus: "0.1", memory: 64m }
+    restart: unless-stopped

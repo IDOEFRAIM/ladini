@@ -1,0 +1,34 @@
+# ═════════════════════════════════════════════════════════════════════
+# infra/inventory.example.yml — inventaire des nodes du cluster (chantier
+# Hetzner scale-out).
+#
+# Un `role` = un profil Compose (`docker-compose.prod.yml`) démarré sur ce
+# node via `docker compose --profile <role> ... up -d` :
+#   app        api + worker + mcp + pgbouncer (+ autoheal, toujours actif)
+#   scheduler  beat — voir la contrainte ci-dessous
+#   admin      flower
+#
+# Copiez ce fichier en `infra/inventory.yml` (gitignored — contient des
+# détails d'infrastructure réels, IP privées incluses) et adaptez-le.
+#
+# CONTRAINTE VALIDÉE PAR scripts/validate_inventory.py (§9/§44 du chantier) :
+#   exactement UN node, dans TOUT l'inventaire, porte le rôle `scheduler`.
+#   Celery Beat planifie — deux `beat` actifs en même temps déclencheraient
+#   chaque tâche planifiée deux fois (double-envoi de notifications,
+#   double-réconciliation...). Jamais de leader election ici : un inventaire
+#   mal écrit doit être rejeté AVANT le déploiement, pas négocié à l'exécution.
+#
+# PHASE 1 (aujourd'hui, < 100 utilisateurs) : un seul node cumule les 3 rôles.
+nodes:
+  - name: node-a
+    # IP du réseau privé Hetzner (infra/providers/hetzner/network.tf) —
+    # jamais l'IP publique pour le trafic inter-node.
+    host: 10.20.1.10
+    roles: [app, scheduler, admin]
+
+# PHASE 2 (exemple — décommentez/ajoutez quand `app_node_count` augmente) :
+# un 2e node app, AUCUN rôle scheduler/admin dessus (contrainte ci-dessus).
+#
+#   - name: node-b
+#     host: 10.20.1.11
+#     roles: [app]

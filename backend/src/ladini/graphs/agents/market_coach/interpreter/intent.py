@@ -19,64 +19,19 @@ INTENT_CONFIG = {
             "farm_id": "exploitation source",
         },
     },
-    "STOCK_RECORD_MOVEMENT": {
-        "tool_name": "add_stock_movement_by_id",
-        "required": ["stock_id", "movement_type", "quantity"],
-        "action_type": "WRITE",
-        "requires_farm": False,
-        "label": "Enregistrement d'un mouvement de stock entrant/sortant",
-        "label_map": {
-            "stock_id": "référence stock (numéro)",
-            "movement_type": "sens (Entrée/Sortie/Perte)",
-            "quantity": "quantité bougée",
-            "reason": "motif",
-        },
-    },
-    "STOCK_ADJUST": {
-        "tool_name": "adjust_stock_by_id",
-        "required": ["stock_id", "quantity"],
-        "action_type": "WRITE",
-        "requires_farm": False,
-        "label": "Correction manuelle de l'inventaire physique",
-        "label_map": {
-            "stock_id": "référence stock (numéro)",
-            "quantity": "nouvelle quantité réelle constatée",
-            "reason": "motif",
-        },
-    },
-    "STOCK_REMOVE_PARTIAL": {
-        "tool_name": "remove_stock_by_id",
-        "required": ["stock_id", "quantity"],
-        "action_type": "WRITE",
-        "requires_farm": False,
-        "label": "Retrait partiel du stock disponible",
-        "label_map": {
-            "stock_id": "référence stock (numéro)",
-            "quantity": "quantité à retirer",
-        },
-    },
-    "STOCK_DELETE": {
-        "tool_name": "delete_stock_by_id",
-        "required": ["stock_id"],
-        "action_type": "WRITE",
-        "requires_farm": False,
-        "label": "Suppression définitive d'une ligne de stock",
-        "label_map": {"stock_id": "identifiant stock"},
-    },
-    "STOCK_UPDATE_LEVEL": {
-        "tool_name": "adjust_stock_by_id",
-        "required": ["stock_id", "quantity"],
-        "action_type": "WRITE",
-        "requires_farm": False,
-        "lifecycle_mode": "UPDATE",
-        "label": "Mise à jour directe du niveau d'un lot",
-        "label_map": {
-            "stock_id": "identifiant stock",
-            "quantity": "nouvelle quantité réelle",
-            "unit": "unité (optionnel)",
-            "reason": "motif",
-        },
-    },
+    # (2026-09-14, Deep Intent Architecture Cleanup) : STOCK_RECORD_MOVEMENT/
+    # STOCK_ADJUST/STOCK_REMOVE_PARTIAL/STOCK_DELETE/STOCK_UPDATE_LEVEL
+    # SUPPRIMÉS — leurs `tool_name` (`*_by_id`) n'ont jamais correspondu à
+    # une méthode DB réelle (les vraies méthodes `adjust_stock`/
+    # `remove_stock`/`delete_stock`/`add_stock_movement` existent mais sous
+    # un autre nom, jamais recâblées) ET aucune entité MCP exposée ne les
+    # sert (`infrastructure/mcp/exposure.py` audité, confirmé absent). Ce
+    # n'était pas une simple dépréciation d'exposition (l'état antérieur,
+    # `_DEPRECATED_INTENTS`) : ces 5 goals n'ont jamais eu de chemin
+    # d'exécution possible, ce chantier supprime le faux bouton lui-même
+    # plutôt que de continuer à le masquer. Voir le rapport final pour
+    # l'audit complet (docs/PRODUCT_INTENT_SCOPE_2026-09-04.md, §5, avait
+    # déjà documenté cette absence sans encore trancher la suppression).
     # =======================================================================
     # DOMAINE : MARCHÉ PRODUCTEUR — VENTES (WRITE — PRODUCER)
     # =======================================================================
@@ -152,14 +107,15 @@ INTENT_CONFIG = {
             "message": "note",
         },
     },
-    "SALES_ACCEPT_CONTRACT": {
-        "tool_name": "commit_staged_transaction",
-        "required": ["bid_id"],
-        "action_type": "WRITE",
-        "requires_farm": False,
-        "label": "Validation définitive des termes du contrat verrouillé",
-        "label_map": {"bid_id": "numéro de transaction/offre"},
-    },
+    # (2026-09-14, Deep Intent Architecture Cleanup) : SALES_ACCEPT_CONTRACT
+    # SUPPRIMÉ — `commit_staged_transaction` n'existe ni comme outil MCP ni
+    # comme méthode DB, aucune entité `Contract`/`StagedTransaction` dans le
+    # domaine ; `SYSTEM_COMMIT_TRANSACTION` (même tool_name fictif, ci-
+    # dessous) confirme qu'il s'agit d'un reliquat d'un flux "staging"
+    # jamais implémenté, remplacé depuis par les Drafts + CAS. Les 3
+    # interprétations possibles étaient déjà documentées sans preuve
+    # (docs/PRODUCT_INTENT_SCOPE_2026-09-04.md §8) — aucune n'est
+    # confirmée par le code, donc pas de fonctionnalité réelle à préserver.
     "SALES_UPDATE_PRODUCT": {
         "tool_name": "update_product_price_and_qty",
         "required": ["product_id"],
@@ -203,7 +159,14 @@ INTENT_CONFIG = {
     # (product), unité, date de disponibilité ou type (culture/élevage) d'un lot
     # déjà déclaré — y compris renommer un lot mal nommé "culture". cycle_id est
     # résolu par la sélection du numéro dans la liste des cultures/futures récoltes.
-    "SALES_UPDATE_PRODUCTION": {
+    #
+    # (2026-09-14, Deep Intent Architecture Cleanup, spec §13/§26) : RENOMMÉ
+    # depuis `SALES_UPDATE_PRODUCTION` — namespace `PRODUCTION_*` cohérent
+    # avec `PRODUCTION_DECLARE_FUTURE` (même entité `cycle_id`/MarketOffer),
+    # jamais `SALES_*` (catalogue de produits déjà disponibles, domaine
+    # distinct). Aucun alias créé (spec §3) : l'ancien nom n'a aucune
+    # nécessité runtime démontrée à préserver.
+    "PRODUCTION_UPDATE_FUTURE": {
         "tool_name": "update_production_fields",
         "required": ["cycle_id"],
         "action_type": "WRITE",
@@ -264,10 +227,70 @@ INTENT_CONFIG = {
         "action_type": "WRITE",
         "requires_farm": False,
         "lifecycle_mode": "UPDATE",
-        "label": "Annulation d'une commande que je ne peux pas honorer",
+        # (2026-09-12) Label enrichi d'exemples de PHRASAGE réel — incident
+        # réel : un producteur qui vient de voir sa liste "commandes reçues"
+        # numérotée (services/database/producer.py, formatted_menu SANS
+        # contexte de sélection actif — voir la note dans flow.py juste
+        # au-dessus) tape "annuler le 1" pour désigner la commande #1 de
+        # cette liste. Le label précédent ("Annulation d'une commande que je
+        # ne peux pas honorer") ne mentionnait ni "annuler", ni une
+        # référence par NUMÉRO — le LLM classait ce message en UNKNOWN au
+        # lieu de PRODUCER_CANCEL_ORDER, malgré un résolveur déjà fonctionnel
+        # (`_resolve_order_for_cancellation`) prêt à afficher SON PROPRE menu
+        # de sélection dès que ce goal est correctement détecté.
+        #
+        # (2026-09-14, incident réel confirmé une 2e fois) : même échec sur
+        # "annuler" tout SEUL, sans numéro — le cas le PLUS fréquent en
+        # pratique : `_producer_sales_block`/`get_producer_orders`
+        # (flows/buyer/order_tracking.py, services/database/producer.py)
+        # invitent EXPLICITEMENT le producteur à "Tapez *confirmer* ... ou
+        # *annuler* ..." quand une seule vente 🟡 est affichée — aucun
+        # numéro n'est alors nécessaire (`_resolve_order_for_cancellation`
+        # auto-sélectionne déjà la commande unique). Le mot nu, sans le
+        # numéro qui servait de seul signal fort dans les exemples
+        # précédents, retombait en UNKNOWN.
+        "label": (
+            "Annulation/refus d'une commande PAR LE PRODUCTEUR — commande pas "
+            "encore confirmée par lui (en attente de sa confirmation) OU déjà "
+            "confirmée mais qu'il ne peut finalement plus honorer (ex: "
+            "\"annuler\" ou \"annuler la commande 1\" en réponse à une liste de "
+            "ventes venant d'être affichée, \"annuler le 1\", \"je ne peux pas "
+            "honorer cette commande\", \"refuser la commande 2\") — référence "
+            "par numéro/position d'une liste déjà vue, ou SANS numéro quand "
+            "une seule commande vient d'être montrée — PAS une annulation par "
+            "l'acheteur (BUYER_CANCEL_ORDER), PAS l'acceptation "
+            "(PRODUCER_CONFIRM_ORDER)"
+        ),
         "label_map": {
             "order_id": "numéro de la commande à annuler",
             "reason": "motif (rupture, aléa de production…)",
+        },
+    },
+    "PRODUCER_CONFIRM_ORDER": {
+        "tool_name": "confirm_order_by_producer",
+        "required": ["order_id"],
+        "action_type": "WRITE",
+        "requires_farm": False,
+        "lifecycle_mode": "UPDATE",
+        # (2026-09-14, incident réel — même diagnostic que le label miroir
+        # PRODUCER_CANCEL_ORDER ci-dessus) : "confirmer" tout SEUL, sans
+        # numéro, en réponse à une liste de ventes n'affichant qu'UNE
+        # commande 🟡, est le cas le PLUS fréquent — `_resolve_order_for_
+        # confirmation` auto-sélectionne déjà cette commande unique, aucun
+        # numéro n'est requis pour que la résolution fonctionne.
+        "label": (
+            "Confirmation PAR LE PRODUCTEUR qu'il peut honorer une commande "
+            "reçue et pas encore confirmée (ex: \"confirmer\" ou \"je confirme "
+            "la commande 1\" en réponse à une liste de ventes venant d'être "
+            "affichée, \"j'accepte\", \"ok pour la commande 2\", \"je peux "
+            "honorer\") — référence par numéro/position d'une liste déjà vue, "
+            "ou SANS numéro quand une seule commande vient d'être montrée — "
+            "PAS une simple consultation (SALES_LIST_ORDERS), PAS l'annulation "
+            "(PRODUCER_CANCEL_ORDER), PAS la clôture livraison/paiement "
+            "après préparation (PRODUCER_CONFIRM_DELIVERY_PAYMENT)"
+        ),
+        "label_map": {
+            "order_id": "numéro de la commande à confirmer",
         },
     },
     "PRODUCER_CONFIRM_DELIVERY_PAYMENT": {
@@ -299,25 +322,56 @@ INTENT_CONFIG = {
             "deadline": "date limite",
         },
     },
-    "PROCUREMENT_SELECT_WINNER": {
-        "tool_name": "select_winning_bid",
-        "required": ["auction_id", "bid_id"],
+    # (2026-09-14) : jusqu'ici un acheteur ne pouvait JAMAIS corriger un
+    # appel d'offres déjà publié (mauvaise quantité, prix plafond à ajuster,
+    # date limite à repousser) — seulement le laisser expirer et en recréer
+    # un depuis zéro. Même principe que SALES_UPDATE_PRODUCT/PRODUCTION_
+    # UPDATE_FUTURE : `auction_id` est résolu conversationnellement (liste
+    # des appels d'offres OUVERTS de l'acheteur, `_resolve_auction_for_
+    # update`, flows/buyer/order_tracking.py), jamais demandé comme UUID
+    # brut. `tool_name` reste une étiquette symbolique — ce goal est géré
+    # par le tunnel `auction_tracking`, qui appelle directement
+    # `AuctionGateway.update_auction`.
+    "PROCUREMENT_UPDATE_REQUEST": {
+        "tool_name": "update_auction_fields",
+        "required": ["auction_id"],
         "action_type": "WRITE",
         "requires_farm": False,
-        "label": "Sélection et validation de l'offre gagnante sur mon marché",
+        "lifecycle_mode": "UPDATE",
+        # Comme BUYER_LIST_AUCTIONS/BUYER_CHECK_AUCTION_STATUS (même tunnel
+        # "auction_tracking") : entièrement pris en charge par
+        # `_resolve_auction_for_update` (flows/buyer/order_tracking.py),
+        # jamais par un handler `actions/*.py` générique — sans ce flag,
+        # `registry.py::validate_integrity()` exigerait un handler enregistré
+        # qui n'existerait jamais (goal flow-handled par construction).
+        "handled_by_flow": True,
+        "label": (
+            "Mise à jour d'un appel d'offres déjà publié par l'acheteur "
+            "(quantité, prix plafond, date limite) — ex: \"modifier mon appel "
+            "d'offres\", \"changer la quantité de ma demande de riz\", "
+            "\"je veux repousser la date limite\" — PAS la création d'un "
+            "nouvel appel d'offres (PROCUREMENT_CREATE_REQUEST)"
+        ),
         "label_map": {
-            "auction_id": "numéro de votre appel d'offres",
-            "bid_id": "numéro de la proposition retenue",
+            "auction_id": "référence de l'appel d'offres",
+            "quantity": "nouvelle quantité recherchée",
+            "price": "nouveau prix plafond",
+            "unit": "unité (optionnel)",
+            "deadline": "nouvelle date limite",
         },
     },
-    "PROCUREMENT_ACCEPT_OFFER": {
-        "tool_name": "accept_bid",
-        "required": ["bid_id"],
-        "action_type": "WRITE",
-        "requires_farm": False,
-        "label": "Achat direct simple d'un produit du catalogue indexé",
-        "label_map": {"bid_id": "numéro du produit catalogue"},
-    },
+    # (2026-09-14, Deep Intent Architecture Cleanup) : PROCUREMENT_SELECT_
+    # WINNER/PROCUREMENT_ACCEPT_OFFER SUPPRIMÉS — handlers neutralisés
+    # intentionnellement par F4 (anti-bypass sécurité, contournement d'un
+    # tunnel de sélection sécurisé) ; `select_winning_bid` reste un outil
+    # réel mais son SEUL point d'entrée sûr est désormais le tunnel
+    # `BUYER_CHECK_AUCTION_STATUS` → confirmation/finalisation — jamais une
+    # classification NEW_TASK directe. `accept_bid` (ACCEPT_OFFER) n'est de
+    # toute façon exposé par aucun outil MCP réel. Laisser ces 2 goals
+    # classables les rendait ATTEIGNABLES pour ne récolter qu'une erreur
+    # technique (ou pire, rouvrir la surface de contournement si le
+    # handler neutralisé était un jour "réparé" par inadvertance) — un seul
+    # chemin métier vers la sélection du gagnant, jamais deux.
     "BUYER_REQUEST": {
         "tool_name": "search_products",
         "required": ["product"],
@@ -464,7 +518,11 @@ INTENT_CONFIG = {
         "action_type": "WRITE",
         "requires_farm": False,
         "handled_by_flow": True,
-        "label": "Annulation d'une commande en attente",
+        "label": (
+            "Annulation d'une commande en attente PAR L'ACHETEUR (ce qu'il a "
+            "commandé) — PAS l'annulation/refus d'une vente reçue PAR LE "
+            "PRODUCTEUR (PRODUCER_CANCEL_ORDER)"
+        ),
         "label_map": {
             "order_id": "numéro/référence de la commande à annuler",
         },
@@ -491,22 +549,19 @@ INTENT_CONFIG = {
         },
     },
     # =======================================================================
-    # DOMAINE : AGRONOMIE — PILOTAGE DE CULTURE (WRITE)
+    # DOMAINE : PRODUCTION FUTURE (WRITE — Producteur)
+    # (2026-09-14, Deep Intent Architecture Cleanup, spec §11/§13) : l'ancien
+    # module "agronomie complète" (CROP_START_CYCLE/RECORD_INTERVENTION/
+    # RECORD_OBSERVATION/UPDATE_STAGE/UPDATE_SOIL + AGRO_GET_*, plus bas dans
+    # ce fichier) est SUPPRIMÉ — audit confirmé (docs/PRODUCT_INTENT_SCOPE_
+    # 2026-09-04.md §6) : aucune méthode DB, aucun modèle de suivi cultural,
+    # aucune référence produit réelle. Seule capacité agronomique VIVANTE :
+    # la déclaration d'une production future pour précommande, ci-dessous —
+    # RENOMMÉE depuis `PRODUCTION_DECLARE_FUTURE` (namespace `PRODUCTION_*`, jamais
+    # `CROP_*` : ce n'est ni un suivi de culture ni une écriture agronomique,
+    # c'est un lot du marketplace pas encore disponible).
     # =======================================================================
-    "CROP_START_CYCLE": {
-        "tool_name": "create_crop_cycle",
-        "required": ["farm_id", "product", "surface"],
-        "action_type": "WRITE",
-        "requires_farm": True,
-        "label": "Démarrage d'un nouveau cycle de culture (semis/plantation)",
-        "label_map": {
-            "farm_id": "identifiant exploitation",
-            "product": "culture",
-            "surface": "superficie parcelle",
-            "variety": "variété/semence",
-        },
-    },
-    "DECLARE_CROP_CYCLE": {
+    "PRODUCTION_DECLARE_FUTURE": {
         "tool_name": "declare_future_production",
         "required": [
             "farm_id",
@@ -518,7 +573,17 @@ INTENT_CONFIG = {
         ],
         "action_type": "WRITE",
         "requires_farm": True,
-        "label": "Déclaration d'un lot futur (culture/élevage) pour précommande",
+        # (2026-09-14) Label sémantique, pas un journal d'incident : la
+        # frontière avec STOCK_REGISTER_HARVEST (déjà récolté/disponible
+        # maintenant) et SALES_PUBLISH_PRODUCT (prêt à vendre maintenant)
+        # est PAS ENCORE DISPONIBLE / date future — voir les tests
+        # contrastifs dédiés plutôt qu'un paragraphe historique ici.
+        "label": (
+            "Déclaration d'une production PAS ENCORE disponible (récolte ou "
+            "élevage à venir, avec une date future) pour précommande — "
+            "jamais un produit déjà prêt à vendre (SALES_PUBLISH_PRODUCT) ni "
+            "déjà récolté (STOCK_REGISTER_HARVEST)"
+        ),
         "label_map": {
             "farm_id": "identifiant exploitation",
             "production_type": "culture (plante) ou élevage (animal)",
@@ -533,57 +598,19 @@ INTENT_CONFIG = {
             "is_public": "visible catalogue (oui/non)",
         },
     },
-    "CROP_RECORD_INTERVENTION": {
-        "tool_name": "log_intervention",
-        "required": ["cycle_id", "intervention_type"],
-        "action_type": "WRITE",
-        "requires_farm": False,
-        "label": "Saisie d'une intervention technique sur site (irrigation, fertilisation)",
-        "label_map": {
-            "cycle_id": "cycle de culture",
-            "intervention_type": "type d'action",
-            "input_used": "intrant/matériel",
-            "quantity": "quantité intrant",
-            "details": "observations",
-        },
-    },
-    "CROP_RECORD_OBSERVATION": {
-        "tool_name": "add_growth_log",
-        "required": ["cycle_id", "stage_label", "observation"],
-        "action_type": "WRITE",
-        "requires_farm": False,
-        "label": "Enregistrement d'un suivi de croissance ou diagnostic",
-        "label_map": {
-            "cycle_id": "cycle de culture",
-            "stage_label": "stade observé",
-            "observation": "notes de suivi",
-        },
-    },
-    "CROP_UPDATE_STAGE": {
-        "tool_name": "add_crop_growth_stage",
-        "required": ["cycle_id", "stage_name"],
-        "action_type": "WRITE",
-        "requires_farm": False,
-        "label": "Changement formel de stade phénologique",
-        "label_map": {
-            "cycle_id": "cycle de culture",
-            "stage_name": "nom du nouveau stade",
-        },
-    },
-    "CROP_UPDATE_SOIL": {
-        "tool_name": "update_soil_profile",
-        "required": ["farm_id", "ph"],
-        "action_type": "WRITE",
-        "requires_farm": True,
-        "label": "Enregistrement d'une analyse de sol (pH/Matière Organique)",
-        "label_map": {
-            "farm_id": "identifiant exploitation",
-            "ph": "acidité sol (pH)",
-            "organic_matter": "taux matière organique",
-        },
-    },
     # =======================================================================
     # DOMAINE : FINANCES (WRITE — Producteur)
+    # (2026-09-14, Deep Intent Architecture Cleanup) : re-exposées (retirées
+    # du masquage `_DISABLED_INTENT_PREFIXES`) — audit confirmé : capacité
+    # RÉELLE et intégralement câblée (`add_expense`/`get_expense_summary`
+    # existent comme méthodes DB ET comme outils MCP exposés,
+    # `@register_action` enregistrés, rendu de confirmation dédié). Le
+    # masquage d'origine (revue de coût LLM, août 2026) répondait à une
+    # pression sur le quota Groq que new_task_v2 (Incrément F, ~1400 tokens
+    # contre ~3990 pour l'ancien catalogue universel) a largement résorbée
+    # — masquer une fonctionnalité VIVANTE pour une raison de coût devenue
+    # marginale contredit le principe de ce chantier ("1 intent
+    # classifiable = 1 objectif utilisateur réel").
     # =======================================================================
     "FINANCE_LOG_EXPENSE": {
         "tool_name": "add_expense",
@@ -644,45 +671,23 @@ INTENT_CONFIG = {
         "label": "Configuration langue et notifications",
         "label_map": {"language": "langue", "allow_voice": "notifications vocales"},
     },
-    "PROFILE_SWITCH_ROLE": {
-        "tool_name": "create_agent_action",
-        "required": ["target_role"],
-        "action_type": "WRITE",
-        "requires_farm": False,
-        "label": "Changement de mode d'interface (PRODUCER/BUYER)",
-        "label_map": {"target_role": "rôle cible"},
-    },
-    # =======================================================================
-    # SYSTEME & SÉCURITÉ (WRITE)
-    # =======================================================================
-    "SYSTEM_REPORT_ANOMALY": {
-        "tool_name": "report_anomaly",
-        "required": ["target_id", "anomaly_type", "description"],
-        "action_type": "WRITE",
-        "requires_farm": False,
-        "label": "Signalement d'une anomalie technique/marché",
-        "label_map": {
-            "target_id": "cible problème",
-            "anomaly_type": "type incident",
-            "description": "détails",
-        },
-    },
-    "SYSTEM_BIND_ZONE": {
-        "tool_name": "create_agent_action",
-        "required": ["zone"],
-        "action_type": "WRITE",
-        "requires_farm": False,
-        "label": "Rattachement territorial (zone agricole)",
-        "label_map": {"zone": "nom zone"},
-    },
-    "SYSTEM_COMMIT_TRANSACTION": {
-        "tool_name": "commit_staged_transaction",
-        "required": ["staging_id"],
-        "action_type": "WRITE",
-        "requires_farm": False,
-        "label": "Validation définitive d'une transaction verrouillée",
-        "label_map": {"staging_id": "identifiant de staging"},
-    },
+    # (2026-09-14, Deep Intent Architecture Cleanup, spec §21) : PROFILE_
+    # SWITCH_ROLE SUPPRIMÉ — `create_agent_action` n'existe pas comme outil,
+    # et la refonte double-rôle (2026-09-08) a rendu le concept OBSOLÈTE :
+    # un même utilisateur vend et achète message par message, sans jamais
+    # "changer de mode". `tests/evals/blocked/PROFILE_SWITCH_ROLE.md`
+    # confirmait déjà "échafaudé mais branché à rien" avant même cette
+    # refonte.
+    #
+    # (2026-09-14) : le namespace SYSTEM_* WRITE en entier (SYSTEM_
+    # REPORT_ANOMALY/BIND_ZONE/COMMIT_TRANSACTION) est SUPPRIMÉ —
+    # `report_anomaly`/`create_agent_action`/`commit_staged_transaction` ne
+    # sont exposés par AUCUN outil MCP réel (audit `infrastructure/mcp/
+    # exposure.py`) ; `bind_user_to_zone` existe comme méthode DB mais
+    # n'est lui non plus jamais exposé, et aucune phrase utilisateur
+    # crédible ne correspond à ces opérations (spec §23) — ce sont des
+    # capacités opérationnelles/internes jamais devenues des intentions
+    # utilisateur réelles, pas juste des "faux boutons" à masquer de plus.
     # =======================================================================
     # intentions DE LECTURE (READ — Consultations MCP Réelles)
     # Mappage strict sémantique des label_map
@@ -703,14 +708,13 @@ INTENT_CONFIG = {
         "label": "Inventaire détaillé par exploitation",
         "label_map": {"farm_id": "identifiant exploitation"},
     },
-    "STOCK_GET_MOVEMENTS": {
-        "tool_name": "get_stock_movements",
-        "required": ["stock_id"],
-        "action_type": "READ",
-        "requires_farm": False,
-        "label": "Grand livre de traçabilité d'un stock",
-        "label_map": {"stock_id": "identifiant stock"},
-    },
+    # (2026-09-14, Deep Intent Architecture Cleanup) : STOCK_GET_MOVEMENTS
+    # SUPPRIMÉ du catalogue classifiable — `get_stock_movements` reste un
+    # outil MCP réel et testé (domain/stock.py::StockService.get_movements,
+    # CONSERVÉ, pas supprimé), mais un historique de mouvements n'a de sens
+    # que si les mouvements sont enregistrables (STOCK_RECORD_MOVEMENT,
+    # supprimé ci-dessus, jamais câblé) — décision produit de cohérence,
+    # pas une absence d'implémentation.
     "SALES_GET_CATALOG": {
         "tool_name": "get_stocks",
         "required": ["phone", "farm_id"],
@@ -727,9 +731,26 @@ INTENT_CONFIG = {
     # marché pour un PRODUCTEUR (browse_auctions), voir SES PROPRES appels
     # d'offres pour un ACHETEUR (list_buyer_auctions). Même nom, deux
     # comportements incompatibles → confusion utilisateur ET risque de
-    # maintenance. Remplacé par deux goals explicites, chacun mono-rôle.
-    # MARKET_MY_REQUESTS est depuis fusionné (2026-07-21) dans
-    # list_buyer_auctions/order_tracking.py — voir AUCTION_TRACKING_GOALS.
+    # maintenance. Remplacé par deux goals explicites, chacun mono-rôle —
+    # `MARKET_BROWSE_REQUESTS` (producteur) ci-dessous, `BUYER_LIST_AUCTIONS`
+    # (acheteur, voir plus haut) pour l'autre moitié.
+    #
+    # (2026-09-14, Deep Intent Architecture Cleanup, spec §16/§19) :
+    # MARKET_MY_REQUESTS et MARKET_GET_REQUEST_DETAIL SUPPRIMÉS — doublons
+    # HIGH-overlap confirmés, jamais de vraie 2e décision à trancher :
+    #   - MARKET_MY_REQUESTS : le commentaire déjà présent depuis 2026-07-21
+    #     confirmait "fusionné dans list_buyer_auctions/order_tracking.py"
+    #     — même `tool_name` (`get_auctions`), même tunnel
+    #     (`auction_tracking`) que `BUYER_LIST_AUCTIONS`, jamais retiré du
+    #     catalogue malgré la fusion déjà faite côté flow.
+    #   - MARKET_GET_REQUEST_DETAIL : `tool_name="get_auctions_bids"` alors
+    #     que sa signature réelle (`get_auctions_bids(phone, status)`,
+    #     `services/database/auction.py`) n'accepte même pas `auction_id`
+    #     (son propre `required`) — contrat interne incohérent, jamais
+    #     réellement exécutable tel que déclaré. `BUYER_CHECK_AUCTION_STATUS`
+    #     (`get_auction_bids(auction_id, phone)`, la bonne méthode) couvre
+    #     déjà exactement ce besoin ("détail d'un appel d'offres et offres
+    #     reçues"), rôle BOTH inclus (le filtrage par rôle n'existe plus).
     "MARKET_BROWSE_REQUESTS": {
         "tool_name": "get_auctions",
         "required": [],
@@ -737,23 +758,6 @@ INTENT_CONFIG = {
         "requires_farm": False,
         "label": "Parcours des appels d'offres du marché (producteur cherche à répondre)",
         "label_map": {"zone": "zone", "product": "produit", "status": "statut"},
-    },
-    "MARKET_MY_REQUESTS": {
-        "tool_name": "get_auctions",
-        "required": [],
-        "action_type": "READ",
-        "requires_farm": False,
-        "handled_by_flow": True,
-        "label": "Consultation de mes propres appels d'offres publiés (acheteur)",
-        "label_map": {"zone": "zone", "product": "produit", "status": "statut"},
-    },
-    "MARKET_GET_REQUEST_DETAIL": {
-        "tool_name": "get_auctions_bids",
-        "required": ["auction_id"],
-        "action_type": "READ",
-        "requires_farm": False,
-        "label": "Consultation des offres reçues sur mon appel d'offres",
-        "label_map": {"auction_id": "identifiant enchère"},
     },
     "MARKET_GET_MY_PROPOSALS": {
         "tool_name": "get_my_active_bids",
@@ -771,46 +775,14 @@ INTENT_CONFIG = {
         "label": "Cours et prix actuel du marché local",
         "label_map": {"zone": "zone de cotation"},
     },
-    "MARKET_SNAPSHOT_ZONAL": {
-        "tool_name": "get_zone_market_overview",
-        "required": ["zone"],
-        "action_type": "READ",
-        "requires_farm": False,
-        "label": "Volumes de transaction et tendances locaux",
-        "label_map": {"zone": "zone"},
-    },
-    "AGRO_GET_CYCLES": {
-        "tool_name": "get_crop_cycles",
-        "required": ["farm_id"],
-        "action_type": "READ",
-        "requires_farm": True,
-        "label": "Historique des cycles de culture d'un domaine",
-        "label_map": {"farm_id": "identifiant exploitation"},
-    },
-    "AGRO_GET_STANDARDS": {
-        "tool_name": "get_crop_requirements",
-        "required": ["product"],
-        "action_type": "READ",
-        "requires_farm": False,
-        "label": "Besoins biologiques théoriques d'une culture",
-        "label_map": {"product": "culture"},
-    },
-    "AGRO_GET_ECONOMICS": {
-        "tool_name": "get_cycle_economics",
-        "required": ["cycle_id"],
-        "action_type": "READ",
-        "requires_farm": False,
-        "label": "Bilan financier analytique d'une parcelle",
-        "label_map": {"cycle_id": "identifiant cycle"},
-    },
-    "AGRO_GET_RISKS": {
-        "tool_name": "get_active_sanitary_risks",
-        "required": ["zone"],
-        "action_type": "READ",
-        "requires_farm": False,
-        "label": "Analyse des risques sanitaires régionaux",
-        "label_map": {"zone": "zone"},
-    },
+    # (2026-09-14, Deep Intent Architecture Cleanup) : MARKET_SNAPSHOT_ZONAL
+    # SUPPRIMÉ — `get_zone_market_overview` inexistant, doublon strict de
+    # `MARKET_SNAPSHOT` (`get_market_snapshot`, même `required=["zone"]`),
+    # qui reste exposé et fonctionnel.
+    # (2026-09-14, Deep Intent Architecture Cleanup) : AGRO_GET_CYCLES/
+    # STANDARDS/ECONOMICS/RISKS SUPPRIMÉS avec le reste du module agronomie
+    # (voir plus haut, "DOMAINE : PRODUCTION FUTURE") — mêmes preuves
+    # (aucune méthode DB, aucun outil MCP exposé).
     "FARM_GET_MY_LIST": {
         "tool_name": "get_producer_farm",
         "required": ["phone"],
@@ -835,46 +807,23 @@ INTENT_CONFIG = {
         "label": "Consultation profil Ladini par téléphone",
         "label_map": {"phone": "téléphone de recherche"},
     },
-    "PROFILE_GET_TRUST": {
-        "tool_name": "get_trust_score",
-        "required": ["phone"],
-        "action_type": "READ",
-        "requires_farm": False,
-        "label": "Note de confiance commerciale",
-        "label_map": {"phone": "votre téléphone"},
-    },
-    "PROFILE_GET_CONTEXT": {
-        "tool_name": "get_user_context",
-        "required": [],
-        "action_type": "READ",
-        "requires_farm": False,
-        "label": "Variables de session NLU/Agent (Zéro MCP)",
-        "label_map": {},
-    },
-    "DASHBOARD_PRODUCER": {
-        "tool_name": "get_producer_dashboard",
-        "required": ["phone"],
-        "action_type": "READ",
-        "requires_farm": False,
-        "label": "Tableau de bord d'exploitation Ladini",
-        "label_map": {"phone": "votre téléphone"},
-    },
-    "SEARCH_PRODUCTS": {
-        "tool_name": "search_products",
-        "required": ["product"],
-        "action_type": "READ",
-        "requires_farm": False,
-        "label": "Recherche par mot-clé dans le catalogue",
-        "label_map": {"product": "terme recherché"},
-    },
-    "SEARCH_NEARBY": {
-        "tool_name": "get_all_zone_market_overview",
-        "required": ["latitude", "longitude"],
-        "action_type": "READ",
-        "requires_farm": False,
-        "label": "Recherche infrastructures / offres de proximité GPS",
-        "label_map": {"latitude": "latitude", "longitude": "longitude"},
-    },
+    # (2026-09-14, Deep Intent Architecture Cleanup) : PROFILE_GET_TRUST/
+    # DASHBOARD_PRODUCER/SEARCH_NEARBY SUPPRIMÉS — outils inexistants,
+    # aucun agrégat/méthode DB équivalent (`get_trust_score`,
+    # `get_producer_dashboard`, `get_all_zone_market_overview` absents de
+    # `infrastructure/mcp/exposure.py`).
+    #
+    # PROFILE_GET_CONTEXT SUPPRIMÉ (pas seulement masqué comme avant) —
+    # `get_user_context` n'existe nulle part, y compris en usage interne
+    # (`get_buyer_context` est la méthode réellement utilisée en interne,
+    # sans rapport avec cet intent) : ni une intention utilisateur ni une
+    # capability interne vivante, spec §22.
+    #
+    # SEARCH_PRODUCTS SUPPRIMÉ (spec §17, HIGH overlap confirmé) — MÊME
+    # `tool_name` (`search_products`) que `BUYER_REQUEST`, sans
+    # `handled_by_flow` ni intégration au flow buyer réel : un doublon
+    # générique jamais réellement distinct de la vraie recherche acheteur.
+    # Une seule intention canonique retenue : `BUYER_REQUEST`.
     "VALIDATE_PRICE": {
         "tool_name": "check_price_anomaly",
         "required": ["product", "price", "zone"],
@@ -887,14 +836,11 @@ INTENT_CONFIG = {
             "zone": "marché référence",
         },
     },
-    "SYSTEM_GET_PENDING": {
-        "tool_name": "get_pending_actions",
-        "required": [],
-        "action_type": "READ",
-        "requires_farm": False,
-        "label": "Consultation des actions système en attente de traitement",
-        "label_map": {},
-    },
+    # (2026-09-14, Deep Intent Architecture Cleanup) : SYSTEM_GET_PENDING
+    # SUPPRIMÉ avec le reste du namespace SYSTEM_* WRITE (voir plus haut) —
+    # `get_pending_actions` n'est exposé par aucun outil MCP réel, et aucune
+    # phrase utilisateur crédible ne correspond à cette opération purement
+    # opérationnelle (spec §23).
 }
 
 
@@ -969,7 +915,12 @@ _TUNNEL_ASSIGNMENTS = {
     "BUYER_CANCEL_ORDER": "order_tracking",
     "BUYER_LIST_AUCTIONS": "auction_tracking",
     "BUYER_CHECK_AUCTION_STATUS": "auction_tracking",
-    "MARKET_MY_REQUESTS": "auction_tracking",
+    # Mise à jour d'un appel d'offres déjà publié — gère sa propre
+    # confirmation (corrections vs annulation), jamais confirmation_gate/
+    # mcp_tool_executor génériques. Réutilise le tunnel "auction_tracking"
+    # (déjà routé vers order_tracking_resolver) : la sélection de l'appel
+    # d'offres à modifier réutilise la même liste que BUYER_LIST_AUCTIONS.
+    "PROCUREMENT_UPDATE_REQUEST": "auction_tracking",
     # PRODUCER — intents entièrement pris en charge par
     # producer_auction_resolver (jamais confirmation_gate/mcp_tool_executor).
     "MARKET_BROWSE_REQUESTS": "producer_auction",
@@ -981,7 +932,31 @@ _TUNNEL_ASSIGNMENTS = {
     # flows/producer/flow.py::_resolve_product_for_update /
     # _resolve_cycle_for_update.
     "SALES_UPDATE_PRODUCT": "producer_update",
-    "SALES_UPDATE_PRODUCTION": "producer_update",
+    "PRODUCTION_UPDATE_FUTURE": "producer_update",
+    # (2026-09-15, correctif RACINE — incident répété "confirmer"/"annuler"
+    # nu jamais compris) : sans cette entrée, ces deux goals ne matchent
+    # AUCUNE règle de `DomainRouter` (core/router.py) et retombent sur son
+    # `fallback_router` (`make_route_after_validator`), qui route TOUT
+    # `PendingInteraction(CONFIRM_ACTION)` porté par un goal à action
+    # enregistrée vers `to_confirmation` (confirmation_gate/
+    # mcp_tool_executor génériques) — AVANT même que `_resolve_pending_
+    # order_action` (flows/producer/flow.py, tunnel auto-suffisant fusionné
+    # confirmer/annuler) n'ait la moindre chance de s'exécuter pour le tour
+    # de confirmation. Résultat observé : le verrou posé par `flows/buyer/
+    # order_tracking.py::list_orders` était bien créé, mais le tour SUIVANT
+    # ("confirmer") ne le retrouvait jamais — confirmation_gate exécute
+    # correctement CONFIRM (même action que le résolveur), mais REJECT n'y
+    # signifie qu'"abandonner", jamais "annuler la commande" (deux actions
+    # RÉELLEMENT différentes ici, `confirm_order_by_producer` vs
+    # `cancel_confirmed_order` — voir `_finalize_pending_order_action`).
+    # Avec cette entrée, `PRODUCER_RESOLVER_GOALS`... (dérivé de ce tunnel,
+    # core/goals.py) matche la règle `RouteRule(goals=PRODUCER_UPDATE_GOALS,
+    # target="to_resolver")` en PREMIER (`DomainRouter.decide`, AVANT toute
+    # bascule vers le fallback) — même garantie de routage que SALES_UPDATE_
+    # PRODUCT/PRODUCTION_UPDATE_FUTURE ci-dessus, empiriquement déjà
+    # vérifiée fonctionnelle en production.
+    "PRODUCER_CONFIRM_ORDER": "producer_update",
+    "PRODUCER_CANCEL_ORDER": "producer_update",
     # Escrow (Paydunya) : gère sa propre extraction/validation de code, jamais
     # confirmation_gate/mcp_tool_executor génériques — voir
     # flows/producer/flow.py::_resolve_delivery_otp.
@@ -993,10 +968,36 @@ _BREAKOUT_INTENTS = (
     "BUYER_LIST_ORDERS",
     "BUYER_CHECK_ORDER_STATUS",
     "BUYER_CANCEL_ORDER",
-    # Ex-"MARKET_GET_REQUESTS" (split 2026-07-20) : les deux moitiés
-    # conservent le même privilège de sortie de tunnel qu'avant le split.
+    # Ex-"MARKET_GET_REQUESTS" (split 2026-07-20) — l'autre moitié
+    # (`MARKET_MY_REQUESTS`) a été supprimée le 2026-09-14 (doublon
+    # confirmé de `BUYER_LIST_AUCTIONS`, voir Deep Intent Architecture
+    # Cleanup) ; elle ne portait de toute façon pas ce privilège de
+    # breakout elle-même.
     "MARKET_BROWSE_REQUESTS",
-    "MARKET_MY_REQUESTS",
+    # (2026-09-13, confirmation explicite producteur) : incident réel
+    # double-rôle — un producteur avec le menu "mes achats" (buyer, sa
+    # propre commande) encore actif tapait "confirmer"/"annuler" pour agir
+    # sur SES VENTES (producteur) ; sans ce privilège de breakout,
+    # `cognitive_guard` pouvait exiger un seuil de confiance au lieu de
+    # laisser passer directement, alors que `BUYER_CANCEL_ORDER` (l'action
+    # miroir côté acheteur) l'a déjà. Mêmes verbes d'action non ambigus,
+    # même traitement.
+    "PRODUCER_CANCEL_ORDER",
+    "PRODUCER_CONFIRM_ORDER",
+    # (2026-09-14, incident WhatsApp #8) : `SALES_LIST_ORDERS` (consultation
+    # pure des ventes reçues, mode READ) n'avait jamais ce privilège alors
+    # que son miroir exact côté acheteur (`BUYER_LIST_ORDERS`, juste
+    # au-dessus) l'a depuis le début — asymétrie jamais remarquée. Un
+    # producteur avec un tunnel `BUYER_PREORDER_CONFIRM` resté actif (parfois
+    # une précommande déjà finalisée par un autre chemin, jamais nettoyée —
+    # `expected=LOCATION` figé indéfiniment) tapant "mes commandes reçues"
+    # se voyait pourtant CORRECTEMENT classé `NEW_TASK`/`SALES_LIST_ORDERS`
+    # par le LLM, mais `goal_planner` gardait le tunnel verrouillé faute de
+    # ce privilège — reprenant la confirmation d'une précommande périmée
+    # (échec silencieux, message d'erreur incompréhensible) au lieu
+    # d'afficher la liste demandée. Une simple CONSULTATION ne devrait
+    # jamais rester bloquée derrière un tunnel d'écriture, quel qu'il soit.
+    "SALES_LIST_ORDERS",
 )
 
 for _goal, _tunnel in _TUNNEL_ASSIGNMENTS.items():
@@ -1015,34 +1016,26 @@ del _goal, _tunnel
 INTENT_ROLE = {
     # STOCK — producer only
     "STOCK_REGISTER_HARVEST": "PRODUCER",
-    "STOCK_RECORD_MOVEMENT": "PRODUCER",
-    "STOCK_ADJUST": "PRODUCER",
-    "STOCK_REMOVE_PARTIAL": "PRODUCER",
-    "STOCK_DELETE": "PRODUCER",
     "STOCK_GET_SUMMARY": "PRODUCER",
     "STOCK_GET_DETAIL": "PRODUCER",
-    "STOCK_GET_MOVEMENTS": "PRODUCER",
-    "STOCK_UPDATE_LEVEL": "PRODUCER",
     # SALES — producer
     "SALES_PUBLISH_PRODUCT": "PRODUCER",
     "SALES_RECORD_DIRECT": "PRODUCER",
     "SALES_LIST_ORDERS": "PRODUCER",
     "SALES_PLACE_BID": "PRODUCER",
-    "SALES_ACCEPT_CONTRACT": "PRODUCER",
     "SALES_GET_CATALOG": "PRODUCER",
     "SALES_UPDATE_PRODUCT": "PRODUCER",
     "SALES_UNPUBLISH_PRODUCT": "PRODUCER",
-    "SALES_UPDATE_PRODUCTION": "PRODUCER",
+    "PRODUCTION_UPDATE_FUTURE": "PRODUCER",
     "PRODUCER_CONFIRM_DELIVERY_OTP": "PRODUCER",
     "PRODUCER_CONFIRM_DELIVERY_PAYMENT": "PRODUCER",
     "PRODUCER_CANCEL_ORDER": "PRODUCER",
+    "PRODUCER_CONFIRM_ORDER": "PRODUCER",
     "MARKET_GET_MY_PROPOSALS": "PRODUCER",
     # PROCUREMENT — buyer
     "PROCUREMENT_CREATE_REQUEST": "BUYER",
-    "PROCUREMENT_SELECT_WINNER": "BUYER",
-    "PROCUREMENT_ACCEPT_OFFER": "BUYER",
+    "PROCUREMENT_UPDATE_REQUEST": "BUYER",
     "BUYER_REQUEST": "BUYER",
-    "MARKET_GET_REQUEST_DETAIL": "BOTH",
     # BUYER transactional tunnel (Panier → Précommande → Négociation)
     "BUYER_ADD_TO_CART": "BUYER",
     "BUYER_VIEW_CART": "BUYER",
@@ -1057,25 +1050,12 @@ INTENT_ROLE = {
     # Auction Tracking — buyer only
     "BUYER_LIST_AUCTIONS": "BUYER",
     "BUYER_CHECK_AUCTION_STATUS": "BUYER",
-    # MARKET / SEARCH — both roles browse
+    # MARKET — both roles browse
     "MARKET_BROWSE_REQUESTS": "PRODUCER",
-    "MARKET_MY_REQUESTS": "BUYER",
     "MARKET_SNAPSHOT": "BOTH",
-    "MARKET_SNAPSHOT_ZONAL": "BOTH",
-    "SEARCH_PRODUCTS": "BOTH",
-    "SEARCH_NEARBY": "BOTH",
     "VALIDATE_PRICE": "BOTH",
-    # CROP / AGRO — producer only
-    "CROP_START_CYCLE": "PRODUCER",
-    "DECLARE_CROP_CYCLE": "PRODUCER",
-    "CROP_RECORD_INTERVENTION": "PRODUCER",
-    "CROP_RECORD_OBSERVATION": "PRODUCER",
-    "CROP_UPDATE_STAGE": "PRODUCER",
-    "CROP_UPDATE_SOIL": "PRODUCER",
-    "AGRO_GET_CYCLES": "PRODUCER",
-    "AGRO_GET_STANDARDS": "BOTH",
-    "AGRO_GET_ECONOMICS": "PRODUCER",
-    "AGRO_GET_RISKS": "BOTH",
+    # PRODUCTION FUTURE — producer only
+    "PRODUCTION_DECLARE_FUTURE": "PRODUCER",
     # FARM
     "FARM_CREATE": "PRODUCER",
     "FARM_UPDATE": "PRODUCER",
@@ -1083,18 +1063,10 @@ INTENT_ROLE = {
     # FINANCE
     "FINANCE_LOG_EXPENSE": "PRODUCER",
     "FINANCE_GET_SUMMARY": "PRODUCER",
-    # PROFILE / SYSTEM
+    # PROFILE
     "PROFILE_SET_GEO": "BOTH",
     "PROFILE_SET_PREFS": "BOTH",
-    "PROFILE_SWITCH_ROLE": "BOTH",
     "PROFILE_GET_MCP_USER": "BOTH",
-    "PROFILE_GET_TRUST": "BOTH",
-    "PROFILE_GET_CONTEXT": "BOTH",
-    "DASHBOARD_PRODUCER": "PRODUCER",
-    "SYSTEM_REPORT_ANOMALY": "BOTH",
-    "SYSTEM_BIND_ZONE": "BOTH",
-    "SYSTEM_COMMIT_TRANSACTION": "BOTH",
-    "SYSTEM_GET_PENDING": "BOTH",
 }
 
 
@@ -1112,15 +1084,19 @@ INTENT_DOMAIN = {
         else "PROCUREMENT"
         if k.startswith("PROCUREMENT_")
         else "MARKET"
-        if k.startswith("MARKET_") or k.startswith("SEARCH_") or k == "VALIDATE_PRICE"
-        else "CROP"
-        if k.startswith("CROP_") or k.startswith("AGRO_") or k.startswith("DECLARE_")
+        if k.startswith("MARKET_") or k == "VALIDATE_PRICE"
+        # (2026-09-14, Deep Intent Architecture Cleanup) : domaine "CROP"
+        # renommé "PRODUCTION" — l'ancien module agronomique (CROP_*/AGRO_*)
+        # est supprimé, seule survit la déclaration/mise à jour de
+        # production future, désormais namespace `PRODUCTION_*` lui-même.
+        else "PRODUCTION"
+        if k.startswith("PRODUCTION_")
         else "FARM"
         if k.startswith("FARM_")
         else "FINANCE"
         if k.startswith("FINANCE_")
         else "PROFILE"
-        if k.startswith("PROFILE_") or k == "DASHBOARD_PRODUCER"
+        if k.startswith("PROFILE_")
         else "SYSTEM"
     )
     for k in INTENT_CONFIG
@@ -1181,7 +1157,7 @@ INTENT_DISAMBIGUATION = {
                 "📦 Prêt maintenant (disponible immédiatement, publié sur le marché)",
             ),
             (
-                "DECLARE_CROP_CYCLE",
+                "PRODUCTION_DECLARE_FUTURE",
                 "⏳ Prêt plus tard (récolte ou production à venir, avec une date)",
             ),
         ],
@@ -1208,7 +1184,7 @@ INTENT_DISAMBIGUATION = {
             # "je veux publier des chèvres", "vendre des tomates"... doivent
             # TOUJOURS demander "prêt maintenant ou plus tard ?" plutôt que de
             # laisser le LLM router seul (il biaise les ANIMAUX vers la
-            # production future / précommande — voir DECLARE_CROP_CYCLE, label
+            # production future / précommande — voir PRODUCTION_DECLARE_FUTURE, label
             # "élevage... précommande"). Décision produit 2026-08-05 : toujours
             # désambiguïser ce cas. Les entités déjà extraites (quantité/prix)
             # sont sauvegardées par semantic_disambiguation avant le menu, donc
@@ -1242,7 +1218,7 @@ INTENT_DISAMBIGUATION = {
         "title": "🧑‍🌾 Espace Vendeur — que souhaitez-vous faire ?",
         "options": [
             ("SALES_PUBLISH_PRODUCT", "📦 Publier un produit disponible maintenant"),
-            ("DECLARE_CROP_CYCLE", "⏳ Déclarer une récolte ou production à venir"),
+            ("PRODUCTION_DECLARE_FUTURE", "⏳ Déclarer une récolte ou production à venir"),
             ("MARKET_BROWSE_REQUESTS", "📢 Répondre à un appel d'offres d'un acheteur"),
         ],
         "roles": ["PRODUCER"],
@@ -1261,28 +1237,13 @@ INTENT_DISAMBIGUATION = {
             "comment vendre mes produits",
         ],
     },
-    # "J'ai vendu 100kg" — already happened
-    "STOCK_OR_SALE_RECORDING": {
-        "title": "Voulez-vous enregistrer une vente ou une simple sortie de stock ?",
-        "options": [
-            (
-                "SALES_RECORD_DIRECT",
-                "💰 Vente : avec montant encaissé (impacte mon chiffre d'affaires)",
-            ),
-            (
-                "STOCK_REMOVE_PARTIAL",
-                "📤 Sortie : ajustement du stock sans revenu (perte, autoconsommation)",
-            ),
-        ],
-        "lexical_hints": [
-            "j'ai vendu",
-            "j ai vendu",
-            "donné",
-            "donne",
-            "perdu",
-            "consommé",
-        ],
-    },
+    # (2026-09-14, Deep Intent Architecture Cleanup) : "STOCK_OR_SALE_
+    # RECORDING" SUPPRIMÉ — son unique alternative à SALES_RECORD_DIRECT
+    # (STOCK_REMOVE_PARTIAL, "sortie sans revenu") est supprimée du
+    # catalogue (aucun outil MCP réel). "j'ai vendu 100kg" route désormais
+    # directement vers SALES_RECORD_DIRECT — plus de désambiguïsation
+    # nécessaire, il n'y a plus qu'une seule intention valide pour ce
+    # phrasé.
     # "Je cherche du mais" — buy via auction or just look at catalog
     "BUY_VS_BROWSE": {
         "title": "Voulez-vous consulter le catalogue ou lancer un appel d'offres ?",
@@ -1308,7 +1269,6 @@ INTENT_DISAMBIGUATION = {
         "title": "Quel type de prix recherchez-vous ?",
         "options": [
             ("MARKET_SNAPSHOT", "📊 Prix actuel près de chez vous"),
-            ("MARKET_SNAPSHOT_ZONAL", "🗺️ Tendance dans une zone précise"),
             ("VALIDATE_PRICE", "✅ Vérifier mon prix face au marché"),
         ],
         "lexical_hints": ["combien", "prix du", "prix actuel", "cours du"],

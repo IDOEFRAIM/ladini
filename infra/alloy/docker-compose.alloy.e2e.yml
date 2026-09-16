@@ -1,0 +1,19 @@
+# ═════════════════════════════════════════════════════════════════════
+# infra/alloy/docker-compose.alloy.e2e.yml — overlay LOCAL E2E UNIQUEMENT.
+#
+# `docker-compose.alloy.yml` attend un réseau externe littéralement nommé
+# "agri_net" (le nom qu'il porte en production, où docker-compose.prod.yml
+# tourne sans `-p`/projet explicite). La validation E2E locale isole tout
+# sous le projet Compose `ladini-e2e` (voir docs/LOCAL_E2E_PREDEPLOY_
+# VALIDATION_2026-09-16.md) — le même réseau y est en réalité nommé
+# `ladini-e2e_agri_net`. Cet overlay fait UNIQUEMENT ce remappage, rien
+# d'autre — jamais utilisé en production.
+#
+# Usage :
+#   docker compose -p ladini-e2e --env-file .env.alloy.e2e \
+#     -f docker-compose.alloy.yml -f docker-compose.alloy.e2e.yml up -d
+# ═════════════════════════════════════════════════════════════════════
+networks:
+  agri_net:
+    name: ladini-e2e_agri_net
+    external: true

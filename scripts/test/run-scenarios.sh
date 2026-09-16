@@ -69,7 +69,15 @@ REPO="${SANDBOX}/repo"; mkdir -p "$REPO/scripts" "$REPO/deploy/releases" "$REPO/
 cp "${ROOT}"/scripts/*.sh "$REPO/scripts/"
 cp "${ROOT}/docker-compose.prod.yml" "$REPO/"
 # .env minimal qui satisfait preflight
+#
+# (2026-09-16, follow-up pre-Hetzner) — REDIS_URL AJOUTÉ : ce fixture datait
+# d'avant le chantier Hetzner scale-out qui a rendu REDIS_URL obligatoire
+# (preflight.sh + docker-compose.prod.yml, Redis externe partagé). Sans lui,
+# TOUS les cas 1-9 échouaient dès preflight — un faux négatif qui masquait
+# ce fichier de tests depuis que REDIS_URL est devenu requis (jamais
+# re-exécuté depuis, confirmé : aucun test ici ne passait avant ce correctif).
 cat > "$REPO/.env" <<EOF
+REDIS_URL=rediss://default:x@redis.example.com:6379/0
 REDIS_PASSWORD=$(printf 'a%.0s' {1..32})
 MCP_HTTP_AUTH_TOKEN=$(printf 'b%.0s' {1..32})
 FLOWER_USER=admin
@@ -178,6 +186,91 @@ MR2="${SANDBOX}/migrepo2"
 mk_migrepo "$MR2" '    "ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS tmpcol VARCHAR",'
 CLS="$(cd "$MR2" && bash scripts/check_migrations.sh HEAD~1 HEAD --classify 2>/dev/null)"
 [ "$CLS" = "ROLLBACK_SAFE" ] && ok "EXPAND-only == ROLLBACK_SAFE" || bad "EXPAND classify == '$CLS'"
+
+# ── Cas 10 — node_deploy.sh (single-node) ne résout JAMAIS la migration
+#            contre le littéral "HEAD" (2026-09-16, follow-up pre-Hetzner) ──
+# Sandbox DÉDIÉ (pas $REPO — déjà mutée par les cas 1-9) : copie de lib.sh
+# avec `migration_class_between` REDÉFINIE en fin de fichier (la dernière
+# définition d'une fonction bash l'emporte) pour capturer ses 2 arguments
+# au lieu de faire un vrai `git diff` — ce test prouve QUEL SHA est passé,
+# pas le comportement de check_migrations.sh (déjà couvert au Cas 9).
+echo "── Cas 10 — GIT_SHA (jamais HEAD) pour la classification migration ──"
+R10="${SANDBOX}/repo10"
+mkdir -p "$R10/scripts" "$R10/deploy/releases" "$R10/backend/alembic"
+cp "${ROOT}"/scripts/*.sh "$R10/scripts/"
+cp "${ROOT}/docker-compose.prod.yml" "$R10/"
+: > "$R10/backend/alembic.ini"   # présence seule suffit à activer la branche
+cat > "$R10/.env" <<EOF
+REDIS_URL=rediss://default:x@redis.example.com:6379/0
+REDIS_PASSWORD=$(printf 'a%.0s' {1..32})
+MCP_HTTP_AUTH_TOKEN=$(printf 'b%.0s' {1..32})
+FLOWER_USER=admin
+FLOWER_PASSWORD=$(printf 'c%.0s' {1..20})
+GROQ_API_KEY=gsk_realish
+DB_HOST=db.example.com
+DB_NAME=ladini
+DB_USER=u
+DB_PASSWORD=p
+EOF
+MIG_LOG="${SANDBOX}/mig_calls.log"; : > "$MIG_LOG"
+cat >> "$R10/scripts/lib.sh" <<EOF
+# ── Override de test (Cas 10, run-scenarios.sh) — capture les arguments
+# au lieu de faire un vrai git diff. La dernière définition d'une fonction
+# bash l'emporte : cette version remplace celle plus haut dans ce fichier.
+migration_class_between() {
+  printf 'FROM=%s TO=%s\n' "\$1" "\$2" >> "${MIG_LOG}"
+  echo "ROLLBACK_SAFE"
+}
+EOF
+( cd "$R10" && git init -q && git config user.email t@t && git config user.name t \
+    && git commit -q --allow-empty -m base )
+run 0 "deploy sha-X10a (1er, alembic présent)" -- env HEALTH_TIMEOUT=6 ROLLBACK_HEALTH_TIMEOUT=6 MOCK_VERSION_RELEASE=sha-X10a bash "$R10/scripts/deploy.sh" sha-X10a
+run 0 "deploy sha-X10b (2e, exerce la classification)" -- env HEALTH_TIMEOUT=6 ROLLBACK_HEALTH_TIMEOUT=6 MOCK_VERSION_RELEASE=sha-X10b bash "$R10/scripts/deploy.sh" sha-X10b
+if [ -s "$MIG_LOG" ]; then
+  if grep -qE '(^|[[:space:]])(FROM|TO)=HEAD([[:space:]]|$)' "$MIG_LOG"; then
+    bad "migration_class_between n'a JAMAIS reçu le littéral HEAD ($(cat "$MIG_LOG"))"
+  else
+    ok "migration_class_between n'a jamais reçu le littéral HEAD ($(tail -n1 "$MIG_LOG"))"
+  fi
+  # Le mock docker (image_label) renvoie toujours ce SHA factice pour
+  # org.opencontainers.image.revision — c'est la SEULE source de vérité
+  # attendue pour le "TO" de la 2e classification.
+  if grep -q 'TO=deadbeefcafe1234deadbeefcafe1234deadbeef' "$MIG_LOG"; then
+    ok "TO == GIT_SHA résolu depuis le label OCI (jamais HEAD ni le tag de release)"
+  else
+    bad "TO n'est pas le GIT_SHA résolu depuis le label OCI ($(cat "$MIG_LOG"))"
+  fi
+else
+  bad "migration_class_between n'a jamais été appelée — la branche alembic.ini n'a pas été exercée"
+fi
+
+echo "── Cas 11 — rollback.sh : GIT_SHA manquant ⇒ jamais de repli sur HEAD ──"
+R11="${SANDBOX}/repo11"
+mkdir -p "$R11/scripts" "$R11/deploy/releases" "$R11/backend/alembic"
+cp "${ROOT}"/scripts/*.sh "$R11/scripts/"
+cp "${ROOT}/docker-compose.prod.yml" "$R11/"
+: > "$R11/backend/alembic.ini"
+cp "$R10/.env" "$R11/.env"
+MIG_LOG11="${SANDBOX}/mig_calls11.log"; : > "$MIG_LOG11"
+cat >> "$R11/scripts/lib.sh" <<EOF
+migration_class_between() {
+  printf 'FROM=%s TO=%s\n' "\$1" "\$2" >> "${MIG_LOG11}"
+  echo "ROLLBACK_SAFE"
+}
+EOF
+# Manifeste de release SANS champ GIT_SHA (simule un fichier ancien/corrompu
+# — exactement le cas qui retombait sur `echo HEAD` avant le correctif).
+: > "$R11/deploy/releases/history.log"
+cat > "$R11/deploy/releases/current" <<EOF
+RELEASE_VERSION=sha-old
+DEPLOYED_AT=2026-01-01T00:00:00Z
+EOF
+run 1 "rollback sans release précédente ni GIT_SHA (cible explicite)" -- env HEALTH_TIMEOUT=6 MOCK_VERSION_RELEASE=sha-target bash "$R11/scripts/rollback.sh" sha-target
+if [ -s "$MIG_LOG11" ]; then
+  bad "migration_class_between n'aurait pas dû être appelée sans GIT_SHA fiable ($(cat "$MIG_LOG11"))"
+else
+  ok "rollback.sh : GIT_SHA absent ⇒ classification forcée MIGRATION_REQUIRES_MANUAL_RECOVERY sans jamais tenter HEAD"
+fi
 
 rm -rf "$SANDBOX"
 echo

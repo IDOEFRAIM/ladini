@@ -143,6 +143,10 @@ class TestNoPendingTargetFallsBackToProductCatalog:
             "ladini.services.pending_photo_target.pop_pending_auction_photo",
             lambda phone: None,
         )
+        monkeypatch.setattr(
+            "ladini.services.pending_photo_target.pop_pending_product_photo",
+            lambda phone: None,
+        )
         resolve = AsyncMock(return_value={"none": True})
         monkeypatch.setattr(mod, "_resolve_target_product", resolve)
         sent = AsyncMock()
@@ -152,3 +156,67 @@ class TestNoPendingTargetFallsBackToProductCatalog:
         run(mod._process(PHONE, "https://twilio/media", "image/jpeg"))
 
         resolve.assert_awaited_once_with(PHONE)
+
+
+class TestPendingProductPhotoTakesPriorityOverCatalogAmbiguity:
+    """(2026-09-15) Un producteur qui vient de publier un 2e/3e produit et
+    envoie une photo juste après ne doit PAS se voir présenter le menu de
+    désambiguïsation ("à quel produit correspond cette photo ?") — la photo
+    va au produit qu'il vient de créer, même mécanisme que bid/auction."""
+
+    def test_a_pending_product_photo_is_linked_when_nothing_else_is_pending(self, monkeypatch):
+        import ladini.workers.media.product_photo_task as mod
+
+        _patch_download_and_upload(monkeypatch)
+        monkeypatch.setattr(
+            "ladini.services.pending_photo_target.pop_pending_bid_photo",
+            lambda phone: None,
+        )
+        monkeypatch.setattr(
+            "ladini.services.pending_photo_target.pop_pending_auction_photo",
+            lambda phone: None,
+        )
+        monkeypatch.setattr(
+            "ladini.services.pending_photo_target.pop_pending_product_photo",
+            lambda phone: "product-1",
+        )
+        resolve_called = {"count": 0}
+        monkeypatch.setattr(
+            mod, "_resolve_target_product",
+            AsyncMock(side_effect=lambda phone: resolve_called.__setitem__("count", 1)),
+        )
+        link_photo = AsyncMock()
+        monkeypatch.setattr(mod, "_link_photo_and_confirm", link_photo)
+
+        run(mod._process(PHONE, "https://twilio/media", "image/jpeg"))
+
+        link_photo.assert_awaited_once_with(
+            PHONE, {"id": "product-1"}, "https://x/uploaded.jpg", message_sid=None
+        )
+        assert resolve_called["count"] == 0, "le menu d'ambiguïté ne doit pas être affiché"
+
+    def test_a_pending_bid_still_wins_over_a_pending_product(self, monkeypatch):
+        import ladini.workers.media.product_photo_task as mod
+
+        _patch_download_and_upload(monkeypatch)
+        monkeypatch.setattr(
+            "ladini.services.pending_photo_target.pop_pending_bid_photo",
+            lambda phone: "bid-1",
+        )
+        monkeypatch.setattr(
+            "ladini.services.pending_photo_target.pop_pending_auction_photo",
+            lambda phone: None,
+        )
+        monkeypatch.setattr(
+            "ladini.services.pending_photo_target.pop_pending_product_photo",
+            lambda phone: "product-1",
+        )
+        link_bid = AsyncMock()
+        link_photo = AsyncMock()
+        monkeypatch.setattr(mod, "_link_bid_photo_and_confirm", link_bid)
+        monkeypatch.setattr(mod, "_link_photo_and_confirm", link_photo)
+
+        run(mod._process(PHONE, "https://twilio/media", "image/jpeg"))
+
+        link_bid.assert_awaited_once()
+        link_photo.assert_not_awaited()

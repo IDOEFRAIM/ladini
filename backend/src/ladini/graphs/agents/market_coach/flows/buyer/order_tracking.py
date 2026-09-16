@@ -6,18 +6,21 @@ Fonctionnalités :
   3. cancel_order      — Annulation conversationnelle directe.
   4. list_buyer_auctions — Dashboard enchères (toutes statuts).
   5. check_auction_status — Détail d'une enchère + offres reçues.
-  6. proactive_order_check — Greeting proactif après inactivité.
+  6. _resolve_auction_for_update — Modification d'un appel d'offres ouvert.
+  7. proactive_order_check — Greeting proactif après inactivité.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ladini.core.formatting import fmt_num as _fmt_num
+from ladini.domain.quantity_unit import parse_quantity_unit_from_text
 from ladini.graphs.agents.market_coach.core.goals import (
     BUYER_AUCTION_TRACKING_GOALS as AUCTION_TRACKING_GOALS,
 )
@@ -26,10 +29,9 @@ from ladini.graphs.agents.market_coach.core.goals import (
 )
 
 # Aliases de compat — source canonique : core/goals.py (dérivés d'INTENT_CONFIG).
-# NOTE : MARKET_MY_REQUESTS ∈ AUCTION_TRACKING_GOALS depuis la fusion du
-# 2026-07-21 (resolve_own_auctions absorbé par list_buyer_auctions, strict
-# superset : tous statuts + compte d'offres + sélection → check_auction_status
-# /finalize_winner). Voir [[market-coach-turn-boundary-state]].
+# NOTE : MARKET_MY_REQUESTS (fusionné dans BUYER_LIST_AUCTIONS le 2026-07-21)
+# a été définitivement supprimé d'INTENT_CONFIG le 2026-09-13 (Deep Intent
+# Architecture Cleanup) — plus aucun goal de ce nom ne peut être classé.
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     set_pending_interaction,
@@ -111,7 +113,10 @@ MENU_SESSION_TTL_SECONDS = 30 * 60
 ORDER_STATUS_MAP = {
     "PENDING": ("⏳", "En attente de validation"),
     "DRAFT": ("📝", "Brouillon (non confirmée)"),
-    "CONFIRMED": ("✅", "Confirmée — préparation en cours"),
+    # (2026-09-13, confirmation explicite producteur) : distinct de
+    # CONFIRMED — le producteur n'a pas encore accepté de l'honorer.
+    "PENDING_PRODUCER_CONFIRMATION": ("⏳", "En attente de confirmation du producteur"),
+    "CONFIRMED": ("✅", "Confirmée par le producteur — préparation en cours"),
     "PAID": ("💰", "Payée — en attente d'expédition"),
     "PROCESSING": ("🔄", "En cours de préparation"),
     "SHIPPED": ("🚛", "Expédiée — en route vers vous"),
@@ -224,6 +229,11 @@ async def _safe_gw_call(
 
 _SALE_STATUS_ICONS = {
     "PENDING": "🟡",
+    # (2026-09-13, confirmation explicite producteur) : commande reçue mais
+    # pas encore acceptée PAR LE PRODUCTEUR — distinct de "PENDING" (statut
+    # de colonne par défaut, jamais réellement atteint par un chemin
+    # conversationnel, voir get_producer_orders).
+    "PENDING_PRODUCER_CONFIRMATION": "🟡",
     "CONFIRMED": "🟢",
     "COMPLETED": "✅",
     "DELIVERED": "✅",
@@ -233,7 +243,9 @@ _SALE_STATUS_ICONS = {
 }
 
 
-async def _producer_sales_block(phone: str, mc_runtime: MarketRuntime) -> str:
+async def _producer_sales_block(
+    phone: str, mc_runtime: MarketRuntime
+) -> Tuple[str, Optional[str]]:
     """Résumé lecture-seule des VENTES du même numéro (mêmes personnes
     peuvent acheter ET vendre sur Ladini) — signalé par un utilisateur réel :
     "mes commandes" ne montrait QUE le mode acheteur, jamais les commandes
@@ -247,25 +259,64 @@ async def _producer_sales_block(phone: str, mc_runtime: MarketRuntime) -> str:
     reste le SEUL chemin pour agir sur une vente précise, avec sa propre
     numérotation dédiée.
 
-    Retourne une chaîne vide (jamais None) si l'utilisateur n'a pas de profil
-    producteur ou aucune vente — `list_orders` peut alors concaténer le
-    résultat sans condition."""
+    Retourne `("", None)` si l'utilisateur n'a pas de profil producteur ou
+    aucune vente — `list_orders` peut alors concaténer le résultat sans
+    condition. Le second élément (2026-09-14/15, incident réel répété —
+    "annuler"/"confirmer" tapé juste après ce résumé retombait en UNKNOWN,
+    malgré l'invite explicite "Tapez *confirmer*... ou *annuler*..."
+    ci-dessous ; un premier correctif — signal d'état donné en CONTEXTE au
+    LLM — s'est avéré insuffisant, le LLM restant peu fiable sur un mot nu
+    sans autre ancrage) porte l'`order_id` de l'UNIQUE vente 🟡 en attente,
+    quand il n'y en a exactement qu'une — `None` s'il n'y en a aucune ou
+    plusieurs (ambigu, jamais de choix implicite). `list_orders` verrouille
+    alors DIRECTEMENT `current_goal`/`PendingInteraction(CONFIRM_ACTION)`
+    sur cette commande, pour que le tour suivant n'ait plus RIEN à
+    classifier : "confirmer"/"annuler" retombe sur le filet déterministe déjà
+    éprouvé (`_CONFIRM_EXACT_PHRASES`/`_REJECT_EXACT_PHRASES`,
+    `interpreter/routing.py`, `expected == "CONFIRMATION"`) au lieu d'une
+    classification NEW_TASK libre sur un mot sans contexte."""
     result = await _safe_gw_call(mc_runtime, "get_producer_orders", phone=phone)
     if not is_success_response(result):
-        return ""
+        return "", None
     sales = result.get("data") or []
     if not sales:
-        return ""
+        return "", None
 
-    shown, extra = sales[:5], len(sales) - 5
+    # (2026-09-13, incident WhatsApp #5) : la troncature ("… et N autres")
+    # portait AUSSI sur les ventes 🟡 (PENDING_PRODUCER_CONFIRMATION) —
+    # justement celles qu'un producteur doit pouvoir confirmer/annuler.
+    # Un producteur avec plus de 5 ventes recevait un décompte tronqué SANS
+    # AUCUN moyen d'agir sur les ventes masquées (`_resolve_order_for_*`
+    # requêtent le statut, pas cette liste — les commandes masquées restent
+    # résolubles, mais l'utilisateur ne les VOIT même plus ici). Priorité
+    # d'affichage : TOUTES les ventes en attente de confirmation d'abord
+    # (jamais tronquées, ce sont les seules actionnables), les autres
+    # (déjà confirmées/livrées) complètent jusqu'à la limite d'affichage.
+    _pending = [s for s in sales if str(s.get("status") or "").upper() == "PENDING_PRODUCER_CONFIRMATION"]
+    _other = [s for s in sales if s not in _pending]
+    shown = _pending + _other[:5]
+    extra = len(sales) - len(shown)
     lines = ["\n📦 *Vos ventes à préparer/livrer :*"]
     for sale in shown:
         ref = sale.get("reference") or str(sale.get("order_id") or "")[:8].upper()
         status = str(sale.get("status") or "PENDING").upper()
         icon = _SALE_STATUS_ICONS.get(status, "🧾")
+        # `tier_label` (2026-09-14, voir services/database/producer.py::
+        # get_producer_orders) : quand la vente porte sur un palier
+        # (`OrderItem.tier_id`), `quantity` est un NOMBRE DE PAQUETS, pas une
+        # quantité dans `unit` (l'unité de BASE du produit) — les combiner
+        # affichait "4 litre" pour une commande de 4 bidons de 20 L
+        # (incident réel, signalé par un producteur). Affiche le
+        # conditionnement littéral du palier quand il est résolu, sinon
+        # repli identique à avant.
         items_summary = ", ".join(
-            f"{it.get('product_name')} ({_fmt_num(it.get('quantity'))} "
-            f"{str(it.get('unit') or '').lower()})"
+            f"{it.get('product_name')} ("
+            + (
+                f"{_fmt_num(it.get('quantity'))} {it['tier_label']}"
+                if it.get("tier_label")
+                else f"{_fmt_num(it.get('quantity'))} {str(it.get('unit') or '').lower()}"
+            )
+            + ")"
             for it in (sale.get("items") or [])
             if it.get("product_name")
         ) or "—"
@@ -290,11 +341,22 @@ async def _producer_sales_block(phone: str, mc_runtime: MarketRuntime) -> str:
         )
     if extra > 0:
         lines.append(f"\n… et {extra} autre{'s' if extra > 1 else ''}.")
+    # (2026-09-13, confirmation explicite producteur) : la ligne générique
+    # "voir le détail... et la gérer" ne disait jamais COMMENT — signalé par
+    # un producteur réel comme une promesse non tenue (SALES_LIST_ORDERS ne
+    # produisait qu'un doublon informatif de ce même résumé). Le call-to-
+    # action explicite ci-dessous pointe directement vers les deux actions
+    # réellement câblées (PRODUCER_CONFIRM_ORDER/PRODUCER_CANCEL_ORDER),
+    # chacune affichant son propre menu numéroté si plusieurs commandes sont
+    # concernées.
     lines.append(
-        "\n_Tapez *commandes reçues* pour voir le détail d'une vente et la "
-        "gérer (numérotation distincte de la liste des achats ci-dessus)._"
+        "\n_Tapez *confirmer* pour accepter une commande en attente "
+        "(🟡), ou *annuler* si vous ne pouvez pas l'honorer._"
     )
-    return "\n".join(lines)
+    single_pending_order_id = (
+        str(_pending[0].get("order_id")) if len(_pending) == 1 else None
+    )
+    return "\n".join(lines), single_pending_order_id
 
 
 async def list_orders(
@@ -317,21 +379,77 @@ async def list_orders(
             synthetic["transaction_payload"] = syn_payload
             return await check_order_status(synthetic, mc_runtime)
 
-    result = await _safe_gw_call(mc_runtime, "get_buyer_orders_dashboard", phone=phone)
-    sales_block = await _producer_sales_block(phone, mc_runtime)
+    # (2026-09-11) Concurrent, pas séquentiel — deux appels MCP indépendants
+    # (achats/ventes) additionnés en série ajoutaient une latence réelle qui
+    # a contribué à un `AGENT_TIMEOUT` (45s) observé en prod sur ce chemin,
+    # combinée à un `security_moderation` déjà lent ce tour-là.
+    result, (sales_block, single_pending_order_id) = await asyncio.gather(
+        _safe_gw_call(mc_runtime, "get_buyer_orders_dashboard", phone=phone),
+        _producer_sales_block(phone, mc_runtime),
+    )
+    # Signal d'ÉTAT (voir docstring de `_producer_sales_block`) — posé dans
+    # `working_memory` sur TOUS les retours de cette fonction, comme repli
+    # CONTEXTE pour le LLM (jamais un court-circuit Python) quand l'acheteur
+    # a AUSSI des achats (menu SELECTION posé plus bas, verrou CONFIRM_ACTION
+    # impossible dans ce cas — un seul PendingInteraction actif à la fois).
+    working = dict(state.get("working_memory") or {})
+    working["producer_order_action_hint"] = bool(single_pending_order_id)
+
+    def _lock_pending_producer_order(patch: Dict[str, Any]) -> Dict[str, Any]:
+        """Verrou DÉTERMINISTE (2026-09-15, 2e incident sur le même bug — le
+        signal d'état donné en CONTEXTE au LLM, tenté d'abord, s'est avéré
+        insuffisant : le LLM reste peu fiable sur un mot nu ("confirmer")
+        sans AUCUN autre ancrage dans le message). Au lieu d'espérer qu'une
+        classification libre retombe sur PRODUCER_CONFIRM_ORDER, ce tour
+        verrouille DIRECTEMENT `current_goal` + `PendingInteraction
+        (CONFIRM_ACTION)` sur l'unique vente 🟡 — le tour suivant n'a plus
+        RIEN à classifier : "confirmer"/"annuler" retombe sur le filet
+        déterministe déjà éprouvé de l'interpréteur
+        (`_CONFIRM_EXACT_PHRASES`/`_REJECT_EXACT_PHRASES`,
+        `expected == "CONFIRMATION"`), qui échoue `detected_intent` sur le
+        goal déjà verrouillé — jamais une invention de but par le fast-path
+        (contrat gardé par `TestGoalLockOnlyValidatedOnTheLlmPath`). La
+        résolution CONFIRM→confirmer / REJECT→annuler est ensuite assurée
+        par `flows/producer/flow.py::_resolve_pending_order_action`, qui lit
+        l'`event` — jamais le nom du goal — pour choisir entre les deux
+        actions RÉELLEMENT différentes (`confirm_order_by_producer` vs
+        `cancel_confirmed_order`)."""
+        if not single_pending_order_id:
+            return patch
+        return {
+            **patch,
+            # WAITING_INPUT (pas COMPLETED) : un PendingInteraction réel est
+            # posé, le tour suivant doit le retrouver — même convention que
+            # tous les autres flows qui verrouillent une CONFIRM_ACTION
+            # (_resolve_product_for_update, _resolve_order_for_confirmation…).
+            "status": "WAITING_INPUT",
+            "current_goal": "PRODUCER_CONFIRM_ORDER",
+            **set_pending_interaction(
+                InteractionKind.CONFIRM_ACTION, context_ref="confirmation"
+            ),
+            "working_memory": {
+                **working,
+                "pending_order_action_id": single_pending_order_id,
+                "pending_order_action_phase": "CONFIRM",
+                "active_goal": "PRODUCER_CONFIRM_ORDER",
+            },
+        }
 
     if not is_success_response(result):
-        return {
-            "status": "COMPLETED",
-            "response_strategy": "SUCCESS",
-            "final_response": (
-                "🛒 *Vos achats*\n\n"
-                "Vous n'avez pas encore passé de commande sur Ladini."
-                + sales_block
-                + render_quick_actions(["chercher un produit", "mes appels d'offres"])
-            ),
-            "ag_ui_component": None,
-        }
+        return _lock_pending_producer_order(
+            {
+                "status": "COMPLETED",
+                "response_strategy": "SUCCESS",
+                "final_response": (
+                    "🛒 *Vos achats*\n\n"
+                    "Vous n'avez pas encore passé de commande sur Ladini."
+                    + sales_block
+                    + render_quick_actions(["chercher un produit", "mes appels d'offres"])
+                ),
+                "working_memory": working,
+                "ag_ui_component": None,
+            }
+        )
 
     # (2026-09-11) `menu_text` DOIT être identique entre `final_response` et
     # `pending_menu.preformatted_text` — voir `nodes/ui_engine.py::
@@ -361,6 +479,30 @@ async def list_orders(
         if oid not in (None, "")
     }
 
+    # (2026-09-11) `get_buyer_orders_dashboard` peut renvoyer `status=success`
+    # SANS `mapping` du tout quand l'acheteur n'a encore AUCUNE commande
+    # (services/database/buyer.py) — un succès, pas un échec, donc le garde
+    # `not is_success_response(result)` plus haut ne l'attrape jamais. Sans
+    # ce second garde, `mapping` reste vide et `MenuRequest(options=[])`
+    # plus bas lève `ValueError` (menu_contracts.py exige >=1 option) —
+    # plantage réel observé en prod (compte sans aucun achat), transformé en
+    # message d'erreur générique au lieu du récap "aucune commande" attendu.
+    if not mapping:
+        return _lock_pending_producer_order(
+            {
+                "status": "COMPLETED",
+                "response_strategy": "SUCCESS",
+                "final_response": (
+                    "🛒 *Vos achats*\n\n"
+                    "Vous n'avez pas encore passé de commande sur Ladini."
+                    + sales_block
+                    + render_quick_actions(["chercher un produit", "mes appels d'offres"])
+                ),
+                "working_memory": working,
+                "ag_ui_component": None,
+            }
+        )
+
     options = [
         MenuOption(
             index=str(idx),
@@ -380,6 +522,7 @@ async def list_orders(
             f"Commande #{oid[:8].upper()}" for oid in mapping.values()
         ],
         "order_tracking_context": _tracking_ctx_patch(menu_generated_at=time.time()),
+        "working_memory": working,
         "ag_ui_component": None,
         "pending_menu": MenuRequest(
             title="Vos commandes",
@@ -742,6 +885,16 @@ async def list_buyer_auctions(
             "sélectionnez le numéro de l'appel d'offres pour les voir."
         )
 
+    # (2026-09-14) Discoverability de PROCUREMENT_UPDATE_REQUEST — sans ce
+    # rappel, rien n'indiquait à l'acheteur qu'un appel d'offres OUVERT
+    # (quantité, prix plafond, date limite) peut être corrigé après coup,
+    # au lieu de le laisser expirer et d'en recréer un.
+    if any(str(a.get("status") or "").upper() == "OPEN" for a in data):
+        lines.append(
+            "\n✏️ Pour modifier un appel d'offres ouvert (quantité, prix "
+            "plafond, date limite), dites *modifier mon appel d'offres*."
+        )
+
     lines.append(render_selection_prompt(noun="appel d'offres"))
     menu_text = "\n".join(lines)
 
@@ -912,7 +1065,386 @@ async def check_auction_status(
 
 
 # =====================================================================
-# 5b. WINNER SELECTION — désigner le gagnant d'une enchère
+# 5b. UPDATE AUCTION — modifier un appel d'offres déjà publié (OUVERT)
+# =====================================================================
+# Flux dédié auto-suffisant (SELECT → COLLECT → CONFIRM → ÉCRITURE), miroir
+# exact de `flows/producer/flow.py::_resolve_product_for_update` côté
+# acheteur (2026-09-14) : jusqu'ici un acheteur ne pouvait JAMAIS corriger un
+# appel d'offres publié (mauvaise quantité, prix plafond à ajuster, date
+# limite à repousser) — seulement le laisser expirer et en recréer un depuis
+# zéro. Gère sa propre confirmation (jamais confirmation_gate/
+# mcp_tool_executor génériques) pour distinguer une VRAIE correction d'un
+# simple oui/non — même raison que les tunnels de mise à jour producteur.
+
+_AUC_PRICE_RE = re.compile(
+    r"(?:prix|plafond|budget|coute?|co[uû]te?)\D{0,15}?(\d+(?:[.,]\d+)?)"
+    r"|(\d+(?:[.,]\d+)?)\s*(?:fcfa|f\s*cfa|francs?)\b",
+    re.IGNORECASE,
+)
+_AUC_BARE_QTY_RE = re.compile(r"quantit\w*\D{0,10}?(\d+(?:[.,]\d+)?)", re.IGNORECASE)
+_AUC_DATE_ISO_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+_AUC_MONTHS_FR = {
+    "janvier": 1,
+    "février": 2,
+    "fevrier": 2,
+    "mars": 3,
+    "avril": 4,
+    "mai": 5,
+    "juin": 6,
+    "juillet": 7,
+    "août": 8,
+    "aout": 8,
+    "septembre": 9,
+    "octobre": 10,
+    "novembre": 11,
+    "décembre": 12,
+    "decembre": 12,
+}
+_AUC_DATE_FR_RE = re.compile(
+    r"\b(\d{1,2})\s+(" + "|".join(_AUC_MONTHS_FR) + r")\s+(\d{4})\b",
+    re.IGNORECASE,
+)
+_AUC_DATE_SLASH_RE = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b")
+
+
+def _extract_auction_price_correction(text: str) -> Optional[float]:
+    m = _AUC_PRICE_RE.search(text)
+    if not m:
+        return None
+    raw = m.group(1) or m.group(2)
+    try:
+        val = float(raw.replace(",", "."))
+        return val if val > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_auction_quantity_correction(
+    text: str,
+) -> "tuple[Optional[float], Optional[str]]":
+    """Même discipline que le miroir producteur
+    (`flow.py::_extract_quantity_correction`) : n'accepte la quantité QUE si
+    une vraie unité a été reconnue, sinon un prix ("5000 fcfa") serait
+    confondu avec une quantité."""
+    qty_result = parse_quantity_unit_from_text(text)
+    if qty_result and qty_result.quantity is not None and qty_result.unit:
+        return qty_result.quantity, qty_result.unit
+    m = _AUC_BARE_QTY_RE.search(text)
+    if m:
+        try:
+            val = float(m.group(1).replace(",", "."))
+            if val > 0:
+                return val, None
+        except (TypeError, ValueError):
+            pass
+    return None, None
+
+
+def _extract_auction_date_correction(text: str) -> Optional[str]:
+    m = _AUC_DATE_ISO_RE.search(text)
+    if m:
+        return m.group(1)
+    m = _AUC_DATE_FR_RE.search(text)
+    if m:
+        day, month_name, year = m.groups()
+        month = _AUC_MONTHS_FR.get(month_name.lower())
+        if month:
+            return f"{int(year):04d}-{month:02d}-{int(day):02d}"
+    m = _AUC_DATE_SLASH_RE.search(text)
+    if m:
+        day, month, year = m.groups()
+        try:
+            if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
+                return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+        except ValueError:
+            pass
+    return None
+
+
+def _parse_auction_update_correction(text: str) -> Dict[str, Any]:
+    """Extrait déterministiquement les champs mentionnés dans *text* — prix
+    plafond, quantité (+unité) et/ou date limite. Utilisé en phase COLLECT
+    (première saisie) et en phase CONFIRM (pour distinguer une VRAIE
+    correction d'un simple "non" d'annulation)."""
+    fields: Dict[str, Any] = {}
+    quantity, unit = _extract_auction_quantity_correction(text)
+    if quantity is not None:
+        fields["quantity"] = quantity
+        if unit:
+            fields["unit"] = unit
+    price = _extract_auction_price_correction(text)
+    if price is not None:
+        fields["price"] = price
+    date = _extract_auction_date_correction(text)
+    if date:
+        fields["deadline"] = date
+    return fields
+
+
+def _format_auction_update_recap(pending: Dict[str, Any]) -> str:
+    lines = ["📝 *Récapitulatif de la modification (appel d'offres)*"]
+    unit_disp = str(pending.get("unit") or "").upper()
+    if pending.get("quantity") is not None:
+        qty_line = f"- Nouvelle quantité : {_fmt_num(pending['quantity'])}"
+        lines.append(f"{qty_line} {unit_disp}".rstrip())
+    if pending.get("price") is not None:
+        lines.append(f"- Nouveau prix plafond : {_fmt_num(pending['price'])} FCFA")
+    if pending.get("deadline"):
+        lines.append(f"- Nouvelle date limite : {pending['deadline']}")
+    lines.append(
+        "\n👉 Répondez *oui* pour confirmer, envoyez une *correction* "
+        "(ex: « prix 5000 », « quantité 200 »), ou *non* pour annuler."
+    )
+    return "\n".join(lines)
+
+
+async def _resolve_auction_for_update(
+    state: Dict[str, Any],
+    mc_runtime: MarketRuntime,
+) -> Dict[str, Any]:
+    """Mini-machine à états pour PROCUREMENT_UPDATE_REQUEST.
+
+    `auction_id` est déjà résolu par `nodes/memory.py` (`_AUCTION_MAPPING_
+    KINDS` inclut "buyer_auction_list", le même mapping_kind que la
+    sélection ci-dessous) — jamais demandé comme UUID brut."""
+    phone = str(state.get("user_phone") or "")
+    if not phone:
+        return _error("Numéro de téléphone introuvable.")
+
+    payload = state.get("transaction_payload") or {}
+    working = dict(state.get("working_memory") or {})
+    event = str(state.get("interpreted_event") or "").upper()
+    text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+
+    phase = str(working.get("auction_update_phase") or "").upper()
+    auction_id = payload.get("auction_id") or working.get("auction_update_id")
+    pending: Dict[str, Any] = dict(working.get("auction_update_pending") or {})
+
+    def _clear_wm() -> Dict[str, Any]:
+        return {
+            **working,
+            "auction_update_id": None,
+            "auction_update_phase": None,
+            "auction_update_pending": None,
+            "active_goal": None,
+        }
+
+    # ── CONFIRM : recap déjà affiché, on attend oui/correction/non ────
+    if phase == "CONFIRM" and auction_id and pending:
+        correction = _parse_auction_update_correction(text)
+        if correction:
+            pending.update(correction)
+            return {
+                "status": "WAITING_INPUT",
+                **set_pending_interaction(
+                    InteractionKind.CONFIRM_ACTION, context_ref="confirmation"
+                ),
+                "response_strategy": "ASK_MISSING_FIELD",
+                "current_goal": "PROCUREMENT_UPDATE_REQUEST",
+                "final_response": _format_auction_update_recap(pending),
+                "working_memory": {
+                    **working,
+                    "auction_update_id": str(auction_id),
+                    "auction_update_phase": "CONFIRM",
+                    "auction_update_pending": pending,
+                    "active_goal": "PROCUREMENT_UPDATE_REQUEST",
+                },
+                "ag_ui_component": None,
+            }
+        # Oui/non : classification déjà faite en amont par le LLM
+        # (input_interpreter), pas de liste de mots-clés à maintenir ici.
+        if event == "CONFIRM":
+            try:
+                result = await AuctionGateway(mc_runtime).update_auction(
+                    phone, str(auction_id), **pending
+                )
+            except Exception as exc:
+                logger.error(
+                    "PROCUREMENT_UPDATE_REQUEST: update_auction a échoué: %s", exc
+                )
+                return {
+                    "status": "COMPLETED",
+                    "response_strategy": "ERROR",
+                    "final_response": (
+                        "Impossible d'enregistrer la modification pour le "
+                        "moment. Réessayez dans un instant."
+                    ),
+                    "working_memory": _clear_wm(),
+                    "ag_ui_component": None,
+                }
+            if not is_success_response(result):
+                return {
+                    "status": "COMPLETED",
+                    "response_strategy": "ERROR",
+                    "final_response": (result or {}).get("message")
+                    or "La modification n'a pas pu être enregistrée.",
+                    "working_memory": _clear_wm(),
+                    "ag_ui_component": None,
+                }
+            return {
+                "status": "COMPLETED",
+                "response_strategy": "SUCCESS",
+                "final_response": (result or {}).get("message")
+                or "✅ Appel d'offres mis à jour.",
+                "working_memory": _clear_wm(),
+                "transaction_payload": {"__reset__": True},
+                "ag_ui_component": None,
+            }
+        if event == "REJECT":
+            return {
+                "status": "COMPLETED",
+                "response_strategy": "SUCCESS",
+                "final_response": "❌ Modification annulée. Rien n'a été changé.",
+                "working_memory": _clear_wm(),
+                "ag_ui_component": None,
+            }
+        # Ni correction, ni CONFIRM, ni REJECT clair : on ré-affiche le récap.
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(
+                InteractionKind.CONFIRM_ACTION, context_ref="confirmation"
+            ),
+            "response_strategy": "ASK_MISSING_FIELD",
+            "current_goal": "PROCUREMENT_UPDATE_REQUEST",
+            "final_response": _format_auction_update_recap(pending),
+            "working_memory": {
+                **working,
+                "auction_update_id": str(auction_id),
+                "auction_update_phase": "CONFIRM",
+                "auction_update_pending": pending,
+                "active_goal": "PROCUREMENT_UPDATE_REQUEST",
+            },
+            "ag_ui_component": None,
+        }
+
+    # ── COLLECT : appel d'offres choisi, on attend au moins une correction ──
+    if auction_id:
+        correction = _parse_auction_update_correction(text)
+        if not correction:
+            base_question = (
+                "✏️ Que souhaitez-vous modifier sur cet appel d'offres ?\n"
+                "Ex : « prix 5000 », « quantité 200 kg », « date 2026-12-31 »."
+            )
+            return {
+                "status": "WAITING_INPUT",
+                **set_pending_interaction(
+                    InteractionKind.ENTER_FIELD,
+                    field_name="update_field",
+                    goal="PROCUREMENT_UPDATE_REQUEST",
+                ),
+                "response_strategy": "ASK_MISSING_FIELD",
+                "current_goal": "PROCUREMENT_UPDATE_REQUEST",
+                "working_memory": {
+                    **working,
+                    "auction_update_id": str(auction_id),
+                    "auction_update_phase": "COLLECT",
+                    "active_goal": "PROCUREMENT_UPDATE_REQUEST",
+                },
+                "final_response": base_question,
+                "ag_ui_component": None,
+            }
+        pending.update(correction)
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(
+                InteractionKind.CONFIRM_ACTION, context_ref="confirmation"
+            ),
+            "response_strategy": "ASK_MISSING_FIELD",
+            "current_goal": "PROCUREMENT_UPDATE_REQUEST",
+            "final_response": _format_auction_update_recap(pending),
+            "working_memory": {
+                **working,
+                "auction_update_id": str(auction_id),
+                "auction_update_phase": "CONFIRM",
+                "auction_update_pending": pending,
+                "active_goal": "PROCUREMENT_UPDATE_REQUEST",
+            },
+            "ag_ui_component": None,
+        }
+
+    # ── SELECT : aucun appel d'offres choisi → liste des OUVERTS ──────
+    try:
+        result = await AuctionGateway(mc_runtime).search_auctions(
+            phone=phone, view_mode="MY_OWN"
+        )
+    except Exception as exc:
+        logger.error(
+            "PROCUREMENT_UPDATE_REQUEST: search_auctions a échoué: %s", exc
+        )
+        return {
+            "status": "ERROR",
+            "response_strategy": "ERROR",
+            "final_response": (
+                "Impossible de charger vos appels d'offres pour le moment. "
+                "Réessayez dans un instant."
+            ),
+            "working_memory": _clear_wm(),
+            "ag_ui_component": None,
+        }
+    # `search_auctions(view_mode="MY_OWN")` sans `status` explicite ne
+    # renvoie QUE les appels d'offres OPEN (services/database/auction.py::
+    # get_auctions, défaut `status="OPEN"`) — exactement l'ensemble éligible
+    # à une modification (`update_auction_fields` refuse tout le reste côté
+    # DB), aucun filtre client supplémentaire nécessaire.
+    items = (result or {}).get("data") if is_success_response(result) else []
+    if not isinstance(items, list) or not items:
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "SUCCESS",
+            "final_response": (
+                "Vous n'avez aucun appel d'offres ouvert à modifier pour le "
+                "moment."
+            ),
+            "working_memory": _clear_wm(),
+            "ag_ui_component": None,
+        }
+
+    mapping: Dict[str, str] = {}
+    options: List[MenuOption] = []
+    lines = ["✏️ *Quel appel d'offres souhaitez-vous modifier ? Indiquez le numéro :*"]
+    for i, it in enumerate(items, start=1):
+        aid = str(it.get("auction_id") or it.get("id") or "")
+        if not aid:
+            continue
+        product = it.get("product") or "Produit"
+        qty = it.get("quantity") or it.get("qty")
+        unit = str(it.get("unit") or "").upper()
+        price = it.get("max_price")
+        qty_str = f" — {_fmt_num(qty)} {unit}" if qty not in (None, "") else ""
+        price_str = (
+            f" — {_fmt_num(price)} FCFA/{unit}" if price not in (None, "") else ""
+        )
+        lines.append(f"{i}. *{product}*{qty_str}{price_str}")
+        mapping[str(i)] = aid
+        options.append(MenuOption(index=str(i), label=f"{product}{qty_str}", value=aid))
+
+    menu = "\n".join(lines)
+    return {
+        "status": "WAITING_INPUT",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
+        "response_strategy": "SELECTION_MENU",
+        "current_goal": "PROCUREMENT_UPDATE_REQUEST",
+        "final_response": menu,
+        "available_mapping": mapping,
+        "working_memory": {
+            **working,
+            "active_goal": "PROCUREMENT_UPDATE_REQUEST",
+            "available_mapping_kind": "buyer_auction_list",
+            "auction_update_phase": "SELECT",
+            "auction_update_pending": None,
+        },
+        "ag_ui_component": None,
+        "pending_menu": MenuRequest(
+            title="Appels d'offres à modifier",
+            options=options,
+            kind="buyer_auction_list",
+            preformatted_text=menu,
+        ),
+    }
+
+
+# =====================================================================
+# 5c. WINNER SELECTION — désigner le gagnant d'une enchère
 # =====================================================================
 
 _YES_TOKENS = frozenset(
@@ -1128,11 +1660,21 @@ async def _execute_winner_selection(
 
     gw = AuctionGateway(mc_runtime)
     try:
+        # `idempotency_key` (2026-09-17, follow-up pre-Hetzner, priorité
+        # explicite "accept bid") : accepter une offre GAGNANTE crée un
+        # `Order` — irréversible, non réexécutable sans risque (un doublon
+        # créerait une seconde commande sur la même enchère). `bid_id` est
+        # déjà l'identifiant métier stable de CETTE action précise (un bid
+        # ne peut être sélectionné gagnant qu'une fois) — pas besoin d'un
+        # objet draft/version comme PROCUREMENT/SALES_PUBLISH : une
+        # redelivery Celery du MÊME tour relit le MÊME `bid_id` depuis
+        # l'état persisté, jamais un identifiant généré à la volée.
         result = await gw.select_winning_bid(
             bid_id=str(bid_id),
             phone=str(state.get("user_phone") or ""),
             delivery_lat=delivery_lat,
             delivery_lon=delivery_lon,
+            idempotency_key=f"select_winning_bid:{bid_id}",
         )
     except MCPCallError as exc:
         # (2026-09-02, taxonomie d'erreurs) : un BUSINESS_ERROR_CODE (ex:
@@ -1407,12 +1949,30 @@ async def order_tracking_resolver(
     # ce OR ce tour ne route JAMAIS vers finalize_winner et la position
     # partagée est ignorée par cette machine à états (elle reste quand même
     # persistée en tâche de fond côté webhook, juste pas utilisée ICI).
+    # (2026-09-14, incident WhatsApp #10) : "oui" à l'étape GPS ("Livraison à
+    # ton point GPS habituel ?") classé `event=UNKNOWN` par le LLM (le mot
+    # n'a pas été reconnu comme CONFIRM cette fois) ne passait AUCUNE des
+    # deux conditions ci-dessus (event≠CONFIRM/REJECT, location_shared=False
+    # — l'utilisateur a tapé "oui" en texte, pas partagé un pin GPS natif) —
+    # ce tour ne routait donc JAMAIS vers `finalize_winner`, qui a pourtant
+    # sa PROPRE reconnaissance robuste de "oui"/"non" par TEXTE
+    # (`_YES_TOKENS`/`_NO_TOKENS`, indépendante de `interpreted_event` —
+    # exactement pour ce cas de non-déterminisme LLM connu). Le tour retombait
+    # sur un chemin générique produisant un récapitulatif vide et incohérent
+    # ("Confirmez-vous cette opération ?" dupliqué, aucun détail). Ajout de
+    # `working.get("winner_gps_stage")` : ce flag n'est posé QUE par
+    # `finalize_winner` lui-même, à l'entrée de CETTE étape GPS précise (pas
+    # un `pending_winner_bid` fantôme générique) — un contexte déjà aussi
+    # étroit que `location_shared`, donc sans réintroduire le risque de
+    # détournement documenté ci-dessus (une simple consultation, ex. "lister
+    # mes appels d'offres", ne pose jamais ce flag).
     if (
         working.get("pending_winner_bid")
         and goal in AUCTION_TRACKING_GOALS
         and (
             str(state.get("interpreted_event") or "").upper() in {"CONFIRM", "REJECT"}
             or bool(state.get("location_shared"))
+            or bool(working.get("winner_gps_stage"))
         )
     ):
         return await finalize_winner(state, mc_runtime)
@@ -1423,6 +1983,14 @@ async def order_tracking_resolver(
         and working.get("winner_auction_id")
     ):
         return await confirm_winner_selection(state, mc_runtime)
+    # PROCUREMENT_UPDATE_REQUEST : AVANT la règle #3 ci-dessous — sinon un
+    # `auction_id` déjà résolu (SELECT déjà fait, phases COLLECT/CONFIRM de
+    # CE tunnel) serait intercepté par la règle générique "une enchère vient
+    # d'être choisie → afficher ses offres" et redirigerait à tort vers
+    # `check_auction_status`, cassant ce tunnel dès son 2e tour.
+    if goal == "PROCUREMENT_UPDATE_REQUEST":
+        return await _resolve_auction_for_update(state, mc_runtime)
+
     # 3. Une enchère vient d'être choisie dans la liste → afficher ses offres.
     if (
         goal in AUCTION_TRACKING_GOALS
@@ -1435,7 +2003,7 @@ async def order_tracking_resolver(
         return await check_order_status(state, mc_runtime)
     if goal == "BUYER_CANCEL_ORDER":
         return await cancel_order(state, mc_runtime)
-    if goal in ("BUYER_LIST_AUCTIONS", "MARKET_MY_REQUESTS"):
+    if goal == "BUYER_LIST_AUCTIONS":
         return await list_buyer_auctions(state, mc_runtime)
     if goal == "BUYER_CHECK_AUCTION_STATUS":
         return await check_auction_status(state, mc_runtime)

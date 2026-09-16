@@ -1,0 +1,82 @@
+# ═════════════════════════════════════════════════════════════════════
+# docker-compose.e2e.yml — overlay LOCAL E2E VALIDATION UNIQUEMENT.
+#
+# Ajoute un Postgres LOCAL (simule le Postgres managé externe, DB_HOST=postgres)
+# pour permettre de tester la stack prod (docker-compose.prod.yml) de bout en
+# bout sur un poste de dev, sans dépendance à un cluster managé réel.
+#
+# Usage (voir docs/LOCAL_E2E_PREDEPLOY_VALIDATION_*.md) :
+#   docker compose -f docker-compose.prod.yml -f docker-compose.build.yml \
+#     -f docker-compose.dev.yml -f docker-compose.e2e.yml \
+#     --profile app --profile scheduler --profile admin up -d --build
+#
+# JAMAIS utilisé en production — comme docker-compose.dev.yml, ce fichier ne
+# doit jamais apparaître dans scripts/lib.sh::dc() (chemin de déploiement réel).
+# ═════════════════════════════════════════════════════════════════════
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      POSTGRES_USER: "${DB_USER:-ladini_e2e}"
+      POSTGRES_PASSWORD: "${DB_PASSWORD:-e2e_local_only}"
+      POSTGRES_DB: "${DB_NAME:-ladini_e2e}"
+    volumes:
+      - e2e_pg_data:/var/lib/postgresql/data
+    ports:
+      # Exposé sur loopback uniquement — pratique pour lancer le bootstrap de
+      # schéma / inspecter la DB depuis l'hôte pendant la validation E2E.
+      # Port 55432 déjà pris par un autre projet local (converter-postgres) —
+      # 55433 utilisé à la place.
+      - "127.0.0.1:55433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-ladini_e2e} -d ${DB_NAME:-ladini_e2e}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging:
+      driver: "json-file"
+      options: { max-size: "20m", max-file: "5" }
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1024m }
+    restart: unless-stopped
+    networks: [agri_net]
+
+  pgbouncer:
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      # Le Postgres managé réel exige TLS (défaut prod : "require", voir
+      # docker-compose.prod.yml) — le Postgres local jetable ci-dessus n'a
+      # pas de certificat configuré. E2E uniquement.
+      SERVER_TLS_SSLMODE: "disable"
+
+  # docker-compose.prod.yml::x-full-app-env n'inclut délibérément PAS
+  # MOCK_EXTERNAL_APIS/SANDBOX_MODE (flags sandbox, jamais censés apparaître
+  # en template prod) — la validation E2E doit donc les injecter elle-même
+  # pour que Settings (lu depuis les variables d'environnement du conteneur,
+  # pas un .env absent de l'image) les voie réellement.
+  api:
+    environment:
+      MOCK_EXTERNAL_APIS: "true"
+      SANDBOX_MODE: "true"
+
+  worker:
+    environment:
+      MOCK_EXTERNAL_APIS: "true"
+      SANDBOX_MODE: "true"
+
+  mcp:
+    environment:
+      MOCK_EXTERNAL_APIS: "true"
+      SANDBOX_MODE: "true"
+
+  beat:
+    environment:
+      MOCK_EXTERNAL_APIS: "true"
+      SANDBOX_MODE: "true"
+
+volumes:
+  e2e_pg_data:

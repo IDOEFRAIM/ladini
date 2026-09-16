@@ -273,13 +273,19 @@ class TestGetFarmStocksIsWiredAndSafe:
     exister (goal ``STOCK_GET_DETAIL`` mort). Implémenté le 2026-09-10."""
 
     def test_the_intent_is_no_longer_deprecated(self):
+        """(2026-09-13, Deep Intent Architecture Cleanup) : le mécanisme de
+        masquage `_DEPRECATED_INTENTS`/`_DISABLED_INTENT_PREFIXES` a été
+        supprimé — chaque entrée d'INTENT_CONFIG est désormais classifiable
+        par construction (voir routing.py::_classifiable_intents)."""
+        from ladini.graphs.agents.market_coach.interpreter.intent import (
+            INTENT_CONFIG,
+        )
         from ladini.graphs.agents.market_coach.interpreter.routing import (
-            _DEPRECATED_INTENTS,
             allowed_intents_for_role,
         )
 
-        assert "STOCK_GET_DETAIL" not in _DEPRECATED_INTENTS
-        # Et donc de nouveau classable depuis un message utilisateur.
+        assert "STOCK_GET_DETAIL" in INTENT_CONFIG
+        # Et donc classable depuis un message utilisateur.
         assert "STOCK_GET_DETAIL" in allowed_intents_for_role("PRODUCER")
 
     def test_the_tool_now_exists_and_is_exposed(self):

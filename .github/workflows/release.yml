@@ -9,9 +9,24 @@
 # ═════════════════════════════════════════════════════════════════════
 name: Release (build & push images)
 
+# (2026-09-17, follow-up pre-Hetzner) — GATE CORRIGÉ ICI : ce workflow se
+# déclenchait auparavant sur `push: branches: [main]`, EN PARALLÈLE de
+# `cicd.yml` (lui aussi déclenché sur `push`) — deux workflows indépendants
+# sur le MÊME évènement, sans aucune dépendance entre eux. Le commentaire
+# "après merge d'une PR verte" ci-dessous n'était qu'une INTENTION, jamais
+# appliquée par ce fichier : `cicd.yml` pouvait échouer (tests rouges) tout
+# en laissant CE workflow construire et pousser des images sur GHCR sans
+# broncher — repose entièrement sur une protection de branche externe, non
+# vérifiable/garantie depuis ce seul YAML. `workflow_run` fait de CE
+# workflow une SUITE explicite de "CI" (cicd.yml) — il ne démarre qu'une
+# fois CI terminé, et le premier job vérifie sa conclusion avant de
+# construire quoi que ce soit.
+
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
     branches: [main]
+    types: [completed]
   workflow_dispatch:
     inputs:
       ref:
@@ -30,8 +45,13 @@ env:
 
 jobs:
   build-push:
-    name: Build & push (sha-${{ github.sha }})
+    name: Build & push (sha-${{ github.event.workflow_run.head_sha || github.sha }})
     runs-on: ubuntu-latest
+    # `workflow_dispatch` (déclenchement manuel) n'a pas de `workflow_run` —
+    # ce garde ne s'applique donc QUE quand le déclencheur est bien "CI" ;
+    # un `conclusion` != 'success' (échec, annulation) arrête tout ici,
+    # AVANT le moindre `docker build`/push.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     permissions:
       contents: read
       packages: write        # push GHCR
@@ -42,7 +62,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.ref || github.sha }}
+          # `workflow_run` s'exécute dans le contexte du DÉFAUT du dépôt —
+          # `head_sha` pointe explicitement le commit que "CI" vient de
+          # valider (jamais un `github.sha` ambigu dans ce contexte).
+          ref: ${{ github.event.inputs.ref || github.event.workflow_run.head_sha || github.sha }}
 
       - name: Compute release metadata
         id: meta

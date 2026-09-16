@@ -181,6 +181,40 @@ class TestQuantityUnit:
         # Apostrophe typographique aussi.
         assert extract_unit_only_from_text("3000 f l’unité") != "LITRE"
 
+    def test_an_elided_article_missing_its_apostrophe_is_never_read_as_a_unit(self):
+        """Incident réel (2026-09-15) : « je veux vendre mes 25 boeufs. L
+        unite coute 425000 fcfa » (= « l'unité coûte… », apostrophe
+        simplement omise — faute de frappe WhatsApp courante) était lu
+        comme `unit=LITRE` pour un producteur vendant des BOEUFS — il n'y a
+        ici même pas d'apostrophe à détecter par le garde précédent, juste
+        un espace entre « L » et « unite ».
+
+        Corrigé par une règle GÉNÉRALE (jamais une liste de mots comme
+        « unité ») : un symbole d'une seule lettre (l/t/k) n'est retenu que
+        s'il est collé à un CHIFFRE — exactement comme un vrai symbole de
+        mesure s'écrit toujours ("25 L", "10T"). Ça couvre n'importe quel
+        article élidé sans apostrophe, pas seulement « l'unité » : « l'année »,
+        « t'inquiète »… peu importe le mot qui suit "l"/"t"."""
+        assert (
+            extract_unit_only_from_text(
+                "je veux vendre mes 25 boeufs. L unite coute 425000 fcfa"
+            )
+            != "LITRE"
+        )
+        assert extract_unit_only_from_text("L unite coute 425000 fcfa") != "LITRE"
+        assert extract_unit_only_from_text("T unite coute 500") != "TONNE"
+        # Généralisation : PAS de "unité" du tout, n'importe quel mot après
+        # l'article élidé sans apostrophe doit être écarté de la même façon.
+        assert (
+            extract_unit_only_from_text(
+                "12 boeufs. L annee derniere ca coutait moins cher"
+            )
+            != "LITRE"
+        )
+        assert extract_unit_only_from_text("T inquiete pas je vends 12 moutons") != "TONNE"
+        # Non-régression : un vrai symbole collé à sa quantité reste détecté.
+        assert extract_unit_only_from_text("12 T de mais") == "TONNE"
+
     def test_a_real_litre_is_still_detected(self):
         """Non-régression : le garde d'élision ne doit pas rendre le litre
         indétectable — c'est un vrai symbole d'unité en usage (lait)."""
@@ -206,10 +240,21 @@ class TestUnitAuthority:
         assert resolve_product_unit("moutons", current_unit="TONNE") == "TETE"
 
     def test_a_plausible_unit_on_livestock_is_left_alone(self):
-        """La correction ne vise QUE la contradiction physique (masse), pas
-        toute unité inattendue : « 20 sacs de poussins » reste du domaine du
-        possible, ce n'est pas à cette fonction d'en juger."""
+        """La correction ne vise QUE la contradiction physique (masse/volume),
+        pas toute unité inattendue : « 20 sacs de poussins » reste du domaine
+        du possible, ce n'est pas à cette fonction d'en juger."""
         assert resolve_product_unit("poulets", current_unit="SAC") == "SAC"
+
+    def test_a_volume_unit_on_livestock_is_also_corrected(self):
+        """Incident réel (2026-09-15) : « Vente de 49 LITRE de chèvres » —
+        un LITRE posé sur un élevage (via le bug d'élision « l'unité » sans
+        apostrophe, corrigé par ailleurs, ou toute autre source) restait
+        collé DÉFINITIVEMENT, puisque la règle 2 ne couvrait que KG/TONNE
+        (`_UNIT_TO_KG`) et LITRE n'a pas d'équivalent kg. Un animal vivant
+        n'est pas plus mesurable en litres qu'en kilos — même correction
+        que pour la masse."""
+        assert resolve_product_unit("chèvres", current_unit="LITRE") == "TETE"
+        assert resolve_product_unit("boeufs", current_unit="LITRE") == "TETE"
 
     def test_user_written_unit_always_wins(self):
         assert resolve_product_unit("poulets", current_unit="KG", text_unit="sacs") == "SAC"

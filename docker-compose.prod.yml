@@ -1,13 +1,24 @@
 # ═════════════════════════════════════════════════════════════════════
-# Ladini — docker-compose.prod.yml   (MVP < 100 users, provider-neutral)
+# Ladini — docker-compose.prod.yml   (provider-neutral, 1 node → N nodes)
 #
 # CE FICHIER NE CONSTRUIT RIEN. Il ne fait que TIRER des images immuables
 # depuis un registry (voir §BUILD ONCE). Le build vit dans
 # `docker-compose.build.yml` (overlay, utilisé UNIQUEMENT par la CI).
 #
+# TOPOLOGIE UNIQUE, ressources qui évoluent (chantier Hetzner scale-out,
+# 2026-09-16) — voir docs/architecture/deployment-hetzner.md. Ce MÊME
+# fichier, ces MÊMES images, tournent aussi bien sur 1 node (< 100
+# utilisateurs, aujourd'hui) que sur N nodes derrière un load balancer
+# (plusieurs milliers, demain) : le nombre de nodes est un paramètre
+# d'infrastructure (infra/providers/hetzner/, infra/inventory.yml), jamais
+# un changement de ce fichier ni du code applicatif. Ce que CHAQUE node
+# lance dépend de son RÔLE (`--profile app|scheduler|admin`, voir plus bas)
+# — jamais "tout sur chaque node".
+#
 #   Production normale :   docker compose -f docker-compose.prod.yml pull
-#                          docker compose -f docker-compose.prod.yml up -d
-#   (piloté par `scripts/deploy.sh <release>` — ne pas lancer à la main)
+#                          docker compose -f docker-compose.prod.yml --profile <rôle> up -d
+#   (piloté par `scripts/deploy.sh`/`scripts/node_deploy.sh`/
+#    `scripts/cluster_deploy.sh` — ne pas lancer à la main)
 #
 # ── BUILD ONCE / RUN EVERYWHERE ─────────────────────────────────────
 # Les 3 images applicatives sont référencées par :
@@ -27,6 +38,29 @@
 # sur un nombre borné de connexions réelles (les plans managés ont un
 # `max_connections` bas). `PGBOUNCER_DEFAULT_POOL_SIZE` DOIT rester <=
 # (max_connections du plan − marge admin).
+#
+# ── DIMENSIONNEMENT MULTI-NODE (2026-09-16, chantier Hetzner scale-out §6) ──
+# PgBouncer reste LOCAL par node (Node A → PgBouncer A, Node B → PgBouncer B,
+# tous vers le MÊME Postgres managé) — jamais un PgBouncer partagé entre nodes
+# (single point of failure + latence réseau inter-node inutile). Ce qui
+# COMPTE côté Postgres managé est la SOMME sur tous les nodes :
+#
+#   connexions réelles ouvertes vers Postgres
+#     = N_nodes × PGBOUNCER_DEFAULT_POOL_SIZE
+#     <= max_connections(plan managé) − marge_admin(ex: 5-10)
+#
+# Exemple : plan à max_connections=97, marge admin=7 → budget=90.
+#   1 node  : PGBOUNCER_DEFAULT_POOL_SIZE peut monter jusqu'à 90.
+#   3 nodes : PGBOUNCER_DEFAULT_POOL_SIZE doit rester <= 30 CHACUN (30×3=90).
+# En clair : ajouter un node app SANS baisser PGBOUNCER_DEFAULT_POOL_SIZE sur
+# TOUS les nodes existants peut saturer `max_connections` du plan managé —
+# vérifier ce calcul à CHAQUE changement de `app_node_count`
+# (infra/providers/hetzner/variables.tf), avant de déployer.
+# `DB_POOL_SIZE`/`DB_POOL_MAX_OVERFLOW` (SQLAlchemy, PAR PROCESS applicatif)
+# restent inchangés par le nombre de nodes — PgBouncer absorbe déjà le fan-in
+# de plusieurs processus applicatifs vers un nombre borné de connexions
+# réelles ; ce sont eux qu'il faut resserrer si le budget ci-dessus est tendu,
+# pas `DB_POOL_SIZE`.
 #
 # ── Le service `mcp` reste à 1 réplique / 1 process ────────────────
 # AgriDBMCPServer/runtime sont des singletons process-local (voir
@@ -88,8 +122,18 @@ x-full-app-env: &full-app-env
   DB_SSL_MODE: "disable"
   DB_POOL_SIZE: "${DB_POOL_SIZE:-5}"
   DB_POOL_MAX_OVERFLOW: "${DB_POOL_MAX_OVERFLOW:-5}"
-  # redis-env
-  REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD requis}@redis:6379/0"
+  # redis-env — (2026-09-16, chantier Hetzner scale-out) : Redis EXTERNE
+  # partagé obligatoire en production, JAMAIS un conteneur local par node
+  # (voir docker-compose.dev.yml pour le seul contexte où un Redis local a
+  # un sens). `CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND` restent des
+  # surcharges OPTIONNELLES (settings.py::celery_broker/celery_backend
+  # retombent déjà sur REDIS_URL si absentes) — découplage conceptuel déjà
+  # présent côté code, exposé ici au cas où le broker et l'état applicatif
+  # devraient un jour vivre sur des clusters Redis distincts ; pointent vers
+  # le MÊME Redis par défaut, jamais deux Redis différents par node.
+  REDIS_URL: "${REDIS_URL:?REDIS_URL requis — Redis externe partagé (ex: rediss://user:pass@host:port/0), jamais un conteneur local en production. Voir docs/architecture/deployment-hetzner.md §5}"
+  CELERY_BROKER_URL: "${CELERY_BROKER_URL:-}"
+  CELERY_RESULT_BACKEND: "${CELERY_RESULT_BACKEND:-}"
   # mcp-env
   MCP_DB_TRANSPORT: "http"
   MCP_DB_HTTP_URL: "http://mcp:8003"
@@ -183,16 +227,29 @@ networks:
     driver: bridge
 
 volumes:
-  # AOF Redis — DURABLE (broker Celery + verrous d'idempotence). Sans volume
-  # nommé, un `docker compose up --force-recreate` repartait sur un /data vide
-  # → perte silencieuse du broker (audit hardening 2026-09-10).
-  redis_data:
+  # État "dernière exécution" de Celery Beat (voir le service `beat`
+  # ci-dessous) — local à CE node (beat est un singleton, §9).
+  beat_schedule:
 
 services:
 
   # ── 1. APPLICATIF ──────────────────────────────────────────────────
+  # NODE ROLE (2026-09-16, chantier Hetzner scale-out) — un `profiles:` par
+  # service reflète le rôle de node auquel il appartient (§9/§19 du chantier) :
+  #   app       : mcp, api, worker, pgbouncer — scalable horizontalement,
+  #               dupliqué tel quel sur chaque nouveau node.
+  #   scheduler : beat — EXACTEMENT un par cluster, jamais par node (voir
+  #               infra/inventory.example.yml, validé par
+  #               scripts/validate_inventory.py).
+  #   admin     : flower — capability d'administration singleton.
+  # `autoheal` n'a AUCUN profil (toujours démarré) : chaque type de node
+  # veut son propre autoheal local. Sélection au démarrage :
+  #   docker compose --profile app -f docker-compose.prod.yml up -d
+  #   docker compose --profile scheduler -f docker-compose.prod.yml up -d
+  #   docker compose --profile app --profile scheduler --profile admin ... up -d   (phase 1, un seul node)
   mcp:
     image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/ladini}/ladini-mcp:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    profiles: ["app"]
     <<: *hardening
     # least-privilege : le daemon MCP n'exécute que des outils DB. Il ne fait
     # AUCUN appel LLM / WhatsApp / Paydunya / Supabase → ces groupes sont retirés.
@@ -231,6 +288,7 @@ services:
 
   api:
     image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/ladini}/ladini-api:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    profiles: ["app"]
     <<: *hardening
     environment: *full-app-env
     # Publié UNIQUEMENT sur la boucle locale : le reverse-proxy (voir
@@ -238,10 +296,15 @@ services:
     # `"8000:8000"` exposait l'API en clair sur toutes les interfaces (audit
     # hardening 2026-09-10 — §PORTS).
     ports:
-      - "127.0.0.1:8000:8000"
+      # ${API_HOST_PORT:-8000} : par défaut identique à toujours (8000), le
+      # cas normal en production (1 seul node app par hôte). Rend le port
+      # hôte surchargeable UNIQUEMENT pour permettre à une stack de
+      # validation E2E locale (docker-compose.e2e.yml, projet Compose isolé
+      # `-p`) de tourner à côté d'une stack déjà démarrée sur le même poste
+      # sans collision de port — jamais utilisé en déploiement réel.
+      - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
     depends_on:
       pgbouncer: { condition: service_healthy }
-      redis: { condition: service_healthy }
       mcp: { condition: service_healthy }
     ulimits: *high-fd-ulimits
     sysctls:
@@ -250,12 +313,19 @@ services:
     # LIVENESS uniquement (`/health` ne teste aucune dépendance externe). La
     # readiness réelle (`/health/ready` : DB + Redis) est vérifiée par
     # `scripts/deploy.sh` APRÈS `up`, pas par autoheal.
+    # (2026-09-15, incident réel sur build local `dev-up.sh`) : un démarrage
+    # à froid (4 workers gunicorn, imports langgraph/groq lourds à chaque
+    # fork) mesuré à ~90-95s de bout en bout — dépassait systématiquement
+    # la fenêtre de grâce précédente (30s + 3×15s = 75s), donc autoheal
+    # tuait le conteneur à répétition juste avant qu'il finisse de
+    # démarrer, en boucle infinie. Relevé à 120s, marge confortable au-delà
+    # du pire cas observé.
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/live"]
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 120s
     stop_grace_period: 40s
     labels: ["autoheal=true"]
     deploy:
@@ -267,11 +337,25 @@ services:
 
   worker:
     image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/ladini}/ladini-worker:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    profiles: ["app"]
     <<: *hardening
     environment: *full-app-env
+    # Concurrence/files : env-driven (§8 du chantier) — reprend EXACTEMENT
+    # les options de `infra/docker/Dockerfile.worker` (CMD par défaut de
+    # l'image : -Ofair, --pool=prefork, --max-tasks-per-child,
+    # --max-memory-per-child, dont les justifications détaillées vivent dans
+    # ce Dockerfile, pas dupliquées ici), en rendant concurrence/files
+    # SURCHARGEABLES sans reconstruire l'image — augmenter la capacité
+    # worker devient un changement de variable, jamais de code/image.
+    command: ["celery", "-A", "ladini.api.celery_app", "worker",
+             "--loglevel=info", "-Ofair", "--pool=prefork",
+             "--concurrency=${CELERY_WORKER_CONCURRENCY:-4}",
+             "--prefetch-multiplier=${CELERY_WORKER_PREFETCH_MULTIPLIER:-1}",
+             "--max-tasks-per-child=${CELERY_WORKER_MAX_TASKS_PER_CHILD:-200}",
+             "--max-memory-per-child=${CELERY_WORKER_MAX_MEMORY_PER_CHILD:-450000}",
+             "-Q", "${CELERY_WORKER_QUEUES:-interactive,background,scheduled,celery}"]
     depends_on:
       pgbouncer: { condition: service_healthy }
-      redis: { condition: service_healthy }
       mcp: { condition: service_healthy }
     ulimits: *high-fd-ulimits
     logging: *logging
@@ -296,16 +380,32 @@ services:
 
   beat:
     image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/ladini}/ladini-worker:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    profiles: ["scheduler"]
     <<: *hardening
     command: ["celery", "-A", "ladini.api.celery_app", "beat",
              "--loglevel=info", "--pidfile=/tmp/celerybeat.pid",
-             "--schedule=/tmp/celerybeat-schedule"]
+             "--schedule=/var/lib/celery-beat/celerybeat-schedule"]
     environment: *full-app-env
-    depends_on:
-      redis: { condition: service_healthy }
+    # (2026-09-16) volume nommé plutôt que `/tmp` : sans lui, un redémarrage
+    # (déploiement, OOM, node swap) perdait l'état "dernière exécution" de
+    # chaque tâche planifiée — bénin pour la plupart des crons (au pire un
+    # cycle sauté/redoublé), mais inutile de le perdre pour rien vu le coût
+    # nul d'un volume. Reste SUR CE NODE : beat est un singleton (§9), il ne
+    # migre pas d'un node à l'autre en cours de route.
+    volumes:
+      - beat_schedule:/var/lib/celery-beat
     logging: *logging
+    # (2026-09-15, incident réel) : `--pidfile` n'écrivait jamais
+    # `/tmp/celerybeat.pid` dans ce conteneur (procédé confirmé bien vivant —
+    # `ps aux` le montrait actif — mais le fichier restait absent, sans
+    # aucune exception journalisée), donc `test -f ...` échouait
+    # systématiquement -> unhealthy -> autoheal redémarrait en boucle un
+    # scheduler qui tournait pourtant normalement. Même correctif déjà
+    # appliqué à `worker` ci-dessus (le check dépendait du broker) : sonder
+    # la LIVENESS du PROCESSUS directement, jamais un fichier intermédiaire
+    # fragile.
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/celerybeat.pid && kill -0 $(cat /tmp/celerybeat.pid)"]
+      test: ["CMD-SHELL", "pgrep -f 'celery.*beat' >/dev/null || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -319,42 +419,17 @@ services:
     restart: unless-stopped
     networks: [agri_net]
 
-  redis:
-    # Pin exact (audit hardening 2026-09-10) : `7-alpine` est un tag mobile.
-    image: redis:7.4.1-alpine
-    <<: *hardening-thirdparty
-    # noeviction (audit hardening 2026-09-10) : Redis est le BROKER Celery +
-    # les verrous d'idempotence + le disjoncteur LLM. `allkeys-lru` pouvait
-    # évincer SILENCIEUSEMENT une tâche en file ou un verrou sous pression
-    # mémoire. `noeviction` → Redis répond OOM sur écriture plutôt que de
-    # perdre des données critiques ; on préfère un échec bruyant. Option A du
-    # cahier des charges (§15) : un seul Redis pour < 100 users, surveillance
-    # mémoire stricte (voir docs/runbooks/incident.md → "Redis OOM").
-    command: ["redis-server",
-              "--appendonly", "yes",
-              "--appendfsync", "everysec",
-              "--dir", "/data",
-              "--maxmemory", "${REDIS_MAXMEMORY:-512mb}",
-              "--maxmemory-policy", "noeviction",
-              "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD requis}"]
-    volumes:
-      - redis_data:/data
-    ulimits: *high-fd-ulimits
-    logging: *logging
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD requis}", "--no-auth-warning", "ping"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    labels: ["autoheal=true"]
-    deploy:
-      resources:
-        limits: { cpus: "0.5", memory: 640m }
-        reservations: { cpus: "0.1", memory: 256m }
-    restart: unless-stopped
-    networks: [agri_net]
+  # (2026-09-16, chantier Hetzner scale-out §5/§20) : le service `redis`
+  # LOCAL a été RETIRÉ d'ici — production pointe désormais vers un Redis
+  # EXTERNE partagé obligatoire (REDIS_URL, tout en haut de ce fichier).
+  # Un Redis local par node empêcherait le vrai multi-node (Node A → Redis A,
+  # Node B → Redis B pour les mêmes fonctions métier — idempotence, verrous,
+  # broker Celery — cassant silencieusement la cohérence dès 2 nodes). Le
+  # service Redis local (config identique, y compris `noeviction`/AOF) vit
+  # maintenant dans `docker-compose.dev.yml`, profil DEV/TEST uniquement.
 
   pgbouncer:
+    profiles: ["app"]
     # Pin exact (audit hardening 2026-09-10) : `:latest` sur un composant qui
     # tient TOUTES les connexions DB de la stack = roulette russe au redéploiement.
     image: edoburu/pgbouncer:v1.23.1-p2
@@ -371,6 +446,35 @@ services:
       MAX_CLIENT_CONN: "1000"
       DEFAULT_POOL_SIZE: "${PGBOUNCER_DEFAULT_POOL_SIZE:-20}"
       AUTH_TYPE: scram-sha-256
+      # (2026-09-17, follow-up pre-Hetzner) — fail-fast sur backend mort.
+      # Trouvé en E2E local : sans réglage explicite, PgBouncer tourne avec
+      # ses défauts (server_connect_timeout=15s — correct pour une NOUVELLE
+      # connexion — mais AUCUN TCP keepalive par défaut), donc une connexion
+      # déjà établie vers un backend qui disparaît BRUTALEMENT (crash, pas de
+      # FIN/RST propre — coupure réseau, primaire managé qui bascule) reste
+      # "vivante" du point de vue du noyau jusqu'à un timeout de
+      # retransmission TCP par défaut du système — mesuré en direct : PREMIÈRE
+      # requête après la mort de Postgres bloquée ~11 MINUTES avant que
+      # PgBouncer ne détecte la connexion morte. Sans TCP keepalive, rien ne
+      # peut fondamentalement détecter ça plus tôt qu'au niveau applicatif.
+      SERVER_CONNECT_TIMEOUT: "5"
+      SERVER_LOGIN_RETRY: "5"
+      # Un client webhook synchrone ne doit jamais attendre plus de quelques
+      # secondes une connexion serveur en file — au-delà, mieux vaut un échec
+      # net (503 côté /health/ready) qu'une requête qui traîne.
+      QUERY_WAIT_TIMEOUT: "20"
+      # Recycle les connexions serveur inactives plus tôt (défaut 600s) —
+      # réduit la fenêtre pendant laquelle une connexion pourrait devenir
+      # silencieusement obsolète avant même d'être réutilisée.
+      SERVER_IDLE_TIMEOUT: "60"
+      # Le vrai correctif : keepalive TCP actif entre PgBouncer et le
+      # Postgres managé — détecte un pair mort en ~15s (5 + 3×3) au lieu de
+      # dépendre du timeout de retransmission par défaut du noyau (bien plus
+      # long, observé ~11min en pratique sur cet environnement).
+      TCP_KEEPALIVE: "1"
+      TCP_KEEPIDLE: "5"
+      TCP_KEEPINTVL: "3"
+      TCP_KEEPCNT: "3"
     ulimits: *high-fd-ulimits
     logging: *logging
     healthcheck:
@@ -390,6 +494,7 @@ services:
 
   flower:
     image: "${REGISTRY:-ghcr.io}/${IMAGE_NAMESPACE:-idoefraim/ladini}/ladini-api:${RELEASE_VERSION:?RELEASE_VERSION requis}"
+    profiles: ["admin"]
     <<: *hardening
     command: ["celery", "-A", "ladini.api.celery_app", "flower",
              "--port=5555",
@@ -405,25 +510,40 @@ services:
       GIT_SHA: "${GIT_SHA:-${RELEASE_VERSION}}"
       BUILD_TIMESTAMP: "${BUILD_TIMESTAMP:-unknown}"
       COMPOSE_VERSION: "${COMPOSE_VERSION:-unknown}"
-      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD requis}@redis:6379/0"
+      REDIS_URL: "${REDIS_URL:?REDIS_URL requis — Redis externe partagé, voir la note sur x-full-app-env plus haut}"
+      CELERY_BROKER_URL: "${CELERY_BROKER_URL:-}"
+      CELERY_RESULT_BACKEND: "${CELERY_RESULT_BACKEND:-}"
     ports:
       # Boucle locale uniquement — accès par tunnel SSH :
       #   ssh -L 5555:127.0.0.1:5555 user@hote
-      - "127.0.0.1:5555:5555"
-    depends_on:
-      redis: { condition: service_healthy }
+      # ${FLOWER_HOST_PORT:-5555} : même rationale que API_HOST_PORT ci-dessus
+      # (service api) — surchargeable uniquement pour la validation E2E locale.
+      - "127.0.0.1:${FLOWER_HOST_PORT:-5555}:5555"
     # Override du HEALTHCHECK natif de l'image ladini-api (`curl .../health`
     # sur :8000) : Flower ne lance pas l'app FastAPI et n'écoute pas sur 8000,
     # il écoute sur :5555 avec basic auth — le healthcheck hérité échouait
     # donc systématiquement (conteneur marqué unhealthy en boucle, restarts
     # autoheal). On vérifie ici que Flower répond réellement (200 ou 401 =
     # serveur up, l'auth n'est pas le sujet du healthcheck).
+    # `start_period` (2026-09-14, incident réel `dev-up` : conteneur marqué
+    # "unhealthy" avant même d'avoir fini de démarrer, faisant échouer le
+    # script alors que Flower finissait par répondre correctement quelques
+    # secondes plus tard). Flower partage l'image `ladini-api` et exécute donc
+    # le MÊME warmup au démarrage que `api`/`worker` (scan du registre
+    # d'outils MCP, `[ToolScopeWarmup]` dans les logs) avant de pouvoir
+    # servir la moindre requête HTTP sur :5555 — mesuré en local à ~110s au
+    # premier succès, largement au-delà des 30s hérités de `api`/`mcp` (qui,
+    # eux, n'ont pas ce warmup avant leur endpoint /health). `worker`
+    # ci-dessus a déjà un `start_period` plus long (40s) pour la même raison
+    # de nature (démarrage plus lourd que les endpoints HTTP simples) ; 90s
+    # donne à Flower une marge réelle plutôt que hérité par erreur de
+    # copier-coller d'`api`/`mcp`.
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:5555/ | grep -qE '^(200|401)$' || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 90s
     logging: *logging
     deploy:
       resources:

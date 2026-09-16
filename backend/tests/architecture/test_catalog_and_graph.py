@@ -72,16 +72,15 @@ class TestIntentCatalog:
                     problems.append(f"{goal}.{f}")
         # Champs connus non encore câblés — tolérés mais figés pour éviter
         # toute NOUVELLE régression silencieuse.
+        # (2026-09-13, Deep Intent Architecture Cleanup) : tous les intents
+        # historiquement listés ici (CROP_RECORD_INTERVENTION/
+        # CROP_RECORD_OBSERVATION/CROP_UPDATE_SOIL/CROP_UPDATE_STAGE/
+        # PROFILE_SWITCH_ROLE/SEARCH_NEARBY/SYSTEM_REPORT_ANOMALY/
+        # SYSTEM_COMMIT_TRANSACTION) ont été supprimés d'INTENT_CONFIG.
         known = {
-            "CROP_RECORD_INTERVENTION.intervention_type",
-            "CROP_RECORD_OBSERVATION.stage_label", "CROP_RECORD_OBSERVATION.observation",
-            "CROP_UPDATE_SOIL.ph", "CROP_UPDATE_STAGE.stage_name",
             "PRODUCER_CONFIRM_DELIVERY_OTP.otp_code",
             "PROFILE_SET_GEO.latitude", "PROFILE_SET_GEO.longitude",
-            "PROFILE_SET_PREFS.language", "PROFILE_SWITCH_ROLE.target_role",
-            "SEARCH_NEARBY.latitude", "SEARCH_NEARBY.longitude",
-            "SYSTEM_REPORT_ANOMALY.anomaly_type", "SYSTEM_REPORT_ANOMALY.description",
-            "SYSTEM_COMMIT_TRANSACTION.staging_id",
+            "PROFILE_SET_PREFS.language",
         }
         new = sorted(set(problems) - known)
         assert not new, f"nouveaux champs requis non demandables : {new}"

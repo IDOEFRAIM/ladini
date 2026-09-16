@@ -1,0 +1,207 @@
+# ═════════════════════════════════════════════════════════════════════
+# Grafana Alloy — stack séparée du compose applicatif (cycle de vie
+# indépendant, même pattern que infra/reverse-proxy/docker-compose.yml :
+# on redéploie l'observabilité sans toucher à l'appli, et inversement).
+#
+#   cd infra/alloy
+#   cp .env.example .env   &&   $EDITOR .env   # identifiants Grafana Cloud
+#   docker compose -f docker-compose.alloy.yml up -d
+#
+# Rejoint `agri_net` (external, créé par docker-compose.prod.yml) UNIQUEMENT
+# pour le conteneur `alloy` — il doit atteindre `api:8000/metrics` en scrape
+# ET recevoir les traces OTLP poussées par `api`/`worker` (voir
+# OTEL_EXPORTER_OTLP_ENDPOINT dans docker-compose.prod.yml, doit pointer
+# vers `http://alloy:4318` ou `alloy:4317`).
+#
+# `docker-socket-proxy` NE rejoint PAS `agri_net` — même raisonnement que
+# `autoheal` dans docker-compose.prod.yml (§ AUTO-HEALING) : il n'a besoin
+# de parler qu'au démon Docker (réseau `alloy_internal`, isolé), aucune
+# visibilité réseau sur redis/pgbouncer/mcp ne lui est utile.
+# ═════════════════════════════════════════════════════════════════════
+
+networks:
+  agri_net:
+    external: true # créé par docker-compose.prod.yml
+  # Réseau interne dédié Alloy <-> socket-proxy — jamais exposé à `agri_net`
+  # ni à un port hôte. Isole le seul composant qui parle au démon Docker.
+  alloy_internal:
+    driver: bridge
+    internal: true # aucune route sortante — le proxy n'a besoin que du socket local
+
+services:
+  # ── Proxy Docker en lecture seule — Alloy ne monte JAMAIS le socket
+  # Docker brut (voir README §"threat model du socket proxy"). Expose
+  # UNIQUEMENT les endpoints CONTAINERS (stats + logs). Tout le reste
+  # (IMAGES, NETWORKS, VOLUMES, EXEC, BUILD, COMMIT, ...) est à 0 — même
+  # compromis en profondeur que le reste de ce repo (cf. `x-hardening` dans
+  # docker-compose.prod.yml : cap_drop ALL partout où c'est possible).
+  docker-socket-proxy:
+    # Pin exact — un conteneur qui parle au démon Docker de l'hôte est un
+    # composant sensible, jamais de `:latest` dessus (même discipline que
+    # `pgbouncer`/`autoheal` dans docker-compose.prod.yml).
+    # ⚠ VÉRIFIER que ce tag est toujours le plus récent stable avant
+    # déploiement — non confirmé contre un registry en direct ici.
+    image: tecnativa/docker-socket-proxy:0.2.0
+    environment:
+      # Endpoints en lecture nécessaires à cadvisor (stats conteneurs) +
+      # loki.source.docker (logs conteneurs) — voir la doc de l'image pour
+      # la liste exhaustive des flags ; tout flag omis vaut 0 (refusé) par
+      # défaut chez tecnativa/docker-socket-proxy.
+      CONTAINERS: "1" # lecture liste/inspect conteneurs — requis (cadvisor + logs)
+      IMAGES: "0" # non utilisé par Alloy
+      # (2026-09-17, follow-up pre-Hetzner) — passé à "1" après test réel :
+      # `discovery.docker` (composant Alloy derrière `loki.source.docker`)
+      # appelle `GET /networks` en plus de `/containers/json` +
+      # `/containers/{id}/json` pour construire les labels réseau
+      # (`__meta_docker_network_*`) — confirmé en E2E local : avec ce flag à
+      # "0", CHAQUE cycle de découverte échouait entièrement ("error while
+      # computing network labels : 403 Forbidden"), donc AUCUN conteneur
+      # n'était jamais scrapé/tail-loggé. `/networks` est une lecture seule
+      # (liste noms/IDs/drivers, aucun secret, aucune écriture) — ne change
+      # pas la posture "0 écriture" du proxy, corrige juste une hypothèse de
+      # l'audit précédent (jamais vérifiée en direct avant cette session).
+      NETWORKS: "1"
+      VOLUMES: "0" # non utilisé par Alloy
+      SERVICES: "0" # pas de mode Swarm ici
+      TASKS: "0" # pas de mode Swarm ici
+      NODES: "0" # pas de mode Swarm ici
+      SWARM: "0"
+      BUILD: "0" # pas de build depuis un conteneur qui tourne
+      COMMIT: "0"
+      CONFIGS: "0"
+      DISTRIBUTION: "0"
+      EXEC: "0" # jamais d'exécution de commande dans un conteneur via le proxy
+      INFO: "1" # `docker info` — utile aux diagnostics cadvisor, lecture seule
+      PLUGINS: "0"
+      SECRETS: "0"
+      SESSION: "0"
+      SYSTEM: "0"
+      POST: "0" # aucune opération d'écriture — proxy 100% lecture seule
+    volumes:
+      # Le SEUL conteneur de cette stack autorisé à toucher le socket brut,
+      # et seulement pour le RELAYER en lecture seule après filtrage.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [alloy_internal] # jamais de port publié, jamais sur agri_net
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    # ═══════════════════════════════════════════════════════════════════
+    # (2026-09-17, follow-up pre-Hetzner) — `read_only: true` seul rendait ce
+    # conteneur INCAPABLE de démarrer, confirmé en E2E local : l'entrypoint
+    # d'origine de `tecnativa/docker-socket-proxy` GÉNÈRE
+    # `/usr/local/etc/haproxy/haproxy.cfg` (depuis un `.template` voisin) à
+    # CHAQUE démarrage — avec une racine en lecture seule et sans scratch
+    # space, cette écriture échouait systématiquement ("Read-only file
+    # system"), boucle de crash infinie. Ni le socket-proxy ni donc Alloy
+    # (`loki.source.docker`/cadvisor derrière lui) n'ont jamais pu
+    # fonctionner tel quel — un gap resté invisible tant que cette stack
+    # n'avait jamais été réellement démarrée (confirmé : NOT RUN dans le
+    # rapport E2E précédent).
+    #
+    # Un `tmpfs` sur `/usr/local/etc/haproxy` (1ère tentative) CASSE
+    # l'entrypoint autrement : ce montage MASQUE aussi `haproxy.cfg.
+    # template` ET les pages d'erreur (`errors/*.http`) que le template
+    # référence par CHEMIN ABSOLU dans CE MÊME dossier — ils viennent de
+    # l'image, jamais recréés par un tmpfs vide.
+    #
+    # Correctif : on laisse le template et les fichiers d'erreur intacts
+    # (aucun montage sur `/usr/local/etc/haproxy`), on écrit le fichier
+    # généré ailleurs (`/run`, tmpfs — seule vraie écriture nécessaire), et
+    # on reproduit ICI la substitution `${BIND_CONFIG}` que faisait
+    # l'entrypoint d'origine (voir son code — seule variable non résolue
+    # nativement par HAProxy, car calculée dans le shell de l'entrypoint,
+    # jamais exportée dans l'environnement du process). Tout le reste
+    # (CONTAINERS/INFO/POST/LOG_LEVEL/SOCKET_PATH/...) reste résolu par
+    # HAProxy lui-même via `${VAR}`/`env(VAR)` — comportement de l'image
+    # inchangé, seule la génération du fichier de config est réécrite pour
+    # tenir sous `read_only: true`.
+    # ═══════════════════════════════════════════════════════════════════
+    tmpfs:
+      - /run
+      - /var/lib/haproxy
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        case "$$(echo "$$DISABLE_IPV6" | tr '[:upper:]' '[:lower:]')" in
+          1|true|yes) BIND_CONFIG=":2375" ;;
+          *) BIND_CONFIG="[::]:2375 v4v6" ;;
+        esac
+        sed "s/\$${BIND_CONFIG}/$$BIND_CONFIG/g" /usr/local/etc/haproxy/haproxy.cfg.template > /run/haproxy.cfg
+        exec haproxy -W -db -f /run/haproxy.cfg
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128m }
+    restart: unless-stopped
+
+  alloy:
+    # Pin exact — même discipline que le reste de la stack (pgbouncer,
+    # autoheal, caddy...). ⚠ VÉRIFIER que ce tag est toujours le plus
+    # récent stable avant déploiement (non confirmé contre un registry en
+    # direct ici).
+    image: grafana/alloy:v1.4.3
+    command:
+      - "run"
+      - "--server.http.listen-addr=0.0.0.0:12345"
+      - "--storage.path=/var/lib/alloy/data"
+      - "/etc/alloy/config.alloy"
+    environment:
+      # ── Grafana Cloud — SEUL ce conteneur détient ces identifiants
+      # (least privilege, voir README §"quels services reçoivent quoi").
+      # `api`/`worker`/`mcp`/`flower` ne les reçoivent JAMAIS : l'app pousse
+      # ses traces à Alloy LOCALEMENT (OTLP, sans auth — réseau Docker
+      # interne uniquement) ; c'est Alloy seul qui s'authentifie ensuite
+      # vers Grafana Cloud.
+      GRAFANA_CLOUD_PROMETHEUS_URL: "${GRAFANA_CLOUD_PROMETHEUS_URL:?requis — voir README}"
+      GRAFANA_CLOUD_PROMETHEUS_USER: "${GRAFANA_CLOUD_PROMETHEUS_USER:?requis — voir README}"
+      GRAFANA_CLOUD_LOKI_URL: "${GRAFANA_CLOUD_LOKI_URL:?requis — voir README}"
+      GRAFANA_CLOUD_LOKI_USER: "${GRAFANA_CLOUD_LOKI_USER:?requis — voir README}"
+      GRAFANA_CLOUD_OTLP_ENDPOINT: "${GRAFANA_CLOUD_OTLP_ENDPOINT:?requis — voir README}"
+      GRAFANA_CLOUD_OTLP_INSTANCE_ID: "${GRAFANA_CLOUD_OTLP_INSTANCE_ID:?requis — voir README}"
+      GRAFANA_CLOUD_API_KEY: "${GRAFANA_CLOUD_API_KEY:?requis — clé API Grafana Cloud (scope metrics/logs/traces:write), voir README}"
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy:ro
+      - alloy_data:/var/lib/alloy/data
+    ports:
+      # Port d'admin/debug Alloy (UI + healthcheck) — boucle locale
+      # uniquement, jamais publié publiquement (même règle que Flower dans
+      # docker-compose.prod.yml : accès par tunnel SSH si besoin).
+      #   ssh -L 12345:127.0.0.1:12345 user@hote
+      - "127.0.0.1:12345:12345"
+    networks: [agri_net, alloy_internal]
+    security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    # (2026-09-17, follow-up pre-Hetzner) — `wget` N'EXISTE PAS dans l'image
+    # `grafana/alloy:v1.4.3` (base Ubuntu minimale, confirmé en E2E local :
+    # `/bin/sh: 1: wget: not found` à CHAQUE tentative) — ce conteneur était
+    # donc marqué `unhealthy` en PERMANENCE depuis son tout premier
+    # démarrage, quel que soit son état réel (vérifié fonctionnel via son
+    # API HTTP `/api/v0/web/components` pendant que Docker le disait
+    # unhealthy). Aucun `curl`/`nc`/bash (`/dev/tcp`) non plus dans cette
+    # image — seuls `awk`/`grep`/`cat` (coreutils) sont disponibles. Repli :
+    # vérifie qu'un socket est bien en LISTEN sur le port admin via
+    # `/proc/net/tcp{,6}` (`12345` décimal = `3039` hex, 4e colonne `0A` =
+    # TCP_LISTEN) — liveness du process, pas un vrai `/-/ready` applicatif,
+    # mais correct et non-cassé, contrairement à l'ancien test. Alloy écoute
+    # en IPv6 (`tcp6`, confirmé en E2E local) — `tcp` (IPv4) inclus par
+    # robustesse si une future version change ce comportement.
+    healthcheck:
+      test: ["CMD-SHELL", "awk '{print $2,$4}' /proc/net/tcp /proc/net/tcp6 2>/dev/null | grep -qi ':3039 0a' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 512m }
+        reservations: { cpus: "0.1", memory: 128m }
+    restart: unless-stopped
+    depends_on:
+      - docker-socket-proxy
+
+volumes:
+  alloy_data: # WAL local (remote_write/loki.write) — survit à un restart du conteneur

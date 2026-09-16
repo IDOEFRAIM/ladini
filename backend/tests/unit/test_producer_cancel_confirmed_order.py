@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import types
 import uuid
+from decimal import Decimal
 
 import pytest
 
@@ -177,6 +178,74 @@ class TestProducerCanCancelAConfirmedOrder:
         )
         assert result["outcome"] == "CANCELLED"
         assert not session.outbox_inserts
+
+
+class TestStockRecreditSurvivesRealDecimalColumns:
+    """Incident réel (2026-09-15) : `Product.quantity_for_sale` est une
+    colonne `Numeric` — chargée en `decimal.Decimal` sur une VRAIE ligne
+    SQLAlchemy, jamais un `float` nu. `resolve_stock_debit` renvoie
+    toujours un `float`. `Decimal += float` lève `TypeError` — masqué côté
+    agent par `SafeDatabaseError` en "erreur technique", aucune commande
+    n'était en réalité jamais annulée. Les autres tests de ce fichier
+    utilisent `quantity_for_sale=float` (via `_product` ci-dessus) — un
+    `types.SimpleNamespace` ne reproduit pas le type RÉEL d'une colonne
+    Numeric, ce qui a laissé ce bug totalement invisible aux tests
+    existants malgré une suite déjà large. Celui-ci reproduit le type
+    exact vu en production."""
+
+    def test_cancellation_recredits_stock_when_the_column_is_a_real_decimal(self):
+        producer_id = uuid.uuid4()
+        product = _product(producer_id, qty=Decimal("100.0"))
+        order = _order(items=[_item(product, qty=10.0)])
+        session = _FakeSession(order)
+        svc = _service(session, types.SimpleNamespace(id=producer_id))
+
+        result = run(
+            svc.cancel_confirmed_order(
+                producer_phone="+22670000001",
+                order_id=str(order.id),
+                reason="rupture de stock",
+            )
+        )
+
+        assert result["outcome"] == "CANCELLED"
+        assert product.quantity_for_sale == 110.0
+
+
+class TestProducerCanDeclineBeforeConfirming:
+    """(2026-09-13, confirmation explicite producteur) : refuser une
+    commande AVANT de la confirmer est désormais un cas d'usage légitime,
+    au même titre qu'annuler après confirmation — mécanique strictement
+    identique, seul `from_status`/la note d'historique diffèrent."""
+
+    def test_pending_confirmation_order_is_declined_stock_recredited_buyer_notified(self):
+        producer_id = uuid.uuid4()
+        product = _product(producer_id, qty=100.0)
+        order = _order(
+            status="PENDING_PRODUCER_CONFIRMATION", items=[_item(product, qty=10.0)]
+        )
+        session = _FakeSession(order)
+        svc = _service(session, types.SimpleNamespace(id=producer_id))
+
+        result = run(
+            svc.cancel_confirmed_order(
+                producer_phone="+22670000001",
+                order_id=str(order.id),
+                reason="rupture de stock",
+            )
+        )
+
+        assert result["outcome"] == "CANCELLED"
+        assert order.status == "CANCELLED"
+        assert product.quantity_for_sale == 110.0  # recrédité
+        assert len(session.outbox_inserts) == 1  # acheteur notifié
+        history = [o for o in session.added if type(o).__name__ == "OrderStatusHistory"]
+        assert len(history) == 1
+        assert (history[0].from_status, history[0].to_status) == (
+            "PENDING_PRODUCER_CONFIRMATION",
+            "CANCELLED",
+        )
+        assert history[0].note == "declined_by_producer"
 
 
 class TestGuards:

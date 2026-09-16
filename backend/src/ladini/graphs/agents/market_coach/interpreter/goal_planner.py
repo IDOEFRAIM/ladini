@@ -194,6 +194,15 @@ async def goal_planner(
     # consomme cette même variable, plus jamais `state.get("expected_input")`.
     pending_interaction = get_pending_interaction(state)
     expected_input = to_tunnel_category(pending_interaction)
+    # (2026-09-14, incident WhatsApp #8) : voir RÈGLE 5 plus bas pour le
+    # contexte complet — calculé ICI, avant la RÈGLE 1bis, parce que celle-ci
+    # doit explicitement laisser passer ce cas plutôt que de reverrouiller
+    # aveuglément le tunnel actuel avant que la RÈGLE 5 n'ait pu agir.
+    _breakout_confirm = (
+        event in ("CONFIRM", "REJECT")
+        and detected_intent in _NAVIGATION_INTENTS
+        and detected_intent != str(current_goal or "").upper()
+    )
     # (2026-09-09, audit Bloc 2, fermeture Blocker B) : la RÈGLE 0bis
     # ci-dessous se déclenche désormais EXCLUSIVEMENT sur ce signal —
     # `pending_interaction` (DURABLE, survit nativement au checkpoint, voir
@@ -525,7 +534,11 @@ async def goal_planner(
     # fragile — d'où le garde `current_goal` ici : « verrouiller le tunnel »
     # n'a de sens que s'il y a un tunnel. Sans tunnel, ANSWER/UPDATE
     # retombent sur la RÈGLE 5, qui sait promouvoir l'intention en goal.
-    if current_goal and event in {"CONFIRM", "SELECTION", "ANSWER", "UPDATE"}:
+    if (
+        current_goal
+        and event in {"CONFIRM", "SELECTION", "ANSWER", "UPDATE"}
+        and not _breakout_confirm
+    ):
         updates["current_goal"] = current_goal
         updates["goal_status"] = "ACTIVE"
         updates["working_memory"] = _lock(current_goal)
@@ -745,7 +758,24 @@ async def goal_planner(
     # devait confirmer deux fois pour la même décision avant même d'arriver
     # à l'étape GPS. `BUYER_PREORDER_CONFIRM` fait chaîner directement
     # bootstrap → `resolve_preorder_confirmation` en un seul tour.
-    _orphan_cart = state.get("active_cart") or working.get("last_active_cart") or []
+    # (2026-09-14, incident WhatsApp #11 — correction du correctif #7) :
+    # `state.get("active_cart")` (CE tour) et `working.get("last_active_cart")`
+    # (un SNAPSHOT d'un tour antérieur, potentiellement vieux de plusieurs
+    # jours) ne portent PAS la même fiabilité de signal — les fusionner sous
+    # un seul `_orphan_cart` masquait cette différence. Le garde de rôle posé
+    # en #7 (bloquer cette promotion pour un rôle PRODUCER) était trop large :
+    # il bloquait aussi un producteur en train d'ACHETER, panier fraîchement
+    # rempli CE MÊME tour ("je veux 9" → panier → "okay" quelques secondes
+    # plus tard) — un signal parfaitement légitime quel que soit le rôle
+    # résolu (un dual-rôle peut acheter ET vendre). Seul le repli sur le
+    # SNAPSHOT (jamais le panier ACTUEL) doit rester restreint au rôle BUYER :
+    # c'est LUI, pas un panier frais, qui a causé l'incident #7 (un panier
+    # acheteur périmé resurgissant chez un producteur qui tapait "confirmer"
+    # pour tout autre chose).
+    _fresh_cart = state.get("active_cart") or []
+    _stale_cart_snapshot = working.get("last_active_cart") or []
+    _role_up = str(state.get("user_role") or "").upper()
+    _orphan_cart = _fresh_cart or (_stale_cart_snapshot if _role_up != "PRODUCER" else [])
     if (
         not current_goal
         and event == "CONFIRM"
@@ -771,12 +801,33 @@ async def goal_planner(
     # traiter comme une nouvelle tâche est la SEULE lecture cohérente — le
     # même traitement que RÈGLE 5 applique déjà à `NEW_TASK`, réutilisé tel
     # quel (purge transactionnelle + verrou incluses), jamais dupliqué.
-    # `CONFIRM`/`SELECTION` restent volontairement EXCLUS : « oui » ou « 2 »
-    # sans rien à confirmer ni menu affiché ne portent aucune intention
-    # métier — les promouvoir inventerait une tâche que l'utilisateur n'a
-    # pas demandée. Si `detected_intent` n'est pas mappable (UNKNOWN), rien
-    # n'est promu et le tour retombe sur le repli par défaut, inchangé.
-    if event == "NEW_TASK" or (not current_goal and event in {"ANSWER", "UPDATE"}):
+    # `CONFIRM`/`SELECTION` restent volontairement EXCLUS dans le cas
+    # général : « oui » ou « 2 » sans rien à confirmer ni menu affiché ne
+    # portent aucune intention métier — les promouvoir inventerait une
+    # tâche que l'utilisateur n'a pas demandée. Si `detected_intent` n'est
+    # pas mappable (UNKNOWN), rien n'est promu et le tour retombe sur le
+    # repli par défaut, inchangé.
+    #
+    # (2026-09-14, incident WhatsApp #8) : EXCEPTION étroite — `CONFIRM`/
+    # `REJECT` visant un intent de `NAVIGATION_BREAKOUT_GOALS` DIFFÉRENT du
+    # tunnel actuel EST promu. Observé en prod : après une interruption déjà
+    # confirmée par la route SELECTION ("confirmer" sans rapport avec le
+    # menu affiché), le classifieur de repli (legacy, moins fiable que le
+    # micro-prompt) retourne parfois `disposition=CONFIRM` au lieu de
+    # `NEW_TASK`, MAIS avec le bon intent identifié (`PRODUCER_CONFIRM_ORDER`)
+    # — pas un intent inventé, une classification réelle du LLM, simplement
+    # portée par la mauvaise étiquette de disposition. Rejeter ce résultat
+    # renvoyait l'utilisateur au tunnel périmé en boucle. Restreint aux
+    # intents déjà vetés pour l'interruption (jamais un intent arbitraire) :
+    # même garde-fou que `nodes/cognitive.py`, pas une nouvelle catégorie de
+    # confiance. (`_breakout_confirm` calculé en tête de fonction — RÈGLE
+    # 1bis, plus haut, doit aussi le connaître pour ne pas reverrouiller le
+    # tunnel avant que cette règle-ci ne puisse agir.)
+    if (
+        event == "NEW_TASK"
+        or (not current_goal and event in {"ANSWER", "UPDATE"})
+        or _breakout_confirm
+    ):
         new_goal = INTENT_TO_GOAL_MAP.get(detected_intent)
         if new_goal:
             updates["current_goal"] = new_goal

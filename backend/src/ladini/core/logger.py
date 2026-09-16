@@ -13,13 +13,27 @@ from typing import Optional
 from ladini.core.settings import settings
 
 _configured = False
+_sentry_initialized = False
 
 
-def _init_sentry_if_needed(level: int = logging.INFO) -> Optional[object]:
+def init_sentry(level: int = logging.INFO) -> Optional[object]:
     """Initialise Sentry SDK si `SENTRY_DSN` est présent dans les settings.
+
+    Idempotent et appelable indépendamment de `setup_logging()` — c'est ce
+    que font `api/main.py` (lifespan FastAPI) et `api/tasks.py`
+    (`worker_process_init` Celery) : `setup_logging()` complet appelle
+    `logging.basicConfig(...)` + installe un `FileHandler`, ce qui
+    reconfigurerait la racine du logging par-dessus celle déjà posée par
+    gunicorn/uvicorn (ou par le process maître Celery) — risque de handlers
+    dupliqués / sortie doublée. Seule l'init Sentry (jusqu'ici JAMAIS
+    appelée nulle part dans le code — `SENTRY_DSN` était configuré en prod
+    sans effet, bug corrigé ici) est nécessaire côté process API/worker.
 
     Returns the sentry client object or None if not initialized / not available.
     """
+    global _sentry_initialized
+    if _sentry_initialized:
+        return None
     dsn = getattr(settings, "SENTRY_DSN", "")
     if not dsn:
         return None
@@ -39,6 +53,7 @@ def _init_sentry_if_needed(level: int = logging.INFO) -> Optional[object]:
             environment=getattr(settings, "SENTRY_ENVIRONMENT", "production"),
             release=f"{settings.APP_NAME}@{settings.APP_VERSION}",
         )
+        _sentry_initialized = True
         logging.getLogger("Ladini").info("Sentry initialized")
         return sentry_sdk
     except Exception:
@@ -47,6 +62,11 @@ def _init_sentry_if_needed(level: int = logging.INFO) -> Optional[object]:
             "Sentry SDK not available or failed to init"
         )
         return None
+
+
+# Alias rétrocompatible — ancien nom interne, conservé au cas où du code
+# l'importait directement (aucun appelant trouvé dans le repo à ce jour).
+_init_sentry_if_needed = init_sentry
 
 
 def setup_logging(level: int = logging.INFO) -> None:
@@ -88,4 +108,4 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-__all__ = ["setup_logging", "get_logger"]
+__all__ = ["setup_logging", "get_logger", "init_sentry"]

@@ -17,7 +17,12 @@ from ladini.api.routes.whatsapp_webhook import (
     router as whatsapp_router,  # provider par défaut
 )
 from ladini.core import telemetry
+from ladini.core.log_redaction import install_log_redaction
 from ladini.core.settings import settings
+
+# Le plus tôt possible — AVANT que gunicorn/uvicorn ne produisent leurs
+# premiers logs (voir log_redaction.py pour le mécanisme et le pourquoi).
+install_log_redaction()
 
 logger = logging.getLogger("Ladini.API")
 
@@ -38,6 +43,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # puis instrumente FastAPI (spans automatiques par requête).
     telemetry.init_telemetry(service_name="ladini-api")
     telemetry.instrument_fastapi(app)
+
+    # Sentry (bug corrigé 2026-09-16) : `SENTRY_DSN` était configuré en prod
+    # (docker-compose.prod.yml) depuis longtemps mais `setup_logging()` —
+    # seule fonction qui appelle `sentry_sdk.init(...)` — n'était JAMAIS
+    # invoquée nulle part dans le code (uniquement `get_logger(name)`,
+    # simple `logging.getLogger`, sans aucun câblage Sentry). On appelle ici
+    # `init_sentry()` seul (pas `setup_logging()` complet, qui ferait
+    # `logging.basicConfig(...)` + un `FileHandler` par-dessus la config de
+    # logging déjà posée par gunicorn/uvicorn) — best-effort, ne doit jamais
+    # empêcher l'API de démarrer.
+    try:
+        from ladini.core.logger import init_sentry
+
+        init_sentry()
+    except Exception as exc:
+        logger.warning("Initialisation Sentry ignorée (non bloquant) : %s", exc)
 
     # (2026-09-02) Amorce le pool DB au démarrage — même correctif que
     # `api/tasks.py::init_worker_process` pour le worker Celery (voir

@@ -39,6 +39,18 @@ _DEFAULT_LABEL_MAP = {
     "price": "prix",
     "unit": "unité",
     "zone": "zone de production",
+    # Incident réel (2026-09-14) : "update_field" est un sentinel INTERNE
+    # posé par `flows/producer/flow.py` (_resolve_cycle_for_update /
+    # _resolve_product_for_update, `InteractionKind.ENTER_FIELD`) pour
+    # verrouiller le tunnel de mise à jour contre une déviation — jamais
+    # pensé comme un nom de champ à afficher. Quand `render_recovery`
+    # (nodes/rendering/feedback.py) intercepte un écart classé UNKNOWN
+    # pendant ce tunnel, il en dérivait un label via `label_for_field`, qui
+    # retombait faute d'entrée ici sur le nom brut : le producteur recevait
+    # littéralement "J'ai juste besoin de update_field." Ajouté ici (pas
+    # dans un `label_map` par goal) car le même sentinel sert aux DEUX flux
+    # de mise à jour (production future ET produit catalogue).
+    "update_field": "l'information à modifier (prix, quantité, nom, unité, tarif...)",
 }
 
 

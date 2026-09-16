@@ -11,8 +11,8 @@ légitimement associés au slot `expected_input` en cours.
 Deux bugs réels trouvés et corrigés par cet audit (la table était recopiée à
 la main et avait dérivé de `core/slots.py`) : `production_type` (slot
 PRODUCT) et `surface` (slot QUANTITY) étaient absents de l'allowlist alors
-qu'ils sont le champ EXACTEMENT demandé pour `DECLARE_CROP_CYCLE`/
-`CROP_START_CYCLE` — une réponse dégradée à sa propre question se faisait
+qu'ils sont le champ EXACTEMENT demandé pour `PRODUCTION_DECLARE_FUTURE`
+(anciennement `DECLARE_CROP_CYCLE`) — une réponse dégradée à sa propre question se faisait
 donc jeter par son propre garde-fou. La table est désormais dérivée de
 `core/slots.py::fields_for_expected_input` (source unique)."""
 from __future__ import annotations

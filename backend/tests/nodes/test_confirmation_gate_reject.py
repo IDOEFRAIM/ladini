@@ -116,8 +116,8 @@ class TestGenericRejectStillFullyResets:
 
     def test_stock_goal_reject_also_fully_resets(self):
         result = gate(
-            current_goal="STOCK_ADJUST",
-            transaction_payload={"stock_id": "s1", "quantity": 10},
+            current_goal="STOCK_REGISTER_HARVEST",
+            transaction_payload={"product": "mais", "quantity": 10},
             expected_input="CONFIRMATION",
             waiting_for_confirmation=True,
             interpreted_event="REJECT",
@@ -392,7 +392,7 @@ class TestDeviationDuringConfirmationGetsAnAdaptiveReply:
         PROCUREMENT, voir `test_sales_publish_draft_anti_regression.py`) —
         ce test-ci continue de verrouiller la garantie pour le mécanisme
         générique, toujours utilisé par les goals pas encore migrés
-        (`SALES_UPDATE_PRODUCT`, `DECLARE_CROP_CYCLE`, panier, stock...)."""
+        (`SALES_UPDATE_PRODUCT`, `PRODUCTION_DECLARE_FUTURE`, panier, stock...)."""
         state = make_state(
             current_goal="SALES_UPDATE_PRODUCT",
             transaction_payload={"product": "champignons", "quantity": 35, "unit": "UNITE", "price": 950},

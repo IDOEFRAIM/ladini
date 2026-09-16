@@ -6,7 +6,7 @@ tags: [happy_path, disambiguation, multi_turn]
 grounding:
   status: PROVEN_BY_CODE
   evidence:
-    - "backend/src/ladini/graphs/agents/market_coach/interpreter/intent.py — INTENT_DISAMBIGUATION['STOCK_OR_SALES_DECLARATION']: candidates=[SALES_PUBLISH_PRODUCT, DECLARE_CROP_CYCLE], lexical_hints include 'j'ai', 'publier', 'mettre en vente'"
+    - "backend/src/ladini/graphs/agents/market_coach/interpreter/intent.py — INTENT_DISAMBIGUATION['STOCK_OR_SALES_DECLARATION']: candidates=[SALES_PUBLISH_PRODUCT, PRODUCTION_DECLARE_FUTURE (renamed 2026-09-13 from DECLARE_CROP_CYCLE)], lexical_hints include 'j'ai', 'publier', 'mettre en vente'"
     - "actions/sales.py:193 — SALES_PUBLISH_PRODUCT tool binding, create_product PROVEN"
 
 persona: {role: PRODUCER, description: "Producteur maraîcher", phone: "+22670000021"}

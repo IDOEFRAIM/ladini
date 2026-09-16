@@ -153,8 +153,12 @@ class TestGroupedConfirmation:
         )
 
         assert result["status"] == "success"
-        assert order_a.status == "CONFIRMED"
-        assert order_b.status == "CONFIRMED"
+        # (2026-09-13, confirmation explicite producteur) : la précommande
+        # confirmée par l'acheteur entre en attente de confirmation DU
+        # PRODUCTEUR — elle ne devient "CONFIRMED" qu'après son geste
+        # explicite (`ProducerMgmtMixin.confirm_order_by_producer`).
+        assert order_a.status == "PENDING_PRODUCER_CONFIRMATION"
+        assert order_b.status == "PENDING_PRODUCER_CONFIRMATION"
         assert len(result["orders"]) == 2
 
     def test_each_order_keeps_its_own_total(self, captured_outbox):
@@ -280,7 +284,9 @@ class TestSingleProducerUnchanged:
             )
         )
 
-        assert order.status == "CONFIRMED"
+        # (2026-09-13, confirmation explicite producteur) : voir note dans
+        # TestGroupedConfirmation ci-dessus.
+        assert order.status == "PENDING_PRODUCER_CONFIRMATION"
         assert float(order.total_amount) == 3000.0
         assert len(result["orders"]) == 1
         assert "une par producteur" not in result["message"]
@@ -309,7 +315,9 @@ class TestLegacyMultiProducerOrdersAreGrandfathered:
             )
         )
 
-        assert legacy.status == "CONFIRMED"
+        # (2026-09-13, confirmation explicite producteur) : voir note dans
+        # TestGroupedConfirmation ci-dessus.
+        assert legacy.status == "PENDING_PRODUCER_CONFIRMATION"
         assert float(legacy.total_amount) == 3000.0
         phones = {e["recipient_phone"] for e in captured_outbox}
         assert phones == {PHONE_A, PHONE_B}

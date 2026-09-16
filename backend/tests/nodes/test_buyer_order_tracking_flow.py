@@ -939,6 +939,48 @@ class TestOrderTrackingResolver:
         result = run(order_tracking_resolver(state, runtime))
         assert "aucun appel d'offres" in result["final_response"]
 
+    def test_pending_winner_bid_during_gps_stage_routes_even_on_unknown_event(self):
+        """Incident réel (2026-09-14) : "oui" à l'étape GPS classé
+        `event=UNKNOWN` par le LLM (non-déterminisme Groq déjà documenté
+        ailleurs) ne passait ni `event in {CONFIRM,REJECT}` ni
+        `location_shared` — ce tour ne routait donc JAMAIS vers
+        `finalize_winner`, qui a pourtant sa PROPRE reconnaissance robuste de
+        "oui" par TEXTE (`_YES_TOKENS`), et retombait sur un chemin générique
+        produisant un récapitulatif vide et incohérent. `winner_gps_stage`
+        (posé UNIQUEMENT par `finalize_winner` lui-même à l'entrée de cette
+        étape précise) doit suffire à router, même sans CONFIRM/REJECT."""
+        from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import order_tracking_resolver
+        state = make_state(
+            current_goal="BUYER_CHECK_AUCTION_STATUS",
+            working_memory={
+                "pending_winner_bid": "b1",
+                "winner_auction_id": "a1",
+                "pending_winner_price": 250.0,
+                "winner_gps_stage": True,
+                "winner_gps_default": {"lat": 12.35, "lon": -1.5},
+            },
+            interpreted_event="UNKNOWN",
+            normalized_text="oui",
+            user_phone="+22670000001",
+        )
+        runtime = rt(
+            {
+                "get_auction_bids": {
+                    "bids": [{"bid_id": "b1", "producer": "Awa", "price": 250.0, "status": "PENDING"}],
+                    "auction": {"product": "riz"},
+                },
+                "select_winning_bid": {
+                    "status": "success",
+                    "summary_buyer": "🤝 C'est fait ! 250 FCFA",
+                },
+            }
+        )
+        result = run(order_tracking_resolver(state, runtime))
+
+        assert "select_winning_bid" in runtime.calls
+        assert result["status"] == "COMPLETED"
+        assert "aucun appel d'offres" not in result.get("final_response", "")
+
     def test_bid_id_with_winner_auction_id_routes_to_confirm_winner_selection(self):
         from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import order_tracking_resolver
         state = make_state(
@@ -972,7 +1014,7 @@ class TestOrderTrackingResolver:
         result = run(order_tracking_resolver(state, rt()))
         assert to_tunnel_category(get_pending_interaction(result)) == "ORDER_ID"
 
-    @pytest.mark.parametrize("goal", ["BUYER_LIST_AUCTIONS", "MARKET_MY_REQUESTS"])
+    @pytest.mark.parametrize("goal", ["BUYER_LIST_AUCTIONS"])
     def test_list_auctions_goals_route_correctly(self, goal):
         from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import order_tracking_resolver
         state = make_state(current_goal=goal, user_phone="+2260")

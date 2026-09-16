@@ -103,6 +103,38 @@ class TestRenderSelectionMenu:
         result = run(render_selection_menu(c))
         assert result["final_response"].startswith("L'option 2, c'est l'offre de Awa")
 
+    def test_an_unresolved_interruption_never_gets_a_misleading_adaptive_note(self):
+        """Incident réel (2026-09-14) : "confirmer" (une vente producteur)
+        pendant qu'un menu ACHETEUR périmé (BUYER_LIST_ORDERS) restait actif
+        — la route SELECTION avait déjà jugé ce message SANS RAPPORT avec ce
+        menu (interruption), mais la reclassification qui a suivi n'a pas pu
+        identifier d'intention métier (UNKNOWN). Sans ce correctif, une note
+        adaptative ("je comprends que vous voulez confirmer...") était collée
+        au menu acheteur réaffiché — laissant croire à tort qu'il répondait à
+        la demande. `interpreter/routing.py` pose `interruption_unresolved`
+        pour ce cas précis ; ce test verrouille que le rendu le respecte en
+        ne générant AUCUN appel LLM d'accompagnement (`ForbiddenLLM`)."""
+        from ladini.graphs.agents.market_coach.nodes.rendering.menus import render_selection_menu
+        from tests.conftest import ForbiddenLLM, make_state
+
+        state_overrides = dict(
+            current_goal="BUYER_LIST_ORDERS",
+            expected_candidates=["Commande #65280745"],
+            interpreted_event="UNKNOWN",
+            normalized_text="confirmer",
+            interruption_unresolved=True,
+        )
+        state = make_state(**state_overrides)
+        runtime = type("RT", (), {"llm": ForbiddenLLM(), "model_answer": "test-model"})()
+        c = RenderContext(
+            state=state, mc_runtime=runtime,
+            strategy="SELECTION_MENU", status="", goal="BUYER_LIST_ORDERS",
+            salutation="", payload={},
+        )
+        result = run(render_selection_menu(c))
+        assert "Commande #65280745" in result["final_response"]
+        assert not result["final_response"].lower().startswith("je comprends")
+
 
 # =====================================================================
 # render_error
@@ -140,11 +172,18 @@ class TestRenderError:
         result = run(render_error(c))
         assert "erreur technique" in result["final_response"].lower()
 
-    def test_known_goal_offers_a_retry_hint(self):
+    def test_known_goal_offers_a_reformulation_hint(self):
+        # (2026-09-12) "annuler" retiré du hint : `post_response_cleanup`
+        # (nodes/cleanup.py) efface INCONDITIONNELLEMENT `current_goal` dès
+        # que `status=="ERROR"` — promettre "dire annuler" ici mentait, il
+        # n'y a déjà plus rien à annuler au tour suivant (bug réel signalé
+        # par un utilisateur : "annuler" tombait sur le fallback générique
+        # "je n'ai pas compris" au lieu d'annuler quoi que ce soit).
         from ladini.graphs.agents.market_coach.nodes.rendering.feedback import render_error
         c = ctx(current_goal="SALES_PUBLISH_PRODUCT", validation_errors=["x"])
         result = run(render_error(c))
-        assert "annuler" in result["final_response"]
+        assert "reformuler" in result["final_response"]
+        assert "annuler" not in result["final_response"]
 
 
 # =====================================================================

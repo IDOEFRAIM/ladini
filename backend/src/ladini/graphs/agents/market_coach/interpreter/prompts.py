@@ -28,6 +28,7 @@ Contexte agent :
 - expected_candidates : {expected_candidates}
 - suspended_task : {suspended_task}
 - panier_en_attente : {cart_pending}
+- vente_producteur_en_attente_de_confirmation : {producer_order_action_pending}
 {selection_action_block}
 Message utilisateur (déjà nettoyé et traduit en français) :
 \"\"\"{normalized_text}\"\"\"

@@ -41,7 +41,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client
 
-from ladini.core.idempotency import claim_once
+from ladini.core.idempotency import claim_once, release
 from ladini.core.settings import settings
 
 logger = logging.getLogger("Ladini.ResponseDispatcher")
@@ -117,6 +117,22 @@ def claim_response_item(item_key: Optional[str]) -> bool:
     if not item_key:
         return True
     return claim_once(f"resp:{item_key}", ttl_seconds=3600)
+
+
+def release_response_item(item_key: Optional[str]) -> None:
+    """Annule une réclamation posée par `claim_response_item` — SEUL moyen
+    de permettre à un retry Celery légitime de renvoyer un item dont
+    l'envoi a RÉELLEMENT échoué (incident réel 2026-09-15 : un
+    `WhatsAppCloudAPIError('(#131005) Access denied')` faisait échouer le
+    premier essai, mais la réclamation posée AVANT l'envoi n'était jamais
+    libérée — le retry Celery suivant la trouvait déjà posée et
+    l'abandonnait silencieusement comme `duplicate_suppressed`, alors
+    qu'aucun message n'était jamais réellement parti. Même pattern déjà
+    établi et documenté pour l'idempotence ENTRANTE, voir
+    `core/idempotency.py::release`."""
+    if not item_key:
+        return
+    release(f"resp:{item_key}")
 
 
 # =====================================================================
@@ -240,6 +256,15 @@ def _send_via_twilio(
     (``MESSAGING_PROVIDER=twilio``) ET pour ne pas casser la suite de tests
     existante qui verrouille ce comportement en détail
     (tests/unit/test_tasks_twilio_interactive.py)."""
+    if getattr(settings, "MOCK_EXTERNAL_APIS", False):
+        # Sandbox (E2E/tests) — voir le même garde dans
+        # `_send_via_whatsapp_cloud` ci-dessus.
+        logger.warning(
+            "MOCK_EXTERNAL_APIS=true — envoi Twilio SIMULÉ (aucun message réel) | to=%s",
+            phone_number,
+        )
+        return {"status": "message_sent", "sid": "MOCK-SANDBOX", "mocked": True}
+
     account_sid = str(settings.TWILIO_ACCOUNT_SID or "").strip()
     auth_token = str(settings.TWILIO_AUTH_TOKEN or "").strip()
     from_number = str(settings.TWILIO_WHATSAPP_NUMBER or "").strip()
@@ -305,6 +330,19 @@ async def _send_via_whatsapp_cloud(
 ) -> Dict[str, Any]:
     """Envoi via l'API Cloud WhatsApp (Meta directe) — provider par défaut.
     Nom ET signature d'origine conservés, voir `_send_via_twilio`."""
+    if getattr(settings, "MOCK_EXTERNAL_APIS", False):
+        # Sandbox (E2E/tests) — même bascule que `core/get_llm.py::_MockGroqClient` :
+        # aucun appel réseau réel vers Meta, jamais de message WhatsApp
+        # effectivement envoyé, mais le pipeline (webhook → Celery → agent →
+        # dispatch) se termine normalement au lieu de lever et de faire
+        # boucler les retries Celery sur un provider volontairement non
+        # configuré.
+        logger.warning(
+            "MOCK_EXTERNAL_APIS=true — envoi WhatsApp Cloud SIMULÉ (aucun message réel) | to=%s",
+            phone_number,
+        )
+        return {"status": "message_sent", "sid": "MOCK-SANDBOX", "mocked": True}
+
     from ladini.services.whatsapp import cloud_api_client as wa
 
     if not wa.is_configured():
@@ -387,46 +425,65 @@ class ResponseDispatcher:
                 results.append({"status": "duplicate_suppressed", "item_key": item_key})
                 continue
 
-            if isinstance(item, TextResponse):
-                legacy_result = {"interactive": item.interactive} if item.interactive else {}
-                if provider == "twilio":
-                    try:
-                        results.append(
-                            _send_via_twilio(phone_number, item.text, legacy_result)
-                        )
-                    except TwilioRestException as exc:
-                        # Erreur de VALIDATION CLIENT (ex: 21617) : jamais
-                        # résolue par un retry identique — abandon sans
-                        # relancer, comme avant cette consolidation.
-                        if exc.status is not None and 400 <= exc.status < 500:
-                            logger.error(
-                                "TWILIO_PERMANENT_FAILURE | code=%s | status=%s | msg=%s — abandon sans retry",
-                                exc.code, exc.status, exc.msg,
-                            )
+            # Incident réel (2026-09-15) : la réclamation ci-dessus est posée
+            # AVANT l'envoi — un échec RETRYABLE (ex: WhatsAppCloudAPIError
+            # '(#131005) Access denied', ou une erreur Twilio 5xx) qui se
+            # propage hors de ce bloc sans libérer `item_key` laisse la
+            # réclamation posée pour rien : le retry Celery suivant la
+            # trouve déjà là et abandonne l'item comme `duplicate_suppressed`
+            # alors qu'AUCUN message n'a jamais été réellement envoyé — une
+            # panne temporaire devient une perte définitive et silencieuse.
+            # Même garde déjà établie côté idempotence ENTRANTE (voir
+            # `core/idempotency.py::release`), appliquée ici symétriquement :
+            # toute exception qui sort de ce bloc libère la réclamation
+            # avant de se propager, pour qu'un retry légitime puisse
+            # réessayer l'envoi lui-même plutôt que de le croire déjà fait.
+            try:
+                if isinstance(item, TextResponse):
+                    legacy_result = {"interactive": item.interactive} if item.interactive else {}
+                    if provider == "twilio":
+                        try:
                             results.append(
-                                {
-                                    "status": "message_failed",
-                                    "reason": "twilio_client_error",
-                                    "code": exc.code,
-                                }
+                                _send_via_twilio(phone_number, item.text, legacy_result)
                             )
-                        else:
-                            raise
-                else:
+                        except TwilioRestException as exc:
+                            # Erreur de VALIDATION CLIENT (ex: 21617) : jamais
+                            # résolue par un retry identique — abandon sans
+                            # relancer, comme avant cette consolidation. La
+                            # réclamation reste donc posée à dessein (pas de
+                            # retry souhaité pour CETTE classe d'erreur).
+                            if exc.status is not None and 400 <= exc.status < 500:
+                                logger.error(
+                                    "TWILIO_PERMANENT_FAILURE | code=%s | status=%s | msg=%s — abandon sans retry",
+                                    exc.code, exc.status, exc.msg,
+                                )
+                                results.append(
+                                    {
+                                        "status": "message_failed",
+                                        "reason": "twilio_client_error",
+                                        "code": exc.code,
+                                    }
+                                )
+                            else:
+                                raise
+                    else:
+                        results.append(
+                            await _send_via_whatsapp_cloud(phone_number, item.text, legacy_result)
+                        )
+                elif isinstance(item, ImageResponse):
+                    # `_send_image_via_twilio` est SYNC (SDK Twilio, appel réseau
+                    # bloquant) — délestée sur un thread pour ne jamais bloquer
+                    # la boucle asyncio partagée du worker (même discipline que
+                    # l'ancien `product_photo_task.py`, voir aussi
+                    # `workers/outbox/channels/whatsapp.py::_send_sync_twilio`).
                     results.append(
-                        await _send_via_whatsapp_cloud(phone_number, item.text, legacy_result)
+                        await asyncio.to_thread(_send_image_via_twilio, phone_number, item)
                     )
-            elif isinstance(item, ImageResponse):
-                # `_send_image_via_twilio` est SYNC (SDK Twilio, appel réseau
-                # bloquant) — délestée sur un thread pour ne jamais bloquer
-                # la boucle asyncio partagée du worker (même discipline que
-                # l'ancien `product_photo_task.py`, voir aussi
-                # `workers/outbox/channels/whatsapp.py::_send_sync_twilio`).
-                results.append(
-                    await asyncio.to_thread(_send_image_via_twilio, phone_number, item)
-                )
-            else:  # pragma: no cover - garde défensive, pas un item connu
-                logger.error("RESPONSE_DISPATCH_UNKNOWN_ITEM_TYPE | type=%s", type(item))
+                else:  # pragma: no cover - garde défensive, pas un item connu
+                    logger.error("RESPONSE_DISPATCH_UNKNOWN_ITEM_TYPE | type=%s", type(item))
+            except Exception:
+                release_response_item(item_key)
+                raise
         return results
 
 

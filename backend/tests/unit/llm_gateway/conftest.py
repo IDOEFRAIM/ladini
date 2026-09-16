@@ -74,6 +74,32 @@ class _FakeRedis:
         self._store[key] = (value, expire_at)
         return True
 
+    def incr(self, key: str) -> int:
+        return self.incrby(key, 1)
+
+    def incrby(self, key: str, amount: int) -> int:
+        # (2026-09-13, Incrément G — rate_limiter.py) : même sémantique que
+        # `redis.Redis.incrby` — crée la clé à 0 si absente, jamais d'erreur
+        # sur un premier appel.
+        if self._expired(key):
+            del self._store[key]
+        entry = self._store.get(key)
+        current = int(entry[0]) if entry else 0
+        new_value = current + amount
+        expire_at = entry[1] if entry else None
+        self._store[key] = (str(new_value), expire_at)
+        return new_value
+
+    def decr(self, key: str) -> int:
+        return self.incrby(key, -1)
+
+    def expire(self, key: str, seconds: int) -> bool:
+        entry = self._store.get(key)
+        if entry is None:
+            return False
+        self._store[key] = (entry[0], time.time() + seconds)
+        return True
+
     def getdel(self, key: str) -> Optional[str]:
         if self._expired(key):
             del self._store[key]

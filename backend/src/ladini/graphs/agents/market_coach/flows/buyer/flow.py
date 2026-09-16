@@ -49,16 +49,12 @@ from .preorder import (
 from .procurement import (
     build_procurement_escalation,
     buyer_request_resolver,
-    resolve_buyer_bid_pick,
-    resolve_received_bids,
 )
 
 # =====================================================================
 # Backward-compat aliases (old private names → new public names)
 # =====================================================================
 _build_procurement_escalation = build_procurement_escalation
-_resolve_received_bids = resolve_received_bids
-_resolve_buyer_bid_pick = resolve_buyer_bid_pick
 _create_preorder = create_preorder
 _build_preflight_recap = build_preflight_recap
 _clear_active_goal = clear_active_goal
@@ -280,7 +276,7 @@ async def buyer_context_resolver(
     if goal in NEGOTIATION_GOALS:
         return _finalize(await negotiation_gate(state, mc_runtime))
 
-    if goal in {"BUYER_REQUEST", "SEARCH_PRODUCTS"}:
+    if goal == "BUYER_REQUEST":
         return _finalize(await buyer_request_resolver(state, mc_runtime))
 
     if goal in ORDER_TRACKING_GOALS:
@@ -299,16 +295,6 @@ async def buyer_context_resolver(
         )
 
         return _finalize(await order_tracking_resolver(state, mc_runtime))
-
-    # ── Auction/bid flows ─────────────────────────────────────────────
-    if goal == "MARKET_GET_REQUEST_DETAIL":
-        return _finalize(await resolve_received_bids(mc_runtime, str(phone), payload))
-
-    if goal in {
-        "PROCUREMENT_ACCEPT_OFFER",
-        "PROCUREMENT_SELECT_WINNER",
-    } and not payload.get("bid_id"):
-        return _finalize(await resolve_buyer_bid_pick(mc_runtime, str(phone), payload))
 
     # ── Default: planning or draft gate ───────────────────────────────
     draft = state.get("draft_payload")
@@ -352,13 +338,9 @@ __all__ = [
     "buyer_request_resolver",
     "create_preorder",
     "build_preflight_recap",
-    "resolve_received_bids",
-    "resolve_buyer_bid_pick",
     "build_procurement_escalation",
     # Backward-compat aliases
     "_create_preorder",
-    "_resolve_received_bids",
-    "_resolve_buyer_bid_pick",
     "_build_procurement_escalation",
     "_build_preflight_recap",
     "build_product_selection_menu",

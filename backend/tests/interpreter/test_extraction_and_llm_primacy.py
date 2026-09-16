@@ -73,7 +73,7 @@ class TestFastPathExtraction:
 
     def test_currency_number_is_never_mistaken_for_quantity(self):
         """« 14 chèvres et l'unité coûte 34500 fcfa » -> qty=14, pas 34500."""
-        r = fast("14 chevres et l unite coute 34500 fcfa", "QUANTITY", goal="DECLARE_CROP_CYCLE")
+        r = fast("14 chevres et l unite coute 34500 fcfa", "QUANTITY", goal="PRODUCTION_DECLARE_FUTURE")
         assert r["extracted_entities"]["quantity"] == 14.0
         assert r["extracted_entities"]["price"] == 34500.0
 
@@ -115,11 +115,10 @@ class TestUnitAnchoringGuard:
     malgré des corrections explicites en kg. Le TEXTE de l'utilisateur prime."""
 
     ANCHORED = {
-        "interpreted_event": "NEW_TASK",
-        "detected_intent": "SALES_PUBLISH_PRODUCT",
-        "interpreter_confidence": 0.9,
-        "validation_status": "VALID",
-        "extracted_entities": {"product": "tomates", "quantity": 200.0, "unit": "TONNE"},
+        "disposition": "NEW_TASK",
+        "intent": "SALES_PUBLISH_PRODUCT",
+        "confidence": 0.9,
+        "entities": {"product": "tomates", "quantity": 200.0, "unit": "TONNE"},
     }
 
     def _interpret(self, text, llm_payload=None):
@@ -150,13 +149,20 @@ class TestUnitAnchoringGuard:
         r = self._interpret("je vends 200 de tomates")
         assert r["extracted_entities"].get("unit") is None
 
-    def test_llm_self_reported_missing_unit_is_honoured(self):
-        """`validation_status` est un signal DU LLM : on le consomme."""
-        payload = dict(self.ANCHORED)
-        payload["validation_status"] = "INVALID_MISSING_UNIT"
-        payload["extracted_entities"] = {"product": "tomates", "quantity": 200.0, "unit": None}
+    def test_python_computes_missing_unit_status_when_no_literal_unit_is_reported(self):
+        """Incrément F (2026-09-13) : `validation_status` n'est plus un champ
+        demandé au LLM (spec §9, économie de tokens) — Python le déduit
+        lui-même de `quantity`/`unit` déjà normalisés (voir
+        `new_task_micro.py::_validation_status_for`)."""
+        payload = {
+            "disposition": "NEW_TASK",
+            "intent": "SALES_PUBLISH_PRODUCT",
+            "confidence": 0.9,
+            "entities": {"product": "tomates", "quantity": 200.0, "unit": None},
+        }
         r = self._interpret("je vends 200 de tomates", payload)
         assert r["extracted_entities"].get("unit") is None
+        assert r.get("validation_status") == "INVALID_MISSING_UNIT"
 
     def test_a_bare_unit_word_hallucinated_as_the_product_is_rejected(self):
         """Bug réel confirmé (2026-08-17) : en réponse à une question de
@@ -168,11 +174,10 @@ class TestUnitAnchoringGuard:
         production ci-dessus, corrigé par le même principe dans
         `_sanitize_product_candidate`."""
         payload = {
-            "interpreted_event": "ANSWER",
-            "detected_intent": "BUYER_ADD_TO_CART",
-            "interpreter_confidence": 0.9,
-            "validation_status": "VALID",
-            "extracted_entities": {"product": "kg", "quantity": 42.0, "unit": "KG"},
+            "disposition": "NEW_TASK",
+            "intent": "BUYER_ADD_TO_CART",
+            "confidence": 0.9,
+            "entities": {"product": "kg", "quantity": 42.0, "unit": "KG"},
         }
         r = self._interpret("je veux 42 kg", payload)
         assert "product" not in r["extracted_entities"]
@@ -267,10 +272,10 @@ class TestNoFrozenListHijack:
     def test_llm_classification_is_not_overridden(self, text, llm_intent):
         interp = make_input_interpreter("BUYER")
         rt = StubRuntime(llm=ScriptedLLM({
-            "interpreted_event": "NEW_TASK",
-            "detected_intent": llm_intent,
-            "interpreter_confidence": 0.92,
-            "extracted_entities": {},
+            "disposition": "NEW_TASK",
+            "intent": llm_intent,
+            "confidence": 0.92,
+            "entities": {},
         }))
         st = make_state(normalized_text=text, expected_input="NONE", user_role="BUYER")
         r = run(interp(st, rt))
@@ -283,10 +288,10 @@ class TestNoFrozenListHijack:
         catalogue) est ramenée à UNKNOWN — jamais routée ni exécutée."""
         interp = make_input_interpreter("BUYER")
         rt = StubRuntime(llm=ScriptedLLM({
-            "interpreted_event": "NEW_TASK",
-            "detected_intent": "INTENTION_QUI_N_EXISTE_PAS",
-            "interpreter_confidence": 0.99,
-            "extracted_entities": {},
+            "disposition": "NEW_TASK",
+            "intent": "INTENTION_QUI_N_EXISTE_PAS",
+            "confidence": 0.99,
+            "entities": {},
         }))
         st = make_state(normalized_text="fais un truc bizarre", expected_input="NONE", user_role="BUYER")
         r = run(interp(st, rt))
@@ -297,10 +302,10 @@ class TestNoFrozenListHijack:
         une intention de vente ne doit PAS être filtrée pour un acheteur."""
         interp = make_input_interpreter("BUYER")
         rt = StubRuntime(llm=ScriptedLLM({
-            "interpreted_event": "NEW_TASK",
-            "detected_intent": "SALES_PUBLISH_PRODUCT",
-            "interpreter_confidence": 0.95,
-            "extracted_entities": {},
+            "disposition": "NEW_TASK",
+            "intent": "SALES_PUBLISH_PRODUCT",
+            "confidence": 0.95,
+            "entities": {},
         }))
         st = make_state(normalized_text="je veux vendre du mais", expected_input="NONE", user_role="BUYER")
         r = run(interp(st, rt))
@@ -315,10 +320,10 @@ class TestNoFrozenListHijack:
         message='je veux acheter 20 kg de tomates' → BUYER_REQUEST"."""
         interp = make_input_interpreter("PRODUCER")
         rt = StubRuntime(llm=ScriptedLLM({
-            "interpreted_event": "NEW_TASK",
-            "detected_intent": "BUYER_REQUEST",
-            "interpreter_confidence": 0.93,
-            "extracted_entities": {"product": "tomates", "quantity": 20.0, "unit": "KG"},
+            "disposition": "NEW_TASK",
+            "intent": "BUYER_REQUEST",
+            "confidence": 0.93,
+            "entities": {"product": "tomates", "quantity": 20.0, "unit": "KG"},
         }))
         st = make_state(
             normalized_text="je veux acheter 20 kg de tomates",
@@ -356,10 +361,10 @@ class TestDegradedModelDetection:
     `tests/nodes/test_nodes_behaviour.py::TestPrimaryModelMultiSlotFilling`)."""
 
     PAYLOAD = {
-        "interpreted_event": "ANSWER",
-        "detected_intent": "SALES_PUBLISH_PRODUCT",
-        "interpreter_confidence": 0.9,
-        "extracted_entities": {"product": "tomates"},
+        "disposition": "NEW_TASK",
+        "intent": "SALES_PUBLISH_PRODUCT",
+        "confidence": 0.9,
+        "entities": {"product": "tomates"},
     }
 
     def test_model_matching_the_request_is_not_flagged_as_degraded(self):
@@ -401,10 +406,10 @@ class TestMultipleProductsAreNeverMerged:
     def test_additional_products_from_the_llm_survive_extraction(self):
         interp = make_input_interpreter("BUYER")
         rt = StubRuntime(llm=ScriptedLLM({
-            "interpreted_event": "NEW_TASK",
-            "detected_intent": "BUYER_REQUEST",
-            "interpreter_confidence": 0.9,
-            "extracted_entities": {
+            "disposition": "NEW_TASK",
+            "intent": "BUYER_REQUEST",
+            "confidence": 0.9,
+            "entities": {
                 "product": "œufs",
                 "additional_products": ["laitue"],
             },
@@ -420,10 +425,10 @@ class TestMultipleProductsAreNeverMerged:
     def test_a_single_product_yields_no_additional_products_key(self):
         interp = make_input_interpreter("BUYER")
         rt = StubRuntime(llm=ScriptedLLM({
-            "interpreted_event": "NEW_TASK",
-            "detected_intent": "BUYER_REQUEST",
-            "interpreter_confidence": 0.9,
-            "extracted_entities": {"product": "tomates", "additional_products": []},
+            "disposition": "NEW_TASK",
+            "intent": "BUYER_REQUEST",
+            "confidence": 0.9,
+            "entities": {"product": "tomates", "additional_products": []},
         }))
         st = make_state(normalized_text="je cherche des tomates", expected_input="NONE", user_role="BUYER")
         r = run(interp(st, rt))

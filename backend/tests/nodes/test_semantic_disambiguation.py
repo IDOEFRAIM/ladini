@@ -22,9 +22,9 @@ _CANDIDATE = {
     "pedagogical_hint": "Choisissez l'option qui correspond.",
     "options": [
         ("SALES_PUBLISH_PRODUCT", "Prêt maintenant"),
-        ("DECLARE_CROP_CYCLE", "Prêt plus tard"),
+        ("PRODUCTION_DECLARE_FUTURE", "Prêt plus tard"),
     ],
-    "candidates": ["SALES_PUBLISH_PRODUCT", "DECLARE_CROP_CYCLE"],
+    "candidates": ["SALES_PUBLISH_PRODUCT", "PRODUCTION_DECLARE_FUTURE"],
 }
 
 
@@ -51,7 +51,7 @@ class TestSemanticDisambiguationTrustsThePrecomputedCandidate:
         assert result["response_strategy"] == "SELECTION_MENU"
         assert result["available_mapping"] == {
             "1": "SALES_PUBLISH_PRODUCT",
-            "2": "DECLARE_CROP_CYCLE",
+            "2": "PRODUCTION_DECLARE_FUTURE",
         }
 
     def test_does_not_reimport_or_recompute_event_based_gating(self):

@@ -14,8 +14,7 @@ enchères), construction des menus AG‑UI et préparation des appels MCP.
    stocks) et renvoie l’utilisateur vers le slot attendu.
 4. **`flows/producer/flow.py` (`producer_context_resolver`)** complète le payload :
    - `_resolve_default_farm` → auto-résolution de `farm_id`
-   - `_resolve_stock` → sélection d’un lot
-   - `_resolve_auction`, `_resolve_my_bids`, `_resolve_bid` → enchères et offres
+   - `_resolve_auction`, `_resolve_my_bids` → enchères et offres
 5. **`ui_engine.py`** convertit chaque `MenuRequest` du flow en composant AG‑UI
    standard, installe `available_mapping` et garde la trace de `kind` dans
    `working_memory.available_mapping_kind`.
@@ -73,8 +72,9 @@ enchères), construction des menus AG‑UI et préparation des appels MCP.
 - `FARM_CRITICAL_GOALS` (dans `core/base.py`) déclenche `ensure_farm_node` au
   niveau du nœud `ensure_farm_node` si, malgré tout, un MCP tool exige encore un
   `farm_id` manquant.
-- `_resolve_stock` interroge `get_producer_stocks`, filtre selon le produit
-  et construit un menu structuré avec quantité/unité pour aider la sélection.
+- (2026-09-13, Deep Intent Architecture Cleanup) : `_resolve_stock`
+  supprimée — exclusivement rattachée aux intents STOCK_ADJUST/
+  STOCK_REMOVE_PARTIAL/STOCK_RECORD_MOVEMENT/STOCK_DELETE, tous supprimés.
 
 ## 4. Construction des menus
 - Tous les menus passent par `MenuRequest` → `ui_engine`. Cela garantit :

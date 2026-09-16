@@ -129,6 +129,12 @@ class TestNonEscrowConfirmationNotifiesProducerExactlyOnce:
 
         assert result["status"] == "success"
         assert len(session.outbox_inserts) == 1
+        # (2026-09-13, incident WhatsApp #3) : ce process MCP n'a pas accès
+        # à Redis — c'est à l'appelant côté worker de poser l'indice de
+        # rôle "prochaine réponse = PRODUCER" pour chacun de ces numéros
+        # (voir flows/buyer/preorder_confirmation.py) ; ce résultat doit
+        # donc lister EXACTEMENT les numéros notifiés ci-dessus.
+        assert result["producer_phones_notified"] == ["+22670000001"]
 
     def test_retry_after_confirmation_never_re_notifies(self):
         """`confirm_preorder_draft` × 2 — la 2e tentative échoue AVANT
@@ -171,6 +177,10 @@ class TestNonEscrowConfirmationNotifiesProducerExactlyOnce:
 
         assert result["status"] == "success"
         assert len(session.outbox_inserts) == 1  # un seul appel enqueue() portant les 2 entrées
+        assert sorted(result["producer_phones_notified"]) == [
+            "+22670000001",
+            "+22670000002",
+        ]
 
     def test_no_producer_phone_resolved_never_blocks_confirmation(self):
         producer_id = uuid.uuid4()
@@ -184,3 +194,4 @@ class TestNonEscrowConfirmationNotifiesProducerExactlyOnce:
         )
         assert result["status"] == "success"
         assert not session.outbox_inserts
+        assert result["producer_phones_notified"] == []

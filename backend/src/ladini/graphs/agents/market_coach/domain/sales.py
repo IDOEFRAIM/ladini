@@ -163,18 +163,6 @@ class SalesService:
             args["zone_name"] = command.zone_name
         return DomainResult(tool_id=ToolId.GET_AUCTIONS, tool_args=args)
 
-    def get_request_detail(
-        self, state: Mapping[str, Any], payload: Mapping[str, Any]
-    ) -> DomainResult:
-        phone = require_phone(state)
-        auction_id = str(require(payload, "auction_id"))
-        args: Dict[str, Any] = {
-            "phone": phone,
-            "auction_id": auction_id,
-            "status": payload.get("status") or "OPEN",
-        }
-        return DomainResult(tool_id=ToolId.GET_AUCTIONS_BIDS, tool_args=args)
-
     def get_my_proposals(
         self, state: Mapping[str, Any], payload: Mapping[str, Any]
     ) -> DomainResult:
@@ -198,42 +186,6 @@ class SalesService:
         if product:
             args["product_query"] = str(product)
         return DomainResult(tool_id=ToolId.GET_MARKET_SNAPSHOT, tool_args=args)
-
-    def market_snapshot_zonal(
-        self, state: Mapping[str, Any], payload: Mapping[str, Any]
-    ) -> DomainResult:
-        zone = str(require(payload, "zone"))
-        return DomainResult(
-            tool_id=ToolId.GET_ZONE_MARKET_OVERVIEW, tool_args={"zone_id": zone}
-        )
-
-    def dashboard_producer(
-        self, state: Mapping[str, Any], payload: Mapping[str, Any]
-    ) -> DomainResult:
-        phone = require_phone(state)
-        return DomainResult(
-            tool_id=ToolId.GET_PRODUCER_DASHBOARD, tool_args={"producer_id": phone}
-        )
-
-    def search_products(
-        self, state: Mapping[str, Any], payload: Mapping[str, Any]
-    ) -> DomainResult:
-        product = str(require(payload, "product"))
-        phone = require_phone(state)
-        args: Dict[str, Any] = {"product": product, "phone": phone}
-        zone = payload.get("zone_name") or payload.get("zone")
-        if zone:
-            args["zone_id"] = str(zone)
-        return DomainResult(tool_id=ToolId.SEARCH_PRODUCTS, tool_args=args)
-
-    def search_nearby(
-        self, state: Mapping[str, Any], payload: Mapping[str, Any]
-    ) -> DomainResult:
-        require_phone(state)
-        require(payload, "latitude")
-        require(payload, "longitude")
-        # The underlying tool uses contextual location; no direct args today.
-        return DomainResult(tool_id=ToolId.GET_ALL_ZONE_MARKET_OVERVIEW, tool_args={})
 
     def validate_price(
         self, state: Mapping[str, Any], payload: Mapping[str, Any]
@@ -300,14 +252,6 @@ class SalesService:
         if payload.get("message"):
             args["message"] = str(payload["message"])
         return DomainResult(tool_id=ToolId.PLACE_BID, tool_args=args)
-
-    def accept_contract(
-        self, state: Mapping[str, Any], payload: Mapping[str, Any]
-    ) -> DomainResult:
-        require_phone(state)
-        transaction_id = str(require(payload, "bid_id"))
-        args = {"transaction_id": transaction_id, "approved": True}
-        return DomainResult(tool_id=ToolId.COMMIT_STAGED_TRANSACTION, tool_args=args)
 
     def update_product(self, command: SalesUpdateProductCommand) -> DomainResult:
         """Domain logic for updating a published product from a typed command."""

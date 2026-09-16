@@ -23,6 +23,14 @@ from ladini.graphs.agents.market_coach.utils import llm_deviation_reply
 
 logger = logging.getLogger("Ladini.Market.Rendering")
 
+# (2026-09-13, chantier State Router — Incrément E) : `generate_llm_question`
+# était déjà, avant cet incrément, un micro-prompt minimal (aucun catalogue,
+# aucun ID, aucun schéma — voir sa docstring "~70 tokens vs ~180 avant, Phase
+# 3") — seule la traçabilité Langfuse (prompt_family/prompt_version)
+# manquait. Version explicite ajoutée ici, pas de refonte du prompt lui-même
+# (déjà conforme à l'esprit de ce chantier).
+ASK_PROMPT_VERSION = "ask_v1"
+
 
 async def render_onboarding(ctx: RenderContext) -> Dict[str, Any]:
     prompt = ctx.state.get("onboarding_prompt") or (
@@ -100,6 +108,12 @@ async def generate_llm_question(
             temperature=0.3,
             max_tokens=90,
             agent_node="generate_llm_question",
+            extra_metadata={
+                "prompt_family": "ask",
+                "prompt_version": ASK_PROMPT_VERSION,
+                "current_goal": goal,
+                "expected_input": field,
+            },
         )
         result = (completion.choices[0].message.content or "").strip()
         return result if result else fallback

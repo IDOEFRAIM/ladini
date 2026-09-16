@@ -68,16 +68,16 @@ def prep_market_get_requests(
     return tool_name, dict(result.tool_args)
 
 
-@register_action("MARKET_GET_REQUEST_DETAIL", mode="READ")
-def prep_market_get_request_detail(
-    state: Mapping[str, Any], payload: Mapping[str, Any]
-) -> Tuple[str, Dict[str, Any]]:
-    """Prépare la consultation des offres reçues sur sa propre demande."""
-    context = DomainContext.from_state(state)
-    service = SalesService(context=context)
-    result = service.get_request_detail(state, payload)
-    tool_name = ToolResolver.resolve_name(result.tool_id or "get_auctions_bids")
-    return tool_name, dict(result.tool_args)
+    # (2026-09-14, Deep Intent Architecture Cleanup, spec §19) :
+    # MARKET_GET_REQUEST_DETAIL SUPPRIMÉ — `tool_name="get_auctions_bids"`
+    # déclaré alors que sa signature réelle (`get_auctions_bids(phone,
+    # status)`, domain/services/database/auction.py) n'accepte même pas
+    # `auction_id` (son propre `required`) : contrat interne incohérent,
+    # jamais réellement exécutable tel que déclaré. `BUYER_CHECK_AUCTION_
+    # STATUS` (`get_auction_bids(auction_id, phone)`, la bonne méthode)
+    # couvre déjà ce besoin, rôle BOTH inclus (le filtrage par rôle
+    # n'existe plus). `SalesService.get_request_detail` devient orpheline,
+    # supprimée avec l'action.
 
 
 @register_action("MARKET_GET_MY_PROPOSALS", mode="READ")
@@ -104,54 +104,17 @@ def prep_market_snapshot(
     return tool_name, dict(result.tool_args)
 
 
-@register_action("MARKET_SNAPSHOT_ZONAL", mode="READ")
-def prep_market_snapshot_zonal(
-    state: Mapping[str, Any], payload: Mapping[str, Any]
-) -> Tuple[str, Dict[str, Any]]:
-    """Prépare l'analyse des tendances locales."""
-    context = DomainContext.from_state(state)
-    service = SalesService(context=context)
-    result = service.market_snapshot_zonal(state, payload)
-    tool_name = ToolResolver.resolve_name(result.tool_id or "get_zone_market_overview")
-    return tool_name, dict(result.tool_args)
-
-
-@register_action("DASHBOARD_PRODUCER", mode="READ")
-def prep_dashboard_producer(
-    state: Mapping[str, Any], payload: Mapping[str, Any]
-) -> Tuple[str, Dict[str, Any]]:
-    """Prépare le chargement du tableau de bord d'exploitation."""
-    context = DomainContext.from_state(state)
-    service = SalesService(context=context)
-    result = service.dashboard_producer(state, payload)
-    tool_name = ToolResolver.resolve_name(result.tool_id or "get_producer_dashboard")
-    return tool_name, dict(result.tool_args)
-
-
-@register_action("SEARCH_PRODUCTS", mode="READ")
-def prep_search_products(
-    state: Mapping[str, Any], payload: Mapping[str, Any]
-) -> Tuple[str, Dict[str, Any]]:
-    """Prépare la recherche par mot-clé dans le catalogue."""
-    context = DomainContext.from_state(state)
-    service = SalesService(context=context)
-    result = service.search_products(state, payload)
-    tool_name = ToolResolver.resolve_name(result.tool_id or "search_products")
-    return tool_name, dict(result.tool_args)
-
-
-@register_action("SEARCH_NEARBY", mode="READ")
-def prep_search_nearby(
-    state: Mapping[str, Any], payload: Mapping[str, Any]
-) -> Tuple[str, Dict[str, Any]]:
-    """Prépare la recherche de proximité GPS."""
-    context = DomainContext.from_state(state)
-    service = SalesService(context=context)
-    result = service.search_nearby(state, payload)
-    tool_name = ToolResolver.resolve_name(
-        result.tool_id or "get_all_zone_market_overview"
-    )
-    return tool_name, dict(result.tool_args)
+    # (2026-09-14, Deep Intent Architecture Cleanup) : SUPPRIMÉS de ce
+    # fichier — MARKET_SNAPSHOT_ZONAL (doublon strict de MARKET_SNAPSHOT,
+    # `get_zone_market_overview` inexistant), DASHBOARD_PRODUCER
+    # (`get_producer_dashboard` inexistant), SEARCH_PRODUCTS (doublon
+    # strict de BUYER_REQUEST, même `tool_name="search_products"`, sans
+    # intégration au flow buyer) et SEARCH_NEARBY
+    # (`get_all_zone_market_overview` inexistant). `SalesService.
+    # market_snapshot_zonal`/`dashboard_producer`/`search_products`/
+    # `search_nearby` (domain/sales.py) sont désormais orphelines de toute
+    # action — vérifiées sans autre appelant, supprimées avec elle (spec
+    # §32, "tools sans consumer -> dead tool").
 
 
 @register_action("VALIDATE_PRICE", mode="READ")
@@ -232,15 +195,11 @@ def prep_sales_place_bid(
     return tool_name, dict(result.tool_args)
 
 
-@register_action("SALES_ACCEPT_CONTRACT", mode="WRITE")
-def prep_sales_accept_contract(
-    state: Mapping[str, Any], payload: Mapping[str, Any]
-) -> Tuple[str, Dict[str, Any]]:
-    context = DomainContext.from_state(state)
-    service = SalesService(context=context)
-    result = service.accept_contract(state, payload)
-    tool_name = ToolResolver.resolve_name(result.tool_id or "commit_staged_transaction")
-    return tool_name, dict(result.tool_args)
+    # (2026-09-14, Deep Intent Architecture Cleanup) : SALES_ACCEPT_CONTRACT
+    # SUPPRIMÉ — `commit_staged_transaction` n'existe ni comme outil MCP ni
+    # comme méthode DB, aucune entité `Contract` dans le domaine (voir
+    # intent.py pour l'audit complet). `SalesService.accept_contract`
+    # devient orpheline, supprimée avec l'action.
 
 
 @register_action("SALES_UPDATE_PRODUCT", mode="WRITE")
@@ -288,8 +247,8 @@ def _coerce_opt_float(value: Any) -> Any:
         return None
 
 
-@register_action("SALES_UPDATE_PRODUCTION", mode="WRITE")
-def prep_sales_update_production(
+@register_action("PRODUCTION_UPDATE_FUTURE", mode="WRITE")
+def prep_production_update_future(
     state: Mapping[str, Any], payload: Mapping[str, Any]
 ) -> Tuple[str, Dict[str, Any]]:
     """Mise à jour d'un lot futur (MarketOffer) : prix/quantité/nom/unité/date/type."""
@@ -403,6 +362,30 @@ def prep_producer_cancel_order(
         "producer_phone": context.phone,
         "order_id": str(order_id),
         "reason": str(reason).strip(),
+    }
+
+
+@register_action("PRODUCER_CONFIRM_ORDER", mode="WRITE")
+def prep_producer_confirm_order(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Tuple[str, Dict[str, Any]]:
+    """Confirmation explicite producteur d'une commande reçue (2026-09-13).
+    `order_id` est déjà résolu par
+    `flows/producer/flow.py::_resolve_order_for_confirmation`. Toute la
+    règle métier vit dans
+    `services/database/producer.py::confirm_order_by_producer`."""
+    context = DomainContext.from_state(state)
+    if not context.phone:
+        raise ValueError(
+            "Le numéro de téléphone du producteur est requis pour confirmer une commande."
+        )
+    order_id = payload.get("order_id")
+    if not order_id:
+        raise ValueError("Identifiant de commande manquant.")
+    tool_name = ToolResolver.resolve_name("confirm_order_by_producer")
+    return tool_name, {
+        "producer_phone": context.phone,
+        "order_id": str(order_id),
     }
 
 

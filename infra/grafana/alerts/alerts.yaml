@@ -1,0 +1,394 @@
+# ═════════════════════════════════════════════════════════════════════
+# Ladini — règles d'alerte Grafana (format de provisioning natif Grafana
+# Alerting, PAS des règles Prometheus classiques).
+#
+# POURQUOI ce format plutôt que des `*.rules.yml` façon Prometheus
+# Alertmanager : la stack de métriques est Grafana Cloud Hosted Prometheus
+# (remote_write depuis Alloy, voir infra/alloy/) — il n'y a PAS de
+# Prometheus/Alertmanager auto-hébergé ici pour évaluer des règles
+# `groups: [...] rules: [...]` classiques. Grafana Cloud évalue lui-même
+# les alertes (Grafana Alerting unifié), et ce format YAML est justement
+# celui que Grafana sait appliquer de façon IDEMPOTENTE via son
+# "file provisioning" (monté dans /etc/grafana/provisioning/alerting/) OU
+# via l'API HTTP de provisioning (`POST /api/v1/provisioning/alert-rules`,
+# voir provision.sh) — chaque règle porte un `uid` stable, un REPLAY de ce
+# fichier ne duplique jamais une règle, il la met à jour en place. C'est
+# exactement le "provisionné via API/Terraform, idempotent" demandé par le
+# brief.
+#
+# VOLONTAIREMENT peu d'alertes (brief : "ne crée pas 50 alertes bruyantes")
+# — les ~12 couvrant les pannes réelles listées dans le mandat, pas plus.
+# Chaque seuil marqué "ADJUST THIS THRESHOLD" est une estimation initiale
+# à affiner avec de la donnée de prod réelle (aucune n'a encore tourné en
+# charge sur Hetzner à la date d'écriture).
+#
+# Cardinalité : aucune règle ci-dessous n'utilise phone/user_id/
+# conversation_id comme label — même discipline que telemetry.py.
+# ═════════════════════════════════════════════════════════════════════
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: ladini-api-health
+    folder: Ladini
+    interval: 1m
+    rules:
+      # ── 1. API readiness down ──────────────────────────────────────
+      - uid: ladini-api-readiness-down
+        title: "Ladini API — readiness DOWN"
+        condition: C
+        for: 2m
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: 'up{job="ladini/api"}'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        annotations:
+          summary: "L'API Ladini ne répond plus au scrape /metrics (proxy pour readiness)."
+          runbook_url: "backend/docs/runbooks/deployment.md"
+        labels:
+          severity: critical
+
+      # ── 2. Pic de 5xx ───────────────────────────────────────────────
+      - uid: ladini-http-5xx-spike
+        title: "Ladini API — pic d'erreurs 5xx"
+        condition: C
+        for: 5m
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: 'sum(rate(ladini_http_5xx_total[5m]))'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # ADJUST THIS THRESHOLD — 0.5 req/s en erreur 5xx soutenu sur 5min.
+              conditions:
+                - evaluator: { type: gt, params: [0.5] }
+        annotations:
+          summary: "Taux de réponses 5xx anormalement élevé sur l'API."
+        labels:
+          severity: critical
+
+      # ── 3. Latence p95 dégradée ─────────────────────────────────────
+      - uid: ladini-http-latency-p95
+        title: "Ladini API — latence p95 dégradée"
+        condition: C
+        for: 10m
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: 'histogram_quantile(0.95, sum(rate(ladini_http_request_duration_seconds_bucket[5m])) by (le))'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # ADJUST THIS THRESHOLD — 5s p95 (webhook WhatsApp avec tour LLM inclus).
+              conditions:
+                - evaluator: { type: gt, params: [5] }
+        annotations:
+          summary: "p95 des requêtes HTTP au-dessus du seuil acceptable."
+        labels:
+          severity: warning
+
+  - orgId: 1
+    name: ladini-infrastructure
+    folder: Ladini
+    interval: 1m
+    rules:
+      # ── 4. Redémarrages de conteneurs en rafale ─────────────────────
+      - uid: ladini-container-restart-spike
+        title: "Conteneur Ladini — redémarrages en rafale"
+        condition: C
+        for: 5m
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: 'sum(increase(container_last_seen{compose_service!=""}[15m])) by (compose_service)'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # ADJUST THIS THRESHOLD — plus de 3 redémarrages/15min = crashloop probable.
+              conditions:
+                - evaluator: { type: gt, params: [3] }
+        annotations:
+          summary: "Un conteneur applicatif redémarre en boucle (voir autoheal / OOM)."
+        labels:
+          severity: warning
+
+      # ── 5. Mémoire host saturée ──────────────────────────────────────
+      - uid: ladini-node-memory-high
+        title: "Host Hetzner — mémoire proche saturation"
+        condition: C
+        for: 10m
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: '1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # ADJUST THIS THRESHOLD — 90% RAM utilisée.
+              conditions:
+                - evaluator: { type: gt, params: [0.9] }
+        annotations:
+          summary: "RAM host au-delà du seuil — risque OOM-kill imminent."
+        labels:
+          severity: warning
+
+      # ── 6. Disque host saturé ────────────────────────────────────────
+      - uid: ladini-node-disk-high
+        title: "Host Hetzner — disque proche saturation"
+        condition: C
+        for: 10m
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: '1 - (node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"})'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # ADJUST THIS THRESHOLD — 85% disque utilisé sur /.
+              conditions:
+                - evaluator: { type: gt, params: [0.85] }
+        annotations:
+          summary: "Espace disque host au-delà du seuil (logs Docker, WAL, images)."
+        labels:
+          severity: warning
+
+      # ── 7. Redis en erreur ────────────────────────────────────────────
+      - uid: ladini-redis-down
+        title: "Redis externe — indisponible"
+        condition: C
+        for: 2m
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: 'redis_up'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        annotations:
+          summary: "redis_exporter ne peut plus joindre le Redis externe partagé — broker Celery + idempotence à risque."
+        labels:
+          severity: critical
+
+      # ── 8. PgBouncer saturé ───────────────────────────────────────────
+      - uid: ladini-pgbouncer-saturation
+        title: "PgBouncer — pool saturé (connexions en attente)"
+        condition: C
+        for: 5m
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: 'pgbouncer_pools_client_waiting_connections'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # ADJUST THIS THRESHOLD — connexions en file d'attente soutenues.
+              conditions:
+                - evaluator: { type: gt, params: [10] }
+        annotations:
+          summary: "PgBouncer met des connexions en attente — DEFAULT_POOL_SIZE ou plan managé trop bas pour la charge."
+        labels:
+          severity: warning
+
+  - orgId: 1
+    name: ladini-celery
+    folder: Ladini
+    interval: 1m
+    rules:
+      # ── 9. Backlog de file Celery ─────────────────────────────────────
+      - uid: ladini-celery-queue-backlog
+        title: "Celery — backlog de file anormal"
+        condition: C
+        for: 10m
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: 'max(celery_queue_length{queue_name="interactive"})'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # ADJUST THIS THRESHOLD — file "interactive" (tours WhatsApp), tout
+              # backlog soutenu s'y traduit directement par une latence perçue
+              # utilisateur. Nécessite `infra/exporters` déployé (celery-exporter).
+              conditions:
+                - evaluator: { type: gt, params: [50] }
+        annotations:
+          summary: "La file Celery 'interactive' accumule un backlog — capacité worker insuffisante ou worker down."
+        labels:
+          severity: warning
+
+      # ── 10. Aucun worker Celery disponible ─────────────────────────────
+      - uid: ladini-celery-worker-unavailable
+        title: "Celery — aucun worker disponible"
+        condition: C
+        for: 3m
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: 'count(celery_worker_up == 1)'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        annotations:
+          summary: "Plus aucun worker Celery UP — traitement des tours WhatsApp/crons à l'arrêt."
+        labels:
+          severity: critical
+
+  - orgId: 1
+    name: ladini-llm
+    folder: Ladini
+    interval: 1m
+    rules:
+      # ── 11. Pic de bascules de repli LLM ────────────────────────────
+      - uid: ladini-llm-fallback-spike
+        title: "LLM Gateway — pic de bascules de repli"
+        condition: C
+        for: 10m
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: 'sum(rate(ladini_llm_fallback_total[15m])) * 60'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # ADJUST THIS THRESHOLD — bascules/min soutenues, hors gap worker
+              # (voir infra/alloy/README.md — n'a d'effet que si le gap est comblé).
+              conditions:
+                - evaluator: { type: gt, params: [5] }
+        annotations:
+          summary: "Le LLM Gateway bascule fréquemment sur ses candidats de repli — provider primaire dégradé."
+        labels:
+          severity: warning
+
+      # ── 12. Disjoncteur LLM ouvert ────────────────────────────────────
+      - uid: ladini-llm-circuit-open
+        title: "LLM Gateway — disjoncteur ouvert"
+        condition: C
+        for: 1m
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: 'sum(increase(ladini_llm_circuit_open_total[5m]))'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        annotations:
+          summary: "Un candidat LLM vient de voir son disjoncteur s'ouvrir — provider indisponible au-delà du seuil d'échecs configuré."
+        labels:
+          severity: critical
+
+      # ── 12bis. 429/5xx provider LLM (repli sur `status=error`) ────────
+      # `ladini_llm_calls_total{status="error"}` n'inclut aujourd'hui aucun
+      # label de code HTTP provider (voir telemetry.py — pas de label
+      # `http_status` pour ne pas ajouter de cardinalité non bornée par
+      # provider/version d'erreur) : ce n'est donc PAS distinguable "429"
+      # de "5xx" de "timeout" sans changer telemetry.py. Alerte volontairement
+      # posée sur `status="error"` global comme proxy — voir Langfuse pour le
+      # détail exact de l'erreur par Generation individuelle (ce niveau de
+      # détail est précisément ce que Langfuse couvre déjà, pas dupliqué ici).
+      - uid: ladini-llm-error-rate
+        title: "LLM Gateway — taux d'erreur provider élevé (429/5xx proxy)"
+        condition: C
+        for: 5m
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: >-
+                sum(rate(ladini_llm_calls_total{status="error"}[5m]))
+                / sum(rate(ladini_llm_calls_total[5m]))
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # ADJUST THIS THRESHOLD — 20% d'appels LLM en erreur sur 5min.
+              conditions:
+                - evaluator: { type: gt, params: [0.2] }
+        annotations:
+          summary: "Taux d'erreur élevé sur les appels LLM — voir Langfuse pour le détail par provider/Generation."
+        labels:
+          severity: warning
+
+contactPoints:
+  - orgId: 1
+    name: ladini-default
+    receivers:
+      # ADJUST : brancher le webhook réel (Slack/PagerDuty/email) — laissé
+      # vide volontairement, aucune URL de notification n'existe dans cet
+      # environnement. `ADMIN_ALERT_WEBHOOK_URL` (docker-compose.prod.yml)
+      # est un webhook APPLICATIF distinct (alertes métier internes à
+      # Ladini, pas Grafana) — ne pas confondre les deux.
+      - uid: ladini-default-webhook
+        type: webhook
+        settings:
+          url: "${GRAFANA_ALERT_WEBHOOK_URL}"
+
+policies:
+  - orgId: 1
+    receiver: ladini-default
+    group_by: ["alertname"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

@@ -410,97 +410,11 @@ class TestBuyerRequestResolverCatalogFlow:
         assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
 
 
-# =====================================================================
-# resolve_received_bids
-# =====================================================================
-
-class TestResolveReceivedBids:
-    def test_no_phone_returns_error(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import resolve_received_bids
-        result = run(resolve_received_bids(rt(), "", {}))
-        assert result["response_strategy"] == "ERROR"
-
-    def test_gateway_failure_returns_the_message(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import resolve_received_bids
-        runtime = rt({"get_auctions_bids": {"status": "error", "message": "panne"}})
-        result = run(resolve_received_bids(runtime, "+2260", {}))
-        assert result["final_response"] == "panne"
-
-    def test_empty_data_returns_a_friendly_empty_message(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import resolve_received_bids
-        runtime = rt({"get_auctions_bids": {"status": "success", "data": []}})
-        result = run(resolve_received_bids(runtime, "+2260", {}))
-        assert "encore été déposée" in result["final_response"]
-
-    def test_success_builds_a_selection_menu(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import resolve_received_bids
-        runtime = rt({"get_auctions_bids": {"status": "success", "data": [
-            {"bid_id": "b1", "producer_name": "Awa", "price": 250, "product": "mais"},
-        ]}})
-        result = run(resolve_received_bids(runtime, "+2260", {}))
-        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
-        assert len(result["pending_menu"].options) == 1
-
-
-# =====================================================================
-# resolve_buyer_bid_pick
-# =====================================================================
-
-class TestResolveBuyerBidPick:
-    def test_bid_id_already_present_short_circuits(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import resolve_buyer_bid_pick
-        result = run(resolve_buyer_bid_pick(rt(), "+2260", {"bid_id": "b1"}))
-        assert result["status"] == "PLANNING"
-
-    def test_no_open_bids_returns_error(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import resolve_buyer_bid_pick
-        runtime = rt({"get_auctions_bids": {"status": "success", "data": []}})
-        result = run(resolve_buyer_bid_pick(runtime, "+2260", {}))
-        assert result["status"] == "ERROR"
-        assert "no_open_bids" in result["validation_errors"]
-
-    def test_selection_index_resolves_the_bid(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import resolve_buyer_bid_pick
-        runtime = rt({"get_auctions_bids": {"status": "success", "data": [
-            {"bid_id": "b1", "producer_name": "Awa"},
-            {"bid_id": "b2", "producer_name": "Ali"},
-        ]}})
-        result = run(resolve_buyer_bid_pick(runtime, "+2260", {"selection_index": 2}))
-        assert result["transaction_payload"]["bid_id"] == "b2"
-        assert "selection_index" not in result["transaction_payload"]
-
-    def test_selected_value_text_matches_producer_name(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import resolve_buyer_bid_pick
-        runtime = rt({"get_auctions_bids": {"status": "success", "data": [
-            {"bid_id": "b1", "producer_name": "Ferme Awa"},
-        ]}})
-        result = run(resolve_buyer_bid_pick(runtime, "+2260", {"selected_value": "awa"}))
-        assert result["transaction_payload"]["bid_id"] == "b1"
-
-    def test_chosen_bid_without_an_id_is_an_error(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import resolve_buyer_bid_pick
-        runtime = rt({"get_auctions_bids": {"status": "success", "data": [
-            {"producer_name": "Awa"},  # pas de bid_id/id
-        ]}})
-        result = run(resolve_buyer_bid_pick(runtime, "+2260", {"selection_index": 1}))
-        assert result["status"] == "ERROR"
-        assert "bid_not_resolved" in result["validation_errors"]
-
-    def test_no_match_falls_back_to_redisplaying_bids(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import resolve_buyer_bid_pick
-        runtime = rt({"get_auctions_bids": {"status": "success", "data": [
-            {"bid_id": "b1", "producer_name": "Awa"},
-        ]}})
-        result = run(resolve_buyer_bid_pick(runtime, "+2260", {"selected_value": "someone_else_entirely"}))
-        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
-
-    def test_out_of_range_index_falls_back_to_redisplaying_bids(self):
-        from ladini.graphs.agents.market_coach.flows.buyer.procurement import resolve_buyer_bid_pick
-        runtime = rt({"get_auctions_bids": {"status": "success", "data": [
-            {"bid_id": "b1", "producer_name": "Awa"},
-        ]}})
-        result = run(resolve_buyer_bid_pick(runtime, "+2260", {"selection_index": 99}))
-        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
+# (2026-09-13, Deep Intent Architecture Cleanup) : `TestResolveReceivedBids`
+# et `TestResolveBuyerBidPick` supprimées — `resolve_received_bids` et
+# `resolve_buyer_bid_pick` (flows/buyer/procurement.py) ont été retirées,
+# exclusivement rattachées à MARKET_GET_REQUEST_DETAIL/PROCUREMENT_SELECT_
+# WINNER/PROCUREMENT_ACCEPT_OFFER, tous supprimés d'INTENT_CONFIG.
 
 
 # =====================================================================

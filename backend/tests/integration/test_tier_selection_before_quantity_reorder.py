@@ -205,21 +205,23 @@ class TestTierBeforeQuantitySingleVendor:
         state = apply_patch(state, run(cart_management(state, seed_runtime)))
         state = _run_turn_boundary(state, seed_runtime)
 
+        # (2026-09-12, Incrément D) : route désormais vers le micro-prompt
+        # STRUCTURED_ACTION dédié — labels humains numérotés seulement
+        # (jamais `tier_id`), "t10" étant le 2e de `_tiered_vendor()`.
         state["normalized_text"] = "le deuxième"
         state["user_query"] = "le deuxième"
         scripted_llm = ScriptedLLM(
             {
-                "interpreted_event": "SELECTION",
-                "detected_intent": "UNKNOWN",
-                "interpreter_confidence": 1.0,
-                "validation_status": "VALID",
-                "extracted_entities": {"selected_value": "t10"},
+                "disposition": "ACTION",
+                "action": "SELECT_PRICING_TIER",
+                "selection_index": 2,
+                "confidence": 1.0,
             }
         )
         runtime = StubRuntime(llm=scripted_llm)
         state = apply_patch(state, run(interpreter(state, runtime)))
         assert state["interpreted_event"] == "SELECTION", state.get("raw_analysis")
-        assert state["extracted_entities"].get("selected_value") == "t10"
+        assert state["extracted_entities"].get("action_pricing_tier_id") == "t10"
 
         state = apply_patch(state, run(memory_update(state, runtime)))
         state = apply_patch(state, run(validator(state, runtime)))
@@ -448,18 +450,17 @@ class TestTierTunnelFsmLock:
 
         # A free-text reply that matches no tier. The LLM is now consulted
         # (never blocked) — scripted here to return UNKNOWN, exactly what
-        # the new system-prompt rule 4bis instructs it to do when nothing
-        # in the active tier list matches confidently.
+        # the STRUCTURED_ACTION micro-prompt (2026-09-12, Incrément D)
+        # instructs it to do when nothing in the active tier list matches
+        # confidently — same behavioral contract as the old rule 4bis, new
+        # dedicated micro-prompt.
         state["normalized_text"] = "je voudrais des champignons"
         state["user_query"] = "je voudrais des champignons"
 
         scripted_llm = ScriptedLLM(
             {
-                "interpreted_event": "UNKNOWN",
-                "detected_intent": "UNKNOWN",
-                "interpreter_confidence": 1.0,
-                "validation_status": "VALID",
-                "extracted_entities": {},
+                "disposition": "UNKNOWN",
+                "confidence": 0.2,
             }
         )
         runtime = StubRuntime(llm=scripted_llm)
@@ -467,7 +468,7 @@ class TestTierTunnelFsmLock:
         interp = run(interpreter(state, runtime))
         assert scripted_llm.calls == 1, "the LLM must be consulted, never blocked"
         assert interp["interpreted_event"] == "UNKNOWN", interp.get("raw_analysis")
-        assert interp["raw_analysis"]["path"] == "llm"
+        assert interp["raw_analysis"]["path"] == "structured_action_micro"
         state = apply_patch(state, interp)
 
         state = apply_patch(state, run(goal_planner(state, runtime)))

@@ -24,6 +24,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     set_pending_interaction,
 )
 from ladini.graphs.agents.market_coach.interpreter.routing import (
+    _cart_pending_signal,
     _interpret_fast_path,
 )
 from tests.conftest import make_state
@@ -154,6 +155,75 @@ class TestConfirmationWordsAreContextOwned:
         )
         result = _interpret_fast_path(state, word)
         assert result is None or result["interpreted_event"] != "CONFIRM"
+
+
+class TestCartPendingIsStateContextNeverAKeywordShortcut:
+    """Incident réel (2026-09-13, WhatsApp production, TROIS occurrences :
+    "okay", puis "je suis d'accord", puis "je valide" — tous après affichage
+    du panier, `BUYER_VIEW_CART`, qui ne pose aucun `PendingInteraction` de
+    type CONFIRM_ACTION, voir `services/domain/cart_service.py`).
+
+    Deux correctifs successifs se sont révélés être la MAUVAISE approche :
+    (1) `_cart_pending_signal` gardait `role_up == "BUYER"` — le RÔLE PAR
+    DÉFAUT du graphe compilé pour cette conversation (`orchestrator.py`,
+    dérivé du `workspace_type`/profil DB), pas le contexte réel de la
+    conversation ; corrigé, le signal ne dépend plus que de l'ÉTAT
+    (`active_cart` non vide + `preorder_workflow.phase == "CART"`).
+    (2) une tentative d'étendre le fast-path déterministe
+    (`_interpret_fast_path`) à ce signal — décision produit EXPLICITEMENT
+    REJETÉE ensuite : « à vouloir tout prédire [tous les synonymes/graphies
+    d'accord libre], on ne pourra pas s'en sortir ». Le vocabulaire humain
+    d'accord/refus est infini ("okay", "je valide", "ça marche", "vas-y",
+    "nickel"...) — coder une liste fermée pour CE signal-là est un jeu perdu
+    d'avance, contrairement à CONFIRM_ACTION (`expected == "CONFIRMATION"`)
+    où le fast-path reste scopé à un vocabulaire déjà documenté ET testé
+    comme filet de fiabilité pour le non-déterminisme MoE de Groq — PAS une
+    tentative de couvrir tous les cas.
+
+    Architecture retenue : `_cart_pending_signal` reste calculé et transmis
+    aux DEUX prompts LLM (legacy + `new_task_v2`) comme CONTEXTE D'ÉTAT
+    factuel ("il y a un panier non vide en attente") — c'est le LLM, jamais
+    Python, qui juge si le texte de CE tour constitue un accord ou un refus.
+    `_interpret_fast_path` ne doit JAMAIS intercepter sur ce signal."""
+
+    def _cart_pending_state(self, text: str, **overrides) -> dict:
+        base = dict(
+            current_goal=None,
+            normalized_text=text,
+            active_cart=[{"product": "oignons", "quantity": 75, "price": 225}],
+            preorder_workflow={"phase": "CART"},
+        )
+        base.update(overrides)
+        return make_state(**base)
+
+    def test_cart_pending_signal_is_true_regardless_of_the_graph_default_role(self):
+        """Le signal d'état reste correct (role_up n'existe même plus comme
+        paramètre) — c'est la partie du correctif (1) qui reste valide."""
+        state = self._cart_pending_state("peu importe le texte", user_role="PRODUCER")
+        assert _cart_pending_signal(state) is True
+
+    def test_cart_pending_signal_is_false_without_an_active_cart(self):
+        state = self._cart_pending_state("peu importe le texte", active_cart=[])
+        assert _cart_pending_signal(state) is False
+
+    @pytest.mark.parametrize(
+        "text",
+        ["okay", "je suis d'accord", "je valide", "ça marche", "nickel", "vas-y"],
+    )
+    def test_the_fast_path_never_intercepts_on_cart_pending_alone(self, text):
+        """Contrat central de ce chantier : quel que soit le texte (y
+        compris un vocabulaire d'accord parfaitement clair pour un humain),
+        `_interpret_fast_path` ne doit JAMAIS trancher CONFIRM/REJECT sur la
+        seule base de `cart_pending` — cette décision appartient au LLM
+        (`new_task_v2`, via `NewTaskPromptContext.cart_pending`), qui reçoit
+        déjà ce contexte (voir `build_new_task_user_prompt`)."""
+        state = self._cart_pending_state(text)
+        result = _interpret_fast_path(state, text)
+        assert result is None, (
+            f"{text!r} a été intercepté par le fast-path déterministe alors "
+            "que la décision CONFIRM/REJECT doit revenir au LLM pour ce "
+            "signal (cart_pending) — voir la docstring de cette classe."
+        )
 
 
 class TestFastPathSharesTheExactSameContractAsTheLlm:

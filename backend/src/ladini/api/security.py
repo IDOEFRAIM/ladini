@@ -159,12 +159,46 @@ async def verify_twilio_signature(request: Request) -> None:
     # `request.form()` est mis en cache par Starlette : le handler pourra le
     # relire (et ses paramètres `Form(...)`) sans re-consommer le corps.
     form_data = await request.form()
+    # (2026-09-11) Diagnostic TEMPORAIRE — si Twilio poste ce webhook en
+    # `multipart/form-data` (pas `application/x-www-form-urlencoded`,
+    # possible pour un canal WhatsApp riche avec `ChannelMetadata`),
+    # Starlette peut parser un champ comme `UploadFile` plutôt que comme une
+    # simple chaîne. `str(value)` produirait alors une représentation objet
+    # (`<starlette.datastructures.UploadFile ...>`), PAS le texte que Twilio
+    # a réellement signé — la signature ne matcherait alors JAMAIS, pour
+    # 100% des requêtes, indépendamment de l'URL/du token (déjà vérifiés
+    # corrects par ailleurs). Journalisé ici (noms de champs seulement,
+    # jamais leur contenu) pour confirmer ou écarter cette hypothèse.
+    non_str_fields = sorted(
+        k for k, v in form_data.items() if not isinstance(v, str)
+    )
+    if non_str_fields:
+        logger.error(
+            "TWILIO_WEBHOOK_NON_STRING_FIELDS | path=%s | fields=%s | "
+            "content_type=%s",
+            request.url.path,
+            non_str_fields,
+            request.headers.get("content-type"),
+        )
     params = {key: str(value) for key, value in form_data.items()}
 
     validator = RequestValidator(auth_token)
     candidates = _candidate_signed_urls(request)
-    for url in candidates:
+    for i, url in enumerate(candidates):
         if validator.validate(url, params, signature):
+            # (2026-09-11) Journalisation TEMPORAIRE côté succès aussi — sans
+            # ça, impossible de comparer un succès et un échec côte à côte
+            # pour un incident intermittent "ça marche pour moi, pas pour
+            # l'autre" avec la même config. Pas de PII : juste l'index/URL
+            # candidate qui a matché et `param_keys` (déjà journalisé côté
+            # échec plus bas).
+            logger.info(
+                "TWILIO_SIGNATURE_VALID | candidate_index=%d | candidate=%s | "
+                "param_keys=%s",
+                i,
+                url,
+                sorted(params.keys()),
+            )
             return
 
     # Ne JAMAIS journaliser les paramètres (corps du message, numéro de

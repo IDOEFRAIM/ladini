@@ -49,6 +49,9 @@ from ladini.domain.quantity_unit import (
     extract_unit_only_from_text as _extract_unit_only,
 )
 from ladini.domain.quantity_unit import (
+    default_unit_for_product as _default_unit_for_product,
+)
+from ladini.domain.quantity_unit import (
     is_livestock_product as _is_livestock_product,
 )
 from ladini.domain.quantity_unit import (
@@ -482,16 +485,48 @@ async def enrich_payload_from_text(
     # `interpreter/routing.py` (garde anti-ancrage) et de
     # `nodes/memory.py::_apply_slot` (qui purge le prix en cascade quand
     # l'unité change) — voir « Périmètre assumé » du docstring de l'autorité.
+    _unit_text_hint = (
+        extract_unit_only(text)
+        if text and payload.get("unit") in (None, "", [], {})
+        else None
+    )
+    # (2026-09-15) Ni le texte ni un tour précédent ne portaient d'unité :
+    # si `resolve_product_unit` en renvoie une quand même, c'est UNIQUEMENT
+    # sa règle 4 (nature du produit, en DÉFAUT) qui a parlé — une
+    # SUPPOSITION, jamais ce que le producteur a écrit. Incident réel :
+    # « Vente de 25 LITRE de boeufs » (avant le correctif d'élision) laissait
+    # passer un défaut faux jusqu'au récapitulatif final SANS que rien ne le
+    # distingue d'une unité confirmée — un producteur qui confirme par
+    # habitude, sans tout relire, ne le voyait jamais. Voir
+    # `unit_was_assumed`, lu par `services/ui/confirmation_summary.py` pour
+    # avertir explicitement, et effacé dès qu'une vraie correction fixe
+    # l'unité (`nodes/memory.py::_apply_slot`).
+    _unit_was_unknown = (
+        payload.get("product")
+        and payload.get("unit") in (None, "", [], {})
+        and not _unit_text_hint
+    )
     resolved_unit = _resolve_product_unit(
         payload.get("product"),
         current_unit=payload.get("unit"),
-        text_unit=(
-            extract_unit_only(text)
-            if text and payload.get("unit") in (None, "", [], {})
-            else None
-        ),
+        text_unit=_unit_text_hint,
     )
+    # `resolve_product_unit` refuse À DESSEIN de deviner pour une culture
+    # (règle 4 : `None`, « à l'appelant de demander ») — mais rien
+    # n'appelait jamais l'appelant : `unit` restait `None` jusqu'à
+    # `SalesPublishProductPayload` (Optional[str]=None) puis
+    # `services/database/producer.py::create_product`, où `unit = clean_text
+    # (unit, ...) or "KG"` le devinait quand même, SANS AUCUNE conscience de
+    # la nature du produit (un élevage y recevrait "KG" aussi) et hors de
+    # portée de tout récapitulatif — l'antithèse de l'autorité unique que
+    # `resolve_product_unit` est censée être. On applique donc ICI le même
+    # filet qu'à l'élevage (`default_unit_for_product`), TOUJOURS marqué
+    # comme supposé, plutôt que de laisser une couche invisible trancher.
+    if not resolved_unit and _unit_was_unknown:
+        resolved_unit = _default_unit_for_product(payload.get("product"))
     if resolved_unit:
+        if _unit_was_unknown:
+            payload["unit_was_assumed"] = True
         payload["unit"] = resolved_unit
 
     if payload.get("surface") in (None, "", [], {}) and text:

@@ -438,3 +438,50 @@ class TestRenderConfirmation:
         result = run(render_confirmation(c))
         assert "mais" not in result["final_response"]
         assert "riz" in result["final_response"]
+
+    def test_an_orphaned_confirm_action_with_no_data_degrades_gracefully(self):
+        """Incident réel (2026-09-14) : un `pending_interaction=CONFIRM_ACTION`
+        ORPHELIN (fuite d'un tunnel `BUYER_LIST_ORDERS` abandonné des jours
+        plus tôt, jamais nettoyé) interceptait via le fast-path déterministe
+        une réponse "confirmer" sans AUCUN rapport (une notification
+        producteur toute nouvelle) — SANS `confirmation_summary` NI
+        `transaction_payload` (rien à confirmer). Avant ce correctif :
+        récapitulatif littéralement "Voici le récapitulatif :\\nNone\\n\\n
+        Confirmez-vous ?". Ce cas doit dégrader exactement comme `not
+        ctx.goal` — jamais tenter un rendu sans données."""
+        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
+        c = ctx(
+            current_goal="BUYER_LIST_ORDERS",
+            confirmation_summary=None,
+            transaction_payload={},
+            pending_interaction=_confirm_pending("BUYER_LIST_ORDERS"),
+        )
+        result = run(render_confirmation(c))
+        assert "None" not in result["final_response"]
+        assert result["response_strategy"] == "CLARIFICATION"
+
+    def test_a_buyer_preorder_confirmation_is_unaffected_by_the_orphan_guard(self):
+        """Non-régression : le nouveau garde-fou ci-dessus ne doit JAMAIS
+        s'appliquer à `_BUYER_PREORDER_GOALS`, qui tire légitimement son récap
+        de `PreorderDraft` — pas de `confirmation_summary`/`transaction_payload`
+        — voir `test_preorder_recap_is_rendered_from_the_draft_not_the_generic_fallback`
+        ci-dessus pour le cas nominal complet."""
+        from ladini.graphs.agents.market_coach.nodes.rendering.confirm import render_confirmation
+        draft = {
+            "draft_id": "d-1", "version": 1, "status": "DRAFT",
+            "items": [{
+                "name": "riz", "quantity": 50.0, "unit": "KG",
+                "price": 20000.0, "producer_id": "p-1",
+            }],
+            "total_amount": 1000000.0, "currency": "XOF",
+        }
+        c = ctx(
+            current_goal="BUYER_PREORDER_CONFIRM",
+            preorder_draft=draft,
+            confirmation_summary=None,
+            transaction_payload={},
+            pending_interaction=_confirm_pending("BUYER_PREORDER_CONFIRM"),
+        )
+        result = run(render_confirmation(c))
+        assert "riz" in result["final_response"]
+        assert result.get("response_strategy") != "CLARIFICATION"

@@ -41,7 +41,12 @@ CHK="compose présent";        check test -f "$COMPOSE_FILE"
 
 # 4. Variables obligatoires présentes dans .env (les `:?` du compose)
 CHK="variables obligatoires (.env)"
-REQUIRED_VARS=(REDIS_PASSWORD MCP_HTTP_AUTH_TOKEN FLOWER_USER FLOWER_PASSWORD GROQ_API_KEY)
+# (2026-09-16, chantier Hetzner scale-out §5/§20) : REDIS_URL remplace
+# REDIS_PASSWORD dans cette liste — la production exige désormais un Redis
+# EXTERNE partagé (REDIS_URL complet, mot de passe déjà inclus dans l'URL),
+# plus de conteneur Redis local dans docker-compose.prod.yml. REDIS_PASSWORD
+# reste utile en DEV (docker-compose.dev.yml), jamais requis en prod.
+REQUIRED_VARS=(REDIS_URL MCP_HTTP_AUTH_TOKEN FLOWER_USER FLOWER_PASSWORD GROQ_API_KEY)
 # DB : accepte la convention neutre OU le legacy DO_DB_*
 missing=()
 for v in "${REQUIRED_VARS[@]}"; do
@@ -50,6 +55,21 @@ done
 if ! grep -qE '^(DB_HOST|DO_DB_HOST)=.+' "$ENV_FILE"; then missing+=("DB_HOST|DO_DB_HOST"); fi
 if ! grep -qE '^(DB_NAME|DO_DB_NAME)=.+' "$ENV_FILE"; then missing+=("DB_NAME|DO_DB_NAME"); fi
 if [ "${#missing[@]}" -eq 0 ]; then log "  ✓ $CHK"; else err "  ✗ $CHK — manquantes/vides : ${missing[*]}"; FAIL=1; fi
+
+# 4bis. REDIS_URL ne doit JAMAIS pointer vers un conteneur Docker local en
+# production (§5/§20) — un `redis://...@redis:6379/...` ou `@localhost:...`
+# signifierait un Redis par node, silencieusement incohérent dès 2 nodes
+# (idempotence/verrous/broker Celery divergents entre nodes). Ne bloque pas
+# le dev (docker-compose.dev.yml n'est jamais dans COMPOSE_FILE ici), donc
+# ce garde est sans risque de faux positif sur le chemin de déploiement réel.
+CHK="REDIS_URL pointe vers un Redis externe (pas un hôte local/conteneur)"
+redis_url_line="$(grep -E '^REDIS_URL=' "$ENV_FILE" | tail -n1)"
+if printf '%s' "$redis_url_line" | grep -qiE '@(redis|localhost|127\.0\.0\.1):'; then
+  err "  ✗ $CHK — REDIS_URL ressemble à un Redis local/conteneur : redis externe partagé requis en prod"
+  FAIL=1
+else
+  log "  ✓ $CHK"
+fi
 
 CHK="pas de placeholder 'change_me' dans .env"
 if grep -qiE '=(change_me|changeme|gsk_xxx|pk-lf-xxx|sk-lf-xxx)' "$ENV_FILE"; then

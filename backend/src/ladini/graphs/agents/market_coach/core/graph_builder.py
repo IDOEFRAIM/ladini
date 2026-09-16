@@ -1086,7 +1086,7 @@ async def _run_producer_write_flow(
     c1 = await confirmation_gate(state, runtime)
     state.update(c1)
     # `WAITING_CONFIRMATION` (mécanisme générique confirmation_summary,
-    # goals pas encore migrés — ex: DECLARE_CROP_CYCLE) ou `WAITING_INPUT`
+    # goals pas encore migrés — ex: PRODUCTION_DECLARE_FUTURE) ou `WAITING_INPUT`
     # (draft canonique versionné — SALES_PUBLISH_PRODUCT depuis 2026-09-04,
     # PROCUREMENT_CREATE_REQUEST depuis 2026-09-03, voir
     # `nodes/confirmation_gate.py::_DRAFT_BASED_CONFIRMATION_GOALS`) sont
@@ -1126,11 +1126,11 @@ async def demo_producer_publish_product_flow() -> Dict[str, Any]:
 
 
 async def demo_producer_declare_future_production_flow() -> Dict[str, Any]:
-    """DECLARE_CROP_CYCLE : déclaration d'une récolte future (préco-commande)."""
+    """PRODUCTION_DECLARE_FUTURE : déclaration d'une récolte future (préco-commande)."""
     runtime = DemoRuntime()
     return await _run_producer_write_flow(
         runtime,
-        goal="DECLARE_CROP_CYCLE",
+        goal="PRODUCTION_DECLARE_FUTURE",
         payload={
             "product": "Sésame",
             "production_type": "CROP",
@@ -1163,7 +1163,7 @@ async def run_producer_creation_test_suite() -> None:
 
     future_state = await demo_producer_declare_future_production_flow()
     assert future_state.get("status") == "COMPLETED", (
-        f"DECLARE_CROP_CYCLE: status={future_state.get('status')} "
+        f"PRODUCTION_DECLARE_FUTURE: status={future_state.get('status')} "
         f"errors={future_state.get('validation_errors')}"
     )
     assert future_state.get("response_strategy") == "SUCCESS"
@@ -1179,7 +1179,7 @@ async def run_producer_creation_test_suite() -> None:
         f"obtenu tool_args={future_state.get('selected_tool_args')}"
     )
     print(
-        f"[DECLARE_CROP_CYCLE] ✅ tool={future_state.get('selected_tool')} "
+        f"[PRODUCTION_DECLARE_FUTURE] ✅ tool={future_state.get('selected_tool')} "
         f"réponse={future_state.get('final_response')!r}"
     )
 
@@ -1285,7 +1285,7 @@ async def _turn_boundary(state: Dict[str, Any], runtime: Any) -> Dict[str, Any]:
 
 
 async def demo_producer_future_production_conversation() -> None:
-    """Transcript tour par tour de DECLARE_CROP_CYCLE — pour revue UX humaine."""
+    """Transcript tour par tour de PRODUCTION_DECLARE_FUTURE — pour revue UX humaine."""
     print("\n" + "=" * 70)
     print("=== TRANSCRIPT — Déclaration d'une production future (culture) ===")
     print("=" * 70)
@@ -1299,7 +1299,7 @@ async def demo_producer_future_production_conversation() -> None:
         "user_phone": COMMAND_TEST_PHONE,
         "user_role": "PRODUCER",
         "user_name": "Adama",
-        "current_goal": "DECLARE_CROP_CYCLE",
+        "current_goal": "PRODUCTION_DECLARE_FUTURE",
         "interpreted_event": "NEW_TASK",
         "transaction_payload": {},
         "working_memory": {},
@@ -1312,7 +1312,7 @@ async def demo_producer_future_production_conversation() -> None:
         # current_goal est DURABLE mais reste tout de même réaffirmé ici :
         # dans le vrai graphe c'est goal_planner qui le maintient verrouillé
         # pendant le tunnel (voir [[market-coach-turn-boundary-state]]).
-        state["current_goal"] = "DECLARE_CROP_CYCLE"
+        state["current_goal"] = "PRODUCTION_DECLARE_FUTURE"
         # NOTE : plus besoin de reset manuel de final_response/ag_ui_component/
         # response_strategy ici — post_response_cleanup (appelé par
         # _turn_boundary à la fin du tour précédent) s'en charge maintenant
@@ -1346,7 +1346,7 @@ async def demo_producer_future_production_conversation() -> None:
     # restauré par goal_planner depuis working_memory.active_goal en début
     # de tour réel ; ce harnais court-circuite goal_planner, donc on le
     # rétablit ici à la main).
-    state["current_goal"] = "DECLARE_CROP_CYCLE"
+    state["current_goal"] = "PRODUCTION_DECLARE_FUTURE"
     state["interpreted_event"] = "CONFIRM"
     c2 = await confirmation_gate(state, runtime)
     state.update(c2)

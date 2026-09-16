@@ -355,7 +355,6 @@ class CartDomainService:
             }
 
         lines = ["🛒 *Votre panier actuel :*"]
-        options = []
         has_auction_items = False
         for i, line in enumerate(cart, start=1):
             source_type = str(line.get("source_type") or "DIRECT").upper()
@@ -397,12 +396,6 @@ class CartDomainService:
                     f"   {_fmt_num(line.get('quantity'))} {line.get('unit')} × {_fmt_num(line.get('price'))} = "
                     f"*{_fmt_num(line.get('line_total'))} FCFA*"
                 )
-            options.append(
-                {
-                    "index": str(i),
-                    "label": f"{line.get('name')} (x{line.get('quantity')})",
-                }
-            )
             if line.get("is_auction"):
                 has_auction_items = True
 
@@ -414,20 +407,27 @@ class CartDomainService:
         if pending_line:
             lines.append("\n" + pending_line)
         cart_text = "\n".join(lines)
+        # (2026-09-13, incident réel WhatsApp, TROIS occurrences) : ce menu
+        # enveloppait auparavant `cart_text` dans un `MenuRequest(kind="cart")`
+        # — or `MenuRequest.__post_init__` documente explicitement (mandat
+        # §25, 2026-09-09) qu'"un MenuRequest implique TOUJOURS une sélection
+        # valide", et `ui_engine.py` (seul consommateur de `pending_menu`)
+        # verrouille alors `pending_interaction=SELECTION_MENU` pour LE TOUR
+        # SUIVANT. `state_router.py` route toute réponse en SELECTION_MENU
+        # vers le micro-prompt SELECTION (qui sait lire un index/texte de
+        # menu, jamais un accord libre) — AVANT même que NEW_TASK/`cart_pending`
+        # ne soient considérés. Or aucun code, nulle part, ne lit jamais une
+        # `selection_index`/`selected_value` contre `available_mapping_kind
+        # == "cart"` (vérifié par recherche exhaustive) : ce verrouillage ne
+        # protège aucune fonctionnalité réelle, il bloquait uniquement la
+        # confirmation en texte libre ("okay"/"je valide"/"je suis d'accord")
+        # que le texte du panier invite pourtant explicitement à donner
+        # ("Répondez *précommander*..."). Le panier reste un simple message
+        # informatif numéroté (lisibilité), jamais un menu de sélection —
+        # plus de `pending_menu` du tout.
         return {
             "final_response": cart_text,
             "ag_ui_component": None,
-            "pending_menu": MenuRequest(
-                title="Votre panier",
-                options=[
-                    MenuOption(index=o["index"], label=o["label"]) for o in options
-                ],
-                kind="cart",
-                metadata={
-                    "actions": ["precommander", "ajouter", "négocier", "annuler"]
-                },
-                preformatted_text=cart_text,
-            ),
         }
 
     async def add_to_cart_with_ref(

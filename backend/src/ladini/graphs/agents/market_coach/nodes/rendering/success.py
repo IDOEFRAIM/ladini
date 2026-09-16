@@ -33,6 +33,9 @@ from ladini.services.pending_photo_target import (
 from ladini.services.pending_photo_target import (
     set_pending_bid_photo as _set_pending_bid_photo,
 )
+from ladini.services.pending_photo_target import (
+    set_pending_product_photo as _set_pending_product_photo,
+)
 from ladini.services.search_results_cache import (
     store_results as _store_search_photo_results,
 )
@@ -601,10 +604,6 @@ _FALLBACK_GOAL_REQUIRES_TOOL: Dict[str, Tuple[str, ...]] = {
     "PUBLISH_OR_SELL": ("create_product", "record_sale"),
     "BID": ("place_bid",),
     "STOCK_REGISTER_HARVEST": ("add_stock",),
-    "STOCK_RECORD_MOVEMENT": ("add_stock_movement_by_id",),
-    "STOCK_ADJUST": ("adjust_stock_by_id",),
-    "STOCK_REMOVE_PARTIAL": ("remove_stock_by_id",),
-    "STOCK_DELETE": ("delete_stock_by_id",),
 }
 
 
@@ -676,14 +675,6 @@ def _transactional_fallback_text(
     # ci-dessous.
     if g == "STOCK_REGISTER_HARVEST" and _tool_matches("STOCK_REGISTER_HARVEST"):
         return f"✅ {salutation}Récolte enregistrée{q_info} pour *{prod_name}*."
-    if g == "STOCK_RECORD_MOVEMENT" and _tool_matches("STOCK_RECORD_MOVEMENT"):
-        return f"✅ {salutation}Mouvement de stock enregistré{q_info} pour *{prod_name}*."
-    if g == "STOCK_ADJUST" and _tool_matches("STOCK_ADJUST"):
-        return f"✅ {salutation}Stock ajusté{q_info} pour *{prod_name}*."
-    if g == "STOCK_REMOVE_PARTIAL" and _tool_matches("STOCK_REMOVE_PARTIAL"):
-        return f"✅ {salutation}Quantité retirée{q_info} pour *{prod_name}*."
-    if g == "STOCK_DELETE" and _tool_matches("STOCK_DELETE"):
-        return f"✅ {salutation}*{prod_name}* a été retiré de votre stock."
     if any(
         tok in g
         for tok in ("LIST", "GET", "CHECK", "SEARCH", "VIEW", "DASHBOARD", "SNAPSHOT")
@@ -755,6 +746,22 @@ async def render_success(ctx: RenderContext) -> Dict[str, Any]:
     ):
         _set_pending_auction_photo(user_phone, str(exec_result["auction_id"]))
         text_output += "\n\n📸 Vous pouvez aussi envoyer une photo de référence pour cet appel d'offres."
+    elif (
+        selected_tool_name == "create_product"
+        and user_phone
+        and exec_result.get("product_id")
+    ):
+        # (2026-09-15) Demandé explicitement APRÈS la création, jamais avant
+        # ni pendant : le produit est déjà publié à ce stade (moins de
+        # risque de perturber la saisie), et le producteur peut enchaîner la
+        # création d'autant de produits qu'il veut sans y être obligé — la
+        # photo reste une simple invitation non bloquante, comme pour
+        # enchères/appels d'offres ci-dessus.
+        _set_pending_product_photo(user_phone, str(exec_result["product_id"]))
+        text_output += (
+            "\n\n📸 Voulez-vous ajouter une photo de ce produit ? Envoyez-la "
+            "simplement maintenant, ou continuez avec un autre produit."
+        )
 
     formatted_menu_raw = exec_result.get("formatted_menu")
     formatted_menu_text = (

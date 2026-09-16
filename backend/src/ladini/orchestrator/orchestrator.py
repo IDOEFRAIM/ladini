@@ -19,6 +19,8 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+from ladini.core.idempotency import get_cached as _get_role_hint
+from ladini.core.idempotency import release as _release_role_hint
 from ladini.graphs.agents.market_coach.utils import build_runtime, ensure_dict
 from ladini.graphs.factory import GraphFactory
 from ladini.graphs.roles import normalize_role
@@ -140,6 +142,7 @@ class Orchestrator:
         location_outcome: str | None = None,
         location_lat: float | None = None,
         location_lon: float | None = None,
+        message_sid: str | None = None,
     ) -> Dict[str, Any]:
         workspace_id = (phone or "anonymous").strip()
         ws = await self.resolver.resolve(workspace_id, workspace_type)
@@ -159,6 +162,7 @@ class Orchestrator:
                     location_outcome=location_outcome,
                     location_lat=location_lat,
                     location_lon=location_lon,
+                    message_sid=message_sid,
                 ),
                 timeout=_AGENT_TIMEOUT_SECONDS,
             )
@@ -307,6 +311,7 @@ class Orchestrator:
         location_outcome: str | None = None,
         location_lat: float | None = None,
         location_lon: float | None = None,
+        message_sid: str | None = None,
     ) -> Dict[str, Any]:
         config = {"configurable": {"thread_id": ws.workspace_id}}
         agent_metadata = {
@@ -318,6 +323,13 @@ class Orchestrator:
             "user_phone": phone,
             "current_goal": ws.active_goal or None,
             "active_form": ws.active_form,
+            # (2026-09-12) Identifiant STABLE de l'événement entrant — voir
+            # `api/tasks.py::process_agent_task` docstring. Clé du cache
+            # d'interprétation LLM (`interpreter/routing.py::
+            # _cached_llm_completion`) : un retry Celery de la tâche
+            # (même MessageSid) ne doit jamais repayer l'appel LLM déjà
+            # réussi de ce tour.
+            "message_sid": message_sid,
             # Clic interactif (bouton/liste WhatsApp) : amorce le bypass LLM de
             # input_interpreter. None pour un message texte classique.
             "interactive_selection": interactive_id or None,
@@ -343,7 +355,43 @@ class Orchestrator:
             role = "BUYER" if ws.workspace_type == "buyer" else "PRODUCER"
             profile_res = None
 
-            if not force_role:
+            # (2026-09-13, incident WhatsApp #3 — utilisateur double-rôle) :
+            # `ws.workspace_type` est STICKY sur le dernier rôle utilisé dans
+            # CE workspace (même clé pour buyer/producer, un seul numéro de
+            # téléphone). Un producteur qui répond "confirmer"/"annuler" à
+            # une notification de commande reçue, alors que son workspace
+            # est resté en mode BUYER (session buyer antérieure jamais
+            # nettoyée), voit son message classifié contre le catalogue
+            # BUYER — qui ne contient même pas PRODUCER_CONFIRM_ORDER/
+            # PRODUCER_CANCEL_ORDER. Aucun réglage du prompt NEW_TASK ne
+            # peut compenser un mauvais catalogue de départ.
+            #
+            # `flows/buyer/preorder_confirmation.py` pose un indice d'ÉTAT
+            # (jamais un mot-clé du texte reçu ici) juste après l'appel MCP
+            # qui a mis CETTE notification producteur en file — lu et
+            # consommé (relâché) ici, donc sans effet sur les tours
+            # suivants de ce même numéro. Fail-open comme tout
+            # `core/idempotency.py` : une panne Redis dégrade simplement
+            # vers le rôle sticky actuel.
+            role_hint_applied = False
+            if not force_role and phone:
+                role_hint = _get_role_hint(f"pending_role_hint:{phone}")
+                if role_hint:
+                    _release_role_hint(f"pending_role_hint:{phone}")
+                    hint_up = str(role_hint).strip().upper()
+                    if hint_up in {"PRODUCER", "PRODUCTEUR", "PRODUCTRICE"}:
+                        role = "PRODUCER"
+                        role_hint_applied = True
+                    elif hint_up in {"BUYER", "ACHETEUR", "ACHETEUSE"}:
+                        role = "BUYER"
+                        role_hint_applied = True
+
+            # L'indice ci-dessus reflète un état RÉEL et plus récent que
+            # `ws.metadata`/le profil (qui datent tous deux du dernier tour
+            # BUYER de ce même numéro, potentiellement périmé) — une fois
+            # posé, il prime sur les deux heuristiques suivantes plutôt que
+            # d'être aussitôt écrasé par elles.
+            if not force_role and not role_hint_applied:
                 meta_role = (
                     ws.metadata.get("user_role")
                     if isinstance(ws.metadata, dict)

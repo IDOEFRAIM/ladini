@@ -87,11 +87,39 @@ class _ScriptedLLM:
         return _ScriptedCompletion(self._payload)
 
 
+class _SequencedScriptedLLM:
+    """Comme `_ScriptedLLM`, mais renvoie un payload DIFFÉRENT à chaque
+    appel successif — nécessaire depuis la Phase C (2026-09-12) pour les
+    scénarios où une ACTIVE_SLOT DEVIATION déclenche un 2e appel (le
+    classifier NEW_TASK existant) avec un contrat JSON différent du 1er
+    (voir `interpreter/active_slot_micro.py`)."""
+
+    def __init__(self, payloads: list) -> None:
+        self._payloads = list(payloads)
+        self.calls = 0
+
+    @property
+    def chat(self):
+        return self
+
+    @property
+    def completions(self):
+        return self
+
+    def create(self, **kwargs):
+        idx = min(self.calls, len(self._payloads) - 1)
+        payload = self._payloads[idx]
+        self.calls += 1
+        return _ScriptedCompletion(payload)
+
+
 def _runtime(llm=None):
     return type("RT", (), {"llm": llm, "model_answer": "scripted-model"})()
 
 
-async def _interpret(text: str, expected_input: str, *, llm_payload=None, **state_kwargs):
+async def _interpret(
+    text: str, expected_input: str, *, llm_payload=None, llm_payloads=None, **state_kwargs
+):
     interp = make_input_interpreter("BUYER")
     state = make_state(
         user_query=text,
@@ -101,7 +129,12 @@ async def _interpret(text: str, expected_input: str, *, llm_payload=None, **stat
         user_role="BUYER",
         **state_kwargs,
     )
-    llm = _ScriptedLLM(llm_payload) if llm_payload is not None else None
+    if llm_payloads is not None:
+        llm = _SequencedScriptedLLM(llm_payloads)
+    elif llm_payload is not None:
+        llm = _ScriptedLLM(llm_payload)
+    else:
+        llm = None
     rt = _runtime(llm=llm)
     patch = await interp(state, rt)
     merged = {**state, **patch}
@@ -145,22 +178,29 @@ class TestFastPathPipelineOnTheSevenMandatedPhrases:
 
     @pytest.mark.asyncio
     async def test_a_free_text_new_request_is_never_bypassed(self):
-        """"en fait je veux acheter" — le LLM classe une nouvelle demande
-        (intent différent du goal verrouillé, confiance suffisante) :
+        """"en fait je veux acheter" — une nouvelle demande pendant un slot
+        QUANTITY actif.
+
+        (2026-09-12, Phase C) : `expected_input=QUANTITY` route désormais
+        vers le micro-prompt ACTIVE_SLOT (`interpreter/active_slot_micro.py`)
+        — celui-ci détecte la déviation (1er appel) puis retombe sur le
+        classifier NEW_TASK existant (2e appel, MÊME contrat qu'avant) :
         NEW_TASK survit, jamais rabaissé en ANSWER — donc jamais bypassé."""
         state, llm = await _interpret(
             "en fait je veux acheter",
             "QUANTITY",
             transaction_payload={"product": "riz"},
-            llm_payload={
-                "interpreted_event": "NEW_TASK",
-                "detected_intent": "BUYER_REQUEST",
-                "interpreter_confidence": 0.85,
-                "validation_status": "VALID",
-                "extracted_entities": {},
-            },
+            llm_payloads=[
+                {"disposition": "DEVIATION", "extracted_entities": {}, "confidence": 0.9},
+                {
+                    "disposition": "NEW_TASK",
+                    "intent": "BUYER_REQUEST",
+                    "confidence": 0.85,
+                    "entities": {},
+                },
+            ],
         )
-        assert llm.calls == 1
+        assert llm.calls == 2
         assert state["interpreted_event"] == "NEW_TASK"
         route = _fastpath_route(state)
         assert route == "to_cognitive", (
@@ -172,28 +212,37 @@ class TestFastPathPipelineOnTheSevenMandatedPhrases:
     async def test_a_product_switch_disguised_as_answer_is_promoted_and_never_bypassed(
         self,
     ):
-        """"je change pour du maïs" — cas central du mandat §13. Le LLM
-        classe (à tort, du point de vue du contrat ANSWER) ce message
-        directement comme ANSWER, avec un produit DIFFÉRENT du produit
-        suivi. Preuve de la correction du 2026-09-08 (garde symétrique) :
-        l'interpréteur promeut cet ANSWER en NEW_TASK avant que
-        FastPathPolicy ne puisse le voir."""
+        """"je change pour du maïs" — cas central du mandat §13, un
+        changement de produit pendant un slot QUANTITY actif (produit suivi:
+        riz).
+
+        (2026-09-12, Phase C) : le micro-prompt ACTIVE_SLOT est désormais le
+        premier à voir ce message — il doit reconnaître qu'un changement de
+        produit explicite est une DÉVIATION (pas une réponse au slot
+        QUANTITY), puis retomber sur le classifier NEW_TASK existant (2e
+        appel) qui produit le contrat final. Preuve que ce changement de
+        produit ne reste JAMAIS classé ANSWER avant que FastPathPolicy ne
+        puisse le voir — même garantie que l'ancienne "garde symétrique"
+        (2026-09-08), portée maintenant par la distinction ANSWER/DEVIATION
+        du micro-prompt plutôt que par un garde-fou dans le gros prompt
+        unifié."""
         state, llm = await _interpret(
             "je change pour du mais",
             "QUANTITY",
             transaction_payload={"product": "riz"},
-            llm_payload={
-                "interpreted_event": "ANSWER",
-                "detected_intent": "UNKNOWN",
-                "interpreter_confidence": 0.6,
-                "validation_status": "VALID",
-                "extracted_entities": {"product": "mais"},
-            },
+            llm_payloads=[
+                {"disposition": "DEVIATION", "extracted_entities": {}, "confidence": 0.9},
+                {
+                    "disposition": "NEW_TASK",
+                    "intent": "BUYER_REQUEST",
+                    "confidence": 0.6,
+                    "entities": {"product": "mais"},
+                },
+            ],
         )
-        assert llm.calls == 1
+        assert llm.calls == 2
         assert state["interpreted_event"] == "NEW_TASK", (
-            "un changement de produit ne doit JAMAIS rester classé ANSWER — "
-            "voir le garde symétrique ajouté dans interpreter/routing.py"
+            "un changement de produit ne doit JAMAIS rester classé ANSWER"
         )
         route = _fastpath_route(state)
         assert route == "to_cognitive"
@@ -217,17 +266,22 @@ class TestFastPathPipelineOnTheSevenMandatedPhrases:
         repose PAS sur la qualité de cette classification (risque LLM
         générique, hors de portée de `cognitive_guard` de toute façon —
         voir I1 : aucune branche de `cognitive_guard` ne traite SELECTION
-        différemment de ANSWER)."""
+        différemment de ANSWER).
+
+        (2026-09-12, chantier State Router — Incrément B) : `expected_input=
+        SELECTION` route désormais vers le micro-prompt dédié
+        (`interpreter/selection_micro.py`), pas l'interpréteur unifié — le
+        payload scripté suit donc le contrat minimal `SelectionInterpretation`
+        (`event`/`selection_index`/`selected_value`), plus l'ancien schéma
+        unifié (`interpreted_event`/`validation_status`/...)."""
         state, llm = await _interpret(
             "la deuxieme option",
             "SELECTION",
             expected_candidates=["Option A", "Option B"],
             llm_payload={
-                "interpreted_event": "SELECTION",
-                "detected_intent": "UNKNOWN",
-                "interpreter_confidence": 0.9,
-                "validation_status": "VALID",
-                "extracted_entities": {"selected_value": "la deuxieme option"},
+                "event": "SELECTION",
+                "selection_index": 2,
+                "selected_value": None,
             },
         )
         assert state["interpreted_event"] == "SELECTION"

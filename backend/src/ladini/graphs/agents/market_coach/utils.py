@@ -1217,7 +1217,21 @@ async def _llm_extract_onboarding_all(
 # consolidation — exactement le genre de duplication qui rendait la
 # précommande fragile à chaque nouvelle exigence (adaptivité, GPS...).
 # Voir [[precommande-architecture-consolidation-2026-08]].
+#
+# (2026-09-13, chantier State Router — Incrément E) : à ne PAS confondre
+# avec `ActiveSlotDisposition.DEVIATION`/`StructuredActionDisposition.
+# DEVIATION` (interpreter/active_slot_contract.py,
+# interpreter/structured_action_contract.py) — CETTE fonction est un
+# RENDERER (formule une phrase de reconnaissance quand l'utilisateur a
+# dévié d'une étape à choix contraint : confirmation oui/non, partage GPS),
+# jamais un CLASSIFIEUR. Elle ne reçoit et ne renvoie aucune décision
+# métier — la classification (répondre/dévier/rejeter) est déjà tranchée
+# en amont par l'interpréteur ; ce renderer ne la refait jamais. Déjà,
+# avant cet incrément, un micro-prompt minimal (aucun catalogue, aucun ID,
+# aucun schéma JSON) — seule la traçabilité Langfuse manquait.
 # =====================================================================
+
+DEVIATION_REPLY_PROMPT_VERSION = "deviation_reply_v1"
 
 
 async def llm_deviation_reply(
@@ -1264,6 +1278,10 @@ async def llm_deviation_reply(
             temperature=0.4,
             max_tokens=150,
             agent_node="llm_deviation_reply",
+            extra_metadata={
+                "prompt_family": "deviation_reply",
+                "prompt_version": DEVIATION_REPLY_PROMPT_VERSION,
+            },
         )
         text = (completion.choices[0].message.content or "").strip()
         return text or None
@@ -1310,6 +1328,7 @@ __all__ = [
     # LLM helpers
     "_llm_extract_onboarding_all",
     "llm_deviation_reply",
+    "DEVIATION_REPLY_PROMPT_VERSION",
     # Compute / reset
     "_compute_progress",
     "reset_error_status",

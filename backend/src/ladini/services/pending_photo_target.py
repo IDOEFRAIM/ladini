@@ -1,12 +1,13 @@
 """Cible de la PROCHAINE photo envoyée par un producteur/acheteur.
 
-Permet de lier automatiquement une photo à l'offre (Bid) ou à l'appel
-d'offres (Auction) que l'utilisateur vient de créer/proposer, sans qu'il ait
-besoin de préciser une commande — écrit depuis
+Permet de lier automatiquement une photo à l'offre (Bid), à l'appel d'offres
+(Auction) ou au PRODUIT que l'utilisateur vient de créer/proposer, sans
+qu'il ait besoin de préciser une commande — écrit depuis
 ``nodes/rendering/success.py`` (LangGraph, juste après un `place_bid`/
-`create_auction` réussi) et lu depuis ``workers/media/product_photo_task.py``
-(Celery, quand une photo arrive). Module volontairement SANS dépendance
-``celery`` — même principe que ``services/search_results_cache.py``.
+`create_auction`/`create_product` réussi) et lu depuis
+``workers/media/product_photo_task.py`` (Celery, quand une photo arrive).
+Module volontairement SANS dépendance ``celery`` — même principe que
+``services/search_results_cache.py``.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ logger = logging.getLogger("ladini.services.pending_photo_target")
 _TTL_SECONDS = 900  # 15 min — assez pour uploader une photo juste après l'action
 _BID_PREFIX = "pending_bid_photo:"
 _AUCTION_PREFIX = "pending_auction_photo:"
+_PRODUCT_PREFIX = "pending_product_photo:"
 
 _redis_client: Optional["redis.Redis"] = None
 
@@ -73,6 +75,28 @@ def pop_pending_auction_photo(phone: str) -> Optional[str]:
     try:
         r = _redis()
         key = f"{_AUCTION_PREFIX}{phone}"
+        val = r.get(key)
+        if val:
+            r.delete(key)
+        return val
+    except Exception:
+        return None
+
+
+def set_pending_product_photo(phone: str, product_id: str) -> None:
+    if not phone or not product_id:
+        return
+    try:
+        _redis().setex(f"{_PRODUCT_PREFIX}{phone}", _TTL_SECONDS, str(product_id))
+    except Exception:
+        logger.warning("PENDING_PRODUCT_PHOTO_WRITE_FAILED | phone=%s", _mask(phone))
+
+
+def pop_pending_product_photo(phone: str) -> Optional[str]:
+    """Lit ET efface le marqueur (usage unique) — ``None`` si absent/expiré."""
+    try:
+        r = _redis()
+        key = f"{_PRODUCT_PREFIX}{phone}"
         val = r.get(key)
         if val:
             r.delete(key)

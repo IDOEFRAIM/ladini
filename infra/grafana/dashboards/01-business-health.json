@@ -1,0 +1,174 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus (Grafana Cloud)",
+      "type": "datasource",
+      "pluginId": "prometheus"
+    }
+  ],
+  "title": "Ladini — Vision opérationnelle (Business Health)",
+  "uid": "ladini-business-health",
+  "description": "Santé opérationnelle agrégée : volume de messages, taux de succès, profondeur de file. Complète Langfuse (LLMOps détaillé), ne le duplique pas.",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "tags": [
+    "ladini",
+    "hetzner"
+  ],
+  "timezone": "utc",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Notes",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 3
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "**Incoming/processed** viennent de `ladini_webhooks_received_total` / `ladini_http_requests_total` (telemetry.py, service `api`). **Profondeur de file Celery** vient de `celery-exporter` (`infra/exporters/docker-compose.exporters.yml`) — panneau vide si cette stack n'est pas déployée sur ce host. Vérifier le nom exact des métriques exposées par la version de `celery-exporter` réellement déployée (peut varier entre versions) avant de se fier aux seuils d'alerte."
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Messages entrants (webhooks) / min",
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(ladini_webhooks_received_total[5m])) by (channel) * 60",
+          "legendFormat": "{{channel}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Webhooks traités / min, par code HTTP",
+      "gridPos": {
+        "x": 12,
+        "y": 3,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(ladini_http_requests_total{route=~\"/api/webhook.*\"}[5m])) by (status) * 60",
+          "legendFormat": "{{status}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Ratio succès / échec (requêtes HTTP, toutes routes)",
+      "gridPos": {
+        "x": 0,
+        "y": 11,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(ladini_http_requests_total{status=~\"2..\"}[5m])) / sum(rate(ladini_http_requests_total[5m]))",
+          "legendFormat": "succès",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Profondeur de file Celery (celery-exporter — gap: voir Notes)",
+      "gridPos": {
+        "x": 12,
+        "y": 11,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "celery_queue_length",
+          "legendFormat": "{{queue_name}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

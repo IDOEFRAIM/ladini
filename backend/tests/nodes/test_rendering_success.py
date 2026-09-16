@@ -374,21 +374,12 @@ class TestTransactionalFallbackText:
         )
         assert "Récolte enregistrée" not in text
 
-    @pytest.mark.parametrize(
-        ("goal", "tool"),
-        [
-            ("STOCK_RECORD_MOVEMENT", "add_stock_movement_by_id"),
-            ("STOCK_ADJUST", "adjust_stock_by_id"),
-            ("STOCK_REMOVE_PARTIAL", "remove_stock_by_id"),
-            ("STOCK_DELETE", "delete_stock_by_id"),
-        ],
-    )
-    def test_other_stock_write_goals_also_confirm(self, goal, tool):
-        text = _transactional_fallback_text(
-            goal, "", {"product": "mais"}, selected_tool=tool,
-        )
-        assert "C'est noté" not in text
-        assert "rien trouvé" not in text
+    # (2026-09-13, Deep Intent Architecture Cleanup) : `test_other_stock_write_
+    # goals_also_confirm` (STOCK_RECORD_MOVEMENT/STOCK_ADJUST/STOCK_REMOVE_
+    # PARTIAL/STOCK_DELETE) supprimé — ces quatre intents ont été retirés
+    # d'INTENT_CONFIG (tool_name `*_by_id` fictif, aucune méthode DB réelle).
+    # STOCK_REGISTER_HARVEST reste le seul goal d'écriture stock et est déjà
+    # couvert par le test précédent.
 
     def test_stock_read_goals_are_unaffected_by_the_write_templates(self):
         # "STOCK_" est un préfixe partagé — les goals de LECTURE
@@ -491,7 +482,11 @@ class TestRenderSuccess:
         )
         result = run(render_success(c))
         assert "poulets" in result["final_response"]
-        assert "6000" in result["final_response"]
+        # (2026-09-11) `fmt_num` (core/formatting.py) ajoute désormais un
+        # séparateur de milliers (notation française) — "6000" s'affiche
+        # "6 000", pas un régression : ambiguïté réelle levée (un montant
+        # brut sans séparateur avait été signalé comme trompeur).
+        assert "6 000" in result["final_response"]
         assert "pour 0" not in result["final_response"]
         assert "votre demande" not in result["final_response"]
         assert "pour 0" not in result["final_response"]
@@ -849,6 +844,31 @@ class TestAuctionAndBidPhotoHooks:
 
         assert captured == {"phone": "+22670000001", "auction_id": "a1"}
         assert "✅ Appel d'offres enregistré." in result["final_response"]
+        assert "photo" in result["final_response"].lower()
+
+    def test_creating_a_product_sets_a_pending_photo_target_and_adds_a_hint(self, monkeypatch):
+        """(2026-09-15) Le produit est déjà publié à ce stade (WRITE déjà
+        exécuté) — la photo n'est qu'une invitation non bloquante juste
+        après, même mécanisme que place_bid/create_auction ci-dessus."""
+        import ladini.graphs.agents.market_coach.nodes.rendering.success as success_mod
+
+        captured = {}
+        monkeypatch.setattr(
+            success_mod, "_set_pending_product_photo",
+            lambda phone, product_id: captured.update(phone=phone, product_id=product_id),
+        )
+        c = ctx(
+            user_phone="+22670000001",
+            selected_tool="create_product",
+            execution_result={
+                "status": "success", "product_id": "p1",
+                "message": "🎉 Le produit *Maïs* a été ajouté avec succès à votre catalogue de vente !",
+            },
+        )
+        result = run(render_success(c))
+
+        assert captured == {"phone": "+22670000001", "product_id": "p1"}
+        assert "ajouté avec succès" in result["final_response"]
         assert "photo" in result["final_response"].lower()
 
     def test_a_bid_list_with_photos_is_cached_and_gets_a_hint(self, monkeypatch):

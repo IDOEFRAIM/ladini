@@ -22,16 +22,21 @@ The goal planner state machine lives in ``interpreter/goal_planner.py``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re as _re
+from datetime import date
 from string import Template
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from ladini.core.idempotency import get_cached as _get_cached_value
+from ladini.core.idempotency import set_cached as _set_cached_value
 from ladini.domain.quantity_unit import (
     extract_deterministic_pricing_tiers,
     extract_unit_only_from_text,
     parse_compound_quantity,
+    parse_packaged_compound_quantity,
     parse_quantity_unit_from_text,
     scan_number_candidates,
 )
@@ -119,6 +124,45 @@ _REJECT_EXACT_PHRASES = frozenset(
     }
 )
 
+
+def _cart_pending_signal(state: Dict[str, Any]) -> bool:
+    """Panier acheteur en attente de précommande — signal d'ÉTAT (phase CART
+    + panier non vide), jamais un mot-clé du texte. Source unique pour les
+    trois consommateurs (fast-path déterministe ci-dessous, prompt legacy,
+    prompt `new_task_v2`) — auparavant recalculé trois fois à l'identique.
+
+    (2026-09-13, incident réel WhatsApp #2) : gardait auparavant un
+    `role_up == "BUYER"` — un filtrage par le RÔLE PAR DÉFAUT du graphe
+    compilé (`orchestrator.py`, dérivé du `workspace_type`/profil DB), PAS
+    par le contexte réel de CETTE conversation. Sous double-rôle, un
+    utilisateur au profil PRODUCER peut parfaitement être en train d'ACHETER
+    (le graphe qui traite son message reste `role_up="PRODUCER"` tant que
+    son profil n'est pas explicitement BUYER) — `active_cart`/
+    `preorder_workflow` ne sont de toute façon écrits QUE par du code panier
+    acheteur : leur seule présence est déjà une preuve suffisante et exacte
+    du contexte, le rôle du graphe n'ajoute rien et masquait au contraire ce
+    signal pour tout profil non explicitement BUYER. Root cause du bug
+    "okay"/"je suis d'accord" jamais reconnu : ni ce fast-path ni le prompt
+    LLM (`cart_pending`) ne recevaient JAMAIS `True` pour ces conversations."""
+    _cart_phase = str((state.get("preorder_workflow") or {}).get("phase") or "").upper()
+    return _cart_phase == "CART" and bool(state.get("active_cart"))
+
+
+def _producer_order_action_pending_signal(state: Dict[str, Any]) -> bool:
+    """Vente(s) en attente de confirmation producteur, juste montrées —
+    signal d'ÉTAT (même principe que `_cart_pending_signal` ci-dessus,
+    2026-09-14). Posé par `flows/buyer/order_tracking.py::list_orders` dans
+    `working_memory["producer_order_action_hint"]` quand `_producer_sales_
+    block` affiche au moins une vente 🟡 avec l'invite "Tapez *confirmer*...
+    ou *annuler*...". Consommé UNIQUEMENT comme CONTEXTE du prompt NEW_TASK
+    (`NewTaskPromptContext.producer_order_action_pending`) — jamais un
+    court-circuit Python : `_interpret_fast_path` ne peut structurellement
+    introduire aucun nouveau but (voir `TestGoalLockOnlyValidatedOnTheLlmPath`,
+    tests/architecture/test_fastpath_normal_path_equivalence.py), donc ce
+    signal doit rester la propriété exclusive du chemin LLM, exactement
+    comme `cart_pending`."""
+    return bool((state.get("working_memory") or {}).get("producer_order_action_hint"))
+
 # =====================================================================
 # ROLE-BASED INTENT FILTERING (anti-cross-pollution AG-UI)
 # =====================================================================
@@ -139,93 +183,26 @@ COMMON_INTENTS: frozenset = frozenset(
 _init_intent_to_goal_map(PRODUCER_INTENTS, BUYER_INTENTS, COMMON_INTENTS)
 
 
-# Intents confirmés non-utilisés en production (2026-08-30, revue coût LLM —
-# voir [[pricing-tiers-litre-fastpath-bug-2026-08]] round 6 : le catalogue
-# unifié ~1700 tokens contribuait à saturer le quota Groq 8000 TPM/modèle sur
-# un seul appel interpréteur). Retirés du catalogue vu par le LLM — donc plus
-# jamais CLASSABLES depuis un message utilisateur — mais INTENT_CONFIG /
-# actions/agro.py /finance.py/system.py restent intacts (pas de suppression de
-# code, juste de surface de classification) au cas où un appel programmatique
-# interne les utiliserait encore ailleurs.
-_DISABLED_INTENT_PREFIXES: frozenset = frozenset({"AGRO_", "FINANCE_", "SYSTEM_"})
+# (2026-09-14, Deep Intent Architecture Cleanup) : `_DISABLED_INTENT_
+# PREFIXES`/`_DEPRECATED_INTENTS` SUPPRIMÉS — ce chantier a tranché chaque
+# entrée qu'ils masquaient : soit réellement DELETE (code mort supprimé
+# d'`INTENT_CONFIG` lui-même — CROP_*/AGRO_*/SYSTEM_*/STOCK write ops/etc.,
+# voir intent.py et le rapport final), soit RE-EXPOSÉE (FINANCE_* : capacité
+# réelle et câblée, masquée uniquement pour une pression coût LLM que
+# new_task_v2 a largement résorbée). Il n'existe donc plus, par construction,
+# d'entrée dans `INTENT_CONFIG` qui ne soit pas un objectif utilisateur réel
+# — `_classifiable_intents()`/`allowed_intents_for_role()` n'ont plus besoin
+# de filtrer quoi que ce soit au-delà du catalogue lui-même.
 
-# (2026-09-04, Phase 4 — alignement catalogue/produit) : goals DÉPRÉCIÉS
-# individuellement. Même mécanisme que les préfixes ci-dessus (retirés du
-# catalogue vu par le LLM, donc jamais classables depuis un message
-# utilisateur) — `INTENT_CONFIG`, les handlers et les services restent
-# INTACTS, aucun code métier n'est supprimé.
-#
-# Critère unique d'entrée dans cette liste : le goal est atteignable par un
-# utilisateur mais ne peut PAS aboutir à un résultat métier réel — soit son
-# `tool_name` ne correspond à aucun outil MCP existant (audit de
-# reachability Phase 3), soit son handler est volontairement neutralisé.
-# Autrement dit : ce sont des « faux boutons » conversationnels.
-# Justification détaillée par goal : docs/PRODUCT_INTENT_SCOPE_2026-09-04.md
-_DEPRECATED_INTENTS: frozenset = frozenset(
-    {
-        # — Agronomie de suivi (interventions, stades, sol) : AUCUNE méthode
-        # DB correspondante (`log_intervention`, `add_growth_log`,
-        # `add_crop_growth_stage`, `update_soil_profile`, `create_crop_cycle`
-        # n'existent nulle part). La capacité « culture » réellement
-        # supportée est `DECLARE_CROP_CYCLE` -> `declare_future_production`,
-        # qui reste exposée.
-        "CROP_START_CYCLE",
-        "CROP_RECORD_INTERVENTION",
-        "CROP_RECORD_OBSERVATION",
-        "CROP_UPDATE_STAGE",
-        "CROP_UPDATE_SOIL",
-        # — Écritures d'inventaire : les vraies méthodes existent
-        # (`adjust_stock`, `remove_stock`, `delete_stock`,
-        # `add_stock_movement`) mais `intent.py` pointe des variantes
-        # `*_by_id` inexistantes. NON recâblées : décision produit explicite
-        # de ne pas exposer un ledger d'inventaire tant que son lien avec
-        # les ventes (qui débitent `Product.quantity_for_sale`, jamais
-        # `Stock`) n'est pas défini.
-        "STOCK_RECORD_MOVEMENT",
-        "STOCK_ADJUST",
-        "STOCK_REMOVE_PARTIAL",
-        "STOCK_DELETE",
-        "STOCK_UPDATE_LEVEL",
-        # (2026-09-10) `STOCK_GET_DETAIL` RÉ-ACTIVÉ : `get_farm_stocks` était
-        # référencé partout mais sans implémentation — la méthode existe
-        # désormais (`MarketplaceMixin.get_farm_stocks`, avec contrôle de
-        # propriété sur `farm_id`) et l'outil est ré-exposé. Ce goal donne
-        # l'inventaire détaillé d'UNE exploitation (dernier mouvement par
-        # ligne), là où `STOCK_GET_SUMMARY` reste la vue multi-sites.
-        #
-        # — Seul cas de la famille dont l'outil FONCTIONNE
-        # (`get_stock_movements`) : il ne manquait que le câblage
-        # (`_RESOLVER_PASSTHROUGH` + branche `_resolve_stock`), soit ~2
-        # lignes. Déprécié malgré tout par COHÉRENCE : un historique de
-        # mouvements n'a de sens que si les mouvements sont enregistrables
-        # et corrigeables, or `STOCK_RECORD_MOVEMENT`/`STOCK_ADJUST` sont
-        # justement hors catalogue. À ré-exposer d'un bloc avec le reste du
-        # ledger si la décision produit va dans ce sens.
-        "STOCK_GET_MOVEMENTS",
-        # — Lectures sans implémentation. `MARKET_SNAPSHOT_ZONAL` est un
-        # doublon strict de `MARKET_SNAPSHOT` (`get_market_snapshot`, même
-        # `required=['zone']`), qui reste exposé : aucune capacité perdue.
-        "MARKET_SNAPSHOT_ZONAL",
-        "SEARCH_NEARBY",  # `get_all_zone_market_overview` absent ; exige lat/lon jamais saisis
-        "DASHBOARD_PRODUCER",  # `get_producer_dashboard` absent, aucun agrégat équivalent
-        "PROFILE_GET_TRUST",  # `get_trust_score` absent
-        "PROFILE_GET_CONTEXT",  # `get_user_context` absent — enrichissement interne, pas une action utilisateur
-        # — Bascule de rôle : écrit une ligne `agent_actions` inerte que
-        # RIEN ne consomme (prouvé : tests/evals/blocked/PROFILE_SWITCH_ROLE.md),
-        # et son `create_agent_action` n'existe pas non plus comme outil.
-        "PROFILE_SWITCH_ROLE",
-        # — « Contrat verrouillé » : aucune entité Contract/StagedTransaction
-        # n'existe dans le dépôt, `commit_staged_transaction` non plus.
-        # Décision produit requise avant toute implémentation.
-        "SALES_ACCEPT_CONTRACT",
-        # — Winner-selection hors tunnel : handlers volontairement neutralisés
-        # par F4 (anti-bypass). Ils restaient CLASSABLES, donc un utilisateur
-        # pouvait encore les atteindre pour ne récolter qu'une erreur
-        # technique — ils sortent maintenant aussi du catalogue.
-        "PROCUREMENT_SELECT_WINNER",
-        "PROCUREMENT_ACCEPT_OFFER",
-    }
-)
+
+def _classifiable_intents() -> frozenset:
+    """Intentions réellement proposables au LLM. Fonction SÉPARÉE de
+    `allowed_intents_for_role()` (pas un simple alias) — pour la même
+    raison qu'avant ce chantier : qu'un futur correctif de
+    `allowed_intents_for_role` qui réintroduirait un VRAI filtrage par
+    rôle (le bug corrigé le 2026-09-08) ne puisse pas silencieusement
+    recontaminer le catalogue LLM par une signature partagée."""
+    return frozenset(INTENT_CONFIG)
 
 
 def allowed_intents_for_role(role: str) -> frozenset:
@@ -244,13 +221,7 @@ def allowed_intents_for_role(role: str) -> frozenset:
             "Intents missing INTENT_ROLE entry (defaulting to PRODUCER): %s",
             sorted(missing),
         )
-    all_intents = PRODUCER_INTENTS | BUYER_INTENTS | COMMON_INTENTS | frozenset(missing)
-    return frozenset(
-        intent
-        for intent in all_intents
-        if not any(intent.startswith(p) for p in _DISABLED_INTENT_PREFIXES)
-        and intent not in _DEPRECATED_INTENTS
-    )
+    return PRODUCER_INTENTS | BUYER_INTENTS | COMMON_INTENTS | frozenset(missing)
 
 
 # Goal de CRÉATION (pas encore persisté, en attente de CONFIRMATION) → intent
@@ -261,7 +232,7 @@ def allowed_intents_for_role(role: str) -> frozenset:
 # INTERRUPTION sur CONFIRMATION.
 _PENDING_CREATE_UPDATE_SIBLINGS: Dict[str, str] = {
     "SALES_PUBLISH_PRODUCT": "SALES_UPDATE_PRODUCT",
-    "DECLARE_CROP_CYCLE": "SALES_UPDATE_PRODUCTION",
+    "PRODUCTION_DECLARE_FUTURE": "PRODUCTION_UPDATE_FUTURE",
     "FARM_CREATE": "FARM_UPDATE",
 }
 
@@ -347,6 +318,20 @@ RÈGLES STRICTES DE CLASSIFICATION :
    - S'il ajoute un nouveau produit (« ajoute 10 kg de riz ») → NEW_TASK.
    Ne renvoie JAMAIS UNKNOWN pour un simple accord/refus dans ce contexte.
 
+1bis-bis. **VENTE PRODUCTEUR EN ATTENTE DE CONFIRMATION** (2026-09-14,
+   incident réel — "confirmer"/"annuler" nu retombait en UNKNOWN) : si le
+   contexte agent indique `vente_producteur_en_attente_de_confirmation = OUI`,
+   le producteur vient de voir une liste de ventes l'invitant EXPLICITEMENT à
+   taper « confirmer » ou « annuler » (aucun numéro requis s'il n'y a qu'une
+   seule vente en attente — le résolveur identifie déjà seul la commande
+   concernée). Un message réduit à ce seul mot (« confirmer », « je
+   confirme », « j'accepte ») → interpreted_event = NEW_TASK, detected_intent
+   = PRODUCER_CONFIRM_ORDER. Réduit à « annuler »/« je refuse »/« je ne peux
+   pas honorer » → interpreted_event = NEW_TASK, detected_intent =
+   PRODUCER_CANCEL_ORDER (JAMAIS BUYER_CANCEL_ORDER : c'est une vente reçue,
+   pas un achat). N'extrais AUCUNE entité dans ce cas (`extracted_entities`
+   vide) — la résolution de LA commande concernée est déjà assurée en aval.
+
 1ter. **RÉPONSE À UN MENU DE SÉLECTION ACTIF (CRITIQUE, PRIORITÉ MAXIMALE)** :
    si le contexte agent indique `expected_input = SELECTION`, l'acheteur
    vient de voir une liste numérotée (paliers, producteurs, commandes,
@@ -373,6 +358,34 @@ RÈGLES STRICTES DE CLASSIFICATION :
    BUYER_REQUEST) ni vers `NEW_TASK` tant que `expected_input = SELECTION` :
    une réponse à un menu de choix n'est structurellement PAS une nouvelle
    recherche, même si sa formulation ressemble à une phrase d'achat libre.
+
+   **EXCEPTION (2026-09-11, incident réel corrigé)** : si le message NOMME
+   EXPLICITEMENT un produit/une action qui NE CORRESPOND À AUCUNE option de
+   la liste fournie dans le contexte (`expected_candidates` ci-dessus) — ex:
+   le menu liste des NUMÉROS DE COMMANDE ("Commande #65280745", "Commande
+   #6EB828D8...") et le message dit "je veux commander des poulets" (aucune
+   commande listée ne s'appelle "poulets") — alors ce N'EST PAS une réponse
+   au menu : classe-le selon sa VRAIE intention (ex: `BUYER_REQUEST`,
+   confidence normale selon ta certitude), PAS `SELECTION`. Le mécanisme de
+   détection d'interruption en aval (basé sur la confidence) gère ensuite la
+   sortie de tunnel proprement — pas besoin de la forcer ici. Cette exception
+   ne s'applique QUE si le produit/l'action nommé est clairement absent de la
+   liste ; en cas de doute réel (le message pourrait désigner une des
+   options), reste sur `SELECTION` comme la règle générale l'exige.
+
+   **EXCEPTION 2 (2026-09-12, incident réel corrigé)** : si le message
+   exprime une demande de GESTION DE CATALOGUE ("je veux voir mes
+   produits", "mon catalogue", "mes produits en vente", "gérer mon stock",
+   "qu'est-ce que je vends") — vocabulaire PRODUIT/CATALOGUE, sans aucun
+   chiffre, ordinal, ni mot de sélection ("le premier", "le 2", "celui-là")
+   — et que le menu actif porte sur un domaine différent (ex: une liste de
+   COMMANDES, "Commande #65280745"...) : ce N'EST PAS une réponse au menu,
+   même si aucun produit/action précis n'est nommé. Classe-le selon sa VRAIE
+   intention (ex: `SALES_GET_CATALOG`), PAS `SELECTION`. Exemple : le menu
+   liste des commandes et le message dit "je veux voir mes produits" → ce
+   n'est pas une réponse au menu, classe `SALES_GET_CATALOG`. En cas de
+   doute réel (le message pourrait être une réponse au menu), reste sur
+   `SELECTION`.
 
 2. **Extraction des entités (OBLIGATOIRE)** :
    - Tu dois copier TOUT nom de culture/produit détecté (tomates, maïs, riz, oignons...) dans `extracted_entities.product`.
@@ -499,6 +512,50 @@ RÈGLES STRICTES DE CLASSIFICATION :
    dans le message, laisse `pricing_tiers` à `[]` (les champs `quantity`/
    `unit`/`price` racine suffisent, pas de duplication).
 
+5ter. **QUANTITÉ TOTALE RÉPARTIE EN PLUSIEURS CONDITIONNEMENTS, UN SEUL PRIX
+   (jamais de troncature)** : si l'utilisateur décrit sa quantité totale en
+   PLUSIEURS groupes de conditionnements DIFFÉRENTS pour le MÊME produit, SANS
+   prix distinct par groupe (contrairement à la règle 5bis ci-dessus — un
+   SEUL prix pour l'ensemble, donné dans ce message ou à venir plus tard),
+   calcule la quantité TOTALE en additionnant chaque groupe (nombre de
+   conditionnements × contenu de chacun), jamais seulement le premier nombre
+   rencontré. Exemple : "60 bidons de 5 litres et 20 bidons de 20 litres" =
+   (60×5) + (20×20) = 300 + 400 → quantity=700.0, unit="LITRE" (jamais
+   quantity=60, qui ne serait que le nombre de bidons du premier groupe pris
+   à tort pour la quantité). Cette règle s'applique quelle que soit la
+   formulation exacte (virgules, "plus", "et aussi", conditionnements
+   différents entre les groupes comme "bidons" puis "fûts"...) — c'est
+   TOUJOURS le calcul (paquets × contenu, sommé) qui compte, jamais la forme
+   de la phrase.
+
+5quater. **QUANTITÉ TOTALE (5ter) + PRIX DE RÉFÉRENCE PAR UNITÉ + TARIFS PAR
+   CONDITIONNEMENT (5bis) — LE MESSAGE PEUT COMBINER LES TROIS À LA FOIS** :
+   ex: "60 bidons de 5 litres et 30 bidons de 20 litres. Prix : 3000 FCFA le
+   litre, et 1 bidon de 5 L coûte 10000 FCFA, 1 bidon de 20 L coûte 50000
+   FCFA." Traite chaque partie SÉPARÉMENT, sans jamais laisser l'une écraser
+   ou vider les autres :
+   - `quantity`/`unit` RACINE = la quantité totale en stock, calculée par la
+     règle 5ter (60×5 + 30×20 = 900.0, unit="LITRE") — INDÉPENDAMMENT des
+     prix qui suivent.
+   - Un prix donné "par unité de base" SANS conditionnement précis ("3000
+     FCFA le litre", "3000 FCFA/L") est le prix DE RÉFÉRENCE global : va
+     dans `price`/`price_unit` RACINE (price=3000.0, price_unit="LITRE"),
+     JAMAIS comme un `pricing_tiers` distinct — ce n'est pas un tarif propre
+     à un conditionnement précis, juste le taux appliqué par défaut.
+   - Chaque prix donné "pour UN conditionnement précis" ("1 bidon de 5 L
+     coûte 10000 FCFA") EST un tarif au sens de la règle 5bis : un objet
+     dans `pricing_tiers` (quantity=5.0, unit="L", price=10000.0,
+     packaging="bidon"), et de même pour le second ("1 bidon de 20 L coûte
+     50000 FCFA" → quantity=20.0, unit="L", price=50000.0,
+     packaging="bidon"). Résultat attendu pour l'exemple ci-dessus :
+     quantity=900.0, unit="LITRE", price=3000.0, price_unit="LITRE",
+     pricing_tiers=[{"quantity":5.0,"unit":"L","price":10000.0,
+     "packaging":"bidon"},{"quantity":20.0,"unit":"L","price":50000.0,
+     "packaging":"bidon"}] — jamais un tarif fantôme associant le prix de
+     référence (3000) à l'un des conditionnements (ex: "20 L = 3000 FCFA"),
+     et jamais la quantité totale réduite au nombre de bidons d'un seul
+     groupe.
+
 6. **NORMALISATION STRICTE DES DATES (OBLIGATOIRE)** :
    - L'année de référence est **2026**.
    - Toute date, estimation de disponibilité ou de récolte formulée en langage naturel (ex: "29 octobre", "fin octobre", "demain", "dans 3 jours") doit être **impérativement convertie au format ISO standard : YYYY-MM-DD**.
@@ -511,10 +568,115 @@ RÈGLES STRICTES DE CLASSIFICATION :
 
 EXEMPLES OBLIGATOIRES (FORMAT STRICT — champs omis ci-dessous = null/[],
 le schéma complet est déjà donné plus haut, ne le redemande pas) :
-"50kg de patates pour le 29 octobre" → {"interpreted_event":"NEW_TASK","detected_intent":"DECLARE_CROP_CYCLE","interpreter_confidence":0.95,"validation_status":"VALID","extracted_entities":{"product":"patates","quantity":50.0,"unit":"KG","estimated_available_at":"2026-10-29"}}
-"20 tomates" → {"interpreted_event":"NEW_TASK","detected_intent":"DECLARE_CROP_CYCLE","interpreter_confidence":0.85,"validation_status":"INVALID_MISSING_UNIT","extracted_entities":{"product":"tomates","quantity":20.0,"unit":null}}
+"50kg de patates pour le 29 octobre" → {"interpreted_event":"NEW_TASK","detected_intent":"PRODUCTION_DECLARE_FUTURE","interpreter_confidence":0.95,"validation_status":"VALID","extracted_entities":{"product":"patates","quantity":50.0,"unit":"KG","estimated_available_at":"2026-10-29"}}
+"20 tomates" → {"interpreted_event":"NEW_TASK","detected_intent":"PRODUCTION_DECLARE_FUTURE","interpreter_confidence":0.85,"validation_status":"INVALID_MISSING_UNIT","extracted_entities":{"product":"tomates","quantity":20.0,"unit":null}}
 "je cherche des œufs et de la laitue dans ma région" → {"interpreted_event":"NEW_TASK","detected_intent":"BUYER_REQUEST","interpreter_confidence":0.9,"validation_status":"VALID","extracted_entities":{"product":"œufs","additional_products":["laitue"]}}
+"60 bidons de 5 litres et 20 bidons de 20 litres" (règle 5ter, quantité totale par groupes) → {"interpreted_event":"ANSWER","detected_intent":"SALES_PUBLISH_PRODUCT","interpreter_confidence":0.95,"validation_status":"VALID","extracted_entities":{"quantity":700.0,"unit":"LITRE"}}
+"60 bidons de 5 litres et 30 bidons de 20 litres. Prix : 3000 FCFA le litre, et 1 bidon de 5 L coûte 10000 FCFA, 1 bidon de 20 litres coûte 50000 FCFA." (règle 5quater, quantité + prix de référence + tarifs par conditionnement combinés) → {"interpreted_event":"ANSWER","detected_intent":"SALES_PUBLISH_PRODUCT","interpreter_confidence":0.95,"validation_status":"VALID","extracted_entities":{"quantity":900.0,"unit":"LITRE","price":3000.0,"price_unit":"LITRE","pricing_tiers":[{"quantity":5.0,"unit":"L","price":10000.0,"packaging":"bidon"},{"quantity":20.0,"unit":"L","price":50000.0,"packaging":"bidon"}]}}
 """)
+
+
+# =====================================================================
+# CACHE D'INTERPRÉTATION LLM — retry-safety (2026-09-12)
+#
+# `process_agent_task` (api/tasks.py) a `autoretry_for=(Exception,),
+# max_retries=3` : une erreur survenant N'IMPORTE OÙ dans le tour — DB,
+# MCP, WhatsApp, un bug d'executor — APRÈS un appel LLM d'interprétation
+# déjà réussi relance TOUT le tour depuis zéro, y compris ce même appel
+# payant, pour un résultat qu'on connaît déjà. `message_sid` (identifiant
+# STABLE de l'événement WhatsApp, injecté dans l'état initial par
+# `orchestrator.py::_run_market`) sert de clé : le retry Celery relit le
+# résultat mis en cache au lieu de rappeler le LLM.
+#
+# La clé combine `message_sid` + `INTERPRETER_PROMPT_VERSION` + le modèle
+# DEMANDÉ + un hash de `system_prompt + user_prompt` concaténés. `message_sid`
+# seul ne suffit PAS : sans la version/le modèle/le hash du prompt complet
+# (system ET user, pas seulement user — le system prompt PEUT changer entre
+# deux déploiements, ex: un correctif de règle ou un changement de modèle
+# FAST/REASONING, sans qu'aucune valeur d'état ne change), un retry Celery
+# survenant APRÈS un déploiement aurait silencieusement réutilisé une
+# completion produite par l'ANCIEN prompt/modèle — incohérence invisible,
+# jamais un crash. `INTERPRETER_PROMPT_VERSION` DOIT être incrémentée à
+# chaque changement comportemental du prompt système (règles, catalogue,
+# format du contrat JSON) : la clé change alors mécaniquement, un ancien
+# cache ne peut plus jamais être relu après un tel changement, même si son
+# TTL n'a pas encore expiré.
+#
+# Portée volontairement étroite : ne cache QUE l'appel LLM le plus coûteux
+# et le plus fréquent (l'interprète, 1 par tour) — pas les autres appels
+# (clarification/ask/deviation), plus rares et déjà chacun protégés par
+# leurs propres gardes (voir leurs modules respectifs). TTL 1h, largement
+# supérieur à la fenêtre de retry Celery (backoff exponentiel, 3 tentatives).
+_LLM_INTERPRETATION_CACHE_TTL_SECONDS = 3600
+
+# Version explicite du prompt d'interprétation — à incrémenter à CHAQUE
+# changement comportemental de `_SYSTEM_PROMPT_TEMPLATE`/`_build_dynamic_
+# interpreter_prompt` (nouvelle règle, catalogue modifié, format du contrat
+# JSON changé). Sert de composante de la clé de cache LLM (voir ci-dessus)
+# ET de dimension Langfuse (`prompt_version`, voir plus bas) pour pouvoir
+# comparer le comportement/coût AVANT/APRÈS un changement de prompt.
+INTERPRETER_PROMPT_VERSION = "interpreter_v4"
+
+
+def _llm_cache_key(
+    message_sid: Optional[str],
+    system_prompt: str,
+    user_prompt: str,
+    requested_model: Optional[str],
+) -> Optional[str]:
+    """`None` si `message_sid` est absent (ex: appel direct hors webhook,
+    test) — pas de cache possible sans identifiant stable, l'appelant
+    retombe alors simplement sur le chemin normal (toujours appeler le LLM).
+
+    Le hash porte sur `system_prompt` ET `user_prompt` concaténés (séparés
+    par un octet NUL, jamais présent dans du texte normal, pour éviter
+    qu'une coupure ambiguë entre les deux fasse collision) — pas seulement
+    `user_prompt` : le system prompt encode le catalogue d'intentions et
+    les règles, silencieusement modifiables entre deux tentatives d'un
+    même message (déploiement, hotfix)."""
+    if not message_sid:
+        return None
+    digest = hashlib.sha256(
+        f"{system_prompt}\x00{user_prompt}".encode("utf-8")
+    ).hexdigest()[:16]
+    model_part = requested_model or "unknown_model"
+    return (
+        f"interp_llm_cache:{INTERPRETER_PROMPT_VERSION}:{model_part}:"
+        f"{message_sid}:{digest}"
+    )
+
+
+def _load_cached_completion(
+    cache_key: Optional[str],
+) -> Optional[Tuple[Dict[str, Any], Optional[str]]]:
+    raw = _get_cached_value(cache_key)
+    if not raw:
+        return None
+    try:
+        payload = json.loads(raw)
+        return payload.get("parsed") or {}, payload.get("model")
+    except Exception:
+        # Cache corrompu/format inattendu : fail-open, comme une absence de
+        # cache — jamais bloquer le tour pour une valeur qu'on ne sait pas lire.
+        logger.warning("[Interpreter] Cache LLM illisible — appel normal")
+        return None
+
+
+def _store_cached_completion(
+    cache_key: Optional[str], parsed: Dict[str, Any], model: Optional[str]
+) -> None:
+    if not cache_key:
+        return
+    try:
+        _set_cached_value(
+            cache_key,
+            json.dumps({"parsed": parsed, "model": model}),
+            ttl_seconds=_LLM_INTERPRETATION_CACHE_TTL_SECONDS,
+        )
+    except Exception:
+        # Best-effort : une écriture de cache qui échoue ne doit jamais faire
+        # échouer le tour qui vient de produire ce résultat.
+        logger.warning("[Interpreter] Écriture cache LLM échouée — ignorée")
 
 
 _UNIFIED_PROMPT_CACHE_KEY = "UNIFIED"
@@ -537,12 +699,27 @@ def _build_dynamic_interpreter_prompt(role: str = "PRODUCER") -> str:
     if _UNIFIED_PROMPT_CACHE_KEY in _PROMPT_CACHE:
         return _PROMPT_CACHE[_UNIFIED_PROMPT_CACHE_KEY]
 
-    intent_lines: List[str] = []
-    for intent_key, config in INTENT_CONFIG.items():
-        label = config.get("label", intent_key)
-        required = config.get("required") or []
-        req_str = ", ".join(required) if required else "aucun"
-        intent_lines.append(f"  - {intent_key} : {label} [requis: {req_str}]")
+    # (2026-09-12, optimisation coût/taille prompt) : DEUX réductions
+    # additives, chacune sans risque comportemental vérifié —
+    #
+    # 1. `_classifiable_intents()` retire les entrées mortes/désactivées du
+    #    texte envoyé au LLM (voir sa docstring) — ~39% du catalogue, sans
+    #    toucher `INTENT_CONFIG` ni réintroduire de filtrage par rôle.
+    # 2. La clause `[requis: ...]` est retirée du format de ligne — vérifié
+    #    qu'AUCUN consommateur ne la reparse depuis ce texte de prompt :
+    #    `required` est lu directement sur `INTENT_CONFIG` par
+    #    `nodes/validation.py`, `nodes/executor.py`, `nodes/cleaner.py`,
+    #    `services/mcp/schema_resolver.py` — jamais depuis la sortie du LLM.
+    #    Le rôle du LLM ici est de CHOISIR l'intention, pas de connaître ses
+    #    champs requis (le remplissage de slot est un tour conversationnel
+    #    séparé, avec sa propre source de vérité). Économie mesurée :
+    #    ~51% du catalogue combiné aux deux coupes (~400-600 tokens/appel).
+    classifiable = _classifiable_intents()
+    intent_lines: List[str] = [
+        f"  - {intent_key} : {config.get('label', intent_key)}"
+        for intent_key, config in INTENT_CONFIG.items()
+        if intent_key in classifiable
+    ]
 
     intent_catalog = "\n".join(intent_lines)
 
@@ -599,6 +776,21 @@ def _interpret_fast_path(
     # ajouter de regex spécifiques" reste respecté — ce n'est pas une regex,
     # c'est une égalité stricte sur un texte NORMALISÉ, pas une correspondance
     # partielle risquant un faux positif sur une phrase plus longue).
+    #
+    # (2026-09-13, incident réel WhatsApp, PUIS décision produit explicite) :
+    # une tentative précédente étendait ce filet au signal d'état
+    # `cart_pending` (panier non vide, `expected in {"NONE", "SELECTION"}`)
+    # pour couvrir l'affichage du panier (`BUYER_VIEW_CART`, qui ne pose
+    # aucun `PendingInteraction` de type CONFIRMATION). Rejetée : décider à
+    # coups de vocabulaire fermé lequel des innombrables synonymes/graphies
+    # d'accord libre ("okay", "je valide", "je suis d'accord", "ça marche"...)
+    # mérite un court-circuit est un jeu qu'on ne peut pas gagner ("à vouloir
+    # tout prédire, on ne pourra pas s'en sortir" — retour explicite). Le
+    # signal `cart_pending` (`_cart_pending_signal`) reste calculé et transmis
+    # aux DEUX prompts LLM (legacy + `new_task_v2`) comme CONTEXTE — c'est le
+    # LLM, jamais Python, qui décide si le texte constitue un accord. Ce
+    # fast-path reste donc strictement scopé à `CONFIRM_ACTION`
+    # (`expected == "CONFIRMATION"`), son périmètre d'origine.
     if expected == "CONFIRMATION":
         _bare = clean.strip(" .!?,;: ")
         if _bare in _CONFIRM_EXACT_PHRASES:
@@ -654,6 +846,65 @@ def _interpret_fast_path(
             for c in scan_number_candidates(clean)
         ]
 
+        # ── QUANTITÉ AMBIGÜE : 2+ NOMBRES PORTANT CHACUN UNE UNITÉ ──
+        # ("60 bidons de 5 litres et 20 bidons de 20 litres") : incident réel
+        # (2026-09-14) — `scan_number_candidates` ci-dessus associe un nombre
+        # à N'IMPORTE QUELLE unité trouvée dans sa fenêtre de `_SCAN_WINDOW`
+        # caractères, sans vérifier l'adjacence réelle. Le "60" (un NOMBRE DE
+        # PAQUETS, sans dimension propre) captait l'unité "litres" du bidon
+        # voisin → `quantity=60, unit=LITRE` au lieu du volume total réel
+        # (700 L), le second groupe "20 bidons de 20 litres" disparaissant
+        # purement et simplement — le pick "premier candidat typé" plus bas
+        # dans cette fonction choisissait ainsi un résultat FAUX avec une
+        # fausse confiance.
+        #
+        # Décision produit explicite (2026-09-14) : la correction n'est PAS
+        # d'empiler une regex par tournure de phrase possible — le langage
+        # humain est trop divers pour ça et un producteur ne doit jamais être
+        # contraint à un format précis. Dès que 2+ nombres portent chacun une
+        # unité, la situation est structurellement ambiguë pour un simple
+        # "premier candidat" (même logique déjà en place pour les tarifs
+        # multiples juste en dessous, `_currency_candidates >= 2`) : on tente
+        # le parseur déterministe UNIQUEMENT sur le motif explicite et sans
+        # ambiguïté "N <conditionnement> de M <unité>" (filet de fiabilité
+        # rapide, jamais de résultat partiel deviné) ; s'il ne reconnaît pas
+        # la structure, on laisse la main au LLM (`return None`) plutôt que
+        # de risquer le pick arbitraire — c'est lui, pas une regex, qui est
+        # armé pour la diversité réelle des formulations (voir règle 5ter du
+        # prompt système).
+        _qty_unit_candidates = [
+            c for c in candidates if c["unit"] and not c["near_currency"]
+        ]
+        # Jamais quand un prix traîne AILLEURS dans le même message ("60
+        # bidons de 5L et 30 bidons de 20L. prix : 3000fcfa/L...") : ce
+        # parseur ne sait sommer QUE des groupes quantité×conditionnement, il
+        # confondrait alors un "1 bidon de 5 L coûte 10000 fcfa" (une clause
+        # de PRIX, qui matche aussi le motif conditionnement) avec un groupe
+        # de stock supplémentaire — un message aussi composé est structurel-
+        # lement du ressort du LLM (règle 5bis/5ter), jamais d'une somme
+        # aveugle de tous les nombres conditionnés du texte.
+        if (
+            expected == "QUANTITY"
+            and pack_count_tier is None
+            and len(_qty_unit_candidates) >= 2
+            and not any(c["near_currency"] for c in candidates)
+        ):
+            _packaged = parse_packaged_compound_quantity(clean)
+            if _packaged.quantity is not None and _packaged.unit is not None:
+                return {
+                    "interpreted_event": "ANSWER",
+                    "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+                    "interpreter_confidence": 0.98,
+                    "extracted_entities": {
+                        "quantity": _packaged.quantity,
+                        "unit": _packaged.unit,
+                    },
+                    "raw_analysis": {
+                        "path": "fast_path_packaged_compound_quantity"
+                    },
+                }
+            return None
+
         # Multi-tarifs ("25 L à 500 fcfa ET 40 L à 900 fcfa") : 2+ nombres
         # accolés à une devise. Ce fast-path déterministe ne sait produire
         # QU'UNE paire quantité/prix — le forcer ici pickait arbitrairement le
@@ -704,7 +955,7 @@ def _interpret_fast_path(
         # d'un coup, TOUJOURS (même LLM disponible) : router un cas aussi
         # net vers le LLM ne fait que l'exposer à une mauvaise classification
         # d'intention (vécu en prod — un message quantité+prix composé s'est
-        # fait détourner vers DECLARE_CROP_CYCLE alors que le tunnel actif
+        # fait détourner vers PRODUCTION_DECLARE_FUTURE alors que le tunnel actif
         # était SALES_PUBLISH_PRODUCT). Le LLM garde la priorité uniquement
         # pour le cas ambigu (un seul nombre, rôle incertain) juste en dessous.
         _event_type = "UPDATE" if expected == "CONFIRMATION" else "ANSWER"
@@ -1084,6 +1335,66 @@ def _degraded_fallback(role_up: str, text: str) -> Optional[Dict[str, Any]]:
 # =====================================================================
 
 
+async def _bare_confirmation_for_pending_producer_order(
+    mc_runtime: Any, phone: str, bare_text: str
+) -> Optional[Dict[str, Any]]:
+    """Incident réel RÉPÉTÉ (2026-09-14, 2026-09-15) : un producteur reçoit
+    une notification PROACTIVE hors-conversation ("Nouvelle commande —
+    confirmation requise... Tapez *confirmer*... ou *annuler*...",
+    `workers/outbox/templates.py::_render_preorder_confirmed_producer`) —
+    AUCUN tour de conversation n'a eu lieu pour verrouiller quoi que ce soit
+    dans l'état persisté (contrairement à `flows/buyer/order_tracking.py::
+    list_orders`, qui verrouille `PendingInteraction(CONFIRM_ACTION)` en
+    tour normal — voir son docstring). La réponse arrive donc comme un mot
+    NU, sans tunnel actif, sans aucun autre ancrage — exactement le cas où
+    une classification LLM libre s'est avérée, empiriquement, structurel-
+    lement peu fiable (2 correctifs précédents : label enrichi, puis signal
+    d'état donné en CONTEXTE au prompt — tous deux insuffisants).
+
+    Vérification déterministe et BORNÉE, jamais un résultat deviné : ne
+    répond QUE si `bare_text` est exactement un mot d'accord/refus fermé
+    (même vocabulaire que `_CONFIRM_EXACT_PHRASES`/`_REJECT_EXACT_PHRASES`
+    ci-dessus) ET qu'il existe EXACTEMENT une vente PENDING_PRODUCER_
+    CONFIRMATION pour ce producteur — `_resolve_pending_order_action`
+    (flows/producer/flow.py) répondrait de toute façon proprement ("rien à
+    confirmer", ou un menu numéroté) si ce n'était pas le cas, donc aucun
+    risque d'action erronée à se tromper ici : au pire, ce filet ne
+    s'applique pas et le message retombe sur la classification normale."""
+    if bare_text in _CONFIRM_EXACT_PHRASES:
+        intent = "PRODUCER_CONFIRM_ORDER"
+    elif bare_text in _REJECT_EXACT_PHRASES:
+        intent = "PRODUCER_CANCEL_ORDER"
+    else:
+        return None
+    if not phone:
+        return None
+    try:
+        from ladini.graphs.agents.market_coach.services.mcp.gateway import (
+            OrderTrackingGateway,
+        )
+
+        result = await OrderTrackingGateway(mc_runtime).get_producer_orders(
+            phone=phone, status="PENDING_PRODUCER_CONFIRMATION"
+        )
+    except Exception as exc:
+        logger.warning(
+            "[Interpreter] bare_confirmation_pending_producer_order: "
+            "get_producer_orders a échoué (%s) — repli sur la classification normale",
+            exc,
+        )
+        return None
+    candidates = (result or {}).get("data") or []
+    if len(candidates) != 1:
+        return None
+    return {
+        "interpreted_event": "NEW_TASK",
+        "detected_intent": intent,
+        "interpreter_confidence": 0.95,
+        "extracted_entities": {},
+        "raw_analysis": {"path": "bare_confirmation_pending_producer_order"},
+    }
+
+
 def make_input_interpreter(role: str = "PRODUCER"):
     """Crée un nœud `input_interpreter`.
 
@@ -1247,6 +1558,29 @@ def make_input_interpreter(role: str = "PRODUCER"):
             )
             return fast
 
+        # 1.5 CONFIRMATION D'UNE VENTE REÇUE, SANS TUNNEL ACTIF (2026-09-15)
+        # — voir le docstring de `_bare_confirmation_for_pending_producer_
+        # order` pour le contexte complet. Court-circuite la classification
+        # LLM (jamais garantie sur un mot nu) par une vérification
+        # déterministe et bornée : ne s'applique QUE si aucun tunnel n'est
+        # déjà actif (sinon `_interpret_fast_path` ci-dessus a déjà traité
+        # le cas, en échoant le goal verrouillé) et que le rôle est
+        # PRODUCER.
+        if not locked_goal and role_up == "PRODUCER" and not onboarding_active:
+            _bare_confirm_text = (
+                text.strip().lower().strip(" .!?,;: ")
+            )
+            _pending_check = await _bare_confirmation_for_pending_producer_order(
+                mc_runtime, str(state.get("user_phone") or ""), _bare_confirm_text
+            )
+            if _pending_check is not None:
+                logger.info(
+                    "[Interpreter] Confirmation nue résolue via vente unique "
+                    "en attente -> %s",
+                    _pending_check["detected_intent"],
+                )
+                return _pending_check
+
         # 2. Sécurité d'exécution de l'infrastructure
         if llm is None:
             logger.warning("No LLM on runtime — interpreter returns UNKNOWN")
@@ -1266,6 +1600,281 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 "extracted_entities": {},
                 "raw_analysis": {"path": "no_llm"},
             }
+
+        # 2.5 MICRO-PROMPTS SELECTION (Incrément B) / ACTIVE_SLOT (Phase C,
+        # 2026-09-12) : ces deux routes sont réellement migrées vers des
+        # micro-prompts dédiés — NEW_TASK/STRUCTURED_ACTION continuent SANS
+        # AUCUN changement sur le chemin ci-dessous (l'ancien interpréteur
+        # unifié). `_legacy_fallback` : partagé entre les deux branches
+        # (mutuellement exclusives — une seule route est choisie par tour),
+        # tracé explicitement en télémétrie (spec §26) — jamais un repli
+        # silencieux.
+        _legacy_fallback = False
+        # (2026-09-13, Incrément F) : mis à True dans les 3 branches
+        # DEVIATION ci-dessous — signale que le message ORIGINAL doit être
+        # reclassifié par NEW_TASK (spec §27), jamais par la route qui a
+        # détecté la déviation elle-même. Séparé de `_route ==
+        # InterpretationRoute.NEW_TASK` (le cas "aucun tunnel actif dès le
+        # départ") car les deux empruntent le même classifieur ensuite.
+        _deviation_reclass = False
+        from ladini.graphs.agents.market_coach.interpreter.state_router import (
+            InterpretationRoute,
+            choose_interpretation_route,
+        )
+
+        _route = None if onboarding_active else choose_interpretation_route(state)
+
+        if _route == InterpretationRoute.SELECTION:
+            from ladini.graphs.agents.market_coach.interpreter.selection_micro import (
+                SelectionOutcome,
+                run_selection_microprompt,
+            )
+
+            try:
+                _sel_outcome, _sel_result = await run_selection_microprompt(
+                    state, mc_runtime, text, locked_goal
+                )
+            except Exception:
+                logger.exception(
+                    "[Interpreter SELECTION] micro-prompt en échec "
+                    "infrastructurel — repli sur l'interpréteur unifié "
+                    "(legacy_fallback=true)"
+                )
+                _sel_outcome, _sel_result = SelectionOutcome.LEGACY_FALLBACK, None
+
+            if _sel_outcome == SelectionOutcome.RESULT:
+                return _sel_result
+            if _sel_outcome == SelectionOutcome.INTERRUPTION:
+                # Le micro-prompt a confirmé que ce N'EST PAS une réponse au
+                # menu — reprend le message ORIGINAL et le fait passer par
+                # le classifier NEW_TASK existant (spec §12/§13/§18) : on ne
+                # fait que neutraliser la condition de déclenchement de la
+                # RÈGLE 1ter ci-dessous (`expected_input == "SELECTION"`),
+                # jamais reclassifier nous-mêmes une intention métier ici.
+                logger.info(
+                    "[Interpreter SELECTION] interruption détectée — "
+                    "reclassification via le classifier NEW_TASK (2e appel)"
+                )
+                expected_input = "NONE"
+                _deviation_reclass = True
+            else:  # LEGACY_FALLBACK
+                _legacy_fallback = True
+
+        elif _route == InterpretationRoute.ACTIVE_SLOT:
+            from ladini.graphs.agents.market_coach.interpreter.active_slot_contract import (
+                build_active_slot_context,
+            )
+            from ladini.graphs.agents.market_coach.interpreter.active_slot_micro import (
+                ActiveSlotOutcome,
+                run_active_slot_microprompt,
+            )
+
+            _slot_context = build_active_slot_context(state)
+            try:
+                _slot_outcome, _slot_result = await run_active_slot_microprompt(
+                    state, mc_runtime, text, _slot_context
+                )
+            except Exception:
+                logger.exception(
+                    "[Interpreter ACTIVE_SLOT] micro-prompt en échec "
+                    "infrastructurel — repli sur l'interpréteur unifié "
+                    "(legacy_fallback=true)"
+                )
+                _slot_outcome, _slot_result = ActiveSlotOutcome.LEGACY_FALLBACK, None
+
+            if _slot_outcome == ActiveSlotOutcome.RESULT:
+                return _slot_result
+            if _slot_outcome == ActiveSlotOutcome.DEVIATION:
+                # Déviation confirmée (ou confiance insuffisante, traitée de
+                # façon conservatrice comme une déviation — spec §20) : ne
+                # JAMAIS classifier nous-mêmes le nouvel intent ici (spec
+                # §11/§12) — neutralise juste la condition déclenchante de
+                # la RÈGLE 1bis/1ter ci-dessous (`expected_input`) pour que
+                # le classifier NEW_TASK existant reclassifie librement le
+                # message ORIGINAL. `current_goal` n'est PAS touché ici —
+                # seul `goal_planner`/`cognitive_guard` en aval décident
+                # d'un changement de goal.
+                logger.info(
+                    "[Interpreter ACTIVE_SLOT] déviation détectée — "
+                    "reclassification via le classifier NEW_TASK (2e appel)"
+                )
+                expected_input = "NONE"
+                _deviation_reclass = True
+            else:  # LEGACY_FALLBACK
+                _legacy_fallback = True
+
+        elif _route == InterpretationRoute.STRUCTURED_ACTION:
+            from ladini.graphs.agents.market_coach.interpreter.structured_action_micro import (
+                StructuredActionOutcome,
+                run_structured_action_microprompt,
+            )
+
+            try:
+                _sa_outcome, _sa_result = await run_structured_action_microprompt(
+                    state, mc_runtime, text, selection_context, locked_goal
+                )
+            except Exception:
+                logger.exception(
+                    "[Interpreter STRUCTURED_ACTION] micro-prompt en échec "
+                    "infrastructurel — repli sur l'interpréteur unifié "
+                    "(legacy_fallback=true)"
+                )
+                _sa_outcome, _sa_result = StructuredActionOutcome.LEGACY_FALLBACK, None
+
+            if _sa_outcome == StructuredActionOutcome.RESULT:
+                return _sa_result
+            if _sa_outcome == StructuredActionOutcome.DEVIATION:
+                # Déviation confirmée — reprend le message ORIGINAL et le
+                # fait passer par le classifier NEW_TASK existant (spec
+                # §8/§29), jamais une classification faite ici. On neutralise
+                # à la fois `expected_input` (RÈGLE 1bis/1ter) ET
+                # `selection_context` : sans ce 2e reset, le bloc "ACTION
+                # ATTENDUE : SELECT_PRICING_TIER" resterait injecté dans le
+                # prompt unifié de CE 2e appel (`selection_context` reste
+                # sinon truthy — c'est justement pourquoi cette branche a été
+                # choisie), risquant de tirer la reclassification NEW_TASK
+                # en arrière vers une sélection au lieu de classifier
+                # librement la nouvelle demande.
+                logger.info(
+                    "[Interpreter STRUCTURED_ACTION] déviation détectée — "
+                    "reclassification via le classifier NEW_TASK (2e appel)"
+                )
+                expected_input = "NONE"
+                selection_context = None
+                _deviation_reclass = True
+            else:  # LEGACY_FALLBACK
+                _legacy_fallback = True
+
+        # 2.6 MICRO-PROMPT NEW_TASK (Incrément F, 2026-09-13) : remplace
+        # l'interpréteur unifié legacy pour la route `NEW_TASK` elle-même
+        # ET pour la reclassification qui suit une DEVIATION confirmée
+        # ci-dessus (spec §27 — `_deviation_reclass`). `_legacy_fallback`
+        # signifie qu'une des 3 routes prioritaires a déjà échoué pour une
+        # raison d'infrastructure : dans ce cas on va DIRECTEMENT sur le
+        # legacy (pas de 2e tentative micro-prompt sur un Gateway déjà en
+        # échec ce tour). Flag de secours `MARKET_COACH_NEW_TASK_V2_ENABLED`
+        # (spec §56) : `False` retombe immédiatement sur legacy, rollback
+        # sans redéploiement de code.
+        from ladini.core.settings import settings as _mc_settings
+
+        _use_new_task_v2 = (
+            not onboarding_active
+            and not _legacy_fallback
+            and llm is not None
+            and (_route == InterpretationRoute.NEW_TASK or _deviation_reclass)
+            and _mc_settings.MARKET_COACH_NEW_TASK_V2_ENABLED
+        )
+        if _use_new_task_v2:
+            from ladini.graphs.agents.market_coach.interpreter.new_task_contract import (
+                NewTaskPromptContext,
+            )
+            from ladini.graphs.agents.market_coach.interpreter.new_task_micro import (
+                NewTaskOutcome,
+                run_new_task_microprompt,
+            )
+
+            _cart_pending_nt = _cart_pending_signal(state)
+            _nt_context = NewTaskPromptContext(
+                reference_date=date.today().isoformat(),
+                cart_pending=_cart_pending_nt,
+                previous_goal=locked_goal if _deviation_reclass else None,
+                producer_order_action_pending=_producer_order_action_pending_signal(
+                    state
+                ),
+            )
+            _nt_catalog = {
+                intent_key: INTENT_CONFIG[intent_key].get("label", intent_key)
+                for intent_key in INTENT_CONFIG
+                if intent_key in _classifiable_intents()
+            }
+            # (2026-09-13) : trace explicite du signal cart_pending et de la
+            # disposition retournée — sans ce log, un incident comme "okay"/
+            # "je valide" jamais reconnu comme CONFIRM après affichage du
+            # panier ne peut être diagnostiqué qu'en devinant depuis les
+            # symptômes (voir l'historique de ce fichier plus haut) : il faut
+            # pouvoir lire, pour CE tour précis, si cart_pending valait bien
+            # True ET ce que le LLM a réellement répondu.
+            logger.info(
+                "[Interpreter NEW_TASK] cart_pending=%s active_cart_items=%d "
+                "preorder_phase=%s",
+                _cart_pending_nt,
+                len(state.get("active_cart") or []),
+                (state.get("preorder_workflow") or {}).get("phase"),
+            )
+            try:
+                _nt_outcome, _nt_result = await run_new_task_microprompt(
+                    state, mc_runtime, text, _nt_context, locked_goal, _nt_catalog
+                )
+            except Exception:
+                logger.exception(
+                    "[Interpreter NEW_TASK] micro-prompt en échec "
+                    "infrastructurel — repli sur l'interpréteur unifié "
+                    "(legacy_fallback=true)"
+                )
+                _nt_outcome, _nt_result = NewTaskOutcome.LEGACY_FALLBACK, None
+
+            logger.info(
+                "[Interpreter NEW_TASK] outcome=%s event=%s intent=%s",
+                _nt_outcome,
+                (_nt_result or {}).get("interpreted_event"),
+                (_nt_result or {}).get("detected_intent"),
+            )
+            if _nt_outcome == NewTaskOutcome.RESULT:
+                # (2026-09-13, incident WhatsApp #5) : garde de COHÉRENCE
+                # inter-appels — PAS un mot-clé déduit du texte, une
+                # contradiction interne entre DEUX jugements LLM successifs
+                # sur CE même message. `_deviation_reclass` signifie que la
+                # route SELECTION a DÉJÀ tranché : ce message est une
+                # interruption, sans rapport avec le menu/but affiché (voir
+                # `selection_prompts.py` : un verbe seul type "confirmer"/
+                # "annuler" est TOUJOURS une interruption). Si ce 2e appel
+                # NEW_TASK revient pourtant avec CONFIRM/REJECT visant
+                # `locked_goal` (le but même qui vient d'être jugé étranger
+                # au message), les deux jugements du LLM se contredisent —
+                # observé en prod : "confirmer" sur une commande producteur
+                # reçue pendant qu'un `BUYER_LIST_ORDERS` restait actif,
+                # reclassé event=CONFIRM intent=BUYER_LIST_ORDERS, renvoyant
+                # l'utilisateur au même menu en boucle. Un résultat
+                # contradictoire n'est pas un signal fiable — on retente via
+                # l'interpréteur unifié (legacy) plutôt que d'agir dessus,
+                # jamais une intention devinée par substitution.
+                _nt_event = str(_nt_result.get("interpreted_event") or "").upper()
+                _nt_intent = _nt_result.get("detected_intent")
+                if (
+                    _deviation_reclass
+                    and _nt_event in ("CONFIRM", "REJECT")
+                    and _nt_intent == locked_goal
+                ):
+                    logger.warning(
+                        "[Interpreter NEW_TASK] résultat contradictoire "
+                        "après interruption confirmée (event=%s intent=%s "
+                        "== locked_goal) — repli sur l'interpréteur unifié",
+                        _nt_event,
+                        _nt_intent,
+                    )
+                    _legacy_fallback = True
+                elif _deviation_reclass and _nt_event in ("UNKNOWN", "OUT_OF_SCOPE"):
+                    # (2026-09-14, incident WhatsApp #9) : la route SELECTION
+                    # a déjà tranché que ce message est SANS RAPPORT avec le
+                    # menu affiché — si la reclassification NEW_TASK ne
+                    # parvient PAS à identifier une intention métier
+                    # (`UNKNOWN`/`OUT_OF_SCOPE`), le rendu du menu
+                    # (`nodes/rendering/menus.py::render_selection_menu`) ne
+                    # doit jamais générer de note d'accompagnement adaptative
+                    # ("je comprends que vous voulez X...") : cette note
+                    # laisserait croire que le menu ci-dessous (potentiellement
+                    # un tout autre tunnel, périmé) est lié au message —
+                    # observé en prod : "confirmer" sur une vente producteur
+                    # non résolu, note générée "vous voulez confirmer..."
+                    # collée à un menu ACHETEUR sans rapport (commande déjà
+                    # confirmée). Signal explicite, jamais deviné par le
+                    # rendu lui-même.
+                    _nt_result["interruption_unresolved"] = True
+                    return _nt_result
+                else:
+                    return _nt_result
+            else:
+                _legacy_fallback = True
 
         # 3. Résolution dynamique des contextes de prompts
         system_prompt = _build_dynamic_interpreter_prompt(role_up)
@@ -1288,14 +1897,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # Panier prêt à valider : signal d'état (phase CART + panier non vide),
         # PAS un mot-clé du texte. Le LLM s'en sert pour comprendre un accord
         # libre ("je suis d'accord") comme une validation de précommande.
-        _cart_phase = str(
-            (state.get("preorder_workflow") or {}).get("phase") or ""
-        ).upper()
-        cart_pending = (
-            role_up == "BUYER"
-            and _cart_phase == "CART"
-            and bool(state.get("active_cart"))
-        )
+        cart_pending = _cart_pending_signal(state)
         # (2026-09-01, contrat d'action structurée) : `selection_context` a
         # déjà été reconstruit en tête de fonction (étape 0.5, JAMAIS depuis
         # un canal générique périmé — voir domain/selection_actions.py). On
@@ -1318,6 +1920,9 @@ def make_input_interpreter(role: str = "PRODUCER"):
             or "—",
             suspended_task=_suspended_task,
             cart_pending="OUI" if cart_pending else "non",
+            producer_order_action_pending=(
+                "OUI" if _producer_order_action_pending_signal(state) else "non"
+            ),
             selection_action_block=selection_action_block,
             normalized_text=text,
         )
@@ -1330,28 +1935,126 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # — voir `graphs/agents/market_coach/llm_gateway/`. Le comportement
         # visible (timeout → UNKNOWN dégradé) est inchangé, juste plus résilient.
         from ladini.graphs.agents.market_coach.llm_gateway import (
+            LLMProfile,
             resolve_gateway,
-            resolve_profile,
         )
 
         _gateway = resolve_gateway(mc_runtime)
-        _profile = resolve_profile(mc_runtime)
+        # (2026-09-12, chantier State Router — Phase B.1) : l'interpréteur
+        # unifié (NEW_TASK/ACTIVE_SLOT/STRUCTURED_ACTION legacy) utilise
+        # désormais le profil INTERPRETER dédié (Groq llama-3.1-8b-instant
+        # par défaut, voir settings.py::LLM_INTERPRETER_PRIMARY) au lieu de
+        # `resolve_profile(mc_runtime)` (qui résolvait toujours REASONING
+        # pour ce node). Choix DÉLIBÉRÉ (spec §7) : SEUL le provider/modèle
+        # change ici — le prompt système (`_build_dynamic_interpreter_prompt`),
+        # le schéma JSON et les règles métier restent STRICTEMENT identiques.
+        # `resolve_profile` reste utilisé ailleurs dans le codebase pour les
+        # autres nodes métier — ce changement est local à l'interpréteur.
+        _profile = LLMProfile.INTERPRETER
         _requested_model = _gateway.primary_model_name(_profile)
+        _message_sid = state.get("message_sid")
+        _cache_key = _llm_cache_key(
+            _message_sid, system_prompt, user_prompt, _requested_model
+        )
+        # (2026-09-12, instrumentation Langfuse — voir `record_generation`
+        # `extra_metadata`) : dimensions minimales pour calculer, PAR
+        # MESSAGE, les appels LLM, tokens, taux de cache-hit et distribution
+        # de modèle demandés (§4/§5 du sprint). `llm_call_index` : compteur
+        # PARTAGÉ Redis par `message_sid` — n'incrémente QUE sur un VRAI
+        # appel réseau (jamais sur un cache-hit, voir plus bas) ; volontairement
+        # PAS encore de garde-fou dur (`MAX_LLM_CALLS_PER_MESSAGE`) ce
+        # sprint — seulement mesurer/tracer, la baseline réelle n'est pas
+        # encore observée.
+        # (2026-09-12, Incrément A) : `interpretation_route` — instrumentation
+        # Langfuse (spec §44). `_route` déjà résolu ci-dessus (étape 2.5) ;
+        # `None` uniquement en onboarding (route jamais calculée dans ce cas).
+        _interpretation_route = _route.value if _route is not None else None
+
+        _base_metadata: Dict[str, Any] = {
+            "message_sid": _message_sid,
+            "prompt_version": INTERPRETER_PROMPT_VERSION,
+            # (2026-09-13, Incrément G, spec §35) : "legacy" tout court —
+            # permet un filtre Prometheus/Langfuse direct
+            # (`prompt_family=legacy`), `interpretation_route` juste
+            # au-dessous garde le détail de QUELLE route est retombée ici.
+            "prompt_family": "legacy",
+            "current_goal": state.get("current_goal"),
+            "expected_input": _exp_input,
+            "interpretation_route": _interpretation_route,
+            "legacy_fallback": _legacy_fallback,
+        }
         try:
             from ladini.core.telemetry import get_trace_id
 
-            completion = await _gateway.complete(
-                profile=_profile,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.0,
-                request_id=get_trace_id(),
-                agent_node="input_interpreter",
-            )
-            parsed = json.loads(completion.choices[0].message.content or "{}")
+            cached = _load_cached_completion(_cache_key)
+            if cached is not None:
+                parsed, _actual_model = cached
+                logger.info(
+                    "[Interpreter] Résultat LLM réutilisé du cache (retry sans "
+                    "repayer l'appel) | message_sid=%s",
+                    _message_sid,
+                )
+                # Marqueur Langfuse SANS appel réel (latence 0, pas d'usage
+                # tokens facturé) — sans ce marqueur, un cache-hit resterait
+                # invisible en télémétrie et "% cache hit" serait incalculable.
+                try:
+                    from ladini.core.telemetry import record_generation
+
+                    record_generation(
+                        model=_actual_model or _requested_model or "unknown",
+                        messages=[{"role": "user", "content": user_prompt}],
+                        output=json.dumps(parsed, ensure_ascii=False),
+                        latency_s=0.0,
+                        usage=None,
+                        name="llm_gateway_completion",
+                        agent_node="input_interpreter",
+                        extra_metadata={**_base_metadata, "cache_hit": True},
+                    )
+                except Exception:
+                    pass  # observabilité seule — jamais bloquant.
+            else:
+                from ladini.core.idempotency import increment as _increment_counter
+
+                _llm_call_index = (
+                    _increment_counter(
+                        f"llm_call_count:{_message_sid}", ttl_seconds=300
+                    )
+                    if _message_sid
+                    else None
+                )
+                completion = await _gateway.complete(
+                    profile=_profile,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.0,
+                    # (2026-09-14, incident WhatsApp — root cause de la
+                    # journée) : cet appel ne posait AUCUN plafond explicite
+                    # — voir `new_task_micro.py::_MAX_TOKENS` pour le
+                    # diagnostic complet (modèles Groq RÉELLEMENT
+                    # disponibles pour ce profil = modèles DE RAISONNEMENT,
+                    # tokens de "réflexion" décomptés de `max_tokens` avant
+                    # le JSON final). Sans plafond explicite, le défaut du
+                    # SDK/provider s'appliquait — insuffisant en pratique
+                    # (même échec HTTP 400 "Failed to validate JSON" observé
+                    # ici qu'avec `max_tokens=300` côté micro-prompt). Même
+                    # valeur que `new_task_micro.py` : ce prompt legacy
+                    # produit un JSON de sortie comparable (catalogue complet
+                    # + jusqu'à ~23 sous-champs d'entités).
+                    max_tokens=1200,
+                    request_id=get_trace_id(),
+                    agent_node="input_interpreter",
+                    extra_metadata={
+                        **_base_metadata,
+                        "cache_hit": False,
+                        "llm_call_index": _llm_call_index,
+                    },
+                )
+                parsed = json.loads(completion.choices[0].message.content or "{}")
+                _actual_model = getattr(completion, "model", None)
+                _store_cached_completion(_cache_key, parsed, _actual_model)
             # Repli transparent (Gateway : fallback inter-candidat, OU
             # get_llm.py::GROQ_RATE_LIMIT_FALLBACK en interne au candidat
             # choisi) : `completion.model` (champ standard de la réponse) est
@@ -1362,7 +2065,6 @@ def make_input_interpreter(role: str = "PRODUCER"):
             # effectivement répondu — le modèle principal, lui, suit déjà
             # l'instruction du prompt d'extraire plusieurs champs à la fois
             # sans halluciner (voir RÈGLE 5 du prompt système).
-            _actual_model = getattr(completion, "model", None)
             # Inconnu (attribut absent) : on ne peut pas prouver que le modèle
             # principal a répondu — on reste prudent (comme avant ce fix).
             _degraded_model_used = (_actual_model is None) or (
@@ -1505,7 +2207,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
 
         # Refonte double-rôle — 2e signal de nouveauté, indépendant du produit :
         # beaucoup d'intentions n'ont structurellement PAS de champ `product`
-        # (BUYER_CHECK_ORDER_STATUS, SALES_LIST_ORDERS, PROFILE_SWITCH_ROLE...).
+        # (BUYER_CHECK_ORDER_STATUS, SALES_LIST_ORDERS).
         # Le catalogue fusionné (interpréteur voit désormais TOUTES les
         # intentions, pas seulement celles du rôle courant) fait que le LLM les
         # reconnaît bien plus souvent en plein tunnel — sans ce garde-fou,
@@ -1552,9 +2254,9 @@ def make_input_interpreter(role: str = "PRODUCER"):
             confidence = max(confidence, 0.9)
 
         # Correction d'un brouillon PAS ENCORE PERSISTÉ (attente de CONFIRMATION
-        # sur SALES_PUBLISH_PRODUCT/DECLARE_CROP_CYCLE/FARM_CREATE) : "non c'est
+        # sur SALES_PUBLISH_PRODUCT/PRODUCTION_DECLARE_FUTURE/FARM_CREATE) : "non c'est
         # 200 tonnes" ressemble fortement, pour le LLM, à l'intent catalogue
-        # SALES_UPDATE_PRODUCT/SALES_UPDATE_PRODUCTION/FARM_UPDATE — mais ces
+        # SALES_UPDATE_PRODUCT/PRODUCTION_UPDATE_FUTURE/FARM_UPDATE — mais ces
         # intents "mettent à jour un produit EXISTANT au catalogue", qui n'existe
         # pas encore puisque rien n'a été confirmé/publié. Sans ce garde-fou, le
         # bloc d'interruption ci-dessous abandonnait le brouillon en cours pour
@@ -1836,7 +2538,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 if raw_intent == "UNKNOWN" and locked_goal:
                     raw_intent = str(locked_goal).upper()
 
-        return {
+        _legacy_result: Dict[str, Any] = {
             "interpreted_event": raw_event,
             "detected_intent": raw_intent,
             "interpreter_confidence": confidence,
@@ -1849,6 +2551,17 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 "degraded_model": _degraded_model_used,
             },
         }
+        # (2026-09-14, incident WhatsApp #9) : même garde que côté
+        # micro-prompt NEW_TASK ci-dessus — voir son commentaire pour le
+        # contexte complet. La route SELECTION a déjà tranché que ce message
+        # est sans rapport avec le menu affiché ; si ce repli legacy ne
+        # parvient PAS non plus à identifier une intention métier, le rendu
+        # du menu ne doit jamais générer de note d'accompagnement laissant
+        # croire que le menu (potentiellement un tout autre tunnel périmé)
+        # est lié au message.
+        if _deviation_reclass and raw_event in ("UNKNOWN", "OUT_OF_SCOPE"):
+            _legacy_result["interruption_unresolved"] = True
+        return _legacy_result
 
     async def input_interpreter(
         state: MarketAgentState, mc_runtime: MarketRuntime

@@ -102,8 +102,17 @@ jobs:
 
   # Valide que les 3 images se CONSTRUISENT encore + que le compose prod est
   # cohérent. Ne pousse rien.
+  #
+  # `needs` (2026-09-17, follow-up pre-Hetzner) — AJOUTÉ : ce job n'avait
+  # aucune dépendance déclarée, il tournait donc EN PARALLÈLE de `test`/
+  # `migration-safety` plutôt qu'après leur succès. Coûteux (un build inutile
+  # si les tests échouent de toute façon) mais surtout trompeur : un
+  # `docker-build` vert n'a jamais garanti que `test` l'était aussi. Release
+  # (release.yml) est désormais également gatée sur ce workflow dans son
+  # ensemble via `workflow_run` — voir son propre commentaire.
   docker-build:
     name: Validation des images Docker + compose
+    needs: [test, migration-safety]
     runs-on: ubuntu-latest
     env:
       RELEASE_VERSION: ci-${{ github.sha }}

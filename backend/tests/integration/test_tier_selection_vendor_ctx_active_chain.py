@@ -276,13 +276,15 @@ class TestVendorCtxActiveTierChain:
         state["normalized_text"] = "je veux celui de 10 L"
         state["user_query"] = "je veux celui de 10 L"
 
+        # (2026-09-12, Incrément D) : route désormais vers le micro-prompt
+        # STRUCTURED_ACTION dédié — labels humains numérotés seulement
+        # (jamais `tier_id`), "t10" étant le 2e de `_tiered_vendor()`.
         scripted_llm = ScriptedLLM(
             {
-                "interpreted_event": "SELECTION",
-                "detected_intent": "UNKNOWN",
-                "interpreter_confidence": 1.0,
-                "validation_status": "VALID",
-                "extracted_entities": {"selected_value": "t10"},
+                "disposition": "ACTION",
+                "action": "SELECT_PRICING_TIER",
+                "selection_index": 2,
+                "confidence": 1.0,
             }
         )
         runtime = StubRuntime(llm=scripted_llm)
@@ -292,7 +294,7 @@ class TestVendorCtxActiveTierChain:
         assert state["interpreted_event"] == "SELECTION", (
             f"free-text tier reply not resolved — raw_analysis={state.get('raw_analysis')}"
         )
-        assert state["extracted_entities"].get("selected_value") == "t10"
+        assert state["extracted_entities"].get("action_pricing_tier_id") == "t10"
 
         state = apply_patch(state, run(memory_update(state, runtime)))
         state = apply_patch(state, run(validator(state, runtime)))

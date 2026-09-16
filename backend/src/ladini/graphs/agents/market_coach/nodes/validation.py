@@ -165,7 +165,6 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
         {
             "BUYER_REQUEST",
             "BUYER_ADD_TO_CART",
-            "SEARCH_PRODUCTS",
         }
     )
     strip_structural = False
@@ -205,23 +204,12 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
     # Pass-through to context resolver for goals that resolve IDs dynamically
     _RESOLVER_PASSTHROUGH = {
         "MARKET_BROWSE_REQUESTS": ("auction_id", ["product"]),
-        "MARKET_MY_REQUESTS": ("auction_id", ["product"]),
         "SALES_PLACE_BID": ("auction_id", ["product"]),
         "MARKET_GET_MY_PROPOSALS": ("bid_id", []),
-        "SALES_ACCEPT_CONTRACT": ("bid_id", []),
-        "PROCUREMENT_ACCEPT_OFFER": ("bid_id", []),
-        # Ces deux-là ONT un résolveur dédié côté acheteur (flows/buyer/flow.py :
-        # `resolve_received_bids` et `resolve_buyer_bid_pick`, qui affichent un
-        # menu de sélection) mais n'étaient PAS déclarés ici : le validateur
-        # bloquait donc AVANT, en réclamant `auction_id`/`bid_id` — un UUID que
-        # l'utilisateur ne peut pas connaître, avec expected_input=NONE (donc
-        # aucune réponse n'était interprétable). Impasse conversationnelle.
-        "MARKET_GET_REQUEST_DETAIL": ("auction_id", []),
-        "PROCUREMENT_SELECT_WINNER": ("bid_id", []),
         # cycle_id / product_id sont résolus par le flux de sélection dédié
         # (_resolve_cycle_for_update / _resolve_product_for_update), jamais
         # demandés comme UUID brut à l'utilisateur.
-        "SALES_UPDATE_PRODUCTION": ("cycle_id", []),
+        "PRODUCTION_UPDATE_FUTURE": ("cycle_id", []),
         "SALES_UPDATE_PRODUCT": ("product_id", []),
         # (2026-09-04, Product Completeness Phase 2) : MÊME impasse que celle
         # décrite juste au-dessus, réintroduite par le chantier F1 —
@@ -239,6 +227,14 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
         # `_resolve_order_for_cancellation` affiche la liste des commandes
         # annulables, l'UUID n'est jamais demandé.
         "PRODUCER_CANCEL_ORDER": ("order_id", []),
+        # (2026-09-13, confirmation explicite producteur) : même impasse F1 —
+        # `_resolve_order_for_confirmation` affiche la liste des commandes
+        # en attente de confirmation, l'UUID n'est jamais demandé.
+        "PRODUCER_CONFIRM_ORDER": ("order_id", []),
+        # (2026-09-14) : même impasse F1 — `_resolve_auction_for_update`
+        # affiche la liste des appels d'offres OUVERTS de l'acheteur,
+        # l'UUID n'est jamais demandé comme texte brut.
+        "PROCUREMENT_UPDATE_REQUEST": ("auction_id", []),
     }
     passthrough = _RESOLVER_PASSTHROUGH.get(goal_upper)
     if passthrough:

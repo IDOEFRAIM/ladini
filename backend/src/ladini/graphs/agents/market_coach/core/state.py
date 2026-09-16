@@ -124,6 +124,16 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
 
     session_id: Annotated[str, replace_value]
 
+    # (2026-09-12) Identifiant STABLE de l'événement WhatsApp entrant (même
+    # valeur que `msg:{MessageSid}`, la clé de dédoublonnage webhook — voir
+    # `api/routes/twilio_webhook.py`). Injecté dans l'état initial par
+    # `orchestrator.py::_run_market`, jamais réécrit en cours de tour — sert
+    # de clé au cache d'interprétation LLM
+    # (`interpreter/routing.py::_cached_llm_completion`) pour qu'un retry
+    # Celery de `process_agent_task` (`autoretry_for=(Exception,)`) ne
+    # repaie jamais un appel LLM déjà réussi pour CE message.
+    message_sid: Annotated[Optional[str], replace_value]
+
     # (2026-09-08, purge redondance) : `role` (doublon exact de `user_role`,
     # écrit une seule fois par `role_guard.py` comme défaut initial puis
     # JAMAIS mis à jour ensuite — contrairement à `user_role`, rafraîchi à
@@ -446,6 +456,17 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # ================================================================
 
     interruption_detected: Annotated[bool, replace_value]
+
+    # (2026-09-14, incident WhatsApp #9) : posé par `interpreter/routing.py`
+    # quand la route SELECTION a jugé un message sans rapport avec le menu
+    # affiché (interruption), mais que la reclassification qui a suivi n'a
+    # PAS pu identifier d'intention métier (`UNKNOWN`/`OUT_OF_SCOPE`) — lu
+    # par `nodes/rendering/menus.py::render_selection_menu` pour ne jamais
+    # générer de note d'accompagnement adaptative laissant croire que le
+    # menu réaffiché (potentiellement un tout autre tunnel périmé) répond au
+    # message. Distinct de `interruption_detected` (qui signifie l'inverse :
+    # une interruption RÉUSSIE, un changement de but effectif).
+    interruption_unresolved: Annotated[bool, replace_value]
 
     interruption_type: Annotated[Optional[str], replace_value]
 

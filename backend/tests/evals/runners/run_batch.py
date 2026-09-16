@@ -84,73 +84,14 @@ def drive_P1_STOCK_016() -> ScenarioResult:
     return res
 
 
-def drive_P1_STOCK_018() -> ScenarioResult:
-    res = _result("P1-STOCK-018", "PROVEN_BY_CODE")
-    # First attempt (no snapshot fixture) returned validation_errors=['snapshot_not_found']
-    # after calling get_producer_stocks — the generic chain resolves/validates the stock
-    # snapshot before delete. Providing a matching snapshot to isolate whether that was
-    # just an incomplete test double, or a real gap.
-    rt = RecordingRuntime(responses={
-        "get_producer_stocks": {
-            "status": "success",
-            "data": [
-                {"id": "ST-777", "stock_id": "ST-777", "product": "mil", "quantity": 50,
-                 "unit": "KG", "farm_id": "F-12"},
-            ],
-        },
-    })
-    state = _base_state(
-        user_phone="+22670000036", user_role="PRODUCER", role="PRODUCER",
-        current_goal="STOCK_DELETE",
-        transaction_payload={"stock_id": "ST-777"},
-    )
-    res.state_before = dict(state)
-    try:
-        final = run(_run_generic_chain(state, rt, role="PRODUCER", confirm=True))
-    except Exception as exc:
-        res.status = "TEST_SETUP_ERROR"
-        res.error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
-        return res
-    res.state_after = dict(final)
-    res.actual_tool_calls = rt.call_names
-    res.actual_tool_arguments = {t: a for t, a in rt.calls}
-    if "delete_stock_by_id" in rt.call_names:
-        res.status = "PASS"
-    else:
-        res.status = "FAIL_CORRECTNESS"
-        res.failed_assertions.append(f"expected 'delete_stock_by_id', got {rt.call_names}; status={final.get('status')} validation_errors={final.get('validation_errors')}")
-    return res
-
-
 # drive_P1_SALES_021 REMOVED from this file (was a wrong, disproven
 # single-turn assumption — see P1-SALES-021.yaml v1.2 correction_note).
 # The real, executed 4-turn driver now lives in run_extra.py.
 
-
-def drive_P1_PROC_026() -> ScenarioResult:
-    res = _result("P1-PROC-026", "PATTERN_CONSISTENT (explicit)")
-    rt = RecordingRuntime()
-    state = _base_state(
-        user_phone="+22670000038", user_role="BUYER", role="BUYER",
-        current_goal="PROCUREMENT_ACCEPT_OFFER",
-        transaction_payload={"bid_id": "PRD-300"},
-    )
-    res.state_before = dict(state)
-    try:
-        final = run(_run_generic_chain(state, rt, role="BUYER", confirm=True))
-    except Exception as exc:
-        res.status = "TEST_SETUP_ERROR"
-        res.error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
-        return res
-    res.state_after = dict(final)
-    res.actual_tool_calls = rt.call_names
-    res.actual_tool_arguments = {t: a for t, a in rt.calls}
-    if "accept_bid" in rt.call_names:
-        res.status = "PASS"
-    else:
-        res.status = "FAIL_CORRECTNESS"
-        res.failed_assertions.append(f"expected 'accept_bid', got {rt.call_names}; status={final.get('status')} validation_errors={final.get('validation_errors')}")
-    return res
+# (2026-09-13, Deep Intent Architecture Cleanup) : drive_P1_STOCK_018 et
+# drive_P1_PROC_026 supprimées avec leurs scénarios (P1-STOCK-018.yaml,
+# P1-PROC-026.yaml) — STOCK_DELETE/PROCUREMENT_ACCEPT_OFFER supprimés
+# d'INTENT_CONFIG (tool_name fictif, jamais réellement exécutable).
 
 
 def drive_P1_AUC_011() -> ScenarioResult:
@@ -272,9 +213,9 @@ def drive_P2_EDGE_042() -> ScenarioResult:
 
 SMOKE_SET: Dict[str, Callable[[], ScenarioResult]] = {
     "P1-STOCK-016": drive_P1_STOCK_016,
-    "P1-STOCK-018": drive_P1_STOCK_018,
     # P1-SALES-021 moved to run_extra.py (real 4-turn flow)
-    "P1-PROC-026": drive_P1_PROC_026,
+    # P1-STOCK-018 / P1-PROC-026 removed (2026-09-13) with their scenarios —
+    # see the deletion note above drive_P1_AUC_011.
     "P1-AUC-011": drive_P1_AUC_011,
     "P2-ROBUST-040": drive_P2_ROBUST_040,
     "P2-EDGE-042": drive_P2_EDGE_042,

@@ -200,10 +200,10 @@ class TestIncidentFixedGroqFallbackNowWorks:
         bedrock_client = _AuthExpiredClient()
         groq_client = _GroqSucceedsClient(
             {
-                "interpreted_event": "NEW_TASK",
-                "detected_intent": "BUYER_LIST_AUCTIONS",
-                "interpreter_confidence": 0.9,
-                "extracted_entities": {},
+                "disposition": "NEW_TASK",
+                "intent": "BUYER_LIST_AUCTIONS",
+                "confidence": 0.9,
+                "entities": {},
             }
         )
         gateway = _make_real_gateway(

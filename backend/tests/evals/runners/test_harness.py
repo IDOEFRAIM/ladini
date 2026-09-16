@@ -137,8 +137,12 @@ def test_not_null_assertion():
 # =====================================================================
 
 def test_all_real_scenario_files_are_valid_yaml():
+    # (2026-09-13, Deep Intent Architecture Cleanup) : seuil abaissé de 35 à
+    # 30 après suppression de 4 scénarios rattachés à des intents supprimés
+    # (PROCUREMENT_ACCEPT_OFFER, STOCK_UPDATE_LEVEL, STOCK_DELETE x2) —
+    # tous décrivaient des tool_name fictifs, jamais réellement exécutables.
     files = list(DATASETS_DIR.rglob("*.yaml"))
-    assert len(files) >= 35, f"expected at least 35 materialized scenarios, found {len(files)}"
+    assert len(files) >= 30, f"expected at least 30 materialized scenarios, found {len(files)}"
     for f in files:
         data = load_scenario(f)
         assert isinstance(data, dict), f"{f} did not parse to a mapping"

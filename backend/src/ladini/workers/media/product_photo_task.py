@@ -279,6 +279,7 @@ async def _process(
     from ladini.services.pending_photo_target import (
         pop_pending_auction_photo,
         pop_pending_bid_photo,
+        pop_pending_product_photo,
     )
     from ladini.services.storage.supabase_storage import (
         SupabaseStorageError,
@@ -309,13 +310,14 @@ async def _process(
         await send_confirmation_text(phone_number, f"❌ {exc}", message_sid=message_sid)
         return
 
-    # Priorité : une offre/un appel d'offres tout juste créé(e) absorbe la
-    # PROCHAINE photo envoyée (voir services/pending_photo_target.py, posé
-    # par nodes/rendering/success.py juste après place_bid/create_auction).
-    # Bid avant auction (ordre arbitraire mais documenté) : un même numéro ne
-    # devrait avoir qu'UN SEUL marqueur actif en pratique (producteur XOR
-    # acheteur pour la même action récente). Ni l'un ni l'autre → repli sur
-    # le catalogue produit du producteur (comportement historique inchangé).
+    # Priorité : une offre/un appel d'offres/un PRODUIT tout juste créé(e)
+    # absorbe la PROCHAINE photo envoyée (voir services/pending_photo_target.py,
+    # posé par nodes/rendering/success.py juste après
+    # place_bid/create_auction/create_product). Bid avant auction avant
+    # produit (ordre arbitraire mais documenté) : un même numéro ne devrait
+    # avoir qu'UN SEUL marqueur actif en pratique (une seule action récente
+    # à la fois). Aucun marqueur → repli sur le catalogue produit du
+    # producteur (comportement historique inchangé, `_resolve_target_product`).
     pending_bid_id = pop_pending_bid_photo(phone_number)
     if pending_bid_id:
         await _link_bid_photo_and_confirm(
@@ -327,6 +329,16 @@ async def _process(
     if pending_auction_id:
         await _link_auction_photo_and_confirm(
             phone_number, pending_auction_id, public_url, message_sid=message_sid
+        )
+        return
+
+    pending_product_id = pop_pending_product_photo(phone_number)
+    if pending_product_id:
+        await _link_photo_and_confirm(
+            phone_number,
+            {"id": pending_product_id},
+            public_url,
+            message_sid=message_sid,
         )
         return
 

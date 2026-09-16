@@ -130,7 +130,29 @@ _EXPECTED_INPUT_ALLOWED_FIELDS: Dict[str, frozenset] = {
 _ALIAS_MIRRORS = build_alias_mirrors()
 
 _CORRECTION_HISTORY_LIMIT = 5
-_ORDER_MAPPING_KINDS = frozenset({"order", "order_list", "buyer_orders"})
+_ORDER_MAPPING_KINDS = frozenset(
+    {
+        "order",
+        "order_list",
+        "buyer_orders",
+        # (2026-09-13, incident WhatsApp #6) : les menus numérotés posés par
+        # `flows/producer/flow.py::_resolve_order_for_confirmation`/
+        # `_resolve_order_for_cancellation`/`_resolve_order_for_delivery_payment`
+        # n'étaient PAS dans cet ensemble — une réponse "1"/"2" à leur menu
+        # était bien classée `SELECTION` (fast-path numérique) mais son
+        # `selection_index` était ensuite POPÉ ici SANS jamais écrire
+        # `payload["order_id"]` (aucune branche ci-dessous ne matchait,
+        # repli silencieux sur `payload["resolved_id"]`, jamais lu par ces
+        # resolvers). Le tour suivant retrouvait donc un payload sans
+        # `selection_index` NI `order_id` — le resolver, incapable de savoir
+        # quelle commande avait été choisie, réaffichait indéfiniment le
+        # même menu (boucle réelle observée en prod sur la confirmation
+        # producteur, réponse "1" répétée sans effet).
+        "order_confirmation",
+        "order_cancellation",
+        "order_delivery_payment",
+    }
+)
 _AUCTION_MAPPING_KINDS = frozenset({"auction", "buyer_auction_list", "auction_bids"})
 # SOURCE UNIQUE : `nodes/cleaner.py` (le nœud qui les remet à None en fin de
 # tour). memory.py les EXCLUT de la mémoire de travail reprise au tour suivant —
@@ -341,6 +363,11 @@ async def memory_update(
         current_value = payload.get(field)
         if not slot_has_value(current_value):
             payload[field] = value
+            if field == "unit":
+                # Une vraie extraction efface le drapeau posé par le défaut
+                # non-confirmé de `validation.py::_apply_slot_defaults` —
+                # voir `unit_was_assumed`.
+                payload.pop("unit_was_assumed", None)
             return
         if _values_equal(current_value, value):
             return
@@ -365,6 +392,7 @@ async def memory_update(
         elif field == "unit":
             _cascade_clear(_UNIT_CASCADE_FIELDS)
             stable.pop("unit", None)
+            payload.pop("unit_was_assumed", None)
         payload[field] = value
 
     def _normalize_menu_text(value: str | None) -> str:
@@ -848,7 +876,7 @@ async def memory_update(
                 payload["stock_id"] = resolved_str
             elif mapping_kind == "cycle":
                 # Sélection d'une production future (MarketOffer) dans la liste
-                # des stocks → cible de SALES_UPDATE_PRODUCTION (mise à jour de lot).
+                # des stocks → cible de PRODUCTION_UPDATE_FUTURE (mise à jour de lot).
                 payload["cycle_id"] = resolved_str
             elif mapping_kind == "catalog_product":
                 # Sélection d'un produit du catalogue → cible de SALES_UPDATE_PRODUCT.

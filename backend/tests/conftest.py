@@ -140,7 +140,17 @@ class StubRuntime:
     async def call_db(self, tool_name: str, **kwargs: Any) -> Any:
         self.calls.append(tool_name)
         if tool_name in self._responses:
-            return self._responses[tool_name]
+            configured = self._responses[tool_name]
+            # (2026-09-13) : une valeur CALLABLE reçoit les kwargs de CET
+            # appel — nécessaire dès qu'un même tool_name est interrogé
+            # plusieurs fois par tour avec des arguments différents (ex:
+            # `get_producer_orders` filtré par `status` successivement) et
+            # doit renvoyer une réponse distincte par appel. Un dict statique
+            # (l'usage historique, toujours supporté) continue de répondre
+            # identiquement à tous les appels.
+            if callable(configured):
+                return configured(**kwargs)
+            return configured
         return {"status": "success", "data": {}, "message": f"{tool_name} ok"}
 
 

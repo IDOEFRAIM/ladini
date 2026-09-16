@@ -31,6 +31,7 @@ import logging
 import uuid
 from typing import Any, Dict, Optional
 
+from ladini.core.idempotency import set_cached as _set_role_hint
 from ladini.core.telemetry import record_procurement_transaction_event
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
@@ -178,6 +179,25 @@ async def _execute_and_finalize(
             )
             execution_status = "COMPLETED" if str(raw.get("status") or "").lower() != "error" else "ERROR"
             execution_result = raw
+            # (2026-09-13, incident WhatsApp #3 — utilisateur double-rôle) :
+            # `services/database/buyer.py::confirm_preorder_draft` tourne
+            # dans le service MCP à privilège minimal (PAS d'accès Redis
+            # par conception) — il ne peut donc pas poser lui-même l'indice
+            # d'état qui force la PROCHAINE réponse de chaque producteur
+            # notifié à être traitée comme PRODUCER (sinon : classifiée
+            # contre le catalogue BUYER si le workspace de ce numéro est
+            # resté figé en mode BUYER, catalogue qui ne contient même pas
+            # PRODUCER_CONFIRM_ORDER/PRODUCER_CANCEL_ORDER). CE process
+            # (worker), lui, a accès à Redis — on pose donc l'indice ICI,
+            # juste après l'appel MCP réussi, à partir de la liste de
+            # numéros que `confirm_preorder_draft` a renvoyée.
+            if execution_status == "COMPLETED":
+                for _producer_phone in raw.get("producer_phones_notified") or []:
+                    _set_role_hint(
+                        f"pending_role_hint:{_producer_phone}",
+                        "PRODUCER",
+                        ttl_seconds=24 * 3600,
+                    )
         except Exception as exc:
             logger.error(
                 "PREORDER_EXECUTE_CONFIRM_FAILED | draft_id=%s | %s", executing_draft.draft_id, exc
@@ -415,6 +435,21 @@ def apply_response_plan(plan: PreorderResponsePlan) -> Dict[str, Any]:
         if not plan.preserve_cart_on_terminal:
             patch["active_cart"] = []
             patch["transaction_payload"] = {"__reset__": True}
+            # (2026-09-11) `working_memory.last_active_cart` DOIT être
+            # effacé ICI aussi — bug réel confirmé : `active_cart=[]`
+            # seul ne suffit pas, `buyer_context_resolver` (flows/buyer/
+            # flow.py) REPEUPLE `active_cart` depuis ce snapshot dès qu'il
+            # le trouve non-vide et que `active_cart` est vide au tour
+            # suivant (mécanisme conçu pour survivre à une navigation
+            # inter-goal, PAS pour ressusciter un panier déjà consommé par
+            # une précommande EXÉCUTÉE). Sans ce clear, un item déjà
+            # confirmé (converti en vraie commande) réapparaissait dans un
+            # panier ultérieur totalement différent, faussant son total.
+            # `None` explicite, pas une omission de clé — `working_memory`
+            # est fusionné par un reducer merge_dict (voir
+            # `helpers.py::clear_active_goal`, même discipline), un `pop`
+            # ne suffirait pas à effacer une valeur déjà présente.
+            patch["working_memory"] = {"last_active_cart": None}
         if plan.draft is not None and plan.draft.status in (
             PreorderDraftStatus.EXECUTED,
             PreorderDraftStatus.AWAITING_PAYMENT,

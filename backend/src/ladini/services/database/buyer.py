@@ -659,7 +659,17 @@ class BuyerMixin(BaseMixin):
                 )
             )
 
-            product.quantity_for_sale -= stock_debit
+            # `stock_debit` est un `float` (`qty`/`base_unit_quantity`
+            # ci-dessus) ; `quantity_for_sale` est une colonne `Numeric`
+            # (chargée en `decimal.Decimal`) — `Decimal -= float` lève
+            # `TypeError` (même classe de bug que le recrédit au moment de
+            # l'annulation, `cancel_confirmed_order`/`cancel_pending_order`,
+            # incident réel 2026-09-15). Conversion explicite avant
+            # l'arithmétique, jamais d'opérateur augmenté sur la colonne
+            # Decimal directement.
+            product.quantity_for_sale = (
+                float(product.quantity_for_sale or 0.0) - stock_debit
+            )
             summary_items.append(f"{product.name} (x{qty} {product.unit or 'u'})")
 
         if not summary_items:
@@ -771,7 +781,12 @@ class BuyerMixin(BaseMixin):
             # Statuts traduits avec des emojis explicites pour l'utilisateur WhatsApp
             status_map = {
                 "PENDING": "⏳ En attente de validation",
-                "CONFIRMED": "✅ Confirmée (Préparation stock)",
+                # (2026-09-13, confirmation explicite producteur) : la
+                # commande a débité le stock mais attend encore que le
+                # producteur confirme pouvoir l'honorer — distinct de
+                # CONFIRMED, qui signifie désormais cet engagement pris.
+                "PENDING_PRODUCER_CONFIRMATION": "⏳ En attente de confirmation du producteur",
+                "CONFIRMED": "✅ Confirmée par le producteur (Préparation)",
                 "PAID": "💰 Payée (En attente d'expédition)",
                 "SHIPPED": "🚛 En cours de route",
                 "PICKED_UP": "📍 Arrivée au point de collecte",
@@ -903,12 +918,17 @@ class BuyerMixin(BaseMixin):
         if not order:
             raise BusinessRuleException("Commande introuvable ou non autorisée.")
         order_status_up = order.status.upper()
-        if order_status_up not in ("PENDING", "CONFIRMED"):
+        if order_status_up not in ("PENDING", "CONFIRMED", "PENDING_PRODUCER_CONFIRMATION"):
             raise BusinessRuleException(
                 f"Impossible d'annuler une commande déjà en statut : {order.status}.",
                 reason="not_cancellable",
             )
-        was_confirmed = order_status_up == "CONFIRMED"
+        # (2026-09-13, confirmation explicite producteur) : le producteur est
+        # déjà informé de la commande dès sa création (`PENDING_PRODUCER_
+        # CONFIRMATION`, notification immédiate) — pas seulement une fois
+        # `CONFIRMED` — il doit donc être prévenu de l'annulation acheteur
+        # dans les deux cas, pour ne pas confirmer une commande déjà annulée.
+        was_confirmed = order_status_up in ("CONFIRMED", "PENDING_PRODUCER_CONFIRMATION")
 
         # Restitution physique des stocks aux producteurs — vide (donc
         # sans effet, correctement) pour une commande RFQ : `select_winning_bid`
@@ -923,7 +943,19 @@ class BuyerMixin(BaseMixin):
                 )
                 product = await current_session.scalar(prod_stmt)
                 if product:
-                    product.quantity_for_sale += resolve_stock_debit(item)
+                    # `resolve_stock_debit` renvoie un `float` ; `quantity_for_sale`
+                    # est une colonne `Numeric` (chargée en `decimal.Decimal`) —
+                    # `Decimal += float` lève `TypeError` (même incident réel
+                    # que son miroir producteur, `services/database/
+                    # producer.py::cancel_confirmed_order`, 2026-09-15).
+                    # Même parade déjà établie plus haut dans ce fichier
+                    # (`available = float(product.quantity_for_sale or 0.0)`
+                    # avant l'arithmétique, ligne ~2204) : convertir
+                    # explicitement avant d'opérer, jamais d'opérateur
+                    # augmenté sur la colonne Decimal directement.
+                    product.quantity_for_sale = float(
+                        product.quantity_for_sale or 0.0
+                    ) + resolve_stock_debit(item)
 
         order.status = "CANCELLED"
         order.cancellation_role = "BUYER"
@@ -2222,9 +2254,17 @@ class BuyerMixin(BaseMixin):
 
         # Postgres column is TIMESTAMP WITHOUT TIME ZONE → store naive UTC
         converted_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        # (2026-09-13, confirmation explicite producteur) : la commande
+        # n'est plus directement `CONFIRMED` à ce stade — elle entre dans un
+        # état intermédiaire (`PENDING_PRODUCER_CONFIRMATION`) tant que le
+        # producteur n'a pas explicitement confirmé pouvoir l'honorer
+        # (`ProducerMgmtMixin.confirm_order_by_producer`) ou l'a refusée
+        # (`cancel_confirmed_order`, désormais aussi valide depuis cet état).
+        # Le stock reste débité dès CE tour (comme avant) — un refus recrédite
+        # via le même mécanisme que l'annulation post-confirmation.
         for grp_order in group_orders:
             grp_order.preorder_converted_at = converted_at
-            grp_order.status = "CONFIRMED"
+            grp_order.status = "PENDING_PRODUCER_CONFIRMATION"
             grp_order.payment_status = grp_order.payment_status or "PENDING"
             grp_total = round(totals_by_order.get(str(grp_order.id), 0.0), 2)
             grp_order.subtotal = grp_total
@@ -2255,6 +2295,7 @@ class BuyerMixin(BaseMixin):
         # par commande pour couvrir les commandes ANCIENNES (antérieures au
         # split, volontairement conservées telles quelles — grandfathering).
         entries: List[Dict[str, Any]] = []
+        all_producer_phones: set[str] = set()
         for grp_order in group_orders:
             grp_number = str(grp_order.id)[:8].upper()
             grp_phones: set[str] = set()
@@ -2299,6 +2340,7 @@ class BuyerMixin(BaseMixin):
                 }
                 for phone in grp_phones
             )
+            all_producer_phones |= grp_phones
 
         if entries:
             await _outbox_repo.enqueue(current_session, entries)
@@ -2338,6 +2380,17 @@ class BuyerMixin(BaseMixin):
             "orders": confirmed_payload,
             "currency": order.currency or "XOF",
             "message": message,
+            # (2026-09-13, incident WhatsApp #3 — utilisateur double-rôle) :
+            # les numéros producteurs notifiés ci-dessus doivent voir leur
+            # PROCHAINE réponse ("confirmer"/"annuler") traitée comme
+            # PRODUCER, même si leur workspace conversationnel (unique par
+            # numéro, partagé buyer/producteur) est resté figé en mode BUYER
+            # par une session antérieure. Ce processus MCP n'a volontairement
+            # pas accès à Redis (service à privilège minimal, DB uniquement)
+            # — l'indice d'ÉTAT correspondant (`pending_role_hint:{phone}`)
+            # est donc posé par l'APPELANT côté worker (qui, lui, a accès à
+            # Redis), voir `flows/buyer/preorder_confirmation.py`, jamais ici.
+            "producer_phones_notified": sorted(all_producer_phones),
         }
 
     async def cancel_preorder_draft(

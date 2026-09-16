@@ -65,6 +65,7 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "add_auction_photo": PermissionScope.DB_DATA_WRITE,
     "create_order": PermissionScope.DB_DATA_WRITE,
     "create_auction": PermissionScope.DB_DATA_WRITE,
+    "update_auction_fields": PermissionScope.DB_DATA_WRITE,
     "place_bid": PermissionScope.DB_DATA_WRITE,
     "update_stock_with_movement": PermissionScope.DB_DATA_WRITE,
     "prepare_transaction_staging": PermissionScope.DB_DATA_WRITE,
@@ -197,6 +198,10 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     # (2026-09-04, Phase 5 — décision produit #1) : annulation producteur
     # d'une commande confirmée.
     "cancel_confirmed_order": PermissionScope.DB_DATA_WRITE,
+    # (2026-09-13, confirmation explicite producteur) : miroir en écriture
+    # de `cancel_confirmed_order` ci-dessus — le producteur accepte
+    # explicitement une commande en attente.
+    "confirm_order_by_producer": PermissionScope.DB_DATA_WRITE,
     "update_production_fields": PermissionScope.DB_DATA_WRITE,
 }
 

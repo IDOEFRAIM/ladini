@@ -241,16 +241,16 @@ class TestTierReselection:
         assert state["vendor_selection_context"]["resolved_tier_id"] == "t10"
         state = _turn_boundary(state, runtime)
 
-        # Le LLM (seul à recevoir la liste des paliers) désigne l'autre palier
-        # via le contrat d'action structurée (2026-09-01).
+        # (2026-09-12, Incrément D) : ce changement de palier pendant
+        # SET_PACKAGE_COUNT route désormais vers le micro-prompt
+        # STRUCTURED_ACTION dédié — il ne voit QUE des labels humains
+        # numérotés (jamais `tier_id`), "t5" (5 L) étant le PREMIER de la
+        # liste construite depuis `_tiered_vendor()`.
         runtime.llm = ScriptedLLM({
-            "interpreted_event": "SELECTION",
-            "detected_intent": "BUYER_ADD_TO_CART",
+            "disposition": "ACTION",
+            "action": "SELECT_PRICING_TIER",
+            "selection_index": 1,
             "confidence": 0.9,
-            "extracted_entities": {
-                "agent_action": "SELECT_PRICING_TIER",
-                "action_pricing_tier_id": "t5",
-            },
         })
         state = _say(state, runtime, interpreter, "finalement le bidon de 5 L")
 

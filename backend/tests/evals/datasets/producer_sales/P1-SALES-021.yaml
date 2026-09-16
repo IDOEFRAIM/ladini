@@ -16,14 +16,15 @@ grounding:
     selection, no correction text) lands in COLLECT phase with ZERO tool
     calls; the tool only fires on turn 4. Rewritten as the real 4-turn flow.
   sales_update_production_note: >
-    SALES_UPDATE_PRODUCTION (_resolve_cycle_for_update, flow.py:776+) is
-    structurally identical by direct code read (same phase machine, same
-    working_memory keys under different names: update_cycle_id instead of
-    update_product_id) and calls StockGateway.update_production() ->
-    'update_production_fields' (services/mcp/gateway.py:207-213). This is
-    PROVEN_BY_CODE (direct read of the mirror function), NOT independently
-    re-executed turn-by-turn the way the PRODUCT half was — do not upgrade
-    to PROVEN_BY_EXECUTION without actually running it.
+    PRODUCTION_UPDATE_FUTURE (renamed 2026-09-13 from SALES_UPDATE_PRODUCTION;
+    _resolve_cycle_for_update, flow.py) is structurally identical by direct
+    code read (same phase machine, same working_memory keys under different
+    names: update_cycle_id instead of update_product_id) and calls
+    StockGateway.update_production() -> 'update_production_fields'
+    (services/mcp/gateway.py:207-213). This is PROVEN_BY_CODE (direct read
+    of the mirror function), NOT independently re-executed turn-by-turn the
+    way the PRODUCT half was — do not upgrade to PROVEN_BY_EXECUTION without
+    actually running it.
 
 persona: {role: PRODUCER, description: "Producteur, un seul produit au catalogue", phone: "+22670000037"}
 workspace_type: producer

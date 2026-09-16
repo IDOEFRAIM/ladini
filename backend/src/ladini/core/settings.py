@@ -397,6 +397,16 @@ class Settings(BaseSettings):
         key = self.LANGCHAIN_API_KEY or self.LANGSMITH_API_KEY
         return bool(self.LANGCHAIN_TRACING_V2 and key)
 
+    # --- Chantier "State Router + micro-prompts", Incrément F (2026-09-13) ---
+    # Bascule NEW_TASK vers le micro-prompt `new_task_v2` (voir
+    # `interpreter/new_task_micro.py`) au lieu de l'ancien interpréteur
+    # unifié legacy. Défaut True (validé par tests + replay live avant
+    # activation) — mettre à `False` pour un rollback immédiat vers le
+    # legacy sans redéploiement de code, le temps qu'un incident éventuel
+    # soit investigué (spec §56/§65 : le legacy reste disponible tel quel,
+    # jamais supprimé dans ce même incrément).
+    MARKET_COACH_NEW_TASK_V2_ENABLED: bool = True
+
     # --- OpenTelemetry (traces infra) ---
     OTEL_ENABLED: bool = False
     # Endpoint OTLP/gRPC du collector (ex: http://otel-collector:4317).
@@ -450,6 +460,26 @@ class Settings(BaseSettings):
     LLM_REASONING_PRIMARY: str = "bedrock_gateway:deepseek.v3.2"
     LLM_REASONING_FALLBACK_1: str = "bedrock_gateway:openai.gpt-oss-120b"
     LLM_REASONING_FALLBACK_2: str = "groq:openai/gpt-oss-120b"
+    # (2026-09-12, chantier State Router — Phase B.1) : profil DÉDIÉ à
+    # `graphs/agents/market_coach/interpreter/` (classifier NEW_TASK legacy
+    # + micro-prompts SELECTION/ACTIVE_SLOT/...) — délibérément SÉPARÉ de
+    # LLM_FAST_* (INPUT_NORMALIZATION/SECURITY_MODERATION/STATE_CLEANER,
+    # inchangés) et de LLM_REASONING_* (génération de réponse, inchangé).
+    # Objectif du chantier : "MarketCoach Interpreter → Groq →
+    # llama-3.1-8b-instant". Validation LIVE (2026-09-12) : ce modèle
+    # renvoie un 404 "does not exist or you do not have access to it" —
+    # EXACT même décommissionnement Groq déjà documenté ci-dessus (incident
+    # 2026-09-05, `llama-3.1-8b-instant`/`llama-3.3-70b-versatile` retirés le
+    # 2026-06-17). Le gateway a basculé silencieusement sur FALLBACK_1 pour
+    # les 15/15 appels de validation — AUCUN n'a réellement touché Groq. Le
+    # remplacement recommandé par Groq pour `llama-3.1-8b-instant`, DÉJÀ
+    # vérifié fonctionnel dans ce repo (voir `LLM_FAST_FALLBACK_1` ci-dessus),
+    # est utilisé ici à la place — même famille "instant/économique", pas
+    # `openai/gpt-oss-120b` (réservé REASONING, jamais un fallback
+    # silencieux de premier niveau ici).
+    LLM_INTERPRETER_PRIMARY: str = "groq:openai/gpt-oss-20b"
+    LLM_INTERPRETER_FALLBACK_1: str = "bedrock_gateway:qwen.qwen3-32b"
+    LLM_INTERPRETER_FALLBACK_2: str = ""
     # --- Réconciliation PROCUREMENT (2026-09-03, phase 1 recovery) ---
     # Fenêtre au-delà de laquelle un `ProcurementDraft` `EXECUTING` est
     # considéré bloqué (crash probable) plutôt qu'en cours de traitement
@@ -490,6 +520,31 @@ class Settings(BaseSettings):
     # (8-15s), avec la marge nécessaire pour couvrir 1-2 fallbacks.
     LLM_FAST_BUDGET_SECONDS: float = 12.0
     LLM_REASONING_BUDGET_SECONDS: float = 20.0
+    # (2026-09-13, Incrément G) : budget dédié pour INTERPRETER — tombait
+    # auparavant, par accident de branchement, sur LLM_REASONING_BUDGET_SECONDS
+    # malgré un timeout par candidat "rapide" (8s, voir llm_gateway/registry.py).
+    # Couvre 1 candidat + son retry court + 1 fallback avec marge.
+    LLM_INTERPRETER_BUDGET_SECONDS: float = 12.0
+
+    # --- Cost accounting (Incrément G, spec §23/§24/§52) ---
+    # Table de prix "provider:model" -> {"input_per_1m": USD, "output_per_1m": USD}
+    # sous forme de JSON (variable d'env unique, extensible sans ajouter un champ
+    # Settings par modèle). VIDE par défaut : tant que les prix négociés réels du
+    # plan payant ne sont pas connus, `cost.py::estimate_cost_usd` retourne `None`
+    # plutôt que d'inventer une valeur "Groq production" arbitraire (spec §52).
+    # Exemple de valeur : '{"groq:openai/gpt-oss-20b": {"input_per_1m": 0.10,
+    # "output_per_1m": 0.10}, "bedrock_gateway:qwen.qwen3-32b": {"input_per_1m":
+    # 0.15, "output_per_1m": 0.60}}'
+    LLM_PRICING_JSON: str = ""
+
+    # --- Rate limiting partagé (Incrément G, spec §14-18) ---
+    # `0` = dimension désactivée (défaut : ne PAS brider le trafic normal
+    # tant que l'opérateur n'a pas explicitement renseigné les vraies
+    # limites du plan payant — spec §15/§52, jamais une valeur contractuelle
+    # Groq inventée ici).
+    GROQ_RPM_LIMIT: int = 0
+    GROQ_TPM_LIMIT: int = 0
+    GROQ_MAX_INFLIGHT: int = 0
     # Alerting admin (incident LLM Gateway) — webhook générique compatible
     # payload Slack Incoming Webhook. Vide = alertes en log structuré
     # uniquement (aucun canal réel configuré tant que l'URL n'est pas fournie).

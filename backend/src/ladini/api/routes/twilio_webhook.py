@@ -4,6 +4,7 @@ Le webhook ne route plus : il transmet (phone, text) à l'Orchestrator via
 Celery. C'est le WorkspaceResolver qui décide l'agent, de façon collante.
 """
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -12,6 +13,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Form, Request, Response
 
 from ladini.api.security import verify_twilio_signature
 from ladini.api.tasks import process_agent_task
+from ladini.core.idempotency import get_cached as _get_role_hint
+from ladini.core.idempotency import release as _release_role_hint
 from ladini.core.location import LocationOutcome, persist_shared_location
 from ladini.core.settings import settings
 from ladini.graphs.roles import normalize_role
@@ -63,6 +66,10 @@ _DELIVERY_STATUSES = frozenset(
         "canceled",
     }
 )
+
+# (2026-09-17, follow-up pre-Hetzner) — voir whatsapp_webhook.py, même
+# constante/rationale : borne dure sur `.delay()` pendant une panne broker.
+_CELERY_DELAY_TIMEOUT_S = 5.0
 
 # Initialisation du client Redis
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
@@ -185,10 +192,16 @@ async def _handle_twilio_webhook(
     MessageSid: str,
 ):
     # --- 1. ANTI-DOUBLON / IDEMPOTENCE (REDIS) ---
+    # `redis_client` est SYNCHRONE — voir la note détaillée dans
+    # whatsapp_webhook.py (même correctif, même cause : un appel Redis
+    # bloquant direct dans un handler async gèle la boucle asyncio, mesuré
+    # via k6 comme le premier goulot d'étranglement de toute la stack).
     redis_key = f"msg:{MessageSid}"
     try:
         # Renvoie True uniquement si la clé n'existait pas (nouveau message)
-        is_new_message = redis_client.set(redis_key, "processing", ex=3600, nx=True)
+        is_new_message = await asyncio.to_thread(
+            redis_client.set, redis_key, "processing", ex=3600, nx=True
+        )
         if not is_new_message:
             logger.warning(
                 "TWILIO_WEBHOOK_DUPLICATE | MessageSid=%s déjà en cours ou traité",
@@ -302,7 +315,11 @@ async def _handle_twilio_webhook(
             phone,
             media_content_type,
         )
-        process_product_photo_task.delay(
+        # `.delay()` (Redis/kombu, synchrone) — asyncio.to_thread sur tous
+        # les sites de ce fichier, même rationale que process_agent_task
+        # ci-dessous.
+        await asyncio.to_thread(
+            process_product_photo_task.delay,
             phone_number=phone,
             media_url=media_url,
             media_content_type=media_content_type,
@@ -321,11 +338,14 @@ async def _handle_twilio_webhook(
     # numérotées strictement simultanées.
     if text.isdigit():
         try:
-            has_pending_photo = bool(redis_client.exists(pending_photo_key(phone)))
+            has_pending_photo = bool(
+                await asyncio.to_thread(redis_client.exists, pending_photo_key(phone))
+            )
         except Exception:
             has_pending_photo = False
         if has_pending_photo:
-            resolve_pending_product_photo_task.delay(
+            await asyncio.to_thread(
+                resolve_pending_product_photo_task.delay,
                 phone_number=phone, selection_text=text, message_sid=MessageSid
             )
             return _empty_twiml()
@@ -336,11 +356,14 @@ async def _handle_twilio_webhook(
         # menu d'upload ci-dessus (celui-ci est vérifié en premier par
         # construction : un numéro ne peut résoudre qu'UN SEUL des deux).
         try:
-            has_pending_view = bool(redis_client.exists(pending_view_key(phone)))
+            has_pending_view = bool(
+                await asyncio.to_thread(redis_client.exists, pending_view_key(phone))
+            )
         except Exception:
             has_pending_view = False
         if has_pending_view:
-            resolve_pending_view_photos_task.delay(
+            await asyncio.to_thread(
+                resolve_pending_view_photos_task.delay,
                 phone_number=phone, selection_text=text, message_sid=MessageSid
             )
             return _empty_twiml()
@@ -362,11 +385,13 @@ async def _handle_twilio_webhook(
             "TWILIO_INBOUND_VIEW_PHOTOS | phone=%s | query=%r", phone, view_query
         )
         if view_query.isdigit():
-            send_search_result_photos_task.delay(
+            await asyncio.to_thread(
+                send_search_result_photos_task.delay,
                 phone_number=phone, index_text=view_query, message_sid=MessageSid
             )
         else:
-            send_product_photos_task.delay(
+            await asyncio.to_thread(
+                send_product_photos_task.delay,
                 phone_number=phone, product_query=view_query, message_sid=MessageSid
             )
         return _empty_twiml()
@@ -382,6 +407,32 @@ async def _handle_twilio_webhook(
         resolved_role = normalize_role("BUYER" if ws_type == "buyer" else "PRODUCER")
         force_role = True
 
+    # (2026-09-13, incident WhatsApp #3 — utilisateur double-rôle) : CE webhook
+    # (pas seulement `orchestrator.py::_run_market`) fige déjà `force_role=True`
+    # dès qu'un workspace existe — ce qui court-circuitait TOTALEMENT le
+    # correctif posé dans l'orchestrateur (il ne s'exécute jamais quand
+    # `force_role` est déjà True). `ws_type` ci-dessus est le dernier rôle
+    # utilisé dans CE workspace (sticky, même numéro pour buyer/producteur) —
+    # potentiellement périmé pour un producteur qui répond "confirmer"/
+    # "annuler" à une notification de commande reçue alors que son workspace
+    # est resté en mode BUYER. `flows/buyer/preorder_confirmation.py` pose un
+    # indice d'ÉTAT plus récent (`pending_role_hint:{phone}`) juste après avoir
+    # mis CETTE notification producteur en file — on le lit et le consomme ICI,
+    # AVANT de figer le rôle, plutôt que de laisser l'orchestrateur tenter (en
+    # vain) de le faire après coup. Fail-open comme tout `core/idempotency.py`.
+    role_hint = await asyncio.to_thread(_get_role_hint, f"pending_role_hint:{phone}")
+    if role_hint:
+        await asyncio.to_thread(_release_role_hint, f"pending_role_hint:{phone}")
+        hint_up = str(role_hint).strip().upper()
+        if hint_up in {"PRODUCER", "PRODUCTEUR", "PRODUCTRICE"}:
+            ws_type = "producer"
+            resolved_role = normalize_role("PRODUCER")
+            force_role = True
+        elif hint_up in {"BUYER", "ACHETEUR", "ACHETEUSE"}:
+            ws_type = "buyer"
+            resolved_role = normalize_role("BUYER")
+            force_role = True
+
     logger.info(
         "Twilio webhook | phone=%s | text=%r | existing_workspace=%s",
         phone,
@@ -390,27 +441,37 @@ async def _handle_twilio_webhook(
     )
 
     # --- 6. DÉLÉGATION À CELERY ---
-    process_agent_task.delay(
-        phone_number=phone,
-        user_query=text,
-        workspace_type=ws_type,
-        role=resolved_role,
-        force_role=force_role,
-        interactive_id=interactive_id,  # Bypass LLM si clic bouton/liste
-        trace_id=trace_id,  # Propagation de la trace d'observabilité
-        location_shared=location_shared,  # Position GPS reçue ce tour (accusé onboarding)
-        # (2026-09-02) Issue EXACTE de la persistance (déjà terminée, ci-dessus,
-        # avant cet enqueue) — l'agent n'a plus besoin de relire la DB pour
-        # savoir si le point a été accepté/rejeté/en erreur. Voir
-        # core/location.py et gps_delivery_gate.py::resolve_gps_stage.
-        location_outcome=location_outcome,
-        location_lat=location_lat,
-        location_lon=location_lon,
-        # (2026-09-02) Clé d'idempotence de l'ENVOI — voir api/tasks.py::
-        # _claim_single_response. Même identifiant que la clé de
-        # dédoublonnage webhook ci-dessus (bloc 1), réutilisé pour protéger
-        # aussi contre un retry Celery de la tâche elle-même.
-        message_sid=MessageSid,
+    # Borne dure (`asyncio.wait_for`) — voir la même note détaillée dans
+    # whatsapp_webhook.py : `asyncio.to_thread` seul ne suffisait pas,
+    # confirmé en E2E local (2026-09-17), un webhook restait bloqué
+    # plusieurs dizaines de secondes pendant une panne Redis/broker malgré
+    # le tuning kombu (celery_app.py). Le thread sous-jacent peut continuer
+    # en arrière-plan sans bloquer CETTE requête au-delà du timeout.
+    await asyncio.wait_for(
+        asyncio.to_thread(
+            process_agent_task.delay,
+            phone_number=phone,
+            user_query=text,
+            workspace_type=ws_type,
+            role=resolved_role,
+            force_role=force_role,
+            interactive_id=interactive_id,  # Bypass LLM si clic bouton/liste
+            trace_id=trace_id,  # Propagation de la trace d'observabilité
+            location_shared=location_shared,  # Position GPS reçue ce tour (accusé onboarding)
+            # (2026-09-02) Issue EXACTE de la persistance (déjà terminée, ci-dessus,
+            # avant cet enqueue) — l'agent n'a plus besoin de relire la DB pour
+            # savoir si le point a été accepté/rejeté/en erreur. Voir
+            # core/location.py et gps_delivery_gate.py::resolve_gps_stage.
+            location_outcome=location_outcome,
+            location_lat=location_lat,
+            location_lon=location_lon,
+            # (2026-09-02) Clé d'idempotence de l'ENVOI — voir api/tasks.py::
+            # _claim_single_response. Même identifiant que la clé de
+            # dédoublonnage webhook ci-dessus (bloc 1), réutilisé pour protéger
+            # aussi contre un retry Celery de la tâche elle-même.
+            message_sid=MessageSid,
+        ),
+        timeout=_CELERY_DELAY_TIMEOUT_S,
     )
 
     return _empty_twiml()

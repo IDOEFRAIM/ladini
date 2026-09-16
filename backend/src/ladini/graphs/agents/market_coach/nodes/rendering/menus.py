@@ -59,7 +59,20 @@ async def render_selection_menu(ctx: RenderContext) -> Dict[str, Any]:
     user_text = str(
         state.get("normalized_text") or state.get("user_query") or ""
     ).strip()
-    if event in {"UNKNOWN", "OUT_OF_SCOPE"} and user_text:
+    # (2026-09-14, incident WhatsApp #9) : `interruption_unresolved` (posé par
+    # `interpreter/routing.py` — voir son commentaire) signifie que la route
+    # SELECTION a DÉJÀ jugé ce message sans rapport avec le menu affiché, et
+    # que la reclassification qui a suivi n'a pas pu identifier d'intention
+    # métier. Générer ici une note du type "je comprends que vous voulez X"
+    # laisserait croire que le menu ci-dessous (potentiellement un tout autre
+    # tunnel périmé) répond à ce message — observé en prod : "confirmer" sur
+    # une vente producteur non résolu, note "vous voulez confirmer..." collée
+    # à un menu ACHETEUR sans rapport (commande déjà confirmée).
+    if (
+        event in {"UNKNOWN", "OUT_OF_SCOPE"}
+        and user_text
+        and not state.get("interruption_unresolved")
+    ):
         note = await llm_deviation_reply(
             ctx.mc_runtime, user_text, "choisir une option dans le menu ci-dessous"
         )

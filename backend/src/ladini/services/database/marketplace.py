@@ -149,7 +149,14 @@ class MarketplaceMixin(BaseMixin):
         stock = result.scalar_one_or_none()
 
         if stock:
-            stock.quantity += quantity
+            # `quantity` (ci-dessus, `positive_float`) est un `float` ;
+            # `Stock.quantity` est une colonne `Numeric` (chargée en
+            # `decimal.Decimal`) — `Decimal += float` lève `TypeError`
+            # (même classe de bug que `services/database/producer.py::
+            # cancel_confirmed_order`, incident réel 2026-09-15). Conversion
+            # explicite avant l'arithmétique, jamais d'opérateur augmenté
+            # sur la colonne Decimal directement.
+            stock.quantity = float(stock.quantity or 0.0) + quantity
             stock_id = str(stock.id)
             new_total = stock.quantity
         else:
@@ -230,7 +237,10 @@ class MarketplaceMixin(BaseMixin):
                 reason="insufficient_stock",
             )
 
-        stock.quantity -= quantity
+        # Voir le commentaire miroir dans `add_stock` ci-dessus : `quantity`
+        # est un `float`, `Stock.quantity` une colonne `Numeric` — conversion
+        # explicite avant l'arithmétique, jamais d'opérateur augmenté direct.
+        stock.quantity = float(stock.quantity or 0.0) - quantity
 
         mvt = StockMovement(
             id=_uuid(),

@@ -457,18 +457,26 @@ def _confirm_claim_key(draft: ProcurementDraft) -> str:
 
 def execution_key(draft: ProcurementDraft) -> str:
     """Clé d'idempotence MÉTIER, stable par draft/version (mandat §4) —
-    destinée à `idempotency_key=` sur l'appel MCP `create_auction` (voir
-    `infrastructure/mcp/client.py::AgriMCPClient.call_tool`, qui accepte
-    déjà ce paramètre). Un retry du MÊME draft/version réutilise TOUJOURS
-    la même clé. NOTE HONNÊTE (audité, pas supposé) : le serveur MCP reçoit
-    cette clé (`_idempotency_key` dans les arguments) mais
-    `AgriDBMCPServer.call_tool` (infrastructure/mcp/runtime.py) la retire
-    AVANT dispatch vers `create_auction`, qui n'a donc AUCUNE déduplication
-    côté serveur aujourd'hui — la clé est déjà correcte et prête pour le
-    jour où ce chantier serveur sera fait, mais ne garantit PAS
-    l'exactly-once tant que ce n'est pas le cas (voir
-    `ProcurementDraftStatus.EXECUTION_UNKNOWN`, la garde qui compense ce
-    manque côté client)."""
+    passée en `idempotency_key=` sur l'appel MCP `create_auction` (voir
+    `nodes/executor.py::mcp_tool_executor`, qui la dérive de
+    `state["procurement_draft"]`). Un retry du MÊME draft/version (y compris
+    après une redelivery Celery complète, puisque `draft_id`/`version` sont
+    persistés en base, pas en mémoire process) réutilise TOUJOURS la même
+    clé.
+    CORRECTIF DOC (2026-09-17, follow-up pre-Hetzner) — cette docstring
+    affirmait auparavant qu'`AgriDBMCPServer.call_tool`
+    (infrastructure/mcp/runtime.py) retirait `_idempotency_key` SANS
+    déduplication serveur. C'était vrai au moment de l'écriture, mais la
+    déduplication générique (claim/replay/conflict via
+    `mcp_idempotency_store`) a été branchée dans `call_tool` le 2026-09-03
+    (voir son propre commentaire "RÉELLEMENT appliquée depuis...") sans que
+    cette docstring soit mise à jour. `create_auction` EST protégé contre
+    une redelivery complète depuis cette date — vérifié en relisant
+    `runtime.py::call_tool` (claim → exécution → complete/fail), pas
+    supposé. `ProcurementDraftStatus.EXECUTION_UNKNOWN` reste une garde
+    utile pour le cas DB de dédup injoignable (`IdempotencyOutcome.
+    UNAVAILABLE`, dégradation honnête), pas pour combler une absence de
+    mécanisme."""
     return f"procurement:{draft.draft_id}:{draft.version}"
 
 

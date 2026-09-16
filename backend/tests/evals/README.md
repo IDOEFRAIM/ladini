@@ -46,10 +46,12 @@ Every scenario's `grounding.status` field is one of:
 - `PATTERN_CONSISTENT` — not individually re-traced, but follows an already-proven
   dispatch pattern (e.g. non-tunnel intents resolved via the `@register_action`
   registry, proven for `SALES_PUBLISH_PRODUCT`/`create_product`,
-  `PROCUREMENT_SELECT_WINNER`/`select_winning_bid`, `SALES_PLACE_BID`/`place_bid`,
-  `PROFILE_SWITCH_ROLE`/`create_agent_action`). Treat with slightly lower
-  confidence than PROVEN — flag for individual re-trace if a scenario built on it
-  starts producing surprising results.
+  `SALES_PLACE_BID`/`place_bid`, `STOCK_REGISTER_HARVEST`/`add_stock`). Treat with
+  slightly lower confidence than PROVEN — flag for individual re-trace if a
+  scenario built on it starts producing surprising results.
+  (2026-09-13: the original examples here, `PROCUREMENT_SELECT_WINNER` and
+  `PROFILE_SWITCH_ROLE`, were removed from `INTENT_CONFIG` by the Deep Intent
+  Architecture Cleanup — replaced above with still-live examples.)
 - `OPEN_BUSINESS_RULE` — a real code behavior was found that does NOT match the
   intuitively "correct" business rule. The scenario reflects what the code
   *actually does*, not what it "should" do — see `P0-SEC-004` for the canonical

@@ -19,13 +19,24 @@ from ladini.graphs.agents.market_coach.domain.procurement import (
 )
 from ladini.graphs.agents.market_coach.registry import register_action
 
-# (2026-09-04, F4 — audit anti-bypass winner-selection) : `ProcurementSelectWinnerPayload`/
-# `ProcurementAcceptOfferPayload`/`ProcurementSelectWinnerCommand`/
-# `ProcurementAcceptOfferCommand`/`ProcurementService.select_winner`/
-# `.accept_offer` (domain/procurement.py, actions/procure_dto.py) restent
-# définis mais ne sont plus appelés nulle part (recherche exhaustive) —
-# code mort, volontairement NON supprimé ici (pas de cascade de suppression
-# hors du périmètre de ce chantier, voir le rapport final).
+# (2026-09-14, Deep Intent Architecture Cleanup) : PROCUREMENT_SELECT_
+# WINNER/PROCUREMENT_ACCEPT_OFFER SUPPRIMÉS d'INTENT_CONFIG — ces handlers
+# neutralisés (F4, 2026-09-04) ne servaient déjà plus qu'à transformer une
+# tentative d'atteindre ce chemin en erreur technique propre plutôt qu'un
+# contournement silencieux. Avec l'intent lui-même retiré du catalogue
+# classifiable, NEW_TASK ne peut structurellement plus produire ces valeurs
+# — le filet de sécurité applicatif devient inutile, supprimé avec lui
+# (spec §33 : "un tool sans consumer -> dead tool"). Le SEUL chemin
+# conversationnel réel pour désigner un gagnant reste
+# BUYER_CHECK_AUCTION_STATUS -> confirm_winner_selection ->
+# finalize_winner (flows/buyer/order_tracking.py), inchangé.
+#
+# `ProcurementSelectWinnerPayload`/`ProcurementAcceptOfferPayload`/
+# `ProcurementSelectWinnerCommand`/`ProcurementAcceptOfferCommand`/
+# `ProcurementService.select_winner`/`.accept_offer` (domain/procurement.py,
+# actions/procure_dto.py) étaient déjà du code mort avant ce chantier —
+# volontairement non supprimés ici pour limiter le rayon d'action de cette
+# passe (voir le rapport final).
 
 
 @register_action("PROCUREMENT_CREATE_REQUEST", mode="WRITE")
@@ -61,48 +72,3 @@ def prep_procurement_create_request(
     return tool_name, dict(result.tool_args)
 
 
-_WINNER_SELECTION_BYPASS_MESSAGE = (
-    "Ce chemin de sélection de gagnant est désactivé : il contournait le "
-    "tunnel sécurisé (revalidation du prix, étape GPS, gardes de statut — "
-    "voir docs/AUCTION_BID_TRANSACTIONAL_AUDIT_2026-09-04.md et "
-    "AUCTION_BID_WINNER_ORDER_LIFECYCLE_2026-09-04.md). Le SEUL chemin "
-    "conversationnel réel pour désigner un gagnant est "
-    "BUYER_CHECK_AUCTION_STATUS -> confirm_winner_selection -> "
-    "finalize_winner (flows/buyer/order_tracking.py), jamais celui-ci."
-)
-
-
-@register_action("PROCUREMENT_SELECT_WINNER", mode="WRITE")
-def prep_procurement_select_winner(
-    state: Mapping[str, Any], payload: Mapping[str, Any]
-) -> Tuple[str, Dict[str, Any]]:
-    """DÉSACTIVÉ (2026-09-04, F4 — audit anti-bypass winner-selection).
-
-    AVANT ce correctif, ce handler résolvait vers le tool_name RÉEL
-    `select_winning_bid` (la même fonction DB sécurisée que le tunnel
-    `auction_tracking`) via l'exécuteur GÉNÉRIQUE — un second chemin
-    conversationnel VIVANT vers la même décision métier, qui ne passait par
-    AUCUNE des protections du tunnel sécurisé (revalidation de prix,
-    étape GPS obligatoire, garde `auction.status`/`bid.status`). La
-    fonction DB elle-même reste inchangée et intacte (mandat §19 : "ne
-    duplique pas select_winning_bid") — seule cette ENTRÉE est neutralisée.
-    `RuntimeError` (pas `ValueError`) : évite délibérément le mécanisme de
-    "self-heal" de l'exécuteur (qui tenterait de "réparer" un champ
-    manquant) — ceci n'est PAS un champ manquant, c'est un chemin
-    intentionnellement bloqué, l'exécuteur le traite alors via son
-    catch-all générique (message technique neutre, jamais un contournement
-    silencieux).
-    """
-    raise RuntimeError(_WINNER_SELECTION_BYPASS_MESSAGE)
-
-
-@register_action("PROCUREMENT_ACCEPT_OFFER", mode="WRITE")
-def prep_procurement_accept_offer(
-    state: Mapping[str, Any], payload: Mapping[str, Any]
-) -> Tuple[str, Dict[str, Any]]:
-    """DÉSACTIVÉ (2026-09-04, F4) — résolvait vers `accept_bid`, un tool_name
-    qui ne correspond à AUCUNE méthode DB réelle (confirmé par l'audit
-    fonctionnel global) : ce chemin échouait déjà systématiquement, mais
-    avec une erreur technique brute au lieu d'un rejet propre. Même
-    justification que `prep_procurement_select_winner` ci-dessus."""
-    raise RuntimeError(_WINNER_SELECTION_BYPASS_MESSAGE)

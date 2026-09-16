@@ -100,6 +100,40 @@ class TestConfirmationSummary:
         s = build_confirmation_summary("PROCUREMENT_CREATE_REQUEST", payload)
         assert "⚠️" in s and "SAC" in s
 
+    def test_an_assumed_unit_is_flagged_for_confirmation(self):
+        """Incident réel (2026-09-15) : « Vente de 25 LITRE de boeufs » — un
+        producteur qui confirme par habitude, sans tout relire, ne voyait
+        jamais que l'unité avait été DEVINÉE (nature du produit) plutôt
+        qu'écrite par lui. `unit_was_assumed` (posé par
+        `validation.py::_apply_slot_defaults`) doit rendre cette hypothèse
+        visible dans le récap, avec un moyen explicite de la corriger."""
+        payload = _normalize_quantity_to_kg(
+            {
+                "product": "boeufs",
+                "quantity": 25,
+                "unit": "TETE",
+                "price": 425000,
+                "unit_was_assumed": True,
+            }
+        )
+        s = build_confirmation_summary("SALES_PUBLISH_PRODUCT", payload)
+        assert "⚠️" in s
+        # (2026-09-15, retour terrain) : la consigne demande le MOT lui-même
+        # ("tête"), pas une syntaxe de commande ("modifier unité : ...") —
+        # un producteur qui répond juste "modifier unite" sans valeur ne
+        # donnait rien d'exploitable au tour suivant.
+        assert "modifier unité" not in s
+        assert "tête" in s.lower()
+
+    def test_an_explicitly_typed_unit_is_never_flagged(self):
+        """Non-régression : le producteur a écrit l'unité lui-même — aucun
+        avertissement à afficher."""
+        payload = _normalize_quantity_to_kg(
+            {"product": "tomates", "quantity": 50, "unit": "KG", "price": 5000}
+        )
+        s = build_confirmation_summary("SALES_PUBLISH_PRODUCT", payload)
+        assert "⚠️" not in s
+
 
 # =====================================================================
 # CONVERSION D'UNITÉS — stockage canonique
@@ -192,6 +226,53 @@ class TestSlotEnrichment:
     def test_future_date_is_iso_formatted(self):
         d = extract_future_datetime_from_text("dans 3 jours")
         assert d is None or (len(d) >= 10 and d[4] == "-")
+
+
+class TestUnitAssumedFlag:
+    """Incident réel (2026-09-15) : « Vente de 25 LITRE de boeufs ». Un
+    producteur pressé confirme souvent par habitude sans tout relire — une
+    unité DEVINÉE (jamais écrite par lui) doit donc être marquée
+    `unit_was_assumed`, jamais confondue avec une unité confirmée. Couvre
+    aussi le trou symétrique côté culture : `resolve_product_unit` refuse à
+    dessein de deviner (retourne `None`), mais rien n'appelait jamais
+    l'utilisateur — `unit` restait `None` jusqu'à `services/database/
+    producer.py::create_product`, où `unit = clean_text(...) or "KG"` le
+    devinait quand même, hors de portée de tout récapitulatif."""
+
+    def test_livestock_with_no_stated_unit_is_flagged(self):
+        p = run(enrich_payload_from_text(
+            {"product": "boeufs", "quantity": 25, "price": 425000},
+            "je veux vendre mes 25 boeufs",
+            "SALES_PUBLISH_PRODUCT", StubRuntime(llm=None),
+        ))
+        assert p["unit"] == "TETE"
+        assert p.get("unit_was_assumed") is True
+
+    def test_crop_with_no_stated_unit_is_flagged_not_silently_left_for_the_db_layer(self):
+        p = run(enrich_payload_from_text(
+            {"product": "haricot", "quantity": 23, "price": 500},
+            "j en ai 23",
+            "SALES_PUBLISH_PRODUCT", StubRuntime(llm=None),
+        ))
+        assert p["unit"] == "KG"
+        assert p.get("unit_was_assumed") is True
+
+    def test_a_unit_written_by_the_user_is_never_flagged(self):
+        p = run(enrich_payload_from_text(
+            {"product": "tomates", "quantity": 50, "unit": "KG", "price": 5000},
+            "je vends 50 kg de tomates a 5000",
+            "SALES_PUBLISH_PRODUCT", StubRuntime(llm=None),
+        ))
+        assert "unit_was_assumed" not in p
+
+    def test_a_unit_found_in_the_text_is_never_flagged(self):
+        p = run(enrich_payload_from_text(
+            {"product": "riz", "quantity": 200},
+            "je vends 200 en sacs",
+            "SALES_PUBLISH_PRODUCT", StubRuntime(llm=None),
+        ))
+        assert p["unit"] == "SAC"
+        assert "unit_was_assumed" not in p
 
     def test_surface_extraction(self):
         v = extract_surface_from_text("2 hectares")

@@ -402,52 +402,14 @@ def drive_P0_STATE_010() -> ScenarioResult:
     return res
 
 
-# =====================================================================
-# P0-SEC-011 — cross-owner delete: orchestration-layer graceful handling
-# (the DB-layer ownership check itself remains PROVEN_BY_CODE statically,
-# not re-verified here — this harness has no real DB)
-# =====================================================================
-
-def drive_P0_SEC_011() -> ScenarioResult:
-    res = _result("P0-SEC-011", "PROVEN_BY_CODE (DB layer, static); orchestration tested here")
-    res.notes.append(
-        "SCOPE NARROWED: services/database/producer.py::delete_stock's phone-ownership check "
-        "(the actual security mechanism) requires a real DB and is not re-verified by this run — "
-        "it remains PROVEN_BY_CODE from the earlier static trace. This run tests a different, "
-        "still-real property: does the ORCHESTRATION layer handle a simulated delete_stock_by_id "
-        "failure (standing in for the real ValueError) gracefully — no retry into an alternate "
-        "tool, no false success claim."
-    )
-    rt = RecordingRuntime(responses={
-        "get_producer_stocks": {"status": "success", "data": [
-            {"id": "ST-500", "stock_id": "ST-500", "product": "mil", "quantity": 10, "unit": "KG", "farm_id": "F-99"},
-        ]},
-        "delete_stock_by_id": Exception("Stock introuvable ou droits insuffisants."),
-    })
-    state = _base_state(
-        user_phone="+22670000012", user_role="PRODUCER", role="PRODUCER",
-        current_goal="STOCK_DELETE",
-        transaction_payload={"stock_id": "ST-500"},
-    )
-    res.state_before = dict(state)
-    try:
-        final = run(_run_generic_chain(state, rt, role="PRODUCER", confirm=True))
-    except Exception as exc:
-        res.status = "TEST_SETUP_ERROR"
-        res.error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
-        return res
-    res.state_after = dict(final)
-    res.actual_tool_calls = rt.call_names
-    res.actual_tool_arguments = {t: a for t, a in rt.calls}
-    resp = str(final.get("final_response") or "")
-    no_false_success = final.get("status") != "COMPLETED" or "supprim" not in resp.lower()
-    no_alternate_tool = set(rt.call_names) <= {"get_producer_stocks", "identify_or_create_user", "delete_stock_by_id"}
-    if no_false_success and no_alternate_tool:
-        res.status = "PASS"
-    else:
-        res.status = "FAIL_CORRECTNESS"
-        res.failed_assertions.append(f"no_false_success={no_false_success}, no_alternate_tool={no_alternate_tool}, tool_calls={rt.call_names}, status={final.get('status')}, final_response={resp!r}")
-    return res
+# (2026-09-13, Deep Intent Architecture Cleanup) : drive_P0_SEC_011
+# supprimée avec son scénario (P0-SEC-011.yaml) — STOCK_DELETE supprimé
+# d'INTENT_CONFIG (tool_name 'delete_stock_by_id' fictif, jamais réellement
+# exécutable ; le seul chemin conversationnel vers `delete_stock` n'existe
+# plus). La vérification DB-layer (`producer.py::delete_stock` phone-
+# ownership check) reste du code défensif réel mais désormais inatteignable
+# depuis la conversation — signalé comme risque résiduel, pas comme un gap
+# à corriger dans ce chantier.
 
 
 P0_SET = {
@@ -459,7 +421,6 @@ P0_SET = {
     "P0-SEC-006": drive_P0_SEC_006,
     "P0-BIZ-007": drive_P0_BIZ_007,
     "P0-STATE-010": drive_P0_STATE_010,
-    "P0-SEC-011": drive_P0_SEC_011,
     "P0-SEC-012": drive_P0_SEC_012,
 }
 

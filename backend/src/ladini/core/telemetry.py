@@ -46,6 +46,7 @@ _current_trace_meta: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
 # Handles singletons (initialisés une fois au démarrage du process).
 _langfuse_client: Optional[Any] = None
 _otel_tracer: Optional[Any] = None
+_otel_meter_provider: Optional[Any] = None
 _initialized = False
 
 # Traces Langfuse déjà créées ce process-ci (évite de recréer la même trace).
@@ -53,9 +54,160 @@ _seen_traces: set[str] = set()
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Métriques Prometheus (déclarées à l'import de prometheus_client seulement)
+# Métriques — double émission Prometheus (scrape, `GET /metrics`) + OTel
+# (push OTLP, voir _DualCounter/_DualHistogram ci-dessous).
+#
+# (2026-09-17, follow-up pre-Hetzner) — GAP CONFIRMÉ ET CORRIGÉ ICI : le
+# process Celery WORKER n'a AUCUN port HTTP exposé (voir
+# docker-compose.prod.yml, service `worker` — aucun `ports:`), donc
+# `GET /metrics` (qui n'existe QUE côté API, api/main.py) ne peut
+# STRUCTURELLEMENT jamais scraper les compteurs LLM (`llm_calls`,
+# `llm_tokens`, `llm_latency`, `llm_fallback`, `llm_circuit_open`,
+# `llm_cost`, `legacy_fallback`) enregistrés PAR le worker — ils existaient
+# bien en mémoire (Counter/Histogram Prometheus process-local) mais
+# n'atteignaient jamais Grafana. Solution retenue : OpenTelemetry metrics,
+# PUSH via le MÊME pipeline OTLP déjà câblé pour les traces (`worker`→
+# `alloy:4317`, voir OTEL_EXPORTER_OTLP_ENDPOINT) — aucune nouvelle
+# infrastructure, aucun port à ouvrir/firewaller sur le worker, cohérent
+# avec le choix déjà fait pour le tracing. Prometheus multiprocess mode
+# (alternative envisagée) aurait exigé un serveur HTTP dédié par worker
+# (nouveau port, nouvelle surface) pour un modèle scrape/pull qui ne colle
+# pas à un process sans serveur web ; Pushgateway explicitement déconseillé
+# par le brief sauf nécessité réelle — aucune ici. Cardinalité : mêmes
+# labels qu'avant (model/status/provider/reason/prompt_family), JAMAIS
+# phone/conversation_id/message_sid/raw prompt (§24, inchangé).
 # ─────────────────────────────────────────────────────────────────────
 _metrics: Dict[str, Any] = {}
+
+
+class _DualCounterBound:
+    """Labels déjà appliqués — `.inc()` écrit dans les DEUX backends."""
+
+    __slots__ = ("_prom_bound", "_otel_instrument", "_attributes")
+
+    def __init__(self, prom_bound: Any, otel_instrument: Any, attributes: Dict[str, str]):
+        self._prom_bound = prom_bound
+        self._otel_instrument = otel_instrument
+        self._attributes = attributes
+
+    def inc(self, amount: float = 1) -> None:
+        if self._prom_bound is not None:
+            self._prom_bound.inc(amount)
+        if self._otel_instrument is not None:
+            try:
+                self._otel_instrument.add(amount, attributes=self._attributes)
+            except Exception:
+                pass  # jamais casser l'appelant pour une raison d'observabilité
+
+    @property
+    def _value(self) -> Any:
+        # Passthrough vers l'objet `prometheus_client.Counter` RÉEL en
+        # dessous — préserve la compatibilité avec le code/tests existants
+        # qui introspectent `.labels(...)._value.get()` (API interne de
+        # prometheus_client, pas publique, mais déjà utilisée ailleurs dans
+        # ce repo avant l'introduction de ce wrapper — voir
+        # test_telemetry_cost_and_legacy_fallback.py).
+        return self._prom_bound._value
+
+
+class _DualHistogramBound:
+    __slots__ = ("_prom_bound", "_otel_instrument", "_attributes")
+
+    def __init__(self, prom_bound: Any, otel_instrument: Any, attributes: Dict[str, str]):
+        self._prom_bound = prom_bound
+        self._otel_instrument = otel_instrument
+        self._attributes = attributes
+
+    def observe(self, value: float) -> None:
+        if self._prom_bound is not None:
+            self._prom_bound.observe(value)
+        if self._otel_instrument is not None:
+            try:
+                self._otel_instrument.record(value, attributes=self._attributes)
+            except Exception:
+                pass
+
+    @property
+    def _value(self) -> Any:
+        return self._prom_bound._value  # voir _DualCounterBound._value
+
+
+class _DualCounter:
+    """Même interface `.labels(**kw).inc(n)` qu'un `prometheus_client.
+    Counter` — les ~15 sites d'appel existants (`_metric("llm_calls").
+    labels(...).inc()`, etc.) n'ont RIEN à changer."""
+
+    __slots__ = ("_prom", "_otel")
+
+    def __init__(self, prom_counter: Any, otel_counter: Any):
+        self._prom = prom_counter
+        self._otel = otel_counter
+
+    def labels(self, **kwargs: Any) -> _DualCounterBound:
+        prom_bound = self._prom.labels(**kwargs) if self._prom is not None else None
+        return _DualCounterBound(prom_bound, self._otel, {k: str(v) for k, v in kwargs.items()})
+
+
+class _DualHistogram:
+    __slots__ = ("_prom", "_otel")
+
+    def __init__(self, prom_histogram: Any, otel_histogram: Any):
+        self._prom = prom_histogram
+        self._otel = otel_histogram
+
+    def labels(self, **kwargs: Any) -> _DualHistogramBound:
+        prom_bound = self._prom.labels(**kwargs) if self._prom is not None else None
+        return _DualHistogramBound(prom_bound, self._otel, {k: str(v) for k, v in kwargs.items()})
+
+
+def _init_metrics_meter() -> Optional[Any]:
+    """MeterProvider OTel — PUSH périodique vers le même collector Alloy que
+    les traces. `None` si OTel désactivé/indisponible (dual-emission
+    dégrade alors silencieusement vers Prometheus seul, comportement
+    historique inchangé)."""
+    global _otel_meter_provider
+    if not _otel_enabled():
+        return None
+    if _otel_meter_provider is not None:
+        return _otel_meter_provider.get_meter("ladini")
+    try:
+        from ladini.core.settings import settings
+
+        from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
+            OTLPMetricExporter,
+        )
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+        from opentelemetry.sdk.resources import Resource
+
+        endpoint = getattr(settings, "OTEL_EXPORTER_OTLP_ENDPOINT", None)
+        if not endpoint:
+            return None
+        reader = PeriodicExportingMetricReader(
+            # `timeout=10` : borne CHAQUE tentative d'export RPC individuelle
+            # (indépendant du retry/backoff interne du SDK) — évite qu'une
+            # seule tentative reste accrochée indéfiniment sur un réseau
+            # dégradé. Ce reader tourne sur son propre thread d'arrière-plan
+            # (jamais le thread qui traite les tâches Celery/requêtes API),
+            # donc même un export lent ne dégrade pas le chemin critique —
+            # voir `flush()` pour pourquoi on ne force JAMAIS cet export
+            # depuis le chemin synchrone.
+            OTLPMetricExporter(endpoint=endpoint, insecure=True, timeout=10),
+            # (worker) un process Celery vit longtemps mais chaque tâche est
+            # courte — export fréquent pour que les métriques LLM n'aient
+            # pas à attendre la fin d'un long run de tâches avant d'arriver
+            # à Grafana. `flush()` (fin de tâche worker, voir plus bas) force
+            # aussi un export immédiat, cet intervalle est le filet pour le
+            # process API (jamais "fini").
+            export_interval_millis=15000,
+        )
+        _otel_meter_provider = MeterProvider(
+            resource=Resource.create({"service.name": "ladini"}), metric_readers=[reader]
+        )
+        return _otel_meter_provider.get_meter("ladini")
+    except Exception as exc:
+        logger.warning("[telemetry] OTel metrics indisponibles (%s) — Prometheus seul.", exc)
+        return None
 
 
 def _init_prometheus() -> None:
@@ -67,55 +219,88 @@ def _init_prometheus() -> None:
     except Exception:
         logger.info("[telemetry] prometheus_client absent — métriques désactivées.")
         return
+
+    meter = _init_metrics_meter()
+
+    def _counter(name: str, description: str, labelnames: list) -> _DualCounter:
+        prom = Counter(name, description, labelnames)
+        otel = meter.create_counter(name, description=description) if meter else None
+        return _DualCounter(prom, otel)
+
+    def _histogram(name: str, description: str, labelnames: list, buckets: tuple) -> _DualHistogram:
+        prom = Histogram(name, description, labelnames, buckets=buckets)
+        otel = meter.create_histogram(name, description=description) if meter else None
+        return _DualHistogram(prom, otel)
+
     _metrics = {
-        "webhooks_received": Counter(
+        "webhooks_received": _counter(
             "ladini_webhooks_received_total",
             "Nombre de webhooks Twilio reçus.",
             ["channel"],
         ),
-        "http_requests": Counter(
+        "http_requests": _counter(
             "ladini_http_requests_total",
             "Requêtes HTTP par méthode / route / code.",
             ["method", "route", "status"],
         ),
-        "http_5xx": Counter(
+        "http_5xx": _counter(
             "ladini_http_5xx_total",
             "Erreurs serveur 5xx.",
             ["route"],
         ),
-        "http_latency": Histogram(
+        "http_latency": _histogram(
             "ladini_http_request_duration_seconds",
             "Latence HTTP globale (secondes).",
             ["method", "route"],
-            buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30),
+            (0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30),
         ),
-        "llm_calls": Counter(
+        # ── LLM (2026-09-17) — désormais RÉELLEMENT exposées côté worker
+        # (voir le commentaire en tête de section) : `_counter`/`_histogram`
+        # émettent en double Prometheus (scrape API) ET OTel/OTLP (push
+        # worker+api → Alloy → Grafana Cloud).
+        "llm_calls": _counter(
             "ladini_llm_calls_total",
             "Appels LLM par modèle / statut.",
             ["model", "status"],
         ),
-        "llm_tokens": Counter(
+        "llm_tokens": _counter(
             "ladini_llm_tokens_total",
             "Tokens LLM consommés.",
             ["model", "kind"],  # kind=prompt|completion
         ),
-        "llm_latency": Histogram(
+        "llm_latency": _histogram(
             "ladini_llm_duration_seconds",
             "Latence des appels LLM (secondes).",
             ["model"],
-            buckets=(0.1, 0.25, 0.5, 1, 2, 4, 8, 16),
+            (0.1, 0.25, 0.5, 1, 2, 4, 8, 16),
         ),
         # ── LLM Gateway (2026-09-02) — cardinalité bornée à dessein : jamais
         # de label user_id/phone/conversation_id (§24 du brief anti-cardinalité).
-        "llm_fallback": Counter(
+        "llm_fallback": _counter(
             "ladini_llm_fallback_total",
             "Bascules de repli du LLM Gateway (candidat primaire indisponible).",
             ["profile", "provider", "reason"],
         ),
-        "llm_circuit_open": Counter(
+        "llm_circuit_open": _counter(
             "ladini_llm_circuit_open_total",
             "Ouvertures du disjoncteur LLM Gateway par candidat.",
             ["provider", "model"],
+        ),
+        # (2026-09-13, Incrément G, spec §35) : mesure l'usage de l'ancien
+        # interpréteur unifié (repli explicite sur échec infrastructurel des
+        # micro-prompts A-F) — objectif affiché : tendre vers 0.
+        "legacy_fallback": _counter(
+            "ladini_legacy_fallback_total",
+            "Replis vers l'interpréteur unifié legacy, par famille de prompt.",
+            ["prompt_family"],
+        ),
+        # (2026-09-13, Incrément G, spec §25-28) : coût estimé par famille de
+        # prompt/modèle — jamais par user_id/phone/conversation_id (même
+        # discipline anti-cardinalité que `llm_fallback` ci-dessus).
+        "llm_cost": _counter(
+            "ladini_llm_cost_usd_total",
+            "Coût USD estimé des appels LLM (prix venant de config, spec §23/§24).",
+            ["prompt_family", "model"],
         ),
     }
 
@@ -311,6 +496,16 @@ def record_generation(
     structured_output_valid: Optional[bool] = None,
     request_id: Optional[str] = None,
     agent_node: Optional[str] = None,
+    # (2026-09-12) Sac libre de dimensions d'observabilité SUPPLÉMENTAIRES,
+    # propre à l'appelant — ex: `message_sid`, `prompt_version`,
+    # `cache_hit`, `llm_call_index`, `current_goal`, `expected_input` pour
+    # `input_interpreter` (voir `interpreter/routing.py`). Ajouté en un seul
+    # paramètre extensible plutôt qu'un nouveau paramètre nommé par
+    # dimension : évite de retoucher cette signature (et les 4 signatures
+    # en amont dans `llm_gateway/gateway.py`) à chaque nouveau besoin
+    # d'observabilité. AUCUN secret/credential ne doit y transiter — même
+    # règle que les autres champs de cette fonction (§21/§52).
+    extra_metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Enregistre un appel LLM : Langfuse Generation + métriques Prometheus.
 
@@ -349,6 +544,21 @@ def record_generation(
                 provider=provider or "unknown",
                 reason=fallback_reason or "unknown",
             ).inc()
+        # (2026-09-13, Incrément G, spec §35) : `legacy_fallback`/
+        # `prompt_family`/`estimated_cost_usd` voyagent dans `extra_metadata`
+        # (sac libre déjà établi, pas un nouveau paramètre nommé — voir la
+        # docstring du paramètre `extra_metadata` plus haut).
+        _extra = extra_metadata or {}
+        if _extra.get("legacy_fallback") and _metric("legacy_fallback"):
+            _metric("legacy_fallback").labels(
+                prompt_family=str(_extra.get("prompt_family") or "unknown")
+            ).inc()
+        _cost = _extra.get("estimated_cost_usd")
+        if _cost is not None and _metric("llm_cost"):
+            _metric("llm_cost").labels(
+                prompt_family=str(_extra.get("prompt_family") or "unknown"),
+                model=model,
+            ).inc(float(_cost))
     except Exception:
         pass
 
@@ -379,6 +589,12 @@ def record_generation(
         ):
             if value is not None:
                 gen_metadata[key] = value
+        # `extra_metadata` fusionné EN DERNIER — un appelant qui fournirait
+        # explicitement une clé déjà posée ci-dessus (ex: `agent_node`) la
+        # remplace volontairement, jamais l'inverse (les valeurs nommées
+        # ci-dessus restent la source de vérité par défaut).
+        if extra_metadata:
+            gen_metadata.update(extra_metadata)
 
         gen_kwargs: Dict[str, Any] = {
             "name": name,
@@ -596,7 +812,21 @@ def record_circuit_open(provider: str, model: str) -> None:
 
 
 def flush() -> None:
-    """Force l'envoi des évènements Langfuse bufferisés (fin de tâche worker)."""
+    """Force l'envoi des évènements Langfuse bufferisés (fin de tâche worker).
+
+    (2026-09-17) : NE fait PAS de `force_flush()` sur le MeterProvider OTel,
+    délibérément — testé en direct : `force_flush(timeout_millis=...)` ne
+    borne PAS l'attente réelle quand le collector est injoignable (l'export
+    OTLP retente en interne avec backoff exponentiel, 1s/2s/4s/8s/16s/...,
+    INDÉPENDAMMENT du timeout demandé au MeterProvider — mesuré : toujours
+    bloqué après 20s dans ce test). Appeler ça à CHAQUE fin de tâche worker
+    aurait réintroduit exactement la même classe de bug que le blocage Redis
+    synchrone déjà corrigé cette session (un appel d'observabilité qui peut
+    geler le chemin critique). Les métriques partent via l'export PÉRIODIQUE
+    en arrière-plan du `PeriodicExportingMetricReader` (15s, non-bloquant
+    pour le traitement des tâches) — largement suffisant pour des compteurs
+    agrégés (contrairement aux traces/événements Langfuse, où un flush par
+    tâche a un vrai intérêt de corrélation, jamais appliqué ici)."""
     if _langfuse_client is not None:
         try:
             _langfuse_client.flush()

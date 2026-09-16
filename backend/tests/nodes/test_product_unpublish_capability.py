@@ -118,7 +118,7 @@ class TestResolveProductForUnpublish:
 
     def test_several_products_never_pick_implicitly(self):
         """Action destructrice : jamais « le dernier produit » — un menu
-        numéroté strict, comme `_resolve_stock`."""
+        numéroté strict."""
         from ladini.graphs.agents.market_coach.flows.producer.flow import (
             _resolve_product_for_unpublish,
         )
@@ -159,6 +159,32 @@ class TestResolveProductForUnpublish:
         assert result["transaction_payload"]["product_id"] == "prod-2"
         # Les jetons de sélection ne doivent jamais fuir dans le payload exécuté.
         assert "selection_index" not in result["transaction_payload"]
+
+    def test_product_id_already_resolved_by_memory_update_is_used_directly(self):
+        """Incident réel (2026-09-15) — voir le miroir
+        test_resolve_order_for_cancellation.py : `nodes/memory.py` résout la
+        sélection numérique en `product_id` (mapping_kind="catalog_product")
+        puis efface `selection_index` dans le même mouvement ; ce résolveur
+        ne lisait QUE `selection_index`."""
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
+            _resolve_product_for_unpublish,
+        )
+
+        runtime = rt(
+            {
+                "get_my_products": {
+                    "status": "success",
+                    "data": [_product("prod-1", "Riz"), _product("prod-2", "Maïs")],
+                }
+            }
+        )
+        result = run(
+            _resolve_product_for_unpublish(
+                runtime, "+22670000001", {"product_id": "prod-2"}
+            )
+        )
+        assert result["status"] == "PLANNING"
+        assert result["transaction_payload"]["product_id"] == "prod-2"
 
     def test_out_of_range_selection_re_displays_the_menu(self):
         from ladini.graphs.agents.market_coach.flows.producer.flow import (

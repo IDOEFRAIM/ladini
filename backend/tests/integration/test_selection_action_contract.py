@@ -140,19 +140,20 @@ class TestLiveIncidentProducerThenTierByFreeText:
         state = _tb(state, runtime)
 
         # --- Turn 3: "LE PREMIER, C'EST À DIRE 5 L" (free text) ----------
-        # Le LLM reçoit `action_structuree_attendue` = SELECT_PRICING_TIER et
-        # les VRAIS tier_id — voir le prompt injecté (rule 4bis). On scripte
-        # exactement la sortie attendue de ce contrat pour vérifier que le
-        # CODE (validation + exécution), pas juste le prompt, se comporte
-        # correctement une fois cette décision reçue.
+        # (2026-09-12, Incrément D) : ce tour route désormais vers le
+        # micro-prompt STRUCTURED_ACTION dédié
+        # (`interpreter/structured_action_micro.py`) — il ne voit QUE des
+        # labels humains numérotés (JAMAIS `tier_id`), et répond avec
+        # "selection_index" (1-based) — c'est PYTHON qui résout l'index
+        # (1) vers le VRAI tier_id ("t5", 5 L — premier de la liste
+        # construite par `build_selection_context` depuis
+        # `_vendor_a().pricing_tiers`). On scripte donc la sortie humaine
+        # attendue de ce nouveau contrat, pas l'ancien format à base d'id.
         runtime.llm = ScriptedLLM({
-            "interpreted_event": "SELECTION",
-            "detected_intent": "BUYER_ADD_TO_CART",
+            "disposition": "ACTION",
+            "action": "SELECT_PRICING_TIER",
+            "selection_index": 1,
             "confidence": 0.97,
-            "extracted_entities": {
-                "agent_action": "SELECT_PRICING_TIER",
-                "action_pricing_tier_id": "t5",
-            },
         })
         state["normalized_text"] = "LE PREMIER, C'EST À DIRE 5 L"
         state["user_query"] = "LE PREMIER, C'EST À DIRE 5 L"

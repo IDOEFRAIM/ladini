@@ -33,6 +33,10 @@ logger = logging.getLogger("ladini.llm_gateway.registry")
 _DEFAULT_TIMEOUT_BY_PROFILE = {
     LLMProfile.FAST: 8.0,
     LLMProfile.REASONING: 12.0,
+    # Même budget que FAST — Groq llama-3.1-8b-instant (2026-09-12, Phase
+    # B.1) est un modèle "instant", pas de raison de lui donner le budget
+    # REASONING (12s).
+    LLMProfile.INTERPRETER: 8.0,
 }
 
 # Capacités connues par provider — PAS par modèle individuel (trop de
@@ -105,6 +109,15 @@ def load_registry(settings=None) -> Dict[LLMProfile, List[ModelCandidate]]:
             getattr(settings, "LLM_REASONING_PRIMARY", ""),
             getattr(settings, "LLM_REASONING_FALLBACK_1", ""),
             getattr(settings, "LLM_REASONING_FALLBACK_2", ""),
+        ],
+        # (2026-09-12, Phase B.1) : profil dédié à `interpreter/` — local à
+        # ce chantier, NE touche PAS `LLM_FAST_*`/`LLM_REASONING_*` ni leurs
+        # consommateurs existants (INPUT_NORMALIZATION/SECURITY_MODERATION/
+        # STATE_CLEANER, génération de réponse).
+        LLMProfile.INTERPRETER: [
+            getattr(settings, "LLM_INTERPRETER_PRIMARY", ""),
+            getattr(settings, "LLM_INTERPRETER_FALLBACK_1", ""),
+            getattr(settings, "LLM_INTERPRETER_FALLBACK_2", ""),
         ],
     }
 

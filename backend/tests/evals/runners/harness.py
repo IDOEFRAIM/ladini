@@ -203,19 +203,22 @@ def find_scenario(scenario_id: str) -> Path:
 #   harness never falls back to guessing a dispatch strategy.
 # =====================================================================
 
+# (2026-09-13, Deep Intent Architecture Cleanup) : STOCK_DELETE/
+# STOCK_UPDATE_LEVEL/STOCK_ADJUST/STOCK_REMOVE_PARTIAL/STOCK_RECORD_MOVEMENT/
+# SALES_ACCEPT_CONTRACT/PROCUREMENT_ACCEPT_OFFER retirés — tous supprimés
+# d'INTENT_CONFIG (tool_name fictif, jamais réellement exécutable).
 GENERIC_CHAIN_INTENTS = {
-    "STOCK_REGISTER_HARVEST", "STOCK_DELETE", "STOCK_UPDATE_LEVEL",
-    "STOCK_ADJUST", "STOCK_REMOVE_PARTIAL", "STOCK_RECORD_MOVEMENT",
+    "STOCK_REGISTER_HARVEST",
     "SALES_PUBLISH_PRODUCT", "SALES_RECORD_DIRECT", "SALES_PLACE_BID",
-    "SALES_ACCEPT_CONTRACT",
     "FINANCE_LOG_EXPENSE",
-    "PROCUREMENT_CREATE_REQUEST", "PROCUREMENT_ACCEPT_OFFER",
+    "PROCUREMENT_CREATE_REQUEST",
     "STOCK_GET_SUMMARY", "SALES_LIST_ORDERS",
 }
-# NOTE: SALES_UPDATE_PRODUCT / SALES_UPDATE_PRODUCTION deliberately excluded
-# — traced to _resolve_product_for_update / _resolve_cycle_for_update, a
-# self-managed "mini state machine" per producer/flow.py, NOT the generic
-# chain. See P1-SALES-021 result below for what actually happens when run.
+# NOTE: SALES_UPDATE_PRODUCT / PRODUCTION_UPDATE_FUTURE (anciennement
+# SALES_UPDATE_PRODUCTION) deliberately excluded — traced to
+# _resolve_product_for_update / _resolve_cycle_for_update, a self-managed
+# "mini state machine" per producer/flow.py, NOT the generic chain. See
+# P1-SALES-021 result below for what actually happens when run.
 
 
 async def _run_generic_chain(

@@ -229,6 +229,59 @@ class _NoopExecutor:
         return payload
 
 
+def _derive_execution_idempotency_key(state: Dict[str, Any]) -> Optional[str]:
+    """Clé d'idempotence CLIENT pour l'exécution MCP de ce tour — générique,
+    pas spécifique à un goal câblé en dur ici (l'exécuteur reste agnostique
+    des goals, mandat §2) : dérivée du draft versionné (PROCUREMENT ou
+    SALES_PUBLISH) SEULEMENT s'il est présent dans l'état de CE tour. `None`
+    pour tout goal sans draft (repli sur un UUID aléatoire par tentative
+    côté `AgriMCPClient.call_tool` — pas de garantie de dédup, comportement
+    historique inchangé pour ces goals).
+
+    (2026-09-03, mandat §8 ; étendu 2026-09-17 follow-up pre-Hetzner) : la
+    clé est RÉELLEMENT dédupliquée côté serveur depuis 2026-09-03 (voir
+    `infrastructure/mcp/runtime.py::AgriDBMCPServer.call_tool`,
+    `mcp_idempotency_store.claim`) — pas seulement une corrélation client.
+
+    (2026-09-17) : `sales_publish_draft` ajouté — `execution_key()` existait
+    déjà dans `domain/sales_publish_draft.py` (même fonction, même format
+    que PROCUREMENT) mais n'était JAMAIS lue ici : `create_product` partait
+    donc TOUJOURS avec une clé `None` — gap confirmé en audit, pas
+    seulement documenté. Extrait en fonction pure (2026-09-17) pour être
+    testable sans exécuter tout le nœud — voir
+    `test_execution_idempotency_key.py`."""
+    _draft_for_key = state.get("procurement_draft")
+    if isinstance(_draft_for_key, dict) and _draft_for_key.get("draft_id"):
+        # Réutilise LA même fonction que le domaine (jamais un format
+        # dupliqué à la main ici — verrouillé par
+        # `test_procurement_execution_pipeline_closure.py::TestExecutionKey`).
+        from ladini.graphs.agents.market_coach.domain.procurement_draft import (
+            ProcurementDraft as _ProcurementDraft,
+        )
+        from ladini.graphs.agents.market_coach.domain.procurement_draft import (
+            execution_key as _procurement_execution_key,
+        )
+
+        _parsed_draft = _ProcurementDraft.from_dict(_draft_for_key)
+        if _parsed_draft is not None:
+            return _procurement_execution_key(_parsed_draft)
+
+    _sales_draft_for_key = state.get("sales_publish_draft")
+    if isinstance(_sales_draft_for_key, dict) and _sales_draft_for_key.get("draft_id"):
+        from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
+            SalesPublishDraft as _SalesPublishDraft,
+        )
+        from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
+            execution_key as _sales_publish_execution_key,
+        )
+
+        _parsed_sales_draft = _SalesPublishDraft.from_dict(_sales_draft_for_key)
+        if _parsed_sales_draft is not None:
+            return _sales_publish_execution_key(_parsed_sales_draft)
+
+    return None
+
+
 def _extract_float(*values: Any) -> Optional[float]:
     for value in values:
         if value is None:
@@ -632,29 +685,7 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
 
     provider: ToolProvider = MCPToolProvider(runtime=mc_runtime)
 
-    # (2026-09-03, mandat §8) : clé d'idempotence CLIENT — générique, pas
-    # spécifique à un goal câblé en dur ici (l'exécuteur reste agnostique
-    # des goals, mandat §2) : dérivée du `procurement_draft` versionné
-    # SEULEMENT s'il est présent dans l'état de CE tour (aujourd'hui, seul
-    # PROCUREMENT_CREATE_REQUEST en pose un). No-op pour les 15+ autres
-    # goals. Portée honnête : voir `MarketRuntime.call_db` — corrélation +
-    # retry interne au client MCP, PAS de dédup serveur.
-    idempotency_key: Optional[str] = None
-    _draft_for_key = state.get("procurement_draft")
-    if isinstance(_draft_for_key, dict) and _draft_for_key.get("draft_id"):
-        # Réutilise LA même fonction que le domaine (jamais un format
-        # dupliqué à la main ici — verrouillé par
-        # `test_procurement_execution_pipeline_closure.py::TestExecutionKey`).
-        from ladini.graphs.agents.market_coach.domain.procurement_draft import (
-            ProcurementDraft as _ProcurementDraft,
-        )
-        from ladini.graphs.agents.market_coach.domain.procurement_draft import (
-            execution_key as _procurement_execution_key,
-        )
-
-        _parsed_draft = _ProcurementDraft.from_dict(_draft_for_key)
-        if _parsed_draft is not None:
-            idempotency_key = _procurement_execution_key(_parsed_draft)
+    idempotency_key = _derive_execution_idempotency_key(state)
 
     _MCP_MAX_TRANSIENT_RETRIES = 2
     _TRANSIENT_MARKERS = (

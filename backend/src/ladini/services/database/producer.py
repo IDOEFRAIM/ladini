@@ -35,6 +35,7 @@ from ladini.domain.models import (
 from ladini.domain.pricing_tiers import (
     PricingTierError,
     resolve_stock_debit,
+    resolve_tier,
     tiers_to_dicts,
     validate_pricing_tiers,
 )
@@ -1402,6 +1403,7 @@ class ProducerMgmtMixin(BaseMixin):
 
         status_icons = {
             "PENDING": "🟡",
+            "PENDING_PRODUCER_CONFIRMATION": "🟡",
             "CONFIRMED": "🟢",
             "COMPLETED": "✅",
             "DELIVERED": "✅",
@@ -1419,6 +1421,15 @@ class ProducerMgmtMixin(BaseMixin):
         payload: List[Dict[str, Any]] = []
         menu_lines = ["📦 *Vos commandes récentes :*"]
         mapping: Dict[str, str] = {}
+        # (2026-09-14, incident WhatsApp #7) : ce listing (SALES_LIST_ORDERS,
+        # consultation directe des ventes) affichait des commandes 🟡
+        # (PENDING_PRODUCER_CONFIRMATION) SANS jamais dire comment agir
+        # dessus — contrairement à `_producer_sales_block`
+        # (flows/buyer/order_tracking.py), qui porte le même rappel.
+        # Signalé par un producteur réel : la liste montrait des commandes
+        # en attente sans qu'il sache que "confirmer"/"annuler" s'y
+        # appliquaient.
+        _has_pending_confirmation = False
 
         for idx, order in enumerate(orders, start=1):
             relevant_items: List[Dict[str, Any]] = []
@@ -1429,6 +1440,34 @@ class ProducerMgmtMixin(BaseMixin):
                     or getattr(product, "producer_id", None) != producer_obj.id
                 ):
                     continue
+                # `item.quantity` est le NOMBRE DE PAQUETS achetés dès qu'un
+                # palier est impliqué (ex: 4 bidons), jamais une quantité
+                # dans l'unité de base du produit — `item.unit` (hérité du
+                # produit, ex: "LITRE") ne lui correspond donc pas : afficher
+                # "4 LITRE" pour une commande de 4 bidons de 20 L est FAUX,
+                # pas seulement ambigu (incident réel 2026-09-14, signalé par
+                # un producteur : sa commande de plusieurs bidons de 20 L
+                # s'affichait "miel (4 litre)"). Quand `tier_id` est posé
+                # (voir `OrderItem.tier_id`/`base_unit_quantity`,
+                # domain/orders/models.py), résout le palier RÉELLEMENT
+                # acheté pour afficher son conditionnement littéral ("4
+                # bidon de 20 L") plutôt que ce mélange nombre-de-paquets +
+                # unité-de-base. `None` (silencieux) si le palier n'existe
+                # plus dans `Product.pricing_tiers` (produit modifié depuis)
+                # — le repli sur l'affichage générique reste correct dans ce
+                # cas, jamais une erreur utilisateur pour une commande déjà
+                # passée.
+                tier_label = None
+                item_tier_id = getattr(item, "tier_id", None)
+                if item_tier_id and product.pricing_tiers:
+                    try:
+                        tier = resolve_tier(product.pricing_tiers, item_tier_id)
+                        tier_label = (
+                            f"{tier.packaging or 'unité'} de "
+                            f"{tier.quantity:g} {tier.unit}"
+                        )
+                    except PricingTierError:
+                        tier_label = None
                 relevant_items.append(
                     {
                         "product_id": str(product.id),
@@ -1436,6 +1475,7 @@ class ProducerMgmtMixin(BaseMixin):
                         "quantity": float(item.quantity or 0.0),
                         "unit": (product.unit or "UNITE").upper(),
                         "price_at_sale": float(item.price_at_sale or 0.0),
+                        "tier_label": tier_label,
                     }
                 )
 
@@ -1457,6 +1497,8 @@ class ProducerMgmtMixin(BaseMixin):
                     relevant_items.append(cycle_context)
 
             status_value = (order.status or "PENDING").upper()
+            if status_value == "PENDING_PRODUCER_CONFIRMATION":
+                _has_pending_confirmation = True
             status_label = (
                 f"{status_icons.get(status_value, '🧾')} {status_value.title()}"
             )
@@ -1471,7 +1513,13 @@ class ProducerMgmtMixin(BaseMixin):
             )
 
             summary_items = ", ".join(
-                f"{item['product_name']} ({item['quantity']:.0f} {item['unit']})"
+                f"{item['product_name']} ("
+                + (
+                    f"{item['quantity']:.0f} {item['tier_label']}"
+                    if item.get("tier_label")
+                    else f"{item['quantity']:.0f} {item['unit']}"
+                )
+                + ")"
                 for item in relevant_items
                 if item.get("quantity") is not None
             )
@@ -1529,6 +1577,12 @@ class ProducerMgmtMixin(BaseMixin):
                     "order_type": source_type,
                     "items": relevant_items,
                 }
+            )
+
+        if _has_pending_confirmation:
+            menu_lines.append(
+                "\n_Tapez *confirmer* pour accepter une commande en attente "
+                "(🟡), ou *annuler* si vous ne pouvez pas l'honorer._"
             )
 
         return {
@@ -1839,10 +1893,16 @@ class ProducerMgmtMixin(BaseMixin):
                     f"Commande #{str(order.id)[:8].upper()} déjà annulée."
                 ),
             }
-        if order_status_up != "CONFIRMED":
+        # (2026-09-13, confirmation explicite producteur) : refuser AVANT de
+        # confirmer est un cas d'usage légitime et distinct — désormais
+        # accepté au même titre qu'annuler APRÈS confirmation. Mécanique
+        # strictement identique (recrédit stock, historique, notification
+        # acheteur) : aucune raison de dupliquer cette méthode pour ça.
+        if order_status_up not in ("CONFIRMED", "PENDING_PRODUCER_CONFIRMATION"):
             raise BusinessRuleException(
-                "Seule une commande confirmée et non encore livrée peut être "
-                f"annulée (statut actuel : {order.status}).",
+                "Seule une commande confirmée ou en attente de votre "
+                "confirmation, et non encore livrée, peut être annulée "
+                f"(statut actuel : {order.status}).",
                 reason="order_not_confirmed",
             )
 
@@ -1856,7 +1916,19 @@ class ProducerMgmtMixin(BaseMixin):
                     .with_for_update()
                 )
                 if product:
-                    product.quantity_for_sale += resolve_stock_debit(item)
+                    # `resolve_stock_debit` renvoie un `float` ; `quantity_for_sale`
+                    # est une colonne `Numeric` (chargée en `decimal.Decimal`) —
+                    # `Decimal += float` lève `TypeError` (incident réel
+                    # 2026-09-15, `cancel_confirmed_order` masqué en erreur
+                    # technique générique côté agent). Même parade déjà
+                    # établie ailleurs dans ce module (`services/database/
+                    # buyer.py`, `available = float(product.quantity_for_sale
+                    # or 0.0)` avant l'arithmétique) : convertir explicitement
+                    # avant d'opérer, jamais d'opérateur augmenté sur la
+                    # colonne Decimal directement.
+                    product.quantity_for_sale = float(
+                        product.quantity_for_sale or 0.0
+                    ) + resolve_stock_debit(item)
 
         normalized_reason = str(reason or "").strip() or None
         order.status = "CANCELLED"
@@ -1873,10 +1945,14 @@ class ProducerMgmtMixin(BaseMixin):
                 id=uuid.uuid4(),
                 order_id=order.id,
                 status_type="ORDER",
-                from_status="CONFIRMED",
+                from_status=order_status_up,
                 to_status="CANCELLED",
                 actor_id=producer_obj.id,
-                note="cancelled_by_producer",
+                note=(
+                    "declined_by_producer"
+                    if order_status_up == "PENDING_PRODUCER_CONFIRMATION"
+                    else "cancelled_by_producer"
+                ),
             )
         )
 
@@ -1921,6 +1997,156 @@ class ProducerMgmtMixin(BaseMixin):
                 f"❌ Commande #{str(order.id)[:8].upper()} annulée. "
                 "L'acheteur en est informé."
                 + (f"\n📝 Motif : {normalized_reason}" if normalized_reason else "")
+            ),
+        }
+
+    async def confirm_order_by_producer(
+        self, producer_phone: str, order_id: str
+    ) -> Dict[str, Any]:
+        """Le producteur confirme explicitement pouvoir honorer une commande
+        reçue en attente (`PENDING_PRODUCER_CONFIRMATION` → `CONFIRMED`).
+
+        Décision produit (2026-09-13, signalé par un producteur réel) : avant
+        ce correctif, une précommande directe (paiement à la livraison,
+        `BuyerMixin.confirm_preorder_draft`) passait `CONFIRMED` sans AUCUNE
+        étape d'acceptation par le producteur — il n'y avait ni logique de
+        confirmation, ni de refus, seulement une notification informative
+        ("préparez la commande"). Cette méthode ferme ce gap : le stock a
+        déjà été débité à la création de la commande (comme avant, aucun
+        changement de ce côté) ; SEULE la transition d'état change de sens —
+        `CONFIRMED` signifie désormais "le producteur s'est engagé à honorer
+        cette commande", pas "le système l'a enregistrée".
+
+        Même gabarit mécanique que `cancel_confirmed_order` (propriété
+        résolue sur les DEUX origines réelles d'une commande, verrou
+        `FOR UPDATE`, notification acheteur en Outbox, même transaction) —
+        rien n'est réinventé, seul le sens de la transition change.
+
+        NON implémenté délibérément (hors périmètre de ce correctif,
+        cantonné au chemin précommande directe sans escrow) : aucun délai
+        d'expiration automatique si le producteur ne répond pas — la
+        commande reste en `PENDING_PRODUCER_CONFIRMATION` indéfiniment tant
+        qu'aucune action (confirmer ou annuler) n'est prise. Un mécanisme
+        d'expiration serait une décision produit distincte (durée du délai,
+        comportement au terme du délai) à trancher séparément."""
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+
+        try:
+            o_uuid = uuid.UUID(str(order_id))
+        except (TypeError, ValueError):
+            raise BusinessRuleException(
+                "Identifiant de commande invalide.", reason="invalid_order_id"
+            ) from None
+
+        _, producer_obj = await self.get_producer_profile(phone=producer_phone)
+
+        order = await current_session.scalar(
+            select(Order)
+            .options(selectinload(Order.items).joinedload(OrderItem.product))
+            .where(Order.id == o_uuid)
+            .with_for_update()
+        )
+        if not order:
+            raise BusinessRuleException(
+                "Commande introuvable.", reason="order_not_found"
+            )
+
+        owns_via_items = (
+            await current_session.scalar(
+                select(OrderItem.id)
+                .join(Product, Product.id == OrderItem.product_id)
+                .where(
+                    OrderItem.order_id == o_uuid,
+                    Product.producer_id == producer_obj.id,
+                )
+                .limit(1)
+            )
+        ) is not None
+        owns_via_bid = False
+        if not owns_via_items and order.winning_bid_id:
+            owns_via_bid = (
+                await current_session.scalar(
+                    select(Bid.id).where(
+                        Bid.id == order.winning_bid_id,
+                        Bid.producer_id == producer_obj.id,
+                    )
+                )
+            ) is not None
+        if not owns_via_items and not owns_via_bid:
+            raise BusinessRuleException(
+                "Commande introuvable ou non autorisée.", reason="not_owner"
+            )
+
+        order_status_up = str(order.status or "").upper()
+        if order_status_up == "CONFIRMED":
+            return {
+                "status": "success",
+                "outcome": "ALREADY_CONFIRMED",
+                "order_id": str(order.id),
+                "message": (
+                    f"Commande #{str(order.id)[:8].upper()} déjà confirmée."
+                ),
+            }
+        if order_status_up != "PENDING_PRODUCER_CONFIRMATION":
+            raise BusinessRuleException(
+                "Seule une commande en attente de votre confirmation peut "
+                f"être confirmée (statut actuel : {order.status}).",
+                reason="order_not_pending_confirmation",
+            )
+
+        order.status = "CONFIRMED"
+
+        current_session.add(
+            OrderStatusHistory(
+                id=uuid.uuid4(),
+                order_id=order.id,
+                status_type="ORDER",
+                from_status="PENDING_PRODUCER_CONFIRMATION",
+                to_status="CONFIRMED",
+                actor_id=producer_obj.id,
+                note="confirmed_by_producer",
+            )
+        )
+
+        # Notification acheteur — même mécanique que l'annulation
+        # producteur, Outbox, MÊME transaction.
+        buyer_row = (
+            await current_session.execute(
+                select(User.phone)
+                .join(BuyerProfile, BuyerProfile.user_id == User.id)
+                .where(BuyerProfile.id == order.buyer_id)
+                .limit(1)
+            )
+        ).first()
+        buyer_phone = buyer_row[0] if buyer_row else None
+        if buyer_phone:
+            from ladini.workers.outbox import templates as _outbox_templates
+            from ladini.workers.repositories import outbox_repo as _outbox_repo
+
+            await _outbox_repo.enqueue(
+                current_session,
+                [
+                    {
+                        "channel": "WHATSAPP",
+                        "recipient_phone": buyer_phone,
+                        "template_key": _outbox_templates.ORDER_CONFIRMED_BY_PRODUCER_BUYER,
+                        "payload": {"order_number": str(order.id)[:8].upper()},
+                        "dedupe_key": f"ORDER_CONFIRMED_BUYER:{order.id}",
+                    }
+                ],
+            )
+
+        await current_session.flush()
+
+        return {
+            "status": "success",
+            "outcome": "CONFIRMED",
+            "order_id": str(order.id),
+            "message": (
+                f"✅ Commande #{str(order.id)[:8].upper()} confirmée. "
+                "L'acheteur en est informé — préparez la commande."
             ),
         }
 
@@ -2238,14 +2464,19 @@ class ProducerMgmtMixin(BaseMixin):
             )
 
         # 4. Application de la logique métier (Incrémentation ou Décrémentation)
+        # `Stock.quantity` est une colonne `Numeric` (chargée en
+        # `decimal.Decimal`) — `Decimal += float`/`-= float` lève `TypeError`
+        # dès que `quantity` est un vrai `float` (même classe de bug que
+        # `cancel_confirmed_order`, incident réel 2026-09-15). Conversion
+        # explicite avant l'arithmétique, jamais d'opérateur augmenté direct.
         if mtype == "IN":
-            stock_obj.quantity += quantity
+            stock_obj.quantity = float(stock_obj.quantity or 0.0) + float(quantity)
         elif mtype == "OUT":
             if stock_obj.quantity < quantity:
                 raise ValueError(
                     f"Stock insuffisant. Disponible : {stock_obj.quantity} {stock_obj.unit}"
                 )
-            stock_obj.quantity -= quantity
+            stock_obj.quantity = float(stock_obj.quantity or 0.0) - float(quantity)
         else:
             raise ValueError("Type de mouvement invalide. Utilisez 'IN' ou 'OUT'.")
 

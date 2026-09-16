@@ -114,9 +114,11 @@ MCP_EXPOSED_TOOLS: frozenset[str] = frozenset(
         "cancel_pending_order",
         "confirm_delivery_and_payment",
         "cancel_confirmed_order",
+        "confirm_order_by_producer",
         "record_sale",
         # ── Enchères / RFQ ───────────────────────────────────────────────
         "create_auction",
+        "update_auction_fields",
         "get_auctions",
         "get_auction_bids",
         "get_auctions_bids",

@@ -52,7 +52,29 @@ class HealthRegistry:
 
     # ── Lecture ──────────────────────────────────────────────────────
     def get(self, candidate_key: str) -> HealthRecord:
-        raw = self._redis.get(_key(candidate_key))
+        # (2026-09-13, Incrément G, spec §43) : fail-open EXPLICITE — trouvé
+        # par chaos test (`tests/chaos/test_llm_gateway_chaos.py`) : sans ce
+        # `try`, une panne Redis PENDANT `self._redis.get()` remontait non
+        # catchée jusqu'à `gateway.complete()`, faisant échouer TOUT appel
+        # LLM à cause d'une panne d'un mécanisme de PROTECTION — alors que
+        # la docstring de ce module promet déjà "jamais un `self.health = {}`
+        # local" mais pas, jusqu'ici, "jamais une panne Redis ne doit
+        # dégrader le SERVICE". Traiter un Redis indisponible comme CLOSED
+        # (candidat considéré sain, aucune information contraire) est le
+        # même choix déjà fait pour `try_acquire_probe_lock` juste plus bas
+        # dans ce fichier — cohérent, pas un nouveau principe.
+        try:
+            raw = self._redis.get(_key(candidate_key))
+        except Exception as exc:
+            logger.warning(
+                "[llm_gateway] Redis indisponible pour lire la santé de %s "
+                "(%s) — fail-open (CLOSED, spec §43) : le disjoncteur ne "
+                "doit jamais transformer une panne d'observabilité en "
+                "panne de service.",
+                candidate_key,
+                exc,
+            )
+            return HealthRecord()
         if not raw:
             return HealthRecord()
         try:

@@ -29,6 +29,38 @@ def _safe_price_unit(raw: Any, fallback: str) -> str:
     return canonical_unit_label(text, fallback)
 
 
+def _unit_assumed_note(payload: Dict[str, Any], unit_label: str) -> str:
+    """Avertissement visible quand l'unité n'a PAS été écrite par le
+    producteur mais seulement supposée d'après la nature du produit
+    (`validation.py::_apply_slot_defaults`, drapeau `unit_was_assumed`).
+
+    Incident réel (2026-09-15) : « Vente de 25 LITRE de boeufs » — un défaut
+    silencieux, jamais distingué d'une unité confirmée, laissait passer une
+    supposition fausse jusqu'au récapitulatif final. Même famille que
+    `mismatch_note` ci-dessous : on ne bloque pas la conversation avec une
+    question supplémentaire (le récap à confirmer/annuler existe déjà), mais
+    on rend l'hypothèse impossible à manquer et on dit comment la corriger —
+    un producteur qui confirme par habitude, sans tout relire, doit quand
+    même voir CE point précis.
+
+    Formulation corrigée (2026-09-15, retour terrain) : la première version
+    disait « Dites *modifier unité : ...* » — une SYNTAXE DE COMMANDE, pas
+    une valeur. Un producteur qui répond littéralement « modifier unite »
+    (sans valeur, comme observé en usage réel) ne donne rien d'exploitable
+    au tour suivant, qui ne peut que réafficher le MÊME récap inchangé. La
+    consigne demande maintenant le MOT lui-même (« tête », « sac »…) — c'est
+    exactement ce que `extract_unit_only_from_text`/`resolve_product_unit`
+    savent reconnaître de façon fiable dans une réponse libre, sans exiger
+    une syntaxe particulière."""
+    if not payload.get("unit_was_assumed"):
+        return ""
+    return (
+        f"\n⚠️ Unité non précisée par vous : *{unit_label}* supposée d'après le "
+        "produit. Si ce n'est pas la bonne, répondez simplement avec l'unité "
+        "correcte (ex : *tête*, *sac*, *kg*)."
+    )
+
+
 def _resolve_units(
     payload: Dict[str, Any], default_unit: str = "KG"
 ) -> Tuple[str, str]:
@@ -97,7 +129,7 @@ def _format_pricing_tiers(payload: Dict[str, Any]) -> Optional[str]:
 
 
 def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
-    if goal == "DECLARE_CROP_CYCLE":
+    if goal == "PRODUCTION_DECLARE_FUTURE":
         production_type = str(payload.get("production_type") or "CROP").upper()
         product = payload.get("product") or payload.get("species") or "production"
         default_unit = payload.get("unit") or (
@@ -133,9 +165,10 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         ]
         bullet_list = "\n".join(f"- {line}" for line in lines if line)
         summary = "Déclaration d'un lot futur"
-        return f"{summary} :\n{bullet_list}" if bullet_list else summary
+        note = _unit_assumed_note(payload, canonical_unit_label(converted_unit))
+        return f"{summary} :\n{bullet_list}{note}" if bullet_list else summary
 
-    if goal == "SALES_UPDATE_PRODUCTION":
+    if goal == "PRODUCTION_UPDATE_FUTURE":
         # Récap dynamique : n'affiche QUE les champs réellement fournis (mise à
         # jour partielle) — sans ça le générique ne montrait que quantité/unité
         # et omettait silencieusement un changement de nom (bug vécu : "le nom
@@ -175,7 +208,7 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         return f"{summary} :\n{bullet_list}" if bullet_list else summary
 
     if goal == "SALES_UPDATE_PRODUCT":
-        # Même logique que SALES_UPDATE_PRODUCTION : n'afficher QUE les champs
+        # Même logique que PRODUCTION_UPDATE_FUTURE : n'afficher QUE les champs
         # réellement fournis (mise à jour partielle du catalogue).
         lines = []
         if payload.get("product") not in (None, "", [], {}):
@@ -240,12 +273,26 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         if price_unit_mismatch
         else ""
     )
+    unit_note = _unit_assumed_note(payload, quantity_unit_for_price)
 
     pricing_tiers_block = _format_pricing_tiers(payload)
+
+    # Incident réel (2026-09-14) : quand `pricing_tiers` est présent, le
+    # récapitulatif n'affichait QUE les déclinaisons de prix — la quantité
+    # TOTALE en stock (root `quantity`/`unit`, ex: "900 LITRE" issus de "60
+    # bidons de 5L et 30 bidons de 20L") disparaissait complètement de ce que
+    # voit le producteur avant de confirmer. Il ne pouvait donc jamais
+    # repérer une extraction fausse du stock total — l'agent doit guider,
+    # pas cacher ce qu'il a compris. Ajoutée en complément des tarifs, jamais
+    # à leur place.
+    _quantity_with_tiers_suffix = (
+        f"\nQuantité totale disponible : {quantity_line}" if quantity_line else ""
+    )
 
     mapping = {
         "SALES_PUBLISH_PRODUCT": (
             f"Vente de {product} — plusieurs déclinaisons :\n{pricing_tiers_block}"
+            f"{_quantity_with_tiers_suffix}{unit_note}"
             if pricing_tiers_block
             else (
                 (
@@ -255,15 +302,19 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
                     else f"Vente de {quantity_line} de {product}."
                 )
                 + mismatch_note
+                + unit_note
             )
             if quantity_line
             else None
         ),
         "SALES_RECORD_DIRECT": (
-            f"Enregistrement d'une vente directe : {quantity_line} de {product}"
-            f" à {price_fmt} FCFA."
-            if price_fmt
-            else f"Enregistrement d'une vente directe : {quantity_line} de {product}."
+            (
+                f"Enregistrement d'une vente directe : {quantity_line} de {product}"
+                f" à {price_fmt} FCFA."
+                if price_fmt
+                else f"Enregistrement d'une vente directe : {quantity_line} de {product}."
+            )
+            + unit_note
         )
         if quantity_line
         else None,
@@ -275,6 +326,7 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
                 else f"Lancement d'un appel d'offres pour {quantity_line} de {product}."
             )
             + mismatch_note
+            + unit_note
         )
         if quantity_line
         else None,
@@ -283,41 +335,25 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
             if price_fmt
             else "Soumission d'une offre sur cette enchère."
         ),
-        "SALES_ACCEPT_CONTRACT": "Validation finale du contrat avec l'acheteur.",
-        "PROCUREMENT_ACCEPT_OFFER": "Acceptation de l'offre du producteur sélectionné.",
-        "PROCUREMENT_SELECT_WINNER": "Sélection de l'offre gagnante.",
         "STOCK_REGISTER_HARVEST": (
             f"Enregistrement d'une récolte de {product} — plusieurs déclinaisons :\n{pricing_tiers_block}"
+            f"{_quantity_with_tiers_suffix}{unit_note}"
             if pricing_tiers_block
             else (
-                f"Enregistrement d'une récolte : {quantity_line} de {product} en stock."
-                if quantity_line
-                else "Enregistrement d'une récolte en stock."
+                (
+                    f"Enregistrement d'une récolte : {quantity_line} de {product} en stock."
+                    if quantity_line
+                    else "Enregistrement d'une récolte en stock."
+                )
+                + unit_note
             )
         ),
-        "STOCK_RECORD_MOVEMENT": (
-            f"Mouvement de stock : {quantity_line} de {product}."
-            if quantity_line
-            else "Mouvement de stock enregistré."
-        ),
-        "STOCK_ADJUST": (
-            f"Modification du stock de {product} à {quantity_line}."
-            if quantity_line
-            else f"Modification du stock de {product}."
-        ),
-        "STOCK_REMOVE_PARTIAL": (
-            f"Retrait de {quantity_line} de {product} du stock."
-            if quantity_line
-            else f"Retrait partiel du stock pour {product}."
-        ),
-        "STOCK_DELETE": f"Suppression définitive du lot de {product}.",
         "FINANCE_LOG_EXPENSE": (
             f"Enregistrement d'une dépense de {price_fmt} FCFA ({product})."
             if price_fmt
             else f"Enregistrement d'une dépense pour {product}."
         ),
         "FARM_CREATE": "Déclaration d'une nouvelle exploitation.",
-        "CROP_RECORD_INTERVENTION": "Enregistrement d'une intervention agronomique.",
     }
     summary = mapping.get(goal)
     if summary:

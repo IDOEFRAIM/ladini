@@ -69,10 +69,10 @@ class TestFreeTextCostsAtMostOneLlmCall:
     def test_a_genuine_free_text_message_calls_the_llm_exactly_once(self):
         interp = make_input_interpreter("PRODUCER")
         llm = ScriptedLLM({
-            "interpreted_event": "NEW_TASK",
-            "detected_intent": "SALES_PUBLISH_PRODUCT",
-            "interpreter_confidence": 0.95,
-            "extracted_entities": {"product": "mais"},
+            "disposition": "NEW_TASK",
+            "intent": "SALES_PUBLISH_PRODUCT",
+            "confidence": 0.95,
+            "entities": {"product": "mais"},
         })
         rt = StubRuntime(llm=llm)
         state = make_state(
@@ -84,11 +84,20 @@ class TestFreeTextCostsAtMostOneLlmCall:
         assert result["detected_intent"] == "SALES_PUBLISH_PRODUCT"
         assert llm.calls == 1
 
-    def test_llm_outage_does_not_retry_internally(self):
-        """Une panne Gateway (crash/timeout) produit UNKNOWN/TECHNICAL_FAILURE
-        en UN SEUL essai côté `input_interpreter` — la ré-tentative inter-
-        provider est déjà portée par le Gateway lui-même (hors périmètre),
-        pas par une boucle locale ici."""
+    def test_llm_outage_falls_back_to_the_legacy_interpreter_once(self):
+        """(2026-09-13, Incrément F) : ce test documentait auparavant "UNE
+        panne = UN SEUL essai" quand NEW_TASK n'avait pas encore de
+        micro-prompt propre — la route NEW_TASK utilisait alors DIRECTEMENT
+        l'interpréteur unifié legacy, sans personne en amont vers qui
+        retomber. Depuis `new_task_micro.py`, une panne infrastructurelle du
+        micro-prompt (spec §57) retombe explicitement sur ce MÊME
+        interpréteur unifié legacy comme filet de sécurité — exactement le
+        même principe déjà appliqué à SELECTION/ACTIVE_SLOT/STRUCTURED_ACTION
+        (voir `test_selection_microprompt.py::
+        test_legacy_fallback_is_traced_in_the_gateway_extra_metadata`). Un
+        total-outage Gateway coûte donc désormais 2 tentatives (micro-prompt
+        + legacy), toutes deux ratées, jamais une boucle locale de retry —
+        chaque tentative reste un essai UNIQUE, pas de ré-essai en interne."""
         interp = make_input_interpreter("PRODUCER")
 
         class _CrashingLLM:
@@ -116,4 +125,4 @@ class TestFreeTextCostsAtMostOneLlmCall:
         )
         result = run(interp(state, rt))
         assert result["interpreted_event"] == "UNKNOWN"
-        assert llm.calls == 1
+        assert llm.calls == 2

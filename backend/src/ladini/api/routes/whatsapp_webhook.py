@@ -13,6 +13,7 @@ pour un rollback instantané.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +25,8 @@ from ladini.api.security import (
     verify_whatsapp_cloud_signature,
 )
 from ladini.api.tasks import process_agent_task
+from ladini.core.idempotency import get_cached as _get_role_hint
+from ladini.core.idempotency import release as _release_role_hint
 from ladini.core.location import LocationOutcome, persist_shared_location
 from ladini.core.settings import settings
 from ladini.graphs.roles import normalize_role
@@ -39,6 +42,12 @@ logger = logging.getLogger("Ladini.WhatsAppWebhook")
 # par l'API (HTTP 200) ne signifie JAMAIS "livré" — seul ce callback dit si
 # l'envoi a réellement échoué, et pourquoi.
 _STATUS_EVENTS_TO_IGNORE = frozenset({"sent", "delivered", "read"})
+
+# (2026-09-17, follow-up pre-Hetzner) — borne dure sur `process_agent_task.
+# delay()` (voir son site d'appel) : garantit qu'un webhook ne reste jamais
+# accroché plus longtemps que ça, quel que soit le comportement interne de
+# kombu/Celery pendant une panne broker.
+_CELERY_DELAY_TIMEOUT_S = 5.0
 
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
@@ -246,11 +255,24 @@ async def _process_single_message(
     message: Dict[str, Any], background_tasks: BackgroundTasks
 ) -> None:
     # --- 1. ANTI-DOUBLON / IDEMPOTENCE (REDIS) ---
+    # `redis_client` (module-level) est le client SYNCHRONE `redis` — pas
+    # `redis.asyncio`. L'appeler directement ici bloquerait la boucle
+    # asyncio du process gunicorn/uvicorn pendant tout le round-trip réseau
+    # (confirmé par charge k6 : throughput plafonné ~42 req/s quel que soit
+    # le nombre de VUs, latence webhook croissant linéairement avec la
+    # concurrence — signature classique d'un appel bloquant synchrone dans
+    # un handler async). `asyncio.to_thread` délègue l'appel bloquant à un
+    # thread du pool par défaut au lieu de geler la boucle événementielle —
+    # coût minimal (le pool grossit dynamiquement, et ces appels Redis sont
+    # courts, contrairement à l'incident historique documenté dans
+    # `core/get_llm.py` sur des appels HTTP longs sans timeout serré).
     message_id = str(message.get("id") or "").strip()
     if message_id:
         redis_key = f"msg:{message_id}"
         try:
-            is_new_message = redis_client.set(redis_key, "processing", ex=3600, nx=True)
+            is_new_message = await asyncio.to_thread(
+                redis_client.set, redis_key, "processing", ex=3600, nx=True
+            )
             if not is_new_message:
                 logger.warning(
                     "WHATSAPP_WEBHOOK_DUPLICATE | id=%s déjà en cours ou traité",
@@ -330,6 +352,34 @@ async def _process_single_message(
         resolved_role = normalize_role("BUYER" if ws_type == "buyer" else "PRODUCER")
         force_role = True
 
+    # (2026-09-13, incident WhatsApp #3 — utilisateur double-rôle) : même
+    # correctif que `twilio_webhook.py` — ce webhook fige déjà `force_role=True`
+    # dès qu'un workspace existe, ce qui court-circuite le correctif posé dans
+    # `orchestrator.py::_run_market` (il ne s'exécute jamais quand `force_role`
+    # est déjà True). `ws_type` ci-dessus est le dernier rôle utilisé dans CE
+    # workspace (sticky, même numéro pour buyer/producteur) — potentiellement
+    # périmé pour un producteur qui répond "confirmer"/"annuler" à une
+    # notification de commande reçue alors que son workspace est resté en mode
+    # BUYER. `flows/buyer/preorder_confirmation.py` pose un indice d'ÉTAT plus
+    # récent (`pending_role_hint:{phone}`) juste après avoir mis CETTE
+    # notification producteur en file — on le lit et le consomme ICI, AVANT de
+    # figer le rôle. Fail-open comme tout `core/idempotency.py`.
+    # `core/idempotency.py` expose un client Redis SYNCHRONE (partagé avec
+    # des appelants Celery sync) — `asyncio.to_thread` ici pour la même
+    # raison que le garde anti-doublon ci-dessus.
+    role_hint = await asyncio.to_thread(_get_role_hint, f"pending_role_hint:{phone}")
+    if role_hint:
+        await asyncio.to_thread(_release_role_hint, f"pending_role_hint:{phone}")
+        hint_up = str(role_hint).strip().upper()
+        if hint_up in {"PRODUCER", "PRODUCTEUR", "PRODUCTRICE"}:
+            ws_type = "producer"
+            resolved_role = normalize_role("PRODUCER")
+            force_role = True
+        elif hint_up in {"BUYER", "ACHETEUR", "ACHETEUSE"}:
+            ws_type = "buyer"
+            resolved_role = normalize_role("BUYER")
+            force_role = True
+
     logger.info(
         "WhatsApp Cloud webhook | phone=%s | type=%s | text=%r | existing_workspace=%s",
         phone,
@@ -339,23 +389,45 @@ async def _process_single_message(
     )
 
     # --- 6. DÉLÉGATION À CELERY ---
-    process_agent_task.delay(
-        phone_number=phone,
-        user_query=text,
-        workspace_type=ws_type,
-        role=resolved_role,
-        force_role=force_role,
-        interactive_id=interactive_id,
-        trace_id=trace_id,
-        location_shared=location_shared,
-        location_outcome=location_outcome,
-        location_lat=location_lat,
-        location_lon=location_lon,
-        # (2026-09-02) Clé d'idempotence de l'ENVOI — voir api/tasks.py::
-        # _claim_single_response. Même identifiant que la clé de
-        # dédoublonnage webhook ci-dessus, réutilisé pour protéger aussi
-        # contre un retry Celery de la tâche elle-même.
-        message_sid=message_id,
+    # `.delay()` (kombu, transport Redis) est SYNCHRONE et bloquante — même
+    # défaut que les appels Redis directs déjà corrigés plus haut dans ce
+    # fichier (asyncio.to_thread), mais PAS entièrement couvert par ce seul
+    # correctif : confirmé en E2E local (2026-09-17) qu'un webhook pouvait
+    # rester bloqué PLUSIEURS DIZAINES DE SECONDES pendant une panne Redis
+    # complète, MALGRÉ `asyncio.to_thread` + le tuning `socket_connect_
+    # timeout`/`broker_connection_max_retries` (celery_app.py) — le thread
+    # sous-jacent restait lui-même accroché plus longtemps que ces réglages
+    # ne le laissaient supposer (kombu/celery, chemin PRODUCTEUR). Plutôt
+    # que de continuer à chasser le réglage kombu exact, `asyncio.wait_for`
+    # BORNE la coroutine elle-même — garantie dure, indépendante de ce que
+    # fait le thread en interne (qui peut continuer de tourner en
+    # arrière-plan jusqu'à sa propre résolution, sans bloquer CETTE requête
+    # plus de `_CELERY_DELAY_TIMEOUT_S`). `TimeoutError` remonte à
+    # l'appelant (`whatsapp_webhook()`), déjà `except Exception` large —
+    # renvoie 200 quand même (fail-open, cohérent avec le reste de ce
+    # fichier), le message est simplement perdu pour cette tentative plutôt
+    # que de geler la requête.
+    await asyncio.wait_for(
+        asyncio.to_thread(
+            process_agent_task.delay,
+            phone_number=phone,
+            user_query=text,
+            workspace_type=ws_type,
+            role=resolved_role,
+            force_role=force_role,
+            interactive_id=interactive_id,
+            trace_id=trace_id,
+            location_shared=location_shared,
+            location_outcome=location_outcome,
+            location_lat=location_lat,
+            location_lon=location_lon,
+            # (2026-09-02) Clé d'idempotence de l'ENVOI — voir api/tasks.py::
+            # _claim_single_response. Même identifiant que la clé de
+            # dédoublonnage webhook ci-dessus, réutilisé pour protéger aussi
+            # contre un retry Celery de la tâche elle-même.
+            message_sid=message_id,
+        ),
+        timeout=_CELERY_DELAY_TIMEOUT_S,
     )
 
 

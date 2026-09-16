@@ -29,16 +29,20 @@ class TestInterpretationSourceIsAlwaysRawAnalysisPath:
     def test_llm_success_path_sets_a_source(self):
         interp = make_input_interpreter("PRODUCER")
         rt = StubRuntime(llm=ScriptedLLM({
-            "interpreted_event": "NEW_TASK",
-            "detected_intent": "SALES_PUBLISH_PRODUCT",
-            "interpreter_confidence": 0.9,
-            "extracted_entities": {},
+            "disposition": "NEW_TASK",
+            "intent": "SALES_PUBLISH_PRODUCT",
+            "confidence": 0.9,
+            "entities": {},
         }))
         state = make_state(
             normalized_text="je vends du mil", expected_input="NONE", user_role="PRODUCER"
         )
         result = run(interp(state, rt))
-        assert result["raw_analysis"]["path"] == "llm"
+        # (2026-09-13, Incrément F) : la route NEW_TASK passe désormais par
+        # `new_task_micro.py` — "new_task_micro" remplace l'ancien "llm"
+        # générique (qui désignait indifféremment NEW_TASK/ACTIVE_SLOT/
+        # STRUCTURED_ACTION avant leur migration en micro-prompts dédiés).
+        assert result["raw_analysis"]["path"] == "new_task_micro"
 
     def test_no_llm_available_sets_a_source(self):
         interp = make_input_interpreter("PRODUCER")

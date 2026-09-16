@@ -15,18 +15,23 @@ from ladini.graphs.agents.market_coach.domain.model import (
 )
 
 
-@dataclass(frozen=True)
-class StockUpdateLevelCommand:
-    """Strongly-typed command for STOCK_UPDATE_LEVEL domain logic."""
-
-    producer_id: str
-    stock_id: str
-    new_quantity_kg: float
-    reason: str
-
-
 @dataclass
 class StockService:
+    """(2026-09-14, Deep Intent Architecture Cleanup) : `record_movement`/
+    `adjust`/`remove_partial`/`delete`/`update_level` SUPPRIMÉES avec leurs
+    intents (aucun outil MCP réel, tool_name jamais câblé — voir
+    intent.py). `StockUpdateLevelCommand` supprimée avec `update_level`,
+    sans autre appelant.
+
+    (2026-09-13, suite de l'audit) : `get_movements` supprimée à son tour —
+    reconsidérée après vérification qu'aucun `@register_action` de
+    market_coach ne l'appelle plus (zéro consommateur dans ce module depuis
+    le retrait de `STOCK_GET_MOVEMENTS` du catalogue classifiable). Le tool
+    MCP `get_stock_movements` reste réel, testé et exposé indépendamment
+    (infrastructure/mcp/exposure.py, security.py) pour d'autres consommateurs
+    MCP éventuels — seul ce wrapper spécifique à market_coach, devenu mort,
+    est retiré."""
+
     context: DomainContext
 
     def get_summary(
@@ -48,18 +53,6 @@ class StockService:
         farm_id = str(require(payload, "farm_id"))
         args: Dict[str, Any] = {"farm_id": farm_id, "producer_phone": phone}
         return DomainResult(tool_id=ToolId.GET_FARM_STOCKS, tool_args=args)
-
-    def get_movements(
-        self, state: Mapping[str, Any], payload: Mapping[str, Any]
-    ) -> DomainResult:
-        # `phone` transmis (et non plus seulement validé) : il autorise la
-        # lecture de `stock_id` (audit sécurité agent 2026-09-10 — sans lui,
-        # `get_stock_movements` exposait la rotation d'inventaire de n'importe
-        # quel producteur).
-        phone = require_phone(state)
-        stock_id = str(require(payload, "stock_id"))
-        args: Dict[str, Any] = {"stock_id": stock_id, "producer_phone": phone}
-        return DomainResult(tool_id=ToolId.GET_STOCK_MOVEMENTS, tool_args=args)
 
     def register_harvest(
         self, state: Mapping[str, Any], payload: Mapping[str, Any]
@@ -85,69 +78,3 @@ class StockService:
             "reason": payload.get("reason") or "Enregistrement récolte via agent",
         }
         return DomainResult(tool_id=ToolId.ADD_STOCK, tool_args=args)
-
-    def record_movement(
-        self, state: Mapping[str, Any], payload: Mapping[str, Any]
-    ) -> DomainResult:
-        phone = require_phone(state)
-        stock_id = str(require(payload, "stock_id"))
-        movement_type = str(require(payload, "movement_type")).upper().strip()
-        qty_raw = float(require(payload, "quantity"))
-        qty_kg, _ = normalize_quantity_to_kg(qty_raw, payload.get("unit"))
-        args: Dict[str, Any] = {
-            "producer_id": phone,
-            "stock_id": stock_id,
-            "movement_type": movement_type,
-            "quantity": qty_kg,
-            "reason": payload.get("reason") or f"Mouvement {movement_type} via agent",
-        }
-        return DomainResult(tool_id=ToolId.ADD_STOCK_MOVEMENT_BY_ID, tool_args=args)
-
-    def adjust(
-        self, state: Mapping[str, Any], payload: Mapping[str, Any]
-    ) -> DomainResult:
-        phone = require_phone(state)
-        stock_id = str(require(payload, "stock_id"))
-        qty_raw = float(require(payload, "quantity"))
-        qty_kg, _ = normalize_quantity_to_kg(qty_raw, payload.get("unit"))
-        args: Dict[str, Any] = {
-            "producer_id": phone,
-            "stock_id": stock_id,
-            "new_quantity": qty_kg,
-            "reason": payload.get("reason") or "Ajustement inventaire physique",
-        }
-        return DomainResult(tool_id=ToolId.ADJUST_STOCK_BY_ID, tool_args=args)
-
-    def remove_partial(
-        self, state: Mapping[str, Any], payload: Mapping[str, Any]
-    ) -> DomainResult:
-        phone = require_phone(state)
-        stock_id = str(require(payload, "stock_id"))
-        qty_raw = float(require(payload, "quantity"))
-        qty_kg, _ = normalize_quantity_to_kg(qty_raw, payload.get("unit"))
-        args: Dict[str, Any] = {
-            "producer_id": phone,
-            "stock_id": stock_id,
-            "quantity": qty_kg,
-            "reason": payload.get("reason") or "Retrait partiel via agent",
-        }
-        return DomainResult(tool_id=ToolId.REMOVE_STOCK_BY_ID, tool_args=args)
-
-    def delete(
-        self, state: Mapping[str, Any], payload: Mapping[str, Any]
-    ) -> DomainResult:
-        phone = require_phone(state)
-        stock_id = str(require(payload, "stock_id"))
-        args: Dict[str, Any] = {"producer_id": phone, "stock_id": stock_id}
-        return DomainResult(tool_id=ToolId.DELETE_STOCK_BY_ID, tool_args=args)
-
-    def update_level(self, command: StockUpdateLevelCommand) -> DomainResult:
-        """Domain logic for adjusting a stock level based on a typed command."""
-
-        args: Dict[str, object] = {
-            "producer_id": command.producer_id,
-            "stock_id": command.stock_id,
-            "new_quantity": command.new_quantity_kg,
-            "reason": command.reason,
-        }
-        return DomainResult(tool_id=ToolId.ADJUST_STOCK_BY_ID, tool_args=args)

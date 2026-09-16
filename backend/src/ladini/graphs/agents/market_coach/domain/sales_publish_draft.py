@@ -378,10 +378,23 @@ def _confirm_claim_key(draft: SalesPublishDraft) -> str:
 
 def execution_key(draft: SalesPublishDraft) -> str:
     """Clé d'idempotence MÉTIER pour `create_product`, stable par
-    draft/version — même limite honnête que PROCUREMENT : passée en
-    `idempotency_key=` côté client, mais `create_product` n'a PAS de
-    déduplication serveur aujourd'hui (voir `EXECUTION_UNKNOWN`, la garde
-    qui compense ce manque côté client)."""
+    draft/version — passée en `idempotency_key=` sur l'appel MCP.
+    CORRECTIF (2026-09-17, follow-up pre-Hetzner) — deux gaps distincts
+    corrigés ici, à ne pas confondre :
+    1. Cette fonction existait mais n'était JAMAIS APPELÉE :
+       `nodes/executor.py::mcp_tool_executor` ne lisait que
+       `state["procurement_draft"]`, jamais `state["sales_publish_draft"]` —
+       `create_product` partait donc TOUJOURS avec `idempotency_key=None`
+       (repli sur un UUID aléatoire par tentative, aucune protection contre
+       une redelivery Celery complète). `mcp_tool_executor` lit désormais
+       aussi `sales_publish_draft`, même pattern que PROCUREMENT.
+    2. Le serveur (`AgriDBMCPServer.call_tool`, infrastructure/mcp/
+       runtime.py) déduplique déjà GÉNÉRIQUEMENT toute clé non vide reçue
+       (claim/replay/conflict via `mcp_idempotency_store`, branché le
+       2026-09-03) — `create_product` en bénéficie automatiquement dès que
+       (1) est corrigé, sans changement serveur supplémentaire.
+    `EXECUTION_UNKNOWN` reste la garde utile pour le cas DB de dédup
+    injoignable, pas pour combler une absence de mécanisme."""
     return f"sales_publish:{draft.draft_id}:{draft.version}"
 
 

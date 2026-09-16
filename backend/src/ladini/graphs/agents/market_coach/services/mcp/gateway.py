@@ -159,6 +159,18 @@ class AuctionGateway(_BaseGateway):
     async def get_my_active_bids(self, phone: str) -> Dict[str, Any]:
         return await self._call("get_my_active_bids", phone=phone.strip())
 
+    async def update_auction(
+        self, phone: str, auction_id: str, **fields: Any
+    ) -> Dict[str, Any]:
+        """Mise à jour partielle d'un appel d'offres acheteur (quantité,
+        unité, prix plafond, date limite)."""
+        return await self._call(
+            "update_auction_fields",
+            phone=phone.strip(),
+            auction_id=auction_id,
+            **fields,
+        )
+
     async def update_bid_price(
         self, bid_id: str, phone: str, new_price: Any
     ) -> Dict[str, Any]:
@@ -182,14 +194,22 @@ class AuctionGateway(_BaseGateway):
         phone: str | None = None,
         delivery_lat: float | None = None,
         delivery_lon: float | None = None,
+        idempotency_key: str | None = None,
     ) -> Dict[str, Any]:
         # phone requis pour l'identité de contexte MCP (sinon PermissionDenied).
+        # `idempotency_key` (2026-09-17, follow-up pre-Hetzner) : accepter
+        # une transition d'enchère GAGNANTE crée un `Order` — une action
+        # irréversible, money-adjacent, explicitement listée comme
+        # prioritaire. Voir `select_winning_bid_key()` ci-dessous pour la
+        # dérivation ; `None` (par défaut) préserve le comportement
+        # antérieur pour tout appelant qui ne le fournit pas encore.
         return await self._call(
             "select_winning_bid",
             bid_id=bid_id,
             phone=phone,
             delivery_lat=delivery_lat,
             delivery_lon=delivery_lon,
+            idempotency_key=idempotency_key,
         )
 
 
@@ -421,6 +441,17 @@ class OrderTrackingGateway(_BaseGateway):
             producer_phone=producer_phone.strip(),
             order_id=order_id,
             reason=reason,
+        )
+
+    # (2026-09-13, confirmation explicite producteur) : miroir en écriture
+    # de `cancel_confirmed_order` ci-dessus.
+    async def confirm_order_by_producer(
+        self, producer_phone: str, order_id: str
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "confirm_order_by_producer",
+            producer_phone=producer_phone.strip(),
+            order_id=order_id,
         )
 
     async def confirm_delivery_and_payment(

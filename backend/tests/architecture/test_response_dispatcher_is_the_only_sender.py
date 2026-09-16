@@ -56,6 +56,9 @@ class _FakeRedis:
         self._store[key] = value
         return True
 
+    def delete(self, key):
+        self._store.pop(key, None)
+
 
 class TestMediaSharesTheSameIdempotenceAsText:
     def test_a_retry_of_the_same_event_does_not_resend_an_already_sent_image(
@@ -170,3 +173,83 @@ class TestMediaSharesTheSameIdempotenceAsText:
 
         assert sum(1 for c in claims if c is True) == 1
         assert sum(1 for c in claims if c is False) == 9
+
+
+class TestAFailedSendReleasesTheClaimForARealRetry:
+    """Incident réel (2026-09-15) : un `WhatsAppCloudAPIError('(#131005)
+    Access denied')` sur le PREMIER envoi laissait la réclamation posée
+    (avant l'envoi) sans jamais la libérer — le retry Celery suivant du
+    MÊME `event_id:index` la trouvait déjà prise et abandonnait l'item comme
+    `duplicate_suppressed`, sans qu'aucun message n'ait jamais réellement
+    été envoyé. Miroir exact de `TestMediaSharesTheSameIdempotenceAsText`
+    ci-dessus, mais pour le chemin d'ÉCHEC : un retry après échec DOIT
+    pouvoir réessayer réellement l'envoi."""
+
+    def test_a_failed_whatsapp_cloud_send_lets_the_retry_actually_resend(
+        self, monkeypatch
+    ):
+        import ladini.api.response_dispatch as mod
+        import ladini.core.idempotency as idempotency_mod
+
+        monkeypatch.setattr(idempotency_mod, "_client", _FakeRedis())
+        monkeypatch.setattr(mod.settings, "MESSAGING_PROVIDER", "whatsapp_cloud", raising=False)
+
+        attempts = []
+
+        async def _flaky_send(phone, text, result):
+            attempts.append(text)
+            if len(attempts) == 1:
+                raise RuntimeError("WhatsAppCloudAPIError('(#131005) Access denied')")
+            return {"status": "message_sent"}
+
+        monkeypatch.setattr(mod, "_send_via_whatsapp_cloud", _flaky_send)
+
+        dispatcher = mod.ResponseDispatcher()
+        plan = mod.ResponsePlan(
+            event_id="WA-RETRY-AFTER-FAILURE",
+            items=(mod.TextResponse(text="Bonjour !"),),
+        )
+
+        # Premier essai : l'envoi échoue, l'exception se propage (Celery la
+        # retry naturellement) — la réclamation ne doit PAS rester posée.
+        import pytest
+
+        with pytest.raises(RuntimeError):
+            run(dispatcher.dispatch("+22670000001", plan))
+        assert attempts == ["Bonjour !"]
+
+        # Retry Celery du MÊME event_id:index — doit réellement RETENTER
+        # l'envoi, jamais être abandonné comme "déjà envoyé".
+        results = run(dispatcher.dispatch("+22670000001", plan))
+        assert attempts == ["Bonjour !", "Bonjour !"], "le retry doit réellement renvoyer"
+        assert results[0]["status"] == "message_sent"
+
+    def test_a_successful_send_still_blocks_a_genuine_duplicate_retry(
+        self, monkeypatch
+    ):
+        """Non-régression : la libération ne doit jamais s'appliquer à un
+        envoi qui a RÉUSSI — seul l'échec libère la réclamation."""
+        import ladini.api.response_dispatch as mod
+        import ladini.core.idempotency as idempotency_mod
+
+        monkeypatch.setattr(idempotency_mod, "_client", _FakeRedis())
+        monkeypatch.setattr(mod.settings, "MESSAGING_PROVIDER", "whatsapp_cloud", raising=False)
+
+        attempts = []
+
+        async def _always_succeeds(phone, text, result):
+            attempts.append(text)
+            return {"status": "message_sent"}
+
+        monkeypatch.setattr(mod, "_send_via_whatsapp_cloud", _always_succeeds)
+
+        dispatcher = mod.ResponseDispatcher()
+        plan = mod.ResponsePlan(
+            event_id="WA-SUCCESS-THEN-RETRY",
+            items=(mod.TextResponse(text="Bonjour !"),),
+        )
+
+        run(dispatcher.dispatch("+22670000001", plan))
+        run(dispatcher.dispatch("+22670000001", plan))  # simule un retry Celery
+
+        assert attempts == ["Bonjour !"], "un envoi réussi ne doit jamais repartir"

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import types
 import uuid
+from decimal import Decimal
 
 import pytest
 
@@ -182,6 +183,31 @@ class TestConfirmedOrderIsNowCancellable:
         result = run(svc.cancel_pending_order(order_id=str(order.id), phone="+22670000099"))
         assert result["status"] == "success"
         assert not session.outbox_inserts
+
+
+class TestStockRecreditSurvivesRealDecimalColumns:
+    """Incident production (2026-09-15) : `quantity_for_sale` est une
+    colonne SQLAlchemy `Numeric`, donc chargée en `decimal.Decimal` — pas
+    le `float` que TOUS les faux objets de cette suite utilisaient
+    jusqu'ici. `product.quantity_for_sale += resolve_stock_debit(item)`
+    (un `float`) levait `TypeError: unsupported operand type(s) for +=:
+    'decimal.Decimal' and 'float'`, masqué en production derrière le
+    message générique `SafeDatabaseError` — l'annulation semblait
+    fonctionner côté conversation (F5/F6) mais l'écriture DB réelle
+    échouait systématiquement dès qu'une commande contenait un article."""
+
+    def test_cancellation_recredits_stock_when_the_column_is_a_real_decimal(self):
+        producer_id = uuid.uuid4()
+        product = _product(producer_id, qty=Decimal("100.0"))
+        item = _item(product, qty=10.0)
+        order = _order("CONFIRMED", items=[item])
+        session = _FakeSession(order, {producer_id: "+22670000001"})
+        svc = _service(session)
+
+        result = run(svc.cancel_pending_order(order_id=str(order.id), phone="+22670000099"))
+
+        assert result["status"] == "success"
+        assert product.quantity_for_sale == 110.0
 
 
 class TestLegacyPendingStatusStillWorksNoProducerToNotify:

@@ -75,6 +75,50 @@ class TestAuctionPhotoTarget:
         assert mod.pop_pending_auction_photo("+22670000001") == "auction-1"
 
 
+class TestProductPhotoTarget:
+    """Même mécanisme que Bid/Auction, posé après un `create_product` réussi
+    (2026-09-15) — voir `nodes/rendering/success.py`."""
+
+    def test_set_then_pop_round_trip(self, monkeypatch):
+        import ladini.services.pending_photo_target as mod
+        fake = _FakeRedis()
+        monkeypatch.setattr(mod, "_redis", lambda: fake)
+
+        mod.set_pending_product_photo("+22670000001", "product-1")
+        assert mod.pop_pending_product_photo("+22670000001") == "product-1"
+
+    def test_pop_is_single_use(self, monkeypatch):
+        import ladini.services.pending_photo_target as mod
+        fake = _FakeRedis()
+        monkeypatch.setattr(mod, "_redis", lambda: fake)
+
+        mod.set_pending_product_photo("+22670000001", "product-1")
+        mod.pop_pending_product_photo("+22670000001")
+        assert mod.pop_pending_product_photo("+22670000001") is None
+
+    def test_bid_auction_and_product_markers_are_independent(self, monkeypatch):
+        import ladini.services.pending_photo_target as mod
+        fake = _FakeRedis()
+        monkeypatch.setattr(mod, "_redis", lambda: fake)
+
+        mod.set_pending_bid_photo("+22670000001", "bid-1")
+        mod.set_pending_auction_photo("+22670000001", "auction-1")
+        mod.set_pending_product_photo("+22670000001", "product-1")
+
+        assert mod.pop_pending_bid_photo("+22670000001") == "bid-1"
+        assert mod.pop_pending_auction_photo("+22670000001") == "auction-1"
+        assert mod.pop_pending_product_photo("+22670000001") == "product-1"
+
+    def test_set_with_no_phone_or_id_is_a_no_op(self, monkeypatch):
+        import ladini.services.pending_photo_target as mod
+        fake = _FakeRedis()
+        monkeypatch.setattr(mod, "_redis", lambda: fake)
+
+        mod.set_pending_product_photo("", "product-1")
+        mod.set_pending_product_photo("+22670000001", "")
+        assert fake.store == {}
+
+
 class TestResilience:
     def test_a_write_failure_never_raises(self, monkeypatch):
         import ladini.services.pending_photo_target as mod

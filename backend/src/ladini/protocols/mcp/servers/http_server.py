@@ -85,9 +85,15 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ladini.core.database import close_db
+from ladini.core.log_redaction import install_log_redaction
 from ladini.core.settings import settings
 from ladini.infrastructure.mcp.runtime import runtime
 from ladini.protocols.mcp.servers.db_server import LadiniMCPEntryPoint
+
+# Voir core/log_redaction.py — même rationale que api/main.py et
+# api/celery_app.py : le daemon MCP journalise lui aussi des identifiants
+# (MCP_CALL_AUDIT côté appelant, mais aussi ses propres logs de requête).
+install_log_redaction()
 
 logger = logging.getLogger("Ladini.MCP.HttpServer")
 

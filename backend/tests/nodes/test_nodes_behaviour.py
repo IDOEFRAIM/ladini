@@ -11,6 +11,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
+from ladini.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from ladini.graphs.agents.market_coach.nodes.validation import validator
 from ladini.graphs.agents.market_coach.nodes.memory import memory_update
 from ladini.graphs.agents.market_coach.nodes.cleanup import post_response_cleanup
@@ -31,12 +32,24 @@ class TestValidatorNeverAsksForIds:
     expected_input=NONE — l'utilisateur ne peut pas connaître un UUID et sa
     réponse n'était rattachable à aucun champ : impasse conversationnelle."""
 
-    @pytest.mark.parametrize("goal", [
-        "STOCK_GET_MOVEMENTS", "STOCK_UPDATE_LEVEL",
-        "CROP_RECORD_INTERVENTION", "CROP_UPDATE_STAGE",
-        "AGRO_GET_ECONOMICS", "SYSTEM_REPORT_ANOMALY",
-    ])
-    def test_missing_technical_id_yields_clarification_not_uuid_prompt(self, goal):
+    def test_missing_technical_id_yields_clarification_not_uuid_prompt(self, monkeypatch):
+        """(2026-09-13, Deep Intent Architecture Cleanup) : les intents
+        historiquement utilisés ici (STOCK_GET_MOVEMENTS/STOCK_UPDATE_LEVEL/
+        CROP_RECORD_INTERVENTION/CROP_UPDATE_STAGE/AGRO_GET_ECONOMICS/
+        SYSTEM_REPORT_ANOMALY) ont tous été supprimés d'INTENT_CONFIG — et par
+        construction, plus aucun intent classifiable ne peut aujourd'hui
+        déclarer un `*_id` requis sans résolveur (voir
+        tests/architecture/test_no_broken_user_goals.py::
+        test_technical_id_has_a_resolver_passthrough). On isole donc ce test
+        du catalogue métier avec un goal synthétique qui reproduit exactement
+        la situation visée (id technique requis, aucun résolveur) plutôt que
+        de dépendre d'un intent réel qui ne devrait plus jamais exister."""
+        goal = "TEST_SYNTHETIC_ORPHAN_ID_GOAL"
+        monkeypatch.setitem(
+            INTENT_CONFIG,
+            goal,
+            {"tool_name": "noop", "required": ["widget_id"], "action_type": "READ"},
+        )
         st = make_state(current_goal=goal)
         r = run(validator(st, StubRuntime()))
         assert r.get("last_missing_field") is None, f"{goal} réclame encore un identifiant"
@@ -79,6 +92,58 @@ class TestValidatorNeverAsksForIds:
         r = run(validator(st, StubRuntime()))
         assert r["response_strategy"] == "ASK_MISSING_FIELD"
         assert any("prix" in e.lower() for e in r.get("validation_errors") or [])
+
+
+class TestUnitDefaultIsFlaggedNotSilent:
+    """Incident réel (2026-09-15) : « Vente de 25 LITRE de boeufs » — l'unité
+    était comblée silencieusement (`slot_enrichment.py`, via l'autorité
+    unique `resolve_product_unit`), sans JAMAIS distinguer un défaut deviné
+    d'une unité que le producteur a réellement écrite. `unit_was_assumed`
+    doit apparaître dans `transaction_payload` chaque fois que ce défaut
+    s'applique, pour que le récapitulatif
+    (`services/ui/confirmation_summary.py`) puisse avertir explicitement au
+    lieu de laisser passer une supposition invisible — voir aussi
+    `tests/services/test_services_and_tools.py::TestSlotEnrichment` pour le
+    test au niveau de la fonction d'enrichissement elle-même."""
+
+    def test_livestock_with_no_stated_unit_is_flagged_as_assumed(self):
+        st = make_state(
+            current_goal="SALES_PUBLISH_PRODUCT",
+            normalized_text="je veux vendre mes 25 boeufs",
+            transaction_payload={"product": "boeufs", "quantity": 25, "price": 425000},
+        )
+        r = run(memory_update(st, StubRuntime()))
+        payload = r["transaction_payload"]
+        assert payload["unit"] == "TETE"
+        assert payload.get("unit_was_assumed") is True
+
+    def test_crop_with_no_stated_unit_is_also_flagged_not_just_livestock(self):
+        """Le défaut aveugle « KG » pour une culture est le MÊME genre de
+        supposition non prouvée que celui déjà corrigé pour l'élevage
+        (incident 2026-09-08) — il doit être signalé de la même façon,
+        plutôt que de descendre jusqu'à `create_product` (`unit=None` ->
+        "KG" silencieux, hors de portée de tout récapitulatif)."""
+        st = make_state(
+            current_goal="SALES_PUBLISH_PRODUCT",
+            normalized_text="j en ai 23",
+            transaction_payload={"product": "haricot", "quantity": 23, "price": 500},
+        )
+        r = run(memory_update(st, StubRuntime()))
+        payload = r["transaction_payload"]
+        assert payload["unit"] == "KG"
+        assert payload.get("unit_was_assumed") is True
+
+    def test_a_stated_unit_is_never_flagged(self):
+        st = make_state(
+            current_goal="SALES_PUBLISH_PRODUCT",
+            normalized_text="je vends 25 tetes de boeufs a 425000",
+            transaction_payload={
+                "product": "boeufs", "quantity": 25, "unit": "TETE", "price": 425000,
+            },
+        )
+        r = run(memory_update(st, StubRuntime()))
+        payload = r["transaction_payload"]
+        assert "unit_was_assumed" not in payload
 
 
 # =====================================================================
@@ -404,10 +469,23 @@ class TestPostResponseCleanup:
         wm = run(post_response_cleanup(st, None))["working_memory"]
         assert wm["bids_menu"] is None and wm["stocks_menu"] is None
 
-    def test_menu_cache_of_the_owning_goal_survives(self):
+    def test_menu_cache_of_the_owning_goal_survives(self, monkeypatch):
+        """(2026-09-13, Deep Intent Architecture Cleanup) : `SALES_ACCEPT_CONTRACT`
+        et son ownership de `bids_menu` ont été supprimés — plus aucun goal
+        classifiable ne possède aujourd'hui une entrée dans
+        `_MENU_CACHE_OWNERS` (les seuls écrivains de `bids_menu`/`stocks_menu`,
+        `resolve_received_bids`/`_resolve_stock`, sont morts avec les intents
+        qui les déclenchaient). On teste donc le mécanisme générique
+        (préservation d'un cache pour son propriétaire déclaré) avec un
+        propriétaire synthétique plutôt que de dépendre d'un intent réel."""
+        import ladini.graphs.agents.market_coach.nodes.cleanup as cleanup_mod
+
+        monkeypatch.setitem(
+            cleanup_mod._MENU_CACHE_OWNERS, "bids_menu", frozenset({"SYNTHETIC_GOAL"})
+        )
         st = make_state(
             status="WAITING_INPUT", expected_input="SELECTION",
-            current_goal="SALES_ACCEPT_CONTRACT",
+            current_goal="SYNTHETIC_GOAL",
             working_memory={"bids_menu": "menu courant", "stocks_menu": "PERIME"},
         )
         wm = run(post_response_cleanup(st, None))["working_memory"]

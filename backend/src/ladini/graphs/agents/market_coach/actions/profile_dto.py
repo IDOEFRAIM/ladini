@@ -27,24 +27,6 @@ class ProfileGetMcpUserPayload(BaseModel):
         return cls(phone=str(phone))
 
 
-class ProfileGetTrustPayload(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "ProfileGetTrustPayload":
-        # No payload fields; phone comes from DomainContext
-        return cls()
-
-
-class ProfileGetContextPayload(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "ProfileGetContextPayload":
-        # No payload fields; phone comes from DomainContext
-        return cls()
-
-
 class ProfileSetGeoPayload(BaseModel):
     latitude: float
     longitude: float
@@ -87,23 +69,3 @@ class ProfileSetPrefsPayload(BaseModel):
         else:
             allow_voice_val = bool(allow_voice)
         return cls(language=str(language).strip(), allow_voice=allow_voice_val)
-
-
-class ProfileSwitchRolePayload(BaseModel):
-    target_role: str
-
-    model_config = ConfigDict(extra="ignore")
-
-    @field_validator("target_role", mode="before")
-    @classmethod
-    def _normalize_role(cls, value: object) -> str:
-        if value in _EMPTY_SLOT_VALUES:
-            raise ValueError("target_role is required")
-        return str(value).strip().upper()
-
-    @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "ProfileSwitchRolePayload":
-        role = payload.get("target_role")
-        if role in _EMPTY_SLOT_VALUES:
-            raise ValueError("target_role is required")
-        return cls(target_role=str(role).strip().upper())

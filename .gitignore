@@ -35,6 +35,8 @@ ENV/
 .env
 .env.local
 .env.consolidated
+.env.e2e
+.env.alloy.e2e
 
 # ============================
 # Node.js
@@ -180,3 +182,14 @@ deploy/releases/current
 deploy/releases/previous
 deploy/releases/history.log
 deploy/.deploy.lock
+
+# ── Inventaire de déploiement réel (IP privées — infra/inventory.example.yml
+#    est le modèle versionné, infra/inventory.yml est l'instance réelle) ────
+infra/inventory.yml
+
+# ── Hetzner IaC (état/secrets Terraform, jamais versionnés) ──────────
+infra/providers/hetzner/.terraform/
+infra/providers/hetzner/*.tfstate
+infra/providers/hetzner/*.tfstate.backup
+infra/providers/hetzner/*.tfvars
+!infra/providers/hetzner/environments/*.tfvars.example

@@ -1056,7 +1056,20 @@ def build_response_plan(
                 "Impossible de confirmer votre précommande — aucun stock n'a été débité. "
                 "Votre panier est conservé, vous pouvez recommencer."
             ),
-            response_strategy="ERROR",
+            # (2026-09-13, incident WhatsApp #4) : "ERROR" fait dispatcher
+            # `final_response` (nodes/response_handlers.py::_select_handler)
+            # vers `render_error`, qui régénère TOUJOURS son propre texte
+            # depuis `state["validation_errors"]` (jamais posé ici) —
+            # écrasant systématiquement le `final_response` ci-dessus par le
+            # générique "Une erreur technique est survenue", peu importe ce
+            # qui est écrit dans ce module. "SUCCESS" avec `graph_status=
+            # COMPLETED` route vers `render_success`, qui RÉUTILISE le
+            # `final_response` déjà posé quand aucun `execution_result` n'est
+            # présent (cas de ce nœud buyer, hors `mcp_tool_executor`) — même
+            # mécanisme déjà utilisé, juste en dessous, par
+            # PREORDER_EXECUTION_UNKNOWN (autre issue terminale mais non
+            # pleinement réussie).
+            response_strategy="SUCCESS",
             graph_status="COMPLETED",
             draft=draft,
             terminal=True,
@@ -1083,7 +1096,9 @@ def build_response_plan(
                 f"Le paiement de votre commande #{draft.order_id} n'a pas abouti — "
                 "aucune somme n'a été débitée. Vous pouvez recommencer une précommande."
             ),
-            response_strategy="ERROR",
+            # (2026-09-13, incident WhatsApp #4) : voir le commentaire jumeau
+            # sur PREORDER_FAILED ci-dessus — même mécanisme, même correctif.
+            response_strategy="SUCCESS",
             graph_status="COMPLETED",
             draft=draft,
             terminal=True,
@@ -1095,7 +1110,9 @@ def build_response_plan(
                 f"Le délai de paiement de votre commande #{draft.order_id} est dépassé — "
                 "elle a été annulée, aucune somme n'a été débitée."
             ),
-            response_strategy="ERROR",
+            # (2026-09-13, incident WhatsApp #4) : voir le commentaire jumeau
+            # sur PREORDER_FAILED ci-dessus — même mécanisme, même correctif.
+            response_strategy="SUCCESS",
             graph_status="COMPLETED",
             draft=draft,
             terminal=True,

@@ -7,9 +7,21 @@
 # (règle : "Required reviewers") → un second humain approuve avant que le
 # SSH ne parte.
 #
-# La logique de release vit ENTIÈREMENT dans `scripts/deploy.sh` sur le VPS —
-# ce workflow ne fait que : (1) valider que l'image existe, (2) SSH, (3) lancer
-# le script. Aucune dépendance à `doctl`/`aws`/`hcloud` : provider-neutral.
+# La logique de release vit ENTIÈREMENT côté VPS — ce workflow ne fait que :
+# (1) valider que l'image existe, (2) SSH vers UN host (le "control node" —
+# le node-a de l'inventaire en phase 1, ou un bastion dédié en phase 2),
+# (3) lancer le bon script. Aucune dépendance à `doctl`/`aws`/`hcloud` :
+# provider-neutral.
+#
+# (2026-09-16, chantier Hetzner scale-out) : PHASE 1 (1 node) et PHASE 2
+# (N nodes) utilisent EXACTEMENT ce même workflow — la seule différence est
+# la PRÉSENCE de `infra/inventory.yml` sur le control node. S'il existe :
+# `scripts/cluster_deploy.sh` (rolling, migrations une seule fois, respecte
+# le rôle scheduler singleton — voir infra/inventory.example.yml). Sinon :
+# le comportement HISTORIQUE inchangé (`scripts/deploy.sh`, single-VPS).
+# Aucun nouvel input de workflow requis — la bascule est automatique et sans
+# risque de régression pour un opérateur qui n'a pas encore créé
+# d'inventaire (le cas de TOUT déploiement existant avant ce chantier).
 # ═════════════════════════════════════════════════════════════════════
 name: Deploy (manual approval)
 
@@ -78,5 +90,11 @@ jobs:
             set -euo pipefail
             cd "${{ secrets.DEPLOY_DIR }}"
             git fetch --tags --quiet origin
-            git checkout --quiet "${{ github.sha }}" -- scripts/ docker-compose.prod.yml infra/ || true
-            ./scripts/deploy.sh "${{ github.event.inputs.release }}"
+            git checkout --quiet "${{ github.sha }}" -- scripts/ docker-compose.prod.yml docker-compose.dev.yml infra/ || true
+            if [ -f infra/inventory.yml ]; then
+              echo "→ infra/inventory.yml présent — déploiement multi-node (cluster_deploy.sh)."
+              ./scripts/cluster_deploy.sh "${{ github.event.inputs.release }}"
+            else
+              echo "→ pas d'infra/inventory.yml — déploiement single-VPS historique (deploy.sh)."
+              ./scripts/deploy.sh "${{ github.event.inputs.release }}"
+            fi

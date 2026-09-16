@@ -293,13 +293,16 @@ class TestFullNodeChainTierSelection:
         state["normalized_text"] = "je veux celui de 10 L"
         state["user_query"] = "je veux celui de 10 L"
 
+        # (2026-09-12, Incrément D) : ce tour route désormais vers le
+        # micro-prompt STRUCTURED_ACTION dédié — il ne voit QUE des labels
+        # humains numérotés (jamais `tier_id`), "t10" étant le 2e de la
+        # liste construite depuis `_tiered_vendor()` ci-dessus.
         scripted_llm = ScriptedLLM(
             {
-                "interpreted_event": "SELECTION",
-                "detected_intent": "UNKNOWN",
-                "interpreter_confidence": 1.0,
-                "validation_status": "VALID",
-                "extracted_entities": {"selected_value": "t10"},
+                "disposition": "ACTION",
+                "action": "SELECT_PRICING_TIER",
+                "selection_index": 2,
+                "confidence": 1.0,
             }
         )
         runtime = StubRuntime(llm=scripted_llm)
@@ -308,8 +311,9 @@ class TestFullNodeChainTierSelection:
         assert scripted_llm.calls == 1, "the LLM must actually be consulted this time"
         state = apply_patch(state, interp2)
         assert state["interpreted_event"] == "SELECTION", state.get("raw_analysis")
-        assert state["raw_analysis"]["path"] == "llm"
-        assert state["extracted_entities"].get("selected_value") == "t10"
+        assert state["raw_analysis"]["path"] == "structured_action_micro"
+        assert state["extracted_entities"].get("agent_action") == "SELECT_PRICING_TIER"
+        assert state["extracted_entities"].get("action_pricing_tier_id") == "t10"
 
         state = apply_patch(state, run(memory_update(state, runtime)))
         state = apply_patch(state, run(validator(state, runtime)))
@@ -344,9 +348,16 @@ class TestFullNodeChainTierSelection:
         self, monkeypatch
     ):
         """Proves the mechanism itself, not just its effect: the tier list
-        (with real tier_ids) must be present in the user prompt sent to the
-        LLM whenever a tier menu is active — this is what was missing
-        during the "champignons" incident."""
+        (human labels) must be present in the prompt sent to the LLM
+        whenever a tier menu is active — this is what was missing during
+        the "champignons" incident.
+
+        (2026-09-12, Incrément D) : le contrat a changé de sens depuis —
+        l'ancien prompt unifié injectait les VRAIS `tier_id` (le LLM les
+        recopiait). Le nouveau micro-prompt STRUCTURED_ACTION fait
+        l'INVERSE par construction (spec §5/§9/§15) : labels humains
+        numérotés seulement, JAMAIS d'identifiant technique — ce test
+        vérifie maintenant les DEUX moitiés de cette garantie."""
         import ladini.graphs.agents.market_coach.services.domain.cart_service as cart_service_mod
         from tests.conftest import ScriptedLLM
 
@@ -391,11 +402,10 @@ class TestFullNodeChainTierSelection:
 
         scripted_llm = ScriptedLLM(
             {
-                "interpreted_event": "UNKNOWN",
-                "detected_intent": "UNKNOWN",
-                "interpreter_confidence": 1.0,
-                "validation_status": "VALID",
-                "extracted_entities": {},
+                "disposition": "ACTION",
+                "action": "SELECT_PRICING_TIER",
+                "selection_index": 2,
+                "confidence": 0.9,
             }
         )
         runtime = StubRuntime(llm=scripted_llm)
@@ -403,21 +413,26 @@ class TestFullNodeChainTierSelection:
         original_create = scripted_llm.create
 
         def _capturing_create(**kwargs):
-            captured["messages"] = kwargs.get("messages")
+            captured.setdefault("all_messages", []).append(kwargs.get("messages"))
             return original_create(**kwargs)
 
         scripted_llm.create = _capturing_create
 
         run(interpreter(state, runtime))
 
+        # Un seul appel attendu (réponse valide dès le 1er essai) — on
+        # inspecte donc le PREMIER (et seul) prompt envoyé.
+        assert len(captured["all_messages"]) == 1
         user_message = next(
-            m["content"] for m in captured["messages"] if m["role"] == "user"
+            m["content"] for m in captured["all_messages"][0] if m["role"] == "user"
         )
-        assert "t5" in user_message and "t10" in user_message, (
-            f"the active tier ids were not injected into the LLM prompt: {user_message!r}"
+        # Moitié 1 (spec §9/§15) : AUCUN identifiant technique dans le prompt.
+        assert "t5" not in user_message and "t10" not in user_message, (
+            f"un tier_id a fuité dans le prompt STRUCTURED_ACTION : {user_message!r}"
         )
-        # (2026-09-01, contrat d'action structurée) : remplace l'ancien
-        # `palier_conditionnement_actif` texte libre — voir
-        # domain/selection_actions.py::tier_menu_prompt_block.
-        assert "action_structuree_attendue" in user_message
-        assert "SELECT_PRICING_TIER" in user_message
+        # Moitié 2 : les labels HUMAINS (prix/quantité), eux, sont bien là —
+        # sans eux le LLM ne pourrait pas comprendre les options.
+        assert "500.0" in user_message and "900.0" in user_message, (
+            f"les labels humains des paliers ne sont pas dans le prompt : {user_message!r}"
+        )
+        assert "SELECT_PRICING_TIER" in user_message or "conditionnement" in user_message.lower()

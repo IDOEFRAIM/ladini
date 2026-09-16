@@ -124,6 +124,32 @@ class TestResolveOrderForDeliveryPayment:
         assert result["status"] == "PLANNING"
         assert result["transaction_payload"]["order_id"] == "order-2"
 
+    def test_order_id_already_resolved_by_memory_update_is_used_directly(self):
+        """Incident réel (2026-09-15) — voir le miroir
+        test_resolve_order_for_cancellation.py : `nodes/memory.py` résout
+        la sélection numérique en `order_id` puis efface `selection_index`
+        dans le même mouvement ; ce résolveur ne lisait QUE
+        `selection_index`."""
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
+            _resolve_order_for_delivery_payment,
+        )
+
+        runtime = rt(
+            {
+                "get_producer_orders": {
+                    "status": "success",
+                    "data": [_order("order-1"), _order("order-2")],
+                }
+            }
+        )
+        result = run(
+            _resolve_order_for_delivery_payment(
+                runtime, "+22670000001", {"order_id": "order-2"}
+            )
+        )
+        assert result["status"] == "PLANNING"
+        assert result["transaction_payload"]["order_id"] == "order-2"
+
     def test_a_mix_of_escrow_and_pay_at_delivery_orders_only_offers_the_latter(self):
         """Une commande escrow ET une commande cash toutes deux CONFIRMED :
         seule la seconde est proposée — jamais un mélange qui laisserait le

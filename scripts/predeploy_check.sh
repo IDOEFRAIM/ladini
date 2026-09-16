@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# ═════════════════════════════════════════════════════════════════════
+# scripts/predeploy_check.sh — dernière barrière avant un déploiement
+# Hetzner réel. Chaîne les vérifications STATIQUES (rien ici ne parle au
+# réseau de production, rien n'est destructif) :
+#
+#   1. syntaxe bash des scripts de déploiement (bash -n)
+#   2. docker compose config (docker-compose.prod.yml, aucun `build:`)
+#   3. tests ciblés : architecture (beat singleton, invariants compose) +
+#      validate_inventory.py
+#   4. validation de infra/inventory.yml (si présent)
+#   5. terraform fmt -check + validate (si terraform est installé et
+#      infra/providers/hetzner/*.tf présent) — jamais `plan`/`apply` ici
+#   6. smoke.sh / smoke_observability.sh — UNIQUEMENT si SMOKE_API_URL est
+#      déjà exporté par l'appelant (un stack tourne réellement quelque
+#      part) ; sinon sautés avec un avertissement, jamais un échec
+#
+# Sortie 0 = tout est passé. Sortie != 0 = NE PAS déployer, lire le
+# dernier bloc affiché.
+#
+# Usage :
+#   ./scripts/predeploy_check.sh
+#   SMOKE_API_URL=http://127.0.0.1:18000 ./scripts/predeploy_check.sh   # + smoke sur un E2E déjà démarré
+#   TERRAFORM_BIN=/path/to/terraform.exe ./scripts/predeploy_check.sh  # si `terraform` n'est pas sur PATH
+# ═════════════════════════════════════════════════════════════════════
+set -Eeuo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "${HERE}/.." && pwd)"
+cd "${ROOT}"
+
+TERRAFORM_BIN="${TERRAFORM_BIN:-terraform}"
+FAILED=0
+STEP=0
+
+_step() {
+  STEP=$((STEP + 1))
+  echo ""
+  echo "── [${STEP}] $* ──────────────────────────────────────"
+}
+
+_fail() {
+  echo "✗ $*"
+  FAILED=1
+}
+
+_ok() {
+  echo "✓ $*"
+}
+
+# ── 1. Syntaxe bash des scripts de déploiement ────────────────────────
+_step "Syntaxe bash (scripts/*.sh)"
+for f in scripts/*.sh; do
+  if bash -n "$f"; then
+    :
+  else
+    _fail "bash -n a échoué sur $f"
+  fi
+done
+[ "$FAILED" -eq 0 ] && _ok "tous les scripts sont syntaxiquement valides"
+
+# ── 2. docker compose config (prod, sans build:) ──────────────────────
+_step "docker compose config (docker-compose.prod.yml)"
+if RELEASE_VERSION=predeploy-check-dummy REDIS_URL="rediss://x:y@z:6379/0" \
+   MCP_HTTP_AUTH_TOKEN=x FLOWER_USER=x FLOWER_PASSWORD=x GROQ_API_KEY=x \
+   DB_HOST=x DB_USER=x DB_PASSWORD=x DB_NAME=x \
+   docker compose -f docker-compose.prod.yml config --quiet 2>/tmp/predeploy_compose_err; then
+  _ok "docker-compose.prod.yml est valide"
+else
+  _fail "docker compose config a échoué : $(cat /tmp/predeploy_compose_err 2>/dev/null)"
+fi
+if grep -qE '^\s*build:' docker-compose.prod.yml; then
+  _fail "docker-compose.prod.yml contient une directive build: (violation BUILD ONCE)"
+else
+  _ok "aucune directive build: dans docker-compose.prod.yml"
+fi
+
+# ── 3. Tests ciblés : beat singleton + invariants compose + inventory +
+#    PII/redaction + idempotency + worker metrics (2026-09-17, follow-up
+#    pre-Hetzner — étendu, reste volontairement CIBLÉ : la suite complète
+#    (lente) est un gate séparé, pas ici, voir DoD "Ne rends pas le script
+#    lent au point d'être inutilisable").
+_step "Tests ciblés (beat singleton, invariants compose, inventory, PII, idempotency, worker metrics)"
+PYTHON_BIN="backend/.venv/Scripts/python.exe"
+[ -x "$PYTHON_BIN" ] || PYTHON_BIN="python3"
+if "$PYTHON_BIN" -m pytest \
+    backend/tests/architecture/test_compose_deployment_invariants.py \
+    backend/tests/architecture/test_validate_inventory.py \
+    backend/tests/architecture/test_execution_idempotency_key.py \
+    backend/tests/unit/test_log_redaction.py \
+    backend/tests/unit/test_telemetry_worker_metrics.py \
+    -q; then
+  _ok "tests ciblés passés"
+else
+  _fail "au moins un test ciblé a échoué"
+fi
+
+# ── 4. infra/inventory.yml (si présent) ────────────────────────────────
+_step "infra/inventory.yml"
+if [ -f infra/inventory.yml ]; then
+  if "$PYTHON_BIN" scripts/validate_inventory.py infra/inventory.yml; then
+    _ok "infra/inventory.yml valide"
+  else
+    _fail "infra/inventory.yml invalide (voir message ci-dessus)"
+  fi
+else
+  echo "⚠ infra/inventory.yml absent (normal si pas encore provisionné) — sauté"
+fi
+
+# ── 5. Terraform fmt + validate (jamais plan/apply ici) ────────────────
+_step "Terraform fmt + validate (infra/providers/hetzner)"
+if command -v "$TERRAFORM_BIN" >/dev/null 2>&1 || [ -x "$TERRAFORM_BIN" ]; then
+  pushd infra/providers/hetzner >/dev/null
+  if "$TERRAFORM_BIN" fmt -check -recursive >/tmp/predeploy_tf_fmt 2>&1; then
+    _ok "terraform fmt -check propre"
+  else
+    _fail "terraform fmt -check a des diffs : $(cat /tmp/predeploy_tf_fmt)"
+  fi
+  if "$TERRAFORM_BIN" init -backend=false -input=false >/tmp/predeploy_tf_init 2>&1 \
+     && "$TERRAFORM_BIN" validate >/tmp/predeploy_tf_validate 2>&1; then
+    _ok "terraform validate OK"
+  else
+    _fail "terraform validate a échoué : $(cat /tmp/predeploy_tf_validate 2>/dev/null)"
+  fi
+  popd >/dev/null
+else
+  echo "⚠ terraform introuvable (ni sur PATH ni à TERRAFORM_BIN=${TERRAFORM_BIN}) — sauté, NOT RUN"
+fi
+
+# ── 6. Smoke (optionnel — seulement si un stack tourne déjà) ───────────
+_step "smoke.sh / smoke_observability.sh"
+if [ -n "${SMOKE_API_URL:-}" ]; then
+  if SMOKE_API_URL="$SMOKE_API_URL" SMOKE_CHECK_ADMIN=0 ./scripts/smoke.sh; then
+    _ok "smoke.sh passé"
+  else
+    _fail "smoke.sh a échoué"
+  fi
+  if SMOKE_API_URL="$SMOKE_API_URL" ./scripts/smoke_observability.sh; then
+    _ok "smoke_observability.sh passé (avertissement seul si échec, voir sortie)"
+  else
+    echo "⚠ smoke_observability.sh a signalé un problème (observabilité — jamais un gate bloquant)"
+  fi
+else
+  echo "⚠ SMOKE_API_URL non défini — aucun stack à sonder, sauté (NOT RUN)"
+fi
+
+# ── Verdict ──────────────────────────────────────────────────────────
+echo ""
+echo "═══════════════════════════════════════════════════════════"
+if [ "$FAILED" -eq 0 ]; then
+  echo "✓ PREDEPLOY CHECK: PASS — rien n'a bloqué (voir avertissements ⚠ ci-dessus, non bloquants)."
+  exit 0
+else
+  echo "✗ PREDEPLOY CHECK: FAIL — corriger les points ✗ ci-dessus avant de déployer."
+  exit 1
+fi

@@ -1072,7 +1072,7 @@ def build_reset_patch(field_names: FrozenSet[str], state: Dict[str,Any]) -> Dict
 INTENT_CONFIG: Dict[str, dict]   # {tool_name, required: List[str], action_type: "READ"|"WRITE", requires_farm: bool, label, label_map, handled_by_flow?, lifecycle_mode}
 INTENT_ROLE: Dict[str,str]       # ~65 entrées, "PRODUCER"|"BUYER"|"BOTH"
 INTENT_DOMAIN: Dict[str,str]     # dérivé par préfixe: STOCK/SALES/PROCUREMENT/MARKET/CROP/FARM/FINANCE/PROFILE/SYSTEM
-INTENT_DISAMBIGUATION: Dict[str, dict]   # 8 clés: STOCK_OR_SALES_DECLARATION, SELLER_HUB, STOCK_OR_SALE_RECORDING, BUY_VS_BROWSE, MARKET_PRICE_LOOKUP, RESUME_TUNNEL, ORDER_TRACKING_INTENT, AUCTION_TRACKING_INTENT
+INTENT_DISAMBIGUATION: Dict[str, dict]   # 7 clés (2026-09-13 : STOCK_OR_SALE_RECORDING supprimée, option unique restante après suppression de STOCK_REMOVE_PARTIAL) : STOCK_OR_SALES_DECLARATION, SELLER_HUB, BUY_VS_BROWSE, MARKET_PRICE_LOOKUP, RESUME_TUNNEL, ORDER_TRACKING_INTENT, AUCTION_TRACKING_INTENT
 
 def get_intent_config(intent: str) -> dict
 def get_required_fields(intent: str) -> list

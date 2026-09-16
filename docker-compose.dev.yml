@@ -1,0 +1,86 @@
+# ═════════════════════════════════════════════════════════════════════
+# docker-compose.dev.yml — overlay DEV/TEST UNIQUEMENT (chantier Hetzner
+# scale-out, §20).
+#
+# `docker-compose.prod.yml` n'a plus de Redis local — la production pointe
+# vers un Redis EXTERNE partagé (REDIS_URL). Ce fichier fournit UN Redis
+# local, pour un poste de dev ou un environnement de test qui n'a pas encore
+# de Redis managé, et REBRANCHE les services applicatifs dessus.
+#
+# Usage (voir aussi scripts/dev-up.sh, qui l'applique automatiquement) :
+#   docker compose -f docker-compose.prod.yml -f docker-compose.dev.yml \
+#     --profile app --profile scheduler --profile admin up -d
+#
+# Ne JAMAIS utiliser ce fichier en production — `scripts/preflight.sh`
+# refuse de déployer si `docker-compose.dev.yml` est présent dans la
+# commande `dc()` de `scripts/lib.sh` (COMPOSE_FILE reste `docker-compose.
+# prod.yml` seul dans le chemin de déploiement réel).
+# ═════════════════════════════════════════════════════════════════════
+volumes:
+  redis_data:
+
+services:
+  redis:
+    # Pin exact (même discipline que le reste de ce dépôt) : `7-alpine` est
+    # un tag mobile.
+    image: redis:7.4.1-alpine
+    security_opt: ["no-new-privileges:true"]
+    # noeviction : Redis est le BROKER Celery + les verrous d'idempotence +
+    # le disjoncteur LLM. `allkeys-lru` pourrait évincer SILENCIEUSEMENT une
+    # tâche en file ou un verrou sous pression mémoire — on préfère un échec
+    # bruyant (OOM sur écriture) à une perte de donnée critique invisible.
+    command: ["redis-server",
+              "--appendonly", "yes",
+              "--appendfsync", "everysec",
+              "--dir", "/data",
+              "--maxmemory", "${REDIS_MAXMEMORY:-512mb}",
+              "--maxmemory-policy", "noeviction",
+              "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD requis}"]
+    volumes:
+      - redis_data:/data
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+    logging:
+      driver: "json-file"
+      options: { max-size: "20m", max-file: "5" }
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?REDIS_PASSWORD requis}", "--no-auth-warning", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    labels: ["autoheal=true"]
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 640m }
+        reservations: { cpus: "0.1", memory: 256m }
+    restart: unless-stopped
+    networks: [agri_net]
+
+  # Rebranche les services applicatifs sur le Redis local ci-dessus — même
+  # forme d'URL que l'ancienne valeur par défaut de `docker-compose.prod.yml`
+  # avant le chantier Hetzner (REDIS_URL y est maintenant OBLIGATOIRE, sans
+  # valeur par défaut, précisément pour empêcher qu'un oubli en production
+  # retombe silencieusement sur un Redis local).
+  api:
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD requis}@redis:6379/0"
+    depends_on:
+      redis: { condition: service_healthy }
+
+  worker:
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD requis}@redis:6379/0"
+    depends_on:
+      redis: { condition: service_healthy }
+
+  beat:
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD requis}@redis:6379/0"
+    depends_on:
+      redis: { condition: service_healthy }
+
+  flower:
+    environment:
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD requis}@redis:6379/0"
+    depends_on:
+      redis: { condition: service_healthy }

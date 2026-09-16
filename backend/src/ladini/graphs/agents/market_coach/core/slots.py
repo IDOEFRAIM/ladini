@@ -239,8 +239,6 @@ _FIELD_PRIORITY: Dict[str, int] = {
     "auction_id": 5,
     "bid_id": 5,
     "cycle_id": 5,
-    "movement_type": 6,
-    "intervention_type": 6,
 }
 
 _EXPECTED_INPUT_MAP: Dict[str, str] = {
@@ -254,14 +252,17 @@ _EXPECTED_INPUT_MAP: Dict[str, str] = {
     "estimated_available_at": "DATE",
     "farm_name": "FARM_NAME",
     "deadline": "DATE",
-    # `movement_type` (IN/OUT) est un vrai slot du registre, requis par
-    # STOCK_RECORD_MOVEMENT — il manquait ici, donc l'agent le demandait avec
-    # `expected_input=NONE` : aucun indice de slot pour l'interpréteur et slot
-    # non ré-interrogeable. Détecté par tests/architecture.
+    # `movement_type` (IN/OUT) reste un slot canonique du registre (SlotDefinition
+    # plus bas, encore consommé par les routes SELECTION/STRUCTURED_ACTION), mais
+    # son seul intent propriétaire, STOCK_RECORD_MOVEMENT, a été supprimé (Deep
+    # Intent Architecture Cleanup, 2026-09-13) — plus aucun intent ne le requiert.
+    # Conservé ici par prudence (le registre de slots reste inerte tant que rien
+    # ne le demande) plutôt que retiré en bloc de tout le pipeline générique.
     "movement_type": "MOVEMENT_TYPE",
-    # (2026-09-09, audit Bloc 2, Blocker D) : `DECLARE_CROP_CYCLE` le requiert
-    # (voir interpreter/intent.py) et `domain/agro.py`/rendering le
-    # consomment déjà — absent d'ici, il retombait sur `expected_input=NONE`
+    # (2026-09-09, audit Bloc 2, Blocker D) : `PRODUCTION_DECLARE_FUTURE`
+    # (anciennement `DECLARE_CROP_CYCLE`, voir interpreter/intent.py) le
+    # requiert et `domain/agro.py`/rendering le consomment déjà — absent d'ici,
+    # il retombait sur `expected_input=NONE`
     # ET, plus grave, était absent de `nodes/memory.py::
     # _EXPECTED_INPUT_ALLOWED_FIELDS["DATE"]` alors qu'il y était pourtant
     # référencé À LA MAIN (double dérive) : la table dérivée

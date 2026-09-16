@@ -10,17 +10,11 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     clear_pending_interaction,
     set_pending_interaction,
 )
-from ladini.graphs.agents.market_coach.flows.common.menu_contracts import (
-    MenuOption,
-    MenuRequest,
-)
 from ladini.graphs.agents.market_coach.services.mcp.gateway import (
-    AuctionGateway,
     ModerationGateway,
 )
 from ladini.graphs.agents.market_coach.utils import (
     MarketRuntime,
-    is_success_response,
 )
 
 from .cart import cart_management
@@ -552,160 +546,15 @@ async def buyer_request_resolver(
     }
 
 
-# =====================================================================
-# RECEIVED BIDS — bids placed on buyer's auctions
-# =====================================================================
-
-
-async def resolve_received_bids(
-    mc_runtime: MarketRuntime,
-    phone: str,
-    payload: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Retrieve bids deposited on buyer's auctions."""
-    kwargs: Dict[str, Any] = {"status": "OPEN"}
-    if not phone:
-        return phone_missing_error()
-    kwargs["phone"] = str(phone)
-
-    auction_gw = AuctionGateway(mc_runtime)
-    result = await auction_gw.get_auctions_bids(**kwargs)
-
-    if not is_success_response(result):
-        msg = result.get("message") or "Impossible de charger les propositions reçues."
-        return {
-            "status": "COMPLETED",
-            "response_strategy": "SUCCESS",
-            "final_response": msg,
-            "ag_ui_component": None,
-        }
-
-    data = result.get("data") or []
-    if not data:
-        return {
-            "status": "COMPLETED",
-            "response_strategy": "SUCCESS",
-            "final_response": "Aucune proposition n'a encore été déposée sur vos appels d'offres.",
-            "ag_ui_component": None,
-        }
-
-    mapping: Dict[str, str] = {}
-    lines = ["📥 *Propositions reçues sur vos appels d'offres :*"]
-    for i, bid in enumerate(data, start=1):
-        bid_id = str(bid.get("bid_id") or bid.get("id") or "")
-        producer_name = (
-            bid.get("producer_name") or bid.get("seller_name") or "Producteur"
-        )
-        price = bid.get("offered_price") or bid.get("price") or "?"
-        product_name = bid.get("product") or bid.get("product_name") or "?"
-        status = bid.get("status") or "PENDING"
-        lines.append(
-            f"\n*{i}. {producer_name}* — {product_name}\n💰 {price} FCFA — Statut: {status}"
-        )
-        mapping[str(i)] = bid_id
-
-    menu = result.get("formatted_menu") or "\n".join(lines)
-    candidates = [
-        f"{b.get('producer_name') or b.get('seller_name') or 'Producteur'} ({b.get('product') or b.get('product_name') or 'Produit'})"
-        for b in data
-    ]
-    return {
-        "status": "WAITING_INPUT",
-        **set_pending_interaction(InteractionKind.SELECTION_MENU),
-        "working_memory": {"bids_menu": menu},
-        "response_strategy": "SELECTION_MENU",
-        "final_response": menu,
-        "ag_ui_component": None,
-        "pending_menu": MenuRequest(
-            title="Offres reçues",
-            options=[
-                MenuOption(index=str(i), label=c, value=mapping.get(str(i)))
-                for i, c in enumerate(candidates, start=1)
-            ],
-            kind="bid",
-            preformatted_text=menu,
-        ),
-    }
-
-
-# =====================================================================
-# BID PICK — resolve bid_id for acceptance
-# =====================================================================
-
-
-async def resolve_buyer_bid_pick(
-    mc_runtime: MarketRuntime,
-    phone: str,
-    payload: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Resolve the bid_id required for acceptance from selection index."""
-    if payload.get("bid_id"):
-        return {"status": "PLANNING", "ag_ui_component": None}
-
-    kwargs: Dict[str, Any] = {"status": "OPEN"}
-    if phone:
-        kwargs["phone"] = str(phone)
-
-    auction_gw = AuctionGateway(mc_runtime)
-    data = (await auction_gw.get_auctions_bids(**kwargs)).get("data") or []
-
-    if not isinstance(data, list) or not data:
-        return {
-            "status": "ERROR",
-            "validation_errors": ["no_open_bids"],
-            "response_strategy": "ERROR",
-            "final_response": "Aucune proposition disponible à accepter.",
-            "ag_ui_component": None,
-        }
-
-    idx = payload.get("selection_index")
-    selected_value = payload.get("selected_value")
-
-    chosen = None
-    if isinstance(idx, int) and 1 <= idx <= len(data):
-        chosen = data[idx - 1]
-    elif selected_value:
-        target = str(selected_value).strip().lower()
-        chosen = next(
-            (
-                b
-                for b in data
-                if b
-                and (
-                    target in str(b.get("producer_name")).lower()
-                    or target in str(b.get("seller_name")).lower()
-                )
-            ),
-            None,
-        )
-
-    if chosen:
-        bid_id = chosen.get("bid_id") or chosen.get("id")
-        if not bid_id:
-            return {
-                "status": "ERROR",
-                "validation_errors": ["bid_not_resolved"],
-                "response_strategy": "ERROR",
-                "final_response": "Identifiant de la proposition introuvable sur l'élément sélectionné.",
-                "ag_ui_component": None,
-            }
-        new_payload = dict(payload)
-        new_payload["bid_id"] = str(bid_id)
-        new_payload.pop("selection_index", None)
-        new_payload.pop("selected_value", None)
-        return {
-            "status": "PLANNING",
-            "transaction_payload": new_payload,
-            "ag_ui_component": None,
-        }
-
-    # Fallback: re-display bids
-    return await resolve_received_bids(mc_runtime, phone, payload)
+# (2026-09-13, Deep Intent Architecture Cleanup) : `resolve_received_bids`
+# et `resolve_buyer_bid_pick` ont été supprimées — exclusivement rattachées
+# à MARKET_GET_REQUEST_DETAIL/PROCUREMENT_ACCEPT_OFFER/PROCUREMENT_SELECT_WINNER,
+# tous supprimés d'INTENT_CONFIG (contrat outil cassé pour le premier, F4
+# sécurité pour les deux autres) — leurs branches d'appel dans flow.py
+# étaient donc déjà du code mort avant même cette suppression.
 
 
 __all__ = [
     "build_procurement_escalation",
     "buyer_request_resolver",
-    "resolve_received_bids",
-    "resolve_buyer_bid_pick",
 ]

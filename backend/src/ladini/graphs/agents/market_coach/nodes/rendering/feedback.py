@@ -41,9 +41,19 @@ async def render_error(ctx: RenderContext) -> Dict[str, Any]:
         text_output = "❌ Une erreur technique est survenue. Réessayez dans un instant."
         ui_reason = "Erreur technique"
 
+    # (2026-09-11) Ne JAMAIS promettre "dire annuler" ici — `render_error`
+    # ne s'exécute QUE sur `status=="ERROR"`, et `post_response_cleanup`
+    # (nodes/cleanup.py, dernier nœud du graphe, tourne juste après) efface
+    # INCONDITIONNELLEMENT `current_goal` dès que `status=="ERROR"` (aucune
+    # des trois conditions `keep_*_channel` n'accepte ce statut). Le goal
+    # n'existe donc déjà plus au moment où l'utilisateur pourrait agir sur
+    # cette suggestion : "annuler" au tour suivant tombe sur `current_goal
+    # =None`, n'a rien à annuler, et retombe sur le fallback générique "je
+    # n'ai pas compris" — un aller-retour confus signalé par un utilisateur
+    # réel qui suivait pourtant exactement l'instruction donnée.
     goal_label = (INTENT_CONFIG.get(ctx.goal or "") or {}).get("label", "")
     if goal_label:
-        text_output += '\n\nVous pouvez réessayer en reformulant ou dire "annuler".'
+        text_output += "\n\nVous pouvez reformuler votre demande."
 
     return {
         "final_response": text_output,

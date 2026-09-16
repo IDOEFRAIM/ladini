@@ -301,6 +301,53 @@ class TestPreorderGpsGate:
         assert seen["delivery_lon"] == -1.5
         assert result["preorder_draft"]["status"] == "EXECUTED"
 
+    def test_a_successful_confirmation_sets_the_producer_role_hint(self, monkeypatch):
+        """(2026-09-13, incident WhatsApp #3) : `confirm_preorder_draft`
+        tourne dans le service MCP à privilège minimal (pas d'accès Redis)
+        et ne peut donc que RENVOYER les numéros producteurs notifiés
+        (`producer_phones_notified`) — c'est ce nœud, côté worker (qui a
+        accès à Redis), qui doit poser l'indice `pending_role_hint:{phone}`
+        pour chacun d'eux juste après l'appel MCP réussi."""
+        monkeypatch.setattr(settings, "ESCROW_PAYMENT_ENABLED", False)
+        mod = _mod()
+
+        class _CapturingGateway:
+            def __init__(self, rt):
+                pass
+
+            async def confirm_draft(self, **kwargs):
+                return {
+                    "status": "success",
+                    "order_id": "order1",
+                    "order_number": "ORD1",
+                    "producer_phones_notified": ["+22670000001", "+22670000002"],
+                }
+
+        import ladini.graphs.agents.market_coach.flows.buyer.preorder_confirmation as pc_mod
+        monkeypatch.setattr(pc_mod, "PreorderGateway", _CapturingGateway)
+
+        hints_set: Dict[str, tuple] = {}
+        monkeypatch.setattr(
+            pc_mod,
+            "_set_role_hint",
+            lambda key, value, ttl_seconds: hints_set.__setitem__(
+                key, (value, ttl_seconds)
+            ),
+        )
+
+        state = self._confirmed_no_location_state(monkeypatch)
+        state["pending_interaction"] = {
+            "kind": "PROVIDE_LOCATION",
+            "target": state["pending_interaction"]["target"],
+        }
+        state["preorder_workflow"] = {"gps_default": {"lat": 12.35, "lon": -1.5}}
+
+        result = run(mod.create_preorder(state, None))
+
+        assert result["status"] == "COMPLETED"
+        assert hints_set["pending_role_hint:+22670000001"][0] == "PRODUCER"
+        assert hints_set["pending_role_hint:+22670000002"][0] == "PRODUCER"
+
     def test_free_text_at_the_gps_stage_reminds_to_use_the_gps_button(self, stub_runtime, monkeypatch):
         mod = _mod()
         state = self._confirmed_no_location_state(monkeypatch)

@@ -287,49 +287,9 @@ class TestResolveMyBids:
         assert result["available_mapping" ] if "available_mapping" in result else True
 
 
-# =====================================================================
-# _resolve_bid
-# =====================================================================
-
-class TestResolveBid:
-    def test_no_open_bids_returns_error(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_bid
-        runtime = rt({"get_auctions_bids": {"status": "success", "data": []}})
-        result = run(_resolve_bid(runtime, "+2260", {}))
-        assert "no_open_bids" in result["validation_errors"]
-
-    def test_selection_index_resolves_the_bid(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_bid
-        runtime = rt({"get_auctions_bids": {"status": "success", "data": [
-            {"bid_id": "b1", "buyer_name": "Awa"},
-            {"bid_id": "b2", "buyer_name": "Ali"},
-        ]}})
-        result = run(_resolve_bid(runtime, "+2260", {"selection_index": 2}))
-        assert result["transaction_payload"]["bid_id"] == "b2"
-
-    def test_selected_value_matches_buyer_name(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_bid
-        runtime = rt({"get_auctions_bids": {"status": "success", "data": [
-            {"bid_id": "b1", "buyer_name": "Ferme Awa"},
-        ]}})
-        result = run(_resolve_bid(runtime, "+2260", {"selected_value": "awa"}))
-        assert result["transaction_payload"]["bid_id"] == "b1"
-
-    def test_chosen_without_bid_id_is_an_error(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_bid
-        runtime = rt({"get_auctions_bids": {"status": "success", "data": [
-            {"buyer_name": "Awa"},
-        ]}})
-        result = run(_resolve_bid(runtime, "+2260", {"selection_index": 1}))
-        assert "bid_not_resolved" in result["validation_errors"]
-
-    def test_no_selection_shows_a_menu(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_bid
-        runtime = rt({"get_auctions_bids": {"status": "success", "data": [
-            {"bid_id": "b1", "buyer_name": "Awa", "product_name": "mais", "price": 250, "quantity": 100},
-        ]}})
-        result = run(_resolve_bid(runtime, "+2260", {}))
-        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
+# (2026-09-13, Deep Intent Architecture Cleanup) : `TestResolveBid` supprimée
+# — `_resolve_bid` (flows/producer/flow.py) a été retirée, exclusivement
+# rattachée à `SALES_ACCEPT_CONTRACT`, supprimé d'INTENT_CONFIG.
 
 
 # =====================================================================
@@ -473,72 +433,10 @@ class TestResolveDefaultFarm:
         assert len(result["pending_menu"].options) == 2
 
 
-# =====================================================================
-# _resolve_stock
-# =====================================================================
-
-class TestResolveStock:
-    def test_no_phone_returns_error(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_stock
-        result = run(_resolve_stock(rt(), "", {}))
-        assert result["status"] == "ERROR"
-
-    def test_empty_inventory_is_an_error(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_stock
-        runtime = rt({"get_producer_stocks": {"status": "success", "data": []}})
-        result = run(_resolve_stock(runtime, "+2260", {}))
-        assert "empty_inventory" in result["validation_errors"]
-
-    def test_product_filter_with_no_match_is_an_error(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_stock
-        runtime = rt({"get_producer_stocks": {"status": "success", "data": [
-            {"stock_id": "s1", "item_name": "riz"},
-        ]}})
-        result = run(_resolve_stock(runtime, "+2260", {"product": "mais"}))
-        assert "product_not_in_stock" in result["validation_errors"]
-
-    def test_single_match_autoresolves(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_stock
-        runtime = rt({"get_producer_stocks": {"status": "success", "data": [
-            {"stock_id": "s1", "item_name": "mais"},
-        ]}})
-        result = run(_resolve_stock(runtime, "+2260", {"product": "mais"}))
-        assert result["status"] == "PLANNING"
-        assert result["transaction_payload"]["stock_id"] == "s1"
-
-    def test_multiple_matches_without_selection_index_shows_a_menu(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_stock
-        runtime = rt({"get_producer_stocks": {"status": "success", "data": [
-            {"stock_id": "s1", "item_name": "mais", "quantity": 10},
-            {"stock_id": "s2", "item_name": "mais", "quantity": 20},
-        ]}})
-        result = run(_resolve_stock(runtime, "+2260", {"product": "mais"}))
-        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
-
-    def test_multiple_matches_with_selection_index_resolves(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_stock
-        runtime = rt({"get_producer_stocks": {"status": "success", "data": [
-            {"stock_id": "s1", "item_name": "mais"},
-            {"stock_id": "s2", "item_name": "mais"},
-        ]}})
-        result = run(_resolve_stock(runtime, "+2260", {"product": "mais", "selection_index": 2}))
-        assert result["transaction_payload"]["stock_id"] == "s2"
-
-    def test_chosen_without_stock_id_is_an_error(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_stock
-        runtime = rt({"get_producer_stocks": {"status": "success", "data": [
-            {"item_name": "mais"},
-        ]}})
-        result = run(_resolve_stock(runtime, "+2260", {"product": "mais"}))
-        assert "stock_not_resolved" in result["validation_errors"]
-
-    def test_no_product_filter_uses_all_items(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_stock
-        runtime = rt({"get_producer_stocks": {"status": "success", "data": [
-            {"stock_id": "s1", "item_name": "mais"},
-        ]}})
-        result = run(_resolve_stock(runtime, "+2260", {}))
-        assert result["transaction_payload"]["stock_id"] == "s1"
+# (2026-09-13, Deep Intent Architecture Cleanup) : `TestResolveStock`
+# supprimée — `_resolve_stock` (flows/producer/flow.py) a été retirée,
+# exclusivement rattachée à STOCK_ADJUST/STOCK_REMOVE_PARTIAL/
+# STOCK_RECORD_MOVEMENT/STOCK_DELETE, tous supprimés d'INTENT_CONFIG.
 
 
 # =====================================================================
@@ -864,10 +762,10 @@ class TestProducerContextResolver:
         assert result["final_response"] == "auction resolver called"
         assert calls == [goal]
 
-    def test_sales_update_production_goal_routes_to_cycle_resolver(self):
+    def test_production_update_future_goal_routes_to_cycle_resolver(self):
         from ladini.graphs.agents.market_coach.flows.producer.flow import producer_context_resolver
         state = make_state(
-            user_phone="+2260", current_goal="SALES_UPDATE_PRODUCTION",
+            user_phone="+2260", current_goal="PRODUCTION_UPDATE_FUTURE",
             transaction_payload={}, working_memory={},
         )
         runtime = rt({"list_producer_productions": {"status": "success", "data": []}})
@@ -893,37 +791,15 @@ class TestProducerContextResolver:
         result = run(producer_context_resolver(state, rt()))
         assert to_tunnel_category(get_pending_interaction(result)) == "OTP_CODE"
 
-    def test_sales_accept_contract_without_bid_id_routes_to_resolve_bid(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import producer_context_resolver
-        state = make_state(user_phone="+2260", current_goal="SALES_ACCEPT_CONTRACT", transaction_payload={})
-        runtime = rt({"get_auctions_bids": {"status": "success", "data": []}})
-        result = run(producer_context_resolver(state, runtime))
-        assert "no_open_bids" in result["validation_errors"]
-
-    def test_sales_accept_contract_with_bid_id_falls_through_to_default(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import producer_context_resolver
-        state = make_state(user_phone="+2260", current_goal="SALES_ACCEPT_CONTRACT", transaction_payload={"bid_id": "b1"})
-        result = run(producer_context_resolver(state, rt()))
-        assert result["status"] == "PLANNING"
-
-    def test_stock_goal_without_stock_id_resolves_then_merges(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import producer_context_resolver
-        state = make_state(user_phone="+2260", current_goal="STOCK_ADJUST", transaction_payload={"product": "mais"})
-        runtime = rt({"get_producer_stocks": {"status": "success", "data": [
-            {"stock_id": "s1", "item_name": "mais"},
-        ]}})
-        result = run(producer_context_resolver(state, runtime))
-        assert result["transaction_payload"]["stock_id"] == "s1"
-
-    def test_stock_goal_menu_short_circuits_before_merge(self):
-        from ladini.graphs.agents.market_coach.flows.producer.flow import producer_context_resolver
-        state = make_state(user_phone="+2260", current_goal="STOCK_DELETE", transaction_payload={})
-        runtime = rt({"get_producer_stocks": {"status": "success", "data": [
-            {"stock_id": "s1", "item_name": "mais"},
-            {"stock_id": "s2", "item_name": "riz"},
-        ]}})
-        result = run(producer_context_resolver(state, runtime))
-        assert to_tunnel_category(get_pending_interaction(result)) == "SELECTION"
+    # (2026-09-13, Deep Intent Architecture Cleanup) :
+    # `test_sales_accept_contract_without_bid_id_routes_to_resolve_bid`,
+    # `test_sales_accept_contract_with_bid_id_falls_through_to_default`,
+    # `test_stock_goal_without_stock_id_resolves_then_merges` et
+    # `test_stock_goal_menu_short_circuits_before_merge` supprimés —
+    # SALES_ACCEPT_CONTRACT/STOCK_ADJUST/STOCK_DELETE ont été retirés
+    # d'INTENT_CONFIG et leurs branches de dispatch dans
+    # `producer_context_resolver` supprimées avec eux (contrat outil
+    # fictif / F4 sécurité — voir interpreter/intent.py).
 
     def test_default_fallback_returns_planning(self):
         from ladini.graphs.agents.market_coach.flows.producer.flow import producer_context_resolver

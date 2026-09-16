@@ -51,16 +51,14 @@ _VOLATILE_WORKING_KEYS = _GENERIC_SELECTION_KEYS + _MENU_CACHE_KEYS
 # 480KB limit, wiping the whole tunnel (cart/goal/draft) for the next turn.
 # Scoping preservation to the goal that actually owns the key closes the
 # general leak, not just the one instance that happened to be raw data.
+# (2026-09-13, Deep Intent Architecture Cleanup) : `bids_menu`/`stocks_menu`
+# retirés — leurs seuls propriétaires (MARKET_GET_REQUEST_DETAIL/
+# SALES_ACCEPT_CONTRACT/STOCK_ADJUST/STOCK_REMOVE_PARTIAL/STOCK_RECORD_MOVEMENT/
+# STOCK_DELETE) ont tous été supprimés d'INTENT_CONFIG, et les seuls écrivains
+# de ces clés (resolve_received_bids/resolve_buyer_bid_pick) ont été supprimés
+# avec eux (flows/buyer/procurement.py). Plus aucun code ne les écrit ni ne
+# doit les préserver.
 _MENU_CACHE_OWNERS: Dict[str, frozenset] = {
-    "bids_menu": frozenset({"MARKET_GET_REQUEST_DETAIL", "SALES_ACCEPT_CONTRACT"}),
-    "stocks_menu": frozenset(
-        {
-            "STOCK_ADJUST",
-            "STOCK_REMOVE_PARTIAL",
-            "STOCK_RECORD_MOVEMENT",
-            "STOCK_DELETE",
-        }
-    ),
     # auction_menu / generic_menu: no reachable code path currently writes
     # them with real content (dead references kept only for backward
     # compatibility with any checkpoint that still carries them) — never
@@ -110,6 +108,7 @@ _EPHEMERAL_REPLACE_FIELDS = {
     "is_locked": False,
     "should_interrupt": False,
     "interruption_detected": False,
+    "interruption_unresolved": False,
     "interruption_type": None,
     "security_reason": None,
     "requires_human": False,

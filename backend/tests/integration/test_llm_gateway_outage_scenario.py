@@ -58,18 +58,30 @@ class _Completion:
 
 
 class _FlakyThenHealthyClient:
-    """Simule `deepseek.v3.2` : lève un timeout pour les N premiers appels,
-    puis répond normalement (le "probe" de récupération réussit)."""
+    """Simule `deepseek.v3.2` : lève un timeout jusqu'à un appel explicite à
+    `heal()`, puis répond normalement (le "probe" de récupération réussit).
 
-    def __init__(self, fail_count: int):
-        self._fail_count = fail_count
+    (2026-09-13, Incrément G) : basé sur un flag explicite plutôt qu'un
+    compteur d'appels fixe — depuis que le Gateway retente une fois le
+    MÊME candidat sur un timeout (spec §5/§6), le nombre d'appels
+    PHYSIQUES par tour n'est plus 1:1 avec le nombre de tours (`_turn()`)
+    de ce scénario ; ce qui compte pour l'histoire racontée par ce test
+    ("le primaire est en panne jusqu'à ce que le probe HALF_OPEN
+    réussisse") est le moment sémantique de la guérison, pas un compte
+    d'appels devenu fragile."""
+
+    def __init__(self):
+        self._healthy = False
         self.calls: List[dict] = []
         self.chat = self
         self.completions = self
 
+    def heal(self) -> None:
+        self._healthy = True
+
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        if len(self.calls) <= self._fail_count:
+        if not self._healthy:
             raise TimeoutError("deepseek.v3.2 a dépassé le budget (incident réel)")
         return _Completion(model=kwargs.get("model"))
 
@@ -99,7 +111,7 @@ class _StubRegistry:
 class TestFullOutageAndRecoveryScenario:
     def test_the_exact_sequence_from_the_brief(self):
         store: Dict[str, Any] = {}
-        primary_client = _FlakyThenHealthyClient(fail_count=3)
+        primary_client = _FlakyThenHealthyClient()
         fallback_client = _AlwaysHealthyFallback()
 
         primary = ModelCandidate(
@@ -167,8 +179,12 @@ class TestFullOutageAndRecoveryScenario:
         c3 = _turn()
         assert c3.model == "openai.gpt-oss-120b"
         assert health.get(primary.key).state == CircuitState.OPEN
+        # (2026-09-13, Incrément G) : plus un compte fixe (le retry
+        # same-candidate sur TIMEOUT fait 2 appels physiques par tour en
+        # échec, contre 1 avant) — ce qui compte ici est qu'AUCUN nouvel
+        # appel ne survienne une fois le circuit OPEN, vérifié juste après.
         calls_to_primary_after_open = len(primary_client.calls)
-        assert calls_to_primary_after_open == 3
+        assert calls_to_primary_after_open > 0
 
         # request 4 -> primaire ignoré (cooldown pas écoulé) -> fallback DIRECT
         c4 = _turn()
@@ -177,10 +193,11 @@ class TestFullOutageAndRecoveryScenario:
 
         # ── cooldown ──
         time.sleep(0.06)
+        primary_client.heal()
 
         # -> HALF_OPEN -> une seule probe -> succès -> HEALTHY
         c5 = _turn()
-        assert c5.model == "deepseek.v3.2"  # le probe a réussi (fail_count=3 épuisé)
+        assert c5.model == "deepseek.v3.2"  # le probe a réussi (heal() appelé)
         record_after_recovery = health.get(primary.key)
         assert record_after_recovery.state == CircuitState.CLOSED
 
@@ -194,7 +211,7 @@ class TestFullOutageAndRecoveryScenario:
         notification d'ouverture, une seule de récupération, quel que soit
         le nombre de tours en échec/en succès traversés."""
         store: Dict[str, Any] = {}
-        primary_client = _FlakyThenHealthyClient(fail_count=3)
+        primary_client = _FlakyThenHealthyClient()
         fallback_client = _AlwaysHealthyFallback()
         primary = ModelCandidate(
             provider="provider_primary",
@@ -256,6 +273,7 @@ class TestFullOutageAndRecoveryScenario:
         for _ in range(4):
             _turn()
         time.sleep(0.06)
+        primary_client.heal()
         _turn()  # probe réussi -> recovery
 
         critical_alerts = [a for a in sent_alerts if a.startswith("CRITICAL")]

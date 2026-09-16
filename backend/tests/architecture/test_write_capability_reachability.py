@@ -47,62 +47,24 @@ from ladini.protocols.mcp.servers.h import TOOL_DESCRIPTIONS
 # aujourd'hui, avec la raison. Retirer une entrée d'ici doit rendre le
 # test vert (capacité réparée), jamais l'inverse sans justification.
 
+# (2026-09-13, Deep Intent Architecture Cleanup) : toutes les entrées
+# historiques de ces deux dicts (famille STOCK_*/CROP_*/AGRO_*,
+# SALES_ACCEPT_CONTRACT, SYSTEM_*, PROCUREMENT_ACCEPT_OFFER,
+# PROFILE_SWITCH_ROLE, STOCK_GET_MOVEMENTS) ont été supprimées
+# d'INTENT_CONFIG — architecturalement, pas simplement masquées. Elles ne
+# peuvent donc plus apparaître dans WRITE_GOALS/READ_GOALS (dérivés
+# d'INTENT_CONFIG) et le mécanisme d'exception documentée n'a provisoirement
+# plus de raison d'être ; conservé vide pour la structure des tests et pour
+# tout futur gap réel qui mériterait la même discipline (documenté, jamais
+# silencieux).
+
 #: `tool_name` sans implémentation MCP/DB réelle.
-TOOL_WITHOUT_IMPLEMENTATION = {
-    # LEGACY — famille STOCK : `intent.py` pointe des `*_by_id` qui
-    # n'existent pas (les vraies méthodes sont `adjust_stock`,
-    # `remove_stock`, `add_stock_movement`, `delete_stock`). Déprioritisé
-    # par décision produit explicite (« STOCK_* n'est pas un besoin
-    # produit démontré »).
-    "STOCK_RECORD_MOVEMENT": "legacy/stock-deprioritized",
-    "STOCK_ADJUST": "legacy/stock-deprioritized",
-    "STOCK_REMOVE_PARTIAL": "legacy/stock-deprioritized",
-    "STOCK_DELETE": "legacy/stock-deprioritized",
-    "STOCK_UPDATE_LEVEL": "legacy/stock-deprioritized",
-    # LEGACY — verticale agronomie jamais construite côté DB.
-    "CROP_START_CYCLE": "legacy/agronomy-vertical-not-built",
-    "CROP_RECORD_INTERVENTION": "legacy/agronomy-vertical-not-built",
-    "CROP_RECORD_OBSERVATION": "legacy/agronomy-vertical-not-built",
-    "CROP_UPDATE_STAGE": "legacy/agronomy-vertical-not-built",
-    "CROP_UPDATE_SOIL": "legacy/agronomy-vertical-not-built",
-    # PRODUCT DECISION — « valider définitivement un contrat verrouillé » :
-    # ce que cette action doit faire n'est pas déterminable depuis le code
-    # (voir docs/PRODUCT_COMPLETENESS_PHASE2_2026-09-04.md §13).
-    "SALES_ACCEPT_CONTRACT": "product-decision/commit_staged_transaction",
-    "SYSTEM_COMMIT_TRANSACTION": "product-decision/commit_staged_transaction",
-    # DISABLED — neutralisé volontairement par F4 (anti-bypass
-    # winner-selection) ; `accept_bid` n'a de toute façon jamais existé.
-    "PROCUREMENT_ACCEPT_OFFER": "disabled/f4-anti-bypass",
-    # SYSTEM-ONLY — actions système sans méthode DB dédiée.
-    "SYSTEM_REPORT_ANOMALY": "system-only/report_anomaly-absent",
-    "SYSTEM_BIND_ZONE": "system-only/create_agent_action-absent",
-    "PROFILE_SWITCH_ROLE": "system-only/create_agent_action-absent",
-}
+TOOL_WITHOUT_IMPLEMENTATION: dict[str, str] = {}
 
 #: Goals exigeant un identifiant technique SANS entrée
 #: `_RESOLVER_PASSTHROUGH` — donc dont un éventuel résolveur ne peut pas
 #: être atteint (impasse de type F1).
-UNREACHABLE_RESOLVER = {
-    # Doublement cassés : tool_name inexistant ET pas de passthrough.
-    # Réparer le passthrough seul ne les rendrait pas fonctionnels.
-    "STOCK_RECORD_MOVEMENT": "legacy/stock-deprioritized",
-    "STOCK_ADJUST": "legacy/stock-deprioritized",
-    "STOCK_REMOVE_PARTIAL": "legacy/stock-deprioritized",
-    "STOCK_DELETE": "legacy/stock-deprioritized",
-    "STOCK_UPDATE_LEVEL": "legacy/stock-deprioritized",
-    "CROP_RECORD_INTERVENTION": "legacy/agronomy-vertical-not-built",
-    "CROP_RECORD_OBSERVATION": "legacy/agronomy-vertical-not-built",
-    "CROP_UPDATE_STAGE": "legacy/agronomy-vertical-not-built",
-    "AGRO_GET_ECONOMICS": "legacy/agronomy-vertical-not-built",
-    "SYSTEM_REPORT_ANOMALY": "system-only/report_anomaly-absent",
-    "SYSTEM_COMMIT_TRANSACTION": "product-decision/commit_staged_transaction",
-    # REAL GAP — `get_stock_movements` EXISTE et fonctionne ; seul le
-    # câblage (passthrough + branche `_resolve_stock`) manque. Laissé en
-    # l'état car la famille STOCK est déprioritisée par décision produit —
-    # correction minimale documentée dans
-    # docs/RUNTIME_REACHABILITY_AUDIT_2026-09-04.md.
-    "STOCK_GET_MOVEMENTS": "real-gap/stock-deprioritized",
-}
+UNREACHABLE_RESOLVER: dict[str, str] = {}
 
 
 def _goals(action_type: str):
@@ -154,7 +116,7 @@ class TestPassthroughTableIsSane:
         """Garde-fou du test lui-même : si la constante est renommée ou
         déplacée, ce fichier doit échouer bruyamment plutôt que de
         silencieusement ne plus rien vérifier."""
-        assert len(PASSTHROUGH) >= 10
+        assert len(PASSTHROUGH) >= 5
 
 
 class TestEveryWriteGoalIsWired:
@@ -238,8 +200,8 @@ class TestRealEntryPointReachesTheResolver:
     @pytest.mark.parametrize(
         "goal",
         ["PRODUCER_CONFIRM_DELIVERY_PAYMENT", "SALES_UNPUBLISH_PRODUCT",
-         "SALES_UPDATE_PRODUCT", "MARKET_GET_REQUEST_DETAIL",
-         "PRODUCER_CANCEL_ORDER"],
+         "SALES_UPDATE_PRODUCT", "PRODUCTION_UPDATE_FUTURE",
+         "PRODUCER_CANCEL_ORDER", "PRODUCER_CONFIRM_ORDER"],
     )
     def test_validator_then_router_route_to_the_resolver(self, goal):
         from ladini.graphs.agents.market_coach.core.router import DomainRouter
@@ -266,6 +228,54 @@ class TestRealEntryPointReachesTheResolver:
         assert decision == "to_resolver", (
             f"{goal} : le routeur décide `{decision}` au lieu de `to_resolver` — "
             "la capacité est déclarée mais son résolveur est inatteignable"
+        )
+
+    @pytest.mark.parametrize(
+        "goal,event",
+        [
+            ("PRODUCER_CONFIRM_ORDER", "CONFIRM"),
+            ("PRODUCER_CONFIRM_ORDER", "REJECT"),
+            ("PRODUCER_CANCEL_ORDER", "CONFIRM"),
+            ("PRODUCER_CANCEL_ORDER", "REJECT"),
+        ],
+    )
+    def test_the_confirm_action_follow_up_turn_also_reaches_the_resolver(
+        self, goal, event
+    ):
+        """Incident réel (2026-09-15) : le tour INITIAL (NEW_TASK, testé
+        ci-dessus) routait déjà correctement vers `to_resolver` — MAIS le
+        tour SUIVANT, une fois `PendingInteraction(CONFIRM_ACTION)` posé par
+        `_resolve_pending_order_action` (flows/producer/flow.py), ne
+        matchait AUCUNE règle de `DomainRouter` (ni goal ici n'était dans un
+        tunnel) et retombait sur `route_after_validator`, qui route TOUT
+        `CONFIRM_ACTION` porté par un goal à action enregistrée vers
+        `to_confirmation` (confirmation_gate) — jamais revu par le
+        résolveur auto-suffisant qui, seul, sait qu'un "annuler" ici doit
+        exécuter `cancel_confirmed_order`, pas juste abandonner. Preuve
+        dynamique que la 2e moitié du tunnel — celle qui manquait de
+        couverture — est désormais atteignable elle aussi."""
+        from ladini.graphs.agents.market_coach.core.router import DomainRouter
+        from ladini.graphs.agents.market_coach.nodes.validation import validator
+        from tests.conftest import StubRuntime, make_state, run
+
+        state = make_state(
+            current_goal=goal,
+            interpreted_event=event,
+            expected_input="CONFIRMATION",
+            transaction_payload={"order_id": "order-1"},
+        )
+        validated = run(validator(state, StubRuntime()))
+        assert not validated.get("missing_fields"), (
+            f"{goal}/{event} : le validateur réclame "
+            f"{validated.get('missing_fields')} — le résolveur ne sera pas atteint"
+        )
+
+        merged = {**state, **validated}
+        decision = DomainRouter.build().decide(merged)
+        assert decision == "to_resolver", (
+            f"{goal}/{event} : le routeur décide `{decision}` au lieu de "
+            "`to_resolver` — le tour de confirmation/annulation ne peut pas "
+            "atteindre `_resolve_pending_order_action`"
         )
 
 

@@ -43,7 +43,25 @@ async def render_confirmation(ctx: RenderContext) -> Dict[str, Any]:
             ctx.goal,
         )
 
-    if not ctx.goal or get_pending_interaction(state).kind != InteractionKind.CONFIRM_ACTION:
+    # (2026-09-14, incident WhatsApp #12) : logguer la violation puis
+    # continuer quand même produisait un récapitulatif littéralement "None"
+    # ("Voici le récapitulatif :\nNone\n\nConfirmez-vous ?") — observé en
+    # prod sur un `pending_interaction=CONFIRM_ACTION` ORPHELIN (fuite d'un
+    # tunnel `BUYER_LIST_ORDERS` abandonné des jours plus tôt, jamais nettoyé)
+    # qui interceptait via le fast-path déterministe une réponse "confirmer"
+    # sans AUCUN rapport (une notification producteur toute nouvelle). Sans
+    # `confirmation_summary` NI `transaction_payload`, il n'y a structurellement
+    # RIEN à confirmer — ce cas doit dégrader EXACTEMENT comme `not ctx.goal`
+    # ci-dessous, jamais tenter un rendu qui n'a aucune donnée à afficher.
+    # EXCLUT `_BUYER_PREORDER_GOALS` : ce flux tire légitimement son récap de
+    # `PreorderDraft` (voir plus bas), jamais de `confirmation_summary`/
+    # `transaction_payload` — l'invariant ci-dessus ne le sait pas et le
+    # signalerait à tort à CHAQUE précommande.
+    if (
+        not ctx.goal
+        or get_pending_interaction(state).kind != InteractionKind.CONFIRM_ACTION
+        or (violations and ctx.goal not in _BUYER_PREORDER_GOALS)
+    ):
         return apply_corrections(
             state,
             {

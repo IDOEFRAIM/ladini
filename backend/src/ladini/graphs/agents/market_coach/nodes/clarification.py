@@ -18,6 +18,14 @@ logger = get_node_logger("ClarificationNode")
 
 _MAX_USER_TEXT_IN_PROMPT = 200
 
+# (2026-09-13, chantier State Router — Incrément E) : ce prompt était déjà,
+# avant cet incrément, un micro-prompt minimal (aucun catalogue de 41
+# intentions, aucun ID, aucun schéma — une description humaine fixe des
+# capacités) — seule la traçabilité Langfuse manquait. Version explicite
+# ajoutée ici, pas de refonte du prompt (déjà conforme à l'esprit de ce
+# chantier).
+CLARIFICATION_PROMPT_VERSION = "clarification_v1"
+
 
 def _sanitize_for_prompt(text: str) -> str:
     """Nettoie le texte utilisateur avant injection dans un prompt LLM.
@@ -243,6 +251,11 @@ async def clarification_node(
             temperature=0.4,
             max_tokens=150,
             agent_node="clarification_node",
+            extra_metadata={
+                "prompt_family": "clarification",
+                "prompt_version": CLARIFICATION_PROMPT_VERSION,
+                "cognitive_action": str(cognitive_action),
+            },
         )
         result = (completion.choices[0].message.content or "").strip()
         if result:

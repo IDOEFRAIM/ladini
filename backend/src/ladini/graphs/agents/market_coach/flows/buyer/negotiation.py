@@ -240,11 +240,16 @@ async def _handle_viewing_offers(
                     "_handle_viewing_offers: échec de lecture du point GPS par défaut"
                 )
         try:
+            # `idempotency_key` — voir order_tracking.py::finalize_winner pour
+            # la même dérivation (bid_id est déjà l'identifiant stable de
+            # cette action précise, un bid n'est sélectionné gagnant qu'une
+            # fois).
             win = await AuctionGateway(mc_runtime).select_winning_bid(
                 bid_id=str(bid_id),
                 phone=str(_buyer_phone) if _buyer_phone else None,
                 delivery_lat=_delivery_lat,
                 delivery_lon=_delivery_lon,
+                idempotency_key=f"select_winning_bid:{bid_id}",
             )
         except Exception as exc:
             logger.error("_handle_viewing_offers: select_winning_bid a échoué: %s", exc)

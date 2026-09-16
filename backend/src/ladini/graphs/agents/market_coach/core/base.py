@@ -87,17 +87,11 @@ load_all_actions()
 MARKET_VALIDATION_CONFIG = MarketValidationConfig(
     auto_farm_notice=_AUTO_FARM_NOTICE,
     farm=FarmRuleConfig(
+        # (2026-09-14, Deep Intent Architecture Cleanup) : références aux
+        # intents supprimés (STOCK_RECORD_MOVEMENT/ADJUST/REMOVE_PARTIAL/
+        # DELETE, CROP_*) retirées — voir intent.py pour l'audit complet.
         write_requires_farm={
             "STOCK_REGISTER_HARVEST",
-            "STOCK_RECORD_MOVEMENT",
-            "STOCK_ADJUST",
-            "STOCK_REMOVE_PARTIAL",
-            "STOCK_DELETE",
-            "CROP_START_CYCLE",
-            "CROP_RECORD_INTERVENTION",
-            "CROP_RECORD_OBSERVATION",
-            "CROP_UPDATE_STAGE",
-            "CROP_UPDATE_SOIL",
             "FINANCE_LOG_EXPENSE",
             "FARM_CREATE",
             "FARM_UPDATE",
@@ -107,7 +101,6 @@ MARKET_VALIDATION_CONFIG = MarketValidationConfig(
         read_optional_farm={
             "STOCK_GET_SUMMARY",
             "STOCK_GET_DETAIL",
-            "STOCK_GET_MOVEMENTS",
             "FINANCE_GET_SUMMARY",
             "FARM_GET_MY_LIST",
             "SALES_GET_CATALOG",

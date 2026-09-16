@@ -10,9 +10,17 @@ de `core/get_llm.py` (aucune réécriture) → Health Registry (rapporte le
 résultat) → télémétrie (Langfuse/Prometheus via `core/telemetry.py` étendu) →
 alerting (incident ouverture/récupération, dédupliqué).
 
-Ne fait JAMAIS plus d'un appel réseau "en vol" par candidat à la fois côté
-CE process (pas de retry en boucle) — la boucle sur `candidates_for(profile)`
-EST la stratégie de repli, pas un retry déguisé.
+Chaque candidat obtient AU PLUS 2 tentatives réseau consécutives (Incrément G,
+2026-09-13, "Production LLM Hardening", spec §5/§6) — jamais plus : un
+timeout/5xx/429/erreur réseau transitoire mérite UNE retentative COURTE
+(backoff+jitter, `Retry-After` honoré si le provider le fournit — voir
+`error_classification.py::should_retry_same_candidate`/`backoff_seconds`),
+mais 400/401/403/413 ne sont JAMAIS retentés (un problème de prompt/contrat/
+credentials ne se résout pas en réessayant identique). Cette 2e tentative
+reste comptée comme UN SEUL résultat pour le disjoncteur (santé rapportée
+une fois par candidat, pas une fois par tentative réseau) — la boucle sur
+`candidates_for(profile)` reste la stratégie de repli inter-candidats,
+inchangée.
 """
 
 from __future__ import annotations
@@ -36,7 +44,11 @@ from ladini.graphs.agents.market_coach.llm_gateway.circuit_breaker import (
     Decision,
 )
 from ladini.graphs.agents.market_coach.llm_gateway.error_classification import (
+    backoff_seconds,
     classify_llm_error,
+    classify_llm_failure_kind,
+    retry_after_seconds,
+    should_retry_same_candidate,
 )
 from ladini.graphs.agents.market_coach.llm_gateway.health_registry import (
     HealthRegistry,
@@ -93,6 +105,7 @@ class LLMGateway:
         registry: Optional[ModelRegistry] = None,
         health_registry: Optional[HealthRegistry] = None,
         circuit_breaker: Optional[CircuitBreaker] = None,
+        rate_limiter: Optional[Any] = None,
         notifier: Optional[NotificationService] = None,
         incident_dedup: Optional[IncidentDeduplicator] = None,
         settings: Any = None,
@@ -113,6 +126,13 @@ class LLMGateway:
             half_open_probes=int(getattr(settings, "LLM_HALF_OPEN_PROBES", 1)),
             probe_lock_seconds=float(getattr(settings, "LLM_PROBE_LOCK_SECONDS", 10.0)),
         )
+        if rate_limiter is None:
+            from ladini.graphs.agents.market_coach.llm_gateway.rate_limiter import (
+                build_rate_limiter,
+            )
+
+            rate_limiter = build_rate_limiter(settings)
+        self._rate_limiter = rate_limiter
         self._notifier = notifier or build_notifier(settings)
         self._incident_dedup = incident_dedup or IncidentDeduplicator()
         # Injectable pour les tests (évite de construire de vrais clients SDK) —
@@ -130,8 +150,19 @@ class LLMGateway:
         response_format: Optional[dict] = None,
         request_id: Optional[str] = None,
         agent_node: Optional[str] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Any:
+        # `extra_metadata` (2026-09-12, instrumentation Langfuse — voir
+        # `record_generation`) : sac libre de dimensions d'observabilité
+        # SUPPLÉMENTAIRES propres à l'appelant (ex: `message_sid`,
+        # `prompt_version`, `cache_hit`, `llm_call_index`, `current_goal`,
+        # `expected_input` pour `input_interpreter`) — paramètre EXPLICITE,
+        # PAS dans `**kwargs` : `**kwargs` est directement éclaté dans l'appel
+        # RÉEL au client LLM (`_call_candidate`, `call_kwargs.update(kwargs)`)
+        # ; y glisser des clés d'observabilité casserait l'appel API. Ne
+        # change AUCUN comportement fonctionnel — uniquement propagé vers
+        # `_on_success`/`_on_failure` → `_emit_telemetry` → `record_generation`.
         structured_required = bool(response_format)
         candidates = [
             c
@@ -199,18 +230,99 @@ class LLMGateway:
             if per_call_timeout <= 0:
                 continue
 
+            # Rate limiter partagé (spec §14-18) — désactivé par défaut
+            # (RPM/TPM/MAX_INFLIGHT=0), donc no-op tant que l'opérateur ne
+            # l'a pas explicitement configuré. Une seule attente courte
+            # avant de basculer sur le candidat suivant (spec §18 : préférer
+            # une attente courte à un 429→retry→429 en boucle) — jamais une
+            # file d'attente longue qui dégraderait la latence perçue.
+            estimated_tokens = _estimate_tokens(messages) + int(kwargs.get("max_tokens") or 0)
+            rl_decision = self._rate_limiter.check_and_reserve(
+                candidate.provider, estimated_tokens
+            )
+            if not rl_decision.allowed:
+                logger.info(
+                    "LLM_RATE_LIMITED | profile=%s candidate=%s reason=%s — attente courte",
+                    profile.value,
+                    candidate.key,
+                    rl_decision.reason,
+                )
+                await asyncio.sleep(min(0.5, max(0.0, remaining - _MIN_VIABLE_SECONDS)))
+                rl_decision = self._rate_limiter.check_and_reserve(
+                    candidate.provider, estimated_tokens
+                )
+                if not rl_decision.allowed:
+                    logger.info(
+                        "LLM_CALL | profile=%s candidate=%s attempt=skip reason=%s",
+                        profile.value,
+                        candidate.key,
+                        rl_decision.reason,
+                    )
+                    continue
+
             attempt += 1
             is_probe = circuit_decision.decision == Decision.PROBE
             t0 = time.perf_counter()
+            # Spec §5/§6 : jusqu'à 2 tentatives réseau pour CE candidat —
+            # la 2e UNIQUEMENT si le premier échec est d'un type qui mérite
+            # un retry court (timeout/5xx/429/connexion — jamais 400/401/
+            # 403/413, voir `should_retry_same_candidate`) ET s'il reste
+            # assez de budget. Compte comme UN SEUL résultat pour le
+            # disjoncteur (`provider_retry_count` tracé séparément,
+            # jamais confondu avec `attempt`, qui reste l'index inter-
+            # candidats pour la télémétrie existante).
+            provider_retry_count = 0
+            exc: Optional[Exception] = None
+            completion = None
             try:
-                completion = await self._call_candidate(
-                    candidate,
-                    messages=messages,
-                    response_format=response_format,
-                    timeout=per_call_timeout,
-                    **kwargs,
-                )
-            except Exception as exc:
+                for _network_try in range(2):
+                    try:
+                        completion = await self._call_candidate(
+                            candidate,
+                            messages=messages,
+                            response_format=response_format,
+                            timeout=per_call_timeout,
+                            **kwargs,
+                        )
+                        exc = None
+                        break
+                    except Exception as call_exc:
+                        exc = call_exc
+                        if _network_try == 0:
+                            kind = classify_llm_failure_kind(call_exc)
+                            remaining_after = deadline - time.monotonic()
+                            if (
+                                should_retry_same_candidate(kind)
+                                and remaining_after > _MIN_VIABLE_SECONDS
+                            ):
+                                delay = backoff_seconds(
+                                    kind, 1, retry_after=retry_after_seconds(call_exc)
+                                )
+                                delay = min(
+                                    delay, max(0.0, remaining_after - _MIN_VIABLE_SECONDS)
+                                )
+                                logger.info(
+                                    "LLM_RETRY | profile=%s candidate=%s kind=%s delay_s=%.2f",
+                                    profile.value,
+                                    candidate.key,
+                                    kind.value,
+                                    delay,
+                                )
+                                if delay > 0:
+                                    await asyncio.sleep(delay)
+                                provider_retry_count = 1
+                                per_call_timeout = min(
+                                    candidate.timeout_seconds,
+                                    (deadline - time.monotonic()) - _SAFETY_MARGIN_SECONDS,
+                                )
+                                if per_call_timeout <= 0:
+                                    break
+                                continue
+                        break
+            finally:
+                self._rate_limiter.release_inflight(candidate.provider)
+
+            if exc is not None:
                 latency_ms = (time.perf_counter() - t0) * 1000.0
                 self._on_failure(
                     candidate=candidate,
@@ -219,10 +331,13 @@ class LLMGateway:
                     latency_ms=latency_ms,
                     attempt=attempt,
                     is_probe=is_probe,
+                    primary_key=primary_key,
                     request_id=request_id,
                     agent_node=agent_node,
                     messages=messages,
                     structured_required=structured_required,
+                    extra_metadata=extra_metadata,
+                    provider_retry_count=provider_retry_count,
                 )
                 last_exc = exc
                 continue
@@ -236,9 +351,12 @@ class LLMGateway:
                 attempt=attempt,
                 is_probe=is_probe,
                 is_fallback=candidate.key != primary_key,
+                primary_key=primary_key,
+                provider_retry_count=provider_retry_count,
                 request_id=request_id,
                 agent_node=agent_node,
                 messages=messages,
+                extra_metadata=extra_metadata,
                 structured_required=structured_required,
             )
             return completion
@@ -303,11 +421,16 @@ class LLMGateway:
         return client
 
     def _budget_for(self, profile: LLMProfile) -> float:
-        attr = (
-            "LLM_FAST_BUDGET_SECONDS"
-            if profile == LLMProfile.FAST
-            else "LLM_REASONING_BUDGET_SECONDS"
-        )
+        # (2026-09-13, Incrément G, spec §21 "timeouts explicites par
+        # profil") : INTERPRETER tombait auparavant dans l'"else" et
+        # empruntait sans le vouloir le budget de REASONING (20s) — alors
+        # que son timeout PAR CANDIDAT (registry.py, 8s, même valeur que
+        # FAST) suggérait clairement une intention "rapide". Budget dédié
+        # explicite plutôt qu'un partage accidentel.
+        attr = {
+            LLMProfile.FAST: "LLM_FAST_BUDGET_SECONDS",
+            LLMProfile.INTERPRETER: "LLM_INTERPRETER_BUDGET_SECONDS",
+        }.get(profile, "LLM_REASONING_BUDGET_SECONDS")
         return float(getattr(self._settings, attr, 15.0))
 
     # ── Callbacks succès/échec (santé + télémétrie + alerting) ───────
@@ -325,6 +448,9 @@ class LLMGateway:
         agent_node: Optional[str],
         messages: Any,
         structured_required: bool,
+        primary_key: Optional[str] = None,
+        provider_retry_count: int = 0,
+        extra_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         record = self._circuit.report_success(candidate, latency_ms)
 
@@ -367,8 +493,15 @@ class LLMGateway:
             agent_node=agent_node,
             messages=messages,
             structured_required=structured_required,
-            fallback_from=None,
+            # (2026-09-13, Incrément G, spec §10/§45) : bug corrigé — ce
+            # champ valait toujours `None`, y compris quand `is_fallback`
+            # était vrai. `fallback_from` doit porter le candidat PRIMAIRE
+            # réellement contourné, pas juste un booléen implicite.
+            fallback_from=primary_key if is_fallback else None,
             fallback_reason="primary_unavailable" if is_fallback else None,
+            provider_retry_count=provider_retry_count,
+            primary_key=primary_key,
+            extra_metadata=extra_metadata,
         )
 
     def _on_failure(
@@ -384,8 +517,12 @@ class LLMGateway:
         agent_node: Optional[str],
         messages: Any,
         structured_required: bool,
+        primary_key: Optional[str] = None,
+        provider_retry_count: int = 0,
+        extra_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         error_class = classify_llm_error(exc)
+        failure_kind = classify_llm_failure_kind(exc)
         is_timeout = isinstance(exc, (asyncio.TimeoutError, TimeoutError))
 
         if error_class == ErrorClass.CONFIG:
@@ -471,6 +608,10 @@ class LLMGateway:
             structured_required=structured_required,
             fallback_from=None,
             fallback_reason=None,
+            provider_retry_count=provider_retry_count,
+            failure_kind=failure_kind.value,
+            primary_key=primary_key,
+            extra_metadata=extra_metadata,
         )
 
     def _safe_alert(self, candidate: ModelCandidate, should_notify, alert: LLMIncidentAlert) -> None:
@@ -512,6 +653,10 @@ class LLMGateway:
         structured_required: bool,
         fallback_from: Optional[str],
         fallback_reason: Optional[str],
+        provider_retry_count: int = 0,
+        failure_kind: Optional[str] = None,
+        primary_key: Optional[str] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         try:
             from ladini.core.telemetry import record_generation
@@ -519,6 +664,7 @@ class LLMGateway:
             output = None
             structured_valid: Optional[bool] = None
             usage = None
+            estimated_cost_usd: Optional[float] = None
             if completion is not None:
                 try:
                     output = completion.choices[0].message.content
@@ -526,12 +672,51 @@ class LLMGateway:
                     output = None
                 usage_obj = getattr(completion, "usage", None)
                 if usage_obj is not None:
+                    prompt_tokens = getattr(usage_obj, "prompt_tokens", None)
+                    completion_tokens = getattr(usage_obj, "completion_tokens", None)
                     usage = {
-                        "prompt_tokens": getattr(usage_obj, "prompt_tokens", None),
-                        "completion_tokens": getattr(usage_obj, "completion_tokens", None),
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
                     }
+                    # Spec §23 : coût estimé, prix venant de config (jamais
+                    # codé en dur ici) — `None` si le modèle n'a pas de prix
+                    # connu plutôt qu'une estimation inventée.
+                    try:
+                        from ladini.graphs.agents.market_coach.llm_gateway.cost import (
+                            estimate_cost_usd,
+                        )
+
+                        estimated_cost_usd = estimate_cost_usd(
+                            candidate.provider,
+                            candidate.model,
+                            prompt_tokens or 0,
+                            completion_tokens or 0,
+                        )
+                    except Exception:
+                        estimated_cost_usd = None
                 if structured_required and output is not None:
                     structured_valid = _looks_like_json(output)
+
+            # (spec §10/§45) : "requested" = candidat PRIMAIRE demandé pour
+            # ce profil, "actual" = celui qui a réellement répondu (ou
+            # échoué) — distincts dès qu'il y a fallback, jamais confondus.
+            requested_provider, _, requested_model = (primary_key or candidate.key).partition(":")
+            gateway_metadata: Dict[str, Any] = {
+                "requested_provider": requested_provider or candidate.provider,
+                "requested_model": requested_model or candidate.model,
+                "actual_provider": candidate.provider,
+                "actual_model": candidate.model,
+                "provider_retry_count": provider_retry_count,
+                "llm_call_category": "interpretation"
+                if profile == LLMProfile.INTERPRETER
+                else None,
+            }
+            if failure_kind is not None:
+                gateway_metadata["failure_kind"] = failure_kind
+            if estimated_cost_usd is not None:
+                gateway_metadata["estimated_cost_usd"] = estimated_cost_usd
+            if extra_metadata:
+                gateway_metadata.update(extra_metadata)
 
             record_generation(
                 model=candidate.model,
@@ -550,10 +735,27 @@ class LLMGateway:
                 structured_output_valid=structured_valid,
                 request_id=request_id,
                 agent_node=agent_node,
+                extra_metadata=gateway_metadata,
             )
         except Exception:
             # Règle d'or telemetry.py : jamais bloquant pour le tour utilisateur.
             pass
+
+
+def _estimate_tokens(messages: Any) -> int:
+    """Estimation GROSSIÈRE (spec §16 : "ne nécessite pas une précision
+    parfaite") du nombre de tokens d'entrée — mots × 1.3, même heuristique
+    que celle utilisée pour les mesures de taille de prompt tout au long de
+    ce chantier (voir les rapports A-F). Sert UNIQUEMENT à réserver un
+    budget TPM avant l'appel, jamais la télémétrie de coût réelle (qui
+    utilise `completion.usage`, l'usage EXACT renvoyé par le provider)."""
+    try:
+        text = " ".join(
+            str(m.get("content") or "") for m in messages if isinstance(m, dict)
+        )
+        return int(len(text.split()) * 1.3)
+    except Exception:
+        return 0
 
 
 def _looks_like_json(text: str) -> bool:
@@ -609,8 +811,14 @@ class LegacyOverrideGateway:
         response_format: Optional[dict] = None,
         request_id: Optional[str] = None,
         agent_node: Optional[str] = None,
+        extra_metadata: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Any:
+        # `extra_metadata` (2026-09-12, instrumentation Langfuse) accepté
+        # pour compatibilité de signature avec le Gateway complet, mais
+        # SANS EFFET ici : cette passerelle de test ne fait aucune
+        # télémétrie (voir docstring de classe) — jamais transmis à
+        # `call_kwargs`/au client réel.
         model = self._model_resolver() or "llama-3.3-70b-versatile"
         call_kwargs: Dict[str, Any] = {"model": model, "messages": messages}
         if response_format is not None:

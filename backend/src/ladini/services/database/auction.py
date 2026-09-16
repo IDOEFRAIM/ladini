@@ -28,7 +28,7 @@ from ladini.domain.models import (
 
 from .base import BaseMixin
 from .category import _is_confident_category_match
-from .common import clean_text, normalize_phone
+from .common import clean_text, normalize_phone, positive_float
 from .errors import BusinessRuleException
 from .moderation import _fold as _fold_for_moderation
 from .search import fuzzy_match, similarity_rank
@@ -480,6 +480,116 @@ class AuctionMixin(BaseMixin):
                 "data": {"auction_id": str(auction.id), "images": current_images},
             }
 
+        except ValueError as e:
+            return {"status": "error", "message": str(e)}
+
+    async def update_auction_fields(
+        self,
+        phone: str,
+        auction_id: str,
+        quantity: Optional[float] = None,
+        unit: Optional[str] = None,
+        max_price_per_unit: Optional[float] = None,
+        deadline: Any = None,
+    ) -> Dict[str, Any]:
+        """Met à jour partiellement un appel d'offres (Auction) : quantité,
+        unité, prix plafond et/ou date limite — seuls les champs fournis sont
+        modifiés. Même discipline que `ProductMixin.
+        update_product_price_and_qty` (verrou FOR UPDATE, contrôle de
+        propriété), adaptée à `Auction` : REFUSE toute modification hors
+        statut OPEN — un appel d'offres déjà clôturé/expiré/annulé ne doit
+        plus pouvoir changer de termes après coup (2026-09-14, ajout de la
+        capacité de mise à jour — jusqu'ici un acheteur ne pouvait JAMAIS
+        corriger un appel d'offres publié, seulement le laisser expirer et
+        en recréer un)."""
+        try:
+            phone = clean_text(phone, "phone", required=True)
+            auction_id = clean_text(auction_id, "auction_id", required=True)
+            _, buyer_profile = await self.get_buyer_profile(phone)
+
+            stmt = (
+                select(Auction)
+                .where(
+                    and_(
+                        Auction.id == uuid.UUID(auction_id),
+                        Auction.buyer_id == buyer_profile.id,
+                    )
+                )
+                .with_for_update()
+            )
+            res = await self.session.execute(stmt)
+            auction = res.scalar_one_or_none()
+
+            if not auction:
+                return {
+                    "status": "error",
+                    "message": "Appel d'offres introuvable ou non autorisé.",
+                }
+
+            if str(auction.status or "").upper() != "OPEN":
+                return {
+                    "status": "error",
+                    "message": (
+                        "Cet appel d'offres n'est plus modifiable (statut : "
+                        f"{str(auction.status or '').upper()})."
+                    ),
+                }
+
+            changed: List[str] = []
+            if quantity is not None:
+                auction.quantity = positive_float(quantity, "quantity")
+                changed.append("quantité")
+            if unit is not None:
+                clean_unit = clean_text(unit, "unit", max_length=16)
+                if clean_unit:
+                    auction.unit = clean_unit.upper()
+                    changed.append("unité")
+            if max_price_per_unit is not None:
+                auction.max_price_per_unit = positive_float(
+                    max_price_per_unit, "max_price_per_unit"
+                )
+                changed.append("prix plafond")
+            if deadline is not None:
+                deadline_dt = deadline
+                if isinstance(deadline_dt, str):
+                    deadline_dt = datetime.fromisoformat(
+                        deadline_dt.replace(" ", "T")
+                    )
+                if deadline_dt <= datetime.now():
+                    return {"status": "error", "message": "Date limite invalide."}
+                auction.deadline = deadline_dt
+                changed.append("date limite")
+
+            if not changed:
+                return {
+                    "status": "error",
+                    "message": "Aucun champ à modifier n'a été fourni.",
+                }
+
+            auction.updated_at = datetime.now()
+            await self.session.flush()
+            await self.session.refresh(auction)
+
+            logger.info(
+                "AUCTION_UPDATED: ID %s par %s (champs: %s)",
+                auction_id,
+                phone,
+                ", ".join(changed),
+            )
+
+            return {
+                "status": "success",
+                "message": f"✅ Appel d'offres mis à jour ({', '.join(changed)}).",
+                "data": {
+                    "auction_id": str(auction.id),
+                    "quantity": auction.quantity,
+                    "unit": auction.unit,
+                    "max_price_per_unit": auction.max_price_per_unit,
+                    "deadline": auction.deadline.isoformat()
+                    if auction.deadline
+                    else None,
+                },
+            }
         except ValueError as e:
             return {"status": "error", "message": str(e)}
 

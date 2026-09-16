@@ -13,13 +13,51 @@ class LLMProfile(str, Enum):
     """Capacité demandée par un node métier — JAMAIS un nom de modèle.
 
     FAST : normalisation, classification simple, modération rapide — latence
-    prioritaire sur la profondeur de raisonnement.
-    REASONING : interprétation d'intent, extraction complexe, génération de
-    réponse — tout goal métier qui a besoin de comprendre, pas juste classer.
+    prioritaire sur la profondeur de raisonnement. Consommateurs actuels
+    (voir `llm_router.py::_FAST_PROFILE_GOALS`) : INPUT_NORMALIZATION,
+    SECURITY_MODERATION, STATE_CLEANER — inchangés par l'introduction
+    d'INTERPRETER ci-dessous (2026-09-12).
+    REASONING : génération de réponse, planification — tout goal métier qui
+    a besoin de comprendre en profondeur, pas juste classer/extraire.
+    INTERPRETER (2026-09-12, chantier State Router — Phase B.1) : profil
+    DÉDIÉ à `graphs/agents/market_coach/interpreter/` (le classifier NEW_TASK
+    legacy ET les micro-prompts SELECTION/ACTIVE_SLOT/...) — délibérément
+    séparé de FAST et REASONING pour pouvoir pointer l'interpréteur vers
+    Groq `llama-3.1-8b-instant` (voir `settings.LLM_INTERPRETER_PRIMARY`)
+    SANS changer le modèle des 3 consommateurs FAST ci-dessus ni du
+    générateur de réponse REASONING — un changement de config strictement
+    local à l'interpréteur, jamais un remplacement global de FAST/REASONING.
     """
 
     FAST = "FAST"
     REASONING = "REASONING"
+    INTERPRETER = "INTERPRETER"
+
+
+class LLMFailureKind(str, Enum):
+    """Classification FINE d'un échec d'appel LLM — Incrément G (2026-09-13,
+    "Production LLM Hardening"), spec §4. Complète (ne remplace pas)
+    `ErrorClass` ci-dessous : `ErrorClass` reste la SEULE chose que lit le
+    disjoncteur (3 catégories, suffisant pour "compte comme panne ou pas") ;
+    `LLMFailureKind` porte la granularité nécessaire à la POLITIQUE DE RETRY
+    (spec §5 — un timeout et un 429 comptent tous deux `ErrorClass.TRANSIENT`
+    pour le disjoncteur, mais n'appellent pas le même backoff) et à
+    l'observabilité (Langfuse `failure_kind`, spec §10/§45). Voir
+    `error_classification.py::classify_llm_failure_kind` et
+    `error_class_for_kind` pour la correspondance vers `ErrorClass`."""
+
+    RATE_LIMIT = "RATE_LIMIT"
+    TIMEOUT = "TIMEOUT"
+    PROVIDER_5XX = "PROVIDER_5XX"
+    CONNECTION = "CONNECTION"
+    AUTH = "AUTH"
+    CONFIG = "CONFIG"
+    BAD_REQUEST = "BAD_REQUEST"
+    CONTEXT_TOO_LARGE = "CONTEXT_TOO_LARGE"
+    INVALID_RESPONSE = "INVALID_RESPONSE"
+    CIRCUIT_OPEN = "CIRCUIT_OPEN"
+    APPLICATION = "APPLICATION"
+    UNKNOWN = "UNKNOWN"
 
 
 class ErrorClass(str, Enum):

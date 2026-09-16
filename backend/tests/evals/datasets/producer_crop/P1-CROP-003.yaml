@@ -6,8 +6,8 @@ tags: [happy_path, disambiguation, livestock, future_production]
 grounding:
   status: PATTERN_CONSISTENT
   evidence:
-    - "backend/src/ladini/graphs/agents/market_coach/interpreter/intent.py — INTENT_DISAMBIGUATION['STOCK_OR_SALES_DECLARATION'] lexical_hints include 'poussin', 'poussins'; DECLARE_CROP_CYCLE required=[farm_id, production_type, product, quantity, estimated_available_at, price], non-tunnel"
-    - "Dispatch pattern for non-tunnel intents PROVEN elsewhere (see P1-STOCK-001); DECLARE_CROP_CYCLE's own actions/agro.py handler not individually re-traced."
+    - "backend/src/ladini/graphs/agents/market_coach/interpreter/intent.py — INTENT_DISAMBIGUATION['STOCK_OR_SALES_DECLARATION'] lexical_hints include 'poussin', 'poussins'; PRODUCTION_DECLARE_FUTURE (renamed 2026-09-13 from DECLARE_CROP_CYCLE) required=[farm_id, production_type, product, quantity, estimated_available_at, price], non-tunnel"
+    - "Dispatch pattern for non-tunnel intents PROVEN elsewhere; PRODUCTION_DECLARE_FUTURE's own actions/agro.py handler (prep_production_declare_future) not individually re-traced."
 
 persona: {role: PRODUCER, description: "Aviculteur", phone: "+22670000022"}
 workspace_type: producer
@@ -22,7 +22,7 @@ conversation:
   - turn: 2
     user_message: "Prêt plus tard"
     expected_behavior:
-      intent: DECLARE_CROP_CYCLE
+      intent: PRODUCTION_DECLARE_FUTURE
       slots: {production_type: "élevage", product: "poussins", quantity: 300}
   - turn: 3
     user_message: "Disponible dans 6 semaines, 5000 FCFA le lot"

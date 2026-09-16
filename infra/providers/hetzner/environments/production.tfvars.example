@@ -1,0 +1,47 @@
+# ═════════════════════════════════════════════════════════════════════
+# infra/providers/hetzner/environments/production.tfvars.example
+#
+# Copiez en `production.tfvars` (gitignored, voir .gitignore racine —
+# `infra/providers/hetzner/*.tfvars` est exclu, seul CE .example reste
+# versionné) puis :
+#
+#   cd infra/providers/hetzner
+#   terraform init
+#   terraform plan  -var-file=environments/production.tfvars -var="hcloud_token=$env:TF_VAR_hcloud_token"
+#   terraform apply -var-file=environments/production.tfvars
+#
+# NE METTEZ JAMAIS hcloud_token dans ce fichier (même une fois copié en
+# .tfvars réel) : passez-le via la variable d'environnement TF_VAR_hcloud_token
+# (voir README.md). Tout le reste ci-dessous n'est pas un secret.
+# ═════════════════════════════════════════════════════════════════════
+
+# Clé publique SSH admin/déploiement (contenu de ex: ~/.ssh/ladini_deploy.pub).
+# Générez une paire DÉDIÉE : ssh-keygen -t ed25519 -f ~/.ssh/ladini_deploy -C "deploy@ladini"
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... deploy@ladini"
+
+# Votre IP fixe (ou un /32 de votre bastion/VPN). Trouvez la vôtre :
+# curl -s https://ifconfig.me
+# JAMAIS 0.0.0.0/0 — Terraform refuse cette valeur (voir variables.tf).
+admin_cidrs = ["203.0.113.4/32"]
+
+# Domaine public réel — DOIT correspondre à PUBLIC_DOMAIN de
+# infra/reverse-proxy/.env sur chaque node (Caddy) une fois déployé, et
+# doit pointer (enregistrement A) vers l'output load_balancer_ipv4 après
+# le premier `apply`.
+public_domain = "api.ladini.com"
+
+# Phase 1 (< 100 utilisateurs, voir infra/inventory.example.yml) : 1 seul
+# node cumule app+scheduler+admin. Montez progressivement (2, 3, …) quand
+# la charge le justifie — voir README.md § scaling.
+app_node_count = 1
+
+# Type de server par défaut — le plus petit type Hetzner actuel (4 Go RAM).
+# Ajustez si la charge LLM/DB le justifie (voir README.md § coûts).
+app_server_type = "cx22"
+
+location     = "nbg1"
+network_zone = "eu-central"
+
+# Dépôt cloné par cloud-init au premier boot de chaque node.
+git_repo_url = "https://github.com/IDOEFRAIM/ladini.git"
+git_ref      = "main"

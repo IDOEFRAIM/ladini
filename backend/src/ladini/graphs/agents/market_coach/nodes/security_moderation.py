@@ -154,7 +154,18 @@ async def _check_account_gate(
     confirmation/executor (Bloc transactionnel), ce signal n'est PAS encore
     branché vers l'exécuteur ici."""
     try:
-        res = await ModerationGateway(mc_runtime).get_account_status(phone)
+        # (2026-09-11) `asyncio.wait_for` explicite — sans lui, un MCP qui ne
+        # répond jamais (pas une exception, un simple silence réseau) bloque
+        # ce await INDÉFINIMENT : rien dans ce `try/except` n'attrape un
+        # hang, seulement une exception levée. Incident réel : ce gate a
+        # laissé passer vite (<100ms côté MCP, confirmé par ses logs) mais
+        # `_get_prohibited_terms_cached` juste après (même pattern, corrigé
+        # au même endroit) a bloqué le tour entier jusqu'au timeout global de
+        # 45s — `moderate_content` plus bas dans ce fichier avait déjà ce
+        # garde-fou (`timeout=5.0`), ces deux appels ne l'avaient pas.
+        res = await asyncio.wait_for(
+            ModerationGateway(mc_runtime).get_account_status(phone), timeout=5.0
+        )
     except (
         Exception
     ) as exc:  # dégradé : ne jamais bloquer un compte sain sur erreur technique
@@ -222,7 +233,15 @@ async def _get_prohibited_terms_cached(
     if cached is not None and (now - _terms_cache["at"]) < _TERMS_CACHE_TTL_SECONDS:
         return cached
     try:
-        terms_res = _unwrap(await ModerationGateway(mc_runtime).get_prohibited_terms())
+        # (2026-09-11) Voir le commentaire jumeau sur `_check_account_gate` —
+        # même incident réel : cet appel SANS timeout a bloqué un tour entier
+        # (45s, jusqu'au timeout global) alors que le cache était froid
+        # (juste après un redémarrage worker, `_terms_cache` réinitialisé).
+        terms_res = _unwrap(
+            await asyncio.wait_for(
+                ModerationGateway(mc_runtime).get_prohibited_terms(), timeout=5.0
+            )
+        )
     except Exception as exc:
         logger.warning("[SecurityModeration] prohibited terms fetch failed: %s", exc)
         # Secours : un cache périmé vaut mieux qu'aucun filtre du tout.
@@ -252,12 +271,19 @@ async def _check_prohibited(
     banned = False
     if phone:
         try:
+            # (2026-09-11) Même garde-fou que les deux appels ci-dessus —
+            # cohérence : aucun appel MCP dans ce nœud ne doit rester sans
+            # timeout explicite (voir l'incident documenté sur
+            # `_check_account_gate`/`_get_prohibited_terms_cached`).
             rec = _unwrap(
-                await ModerationGateway(mc_runtime).record_moderation_strike(
-                    phone=phone,
-                    matched_term=str(matched),
-                    excerpt=text,
-                    kind="PROHIBITED_PRODUCT",
+                await asyncio.wait_for(
+                    ModerationGateway(mc_runtime).record_moderation_strike(
+                        phone=phone,
+                        matched_term=str(matched),
+                        excerpt=text,
+                        kind="PROHIBITED_PRODUCT",
+                    ),
+                    timeout=5.0,
                 )
             )
             strikes = int(rec.get("strikes") or 0)

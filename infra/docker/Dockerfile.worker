@@ -7,6 +7,27 @@
 ARG API_IMAGE=ladini-api:latest
 FROM ${API_IMAGE} AS runtime
 
+# (2026-09-17, follow-up pre-Hetzner) — BUG RÉEL trouvé en E2E local, pas
+# seulement documenté : `beat` (docker-compose.prod.yml) monte un volume
+# NOMMÉ sur `/var/lib/celery-beat` pour survivre à un redémarrage — mais ce
+# répertoire n'existait NULLE PART dans cette image avant ce commit, donc
+# Docker le crée au premier montage avec le propriétaire par défaut
+# (root:root, 755). `appuser` (uid 10001, ligne `USER` ci-dessous) ne peut
+# alors JAMAIS écrire `celerybeat-schedule` — `_gdbm.error: [Errno 13]
+# Permission denied`, à CHAQUE démarrage, crash immédiat, `restart:
+# unless-stopped` relance en boucle indéfiniment (observé : 170+ redémarrages
+# en ~5h de validation E2E). Le healthcheck (`pgrep`) masquait partiellement
+# le problème : "healthy" entre deux crashs très rapprochés donnait
+# l'illusion d'un service stable. Créer le répertoire ICI, avant `USER`, avec
+# le bon propriétaire : Docker initialise un volume nommé VIDE en copiant le
+# contenu (et les permissions) du répertoire de l'image au même chemin — la
+# correction doit donc vivre dans l'image, pas seulement dans le compose.
+# `USER root` explicite : l'image API de base bascule déjà sur `appuser` en
+# fin de son propre Dockerfile — sans ce retour à root, `mkdir /var/lib/...`
+# échoue lui-même en Permission denied (confirmé en E2E local).
+USER root
+RUN mkdir -p /var/lib/celery-beat && chown -R appuser:appuser /var/lib/celery-beat
+
 USER appuser
 WORKDIR /app/backend/src
 
