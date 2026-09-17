@@ -123,6 +123,7 @@ backend/services/external_apis/earth_engine/apikey.json
 .DS_Store
 Thumbs.db
 
+*.tfplan
 # ============================
 # Notebooks
 # ============================
