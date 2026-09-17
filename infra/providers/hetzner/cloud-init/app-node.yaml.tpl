@@ -71,7 +71,56 @@ write_files:
       PermitRootLogin no
       X11Forwarding no
 
+
+  # ── Réseau privé Hetzner ────────────────────────────────────────────
+  # La NIC privée est enp7s0 sur les VMs Hetzner de cette topologie.
+  # Sans cette configuration, l'interface reste DOWN et le Load Balancer
+  # ne peut pas joindre Caddy sur 80/443 via le réseau 10.20.0.0/16.
+  - path: /etc/netplan/60-ladini-private.yaml
+    owner: root:root
+    permissions: "0600"
+    content: |
+      network:
+        version: 2
+        renderer: networkd
+        ethernets:
+          enp7s0:
+            dhcp4: true
+
 runcmd:
+  # ── Activation du réseau privé Hetzner ─────────────────────────────
+  # Fail-closed : le node ne doit pas être déclaré prêt si sa NIC privée
+  # n'est pas opérationnelle, car le LB cible le serveur par cette NIC.
+  - |
+    echo "[ladini] configuration du réseau privé Hetzner (enp7s0)"
+    if ! netplan generate; then
+      echo "[ladini] FATAL: netplan generate a échoué" >&2
+      exit 1
+    fi
+
+    if ! netplan apply; then
+      echo "[ladini] FATAL: netplan apply a échoué" >&2
+      exit 1
+    fi
+
+    PRIVATE_NET_READY=0
+    for i in $(seq 1 20); do
+      if ip -4 addr show dev enp7s0 2>/dev/null | grep -q "inet "; then
+        PRIVATE_NET_READY=1
+        break
+      fi
+      sleep 1
+    done
+
+    if [ "$PRIVATE_NET_READY" -ne 1 ]; then
+      echo "[ladini] FATAL: enp7s0 n'a reçu aucune IPv4 privée" >&2
+      ip -br addr >&2 || true
+      exit 1
+    fi
+
+    echo "[ladini] réseau privé OK :"
+    ip -br addr show enp7s0
+
   # ── Docker Engine + plugin compose (dépôt officiel Docker) ──────────
   - install -m 0755 -d /etc/apt/keyrings
   - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
