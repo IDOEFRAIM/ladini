@@ -171,7 +171,9 @@ jobs:
           # ── Déploiement ────────────────────────────────────────────
           if [ -f infra/inventory.yml ]; then
             echo "→ inventaire présent : déploiement multi-node"
-            ./scripts/cluster_deploy.sh "${{ github.event.inputs.release }}"
+            NODE_DEPLOY_DIR="$DEPLOY_DIR" \
+            CLUSTER_SSH_KEY="$HOME/.ssh/github_actions_deploy" \
+              ./scripts/cluster_deploy.sh "${{ github.event.inputs.release }}"
           else
             echo "→ pas d'inventaire : déploiement single-node"
             ./scripts/deploy.sh "${{ github.event.inputs.release }}"

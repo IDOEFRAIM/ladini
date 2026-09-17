@@ -36,8 +36,22 @@ INVENTORY_FILE="${2:-${LADINI_ROOT}/infra/inventory.yml}"
 # partagé par tous les nodes de l'inventaire ; si un jour les nodes ont des
 # chemins différents, ce sera un champ additionnel de infra/inventory.yml,
 # volontairement PAS ajouté maintenant — YAGNI tant qu'un seul chemin suffit).
-NODE_DEPLOY_DIR="${NODE_DEPLOY_DIR:-/opt/ladini}"
-SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
+NODE_DEPLOY_DIR="${NODE_DEPLOY_DIR:-/opt/ladini/app}"
+CLUSTER_SSH_KEY="${CLUSTER_SSH_KEY:-}"
+
+SSH_OPTS=(
+  -o BatchMode=yes
+  -o ConnectTimeout=10
+  -o StrictHostKeyChecking=accept-new
+)
+
+if [ -n "$CLUSTER_SSH_KEY" ]; then
+  [ -f "$CLUSTER_SSH_KEY" ] || die "CLUSTER_SSH_KEY introuvable : $CLUSTER_SSH_KEY"
+  SSH_OPTS+=(
+    -i "$CLUSTER_SSH_KEY"
+    -o IdentitiesOnly=yes
+  )
+fi
 
 CLUSTER_MANIFEST="${RELEASES_DIR}/cluster-current.json"
 CLUSTER_DEPLOY_STARTED_AT="$(date -u +%FT%TZ)"
