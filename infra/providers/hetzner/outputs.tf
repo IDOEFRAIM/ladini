@@ -13,10 +13,17 @@ output "app_nodes" {
       public_ip = s.ipv4_address
       # `network` est un bloc imbriqué représenté par un SET (pas une liste) —
       # non indexable par [0] (confirmé par `terraform validate`, corrigé
-      # 2026-09-16). Le splat `[*]` fonctionne sur un set (conversion
-      # implicite en liste) ; chaque node n'a qu'un seul réseau privé attaché
-      # ici (voir network.tf), donc `[0]` après le splat est sûr.
-      private_ip = s.network[*].ip[0]
+      # 2026-09-16). Le splat seul (`s.network[*].ip[0]`) passait `validate`
+      # mais échouait sur un VRAI `terraform plan` (création initiale — tout
+      # le bloc `network` est "known after apply", et Terraform ne peut pas
+      # indexer un set totalement inconnu : "This value does not have any
+      # indices", confirmé 2026-09-17 par un plan réel contre l'API Hetzner
+      # — exactement le genre de bug qu'un simple `validate` statique ne
+      # peut pas attraper). `one()` gère le cas "exactement 1 élément" d'un
+      # set/liste (garanti ici, un seul bloc `network` par server, voir
+      # network.tf) même quand son contenu est encore inconnu ; `try()` en
+      # filet si la structure elle-même devait un jour rester ambiguë.
+      private_ip = try(one(s.network).ip, null)
       roles      = local.app_node_roles[i]
     }
   ]
@@ -25,9 +32,10 @@ output "app_nodes" {
 output "scheduler_node" {
   description = "Node scheduler dédié (null si scheduler_on_dedicated_node=false, auquel cas Beat/Flower tournent sur app_nodes[0])."
   value = length(hcloud_server.scheduler) > 0 ? {
-    name       = hcloud_server.scheduler[0].name
-    public_ip  = hcloud_server.scheduler[0].ipv4_address
-    private_ip = hcloud_server.scheduler[0].network[*].ip[0]
+    name      = hcloud_server.scheduler[0].name
+    public_ip = hcloud_server.scheduler[0].ipv4_address
+    # Même correctif que app_nodes ci-dessus.
+    private_ip = try(one(hcloud_server.scheduler[0].network).ip, null)
     roles      = ["scheduler", "admin"]
   } : null
 }

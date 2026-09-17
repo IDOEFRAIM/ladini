@@ -99,7 +99,31 @@ runcmd:
     git checkout ${git_ref})
 
   # ── Pare-feu hôte — RÉFÉRENCE le script du dépôt, ne le duplique pas ──
-  - bash /opt/ladini/app/infra/firewall/ufw.sh
+  # `PRIVATE_NET_CIDR` (2026-09-17, audit Cloudflare/LB) : cette topologie a
+  # TOUJOURS un Load Balancer Hetzner devant (voir load_balancer.tf) — le
+  # host n'a donc jamais besoin d'exposer 80/443 à 0.0.0.0/0, seulement au
+  # réseau privé par lequel le LB route réellement (défense en profondeur,
+  # même raisonnement que infra/providers/hetzner/firewall.tf).
+  #
+  # Bloc explicite, pas une simple ligne (2026-09-17, incident réel : `ufw
+  # status` restait `inactive` après un `terraform apply`, alors que
+  # cloud-init affichait `done`) — `runcmd` concatène TOUTES ses commandes
+  # en UN SEUL script `/bin/sh`, SANS `set -e` : un échec au milieu (quelle
+  # qu'en soit la cause) ne fait PAS échouer cloud-init, puisque sa DERNIÈRE
+  # commande (`systemctl restart ssh || true`, plus bas) réussit toujours.
+  # Ce bloc rend l'échec VISIBLE (log dédié + `exit 1` qui stoppe net le
+  # reste du bootstrap) au lieu de le laisser disparaître en silence. La
+  # cause racine du bug d'origine (ufw.sh mourait dans sa détection du port
+  # SSH) est corrigée dans ufw.sh lui-même — ce bloc est une défense en
+  # profondeur pour que toute régression future soit visible immédiatement.
+  - |
+    echo "[ladini] application du pare-feu hôte (ufw.sh, PRIVATE_NET_CIDR=${private_net_cidr})"
+    if PRIVATE_NET_CIDR=${private_net_cidr} bash /opt/ladini/app/infra/firewall/ufw.sh >/var/log/ladini-ufw.log 2>&1; then
+      echo "[ladini] ufw.sh OK — voir /var/log/ladini-ufw.log"
+    else
+      echo "[ladini] FATAL: ufw.sh a echoue - voir /var/log/ladini-ufw.log - abandon du bootstrap" >&2
+      exit 1
+    fi
 
   # ── Alloy : dossier de données créé, service PAS activé (placeholder) ──
   - install -d -o root -g root /var/lib/alloy

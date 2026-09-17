@@ -1,14 +1,14 @@
-ssh_public_key="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMiqf+ZMXaAFTe5JjHGRQ7eQlhuWG5an2m/9HTAzjDnq"
-
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMiqf+ZMXaAFTe5JjHGRQ7eQlhuWG5an2m/9HTAzjDnq"
 
 admin_cidrs = [
-  "TON_IP_PUBLIQUE/32"
+  "196.118.44.22/32"
 ]
 
-public_domain = "api.ladini.com"
+public_domain = "api.ladini.tech"
 
 app_node_count = 1
-app_server_type = "cx22"
+
+app_server_type = "cx33"
 
 location     = "nbg1"
 network_zone = "eu-central"

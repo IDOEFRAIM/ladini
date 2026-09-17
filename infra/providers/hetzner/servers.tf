@@ -58,17 +58,24 @@ resource "hcloud_server" "app" {
     # rempli après `terraform apply` à partir de l'output `app_nodes`).
   }
 
+  # (2026-09-17) — les labels Hetzner Cloud suivent la syntaxe des labels
+  # Kubernetes : valeur alphanumérique + `-_.` uniquement, JAMAIS de virgule
+  # (confirmé par un vrai `terraform plan` : "label value 'app,scheduler,
+  # admin' (key: role) is not correctly formatted"). `node_roles` plus bas
+  # (passé au cloud-init, pas un label Hetzner) garde la virgule — seul CE
+  # label change de séparateur.
   labels = merge(var.labels, {
-    role = join(",", local.app_node_roles[count.index])
+    role = join("-", local.app_node_roles[count.index])
   })
 
   user_data = templatefile("${path.module}/cloud-init/app-node.yaml.tpl", {
-    deploy_user    = var.deploy_user
-    ssh_public_key = var.ssh_public_key
-    git_repo_url   = var.git_repo_url
-    git_ref        = var.git_ref
-    node_name      = "ladini-app-${count.index + 1}"
-    node_roles     = join(",", local.app_node_roles[count.index])
+    deploy_user      = var.deploy_user
+    ssh_public_key   = var.ssh_public_key
+    git_repo_url     = var.git_repo_url
+    git_ref          = var.git_ref
+    node_name        = "ladini-app-${count.index + 1}"
+    node_roles       = join(",", local.app_node_roles[count.index])
+    private_net_cidr = var.network_ip_range
   })
 
   # Le subnet doit exister avant qu'un server puisse s'y attacher.
@@ -98,17 +105,20 @@ resource "hcloud_server" "scheduler" {
     network_id = hcloud_network.main.id
   }
 
+  # Même correctif que hcloud_server.app ci-dessus — même clé, même règle
+  # Hetzner (pas de virgule dans une valeur de label).
   labels = merge(var.labels, {
-    role = "scheduler,admin"
+    role = "scheduler-admin"
   })
 
   user_data = templatefile("${path.module}/cloud-init/app-node.yaml.tpl", {
-    deploy_user    = var.deploy_user
-    ssh_public_key = var.ssh_public_key
-    git_repo_url   = var.git_repo_url
-    git_ref        = var.git_ref
-    node_name      = "ladini-scheduler-1"
-    node_roles     = "scheduler,admin"
+    deploy_user      = var.deploy_user
+    ssh_public_key   = var.ssh_public_key
+    git_repo_url     = var.git_repo_url
+    git_ref          = var.git_ref
+    node_name        = "ladini-scheduler-1"
+    node_roles       = "scheduler,admin"
+    private_net_cidr = var.network_ip_range
   })
 
   depends_on = [hcloud_network_subnet.app]

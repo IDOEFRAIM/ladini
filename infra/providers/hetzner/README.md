@@ -68,6 +68,30 @@ Attendez ~1-2 minutes après la création d'un node avant de vous y connecter :
 `cloud-init` (Docker, checkout, `ufw.sh`) doit terminer. Suivez sa progression
 avec `ssh deploy@<ip> 'cloud-init status --wait'`.
 
+**⚠️ L'ORDRE 2 → 3 ci-dessus n'est pas arbitraire — ne l'inversez jamais**
+(2026-09-17, audit bootstrap Cloudflare/LB). Caddy (étape 3) demande son
+certificat Let's Encrypt (challenge HTTP-01) dès son démarrage, en visant le
+VRAI nom de domaine public (`PUBLIC_DOMAIN`) — si le DNS (étape 2) n'existe
+pas encore à ce moment-là, le challenge échoue et Caddy réessaie en
+arrière-plan avec un backoff croissant (il ne plante pas, ne bloque pas
+`docker compose up`, mais 443 restera un handshake TLS invalide jusqu'à
+obtention du certificat). Respecter l'ordre documenté (DNS avant Caddy)
+évite cette fenêtre "unhealthy" entièrement. Si vous l'inversez quand même
+(ou si la propagation DNS/Cloudflare prend du temps) :
+- `terraform apply` **n'échoue jamais** à cause de ça — le healthcheck HTTPS
+  du Load Balancer (`load_balancer.tf`) est un état POST-apply, jamais une
+  condition bloquante pour `apply` lui-même ;
+- le check `/health/ready` du LB affichera simplement le target `unhealthy`
+  jusqu'à ce que Caddy obtienne son certificat (généralement quelques
+  minutes après que le DNS résout correctement) — aucune intervention
+  manuelle requise au-delà d'attendre, pas de deadlock : Caddy retente son
+  ACME tout seul, il n'a besoin d'aucun redémarrage.
+- le healthcheck LUI-MÊME ne dépend jamais du DNS : le Load Balancer parle
+  DIRECTEMENT à l'IP privée du node (`use_private_ip = true`), avec
+  `domain = PUBLIC_DOMAIN` utilisé seulement comme SNI/Host — la résolution
+  DNS publique n'entre jamais en jeu pour CE check précis, seule l'obtention
+  du certificat par Caddy en dépend.
+
 ## Comment `app_node_count` scale (1 → 2 → N)
 
 1. **Phase 1 (défaut, < 100 utilisateurs)** : `app_node_count = 1`. Ce node
@@ -106,6 +130,25 @@ avec `ssh deploy@<ip> 'cloud-init status --wait'`.
 
 ## Notes de conception importantes
 
+- **Chemin complet, TLS terminé deux fois — délibéré, pas un doublon
+  accidentel** (2026-09-17, audit Cloudflare/LB) :
+  ```
+  Client
+    → TLS #1 : Cloudflare edge (certificat géré par Cloudflare)
+    → Cloudflare (WAF/cache/proxy — record DNS "proxied", nuage orange)
+    → TLS #2 (nouvelle connexion) : Cloudflare → Hetzner LB (IP publique du LB)
+    → Load Balancer Hetzner : TCP passthrough pur, AUCUNE terminaison TLS
+    → réseau privé Hetzner (10.20.0.0/16) → node (IP PRIVÉE)
+    → Caddy sur le node : termine réellement TLS #2 (certificat Let's Encrypt,
+      ACME HTTP-01) → reverse_proxy en clair vers api:8000 (réseau Docker interne)
+  ```
+  **Réglage Cloudflare requis : SSL/TLS mode = `Full` ou `Full (strict)` —
+  JAMAIS `Flexible`.** `Flexible` enverrait du HTTP EN CLAIR de Cloudflare
+  vers le LB/node (Caddy n'écoute qu'en HTTPS sur 443 ici) — la connexion
+  échouerait purement et simplement. `Full (strict)` est recommandé : le
+  certificat Let's Encrypt de Caddy est un vrai certificat validé par une CA
+  publique, donc `strict` (qui exige un certificat d'origine valide, pas
+  seulement présent) fonctionne sans compromis.
 - **TCP passthrough, pas de TLS au niveau du Load Balancer.** Chaque node
   fait tourner son propre Caddy (`infra/reverse-proxy/`) qui gère lui-même
   le certificat Let's Encrypt. Terminer le TLS au LB casserait le
@@ -123,6 +166,32 @@ avec `ssh deploy@<ip> 'cloud-init status --wait'`.
   (6379), PgBouncer (6432), MCP (8003) ou Flower (5555) publiquement — ils
   restent sur le réseau privé Hetzner (`network.tf`) ou en loopback (voir
   `docker-compose.prod.yml`, tunnel SSH pour Flower).
+- **80/443/443-udp NE sont PAS ouverts publiquement sur les nodes**
+  (2026-09-17, audit Cloudflare/LB — corrigé, ils l'étaient avant). Fait
+  Hetzner documenté : un Cloud Firewall ne filtre QUE l'interface PUBLIQUE
+  d'un server, jamais le réseau privé — le LB route vers ce node via SA
+  SEULE IP PRIVÉE (`use_private_ip = true`), donc fermer ces ports au monde
+  n'affecte EN RIEN le trafic LB → node, mais empêche structurellement de
+  contourner Cloudflare + le LB en appelant directement l'IP publique du
+  node. `infra/firewall/ufw.sh` (couche hôte) applique la même restriction
+  via `PRIVATE_NET_CIDR` (voir cloud-init). Aucun impact sur ACME : Let's
+  Encrypt valide via le VRAI enregistrement DNS public (donc via Cloudflare
+  → LB → node en privé), jamais en visant l'IP du node directement.
+- **443/udp (HTTP/3) retiré, pas seulement restreint.** Le Load Balancer
+  Hetzner ne fait passer QUE du TCP (ses 2 services sont `protocol = "tcp"`,
+  voir `load_balancer.tf`) — aucun trafic QUIC n'atteint jamais un node.
+  Cloudflare négocie HTTP/3 avec le CLIENT uniquement ; sa propre connexion
+  vers l'origine (le LB) reste HTTP(S) standard. Un `443/udp` public ne
+  servait donc à rien d'autre qu'à élargir la surface de bypass ci-dessus.
+- **IPv4 publique du node conservée, délibérément.** Un Hetzner Cloud
+  Server sans IP publique n'a AUCUN accès sortant par défaut (pas de
+  passerelle NAT managée côté Hetzner pour les servers privés-seuls) — donc
+  `apt-get`, les `docker pull` depuis GHCR, et les appels sortants de
+  l'appli (Groq/Bedrock, WhatsApp Cloud API, Paydunya, Sentry, Langfuse,
+  Grafana Cloud) en ont besoin de toute façon. Retirer l'IP publique
+  exigerait une passerelle NAT dédiée (un server de plus, complexité inutile
+  au stade MVP). Le firewall (ci-dessus) est le bon niveau pour fermer ce
+  qui doit l'être, pas l'absence d'IP publique.
 - **`admin_cidrs` est vide par défaut et Terraform refuse `0.0.0.0/0`**
   (validation dans `variables.tf`) — vous DEVEZ renseigner explicitement vos
   IP/CIDR admin, jamais d'ouverture SSH universelle par défaut.
