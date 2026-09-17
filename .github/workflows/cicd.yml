@@ -94,7 +94,7 @@ jobs:
   # `conclusion == 'success'`) exactement comme `test`/`migration-safety`,
   # sans avoir besoin d'un `needs` explicite vers `docker-build`.
   shell-tests:
-    name: Tests bash (ufw.sh, predeploy_check.sh, verrous deploy — sans dépendances backend)
+    name: Tests bash (ufw.sh, predeploy_check.sh, verrous deploy, smoke Celery — sans dépendances backend)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -106,6 +106,8 @@ jobs:
         run: bash scripts/test/test-deploy-lock-architecture.sh
       - name: Verrou node vs preflight — auto-deadlock sur soi-même (Cas G)
         run: bash scripts/test/test-node-preflight-lock.sh
+      - name: Smoke Celery — celery_worker_ping (Cas A-F)
+        run: bash scripts/test/test-celery-smoke.sh
 
   # Garde EXPAND/CONTRACT (§11) — bloque une migration destructive dans la
   # MÊME release que le code qui en dépend encore. Voir le script pour la

@@ -118,6 +118,11 @@ if bash scripts/test/test-node-preflight-lock.sh; then
 else
   _fail "verrou node vs preflight : au moins un cas de test-node-preflight-lock.sh a échoué"
 fi
+if bash scripts/test/test-celery-smoke.sh; then
+  _ok "smoke Celery : Cas A-F passent (lib.sh::celery_worker_ping — diagnostic jamais avalé, retries bornés)"
+else
+  _fail "smoke Celery : au moins un cas de test-celery-smoke.sh a échoué"
+fi
 
 # ── 4. docker compose config (prod, sans build:) ──────────────────────
 _step "docker compose config (docker-compose.prod.yml)"

@@ -229,6 +229,70 @@ release_cluster_lock() {
 # ── docker compose : toujours avec le bon fichier + .env ───────────
 dc() { docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"; }
 
+# ── Celery worker : ping via le control bus (2026-09-18, audit smoke Celery)
+# ─────────────────────────────────────────────────────────────────────
+# celery_worker_ping <service> <app_module> [timeout_s] [retries] [retry_delay_s]
+#
+# Exécute `celery -A <app_module> inspect ping` DANS <service> (via `dc
+# exec`), en BROADCAST — jamais `--destination`/`--hostname` explicite : le
+# but est "AU MOINS UN worker de ce service répond", pas "LE worker nommé
+# X répond". Une réplique scale-out future (`docker compose up --scale
+# worker=N`) ou un `--hostname` non standard côté commande worker ne doit
+# JAMAIS faire échouer ce test pour une raison de nommage (voir le
+# HEALTHCHECK figé du Dockerfile, corrigé pour la même raison — il ciblait
+# `-d "celery@$(hostname)"`, un nom de destination fragile, désormais dead
+# code de toute façon car ce même repli compose l'écrase).
+#
+# Vérifié contre le code source de Celery 5.6 (celery/bin/control.py) :
+# `inspect` lève TOUJOURS un exit code non-zéro dès que `replies` est vide
+# (aucun worker n'a répondu dans le délai — "No nodes replied within time
+# constraint") OU qu'une exception survient (broker injoignable —
+# "Could not connect to the message broker: ..."), avec un message
+# descriptif à chaque fois. Le SEUL vrai défaut trouvé dans l'ancienne
+# version de ce test : elle jetait ce message (`>/dev/null 2>&1`), rendant
+# IMPOSSIBLE de distinguer un worker réellement mort d'un broker
+# injoignable ou d'un simple retard de démarrage — exactement l'ambiguïté
+# reportée en incident réel (2026-09-18, release sha-6af07e0). Ce message
+# est désormais TOUJOURS affiché (stderr) en cas d'échec final.
+#
+# Retries bornés (défaut 3, délai 3s = ~33s pire cas avec timeout=8 par
+# défaut — raisonnable, pas arbitrairement énorme) : le healthcheck Docker
+# du service worker (docker-compose.prod.yml) ne sonde que `pgrep -f
+# 'celery.*worker'` — un process VIVANT, pas un worker connecté au control
+# bus (délibéré, voir son commentaire : `inspect ping` en healthcheck
+# redémarrait tous les workers en boucle pendant un hoquet Redis, audit
+# 2026-09-10). `wait_healthy_container` (node_deploy.sh) peut donc rendre
+# la main dès que le process a forké, potentiellement AVANT que le worker
+# ait fini son `worker_process_init` (appels réseau DB/Langfuse — voir
+# celery_app.py::worker_proc_alive_timeout, jusqu'à plusieurs dizaines de
+# secondes sous contention). Sans retry, ce test peut échouer sur un
+# worker parfaitement sain, juste pas encore prêt — un FAUX négatif, pas
+# une preuve de panne. Un worker RÉELLEMENT mort/mal configuré épuise
+# quand même tous les essais et échoue, fail-closed.
+celery_worker_ping() {
+  local svc="${1:?service requis}" app="${2:?module Celery (-A) requis}" \
+        timeout="${3:-8}" retries="${4:-3}" delay="${5:-3}"
+  local attempt out
+  for ((attempt = 1; attempt <= retries; attempt++)); do
+    # `if out=$(...); then` — PAS une affectation nue : sous `set -e`
+    # (hérité par tout appelant qui source lib.sh, dont smoke.sh), une
+    # affectation nue `out="$(cmd)"` dont `cmd` échoue tue le script ENTIER
+    # immédiatement (même piège que le bug SSH_PORT d'infra/firewall/ufw.sh,
+    # 2026-09-17) — avant même d'atteindre le retry ou l'affichage du
+    # diagnostic ci-dessous. Tester l'affectation comme condition d'un `if`
+    # est l'exemption documentée de `set -e` : `$out` est quand même peuplé
+    # (stdout+stderr, 2>&1) que la commande réussisse ou non.
+    if out="$(dc exec -T "$svc" celery -A "$app" inspect ping --timeout "$timeout" 2>&1)"; then
+      return 0
+    fi
+    if [ "$attempt" -lt "$retries" ]; then
+      sleep "$delay"
+    fi
+  done
+  printf '%s\n' "$out" | sed 's/^/      /' >&2
+  return 1
+}
+
 # ── Image refs ────────────────────────────────────────────────────
 image_ref() { printf '%s/%s/ladini-%s:%s' "$REGISTRY" "$IMAGE_NAMESPACE" "$1" "${2:?release}"; }
 

@@ -84,11 +84,15 @@ if [ "$SMOKE_CHECK_APP" = 1 ]; then
 
   # 5. Celery worker répond au broker (lecture seule) — worker est du rôle
   #    "app" (voir docker-compose.prod.yml : profiles: ["app"]), pas un rôle
-  #    à part.
-  if dc exec -T worker celery -A ladini.api.celery_app inspect ping --timeout 8 >/dev/null 2>&1; then
+  #    à part. Voir lib.sh::celery_worker_ping pour le détail complet
+  #    (retries bornés + diagnostic JAMAIS avalé — audit 2026-09-18).
+  #    CELERY_PING_TIMEOUT/RETRIES/RETRY_DELAY : configurables, défauts
+  #    raisonnables (8s × 3 essais × 3s de délai ≈ 33s pire cas).
+  if celery_worker_ping worker ladini.api.celery_app \
+       "${CELERY_PING_TIMEOUT:-8}" "${CELERY_PING_RETRIES:-3}" "${CELERY_PING_RETRY_DELAY:-3}"; then
     pass "Celery worker répond (inspect ping)"
   else
-    ko "Celery worker ne répond pas au broker"
+    ko "Celery worker ne répond pas au broker (voir la sortie Celery ci-dessus pour la cause précise)"
   fi
 
   # 7. Webhook joignable (SANS payload — on veut juste que la route existe).

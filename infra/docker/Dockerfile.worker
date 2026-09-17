@@ -39,9 +39,29 @@ WORKDIR /app/backend/src
 # conteneur.
 
 # Pas de port exposé (le worker ne sert pas de HTTP).
-# Healthcheck : ping applicatif Celery (le worker répond au broker).
+#
+# Healthcheck : LIVENESS uniquement (process vivant), PAS un ping broker.
+# (2026-09-18, audit smoke Celery — incident sha-6af07e0) : cette directive
+# utilisait auparavant `celery inspect ping -d "celery@$(hostname)"` — DEUX
+# défauts distincts, trouvés en auditant pourquoi le worker semblait KO en
+# smoke test alors qu'il tournait normalement :
+#   1. `-d "celery@$(hostname)"` cible un NOM DE DESTINATION précis — fragile
+#      par construction (dépend que $(hostname), résolu À CHAQUE probe dans
+#      un NOUVEAU shell, corresponde exactement au nodename que le worker a
+#      choisi À SON DÉMARRAGE ; aucune garantie forte de ce côté, et aucun
+#      besoin de cibler un worker précis pour une question de liveness — voir
+#      lib.sh::celery_worker_ping, qui ping en BROADCAST pour la même raison).
+#   2. `docker-compose.prod.yml` (service `worker`) écrase de toute façon
+#      cette directive avec `pgrep -f 'celery.*worker'` depuis l'audit
+#      hardening 2026-09-10 (`celery inspect ping` en HEALTHCHECK redémarrait
+#      TOUS les workers en boucle pendant un simple hoquet Redis) — ce qui
+#      précède était donc du CODE MORT en production, mais restait le
+#      comportement par défaut si jamais cette image tournait SANS ce
+#      compose (`docker run` direct, autre orchestrateur) : dangereux de
+#      laisser un défaut fragile/trompeur. Alignée ici sur la MÊME logique
+#      que le compose, pour un comportement sain par défaut dans tous les cas.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD celery -A ladini.api.celery_app inspect ping -d "celery@$(hostname)" || exit 1
+    CMD sh -c "pgrep -f 'celery.*worker' >/dev/null" || exit 1
 
 # --- Tuning Celery : charge 100% I/O-bound (appels LLM Groq, MCP HTTP,
 # webhooks WhatsApp/Twilio, requêtes DB via pgbouncer) — AUCUNE tâche
