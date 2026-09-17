@@ -20,7 +20,7 @@ HISTORY_FILE="${RELEASES_DIR}/history.log"
 
 # ── Registry / namespace (surchargeable → ECR, Docker Hub…) ─────────
 REGISTRY="${REGISTRY:-ghcr.io}"
-IMAGE_NAMESPACE="${IMAGE_NAMESPACE:-idoefraim/agriconnect}"
+IMAGE_NAMESPACE="${IMAGE_NAMESPACE:-idoefraim/ladini}"
 APP_SERVICES=(api worker mcp)          # les 3 images versionnées
 ALL_SERVICES=(mcp api worker beat redis pgbouncer flower autoheal)
 
