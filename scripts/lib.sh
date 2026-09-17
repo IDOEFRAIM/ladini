@@ -82,6 +82,30 @@ declare -a _HELD_LOCKS=()
 
 _lock_holder_info() { [ -f "$1/info" ] && cat "$1/info" 2>/dev/null || true; }
 
+# ── Diagnostic PUR (jamais une action) — utilisé par preflight.sh (check 9,
+# lancé MANUELLEMENT par un opérateur) pour signaler un déploiement
+# concurrent SANS jamais toucher au verrou lui-même : ni le créer, ni le
+# libérer, ni le récupérer (seul acquire_named_lock a cette autorité, au
+# moment où il tente RÉELLEMENT d'acquérir). echo "free"|"active"|"stale".
+# (2026-09-18, §BUG "preflight se bloque sur son propre verrou") : cette
+# fonction est volontairement APPELÉE PAR preflight.sh, JAMAIS PAR
+# node_deploy.sh sur SON PROPRE acquire_lock() à venir — la garantie contre
+# ce faux-positif ne vient pas d'une logique ICI (ex: exclure son propre
+# PID), mais de l'ORDRE d'exécution dans node_deploy.sh : préflight (donc
+# cette fonction) tourne TOUJOURS avant que ce même process n'appelle
+# acquire_lock() — au moment du diagnostic, ce process ne détient encore
+# AUCUN verrou, donc "free" par construction, jamais par coïncidence de PID.
+deploy_lock_status() {  # deploy_lock_status <lockdir>
+  local dir="$1" pid
+  [ -d "$dir" ] || { echo "free"; return 0; }
+  pid="$(cat "${dir}/pid" 2>/dev/null || echo 0)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    echo "active"
+  else
+    echo "stale"
+  fi
+}
+
 acquire_named_lock() {  # acquire_named_lock <lockdir_path> <label humain>
   local dir="$1" label="${2:-déploiement}"
   mkdir -p "$(dirname "$dir")"

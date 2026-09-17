@@ -8,14 +8,17 @@
 #   2. régression pare-feu hôte (infra/firewall/ufw.sh --dry-run, voir
 #      scripts/test/test-ufw-firewall.sh) — PRIVATE_NET_CIDR, dry-run
 #      inoffensif, non-régression de l'incident "ufw resté inactive"
-#   3. docker compose config (docker-compose.prod.yml, aucun `build:`)
-#   4. validation de infra/inventory.yml (si présent) — via
+#   3. régression verrous de déploiement (scripts/test/
+#      test-deploy-lock-architecture.sh + test-node-preflight-lock.sh) —
+#      deadlock cluster/node ET deadlock node/preflight (voir §BUG plus bas)
+#   4. docker compose config (docker-compose.prod.yml, aucun `build:`)
+#   5. validation de infra/inventory.yml (si présent) — via
 #      scripts/validate_inventory.py, script Python STDLIB PUR (re/sys/
 #      pathlib, aucune dépendance tierce), exécutable par n'importe quel
 #      `python3` système
-#   5. terraform fmt -check + validate (si terraform est installé et
+#   6. terraform fmt -check + validate (si terraform est installé et
 #      infra/providers/hetzner/*.tf présent) — jamais `plan`/`apply` ici
-#   6. smoke.sh / smoke_observability.sh — UNIQUEMENT si SMOKE_API_URL est
+#   7. smoke.sh / smoke_observability.sh — UNIQUEMENT si SMOKE_API_URL est
 #      déjà exporté par l'appelant (un stack tourne réellement quelque
 #      part) ; sinon sautés avec un avertissement, jamais un échec
 #
@@ -36,6 +39,20 @@
 # `conclusion == 'success'`) : une image ne peut être poussée sur GHCR que si
 # CI est passée. Non-régression : backend/tests/architecture/
 # test_ci_release_gating.py (CI) + scripts/test/test-predeploy-check-minimal-host.sh.
+#
+# Deux incidents de VERROUILLAGE réels corrigés le même jour (2026-09-18),
+# couverts par l'étape 3 ci-dessus :
+#   (1) cluster_deploy.sh (orchestrateur, self-hosted runner co-localisé
+#       avec le node qu'il déploie) dégradait son verrou cluster-wide sur LA
+#       MÊME ressource que le verrou local du node → auto-deadlock dès que
+#       l'orchestrateur SSHait vers lui-même. Fix : deux verrous, deux
+#       ressources toujours distinctes (voir scripts/lib.sh).
+#   (2) node_deploy.sh appelait acquire_lock() AVANT preflight.sh — dont le
+#       check 9 (verrou actif) détectait alors le verrou que node_deploy.sh
+#       venait LUI-MÊME de poser, et refusait son propre déploiement. Fix :
+#       preflight.sh (non-mutant) tourne désormais TOUJOURS avant
+#       acquire_lock() — voir le commentaire "§BUG CORRIGÉ" dans
+#       node_deploy.sh.
 #
 # Sortie 0 = tout est passé. Sortie != 0 = NE PAS déployer, lire le
 # dernier bloc affiché.
@@ -89,7 +106,20 @@ else
   _fail "ufw.sh : au moins un cas de scripts/test/test-ufw-firewall.sh a échoué"
 fi
 
-# ── 3. docker compose config (prod, sans build:) ──────────────────────
+# ── 3. Régression verrous de déploiement (cluster/node + node/preflight) ──
+_step "Régression verrous de déploiement (cluster/node, node/preflight)"
+if bash scripts/test/test-deploy-lock-architecture.sh; then
+  _ok "verrous cluster/node : Cas A-F passent (deadlock co-localisé, double orchestration, stale lock, REDIS_URL)"
+else
+  _fail "verrous cluster/node : au moins un cas de test-deploy-lock-architecture.sh a échoué"
+fi
+if bash scripts/test/test-node-preflight-lock.sh; then
+  _ok "verrou node vs preflight : Cas G passent (preflight ne s'auto-bloque plus sur son propre verrou)"
+else
+  _fail "verrou node vs preflight : au moins un cas de test-node-preflight-lock.sh a échoué"
+fi
+
+# ── 4. docker compose config (prod, sans build:) ──────────────────────
 _step "docker compose config (docker-compose.prod.yml)"
 if RELEASE_VERSION=predeploy-check-dummy REDIS_URL="rediss://x:y@z:6379/0" \
    MCP_HTTP_AUTH_TOKEN=x FLOWER_USER=x FLOWER_PASSWORD=x GROQ_API_KEY=x \
@@ -105,7 +135,7 @@ else
   _ok "aucune directive build: dans docker-compose.prod.yml"
 fi
 
-# ── 4. infra/inventory.yml (si présent) — Python STDLIB PUR uniquement ──
+# ── 5. infra/inventory.yml (si présent) — Python STDLIB PUR uniquement ──
 # `PYTHON_BIN` : PAS de préférence pour un venv projet ici (ce script tourne
 # aussi bien sur un poste de dev QUE sur le node de prod, qui n'a ni Poetry
 # ni `backend/.venv`) — n'importe quel `python3` système suffit, car
@@ -125,7 +155,7 @@ else
   echo "⚠ infra/inventory.yml absent (normal si pas encore provisionné) — sauté"
 fi
 
-# ── 5. Terraform fmt + validate (jamais plan/apply ici) ────────────────
+# ── 6. Terraform fmt + validate (jamais plan/apply ici) ────────────────
 _step "Terraform fmt + validate (infra/providers/hetzner)"
 if command -v "$TERRAFORM_BIN" >/dev/null 2>&1 || [ -x "$TERRAFORM_BIN" ]; then
   pushd infra/providers/hetzner >/dev/null
@@ -145,7 +175,7 @@ else
   echo "⚠ terraform introuvable (ni sur PATH ni à TERRAFORM_BIN=${TERRAFORM_BIN}) — sauté, NOT RUN"
 fi
 
-# ── 6. Smoke (optionnel — seulement si un stack tourne déjà) ───────────
+# ── 7. Smoke (optionnel — seulement si un stack tourne déjà) ───────────
 _step "smoke.sh / smoke_observability.sh"
 if [ -n "${SMOKE_API_URL:-}" ]; then
   if SMOKE_API_URL="$SMOKE_API_URL" SMOKE_CHECK_ADMIN=0 ./scripts/smoke.sh; then

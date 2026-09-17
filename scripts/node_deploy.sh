@@ -41,10 +41,12 @@
 # point d'entrée "legacy / single-VPS", node_deploy.sh le point d'entrée
 # "brique élémentaire pilotée par cluster_deploy.sh".
 #
-# Ne CONSTRUIT rien (build-once). Ne fait PAS `git pull`. Séquence :
-#   lock → préflight → snapshot release courante → pull → migration
-#   (sauf --skip-migrate) → up -d --profile ... → attente santé → smoke
-#   (adapté aux rôles présents SUR CE NODE) → enregistrement release LOCALE.
+# Ne CONSTRUIT rien (build-once). Ne fait PAS `git pull`. Séquence (2026-09-18,
+# préflight PUIS lock — voir §BUG CORRIGÉ plus bas pour le pourquoi) :
+#   préflight (non-mutant) → lock → snapshot release courante → pull →
+#   migration (sauf --skip-migrate) → up -d --profile ... → attente santé →
+#   smoke (adapté aux rôles présents SUR CE NODE) → enregistrement release
+#   LOCALE → unlock.
 #
 # Échec AVANT `up` : ce node continue de tourner sur l'ancien code (rien
 #   n'a bougé). Échec APRÈS `up` (santé/smoke KO) : rollback APPLICATIF
@@ -134,9 +136,6 @@ fi
 # dédoublonnage (worker/api peuvent apparaître deux fois selon les rôles)
 mapfile -t PULL_SERVICES < <(printf '%s\n' "${PULL_SERVICES[@]}" | awk '!seen[$0]++')
 
-# ── Verrou (un seul deploy/rollback à la fois SUR CE NODE) ────────
-acquire_lock
-
 CURRENT_RELEASE="$(current_release || true)"
 STAGE="init"
 FAILED_REASON=""
@@ -181,9 +180,31 @@ EOF
 trap 'fail "${STAGE}" "commande inattendue (ligne $LINENO)"' ERR
 
 # ── 1. Préflight ───────────────────────────────────────────────────
+# NON-MUTANT (lit des fichiers, sonde docker/registry/ports — ne touche
+# jamais le compose stack ni deploy/releases/). Exécuté délibérément AVANT
+# acquire_lock() (§BUG CORRIGÉ ICI, 2026-09-18, incident réel : preflight
+# tournait APRÈS acquire_lock() et détectait le verrou que CE MÊME
+# node_deploy.sh venait de poser, le prenant pour un déploiement concurrent
+# — auto-deadlock sur soi-même). Architecture retenue (Option A du brief) :
+#   préflight (non-mutant) → acquire_lock() → mutations → release_lock()
+# Un petit intervalle existe entre "préflight OK" et "verrou acquis" : deux
+# node_deploy.sh concurrents peuvent tous les deux passer le préflight, mais
+# UN SEUL obtiendra ensuite acquire_lock() — c'est LUI l'arbitre réel de la
+# concurrence, pas preflight.sh (qui ne fait que diagnostiquer, jamais
+# arbitrer). Voir scripts/preflight.sh pour le corollaire : son propre
+# contrôle de verrou (check 9) reste utile pour un OPÉRATEUR qui le lance
+# MANUELLEMENT pendant qu'un déploiement tourne ailleurs — ce n'est plus
+# jamais auto-déclenché par node_deploy.sh sur SON PROPRE verrou, puisqu'il
+# n'existe pas encore à ce stade.
 STAGE="preflight"
 log "1/7 · préflight (rôles: ${ROLES_CSV})…"
 "${HERE}/preflight.sh" "$TARGET_RELEASE" || fail "preflight" "préconditions non satisfaites (voir ci-dessus)"
+
+# ── Verrou (un seul deploy/rollback à la fois SUR CE NODE) ────────
+# À partir d'ICI, et pas avant : c'est la première mutation potentielle
+# (tout ce qui suit touche le compose stack et/ou deploy/releases/).
+STAGE="lock"
+acquire_lock
 
 # ── 2. Résolution des métadonnées ─────────────────────────────────
 STAGE="resolve-metadata"

@@ -145,33 +145,45 @@ done
 
 [ "$port_clash" -eq 0 ] && log "  ✓ $CHK" || { err "  ✗ $CHK"; FAIL=1; }
 
-# 9. Pas de verrou de déploiement résiduel bloquant (info seulement — le vrai
+# 9. Pas de verrou de déploiement résiduel bloquant (DIAGNOSTIC seulement —
+#    ne touche jamais au verrou, voir lib.sh::deploy_lock_status). Le vrai
 #    verrou est pris par acquire_lock() dans lib.sh, un `mkdir` atomique sur
-#    LOCK_DIR, jamais LOCK_FILE — voir §BUG CORRIGÉ ci-dessous).
+#    LOCK_DIR, jamais LOCK_FILE — voir §BUG CORRIGÉ (historique) ci-dessous.
 #
-# §BUG CORRIGÉ ICI (2026-09-18, audit lock cluster/node) : cette vérification
+# §BUG CORRIGÉ #1 (2026-09-18, audit lock cluster/node) : cette vérification
 # testait `[ -f "$LOCK_FILE" ]` — un chemin `deploy/.deploy.lock` (fichier)
 # qu'AUCUN script de ce dépôt n'a jamais créé (le verrou réel est le
 # RÉPERTOIRE `deploy/.deploy.lockdir`, créé par `mkdir` dans
-# lib.sh::acquire_lock — voir son commentaire pour pourquoi `mkdir`, pas
-# `flock`, est le mécanisme atomique choisi ici). Cette étape passait donc
-# TOUJOURS au vert, silencieusement, quel que soit l'état réel du verrou —
-# un faux sentiment de sécurité, jamais une vraie vérification. Fix :
-# tester LOCK_DIR (le vrai verrou), et ignorer un verrou PÉRIMÉ (process
-# mort) plutôt que de le signaler comme bloquant — cohérent avec la
-# récupération automatique que fait déjà acquire_lock() lui-même.
+# lib.sh::acquire_lock). Cette étape passait donc TOUJOURS au vert,
+# silencieusement — un faux sentiment de sécurité, jamais une vraie
+# vérification.
+#
+# §BUG CORRIGÉ #2 (2026-09-18, incident réel post-premier-fix) : une fois
+# #1 corrigé pour tester LE VRAI LOCK_DIR, ce check tournait encore APRÈS
+# que node_deploy.sh ait lui-même appelé acquire_lock() — preflight.sh
+# détectait alors le verrou que SON PROPRE appelant venait de poser, et le
+# signalait comme "déploiement concurrent" : auto-deadlock sur soi-même.
+# Fix DÉFINITIF, côté ORDRE D'EXÉCUTION (pas ici) : node_deploy.sh appelle
+# désormais preflight.sh AVANT acquire_lock() — voir son commentaire
+# "§BUG CORRIGÉ ICI". Au moment où CE check tourne, le process appelant n'a
+# donc JAMAIS encore posé de verrou lui-même ; un verrou "active" détecté
+# ici ne peut être QUE celui d'un AUTRE déploiement, réellement concurrent.
+# Ce check reste utile pour un OPÉRATEUR qui lance `preflight.sh` à la main
+# pendant qu'un déploiement tourne ailleurs (voir scripts/test/
+# test-node-preflight-lock.sh, Cas G3).
 CHK="pas de verrou de déploiement actif"
-if [ -d "$LOCK_DIR" ]; then
-  lock_pid="$(cat "${LOCK_DIR}/pid" 2>/dev/null || echo 0)"
-  if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
-    holder="$(cat "${LOCK_DIR}/info" 2>/dev/null || true)"
+case "$(deploy_lock_status "$LOCK_DIR")" in
+  active)
+    holder="$(_lock_holder_info "$LOCK_DIR")"
     err "  ✗ $CHK — ${LOCK_DIR} tenu (déploiement concurrent ?${holder:+ — $holder})"; FAIL=1
-  else
+    ;;
+  stale)
     log "  ✓ $CHK (un verrou périmé existe — sera récupéré automatiquement au prochain acquire_lock)"
-  fi
-else
-  log "  ✓ $CHK"
-fi
+    ;;
+  *)
+    log "  ✓ $CHK"
+    ;;
+esac
 
 echo
 if [ "$FAIL" -ne 0 ]; then
