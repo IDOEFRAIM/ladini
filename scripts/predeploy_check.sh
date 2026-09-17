@@ -9,14 +9,33 @@
 #      scripts/test/test-ufw-firewall.sh) — PRIVATE_NET_CIDR, dry-run
 #      inoffensif, non-régression de l'incident "ufw resté inactive"
 #   3. docker compose config (docker-compose.prod.yml, aucun `build:`)
-#   4. tests ciblés : architecture (beat singleton, invariants compose) +
-#      validate_inventory.py
-#   5. validation de infra/inventory.yml (si présent)
-#   6. terraform fmt -check + validate (si terraform est installé et
+#   4. validation de infra/inventory.yml (si présent) — via
+#      scripts/validate_inventory.py, script Python STDLIB PUR (re/sys/
+#      pathlib, aucune dépendance tierce), exécutable par n'importe quel
+#      `python3` système
+#   5. terraform fmt -check + validate (si terraform est installé et
 #      infra/providers/hetzner/*.tf présent) — jamais `plan`/`apply` ici
-#   7. smoke.sh / smoke_observability.sh — UNIQUEMENT si SMOKE_API_URL est
+#   6. smoke.sh / smoke_observability.sh — UNIQUEMENT si SMOKE_API_URL est
 #      déjà exporté par l'appelant (un stack tourne réellement quelque
 #      part) ; sinon sautés avec un avertissement, jamais un échec
+#
+# CE QUE CE SCRIPT NE FAIT PLUS (2026-09-18, incident réel premier déploiement
+# Hetzner) : il n'exécute PLUS `pytest backend/tests/...`. Root cause : ce
+# script tourne SUR LE NODE DE PROD (Ubuntu 24.04 minimal, images Docker
+# immuables GHCR) — qui n'a NI Poetry NI les dépendances backend (SQLAlchemy,
+# pydantic, langgraph…) installées, et ne doit JAMAIS les installer juste
+# pour ce script (l'image de prod ne contient même pas `backend/tests`,
+# volontairement). `pytest` y tombait sur `/usr/bin/python3` sans ces
+# dépendances → échec de COLLECTION (pas un vrai échec de test) dès qu'un
+# seul fichier importait `ladini.*`, faisant échouer predeploy_check pour une
+# raison n'ayant RIEN à voir avec la sécurité du déploiement lui-même. Ces
+# tests applicatifs (architecture métier, PII redaction, idempotency,
+# métriques worker, invariants compose nécessitant PyYAML) restent un GATE
+# CI obligatoire — voir `.github/workflows/cicd.yml` (`pytest tests`, tout le
+# dossier) et sa dépendance dure avec `release.yml` (`workflow_run` +
+# `conclusion == 'success'`) : une image ne peut être poussée sur GHCR que si
+# CI est passée. Non-régression : backend/tests/architecture/
+# test_ci_release_gating.py (CI) + scripts/test/test-predeploy-check-minimal-host.sh.
 #
 # Sortie 0 = tout est passé. Sortie != 0 = NE PAS déployer, lire le
 # dernier bloc affiché.
@@ -25,6 +44,7 @@
 #   ./scripts/predeploy_check.sh
 #   SMOKE_API_URL=http://127.0.0.1:18000 ./scripts/predeploy_check.sh   # + smoke sur un E2E déjà démarré
 #   TERRAFORM_BIN=/path/to/terraform.exe ./scripts/predeploy_check.sh  # si `terraform` n'est pas sur PATH
+#   PYTHON_BIN=/usr/bin/python3 ./scripts/predeploy_check.sh            # forcer l'interpréteur (défaut : détection auto)
 # ═════════════════════════════════════════════════════════════════════
 set -Eeuo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -85,28 +105,16 @@ else
   _ok "aucune directive build: dans docker-compose.prod.yml"
 fi
 
-# ── 4. Tests ciblés : beat singleton + invariants compose + inventory +
-#    PII/redaction + idempotency + worker metrics (2026-09-17, follow-up
-#    pre-Hetzner — étendu, reste volontairement CIBLÉ : la suite complète
-#    (lente) est un gate séparé, pas ici, voir DoD "Ne rends pas le script
-#    lent au point d'être inutilisable").
-_step "Tests ciblés (beat singleton, invariants compose, inventory, PII, idempotency, worker metrics)"
-PYTHON_BIN="backend/.venv/Scripts/python.exe"
-[ -x "$PYTHON_BIN" ] || PYTHON_BIN="python3"
-if "$PYTHON_BIN" -m pytest \
-    backend/tests/architecture/test_compose_deployment_invariants.py \
-    backend/tests/architecture/test_validate_inventory.py \
-    backend/tests/architecture/test_execution_idempotency_key.py \
-    backend/tests/unit/test_log_redaction.py \
-    backend/tests/unit/test_telemetry_worker_metrics.py \
-    -q; then
-  _ok "tests ciblés passés"
-else
-  _fail "au moins un test ciblé a échoué"
-fi
-
-# ── 5. infra/inventory.yml (si présent) ────────────────────────────────
+# ── 4. infra/inventory.yml (si présent) — Python STDLIB PUR uniquement ──
+# `PYTHON_BIN` : PAS de préférence pour un venv projet ici (ce script tourne
+# aussi bien sur un poste de dev QUE sur le node de prod, qui n'a ni Poetry
+# ni `backend/.venv`) — n'importe quel `python3` système suffit, car
+# scripts/validate_inventory.py n'importe QUE `re`/`sys`/`pathlib` (vérifié :
+# aucun `import ladini`, aucune dépendance tierce). Overridable via
+# `PYTHON_BIN=...` (voir en-tête) pour forcer un interpréteur précis.
 _step "infra/inventory.yml"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || PYTHON_BIN="python"
 if [ -f infra/inventory.yml ]; then
   if "$PYTHON_BIN" scripts/validate_inventory.py infra/inventory.yml; then
     _ok "infra/inventory.yml valide"
@@ -117,7 +125,7 @@ else
   echo "⚠ infra/inventory.yml absent (normal si pas encore provisionné) — sauté"
 fi
 
-# ── 6. Terraform fmt + validate (jamais plan/apply ici) ────────────────
+# ── 5. Terraform fmt + validate (jamais plan/apply ici) ────────────────
 _step "Terraform fmt + validate (infra/providers/hetzner)"
 if command -v "$TERRAFORM_BIN" >/dev/null 2>&1 || [ -x "$TERRAFORM_BIN" ]; then
   pushd infra/providers/hetzner >/dev/null
@@ -137,7 +145,7 @@ else
   echo "⚠ terraform introuvable (ni sur PATH ni à TERRAFORM_BIN=${TERRAFORM_BIN}) — sauté, NOT RUN"
 fi
 
-# ── 7. Smoke (optionnel — seulement si un stack tourne déjà) ───────────
+# ── 6. Smoke (optionnel — seulement si un stack tourne déjà) ───────────
 _step "smoke.sh / smoke_observability.sh"
 if [ -n "${SMOKE_API_URL:-}" ]; then
   if SMOKE_API_URL="$SMOKE_API_URL" SMOKE_CHECK_ADMIN=0 ./scripts/smoke.sh; then

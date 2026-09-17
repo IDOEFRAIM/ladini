@@ -85,6 +85,24 @@ jobs:
           pip-audit -r /tmp/requirements.txt
         continue-on-error: true
 
+  # Tests de régression bash, SANS Poetry/dépendances backend (2026-09-18,
+  # incident premier déploiement Hetzner — voir l'en-tête de
+  # scripts/predeploy_check.sh) : ces scripts tournent SUR LE NODE DE PROD,
+  # qui n'a jamais ces dépendances. Job séparé, volontairement léger (pas de
+  # `runs-on`/setup Python) — sa conclusion fait partie de celle du workflow
+  # "CI" dans son ensemble, donc gate `release.yml` (`workflow_run` +
+  # `conclusion == 'success'`) exactement comme `test`/`migration-safety`,
+  # sans avoir besoin d'un `needs` explicite vers `docker-build`.
+  shell-tests:
+    name: Tests bash (ufw.sh, predeploy_check.sh — sans dépendances backend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: infra/firewall/ufw.sh — Cas A/B/C/D
+        run: bash scripts/test/test-ufw-firewall.sh
+      - name: predeploy_check.sh — fonctionne sur un host sans dépendances backend
+        run: bash scripts/test/test-predeploy-check-minimal-host.sh
+
   # Garde EXPAND/CONTRACT (§11) — bloque une migration destructive dans la
   # MÊME release que le code qui en dépend encore. Voir le script pour la
   # liste des motifs interdits et comment marquer une contraction validée.
