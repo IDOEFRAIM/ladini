@@ -456,8 +456,8 @@ class TestFullReportedScenario:
         draft_v3 = ProcurementDraft.from_dict(state["procurement_draft"])
         assert draft_v3.version == 3
         assert draft_v3.quantity == 1125.0
-        assert "1125" in state["final_response"]
-        assert "2250" not in state["final_response"]
+        assert "1125" in state["final_response"] or "1 125" in state["final_response"]
+        assert "2250" not in state["final_response"] and "2 250" not in state["final_response"]
         assert "2 TONNE" not in state["final_response"]
 
         # La cible de confirmation POINTE la version 3, pas une ancienne.

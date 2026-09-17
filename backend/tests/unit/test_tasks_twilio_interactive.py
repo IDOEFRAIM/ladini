@@ -18,6 +18,11 @@ import pytest
 def _tasks_module(monkeypatch, *, interactive_enabled=True, list_sid="HXlist", confirm_sid="HXconfirm"):
     import ladini.api.response_dispatch as mod
 
+    # CI exporte MOCK_EXTERNAL_APIS=true (voir .github/workflows/cicd.yml) —
+    # sans ce garde, `_send_via_twilio` retourne son court-circuit "SIMULÉ"
+    # (MOCK-SANDBOX) avant même d'atteindre le code que CES tests verrouillent
+    # explicitement (Client/send_whatsapp_message/config manquante).
+    monkeypatch.setattr(mod.settings, "MOCK_EXTERNAL_APIS", False, raising=False)
     monkeypatch.setattr(mod, "Client", MagicMock(return_value=SimpleNamespace()))
     monkeypatch.setattr(mod.settings, "TWILIO_ACCOUNT_SID", "sid", raising=False)
     monkeypatch.setattr(mod.settings, "TWILIO_AUTH_TOKEN", "token", raising=False)
@@ -226,6 +231,9 @@ class TestSendViaTwilioPlainText:
     def test_missing_twilio_config_raises_before_any_send_attempt(self, monkeypatch):
         import ladini.api.response_dispatch as mod
 
+        # Même garde que _tasks_module() ci-dessus — nécessaire même hors
+        # helper puisque CI exporte MOCK_EXTERNAL_APIS=true.
+        monkeypatch.setattr(mod.settings, "MOCK_EXTERNAL_APIS", False, raising=False)
         monkeypatch.setattr(mod.settings, "TWILIO_ACCOUNT_SID", "", raising=False)
         with pytest.raises(RuntimeError, match="Twilio configuration incomplete"):
             mod._send_via_twilio("+22670000001", "texte", {})

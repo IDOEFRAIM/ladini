@@ -420,9 +420,11 @@ class TestG_NoPreviousResponseCanBeReused:
         plan2 = build_response_plan(outcome2)
 
         assert plan1.final_response != plan2.final_response
-        assert "2250" in plan1.final_response
-        assert "2250" not in plan2.final_response
-        assert "1125" in plan2.final_response
+        # fmt_num (2026-09-11) formate désormais les milliers avec un espace
+        # (notation française) — "2 250", pas "2250". Voir core/formatting.py.
+        assert "2 250" in plan1.final_response
+        assert "2 250" not in plan2.final_response
+        assert "1 125" in plan2.final_response
 
     def test_no_stored_summary_field_exists_on_the_draft_itself(self):
         """Preuve structurelle (mandat §8/§10) : `ProcurementDraft` n'a

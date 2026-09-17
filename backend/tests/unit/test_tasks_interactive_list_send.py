@@ -17,6 +17,11 @@ class TestSendViaWhatsAppCloudListMenu:
         import ladini.api.response_dispatch as mod
         from ladini.services.whatsapp import cloud_api_client as wa
 
+        # CI exporte MOCK_EXTERNAL_APIS=true (voir .github/workflows/cicd.yml)
+        # — sans ce garde, `_send_via_whatsapp_cloud` retourne son
+        # court-circuit "SIMULÉ" avant d'atteindre wa.is_configured()/send_text
+        # /send_interactive_buttons, ce que ces tests verrouillent explicitement.
+        monkeypatch.setattr(mod.settings, "MOCK_EXTERNAL_APIS", False, raising=False)
         monkeypatch.setattr(wa, "is_configured", lambda: True)
         monkeypatch.setattr(mod.settings, "WHATSAPP_NATIVE_INTERACTIVE_ENABLED", native_enabled)
         send_list = AsyncMock(return_value="wamid.list1")
