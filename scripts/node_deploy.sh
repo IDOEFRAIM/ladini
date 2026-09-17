@@ -274,6 +274,46 @@ STAGE_REACHED_UP=1
 RELEASE_VERSION="$TARGET_RELEASE" dc "${PROFILE_ARGS[@]}" up -d --remove-orphans \
   || fail "up" "docker compose up a échoué"
 
+# ── Reverse proxy Caddy — uniquement sur les nodes avec rôle app ────
+# Le compose applicatif est lancé d'abord afin que le réseau Docker
+# app_agri_net existe avant que Caddy tente de le rejoindre.
+if _has_role app; then
+  PROXY_DIR="${LADINI_ROOT}/infra/reverse-proxy"
+
+  [ -f "${PROXY_DIR}/.env" ] \
+    || fail "up" "reverse proxy: ${PROXY_DIR}/.env absent"
+
+  log "   démarrage/vérification du reverse proxy Caddy…"
+
+  (
+    cd "$PROXY_DIR"
+    docker compose --env-file .env up -d
+  ) || fail "up" "reverse proxy Caddy: docker compose up a échoué"
+
+  CADDY_ID="$(
+    cd "$PROXY_DIR"
+    docker compose --env-file .env ps -q caddy
+  )"
+
+  [ -n "$CADDY_ID" ] \
+    || fail "up" "reverse proxy Caddy: conteneur introuvable"
+
+  CADDY_STATUS=""
+  for _i in $(seq 1 90); do
+    CADDY_STATUS="$(
+      docker inspect         --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}'         "$CADDY_ID" 2>/dev/null || true
+    )"
+
+    [ "$CADDY_STATUS" = "healthy" ] && break
+    sleep 1
+  done
+
+  [ "$CADDY_STATUS" = "healthy" ] \
+    || fail "health" "reverse proxy Caddy non healthy après 90s (status=${CADDY_STATUS:-unknown})"
+
+  log "   ✓ Caddy healthy"
+fi
+
 # ── 6. Attente de la SANTÉ RÉELLE (services de CE node uniquement) ─
 STAGE="health"
 log "5/7 · attente santé (timeout ${HEALTH_TIMEOUT}s)…"
