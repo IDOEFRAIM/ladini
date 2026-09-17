@@ -118,6 +118,12 @@ variable "public_domain" {
   default     = "api.ladini.com"
 }
 
+variable "acme_email" {
+  description = "Adresse email de contact ACME utilisée par Caddy pour la gestion des certificats TLS."
+  type        = string
+}
+
+
 # ── Déploiement (référencé par cloud-init, pas dupliqué) ────────────
 
 variable "git_repo_url" {

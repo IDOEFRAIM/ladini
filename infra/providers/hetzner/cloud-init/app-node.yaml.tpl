@@ -23,9 +23,8 @@
 #   - n'écrit PAS le `.env` applicatif (secrets réels — jamais dans
 #     user_data, qui est lisible via l'API des metadata Hetzner par tout
 #     process root sur le node) ;
-#   - ne configure PAS le reverse proxy (infra/reverse-proxy/), qui a son
-#     propre cycle de vie (cd infra/reverse-proxy && docker compose up -d,
-#     voir son README/commentaires) ;
+#   - prépare le .env du reverse proxy Caddy, mais ne lance PAS Caddy ;
+#     le démarrage du proxy appartient au workflow de déploiement applicatif ;
 #   - ne configure PAS Alloy (observabilité — chantier séparé).
 #
 # Rôles Compose (profiles) destinés à ce node, pour référence humaine
@@ -146,6 +145,26 @@ runcmd:
     ${git_repo_url} /opt/ladini/app || (cd /opt/ladini/app && sudo -u
     ${deploy_user} git fetch origin ${git_ref} && sudo -u ${deploy_user}
     git checkout ${git_ref})
+
+  # ── Configuration du reverse proxy Caddy ─────────────────────────
+  # Le dépôt doit déjà être cloné à ce stade. Ces valeurs ne sont pas des
+  # secrets applicatifs : domaine public + email de contact ACME.
+  - |
+    echo "[ladini] configuration de l'environnement Caddy"
+
+    PROXY_ENV="/opt/ladini/app/infra/reverse-proxy/.env"
+
+    install -m 0600 -o ${deploy_user} -g ${deploy_user} /dev/null "$PROXY_ENV"
+
+    cat > "$PROXY_ENV" <<'EOF'
+    PUBLIC_DOMAIN=${public_domain}
+    ACME_EMAIL=${acme_email}
+    EOF
+
+    chown ${deploy_user}:${deploy_user} "$PROXY_ENV"
+    chmod 0600 "$PROXY_ENV"
+
+    echo "[ladini] Caddy .env prêt : $PROXY_ENV"
 
   # ── Pare-feu hôte — RÉFÉRENCE le script du dépôt, ne le duplique pas ──
   # `PRIVATE_NET_CIDR` (2026-09-17, audit Cloudflare/LB) : cette topologie a

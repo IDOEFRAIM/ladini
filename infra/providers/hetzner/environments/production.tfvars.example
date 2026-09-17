@@ -29,6 +29,7 @@ admin_cidrs = ["203.0.113.4/32"]
 # doit pointer (enregistrement A) vers l'output load_balancer_ipv4 après
 # le premier `apply`.
 public_domain = "api.ladini.com"
+acme_email    = "ops@ladini.com"
 
 # Phase 1 (< 100 utilisateurs, voir infra/inventory.example.yml) : 1 seul
 # node cumule app+scheduler+admin. Montez progressivement (2, 3, …) quand

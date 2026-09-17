@@ -5,6 +5,7 @@ admin_cidrs = [
 ]
 
 public_domain = "api.ladini.tech"
+acme_email    = "idoefraim06@gmail.com"
 
 app_node_count = 1
 
