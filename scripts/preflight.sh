@@ -118,14 +118,31 @@ fi
 # 8. Ports hôte requis (loopback) libres OU déjà tenus par NOS conteneurs
 CHK="ports 127.0.0.1:8000 / 127.0.0.1:5555 disponibles ou à nous"
 port_clash=0
+
 for p in 8000 5555; do
   if command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :$p" 2>/dev/null | grep -q .; then
-    # occupé — OK seulement si c'est un conteneur de CETTE stack
-    if ! dc ps --format '{{.Publishers}}' 2>/dev/null | grep -q ":$p->"; then
-      err "      port $p occupé par un process externe"; port_clash=1
+    # Le port est occupé. Il est acceptable uniquement si le mapping hôte
+    # appartient à un conteneur de CETTE stack Docker Compose.
+    owned_by_stack=0
+
+    while IFS= read -r cid; do
+      [ -n "$cid" ] || continue
+
+      if docker inspect         --format '{{range $containerPort, $bindings := .NetworkSettings.Ports}}{{range $bindings}}{{println .HostPort}}{{end}}{{end}}'         "$cid" 2>/dev/null | grep -qx "$p"; then
+        owned_by_stack=1
+        break
+      fi
+    done < <(dc ps -q 2>/dev/null)
+
+    if [ "$owned_by_stack" -ne 1 ]; then
+      err "      port $p occupé par un process externe"
+      port_clash=1
+    else
+      log "      ✓ port $p déjà tenu par un conteneur de cette stack"
     fi
   fi
 done
+
 [ "$port_clash" -eq 0 ] && log "  ✓ $CHK" || { err "  ✗ $CHK"; FAIL=1; }
 
 # 9. Pas de verrou de déploiement résiduel bloquant (info seulement — le vrai
