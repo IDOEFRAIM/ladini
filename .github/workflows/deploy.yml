@@ -4,7 +4,6 @@
 # Jamais déclenché automatiquement. Un opérateur lance `workflow_dispatch`
 # avec la `release` cible (un tag `sha-*` produit par release.yml). L'étape
 # de déploiement est protégée par l'ENVIRONNEMENT GitHub `production`
-# (règle : "Required reviewers") → un second humain approuve avant que le
 # SSH ne parte.
 #
 # La logique de release vit ENTIÈREMENT côté VPS — ce workflow ne fait que :
@@ -74,11 +73,13 @@ jobs:
     name: Deploy → ${{ github.event.inputs.target }}
     needs: verify-image
     runs-on: ubuntu-latest
-    # ⚠️ Créer les environnements `staging` et `production` dans
-    # Settings → Environments, avec "Required reviewers" sur `production`.
     environment: ${{ github.event.inputs.target }}
     steps:
       - name: SSH & run scripts/deploy.sh
+        env:
+          LADINI_APP_ENV_B64: ${{ secrets.LADINI_APP_ENV_B64 }}
+          PUBLIC_DOMAIN: ${{ vars.PUBLIC_DOMAIN }}
+          ACME_EMAIL: ${{ vars.ACME_EMAIL }}
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -86,11 +87,126 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           script_stop: true
           command_timeout: 20m
+          envs: LADINI_APP_ENV_B64,PUBLIC_DOMAIN,ACME_EMAIL
           script: |
             set -euo pipefail
-            cd "${{ secrets.DEPLOY_DIR }}"
+
+            DEPLOY_DIR="${{ secrets.DEPLOY_DIR }}"
+            REPO_SSH="git@github.com:IDOEFRAIM/ladini.git"
+            DEPLOY_KEY="$HOME/.ssh/ladini_github_deploy"
+
+            [ -n "$DEPLOY_DIR" ] || {
+              echo "FATAL: DEPLOY_DIR absent"
+              exit 1
+            }
+
+            # ── GitHub Deploy Key read-only ─────────────────────────────
+            install -d -m 700 "$HOME/.ssh"
+
+            cat > "$DEPLOY_KEY" <<'LADINI_DEPLOY_KEY'
+            ${{ secrets.LADINI_GITHUB_DEPLOY_KEY }}
+            LADINI_DEPLOY_KEY
+
+            chmod 600 "$DEPLOY_KEY"
+
+            grep -q '^-----BEGIN OPENSSH PRIVATE KEY-----$' "$DEPLOY_KEY" || {
+              echo "FATAL: LADINI_GITHUB_DEPLOY_KEY absent ou invalide"
+              exit 1
+            }
+
+            # Clé hôte ED25519 officielle de github.com.
+            # Fail-closed : pas de StrictHostKeyChecking=accept-new.
+            touch "$HOME/.ssh/known_hosts"
+            chmod 600 "$HOME/.ssh/known_hosts"
+
+            GITHUB_HOST_KEY='github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl'
+
+            grep -Fqx "$GITHUB_HOST_KEY" "$HOME/.ssh/known_hosts"               || printf '%s\n' "$GITHUB_HOST_KEY" >> "$HOME/.ssh/known_hosts"
+
+            export GIT_SSH_COMMAND="ssh -i $DEPLOY_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+
+            # ── Bootstrap du checkout si VM neuve ───────────────────────
+            if [ ! -d "$DEPLOY_DIR/.git" ]; then
+              echo "→ checkout Ladini absent : bootstrap depuis le dépôt privé"
+
+              if [ -d "$DEPLOY_DIR" ] &&                  [ -n "$(find "$DEPLOY_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+                echo "FATAL: $DEPLOY_DIR existe mais n'est pas un checkout Git vide"
+                exit 1
+              fi
+
+              mkdir -p "$DEPLOY_DIR"
+
+              git clone                 --branch main                 "$REPO_SSH"                 "$DEPLOY_DIR"
+            fi
+
+            cd "$DEPLOY_DIR"
+
+            # ── Configuration runtime de la VM ──────────────────────────
+            # Les secrets applicatifs restent dans GitHub Environment
+            # Secrets. Rien n'est injecté dans Terraform ou cloud-init.
+            [ -n "${LADINI_APP_ENV_B64:-}" ] || {
+              echo "FATAL: secret LADINI_APP_ENV_B64 absent"
+              exit 1
+            }
+
+            [ -n "${PUBLIC_DOMAIN:-}" ] || {
+              echo "FATAL: variable GitHub PUBLIC_DOMAIN absente"
+              exit 1
+            }
+
+            [ -n "${ACME_EMAIL:-}" ] || {
+              echo "FATAL: variable GitHub ACME_EMAIL absente"
+              exit 1
+            }
+
+            umask 077
+
+            APP_ENV_TMP="$DEPLOY_DIR/.env.new.$$"
+
+            if ! printf '%s' "$LADINI_APP_ENV_B64" | base64 -d > "$APP_ENV_TMP"; then
+              rm -f "$APP_ENV_TMP"
+              echo "FATAL: décodage de LADINI_APP_ENV_B64 impossible"
+              exit 1
+            fi
+
+            if [ ! -s "$APP_ENV_TMP" ]; then
+              rm -f "$APP_ENV_TMP"
+              echo "FATAL: .env applicatif décodé vide"
+              exit 1
+            fi
+
+            chmod 600 "$APP_ENV_TMP"
+            mv -f "$APP_ENV_TMP" "$DEPLOY_DIR/.env"
+
+            echo "→ .env applicatif installé"
+
+            PROXY_DIR="$DEPLOY_DIR/infra/reverse-proxy"
+
+            [ -d "$PROXY_DIR" ] || {
+              echo "FATAL: $PROXY_DIR absent du checkout"
+              exit 1
+            }
+
+            PROXY_ENV_TMP="$PROXY_DIR/.env.new.$$"
+
+            printf 'PUBLIC_DOMAIN=%s\nACME_EMAIL=%s\n'               "$PUBLIC_DOMAIN"               "$ACME_EMAIL"               > "$PROXY_ENV_TMP"
+
+            chmod 600 "$PROXY_ENV_TMP"
+            mv -f "$PROXY_ENV_TMP" "$PROXY_DIR/.env"
+
+            echo "→ .env Caddy installé"
+
+            # Normalise l'origin vers SSH privé et persiste la clé
+            # uniquement pour CE dépôt.
+            git remote set-url origin "$REPO_SSH"
+
+            git config core.sshCommand               "ssh -i $DEPLOY_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+
+            echo "→ synchronisation du dépôt"
             git fetch --tags --quiet origin
-            git checkout --quiet "${{ github.sha }}" -- scripts/ docker-compose.prod.yml docker-compose.dev.yml infra/ || true
+
+            git checkout --quiet "${{ github.sha }}" --               scripts/               docker-compose.prod.yml               docker-compose.dev.yml               infra/ || true
+
             if [ -f infra/inventory.yml ]; then
               echo "→ infra/inventory.yml présent — déploiement multi-node (cluster_deploy.sh)."
               ./scripts/cluster_deploy.sh "${{ github.event.inputs.release }}"

@@ -118,25 +118,11 @@ variable "public_domain" {
   default     = "api.ladini.com"
 }
 
-variable "acme_email" {
-  description = "Adresse email de contact ACME utilisée par Caddy pour la gestion des certificats TLS."
-  type        = string
-}
 
 
 # ── Déploiement (référencé par cloud-init, pas dupliqué) ────────────
 
-variable "git_repo_url" {
-  description = "URL HTTPS du dépôt Ladini cloné par cloud-init sur chaque node (checkout requis par scripts/deploy.sh, infra/firewall/ufw.sh, infra/reverse-proxy/ — tous des chemins relatifs à un checkout). Dépôt public : clone anonyme suffit. Dépôt privé : passez un token dans l'URL via une variable sensible séparée (non fait ici par défaut, voir README.md)."
-  type        = string
-  default     = "https://github.com/IDOEFRAIM/ladini.git"
-}
 
-variable "git_ref" {
-  description = "Branche/tag cloné par cloud-init au premier boot. Un premier `git checkout` seulement — les déploiements suivants sont le rôle de scripts/deploy.sh, PAS de ce Terraform (qui ne tourne pas à chaque release)."
-  type        = string
-  default     = "main"
-}
 
 variable "deploy_user" {
   description = "Utilisateur Linux non-root créé sur chaque node, propriétaire du checkout et autorisé à lancer docker compose (groupe docker). C'est ce user que scripts/deploy.sh utilise via SSH."
@@ -154,4 +140,9 @@ variable "labels" {
     managed_by  = "terraform"
     environment = "production"
   }
+}
+
+variable "github_actions_public_key" {
+  description = "Clé publique SSH dédiée à GitHub Actions pour se connecter aux nodes en tant que deploy_user."
+  type        = string
 }

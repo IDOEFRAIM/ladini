@@ -18,6 +18,7 @@
 # Clé publique SSH admin/déploiement (contenu de ex: ~/.ssh/ladini_deploy.pub).
 # Générez une paire DÉDIÉE : ssh-keygen -t ed25519 -f ~/.ssh/ladini_deploy -C "deploy@ladini"
 ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... deploy@ladini"
+github_actions_public_key = "ssh-ed25519 AAAA... github-actions-production"
 
 # Votre IP fixe (ou un /32 de votre bastion/VPN). Trouvez la vôtre :
 # curl -s https://ifconfig.me
@@ -29,7 +30,6 @@ admin_cidrs = ["203.0.113.4/32"]
 # doit pointer (enregistrement A) vers l'output load_balancer_ipv4 après
 # le premier `apply`.
 public_domain = "api.ladini.com"
-acme_email    = "ops@ladini.com"
 
 # Phase 1 (< 100 utilisateurs, voir infra/inventory.example.yml) : 1 seul
 # node cumule app+scheduler+admin. Montez progressivement (2, 3, …) quand
@@ -44,5 +44,3 @@ location     = "nbg1"
 network_zone = "eu-central"
 
 # Dépôt cloné par cloud-init au premier boot de chaque node.
-git_repo_url = "https://github.com/IDOEFRAIM/ladini.git"
-git_ref      = "main"

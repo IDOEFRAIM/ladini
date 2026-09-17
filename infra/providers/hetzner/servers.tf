@@ -69,15 +69,12 @@ resource "hcloud_server" "app" {
   })
 
   user_data = templatefile("${path.module}/cloud-init/app-node.yaml.tpl", {
-    deploy_user      = var.deploy_user
-    ssh_public_key   = var.ssh_public_key
-    git_repo_url     = var.git_repo_url
-    git_ref          = var.git_ref
-    public_domain    = var.public_domain
-    acme_email       = var.acme_email
-    node_name        = "ladini-app-${count.index + 1}"
-    node_roles       = join(",", local.app_node_roles[count.index])
-    private_net_cidr = var.network_ip_range
+    deploy_user               = var.deploy_user
+    ssh_public_key            = var.ssh_public_key
+    github_actions_public_key = var.github_actions_public_key
+    node_name                 = "ladini-app-${count.index + 1}"
+    node_roles                = join(",", local.app_node_roles[count.index])
+    private_net_cidr          = var.network_ip_range
   })
 
   # Le subnet doit exister avant qu'un server puisse s'y attacher.
@@ -114,15 +111,12 @@ resource "hcloud_server" "scheduler" {
   })
 
   user_data = templatefile("${path.module}/cloud-init/app-node.yaml.tpl", {
-    deploy_user      = var.deploy_user
-    ssh_public_key   = var.ssh_public_key
-    git_repo_url     = var.git_repo_url
-    git_ref          = var.git_ref
-    public_domain    = var.public_domain
-    acme_email       = var.acme_email
-    node_name        = "ladini-scheduler-1"
-    node_roles       = "scheduler,admin"
-    private_net_cidr = var.network_ip_range
+    deploy_user               = var.deploy_user
+    ssh_public_key            = var.ssh_public_key
+    github_actions_public_key = var.github_actions_public_key
+    node_name                 = "ladini-scheduler-1"
+    node_roles                = "scheduler,admin"
+    private_net_cidr          = var.network_ip_range
   })
 
   depends_on = [hcloud_network_subnet.app]

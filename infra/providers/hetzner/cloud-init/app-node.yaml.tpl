@@ -10,22 +10,24 @@
 #   - installe Docker Engine + le plugin compose ;
 #   - crée l'utilisateur de déploiement (${deploy_user}), membre du groupe
 #     docker, avec la clé SSH admin injectée ;
-#   - clone le dépôt Ladini (checkout requis par scripts/deploy.sh et par
-#     ce cloud-init lui-même pour invoquer infra/firewall/ufw.sh) ;
-#   - applique le pare-feu hôte via infra/firewall/ufw.sh (RÉFÉRENCÉ, pas
-#     dupliqué — voir ce script pour le détail des ports) ;
+#   - prépare le node sans dépendre du dépôt GitHub ;
+#   - applique un pare-feu hôte minimal directement au bootstrap :
+#     SSH autorisé, 80/443 uniquement depuis le réseau privé Hetzner ;
 #   - prépare le répertoire Alloy (placeholder — la config complète Alloy
 #     est un autre chantier, volontairement hors scope ici) ;
 #   - durcit SSH (désactive l'auth par mot de passe et le login root).
 #
-# CE QUE CE FICHIER NE FAIT PAS (hors scope, réservé à scripts/deploy.sh) :
+# CE QUE CE FICHIER NE FAIT PAS :
+#   - ne clone PAS le dépôt GitHub ;
+#   - ne contient aucune clé GitHub / Deploy Key / PAT ;
 #   - ne lance PAS `docker compose up` ;
 #   - n'écrit PAS le `.env` applicatif (secrets réels — jamais dans
-#     user_data, qui est lisible via l'API des metadata Hetzner par tout
-#     process root sur le node) ;
-#   - prépare le .env du reverse proxy Caddy, mais ne lance PAS Caddy ;
-#     le démarrage du proxy appartient au workflow de déploiement applicatif ;
+#     user_data, qui est lisible depuis le node avec les privilèges root) ;
+#   - ne configure ni ne démarre Caddy ;
 #   - ne configure PAS Alloy (observabilité — chantier séparé).
+#
+# Le checkout privé, les fichiers d'environnement et le déploiement
+# applicatif sont pris en charge ensuite par GitHub Actions.
 #
 # Rôles Compose (profiles) destinés à ce node, pour référence humaine
 # uniquement (ce cloud-init ne les utilise pas directement) — reportez ces
@@ -44,7 +46,10 @@ users:
     shell: /bin/bash
     sudo: ["ALL=(ALL) NOPASSWD:ALL"]
     ssh_authorized_keys:
+      # Accès opérateur / administrateur.
       - ${ssh_public_key}
+      # Accès CI/CD GitHub Actions avec une clé dédiée.
+      - ${github_actions_public_key}
 
 write_files:
   # Placeholder Alloy — répertoire + config vide prête à être remplie par un
@@ -60,8 +65,8 @@ write_files:
       // remplacé par une vraie configuration.
 
   # Durcissement SSH minimal (en plus du firewall) — pas de mot de passe,
-  # pas de login root direct. Le port SSH courant reste celui détecté par
-  # infra/firewall/ufw.sh (défaut 22, non modifié ici).
+  # pas de login root direct. Le port SSH est détecté au bootstrap via
+  # `sshd -T` (repli sur 22 si nécessaire).
   - path: /etc/ssh/sshd_config.d/99-ladini-hardening.conf
     owner: root:root
     permissions: "0644"
@@ -138,58 +143,47 @@ runcmd:
   - install -d -o ${deploy_user} -g ${deploy_user} /opt/ladini
   - install -d -o ${deploy_user} -g ${deploy_user} /opt/ladini/deploy/releases
 
-  # ── Checkout du dépôt (requis par scripts/deploy.sh ET par ufw.sh
-  #    invoqué juste après) — clone en tant que deploy_user, pas root.
-  - >
-    sudo -u ${deploy_user} git clone --branch ${git_ref} --depth 1
-    ${git_repo_url} /opt/ladini/app || (cd /opt/ladini/app && sudo -u
-    ${deploy_user} git fetch origin ${git_ref} && sudo -u ${deploy_user}
-    git checkout ${git_ref})
-
-  # ── Configuration du reverse proxy Caddy ─────────────────────────
-  # Le dépôt doit déjà être cloné à ce stade. Ces valeurs ne sont pas des
-  # secrets applicatifs : domaine public + email de contact ACME.
-  - |
-    echo "[ladini] configuration de l'environnement Caddy"
-
-    PROXY_ENV="/opt/ladini/app/infra/reverse-proxy/.env"
-
-    install -m 0600 -o ${deploy_user} -g ${deploy_user} /dev/null "$PROXY_ENV"
-
-    cat > "$PROXY_ENV" <<'EOF'
-    PUBLIC_DOMAIN=${public_domain}
-    ACME_EMAIL=${acme_email}
-    EOF
-
-    chown ${deploy_user}:${deploy_user} "$PROXY_ENV"
-    chmod 0600 "$PROXY_ENV"
-
-    echo "[ladini] Caddy .env prêt : $PROXY_ENV"
-
-  # ── Pare-feu hôte — RÉFÉRENCE le script du dépôt, ne le duplique pas ──
-  # `PRIVATE_NET_CIDR` (2026-09-17, audit Cloudflare/LB) : cette topologie a
-  # TOUJOURS un Load Balancer Hetzner devant (voir load_balancer.tf) — le
-  # host n'a donc jamais besoin d'exposer 80/443 à 0.0.0.0/0, seulement au
-  # réseau privé par lequel le LB route réellement (défense en profondeur,
-  # même raisonnement que infra/providers/hetzner/firewall.tf).
+  # ── Pare-feu hôte — bootstrap autonome ───────────────────────────
+  # Aucune dépendance au dépôt GitHub ici.
   #
-  # Bloc explicite, pas une simple ligne (2026-09-17, incident réel : `ufw
-  # status` restait `inactive` après un `terraform apply`, alors que
-  # cloud-init affichait `done`) — `runcmd` concatène TOUTES ses commandes
-  # en UN SEUL script `/bin/sh`, SANS `set -e` : un échec au milieu (quelle
-  # qu'en soit la cause) ne fait PAS échouer cloud-init, puisque sa DERNIÈRE
-  # commande (`systemctl restart ssh || true`, plus bas) réussit toujours.
-  # Ce bloc rend l'échec VISIBLE (log dédié + `exit 1` qui stoppe net le
-  # reste du bootstrap) au lieu de le laisser disparaître en silence. La
-  # cause racine du bug d'origine (ufw.sh mourait dans sa détection du port
-  # SSH) est corrigée dans ufw.sh lui-même — ce bloc est une défense en
-  # profondeur pour que toute régression future soit visible immédiatement.
+  # Défense en profondeur :
+  #   - trafic entrant refusé par défaut ;
+  #   - SSH limité sur le port réellement configuré ;
+  #   - HTTP/HTTPS acceptés uniquement depuis le réseau privé Hetzner,
+  #     utilisé par le Load Balancer ;
+  #   - aucun port applicatif interne n'est exposé publiquement.
+  #
+  # Fail-closed : toute erreur UFW arrête le bootstrap.
   - |
-    echo "[ladini] application du pare-feu hôte (ufw.sh, PRIVATE_NET_CIDR=${private_net_cidr})"
-    if PRIVATE_NET_CIDR=${private_net_cidr} bash /opt/ladini/app/infra/firewall/ufw.sh >/var/log/ladini-ufw.log 2>&1; then
-      echo "[ladini] ufw.sh OK — voir /var/log/ladini-ufw.log"
+    echo "[ladini] application du pare-feu hôte autonome"
+
+    if (
+      set -eu
+
+      SSH_PORT="$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2; exit }')"
+      if [ -z "$SSH_PORT" ]; then
+        SSH_PORT=22
+      fi
+
+      echo "SSH_PORT=$SSH_PORT"
+      echo "PRIVATE_NET_CIDR=${private_net_cidr}"
+
+      ufw --force reset
+      ufw default deny incoming
+      ufw default allow outgoing
+
+      ufw limit "$SSH_PORT/tcp"
+
+      ufw allow from ${private_net_cidr} to any port 80 proto tcp
+      ufw allow from ${private_net_cidr} to any port 443 proto tcp
+
+      ufw --force enable
+      ufw status verbose
+    ) >/var/log/ladini-ufw.log 2>&1; then
+      echo "[ladini] firewall OK — voir /var/log/ladini-ufw.log"
     else
-      echo "[ladini] FATAL: ufw.sh a echoue - voir /var/log/ladini-ufw.log - abandon du bootstrap" >&2
+      echo "[ladini] FATAL: configuration UFW échouée — voir /var/log/ladini-ufw.log" >&2
+      cat /var/log/ladini-ufw.log >&2 || true
       exit 1
     fi
 
@@ -207,4 +201,4 @@ runcmd:
 # (confirmé — aucune valeur correspondante n'existe côté Terraform, ni ne devrait).
 # ⚠️ Ne PAS écrire le nom de cette variable dans ce commentaire sans le
 # préfixer de `$$` : templatefile() interpole aussi le texte des commentaires.
-final_message: "Ladini node (${node_name}, roles: ${node_roles}) prêt après $${uptime}s. Étape suivante : infra/inventory.yml + scripts/deploy.sh <release> depuis un poste avec accès SSH ${deploy_user}@<ip>."
+final_message: "Ladini node (${node_name}, roles: ${node_roles}) prêt après $${uptime}s. Bootstrap infrastructure terminé ; le checkout privé et le déploiement sont pris en charge par GitHub Actions."
