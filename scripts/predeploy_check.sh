@@ -5,13 +5,16 @@
 # réseau de production, rien n'est destructif) :
 #
 #   1. syntaxe bash des scripts de déploiement (bash -n)
-#   2. docker compose config (docker-compose.prod.yml, aucun `build:`)
-#   3. tests ciblés : architecture (beat singleton, invariants compose) +
+#   2. régression pare-feu hôte (infra/firewall/ufw.sh --dry-run, voir
+#      scripts/test/test-ufw-firewall.sh) — PRIVATE_NET_CIDR, dry-run
+#      inoffensif, non-régression de l'incident "ufw resté inactive"
+#   3. docker compose config (docker-compose.prod.yml, aucun `build:`)
+#   4. tests ciblés : architecture (beat singleton, invariants compose) +
 #      validate_inventory.py
-#   4. validation de infra/inventory.yml (si présent)
-#   5. terraform fmt -check + validate (si terraform est installé et
+#   5. validation de infra/inventory.yml (si présent)
+#   6. terraform fmt -check + validate (si terraform est installé et
 #      infra/providers/hetzner/*.tf présent) — jamais `plan`/`apply` ici
-#   6. smoke.sh / smoke_observability.sh — UNIQUEMENT si SMOKE_API_URL est
+#   7. smoke.sh / smoke_observability.sh — UNIQUEMENT si SMOKE_API_URL est
 #      déjà exporté par l'appelant (un stack tourne réellement quelque
 #      part) ; sinon sautés avec un avertissement, jamais un échec
 #
@@ -58,7 +61,15 @@ for f in scripts/*.sh; do
 done
 [ "$FAILED" -eq 0 ] && _ok "tous les scripts sont syntaxiquement valides"
 
-# ── 2. docker compose config (prod, sans build:) ──────────────────────
+# ── 2. Régression pare-feu hôte (ufw.sh, --dry-run uniquement) ─────────
+_step "Régression pare-feu hôte (infra/firewall/ufw.sh --dry-run)"
+if bash scripts/test/test-ufw-firewall.sh; then
+  _ok "ufw.sh : Cas A/B/C/D passent (PRIVATE_NET_CIDR, dry-run, non-régression incident ufw inactive)"
+else
+  _fail "ufw.sh : au moins un cas de scripts/test/test-ufw-firewall.sh a échoué"
+fi
+
+# ── 3. docker compose config (prod, sans build:) ──────────────────────
 _step "docker compose config (docker-compose.prod.yml)"
 if RELEASE_VERSION=predeploy-check-dummy REDIS_URL="rediss://x:y@z:6379/0" \
    MCP_HTTP_AUTH_TOKEN=x FLOWER_USER=x FLOWER_PASSWORD=x GROQ_API_KEY=x \
@@ -74,7 +85,7 @@ else
   _ok "aucune directive build: dans docker-compose.prod.yml"
 fi
 
-# ── 3. Tests ciblés : beat singleton + invariants compose + inventory +
+# ── 4. Tests ciblés : beat singleton + invariants compose + inventory +
 #    PII/redaction + idempotency + worker metrics (2026-09-17, follow-up
 #    pre-Hetzner — étendu, reste volontairement CIBLÉ : la suite complète
 #    (lente) est un gate séparé, pas ici, voir DoD "Ne rends pas le script
@@ -94,7 +105,7 @@ else
   _fail "au moins un test ciblé a échoué"
 fi
 
-# ── 4. infra/inventory.yml (si présent) ────────────────────────────────
+# ── 5. infra/inventory.yml (si présent) ────────────────────────────────
 _step "infra/inventory.yml"
 if [ -f infra/inventory.yml ]; then
   if "$PYTHON_BIN" scripts/validate_inventory.py infra/inventory.yml; then
@@ -106,7 +117,7 @@ else
   echo "⚠ infra/inventory.yml absent (normal si pas encore provisionné) — sauté"
 fi
 
-# ── 5. Terraform fmt + validate (jamais plan/apply ici) ────────────────
+# ── 6. Terraform fmt + validate (jamais plan/apply ici) ────────────────
 _step "Terraform fmt + validate (infra/providers/hetzner)"
 if command -v "$TERRAFORM_BIN" >/dev/null 2>&1 || [ -x "$TERRAFORM_BIN" ]; then
   pushd infra/providers/hetzner >/dev/null
@@ -126,7 +137,7 @@ else
   echo "⚠ terraform introuvable (ni sur PATH ni à TERRAFORM_BIN=${TERRAFORM_BIN}) — sauté, NOT RUN"
 fi
 
-# ── 6. Smoke (optionnel — seulement si un stack tourne déjà) ───────────
+# ── 7. Smoke (optionnel — seulement si un stack tourne déjà) ───────────
 _step "smoke.sh / smoke_observability.sh"
 if [ -n "${SMOKE_API_URL:-}" ]; then
   if SMOKE_API_URL="$SMOKE_API_URL" SMOKE_CHECK_ADMIN=0 ./scripts/smoke.sh; then
