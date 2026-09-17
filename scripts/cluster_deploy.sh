@@ -56,64 +56,20 @@ fi
 CLUSTER_MANIFEST="${RELEASES_DIR}/cluster-current.json"
 CLUSTER_DEPLOY_STARTED_AT="$(date -u +%FT%TZ)"
 
-# ── Verrou CLUSTER-WIDE ─────────────────────────────────────────────
-# lib.sh fournit déjà un verrou LOCAL (mkdir atomique sur deploy/.deploy.lock)
-# — suffisant pour un seul node, PAS pour un orchestrateur qui pourrait être
-# lancé depuis deux machines différentes (poste d'un dev + CI, ou deux runs
-# CI concurrents) contre le MÊME inventaire.
+# ── Verrou CLUSTER-WIDE — implémentation dans lib.sh (acquire_cluster_lock/
+# release_cluster_lock), PARTAGÉE avec cluster_rollback.sh — voir le
+# commentaire détaillé de lib.sh (§DEADLOCK) pour : pourquoi ce verrou vit
+# sur une ressource TOUJOURS DISTINCTE du verrou local par node (LOCK_DIR),
+# le choix Redis SET NX EX vs. repli local, et la résolution de REDIS_URL
+# depuis $ENV_FILE quand l'appelant ne l'a pas déjà exportée.
 #
-# Choix : verrou Redis (SET NX EX) quand redis-cli + REDIS_URL sont
-# disponibles. C'est un choix DÉLIBÉRÉ et justifiable ici précisément parce
-# que le refactor du jour a rendu Redis EXTERNE et PARTAGÉ obligatoire pour
-# tout le cluster (docker-compose.prod.yml, REDIS_URL sans défaut) — ce
-# n'est donc PAS une nouvelle dépendance ajoutée pour ce seul script, juste
-# la réutilisation d'une ressource déjà garantie partagée. SET NX EX est
-# atomique côté serveur Redis : pas de leader election, juste un mutex
-# classique avec expiration de sécurité (si le process qui tient le verrou
-# meurt sans le relâcher — kill -9, OOM — le verrou expire tout seul après
-# CLUSTER_LOCK_TTL plutôt que de bloquer indéfiniment tout déploiement
-# futur, symétrique à la récupération de verrou périmé de lib.sh::acquire_lock).
-#
-# Repli si redis-cli/REDIS_URL absents localement (ex: poste dev sans
-# redis-cli installé) : verrou LOCAL (lib.sh::acquire_lock). C'est une
-# DÉGRADATION ASSUMÉE, pas un faux sentiment de sécurité — voir le warn émis
-# à l'exécution. Un vrai verrou distribué sans dépendance fiable existante
-# (etcd/Consul, hors scope §brief) n'a pas de solution bash pure honnête ;
-# en pratique un seul opérateur/CI pilote les déploiements (la
-# `concurrency:` de .github/workflows/deploy.yml ajoute déjà une protection
-# côté CI), donc ce repli couvre le cas réel du jour 1.
-CLUSTER_LOCK_KEY="ladini:cluster-deploy:lock:$(basename "$INVENTORY_FILE")"
-CLUSTER_LOCK_TTL="${CLUSTER_LOCK_TTL:-3600}"
-_CLUSTER_LOCK_TOKEN="$(hostname 2>/dev/null || echo host)-$$-$(date +%s)"
-_CLUSTER_LOCK_MODE=""
-
-acquire_cluster_lock() {
-  if command -v redis-cli >/dev/null 2>&1 && [ -n "${REDIS_URL:-}" ]; then
-    if redis-cli -u "$REDIS_URL" SET "$CLUSTER_LOCK_KEY" "$_CLUSTER_LOCK_TOKEN" NX EX "$CLUSTER_LOCK_TTL" 2>/dev/null | grep -qx OK; then
-      _CLUSTER_LOCK_MODE="redis"
-      log "Verrou cluster acquis (Redis, clé ${CLUSTER_LOCK_KEY}, TTL ${CLUSTER_LOCK_TTL}s)."
-      return 0
-    fi
-    local holder; holder="$(redis-cli -u "$REDIS_URL" GET "$CLUSTER_LOCK_KEY" 2>/dev/null || true)"
-    die "Un autre cluster_deploy.sh est en cours (verrou Redis tenu par: ${holder:-inconnu}). Réessayez plus tard, ou attendez l'expiration du TTL (${CLUSTER_LOCK_TTL}s)."
-  fi
-  warn "redis-cli/REDIS_URL indisponible ICI — verrou cluster-wide DÉGRADÉ en verrou LOCAL (protège uniquement contre une double exécution DEPUIS CETTE MACHINE, pas depuis deux machines différentes)."
-  acquire_lock
-  _CLUSTER_LOCK_MODE="local"
-}
-release_cluster_lock() {
-  if [ "$_CLUSTER_LOCK_MODE" = "redis" ]; then
-    # DEL seulement si on est toujours le détenteur (évite de supprimer le
-    # verrou de quelqu'un d'autre si notre TTL a déjà expiré entre-temps).
-    redis-cli -u "$REDIS_URL" eval \
-      'if redis.call("GET",KEYS[1])==ARGV[1] then return redis.call("DEL",KEYS[1]) else return 0 end' \
-      1 "$CLUSTER_LOCK_KEY" "$_CLUSTER_LOCK_TOKEN" >/dev/null 2>&1 || true
-  fi
-  # mode "local" : relâché par le trap EXIT de lib.sh (release_lock), rien à
-  # faire ici — mais on combine les deux dans NOTRE propre trap ci-dessous
-  # pour ne pas dépendre de l'ORDRE d'enregistrement des traps.
-}
-trap 'release_cluster_lock; release_lock' EXIT
+# `release_cluster_lock` gère explicitement le DEL Redis / la suppression du
+# répertoire local ; `release_all_locks` (défini par lib.sh, PAS réenregistré
+# ici — un `trap ... EXIT` REMPLACE le précédent, jamais ne l'empile) est
+# donc explicitement rappelé en second : filet de sécurité pour tout autre
+# verrou nommé encore tenu (voir l'étape 4/8 ci-dessous, verrou local
+# temporaire autour des migrations).
+trap 'release_cluster_lock; release_all_locks' EXIT
 
 # ── JSON minimal (pas de dépendance jq) ────────────────────────────
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
@@ -191,7 +147,7 @@ command -v "$PYTHON_BIN" >/dev/null 2>&1 || PYTHON_BIN=python
 # ═════════════════════════════════════════════════════════════════════
 # 2. Verrou cluster-wide
 # ═════════════════════════════════════════════════════════════════════
-acquire_cluster_lock
+acquire_cluster_lock "$(basename "$INVENTORY_FILE")" "cluster_deploy.sh"
 
 # Manifeste PRÉCÉDENT (avant de l'écraser) — utile pour résoudre le SHA
 # "d'avant" pour la classification migration (§4) si dispo.
@@ -261,11 +217,24 @@ if [ -f "${LADINI_ROOT}/backend/alembic.ini" ]; then
   MIG_CLASS="$(migration_class_between "$FROM_SHA" "$GIT_SHA" || echo MIGRATION_REQUIRES_MANUAL_RECOVERY)"
   log "   classification migration : ${MIG_CLASS}  (${FROM_SHA}..${GIT_SHA})"
 
+  # Verrou LOCAL PAR NODE (LOCK_DIR — le même que deploy.sh/node_deploy.sh),
+  # tenu UNIQUEMENT le temps de ces deux commandes : elles mutent le compose
+  # stack LOCAL de la machine orchestratrice (pgbouncer up, migration DB) —
+  # exactement le genre d'opération que ce verrou existe pour protéger,
+  # peu importe que ce soit ICI (l'orchestrateur) ou node_deploy.sh (un
+  # node) qui la déclenche. Acquis puis RELÂCHÉ avant la boucle SSH
+  # ci-dessous (étape 5/8) — jamais tenu pendant le rollout lui-même, donc
+  # jamais en conflit avec node_deploy.sh acquérant ce même verrou sur un
+  # node co-localisé (voir §DEADLOCK dans lib.sh : ce sont deux verrous
+  # DISTINCTS de toute façon, mais celui-ci en particulier n'a pas de raison
+  # de rester tenu plus longtemps que la mutation qu'il protège).
+  acquire_lock
   RELEASE_VERSION="$TARGET_RELEASE" dc --profile app up -d --wait --wait-timeout 60 pgbouncer \
     || die "PgBouncer local (orchestrateur) non healthy — DB injoignable depuis cette machine (.env DB_HOST/USER/PASSWORD/NAME ?). Aucun node n'a été touché."
   RELEASE_VERSION="$TARGET_RELEASE" dc --profile app run --rm --no-deps -w /app/backend \
     api alembic upgrade head \
     || die "alembic upgrade head a échoué depuis l'orchestrateur — AUCUN node n'a été touché (la migration s'applique AVANT tout rollout applicatif)."
+  release_lock
   STAGE_MIGRATE_DONE=1
   log "   migrations appliquées (une fois, pour tout le cluster)."
 else

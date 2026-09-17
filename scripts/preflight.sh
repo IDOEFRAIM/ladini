@@ -146,11 +146,32 @@ done
 [ "$port_clash" -eq 0 ] && log "  ✓ $CHK" || { err "  ✗ $CHK"; FAIL=1; }
 
 # 9. Pas de verrou de déploiement résiduel bloquant (info seulement — le vrai
-#    verrou est pris par deploy.sh via flock).
+#    verrou est pris par acquire_lock() dans lib.sh, un `mkdir` atomique sur
+#    LOCK_DIR, jamais LOCK_FILE — voir §BUG CORRIGÉ ci-dessous).
+#
+# §BUG CORRIGÉ ICI (2026-09-18, audit lock cluster/node) : cette vérification
+# testait `[ -f "$LOCK_FILE" ]` — un chemin `deploy/.deploy.lock` (fichier)
+# qu'AUCUN script de ce dépôt n'a jamais créé (le verrou réel est le
+# RÉPERTOIRE `deploy/.deploy.lockdir`, créé par `mkdir` dans
+# lib.sh::acquire_lock — voir son commentaire pour pourquoi `mkdir`, pas
+# `flock`, est le mécanisme atomique choisi ici). Cette étape passait donc
+# TOUJOURS au vert, silencieusement, quel que soit l'état réel du verrou —
+# un faux sentiment de sécurité, jamais une vraie vérification. Fix :
+# tester LOCK_DIR (le vrai verrou), et ignorer un verrou PÉRIMÉ (process
+# mort) plutôt que de le signaler comme bloquant — cohérent avec la
+# récupération automatique que fait déjà acquire_lock() lui-même.
 CHK="pas de verrou de déploiement actif"
-if [ -f "$LOCK_FILE" ] && fuser "$LOCK_FILE" >/dev/null 2>&1; then
-  err "  ✗ $CHK — $LOCK_FILE tenu (déploiement concurrent ?)"; FAIL=1
-else log "  ✓ $CHK"; fi
+if [ -d "$LOCK_DIR" ]; then
+  lock_pid="$(cat "${LOCK_DIR}/pid" 2>/dev/null || echo 0)"
+  if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+    holder="$(cat "${LOCK_DIR}/info" 2>/dev/null || true)"
+    err "  ✗ $CHK — ${LOCK_DIR} tenu (déploiement concurrent ?${holder:+ — $holder})"; FAIL=1
+  else
+    log "  ✓ $CHK (un verrou périmé existe — sera récupéré automatiquement au prochain acquire_lock)"
+  fi
+else
+  log "  ✓ $CHK"
+fi
 
 echo
 if [ "$FAIL" -ne 0 ]; then

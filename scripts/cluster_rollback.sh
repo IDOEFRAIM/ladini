@@ -21,43 +21,24 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/lib.sh"
 
 INVENTORY_FILE="${1:-${LADINI_ROOT}/infra/inventory.yml}"
-NODE_DEPLOY_DIR="${NODE_DEPLOY_DIR:-/opt/ladini}"
+# (2026-09-18) §BUG CORRIGÉ : défaut incohérent avec cluster_deploy.sh
+# (celui-ci pointait vers `/opt/ladini`, sans `/app` — cd échouerait sur le
+# vrai chemin de checkout du node, `/opt/ladini/app`, voir .github/workflows/
+# deploy.yml::DEPLOY_DIR et infra/providers/hetzner/cloud-init/app-node.yaml.tpl).
+NODE_DEPLOY_DIR="${NODE_DEPLOY_DIR:-/opt/ladini/app}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
 CLUSTER_MANIFEST="${RELEASES_DIR}/cluster-current.json"
 
 [ -f "$CLUSTER_MANIFEST" ] || die "Aucun manifeste cluster trouvé (${CLUSTER_MANIFEST}) — jamais de cluster_deploy.sh exécuté sur cette machine ? Sans manifeste, ce script ne sait pas quels nodes ont changé de release ; rollback un node à la fois avec ./scripts/rollback.sh directement en SSH si besoin."
 
-# ── Même stratégie de verrou que cluster_deploy.sh (voir ses commentaires
-# détaillés) — réutilisée telle quelle pour éviter un rollback et un deploy
-# concurrents sur le même inventaire.
-CLUSTER_LOCK_KEY="ladini:cluster-deploy:lock:$(basename "$INVENTORY_FILE")"
-CLUSTER_LOCK_TTL="${CLUSTER_LOCK_TTL:-3600}"
-_CLUSTER_LOCK_TOKEN="$(hostname 2>/dev/null || echo host)-$$-$(date +%s)"
-_CLUSTER_LOCK_MODE=""
-acquire_cluster_lock() {
-  if command -v redis-cli >/dev/null 2>&1 && [ -n "${REDIS_URL:-}" ]; then
-    if redis-cli -u "$REDIS_URL" SET "$CLUSTER_LOCK_KEY" "$_CLUSTER_LOCK_TOKEN" NX EX "$CLUSTER_LOCK_TTL" 2>/dev/null | grep -qx OK; then
-      _CLUSTER_LOCK_MODE="redis"
-      log "Verrou cluster acquis (Redis, clé ${CLUSTER_LOCK_KEY})."
-      return 0
-    fi
-    local holder; holder="$(redis-cli -u "$REDIS_URL" GET "$CLUSTER_LOCK_KEY" 2>/dev/null || true)"
-    die "Un cluster_deploy.sh/cluster_rollback.sh est déjà en cours (verrou Redis tenu par: ${holder:-inconnu})."
-  fi
-  warn "redis-cli/REDIS_URL indisponible — verrou cluster-wide DÉGRADÉ en verrou LOCAL (voir cluster_deploy.sh pour le détail de cette limitation assumée)."
-  acquire_lock
-  _CLUSTER_LOCK_MODE="local"
-}
-release_cluster_lock() {
-  if [ "$_CLUSTER_LOCK_MODE" = "redis" ]; then
-    redis-cli -u "$REDIS_URL" eval \
-      'if redis.call("GET",KEYS[1])==ARGV[1] then return redis.call("DEL",KEYS[1]) else return 0 end' \
-      1 "$CLUSTER_LOCK_KEY" "$_CLUSTER_LOCK_TOKEN" >/dev/null 2>&1 || true
-  fi
-}
-trap 'release_cluster_lock; release_lock' EXIT
+# ── Verrou CLUSTER-WIDE — implémentation PARTAGÉE avec cluster_deploy.sh,
+# voir lib.sh (§DEADLOCK) pour le détail (ressource TOUJOURS distincte du
+# verrou local par node, résolution REDIS_URL depuis $ENV_FILE, etc.). Même
+# clé que cluster_deploy.sh (basée sur le nom de l'inventaire) : un deploy
+# ET un rollback sur le MÊME inventaire s'excluent mutuellement, comme avant.
+trap 'release_cluster_lock; release_all_locks' EXIT
 
-acquire_cluster_lock
+acquire_cluster_lock "$(basename "$INVENTORY_FILE")" "cluster_rollback.sh"
 
 # ── Lecture du manifeste (format écrit par cluster_deploy.sh, JSON minimal
 # volontairement simple — même esprit que le parseur d'inventaire : pas de

@@ -182,7 +182,14 @@ frontend/
 deploy/releases/current
 deploy/releases/previous
 deploy/releases/history.log
+deploy/releases/cluster-current.json
+# Verrous réels (répertoires créés par `mkdir`, voir scripts/lib.sh) — les
+# `*.lock` ci-dessous sont des noms de base historiques, jamais créés tels
+# quels ; seuls les `*.lockdir` le sont (2026-09-18, audit lock cluster/node).
 deploy/.deploy.lock
+deploy/.deploy.lockdir
+deploy/.cluster-deploy.lock
+deploy/.cluster-deploy.lockdir
 
 # ── Inventaire de déploiement réel (IP privées — infra/inventory.example.yml
 #    est le modèle versionné, infra/inventory.yml est l'instance réelle) ────

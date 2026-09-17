@@ -348,7 +348,7 @@ log "7/7 · enregistrement de la release (locale à ce node)…"
 if [ -n "$CURRENT_RELEASE" ] && [ "$CURRENT_RELEASE" != "$TARGET_RELEASE" ]; then
   cp -f "$CURRENT_FILE" "$PREVIOUS_FILE"
 fi
-write_release_file "$CURRENT_FILE" "$TARGET_RELEASE" "$GIT_SHA" "$BUILD_TIMESTAMP"
+write_release_file "$CURRENT_FILE" "$TARGET_RELEASE" "$GIT_SHA" "$BUILD_TIMESTAMP" "$ROLES_CSV"
 history_append "node-deploy-success" "$TARGET_RELEASE" "roles=$ROLES_CSV ; prev=${CURRENT_RELEASE:-none} ; mig=${MIG_CLASS}"
 trap - ERR
 
