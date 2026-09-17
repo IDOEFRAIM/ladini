@@ -13,7 +13,10 @@ from __future__ import annotations
 import random
 from typing import Optional
 
-from ladini.graphs.agents.market_coach.llm_gateway.types import ErrorClass, LLMFailureKind
+from ladini.graphs.agents.market_coach.llm_gateway.types import (
+    ErrorClass,
+    LLMFailureKind,
+)
 
 # Fragments observés en direct cette session (2026-09-02) contre la
 # passerelle bedrock-mantle — ex: `anthropic.claude-haiku-4-5` renvoyait

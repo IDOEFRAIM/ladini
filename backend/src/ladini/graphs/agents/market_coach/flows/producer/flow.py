@@ -18,15 +18,11 @@ from typing import Any, Callable, Dict, List, Optional
 from ladini.core.formatting import fmt_num as _fmt_num
 from ladini.domain.quantity_unit import (
     extract_deterministic_pricing_tiers,
-)
-from ladini.domain.quantity_unit import (
     extract_single_pricing_tier_correction,
+    find_matching_tier_index,
 )
 from ladini.domain.quantity_unit import (
     extract_unit_only_from_text as _extract_unit_only,
-)
-from ladini.domain.quantity_unit import (
-    find_matching_tier_index,
 )
 from ladini.domain.quantity_unit import (
     parse_quantity_unit_from_text as _parse_qty_unit,

@@ -46,10 +46,10 @@ from pydantic import BaseModel, Field, ValidationError
 
 from ladini.core.logger import get_logger
 from ladini.domain.quantity_unit import (
-    extract_unit_only_from_text as _extract_unit_only,
+    default_unit_for_product as _default_unit_for_product,
 )
 from ladini.domain.quantity_unit import (
-    default_unit_for_product as _default_unit_for_product,
+    extract_unit_only_from_text as _extract_unit_only,
 )
 from ladini.domain.quantity_unit import (
     is_livestock_product as _is_livestock_product,

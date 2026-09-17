@@ -171,14 +171,14 @@ def _init_metrics_meter() -> Optional[Any]:
     if _otel_meter_provider is not None:
         return _otel_meter_provider.get_meter("ladini")
     try:
-        from ladini.core.settings import settings
-
         from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (
             OTLPMetricExporter,
         )
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
         from opentelemetry.sdk.resources import Resource
+
+        from ladini.core.settings import settings
 
         endpoint = getattr(settings, "OTEL_EXPORTER_OTLP_ENDPOINT", None)
         if not endpoint:
