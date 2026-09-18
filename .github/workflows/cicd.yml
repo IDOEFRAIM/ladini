@@ -108,6 +108,8 @@ jobs:
         run: bash scripts/test/test-node-preflight-lock.sh
       - name: Smoke Celery — celery_worker_ping (Cas A-F)
         run: bash scripts/test/test-celery-smoke.sh
+      - name: Healthcheck worker Celery — crash-loop TLS (Cas G)
+        run: bash scripts/test/test-celery-healthcheck.sh
 
   # Garde EXPAND/CONTRACT (§11) — bloque une migration destructive dans la
   # MÊME release que le code qui en dépend encore. Voir le script pour la

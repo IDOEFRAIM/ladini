@@ -1,6 +1,12 @@
 import logging
+import os
+import ssl
+import time
+from pathlib import Path
+from urllib.parse import urlsplit
 
 from celery import Celery
+from celery.signals import worker_ready, worker_shutdown
 
 from ladini.core.log_redaction import install_log_redaction
 from ladini.core.settings import settings
@@ -24,6 +30,81 @@ logger = logging.getLogger(__name__)
 # vérité désormais, jamais deux lectures indépendantes de la même variable.
 BROKER_URL = settings.celery_broker
 RESULT_BACKEND = settings.celery_backend
+
+# ═══════════════════════════════════════════════════════════════════════
+# §BUG CORRIGÉ ICI (2026-09-18, incident réel production, release sha-891cb2f)
+# — le worker crashait au démarrage : `ValueError: A rediss:// URL must have
+# parameter ssl_cert_reqs and this must be set to CERT_REQUIRED, CERT_OPTIONAL,
+# or CERT_NONE`, levée depuis celery/backends/redis.py::RedisBackend.__init__.
+#
+# Cause racine exacte, confirmée en lisant le code source installé (pas une
+# supposition) :
+#   - `celery_app.py` ne passait JAMAIS `broker_use_ssl`/`redis_backend_use_ssl`
+#     — aucune des deux options n'a de valeur par défaut côté Celery.
+#   - Côté BROKER (kombu/transport/redis.py, via kombu/connection.py::
+#     Connection._init_params) : un schéma `rediss://` SANS `ssl=` explicite
+#     ne lève PAS d'exception — kombu retombe SILENCIEUSEMENT sur
+#     `ssl_cert_reqs=CERT_NONE` (aucune vérification de certificat), avec
+#     seulement un warning ("Secure redis scheme specified (rediss) with no
+#     ssl options, defaulting to insecure SSL behaviour.") — visible dans les
+#     logs du worker, mais un warning, pas un crash.
+#   - Côté RESULT BACKEND (celery/backends/redis.py::RedisBackend.__init__) :
+#     AUCUN filet de sécurité équivalent — un schéma `rediss://` SANS
+#     `redis_backend_use_ssl=` explicite (donc sans `ssl_cert_reqs` dans
+#     connparams) lève un `ValueError` bloquant, IMMÉDIATEMENT à
+#     l'initialisation du backend. C'est CE crash, pas le broker, qui
+#     apparaissait dans les logs du worker (traceback dans
+#     celery/backends/redis.py) — le worker Docker restait "healthy" (le
+#     healthcheck ne sonde qu'un `pgrep`, voir docker-compose.prod.yml) alors
+#     que le PROCESS CELERY LUI-MÊME avait déjà crashé au boot.
+#
+# Fix : calculer explicitement les options SSL pour CHAQUE URL (broker ET
+# backend peuvent diverger — CELERY_BROKER_URL/CELERY_RESULT_BACKEND restent
+# des surcharges optionnelles de REDIS_URL, voir settings.py::celery_broker/
+# celery_backend), UNE SEULE FOIS ici — worker/beat/flower important tous les
+# trois CE MÊME module, aucune duplication de logique TLS entre eux.
+# `redis://` (schéma non sécurisé, ex: dev local) → `None`, aucune config SSL
+# forcée (Celery lève lui-même une erreur si des params SSL sont présents sur
+# un schéma `redis://` non-TLS, voir celery/backends/redis.py::_params_from_url
+# — cohérent, on ne doit donc RIEN passer dans ce cas).
+# `rediss://` → `ssl_cert_reqs` explicite, résolu depuis
+# `settings.REDIS_TLS_CERT_REQS` (défaut "required" = `ssl.CERT_REQUIRED`,
+# vérification complète du certificat — jamais `CERT_NONE` par défaut,
+# contrairement au repli silencieux de kombu décrit ci-dessus).
+# ═══════════════════════════════════════════════════════════════════════
+_SSL_CERT_REQS_BY_NAME = {
+    "required": ssl.CERT_REQUIRED,
+    "optional": ssl.CERT_OPTIONAL,
+    "none": ssl.CERT_NONE,
+}
+
+
+def _redis_ssl_options(url: str) -> dict | None:
+    """`rediss://` -> dict d'options SSL explicites pour broker_use_ssl /
+    redis_backend_use_ssl (format attendu par Celery : un dict avec au moins
+    `ssl_cert_reqs`). Tout autre schéma (`redis://`, ...) -> None : aucune
+    config SSL n'est forcée."""
+    if urlsplit(url).scheme != "rediss":
+        return None
+    cert_reqs_name = str(getattr(settings, "REDIS_TLS_CERT_REQS", "required") or "required").strip().lower()
+    cert_reqs = _SSL_CERT_REQS_BY_NAME.get(cert_reqs_name)
+    if cert_reqs is None:
+        logger.warning(
+            "REDIS_TLS_CERT_REQS=%r inconnu (valides: %s) — repli sur 'required' (CERT_REQUIRED).",
+            cert_reqs_name, sorted(_SSL_CERT_REQS_BY_NAME),
+        )
+        cert_reqs = ssl.CERT_REQUIRED
+    elif cert_reqs != ssl.CERT_REQUIRED:
+        logger.warning(
+            "REDIS_TLS_CERT_REQS=%r — vérification de certificat AFFAIBLIE pour la connexion Redis "
+            "(devrait être 'required' sauf raison documentée).",
+            cert_reqs_name,
+        )
+    return {"ssl_cert_reqs": cert_reqs}
+
+
+BROKER_SSL = _redis_ssl_options(BROKER_URL)
+BACKEND_SSL = _redis_ssl_options(RESULT_BACKEND)
 
 # Initialisation de Celery
 celery_app = Celery(
@@ -69,6 +150,14 @@ TASK_ROUTES = {
 # Configuration détaillée pour la résilience et la performance
 celery_app.conf.update(
     task_routes=TASK_ROUTES,
+    # 0. TLS Redis (voir le bloc §BUG CORRIGÉ ICI ci-dessus) — `None` sur un
+    #    schéma `redis://` (équivalent à ne rien passer, Celery lève lui-même
+    #    une erreur si des params SSL traînent sur un schéma non-TLS) ; un
+    #    dict `{"ssl_cert_reqs": ...}` sur `rediss://`. Broker et backend
+    #    calculés SÉPARÉMENT : ils peuvent légitimement diverger (§5 du
+    #    chantier scale-out) et chacun doit refléter SON PROPRE schéma.
+    broker_use_ssl=BROKER_SSL,
+    redis_backend_use_ssl=BACKEND_SSL,
     # 1. Gestion des tâches : la tâche n'est supprimée du broker qu'APRÈS exécution réussie
     task_acks_late=True,
     # 2. Performance : Un worker ne traite qu'une tâche à la fois
@@ -138,6 +227,53 @@ celery_app.conf.update(
     #    le signe d'un vrai blocage.
     worker_proc_alive_timeout=60.0,
 )
+
+# ═══════════════════════════════════════════════════════════════════════
+# Marqueur de démarrage RÉUSSI — healthcheck (2026-09-18, incident sha-891cb2f)
+# ═══════════════════════════════════════════════════════════════════════
+# Pourquoi : `docker-compose.prod.yml`/`Dockerfile.worker` sondent la santé du
+# worker via `pgrep -f 'celery.*worker'` (process vivant), délibérément PAS
+# `celery inspect ping` (un aller-retour broker en direct sur CHAQUE probe —
+# reverté le 2026-09-10 : un simple hoquet Redis faisait redémarrer TOUS les
+# workers en boucle, aggravant l'incident au lieu de le signaler). Mais
+# `pgrep` seul a un angle mort CONCRET, confirmé lors de CET incident : un
+# worker qui crashe au boot (ex: le `ValueError` TLS corrigé ci-dessus) puis
+# `restart: unless-stopped` en boucle laisse, À CHAQUE cycle, une brève
+# fenêtre où un process "celery...worker" existe réellement (le temps
+# d'importer, de se connecter, avant de crasher) — largement suffisant pour
+# qu'une probe `pgrep` (intervalle 30s) l'attrape "vivant" par pur
+# échantillonnage, alors que ce worker n'a JAMAIS terminé son démarrage.
+# `docker healthy` mentait donc pendant que Celery crash-loopait réellement.
+#
+# Fix : `celery.signals.worker_ready` ne se déclenche QU'APRÈS une connexion
+# broker+backend réussie et le mingle terminé — impossible d'y arriver si le
+# process crashe pendant l'initialisation (avant même l'event loop). On pose
+# un fichier marqueur À CE moment précis ; le healthcheck exige les DEUX :
+# `pgrep` (un process vit CE round) ET ce marqueur (CE process a RÉELLEMENT
+# fini de démarrer au moins une fois). Pas de round-trip broker à chaque
+# probe (contrairement à `inspect ping`) — juste `test -f`, aussi bon marché
+# et insensible aux pannes Redis transitoires que `pgrep` seul, mais qui ne
+# peut plus mentir sur un crash-loop au boot. `worker_shutdown` nettoie le
+# marqueur par hygiène (le redémarrage du conteneur y suffit déjà : `/tmp`
+# n'est pas un volume persistant ici).
+WORKER_READY_MARKER = os.environ.get("CELERY_WORKER_READY_FILE", "/tmp/celery_worker_ready")
+
+
+@worker_ready.connect
+def _mark_worker_ready(**_kwargs) -> None:
+    try:
+        Path(WORKER_READY_MARKER).write_text(str(time.time()), encoding="utf-8")
+    except OSError as exc:  # jamais bloquant : un healthcheck plus faible
+        logger.warning("Impossible d'écrire le marqueur de santé worker (%s) : %s", WORKER_READY_MARKER, exc)
+
+
+@worker_shutdown.connect
+def _clear_worker_ready(**_kwargs) -> None:
+    try:
+        Path(WORKER_READY_MARKER).unlink(missing_ok=True)
+    except OSError:
+        pass
+
 
 # Optionnel : configuration du mode "Task Always Eager" pour les tests unitaires
 # Si tu veux que Celery exécute les tâches immédiatement sans worker (pour debug) :

@@ -363,8 +363,29 @@ services:
     # au broker. `celery inspect ping` (ancienne sonde) échoue dès que Redis
     # a un hoquet → autoheal redémarrait tous les workers en boucle pendant une
     # panne Redis, aggravant l'incident (audit hardening 2026-09-10).
+    #
+    # (2026-09-18, incident réel sha-891cb2f) — `pgrep` SEUL rapportait
+    # "healthy" pendant que le worker crash-loopait réellement (ValueError
+    # TLS Redis au boot, voir api/celery_app.py §BUG CORRIGÉ ICI) : un
+    # crash-loop rapide laisse, à chaque cycle, une brève fenêtre où un
+    # process "celery...worker" existe (le temps de crasher), suffisante pour
+    # qu'un `pgrep` échantillonné toutes les 30s l'attrape "vivant" sans qu'il
+    # ait jamais fini de démarrer. Fix : exige EN PLUS le marqueur écrit par
+    # `celery.signals.worker_ready` (api/celery_app.py) — ne se déclenche
+    # qu'APRÈS une connexion broker+backend réussie, jamais pendant un crash
+    # au boot. Toujours zéro round-trip broker sur CHAQUE probe (juste
+    # `test -f`) — même coût et même insensibilité à un hoquet Redis
+    # transitoire que `pgrep` seul, mais ne peut plus mentir sur un
+    # crash-loop au démarrage.
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'celery.*worker' >/dev/null || exit 1"]
+      # Chemin en dur (PAS `${CELERY_WORKER_READY_FILE:-...}`) : Compose
+      # interpole `${...}` dans `test:` au moment de `config`/`up` — CÔTÉ
+      # HÔTE, pas dans le shell du conteneur au moment de la probe — un
+      # override de CELERY_WORKER_READY_FILE dans `environment:` ci-dessus
+      # n'aurait donc AUCUN effet ici (confirmé via `docker compose config`).
+      # Le défaut Python (api/celery_app.py) est le même chemin ; les deux
+      # DOIVENT rester synchronisés si l'un change un jour.
+      test: ["CMD-SHELL", "pgrep -f 'celery.*worker' >/dev/null && test -f /tmp/celery_worker_ready || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

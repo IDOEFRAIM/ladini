@@ -123,6 +123,11 @@ if bash scripts/test/test-celery-smoke.sh; then
 else
   _fail "smoke Celery : au moins un cas de test-celery-smoke.sh a échoué"
 fi
+if bash scripts/test/test-celery-healthcheck.sh; then
+  _ok "healthcheck worker Celery : Cas G passent (crash-loop TLS ne peut plus se déclarer 'healthy')"
+else
+  _fail "healthcheck worker Celery : au moins un cas de test-celery-healthcheck.sh a échoué"
+fi
 
 # ── 4. docker compose config (prod, sans build:) ──────────────────────
 _step "docker compose config (docker-compose.prod.yml)"

@@ -138,6 +138,18 @@ class Settings(BaseSettings):
     # définir REDIS_URL via variable d'environnement (ex: rediss://... pour
     # un Redis managé avec TLS).
     REDIS_URL: str = "redis://localhost:6379/0"
+    # (2026-09-18, incident réel prod sha-891cb2f) — validation TLS pour
+    # Celery quand REDIS_URL (ou CELERY_BROKER_URL/CELERY_RESULT_BACKEND)
+    # utilise le schéma `rediss://`. "required" (défaut) = vérification
+    # complète du certificat (ssl.CERT_REQUIRED) — le fournisseur Redis managé
+    # doit présenter un certificat signé par une CA publique reconnue (cas
+    # normal, aucune config CA supplémentaire nécessaire). "optional"/"none"
+    # existent UNIQUEMENT pour un provider à certificat auto-signé/non
+    # standard — à ne changer qu'avec une raison documentée, jamais pour
+    # "faire passer" un déploiement : voir api/celery_app.py::_redis_ssl_options
+    # pour où cette valeur est consommée (jamais lu directement ici, settings.py
+    # ne connaît rien à Celery — juste la config brute).
+    REDIS_TLS_CERT_REQS: str = "required"
     VALKEY_ENDPOINT: str = ""
     VALKEY_AUTH_TOKEN: str = ""
     VALKEY_USE_TLS: bool = True

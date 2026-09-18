@@ -52,16 +52,30 @@ WORKDIR /app/backend/src
 #      besoin de cibler un worker précis pour une question de liveness — voir
 #      lib.sh::celery_worker_ping, qui ping en BROADCAST pour la même raison).
 #   2. `docker-compose.prod.yml` (service `worker`) écrase de toute façon
-#      cette directive avec `pgrep -f 'celery.*worker'` depuis l'audit
-#      hardening 2026-09-10 (`celery inspect ping` en HEALTHCHECK redémarrait
-#      TOUS les workers en boucle pendant un simple hoquet Redis) — ce qui
-#      précède était donc du CODE MORT en production, mais restait le
-#      comportement par défaut si jamais cette image tournait SANS ce
-#      compose (`docker run` direct, autre orchestrateur) : dangereux de
-#      laisser un défaut fragile/trompeur. Alignée ici sur la MÊME logique
+#      cette directive avec la MÊME logique pgrep (+marqueur, voir ci-dessous)
+#      depuis l'audit hardening 2026-09-10 (`celery inspect ping` en
+#      HEALTHCHECK redémarrait TOUS les workers en boucle pendant un simple
+#      hoquet Redis) — ce qui précède était donc du CODE MORT en production,
+#      mais restait le comportement par défaut si jamais cette image tournait
+#      SANS ce compose (`docker run` direct, autre orchestrateur) : dangereux
+#      de laisser un défaut fragile/trompeur. Alignée ici sur la MÊME logique
 #      que le compose, pour un comportement sain par défaut dans tous les cas.
+#
+# (2026-09-18, incident réel sha-891cb2f — worker crash-loopait sur une
+# ValueError TLS Redis au boot, mais `pgrep` seul le rapportait "healthy") :
+# `pgrep` prouve qu'UN process correspondant existe À L'INSTANT de la probe —
+# pas qu'il a fini de démarrer. Un crash-loop rapide (process créé, crashe
+# avant l'event loop, conteneur relancé par `restart: unless-stopped`, repeat)
+# laisse une fenêtre où `pgrep` attrape un process "vivant" qui n'a en réalité
+# JAMAIS atteint un état fonctionnel. Fix : exige EN PLUS l'existence du
+# marqueur écrit par `celery.signals.worker_ready` (api/celery_app.py) — ce
+# signal ne se déclenche qu'APRÈS une connexion broker+backend réussie et le
+# mingle terminé, donc jamais pendant un crash au boot. Toujours zéro
+# round-trip broker sur CHAQUE probe (juste `test -f`) — aussi bon marché et
+# insensible à un hoquet Redis transitoire que `pgrep` seul, mais qui ne peut
+# plus mentir sur un crash-loop au démarrage.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD sh -c "pgrep -f 'celery.*worker' >/dev/null" || exit 1
+    CMD sh -c 'pgrep -f "celery.*worker" >/dev/null && test -f "${CELERY_WORKER_READY_FILE:-/tmp/celery_worker_ready}"' || exit 1
 
 # --- Tuning Celery : charge 100% I/O-bound (appels LLM Groq, MCP HTTP,
 # webhooks WhatsApp/Twilio, requêtes DB via pgbouncer) — AUCUNE tâche
