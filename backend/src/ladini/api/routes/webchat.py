@@ -112,8 +112,10 @@ async def _run_photo_channel(request: WebChatRequest) -> Optional[WebChatRespons
     if request.image_base64:
         try:
             binary = base64.b64decode(request.image_base64, validate=True)
-        except (binascii.Error, ValueError):
-            raise HTTPException(status_code=422, detail="image_base64 invalide.")
+        except (binascii.Error, ValueError) as exc:
+            raise HTTPException(
+                status_code=422, detail="image_base64 invalide."
+            ) from exc
         with collect_replies() as replies:
             await photo.handle_inbound_photo_bytes(
                 request.phone_number, binary, str(request.image_mime)

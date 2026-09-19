@@ -7,8 +7,8 @@ from celery.signals import worker_process_init, worker_process_shutdown
 from ladini.api.celery_app import celery_app
 from ladini.api.response_dispatch import ResponsePlan, get_dispatcher
 from ladini.core.database import close_db, get_engine
-from ladini.core.reply_sink import active_sink
 from ladini.core.idempotency import claim_once, get_cached, release, set_cached
+from ladini.core.reply_sink import active_sink
 from ladini.orchestrator import Orchestrator
 
 logger = logging.getLogger("Ladini.Worker")
