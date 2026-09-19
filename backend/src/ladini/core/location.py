@@ -66,6 +66,23 @@ _MAPS_COORD_PATTERNS = (
 )
 
 
+# Paire « lat,lon » collée seule (ex. copiée depuis Google Maps). ≥3 décimales
+# des deux côtés : un prix ou une quantité (« 12.5, 3.2 ») n'est jamais un GPS.
+_BARE_COORDS_RE = re.compile(
+    r"(?<![\d.])(-?\d{1,3}\.\d{3,})\s*[,;]\s*(-?\d{1,3}\.\d{3,})(?![\d.])"
+)
+
+
+def _parse_bare_coordinates(text: str) -> Optional[Tuple[float, float]]:
+    found = _BARE_COORDS_RE.search(text)
+    if not found:
+        return None
+    lat, lon = float(found.group(1)), float(found.group(2))
+    if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+        return lat, lon
+    return None
+
+
 def parse_google_maps_coordinates(text: str) -> Optional[Tuple[float, float]]:
     """Extrait `(lat, lon)` d'un lien Google Maps collé en TEXTE, ou None.
 
@@ -76,7 +93,7 @@ def parse_google_maps_coordinates(text: str) -> Optional[Tuple[float, float]]:
     (jamais de LLM) ; le geofencing reste appliqué par `persist_shared_location`."""
     match = _MAPS_URL_RE.search(text or "")
     if not match:
-        return None
+        return _parse_bare_coordinates(text or "")
     url = match.group(0)
     for pattern in _MAPS_COORD_PATTERNS:
         found = pattern.search(url)

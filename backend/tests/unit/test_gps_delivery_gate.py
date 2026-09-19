@@ -156,6 +156,14 @@ class TestGoogleMapsLinkPastedAsText:
         assert p("https://www.google.com/maps?q=95.0,-1.5") is None
         assert p("salut, voici mon adresse") is None
 
+    def test_parser_accepts_bare_coordinates_but_not_prices(self):
+        from ladini.core.location import parse_google_maps_coordinates as p
+
+        assert p("33.264381,-7.586925") == (33.264381, -7.586925)
+        assert p("ma position 12.3714, -1.5197 merci") == (12.3714, -1.5197)
+        assert p("12.5, 3.2") is None
+        assert p("prix 495000.50 quantite 95") is None
+
     def test_accepted_point_resolves_even_when_the_interpreter_read_it_as_yes(self, monkeypatch):
         async def _fake_persist(phone, lat, lon):
             from ladini.core.location import LocationOutcome
