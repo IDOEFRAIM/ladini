@@ -58,6 +58,51 @@ async def _ensure_schema() -> None:
         logger.warning("Vérification du schéma DB ignorée (non bloquant) : %s", exc)
 
 
+def _maybe_ensure_schema(loop: asyncio.AbstractEventLoop) -> None:
+    """Exécute `_ensure_schema()` — mais UNE SEULE FOIS par fenêtre de
+    démarrage, jamais une fois par processus worker forké.
+
+    ⚠️ CORRECTIF (2026-09-19, incident réel prod) — `ensure_performance_indexes`
+    tournait AUPARAVANT dans CHAQUE processus worker forké
+    (`worker_process_init` se déclenche une fois PAR ENFANT prefork, ex. 4
+    fois avec `concurrency: 4`), donc 4 exécutions CONCURRENTES de la même
+    longue séquence de DDL (index + colonnes + plusieurs schémas de store —
+    une douzaine de `CREATE INDEX`/`ALTER TABLE`, chacun dans un SAVEPOINT
+    mais TOUS sous UNE SEULE transaction externe, donc verrous tenus
+    jusqu'à la toute fin de la boucle). Preuve empirique (logs prod,
+    incident du 2026-09-19) : pendant que les workers 2/3/4 étaient encore
+    au milieu de leur propre passage DDL, une requête `SELECT` ordinaire
+    d'une tâche périodique (`producers_for_auction`,
+    workers/automation/targeting.py) a été tuée par le détecteur de
+    deadlock Postgres (`DeadlockDetectedError`) — cycle classique
+    AccessExclusiveLock/AccessShareLock entre ces exécutions DDL
+    concurrentes et le trafic normal.
+
+    Un jeton Redis SET-NX-EX (`claim_once`, déjà utilisé ailleurs dans ce
+    fichier) garantit qu'UN SEUL des N processus forkés exécute réellement
+    `ensure_performance_indexes` par fenêtre de démarrage ; les autres
+    l'ignorent (le DDL est idempotent, il n'y a rien à regagner à le
+    rejouer N fois). TTL généreux (5 min, largement au-dessus de la durée
+    observée la plus longue ~52s) : au pire, un redéploiement qui survient
+    DANS cette fenêtre voit le check sauté partout — sans conséquence, le
+    DDL reste idempotent et sera réappliqué au prochain démarrage hors
+    fenêtre. Fail-open par design de `claim_once` (True si Redis
+    indisponible) : dans ce cas on retombe simplement sur l'ancien
+    comportement (N exécutions), jamais un blocage du démarrage du worker.
+    """
+    if claim_once("worker:ensure_performance_indexes:startup", ttl_seconds=300):
+        try:
+            loop.run_until_complete(_ensure_schema())
+        except Exception as exc:
+            logger.warning("Vérification du schéma au démarrage ignorée : %s", exc)
+    else:
+        logger.info(
+            "🔧 Vérification du schéma DB déjà prise en charge par un autre "
+            "processus worker démarré concurremment — sautée ici (évite les "
+            "DDL concurrents, voir incident 2026-09-19)."
+        )
+
+
 @worker_process_init.connect
 def init_worker_process(**kwargs):
     """Exécuté une seule fois à l'initialisation du processus worker Celery."""
@@ -99,11 +144,10 @@ def init_worker_process(**kwargs):
     except Exception as exc:
         logger.warning("Warm-up DB au démarrage ignoré : %s", exc)
 
-    # Applique les DDL idempotents (nouvelles colonnes/index) — best-effort.
-    try:
-        _loop.run_until_complete(_ensure_schema())
-    except Exception as exc:
-        logger.warning("Vérification du schéma au démarrage ignorée : %s", exc)
+    # Applique les DDL idempotents (nouvelles colonnes/index) — best-effort,
+    # UNE SEULE FOIS par fenêtre de démarrage (pas une fois par processus
+    # forké) — voir _maybe_ensure_schema pour le pourquoi (incident réel).
+    _maybe_ensure_schema(_loop)
 
 
 @worker_process_shutdown.connect

@@ -1,8 +1,12 @@
 """Traitement asynchrone d'une photo produit reçue par WhatsApp.
 
-Flux : téléchargement Twilio (Basic Auth) -> upload Supabase Storage ->
-résolution du produit cible (auto si non ambigu, sinon menu WhatsApp + attente
-de la réponse) -> liaison en base -> confirmation WhatsApp.
+Flux : téléchargement (Twilio Basic Auth via `media_url`, OU WhatsApp Cloud
+API Bearer token via `media_id` — voir `api/routes/twilio_webhook.py` et
+`api/routes/whatsapp_webhook.py` pour les deux points d'entrée, `_process`
+choisit le téléchargeur selon lequel des deux champs est renseigné) ->
+upload Supabase Storage -> résolution du produit cible (auto si non ambigu,
+sinon menu WhatsApp + attente de la réponse) -> liaison en base ->
+confirmation WhatsApp.
 
 Volontairement DÉCOUPLÉ de ``process_agent_task``/LangGraph : une photo n'est
 pas un texte à interpréter par le LLM, et ce module ne doit jamais ralentir
@@ -49,9 +53,10 @@ def _redis() -> "redis.Redis":
 
 
 def pending_photo_key(phone: str) -> str:
-    """Clé Redis partagée avec le webhook (twilio_webhook.py) — DOIT rester
-    identique des deux côtés pour que l'interception de la réponse numérique
-    fonctionne."""
+    """Clé Redis partagée avec les DEUX webhooks (twilio_webhook.py ET
+    whatsapp_webhook.py, keyée uniquement par numéro — provider-agnostic) —
+    DOIT rester identique partout pour que l'interception de la réponse
+    numérique fonctionne quel que soit le canal entrant."""
     return f"{_PENDING_KEY_PREFIX}{phone}"
 
 
@@ -273,6 +278,7 @@ async def _process(
     media_url: str,
     media_content_type: str,
     *,
+    media_id: str = "",
     message_sid: Optional[str] = None,
 ) -> None:
     from ladini.api.tasks import send_confirmation_text
@@ -285,14 +291,26 @@ async def _process(
         SupabaseStorageError,
         upload_product_photo,
     )
+    from ladini.services.whatsapp.cloud_api_media import (
+        CloudAPIMediaError,
+        download_cloud_api_media,
+    )
     from ladini.services.whatsapp.twilio_media import (
         TwilioMediaError,
         download_twilio_media,
     )
 
+    # Deux fournisseurs possibles, jamais les deux à la fois (voir
+    # `api/routes/whatsapp_webhook.py` — Meta Cloud API ne donne qu'un `id`
+    # opaque, jamais une URL directe fetchable — vs. `api/routes/
+    # twilio_webhook.py` — `MediaUrl0`). `media_id` a priorité : c'est le
+    # SEUL champ que le webhook Cloud API peut renseigner.
     try:
-        binary, resolved_content_type = await download_twilio_media(media_url)
-    except TwilioMediaError as exc:
+        if media_id:
+            binary, resolved_content_type = await download_cloud_api_media(media_id)
+        else:
+            binary, resolved_content_type = await download_twilio_media(media_url)
+    except (TwilioMediaError, CloudAPIMediaError) as exc:
         logger.warning(
             "PRODUCT_PHOTO_DOWNLOAD_FAILED | phone=%s | %s", _mask(phone_number), exc
         )
@@ -454,6 +472,7 @@ def process_product_photo_task(
     phone_number: str = "",
     media_url: str = "",
     media_content_type: str = "",
+    media_id: str = "",
     trace_id: Optional[str] = None,
     message_sid: Optional[str] = None,
 ) -> None:
@@ -467,7 +486,11 @@ def process_product_photo_task(
     try:
         run_async(
             _process(
-                phone_number, media_url, media_content_type, message_sid=message_sid
+                phone_number,
+                media_url,
+                media_content_type,
+                media_id=media_id,
+                message_sid=message_sid,
             )
         )
     except Exception:

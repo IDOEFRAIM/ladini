@@ -6,9 +6,9 @@
 # ═════════════════════════════════════════════════════════════════════
 
 output "app_nodes" {
-  description = "Nodes app (index 0 = app+scheduler+admin sauf si scheduler_on_dedicated_node=true) : nom, IP publique, IP privée, rôles — à reporter dans infra/inventory.yml."
+  description = "Nodes app (clé \"1\" = app+scheduler+admin sauf si scheduler_on_dedicated_node=true) : nom, IP publique, IP privée, rôles — consommé par scripts/generate_inventory.py pour produire infra/inventory.yml (plus d'édition manuelle requise)."
   value = [
-    for i, s in hcloud_server.app : {
+    for k, s in hcloud_server.app : {
       name      = s.name
       public_ip = s.ipv4_address
       # `network` est un bloc imbriqué représenté par un SET (pas une liste) —
@@ -24,13 +24,13 @@ output "app_nodes" {
       # network.tf) même quand son contenu est encore inconnu ; `try()` en
       # filet si la structure elle-même devait un jour rester ambiguë.
       private_ip = try(one(s.network).ip, null)
-      roles      = local.app_node_roles[i]
+      roles      = local.app_node_roles[k]
     }
   ]
 }
 
 output "scheduler_node" {
-  description = "Node scheduler dédié (null si scheduler_on_dedicated_node=false, auquel cas Beat/Flower tournent sur app_nodes[0])."
+  description = "Node scheduler dédié (null si scheduler_on_dedicated_node=false, auquel cas Beat/Flower tournent sur le node app de clé \"1\")."
   value = length(hcloud_server.scheduler) > 0 ? {
     name      = hcloud_server.scheduler[0].name
     public_ip = hcloud_server.scheduler[0].ipv4_address

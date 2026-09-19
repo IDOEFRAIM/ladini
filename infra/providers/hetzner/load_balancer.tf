@@ -42,11 +42,16 @@ resource "hcloud_load_balancer_network" "app" {
   depends_on = [hcloud_network_subnet.app]
 }
 
+# for_each sur les mêmes clés stables que hcloud_server.app (servers.tf) —
+# migration miroir, voir moved.tf. L'identité d'un target ne dépend QUE de
+# la clé du node qu'il cible, jamais de la taille courante du cluster :
+# retirer un node du MILIEU (scale-in ciblé, futur) ne recrée jamais les
+# targets des nodes qui restent.
 resource "hcloud_load_balancer_target" "app" {
-  count            = var.app_node_count
+  for_each         = local.app_node_keys
   type             = "server"
   load_balancer_id = hcloud_load_balancer.app.id
-  server_id        = hcloud_server.app[count.index].id
+  server_id        = hcloud_server.app[each.key].id
   use_private_ip   = true
 
   depends_on = [hcloud_load_balancer_network.app]

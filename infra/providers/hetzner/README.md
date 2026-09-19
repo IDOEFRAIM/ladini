@@ -18,11 +18,20 @@
 | `network.tf` | Réseau privé Hetzner `10.20.0.0/16` + subnet `10.20.1.0/24` |
 | `firewall.tf` | Firewall Cloud Hetzner — default-deny, 22 (admin_cidrs)/80/443/443-udp/icmp seulement |
 | `placement.tf` | Spread Placement Group — actif seulement si `app_node_count >= 2` |
-| `servers.tf` | Nodes app (`count = var.app_node_count`) + node scheduler optionnel |
+| `servers.tf` | Nodes app (`for_each` sur des clés stables `"1".."N"`, voir § identité stable) + node scheduler optionnel |
+| `moved.tf` | Migration d'état `count` → `for_each` (2026-09-19) — voir son en-tête, à retirer après le premier `apply` qui suit |
 | `load_balancer.tf` | Load Balancer Hetzner → nodes app, TCP passthrough 80/443, health check `/health/ready` |
-| `outputs.tf` | IP des nodes (privées/publiques), IP du LB, aide-mémoire SSH |
+| `outputs.tf` | IP des nodes (privées/publiques), IP du LB, aide-mémoire SSH — consommé par `scripts/generate_inventory.py` |
 | `environments/production.tfvars.example` | Valeurs d'exemple, aucun secret réel |
-| `cloud-init/app-node.yaml.tpl` | Bootstrap d'un node : Docker, user `deploy`, checkout du dépôt, `infra/firewall/ufw.sh`, placeholder Alloy |
+| `cloud-init/app-node.yaml.tpl` | Bootstrap d'un node, **immuable après le premier boot** (voir `lifecycle.ignore_changes` dans `servers.tf`) : Docker, user `deploy`, pare-feu hôte minimal, réseau privé. Ne clone jamais le dépôt — le checkout et le déploiement applicatif restent le rôle de GitHub Actions / `scripts/node_deploy.sh` |
+
+Scripts associés (racine du dépôt, pas dans ce dossier — provider-neutral, voir `infra/providers/README.md`) :
+
+| Script | Rôle |
+|---|---|
+| `scripts/generate_inventory.py` | Génère `infra/inventory.yml` depuis `terraform output -json` — plus d'édition manuelle des IP/rôles |
+| `scripts/test_scale_out_plan.sh` | Verrou de non-régression : prouve qu'un `terraform plan` de scale-out ne détruit/remplace aucune ressource existante |
+| `scripts/scale_in_drain.sh` | Drain applicatif d'un node (LB + Celery) AVANT de le retirer par Terraform — voir § Scale-in |
 
 ## Prérequis
 
@@ -50,10 +59,11 @@ terraform apply -var-file=environments/production.tfvars
 
 Après `apply` :
 
-1. `terraform output app_nodes` donne les IP (publiques + privées) et rôles
-   de chaque node → reportez-les dans `infra/inventory.yml` (copié depuis
-   `infra/inventory.example.yml`, gitignored), puis validez :
-   `python scripts/validate_inventory.py`.
+1. `python scripts/generate_inventory.py` génère `infra/inventory.yml`
+   directement depuis `terraform output` (IP privées + rôles) — plus besoin
+   de le copier/éditer à la main depuis `infra/inventory.example.yml`. Il
+   auto-valide son propre résultat (`scripts/validate_inventory.py`) avant
+   d'écrire quoi que ce soit.
 2. Pointez l'enregistrement DNS A de `PUBLIC_DOMAIN` vers
    `terraform output load_balancer_ipv4`.
 3. Sur **chaque** node : `cd infra/reverse-proxy && cp .env.example .env &&
@@ -65,8 +75,9 @@ Après `apply` :
    **cette étape**, pas Terraform, qui démarre réellement l'application.
 
 Attendez ~1-2 minutes après la création d'un node avant de vous y connecter :
-`cloud-init` (Docker, checkout, `ufw.sh`) doit terminer. Suivez sa progression
-avec `ssh deploy@<ip> 'cloud-init status --wait'`.
+`cloud-init` (réseau privé, Docker, pare-feu hôte minimal — voir
+`cloud-init/app-node.yaml.tpl`) doit terminer. Suivez sa progression avec
+`ssh deploy@<ip> 'cloud-init status --wait'`.
 
 **⚠️ L'ORDRE 2 → 3 ci-dessus n'est pas arbitraire — ne l'inversez jamais**
 (2026-09-17, audit bootstrap Cloudflare/LB). Caddy (étape 3) demande son
@@ -92,41 +103,109 @@ obtention du certificat). Respecter l'ordre documenté (DNS avant Caddy)
   DNS publique n'entre jamais en jeu pour CE check précis, seule l'obtention
   du certificat par Caddy en dépend.
 
-## Comment `app_node_count` scale (1 → 2 → N)
+## Identité stable des nodes (`for_each`, pas `count`)
 
-1. **Phase 1 (défaut, < 100 utilisateurs)** : `app_node_count = 1`. Ce node
-   unique cumule les 3 profils Compose (`app`, `scheduler`, `admin`) — voir
-   `infra/inventory.example.yml`. Aucun Load Balancer n'est *nécessaire* à ce
-   stade mais il est créé quand même (coût faible, simplifie la bascule vers
-   la Phase 2 : le DNS pointe déjà vers le LB, jamais vers une IP de node).
+`hcloud_server.app` et `hcloud_load_balancer_target.app` sont indexés par une
+clé **string stable** (`"1"`, `"2"`, `"3"`…, dérivée de `app_node_count` mais
+jamais recalculée à l'envers) — pas par position de liste. `ladini-app-1`
+(clé `"1"`) reste `"1"` quel que soit le nombre total de nodes, aujourd'hui
+et pour toujours. Migration effectuée le 2026-09-19 depuis l'ancien schéma
+`count` via des blocs `moved` (`moved.tf`) — **aucune destruction d'état**,
+validée par un `terraform plan` qui ne montre que des renommages d'adresse
+(`has moved to`), jamais un `add`/`destroy`.
 
-2. **Phase 2** : montez `app_node_count` (ex: `2`). Terraform :
-   - crée un nouveau `hcloud_server.app[1]` (aucun changement sur `[0]`,
-     `count` ajoute sans recréer les nodes existants) ;
-   - crée automatiquement le `hcloud_placement_group` (condition
-     `app_node_count >= 2`, voir `placement.tf`) et y assigne tous les nodes
-     app existants ⚠️ **cela force un remplacement (`ForceNew`) des nodes déjà
-     créés**, car `placement_group_id` ne peut être défini qu'à la création
-     d'un server côté API Hetzner — `terraform plan` vous le montrera
-     explicitement avant tout `apply` (nodes détruits/recréés). Si vous
-     voulez éviter cette recréation en Phase 1→2, démarrez directement à
-     `app_node_count = 2` dès le premier `apply`.
-   - ajoute automatiquement le nouveau node comme target du Load Balancer
-     (`hcloud_load_balancer_target`, `count = var.app_node_count`).
-   - le node d'index 0 **reste** le seul à porter `scheduler`+`admin` (voir
-     `servers.tf` locals) — jamais un 2e Beat.
-   - reportez le nouveau node dans `infra/inventory.yml` avec `roles: [app]`
-     uniquement, puis `python scripts/validate_inventory.py`.
+## ⚠️ Pourquoi `ladini-app-1` semblait devoir être recréé — cause racine (2026-09-19)
 
-3. **N nodes** : répétez — augmentez `app_node_count`, `apply`, mettez à jour
-   `infra/inventory.yml`. Le Load Balancer et le firewall n'ont besoin
-   d'aucun changement manuel.
+Un `terraform plan` (même sans AUCUN scale-out, `app_node_count` inchangé)
+proposait de **détruire et recréer** `ladini-app-1` — et pas seulement au
+moment d'un scale-out, ce qui a été mal interprété au départ. Root cause
+identifiée et corrigée :
 
-4. **Isoler `scheduler`/`admin` sur un node dédié** (optionnel, à tout
-   moment) : passez `scheduler_on_dedicated_node = true`. Un
-   `hcloud_server.scheduler` séparé est créé (hors `app_node_count`, hors
-   Load Balancer — il ne sert jamais de trafic HTTP) ; retirez alors
-   `scheduler`/`admin` du node app d'index 0 dans `infra/inventory.yml`.
+- **Ce n'était PAS `app_node_count`.** Preuve : un `terraform plan` à
+  `app_node_count = 1`, configuration par ailleurs strictement identique à
+  la prod réelle, proposait déjà exactement le même remplacement.
+- **Ce n'était PAS `placement_group_id`.** Ce champ n'est pas `force_new`
+  dans le schéma du provider `hcloud` v1.69.0 et un `terraform plan` réel
+  le confirme (changement en place `~`, jamais `# forces replacement`).
+- **La vraie cause : `user_data`.** Le commit `7dd474f` ("secure private
+  repository deployment bootstrap", 2026-09-17) a réécrit en profondeur
+  `cloud-init/app-node.yaml.tpl` (nouvelle variable
+  `github_actions_public_key`, suppression du `git clone` embarqué,
+  réécriture du pare-feu bootstrap) **après** que `ladini-app-1` avait déjà
+  été provisionné avec l'ancienne version du template. `user_data` ne
+  s'exécute qu'**une seule fois**, au premier boot — Hetzner n'offre aucun
+  moyen de le "réappliquer" sur un server vivant, donc la SEULE façon dont
+  Terraform peut faire converger un `user_data` différent est de détruire
+  et recréer le server (`terraform plan` le marque explicitement
+  `# forces replacement`, et seulement lui).
+- **Correctif** : `lifecycle { ignore_changes = [user_data] }` sur
+  `hcloud_server.app`/`hcloud_server.scheduler` (voir `servers.tf`, section
+  commentée "CAUSE RACINE"). Design assumé, pas un cache-misère : le
+  bootstrap cloud-init est un événement **unique et immuable** par nature
+  ("cattle", pas "pet") — toute évolution de configuration RUNTIME (clés,
+  checkout du dépôt…) passe déjà par GitHub Actions/`scripts/node_deploy.sh`,
+  jamais par une ré-exécution de cloud-init. Éditer ce template prépare le
+  bootstrap des **futurs** nodes, jamais une mutation rétroactive d'un node
+  déjà vivant. Une vraie rotation de clé SSH admin/CI nécessite désormais un
+  geste **explicite** : `terraform apply -replace='hcloud_server.app["1"]'`
+  (jamais un `apply` de routine qui la déclenche par accident).
+
+## SCALE OUT — procédure exacte (1 → 2 → N)
+
+1. Modifiez `app_node_count` dans `environments/production.tfvars` (ex: `1` → `2`).
+2. `terraform plan -var-file=environments/production.tfvars`
+3. **Vérifiez `0 to destroy`** dans le résumé du plan (et aucune ligne
+   `must be replaced` sur un node existant) — sinon **n'appliquez pas**,
+   investiguez (voir `scripts/test_scale_out_plan.sh` pour automatiser
+   exactement cette vérification).
+4. `terraform apply -var-file=environments/production.tfvars`
+5. `python scripts/generate_inventory.py` — régénère `infra/inventory.yml`
+   depuis `terraform output` (IP privées + rôles, plus d'édition manuelle).
+   Le nouveau node hérite automatiquement de `roles: [app]` uniquement —
+   jamais `scheduler`/`admin` (voir `servers.tf::local.app_node_roles`,
+   seule la clé `"1"` les porte).
+6. `python scripts/validate_inventory.py` — doit confirmer exactement un
+   node `scheduler` dans tout le cluster.
+7. Déployez la release courante sur le cluster (inclut le nouveau node) :
+   `./scripts/cluster_deploy.sh <release>` — valide l'inventaire, la
+   connectivité SSH de TOUS les nodes, migre la DB une seule fois, déploie
+   node par node, vérifie `/health/ready` sur chacun puis (si
+   `PUBLIC_DOMAIN` est fourni) le chemin public/LB.
+8. Confirmez : `terraform output ssh_command_hint`, `curl
+   https://<PUBLIC_DOMAIN>/health/ready`, et dans la console Hetzner que le
+   nouveau target du Load Balancer est `healthy`.
+
+**Isoler `scheduler`/`admin` sur un node dédié** (optionnel, à tout
+moment) : passez `scheduler_on_dedicated_node = true`. Un
+`hcloud_server.scheduler` séparé est créé (hors `app_node_count`, hors
+Load Balancer — il ne sert jamais de trafic HTTP) ; régénérez l'inventaire
+(étape 5 ci-dessus) — le node app `"1"` ne porte alors plus que `[app]`.
+
+## SCALE IN — procédure exacte et volontaire (N → N-1)
+
+**Jamais** un simple `app_node_count -= 1` suivi d'un `apply` à froid : le
+node visé (le plus haut numéroté, ex. `ladini-app-3` sur un cluster de 3)
+peut porter du trafic HTTP en cours ou des tâches Celery en vol. Procédure :
+
+1. **Drain applicatif** — `./scripts/scale_in_drain.sh <node_name>` :
+   arrête `api` (le Load Balancer cesse de router du nouveau trafic dès son
+   prochain health check `/health/ready` en échec), attend une marge de
+   sécurité, puis arrête `mcp`/`worker` (grace period respectée, tâches
+   Celery déjà dispatchées vers ce node laissées se terminer). Refuse
+   explicitement de draîner un node qui porte `scheduler` — voir sa sortie
+   pour la marche à suivre (réassigner Beat AVANT de continuer).
+2. Décrémentez `app_node_count` dans `environments/production.tfvars`.
+3. `terraform plan -var-file=environments/production.tfvars` — vérifiez
+   que **seules** les ressources du node drainé apparaissent en
+   `destroy`/`will be destroyed` (son `hcloud_server.app[...]` et son
+   `hcloud_load_balancer_target.app[...]`), **rien d'autre**.
+4. `terraform apply -var-file=environments/production.tfvars`
+5. `python scripts/generate_inventory.py` puis
+   `python scripts/validate_inventory.py` — le node retiré disparaît de
+   `infra/inventory.yml` automatiquement (il n'existe plus dans le state
+   Terraform, donc plus dans `terraform output app_nodes`).
+6. Confirmez dans la console Hetzner que le Load Balancer n'a plus ce
+   target, et que le reste du cluster reste `healthy`.
 
 ## Notes de conception importantes
 
@@ -195,9 +274,14 @@ obtention du certificat). Respecter l'ordre documenté (DNS avant Caddy)
 - **`admin_cidrs` est vide par défaut et Terraform refuse `0.0.0.0/0`**
   (validation dans `variables.tf`) — vous DEVEZ renseigner explicitement vos
   IP/CIDR admin, jamais d'ouverture SSH universelle par défaut.
-- **cloud-init ne duplique pas** `infra/firewall/ufw.sh` : il clone le dépôt
-  puis exécute ce script tel quel. Si le script évolue, le comportement du
-  node évolue avec, sans toucher à ce Terraform.
+- **cloud-init ne clone plus le dépôt** (corrigé 2026-09-17, commit
+  `7dd474f` — avant cela il clonait puis exécutait `infra/firewall/ufw.sh`
+  tel quel ; ce paragraphe était resté périmé jusqu'à cet audit). Le
+  bootstrap applique désormais un pare-feu hôte **minimal et autonome**
+  directement en `runcmd` (SSH + 80/443 réseau privé uniquement — voir
+  `cloud-init/app-node.yaml.tpl`), sans dépendre du dépôt GitHub. Le
+  checkout réel et tout le reste du déploiement applicatif restent pris en
+  charge ensuite par GitHub Actions/`scripts/node_deploy.sh`.
 - **Aucun secret dans `user_data`/cloud-init.** Le `.env` applicatif (clés
   LLM, tokens webhooks, mot de passe DB/Redis…) n'est jamais écrit par
   Terraform — `user_data` est lisible par l'API metadata Hetzner depuis le
@@ -217,18 +301,60 @@ obtention du certificat). Respecter l'ordre documenté (DNS avant Caddy)
 
 ## Ce qui a été validé dans cet environnement (et ce qui ne l'a pas été)
 
-- `terraform`/`tofu` ne sont **pas installés** sur la machine où ce module a
-  été écrit — `terraform init`/`validate`/`fmt` n'ont **pas pu être
-  exécutés**. Tous les noms de ressources/arguments (`hcloud_network`,
-  `hcloud_network_subnet`, `hcloud_firewall`, `hcloud_placement_group`,
-  `hcloud_server`, `hcloud_load_balancer`, `hcloud_load_balancer_network`,
-  `hcloud_load_balancer_target`, `hcloud_load_balancer_service`,
-  `hcloud_ssh_key`, le bloc `algorithm { type = "least_connections" }`, le
-  bloc `health_check`/`http` avec `tls`) ont été vérifiés contre la
-  documentation officielle du provider `hetznercloud/hcloud` (version
-  `v1.69.0`, la plus récente au 2026-09-16) directement sur GitHub — pas
-  deviné. **Avant le premier `apply` réel**, lancez `terraform init &&
-  terraform validate` localement (où le binaire est disponible) pour
-  confirmer, et committez le `.terraform.lock.hcl` généré.
-- Aucun `terraform apply`/`plan` n'a été exécuté contre de vraies
-  identifiants Hetzner — aucune infrastructure réelle n'a été provisionnée.
+*(Section mise à jour 2026-09-19, audit scale-out — la version précédente,
+écrite avant que ce module soit réellement appliqué, affirmait à tort que
+`terraform` n'était pas disponible et que rien n'avait pu être testé.)*
+
+- `terraform fmt`/`validate` **exécutés et passants** sur l'ensemble du
+  module (v1.16.2).
+- `terraform plan` **réellement exécuté**, à plusieurs reprises, contre le
+  **vrai state de production** (`terraform.tfstate` local — `ladini-app-1`,
+  server id `166245083`) :
+  - `-refresh=false` (jeton syntaxiquement valide mais non réel — voir
+    `scripts/test_scale_out_plan.sh` pour le pourquoi ; ce module n'a
+    aucune `data "hcloud_*"`, donc aucun appel réseau n'est nécessaire pour
+    ce mode) : reproduit à l'identique le bug rapporté (`5 to add, 1 to
+    change, 2 to destroy` à `app_node_count = 2`, et confirmé que le MÊME
+    remplacement de `ladini-app-1` apparaissait déjà à `app_node_count = 1`
+    inchangé — la preuve empirique de la cause racine `user_data`
+    ci-dessus), puis validé le correctif (`0 to destroy` à 1→2 et à 1→3).
+  - **Non exécuté** : un `terraform plan` avec **refresh réel** (jeton
+    Hetzner valide + accès réseau à l'API) — aucun accès identifiants/réseau
+    disponible pendant cet audit. C'est la limite honnête de cette
+    validation : un refresh réel pourrait révéler un drift EXTERNE
+    (modification faite dans la console Hetzner, hors Terraform) que
+    `-refresh=false` ne peut pas voir. **Avant le premier `apply` qui suit
+    ce chantier**, lancez `./scripts/test_scale_out_plan.sh --refresh` (ou
+    un simple `terraform plan` normal) avec un jeton réel pour la
+    confirmation finale.
+- Aucun `terraform apply` n'a été exécuté (ni avant, ni pendant cet audit) —
+  conformément à la consigne, aucune infrastructure réelle n'a été modifiée.
+- Tous les noms de ressources/arguments nouvellement introduits ou modifiés
+  par ce chantier (`for_each` sur `hcloud_server`/`hcloud_load_balancer_target`,
+  bloc `moved`, `lifecycle.ignore_changes`) sont standards Terraform (pas
+  spécifiques au provider `hcloud`) et ont été exercés par les `plan` réels
+  ci-dessus, pas seulement lus dans la documentation.
+
+## Observabilité — quand envisager un scale-out (manuel, pas automatique)
+
+Pas d'autoscaling aujourd'hui (délibéré — voir plus haut, "scaling manuel
+contrôlé mais rapide"). Signaux à surveiller (Prometheus/Grafana déjà en
+place, voir `infra/grafana/dashboards/03-infrastructure.json`) pour décider
+**manuellement** d'augmenter `app_node_count` :
+
+| Composant | Signal | Seuil indicatif |
+|---|---|---|
+| API (FastAPI/Uvicorn) | CPU | > 75 % durablement (plusieurs minutes, pas un pic) |
+| API | RAM | > 80 % |
+| API | Latence p95/p99 | en hausse soutenue par rapport à la baseline |
+| Worker Celery | Longueur de queue | croissante sur la durée (pas un pic ponctuel) |
+| Worker Celery | CPU | élevé et soutenu |
+| Worker Celery | Latence des tâches | en hausse |
+| PostgreSQL | Saturation du pool de connexions (PgBouncer) | proche de la limite configurée |
+| PostgreSQL | Latence des requêtes | en hausse |
+| Redis | Latence / mémoire / connexions | en hausse par rapport à la baseline |
+
+Un ou plusieurs de ces signaux SOUTENUS (pas un pic isolé) → augmentez
+`app_node_count` (voir § SCALE OUT ci-dessus). Aucun de ces seuils ne
+déclenche quoi que ce soit automatiquement — c'est un guide de décision
+humaine, pas un contrôleur.

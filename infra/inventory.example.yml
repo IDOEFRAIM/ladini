@@ -11,6 +11,14 @@
 # Copiez ce fichier en `infra/inventory.yml` (gitignored — contient des
 # détails d'infrastructure réels, IP privées incluses) et adaptez-le.
 #
+# Sur Hetzner (infra/providers/hetzner/) : cette copie/édition manuelle est
+# désormais OPTIONNELLE — `python scripts/generate_inventory.py` produit
+# `infra/inventory.yml` directement depuis `terraform output`, avec les
+# rôles déjà corrects (le node de clé "1" porte scheduler+admin, tous les
+# autres ne portent que "app" — voir infra/providers/hetzner/servers.tf).
+# Ce fichier .example reste utile pour un provider SANS Terraform (§ contrat
+# provider-neutral, infra/providers/README.md) ou pour comprendre le format.
+#
 # CONTRAINTE VALIDÉE PAR scripts/validate_inventory.py (§9/§44 du chantier) :
 #   exactement UN node, dans TOUT l'inventaire, porte le rôle `scheduler`.
 #   Celery Beat planifie — deux `beat` actifs en même temps déclencheraient

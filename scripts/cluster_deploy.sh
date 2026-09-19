@@ -67,7 +67,7 @@ CLUSTER_DEPLOY_STARTED_AT="$(date -u +%FT%TZ)"
 # répertoire local ; `release_all_locks` (défini par lib.sh, PAS réenregistré
 # ici — un `trap ... EXIT` REMPLACE le précédent, jamais ne l'empile) est
 # donc explicitement rappelé en second : filet de sécurité pour tout autre
-# verrou nommé encore tenu (voir l'étape 4/8 ci-dessous, verrou local
+# verrou nommé encore tenu (voir l'étape 5/9 ci-dessous, verrou local
 # temporaire autour des migrations).
 trap 'release_cluster_lock; release_all_locks' EXIT
 
@@ -138,11 +138,40 @@ parse_inventory() {
 # ═════════════════════════════════════════════════════════════════════
 # 1. Validation de l'inventaire — ABORT bruyant si invalide, RIEN touché.
 # ═════════════════════════════════════════════════════════════════════
-log "1/8 · validation de l'inventaire (${INVENTORY_FILE})…"
+log "1/9 · validation de l'inventaire (${INVENTORY_FILE})…"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || PYTHON_BIN=python
 "$PYTHON_BIN" "${HERE}/validate_inventory.py" "$INVENTORY_FILE" \
   || die "Inventaire invalide (voir ci-dessus) — AUCUN node n'a été touché."
+
+# ═════════════════════════════════════════════════════════════════════
+# 1.5. Connectivité SSH — TOUS les nodes de l'inventaire, AVANT toute
+# mutation (verrou, migrations). Objectif : détecter un node injoignable
+# (clé absente, host down, firewall cloud pas encore ouvert pour cette IP…)
+# EN UN SEUL COUP, avant d'avoir déjà migré la DB et basculé un premier
+# node — pas après coup, au milieu d'un rollout, où l'échec laisserait le
+# cluster dans un état hétérogène (certains nodes déjà sur la nouvelle
+# release, d'autres non — voir §5 plus bas pour ce cas malgré tout géré).
+# Best-effort mais EXHAUSTIF : on teste TOUS les nodes avant de conclure,
+# pas d'arrêt au premier échec, pour que l'opérateur voie le tableau
+# complet en un seul essai plutôt que de découvrir les pannes une à une.
+# ═════════════════════════════════════════════════════════════════════
+log "2/9 · connectivité SSH — ${INVENTORY_FILE}…"
+mapfile -t PRECHECK_LINES < <(parse_inventory "$INVENTORY_FILE")
+[ "${#PRECHECK_LINES[@]}" -gt 0 ] || die "Aucun node parsé depuis ${INVENTORY_FILE} (pourtant validé à l'étape 1) — parseur bash désynchronisé de validate_inventory.py."
+
+SSH_PRECHECK_FAILED=0
+for line in "${PRECHECK_LINES[@]}"; do
+  IFS=$'\t' read -r name host _roles <<<"$line"
+  if ssh "${SSH_OPTS[@]}" "$host" true >/dev/null 2>&1; then
+    log "   ✓ ${name} (${host}) joignable en SSH"
+  else
+    err "   ✗ ${name} (${host}) INJOIGNABLE en SSH (clé/host/firewall ?)"
+    SSH_PRECHECK_FAILED=1
+  fi
+done
+[ "$SSH_PRECHECK_FAILED" = 0 ] \
+  || die "Au moins un node est injoignable en SSH (voir ci-dessus) — AUCUN node n'a été touché, AUCUNE migration DB n'a tourné."
 
 # ═════════════════════════════════════════════════════════════════════
 # 2. Verrou cluster-wide
@@ -160,13 +189,13 @@ fi
 # 3. Préflight local (l'orchestrateur va lui-même piloter le pull + les
 #    migrations, il doit satisfaire les mêmes préconditions que deploy.sh)
 # ═════════════════════════════════════════════════════════════════════
-log "2/8 · préflight (orchestrateur)…"
+log "3/9 · préflight (orchestrateur)…"
 "${HERE}/preflight.sh" "$TARGET_RELEASE" || die "préflight orchestrateur KO — voir ci-dessus. Rien n'a été touché."
 
 # ═════════════════════════════════════════════════════════════════════
 # 4. Résolution des métadonnées de release — UNE SEULE FOIS, ICI.
 # ═════════════════════════════════════════════════════════════════════
-log "3/8 · résolution des métadonnées (pull local de l'image api)…"
+log "4/9 · résolution des métadonnées (pull local de l'image api)…"
 export RELEASE_VERSION="$TARGET_RELEASE"
 export COMPOSE_VERSION="compose-$(sha1sum "$COMPOSE_FILE" | cut -c1-12)"
 dc pull api >/dev/null || die "impossible de tirer l'image api:${TARGET_RELEASE} depuis l'orchestrateur — aucun node n'a été touché."
@@ -205,7 +234,7 @@ log "   GIT_SHA=${GIT_SHA} BUILD_TIMESTAMP=${BUILD_TIMESTAMP}"
 # aucun besoin de `git checkout` : juste s'assurer que le commit existe
 # localement (fetch si besoin) avant de diffuser dessus.
 # ═════════════════════════════════════════════════════════════════════
-log "4/8 · migrations base de données (UNE SEULE FOIS, depuis l'orchestrateur)…"
+log "5/9 · migrations base de données (UNE SEULE FOIS, depuis l'orchestrateur)…"
 STAGE_MIGRATE_DONE=0
 MIG_CLASS="ROLLBACK_SAFE"
 if [ -f "${LADINI_ROOT}/backend/alembic.ini" ]; then
@@ -223,7 +252,7 @@ if [ -f "${LADINI_ROOT}/backend/alembic.ini" ]; then
   # exactement le genre d'opération que ce verrou existe pour protéger,
   # peu importe que ce soit ICI (l'orchestrateur) ou node_deploy.sh (un
   # node) qui la déclenche. Acquis puis RELÂCHÉ avant la boucle SSH
-  # ci-dessous (étape 5/8) — jamais tenu pendant le rollout lui-même, donc
+  # ci-dessous (étape 5/9) — jamais tenu pendant le rollout lui-même, donc
   # jamais en conflit avec node_deploy.sh acquérant ce même verrou sur un
   # node co-localisé (voir §DEADLOCK dans lib.sh : ce sont deux verrous
   # DISTINCTS de toute façon, mais celui-ci en particulier n'a pas de raison
@@ -271,7 +300,7 @@ for line in "${NODE_LINES[@]}"; do
 done
 [ -n "$SCHEDULER_LINE" ] && ORDERED_LINES+=("$SCHEDULER_LINE")
 
-log "5/8 · rollout — ${#ORDERED_LINES[@]} node(s), un à la fois (scheduler en dernier)…"
+log "6/9 · rollout — ${#ORDERED_LINES[@]} node(s), un à la fois (scheduler en dernier)…"
 
 ROLLOUT_FAILED=0
 FAILED_NODE_NAME=""
@@ -352,24 +381,45 @@ EOF
 fi
 
 # ═════════════════════════════════════════════════════════════════════
-# 6. Validation LB (Hetzner) — HOOK, pas encore câblé.
+# 7. Validation Load Balancer — best-effort, provider-neutre.
 #
-# TODO(hetzner-lb) : dès que infra/providers/hetzner/ expose l'IP/DNS du
-# Load Balancer (autre chantier, en cours), sonder ici :
-#     wait_http "https://<lb-host-or-dns>/health/ready" "$HEALTH_TIMEOUT" 200
+# (2026-09-19) — `infra/providers/hetzner/outputs.tf` expose désormais
+# `load_balancer_ipv4`, mais ce script reste délibérément SANS dépendance à
+# `terraform`/`hcloud` (voir infra/providers/README.md, "provider-neutral" —
+# `.github/workflows/deploy.yml` lui-même n'en a aucune). On ne sonde donc
+# PAS le LB par son IP Hetzner directe : on sonde le domaine PUBLIC
+# (`PUBLIC_HEALTH_URL`, ou dérivé de `PUBLIC_DOMAIN` si fourni — CETTE
+# variable est déjà disponible dans .github/workflows/deploy.yml, aucun
+# nouveau secret/input requis). C'est en réalité un check PLUS complet que
+# "seulement le LB" : il traverse Cloudflare → LB → un node app réel, donc
+# valide le chemin qu'un vrai utilisateur emprunte, pas seulement
+# l'infrastructure interne.
+#
 # Chaque node a DÉJÀ été validé individuellement (node_deploy.sh a fait
 # tourner son propre health+smoke en loopback avant de rendre la main via
-# SSH) — ce hook validerait EN PLUS que le LB route correctement vers TOUS
-# les nodes "app" nouvellement déployés (pas seulement que chacun répond en
-# loopback). Sans LB déployé, cette étape est un no-op documenté plutôt
-# qu'une vérification inventée.
+# SSH) — ce hook valide EN PLUS que le chemin public route correctement
+# vers un node "app" à jour. Sans `PUBLIC_HEALTH_URL`/`PUBLIC_DOMAIN` fourni
+# (single-node sans LB, environnement de test…), cette étape reste un no-op
+# documenté plutôt qu'une vérification inventée.
 # ═════════════════════════════════════════════════════════════════════
-log "6/8 · validation LB — SAUTÉE (pas de LB Hetzner câblé, voir TODO(hetzner-lb) dans ce fichier)."
+PUBLIC_HEALTH_URL="${PUBLIC_HEALTH_URL:-}"
+if [ -z "$PUBLIC_HEALTH_URL" ] && [ -n "${PUBLIC_DOMAIN:-}" ]; then
+  PUBLIC_HEALTH_URL="https://${PUBLIC_DOMAIN}/health/ready"
+fi
+
+if [ -n "$PUBLIC_HEALTH_URL" ]; then
+  log "7/9 · validation Load Balancer/chemin public (${PUBLIC_HEALTH_URL})…"
+  wait_http "$PUBLIC_HEALTH_URL" "$HEALTH_TIMEOUT" 200 \
+    || die "chemin public non healthy après le rollout (${PUBLIC_HEALTH_URL}) — tous les nodes individuels ont pourtant validé leur propre santé en loopback : suspectez le LB (target unhealthy, DNS, Cloudflare) plutôt que l'application. Voir infra/providers/hetzner/README.md § Load Balancer."
+  log "   ✓ ${PUBLIC_HEALTH_URL} = 200"
+else
+  log "7/9 · validation LB — SAUTÉE (ni PUBLIC_HEALTH_URL ni PUBLIC_DOMAIN fournis — pas de LB/domaine public dans cet environnement)."
+fi
 
 # ═════════════════════════════════════════════════════════════════════
-# 7/8. Enregistrement final
+# 8/9. Enregistrement final
 # ═════════════════════════════════════════════════════════════════════
-log "7/8 · manifeste cluster écrit → ${CLUSTER_MANIFEST}"
+log "8/9 · manifeste cluster écrit → ${CLUSTER_MANIFEST}"
 history_append "cluster-deploy-success" "$TARGET_RELEASE" "nodes=${#ORDERED_LINES[@]} ; mig=${MIG_CLASS}"
 
 cat <<EOF
@@ -389,4 +439,4 @@ cat <<EOF
   Manifest   : ${CLUSTER_MANIFEST}
 ╚══════════════════════════════════════════════════════════════════╝
 EOF
-log "8/8 · terminé."
+log "9/9 · terminé."

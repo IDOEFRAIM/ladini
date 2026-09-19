@@ -169,6 +169,12 @@ jobs:
             infra/
 
           # ── Déploiement ────────────────────────────────────────────
+          # `PUBLIC_DOMAIN` (déjà exporté dans `env:` ci-dessus, aucun
+          # secret/input nouveau) est repris automatiquement par
+          # cluster_deploy.sh pour son étape 7/9 (validation Load Balancer/
+          # chemin public post-rollout, `https://${PUBLIC_DOMAIN}/health/
+          # ready`) — voir cluster_deploy.sh, section "7. Validation Load
+          # Balancer".
           if [ -f infra/inventory.yml ]; then
             echo "→ inventaire présent : déploiement multi-node"
             NODE_DEPLOY_DIR="$DEPLOY_DIR" \

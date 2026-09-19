@@ -30,6 +30,15 @@ from ladini.core.idempotency import release as _release_role_hint
 from ladini.core.location import LocationOutcome, persist_shared_location
 from ladini.core.settings import settings
 from ladini.graphs.roles import normalize_role
+from ladini.workers.media.product_photo_task import (
+    pending_photo_key,
+    pending_view_key,
+    process_product_photo_task,
+    resolve_pending_product_photo_task,
+    resolve_pending_view_photos_task,
+    send_product_photos_task,
+    send_search_result_photos_task,
+)
 from ladini.workspace.store import WorkspaceStore
 
 router = APIRouter()
@@ -153,6 +162,46 @@ def _log_failed_status(st: Dict[str, Any]) -> None:
             err.get("message"),
             details,
         )
+
+
+def _extract_media_id(message: Dict[str, Any]) -> Optional[tuple[str, str]]:
+    """Extrait une image entrante Cloud API (``message["image"]``).
+
+    Miroir de ``twilio_webhook.py::_extract_media`` pour le format Cloud
+    API — mais contrairement à Twilio (URL directe fetchable), Meta ne
+    donne ici qu'un ``id`` OPAQUE (``message["image"]["id"]``), résolu en
+    URL téléchargeable UNIQUEMENT au moment du téléchargement (voir
+    ``services/whatsapp/cloud_api_media.py``). Renvoie ``(media_id,
+    mime_type)`` pour un message de type ``image`` uniquement — audio/vidéo/
+    document/document ou texte classique renvoient ``None``.
+    """
+    if str(message.get("type") or "").strip() != "image":
+        return None
+    image = message.get("image")
+    if not isinstance(image, dict):
+        return None
+    media_id = str(image.get("id") or "").strip()
+    if not media_id:
+        return None
+    mime_type = str(image.get("mime_type") or "").strip().lower()
+    return media_id, mime_type
+
+
+_VIEW_PHOTOS_PREFIXES = ("photos ", "photo ")
+
+
+def _extract_view_photos_query(text: str) -> Optional[str]:
+    """Commande déterministe « photos <nom> » / « photo <nom> » — MIROIR
+    VOLONTAIRE de ``twilio_webhook.py::_extract_view_photos_query`` (même
+    sous-ensemble de commande, même raisonnement : mot-clé simple, pas une
+    intention LLM — voir l'original pour le détail)."""
+    stripped = text.strip()
+    lowered = stripped.lower()
+    for prefix in _VIEW_PHOTOS_PREFIXES:
+        if lowered.startswith(prefix):
+            query = stripped[len(prefix) :].strip()
+            return query or None
+    return None
 
 
 def _extract_interactive_id(message: Dict[str, Any]) -> Optional[str]:
@@ -339,6 +388,87 @@ async def _process_single_message(
         trace_id = telemetry.new_trace_id()
     except Exception:
         trace_id = None
+
+    # --- 4bis. PHOTO PRODUIT (MEDIA) ---
+    # ⚠️ CORRECTIF (2026-09-19, incident réel prod) — ce bloc, présent côté
+    # `twilio_webhook.py` depuis la feature "photo produit par WhatsApp",
+    # n'avait JAMAIS été porté ici. Comme `whatsapp_cloud` est le
+    # `MESSAGING_PROVIDER` par défaut (voir en-tête de ce fichier), TOUTE
+    # photo envoyée par un producteur/acheteur en production tombait
+    # silencieusement dans le pipeline texte (`text=""`, `msg_type="image"`
+    # jamais lu) — l'intention finissait en `UNKNOWN` côté agent, qui
+    # répondait par le message générique de clarification ("Je n'ai pas
+    # compris ton message avec la photo..."). La fonctionnalité de photo
+    # produit était donc entièrement morte en production tant que
+    # `MESSAGING_PROVIDER` n'était pas manuellement basculé sur `twilio`.
+    #
+    # Miroir volontaire de `twilio_webhook.py` (§4ter/4quater/4quinquies) —
+    # même découplage du pipeline agent, seule la source du média change
+    # (`media_id` Cloud API vs `media_url` Twilio, voir
+    # `services/whatsapp/cloud_api_media.py` et `workers/media/
+    # product_photo_task.py::_process`).
+    media = _extract_media_id(message)
+    if media:
+        media_id, media_content_type = media
+        logger.info(
+            "WHATSAPP_INBOUND_MEDIA | phone=%s | content_type=%s", phone, media_content_type
+        )
+        await asyncio.to_thread(
+            process_product_photo_task.delay,
+            phone_number=phone,
+            media_id=media_id,
+            media_content_type=media_content_type,
+            trace_id=trace_id,
+            message_sid=message_id,
+        )
+        return
+
+    # --- 4ter. RÉPONSE À UN MENU "QUEL PRODUIT ?" EN ATTENTE ---
+    # Même garde qu'en Twilio : ne court-circuite le pipeline agent QUE si
+    # (a) une photo est en attente de sélection pour ce numéro ET (b) le
+    # texte est un simple chiffre.
+    if text.isdigit():
+        try:
+            has_pending_photo = bool(
+                await asyncio.to_thread(redis_client.exists, pending_photo_key(phone))
+            )
+        except Exception:
+            has_pending_photo = False
+        if has_pending_photo:
+            await asyncio.to_thread(
+                resolve_pending_product_photo_task.delay,
+                phone_number=phone, selection_text=text, message_sid=message_id,
+            )
+            return
+
+        try:
+            has_pending_view = bool(
+                await asyncio.to_thread(redis_client.exists, pending_view_key(phone))
+            )
+        except Exception:
+            has_pending_view = False
+        if has_pending_view:
+            await asyncio.to_thread(
+                resolve_pending_view_photos_task.delay,
+                phone_number=phone, selection_text=text, message_sid=message_id,
+            )
+            return
+
+    # --- 4quater. CONSULTATION "PHOTOS <NOM>" / "PHOTOS <NUMÉRO>" ---
+    view_query = _extract_view_photos_query(text)
+    if view_query:
+        logger.info("WHATSAPP_INBOUND_VIEW_PHOTOS | phone=%s | query=%r", phone, view_query)
+        if view_query.isdigit():
+            await asyncio.to_thread(
+                send_search_result_photos_task.delay,
+                phone_number=phone, index_text=view_query, message_sid=message_id,
+            )
+        else:
+            await asyncio.to_thread(
+                send_product_photos_task.delay,
+                phone_number=phone, product_query=view_query, message_sid=message_id,
+            )
+        return
 
     # --- 5. RÉSOLUTION DU WORKSPACE & RÔLE ---
     store = WorkspaceStore()
