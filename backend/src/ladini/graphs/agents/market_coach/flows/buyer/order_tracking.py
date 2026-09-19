@@ -349,10 +349,19 @@ async def _producer_sales_block(
     # réellement câblées (PRODUCER_CONFIRM_ORDER/PRODUCER_CANCEL_ORDER),
     # chacune affichant son propre menu numéroté si plusieurs commandes sont
     # concernées.
-    lines.append(
-        "\n_Tapez *confirmer* pour accepter une commande en attente "
-        "(🟡), ou *annuler* si vous ne pouvez pas l'honorer._"
-    )
+    # Invite "confirmer" uniquement s'il existe une vente 🟡 : sinon (ex.
+    # vente gagnée par enchère, déjà 🟢) elle promettait une action sans objet
+    # et "confirmer" échouait (incident 2026-09-19).
+    if _pending:
+        lines.append(
+            "\n_Tapez *confirmer* pour accepter une commande en attente "
+            "(🟡), ou *annuler* si vous ne pouvez pas l'honorer._"
+        )
+    else:
+        lines.append(
+            "\n_Ces commandes sont déjà confirmées : rien à accepter. "
+            "Tapez *annuler* si vous ne pouvez plus l'honorer._"
+        )
     single_pending_order_id = (
         str(_pending[0].get("order_id")) if len(_pending) == 1 else None
     )

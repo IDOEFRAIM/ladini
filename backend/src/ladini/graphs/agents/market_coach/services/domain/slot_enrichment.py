@@ -508,6 +508,18 @@ async def enrich_payload_from_text(
     # `interpreter/routing.py` (garde anti-ancrage) et de
     # `nodes/memory.py::_apply_slot` (qui purge le prix en cascade quand
     # l'unité change) — voir « Périmètre assumé » du docstring de l'autorité.
+    # Incident 2026-09-19 : « 375 fcfa par kg … je veux 65 kg » → récap « Unité
+    # non précisée par vous : KG supposée ». Un tour précédent avait posé KG
+    # par défaut (`unit_was_assumed`) ; l'unité explicite, IDENTIQUE, était
+    # ignorée en aval (valeur égale → aucune écriture) et le drapeau survivait.
+    # Une unité écrite AVEC la quantité prouve que ce n'est plus une
+    # supposition — on lit la paire (quantité, unité), jamais un « kg »
+    # isolé qui pourrait n'être que la base du prix.
+    if payload.get("unit_was_assumed") and payload.get("unit") and text:
+        _written = extract_quantity_unit_from_text(text) or {}
+        if str(_written.get("unit") or "").upper() == str(payload["unit"]).upper():
+            payload.pop("unit_was_assumed", None)
+
     _unit_text_hint = (
         extract_unit_only(text)
         if text and payload.get("unit") in (None, "", [], {})

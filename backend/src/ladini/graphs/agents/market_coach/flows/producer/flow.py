@@ -647,7 +647,8 @@ async def _resolve_order_for_confirmation(
             "response_strategy": "ERROR",
             "final_response": (
                 "Aucune commande en attente de votre confirmation pour le "
-                "moment."
+                "moment. Les commandes 🟢 sont déjà confirmées : rien à "
+                "accepter."
             ),
             "ag_ui_component": None,
         }

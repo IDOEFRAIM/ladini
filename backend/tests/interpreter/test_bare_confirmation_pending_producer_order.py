@@ -31,7 +31,7 @@ class TestBareConfirmationResolvesOnlyWhenUnambiguous:
             {
                 "get_producer_orders": {
                     "status": "success",
-                    "data": [{"order_id": "order-1"}],
+                    "data": [{"order_id": "order-1", "status": "PENDING_PRODUCER_CONFIRMATION"}],
                 }
             }
         )
@@ -50,7 +50,7 @@ class TestBareConfirmationResolvesOnlyWhenUnambiguous:
             {
                 "get_producer_orders": {
                     "status": "success",
-                    "data": [{"order_id": "order-1"}],
+                    "data": [{"order_id": "order-1", "status": "PENDING_PRODUCER_CONFIRMATION"}],
                 }
             }
         )
@@ -78,7 +78,10 @@ class TestBareConfirmationResolvesOnlyWhenUnambiguous:
             {
                 "get_producer_orders": {
                     "status": "success",
-                    "data": [{"order_id": "order-1"}, {"order_id": "order-2"}],
+                    "data": [
+                        {"order_id": "order-1", "status": "PENDING_PRODUCER_CONFIRMATION"},
+                        {"order_id": "order-2", "status": "PENDING_PRODUCER_CONFIRMATION"},
+                    ],
                 }
             }
         )
@@ -106,7 +109,7 @@ class TestBareConfirmationResolvesOnlyWhenUnambiguous:
             {
                 "get_producer_orders": {
                     "status": "success",
-                    "data": [{"order_id": "order-1"}],
+                    "data": [{"order_id": "order-1", "status": "PENDING_PRODUCER_CONFIRMATION"}],
                 }
             }
         )
@@ -128,3 +131,71 @@ class TestBareConfirmationResolvesOnlyWhenUnambiguous:
             )
         )
         assert result is None
+
+
+class TestConfirmWithNothingPending:
+    """Incident 2026-09-19 : vente déjà 🟢 (enchère gagnée) → « confirmer »
+    partait au LLM et répondait « je ne comprends pas »."""
+
+    _CONFIRMED = {
+        "get_producer_orders": {
+            "status": "success",
+            "data": [{"order_id": "o1", "status": "CONFIRMED"}],
+        }
+    }
+
+    def test_confirmer_with_only_confirmed_sales_routes_to_the_resolver(self):
+        result = run(
+            _bare_confirmation_for_pending_producer_order(
+                rt(self._CONFIRMED), "+22670000001", "confirmer", "BUYER"
+            )
+        )
+        assert result is not None
+        assert result["detected_intent"] == "PRODUCER_CONFIRM_ORDER"
+
+    def test_annuler_with_only_confirmed_sales_is_never_hijacked(self):
+        result = run(
+            _bare_confirmation_for_pending_producer_order(
+                rt(self._CONFIRMED), "+22670000001", "annuler", "BUYER"
+            )
+        )
+        assert result is None
+
+    def test_a_pure_buyer_without_sales_is_never_hijacked(self):
+        result = run(
+            _bare_confirmation_for_pending_producer_order(
+                rt({"get_producer_orders": {"status": "success", "data": []}}),
+                "+22670000001", "confirmer", "BUYER",
+            )
+        )
+        assert result is None
+
+    def test_buyer_role_with_one_pending_sale_confirms_but_never_cancels_bare(self):
+        pending = {
+            "get_producer_orders": {
+                "status": "success",
+                "data": [{"order_id": "o1", "status": "PENDING_PRODUCER_CONFIRMATION"}],
+            }
+        }
+        ok = run(_bare_confirmation_for_pending_producer_order(
+            rt(pending), "+22670000001", "confirmer", "BUYER"))
+        no = run(_bare_confirmation_for_pending_producer_order(
+            rt(pending), "+22670000001", "annuler", "BUYER"))
+        assert ok is not None and ok["detected_intent"] == "PRODUCER_CONFIRM_ORDER"
+        assert no is None
+
+
+class TestTypoTolerance:
+    def test_confimer_typo_with_only_confirmed_sales_routes_to_the_resolver(self):
+        runtime = rt({"get_producer_orders": {
+            "status": "success", "data": [{"order_id": "o1", "status": "CONFIRMED"}]}})
+        for typo in ("confimer", "confirmr", "cofirmer"):
+            result = run(_bare_confirmation_for_pending_producer_order(
+                runtime, "+22670000001", typo))
+            assert result is not None and result["detected_intent"] == "PRODUCER_CONFIRM_ORDER", typo
+
+    def test_unrelated_words_are_never_corrected(self):
+        runtime = rt()
+        for word in ("bonjour", "confiture", "annulation", "commander"):
+            assert run(_bare_confirmation_for_pending_producer_order(
+                runtime, "+22670000001", word)) is None, word

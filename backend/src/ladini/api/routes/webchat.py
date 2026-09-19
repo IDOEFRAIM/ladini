@@ -31,13 +31,17 @@ conversation WhatsApp de n'importe quel autre utilisateur).
 """
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field, model_validator
 
 from ladini.api.security import require_internal_token
+from ladini.core.reply_sink import collect_replies
 from ladini.orchestrator.orchestrator import Orchestrator
 
 logger = logging.getLogger("Ladini.WebChatRouter")
@@ -53,10 +57,36 @@ router = APIRouter(
 )
 
 
+# ~8 Mo décodés (limite de `services/storage/supabase_storage.py`) en base64.
+_MAX_IMAGE_B64_CHARS = 11_500_000
+
+
 class WebChatRequest(BaseModel):
+    # Vide autorisé UNIQUEMENT avec une image (photo envoyée seule).
     message: str = Field(
-        ..., min_length=1, max_length=4000, description="Message de l'utilisateur"
+        default="", max_length=4000, description="Message de l'utilisateur"
     )
+    image_base64: Optional[str] = Field(
+        default=None,
+        max_length=_MAX_IMAGE_B64_CHARS,
+        description=(
+            "Photo produit (JPEG/PNG/WebP) en base64, sans préfixe `data:`. "
+            "Traitée par le pipeline photo — jamais par le LLM."
+        ),
+    )
+    image_mime: Optional[str] = Field(
+        default=None,
+        description="Type MIME de l'image (image/jpeg, image/png, image/webp).",
+    )
+
+    @model_validator(mode="after")
+    def _message_or_image(self) -> "WebChatRequest":
+        if not self.message.strip() and not self.image_base64:
+            raise ValueError("`message` ou `image_base64` est requis.")
+        if self.image_base64 and not (self.image_mime or "").strip():
+            raise ValueError("`image_mime` est requis avec `image_base64`.")
+        return self
+
     phone_number: str = Field(
         ...,
         description=(
@@ -72,7 +102,39 @@ class WebChatResponse(BaseModel):
     workspace_id: str
 
 
+async def _run_photo_channel(request: WebChatRequest) -> Optional[WebChatResponse]:
+    """Photo produit (ou réponse chiffrée au menu « quel produit ? ») — traitée
+    par le pipeline photo, JAMAIS par le LLM (incident 2026-09-19 : « je ne
+    peux pas voir les photos »). Renvoie None si le tour n'est pas concerné."""
+    from ladini.workers.media import product_photo_task as photo
+
+    text = request.message.strip()
+    if request.image_base64:
+        try:
+            binary = base64.b64decode(request.image_base64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=422, detail="image_base64 invalide.")
+        with collect_replies() as replies:
+            await photo.handle_inbound_photo_bytes(
+                request.phone_number, binary, str(request.image_mime)
+            )
+    elif text.isdigit() and await asyncio.to_thread(
+        photo.has_pending_photo_selection, request.phone_number
+    ):
+        with collect_replies() as replies:
+            await photo.handle_pending_photo_selection(request.phone_number, text)
+    else:
+        return None
+    return WebChatResponse(
+        reply="\n\n".join(replies) or "Photo reçue.",
+        workspace_id=request.phone_number,
+    )
+
+
 async def _run(request: WebChatRequest, workspace_type: str) -> WebChatResponse:
+    photo_response = await _run_photo_channel(request)
+    if photo_response is not None:
+        return photo_response
     # `force_role=True` : même comportement que market.py — le rôle
     # (producteur/acheteur) est déterminé par LA ROUTE appelée, jamais par un
     # texte utilisateur ambigu, cohérent avec le fait que le site sait déjà

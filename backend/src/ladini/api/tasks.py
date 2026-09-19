@@ -7,6 +7,7 @@ from celery.signals import worker_process_init, worker_process_shutdown
 from ladini.api.celery_app import celery_app
 from ladini.api.response_dispatch import ResponsePlan, get_dispatcher
 from ladini.core.database import close_db, get_engine
+from ladini.core.reply_sink import active_sink
 from ladini.core.idempotency import claim_once, get_cached, release, set_cached
 from ladini.orchestrator import Orchestrator
 
@@ -375,6 +376,12 @@ async def send_confirmation_text(
     un `ResponsePlan` à un seul `TextResponse` et appeler EXACTEMENT le même
     `ResponseDispatcher` que `process_agent_task`. Aucune logique de
     provider, de claim, ou de transport ne vit plus ici."""
+    # Canal synchrone (webchat) : la réponse revient en HTTP, jamais par
+    # WhatsApp — voir `core/reply_sink.py`.
+    sink = active_sink()
+    if sink is not None:
+        sink.append(text)
+        return {"status": "collected"}
     plan = ResponsePlan.text(message_sid, text)
     results = await get_dispatcher().dispatch(phone_number, plan)
     return results[0] if results else {"status": "message_skipped", "reason": "no_items"}

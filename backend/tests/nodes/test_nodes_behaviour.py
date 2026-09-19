@@ -146,6 +146,40 @@ class TestUnitDefaultIsFlaggedNotSilent:
         assert "unit_was_assumed" not in payload
 
 
+class TestExplicitUnitClearsTheAssumedFlag:
+    """Incident 2026-09-19 : « je propose maximum 375 fcfa par kg et je veux
+    65 kg » — l'acheteur écrit « kg » deux fois, mais le récap disait « Unité
+    non précisée par vous : KG supposée ». Un tour précédent avait posé
+    KG par défaut (`unit_was_assumed`) ; l'unité explicite, IDENTIQUE, était
+    ignorée par `_apply_slot` (valeur égale → retour) donc le drapeau restait."""
+
+    _TEXT = "je propose maximum 375 fcfa par kg et je veux 65 kg"
+
+    def _turn(self, text, entities):
+        st = make_state(
+            current_goal="BUYER_REQUEST",
+            normalized_text=text,
+            interpreted_event="UPDATE",
+            extracted_entities=entities,
+            transaction_payload={
+                "product": "poivrons", "unit": "KG", "unit_was_assumed": True,
+            },
+        )
+        return run(memory_update(st, StubRuntime()))["transaction_payload"]
+
+    def test_llm_extracted_unit_equal_to_the_assumed_one_clears_the_flag(self):
+        payload = self._turn(self._TEXT, {"unit": "KG", "quantity": 65, "price": 375})
+        assert "unit_was_assumed" not in payload
+
+    def test_unit_written_in_the_text_clears_the_flag_even_without_llm_unit(self):
+        payload = self._turn(self._TEXT, {"quantity": 65, "price": 375})
+        assert "unit_was_assumed" not in payload
+
+    def test_a_text_without_any_unit_keeps_the_flag(self):
+        payload = self._turn("je veux du poivron pas cher", {"unit": "KG"})
+        assert payload.get("unit_was_assumed") is True
+
+
 # =====================================================================
 # MEMORY — enrichissement et gardes anti-hallucination
 # =====================================================================

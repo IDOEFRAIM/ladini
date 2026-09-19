@@ -125,6 +125,20 @@ _REJECT_EXACT_PHRASES = frozenset(
 )
 
 
+def _fix_bare_confirmation_typo(text: str) -> str:
+    """« confimer », « confirmr », « anuler » → forme canonique. Incident
+    2026-09-19 : un producteur a tapé « confimer » sur son mobile ; le mot
+    n'étant pas dans le vocabulaire fermé, le LLM répondait « je ne comprends
+    pas ». Borné : un SEUL mot d'au moins 6 lettres, proche (difflib ≥ 0.85)
+    de « confirmer »/« annuler » — jamais une phrase, jamais un autre mot."""
+    import difflib
+
+    if " " in text or len(text) < 6 or text in _CONFIRM_EXACT_PHRASES | _REJECT_EXACT_PHRASES:
+        return text
+    close = difflib.get_close_matches(text, ("confirmer", "annuler"), n=1, cutoff=0.85)
+    return close[0] if close else text
+
+
 def _cart_pending_signal(state: Dict[str, Any]) -> bool:
     """Panier acheteur en attente de précommande — signal d'ÉTAT (phase CART
     + panier non vide), jamais un mot-clé du texte. Source unique pour les
@@ -1445,7 +1459,7 @@ def _degraded_fallback(role_up: str, text: str) -> Optional[Dict[str, Any]]:
 
 
 async def _bare_confirmation_for_pending_producer_order(
-    mc_runtime: Any, phone: str, bare_text: str
+    mc_runtime: Any, phone: str, bare_text: str, role: str = "PRODUCER"
 ) -> Optional[Dict[str, Any]]:
     """Incident réel RÉPÉTÉ (2026-09-14, 2026-09-15) : un producteur reçoit
     une notification PROACTIVE hors-conversation ("Nouvelle commande —
@@ -1469,6 +1483,7 @@ async def _bare_confirmation_for_pending_producer_order(
     confirmer", ou un menu numéroté) si ce n'était pas le cas, donc aucun
     risque d'action erronée à se tromper ici : au pire, ce filet ne
     s'applique pas et le message retombe sur la classification normale."""
+    bare_text = _fix_bare_confirmation_typo(bare_text)
     if bare_text in _CONFIRM_EXACT_PHRASES:
         intent = "PRODUCER_CONFIRM_ORDER"
     elif bare_text in _REJECT_EXACT_PHRASES:
@@ -1482,9 +1497,10 @@ async def _bare_confirmation_for_pending_producer_order(
             OrderTrackingGateway,
         )
 
-        result = await OrderTrackingGateway(mc_runtime).get_producer_orders(
-            phone=phone, status="PENDING_PRODUCER_CONFIRMATION"
-        )
+        # UN seul appel sans filtre de statut (même source que la liste
+        # "Vos ventes" affichée à l'utilisateur) : on distingue ainsi
+        # "aucune vente" de "ventes déjà confirmées, rien en attente".
+        result = await OrderTrackingGateway(mc_runtime).get_producer_orders(phone=phone)
     except Exception as exc:
         logger.warning(
             "[Interpreter] bare_confirmation_pending_producer_order: "
@@ -1492,8 +1508,24 @@ async def _bare_confirmation_for_pending_producer_order(
             exc,
         )
         return None
-    candidates = (result or {}).get("data") or []
-    if len(candidates) != 1:
+    sales = (result or {}).get("data") or []
+    pending = [
+        o
+        for o in sales
+        if str(o.get("status") or "").upper() == "PENDING_PRODUCER_CONFIRMATION"
+    ]
+    if len(pending) > 1:
+        return None
+    if not pending:
+        # Incident réel (2026-09-19) : la liste "Vos ventes" montrait une
+        # vente déjà 🟢 (gagnée par enchère → CONFIRMED d'emblée) et l'invite
+        # "Tapez *confirmer*" ; "confirmer" partait au LLM → "je ne comprends
+        # pas". On route vers le résolveur, qui répond "aucune commande en
+        # attente". Limité à "confirmer" (jamais "annuler", ambigu avec
+        # l'annulation d'un achat) et aux utilisateurs ayant des ventes.
+        if intent != "PRODUCER_CONFIRM_ORDER" or not sales:
+            return None
+    elif role != "PRODUCER" and intent != "PRODUCER_CONFIRM_ORDER":
         return None
     return {
         "interpreted_event": "NEW_TASK",
@@ -1675,12 +1707,15 @@ def make_input_interpreter(role: str = "PRODUCER"):
         # déjà actif (sinon `_interpret_fast_path` ci-dessus a déjà traité
         # le cas, en échoant le goal verrouillé) et que le rôle est
         # PRODUCER.
-        if not locked_goal and role_up == "PRODUCER" and not onboarding_active:
+        if not locked_goal and role_up in ("PRODUCER", "BUYER") and not onboarding_active:
             _bare_confirm_text = (
                 text.strip().lower().strip(" .!?,;: ")
             )
             _pending_check = await _bare_confirmation_for_pending_producer_order(
-                mc_runtime, str(state.get("user_phone") or ""), _bare_confirm_text
+                mc_runtime,
+                str(state.get("user_phone") or ""),
+                _bare_confirm_text,
+                role_up,
             )
             if _pending_check is not None:
                 logger.info(

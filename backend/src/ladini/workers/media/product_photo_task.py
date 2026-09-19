@@ -280,6 +280,7 @@ async def _process(
     *,
     media_id: str = "",
     message_sid: Optional[str] = None,
+    binary: Optional[bytes] = None,
 ) -> None:
     from ladini.api.tasks import send_confirmation_text
     from ladini.services.pending_photo_target import (
@@ -306,7 +307,11 @@ async def _process(
     # twilio_webhook.py` — `MediaUrl0`). `media_id` a priorité : c'est le
     # SEUL champ que le webhook Cloud API peut renseigner.
     try:
-        if media_id:
+        if binary is not None:
+            # Octets déjà reçus (webchat : image envoyée directement en HTTP,
+            # rien à télécharger chez Meta/Twilio).
+            resolved_content_type = media_content_type
+        elif media_id:
             binary, resolved_content_type = await download_cloud_api_media(media_id)
         else:
             binary, resolved_content_type = await download_twilio_media(media_url)
@@ -833,3 +838,28 @@ def send_search_result_photos_task(
     except Exception:
         logger.exception("SEARCH_RESULT_PHOTO_FAILED | phone=%s", _mask(phone_number))
         raise
+
+
+# ── Points d'entrée PUBLICS pour le canal webchat (réponse en HTTP) ────────
+# Le webchat appelle ces coroutines DANS le process API, sous
+# `core/reply_sink.py::collect_replies` — les confirmations reviennent dans
+# la réponse HTTP au lieu de partir sur WhatsApp.
+
+
+async def handle_inbound_photo_bytes(
+    phone_number: str, binary: bytes, content_type: str
+) -> None:
+    await _process(
+        phone_number, "", (content_type or "").lower(), binary=binary
+    )
+
+
+def has_pending_photo_selection(phone_number: str) -> bool:
+    try:
+        return bool(_redis().exists(pending_photo_key(phone_number)))
+    except Exception:
+        return False
+
+
+async def handle_pending_photo_selection(phone_number: str, selection_text: str) -> None:
+    await _resolve_pending(phone_number, selection_text)
