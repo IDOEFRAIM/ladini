@@ -4,8 +4,8 @@ import logging
 import uuid
 from typing import Any, Dict, Tuple
 
-from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -14,12 +14,14 @@ from ladini.domain.models import (
     DeliveryAgent,
     Farm,
     Producer,
+    SubCategory,
     User,
     Zone,
 )
 
 from .common import normalize_phone
 from .errors import BusinessRuleException
+from .search import fuzzy_match, similarity_rank
 
 logger = logging.getLogger("Ladini.BaseMixin")
 
@@ -736,4 +738,94 @@ class BaseMixin:
 
         except Exception as e:
             logger.error(f"[BaseMixin] Erreur lors de la récupération des zones: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def get_product_category_unit_config(self, product_name: str) -> Dict[str, Any]:
+        """Config d'unités (ensemble autorisé + unité prioritaire) pour la
+        sous-catégorie dont le nom matche `product_name`.
+
+        (2026-09-19, retour produit) — remplace le pari fait sur le texte
+        libre par la config ADMIN de la sous-catégorie, sur le même patron que
+        `SubCategory.minimum_order_quantity`/`minimum_order_unit`
+        (`domain/governance/models.py`, `domain/order_policy.py`). Consommée
+        par `resolve_product_unit(..., category_config=...)`
+        (`domain/quantity_unit.py`).
+
+        ⚠️ `priority_unit`/`allowed_units` N'EXISTENT PAS ENCORE dans la table
+        réelle `governance.sub_categories` (gérée côté site par Drizzle, hors
+        de ce dépôt) — seul un SELECT brut (hors ORM) est utilisé ici, dans un
+        SAVEPOINT dédié (`begin_nested`), pour que l'absence de ces colonnes
+        ne fasse jamais échouer ni la résolution de sous-catégorie qui
+        précède, ni le reste de la transaction de l'appelant : tant que le
+        site n'a pas ajouté ces colonnes, cette méthode se dégrade proprement
+        en `{"status": "error"}` et `resolve_product_unit` retombe sur son
+        comportement historique. Dès qu'elles existent (types attendus :
+        `priority_unit text`, `allowed_units text[]`), cette méthode les
+        consomme automatiquement, sans changement de code.
+        """
+        current_session = self.session
+        if not current_session:
+            raise RuntimeError("Database session missing.")
+
+        name_clean = (product_name or "").strip()
+        if not name_clean:
+            return {"status": "error", "message": "product_name vide."}
+
+        try:
+            # 1. Résolution du produit -> sous-catégorie, même patron
+            # trigram que `producer.py::create_product`.
+            sub_cat_stmt = (
+                select(SubCategory.id)
+                .where(fuzzy_match(SubCategory.name, name_clean))
+                .order_by(similarity_rank(SubCategory.name, name_clean))
+                .limit(1)
+            )
+            sub_category_id = await current_session.scalar(sub_cat_stmt)
+            if not sub_category_id:
+                return {
+                    "status": "error",
+                    "message": f"Sous-categorie introuvable pour '{product_name}'.",
+                }
+
+            # 2. Lecture défensive des colonnes futures. SAVEPOINT propre :
+            # si `priority_unit`/`allowed_units` n'existent pas encore, seul
+            # ce point de reprise est annulé (jamais toute la transaction).
+            row = None
+            try:
+                async with current_session.begin_nested():
+                    raw = await current_session.execute(
+                        text(
+                            "SELECT priority_unit, allowed_units "
+                            "FROM governance.sub_categories WHERE id = :id"
+                        ),
+                        {"id": sub_category_id},
+                    )
+                    row = raw.mappings().first()
+            except (ProgrammingError, OperationalError) as exc:
+                logger.info(
+                    "[BaseMixin] get_product_category_unit_config: colonnes "
+                    "unite pas encore en base (%s) — comportement historique.",
+                    exc,
+                )
+                row = None
+
+            allowed_units = list(row["allowed_units"]) if row and row.get("allowed_units") else []
+            if not allowed_units:
+                return {
+                    "status": "error",
+                    "message": "Aucune config d'unite pour cette sous-categorie.",
+                }
+
+            return {
+                "status": "success",
+                "data": {
+                    "priority_unit": row.get("priority_unit"),
+                    "allowed_units": allowed_units,
+                },
+            }
+
+        except Exception as e:
+            logger.error(
+                f"[BaseMixin] Erreur get_product_category_unit_config('{product_name}'): {e}"
+            )
             return {"status": "error", "message": str(e)}

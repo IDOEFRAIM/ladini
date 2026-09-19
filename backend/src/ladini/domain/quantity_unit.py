@@ -256,10 +256,41 @@ def extract_unit_only_from_text(text: str) -> Optional[str]:
 _LIVESTOCK_IMPOSSIBLE_UNITS = frozenset({"KG", "TONNE", "LITRE"})
 
 
+def _clean_category_config(
+    category_config: Optional[Dict[str, Any]],
+) -> "Optional[tuple[Optional[str], frozenset[str]]]":
+    """Normalise un `category_config` brut (venant d'un outil MCP, donc
+    potentiellement `None`/mal formé) en `(priority_unit, allowed_units)`.
+    Renvoie `None` si la config est absente ou inexploitable — jamais une
+    exception : une config catégorie mal formée ne doit JAMAIS faire échouer
+    la résolution d'unité, seulement la dégrader au comportement historique."""
+    if not category_config or not isinstance(category_config, dict):
+        return None
+    raw_allowed = category_config.get("allowed_units") or []
+    if not isinstance(raw_allowed, (list, tuple)):
+        return None
+    allowed = frozenset(
+        normalize_unit(u) or str(u).strip().upper() for u in raw_allowed if u
+    )
+    if not allowed:
+        return None
+    raw_priority = category_config.get("priority_unit")
+    priority = (normalize_unit(raw_priority) or str(raw_priority).strip().upper()) if raw_priority else None
+    if priority and priority not in allowed:
+        # Config incohérente (l'unité prioritaire n'est pas dans l'ensemble
+        # autorisé) — on préfère l'ignorer plutôt que de retourner une unité
+        # que l'appelant n'attend pas dans `allowed_units`.
+        priority = None
+    if priority is None and len(allowed) == 1:
+        priority = next(iter(allowed))
+    return priority, allowed
+
+
 def resolve_product_unit(
     product: Any,
     current_unit: Any = None,
     text_unit: Any = None,
+    category_config: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """AUTORITÉ UNIQUE : quelle unité pour ce produit ?
 
@@ -277,10 +308,34 @@ def resolve_product_unit(
     existait pourtant, mais ne pouvait que COMBLER un vide, jamais CORRIGER
     une valeur déjà posée.
 
+    (2026-09-19, retour produit — DESIGN PATTERN, plus une regex) : deviner
+    l'unité depuis le texte libre (élevage → mots-clés codés en dur, sinon
+    rien) reste fondamentalement un pari — chaque incident (LITRE pour des
+    bœufs, KG pour des poulets...) a forcé un correctif ad hoc de plus. La
+    VRAIE source de vérité doit être la configuration ADMIN par
+    catégorie/sous-catégorie (déjà le patron établi pour
+    `SubCategory.minimum_order_quantity`/`minimum_order_unit`, voir
+    `domain/governance/models.py`) : un ENSEMBLE d'unités autorisées + une
+    unité PRIORITAIRE pour standardiser (« lait » → LITRE seul ; « bœuf » →
+    TETE/UNITE ; « maïs » → G/KG/TONNE/SAC avec un ordre de priorité). Cette
+    config n'existe pas encore en base (à configurer côté site/Drizzle,
+    hors de ce dépôt) — `category_config` est donc `None` par défaut
+    aujourd'hui, ce qui fait tomber le comportement EXACTEMENT sur les règles
+    1-4 historiques ci-dessous (zéro régression). Dès qu'un appelant peut
+    fournir une config réelle (voir `services/database/base.py::
+    get_product_category_unit_config`, résolution paresseuse et
+    défensive), elle devient PRIORITAIRE sur tout le reste — voir la
+    RÈGLE 0 ci-dessous.
+
     ## La règle
 
     Précédence par FIABILITÉ de la source, jamais par ordre d'exécution :
 
+    0. CONFIG CATÉGORIE (si fournie) — `text_unit`/`current_unit` ne sont
+       respectés QUE s'ils appartiennent à `allowed_units` (l'admin a
+       explicitement autorisé cette unité pour cette catégorie) ; sinon
+       `priority_unit` s'applique, quel que soit ce que le texte libre ou
+       l'état courant portaient — c'est la définition même de « standardiser ».
     1. `text_unit` — l'utilisateur a écrit l'unité noir sur blanc.
     2. NATURE DU PRODUIT, en CORRECTION — `current_unit` est une unité de
        MASSE ou de VOLUME (`_LIVESTOCK_IMPOSSIBLE_UNITS` : KG, TONNE, LITRE)
@@ -299,6 +354,11 @@ def resolve_product_unit(
     4. NATURE DU PRODUIT, en DÉFAUT — rien de connu : TETE pour un élevage,
        `None` sinon (à l'appelant de demander plutôt que de deviner).
 
+    Les règles 1-4 restent le FILET DE SÉCURITÉ pour tout produit dont la
+    catégorie n'est pas encore configurée (ou pas encore résolue côté
+    catalogue) — jamais supprimées, seulement court-circuitées dès qu'une
+    config catégorie fiable existe.
+
     ## Périmètre assumé
 
     Cette fonction décide « quelle unité pour CE produit », pas « l'utilisateur
@@ -309,6 +369,24 @@ def resolve_product_unit(
     un passage en SAC). Les appelants ne fournissent donc `text_unit` que
     lorsqu'ils sont légitimes à trancher ce point.
     """
+    cleaned_category = _clean_category_config(category_config)
+    if cleaned_category is not None:
+        priority_unit, allowed_units = cleaned_category
+        if text_unit:
+            canonical = normalize_unit(text_unit) or str(text_unit).strip().upper()
+            if canonical in allowed_units:
+                return canonical
+        if current_unit not in (None, "", [], {}):
+            canonical = normalize_unit(current_unit) or str(current_unit).strip().upper()
+            if canonical in allowed_units:
+                return canonical
+        if priority_unit:
+            return priority_unit
+        # Config présente mais sans unité prioritaire exploitable (ensemble à
+        # plusieurs unités, aucune priorité valide) : on retombe sur les
+        # règles historiques plutôt que de deviner arbitrairement laquelle
+        # des `allowed_units` choisir.
+
     if text_unit:
         canonical = normalize_unit(text_unit)
         if canonical:
@@ -360,6 +438,93 @@ _SCAN_CURRENCY_RE = re.compile(
 )
 _SCAN_NUMBER_RE = re.compile(r"(\d+[\d\s,.]*)")
 
+# Mots-like tokens à comparer à "fcfa"/"cfa" en repli flou (Bug B, 2026-09-19).
+_CURRENCY_WORDLIKE_RE = re.compile(r"[a-zàâäéèêëïîôöùûüÿç]+")
+
+
+def _edit_distance_at_most_one(a: str, b: str) -> bool:
+    """True si *a* et *b* diffèrent d'au plus UNE insertion/suppression/
+    substitution/transposition de deux caractères ADJACENTS (distance de
+    Damerau-Levenshtein <= 1) — implémentation minimale (pas de dépendance
+    externe), déjà utilisée nulle part ailleurs dans ce module, mais
+    volontairement générique (pas un correctif ad hoc pour un seul mot) :
+    voir `_looks_like_fcfa_typo`. La transposition est incluse car c'est un
+    type de faute de frappe mobile aussi courant que l'insertion/omission
+    (ex: "fcaf" pour "fcfa")."""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        mismatches = [i for i in range(la) if a[i] != b[i]]
+        if len(mismatches) <= 1:
+            return True
+        if (
+            len(mismatches) == 2
+            and mismatches[1] == mismatches[0] + 1
+            and a[mismatches[0]] == b[mismatches[1]]
+            and a[mismatches[1]] == b[mismatches[0]]
+        ):
+            return True  # transposition de deux caractères adjacents
+        return False
+    longer, shorter = (a, b) if la > lb else (b, a)
+    i = j = 0
+    skipped = False
+    while i < len(longer) and j < len(shorter):
+        if longer[i] == shorter[j]:
+            i += 1
+            j += 1
+            continue
+        if skipped:
+            return False
+        skipped = True
+        i += 1
+    return True
+
+
+def _looks_like_fcfa_typo(word: str) -> bool:
+    """Incident réel (2026-09-19) : « 495000 fcfca par unite » — faute de
+    frappe WhatsApp sur "fcfa" (une lettre insérée) faisait échouer
+    `_SCAN_CURRENCY_RE` (correspondance EXACTE), donc `near_currency=False` ;
+    le nombre était alors classé QUANTITÉ (voir la logique de sélection du
+    module appelant) au lieu de PRIX, écrasant la quantité déjà connue par le
+    montant du prix. Tolérance à UNE faute de frappe (edit-distance <= 1) sur
+    "fcfa" UNIQUEMENT — PAS "cfa" (3 lettres) : "ça" (mot français très
+    courant) est à distance 1 de "cfa" (suppression du "f"), ce qui aurait
+    classé "à PRIX" n'importe quel nombre suivi de "ça" ("ça coûte...", "25
+    sacs, ça part demain"...) — testé et confirmé faux positif avant ce
+    garde. "fcfa" (4 lettres, jamais un mot français par ailleurs) n'a pas ce
+    risque. Pas de tolérance non plus sur "francs"/"balles" (mots plus longs,
+    plus rares en faute de frappe à ce point)."""
+    return _edit_distance_at_most_one(word, "fcfa")
+
+
+def _near_currency_fuzzy(window: str) -> bool:
+    return any(_looks_like_fcfa_typo(w) for w in _CURRENCY_WORDLIKE_RE.findall(window))
+
+
+def _find_scan_unit_token(window: str) -> Optional[str]:
+    """Comme `_SCAN_UNIT_RE.search(window).group(1)`, mais applique la MÊME
+    garde anti-élision que `extract_unit_only_from_text` (voir sa docstring,
+    incidents 2026-09-08/2026-09-15) — jamais répliquée ici avant (Bug A,
+    2026-09-19) : « l unite coute 495000 fcfa » matchait "l" isolé (symbole du
+    LITRE) en première position, AVANT d'atteindre "unite" un peu plus loin,
+    faisant afficher "FCFA/LITRE" pour une vente de bœufs. `_SCAN_UNIT_RE.search`
+    ne renvoie que le PREMIER match par position ; on itère ici sur TOUS les
+    matches et on saute ceux qui échouent la garde, au lieu de s'arrêter au
+    premier trouvé."""
+    for m in _SCAN_UNIT_RE.finditer(window):
+        if m.end() < len(window) and window[m.end()] in _ELISION_CHARS:
+            continue
+        token = normalize_unit_token(m.group(1))
+        if token in _SINGLE_LETTER_UNIT_SYMBOLS:
+            before = window[: m.start()].rstrip()
+            if not before or not before[-1].isdigit():
+                continue
+        return m.group(1)
+    return None
+
 
 @dataclass(frozen=True)
 class NumberCandidate:
@@ -387,13 +552,16 @@ def scan_number_candidates(text: str) -> "list[NumberCandidate]":
             continue
         after = clean[m.end() : m.end() + _SCAN_WINDOW]
         before = clean[max(0, m.start() - _SCAN_WINDOW) : m.start()]
-        near_currency = bool(_SCAN_CURRENCY_RE.search(after)) or bool(
-            _SCAN_CURRENCY_RE.search(before)
+        near_currency = (
+            bool(_SCAN_CURRENCY_RE.search(after))
+            or bool(_SCAN_CURRENCY_RE.search(before))
+            or _near_currency_fuzzy(after)
+            or _near_currency_fuzzy(before)
         )
-        unit_match = _SCAN_UNIT_RE.search(after) or _SCAN_UNIT_RE.search(before)
+        unit_token = _find_scan_unit_token(after) or _find_scan_unit_token(before)
         mapped_unit = (
-            UNIT_SYNONYMS.get(normalize_unit_token(unit_match.group(1) or ""))
-            if unit_match
+            UNIT_SYNONYMS.get(normalize_unit_token(unit_token))
+            if unit_token
             else None
         )
         out.append(

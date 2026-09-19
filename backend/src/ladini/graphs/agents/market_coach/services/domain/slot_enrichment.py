@@ -73,6 +73,29 @@ class SlotValidationError(RuntimeError):
     """Raised when an LLM payload fails schema validation."""
 
 
+def _extract_category_unit_config(
+    raw: Any, *, _depth: int = 0
+) -> Optional[Dict[str, Any]]:
+    """Déroule l'enveloppe MCP (`{"status", "data": {...}}`, parfois imbriquée
+    une couche de plus par le transport) jusqu'au dict `{priority_unit,
+    allowed_units}` attendu par `resolve_product_unit`. Défensif par
+    construction — reconnaît la charge utile à son empreinte
+    (`allowed_units`) plutôt qu'à une profondeur fixe, pour que
+    `services/database/base.py::get_product_category_unit_config` reste
+    libre de faire évoluer son enveloppe sans casser cet appelant."""
+    if _depth > 4 or not isinstance(raw, dict):
+        return None
+    if "allowed_units" in raw:
+        return raw
+    for key in ("data", "result", "payload"):
+        nested = raw.get(key)
+        if isinstance(nested, dict):
+            found = _extract_category_unit_config(nested, _depth=_depth + 1)
+            if found:
+                return found
+    return None
+
+
 # Mots désignant le TYPE de production (culture/élevage), jamais un produit.
 # Restreint aux mots GÉNÉRIQUES : surtout PAS "poulet"/"poussins"/"mais" qui
 # sont de vrais produits. Empêche qu'une réponse à « culture ou élevage ? »
@@ -506,10 +529,40 @@ async def enrich_payload_from_text(
         and payload.get("unit") in (None, "", [], {})
         and not _unit_text_hint
     )
+    # (2026-09-19, retour produit — DESIGN PATTERN, plus une regex) : avant
+    # de retomber sur les règles 1-4 (texte libre / nature du produit
+    # devinée), on demande à l'admin s'il a déjà configuré un ENSEMBLE
+    # d'unités autorisées + une unité PRIORITAIRE pour la sous-catégorie de
+    # CE produit (même patron que `SubCategory.minimum_order_quantity`).
+    # Cette config n'existe pas encore en base aujourd'hui (à ajouter côté
+    # site/Drizzle) — `get_product_category_unit_config` s'appuie sur un
+    # SELECT défensif qui se dégrade en erreur tant que les colonnes
+    # n'existent pas (voir `services/database/base.py`), donc `category_config`
+    # reste `None` et `resolve_product_unit` retombe intégralement sur son
+    # comportement historique : zéro changement de comportement tant que
+    # rien n'est configuré.
+    category_config = None
+    _product_name = payload.get("product")
+    if _product_name and isinstance(_product_name, str) and mc_runtime is not None:
+        try:
+            _raw_category_config = await mc_runtime.call_db(
+                "get_product_category_unit_config", product_name=_product_name
+            )
+            category_config = _extract_category_unit_config(_raw_category_config)
+        except Exception as exc:
+            logger.debug(
+                "get_product_category_unit_config indisponible pour '%s' (%s) "
+                "— repli sur les regles historiques de resolve_product_unit.",
+                _product_name,
+                exc,
+            )
+            category_config = None
+
     resolved_unit = _resolve_product_unit(
         payload.get("product"),
         current_unit=payload.get("unit"),
         text_unit=_unit_text_hint,
+        category_config=category_config,
     )
     # `resolve_product_unit` refuse À DESSEIN de deviner pour une culture
     # (règle 4 : `None`, « à l'appelant de demander ») — mais rien

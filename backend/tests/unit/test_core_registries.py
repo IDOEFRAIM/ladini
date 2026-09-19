@@ -276,6 +276,98 @@ class TestUnitAuthority:
         assert resolve_product_unit("tomates", current_unit="CAGEOT") == "CAGEOT"
 
 
+class TestUnitAuthorityCategoryConfig:
+    """(2026-09-19, retour produit) — `category_config` : l'admin a
+    configuré un ENSEMBLE d'unités autorisées + une unité PRIORITAIRE pour
+    standardiser (ex: lait -> LITRE seul ; maïs -> G/KG/TONNE/SAC avec
+    priorité). Quand elle est fournie, elle prime sur TOUT le reste — c'est
+    la définition même de « standardiser » ; quand elle est absente/None
+    (comportement réel aujourd'hui, tant que le site n'a rien configuré),
+    `resolve_product_unit` retombe EXACTEMENT sur les règles 1-4
+    historiques (`TestUnitAuthority` ci-dessus), zéro régression."""
+
+    def test_text_unit_outside_allowed_set_is_overridden_by_priority(self):
+        """Le producteur écrit une unité qui n'est PAS dans l'ensemble admin
+        -> on standardise sur `priority_unit`, on ne suit pas le texte."""
+        config = {"priority_unit": "LITRE", "allowed_units": ["LITRE"]}
+        assert (
+            resolve_product_unit(
+                "lait", current_unit=None, text_unit="kg", category_config=config
+            )
+            == "LITRE"
+        )
+
+    def test_text_unit_inside_allowed_set_is_honored(self):
+        config = {
+            "priority_unit": "TONNE",
+            "allowed_units": ["G", "KG", "TONNE", "SAC"],
+        }
+        assert (
+            resolve_product_unit(
+                "mais", current_unit=None, text_unit="sacs", category_config=config
+            )
+            == "SAC"
+        )
+
+    def test_current_unit_outside_allowed_set_is_corrected_to_priority(self):
+        """Une unité déjà posée (tour précédent) hors de l'ensemble admin
+        doit être corrigée, pas simplement conservée."""
+        config = {"priority_unit": "TETE", "allowed_units": ["TETE", "UNITE"]}
+        assert (
+            resolve_product_unit(
+                "boeufs", current_unit="LITRE", category_config=config
+            )
+            == "TETE"
+        )
+
+    def test_current_unit_inside_allowed_set_is_kept_over_priority(self):
+        config = {"priority_unit": "TETE", "allowed_units": ["TETE", "UNITE"]}
+        assert (
+            resolve_product_unit(
+                "boeufs", current_unit="UNITE", category_config=config
+            )
+            == "UNITE"
+        )
+
+    def test_nothing_known_falls_back_to_priority_unit(self):
+        config = {"priority_unit": "LITRE", "allowed_units": ["LITRE"]}
+        assert (
+            resolve_product_unit("lait", category_config=config) == "LITRE"
+        )
+
+    def test_none_config_is_the_default_and_changes_nothing(self):
+        """Non-régression explicite : `category_config=None` (valeur par
+        défaut du paramètre) doit produire EXACTEMENT le même résultat que
+        sans le paramètre du tout."""
+        assert resolve_product_unit(
+            "poulets", current_unit="KG", category_config=None
+        ) == resolve_product_unit("poulets", current_unit="KG")
+
+    def test_malformed_config_degrades_to_historical_rules_never_raises(self):
+        """Une config mal formée (venant d'un futur outil MCP, donc pas sous
+        notre contrôle) ne doit jamais faire planter la résolution d'unité —
+        seulement se dégrader au comportement historique."""
+        assert resolve_product_unit(
+            "poulets", current_unit="KG", category_config={}
+        ) == "TETE"
+        assert resolve_product_unit(
+            "poulets", current_unit="KG", category_config={"allowed_units": []}
+        ) == "TETE"
+        assert resolve_product_unit(
+            "poulets",
+            current_unit="KG",
+            category_config={"priority_unit": "LITRE", "allowed_units": ["LITRE"]},
+        ) == "LITRE"
+        # unité prioritaire incohérente (absente de l'ensemble autorisé) :
+        # ignorée, mais l'ensemble reste exploitable si non-ambigu (1 seule
+        # unité) ; sinon repli complet sur les règles 1-4.
+        assert resolve_product_unit(
+            "poulets",
+            current_unit="KG",
+            category_config={"priority_unit": "SAC", "allowed_units": ["TETE"]},
+        ) == "TETE"
+
+
 class TestUnitSlotDefaultIsProductAware:
     """Le défaut du slot `unit` était la constante « KG », posée sans aucune
     preuve — c'est elle qui gagnait ensuite contre la nature du produit."""

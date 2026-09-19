@@ -272,6 +272,78 @@ class TestUnitAssumedFlag:
             "SALES_PUBLISH_PRODUCT", StubRuntime(llm=None),
         ))
         assert p["unit"] == "SAC"
+
+
+class TestCategoryConfigWiringInSlotEnrichment:
+    """(2026-09-19, retour produit) — `enrich_payload_from_text` doit
+    interroger `get_product_category_unit_config` via `mc_runtime.call_db`
+    et laisser cette config PRIMER sur le texte libre quand elle est
+    fournie. Sans config (le cas par défaut aujourd'hui, colonnes pas
+    encore en base côté site), rien ne doit changer — voir la dernière
+    classe de ce groupe."""
+
+    def test_category_config_overrides_a_text_unit_outside_the_allowed_set(self):
+        runtime = StubRuntime(llm=None, responses={
+            "get_product_category_unit_config": {
+                "status": "success",
+                "data": {"priority_unit": "LITRE", "allowed_units": ["LITRE"]},
+            },
+        })
+        p = run(enrich_payload_from_text(
+            {"product": "lait", "quantity": 25, "price": 500},
+            "je vends 25 kg de lait a 500",
+            "SALES_PUBLISH_PRODUCT", runtime,
+        ))
+        assert p["unit"] == "LITRE"
+        assert "get_product_category_unit_config" in runtime.calls
+
+    def test_category_config_lets_an_allowed_text_unit_through(self):
+        runtime = StubRuntime(llm=None, responses={
+            "get_product_category_unit_config": {
+                "status": "success",
+                "data": {
+                    "priority_unit": "TONNE",
+                    "allowed_units": ["G", "KG", "TONNE", "SAC"],
+                },
+            },
+        })
+        p = run(enrich_payload_from_text(
+            {"product": "mais", "quantity": 8},
+            "je vends 8 sacs de mais",
+            "SALES_PUBLISH_PRODUCT", runtime,
+        ))
+        assert p["unit"] == "SAC"
+
+    def test_a_tool_failure_degrades_silently_to_the_historical_behaviour(self):
+        """`get_product_category_unit_config` peut échouer (colonnes pas
+        encore en base, réseau, etc.) — ça ne doit JAMAIS faire planter
+        l'enrichissement, seulement retomber sur les règles 1-4 historiques."""
+        def _boom(**kwargs):
+            raise RuntimeError("colonnes pas encore en base")
+
+        runtime = StubRuntime(llm=None, responses={
+            "get_product_category_unit_config": _boom,
+        })
+        p = run(enrich_payload_from_text(
+            {"product": "boeufs", "quantity": 25, "price": 425000},
+            "je veux vendre mes 25 boeufs",
+            "SALES_PUBLISH_PRODUCT", runtime,
+        ))
+        assert p["unit"] == "TETE"
+        assert p.get("unit_was_assumed") is True
+
+    def test_no_config_available_is_the_default_and_changes_nothing(self):
+        """Comportement RÉEL aujourd'hui (aucun outil configuré dans
+        `StubRuntime` -> réponse générique `{"status": "success", "data": {}}`,
+        donc aucune `allowed_units` exploitable) : identique à avant ce
+        chantier."""
+        p = run(enrich_payload_from_text(
+            {"product": "tomates", "quantity": 50, "unit": "KG", "price": 5000},
+            "je vends 50 kg de tomates a 5000",
+            "SALES_PUBLISH_PRODUCT", StubRuntime(llm=None),
+        ))
+        assert p["unit"] == "KG"
+        assert "unit_was_assumed" not in p
         assert "unit_was_assumed" not in p
 
     def test_surface_extraction(self):
