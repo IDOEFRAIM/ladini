@@ -16,7 +16,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from ladini.core.location import LocationOutcome
+from ladini.core.location import (
+    LocationOutcome,
+    parse_google_maps_coordinates,
+    persist_shared_location,
+)
 from ladini.graphs.agents.market_coach.core.base import get_node_logger
 from ladini.graphs.agents.market_coach.utils import (
     MarketRuntime,
@@ -173,6 +177,25 @@ async def resolve_gps_stage(
             ),
         )
 
+    # Lien Google Maps collé en TEXTE (client sans message `location` natif) :
+    # avant `is_yes`, sinon l'interpréteur le lit comme un « oui » et, sans
+    # point par défaut, on redemande le GPS en boucle. Même persistance +
+    # geofencing que le partage natif → mêmes issues, jamais de repli silencieux.
+    text_point = parse_google_maps_coordinates(user_text)
+    if text_point is not None:
+        lat, lon = text_point
+        outcome, _msg = await persist_shared_location(phone, lat, lon)
+        if outcome == LocationOutcome.NEW_LOCATION_ACCEPTED:
+            return GpsResolution(resolved=True, outcome=outcome, lat=lat, lon=lon)
+        return await resolve_gps_stage(
+            mc_runtime,
+            phone,
+            location_shared=True,
+            is_yes=False,
+            gps_default=gps_default,
+            location_outcome=outcome.value,
+        )
+
     if is_yes:
         default = gps_default or {}
         lat, lon = default.get("lat"), default.get("lon")
@@ -194,9 +217,9 @@ async def resolve_gps_stage(
     # Texte libre (ni "oui", ni position partagée) : reconnaître ce qui a été
     # dit avant de rappeler le bouton GPS, au lieu du même rappel figé en
     # boucle — voir [[precommande-architecture-consolidation-2026-08]].
-    # Aucun parseur de texte/URL n'existe (mandat §29 — décision de périmètre
-    # séparée) : un lien Google Maps collé ici est traité comme un texte
-    # libre quelconque, jamais silencieusement ignoré ni faussement accepté.
+    # Seuls les liens Google Maps à coordonnées explicites sont parsés (plus
+    # haut) ; adresses/plus codes/liens courts restent du texte libre, jamais
+    # faussement acceptés.
     note = await llm_deviation_reply(mc_runtime, user_text, _GPS_STAGE_CONTEXT)
     message = f"{note}\n\n{_GPS_TEXT_REMINDER}" if note else _GPS_TEXT_REMINDER
     return GpsResolution(

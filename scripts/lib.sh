@@ -369,6 +369,51 @@ wait_http() {
   done
 }
 
+# ── Validation Load Balancer / chemin public — provider-neutre ─────
+# (2026-09-19, incident réel — `HEALTH_TIMEOUT: unbound variable`) :
+# `cluster_deploy.sh` référençait `$HEALTH_TIMEOUT` pour sa dernière étape
+# (health-check public post-rollout, cluster déjà déployé et healthy sur
+# tous les nodes) sans jamais la définir dans SON PROPRE scope — cette
+# variable n'existe que dans `node_deploy.sh`/`rollback.sh` (processus SSH
+# distincts, sur le node distant, qui n'exportent rien en retour vers
+# l'orchestrateur). Sous `set -euo pipefail`, toute référence à une
+# variable jamais assignée est fatale. Les deux fonctions ci-dessous
+# portent chacune leur PROPRE défaut explicite (même convention
+# `HEALTH_TIMEOUT`, même valeur 180s que node_deploy.sh/rollback.sh — voir
+# leurs propres `HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"`) : impossible de
+# reproduire ce bug depuis un site d'appel qui oublierait de la définir.
+#
+# Extraites ici (plutôt que codées en dur dans cluster_deploy.sh) pour être
+# testables en isolation, sans SSH/inventaire/migrations — voir
+# scripts/test/test-cluster-deploy-lb-validation.sh.
+
+# resolve_public_health_url : dérive l'URL de health-check PUBLIQUE à
+# sonder. `PUBLIC_HEALTH_URL` explicite en priorité, sinon dérivée de
+# `PUBLIC_DOMAIN` (`https://$PUBLIC_DOMAIN/health/ready`), sinon CHAÎNE
+# VIDE — ce n'est PAS une erreur : ça signifie "pas de LB/domaine public
+# dans cet environnement" (ex: single-node de test), l'appelant doit alors
+# SAUTER la validation plutôt que d'échouer. Fonction PURE, aucun accès
+# réseau, jamais de crash même si les deux variables sont totalement
+# absentes de l'environnement.
+resolve_public_health_url() {
+  if [ -n "${PUBLIC_HEALTH_URL:-}" ]; then
+    printf '%s' "$PUBLIC_HEALTH_URL"
+  elif [ -n "${PUBLIC_DOMAIN:-}" ]; then
+    printf 'https://%s/health/ready' "$PUBLIC_DOMAIN"
+  fi
+}
+
+# validate_public_health <url> [timeout_s] : sonde `<url>` jusqu'à 200 (via
+# wait_http, donc curl borné --max-time 5 par tentative + retry toutes les
+# 3s jusqu'au timeout global — voir wait_http). `timeout_s` retombe sur
+# `$HEALTH_TIMEOUT` si définie (convention partagée avec node_deploy.sh/
+# rollback.sh), sinon 180s en dur — JAMAIS une référence non gardée.
+validate_public_health() {
+  local url="${1:?url requise}"
+  local timeout="${2:-${HEALTH_TIMEOUT:-180}}"
+  wait_http "$url" "$timeout" 200
+}
+
 # ── Migrations : classer une release ────────────────────────────
 # ROLLBACK_SAFE si aucune migration DB dans le diff, ou seulement des
 # migrations EXPAND. Sinon MIGRATION_REQUIRES_MANUAL_RECOVERY.

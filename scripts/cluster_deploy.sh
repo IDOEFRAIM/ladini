@@ -39,6 +39,17 @@ INVENTORY_FILE="${2:-${LADINI_ROOT}/infra/inventory.yml}"
 NODE_DEPLOY_DIR="${NODE_DEPLOY_DIR:-/opt/ladini/app}"
 CLUSTER_SSH_KEY="${CLUSTER_SSH_KEY:-}"
 
+# (2026-09-19, incident réel — `HEALTH_TIMEOUT: unbound variable` à l'étape
+# 7/9) : même convention/même défaut que node_deploy.sh/rollback.sh
+# (`HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"`) — mais déclarée ICI aussi,
+# dans le scope de CET orchestrateur, qui ne l'a jamais héritée de ces
+# scripts-là (processus SSH distincts sur les nodes distants, rien n'est
+# exporté en retour). Voir lib.sh::validate_public_health pour la garde
+# supplémentaire côté fonction (défense en profondeur — cette ligne ne
+# doit toutefois jamais être retirée, c'est ELLE la source de vérité pour
+# un opérateur qui veut surcharger ce délai sur ce script précis).
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
+
 SSH_OPTS=(
   -o BatchMode=yes
   -o ConnectTimeout=10
@@ -401,17 +412,61 @@ fi
 # vers un node "app" à jour. Sans `PUBLIC_HEALTH_URL`/`PUBLIC_DOMAIN` fourni
 # (single-node sans LB, environnement de test…), cette étape reste un no-op
 # documenté plutôt qu'une vérification inventée.
+#
+# `resolve_public_health_url`/`validate_public_health` (lib.sh) portent
+# CHACUNE leur propre défaut explicite pour `HEALTH_TIMEOUT` — voir leur
+# docstring pour l'incident (`unbound variable`) que cette extraction
+# corrige à la racine, pas seulement au site d'appel.
 # ═════════════════════════════════════════════════════════════════════
-PUBLIC_HEALTH_URL="${PUBLIC_HEALTH_URL:-}"
-if [ -z "$PUBLIC_HEALTH_URL" ] && [ -n "${PUBLIC_DOMAIN:-}" ]; then
-  PUBLIC_HEALTH_URL="https://${PUBLIC_DOMAIN}/health/ready"
-fi
+PUBLIC_HEALTH_URL="$(resolve_public_health_url)"
 
 if [ -n "$PUBLIC_HEALTH_URL" ]; then
-  log "7/9 · validation Load Balancer/chemin public (${PUBLIC_HEALTH_URL})…"
-  wait_http "$PUBLIC_HEALTH_URL" "$HEALTH_TIMEOUT" 200 \
-    || die "chemin public non healthy après le rollout (${PUBLIC_HEALTH_URL}) — tous les nodes individuels ont pourtant validé leur propre santé en loopback : suspectez le LB (target unhealthy, DNS, Cloudflare) plutôt que l'application. Voir infra/providers/hetzner/README.md § Load Balancer."
-  log "   ✓ ${PUBLIC_HEALTH_URL} = 200"
+  log "7/9 · validation Load Balancer/chemin public (${PUBLIC_HEALTH_URL}, timeout ${HEALTH_TIMEOUT}s)…"
+  if validate_public_health "$PUBLIC_HEALTH_URL" "$HEALTH_TIMEOUT"; then
+    log "   ✓ ${PUBLIC_HEALTH_URL} = 200"
+  else
+    # ⚠️ SÉMANTIQUE IMPORTANTE — CE N'EST PAS UN ÉCHEC DE DÉPLOIEMENT.
+    # À ce stade, TOUS les nodes de l'inventaire ont déjà individuellement
+    # réussi (rollout terminé sans erreur juste au-dessus, chacun avec son
+    # propre health+smoke en loopback validé par node_deploy.sh) et le
+    # manifeste cluster a déjà été écrit avec leur statut "success" (voir
+    # write_cluster_manifest, appelé après la boucle de rollout, AVANT
+    # cette étape). Seul le CHEMIN PUBLIC (Cloudflare → Load Balancer →
+    # node) n'a pas répondu 200 dans le délai imparti — un problème
+    # d'infrastructure/routage, jamais une preuve que le code déployé est
+    # mauvais. On distingue donc explicitement ce cas du bloc CLUSTER
+    # DEPLOYMENT FAILED ci-dessus (qui, lui, signifie qu'un NODE a
+    # réellement échoué) : même code de sortie (1 — cette validation reste
+    # critique, voir la consigne), mais un message qui ne laisse planer
+    # aucun doute sur ce qui a réellement échoué.
+    history_append "cluster-deploy-nodes-ok-lb-failed" "$TARGET_RELEASE" "nodes=${#ORDERED_LINES[@]} ; mig=${MIG_CLASS} ; url=${PUBLIC_HEALTH_URL}"
+    cat >&2 <<EOF
+
+╔══════════════════════════════════════════════════════════════════╗
+  NODE DEPLOYMENT SUCCEEDED — CLUSTER (LB/PUBLIC) VALIDATION FAILED
+  Release         : ${TARGET_RELEASE}
+  Git SHA         : ${GIT_SHA}
+  Nodes (${#ORDERED_LINES[@]})      : tous déployés et healthy individuellement (voir le détail ci-dessus)
+  Failed check    : validation Load Balancer / chemin public
+  URL             : ${PUBLIC_HEALTH_URL}
+  Timeout         : ${HEALTH_TIMEOUT}s
+  Manifest        : ${CLUSTER_MANIFEST}
+
+  IMPORTANT — ceci N'EST PAS un échec de déploiement applicatif. Chaque
+  node de l'inventaire tourne déjà sur ${TARGET_RELEASE} et a validé sa
+  propre santé (health+smoke, en loopback) AVANT cette étape. Seul le
+  CHEMIN PUBLIC (Cloudflare → Load Balancer → node) n'a pas répondu 200
+  sur /health/ready dans le délai imparti — suspectez le Load Balancer
+  (target marqué unhealthy), le DNS, ou Cloudflare, PAS l'application.
+  Voir infra/providers/hetzner/README.md § Load Balancer.
+
+  Aucun rollback n'est nécessaire à ce stade — le code déployé est sain.
+  Prochaine étape : vérifiez la console Hetzner (Load Balancer → Targets)
+  et/ou testez manuellement : curl -v ${PUBLIC_HEALTH_URL}
+╚══════════════════════════════════════════════════════════════════╝
+EOF
+    exit 1
+  fi
 else
   log "7/9 · validation LB — SAUTÉE (ni PUBLIC_HEALTH_URL ni PUBLIC_DOMAIN fournis — pas de LB/domaine public dans cet environnement)."
 fi

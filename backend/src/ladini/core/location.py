@@ -29,6 +29,7 @@ message d'erreur (mandat §31 : jamais de repli silencieux)."""
 from __future__ import annotations
 
 import logging
+import re
 from enum import Enum
 from typing import Optional, Tuple
 
@@ -44,10 +45,46 @@ class LocationSourceKind(str, Enum):
     pas pour être traités silencieusement comme équivalents."""
 
     NATIVE_WHATSAPP_LOCATION = "NATIVE_WHATSAPP_LOCATION"
-    GOOGLE_MAPS_URL = "GOOGLE_MAPS_URL"  # déclaré, PAS implémenté
+    GOOGLE_MAPS_URL = "GOOGLE_MAPS_URL"  # implémenté : parse_google_maps_coordinates
     COORDINATES = "COORDINATES"  # déclaré, PAS implémenté
     TEXT_ADDRESS = "TEXT_ADDRESS"  # déclaré, PAS implémenté
     PLUS_CODE = "PLUS_CODE"  # déclaré, PAS implémenté
+
+
+_COORD = r"(-?\d{1,3}\.\d+)"
+# Formes Google Maps qui portent les coordonnées DANS l'URL (aucun appel
+# réseau) : ?q=lat,lon / ?ll=lat,lon / ?query=lat,lon, /@lat,lon, !3dlat!4dlon.
+# Les liens courts (maps.app.goo.gl) exigent une résolution HTTP — non gérés.
+_MAPS_URL_RE = re.compile(
+    r"https?://(?:www\.)?(?:google\.[a-z.]+/maps|maps\.google\.[a-z.]+|goo\.gl/maps)\S*",
+    re.IGNORECASE,
+)
+_MAPS_COORD_PATTERNS = (
+    re.compile(rf"[?&](?:q|ll|query|destination)={_COORD}(?:,|%2C)\s*{_COORD}", re.I),
+    re.compile(rf"/@{_COORD},{_COORD}"),
+    re.compile(rf"!3d{_COORD}!4d{_COORD}"),
+)
+
+
+def parse_google_maps_coordinates(text: str) -> Optional[Tuple[float, float]]:
+    """Extrait `(lat, lon)` d'un lien Google Maps collé en TEXTE, ou None.
+
+    Incident : un client (webchat / partage « position actuelle ») envoie
+    `📍 Ma position actuelle : https://www.google.com/maps?q=..,..` comme
+    message texte, pas comme message `location` natif. Sans ce parseur le
+    point était ignoré et l'agent redemandait le GPS en boucle. Déterministe
+    (jamais de LLM) ; le geofencing reste appliqué par `persist_shared_location`."""
+    match = _MAPS_URL_RE.search(text or "")
+    if not match:
+        return None
+    url = match.group(0)
+    for pattern in _MAPS_COORD_PATTERNS:
+        found = pattern.search(url)
+        if found:
+            lat, lon = float(found.group(1)), float(found.group(2))
+            if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+                return lat, lon
+    return None
 
 
 class LocationOutcome(str, Enum):
@@ -120,6 +157,7 @@ __all__ = [
     "LocationSourceKind",
     "LocationOutcome",
     "persist_shared_location",
+    "parse_google_maps_coordinates",
     "is_within_burkina_faso",
     "OUT_OF_COUNTRY_MESSAGE",
 ]

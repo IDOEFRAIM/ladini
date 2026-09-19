@@ -737,6 +737,73 @@ def _build_dynamic_interpreter_prompt(role: str = "PRODUCER") -> str:
 # =====================================================================
 
 
+def _fast_path_update_field_correction(
+    locked_goal: Optional[str], text: str
+) -> Optional[Dict[str, Any]]:
+    """Court-circuite déterministiquement le tunnel "quel champ modifier ?"
+    (`field_name="update_field"`, catégorie résolue `"UPDATE_FIELD"` — voir
+    le commentaire d'appel dans `_interpret_fast_path` pour l'incident
+    complet). Réutilise le parseur déterministe DÉJÀ correct de la couche
+    flow concernée — jamais une copie qui dériverait — pour les 3 mini-flows
+    connus qui partagent ce même motif. `None` = abstention explicite
+    (goal non reconnu, aucun champ extrait, ou message ambigu avec un
+    palier tarifaire précis) : l'appelant retombe alors sur le comportement
+    existant (classification LLM), inchangé.
+    """
+    from ladini.domain.quantity_unit import (
+        extract_deterministic_pricing_tiers,
+        extract_single_pricing_tier_correction,
+    )
+
+    # Abstention délibérée : une correction de PALIER précis ("prix bidon de
+    # 20 L à 70000 fcfa") ne peut être résolue sans risque de faux positif
+    # qu'avec les tarifs RÉELS du produit (chargés en DB par flow.py,
+    # `current_tiers`) — ce fast-path, sans accès DB, ne les a pas. Sans
+    # cette garde, un message qui a la FORME d'une correction de palier
+    # serait mal-interprété comme un prix scalaire plat (exactement le bug
+    # déjà corrigé le 2026-09-14 côté flow.py, voir
+    # `flow.py::_extract_pricing_tier_update`) — jamais reproduit ici.
+    if extract_single_pricing_tier_correction(text) or extract_deterministic_pricing_tiers(text):
+        return None
+
+    goal_up = str(locked_goal or "").upper()
+    correction: Dict[str, Any]
+    if goal_up == "SALES_UPDATE_PRODUCT":
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
+            _parse_update_correction,
+        )
+
+        correction = _parse_update_correction(text, allow_type_date=False)
+    elif goal_up == "PRODUCTION_UPDATE_FUTURE":
+        from ladini.graphs.agents.market_coach.flows.producer.flow import (
+            _parse_update_correction,
+        )
+
+        correction = _parse_update_correction(text, allow_type_date=True)
+    elif goal_up == "PROCUREMENT_UPDATE_REQUEST":
+        from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import (
+            _parse_auction_update_correction,
+        )
+
+        correction = _parse_auction_update_correction(text)
+    else:
+        # Goal non reconnu par ce fast-path (mini-flow futur qui réutilise
+        # le même sentinel "update_field" sans être câblé ici) — abstention
+        # plutôt qu'une supposition : comportement inchangé pour lui.
+        return None
+
+    if not correction:
+        return None
+
+    return {
+        "interpreted_event": "ANSWER",
+        "detected_intent": goal_up,
+        "interpreter_confidence": 0.95,
+        "extracted_entities": dict(correction),
+        "raw_analysis": {"path": "fast_path_update_field_correction"},
+    }
+
+
 def _interpret_fast_path(
     state: Dict[str, Any],
     text: str,
@@ -809,6 +876,48 @@ def _interpret_fast_path(
                 "extracted_entities": {},
                 "raw_analysis": {"path": "fast_path_confirmation_keyword"},
             }
+
+    # ⚠️ CORRECTIF (2026-09-19, incident réel) — mini-flows "quel champ
+    # modifier ?" (SALES_UPDATE_PRODUCT / PRODUCTION_UPDATE_FUTURE /
+    # PROCUREMENT_UPDATE_REQUEST, `ENTER_FIELD` avec `field_name=
+    # "update_field"`, voir `core/pending_interaction.py::to_tunnel_category`
+    # lignes 417-426). Ce champ est un SENTINEL INTERNE délibérément absent
+    # de `core/slots.py::SLOT_FILLING_INPUTS` (le champ à corriger n'est
+    # connu qu'APRÈS lecture du message : prix, quantité, nom, unité, date,
+    # palier...) — `to_tunnel_category` résout donc "UPDATE_FIELD", qui ne
+    # peut PAS matcher `SLOT_FILLING_INPUTS` dans `state_router.py::
+    # choose_interpretation_route`, donc CE tunnel ne route JAMAIS vers le
+    # micro-prompt spécialisé ACTIVE_SLOT — il retombe sur la route NEW_TASK
+    # (l'interpréteur unifié historique, un seul gros prompt ~60 intentions).
+    #
+    # Incident réel observé : "prix 485000 fcfa et la quantite est
+    # maintenant de 95" (double correction, dans le tunnel) classé UNKNOWN
+    # par ce classifieur générique → `cognitive_guard` déclenche RECOVERY
+    # (le message est accusé réception puis IGNORÉ — le flow.py de mise à
+    # jour, dont le parseur déterministe `_parse_update_correction` est
+    # pourtant déjà correct pour CE cas exact, n'est jamais invoqué) ; au
+    # 2e essai consécutif classé UNKNOWN, `reset_abandoned_conversation_
+    # context` efface le tunnel entier — un simple "prix 485000 fcfa" (le
+    # format d'exemple donné PAR LE BOT lui-même) tombe alors hors contexte
+    # et reçoit le message générique "je n'ai pas compris".
+    #
+    # Correctif — même principe que tout le reste de ce fast-path (le
+    # texte, jamais le LLM, tranche dès qu'une extraction déterministe est
+    # possible, voir la garde anti-ancrage documentée dans ce module) :
+    # tente le parseur déterministe DÉJÀ correct de la couche flow AVANT de
+    # laisser la main au classifieur générique. `_fast_path_update_field_
+    # correction` s'abstient explicitement (retourne `None`, comportement
+    # inchangé) sur tout goal non reconnu ou tout message qui ressemble à
+    # une correction de PALIER tarifaire précis (ex: "prix bidon de 20 L à
+    # 70000 fcfa") — cette dernière a besoin des tarifs RÉELS du produit
+    # (chargés en DB par flow.py) pour être résolue sans ambiguïté
+    # (incident distinct déjà corrigé le 2026-09-14, voir
+    # `flow.py::_extract_pricing_tier_update`) ; ce fast-path, sans accès
+    # DB, ne doit jamais deviner à sa place.
+    if expected == "UPDATE_FIELD":
+        fast_update = _fast_path_update_field_correction(locked_goal, text)
+        if fast_update is not None:
+            return fast_update
 
     # WAITING_FOR_PACKAGE_COUNT (audit 2026-09-01) : un palier est déjà résolu
     # et on attend son NOMBRE DE PAQUETS. Le même texte "2" ne veut pas dire la

@@ -136,3 +136,51 @@ class TestResolveGpsStage:
         assert result.resolved is False
         assert result.message.startswith("Je comprends ta question")
         assert _GPS_TEXT_REMINDER in result.message
+
+
+class TestGoogleMapsLinkPastedAsText:
+    """Incident : « 📍 Ma position actuelle : https://www.google.com/maps?q=..
+    (précision ±58 m) » envoyé en TEXTE → GPS redemandé en boucle."""
+
+    _TEXT = (
+        "📍 Ma position actuelle : https://www.google.com/maps?q=12.371400,-1.519700 "
+        "(précision ±58 m)"
+    )
+
+    def test_parser_handles_the_common_google_maps_forms(self):
+        from ladini.core.location import parse_google_maps_coordinates as p
+
+        assert p(self._TEXT) == (12.3714, -1.5197)
+        assert p("https://www.google.com/maps/@12.37,-1.51,15z") == (12.37, -1.51)
+        assert p("https://www.google.com/maps/place/X/data=!3d12.37!4d-1.51") == (12.37, -1.51)
+        assert p("https://www.google.com/maps?q=95.0,-1.5") is None
+        assert p("salut, voici mon adresse") is None
+
+    def test_accepted_point_resolves_even_when_the_interpreter_read_it_as_yes(self, monkeypatch):
+        async def _fake_persist(phone, lat, lon):
+            from ladini.core.location import LocationOutcome
+            return LocationOutcome.NEW_LOCATION_ACCEPTED, None
+        monkeypatch.setattr(f"{_MODULE}.persist_shared_location", _fake_persist)
+
+        result = run(resolve_gps_stage(
+            _RuntimeNoLLM(), "+22670000001",
+            location_shared=False, is_yes=True, gps_default=None, user_text=self._TEXT,
+        ))
+
+        assert result.resolved is True
+        assert (result.lat, result.lon) == (12.3714, -1.5197)
+
+    def test_out_of_zone_link_is_rejected_explicitly_not_looped(self, monkeypatch):
+        async def _fake_persist(phone, lat, lon):
+            from ladini.core.location import LocationOutcome
+            return LocationOutcome.LOCATION_OUT_OF_ZONE, "hors zone"
+        monkeypatch.setattr(f"{_MODULE}.persist_shared_location", _fake_persist)
+
+        result = run(resolve_gps_stage(
+            _RuntimeNoLLM(), "+22670000001",
+            location_shared=False, is_yes=False, gps_default=None,
+            user_text="https://www.google.com/maps?q=33.264381,-7.586925",
+        ))
+
+        assert result.resolved is False
+        assert "hors de notre zone" in result.message

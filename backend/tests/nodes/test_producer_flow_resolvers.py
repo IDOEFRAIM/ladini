@@ -108,6 +108,26 @@ class TestExtractQuantityCorrection:
         from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_quantity_correction
         assert _extract_quantity_correction("bonjour") == (None, None)
 
+    def test_a_long_verbal_connector_between_trigger_and_number_is_still_recognized(self):
+        """Incident réel (2026-09-19) : "la quantite est maintenant de 95"
+        (19 caractères entre "quantite" et "95") ne matchait plus rien avec
+        l'ancienne borne `\\D{0,10}` — la quantité disparaissait
+        silencieusement d'une double correction prix+quantité."""
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_quantity_correction
+        qty, unit = _extract_quantity_correction("la quantite est maintenant de 95")
+        assert qty == 95.0
+        assert unit is None
+
+    def test_a_distant_unrelated_number_across_a_full_new_clause_is_not_captured(self):
+        """La borne élargie reste bornée : un nombre séparé du déclencheur
+        par une clause entièrement différente ne doit toujours pas être pris
+        pour la quantité."""
+        from ladini.graphs.agents.market_coach.flows.producer.flow import _extract_quantity_correction
+        qty, unit = _extract_quantity_correction(
+            "la quantité, on en reparlera une autre fois si besoin, le prix est 400"
+        )
+        assert qty is None
+
 
 class TestExtractNameCorrection:
     def test_explicit_rename_trigger_is_required(self):

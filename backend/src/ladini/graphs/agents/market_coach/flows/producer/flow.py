@@ -1080,7 +1080,17 @@ _PRICE_RE = _re.compile(
 )
 # Fallback pour "quantité 500" (nombre nu, sans mot d'unité reconnu qui suit —
 # _parse_qty_unit exige une vraie unité et renvoie None sinon).
-_BARE_QUANTITY_RE = _re.compile(r"quantit\w*\D{0,10}?(\d+(?:[.,]\d+)?)", _re.IGNORECASE)
+#
+# (2026-09-19, incident réel) : la borne `\D{0,10}` (avant correctif)
+# ratait toute formulation avec un connecteur verbal un peu long entre le
+# mot déclencheur et le nombre — ex. "la quantite est maintenant de 95"
+# (19 caractères entre "quantite" et "95"), message réel qui a fait
+# silencieusement disparaître la quantité d'une double correction
+# prix+quantité (seul le prix était retenu). `\D{0,30}?` reste NON-GREEDY —
+# élargir cette borne ne change donc jamais QUEL nombre est capturé (déjà
+# toujours le plus proche atteignable), seulement SI un connecteur verbal
+# plus long est encore reconnu.
+_BARE_QUANTITY_RE = _re.compile(r"quantit\w*\D{0,30}?(\d+(?:[.,]\d+)?)", _re.IGNORECASE)
 _DATE_RE = _re.compile(r"(\d{4}-\d{2}-\d{2})")
 # Complète _DATE_RE (ISO strict) pour une date en français ("13 décembre
 # 2026", "13/12/2026") — sinon une correction de date en langage naturel était
