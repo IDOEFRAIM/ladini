@@ -288,19 +288,23 @@ def _context_hint_for_llm(ob_state: OnboardingState) -> str:
     )
 
 
+# (2026-09-18, retour produit) : le premier message précédent noyait la
+# SEULE action attendue au premier tour (répondre producteur/acheteur) sous
+# deux paragraphes de pitch produit (mission Ladini + détail par rôle) — pas
+# limpide sur ce qu'il fallait faire. Le pitch complet existe déjà ailleurs
+# (`_EXPLAIN_AGAIN`, affiché SI l'utilisateur demande "c'est quoi Ladini ?")
+# — inutile de le dupliquer ici. Ce premier message reste court : qui est
+# LADINI (une phrase), LA question à laquelle répondre, et une invite
+# explicite à demander plus de détails si besoin.
 _WELCOME = (
-    "🌾 *Bienvenue patron !* Je suis *LADINI*, ton assistant personnel sur *Ladini*.\n\n"
-    "*Ladini*, c'est quoi ?* C'est ta plateforme agricole qui te connecte "
-    "directement aux bons partenaires — acheteurs et producteurs — près de chez toi, "
-    "par simple message WhatsApp. Pas de déplacement inutile, pas d'intermédiaire.\n\n"
-    "🧑🏾‍🌾 *Tu produis ?* Publie tes récoltes, gère ton stock, reçois des commandes "
-    "et fais connaître tes produits aux acheteurs de ta région.\n"
-    "🛒 *Tu achètes ?* Trouve les meilleurs produits frais autour de toi, compare "
-    "les prix et commande en quelques mots.\n\n"
-    "Pour qu'on démarre ensemble, dis-moi : tu es *producteur* (tu vends) "
+    "🌾 *Bienvenue patron !* Je suis *LADINI*, ton assistant sur la plateforme "
+    "agricole qui te connecte directement à d'autres producteurs et acheteurs, "
+    "par simple message WhatsApp.\n\n"
+    "Pour commencer, dis-moi : tu es *producteur* (tu vends) "
     "ou *acheteur* (tu achètes) ?\n\n"
     "_💡 Tu peux tout me dire d'un coup — par exemple « Je suis Awa, productrice "
-    "à Bobo » — ou avancer étape par étape, comme tu préfères !_"
+    "à Bobo » — ou avancer étape par étape, comme tu préfères. Tape « c'est quoi "
+    "Ladini ? » si tu veux en savoir plus avant de commencer._"
 )
 
 
@@ -352,7 +356,7 @@ _EXPLAIN_AGAIN_SHORT = (
     "Je comprends ta prudence patron, c'est normal de vérifier ! 🙏 "
     "Ladini est un vrai service gratuit, sans engagement — déjà "
     "utilisé par des producteurs et acheteurs près de chez toi. Donne-moi "
-    "juste ton nom et ta ville pour avancer, tu peux toujours changer "
+    "juste ton nom et ta région pour avancer, tu peux toujours changer "
     "d'avis après."
 )
 
@@ -380,7 +384,7 @@ def _missing_labels(ob_state: OnboardingState) -> List[str]:
     if not ob_state.name:
         labels.append("ton nom")
     if not ob_state.zone_id:
-        labels.append("ta ville ou province")
+        labels.append("ta région")
     return labels
 
 
@@ -394,8 +398,14 @@ _FIELD_QUESTIONS: Dict[str, str] = {
     "name": (
         "Comment tu t'appelles patron ? _(comme ça je te reconnais à chaque fois !)_"
     ),
+    # (2026-09-18, retour produit) : demande la RÉGION (large), pas la ville
+    # précise — voir services/database/base.py::get_zone_by_name/
+    # get_available_zones, désormais restreintes aux zones racines
+    # (parent_id IS NULL) pour la même raison : une région a beaucoup plus de
+    # chances d'être déjà en base qu'une localité précise, donc moins
+    # d'allers-retours "zone introuvable" pendant l'onboarding.
     "zone": (
-        "Tu es dans quelle *ville ou province* ? "
+        "Tu es dans quelle *région* ? "
         "_(pour te connecter avec les meilleurs partenaires près de chez toi)_ 📍"
     ),
 }
@@ -520,14 +530,19 @@ async def run_onboarding_step(
             hint = await _build_zone_catalog_hint(mcp_runtime)
             if hint:
                 msg = (
-                    f"Je n'ai pas trouve la zone '{failed}'. "
-                    f"Merci d'indiquer une ville ou province valide.{hint}"
+                    f"Je n'ai pas trouve la region '{failed}'. "
+                    f"Merci d'indiquer une region valide.{hint}"
                 )
             else:
+                # Pas d'exemples de noms en dur ici (2026-09-18) : lister des
+                # régions précises qu'on ne peut pas garantir présentes dans
+                # CETTE base serait pire que pas d'exemple du tout — le hint
+                # dynamique ci-dessus (`_build_zone_catalog_hint`) est la
+                # seule source fiable de noms réels ; ce message ne sert que
+                # de repli quand même CE hint est indisponible.
                 msg = (
-                    f"Je n'ai pas pu verifier la zone '{failed}'. "
-                    "Indiquez simplement votre ville ou province "
-                    "(ex : Ouagadougou, Bobo-Dioulasso, Koudougou)."
+                    f"Je n'ai pas pu verifier la region '{failed}'. "
+                    "Indiquez le nom de votre region."
                 )
             ob_state.step = OnboardingStep.COLLECT_ROLE
             return OnboardingResult(state=ob_state, response_text=msg)

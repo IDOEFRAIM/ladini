@@ -646,6 +646,20 @@ class BaseMixin:
     async def get_zone_by_name(self, name: str) -> Dict[str, Any]:
         """
         Résout le nom d'une zone via une recherche par similarité (trigram).
+
+        (2026-09-18, retour produit onboarding) — restreint aux zones RACINES
+        (`parent_id IS NULL`, la "région" au sens de `buyer.py`, ex: Hauts-
+        Bassins) plutôt que sur toute la table (qui mélange région ET ville/
+        village, cette dernière étant le niveau habituellement assigné aux
+        users/producers/farms — voir `Zone.parent_id`). Une ville précise a
+        beaucoup moins de chances d'être déjà en base qu'une région large ;
+        forcer une résolution au niveau ville faisait donc souvent échouer
+        l'onboarding sur une localité non répertoriée, alors que la région
+        englobante existe presque toujours. Compromis assumé (choix produit) :
+        la logique "circuit ultra-court même ville" de `buyer.py` (comparaison
+        `producer_zone_id == buyer_zone_id`) devient de facto "même région"
+        pour tout profil créé via l'onboarding — voir aussi
+        docs/ONBOARDING_ZONE_REGION_LEVEL_2026-09-18.md.
         """
         current_session = self.session
         if not current_session:
@@ -658,12 +672,14 @@ class BaseMixin:
                 hex(id(current_session)),
                 name,
             )
-            # 1. Recherche par similarité trigram
-            # Le threshold par défaut est 0.3. On utilise l'opérateur '%'
-            # pour comparer la similarité entre la colonne et l'input.
+            # 1. Recherche par similarité trigram, RÉGIONS UNIQUEMENT
+            # (parent_id IS NULL). Le threshold par défaut est 0.3. On utilise
+            # l'opérateur '%' pour comparer la similarité entre la colonne et
+            # l'input.
             stmt = (
                 select(Zone)
                 .where(Zone.name.op("%")(name))
+                .where(Zone.parent_id.is_(None))
                 .order_by(func.similarity(Zone.name, name).desc())
                 .limit(1)
             )
@@ -687,7 +703,17 @@ class BaseMixin:
 
     async def get_available_zones(self) -> list[dict[str, Any]]:
         """
-        Récupère la liste de toutes les zones disponibles.
+        Récupère la liste des zones RACINES disponibles ("région" au sens de
+        `buyer.py` — `parent_id IS NULL`), pas les villes/villages enfants.
+
+        (2026-09-18, retour produit onboarding) — cette liste alimente le
+        texte "Zones valides : ..." proposé à l'utilisateur quand sa saisie ne
+        matche rien (voir `agents/onboarding.py::_build_zone_catalog_hint`).
+        Proposer des villes précises listait souvent des localités que
+        l'utilisateur ne reconnaît pas forcément lui-même ; les régions,
+        moins nombreuses et plus larges, sont plus facilement reconnaissables
+        et évitent une deuxième non-correspondance. Voir `get_zone_by_name`
+        (même fichier) pour le même raisonnement côté résolution.
         """
         current_session = self.session
         if not current_session:
@@ -699,7 +725,7 @@ class BaseMixin:
                 current_session,
                 hex(id(current_session)),
             )
-            stmt = select(Zone)
+            stmt = select(Zone).where(Zone.parent_id.is_(None))
             result = await current_session.execute(stmt)
             zones = result.scalars().all()
 

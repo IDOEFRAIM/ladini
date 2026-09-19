@@ -13,6 +13,7 @@ from ladini.api.routes.paydunya_webhook import router as paydunya_router
 from ladini.api.routes.twilio_webhook import (
     router as twilio_router,  # repli (MESSAGING_PROVIDER=twilio)
 )
+from ladini.api.routes.webchat import router as webchat_router
 from ladini.api.routes.whatsapp_webhook import (
     router as whatsapp_router,  # provider par défaut
 )
@@ -165,6 +166,10 @@ async def trace_and_metrics_middleware(request: Request, call_next):
 
 # 2. Inclus tes routers
 app.include_router(market_router, prefix="/api")
+app.include_router(webchat_router, prefix="/api")
+# endpoints réels : /api/webchat/producer, /api/webchat/buyer — canal
+# SYNCHRONE serveur-à-serveur pour le site web (voir routes/webchat.py pour
+# le raisonnement sécurité complet). Jamais appelé directement par WhatsApp.
 # Les deux webhooks WhatsApp restent enregistrés en parallèle : seul
 # MESSAGING_PROVIDER (core/settings.py) décide lequel le worker utilise pour
 # ENVOYER — recevoir sur les deux endpoints ne coûte rien et permet de

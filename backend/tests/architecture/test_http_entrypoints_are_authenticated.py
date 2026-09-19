@@ -136,11 +136,23 @@ def test_twilio_webhook_validates_its_signature():
 
 @pytest.mark.architecture
 @pytest.mark.parametrize(
-    "path", ["/api/market/producer", "/api/market/buyer", "/api/market/status/{task_id}"]
+    "path",
+    [
+        "/api/market/producer",
+        "/api/market/buyer",
+        "/api/market/status/{task_id}",
+        # (2026-09-19) Canal chat web — même raisonnement exact que
+        # /api/market/* : phone_number arbitraire + force_role=True, appelé
+        # depuis le BACKEND du site (jamais son navigateur), voir
+        # routes/webchat.py pour le détail complet.
+        "/api/webchat/producer",
+        "/api/webchat/buyer",
+    ],
 )
 def test_market_routes_require_the_internal_token(path):
-    """Les routes `/api/market/*` lancent l'agent pour un numéro arbitraire
-    avec `force_role=True` : elles doivent exiger le secret interne."""
+    """Les routes `/api/market/*` et `/api/webchat/*` lancent l'agent pour un
+    numéro arbitraire avec `force_role=True` : elles doivent exiger le secret
+    interne."""
     matches = [route for _m, p, route in _routes() if p == path]
     assert matches, f"La route {path} a disparu."
     for route in matches:
