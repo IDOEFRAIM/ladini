@@ -35,7 +35,7 @@
 	}
 
 	# Seuls les chemins réellement publics sont proxifiés. Tout le reste → 404.
-	@public path /api/webhook/* /api/webhooks/* /health /health/* /version
+	@public path /api/webhook/* /api/webhooks/* /api/webchat/* /health /health/* /version
 	handle @public {
 		reverse_proxy api:8000 {
 			header_up X-Forwarded-Proto {scheme}
