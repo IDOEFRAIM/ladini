@@ -116,7 +116,54 @@ if grep -qiE '=(change_me|changeme|gsk_xxx|pk-lf-xxx|sk-lf-xxx)' "$ENV_FILE"; th
   err "  ✗ $CHK — des valeurs d'exemple traînent dans .env"; FAIL=1
 else log "  ✓ $CHK"; fi
 
-# 4quinquies (2026-09-20, migration Valkey via tunnel WireGuard) — l'hôte
+# 4quinquies (2026-09-20, incident réel production — release sha-efc4ff8/
+# sha-381321d) : REDIS_URL doit être PARSABLE par le même mécanisme stdlib
+# que redis-py/kombu (`urllib.parse.SplitResult.port`), pas seulement
+# "ressembler" à une URL valide côté regex bash. Incident réel confirmé par
+# les logs prod : un mot de passe Valkey régénéré contenait un caractère
+# NON percent-encodé (probablement `:`/`@` ou similaire, jamais confirmé
+# précisément — sans rapport avec le caractère exact, la classe de bug est
+# générale) qui faisait échouer `url.port` avec `ValueError: Port could not
+# be cast to integer value as '<fragment du mot de passe>'` — API ET worker
+# crashaient TOUS LES DEUX au démarrage (`redis.from_url`/`kombu.parse_url`
+# construisent leur client Redis AU NIVEAU MODULE, avant même `main()`),
+# rendant même le ROLLBACK inefficace : l'ancien code lit le MÊME .env
+# cassé et crashe identiquement, quelle que soit la release déployée.
+# Ce check reproduit EXACTEMENT `urllib.parse.urlsplit(url).port` (le même
+# code stdlib que redis-py/kombu appellent en interne) — s'il lève ici, il
+# aurait levé exactement pareil dans le conteneur. N'affiche JAMAIS le mot
+# de passe ni l'URL complète, même en cas d'échec (uniquement le nom de
+# l'exception).
+CHK="REDIS_URL parsable par urllib (même mécanisme que redis-py/kombu)"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || PYTHON_BIN="python"
+if command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  redis_url_value="${redis_url_line#REDIS_URL=}"
+  if REDIS_URL_TO_CHECK="$redis_url_value" "$PYTHON_BIN" -c '
+import os
+import sys
+from urllib.parse import urlsplit
+
+url = os.environ.get("REDIS_URL_TO_CHECK", "")
+try:
+    parts = urlsplit(url)
+    _ = parts.port          # lève ValueError exactement comme redis-py/kombu si malformé
+    _ = parts.hostname
+except Exception as exc:
+    print(type(exc).__name__, file=sys.stderr)
+    sys.exit(1)
+' 2>/tmp/pf_redis_url_parse.err; then
+    log "  ✓ $CHK"
+  else
+    err "  ✗ $CHK — échec : $(cat /tmp/pf_redis_url_parse.err 2>/dev/null) — un caractère du mot de passe/URL n'est probablement pas percent-encodé (voir docs/REDIS_VALKEY_PRODUCTION_CUTOVER_2026-09-20.md, incident sha-efc4ff8) ; régénérer avec 'openssl rand -hex 32' (caractères 0-9a-f uniquement, jamais besoin d'encodage) plutôt que corriger l'encodage à la main"
+    FAIL=1
+  fi
+  rm -f /tmp/pf_redis_url_parse.err
+else
+  warn "  ? $CHK — aucun interpréteur Python disponible sur cet hôte, étape sautée"
+fi
+
+# 4sexies (2026-09-20, migration Valkey via tunnel WireGuard) — l'hôte
 # REDIS_URL doit être RÉSOLVABLE et le port TCP JOIGNABLE avant de
 # poursuivre un déploiement — sans ça, worker/api/beat démarreraient quand
 # même (Celery/redis-py ne se connectent qu'à la première commande), pour
@@ -140,7 +187,7 @@ else
   warn "  ? $CHK — impossible d'extraire host:port de REDIS_URL, étape sautée"
 fi
 
-# 4sexies — WireGuard, UNIQUEMENT si explicitement requis (Valkey joint
+# 4septies — WireGuard, UNIQUEMENT si explicitement requis (Valkey joint
 # via tunnel plutôt qu'en direct — voir infra/wireguard/README.md). Vide
 # par défaut = comportement inchangé pour tout déploiement SANS WireGuard
 # (jamais un faux échec sur une topologie qui n'en a pas besoin).

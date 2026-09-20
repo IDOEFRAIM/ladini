@@ -114,6 +114,8 @@ jobs:
         run: bash scripts/test/test-cluster-deploy-lb-validation.sh
       - name: preflight.sh — REDIS_URL schéma + placeholder embarqué (migration Upstash → Valkey, 2026-09-20)
         run: bash scripts/test/test-preflight-redis-url-checks.sh
+      - name: preflight.sh — REDIS_URL parsable par urllib (incident réel sha-efc4ff8, 2026-09-20)
+        run: bash scripts/test/test-preflight-redis-url-parseable.sh
       - name: preflight.sh — host:port joignable + gate WireGuard (tunnel Hetzner ↔ AWS, 2026-09-20)
         run: bash scripts/test/test-preflight-network-checks.sh
       - name: bind Valkey WireGuard + détection unit systemd (blockers #4/#5, 2026-09-20)

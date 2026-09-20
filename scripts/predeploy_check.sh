@@ -123,6 +123,11 @@ if bash scripts/test/test-preflight-redis-url-checks.sh; then
 else
   _fail "preflight REDIS_URL : au moins un cas de test-preflight-redis-url-checks.sh a échoué"
 fi
+if bash scripts/test/test-preflight-redis-url-parseable.sh; then
+  _ok "preflight REDIS_URL parsable (urllib, même mécanisme que redis-py/kombu) : Cas A-D passent (incident réel sha-efc4ff8, 2026-09-20)"
+else
+  _fail "preflight REDIS_URL parsable : au moins un cas de test-preflight-redis-url-parseable.sh a échoué"
+fi
 if bash scripts/test/test-preflight-network-checks.sh; then
   _ok "preflight réseau (host:port joignable + gate WireGuard) : Cas A-E passent (tunnel WireGuard, 2026-09-20)"
 else
