@@ -76,7 +76,12 @@ echo
 echo "═══ Vérification (redacted) ═══"
 for kv in "$@"; do
   key="${kv%%=*}"
-  line="$(grep -E "^${key}=" "$ENV_FILE" | tail -n1)"
+  # `|| true` : cette clé vient d'être upsertée dans $ENV_FILE juste
+  # au-dessus, `grep` devrait donc toujours la trouver — mais sous `set -e`,
+  # tout écart imprévu (upsert qui aurait échoué) tuerait ce script
+  # silencieusement ICI plutôt que de laisser un diagnostic clair
+  # apparaître (même classe de bug que scripts/preflight.sh §4sexies).
+  line="$(grep -E "^${key}=" "$ENV_FILE" | tail -n1 || true)"
   if [[ "$key" == "REDIS_URL" || "$key" == *_URL || "$key" == *PASSWORD* || "$key" == *SECRET* || "$key" == *TOKEN* ]]; then
     # Redaction : scheme://host:port uniquement pour une URL avec
     # credentials, "<défini>"/"<absent>" pour un secret nu.

@@ -1160,6 +1160,28 @@ basculer le worker, garder Upstash comme broker actif jusqu'à résolution.
 
 ## S. Tests exécutés (cette session)
 
+**§BUG CORRIGÉ ICI (2026-09-20, incident réel — premier run CI post-migration,
+release `sha-5988d2a`)** : le tout premier déploiement réel après ce
+chantier a échoué en préflight, immédiatement après le `✓` de §4quinquies
+("hôte REDIS_URL résolvable"), sans afficher le moindre `✗` avant l'erreur
+générique `préflight orchestrateur KO`. Cause confirmée : la ligne
+`WIREGUARD_REQUIRED="${WIREGUARD_REQUIRED:-$(grep ... "$ENV_FILE" | tail -n1
+| cut -d= -f2-)}"` (§4sexies) mourait silencieusement sous `set -euo
+pipefail` dès que `WIREGUARD_REQUIRED` est absent de `.env` — le cas
+NORMAL tant que WireGuard n'est pas encore déployé — exactement la même
+classe de bug que l'incident SSH_PORT d'`infra/firewall/ufw.sh`
+(2026-09-17). **Trois occurrences de la MÊME classe de bug ont été
+trouvées et corrigées** (pas seulement celle qui s'est manifestée) :
+`scripts/preflight.sh` (`redis_url_line`, `WIREGUARD_REQUIRED`),
+`scripts/compute_valkey_maxmemory.sh` (`MEM_TOTAL_KB`),
+`scripts/apply_env_change_on_node.sh` (`line`) — toutes corrigées par
+`|| true` sur la pipeline, avec le raisonnement documenté inline à chaque
+site. Reproduit en isolation (bash direct) ET en bout en bout (exécution
+complète de `preflight.sh` dans un sandbox avec `docker`/DNS/TCP mockés)
+AVANT et APRÈS le fix — la version corrigée exécute désormais les 9
+sections de préflight jusqu'au bout, sans mourir silencieusement nulle
+part.
+
 ```bash
 # Unitaires/architecture pertinents :
 cd backend

@@ -63,7 +63,15 @@ if [ "${#missing[@]}" -eq 0 ]; then log "  ✓ $CHK"; else err "  ✗ $CHK — m
 # le dev (docker-compose.dev.yml n'est jamais dans COMPOSE_FILE ici), donc
 # ce garde est sans risque de faux positif sur le chemin de déploiement réel.
 CHK="REDIS_URL pointe vers un Redis externe (pas un hôte local/conteneur)"
-redis_url_line="$(grep -E '^REDIS_URL=' "$ENV_FILE" | tail -n1)"
+# `|| true` : si REDIS_URL est carrément ABSENTE de .env (pas seulement
+# vide — §4 l'a déjà signalé dans "variables obligatoires" sans arrêter le
+# script), `grep` sort en erreur (aucune ligne trouvée) et tuerait tout le
+# préflight ICI, silencieusement, sous `set -euo pipefail` — même classe de
+# bug que celle corrigée juste en dessous (§4sexies, voir son commentaire
+# détaillé). `redis_url_line` reste alors vide, et les checks suivants
+# (§4ter/quater/quinquies) le signalent déjà proprement via
+# `${redis_url_line:-<absent>}`.
+redis_url_line="$(grep -E '^REDIS_URL=' "$ENV_FILE" | tail -n1 || true)"
 if printf '%s' "$redis_url_line" | grep -qiE '@(redis|localhost|127\.0\.0\.1):'; then
   err "  ✗ $CHK — REDIS_URL ressemble à un Redis local/conteneur : redis externe partagé requis en prod"
   FAIL=1
@@ -142,7 +150,24 @@ fi
 # LADINI_APP_ENV_B64 décodé en .env) d'activer ce gate simplement en
 # ajoutant `WIREGUARD_REQUIRED=1` dans .env.production, sans toucher au
 # workflow ni exporter quoi que ce soit côté CI.
-WIREGUARD_REQUIRED="${WIREGUARD_REQUIRED:-$(grep -E '^WIREGUARD_REQUIRED=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)}"
+#
+# §BUG CORRIGÉ ICI (2026-09-20, incident réel premier run CI post-migration
+# Valkey) : la ligne ci-dessous, sans le `|| true` final, tuait le script
+# ENTIER silencieusement dès que WIREGUARD_REQUIRED est absent de $ENV_FILE
+# (le cas NORMAL tant que WireGuard n'est pas encore déployé) — exactement
+# le même piège que le bug SSH_PORT corrigé le 2026-09-17 dans
+# infra/firewall/ufw.sh : sous `set -euo pipefail`, `grep` qui ne trouve
+# AUCUNE ligne sort en erreur (1), `pipefail` propage cet échec à toute la
+# pipeline (`grep | tail | cut`), et cette affectation nue hérite de ce
+# statut → tout le préflight s'arrête ICI, avant même le check §5 (compose
+# config), sans afficher le moindre `✗` — reproduit et confirmé en CI
+# (release sha-5988d2a, 2026-09-20) : le préflight orchestrateur échouait
+# juste après "hôte REDIS_URL résolvable" (§4quinquies), sans aucune ligne
+# d'erreur explicite entre les deux, correspondant EXACTEMENT à ce point de
+# rupture. Fix identique à celui de ufw.sh : `|| true` — "aucune ligne
+# WIREGUARD_REQUIRED trouvée" est un résultat NORMAL (repli sur `0`/désactivé
+# via `${WIREGUARD_REQUIRED:-0}` juste en dessous), jamais une erreur.
+WIREGUARD_REQUIRED="${WIREGUARD_REQUIRED:-$(grep -E '^WIREGUARD_REQUIRED=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- || true)}"
 if [ "${WIREGUARD_REQUIRED:-0}" = "1" ]; then
   CHK="tunnel WireGuard + Valkey accessibles (check_valkey_network.sh)"
   if bash "${HERE}/check_valkey_network.sh"; then

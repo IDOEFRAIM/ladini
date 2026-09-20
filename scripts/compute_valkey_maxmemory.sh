@@ -54,7 +54,13 @@ if [ ! -r "$MEMINFO_PATH" ]; then
   exit 1
 fi
 
-MEM_TOTAL_KB="$(grep -E '^MemTotal:' "$MEMINFO_PATH" | awk '{print $2}')"
+# `|| true` : sous `set -e`, si `MemTotal:` est absente de $MEMINFO_PATH
+# (fichier malformé/inattendu), `grep` sort en erreur et tuerait ce script
+# silencieusement ICI, AVANT même d'atteindre le message FATAL explicite
+# juste en dessous — même classe de bug que celle documentée dans
+# scripts/preflight.sh (§4sexies, incident réel 2026-09-20). `MEM_TOTAL_KB`
+# reste vide dans ce cas, et le check suivant le rapporte proprement.
+MEM_TOTAL_KB="$(grep -E '^MemTotal:' "$MEMINFO_PATH" | awk '{print $2}' || true)"
 [ -n "$MEM_TOTAL_KB" ] || { echo "FATAL: impossible de lire MemTotal depuis ${MEMINFO_PATH}" >&2; exit 1; }
 MEM_TOTAL_BYTES=$((MEM_TOTAL_KB * 1024))
 MEM_TOTAL_MB=$((MEM_TOTAL_KB / 1024))
