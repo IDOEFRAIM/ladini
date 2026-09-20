@@ -112,6 +112,16 @@ jobs:
         run: bash scripts/test/test-celery-healthcheck.sh
       - name: cluster_deploy.sh — validation LB/chemin public, HEALTH_TIMEOUT (incident 2026-09-19)
         run: bash scripts/test/test-cluster-deploy-lb-validation.sh
+      - name: preflight.sh — REDIS_URL schéma + placeholder embarqué (migration Upstash → Valkey, 2026-09-20)
+        run: bash scripts/test/test-preflight-redis-url-checks.sh
+      - name: preflight.sh — host:port joignable + gate WireGuard (tunnel Hetzner ↔ AWS, 2026-09-20)
+        run: bash scripts/test/test-preflight-network-checks.sh
+      - name: bind Valkey WireGuard + détection unit systemd (blockers #4/#5, 2026-09-20)
+        run: bash scripts/test/test-valkey-bind-wireguard-order.sh
+      - name: calcul maxmemory Valkey depuis la RAM réelle (blocker #3, 2026-09-20)
+        run: bash scripts/test/test-compute-valkey-maxmemory.sh
+      - name: application .env sur le node (backup + upsert + redaction, blocker #2, 2026-09-20)
+        run: bash scripts/test/test-apply-env-change-on-node.sh
 
   # Garde EXPAND/CONTRACT (§11) — bloque une migration destructive dans la
   # MÊME release que le code qui en dépend encore. Voir le script pour la

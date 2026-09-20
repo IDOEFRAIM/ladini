@@ -16,6 +16,7 @@ from ladini.api.tasks import process_agent_task
 from ladini.core.idempotency import get_cached as _get_role_hint
 from ladini.core.idempotency import release as _release_role_hint
 from ladini.core.location import LocationOutcome, persist_shared_location
+from ladini.core.maintenance import MAINTENANCE_MESSAGE, is_celery_producer_paused
 from ladini.core.settings import settings
 from ladini.graphs.roles import normalize_role
 from ladini.workers.media.product_photo_task import (
@@ -441,6 +442,21 @@ async def _handle_twilio_webhook(
     )
 
     # --- 6. DÉLÉGATION À CELERY ---
+    # (2026-09-20, bascule Upstash → Valkey) — vérifié JUSTE AVANT l'enqueue,
+    # jamais plus tôt (voir core/maintenance.py) : le reste du traitement
+    # ci-dessus (persistance GPS, résolution de rôle) reste idempotent et
+    # s'exécute normalement, seul le PRODUCTEUR est gardé. 503 plutôt que
+    # `_empty_twiml()` : Twilio redélivre ce webhook après un échec — le
+    # message n'est PAS perdu, seulement retardé jusqu'à la fin de la
+    # bascule.
+    if is_celery_producer_paused():
+        logger.info(
+            "TWILIO_WEBHOOK_PAUSED | phone=%s | message_sid=%s — maintenance broker en cours",
+            phone,
+            MessageSid,
+        )
+        return Response(content=MAINTENANCE_MESSAGE, media_type="text/plain", status_code=503)
+
     # Borne dure (`asyncio.wait_for`) — voir la même note détaillée dans
     # whatsapp_webhook.py : `asyncio.to_thread` seul ne suffisait pas,
     # confirmé en E2E local (2026-09-17), un webhook restait bloqué

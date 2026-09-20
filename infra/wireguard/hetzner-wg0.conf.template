@@ -1,0 +1,28 @@
+# infra/wireguard/hetzner-wg0.conf.template — à installer en tant que
+# /etc/wireguard/wg0.conf sur CHAQUE node Hetzner qui doit joindre Valkey.
+# AUCUNE vraie clé ici — uniquement des placeholders. Voir
+# infra/wireguard/README.md. Ne JAMAIS commiter le fichier réel.
+#
+# Pour un 2e node Hetzner (scale-out) : copier ce template, changer
+# Address en 10.200.0.3/32 (puis .4, .5, ... — jamais .1/.2), générer une
+# NOUVELLE paire de clés propre à CE node (scripts/wireguard_setup_hetzner.sh),
+# et ajouter le bloc [Peer] correspondant côté AWS (voir
+# aws-wg0.conf.template).
+
+[Interface]
+# Généré par scripts/wireguard_setup_hetzner.sh sur CETTE machine — jamais
+# transmis, jamais commité.
+PrivateKey = __HETZNER_PRIVATE_KEY__
+Address = 10.200.0.1/24
+# Pas de ListenPort explicite nécessaire côté client (Hetzner initie la
+# connexion vers AWS) — WireGuard choisit un port source éphémère.
+
+[Peer]
+PublicKey = __AWS_PUBLIC_KEY__
+Endpoint = __AWS_PUBLIC_IP__:51820
+AllowedIPs = 10.200.0.2/32
+# Garde le tunnel actif même sans trafic (indispensable si Hetzner est
+# derrière un NAT/firewall qui fermerait une connexion UDP inactive — pas
+# le cas typique d'un node Hetzner avec IP publique directe, mais inoffensif
+# à garder, et protège contre un NAT ajouté plus tard sans y repenser).
+PersistentKeepalive = 25

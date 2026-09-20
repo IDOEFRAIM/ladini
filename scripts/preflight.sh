@@ -71,10 +71,87 @@ else
   log "  ✓ $CHK"
 fi
 
+# 4ter (2026-09-20, migration Upstash → Valkey) — schéma REDIS_URL valide.
+# Volontairement PERMISSIF sur `redis://` vs `rediss://` : les deux sont des
+# schémas de production légitimes selon que le Redis/Valkey externe exige
+# TLS ou non (voir api/celery_app.py::_redis_ssl_options, scheme-aware) —
+# ce garde ne doit JAMAIS rejeter `redis://` juste parce que le fournisseur
+# précédent utilisait `rediss://`. Il rejette uniquement un schéma ABSENT ou
+# manifestement invalide (typo, mauvais protocole copié-collé).
+CHK="REDIS_URL a un schéma valide (redis:// ou rediss://)"
+if printf '%s' "$redis_url_line" | grep -qE '^REDIS_URL=rediss?://'; then
+  log "  ✓ $CHK"
+else
+  err "  ✗ $CHK — REDIS_URL doit commencer par 'redis://' ou 'rediss://' (obtenu : ${redis_url_line:-<absent>})"
+  FAIL=1
+fi
+
+# 4quater — placeholder EMBARQUÉ dans REDIS_URL spécifiquement (2026-09-20,
+# migration Upstash → Valkey). Le check générique ci-dessous (`change_me`
+# juste après un `=`) ne détecte QU'une valeur qui commence par le
+# placeholder — il rate un placeholder laissé au milieu d'une URL, ex.
+# `REDIS_URL=redis://:CHANGE_ME@valkey-host:6379/0` copié tel quel depuis
+# .env.example sans être rempli (incident de config plausible : le format
+# recommandé place justement le placeholder après le premier `:`, jamais en
+# tout début de valeur). Cherche aussi le nom d'hôte d'exemple lui-même
+# (`valkey-host`/`your-redis-host`) laissé par erreur.
+CHK="REDIS_URL ne contient aucun placeholder d'exemple"
+if printf '%s' "$redis_url_line" | grep -qiE 'change_?me|valkey-host|your-redis-host'; then
+  err "  ✗ $CHK — REDIS_URL contient encore une valeur d'exemple (CHANGE_ME/valkey-host/your-redis-host) — remplissez la vraie URL"
+  FAIL=1
+else
+  log "  ✓ $CHK"
+fi
+
 CHK="pas de placeholder 'change_me' dans .env"
 if grep -qiE '=(change_me|changeme|gsk_xxx|pk-lf-xxx|sk-lf-xxx)' "$ENV_FILE"; then
   err "  ✗ $CHK — des valeurs d'exemple traînent dans .env"; FAIL=1
 else log "  ✓ $CHK"; fi
+
+# 4quinquies (2026-09-20, migration Valkey via tunnel WireGuard) — l'hôte
+# REDIS_URL doit être RÉSOLVABLE et le port TCP JOIGNABLE avant de
+# poursuivre un déploiement — sans ça, worker/api/beat démarreraient quand
+# même (Celery/redis-py ne se connectent qu'à la première commande), pour
+# échouer bien plus tard et bien moins clairement (voir /health/ready, qui
+# ne sonde qu'APRÈS coup). Best-effort, borné à quelques secondes — ne
+# remplace pas check_valkey_network.sh (plus complet, spécifique au tunnel)
+# mais attrape déjà l'erreur la plus commune (mauvais host/port dans .env)
+# sans dépendance à WireGuard. N'affiche JAMAIS le mot de passe.
+CHK="hôte REDIS_URL résolvable et port TCP joignable"
+redis_host_port="$(printf '%s' "$redis_url_line" | sed -nE 's#^REDIS_URL=rediss?://([^@]*@)?([^/:]+):([0-9]+).*#\2 \3#p')"
+if [ -n "$redis_host_port" ]; then
+  read -r _redis_host _redis_port <<<"$redis_host_port"
+  if timeout 5 bash -c "exec 3<>\"/dev/tcp/${_redis_host}/${_redis_port}\"" 2>/dev/null; then
+    log "  ✓ $CHK (${_redis_host}:${_redis_port})"
+  else
+    err "  ✗ $CHK — ${_redis_host}:${_redis_port} injoignable (résolution DNS/tunnel WireGuard/Security Group/Valkey down ?)"
+    FAIL=1
+  fi
+  unset _redis_host _redis_port
+else
+  warn "  ? $CHK — impossible d'extraire host:port de REDIS_URL, étape sautée"
+fi
+
+# 4sexies — WireGuard, UNIQUEMENT si explicitement requis (Valkey joint
+# via tunnel plutôt qu'en direct — voir infra/wireguard/README.md). Vide
+# par défaut = comportement inchangé pour tout déploiement SANS WireGuard
+# (jamais un faux échec sur une topologie qui n'en a pas besoin).
+#   WIREGUARD_REQUIRED=1 bash scripts/preflight.sh <release>
+# Lu aussi depuis $ENV_FILE (pas seulement la variable shell) — c'est ce
+# qui permet à `deploy.yml` (aucun accès direct au shell du node, juste
+# LADINI_APP_ENV_B64 décodé en .env) d'activer ce gate simplement en
+# ajoutant `WIREGUARD_REQUIRED=1` dans .env.production, sans toucher au
+# workflow ni exporter quoi que ce soit côté CI.
+WIREGUARD_REQUIRED="${WIREGUARD_REQUIRED:-$(grep -E '^WIREGUARD_REQUIRED=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)}"
+if [ "${WIREGUARD_REQUIRED:-0}" = "1" ]; then
+  CHK="tunnel WireGuard + Valkey accessibles (check_valkey_network.sh)"
+  if bash "${HERE}/check_valkey_network.sh"; then
+    log "  ✓ $CHK"
+  else
+    err "  ✗ $CHK — voir détails ci-dessus (jamais de secret affiché)"
+    FAIL=1
+  fi
+fi
 
 # 5. compose config valide (résolution des variables), AVANT tout changement
 CHK="docker compose config valide"

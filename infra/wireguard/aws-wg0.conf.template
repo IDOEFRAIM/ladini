@@ -1,0 +1,37 @@
+# infra/wireguard/aws-wg0.conf.template — à installer en tant que
+# /etc/wireguard/wg0.conf sur l'EC2 AWS (Valkey). AUCUNE vraie clé ici —
+# uniquement des placeholders. Voir infra/wireguard/README.md pour la
+# procédure d'échange de clés complète. Ne JAMAIS commiter le fichier réel
+# une fois les placeholders remplacés.
+#
+# Rôle : AWS est le "hub" du tunnel (peut accepter plusieurs peers Hetzner
+# en scale-out, un bloc [Peer] par node). AWS n'a PAS besoin de connaître
+# l'IP publique de chaque Hetzner à l'avance si elle peut changer — le
+# Endpoint côté [Peer] est optionnel ici tant que Hetzner initie la
+# connexion en premier avec PersistentKeepalive (voir template Hetzner).
+
+[Interface]
+# Généré par scripts/wireguard_setup_aws.sh — jamais transmis, jamais
+# commité. Remplacer __AWS_PRIVATE_KEY__ par le contenu de
+# /etc/wireguard/privatekey (permissions 600) sur CETTE machine uniquement.
+PrivateKey = __AWS_PRIVATE_KEY__
+Address = 10.200.0.2/24
+ListenPort = 51820
+# Pas de PostUp/PostDown iptables ici par défaut — le Security Group AWS
+# est la couche de filtrage (voir README.md §Security Group). Si un
+# pare-feu hôte (ufw/iptables) est aussi actif sur l'EC2, autoriser UDP
+# 51820 depuis l'IP publique Hetzner uniquement, en plus du Security Group
+# (défense en profondeur, même principe que infra/firewall/ufw.sh côté
+# Hetzner).
+
+# ── Peer #1 : premier node Hetzner (10.200.0.1) ────────────────────────
+[Peer]
+PublicKey = __HETZNER_PUBLIC_KEY__
+AllowedIPs = 10.200.0.1/32
+
+# ── Peer additionnel (scale-out) — dupliquer ce bloc pour chaque node
+# Hetzner supplémentaire, AllowedIPs = 10.200.0.X/32 avec X jamais réutilisé
+# (voir README.md §"Ajouter un node Hetzner") ────────────────────────────
+# [Peer]
+# PublicKey = __HETZNER_NODE_2_PUBLIC_KEY__
+# AllowedIPs = 10.200.0.3/32

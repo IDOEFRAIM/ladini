@@ -20,6 +20,8 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Request, Response
 
+from ladini.core.maintenance import MAINTENANCE_MESSAGE, is_celery_producer_paused
+
 router = APIRouter()
 logger = logging.getLogger("Ladini.PaydunyaWebhook")
 
@@ -89,6 +91,13 @@ async def _handle_paydunya_ipn(request: Request) -> Response:
         return _ok()
 
     logger.info("PAYDUNYA_WEBHOOK_RECEIVED | token=%s", invoice_token)
+
+    if is_celery_producer_paused():
+        # (2026-09-20, bascule Upstash → Valkey) — voir core/maintenance.py.
+        # 503, PAS `_ok()` : on VEUT que Paydunya redélivre cet IPN une fois
+        # la bascule terminée, jamais qu'il le considère acquitté à tort.
+        logger.info("PAYDUNYA_WEBHOOK_PAUSED | token=%s — maintenance broker en cours", invoice_token)
+        return Response(content=MAINTENANCE_MESSAGE, media_type="text/plain", status_code=503)
 
     from ladini.workers.payments.paydunya_ipn_task import process_paydunya_ipn
 

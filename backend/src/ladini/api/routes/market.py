@@ -1,7 +1,7 @@
 import logging
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ladini.api.celery_app import celery_app
@@ -9,6 +9,7 @@ from ladini.api.security import require_internal_token
 
 # On importe la tâche Celery définie dans api.tasks
 from ladini.api.tasks import process_agent_task
+from ladini.core.maintenance import MAINTENANCE_MESSAGE, is_celery_producer_paused
 
 logger = logging.getLogger("Ladini.MarketRouter")
 
@@ -45,6 +46,9 @@ class AgentRequest(BaseModel):
 @router.post("/producer")
 async def producer_agent(request: AgentRequest):
     """Envoie la tâche de l'agent PRODUCER au worker Celery."""
+    if is_celery_producer_paused():
+        # (2026-09-20, bascule Upstash → Valkey) — voir core/maintenance.py.
+        raise HTTPException(status_code=503, detail=MAINTENANCE_MESSAGE)
     task = process_agent_task.delay(
         phone_number=request.phone_number,
         user_query=request.message,
@@ -57,6 +61,8 @@ async def producer_agent(request: AgentRequest):
 @router.post("/buyer")
 async def buyer_agent(request: AgentRequest):
     """Envoie la tâche de l'agent BUYER au worker Celery."""
+    if is_celery_producer_paused():
+        raise HTTPException(status_code=503, detail=MAINTENANCE_MESSAGE)
     task = process_agent_task.delay(
         phone_number=request.phone_number,
         user_query=request.message,

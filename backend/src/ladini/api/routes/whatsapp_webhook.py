@@ -28,6 +28,7 @@ from ladini.api.tasks import process_agent_task
 from ladini.core.idempotency import get_cached as _get_role_hint
 from ladini.core.idempotency import release as _release_role_hint
 from ladini.core.location import LocationOutcome, persist_shared_location
+from ladini.core.maintenance import MAINTENANCE_MESSAGE, is_celery_producer_paused
 from ladini.core.settings import settings
 from ladini.graphs.roles import normalize_role
 from ladini.workers.media.product_photo_task import (
@@ -275,6 +276,20 @@ async def _handle_whatsapp_webhook(
         )
         return Response(
             content="Service Unavailable", media_type="text/plain", status_code=503
+        )
+
+    # (2026-09-20, bascule Upstash → Valkey) — voir core/maintenance.py.
+    # Vérifié ICI (après la signature, avant tout traitement de message) :
+    # un webhook peut porter PLUSIEURS messages (boucle plus bas), un seul
+    # check groupé évite de produire une tâche pour certains messages du
+    # lot et pas d'autres. 503 plutôt que `_plain_ok()` : WhatsApp Cloud API
+    # redélivre ce webhook après un échec — acceptable UNIQUEMENT parce que
+    # la fenêtre de maintenance visée est courte (1-3 minutes) et ponctuelle
+    # (voir docstring de core/maintenance.py pour le tradeoff détaillé).
+    if is_celery_producer_paused():
+        logger.info("WHATSAPP_WEBHOOK_PAUSED — maintenance broker en cours")
+        return Response(
+            content=MAINTENANCE_MESSAGE, media_type="text/plain", status_code=503
         )
 
     payload = await request.json()

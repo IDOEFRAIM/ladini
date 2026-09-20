@@ -118,6 +118,31 @@ if bash scripts/test/test-node-preflight-lock.sh; then
 else
   _fail "verrou node vs preflight : au moins un cas de test-node-preflight-lock.sh a échoué"
 fi
+if bash scripts/test/test-preflight-redis-url-checks.sh; then
+  _ok "preflight REDIS_URL (schéma + placeholder embarqué) : Cas A-E passent (migration Upstash → Valkey, 2026-09-20)"
+else
+  _fail "preflight REDIS_URL : au moins un cas de test-preflight-redis-url-checks.sh a échoué"
+fi
+if bash scripts/test/test-preflight-network-checks.sh; then
+  _ok "preflight réseau (host:port joignable + gate WireGuard) : Cas A-E passent (tunnel WireGuard, 2026-09-20)"
+else
+  _fail "preflight réseau : au moins un cas de test-preflight-network-checks.sh a échoué"
+fi
+if bash scripts/test/test-valkey-bind-wireguard-order.sh; then
+  _ok "bind Valkey + détection unit systemd : Cas A-F passent (blockers #4/#5, 2026-09-20)"
+else
+  _fail "bind Valkey/unit systemd : au moins un cas de test-valkey-bind-wireguard-order.sh a échoué"
+fi
+if bash scripts/test/test-compute-valkey-maxmemory.sh; then
+  _ok "calcul maxmemory Valkey : Cas A-E passent (blocker #3, 2026-09-20)"
+else
+  _fail "calcul maxmemory Valkey : au moins un cas de test-compute-valkey-maxmemory.sh a échoué"
+fi
+if bash scripts/test/test-apply-env-change-on-node.sh; then
+  _ok "application .env sur le node : Cas A-E passent (blocker #2, 2026-09-20)"
+else
+  _fail "application .env sur le node : au moins un cas de test-apply-env-change-on-node.sh a échoué"
+fi
 if bash scripts/test/test-celery-smoke.sh; then
   _ok "smoke Celery : Cas A-F passent (lib.sh::celery_worker_ping — diagnostic jamais avalé, retries bornés)"
 else

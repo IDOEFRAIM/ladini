@@ -135,8 +135,13 @@ class Settings(BaseSettings):
     DB_POOL_TIMEOUT: float = 60.0
     # --- Redis / Celery ---
     # Défaut local pour le dev (docker-compose / redis local) ; en prod,
-    # définir REDIS_URL via variable d'environnement (ex: rediss://... pour
-    # un Redis managé avec TLS).
+    # définir REDIS_URL via variable d'environnement. Provider-agnostic par
+    # construction (Redis managé, Valkey auto-hébergé, peu importe — même
+    # protocole de fil, `redis-py`/Celery ne font aucune distinction) :
+    # `redis://` (sans TLS, ex: Valkey EC2 joint via réseau privé/VPN) ou
+    # `rediss://` (avec TLS, ex: un fournisseur managé public) — le schéma
+    # seul pilote toute la config TLS, voir `api/celery_app.py::
+    # _redis_ssl_options` et `REDIS_TLS_CERT_REQS` juste en dessous.
     REDIS_URL: str = "redis://localhost:6379/0"
     # (2026-09-18, incident réel prod sha-891cb2f) — validation TLS pour
     # Celery quand REDIS_URL (ou CELERY_BROKER_URL/CELERY_RESULT_BACKEND)
@@ -150,9 +155,19 @@ class Settings(BaseSettings):
     # pour où cette valeur est consommée (jamais lu directement ici, settings.py
     # ne connaît rien à Celery — juste la config brute).
     REDIS_TLS_CERT_REQS: str = "required"
-    VALKEY_ENDPOINT: str = ""
-    VALKEY_AUTH_TOKEN: str = ""
-    VALKEY_USE_TLS: bool = True
+    # (2026-09-20, migration Upstash → Valkey auto-hébergé) — PAS de champs
+    # `VALKEY_*` séparés : délibéré. `REDIS_URL` (+ CELERY_BROKER_URL/
+    # CELERY_RESULT_BACKEND ci-dessous, dérivés d'elle par défaut) reste
+    # l'UNIQUE source de vérité, quel que soit le fournisseur réel derrière
+    # (Upstash hier, Valkey AWS EC2 aujourd'hui, autre chose demain) — un
+    # simple `redis://:PASSWORD@HOST:6379/0` (ou `rediss://` si TLS) suffit,
+    # `redis-py`/Celery détectent déjà le schéma tout seuls (voir
+    # `api/celery_app.py::_redis_ssl_options`). D'anciens champs
+    # `VALKEY_ENDPOINT`/`VALKEY_AUTH_TOKEN`/`VALKEY_USE_TLS` avaient été
+    # ajoutés ici sans jamais être consommés nulle part (vérifié : aucune
+    # référence dans tout `src/`) — retirés plutôt que laissés comme un
+    # second chemin de config mort, qui aurait suggéré à tort qu'un Redis
+    # externe et un Valkey externe se configurent différemment.
     CELERY_BROKER_URL: str = ""
     CELERY_RESULT_BACKEND: str = ""
     # Lean mode default: run tasks directly without broker/workers.

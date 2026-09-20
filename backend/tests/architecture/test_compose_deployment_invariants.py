@@ -49,6 +49,70 @@ class TestNoLocalRedisInProduction:
         assert "@redis:" not in full_env, (
             "REDIS_URL ne doit plus pointer vers un hostname Docker local `redis` par défaut."
         )
+        assert "@localhost:" not in full_env, (
+            "REDIS_URL ne doit plus pointer vers `localhost` par défaut en production."
+        )
+
+
+class TestRedisUrlSharedAcrossAllRedisTouchingServices:
+    """(2026-09-20, migration Upstash → Valkey) — piège explicitement à
+    éviter (item 10 de la demande de migration) : une config splittée où
+    l'API pointerait déjà vers Valkey mais worker/beat/flower resteraient
+    encore sur Upstash (ou l'inverse). Les 4 services qui parlent Redis
+    doivent TOUS résoudre `REDIS_URL`/`CELERY_BROKER_URL`/
+    `CELERY_RESULT_BACKEND` depuis la MÊME source — soit l'ancre
+    `x-full-app-env` (api/worker/beat), soit un bloc `flower` qui référence
+    littéralement les mêmes noms de variables d'env (donc la même valeur au
+    déploiement, injectée une seule fois via .env/LADINI_APP_ENV_B64)."""
+
+    _REDIS_VARS = ("REDIS_URL", "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND")
+
+    def test_api_worker_beat_share_the_full_app_env_anchor(self):
+        compose = _load_compose()
+        services = compose["services"]
+        full_env = compose["x-full-app-env"]
+        for name in ("api", "worker", "beat"):
+            env = services[name].get("environment")
+            assert env == full_env, (
+                f"service '{name}' n'utilise pas l'ancre x-full-app-env "
+                f"partagée — risque de config Redis divergente entre services."
+            )
+            for var in self._REDIS_VARS:
+                assert var in full_env, f"x-full-app-env ne définit pas {var}"
+
+    def test_flower_references_the_same_redis_var_names(self):
+        compose = _load_compose()
+        flower_env = compose["services"]["flower"].get("environment") or {}
+        for var in self._REDIS_VARS:
+            assert var in flower_env, (
+                f"service 'flower' ne définit pas {var} — pourrait rester "
+                f"branché sur un ancien broker pendant que api/worker/beat "
+                f"migrent, cassant la visibilité Flower sans erreur visible."
+            )
+            assert f"${{{var}" in str(flower_env[var]), (
+                f"service 'flower', variable {var} : attendu une référence "
+                f"`${{{var}...}}` résolue au déploiement (même source que "
+                f"api/worker/beat), pas une valeur en dur."
+            )
+
+    def test_mcp_does_not_reference_redis_at_all(self):
+        """`mcp` (2026-09-20, migration Valkey) n'exécute AUCUN outil qui
+        touche Redis — confirmé par audit des imports (aucun module sous
+        `protocols/mcp/` n'importe `core.idempotency`/`redis`). Il ne doit
+        donc PORTER AUCUNE variable REDIS_URL/CELERY_* — si une future
+        évolution donne à MCP un besoin Redis, ce test doit être mis à jour
+        EXPLICITEMENT (pas de dérive silencieuse d'un service qui serait
+        resté sur un ancien broker sans que personne ne le remarque, faute
+        de variable du tout)."""
+        compose = _load_compose()
+        mcp_env = compose["services"]["mcp"].get("environment") or {}
+        for var in self._REDIS_VARS:
+            assert var not in mcp_env, (
+                f"service 'mcp' référence désormais {var} — s'assurer qu'il "
+                f"partage bien la même source que api/worker/beat/flower "
+                f"(x-full-app-env), pas une valeur indépendante qui pourrait "
+                f"diverger, puis mettre à jour ce test pour l'attendre."
+            )
 
 
 class TestNodeRoleProfiles:
