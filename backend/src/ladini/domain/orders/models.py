@@ -108,8 +108,9 @@ class Order(Base):
     payment_method = Column(String, default="CASH", nullable=False)
     payment_status = Column(String, default="PENDING", nullable=False)
     city = Column(String)
-    gps_lat = Column(Float)
-    gps_lng = Column(Float)
+    # REAL (float4) : type réel en base (créé par Drizzle `real()`), aligné ici.
+    gps_lat = Column(Float(24))
+    gps_lng = Column(Float(24))
     delivery_desc = Column(Text)
     audio_url = Column(String)
     status = Column(String, default="PENDING", nullable=False)

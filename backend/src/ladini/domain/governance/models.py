@@ -246,6 +246,11 @@ class SubCategory(Base):
     # lisent tous deux CES colonnes, jamais une copie locale.
     minimum_order_quantity = Column(Numeric(14, 3), nullable=True)
     minimum_order_unit = Column(String, nullable=True)
+    # Configuration des unités par type de produit (miroir de
+    # `governance.sub_categories` côté Drizzle, migration 0004) : nullable, NULL =
+    # aucune configuration = comportement historique.
+    priority_unit = Column(String, nullable=True)
+    allowed_units = Column(PG_ARRAY(String), nullable=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
