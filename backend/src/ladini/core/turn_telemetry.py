@@ -33,6 +33,8 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger("ladini.turn_telemetry")
 
 ENQUEUED_AT_HEADER = "ladini_enqueued_at"
+# Tâches dont la publication est horodatée (temps d'attente en file) — extensible (les tests y ajoutent la leur).
+TRACKED_TASKS: set[str] = {"ladini.api.tasks.process_agent_task"}
 _EXCERPT_MAX = 280
 
 _current: ContextVar[Optional["TurnRecorder"]] = ContextVar("ladini_turn_recorder", default=None)
@@ -411,7 +413,7 @@ def connect_celery_signals() -> None:
         @before_task_publish.connect(weak=False)
         def _stamp(sender=None, headers=None, **_kw):  # noqa: ANN001
             try:
-                if headers is not None and sender == "ladini.api.tasks.process_agent_task":
+                if headers is not None and sender in TRACKED_TASKS:
                     headers[ENQUEUED_AT_HEADER] = time.time()
             except Exception:  # pragma: no cover
                 pass
