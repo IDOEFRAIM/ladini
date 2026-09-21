@@ -86,3 +86,34 @@ class TestApplicationErrors:
         disjoncteur — mieux vaut la rendre visible en log qu'accuser à tort
         un provider sain."""
         assert classify_llm_error(RuntimeError("quelque chose d'inattendu")) == ErrorClass.APPLICATION
+
+    def test_the_real_groq_json_validate_failed_message_is_application_not_config(self):
+        """Incident réel de production (2026-09-21) : ce message EXACT,
+        renvoyé par `groq:openai/gpt-oss-20b` (candidat PRIMARY du profil
+        INTERPRETER, par ailleurs sain), a été classé CONFIG — mis en
+        cooldown ET a déclenché une alerte CRITICAL "MODEL_CONFIG_ERROR" —
+        pour un échec de validation JSON d'UNE SEULE génération, rien à
+        voir avec le candidat lui-même. Cause : le `type` "invalid_request_
+        error" qu'OpenAI/Groq posent sur QUASIMENT toute erreur 400 client
+        était dans `_CONFIG_ERROR_MESSAGE_FRAGMENTS`, alors qu'il ne désigne
+        rien de spécifique à un modèle/candidat cassé (contrairement à
+        "does not support"/"model not found"/... qui restent dans la
+        liste). Combiné à un second candidat réellement en panne (404), ce
+        faux positif a fait chuter TOUS les candidats du profil pendant le
+        cooldown."""
+        exc = Exception(
+            "Error code: 400 - {'error': {'message': \"Failed to validate "
+            "JSON. Please adjust your prompt. See 'failed_generation' for "
+            "more details.\", 'type': 'invalid_request_error', 'code': "
+            "'json_validate_failed', 'failed_generation': ''}}"
+        )
+        exc.status_code = 400
+        assert classify_llm_error(exc) == ErrorClass.APPLICATION
+
+    def test_a_generic_400_with_only_the_generic_error_type_stays_application(self):
+        exc = Exception(
+            "Error code: 400 - {'error': {'message': \"some per-request "
+            "issue\", 'type': 'invalid_request_error'}}"
+        )
+        exc.status_code = 400
+        assert classify_llm_error(exc) == ErrorClass.APPLICATION
