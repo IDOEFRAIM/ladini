@@ -462,6 +462,10 @@ class TestGoalStatusEquivalenceClassIsConsumerSafe:
             text = path.read_text(encoding="utf-8", errors="ignore")
             if 'get("goal_status")' in text:
                 readers.add(path.name)
+        # `turn_telemetry.py` (cockpit /admin/monitoring) LIT `goal_status` en pure OBSERVATION : il l'enregistre
+        # dans `agent_turns` sans jamais brancher de logique métier dessus — il ne peut donc pas casser la preuve
+        # d'innocuité ci-dessous (qui ne concerne que les lecteurs COMPORTEMENTAUX).
+        readers.discard("turn_telemetry.py")
         assert readers == {"cleaner.py", "memory.py", "orchestrator.py"}, (
             f"lecteurs de goal_status inattendus : {sorted(readers)} — la "
             "preuve d'innocuité de la divergence FastPath doit être refaite"

@@ -211,6 +211,12 @@ def _init_db_locked() -> None:
     _AsyncSessionLocal = async_sessionmaker(
         bind=_async_engine, class_=AsyncSession, expire_on_commit=False
     )
+    try:  # télémétrie de tour (nb requêtes / temps SQL) — best-effort, jamais bloquant
+        from ladini.core import turn_telemetry
+
+        turn_telemetry.attach_sql_listeners(_async_engine.sync_engine)
+    except Exception:  # pragma: no cover
+        logger.warning("Instrumentation SQL de télémétrie indisponible (non bloquant).", exc_info=True)
     logger.info("✅ Database engine asynchrone initialized for DigitalOcean.")
 
 

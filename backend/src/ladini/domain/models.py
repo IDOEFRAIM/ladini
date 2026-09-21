@@ -84,8 +84,12 @@ from ladini.domain.orders.models import (
     Payment,
 )
 from ladini.domain.orm_base import Base, _uuid4
+from ladini.domain.telemetry import AgentLlmCall, AgentToolCall, AgentTurn
 
 __all__ = [
+    "AgentLlmCall",
+    "AgentToolCall",
+    "AgentTurn",
     "Base",
     "_uuid4",
     # auth

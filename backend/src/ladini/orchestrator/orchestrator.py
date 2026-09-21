@@ -46,6 +46,24 @@ _SNAPSHOT_EXCLUDE = frozenset(
     }
 )
 
+def _tt_final(final: Any) -> None:
+    try:
+        from ladini.core import turn_telemetry
+
+        turn_telemetry.note_final(final)
+    except Exception:  # pragma: no cover
+        pass
+
+
+def _tt_error(code: str, category: str) -> None:
+    try:
+        from ladini.core import turn_telemetry
+
+        turn_telemetry.note_error(code, category)
+    except Exception:  # pragma: no cover
+        pass
+
+
 _FALLBACK_RESPONSE = (
     "Désolé, une difficulté technique est survenue. Veuillez reessayer.Si cela persiste,"
     "vous pouvez nous contacter au +226 68 81 52 99. L'equipe de LADINI vous presente ses escuses pour ce desagreement"
@@ -176,6 +194,7 @@ class Orchestrator:
                 elapsed_ms,
                 exc,
             )
+            _tt_error("AGENT_CIRCUIT_BREAKER", "INTERNAL")
             await self._flush_workspace(ws, reason="circuit_breaker")
             return self._build_failure_response(ws, workspace_id)
         except asyncio.TimeoutError:
@@ -188,6 +207,7 @@ class Orchestrator:
                 elapsed_ms,
                 (user_query or "")[:160],
             )
+            _tt_error("AGENT_TIMEOUT", "TIMEOUT")
             await self._flush_workspace(ws, reason="timeout")
             return self._build_failure_response(ws, workspace_id)
         except Exception as exc:  # pragma: no cover - safety net
@@ -201,6 +221,7 @@ class Orchestrator:
                 exc,
                 exc_info=True,
             )
+            _tt_error(type(exc).__name__, "INTERNAL")
             await self._flush_workspace(ws, reason="agent_error")
             return self._build_failure_response(ws, workspace_id)
         else:
@@ -213,6 +234,7 @@ class Orchestrator:
                 final.get("current_goal"),
                 final.get("status"),
             )
+            _tt_final(final)  # télémétrie du tour (best-effort, sans effet sur le métier)
             langgraph_blob = (
                 copy.deepcopy(ws.agent_state)
                 if isinstance(ws.agent_state, dict)

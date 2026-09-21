@@ -58,6 +58,13 @@ BEAT_SCHEDULE: Dict[str, Dict[str, Any]] = {
     },
     # Réconciliation des SalesPublishDraft bloqués en EXECUTING
     # (2026-09-04, migration SALES) — même principe que PROCUREMENT/PREORDER.
+    # Rétention de la télémétrie de l'agent (cockpit /admin/monitoring) : purge batchée, non bloquante,
+    # des tours plus vieux que `AGENT_MONITORING_RETENTION_DAYS`. Toutes les 6 h suffit (volume modeste).
+    "agent-telemetry-retention": {
+        "task": "workers.agent_telemetry_retention",
+        "schedule": 21600.0,
+        "options": {"expires": 3600},
+    },
     "sales-publish-reconciliation": {
         "task": "workers.sales_publish_reconciliation",
         "schedule": settings.SALES_RECONCILIATION_INTERVAL_SECONDS,

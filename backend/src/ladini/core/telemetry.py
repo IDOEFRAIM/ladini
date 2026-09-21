@@ -518,7 +518,17 @@ def record_generation(
       - depuis le LLM Gateway : profile/provider/attempt/fallback/structured
         validity — voir `graphs/agents/market_coach/llm_gateway/gateway.py`.
     Défensif : n'échoue jamais, quel que soit l'état des backends.
+    (Alimente aussi la télémétrie de tour `core/turn_telemetry` : provider/modèle/durée/fallback par appel.)
     """
+    try:  # télémétrie de tour (cockpit) : jamais bloquant
+        from ladini.core import turn_telemetry
+
+        turn_telemetry.note_llm(
+            name=name, model=model, provider=provider, profile=profile, agent_node=agent_node,
+            latency_s=latency_s, usage=usage, error=error, fallback_from=fallback_from,
+        )
+    except Exception:  # pragma: no cover
+        pass
     status = "error" if error else "success"
     prompt_tokens = int((usage or {}).get("prompt_tokens") or 0)
     completion_tokens = int((usage or {}).get("completion_tokens") or 0)
