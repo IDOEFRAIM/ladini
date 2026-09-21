@@ -67,12 +67,77 @@ class TestBugALivestockNeverGetsLitreFromAnElidedUnite:
         """Non-régression de l'incident 2026-08-29 (raison d'être de
         UNIT_SYNONYMS["l"] = "LITRE") : "25 L à 500 fcfa" doit continuer à
         reconnaître LITRE pour la quantité — un vrai symbole de litre COLLÉ
-        à un chiffre reste un litre."""
+        à un chiffre reste un litre.
+
+        §BUG DE COUVERTURE CORRIGÉ ICI (2026-09-21) : cette assertion ne
+        vérifiait JAMAIS QUEL nombre recevait `unit == "LITRE"` — seulement
+        que 2 candidats existaient et que le second (le prix) était bien
+        `near_currency`. Le vrai bug (25, la quantité, restait `unit=None`,
+        et c'est 500, le PRIX, qui récupérait `unit="LITRE"` par erreur —
+        voir le correctif de `_find_scan_unit_token` dans
+        `domain/quantity_unit.py`, incident réel récurrent) passait donc
+        inaperçu malgré ce test "de non-régression" déjà en place, qui
+        passait au vert des deux côtés du bug. `candidates[0].unit` est
+        désormais vérifié explicitement."""
         candidates = scan_number_candidates("25 L a 500 fcfa")
         assert len(candidates) == 2
         assert candidates[0].value == 25.0
+        assert candidates[0].unit == "LITRE", (
+            f"la QUANTITÉ (25) doit porter l'unité LITRE, pas {candidates[0].unit!r}"
+        )
         assert candidates[1].value == 500.0
         assert candidates[1].near_currency is True
+
+
+class TestBugCUnitNotAttachedWhenItImmediatelyFollowsTheNumber:
+    """Incident réel RÉCURRENT (2026-09-21) — signalé lors d'une session
+    précédente, jamais réellement fermé (voir le test de couverture corrigé
+    ci-dessus) : un producteur laitier répond "j'ai 600 L de lait... Le
+    bidon de 5 L coûte 500 fcfa et celui de 10 L coûte 900 fcfa" pendant la
+    collecte de quantité — l'agent accuse réception des tarifs mais
+    re-demande la quantité, alors que "600 L" venait d'être donnée.
+
+    Root cause : `_find_scan_unit_token`, appelée sur la fenêtre `after`
+    (texte APRÈS le nombre scanné), rejetait TOUJOURS un symbole mono-lettre
+    ("L") collé au nombre, car sa garde anti-faux-positif ne regardait QUE
+    l'intérieur de cette fenêtre — qui, par construction, exclut le chiffre
+    qui vient d'être scanné. "600 L" (nombre puis unité, l'ordre naturel en
+    français) ne pouvait donc JAMAIS obtenir `unit="LITRE"` ; l'unité
+    "flottait" alors jusqu'au nombre suivant portant une devise à proximité
+    (500), un PRIX pris à tort pour un litre."""
+
+    def test_bare_quantity_immediately_followed_by_l_gets_the_unit(self):
+        candidates = scan_number_candidates("600 L de lait")
+        assert len(candidates) == 1
+        assert candidates[0].value == 600.0
+        assert candidates[0].unit == "LITRE"
+        assert candidates[0].near_currency is False
+
+    def test_the_exact_incident_message_attaches_litre_to_the_bare_quantity_only(self):
+        text = (
+            "600 L de lait... Le bidon de 5 L coute 500 fcfa et celui de "
+            "10 L coute 900 fcfa"
+        )
+        candidates = scan_number_candidates(text)
+        by_value = {c.value: c for c in candidates}
+
+        # La quantité globale (600) : unité reconnue, jamais confondue avec
+        # un prix.
+        assert by_value[600.0].unit == "LITRE"
+        assert by_value[600.0].near_currency is False
+
+        # Les prix (500, 900) restent correctement marqués near_currency —
+        # inchangé par ce correctif.
+        assert by_value[500.0].near_currency is True
+        assert by_value[900.0].near_currency is True
+
+    def test_livestock_single_letter_false_positive_guard_is_not_reopened(self):
+        """Garde-fou : ce correctif ne doit PAS réouvrir Bug A (2026-09-19,
+        "l unite coute 495000 fcfa" ne doit jamais capter LITRE depuis un
+        "l" isolé sans rapport avec un chiffre)."""
+        candidates = scan_number_candidates("l unite coute 495000 fcfa")
+        assert len(candidates) == 1
+        assert candidates[0].unit == "UNITE"
 
 
 class TestBugBTypoOnFcfaNoLongerMisclassifiesPriceAsQuantity:

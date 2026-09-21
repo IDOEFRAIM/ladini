@@ -30,7 +30,24 @@ from typing import Dict
 # ajoute une règle sémantique explicite (une nouvelle demande explicite
 # prévaut sur une correction de champ de même nom) + 2 paires d'exemples
 # contrastifs courts — jamais une liste de déclencheurs lexicaux.
-ACTIVE_SLOT_PROMPT_VERSION = "active_slot_v3"
+#
+# v4 (2026-09-21, incident réel production, signalé RÉCURRENT — déjà vu lors
+# d'une session précédente, jamais complètement fermé) : "600 L de lait...
+# Le bidon de 5 L coûte 500 fcfa et celui de 10 L coûte 900 fcfa" (slot
+# QUANTITY actif) perdait la quantité globale (600) — la réponse ressortait
+# `UNKNOWN`/confiance insuffisante, l'utilisateur se voyait re-demander une
+# information qu'il venait de donner. Cause racine : le prompt n'expliquait
+# QUE le cas "quantity dérivée d'une somme de groupes de conditionnements"
+# ("60 bidons de 5 L" → 60×5) — jamais le cas, pourtant courant, d'une
+# quantité globale énoncée DIRECTEMENT ("600 L") à côté de tarifs par
+# conditionnement INDÉPENDANTS (qui ne donnent aucun compte de bidons). Sans
+# exemple pour ce second cas, le modèle hésitait entre les deux lectures et
+# retombait sous le seuil de confiance — v4 ajoute la règle explicite de
+# non-réconciliation + un exemple travaillé reproduisant EXACTEMENT
+# l'incident (voir `_USER_PROMPT_TEMPLATE` ci-dessous). Aucune règle
+# existante retirée — l'ancien cas (quantité dérivée des groupes) reste
+# couvert tel quel.
+ACTIVE_SLOT_PROMPT_VERSION = "active_slot_v4"
 
 ACTIVE_SLOT_SYSTEM_PROMPT = (
     "Tu interprètes, dans une conversation WhatsApp au Burkina Faso, la "
@@ -108,18 +125,40 @@ _USER_PROMPT_TEMPLATE = (
     "- \"quantity\" : si le stock est décrit en PLUSIEURS groupes de "
     "conditionnements (\"60 bidons de 5 L et 30 bidons de 20 L\"), c'est la "
     "SOMME de chaque groupe (paquets × contenu), jamais le premier nombre "
-    "lu seul (60×5 + 30×20 = 900, pas 60).\n"
+    "lu seul (60×5 + 30×20 = 900, pas 60). Si en revanche la quantité "
+    "globale est énoncée DIRECTEMENT (\"600 L de lait\"), prends-la TELLE "
+    "QUELLE — ne cherche JAMAIS à la recalculer ou à la réconcilier avec "
+    "des tailles de conditionnement mentionnées séparément dans des tarifs "
+    "(voir \"pricing_tiers\" juste en dessous) : une quantité globale "
+    "directe et des tarifs par conditionnement sont DEUX informations "
+    "INDÉPENDANTES du même message, toutes deux à extraire normalement.\n"
     "- \"pricing_tiers\" : si PLUSIEURS couples quantité+unité+prix sont "
     "donnés pour le même produit (\"1 bidon de 5 L à 10000 FCFA, 1 bidon de "
-    "20 L à 50000 FCFA\"), liste CHAQUE déclinaison comme un objet distinct "
-    "(quantity/unit/price/packaging) — un prix \"par unité de base\" SANS "
-    "conditionnement précis (\"3000 FCFA le litre\") va dans price/"
-    "price_unit, jamais dans pricing_tiers. Le quantity/unit D'UN TARIF "
-    "décrit le CONTENU d'un seul paquet, jamais le nombre de paquets en "
-    "stock.\n"
+    "20 L à 50000 FCFA\", ou \"le bidon de 5 L coûte 500 FCFA et celui de "
+    "10 L coûte 900 FCFA\"), liste CHAQUE déclinaison comme un objet "
+    "distinct (quantity/unit/price/packaging) — un prix \"par unité de "
+    "base\" SANS conditionnement précis (\"3000 FCFA le litre\") va dans "
+    "price/price_unit, jamais dans pricing_tiers. Le quantity/unit D'UN "
+    "TARIF décrit le CONTENU d'un seul paquet, jamais le nombre de paquets "
+    "en stock — et n'affecte JAMAIS la valeur de \"quantity\" globale "
+    "quand celle-ci est donnée par ailleurs (règle ci-dessus).\n"
     "- \"confidence\" : ta certitude entre 0.0 et 1.0 sur la disposition "
     "choisie — sois prudent (valeur basse) en cas de doute réel entre "
-    "ANSWER et DEVIATION.\n"
+    "ANSWER et DEVIATION. La présence de tarifs par conditionnement "
+    "(pricing_tiers) n'est PAS, à elle seule, une raison de baisser cette "
+    "confiance : une quantité globale directe reste une réponse claire au "
+    "champ attendu même accompagnée de tarifs détaillés.\n"
+    "\n"
+    "EXEMPLE (quantité globale énoncée directement + tarifs par "
+    "conditionnement indépendants, combinés dans le MÊME message — champ "
+    "attendu : quantity) :\n"
+    '"600 L de lait. Le bidon de 5 L coûte 500 FCFA et celui de 10 L coûte '
+    '900 FCFA." → disposition=ANSWER, extracted_entities={{"quantity": '
+    '600.0, "unit": "L", "pricing_tiers": [{{"quantity": 5.0, "unit": "L", '
+    '"price": 500.0, "packaging": "bidon"}}, {{"quantity": 10.0, "unit": '
+    '"L", "price": 900.0, "packaging": "bidon"}}]}} — jamais DEVIATION, '
+    "jamais UNKNOWN, jamais une confiance basse : les deux informations "
+    "sont explicites et sans ambiguïté.\n"
     "\n"
     "Réponds strictement avec cet objet JSON, sans aucun autre texte :\n"
     '{{"disposition": "ANSWER|UPDATE|REJECT|DEVIATION|UNKNOWN", '

@@ -57,6 +57,18 @@ def _order(status="CONFIRMED", items=None, winning_bid_id=None, payment_status="
     )
 
 
+class _Rows(list):
+    """Liste de tuples-ligne qui supporte AUSSI `.first()`/`.all()` — voir la
+    même classe dans test_cancel_pending_order_confirmed_gap.py pour le
+    détail (protocole d'itération vs `types.SimpleNamespace`)."""
+
+    def first(self):
+        return self[0] if self else None
+
+    def all(self):
+        return list(self)
+
+
 class _FakeSession:
     """Dispatch par contenu SQL compilé — aucun ordre d'appel supposé
     (même convention que le reste de cette suite)."""
@@ -93,6 +105,20 @@ class _FakeSession:
             self._order_served = True
             return self._order
         return None
+
+    async def scalars(self, stmt):
+        # (2026-09-21, audit latence — N+1) : `cancel_confirmed_order`
+        # verrouille désormais TOUS les produits de la commande en UNE
+        # requête `IN (...)` plutôt qu'une par item — même correspondance
+        # par sous-chaîne que `.scalar()` ci-dessus, mais collecte TOUS les
+        # matches au lieu du premier.
+        sql = self._sql(stmt)
+        matched = [
+            item.product
+            for item in self._order.items
+            if item.product and str(item.product_id) in sql
+        ]
+        return _Rows(matched)
 
     async def execute(self, stmt):
         from sqlalchemy.sql.dml import Insert as _InsertStmt

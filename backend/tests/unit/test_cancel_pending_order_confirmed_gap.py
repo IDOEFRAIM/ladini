@@ -68,9 +68,25 @@ def _order(status, items=None, winning_bid_id=None):
     )
 
 
+class _Rows(list):
+    """Liste de tuples-ligne qui supporte AUSSI `.first()`/`.all()` — imite
+    le strict minimum de l'API `Result` de SQLAlchemy utilisée par le code
+    réel (itération directe pour un `IN (...)` batché via `.execute()`,
+    `.all()` pour un `.scalars()`, `.first()` pour un lookup ponctuel), sans
+    dépendre de `types.SimpleNamespace` (dont les attributs d'instance ne
+    satisfont PAS le protocole d'itération, qui ne regarde que le TYPE)."""
+
+    def first(self):
+        return self[0] if self else None
+
+    def all(self):
+        return list(self)
+
+
 class _FakeSession:
-    """Dispatch `.scalar()`/`.execute()` par contenu SQL compilé — même
-    convention que le reste de cette suite (aucun ordre d'appel supposé)."""
+    """Dispatch `.scalar()`/`.scalars()`/`.execute()` par contenu SQL
+    compilé — même convention que le reste de cette suite (aucun ordre
+    d'appel supposé)."""
 
     def __init__(self, order, phones_by_producer=None):
         self._order = order
@@ -99,6 +115,20 @@ class _FakeSession:
             return None
         return None
 
+    async def scalars(self, stmt):
+        # (2026-09-21, audit latence — N+1) : `cancel_pending_order` verrouille
+        # désormais TOUS les produits de la commande en UNE requête `IN (...)`
+        # plutôt qu'une par item — mêmes ids littéraux dans le SQL compilé,
+        # donc même correspondance par sous-chaîne que `.scalar()` ci-dessus,
+        # mais collecte TOUS les matches au lieu du premier.
+        sql = self._sql(stmt)
+        matched = [
+            item.product
+            for item in self._order.items
+            if item.product and str(item.product_id) in sql
+        ]
+        return _Rows(matched)
+
     async def execute(self, stmt):
         from sqlalchemy.sql.dml import Insert as _InsertStmt
 
@@ -106,16 +136,25 @@ class _FakeSession:
             self.outbox_inserts.append(stmt)
             return types.SimpleNamespace(all=lambda: [1])
         sql = self._sql(stmt)
-        for producer_id, phone in self._phones_by_producer.items():
-            if str(producer_id) in sql:
-                return types.SimpleNamespace(first=lambda: (phone,))
+        # (2026-09-21, audit latence — N+1) : la résolution des téléphones
+        # producteur est désormais UNE requête `IN (...)` pour tous les
+        # producteurs de la commande (avant : une par producteur) — collecte
+        # tous les matches, itérable directement (`for (phone,) in rows`),
+        # pas seulement `.first()`.
+        matched_phones = [
+            (phone,)
+            for producer_id, phone in self._phones_by_producer.items()
+            if str(producer_id) in sql
+        ]
+        if matched_phones:
+            return _Rows(matched_phones)
         # Résolution via `Bid.id == order.winning_bid_id` : aucun producer_id
         # littéral dans le SQL compilé (filtré par bid_id, joint sur
         # `Bid.producer_id`) — matché sur la présence de la table `bids`.
         if "marketplace.bids" in sql and self._phones_by_producer:
             phone = next(iter(self._phones_by_producer.values()))
-            return types.SimpleNamespace(first=lambda: (phone,))
-        return types.SimpleNamespace(first=lambda: None)
+            return _Rows([(phone,)])
+        return _Rows([])
 
     def add(self, obj):
         pass

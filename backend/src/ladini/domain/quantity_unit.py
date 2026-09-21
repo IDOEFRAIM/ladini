@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, Optional
 
 UNIT_SYNONYMS: Dict[str, str] = {
@@ -504,7 +505,9 @@ def _near_currency_fuzzy(window: str) -> bool:
     return any(_looks_like_fcfa_typo(w) for w in _CURRENCY_WORDLIKE_RE.findall(window))
 
 
-def _find_scan_unit_token(window: str) -> Optional[str]:
+def _find_scan_unit_token(
+    window: str, *, digit_precedes_window: bool = False
+) -> Optional[str]:
     """Comme `_SCAN_UNIT_RE.search(window).group(1)`, mais applique la MÊME
     garde anti-élision que `extract_unit_only_from_text` (voir sa docstring,
     incidents 2026-09-08/2026-09-15) — jamais répliquée ici avant (Bug A,
@@ -513,14 +516,48 @@ def _find_scan_unit_token(window: str) -> Optional[str]:
     faisant afficher "FCFA/LITRE" pour une vente de bœufs. `_SCAN_UNIT_RE.search`
     ne renvoie que le PREMIER match par position ; on itère ici sur TOUS les
     matches et on saute ceux qui échouent la garde, au lieu de s'arrêter au
-    premier trouvé."""
+    premier trouvé.
+
+    §BUG CORRIGÉ ICI (2026-09-21, incident réel récurrent — déjà signalé lors
+    d'une session précédente, jamais fermé jusqu'ici) : pour un symbole
+    mono-lettre (`L`), la garde "un chiffre précède immédiatement" ne
+    regardait QUE l'intérieur de `window` — or `scan_number_candidates`
+    appelle cette fonction avec `after = clean[m.end():m.end()+SCAN_WINDOW]`,
+    une tranche qui EXCLUT PAR CONSTRUCTION le chiffre qui vient d'être
+    scanné (il est juste AVANT le début de `after`, jamais dedans). Résultat :
+    pour "5 L coûte 500 fcfa", la garde ne pouvait JAMAIS être satisfaite
+    pour le "L" collé à "5" (rien avant lui DANS `after`) — elle retombait
+    alors sur le "L"/LITRE suivant, capté par erreur pour "500" (le PRIX,
+    pas la quantité). Reproduit et confirmé (pas une supposition) :
+    `scan_number_candidates("25 L a 500 fcfa")` renvoyait déjà
+    `candidates[0].unit is None` et `candidates[1].unit == "LITRE"` AVANT ce
+    correctif — l'ancien test de non-régression associé
+    (`test_dairy_producer_selling_by_the_litre_is_not_regressed`) ne
+    vérifiait jamais QUEL nombre recevait l'unité, laissant ce bug passer
+    inaperçu malgré son propre docstring affirmant le contraire (corrigé
+    dans le même correctif, voir `tests/unit/test_scan_number_candidates_livestock_price_bug.py`).
+
+    `digit_precedes_window=True` (passé UNIQUEMENT par l'appel sur `after`,
+    jamais sur `before`) indique à cette fonction qu'un chiffre est déjà
+    connu comme précédant IMMÉDIATEMENT le tout début de `window` (c'est la
+    définition même de `after`) — un match mono-lettre trouvé tout au début
+    de `window` (rien avant lui dans `window`, hormis des espaces) est donc
+    accepté SANS avoir besoin de revoir ce chiffre dans `window` lui-même,
+    qui ne peut structurellement pas s'y trouver. Un match mono-lettre plus
+    loin dans `window` (donc PAS adjacent au chiffre scanné) garde la garde
+    stricte d'origine, inchangée. Le scan de `before` (unité AVANT le
+    nombre) n'est PAS concerné par ce correctif — sa sémantique reste celle
+    d'origine, aucun changement de comportement pour cette direction."""
     for m in _SCAN_UNIT_RE.finditer(window):
         if m.end() < len(window) and window[m.end()] in _ELISION_CHARS:
             continue
         token = normalize_unit_token(m.group(1))
         if token in _SINGLE_LETTER_UNIT_SYMBOLS:
             before = window[: m.start()].rstrip()
-            if not before or not before[-1].isdigit():
+            if before:
+                if not before[-1].isdigit():
+                    continue
+            elif not digit_precedes_window:
                 continue
         return m.group(1)
     return None
@@ -558,7 +595,10 @@ def scan_number_candidates(text: str) -> "list[NumberCandidate]":
             or _near_currency_fuzzy(after)
             or _near_currency_fuzzy(before)
         )
-        unit_token = _find_scan_unit_token(after) or _find_scan_unit_token(before)
+        unit_token = (
+            _find_scan_unit_token(after, digit_precedes_window=True)
+            or _find_scan_unit_token(before)
+        )
         mapped_unit = (
             UNIT_SYNONYMS.get(normalize_unit_token(unit_token))
             if unit_token
@@ -658,57 +698,434 @@ def parse_packaged_compound_quantity(text: str) -> QuantityUnitResult:
     et somme les clauses — jamais de résultat partiel deviné : une clause
     ambiguë (0 ou plusieurs correspondances) ou des unités mélangées entre
     clauses annulent le résultat entier (retombe alors sur le comportement
-    existant, `parse_quantity_unit_from_text`/`scan_number_candidates`)."""
-    if not text:
-        return QuantityUnitResult()
-    # Jamais quand un PRIX est mentionné dans le texte : "1 bidon de 5 L
-    # coûte 10000 fcfa" matche EXACTEMENT le même motif conditionnement que
-    # "30 bidons de 20 L" (une vraie quantité de stock) — ce parseur ne sait
-    # pas distinguer les deux (incident réel 2026-09-14 : sommait à tort les
-    # deux clauses de PRIX comme des groupes de stock supplémentaires, total
-    # gonflé de 900 à 925 L). Dès qu'un prix apparaît, le message mélange
-    # quantité ET prix : structurellement du ressort du LLM (règle 5bis/
-    # 5ter du prompt système), jamais d'une somme aveugle de tout ce qui
-    # ressemble à un conditionnement.
-    if _TIER_PRICE_CURRENCY_RE.search(text):
-        return QuantityUnitResult()
-    clauses = [c.strip() for c in _TIER_CLAUSE_SPLIT_RE.split(text) if c.strip()]
-    if not clauses:
-        return QuantityUnitResult()
+    existant, `parse_quantity_unit_from_text`/`scan_number_candidates`).
 
-    total = 0.0
-    unit_canonical: Optional[str] = None
-    matched_multiplier = False
-    for clause in clauses:
-        multiplier_match = _PACKAGE_COUNT_UNIT_RE.search(clause)
-        if multiplier_match:
-            count_val = _parse_number(multiplier_match.group("count"))
-            content_val = _parse_number(multiplier_match.group("qty"))
-            content_unit = UNIT_SYNONYMS.get(
-                normalize_unit_token(multiplier_match.group("unit"))
+    (2026-09-21) Devenue une VUE de `parse_packaging_message` — contrat
+    public strictement inchangé. Le "jamais quand un PRIX est mentionné"
+    est désormais porté par le moteur (il marque le message ambigu), au
+    lieu d'être re-testé ici sur un découpage en clauses parallèle."""
+    return packaged_compound_total(parse_packaging_message(text))
+
+
+def packaged_compound_total(parsed: "PackagingParse") -> QuantityUnitResult:
+    """Quantité totale exprimée EN PAQUETS, depuis une analyse déjà faite.
+
+    Même règle que `parse_packaged_compound_quantity` (dont c'est le corps),
+    exposée séparément pour les appelants qui ont DÉJÀ le résultat de
+    `parse_packaging_message` sous la main — pas de seconde analyse du même
+    texte, c'est précisément ce que cette refonte supprime."""
+    if parsed.ambiguous or parsed.quantity is None or parsed.quantity <= 0:
+        return QuantityUnitResult()
+    # Ce parseur est spécifiquement celui des quantités exprimées EN
+    # PAQUETS : sans au moins un groupe "N <conditionnement> de M <unité>",
+    # il ne répond pas (une quantité simple relève de
+    # `parse_quantity_unit_from_text`) — contrat historique.
+    if not any(
+        c.role is PackagingClauseRole.PACKAGED_GROUP for c in parsed.clauses
+    ):
+        return QuantityUnitResult()
+    return QuantityUnitResult(quantity=parsed.quantity, unit=parsed.unit)
+
+
+# ===========================================================================
+# MOTEUR UNIFIÉ "packaging / multi-tarification" (2026-09-21, refonte
+# STRUCTURELLE — remplace 3 analyses divergentes du MÊME texte)
+# ===========================================================================
+# Pourquoi cette refonte (et pas une Nième rustine) : ce thème a cassé
+# plusieurs fois, sous des FORMES DIFFÉRENTES (2026-08-29, 2026-08-30,
+# 2026-09-14, 2026-09-19, 2026-09-21). La cause commune n'était jamais la
+# regex du jour, mais la TOPOLOGIE : trois mécanismes INDÉPENDANTS
+# analysaient le même message sans jamais se recouper —
+#
+#   1. `scan_number_candidates` : fenêtre glissante de N caractères, AUCUNE
+#      notion de clause. Servait à COMPTER les candidats pour décider QUEL
+#      fast-path tenter (`_qty_unit_candidates`, `_currency_candidates`).
+#   2. `extract_deterministic_pricing_tiers` : découpage en CLAUSES, ses
+#      propres regexes, faisait l'extraction RÉELLE des tarifs.
+#   3. `parse_packaged_compound_quantity` : découpage en CLAUSES aussi, mais
+#      ENCORE d'autres regexes, pour les groupes de conditionnements.
+#
+# Décider avec (1) puis extraire avec (2)/(3) = deux modèles de segmentation
+# pour répondre à des questions qui se recouvrent, sans garantie d'accord.
+# Chaque incident ajoutait une branche spéciale de plus à l'arbitrage, sans
+# jamais supprimer la divergence de fond.
+#
+# Ce moteur classe CHAQUE clause UNE FOIS, selon UN seul jeu de règles, et
+# expose le résultat complet (quantité globale, tarifs, nombres non
+# expliqués, ambiguïté). Tous les consommateurs en dérivent désormais :
+# `extract_deterministic_pricing_tiers` et `parse_packaged_compound_quantity`
+# deviennent de simples vues de CE résultat (contrats publics inchangés,
+# zéro changement pour leurs appelants existants), et
+# `interpreter/routing.py` interroge directement le moteur au lieu de
+# recouper lui-même des comptages issus d'une autre analyse.
+#
+# Règles métier préservées à l'identique (chacune issue d'un incident réel,
+# aucune n'est réinventée ici) :
+#   - un tarif est TOUJOURS "par UN conditionnement" : une clause "N
+#     <conditionnement> de M <unité>" avec N != 1 décrit un STOCK, jamais un
+#     tarif unitaire (2026-09-14) ;
+#   - il faut 2+ tarifs pour lever l'ambiguïté avec un prix simple
+#     (2026-08-30) ;
+#   - un groupe de conditionnements ne se somme JAMAIS si un prix apparaît
+#     dans le texte (2026-09-14) ;
+#   - des unités mélangées entre groupes annulent tout le résultat ;
+#   - le conditionnement d'un tarif s'hérite du tarif précédent quand la
+#     clause y fait référence sans le renommer ("celui de 10 L à 900f").
+
+
+class PackagingClauseRole(str, Enum):
+    """Rôle d'UNE clause dans un message de mise en vente."""
+
+    #: "le bidon de 5 L coûte 500 FCFA" — contenu d'UN paquet + son prix.
+    TIER = "TIER"
+    #: "60 bidons de 5 L" — un compte de paquets × leur contenu, sans prix.
+    PACKAGED_GROUP = "PACKAGED_GROUP"
+    #: "600 L de lait" — une quantité globale énoncée directement.
+    BARE_QUANTITY = "BARE_QUANTITY"
+    #: Aucune information chiffrée exploitable ("je vends du lait frais").
+    NO_NUMBER = "NO_NUMBER"
+    #: Des nombres, mais un rôle non déterminable sans deviner.
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+@dataclass(frozen=True)
+class PackagingClause:
+    role: PackagingClauseRole
+    text: str
+    #: TIER -> contenu d'UN paquet ; PACKAGED_GROUP -> total du groupe
+    #: (compte × contenu) ; BARE_QUANTITY -> la valeur énoncée.
+    quantity: Optional[float] = None
+    #: Unité canonique (`UNIT_SYNONYMS`), ex "LITRE".
+    unit: Optional[str] = None
+    #: Unité telle qu'écrite par l'utilisateur — `pricing_tiers` conserve
+    #: historiquement cette forme brute ("L"), pas la forme canonique.
+    unit_raw: Optional[str] = None
+    price: Optional[float] = None
+    packaging: Optional[str] = None
+    #: TOUTES les valeurs numériques de la clause — sert au contrôle de
+    #: complétude (`all_numbers_accounted_for`), jamais à l'extraction.
+    numbers: tuple = ()
+    #: Nombres que le rôle retenu n'explique PAS (ex: un prix traînant dans
+    #: une clause classée BARE_QUANTITY).
+    unexplained: tuple = ()
+
+
+@dataclass(frozen=True)
+class PackagingParse:
+    """Analyse COMPLÈTE d'un message — source unique de vérité."""
+
+    clauses: tuple = ()
+    quantity: Optional[float] = None
+    unit: Optional[str] = None
+    #: Liste de dicts {"quantity","unit","price","packaging"} — même forme
+    #: que ce que le LLM produit, contrat historique inchangé.
+    pricing_tiers: tuple = ()
+    #: Au moins une clause porte des nombres dont le rôle est indécidable :
+    #: l'appelant ne doit JAMAIS produire un résultat partiel, il défère
+    #: (LLM). Même discipline que le reste de ce module.
+    ambiguous: bool = False
+    #: Nombres du message qu'AUCUN champ du résultat n'explique.
+    unexplained_numbers: tuple = ()
+
+
+def _clause_numbers(clause: str) -> tuple:
+    out = []
+    for m in _SCAN_NUMBER_RE.finditer(clause):
+        val = _parse_number(m.group(1))
+        if val is not None:
+            out.append(val)
+    return tuple(out)
+
+
+def _classify_packaging_clause(clause: str) -> PackagingClause:
+    """Classe UNE clause. Aucune décision d'agrégation ici (2+ tarifs,
+    unités mélangées, présence d'un prix ailleurs dans le message...) —
+    c'est `parse_packaging_message` qui arbitre, avec la vue d'ensemble."""
+    numbers = _clause_numbers(clause)
+    if not numbers:
+        return PackagingClause(
+            role=PackagingClauseRole.NO_NUMBER, text=clause, numbers=numbers
+        )
+
+    qty_matches = list(_TIER_QTY_UNIT_RE.finditer(clause))
+    price_matches = list(_TIER_PRICE_CURRENCY_RE.finditer(clause))
+    pack_match = _PACKAGE_COUNT_UNIT_RE.search(clause)
+    packaging_match = _TIER_PACKAGING_RE.search(clause)
+    packaging = packaging_match.group(1).lower() if packaging_match else None
+
+    # --- "N <conditionnement> de M <unité>" -------------------------------
+    if pack_match:
+        count_val = _parse_number(pack_match.group("count"))
+        content_val = _parse_number(pack_match.group("qty"))
+        content_unit = UNIT_SYNONYMS.get(
+            normalize_unit_token(pack_match.group("unit"))
+        )
+        if count_val == 1 and len(price_matches) == 1:
+            # "1 sac de 50 kg à 25 000 FCFA" — un tarif, écrit avec le
+            # compte explicite. La branche TIER générique plus bas ne sait
+            # PAS le lire : "sac" appartient aussi à l'alternance d'unités,
+            # donc `_TIER_QTY_UNIT_RE` y voit DEUX quantités ("1 sac" et
+            # "50 kg") et renonce. Ici la structure est explicite, le
+            # contenu du paquet est sans ambiguïté.
+            price_val = _parse_number(price_matches[0].group(1))
+            if (
+                content_val is not None
+                and content_unit is not None
+                and price_val is not None
+                and content_val > 0
+                and price_val > 0
+            ):
+                explained = {1.0, content_val, price_val}
+                return PackagingClause(
+                    role=PackagingClauseRole.TIER,
+                    text=clause,
+                    quantity=content_val,
+                    unit=content_unit,
+                    unit_raw=pack_match.group("unit"),
+                    price=price_val,
+                    packaging=packaging,
+                    numbers=numbers,
+                    unexplained=tuple(n for n in numbers if n not in explained),
+                )
+        if count_val is not None:
+            # Un STOCK, jamais un tarif (2026-09-14). Avec un prix dans la
+            # MÊME clause, la structure est indécidable ("30 bidons de 20 L
+            # à 50000" = 30 paquets vendus 50000 l'unité ? au total ?).
+            if price_matches:
+                return PackagingClause(
+                    role=PackagingClauseRole.AMBIGUOUS,
+                    text=clause,
+                    numbers=numbers,
+                    unexplained=numbers,
+                )
+            if (
+                count_val is None
+                or content_val is None
+                or content_unit is None
+                or count_val <= 0
+                or content_val <= 0
+            ):
+                return PackagingClause(
+                    role=PackagingClauseRole.AMBIGUOUS,
+                    text=clause,
+                    numbers=numbers,
+                    unexplained=numbers,
+                )
+            total = count_val * content_val
+            # `count` et `content` sont CONSOMMÉS par la multiplication —
+            # seul le total survit dans le contrat canonique.
+            explained = {count_val, content_val}
+            return PackagingClause(
+                role=PackagingClauseRole.PACKAGED_GROUP,
+                text=clause,
+                quantity=total,
+                unit=content_unit,
+                unit_raw=pack_match.group("unit"),
+                packaging=packaging,
+                numbers=numbers,
+                unexplained=tuple(n for n in numbers if n not in explained),
             )
-            if count_val is None or content_val is None or content_unit is None:
-                return QuantityUnitResult()
-            if unit_canonical is None:
-                unit_canonical = content_unit
-            elif unit_canonical != content_unit:
-                return QuantityUnitResult()
-            total += count_val * content_val
-            matched_multiplier = True
-            continue
 
+    # --- Tarif : exactement 1 quantité+unité ET 1 prix+devise -------------
+    if len(qty_matches) == 1 and len(price_matches) == 1:
+        qty_val = _parse_number(qty_matches[0].group(1))
+        unit_raw = qty_matches[0].group(2)
+        price_val = _parse_number(price_matches[0].group(1))
+        if (
+            qty_val is None
+            or price_val is None
+            or qty_val <= 0
+            or price_val <= 0
+        ):
+            return PackagingClause(
+                role=PackagingClauseRole.AMBIGUOUS,
+                text=clause,
+                numbers=numbers,
+                unexplained=numbers,
+            )
+        explained = {qty_val, price_val}
+        # Un compte de paquets ("1 bidon") n'est pas une donnée du tarif,
+        # mais il est bien EXPLIQUÉ par cette lecture — jamais "perdu".
+        if pack_match:
+            pack_count = _parse_number(pack_match.group("count"))
+            if pack_count is not None:
+                explained.add(pack_count)
+        return PackagingClause(
+            role=PackagingClauseRole.TIER,
+            text=clause,
+            quantity=qty_val,
+            unit=UNIT_SYNONYMS.get(normalize_unit_token(unit_raw)),
+            unit_raw=unit_raw.strip(),
+            price=price_val,
+            packaging=packaging,
+            numbers=numbers,
+            unexplained=tuple(n for n in numbers if n not in explained),
+        )
+
+    # --- Quantité globale énoncée directement ("600 L de lait") -----------
+    if len(qty_matches) == 1 and not price_matches:
+        qty_val = _parse_number(qty_matches[0].group(1))
+        unit_raw = qty_matches[0].group(2)
+        if qty_val is None or qty_val <= 0:
+            return PackagingClause(
+                role=PackagingClauseRole.AMBIGUOUS,
+                text=clause,
+                numbers=numbers,
+                unexplained=numbers,
+            )
+        return PackagingClause(
+            role=PackagingClauseRole.BARE_QUANTITY,
+            text=clause,
+            quantity=qty_val,
+            unit=UNIT_SYNONYMS.get(normalize_unit_token(unit_raw)),
+            unit_raw=unit_raw.strip(),
+            packaging=packaging,
+            numbers=numbers,
+            unexplained=tuple(n for n in numbers if n != qty_val),
+        )
+
+    # --- Quantité nue exprimée dans une unité hors alternance tarifaire ---
+    # `_TIER_QTY_UNIT_RE` ne couvre volontairement qu'un sous-ensemble
+    # d'unités (celles qui apparaissent dans des tarifs). Pour une clause
+    # SANS prix, on délègue au parseur de quantité canonique du module
+    # plutôt que d'élargir la regex — un seul parseur de quantité simple
+    # dans le dépôt, pas deux vocabulaires d'unités qui divergent.
+    if not price_matches and not qty_matches:
         single = parse_quantity_unit_from_text(clause)
-        if single.quantity is None or single.unit is None:
-            continue
-        if unit_canonical is None:
-            unit_canonical = single.unit
-        elif unit_canonical != single.unit:
-            return QuantityUnitResult()
-        total += single.quantity
+        if (
+            single.quantity is not None
+            and single.unit is not None
+            and single.quantity > 0
+        ):
+            return PackagingClause(
+                role=PackagingClauseRole.BARE_QUANTITY,
+                text=clause,
+                quantity=single.quantity,
+                unit=single.unit,
+                unit_raw=single.unit,
+                packaging=packaging,
+                numbers=numbers,
+                unexplained=tuple(
+                    n for n in numbers if n != single.quantity
+                ),
+            )
 
-    if matched_multiplier and unit_canonical and total > 0:
-        return QuantityUnitResult(quantity=total, unit=unit_canonical)
-    return QuantityUnitResult()
+    # --- Tout le reste : des nombres, un rôle indécidable -----------------
+    # (prix seul "à 500 fcfa", plusieurs quantités dans la même clause,
+    # "3000 FCFA le litre" — prix de RÉFÉRENCE, dont l'extraction
+    # déterministe n'est volontairement PAS tentée ici : mieux vaut déférer
+    # au LLM que d'inventer une 4e famille de regexes.)
+    return PackagingClause(
+        role=PackagingClauseRole.AMBIGUOUS,
+        text=clause,
+        numbers=numbers,
+        unexplained=numbers,
+    )
+
+
+def parse_packaging_message(text: str) -> PackagingParse:
+    """Analyse UNIQUE d'un message "quantité / conditionnements / tarifs".
+
+    Source de vérité unique de ce thème : tout ce que le dépôt sait extraire
+    de façon DÉTERMINISTE (quantité globale, groupes de conditionnements,
+    tarifs multiples) sort d'ICI, d'une seule segmentation en clauses et
+    d'un seul jeu de règles. Voir le commentaire de section au-dessus pour
+    l'historique complet et les règles métier préservées."""
+    clean = (text or "").strip()
+    if not clean:
+        return PackagingParse()
+
+    clauses = tuple(
+        _classify_packaging_clause(c.strip())
+        for c in _TIER_CLAUSE_SPLIT_RE.split(clean)
+        if c.strip()
+    )
+    if not clauses:
+        return PackagingParse()
+
+    roles = [c.role for c in clauses]
+    ambiguous = PackagingClauseRole.AMBIGUOUS in roles
+    unexplained: list = []
+    for clause in clauses:
+        unexplained.extend(clause.unexplained)
+
+    # --- Tarifs : 2+ requis (2026-08-30) ---------------------------------
+    tier_clauses = [c for c in clauses if c.role is PackagingClauseRole.TIER]
+    tiers: list = []
+    if len(tier_clauses) >= 2:
+        for clause in tier_clauses:
+            tiers.append(
+                {
+                    "quantity": clause.quantity,
+                    "unit": clause.unit_raw,
+                    "price": clause.price,
+                    # Héritage du conditionnement précédent quand la clause
+                    # y fait référence sans le renommer ("celui de 10 L").
+                    "packaging": clause.packaging
+                    or (tiers[-1]["packaging"] if tiers else None),
+                }
+            )
+    elif tier_clauses:
+        # UN seul tarif est structurellement ambigu avec un prix simple —
+        # ses nombres restent donc inexpliqués, jamais "devinés" en tarif.
+        for clause in tier_clauses:
+            unexplained.extend(clause.numbers)
+
+    # --- Quantité globale -------------------------------------------------
+    group_clauses = [
+        c for c in clauses if c.role is PackagingClauseRole.PACKAGED_GROUP
+    ]
+    bare_clauses = [
+        c for c in clauses if c.role is PackagingClauseRole.BARE_QUANTITY
+    ]
+    quantity: Optional[float] = None
+    unit: Optional[str] = None
+
+    if group_clauses:
+        # Somme des groupes (et des quantités nues du même message, qui
+        # s'y ajoutent : "60 bidons de 5 L et 100 L en vrac") — JAMAIS si
+        # un prix apparaît ailleurs dans le message (2026-09-14 : une
+        # clause de PRIX a la même forme qu'un groupe de stock, le total se
+        # gonflait silencieusement). Des unités mélangées annulent tout.
+        has_price_anywhere = any(c.price is not None for c in clauses) or bool(
+            _TIER_PRICE_CURRENCY_RE.search(clean)
+        )
+        summable = group_clauses + bare_clauses
+        units = {c.unit for c in summable if c.unit}
+        if has_price_anywhere or len(units) != 1:
+            ambiguous = True
+            for clause in summable:
+                unexplained.extend(clause.numbers)
+        else:
+            quantity = sum(c.quantity or 0.0 for c in summable)
+            unit = next(iter(units))
+    elif len(bare_clauses) == 1:
+        quantity = bare_clauses[0].quantity
+        unit = bare_clauses[0].unit
+    elif len(bare_clauses) > 1:
+        # 2+ quantités nues ("600 L de lait et 5 poulets") : les sommer
+        # serait une invention — deux produits distincts peuvent coexister.
+        ambiguous = True
+        for clause in bare_clauses:
+            unexplained.extend(clause.numbers)
+
+    explained_values = set()
+    if quantity is not None:
+        explained_values.add(quantity)
+    for tier in tiers:
+        explained_values.add(tier["quantity"])
+        explained_values.add(tier["price"])
+
+    return PackagingParse(
+        clauses=clauses,
+        quantity=quantity,
+        unit=unit,
+        pricing_tiers=tuple(tiers),
+        ambiguous=ambiguous,
+        unexplained_numbers=tuple(
+            n for n in unexplained if n not in explained_values
+        ),
+    )
 
 
 def extract_deterministic_pricing_tiers(text: str) -> Optional[list]:
@@ -719,62 +1136,104 @@ def extract_deterministic_pricing_tiers(text: str) -> Optional[list]:
     forme que ce que le LLM produit pour `extracted_entities.pricing_tiers`
     (voir routing.py règle 5bis) — uniquement si CHAQUE clause candidate a
     livré EXACTEMENT une paire quantité+unité et prix+devise sans ambiguïté.
-    """
-    clean = (text or "").strip()
-    if not clean:
-        return None
-    clauses = [c.strip() for c in _TIER_CLAUSE_SPLIT_RE.split(clean) if c.strip()]
-    if len(clauses) < 2:
-        return None
 
-    tiers: list = []
-    for clause in clauses:
-        # Un tarif est TOUJOURS "par UN conditionnement" ("le bidon de 5 L
-        # coûte 10 000 FCFA", "1 sac de 50 kg à 25 000 FCFA") — jamais "par
-        # groupe de N". Incident réel (2026-09-14) : même avec le découpage
-        # corrigé ci-dessus, une clause qui décrit un STOCK ("30 bidons de
-        # 20 L") reste structurellement identique à une clause de tarif (un
-        # nombre+unité) si un prix traîne n'importe où à proximité — mieux
-        # vaut refuser tout le résultat (jamais deviné à moitié) que produire
-        # un tarif fantôme "20 L = <prix sans rapport>". `_PACKAGE_COUNT_UNIT_RE`
-        # capture explicitement ce motif "N <conditionnement> de M <unité>" ;
-        # un compte ≠ 1 dans CETTE clause signale une quantité de stock, pas
-        # un prix unitaire.
-        _pack_match = _PACKAGE_COUNT_UNIT_RE.search(clause)
-        if _pack_match:
-            _pack_count = _parse_number(_pack_match.group("count"))
-            if _pack_count is not None and _pack_count != 1:
-                return None
-        qty_matches = list(_TIER_QTY_UNIT_RE.finditer(clause))
-        price_matches = list(_TIER_PRICE_CURRENCY_RE.finditer(clause))
-        if len(qty_matches) != 1 or len(price_matches) != 1:
-            continue  # clause sans info tarifaire (ex: "je vend le bidon de")
-        qty_val = _parse_number(qty_matches[0].group(1))
-        unit_raw = qty_matches[0].group(2)
-        price_val = _parse_number(price_matches[0].group(1))
-        if qty_val is None or price_val is None or qty_val <= 0 or price_val <= 0:
+    (2026-09-21) Devenue une VUE de `parse_packaging_message` — contrat
+    public strictement inchangé (mêmes entrées, mêmes sorties, mêmes
+    refus), mais plus de jeu de règles parallèle à maintenir. Reste
+    volontairement TOLÉRANTE aux clauses non tarifaires du message (elles
+    sont ignorées ici) : ses appelants historiques
+    (`flows/producer/flow.py`, garde booléenne de `routing.py`) ne
+    s'intéressent qu'aux tarifs. Le contrôle de complétude STRICT est fait
+    par `interpreter/routing.py` via `parse_packaging_message` +
+    `all_numbers_accounted_for`, là où le résultat alimente réellement un
+    brouillon."""
+    parsed = parse_packaging_message(text)
+    # Un groupe de stock ("30 bidons de 20 L") dans le message interdit
+    # toute lecture tarifaire (2026-09-14) — comportement historique.
+    if any(
+        c.role is PackagingClauseRole.PACKAGED_GROUP for c in parsed.clauses
+    ):
+        return None
+    if any(
+        c.role is PackagingClauseRole.AMBIGUOUS
+        and _PACKAGE_COUNT_UNIT_RE.search(c.text)
+        for c in parsed.clauses
+    ):
+        return None
+    if len(parsed.pricing_tiers) < 2:
+        return None
+    return [dict(t) for t in parsed.pricing_tiers]
+
+
+# ---------------------------------------------------------------------------
+# Filet de sécurité GÉNÉRIQUE — complétude d'une extraction de quantité/prix/
+# tarifs (2026-09-21, correctif STRUCTUREL, pas un rustine de plus)
+# ---------------------------------------------------------------------------
+# Constat après plusieurs incidents empilés sur ce même thème ("packaging",
+# tarifs multiples, quantités composées) : deux analyses INDÉPENDANTES du
+# même texte coexistent sans jamais se recouper — `scan_number_candidates`
+# (fenêtre glissante, AUCUNE notion de clause) sert à décider QUEL fast-path
+# tenter, tandis que `extract_deterministic_pricing_tiers`/
+# `parse_packaged_compound_quantity` (découpage en clauses, AUCUNE notion de
+# fenêtre) font l'extraction réelle. Rien ne garantit qu'elles restent
+# d'accord — c'est exactement ce qui a permis à un nombre de "disparaître"
+# silencieusement (incident du 2026-09-21 : "600 L de lait... le bidon de
+# 5 L coûte 500 fcfa...", la quantité globale 600 perdue par le fast-path
+# `pricing_tiers`, sans qu'aucun garde-fou ne le détecte).
+#
+# Plutôt que de continuer à rustiner CHAQUE nouvelle forme de message
+# composé au fur et à mesure qu'elle casse (l'approche qui a produit cette
+# accumulation de branches spéciales dans `interpreter/routing.py`), cette
+# fonction ajoute une INVARIANT STRUCTUREL, appliqué en sortie de n'importe
+# quel fast-path déterministe qui touche à la quantité/au prix/aux tarifs :
+# CHAQUE nombre du message doit être RETROUVABLE quelque part dans le
+# résultat extrait. Si un seul nombre n'est expliqué par aucun champ, le
+# résultat est structurellement INCOMPLET — l'appelant doit renoncer
+# (`return None`, repli sur le LLM) plutôt que de le renvoyer tel quel. Ce
+# garde ne sait PAS si le résultat est correct — seulement s'il est
+# COMPLET — mais une extraction incomplète est exactement la classe de bug
+# qui s'est reproduite plusieurs fois sous des formes différentes ; ce garde
+# la ferme UNE FOIS, structurellement, plutôt qu'un cas à la fois.
+def all_numbers_accounted_for(
+    values: "list[float]", entities: Dict[str, Any]
+) -> bool:
+    """True si chaque valeur de *values* (typiquement TOUTES les valeurs
+    numériques du message source, via `scan_number_candidates`) apparaît
+    dans *entities* — `quantity`, `price`, ou le `quantity`/`price` d'un
+    `pricing_tiers`. Comparaison à 1e-6 près (valeurs `float`).
+
+    Délibérément TOLÉRANT sur les compteurs de conditionnement ("N bidons
+    de M unité" — seul N×M apparaît dans le contrat canonique, jamais N
+    isolé) : ce garde ne revalide pas la logique métier de chaque parseur,
+    il détecte seulement un nombre purement et simplement OUBLIÉ. Un
+    appelant dont le parseur CONSOMME légitimement certains nombres (ex:
+    les compteurs de paquets) doit les retirer de *values* avant l'appel —
+    voir les commentaires d'utilisation dans `interpreter/routing.py`."""
+
+    def _norm(raw: Any) -> Optional[float]:
+        try:
+            return round(float(raw), 6)
+        except (TypeError, ValueError):
             return None
-        packaging_match = _TIER_PACKAGING_RE.search(clause)
-        # "celui de 10 L à 900f" (référence au conditionnement du tarif
-        # précédent, ex: "bidon") sans le renommer — hérite du dernier
-        # conditionnement vu plutôt que de le laisser vide.
-        packaging = (
-            packaging_match.group(1).lower()
-            if packaging_match
-            else (tiers[-1]["packaging"] if tiers else None)
-        )
-        tiers.append(
-            {
-                "quantity": qty_val,
-                "unit": unit_raw.strip(),
-                "price": price_val,
-                "packaging": packaging,
-            }
-        )
 
-    if len(tiers) < 2:
-        return None
-    return tiers
+    used: set = set()
+    for key in ("quantity", "price"):
+        norm = _norm(entities.get(key))
+        if norm is not None:
+            used.add(norm)
+    for tier in entities.get("pricing_tiers") or []:
+        if not isinstance(tier, dict):
+            continue
+        for key in ("quantity", "price"):
+            norm = _norm(tier.get(key))
+            if norm is not None:
+                used.add(norm)
+
+    for value in values:
+        norm = _norm(value)
+        if norm is None or norm not in used:
+            return False
+    return True
 
 
 def extract_single_pricing_tier_correction(text: str) -> Optional[Dict[str, Any]]:

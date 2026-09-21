@@ -24,6 +24,18 @@ from ladini.services.database.buyer import BuyerMixin
 from ladini.services.database.errors import BusinessRuleException
 
 
+class _Rows(list):
+    """Liste de tuples-ligne qui supporte AUSSI `.first()`/`.all()` — voir la
+    même classe dans test_cancel_pending_order_confirmed_gap.py pour le
+    détail (protocole d'itération vs `types.SimpleNamespace`)."""
+
+    def first(self):
+        return self[0] if self else None
+
+    def all(self):
+        return list(self)
+
+
 async def _async_return(value):
     return value
 
@@ -78,12 +90,18 @@ class _FakeSession:
 
         if isinstance(stmt, _InsertStmt):
             self.outbox_inserts.append(stmt)
-            return types.SimpleNamespace(all=lambda: [1])
+            return _Rows([1])
         sql = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
-        for producer_id, phone in self._phones_by_producer.items():
-            if str(producer_id) in sql:
-                return types.SimpleNamespace(first=lambda: (phone,))
-        return types.SimpleNamespace(first=lambda: None)
+        # Le service résout les téléphones producteurs en UNE requête
+        # groupée (`Producer.id.in_(...)`) — ce double est donc lui aussi
+        # ensembliste, jamais "une ligne par appel".
+        return _Rows(
+            [
+                (producer_id, phone)
+                for producer_id, phone in self._phones_by_producer.items()
+                if str(producer_id) in sql
+            ]
+        )
 
     async def flush(self):
         pass

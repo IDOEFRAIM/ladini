@@ -934,14 +934,35 @@ class BuyerMixin(BaseMixin):
         # sans effet, correctement) pour une commande RFQ : `select_winning_bid`
         # ne crée jamais d'`OrderItem` (voir l'audit Auction/Bid), aucun
         # stock catalogue n'est débité à la confirmation d'une telle commande.
-        for item in order.items:
-            if item.product:
-                prod_stmt = (
-                    select(Product)
-                    .where(Product.id == item.product_id)
-                    .with_for_update()
-                )
-                product = await current_session.scalar(prod_stmt)
+        #
+        # (2026-09-21, audit latence — N+1) : 1 requête verrouillée pour TOUS
+        # les produits de la commande (avant : 1 `SELECT ... FOR UPDATE` par
+        # item, mesuré ~72ms chacun sur ce déploiement — une commande de 5
+        # lignes payait 5x la latence réseau DB pour une opération qui n'en
+        # nécessite qu'une). `ORDER BY Product.id` : même discipline
+        # anti-deadlock que `finalize_multi_order`/le checkout (verrouillage
+        # multi-lignes dans un ordre global déterministe, voir la docstring
+        # de ce fichier plus bas, ligne ~2200) — un `IN (...)` seul ne
+        # garantit pas l'ordre d'acquisition, `ORDER BY` sur la clé de tri le
+        # fixe explicitement.
+        item_product_ids = sorted(
+            {item.product_id for item in order.items if item.product and item.product_id},
+            key=str,
+        )
+        if item_product_ids:
+            products_by_id: Dict[Any, Product] = {
+                p.id: p
+                for p in (
+                    await current_session.scalars(
+                        select(Product)
+                        .where(Product.id.in_(item_product_ids))
+                        .order_by(Product.id)
+                        .with_for_update()
+                    )
+                ).all()
+            }
+            for item in order.items:
+                product = products_by_id.get(item.product_id) if item.product else None
                 if product:
                     # `resolve_stock_debit` renvoie un `float` ; `quantity_for_sale`
                     # est une colonne `Numeric` (chargée en `decimal.Decimal`) —
@@ -952,7 +973,11 @@ class BuyerMixin(BaseMixin):
                     # (`available = float(product.quantity_for_sale or 0.0)`
                     # avant l'arithmétique, ligne ~2204) : convertir
                     # explicitement avant d'opérer, jamais d'opérateur
-                    # augmenté sur la colonne Decimal directement.
+                    # augmenté sur la colonne Decimal directement. Relire
+                    # `product.quantity_for_sale` (pas une variable capturée
+                    # avant la boucle) : si DEUX lignes de la même commande
+                    # portent le même produit, la 2e doit voir le recrédit de
+                    # la 1re déjà appliqué sur le MÊME objet `product`.
                     product.quantity_for_sale = float(
                         product.quantity_for_sale or 0.0
                     ) + resolve_stock_debit(item)
@@ -979,19 +1004,21 @@ class BuyerMixin(BaseMixin):
         # `Order.winning_bid_id`→`Bid.producer_id`. Outbox, même
         # transaction, jamais un envoi direct.
         if was_confirmed:
+            # (2026-09-21, audit latence — N+1) : 1 requête pour TOUS les
+            # producteurs de la commande (avant : 1 requête par item).
+            producer_ids = {
+                item.product.producer_id
+                for item in order.items or []
+                if item.product and item.product.producer_id
+            }
             producer_phones: set[str] = set()
-            for item in order.items or []:
-                if item.product and item.product.producer_id:
-                    prod_row = (
-                        await current_session.execute(
-                            select(User.phone)
-                            .join(Producer, Producer.user_id == User.id)
-                            .where(Producer.id == item.product.producer_id)
-                            .limit(1)
-                        )
-                    ).first()
-                    if prod_row and prod_row[0]:
-                        producer_phones.add(prod_row[0])
+            if producer_ids:
+                phone_rows = await current_session.execute(
+                    select(User.phone)
+                    .join(Producer, Producer.user_id == User.id)
+                    .where(Producer.id.in_(producer_ids))
+                )
+                producer_phones = {p for (p,) in phone_rows if p}
             if order.winning_bid_id and not producer_phones:
                 bid_prod_row = (
                     await current_session.execute(
@@ -2212,6 +2239,22 @@ class BuyerMixin(BaseMixin):
             key=lambda pair: str(pair[0].product_id or ""),
         )
 
+        # (2026-09-21, audit latence — N+1) : DÉLIBÉRÉMENT PAS batché en une
+        # seule requête `IN (...) ORDER BY ... FOR UPDATE`, contrairement aux
+        # autres boucles de verrouillage corrigées le même jour
+        # (`cancel_pending_order`/`cancel_confirmed_order`) — celles-là
+        # n'avaient AUCUNE garantie d'ordre au départ (batcher est donc une
+        # amélioration stricte). ICI, l'ordre d'acquisition séquentiel
+        # (`sorted_items`, trié plus haut) EST le correctif anti-deadlock du
+        # 2026-09-04, prouvé par test dédié
+        # (test_confirm_preorder_draft_row_locking.py). PostgreSQL ne
+        # garantit PAS que `FOR UPDATE` combiné à `ORDER BY` verrouille les
+        # lignes dans l'ordre de tri à travers tous les plans d'exécution
+        # possibles (le nœud LockRows peut s'exécuter avant le Sort selon le
+        # plan choisi) — remplacer cette boucle par une requête unique
+        # risquerait de réintroduire silencieusement le deadlock que ce code
+        # corrige. Le gain de latence potentiel ne justifie pas ce risque sur
+        # un chemin déjà verrouillé par un test de non-régression explicite.
         for item, item_order in sorted_items:
             if not item.product_id:
                 continue
@@ -2306,21 +2349,34 @@ class BuyerMixin(BaseMixin):
         # split, volontairement conservées telles quelles — grandfathering).
         entries: List[Dict[str, Any]] = []
         all_producer_phones: set[str] = set()
+
+        # (2026-09-21, audit latence — N+1) : 1 requête pour TOUS les
+        # producteurs de TOUTES les commandes du groupe (avant : 1 requête
+        # par item, par commande — imbriqué sur 2 niveaux de boucle).
+        all_producer_ids = {
+            item.product.producer_id
+            for grp_order in group_orders
+            for item in (grp_order.items or [])
+            if item.product and item.product.producer_id
+        }
+        phone_by_producer_id: Dict[Any, str] = {}
+        if all_producer_ids:
+            phone_rows = await current_session.execute(
+                select(Producer.id, User.phone)
+                .join(User, Producer.user_id == User.id)
+                .where(Producer.id.in_(all_producer_ids))
+            )
+            phone_by_producer_id = {pid: ph for pid, ph in phone_rows.all() if ph}
+
         for grp_order in group_orders:
             grp_number = str(grp_order.id)[:8].upper()
-            grp_phones: set[str] = set()
-            for item in grp_order.items or []:
-                if item.product and item.product.producer_id:
-                    prod_row = (
-                        await current_session.execute(
-                            select(User.phone)
-                            .join(Producer, Producer.user_id == User.id)
-                            .where(Producer.id == item.product.producer_id)
-                            .limit(1)
-                        )
-                    ).first()
-                    if prod_row and prod_row[0]:
-                        grp_phones.add(prod_row[0])
+            grp_phones: set[str] = {
+                phone_by_producer_id[item.product.producer_id]
+                for item in (grp_order.items or [])
+                if item.product
+                and item.product.producer_id
+                and item.product.producer_id in phone_by_producer_id
+            }
             # (2026-09-11) `items_summary` : le producteur recevait jusqu'ici
             # UNIQUEMENT un code de commande + un montant ("Nouvelle commande
             # confirmée ! #65280745 — 1000000 CFA"), sans savoir CE QUE

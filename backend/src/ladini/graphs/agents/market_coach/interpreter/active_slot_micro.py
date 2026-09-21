@@ -151,17 +151,52 @@ def _outcome_for_decision(
     if decision.disposition == ActiveSlotDisposition.DEVIATION:
         return ActiveSlotOutcome.DEVIATION, None
     if decision.confidence < INTERRUPTION_CONFIDENCE_THRESHOLD:
-        # Politique conservatrice (spec §19/§20) : une ANSWER/UPDATE/REJECT
-        # peu sûre est traitée comme une déviation potentielle plutôt que de
-        # risquer un faux ANSWER qui bypasserait cognitive_guard.
+        # (2026-09-21, correctif UX — réponse partielle mid-tunnel, ex: "j ai"
+        # pendant la collecte de quantité) : AVANT ce correctif, une
+        # disposition ANSWER/UPDATE/REJECT peu sûre retombait sur
+        # `ActiveSlotOutcome.DEVIATION` — EXACTEMENT le même traitement que
+        # la déviation EXPLICITE et confiante ci-dessus — déclenchant côté
+        # `routing.py` un 2e appel LLM "classifier NEW_TASK" totalement
+        # AVEUGLE au slot en attente (`expected_input` remis à `"NONE"`).
+        # Pour un fragment incomplet comme "j ai" (pas une vraie déviation,
+        # juste une réponse tronquée/peu claire), ce 2e appel devine dans le
+        # vide : selon ce qu'il retourne (`event="UNKNOWN"` vs autre chose),
+        # l'utilisateur voyait tantôt la bannière de reprise ("🔄 On
+        # continue..."), tantôt un texte de clarification générique qui
+        # donne l'impression que l'agent a perdu le fil — même entrée,
+        # comportement non déterministe (incident réel signalé).
+        #
+        # Traité désormais EXACTEMENT comme `ActiveSlotDisposition.UNKNOWN`
+        # (même forme de résultat que la branche au-dessus, `event=
+        # "UNKNOWN"`) plutôt que comme une déviation : ni second appel LLM,
+        # ni pari sur ce qu'il va répondre — directement le chemin de
+        # reprise déjà fiable et déjà testé (`cognitive_guard.py`,
+        # `event=="UNKNOWN" and in_tunnel` -> `recover_active_tunnel`, avec
+        # son propre compteur de retries et son abandon de secours après 2
+        # essais, voir sa docstring "BUG CAPITAL 2026-08-19"). La déviation
+        # EXPLICITE (`disposition == DEVIATION`, branche au-dessus) garde le
+        # comportement EXISTANT sans changement : c'est un changement de
+        # sujet réellement AFFIRMÉ par le modèle, pas une simple
+        # incertitude — spec §11/§12/§18/§20 toujours respectée pour ce
+        # cas-là précisément.
         logger.info(
             "[Interpreter ACTIVE_SLOT] confiance %.2f < seuil %.2f pour "
-            "disposition=%s — repli conservateur vers NEW_TASK",
+            "disposition=%s — traité comme UNKNOWN (reprise directe du "
+            "slot en attente, jamais un 2e appel LLM aveugle)",
             decision.confidence,
             INTERRUPTION_CONFIDENCE_THRESHOLD,
             decision.disposition.value,
         )
-        return ActiveSlotOutcome.DEVIATION, None
+        return ActiveSlotOutcome.RESULT, {
+            "interpreted_event": "UNKNOWN",
+            "detected_intent": "UNKNOWN",
+            "interpreter_confidence": decision.confidence,
+            "extracted_entities": {},
+            "raw_analysis": {
+                "path": "active_slot_low_confidence_treated_as_unknown",
+                "original_disposition": decision.disposition.value,
+            },
+        }
     return ActiveSlotOutcome.RESULT, adapt_active_slot_to_canonical(decision, context)
 
 
