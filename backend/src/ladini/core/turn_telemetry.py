@@ -328,6 +328,51 @@ def _i(v: Any) -> Optional[int]:
         return None
 
 
+# ── Diagnostic : « la télémétrie arrive-t-elle dans la bonne base ? » ──────────────────────────────────
+
+def describe_database() -> str:
+    """`hôte:port/base` de la base ciblée par ce processus — SANS identifiants. À comparer avec la base affichée par le cockpit."""
+    from urllib.parse import urlsplit
+
+    from ladini.core.settings import settings
+
+    try:
+        u = urlsplit(str(getattr(settings, "DATABASE_URL", "") or ""))
+        return f"{u.hostname or '?'}:{u.port or 5432}/{(u.path or '/').lstrip('/') or '?'}"
+    except Exception:  # pragma: no cover
+        return "inconnue"
+
+
+async def startup_check() -> dict:
+    """Au démarrage d'un worker : journalise la base ciblée et vérifie que les tables de télémétrie y existent.
+    Un échec est BRUYANT (ERROR, remède indiqué) mais n'empêche jamais le worker de démarrer."""
+    from sqlalchemy import text
+
+    from ladini.core.database import get_sessionmaker
+    from ladini.core.settings import settings
+
+    target = describe_database()
+    if not bool(getattr(settings, "AGENT_MONITORING_ENABLED", True)):
+        logger.info("TURN_TELEMETRY | désactivée (AGENT_MONITORING_ENABLED=false) | base=%s", target)
+        return {"enabled": False, "database": target}
+    try:
+        async with get_sessionmaker()() as session:
+            present = (await session.execute(text("select to_regclass('intelligence.agent_turns') is not null"))).scalar()
+    except Exception as exc:
+        logger.error("TURN_TELEMETRY | base=%s | vérification impossible (%s: %s) — les tours ne seront pas enregistrés.", target, type(exc).__name__, exc)
+        return {"enabled": True, "database": target, "tables_present": None, "error": type(exc).__name__}
+    if present:
+        logger.info("TURN_TELEMETRY | actif | base=%s | tables de télémétrie présentes", target)
+    else:
+        logger.error(
+            "TURN_TELEMETRY | base=%s | tables intelligence.agent_turns/agent_tool_calls/agent_llm_calls ABSENTES : les tours ne seront PAS "
+            "enregistrés. Appliquer la migration Drizzle 0001 (`npm run db:migrate`) sur CETTE base, ou vérifier que DATABASE_URL du "
+            "backend est la même base que celle lue par le cockpit /admin/monitoring.",
+            target,
+        )
+    return {"enabled": True, "database": target, "tables_present": bool(present)}
+
+
 # ── Instrumentation transversale (SQL, Redis, Celery) ──────────────────────
 
 def attach_sql_listeners(sync_engine: Any) -> None:
@@ -541,5 +586,8 @@ async def finish_and_persist(rec: TurnRecorder) -> bool:
         return True
     except Exception as exc:  # noqa: BLE001 — jamais vers l'appelant (timeout inclus ; l'annulation asyncio se propage)
         _write_failures += 1
-        logger.warning("TURN_TELEMETRY_WRITE_FAILED | turn=%s | %s: %s", rec.turn_id, type(exc).__name__, exc)
+        hint = ""
+        if "agent_turns" in str(exc) and ("does not exist" in str(exc) or "UndefinedTable" in type(exc).__name__):
+            hint = f" | INDICE : tables de télémétrie absentes de la base {describe_database()} (migration 0001 non appliquée ou mauvaise base)"
+        logger.warning("TURN_TELEMETRY_WRITE_FAILED | turn=%s | %s: %s%s", rec.turn_id, type(exc).__name__, exc, hint)
         return False

@@ -93,6 +93,13 @@ def init_worker_process(**kwargs):
     except Exception as exc:
         logger.warning("Warm-up DB au démarrage ignoré : %s", exc)
 
+    try:  # base ciblée par la télémétrie + présence des tables (jamais bloquant)
+        from ladini.core import turn_telemetry as _tt
+
+        _loop.run_until_complete(_tt.startup_check())
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Contrôle de télémétrie au démarrage ignoré : %s", exc)
+
 
 @worker_process_shutdown.connect
 def shutdown_worker_process(**kwargs):

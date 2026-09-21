@@ -235,3 +235,51 @@ class TestMcpWrapper:
 
         monkeypatch.setattr(tt, "note_tool", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("télémétrie cassée")))
         assert asyncio.run(self._server(monkeypatch, inner).call_tool("search_products", {})) == "résultat"
+
+
+# ── Diagnostic : la télémétrie arrive-t-elle dans la bonne base ? ───────────
+
+class TestStartupDiagnostic:
+    def test_describe_database_never_leaks_credentials(self, monkeypatch):
+        monkeypatch.setattr(_settings, "DATABASE_URL", "postgres://user:s3cr3t@db.example.com:6543/ladini?sslmode=require", raising=False)
+        out = tt.describe_database()
+        assert out == "db.example.com:6543/ladini" and "s3cr3t" not in out and "user" not in out
+
+    def _run(self, monkeypatch, scalar=None, error=None):
+        import ladini.core.database as dbmod
+
+        class _Res:
+            def scalar(self_inner):
+                return scalar
+
+        class _Sess:
+            async def __aenter__(self_inner):
+                return self_inner
+
+            async def __aexit__(self_inner, *a):
+                return False
+
+            async def execute(self_inner, *a, **k):
+                if error:
+                    raise error
+                return _Res()
+
+        monkeypatch.setattr(dbmod, "get_sessionmaker", lambda: (lambda: _Sess()))
+        return asyncio.run(tt.startup_check())
+
+    def test_present_tables(self, monkeypatch):
+        assert self._run(monkeypatch, scalar=True)["tables_present"] is True
+
+    def test_missing_tables_are_reported_loudly_with_the_remedy(self, monkeypatch, caplog):
+        with caplog.at_level("ERROR", logger="ladini.turn_telemetry"):
+            res = self._run(monkeypatch, scalar=False)
+        assert res["tables_present"] is False
+        assert "migration Drizzle 0001" in caplog.text and "ABSENTES" in caplog.text
+
+    def test_a_broken_database_never_raises(self, monkeypatch):
+        res = self._run(monkeypatch, error=ConnectionError("down"))
+        assert res["tables_present"] is None and res["error"] == "ConnectionError"
+
+    def test_disabled_monitoring_skips_the_check(self, monkeypatch):
+        monkeypatch.setattr(_settings, "AGENT_MONITORING_ENABLED", False, raising=False)
+        assert asyncio.run(tt.startup_check())["enabled"] is False
