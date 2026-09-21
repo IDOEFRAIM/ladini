@@ -442,6 +442,17 @@ class Settings(BaseSettings):
     # --- Prometheus (métriques /metrics) ---
     PROMETHEUS_ENABLED: bool = True
 
+    # --- Télémétrie des tours de l'agent (cockpit /admin/monitoring) ---
+    # Best-effort : jamais bloquante pour un tour utilisateur. Schéma : Drizzle (tables intelligence.agent_*).
+    AGENT_MONITORING_ENABLED: bool = True
+    # Rétention des tours (purge batchée par Celery Beat) ; les enfants suivent (FK CASCADE).
+    AGENT_MONITORING_RETENTION_DAYS: int = 30
+    # Écart max entre deux tours pour rester dans la même session (conversation).
+    AGENT_MONITORING_SESSION_GAP_MINUTES: int = 30
+    AGENT_MONITORING_WRITE_TIMEOUT_SECONDS: float = 2.0
+    # Poivre du HMAC des numéros de téléphone (jamais stockés en clair). Vide = repli dérivé de DATABASE_URL.
+    AGENT_MONITORING_PHONE_PEPPER: str = ""
+
     # --- Langfuse (LLMOps self-hosted) ---
     LANGFUSE_ENABLED: bool = False
     LANGFUSE_PUBLIC_KEY: str = ""

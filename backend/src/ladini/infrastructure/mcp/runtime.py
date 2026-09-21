@@ -36,6 +36,7 @@ from ladini.infrastructure.mcp.security import (
     HostBlockedError,
     MCPPermissionHostApp,
     PermissionDenied,
+    PermissionScope,
     ensure_scopes_filled,
     get_execution_policy,
 )
@@ -335,6 +336,37 @@ class AgriDBMCPServer:
         return {}
 
     async def call_tool(self, name: str, arguments: dict | None = None, **kwargs):
+        """Point d'entrée unique de tous les outils : mesure (durée, statut) pour la télémétrie du tour, puis délègue à
+        `_call_tool_inner`. La mesure est best-effort et ne change ni le résultat ni les exceptions."""
+        import time as _time
+        from datetime import datetime, timezone
+
+        started = datetime.now(timezone.utc)
+        t0 = _time.perf_counter()
+        status, error = "SUCCESS", None
+        try:
+            return await self._call_tool_inner(name, arguments, **kwargs)
+        except (PermissionDenied, HostBlockedError) as exc:
+            status, error = "DENIED", exc
+            raise
+        except Exception as exc:
+            status, error = "ERROR", exc
+            raise
+        finally:
+            try:
+                from ladini.core import turn_telemetry
+
+                scope = TOOL_SCOPE_MAP.get(name)
+                category = (
+                    "WRITE" if scope is PermissionScope.DB_DATA_WRITE
+                    else "READ" if scope is PermissionScope.DB_READ_ONLY
+                    else "UNKNOWN"
+                )
+                turn_telemetry.note_tool(name, category, started, _time.perf_counter() - t0, status, error)
+            except Exception:  # pragma: no cover - la télémétrie ne casse jamais un outil
+                pass
+
+    async def _call_tool_inner(self, name: str, arguments: dict | None = None, **kwargs):
         """Backend tool execution: context → scope check → preflight → execute → audit."""
         full_args = {**(arguments or {}), **kwargs}
         # Masquage AVANT écriture en log : `verify_delivery_otp` transporte le

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import Any, Dict, Optional
 
 from celery.signals import worker_process_init, worker_process_shutdown
@@ -52,6 +53,14 @@ def init_worker_process(**kwargs):
     )
     _loop = asyncio.new_event_loop()
     asyncio.set_event_loop(_loop)
+
+    # Télémétrie de tour : compteur Redis transversal (un seul wrapper de `Redis.execute_command`).
+    try:
+        from ladini.core import turn_telemetry
+
+        turn_telemetry.install_redis_instrumentation()
+    except Exception:  # pragma: no cover
+        pass
 
     # L'orchestrateur est instancié UNE SEULE FOIS par worker et garde ses connexions chaudes
     _orchestrator = Orchestrator()
@@ -209,6 +218,23 @@ def process_agent_task(
             "Le worker Celery n'a pas été initialisé correctement (boucle/orchestrateur manquant)."
         )
 
+    # Télémétrie du tour (cockpit /admin/monitoring) — best-effort, jamais bloquante. Créé AVANT le dédoublonnage pour
+    # que les commandes Redis de claim soient comptées ; abandonné (non écrit) si le message est un doublon.
+    from ladini.core import turn_telemetry
+
+    _rec = None
+    try:
+        _rec = turn_telemetry.TurnRecorder(
+            phone=phone_number,
+            message_sid=message_sid,
+            task_retries=int(getattr(self.request, "retries", 0) or 0),
+            user_message=user_query,
+            enqueued_at=turn_telemetry.enqueued_at_from_request(self.request),
+        )
+        turn_telemetry.begin_turn(_rec)
+    except Exception:  # pragma: no cover
+        _rec = None
+
     # --- Dédoublonnage GLOBAL par message_sid (voir commentaire au-dessus
     # de la déclaration de la tâche) — AVANT tout traitement métier coûteux. ---
     claim_key = _task_claim_key(message_sid)
@@ -220,6 +246,7 @@ def process_agent_task(
             "(dédoublonnage, déjà traité avec succès)",
             message_sid,
         )
+        turn_telemetry.end_turn()
         return [{"status": "duplicate_skipped", "reason": "already_completed"}]
 
     if claim_key and not claim_once(claim_key, ttl_seconds=_TASK_CLAIM_TTL_SECONDS):
@@ -228,6 +255,7 @@ def process_agent_task(
             "(dédoublonnage, déjà en cours sur un autre worker/tentative)",
             message_sid,
         )
+        turn_telemetry.end_turn()
         return [{"status": "duplicate_skipped", "reason": "already_processing"}]
 
     # Rattache ce tour à la trace infra reçue de l'API (contexte worker)
@@ -266,8 +294,10 @@ def process_agent_task(
     # tâche — c'est le point critique "ne jamais perdre un message
     # retryable"). `done_key` n'est posé QUE dans la branche de succès, en
     # bas de ce `try`, jamais dans le `except`.
+    _stage = "agent"
     try:
         result = _loop.run_until_complete(_run())
+        _stage = "dispatch"
 
         final_text = result.get("final_response") or "Je n'ai pas pu générer de réponse."
         interactive = result.get("interactive") or None
@@ -279,11 +309,25 @@ def process_agent_task(
         # contrat de sortie du domaine, ici un seul `TextResponse`) et
         # délègue ENTIÈREMENT au `ResponseDispatcher`
         # (api/response_dispatch.py), SEUL point d'autorité pour l'envoi.
+        _t_wa = time.perf_counter()
         dispatch_result = _loop.run_until_complete(
             get_dispatcher().dispatch(phone_number, plan)
         )
+        if _rec is not None:
+            _rec.whatsapp_ms = int((time.perf_counter() - _t_wa) * 1000)
+            _rec.response_status = _response_status(dispatch_result)
+            _rec.response_text = final_text
     except Exception as e:
         logger.error("Erreur orchestrateur: %s", e)
+        if _rec is not None:
+            try:
+                turn_telemetry.note_error(
+                    type(e).__name__, "WHATSAPP" if _stage == "dispatch" else "INTERNAL"
+                )
+                _rec.response_status = "FAILED" if _stage == "dispatch" else _rec.response_status
+                _loop.run_until_complete(turn_telemetry.finish_and_persist(_rec))
+            except Exception:  # pragma: no cover - la télémétrie ne masque jamais l'erreur métier
+                pass
         if telemetry is not None:
             telemetry.flush()
         release(claim_key)
@@ -294,7 +338,26 @@ def process_agent_task(
     if done_key:
         set_cached(done_key, "1", ttl_seconds=_TASK_DONE_TTL_SECONDS)
     release(claim_key)
+    if _rec is not None:
+        try:  # après l'envoi et les marqueurs d'idempotence : la télémétrie ne retarde ni ne peut casser ce tour
+            _loop.run_until_complete(turn_telemetry.finish_and_persist(_rec))
+        except Exception:  # pragma: no cover
+            pass
     return dispatch_result
+
+
+def _response_status(dispatch_result: Any) -> str:
+    """Statut d'envoi d'un tour d'après les items du `ResponseDispatcher` (`message_sent`, `message_skipped`,
+    `duplicate_suppressed`, `collected` pour le webchat)."""
+    items = [i for i in (dispatch_result if isinstance(dispatch_result, list) else [dispatch_result]) if isinstance(i, dict)]
+    if any(i.get("status") == "message_skipped" and i.get("reason") == "send_failed" for i in items):
+        return "FAILED"
+    statuses = [str(i.get("status")) for i in items]
+    if statuses and all(x == "duplicate_suppressed" for x in statuses):
+        return "DUPLICATE"
+    if any(x in {"message_sent", "collected"} for x in statuses):
+        return "SENT"
+    return "SKIPPED"
 
 
 async def send_confirmation_text(

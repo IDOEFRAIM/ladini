@@ -275,6 +275,11 @@ def _clear_worker_ready(**_kwargs) -> None:
         pass
 
 
+# Horodatage de publication des tâches (temps d'attente en file d'un tour) — API ET worker importent ce module.
+from ladini.core import turn_telemetry as _turn_telemetry  # noqa: E402
+
+_turn_telemetry.connect_celery_signals()
+
 # Optionnel : configuration du mode "Task Always Eager" pour les tests unitaires
 # Si tu veux que Celery exécute les tâches immédiatement sans worker (pour debug) :
 # celery_app.conf.task_always_eager = False
