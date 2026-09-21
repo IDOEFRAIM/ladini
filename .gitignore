@@ -200,3 +200,6 @@ infra/providers/hetzner/*.tfstate
 infra/providers/hetzner/*.tfstate.backup
 infra/providers/hetzner/*.tfvars
 !infra/providers/hetzner/environments/*.tfvars.example
+
+# Copie encodee d un .env (secrets) : ne jamais versionner
+env_b64.txt
