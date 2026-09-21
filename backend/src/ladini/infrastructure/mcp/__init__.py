@@ -5,7 +5,6 @@ from typing import Any
 __all__ = [
     "AgriDBMCPServer",
     "AgriMCPClient",
-    "MCPContextServer",
     "MCPProvider",
     "MCPServerApp",
     "MCPToolSpec",
@@ -38,10 +37,6 @@ def __getattr__(name: str) -> Any:
             "AgriMCPClient": AgriMCPClient,
             "MCPTransportConfig": MCPTransportConfig,
         }[name]
-    if name == "MCPContextServer":
-        from ladini.infrastructure.mcp.context import MCPContextServer
-
-        return MCPContextServer
     if name in {"AgriDBMCPServer", "mcp", "runtime"}:
         from ladini.infrastructure.mcp.runtime import AgriDBMCPServer, mcp, runtime
 

@@ -4,10 +4,8 @@ import logging
 import types
 from typing import Any, Callable, Dict, Optional, Set
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ladini.core.database import get_sessionmaker
 from ladini.services.database.auction import AuctionMixin
 
 # Imports des Mixins
@@ -99,7 +97,6 @@ class AgriDatabaseService(
     # DISPATCHER — proxy pur vers @transactional
     # ==================================================================
     _BYPASS_DISPATCH: Set[str] = {
-        "ensure_performance_indexes",
         "DatabaseServiceError",
         "IntegrityError",
         "session",
@@ -157,48 +154,6 @@ class AgriDatabaseService(
     # ==================================================================
     # MÉTHODES SPÉCIFIQUES & EXCEPTIONS
     # ==================================================================
-
-    async def ensure_performance_indexes(self, session: Optional[AsyncSession] = None):
-        """Méthode de maintenance des index SQL exécutée de manière isolée."""
-        from ladini.services.database.common import (
-            PERFORMANCE_INDEX_DDL,
-            SCHEMA_COLUMN_DDL,
-        )
-        from ladini.services.database.mcp_idempotency_store import (
-            MCP_IDEMPOTENCY_SCHEMA_DDL,
-        )
-        from ladini.services.database.preorder_draft_store import (
-            PREORDER_DRAFT_SCHEMA_DDL,
-        )
-        from ladini.services.database.procurement_draft_store import (
-            PROCUREMENT_DRAFT_SCHEMA_DDL,
-        )
-        from ladini.services.database.sales_publish_draft_store import (
-            SALES_PUBLISH_DRAFT_SCHEMA_DDL,
-        )
-
-        async def _logic(sess: AsyncSession):
-            for ddl in (
-                *PERFORMANCE_INDEX_DDL,
-                *SCHEMA_COLUMN_DDL,
-                *PROCUREMENT_DRAFT_SCHEMA_DDL,
-                *MCP_IDEMPOTENCY_SCHEMA_DDL,
-                *PREORDER_DRAFT_SCHEMA_DDL,
-                *SALES_PUBLISH_DRAFT_SCHEMA_DDL,
-            ):
-                try:
-                    async with sess.begin_nested():
-                        await sess.execute(text(ddl))
-                except Exception:
-                    continue
-            return {"status": "indexes_checked"}
-
-        if session:
-            return await _logic(session)
-        async with get_sessionmaker()() as s:
-            res = await _logic(s)
-            await s.commit()
-            return res
 
     class DatabaseServiceError(Exception):
         pass

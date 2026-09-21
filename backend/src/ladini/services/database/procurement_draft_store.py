@@ -74,23 +74,8 @@ from ladini.services.database.draft_store_support import decode_json_payload
 
 logger = logging.getLogger("ladini.services.database.procurement_draft_store")
 
-# Suit la convention établie par `services/database/common.py::SCHEMA_COLUMN_DDL`
-# — DDL idempotent, appliqué best-effort au démarrage worker (voir
-# `AgriDatabaseService.ensure_performance_indexes`, où ce tuple est inclus).
-PROCUREMENT_DRAFT_SCHEMA_DDL = (
-    "CREATE TABLE IF NOT EXISTS marketplace.procurement_drafts ("
-    "draft_id TEXT PRIMARY KEY, "
-    "conversation_id TEXT NOT NULL, "
-    "version INTEGER NOT NULL, "
-    "status TEXT NOT NULL, "
-    "payload JSONB NOT NULL, "
-    "created_at TIMESTAMPTZ NOT NULL DEFAULT now(), "
-    "updated_at TIMESTAMPTZ NOT NULL DEFAULT now()"
-    ")",
-    "CREATE INDEX IF NOT EXISTS ix_procurement_drafts_conversation "
-    "ON marketplace.procurement_drafts (conversation_id)",
-)
-
+# La table `marketplace.procurement_drafts` est créée par les migrations Drizzle
+# (frontend `src/db/schema/runtime.ts`) ; ce module ne fait AUCUN DDL.
 _SELECT_SQL = text(
     "SELECT draft_id, version, status, payload "
     "FROM marketplace.procurement_drafts WHERE draft_id = :draft_id"
@@ -252,7 +237,6 @@ async def find_stale_executing(*, older_than_seconds: float) -> list[Procurement
 
 
 __all__ = [
-    "PROCUREMENT_DRAFT_SCHEMA_DDL",
     "load",
     "insert",
     "compare_and_swap",

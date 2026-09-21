@@ -43,9 +43,10 @@ Interdit **dans une même release** :
 
 - `backend/alembic/versions/*.py` (si/quand Alembic est configuré)
 - `backend/migrations/*.py`
-- `backend/src/ladini/services/database/common.py` — **le mécanisme de schéma
-  ACTUEL** : `SCHEMA_COLUMN_DDL` (tuple d'`ALTER TABLE ... IF NOT EXISTS`)
-  appliqué au démarrage du worker via `ensure_performance_indexes()`.
+- `backend/schema_contract/migrations/*.sql` — **le mécanisme de schéma** : copie des migrations
+  Drizzle (dépôt frontend = source de vérité). Le backend n'exécute plus AUCUN DDL (l'ancien
+  `SCHEMA_COLUMN_DDL` / `ensure_performance_indexes()` au démarrage du worker a été supprimé : il avait
+  provoqué un deadlock en prod le 2026-09-19).
 
 Il **bloque** le merge si une ligne AJOUTÉE contient un motif destructif, sauf
 si le commit porte `migration-contract-approved: <raison>` (contraction
@@ -80,9 +81,8 @@ pourquoi App-rollback et DB-rollback sont traités séparément (§43).
 
 ## Quand Alembic sera branché
 
-Aujourd'hui il n'y a **pas** d'Alembic : le schéma initial est créé hors
-migration et les colonnes ajoutées le sont via `SCHEMA_COLUMN_DDL`
-(idempotent). `scripts/deploy.sh` détecte `backend/alembic.ini` : s'il existe,
+Il n'y a **pas** d'Alembic et il n'en faut pas : le schéma est défini et migré par **Drizzle**
+(voir `docs/schema/SCHEMA_ARCHITECTURE.md`). `scripts/deploy.sh` détecte `backend/alembic.ini` : s'il existe,
 il lance `alembic upgrade head` dans un conteneur éphémère **avant** la
 bascule ; sinon il saute avec un avertissement.
 

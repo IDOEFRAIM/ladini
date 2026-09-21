@@ -155,15 +155,15 @@ rm -rf "$LKD"
 # la LOGIQUE de détection des motifs destructifs (son vrai job en CI).
 mk_migrepo() {  # mk_migrepo <dir> <ligne-ajoutée> [amend-msg]
   local d="$1" line="$2" amsg="${3:-}"
-  mkdir -p "$d/backend/src/ladini/services/database" "$d/scripts"
+  mkdir -p "$d/backend/schema_contract/migrations" "$d/scripts"
   cp "${ROOT}/scripts/check_migrations.sh" "$d/scripts/"
   ( cd "$d"
     git init -q; git config user.email t@t; git config user.name t
     mkdir -p backend/alembic
-    printf 'SCHEMA_COLUMN_DDL = (\n    "ALTER TABLE x ADD COLUMN IF NOT EXISTS a VARCHAR",\n)\n' \
-      > backend/src/ladini/services/database/common.py
+    printf 'ALTER TABLE x ADD COLUMN IF NOT EXISTS a text;\n' \
+      > backend/schema_contract/migrations/0001_change.sql
     git add -A; git commit -q -m "base"
-    printf '%s\n' "$line" >> backend/src/ladini/services/database/common.py
+    printf '%s\n' "$line" >> backend/schema_contract/migrations/0001_change.sql
     git add -A; git commit -q -m "migration change"
     [ -n "$amsg" ] && git commit -q --amend -m "$amsg" || true
   )

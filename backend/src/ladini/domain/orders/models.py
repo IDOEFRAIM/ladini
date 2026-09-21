@@ -15,7 +15,6 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
-    String,
     Text,
     func,
     text,
@@ -44,15 +43,15 @@ class Delivery(Base):
     )
     order_id = Column(
         PG_UUID(as_uuid=True),
-        ForeignKey("marketplace.orders.id"),
+        ForeignKey("marketplace.orders.id", ondelete="RESTRICT"),
         nullable=False,
         unique=True,
     )
     delivery_agent_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("marketplace.delivery_agents.id")
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.delivery_agents.id", ondelete="SET NULL")
     )
-    status = Column(String, default="PENDING", nullable=False)
-    delivery_code = Column(String)
+    status = Column(Text, default="PENDING", nullable=False, server_default=text("'PENDING'"))
+    delivery_code = Column(Text)
     origin_gps_lat = Column(Float)
     origin_gps_lng = Column(Float)
     destination_gps_lat = Column(Float)
@@ -60,8 +59,8 @@ class Delivery(Base):
     destination_desc = Column(Text)
     estimated_distance_km = Column(Float)
     actual_distance_km = Column(Float)
-    shipping_condition = Column(String)
-    proof_of_delivery_url = Column(String)
+    shipping_condition = Column(Text)
+    proof_of_delivery_url = Column(Text)
     assigned_at = Column(DateTime)
     picked_up_at = Column(DateTime)
     delivered_at = Column(DateTime)
@@ -79,6 +78,7 @@ class Order(Base):
     __tablename__ = "orders"
     __table_args__ = (
         Index("orders_buyer_idx", "buyer_id"),
+        Index("orders_client_idx", "client_id"),
         Index("orders_org_idx", "organization_id"),
         Index("orders_status_idx", "status"),
         Index("orders_delivery_status_idx", "delivery_status"),
@@ -91,10 +91,13 @@ class Order(Base):
         Index("orders_winning_bid_idx", "winning_bid_id"),
         Index("orders_buyer_status_idx", "buyer_id", "status"),
         Index("orders_payment_status_idx", "payment_status"),
+        Index("ix_orders_paydunya_token", "paydunya_invoice_token", unique=True, postgresql_where=text("paydunya_invoice_token IS NOT NULL")),
+        Index("ix_orders_payment_expires_at", "payment_expires_at", postgresql_where=text("payment_status = 'PENDING'")),
+        Index("ix_orders_checkout_group", "checkout_group_id", postgresql_where=text("checkout_group_id IS NOT NULL")),
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
     buyer_id = Column(
         PG_UUID(as_uuid=True), ForeignKey("marketplace.buyer_profiles.id")
     )
@@ -103,39 +106,37 @@ class Order(Base):
         PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id")
     )
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
-    customer_name = Column(String)
-    customer_phone = Column(String)
-    payment_method = Column(String, default="CASH", nullable=False)
-    payment_status = Column(String, default="PENDING", nullable=False)
-    city = Column(String)
+    customer_name = Column(Text)
+    customer_phone = Column(Text)
+    payment_method = Column(Text, default="CASH", nullable=False, server_default=text("'CASH'"))
+    payment_status = Column(Text, default="PENDING", nullable=False, server_default=text("'PENDING'"))
+    city = Column(Text)
     # REAL (float4) : type réel en base (créé par Drizzle `real()`), aligné ici.
     gps_lat = Column(Float(24))
     gps_lng = Column(Float(24))
     delivery_desc = Column(Text)
-    audio_url = Column(String)
-    status = Column(String, default="PENDING", nullable=False)
-    delivery_status = Column(String, default="PENDING", nullable=False)
-    source = Column(String, default="APP", nullable=False)
-    order_type = Column(String, default="STANDARD", nullable=False)
-    whatsapp_id = Column(String)
+    audio_url = Column(Text)
+    status = Column(Text, default="PENDING", nullable=False, server_default=text("'PENDING'"))
+    delivery_status = Column(Text, default="PENDING", nullable=False, server_default=text("'PENDING'"))
+    source = Column(Text, default="APP", nullable=False, server_default=text("'APP'"))
+    order_type = Column(Text, default="STANDARD", nullable=False, server_default=text("'STANDARD'"))
+    whatsapp_id = Column(Text)
     total_amount = Column(Numeric(14, 2), nullable=False)
-    is_agent_order = Column(Boolean, default=False, nullable=False)
+    is_agent_order = Column(Boolean, default=False, nullable=False, server_default=text("false"))
     delivery_date = Column(DateTime)
-    subtotal = Column(Numeric(14, 2), default=0, nullable=False)
-    tax_amount = Column(Numeric(14, 2), default=0, nullable=False)
-    currency = Column(String, default="XOF", nullable=False)
-    delivery_fee = Column(Numeric(14, 2), default=0, nullable=False)
-    cancellation_role = Column(String)
+    subtotal = Column(Numeric(14, 2), default=0, nullable=False, server_default=text("'0'"))
+    tax_amount = Column(Numeric(14, 2), default=0, nullable=False, server_default=text("'0'"))
+    currency = Column(Text, default="XOF", nullable=False, server_default=text("'XOF'"))
+    delivery_fee = Column(Numeric(14, 2), default=0, nullable=False, server_default=text("'0'"))
+    cancellation_role = Column(Text)
     escrow_wallet_id = Column(PG_UUID(as_uuid=True), nullable=True)
     # --- Escrow Paydunya ---
     # `payment_status` (ci-dessus) porte désormais aussi : ESCROWED (payé,
     # fonds bloqués), PAID_OUT (livraison confirmée par OTP, fonds débloqués),
     # REFUNDED — en plus des valeurs existantes PENDING/PAID/CANCELLED.
-    # Colonnes ajoutées après coup — voir services/database/common.py::
-    # SCHEMA_COLUMN_DDL pour l'ALTER TABLE idempotent correspondant (pas
-    # d'Alembic dans ce repo).
-    paydunya_invoice_token = Column(String, nullable=True)
-    delivery_otp = Column(String, nullable=True)
+    # Colonnes déclarées dans Drizzle (source de vérité du schéma) ; migrations Drizzle.
+    paydunya_invoice_token = Column(Text, nullable=True)
+    delivery_otp = Column(Text, nullable=True)
     payment_expires_at = Column(DateTime, nullable=True)
     locked_amount = Column(Numeric(14, 2), nullable=True)
     # Anti-force-brute du code de livraison (audit sécurité 2026-09-10) :
@@ -145,7 +146,7 @@ class Order(Base):
     # en PAID_OUT/DELIVERED (déblocage de fonds) sans que l'acheteur ait
     # jamais confirmé la livraison. Compteur PERSISTÉ (pas en mémoire process :
     # il doit survivre aux redéploiements et être partagé par tous les workers).
-    delivery_otp_attempts = Column(Integer, default=0, nullable=False, server_default="0")
+    delivery_otp_attempts = Column(Integer, default=0, nullable=False, server_default=text("0"))
     delivery_otp_locked_until = Column(DateTime, nullable=True)
     market_offer_id = Column(
         PG_UUID(as_uuid=True), ForeignKey("marketplace.market_offers.id")
@@ -190,7 +191,7 @@ class OrderItem(Base):
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
     order_id = Column(
         PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False
     )
@@ -204,7 +205,7 @@ class OrderItem(Base):
     # TOUTE commande sans palier (produit sans pricing_tiers, ou commande
     # créée avant cette colonne) : traçabilité complète du palier acheté
     # sans casser aucune ligne de commande existante.
-    tier_id = Column(String, nullable=True)
+    tier_id = Column(Text, nullable=True)
     # Quantité déjà convertie dans l'unité de BASE du produit (ex: 3 bidons
     # de 10L => 30, en LITRE) — c'est CETTE valeur qu'il faut débiter de
     # `Product.quantity_for_sale`, jamais `quantity` telle quelle dès qu'un
@@ -227,16 +228,16 @@ class Payment(Base):
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
     order_id = Column(
         PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False
     )
     amount = Column(Numeric(14, 2), nullable=False)
-    currency = Column(String, default="XOF", nullable=False)
-    method = Column(String, default="CASH", nullable=False)
-    status = Column(String, default="PENDING", nullable=False)
-    provider = Column(String)
-    provider_ref = Column(String)
+    currency = Column(Text, default="XOF", nullable=False, server_default=text("'XOF'"))
+    method = Column(Text, default="CASH", nullable=False, server_default=text("'CASH'"))
+    status = Column(Text, default="PENDING", nullable=False, server_default=text("'PENDING'"))
+    provider = Column(Text)
+    provider_ref = Column(Text)
     escrow_wallet_id = Column(PG_UUID(as_uuid=True))
     failure_reason = Column(Text)
     authorized_at = Column(DateTime)
@@ -261,13 +262,13 @@ class OrderStatusHistory(Base):
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
     order_id = Column(
         PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False
     )
-    status_type = Column(String, nullable=False)  # ORDER | PAYMENT | DELIVERY
-    from_status = Column(String)
-    to_status = Column(String, nullable=False)
+    status_type = Column(Text, nullable=False)  # ORDER | PAYMENT | DELIVERY
+    from_status = Column(Text)
+    to_status = Column(Text, nullable=False)
     actor_id = Column(PG_UUID(as_uuid=True))
     note = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
@@ -285,16 +286,16 @@ class OrderReminder(Base):
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
     order_id = Column(
         PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False
     )
-    type = Column(String, nullable=False)
-    channel = Column(String, default="WHATSAPP", nullable=False)
-    status = Column(String, default="SCHEDULED", nullable=False)
+    type = Column(Text, nullable=False)
+    channel = Column(Text, default="WHATSAPP", nullable=False, server_default=text("'WHATSAPP'"))
+    status = Column(Text, default="SCHEDULED", nullable=False, server_default=text("'SCHEDULED'"))
     scheduled_at = Column(DateTime, nullable=False)
     sent_at = Column(DateTime)
-    attempts = Column(Integer, default=0, nullable=False)
+    attempts = Column(Integer, default=0, nullable=False, server_default=text("0"))
     last_error = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
@@ -314,21 +315,21 @@ class OrderDispute(Base):
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
     order_id = Column(
         PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False
     )
     escrow_wallet_id = Column(PG_UUID(as_uuid=True), nullable=True)
-    raised_by_id = Column(PG_UUID(as_uuid=True), nullable=False)
-    reason_category = Column(String, nullable=False)
+    raised_by_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="RESTRICT"), nullable=False)
+    reason_category = Column(Text, nullable=False)
     description = Column(Text, nullable=False)
     evidence_images = Column(
-        PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]")
+        PG_ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
-    requested_solution = Column(String, nullable=False)
-    disputed_amount = Column(Numeric(14, 2), default=0, nullable=False)
-    escrow_payout_status = Column(String, default="HELD", nullable=False)
-    status = Column(String, default="PENDING", nullable=False)
+    requested_solution = Column(Text, nullable=False)
+    disputed_amount = Column(Numeric(14, 2), default=0, nullable=False, server_default=text("'0'"))
+    escrow_payout_status = Column(Text, default="HELD", nullable=False, server_default=text("'HELD'"))
+    status = Column(Text, default="PENDING", nullable=False, server_default=text("'PENDING'"))
     resolution_notes = Column(Text)
     resolved_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
@@ -341,6 +342,7 @@ class Auction(Base):
     __tablename__ = "auctions"
     __table_args__ = (
         Index("auctions_status_idx", "status"),
+        Index("auctions_subcategory_idx", "sub_category_id"),
         Index("auctions_buyer_idx", "buyer_id"),
         Index("auctions_escrow_status_idx", "escrow_status"),
         Index("auctions_zone_idx", "target_zone_id"),
@@ -348,42 +350,42 @@ class Auction(Base):
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
     buyer_id = Column(
         PG_UUID(as_uuid=True),
-        ForeignKey("marketplace.buyer_profiles.id"),
+        ForeignKey("marketplace.buyer_profiles.id", ondelete="RESTRICT"),
         nullable=False,
     )
     sub_category_id = Column(
         PG_UUID(as_uuid=True),
-        ForeignKey("governance.sub_categories.id"),
+        ForeignKey("governance.sub_categories.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    winner_bid_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.bids.id"))
+    winner_bid_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.bids.id", ondelete="RESTRICT"))
     quantity = Column(Numeric(14, 3), nullable=False)
-    unit = Column(String, default="TONNE", nullable=False)
+    unit = Column(Text, default="TONNE", nullable=False, server_default=text("'TONNE'"))
     max_price_per_unit = Column(Numeric(12, 2), nullable=False)
     description = Column(Text)
-    incoterm = Column(String, default="DDP", nullable=False)
-    delivery_location = Column(String, nullable=False)
+    incoterm = Column(Text, default="DDP", nullable=False, server_default=text("'DDP'"))
+    delivery_location = Column(Text, nullable=False)
     delivery_deadline = Column(DateTime, nullable=False)
-    quality_grading = Column(String)
+    quality_grading = Column(Text)
     required_certifications = Column(
-        PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]")
+        PG_ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
-    preferred_packaging = Column(String)
+    preferred_packaging = Column(Text)
     # Photos de référence jointes par l'acheteur (ce qu'il recherche) — voir
     # services/database/auction.py::add_auction_photo.
     images = Column(
-        PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]")
+        PG_ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
     deadline = Column(DateTime, nullable=False)
-    auto_extend = Column(Boolean, default=True, nullable=False)
+    auto_extend = Column(Boolean, default=True, nullable=False, server_default=text("true"))
     escrow_wallet_id = Column(PG_UUID(as_uuid=True), nullable=True)
-    escrow_status = Column(String, default="NONE", nullable=False)
-    status = Column(String, default="OPEN", nullable=False)
-    cancellation_reason = Column(String)
-    target_zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
+    escrow_status = Column(Text, default="NONE", nullable=False, server_default=text("'NONE'"))
+    status = Column(Text, default="OPEN", nullable=False, server_default=text("'OPEN'"))
+    cancellation_reason = Column(Text)
+    target_zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id", ondelete="SET NULL"))
     # DEPRECATED / UNUSED (2026-09-04, audit fonctionnel/transactionnel
     # Auction↔Bid — voir docs/AUCTION_BID_TRANSACTIONAL_AUDIT_2026-09-04.md
     # section L, et son suivi WINNER_AND_ORDER_LIFECYCLE audit) :
@@ -392,13 +394,12 @@ class Auction(Base):
     # protégée par `SELECT...FOR UPDATE`, pas par CAS de version). Elle
     # avait un unique écrivain (`services/database/buyer.py::update_negotiation_offer`,
     # un compteur "nombre de corrections de prix" jamais consommé), retiré
-    # à cette même date. Colonne conservée en base : ce dépôt n'a PAS de
-    # mécanisme de migration destructive (DDL additif uniquement, voir
-    # `services/database/common.py::SCHEMA_COLUMN_DDL`), et un éventuel
+    # à cette même date. Colonne conservée en base : suppression = migration
+    # Drizzle destructive (EXPAND/CONTRACT, voir docs/runbooks/migrations.md), et un éventuel
     # lecteur hors de ce dépôt (tableau de bord admin externe) ne peut pas
     # être exclu depuis ici. Ne pas réutiliser cette colonne pour un
     # nouveau besoin sans revérifier cette conclusion.
-    version = Column(Integer, default=0, nullable=False)
+    version = Column(Integer, default=0, nullable=False, server_default=text("0"))
     awarded_at = Column(DateTime)
     cancelled_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
@@ -415,20 +416,21 @@ class Bid(Base):
         Index("bids_producer_idx", "producer_id"),
         Index("bids_linked_stock_idx", "linked_stock_id"),
         Index("bids_status_idx", "status"),
+        Index("bids_one_winner_per_auction_uq", "auction_id", unique=True, postgresql_where=text("is_winner = true")),
         {"schema": "marketplace"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
     auction_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("marketplace.auctions.id"), nullable=False
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.auctions.id", ondelete="RESTRICT"), nullable=False
     )
     producer_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"), nullable=False
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id", ondelete="RESTRICT"), nullable=False
     )
     offered_price = Column(Numeric(12, 2), nullable=False)
-    linked_stock_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.stocks.id"))
-    is_winner = Column(Boolean, default=False, nullable=False)
-    status = Column(String, default="PENDING", nullable=False)
+    linked_stock_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.stocks.id", ondelete="SET NULL"))
+    is_winner = Column(Boolean, default=False, nullable=False, server_default=text("false"))
+    status = Column(Text, default="PENDING", nullable=False, server_default=text("'PENDING'"))
     message = Column(Text)
     notified_at = Column(DateTime)
     valid_until = Column(DateTime)
@@ -438,7 +440,7 @@ class Bid(Base):
     # `linked_stock_id` (jamais renseigné par `place_bid` en pratique) : le
     # `Stock` référencé n'a lui-même aucune colonne image.
     images = Column(
-        PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]")
+        PG_ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
@@ -446,32 +448,6 @@ class Bid(Base):
     )
 
 
-class MarketplaceRating(Base):
-    __tablename__ = "marketplace_ratings"
-    __table_args__ = (
-        Index("mr_order_idx", "order_id"),
-        Index("mr_author_idx", "author_id"),
-        Index("mr_target_idx", "target_id"),
-        Index("mr_order_author_unique", "order_id", "author_id", unique=True),
-        {"schema": "marketplace"},
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    order_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), nullable=False
-    )
-    author_type = Column(String, nullable=False)
-    author_id = Column(PG_UUID(as_uuid=True), nullable=False)
-    target_type = Column(String, nullable=False)
-    target_id = Column(PG_UUID(as_uuid=True), nullable=False)
-    rating_product_quality = Column(Integer)
-    rating_packaging = Column(Integer)
-    rating_reception_speed = Column(Integer)
-    rating_communication = Column(Integer)
-    rating_reliability = Column(Integer, nullable=False)
-    global_rating = Column(Float, nullable=False)
-    comment = Column(Text)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
 __all__ = [
@@ -484,5 +460,4 @@ __all__ = [
     "OrderDispute",
     "Auction",
     "Bid",
-    "MarketplaceRating",
 ]

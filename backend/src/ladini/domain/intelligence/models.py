@@ -13,7 +13,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    String,
     Text,
     func,
     text,
@@ -33,9 +32,9 @@ class AuditLog(Base):
         {"schema": "intelligence"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
     actor_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False
+        PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="RESTRICT"), nullable=False
     )
     action = Column(Text, nullable=False)
     entity_id = Column(Text, nullable=False)
@@ -50,6 +49,7 @@ class AgentAction(Base):
     __tablename__ = "agent_actions"
     __table_args__ = (
         Index("agent_actions_status_idx", "status"),
+        Index("agent_actions_user_idx", "user_id"),
         Index("agent_actions_batch_idx", "batch_id"),
         Index("agent_actions_name_idx", "agent_name"),
         Index("agent_actions_order_unique", "order_id", unique=True),
@@ -57,17 +57,17 @@ class AgentAction(Base):
         {"schema": "intelligence"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
     agent_name = Column(Text, nullable=False)
     action_type = Column(Text, nullable=False)
     batch_id = Column(Text)
     payload = Column(JSONB)
-    status = Column(String, default="PENDING", nullable=False)
-    priority = Column(String, default="MEDIUM", nullable=False)
+    status = Column(Text, default="PENDING", nullable=False, server_default=text("'PENDING'"))
+    priority = Column(Text, default="MEDIUM", nullable=False, server_default=text("'MEDIUM'"))
     order_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id"), unique=True
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.orders.id", ondelete="SET NULL"), unique=True
     )
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
+    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
     audit_trail_id = Column(Text)
     ai_reasoning = Column(Text)
     admin_notes = Column(Text)
@@ -89,21 +89,21 @@ class Conversation(Base):
         {"schema": "intelligence"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="RESTRICT"), nullable=False)
     query = Column(Text, nullable=False)
     response = Column(Text)
     agent_type = Column(Text)
-    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
-    mode = Column(Text, default="text", nullable=False)
+    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id", ondelete="SET NULL"))
+    mode = Column(Text, default="text", nullable=False, server_default=text("'text'"))
     audio_url = Column(Text)
-    is_waiting_for_input = Column(Boolean, default=False, nullable=False)
+    is_waiting_for_input = Column(Boolean, default=False, nullable=False, server_default=text("false"))
     missing_slots = Column(JSONB)
     execution_path = Column(JSONB)
     confidence_score = Column(DOUBLE_PRECISION)
     user_intent = Column(Text)
-    needs_follow_up = Column(Boolean, default=False, nullable=False)
-    total_tokens_used = Column(Integer, default=0, nullable=False)
+    needs_follow_up = Column(Boolean, default=False, nullable=False, server_default=text("false"))
+    total_tokens_used = Column(Integer, default=0, nullable=False, server_default=text("0"))
     response_time_ms = Column(Integer)
     audit_trail_id = Column(Text, unique=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
@@ -112,49 +112,8 @@ class Conversation(Base):
     )
 
 
-class AgentContextMemory(Base):
-    __tablename__ = "agent_context_memory"
-    __table_args__ = (
-        Index("acm_user_idx", "user_id"),
-        Index("acm_key_idx", "context_key"),
-        Index("acm_user_key_unique", "user_id", "context_key", unique=True),
-        {"schema": "intelligence"},
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
-    market_offer_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("marketplace.market_offers.id")
-    )
-    context_key = Column(Text, nullable=False)
-    context_value = Column(JSONB, nullable=False)
-    source = Column(Text, default="AGENT", nullable=False)
-    confidence = Column(DOUBLE_PRECISION)
-    expires_at = Column(DateTime)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(
-        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
-    )
 
 
-class AIRatingReasoning(Base):
-    __tablename__ = "ai_rating_reasonings"
-    __table_args__ = (
-        Index("ai_rating_trust_idx", "trust_score_id"),
-        Index("ai_rating_agent_idx", "agent_name"),
-        {"schema": "intelligence"},
-    )
-
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    trust_score_id = Column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("intelligence.trust_scores.id"),
-        nullable=False,
-    )
-    agent_name = Column(Text, nullable=False)
-    justification = Column(Text, nullable=False)
-    data_points = Column(JSONB, nullable=False)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
 class ModerationEvent(Base):
@@ -171,13 +130,13 @@ class ModerationEvent(Base):
         {"schema": "intelligence"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    user_id = Column(PG_UUID(as_uuid=True))
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
     phone = Column(Text, nullable=False)
-    kind = Column(String, nullable=False)  # PROHIBITED_PRODUCT | SCAM
+    kind = Column(Text, nullable=False)  # PROHIBITED_PRODUCT | SCAM
     matched_term = Column(Text)
     excerpt = Column(Text)
-    action_taken = Column(String)  # WARNED | BANNED
+    action_taken = Column(Text)  # WARNED | BANNED
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
@@ -191,12 +150,12 @@ class DemandSignal(Base):
         {"schema": "intelligence"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
     normalized_term = Column(Text, nullable=False)
     raw_query = Column(Text, nullable=False)
     phone = Column(Text)
-    user_id = Column(PG_UUID(as_uuid=True))
-    zone_id = Column(PG_UUID(as_uuid=True))
+    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
+    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id", ondelete="SET NULL"))
     occurrences = Column(Integer, default=1, nullable=False, server_default=text("1"))
     resolved = Column(
         Boolean, default=False, nullable=False, server_default=text("false")
@@ -232,16 +191,16 @@ class Solicitation(Base):
         {"schema": "intelligence"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    kind = Column(String, nullable=False)  # AUCTION_INVITE | NEW_PRODUCT_ALERT
-    auction_id = Column(PG_UUID(as_uuid=True))
-    market_offer_id = Column(PG_UUID(as_uuid=True))
-    target_producer_id = Column(PG_UUID(as_uuid=True))
-    target_buyer_id = Column(PG_UUID(as_uuid=True))
-    sub_category_id = Column(PG_UUID(as_uuid=True))
-    zone_id = Column(PG_UUID(as_uuid=True))
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    kind = Column(Text, nullable=False)  # AUCTION_INVITE | NEW_PRODUCT_ALERT
+    auction_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.auctions.id", ondelete="CASCADE"))
+    market_offer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.market_offers.id", ondelete="CASCADE"))
+    target_producer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id", ondelete="CASCADE"))
+    target_buyer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.buyer_profiles.id", ondelete="CASCADE"))
+    sub_category_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.sub_categories.id", ondelete="SET NULL"))
+    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id", ondelete="SET NULL"))
     status = Column(
-        String, default="PENDING", nullable=False, server_default=text("'PENDING'")
+        Text, default="PENDING", nullable=False, server_default=text("'PENDING'")
     )
     notified_at = Column(DateTime)
     responded_at = Column(DateTime)
@@ -264,16 +223,16 @@ class NotificationOutbox(Base):
         {"schema": "intelligence"},
     )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    solicitation_id = Column(PG_UUID(as_uuid=True))
-    channel = Column(String, nullable=False)  # WHATSAPP | EMAIL | PUSH | IN_APP
-    recipient_user_id = Column(PG_UUID(as_uuid=True))
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    solicitation_id = Column(PG_UUID(as_uuid=True), ForeignKey("intelligence.solicitations.id", ondelete="SET NULL"))
+    channel = Column(Text, nullable=False)  # WHATSAPP | EMAIL | PUSH | IN_APP
+    recipient_user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
     recipient_phone = Column(Text)
-    template_key = Column(String, nullable=False)
+    template_key = Column(Text, nullable=False)
     payload = Column(JSONB, nullable=False)
     dedupe_key = Column(Text, nullable=False)
     status = Column(
-        String, default="PENDING", nullable=False, server_default=text("'PENDING'")
+        Text, default="PENDING", nullable=False, server_default=text("'PENDING'")
     )
     attempts = Column(Integer, default=0, nullable=False, server_default=text("0"))
     max_attempts = Column(Integer, default=5, nullable=False, server_default=text("5"))
@@ -290,8 +249,6 @@ __all__ = [
     "AuditLog",
     "AgentAction",
     "Conversation",
-    "AgentContextMemory",
-    "AIRatingReasoning",
     "ModerationEvent",
     "DemandSignal",
     "Solicitation",

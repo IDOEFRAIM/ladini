@@ -167,7 +167,6 @@ backend/_.pytest_cache__/
 backend/.venv
 backend/src/ladini/graphs/agent_test/
 backend/src/ladini/worker.py
-backend/src/ladini/services/memory/
 
 backend/src/future
 backend/AUDIT_MARKET_AGENTS.md

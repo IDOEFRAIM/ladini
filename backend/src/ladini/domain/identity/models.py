@@ -15,7 +15,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    String,
     Text,
     func,
     text,
@@ -32,16 +31,21 @@ from ladini.domain.orm_base import Base, _uuid4
 # ══════════════════════════════════════════════════════════════════════════
 class User(Base):
     __tablename__ = "users"
-    __table_args__ = {"schema": "auth"}
+    __table_args__ = (
+        Index("users_created_idx", "created_at"),
+        Index("users_role_idx", "role"),
+        Index("users_zone_idx", "zone_id"),
+        {"schema": "auth"},
+    )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    name = Column(String)
-    email = Column(String, unique=True, index=True)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    name = Column(Text)
+    email = Column(Text, unique=True, index=True)
     email_verified = Column(DateTime)
-    image = Column(String)
-    password = Column(String)
-    phone = Column(String, unique=True, index=True)
-    whatsapp_enabled = Column(Boolean, default=True)
+    image = Column(Text)
+    password = Column(Text)
+    phone = Column(Text, unique=True, index=True)
+    whatsapp_enabled = Column(Boolean, default=True, server_default=text("true"))
     onboarding_completed = Column(Boolean, nullable=False, server_default=text("false"))
     latitude = Column(Float)
     longitude = Column(Float)
@@ -50,13 +54,13 @@ class User(Base):
     # native Twilio (message de localisation WhatsApp) ou par mise à jour
     # manuelle ultérieure (menu dédié).
     location_updated_at = Column(DateTime, nullable=True)
-    cnib_number = Column(String, unique=True)
-    role = Column(String, default="USER", nullable=False)
-    identity_verified = Column(Boolean, default=False)
-    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
+    cnib_number = Column(Text, unique=True)
+    role = Column(Text, default="USER", nullable=False, server_default=text("'USER'"))
+    identity_verified = Column(Boolean, default=False, server_default=text("false"))
+    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id", ondelete="SET NULL"))
     # Modération / abus : blocage (annulations répétées) & bannissement (produits interdits).
     account_status = Column(
-        String,
+        Text,
         default="ACTIVE",
         nullable=False,
         server_default=text("'ACTIVE'"),
@@ -75,32 +79,39 @@ class User(Base):
 
 class Account(Base):
     __tablename__ = "accounts"
-    __table_args__ = {"schema": "auth"}
+    __table_args__ = (
+        Index("accounts_provider_unique", "provider", "provider_account_id", unique=True),
+        Index("accounts_user_idx", "user_id"),
+        {"schema": "auth"},
+    )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
     user_id = Column(
         PG_UUID(as_uuid=True),
         ForeignKey("auth.users.id", ondelete="CASCADE"),
         nullable=False,
     )
-    type = Column(String, nullable=False)
-    provider = Column(String, nullable=False)
-    provider_account_id = Column(String, nullable=False)
+    type = Column(Text, nullable=False)
+    provider = Column(Text, nullable=False)
+    provider_account_id = Column(Text, nullable=False)
     refresh_token = Column(Text)
     access_token = Column(Text)
     expires_at = Column(Integer)
-    token_type = Column(String)
-    scope = Column(String)
+    token_type = Column(Text)
+    scope = Column(Text)
     id_token = Column(Text)
-    session_state = Column(String)
+    session_state = Column(Text)
 
 
 class Session(Base):
     __tablename__ = "sessions"
-    __table_args__ = {"schema": "auth"}
+    __table_args__ = (
+        Index("sessions_user_idx", "user_id"),
+        {"schema": "auth"},
+    )
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
-    session_token = Column(String, unique=True, nullable=False)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    session_token = Column(Text, unique=True, nullable=False)
     user_id = Column(
         PG_UUID(as_uuid=True),
         ForeignKey("auth.users.id", ondelete="CASCADE"),
@@ -127,23 +138,23 @@ class Producer(Base):
         server_default=text("gen_random_uuid()"),
     )
     user_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True
+        PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="RESTRICT"), nullable=False, unique=True
     )
     organization_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id")
+        PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id", ondelete="SET NULL")
     )
-    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
-    business_name = Column(String)
-    status = Column(String, default="PENDING", nullable=False)
-    is_certified = Column(Boolean, default=False, nullable=False)
-    region = Column(String)
-    province = Column(String)
-    commune = Column(String)
-    logo_url = Column(String)
-    phone_number = Column(String)
+    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id", ondelete="SET NULL"))
+    business_name = Column(Text)
+    status = Column(Text, default="PENDING", nullable=False, server_default=text("'PENDING'"))
+    is_certified = Column(Boolean, default=False, nullable=False, server_default=text("false"))
+    region = Column(Text)
+    province = Column(Text)
+    commune = Column(Text)
+    logo_url = Column(Text)
+    phone_number = Column(Text)
     rating = Column(Integer)
-    reviews_count = Column(Integer, default=0, nullable=False)
-    company_registration_number = Column(String)
+    reviews_count = Column(Integer, default=0, nullable=False, server_default=text("0"))
+    company_registration_number = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
@@ -177,15 +188,15 @@ class Client(Base):
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
-    producer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id"))
-    name = Column(String, nullable=False)
-    phone = Column(String, nullable=False)
-    email = Column(String)
-    location = Column(String)
-    total_orders = Column(Integer, default=0, nullable=False)
-    total_spent = Column(Float, default=0.0, nullable=False)
+    producer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id", ondelete="SET NULL"))
+    name = Column(Text, nullable=False)
+    phone = Column(Text, nullable=False)
+    email = Column(Text)
+    location = Column(Text)
+    total_orders = Column(Integer, default=0, nullable=False, server_default=text("0"))
+    total_spent = Column(Float, default=0.0, nullable=False, server_default=text("0"))
     last_order_date = Column(DateTime)
-    tax_id = Column(String)
+    tax_id = Column(Text)
     prefered_payement_method = Column(JSONB)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
@@ -206,7 +217,7 @@ class BuyerType(Base):
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
-    name = Column(String, unique=True, nullable=False)
+    name = Column(Text, unique=True, nullable=False)
     description = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
@@ -229,20 +240,20 @@ class BuyerProfile(Base):
         server_default=text("gen_random_uuid()"),
     )
     user_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True
+        PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="RESTRICT"), nullable=False, unique=True
     )
     buyer_type_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("marketplace.buyer_types.id")
+        PG_UUID(as_uuid=True), ForeignKey("marketplace.buyer_types.id", ondelete="SET NULL")
     )
-    establishment_name = Column(String)
+    establishment_name = Column(Text)
     default_delivery_address = Column(Text)
-    is_verified = Column(Boolean, default=False, nullable=False)
-    trust_badge = Column(String)
+    is_verified = Column(Boolean, default=False, nullable=False, server_default=text("false"))
+    trust_badge = Column(Text)
     rating = Column(Float)
-    reviews_count = Column(Integer, default=0, nullable=False)
-    company_registration_number = Column(String)
+    reviews_count = Column(Integer, default=0, nullable=False, server_default=text("0"))
+    company_registration_number = Column(Text)
     verified_at = Column(DateTime)
-    verified_by_id = Column(PG_UUID(as_uuid=True))
+    verified_by_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
@@ -253,7 +264,11 @@ class BuyerProfile(Base):
 
 class DeliveryAgent(Base):
     __tablename__ = "delivery_agents"
-    __table_args__ = {"schema": "marketplace"}
+    __table_args__ = (
+        Index("delivery_agents_status_idx", "status"),
+        Index("delivery_agents_zone_idx", "zone_id"),
+        {"schema": "marketplace"},
+    )
 
     id = Column(
         PG_UUID(as_uuid=True),
@@ -261,12 +276,12 @@ class DeliveryAgent(Base):
         server_default=text("gen_random_uuid()"),
     )
     user_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True
+        PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="RESTRICT"), nullable=False, unique=True
     )
-    vehicle_type = Column(String)
-    license_number = Column(String)
-    status = Column(String, default="OFFLINE", nullable=False)
-    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
+    vehicle_type = Column(Text)
+    license_number = Column(Text)
+    status = Column(Text, default="OFFLINE", nullable=False, server_default=text("'OFFLINE'"))
+    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id", ondelete="SET NULL"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
@@ -282,15 +297,15 @@ class TrustScore(Base):
     __tablename__ = "trust_scores"
     __table_args__ = {"schema": "intelligence"}
 
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4)
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
     user_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False, unique=True
+        PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False, unique=True
     )
-    global_score = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
-    reliability_index = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
-    quality_index = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
-    compliance_index = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
-    resilience_bonus = Column(DOUBLE_PRECISION, default=0.0, nullable=False)
+    global_score = Column(DOUBLE_PRECISION, default=0.0, nullable=False, server_default=text("0"))
+    reliability_index = Column(DOUBLE_PRECISION, default=0.0, nullable=False, server_default=text("0"))
+    quality_index = Column(DOUBLE_PRECISION, default=0.0, nullable=False, server_default=text("0"))
+    compliance_index = Column(DOUBLE_PRECISION, default=0.0, nullable=False, server_default=text("0"))
+    resilience_bonus = Column(DOUBLE_PRECISION, default=0.0, nullable=False, server_default=text("0"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False

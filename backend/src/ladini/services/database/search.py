@@ -10,7 +10,7 @@ Ce module généralise le pattern trigram déjà validé sur les zones, avec une
 stratégie « haute sensibilité » : on élargit d'abord (similarité + substring),
 l'agent trie ensuite. Mieux vaut un faux positif qu'un blocage.
 
-Prérequis : extension `pg_trgm` + index GIN (voir `common.PERFORMANCE_INDEX_DDL`).
+Prérequis : extension `pg_trgm` + index GIN (créés par la migration Drizzle baseline : `ix_*_trgm`).
 """
 
 from __future__ import annotations

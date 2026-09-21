@@ -165,7 +165,6 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "check_price_anomaly": PermissionScope.DB_READ_ONLY,
     "validate_stock_availability_atomic": PermissionScope.DB_READ_ONLY,
     "get_or_create_client": PermissionScope.DB_DATA_WRITE,
-    "ensure_performance_indexes": PermissionScope.DB_SCHEMA_MODIFY,
     "adjust_stock": PermissionScope.DB_DATA_WRITE,
     "cancel_pending_order": PermissionScope.DB_DATA_WRITE,
     # (2026-09-04, audit Order(DRAFT) orphelin PREORDER) : méthode déjà

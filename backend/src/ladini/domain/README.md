@@ -39,8 +39,8 @@ Regroupe le cœur du système d'authentification et les profils d'utilisateurs q
 
 ### 3. Catalogue & Production (`catalog/`)
 Gère l'infrastructure physique des producteurs et le cycle de vie des produits avant vente.
-*   **Classes clés :** `Warehouse`, `Farm`, `Product`, `Stock`, `StockMovement`, `Batch`, `Expense`, `MarketOffer`.
-*   **Concepts clés :** Localisation des fermes, traçabilité des lots (`Batch`), mouvements de stock, valorisation financière des offres marché.
+*   **Classes clés :** `Warehouse`, `Farm`, `Product`, `Stock`, `StockMovement`, `Expense`, `MarketOffer`.
+*   **Concepts clés :** Localisation des fermes, mouvements de stock, valorisation financière des offres marché.
 
 ### 4. Commandes & Enchères (`orders/`)
 Prend en charge l'intégralité du cycle transactionnel et de la supply chain.

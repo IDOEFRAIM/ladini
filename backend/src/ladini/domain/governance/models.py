@@ -15,14 +15,12 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
-    String,
     Text,
     UniqueConstraint,
     func,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 
 from ladini.domain.orm_base import Base
@@ -37,11 +35,11 @@ class Organization(Base):
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
-    name = Column(String, nullable=False)
-    type = Column(String, nullable=False)
-    tax_id = Column(String, unique=True)
+    name = Column(Text, nullable=False)
+    type = Column(Text, nullable=False)
+    tax_id = Column(Text, unique=True)
     description = Column(Text)
-    status = Column(String, default="PENDING", nullable=False)
+    status = Column(Text, default="PENDING", nullable=False, server_default=text("'PENDING'"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
@@ -52,6 +50,9 @@ class UserOrganization(Base):
     __tablename__ = "user_organizations"
     __table_args__ = (
         UniqueConstraint("user_id", "organization_id", name="user_org_unique"),
+        Index("user_org_org_idx", "organization_id"),
+        Index("user_org_role_idx", "role_id"),
+        Index("user_org_user_idx", "user_id"),
         {"schema": "governance"},
     )
 
@@ -60,15 +61,15 @@ class UserOrganization(Base):
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
-    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False)
+    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), nullable=False)
     organization_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id"), nullable=False
+        PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id", ondelete="CASCADE"), nullable=False
     )
-    role = Column(String, default="FIELD_AGENT", nullable=False)
+    role = Column(Text, default="FIELD_AGENT", nullable=False, server_default=text("'FIELD_AGENT'"))
     role_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("governance.role_definitions.id")
+        PG_UUID(as_uuid=True), ForeignKey("governance.role_definitions.id", ondelete="SET NULL")
     )
-    managed_zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
+    managed_zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id", ondelete="SET NULL"))
 
 
 class RoleDefinition(Base):
@@ -80,10 +81,10 @@ class RoleDefinition(Base):
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
-    name = Column(String, unique=True, nullable=False)
+    name = Column(Text, unique=True, nullable=False)
     description = Column(Text)
     permissions = Column(
-        PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]")
+        PG_ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
@@ -97,7 +98,7 @@ class ClimaticRegion(Base):
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
-    name = Column(String, unique=True, nullable=False)
+    name = Column(Text, unique=True, nullable=False)
     description = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
@@ -113,6 +114,7 @@ class Zone(Base):
         Index("zones_active_idx", "is_active"),
         Index("zones_parent_idx", "parent_id"),
         Index("zones_path_idx", "path"),
+        Index("ix_zones_name_trgm", "name", postgresql_using="gin", postgresql_ops={"name": "gin_trgm_ops"}),
         {"schema": "governance"},
     )
 
@@ -121,22 +123,22 @@ class Zone(Base):
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
-    name = Column(String, unique=True, nullable=False)
-    code = Column(String, unique=True, nullable=False)
+    name = Column(Text, unique=True, nullable=False)
+    code = Column(Text, unique=True, nullable=False)
     climatic_region_id = Column(
         PG_UUID(as_uuid=True),
-        ForeignKey("governance.climatic_regions.id"),
+        ForeignKey("governance.climatic_regions.id", ondelete="RESTRICT"),
         nullable=False,
     )
     organization_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id")
+        PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id", ondelete="SET NULL")
     )
-    parent_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"))
-    path = Column(String)
-    depth = Column(Integer, default=0, nullable=False)
+    parent_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id", ondelete="RESTRICT"))
+    path = Column(Text)
+    depth = Column(Integer, default=0, nullable=False, server_default=text("0"))
     latitude = Column(Float)
     longitude = Column(Float)
-    is_active = Column(Boolean, default=True, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False, server_default=text("true"))
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
@@ -160,38 +162,19 @@ class WorkZone(Base):
         server_default=text("gen_random_uuid()"),
     )
     organization_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id"), nullable=False
+        PG_UUID(as_uuid=True), ForeignKey("governance.organizations.id", ondelete="CASCADE"), nullable=False
     )
     zone_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"), nullable=False
+        PG_UUID(as_uuid=True), ForeignKey("governance.zones.id", ondelete="CASCADE"), nullable=False
     )
-    manager_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id"))
-    role = Column(String)
+    manager_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
+    role = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
 
-class ZoneMetric(Base):
-    __tablename__ = "zone_metrics"
-    __table_args__ = (
-        Index("zone_metrics_composite_idx", "zone_id", "date", "metric_name"),
-        {"schema": "governance"},
-    )
-
-    id = Column(
-        PG_UUID(as_uuid=True),
-        primary_key=True,
-        server_default=text("gen_random_uuid()"),
-    )
-    zone_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"), nullable=False
-    )
-    date = Column(DateTime, server_default=func.now(), nullable=False)
-    metric_name = Column(String, nullable=False)
-    value = Column(Float, nullable=False)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
 class Category(Base):
@@ -203,7 +186,7 @@ class Category(Base):
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
-    name = Column(String, unique=True, nullable=False)
+    name = Column(Text, unique=True, nullable=False)
     description = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
@@ -215,6 +198,7 @@ class SubCategory(Base):
     __tablename__ = "sub_categories"
     __table_args__ = (
         UniqueConstraint("category_id", "name", name="sub_categories_cat_name_unique"),
+        Index("ix_subcategories_name_trgm", "name", postgresql_using="gin", postgresql_ops={"name": "gin_trgm_ops"}),
         {"schema": "governance"},
     )
 
@@ -224,11 +208,11 @@ class SubCategory(Base):
         server_default=text("gen_random_uuid()"),
     )
     category_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("governance.categories.id"), nullable=False
+        PG_UUID(as_uuid=True), ForeignKey("governance.categories.id", ondelete="RESTRICT"), nullable=False
     )
-    name = Column(String, nullable=False)
+    name = Column(Text, nullable=False)
     blocked_zone_ids = Column(
-        PG_ARRAY(String), nullable=False, server_default=text("'{}'::text[]")
+        PG_ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
     # Politique plateforme (2026-09-02, demande explicite utilisateur) : quantité
     # minimale, en unité de BASE, qu'une commande de ce TYPE de produit doit
@@ -245,12 +229,12 @@ class SubCategory(Base):
     # (Next.js/drizzle, table miroir `governance.sub_categories`) et l'agent
     # lisent tous deux CES colonnes, jamais une copie locale.
     minimum_order_quantity = Column(Numeric(14, 3), nullable=True)
-    minimum_order_unit = Column(String, nullable=True)
+    minimum_order_unit = Column(Text, nullable=True)
     # Configuration des unités par type de produit (miroir de
     # `governance.sub_categories` côté Drizzle, migration 0004) : nullable, NULL =
     # aucune configuration = comportement historique.
-    priority_unit = Column(String, nullable=True)
-    allowed_units = Column(PG_ARRAY(String), nullable=True)
+    priority_unit = Column(Text, nullable=True)
+    allowed_units = Column(PG_ARRAY(Text), nullable=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
@@ -274,16 +258,16 @@ class StandardPrice(Base):
     )
     sub_category_id = Column(
         PG_UUID(as_uuid=True),
-        ForeignKey("governance.sub_categories.id"),
+        ForeignKey("governance.sub_categories.id", ondelete="RESTRICT"),
         nullable=False,
     )
     zone_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"), nullable=False
+        PG_UUID(as_uuid=True), ForeignKey("governance.zones.id", ondelete="RESTRICT"), nullable=False
     )
     price_per_unit = Column(Float, nullable=False)
-    unit = Column(String, default="KG", nullable=False)
+    unit = Column(Text, default="KG", nullable=False, server_default=text("'KG'"))
     updated_by_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False
+        PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="RESTRICT"), nullable=False
     )
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
@@ -291,28 +275,6 @@ class StandardPrice(Base):
     )
 
 
-class ZoneSetting(Base):
-    __tablename__ = "zone_settings"
-    __table_args__ = (
-        UniqueConstraint("zone_id", "key", name="zone_settings_zone_key_unique"),
-        Index("zone_settings_zone_idx", "zone_id"),
-        {"schema": "governance"},
-    )
-
-    id = Column(
-        PG_UUID(as_uuid=True),
-        primary_key=True,
-        server_default=text("gen_random_uuid()"),
-    )
-    zone_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"), nullable=False
-    )
-    key = Column(String, nullable=False)
-    value = Column(JSONB, nullable=False)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(
-        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
-    )
 
 
 class ProhibitedTerm(Base):
@@ -329,12 +291,12 @@ class ProhibitedTerm(Base):
         primary_key=True,
         server_default=text("gen_random_uuid()"),
     )
-    term = Column(String, unique=True, nullable=False)
+    term = Column(Text, unique=True, nullable=False)
     category = Column(
-        String, default="ILLICIT", nullable=False, server_default=text("'ILLICIT'")
+        Text, default="ILLICIT", nullable=False, server_default=text("'ILLICIT'")
     )
     severity = Column(
-        String, default="HIGH", nullable=False, server_default=text("'HIGH'")
+        Text, default="HIGH", nullable=False, server_default=text("'HIGH'")
     )
     is_active = Column(
         Boolean, default=True, nullable=False, server_default=text("true")
@@ -342,30 +304,6 @@ class ProhibitedTerm(Base):
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 
-class OverlayLayer(Base):
-    __tablename__ = "overlay_layers"
-    __table_args__ = (
-        UniqueConstraint("zone_id", "key", name="overlay_layers_zone_key_unique"),
-        Index("overlay_layers_zone_idx", "zone_id"),
-        {"schema": "governance"},
-    )
-
-    id = Column(
-        PG_UUID(as_uuid=True),
-        primary_key=True,
-        server_default=text("gen_random_uuid()"),
-    )
-    zone_id = Column(
-        PG_UUID(as_uuid=True), ForeignKey("governance.zones.id"), nullable=False
-    )
-    key = Column(String, nullable=False)
-    label = Column(String, nullable=False)
-    enabled = Column(Boolean, default=False, nullable=False)
-    settings = Column(JSONB)
-    created_at = Column(DateTime, server_default=func.now(), nullable=False)
-    updated_at = Column(
-        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
-    )
 
 
 __all__ = [
@@ -375,11 +313,8 @@ __all__ = [
     "ClimaticRegion",
     "Zone",
     "WorkZone",
-    "ZoneMetric",
     "Category",
     "SubCategory",
     "StandardPrice",
-    "ZoneSetting",
     "ProhibitedTerm",
-    "OverlayLayer",
 ]

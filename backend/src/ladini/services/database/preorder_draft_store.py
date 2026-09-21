@@ -34,31 +34,6 @@ from ladini.services.database.draft_store_support import decode_json_payload
 
 logger = logging.getLogger("ladini.services.database.preorder_draft_store")
 
-PREORDER_DRAFT_SCHEMA_DDL = (
-    "CREATE TABLE IF NOT EXISTS marketplace.preorder_drafts ("
-    "draft_id TEXT PRIMARY KEY, "
-    "conversation_id TEXT NOT NULL, "
-    "version INTEGER NOT NULL, "
-    "status TEXT NOT NULL, "
-    "order_id TEXT, "
-    "payload JSONB NOT NULL, "
-    "created_at TIMESTAMPTZ NOT NULL DEFAULT now(), "
-    "updated_at TIMESTAMPTZ NOT NULL DEFAULT now()"
-    ")",
-    "CREATE INDEX IF NOT EXISTS ix_preorder_drafts_conversation "
-    "ON marketplace.preorder_drafts (conversation_id)",
-    # (2026-09-03, clôture escrow/IPN) : `order_id` — l'IPN Paydunya et le
-    # cron d'expiration paiement identifient une commande par `Order.id`,
-    # jamais par `draft_id` (qu'ils ne connaissent pas). Colonne ajoutée
-    # après coup (`ALTER ... ADD COLUMN IF NOT EXISTS`, même convention que
-    # `services/database/common.py::SCHEMA_COLUMN_DDL`) plutôt que recréée
-    # dans le `CREATE TABLE` ci-dessus : reste idempotent même sur une base
-    # où la table existait déjà sans cette colonne.
-    "ALTER TABLE marketplace.preorder_drafts ADD COLUMN IF NOT EXISTS order_id TEXT",
-    "CREATE INDEX IF NOT EXISTS ix_preorder_drafts_order_id "
-    "ON marketplace.preorder_drafts (order_id) WHERE order_id IS NOT NULL",
-)
-
 _SELECT_SQL = text(
     "SELECT draft_id, version, status, payload "
     "FROM marketplace.preorder_drafts WHERE draft_id = :draft_id"
@@ -230,7 +205,6 @@ async def find_stale_executing(*, older_than_seconds: float) -> list:
 
 
 __all__ = [
-    "PREORDER_DRAFT_SCHEMA_DDL",
     "load",
     "find_by_order_id",
     "insert",

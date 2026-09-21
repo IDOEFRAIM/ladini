@@ -35,25 +35,6 @@ _MAX_STATE_BYTES = 480_000  # 480 KB: langgraph_state hard cap
 _MAX_META_BYTES = 48_000  #  48 KB: metadata hard cap
 _COMPRESS_THRESHOLD = 100_000  # bytes — start compressing large state blobs
 
-_DDL = """
-CREATE TABLE IF NOT EXISTS agri_workspaces (
-    workspace_id     TEXT PRIMARY KEY,
-    workspace_type   TEXT NOT NULL DEFAULT 'producer',
-    active_agent     TEXT NOT NULL DEFAULT 'market',
-    active_goal      TEXT NOT NULL DEFAULT '',
-    active_form      TEXT,
-    locked_agent     TEXT,
-    metadata         JSONB NOT NULL DEFAULT '{}'::jsonb,
-    langgraph_state  JSONB NOT NULL DEFAULT '{}'::jsonb,
-    updated_at       DOUBLE PRECISION NOT NULL DEFAULT 0
-);
-"""
-
-_ALTERS = [
-    "ALTER TABLE agri_workspaces ADD COLUMN IF NOT EXISTS locked_agent TEXT;",
-    "ALTER TABLE agri_workspaces ADD COLUMN IF NOT EXISTS langgraph_state JSONB NOT NULL DEFAULT '{}'::jsonb;",
-]
-
 _INSERT = """
 INSERT INTO agri_workspaces
     (workspace_id, workspace_type, active_agent, active_goal, active_form, locked_agent, metadata, langgraph_state, updated_at)
@@ -91,34 +72,11 @@ _EMPTY_ROW: dict = {
 class WorkspaceStore:
     """CRUD minimal Postgres pour les Workspaces."""
 
-    _table_ready: bool = False
-
-    # ------------------------------------------------------------------
-    # Table bootstrap (idempotent, retries on failure)
-    # ------------------------------------------------------------------
-
-    async def _ensure_table(self) -> bool:
-        if WorkspaceStore._table_ready:
-            return True
-        try:
-            async with get_db() as session:
-                await session.execute(text(_DDL))
-                for ddl in _ALTERS:
-                    await session.execute(text(ddl))
-                await session.commit()
-            WorkspaceStore._table_ready = True
-            return True
-        except Exception as exc:
-            logger.error("WorkspaceStore table creation failed: %s", exc)
-            return False  # Caller gets False; _table_ready stays False so next call retries.
-
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------
 
     async def get(self, workspace_id: str) -> Optional[Workspace]:
-        if not await self._ensure_table():
-            return None
         try:
             async with get_db() as session:
                 row = (
@@ -170,8 +128,6 @@ class WorkspaceStore:
 
     async def save(self, workspace: Workspace) -> bool:
         """Persist workspace to Postgres.  Returns True on success, False on any error."""
-        if not await self._ensure_table():
-            return False
 
         workspace.touch()
 

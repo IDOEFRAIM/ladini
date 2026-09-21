@@ -1121,16 +1121,31 @@ class BuyerMixin(BaseMixin):
             total_transport_estimate = 0.0
             number_of_pickup_points = 0
 
-            for p_id in product_ids:
-                p_uuid = uuid.UUID(p_id) if isinstance(p_id, str) else p_id
+            p_uuids = [uuid.UUID(p) if isinstance(p, str) else p for p in product_ids]
 
-                # Récupération de la zone de production
-                stmt = (
-                    select(Producer.zone_id)
-                    .join(Product, Product.producer_id == Producer.id)
-                    .where(Product.id == p_uuid)
+            # 1 requête pour TOUTES les zones de production (avant : 1 requête par produit).
+            zone_by_product: Dict[Any, Any] = {}
+            if p_uuids:
+                rows = await current_session.execute(
+                    select(Product.id, Producer.zone_id)
+                    .join(Producer, Product.producer_id == Producer.id)
+                    .where(Product.id.in_(set(p_uuids)))
                 )
-                producer_zone_id = await current_session.scalar(stmt)
+                zone_by_product = {pid: zid for pid, zid in rows.all()}
+
+            # 1 requête pour tous les parents logistiques concernés (avant : 2 requêtes par
+            # produit, dont celle de l'acheteur, invariante, refaite à chaque tour).
+            involved_zones = {z for z in zone_by_product.values() if z} | {buyer_zone_id}
+            parent_by_zone: Dict[Any, Any] = {}
+            if involved_zones:
+                zone_rows = await current_session.execute(
+                    select(Zone.id, Zone.parent_id).where(Zone.id.in_(involved_zones))
+                )
+                parent_by_zone = {zid: parent for zid, parent in zone_rows.all()}
+            b_parent = parent_by_zone.get(buyer_zone_id)
+
+            for p_uuid in p_uuids:
+                producer_zone_id = zone_by_product.get(p_uuid)
 
                 if not producer_zone_id:
                     continue
@@ -1144,12 +1159,7 @@ class BuyerMixin(BaseMixin):
                     )
                 else:
                     # Vérification si même région (même parent logistique)
-                    p_parent = await current_session.scalar(
-                        select(Zone.parent_id).where(Zone.id == producer_zone_id)
-                    )
-                    b_parent = await current_session.scalar(
-                        select(Zone.parent_id).where(Zone.id == buyer_zone_id)
-                    )
+                    p_parent = parent_by_zone.get(producer_zone_id)
 
                     if p_parent and p_parent == b_parent:
                         total_transport_estimate += (
