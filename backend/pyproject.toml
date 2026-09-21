@@ -102,6 +102,7 @@ pyyaml = "^6.0"            # utilisé seulement par tests/evals/runners/
 # ==========================================
 # Configuration Ruff
 # ==========================================
+psycopg2-binary = "^2.9"
 [tool.ruff]
 line-length = 88
 target-version = "py311"

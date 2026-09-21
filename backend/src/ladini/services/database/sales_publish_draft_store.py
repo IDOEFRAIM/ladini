@@ -22,20 +22,6 @@ from ladini.services.database.draft_store_support import decode_json_payload
 
 logger = logging.getLogger("ladini.services.database.sales_publish_draft_store")
 
-SALES_PUBLISH_DRAFT_SCHEMA_DDL = (
-    "CREATE TABLE IF NOT EXISTS marketplace.sales_publish_drafts ("
-    "draft_id TEXT PRIMARY KEY, "
-    "conversation_id TEXT NOT NULL, "
-    "version INTEGER NOT NULL, "
-    "status TEXT NOT NULL, "
-    "payload JSONB NOT NULL, "
-    "created_at TIMESTAMPTZ NOT NULL DEFAULT now(), "
-    "updated_at TIMESTAMPTZ NOT NULL DEFAULT now()"
-    ")",
-    "CREATE INDEX IF NOT EXISTS ix_sales_publish_drafts_conversation "
-    "ON marketplace.sales_publish_drafts (conversation_id)",
-)
-
 _SELECT_SQL = text(
     "SELECT draft_id, version, status, payload "
     "FROM marketplace.sales_publish_drafts WHERE draft_id = :draft_id"
@@ -167,7 +153,6 @@ async def find_stale_by_status(status: str, *, older_than_seconds: float) -> lis
 
 
 __all__ = [
-    "SALES_PUBLISH_DRAFT_SCHEMA_DDL",
     "load",
     "insert",
     "compare_and_swap",

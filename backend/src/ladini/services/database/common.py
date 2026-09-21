@@ -115,101 +115,6 @@ def clamp_limit(value: Any, default: int = 20, maximum: int = 100) -> int:
     return max(1, min(limit, maximum))
 
 
-# CORRECTIF AUDIT : les DDL étaient (a) NON qualifiés par schéma alors que les
-# tables vivent dans auth/marketplace/governance/intelligence → échec silencieux
-# (le try/except du dispatcher masquait l'erreur), et (b) référençaient
-# `anomalies`, table INEXISTANTE. Qualifiés + extension pg_trgm garantie (requise
-# par la recherche floue trigram, cf. search.py).
-#
-# Périmètre EXCLUSIF (chirurgical, cf. audit) — un index GIN trigram UNIQUEMENT
-# sur les champs textuels descriptifs/catalogue à fort impact métier (tolérance
-# aux fautes de frappe agricoles). AUCUN index trigram sur les champs
-# structurels/d'isolation (phone, id, status, email...) : ces champs restent en
-# égalité stricte, portée par leurs index B-tree usuels (déjà déclarés dans les
-# `__table_args__` des modèles ORM, non dupliqués ici).
-#
-# Note : `auctions.title` n'existe PAS dans le schéma (`Auction` n'a pas de
-# colonne de titre libre) — la recherche produit sur les enchères passe par
-# `sub_categories.name` (déjà indexé ci-dessous), qui est le VRAI champ
-# textuel interrogé par `auction.py` (resolve_sub_category, create_auction,
-# get_auctions, get_price_recommendation).
-PERFORMANCE_INDEX_DDL = (
-    # Extension requise pour SIMILARITY / opérateur `%` / index GIN trigram.
-    "CREATE EXTENSION IF NOT EXISTS pg_trgm",
-    # products.name — recherche catalogue (get_public_products, search_products).
-    "CREATE INDEX IF NOT EXISTS ix_products_name_trgm "
-    "ON marketplace.products USING gin (name gin_trgm_ops)",
-    # market_offers.product_label — recherche offres/préventes futures.
-    "CREATE INDEX IF NOT EXISTS ix_market_offers_label_trgm "
-    "ON marketplace.market_offers USING gin (product_label gin_trgm_ops)",
-    # sub_categories.name — résolution produit pour enchères/appels d'offres.
-    "CREATE INDEX IF NOT EXISTS ix_subcategories_name_trgm "
-    "ON governance.sub_categories USING gin (name gin_trgm_ops)",
-    # zones.name — résolution de secteur logistique (livraison, marché local).
-    "CREATE INDEX IF NOT EXISTS ix_zones_name_trgm "
-    "ON governance.zones USING gin (name gin_trgm_ops)",
-)
-
-# Colonnes ajoutées après la création initiale du schéma — ALTER TABLE
-# idempotents (mêmes garanties que PERFORMANCE_INDEX_DDL : rejouables sans
-# erreur, exécutés au même endroit — voir AgriDatabaseService.ensure_performance_indexes).
-SCHEMA_COLUMN_DDL = (
-    # Géolocalisation utilisateur (GPS WhatsApp natif) : nullable, ne bloque
-    # jamais un profil sans position — voir services/database/auth.py::update_geo_location.
-    "ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMP",
-    # Escrow Paydunya — voir services/database/escrow.py. Toutes nullable :
-    # une commande CASH classique n'a jamais ces champs renseignés.
-    "ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS paydunya_invoice_token VARCHAR",
-    "ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS delivery_otp VARCHAR",
-    # Anti-force-brute du code de livraison (audit sécurité 2026-09-10) — voir
-    # escrow.py::verify_delivery_otp. NOT NULL DEFAULT 0 : les commandes
-    # existantes démarrent le compteur à zéro, aucune n'est verrouillée.
-    "ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS "
-    "delivery_otp_attempts INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS "
-    "delivery_otp_locked_until TIMESTAMP",
-    "ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS payment_expires_at TIMESTAMP",
-    "ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS locked_amount NUMERIC(14,2)",
-    # Unicité du token (index partiel : la colonne est nullable et la
-    # contrainte ne doit s'appliquer qu'aux commandes qui en ont réellement un).
-    "CREATE UNIQUE INDEX IF NOT EXISTS ix_orders_paydunya_token "
-    "ON marketplace.orders (paydunya_invoice_token) WHERE paydunya_invoice_token IS NOT NULL",
-    # Repérage rapide des commandes en attente de paiement à expirer (cron).
-    "CREATE INDEX IF NOT EXISTS ix_orders_payment_expires_at "
-    "ON marketplace.orders (payment_expires_at) WHERE payment_status = 'PENDING'",
-    # Photos enchères/offres — voir services/database/auction.py
-    # (add_auction_photo / add_bid_photo). Toujours NOT NULL avec un défaut
-    # tableau vide, même pattern que Product.images.
-    "ALTER TABLE marketplace.auctions ADD COLUMN IF NOT EXISTS images TEXT[] NOT NULL DEFAULT '{}'",
-    "ALTER TABLE marketplace.bids ADD COLUMN IF NOT EXISTS images TEXT[] NOT NULL DEFAULT '{}'",
-    # Déclinaisons de prix/conditionnement (2026-08-27) — voir
-    # domain/catalog/models.py::Product.pricing_tiers. Nullable : NULL =
-    # produit à tarif unique, comportement historique inchangé.
-    "ALTER TABLE marketplace.products ADD COLUMN IF NOT EXISTS pricing_tiers JSONB",
-    # Traçabilité du palier acheté côté acheteur (2026-08-30) — voir
-    # domain/pricing_tiers.py + domain/orders/models.py::OrderItem. Nullable
-    # sur TOUTE commande sans palier (produit à tarif unique, ou commande
-    # créée avant cette colonne) : comportement historique inchangé.
-    "ALTER TABLE marketplace.order_items ADD COLUMN IF NOT EXISTS tier_id TEXT",
-    "ALTER TABLE marketplace.order_items ADD COLUMN IF NOT EXISTS base_unit_quantity NUMERIC(14,3)",
-    # Corrélation de checkout (2026-09-05, Phase 6A — « une commande par
-    # producteur ») : un panier contenant des produits de plusieurs
-    # producteurs produit désormais UNE commande par producteur, toutes
-    # marquées du même `checkout_group_id`. Ce n'est PAS un nouveau cycle de
-    # vie transactionnel — chaque commande reste totalement indépendante
-    # après confirmation ; la colonne sert uniquement à retrouver, confirmer
-    # et présenter ensemble les commandes issues d'un même checkout.
-    # NULLABLE et jamais rétro-remplie : toute commande antérieure (y compris
-    # les anciennes multi-producteurs, volontairement conservées telles
-    # quelles — voir docs/MULTI_PRODUCER_ORDER_DECISION_2026-09-05.md §18)
-    # garde NULL, ce qui se lit « groupe d'une seule commande » et reproduit
-    # exactement le comportement historique.
-    "ALTER TABLE marketplace.orders ADD COLUMN IF NOT EXISTS checkout_group_id UUID",
-    "CREATE INDEX IF NOT EXISTS ix_orders_checkout_group "
-    "ON marketplace.orders (checkout_group_id) WHERE checkout_group_id IS NOT NULL",
-)
-
-
 def haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Distance orthodromique (grand cercle) entre deux points GPS, en kilomètres.
 
@@ -242,7 +147,5 @@ __all__ = [
     "normalize_uuid",
     "positive_float",
     "clamp_limit",
-    "PERFORMANCE_INDEX_DDL",
-    "SCHEMA_COLUMN_DDL",
     "haversine_distance_km",
 ]

@@ -365,49 +365,6 @@ async def check_connection_aggressive() -> Tuple[bool, str]:
         return False, msg
 
 
-async def ensure_extensions() -> dict:
-    """Ensure required Postgres extensions are available.
-
-    Creates `pg_trgm`, `vector` and attempts to enable a UUID generator
-    provider (pgcrypto and/or uuid-ossp). This is idempotent.
-    """
-    if _async_engine is None:
-        init_db()
-    results = {"pg_trgm": None, "vector": None, "pgcrypto": None, "uuid-ossp": None}
-    try:
-        async with _async_engine.begin() as conn:
-            # pg_trgm
-            try:
-                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
-                results["pg_trgm"] = "ok"
-            except Exception as e:
-                results["pg_trgm"] = str(e)
-
-            # vector (pgvector)
-            try:
-                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-                results["vector"] = "ok"
-            except Exception as e:
-                results["vector"] = str(e)
-
-            # pgcrypto (provides gen_random_uuid)
-            try:
-                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
-                results["pgcrypto"] = "ok"
-            except Exception as e:
-                results["pgcrypto"] = str(e)
-
-            # uuid-ossp (fallback for uuid_generate_v4)
-            try:
-                await conn.execute(text('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"'))
-                results["uuid-ossp"] = "ok"
-            except Exception as e:
-                results["uuid-ossp"] = str(e)
-    except Exception as e:
-        logger.warning("ensure_extensions failed: %s", e)
-    return results
-
-
 if __name__ == "__main__":
     import asyncio
 

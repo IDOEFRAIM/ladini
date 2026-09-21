@@ -60,19 +60,6 @@ from ladini.core.database import get_sessionmaker
 
 logger = logging.getLogger("ladini.services.database.mcp_idempotency_store")
 
-MCP_IDEMPOTENCY_SCHEMA_DDL = (
-    "CREATE TABLE IF NOT EXISTS marketplace.mcp_idempotency_records ("
-    "idempotency_key TEXT NOT NULL, "
-    "tool_name TEXT NOT NULL, "
-    "request_hash TEXT NOT NULL, "
-    "status TEXT NOT NULL, "
-    "external_result JSONB, "
-    "created_at TIMESTAMPTZ NOT NULL DEFAULT now(), "
-    "updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), "
-    "PRIMARY KEY (idempotency_key, tool_name)"
-    ")",
-)
-
 _SELECT_SQL = text(
     "SELECT idempotency_key, tool_name, request_hash, status, external_result "
     "FROM marketplace.mcp_idempotency_records "
@@ -311,7 +298,6 @@ async def _update_status(
 
 
 __all__ = [
-    "MCP_IDEMPOTENCY_SCHEMA_DDL",
     "IdempotencyOutcome",
     "IdempotencyClaim",
     "IdempotencyRecord",

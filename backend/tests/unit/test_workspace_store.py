@@ -1,14 +1,12 @@
 """`workspace/store.py::WorkspaceStore` — persistance Postgres unique des
 Workspaces (JSONB `langgraph_state`). Zéro Postgres réel : `get_db()` est
 doublé par un context-manager qui expose une session `_FakeSession`
-contrôlée. `WorkspaceStore._table_ready` est un attribut de CLASSE partagé
-entre instances — reset obligatoire entre tests (fixture `autouse`)."""
+contrôlée. La table `agri_workspaces` est créée par les migrations Drizzle,
+jamais par le store."""
 from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-
-import pytest
 
 from ladini.workspace.models import Workspace
 from ladini.workspace.store import (
@@ -17,14 +15,6 @@ from ladini.workspace.store import (
     _encode_state_blob,
 )
 from tests.conftest import run
-
-
-@pytest.fixture(autouse=True)
-def _reset_table_ready():
-    WorkspaceStore._table_ready = False
-    yield
-    WorkspaceStore._table_ready = False
-
 
 # =====================================================================
 # _encode_state_blob / _decode_state_blob
@@ -140,15 +130,8 @@ def _install_fake_get_db(monkeypatch, session):
 # =====================================================================
 
 class TestWorkspaceStoreGet:
-    def test_returns_none_when_table_bootstrap_fails(self, monkeypatch):
-        session = _FakeSession(raise_on_call=1)  # la 1re execute() (DDL) échoue
-        _install_fake_get_db(monkeypatch, session)
-        store = WorkspaceStore()
-        assert run(store.get("phone-1")) is None
-        assert WorkspaceStore._table_ready is False
-
     def test_returns_none_when_row_not_found(self, monkeypatch):
-        session = _FakeSession(results=[_FakeResult(), _FakeResult(), _FakeResult(mapping_row=None)])
+        session = _FakeSession(results=[_FakeResult(mapping_row=None)])
         _install_fake_get_db(monkeypatch, session)
         store = WorkspaceStore()
         assert run(store.get("phone-1")) is None
@@ -161,8 +144,7 @@ class TestWorkspaceStoreGet:
             "langgraph_state": json.dumps({"current_goal": "X"}),
             "updated_at": 123.0,
         }
-        # 3 appels pour _ensure_table (1 DDL + 2 ALTER), puis le SELECT (4e appel).
-        session = _FakeSession(results=[_FakeResult(), _FakeResult(), _FakeResult(), _FakeResult(mapping_row=row)])
+        session = _FakeSession(results=[_FakeResult(mapping_row=row)])
         _install_fake_get_db(monkeypatch, session)
         store = WorkspaceStore()
         ws = run(store.get("phone-1"))
@@ -178,7 +160,7 @@ class TestWorkspaceStoreGet:
             "langgraph_state": json.dumps({}),
             "updated_at": 123.0,
         }
-        session = _FakeSession(results=[_FakeResult(), _FakeResult(), _FakeResult(), _FakeResult(mapping_row=row)])
+        session = _FakeSession(results=[_FakeResult(mapping_row=row)])
         _install_fake_get_db(monkeypatch, session)
         store = WorkspaceStore()
         ws = run(store.get("phone-1"))
@@ -190,7 +172,7 @@ class TestWorkspaceStoreGet:
         class _RaisingOnSelectSession(_FakeSession):
             async def execute(self, stmt, params=None):
                 self._call_count += 1
-                if self._call_count == 4:  # 1-3: bootstrap (DDL+2 ALTER), 4: SELECT
+                if self._call_count == 1:  # 1: SELECT
                     raise asyncpg.exceptions.ConnectionDoesNotExistError("gone")
                 self.executed.append((str(stmt), params))
                 if self._results:
@@ -205,13 +187,12 @@ class TestWorkspaceStoreGet:
         assert session.committed is True
 
     def test_non_fatal_error_during_select_returns_none_without_reset(self, monkeypatch):
-        session = _FakeSession(raise_on_call=4)  # 1-3: bootstrap, 4: SELECT explose (générique)
+        session = _FakeSession(raise_on_call=1)  # le SELECT explose (générique)
         _install_fake_get_db(monkeypatch, session)
         store = WorkspaceStore()
         assert run(store.get("phone-1")) is None
-        # Seuls les 3 appels de bootstrap (_ensure_table) ont abouti — aucune
-        # tentative d'écriture de réinitialisation (_reset_workspace_row).
-        assert len(session.executed) == 3
+        # Aucune tentative d'écriture de réinitialisation (_reset_workspace_row).
+        assert len(session.executed) == 0
 
 
 # =====================================================================
@@ -219,18 +200,10 @@ class TestWorkspaceStoreGet:
 # =====================================================================
 
 class TestWorkspaceStoreSave:
-    def test_returns_false_when_table_bootstrap_fails(self, monkeypatch):
-        session = _FakeSession(raise_on_call=1)
-        _install_fake_get_db(monkeypatch, session)
-        store = WorkspaceStore()
-        ws = Workspace(workspace_id="phone-1", agent_state={"x": 1})
-        assert run(store.save(ws)) is False
-
-    # NB : 3 résultats "bulle" pour _ensure_table (1 DDL + 2 ALTER), puis le
-    # 4e résultat porte la vraie valeur pour SELECT_FOR_UPDATE (scalar()).
+    # NB : le 1er résultat porte la valeur du SELECT_FOR_UPDATE (scalar()).
 
     def test_new_workspace_is_inserted(self, monkeypatch):
-        session = _FakeSession(results=[_FakeResult(), _FakeResult(), _FakeResult(), _FakeResult(scalar_value=None)])
+        session = _FakeSession(results=[_FakeResult(scalar_value=None)])
         _install_fake_get_db(monkeypatch, session)
         store = WorkspaceStore()
         ws = Workspace(workspace_id="phone-1", agent_state={"x": 1})
@@ -239,7 +212,7 @@ class TestWorkspaceStoreSave:
         assert "INSERT INTO" in last_query
 
     def test_existing_workspace_is_updated(self, monkeypatch):
-        session = _FakeSession(results=[_FakeResult(), _FakeResult(), _FakeResult(), _FakeResult(scalar_value="phone-1")])
+        session = _FakeSession(results=[_FakeResult(scalar_value="phone-1")])
         _install_fake_get_db(monkeypatch, session)
         store = WorkspaceStore()
         ws = Workspace(workspace_id="phone-1", agent_state={"x": 1})
@@ -248,7 +221,7 @@ class TestWorkspaceStoreSave:
         assert "UPDATE agri_workspaces" in last_query
 
     def test_oversized_metadata_is_saved_as_empty_without_failing(self, monkeypatch):
-        session = _FakeSession(results=[_FakeResult(), _FakeResult(), _FakeResult(), _FakeResult(scalar_value=None)])
+        session = _FakeSession(results=[_FakeResult(scalar_value=None)])
         _install_fake_get_db(monkeypatch, session)
         store = WorkspaceStore()
         ws = Workspace(workspace_id="phone-1", metadata={"huge": "x" * 100_000}, agent_state={})
@@ -259,7 +232,7 @@ class TestWorkspaceStoreSave:
     def test_oversized_state_after_compression_is_truncated(self, monkeypatch):
         import ladini.workspace.store as store_mod
         monkeypatch.setattr(store_mod, "_MAX_STATE_BYTES", 100)
-        session = _FakeSession(results=[_FakeResult(), _FakeResult(), _FakeResult(), _FakeResult(scalar_value=None)])
+        session = _FakeSession(results=[_FakeResult(scalar_value=None)])
         _install_fake_get_db(monkeypatch, session)
         store = WorkspaceStore()
         ws = Workspace(workspace_id="phone-1", agent_state={"blob": "y" * 10_000})
@@ -269,7 +242,7 @@ class TestWorkspaceStoreSave:
         assert saved_state.get("__truncated__") is True
 
     def test_exception_during_upsert_returns_false(self, monkeypatch):
-        session = _FakeSession(results=[_FakeResult(), _FakeResult(), _FakeResult()], raise_on_call=4)
+        session = _FakeSession(raise_on_call=1)  # le SELECT ... FOR UPDATE explose
         _install_fake_get_db(monkeypatch, session)
         store = WorkspaceStore()
         ws = Workspace(workspace_id="phone-1", agent_state={"x": 1})
@@ -277,7 +250,7 @@ class TestWorkspaceStoreSave:
 
     def test_legacy_state_under_metadata_key_is_used_when_agent_state_empty(self, monkeypatch):
         from ladini.workspace.metadata import LANGGRAPH_STATE_KEY
-        session = _FakeSession(results=[_FakeResult(), _FakeResult(), _FakeResult(), _FakeResult(scalar_value=None)])
+        session = _FakeSession(results=[_FakeResult(scalar_value=None)])
         _install_fake_get_db(monkeypatch, session)
         store = WorkspaceStore()
         ws = Workspace(workspace_id="phone-1", agent_state={}, metadata={LANGGRAPH_STATE_KEY: {"legacy": True}})

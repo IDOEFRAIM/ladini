@@ -6,9 +6,9 @@
 #   ./scripts/check_migrations.sh <base_ref> <head_ref> --classify # echo ROLLBACK_SAFE|MIGRATION_REQUIRES_MANUAL_RECOVERY
 #
 # Ce qui est inspecté dans le diff <base>..<head> :
-#   - backend/alembic/versions/*.py            (si/quand Alembic sera configuré)
-#   - backend/src/ladini/services/database/common.py  (SCHEMA_COLUMN_DDL — le
-#     mécanisme de schéma ACTUEL, appliqué au démarrage du worker)
+#   - backend/schema_contract/migrations/*.sql (copie des migrations Drizzle — LE mécanisme de
+#     schéma : Drizzle définit et migre ; le backend n'exécute plus aucun DDL)
+#   - backend/alembic/versions/*.py (si/quand Alembic sera configuré)
 #   - tout autre .py sous backend/migrations/
 #
 # Motifs DESTRUCTIFS refusés dans une release (car ils cassent le rollback
@@ -38,10 +38,9 @@ cd "$ROOT"
 
 # Fichiers "migration" modifiés/ajoutés dans le diff
 mapfile -t CHANGED < <(git diff --name-only "${BASE}..${HEAD}" -- \
+  'backend/schema_contract/migrations/*.sql' \
   'backend/alembic/versions/*.py' \
-  'backend/migrations/*.py' \
-  'backend/src/ladini/services/database/common.py' 2>/dev/null || true)
-
+  'backend/migrations/*.py' 2>/dev/null || true)
 emit_safe()   { [ "$MODE" = classify ] && { echo "ROLLBACK_SAFE"; exit 0; }; echo "✓ migrations: ROLLBACK_SAFE (aucune contraction destructive)"; exit 0; }
 emit_unsafe() {
   if [ "$MODE" = classify ]; then echo "MIGRATION_REQUIRES_MANUAL_RECOVERY"; exit 0; fi

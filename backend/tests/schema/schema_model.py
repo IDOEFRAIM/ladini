@@ -84,6 +84,17 @@ def norm_default(raw: Any) -> str | None:
     return low
 
 
+def norm_where(raw: Any) -> str | None:
+    """Prédicat d'index partiel réduit à sa substance (sans qualificatifs, casts, parenthèses)."""
+    if raw is None:
+        return None
+    w = str(raw)
+    w = re.sub(r'"[A-Za-z_]+"\."[A-Za-z_]+"\.', "", w)  # "schema"."table".col
+    w = re.sub(r"::[a-z_ ]+", "", w, flags=re.I)
+    w = w.replace('"', "").replace("(", " ").replace(")", " ")
+    return re.sub(r"\s+", " ", w).strip().lower() or None
+
+
 # ── Modèle ─────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -147,7 +158,7 @@ def load_drizzle(snapshot: Path | str) -> Schema:
             tb.uniques.add(tuple(uc["columns"]))
         for iname, ix in t.get("indexes", {}).items():
             cols = tuple(c["expression"] for c in ix["columns"])
-            tb.indexes[iname] = Idx(cols, bool(ix.get("isUnique")), ix.get("where"), ix.get("method", "btree"))
+            tb.indexes[iname] = Idx(cols, bool(ix.get("isUnique")), norm_where(ix.get("where")), ix.get("method", "btree"))
             if ix.get("isUnique") and not ix.get("where"):
                 tb.uniques.add(cols)
         out[(t.get("schema") or "public", t["name"])] = tb
@@ -168,7 +179,7 @@ def load_sqlalchemy(metadata) -> Schema:
             d = None
             if c.server_default is not None:
                 arg = getattr(c.server_default, "arg", None)
-                d = norm_default(getattr(arg, "text", arg))
+                d = norm_default(getattr(arg, "text", None) or (f"'{arg}'" if isinstance(arg, str) else arg))
             tb.cols[c.name] = Col(norm_type(c.type.compile(dialect=dialect)), bool(c.nullable), d)
         tb.pk = tuple(c.name for c in t.primary_key.columns)
         for fk in t.foreign_key_constraints:
@@ -185,8 +196,9 @@ def load_sqlalchemy(metadata) -> Schema:
         for i in t.indexes:
             assert isinstance(i, Index)
             where = i.dialect_options["postgresql"].get("where")
+            method = i.dialect_options["postgresql"].get("using") or "btree"
             cols = tuple(getattr(e, "name", None) or str(e) for e in i.expressions)
-            tb.indexes[i.name] = Idx(cols, bool(i.unique), str(where) if where is not None else None)
+            tb.indexes[i.name] = Idx(cols, bool(i.unique), norm_where(where), method)
             if i.unique and where is None:
                 tb.uniques.add(cols)
         out[(t.schema or "public", t.name)] = tb
@@ -258,7 +270,7 @@ def load_postgres(conn, schemas: Iterable[str] = _SCHEMAS) -> Schema:
         cols = tuple(names[(oid, k)] if k > 0 else "<expr>" for k in indkey)
         if primary or from_con:
             continue  # déjà représenté par pk/uniques
-        tb.indexes[name] = Idx(cols, bool(uniq), pred, method)
+        tb.indexes[name] = Idx(cols, bool(uniq), norm_where(pred), method)
         if uniq and not pred:
             tb.uniques.add(cols)
     return out
@@ -326,8 +338,8 @@ def compare(a: Schema, b: Schema, an: str, bn: str, *, only_tables: Iterable[Key
             out.append(Divergence(tn, ",".join(u), "unique", {an: "oui" if u in x.uniques else "ABSENTE", bn: "oui" if u in y.uniques else "ABSENTE"}))
         if check_indexes:
             # Comparaison par (colonnes, unique, where) — les NOMS d'index ne comptent pas.
-            sx = {(i.cols, i.unique, i.where) for i in x.indexes.values() if not (i.unique and not i.where)}
-            sy = {(i.cols, i.unique, i.where) for i in y.indexes.values() if not (i.unique and not i.where)}
+            sx = {(i.cols, i.unique, i.where, i.method) for i in x.indexes.values() if not (i.unique and not i.where)}
+            sy = {(i.cols, i.unique, i.where, i.method) for i in y.indexes.values() if not (i.unique and not i.where)}
             for sig in sorted(sx ^ sy, key=str):
                 out.append(Divergence(tn, ",".join(sig[0]), "index", {an: "oui" if sig in sx else "ABSENT", bn: "oui" if sig in sy else "ABSENT"}, "warning"))
     return out
@@ -364,6 +376,10 @@ def _fmt_col(c: Col | None) -> str:
 
 def _fmt_fk(f: FK | None) -> str:
     return "ABSENTE" if f is None else f"→{'.'.join(f.ref)}({','.join(f.refcols)}) del={f.ondelete} upd={f.onupdate}"
+
+
+def _index_sigs(t: Table) -> set:
+    return {(i.cols, i.unique, i.where, i.method) for i in t.indexes.values() if not (i.unique and not i.where)}
 
 
 def build_matrix(D: Schema, S: Schema, P: Schema) -> tuple[list[Row], int]:
@@ -410,8 +426,7 @@ def build_matrix(D: Schema, S: Schema, P: Schema) -> tuple[list[Row], int]:
                 ok += 1
                 continue
             rows.append(Row(tn, f"unique:{','.join(u)}", *vals, "DIVERGENT", "Aligner sur Drizzle"))
-        sig = lambda t: {(i.cols, i.unique, i.where) for i in t.indexes.values() if not (i.unique and not i.where)}
-        sd, ss, sp = sig(d), sig(s), sig(p)
+        sd, ss, sp = _index_sigs(d), _index_sigs(s), _index_sigs(p)
         for x in sorted(sd | ss | sp, key=str):
             vals = ["oui" if x in y else "ABSENT" for y in (sd, ss, sp)]
             if len(set(vals)) == 1:
@@ -422,11 +437,15 @@ def build_matrix(D: Schema, S: Schema, P: Schema) -> tuple[list[Row], int]:
     return rows, ok
 
 
+def _esc(x) -> str:
+    return str(x).replace("|", r"\|")
+
+
 def matrix_markdown(rows: list[Row], ok: int, title: str) -> str:
+    esc = _esc
     out = [f"# {title}", "", f"Éléments identiques sur les 3 sources : **{ok}** — divergents : **{len(rows)}**", "",
            "| table | élément | drizzle | sqlalchemy | postgres | statut | action recommandée |",
            "|---|---|---|---|---|---|---|"]
     for r in rows:
-        esc = lambda x: str(x).replace("|", "\|")
         out.append(f"| {esc(r.table)} | {esc(r.item)} | {esc(r.drizzle)} | {esc(r.sqlalchemy)} | {esc(r.postgres)} | {r.status} | {esc(r.action)} |")
     return "\n".join(out) + "\n"

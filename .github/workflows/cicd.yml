@@ -21,6 +21,23 @@ jobs:
   test:
     name: Tests & Code Quality
     runs-on: ubuntu-latest
+    # PostgreSQL éphémère pour `backend/tests/schema/` : chaque session de test y CRÉE une base
+    # vide, rejoue les migrations Drizzle (backend/schema_contract/) et compare Drizzle / SQLAlchemy
+    # / PostgreSQL. REQUIRE_SCHEMA_DB=1 : sans base, le test ÉCHOUE (jamais de skip silencieux en CI).
+    env:
+      HAS_FRONTEND_TOKEN: ${{ secrets.FRONTEND_REPO_TOKEN != '' }}
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     defaults:
       run:
         working-directory: backend
@@ -65,10 +82,24 @@ jobs:
         run: poetry run mypy src
         continue-on-error: true
 
+      - name: Contrat de schéma — copie backend == dépôt frontend (Drizzle = source de vérité)
+        # Nécessite le secret FRONTEND_REPO_TOKEN (lecture du dépôt frontend, privé). Sans lui, ce
+        # contrôle de synchronisation est ignoré ; les tests de cohérence, eux, tournent toujours
+        # sur la copie versionnée (backend/schema_contract/).
+        if: ${{ env.HAS_FRONTEND_TOKEN == 'true' }}
+        uses: actions/checkout@v4
+        with:
+          repository: IDOEFRAIM/ladinifront
+          token: ${{ secrets.FRONTEND_REPO_TOKEN }}
+          path: _frontend
+
       - name: Run tests
         env:
           SANDBOX_MODE: "true"
           MOCK_EXTERNAL_APIS: "true"
+          SCHEMA_TEST_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+          REQUIRE_SCHEMA_DB: "1"
+          LADINI_FRONTEND_DIR: ${{ github.workspace }}/_frontend
         run: poetry run pytest tests --cov=src --cov-report=xml
 
       - name: Upload coverage

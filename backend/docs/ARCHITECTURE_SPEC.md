@@ -83,7 +83,6 @@ backend/src/ladini/
 ├── services/
 │   ├── __init__.py                    # `__all__` référence `AgriDatabase` **jamais défini** (§5.6)
 │   ├── database/                      # === couche transactionnelle SQL, doc complète §3.C ===
-│   └── memory/                        # user_profile, episodic_memory, profile_extractor, context_optimizer — **import cassé** (§5.2)
 ├── workers/
 │   ├── __init__.py
 │   ├── beat_schedule.py               # BEAT_SCHEDULE (Celery Beat, 3 crons)
@@ -130,7 +129,7 @@ graphs/agents/common/voice.py -> services.voice_engine (**MODULE MANQUANT**), co
 infrastructure/mcp/client.py -> infrastructure.mcp.security
 infrastructure/mcp/runtime.py -> core.database, core.settings, infrastructure.mcp.{context,security,utils}, services.database, protocols.mcp.servers.h (lazy)
 infrastructure/mcp/base.py -> infrastructure.mcp.{context,security,utils}
-infrastructure/mcp/context.py -> infrastructure.mcp.utils, services.memory (lazy), protocols.core (lazy, **CASSÉ**)
+infrastructure/mcp/context.py -> (contexte d'identité ContextVar uniquement ; l'ancien serveur mémoire a été supprimé 2026-09-21)
 infrastructure/mcp/security.py -> protocols.mcp.servers.h (lazy)
 infrastructure/mcp/main.py -> infrastructure.mcp.security
 
@@ -151,7 +150,6 @@ orchestrator/orchestrator.py -> workspace.*, graphs.factory, graphs.roles, graph
 
 services/database/d.py -> services.database.{auth,utils,marketplace,category,buyer,buyer_verification,producer,product,auction,moderation,base_service}
 services/database/{producer,marketplace,buyer,auction,product,category,delivery,buyer_verification,moderation,order}.py -> domain.models, services.database.{base,common,search,errors}
-services/memory/{user_profile,episodic_memory}.py -> services.database.model (**CASSÉ, module inexistant**)
 
 workers/runtime.py -> core.database, services.database.base_service, api.tasks (lazy)
 workers/crons/*.py -> api.celery_app, workers.automation.*, workers.runtime
@@ -167,7 +165,6 @@ Import graph interne à `market_coach/` : voir §3.B.0 (pipeline) et §3.B.13 (i
 | Import cassé | Cause |
 |---|---|
 | `protocols.core` (`ClientCapabilities`, `TraceCategory`, `TraceEnvelope`, `CachePolicy`) | Module inexistant (seul un `.pyc` orphelin subsiste) — casse `protocols/ag_ui/renderer.py` et `infrastructure/mcp/context.py` |
-| `services.database.model` (`Base`) | Module inexistant — casse `services/memory/user_profile.py` et `services/memory/episodic_memory.py` |
 | `services.voice_engine` (`VoiceEngine`) | Module inexistant — casse `graphs/agents/common/voice.py::VoiceAgent` |
 
 ---
@@ -576,7 +573,6 @@ async def close_db() -> None
 async def check_connection() -> bool
 async def check_connection_detailed() -> Tuple[bool, str]
 async def check_connection_aggressive() -> Tuple[bool, str]
-async def ensure_extensions() -> dict          # pg_trgm, vector, pgcrypto, uuid-ossp
 ```
 Moteur async unique, SSL via `DB_SSL_MODE` (`disable`/`require`/`verify-full`+`DB_CA_PATH`), `prepared_statement_cache_size=0` (asyncpg), `pool_pre_ping=True`.
 Externe : PostgreSQL (asyncpg).
@@ -694,7 +690,6 @@ class AgriDatabaseService:
     _READ_ONLY_METHODS: Set[str]   # ~25 noms
     _DISPATCH_CACHE: Dict[str, Callable]
     def __getattribute__(self, name) -> Any     # proxy : cache classe + cache instance
-    async def ensure_performance_indexes(self, session=None)
     class DatabaseServiceError(Exception): ...
     class IntegrityError(DatabaseServiceError): ...
 ```
@@ -1648,7 +1643,7 @@ Beat (BEAT_SCHEDULE, 3 entrées)
 # 5. DIAGNOSTIC & BACKLOG DE CORRECTION
 
 > **✅ PHASE 4 EXÉCUTÉE (2026-07-21) — Performance & robustesse.**
-> **(a) Timeouts LLM** : les 3 sites `asyncio.to_thread` sans `wait_for` sont couverts — `interpreter/routing.py::input_interpreter` (**15s** — le site critique : un appel Groq suspendu y gelait le tour entier jusqu'au timeout orchestrateur 45s ; `TimeoutError` retombe sur le fallback UNKNOWN existant), `utils.py::_llm_extract_onboarding_all` (10s), `nodes/clarification.py` (8s). Les autres sites (`slot_enrichment`, `rendering/ask.py`) avaient déjà leur `wait_for`. Audit : aucun appel LLM bloquant hors `to_thread` dans le graphe ; `services/memory/{profile_extractor,episodic_memory}` font des appels sync directs mais hors chemin de graphe (consommés lazy par mcp/context).
+> **(a) Timeouts LLM** : les 3 sites `asyncio.to_thread` sans `wait_for` sont couverts — `interpreter/routing.py::input_interpreter` (**15s** — le site critique : un appel Groq suspendu y gelait le tour entier jusqu'au timeout orchestrateur 45s ; `TimeoutError` retombe sur le fallback UNKNOWN existant), `utils.py::_llm_extract_onboarding_all` (10s), `nodes/clarification.py` (8s). Les autres sites (`slot_enrichment`, `rendering/ask.py`) avaient déjà leur `wait_for`. Audit : aucun appel LLM bloquant hors `to_thread` dans le graphe ; (l'ancien `services/memory` a été supprimé le 2026-09-21).
 > **(b) Cache client termes interdits** : `nodes/security_moderation.py::_get_prohibited_terms_cached` (TTL 300s, aligné sur le cache serveur du ModerationMixin) — économise un aller-retour MCP (stdio inter-processus) PAR MESSAGE ; secours sur cache périmé si le fetch échoue. Le gate compte (`get_account_status`) reste volontairement NON caché (un ban doit s'appliquer au message suivant).
 > **(c) §5.19 clos** : `LADINI_EAGER_IMPORTS=1` force l'import eager de `d.py` + 10 mixins dans `services/database/__init__.py` (fail-fast CI ; démontré : attrape le `rapidfuzz` manquant à l'import au lieu du premier accès en prod). À poser dans la CI et le smoke de démarrage.
 > **(d) Audit N+1 resolvers** : aucun N+1 détecté dans `market_coach/` (profondeur 3 lignes) — seule boucle await trouvée : retry ×2 de `profile_loader` (légitime). Vérifié : cache 6 messages→1 fetch avec détection intacte, fallback périmé, graphes BUYER/PRODUCER compilés.
@@ -1672,14 +1667,9 @@ Beat (BEAT_SCHEDULE, 3 entrées)
 **Impact** : `WhatsAppRenderer`, `WebRenderer`, `SMSRenderer` sont inutilisables ; `protocols/ag_ui/__init__.py` qui re-exporte tout le module échouera aussi si `renderer.py` y est importé en dur.
 **À faire** : soit restaurer `protocols/core.py` (retrouver `ClientCapabilities`/`TraceCategory`/`TraceEnvelope` dans l'historique git), soit retirer la dépendance et inline ces types localement dans `renderer.py`.
 
-## 5.2 `infrastructure/mcp/context.py` + `services/memory/{user_profile,episodic_memory}.py` — imports cassés
-**Fichiers** :
-- `backend/src/ladini/infrastructure/mcp/context.py` (import lazy `ladini.protocols.core.CachePolicy`).
-- `backend/src/ladini/services/memory/user_profile.py` (import `from ladini.services.database.model import Base`).
-- `backend/src/ladini/services/memory/episodic_memory.py` (même import).
-**Problème** : `ladini.services.database.model` n'existe pas (seul un `.pyc` orphelin). `UserFarmProfileModel(Base)` et `EpisodicMemoryModel(Base)` ne peuvent pas être définis.
-**Impact** : tout import de `ladini.services.memory` échoue → `ContextOptimizer`/`ProfileExtractor` inutilisables, et `infrastructure/mcp/context.py::MCPContextServer` (qui les importe en lazy) casse dès qu'on appelle `build_context`/`enrich_state`.
-**À faire** : restaurer `services/database/model.py` (probablement un alias vers `domain.orm_base.Base`) ou rediriger l'import vers `ladini.domain.orm_base.Base`.
+## 5.2 (supprimé 2026-09-21) — fonctionnalité « mémoire agronomique »
+
+`services/memory/` (profil fermier, mémoire épisodique, optimiseur de contexte), leurs modèles/tables (`episodic_memories`, `user_farm_profiles`) et les outils MCP `build_context`/`enrich_state`/`record_interaction` ont été supprimés : direction produit abandonnée. Aucune table n'existe pour eux ; un test (`tests/schema/`) interdit leur retour.
 
 ## 5.3 `graphs/agents/common/voice.py` — import cassé
 **Fichier** : `backend/src/ladini/graphs/agents/common/voice.py`, classe `VoiceAgent`.

@@ -27,8 +27,8 @@ def main() -> int:
     a = ap.parse_args()
     import psycopg2
 
-    from ladini.domain.orm_base import Base
     import ladini.domain.models  # noqa: F401  (enregistre tous les modèles)
+    from ladini.domain.orm_base import Base
 
     for extra in ("ladini.services.memory.episodic_memory", "ladini.services.memory.user_profile"):
         try:  # modèles hors domain/ (supprimés par le nettoyage ; tolérés ici pour la baseline)

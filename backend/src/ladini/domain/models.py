@@ -7,12 +7,12 @@ domaine métier dans des modules dédiés :
     identity/models.py     User, Account, Session, Producer, Client, BuyerType,
                           BuyerProfile, DeliveryAgent, TrustScore
     catalog/models.py      Warehouse, Farm, MarketOffer, Stock, StockMovement,
-                          Batch, Expense, Product
+                          Expense, Product
     orders/models.py       Delivery, Order, OrderItem, Payment,
                           OrderStatusHistory, OrderReminder, OrderDispute,
-                          Auction, Bid, MarketplaceRating
+                          Auction, Bid
     governance/models.py   Organization, Zone, Category, StandardPrice...
-    intelligence/models.py AuditLog, Conversation, AgentContextMemory...
+    intelligence/models.py AuditLog, Conversation...
 
 Toutes les classes partagent le MÊME `Base` (orm_base.py) — un seul registre
 de mappers, les `relationship("NomClasse", ...)` inter-fichiers se résolvent
@@ -27,8 +27,10 @@ Order`) — plus précis, et le fichier qu'on ouvre correspond à ce qu'on lit.
 
 from __future__ import annotations
 
+from ladini.domain import (
+    runtime_tables,  # noqa: F401  (tables d'état runtime, miroir de Drizzle)
+)
 from ladini.domain.catalog.models import (
-    Batch,
     CropCycle,
     Expense,
     Farm,
@@ -42,7 +44,6 @@ from ladini.domain.governance.models import (
     Category,
     ClimaticRegion,
     Organization,
-    OverlayLayer,
     ProhibitedTerm,
     RoleDefinition,
     StandardPrice,
@@ -50,8 +51,6 @@ from ladini.domain.governance.models import (
     UserOrganization,
     WorkZone,
     Zone,
-    ZoneMetric,
-    ZoneSetting,
 )
 from ladini.domain.identity.models import (
     Account,
@@ -66,8 +65,6 @@ from ladini.domain.identity.models import (
 )
 from ladini.domain.intelligence.models import (
     AgentAction,
-    AgentContextMemory,
-    AIRatingReasoning,
     AuditLog,
     Conversation,
     DemandSignal,
@@ -79,7 +76,6 @@ from ladini.domain.orders.models import (
     Auction,
     Bid,
     Delivery,
-    MarketplaceRating,
     Order,
     OrderDispute,
     OrderItem,
@@ -103,12 +99,9 @@ __all__ = [
     "ClimaticRegion",
     "Zone",
     "WorkZone",
-    "ZoneMetric",
     "Category",
     "SubCategory",
     "StandardPrice",
-    "ZoneSetting",
-    "OverlayLayer",
     "ProhibitedTerm",
     # marketplace
     "Warehouse",
@@ -123,7 +116,6 @@ __all__ = [
     "CropCycle",
     "Stock",
     "StockMovement",
-    "Batch",
     "Expense",
     "Product",
     "Order",
@@ -134,14 +126,11 @@ __all__ = [
     "OrderDispute",
     "Auction",
     "Bid",
-    "MarketplaceRating",
     # intelligence
     "AuditLog",
     "AgentAction",
     "Conversation",
-    "AgentContextMemory",
     "TrustScore",
-    "AIRatingReasoning",
     "ModerationEvent",
     "DemandSignal",
     "Solicitation",

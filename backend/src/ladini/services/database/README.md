@@ -90,7 +90,7 @@ services/database/
 ├── user_context_service.py  ← UserContextService : mémoire agent, trust score
 │
 │── Modules transversaux (pas de session propre)
-├── common.py                ← normalize_phone, clean_text, PERFORMANCE_INDEX_DDL
+├── common.py                ← normalize_phone, clean_text, haversine
 ├── search.py                ← fuzzy_match() + similarity_rank() via pg_trgm
 └── errors.py                ← SafeDatabaseError, scrub_error_result (anti-leak)
 ```
@@ -156,7 +156,6 @@ async def close_db():
 | `check_connection()` | 3 tentatives avec backoff exponentiel |
 | `check_connection_detailed()` | Retourne `(bool, reason_str)` |
 | `check_connection_aggressive()` | Valide connexion + `gen_random_uuid` + pgvector + écriture table temp |
-| `ensure_extensions()` | Crée `pg_trgm`, `vector`, `pgcrypto`, `uuid-ossp` idempotent |
 
 ---
 
@@ -324,9 +323,7 @@ Aucune closure ni fonction `async def proxy(...)` n'est plus créée à chaque
 appel — seul le premier accès à un nom de méthode, par instance, construit et
 met en cache le binding.
 
-#### `ensure_performance_indexes()`
-
-Exécute les DDL de `PERFORMANCE_INDEX_DDL` (de `common.py`) dans des savepoints isolés. Les erreurs par index sont silencieusement ignorées (l'index peut déjà exister). Peut être appelé avec ou sans session externe.
+> `ensure_performance_indexes()` et `ensure_extensions()` ont été **supprimés** (2026-09-21) : le backend n'exécute plus aucun DDL. Index (dont GIN trigram), colonnes et tables viennent des migrations Drizzle (`schema_contract/`, voir `docs/schema/SCHEMA_ARCHITECTURE.md`).
 
 ---
 
@@ -867,22 +864,7 @@ Stocke la mémoire contextuelle des agents LangGraph (ex : "l'utilisateur cherch
 
 > `clean_text` ne protège **pas** contre l'injection SQL — c'est l'ORM qui s'en charge via paramètres bindés. Cette fonction gère uniquement la qualité des données.
 
-#### `PERFORMANCE_INDEX_DDL`
-
-Tuple de DDL SQL pour indexes GIN trigram :
-
-```sql
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_products_name_trgm
-    ON marketplace.products USING gin (name gin_trgm_ops);
-
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_market_offers_label_trgm
-    ON marketplace.market_offers USING gin (product_label gin_trgm_ops);
-
--- + sub_categories(name), zones(name)
--- + CREATE EXTENSION IF NOT EXISTS pg_trgm
-```
-
-Exécutés via `AgriDatabaseService.ensure_performance_indexes()` au démarrage.
+> `PERFORMANCE_INDEX_DDL` / `SCHEMA_COLUMN_DDL` supprimés : les index trigram `ix_products_name_trgm`, `ix_market_offers_label_trgm`, `ix_subcategories_name_trgm`, `ix_zones_name_trgm` sont créés par la migration Drizzle baseline.
 
 ---
 
