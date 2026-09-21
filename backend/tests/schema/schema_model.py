@@ -128,6 +128,7 @@ class Table:
     fks: dict[tuple[str, ...], FK] = field(default_factory=dict)
     uniques: set[tuple[str, ...]] = field(default_factory=set)  # contraintes + index uniques non partiels
     indexes: dict[str, Idx] = field(default_factory=dict)
+    checks: set[str] = field(default_factory=set)  # NOMS des contraintes CHECK (le comportement est testé sur PostgreSQL)
 
 
 Schema = dict[Key, Table]
@@ -154,6 +155,8 @@ def load_drizzle(snapshot: Path | str) -> Schema:
             f = FK(tuple(fk["columnsFrom"]), (fk.get("schemaTo") or "public", fk["tableTo"]),
                    tuple(fk["columnsTo"]), _act(fk.get("onDelete")), _act(fk.get("onUpdate")))
             tb.fks[f.cols] = f
+        for ck in (t.get("checkConstraints") or {}).values():
+            tb.checks.add(ck["name"])
         for uc in (t.get("uniqueConstraints") or {}).values():
             tb.uniques.add(tuple(uc["columns"]))
         for iname, ix in t.get("indexes", {}).items():
@@ -168,7 +171,7 @@ def load_drizzle(snapshot: Path | str) -> Schema:
 # ── Extracteur SQLAlchemy ──────────────────────────────────────────────────
 
 def load_sqlalchemy(metadata) -> Schema:
-    from sqlalchemy import Index, UniqueConstraint
+    from sqlalchemy import CheckConstraint, Index, UniqueConstraint
     from sqlalchemy.dialects import postgresql
 
     dialect = postgresql.dialect()
@@ -188,6 +191,8 @@ def load_sqlalchemy(metadata) -> Schema:
                    tuple(x.column.name for x in fk.elements), _act(fk.ondelete), _act(fk.onupdate))
             tb.fks[f.cols] = f
         for c in t.constraints:
+            if isinstance(c, CheckConstraint) and c.name:
+                tb.checks.add(c.name)
             if isinstance(c, UniqueConstraint):
                 tb.uniques.add(tuple(x.name for x in c.columns))
         for c in t.columns:
@@ -219,9 +224,9 @@ order by 1,2,a.attnum"""
 
 _Q_CONS = """
 select n.nspname, c.relname, co.contype, co.conkey, co.confkey, co.confrelid::regclass::text,
-       co.confdeltype, co.confupdtype, c.oid, co.confrelid
+       co.confdeltype, co.confupdtype, c.oid, co.confrelid, co.conname
 from pg_constraint co join pg_class c on c.oid=co.conrelid join pg_namespace n on n.oid=c.relnamespace
-where co.contype in ('p','u','f') and n.nspname = any(%s)"""
+where co.contype in ('p','u','f','c') and n.nspname = any(%s)"""
 
 _Q_IDX = """
 select n.nspname, c.relname, c.oid, i.relname, ix.indisunique, ix.indkey::int2[], pg_get_expr(ix.indpred, ix.indrelid),
@@ -254,8 +259,11 @@ def load_postgres(conn, schemas: Iterable[str] = _SCHEMAS) -> Schema:
     def cols_of(oid, nums):
         return tuple(names[(oid, n)] for n in nums)
 
-    for s, t, ty, conkey, confkey, confrel, deltype, updtype, oid, confrelid in q(_Q_CONS):
+    for s, t, ty, conkey, confkey, confrel, deltype, updtype, oid, confrelid, conname in q(_Q_CONS):
         tb = out[(s, t)]
+        if ty == "c":
+            tb.checks.add(conname)
+            continue
         cols = cols_of(oid, conkey)
         if ty == "p":
             tb.pk = cols
@@ -334,6 +342,8 @@ def compare(a: Schema, b: Schema, an: str, bn: str, *, only_tables: Iterable[Key
                     out.append(Divergence(tn, cn, "ondelete", {an: f.ondelete, bn: g.ondelete}))
                 if f.onupdate != g.onupdate:
                     out.append(Divergence(tn, cn, "onupdate", {an: f.onupdate, bn: g.onupdate}))
+        for ck in sorted(x.checks ^ y.checks):
+            out.append(Divergence(tn, ck, "check", {an: "oui" if ck in x.checks else "ABSENTE", bn: "oui" if ck in y.checks else "ABSENTE"}))
         for u in sorted(x.uniques ^ y.uniques):
             out.append(Divergence(tn, ",".join(u), "unique", {an: "oui" if u in x.uniques else "ABSENTE", bn: "oui" if u in y.uniques else "ABSENTE"}))
         if check_indexes:
@@ -420,6 +430,12 @@ def build_matrix(D: Schema, S: Schema, P: Schema) -> tuple[list[Row], int]:
                 continue
             rows.append(Row(tn, f"fk:{','.join(cols)}", *vals, "DIVERGENT",
                             "Classer A/B/C : A = ajouter dans Drizzle + migration ; B = retirer ForeignKey du modèle ; C = supprimer"))
+        for ck in sorted(d.checks | s.checks | p.checks):
+            vals = ["oui" if ck in x.checks else "ABSENTE" for x in (d, s, p)]
+            if len(set(vals)) == 1:
+                ok += 1
+                continue
+            rows.append(Row(tn, f"check:{ck}", *vals, "DIVERGENT", "Aligner sur Drizzle"))
         for u in sorted(d.uniques | s.uniques | p.uniques):
             vals = ["oui" if u in x.uniques else "ABSENTE" for x in (d, s, p)]
             if len(set(vals)) == 1:
