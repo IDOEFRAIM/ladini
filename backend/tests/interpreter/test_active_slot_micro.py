@@ -212,10 +212,25 @@ class TestDeviationFallsThroughToNewTaskClassifier:
         result = run(interp(state, StubRuntime(llm=llm)))
         assert "quantity" not in result.get("extracted_entities", {})
 
-    def test_low_confidence_answer_is_conservatively_treated_as_deviation(self):
-        # Spec §19/§20 : une ANSWER peu sûre ne doit JAMAIS bypasser
-        # cognitive_guard comme un faux ANSWER — traitée comme une
-        # déviation potentielle (repli conservateur vers NEW_TASK).
+    def test_low_confidence_answer_is_treated_as_unknown_never_a_blind_second_call(self):
+        # (2026-09-21, correctif UX réel — "j ai" pendant la collecte de
+        # quantité) : AVANT ce correctif, une ANSWER peu sûre retombait sur
+        # `ActiveSlotOutcome.DEVIATION`, déclenchant un 2e appel LLM
+        # "classifier NEW_TASK" totalement AVEUGLE au slot en attente
+        # (`expected_input` remis à "NONE"). Pour un fragment incomplet, ce
+        # 2e appel devine dans le vide : selon ce qu'il renvoie, l'utilisateur
+        # voyait tantôt la bannière de reprise cohérente, tantôt un texte de
+        # clarification générique donnant l'impression que l'agent a perdu
+        # le fil — même entrée, comportement non déterministe.
+        #
+        # Invariant de sécurité INCHANGÉ (spec §19/§20, toujours vrai) : une
+        # ANSWER peu sûre ne doit JAMAIS bypasser `cognitive_guard` comme un
+        # faux ANSWER — vérifié ici par `interpreted_event == "UNKNOWN"` (pas
+        # "ANSWER") ET par l'absence de la quantité peu fiable dans les
+        # entités extraites. Ce qui CHANGE : plus de 2e appel LLM (`llm.calls
+        # == 1`), et le résultat va directement vers le chemin de reprise
+        # déterministe de `cognitive_guard` (`event=="UNKNOWN" and in_tunnel`
+        # -> `recover_active_tunnel`) plutôt que vers un pari NEW_TASK.
         llm = _SequencedLLM(
             [
                 {
@@ -223,20 +238,15 @@ class TestDeviationFallsThroughToNewTaskClassifier:
                     "extracted_entities": {"quantity": 5},
                     "confidence": 0.2,
                 },
-                {
-                    "disposition": "NEW_TASK",
-                    "intent": "BUYER_LIST_ORDERS",
-                    "confidence": 0.7,
-                    "entities": {},
-                },
             ]
         )
         interp = make_input_interpreter("PRODUCER")
         state = _slot_state(normalized_text="5 peut-etre ? pas sur", expected_input="QUANTITY")
         result = run(interp(state, StubRuntime(llm=llm)))
 
-        assert llm.calls == 2
-        assert result["interpreted_event"] == "NEW_TASK"
+        assert llm.calls == 1
+        assert result["interpreted_event"] == "UNKNOWN"
+        assert "quantity" not in result.get("extracted_entities", {})
 
     def test_current_goal_is_never_changed_by_the_active_slot_microprompt(self):
         # `current_goal` reste un champ d'ÉTAT géré par `goal_planner` — le
@@ -580,8 +590,31 @@ class TestActiveSlotPromptNeverLeaksTheFullCatalog:
             assert forbidden_intent not in prompt
 
     def test_prompt_family_and_version_are_distinct_from_selection_and_unified(self):
-        assert ACTIVE_SLOT_PROMPT_VERSION == "active_slot_v3"
+        assert ACTIVE_SLOT_PROMPT_VERSION == "active_slot_v4"
         assert ACTIVE_SLOT_PROMPT_VERSION not in ("selection_v1", "interpreter_v1")
+
+    def test_prompt_explains_direct_quantity_is_independent_from_pricing_tiers(self):
+        # (2026-09-21, incident réel récurrent) : "600 L de lait... Le bidon
+        # de 5 L coûte 500 fcfa et celui de 10 L coûte 900 fcfa" perdait la
+        # quantité globale — le prompt n'expliquait QUE le cas "quantity
+        # dérivée d'une somme de groupes de conditionnements", jamais celui
+        # d'une quantité globale énoncée DIRECTEMENT à côté de tarifs par
+        # conditionnement indépendants. Verrouille la présence de la règle
+        # de non-réconciliation ET de l'exemple travaillé qui reproduit
+        # l'incident exact, pour qu'un futur changement de prompt ne les
+        # retire pas silencieusement.
+        prompt = build_active_slot_user_prompt(
+            goal="SALES_PUBLISH_PRODUCT",
+            category="QUANTITY",
+            field_name="quantity",
+            known_entities={"product": "lait"},
+            normalized_text="600 L de lait",
+        )
+        assert "600 L de lait" in prompt
+        assert "500 FCFA" in prompt and "900 FCFA" in prompt
+        assert '"quantity": 600.0' in prompt
+        assert "pricing_tiers" in prompt
+        assert "INDÉPENDANTES" in prompt or "indépendant" in prompt.lower()
 
 
 # =====================================================================
@@ -590,6 +623,152 @@ class TestActiveSlotPromptNeverLeaksTheFullCatalog:
 
 
 class TestFullPipelineSafety:
+    def test_direct_quantity_with_independent_pricing_tiers_is_never_lost(self):
+        # (2026-09-21, incident réel récurrent — "600 L de lait... Le bidon
+        # de 5 L coûte 500 fcfa et celui de 10 L coûte 900 fcfa" pendant la
+        # collecte de quantité) : ce message EXACT est en fait intercepté
+        # AVANT tout appel LLM par le fast-path déterministe
+        # `fast_path_deterministic_pricing_tiers` (2+ nombres près d'une
+        # devise) — voir `interpreter/routing.py`. Deux bugs empilés y
+        # faisaient perdre la quantité globale (600) :
+        #   1. `domain/quantity_unit.py::scan_number_candidates` ne pouvait
+        #      JAMAIS attacher l'unité "L" à un nombre qui la précède
+        #      immédiatement (fenêtre `after` excluant structurellement le
+        #      chiffre scanné) — "600 L" ressortait sans unité, "500"/"900"
+        #      (les PRIX) récupéraient l'unité à tort (voir
+        #      `test_scan_number_candidates_livestock_price_bug.py`).
+        #   2. Même une fois ce premier bug corrigé, le fast-path
+        #      `fast_path_deterministic_pricing_tiers` lui-même ne
+        #      regardait jamais s'il restait une quantité globale NON
+        #      ambiguë (`_qty_unit_candidates`) à côté des tarifs déjà
+        #      extraits — il renvoyait `pricing_tiers` SEUL.
+        # Ce test verrouille bout en bout, sur le message EXACT de
+        # l'incident : ZÉRO appel LLM (déterministe, donc rapide ET fiable
+        # à 100%, pas de pari sur un modèle), événement ANSWER, et quantity
+        # ET pricing_tiers ressortent TOUS LES DEUX intacts — jamais l'un
+        # amputé au profit de l'autre.
+        interp = make_input_interpreter("PRODUCER")
+        state = _slot_state(
+            normalized_text=(
+                "600 L de lait... Le bidon de 5 L coute 500 fcfa et celui "
+                "de 10 L coute 900 fcfa"
+            ),
+            expected_input="QUANTITY",
+        )
+        result = run(interp(state, StubRuntime(llm=ForbiddenLLM())))
+
+        assert result["raw_analysis"]["path"] == "fast_path_deterministic_pricing_tiers"
+        assert result["interpreted_event"] == "ANSWER"
+        entities = result["extracted_entities"]
+        assert entities["quantity"] == 600
+        assert len(entities["pricing_tiers"]) == 2
+
+    def test_multi_tier_resolution_does_not_depend_on_llm_availability(self):
+        """(2026-09-21) La résolution déterministe des paliers était enfouie
+        sous `skip_numeric_shortcut` — un drapeau qui signifie seulement
+        "un LLM est disponible sur ce runtime". Sans LLM, le même message
+        retombait sur le pick "premier nombre près d'une devise" et publiait
+        un prix FAUX (mesuré : 5 FCFA/L au lieu des deux paliers, quantité
+        globale perdue). Une extraction 100% déterministe et complète n'a
+        aucune raison de dépendre de la présence d'un LLM : c'est au
+        contraire le cas où elle est la plus nécessaire."""
+        from ladini.graphs.agents.market_coach.interpreter.routing import (
+            _interpret_fast_path,
+        )
+
+        text = (
+            "600 L de lait... Le bidon de 5 L coute 500 fcfa et celui "
+            "de 10 L coute 900 fcfa"
+        )
+        state = _slot_state(normalized_text=text, expected_input="QUANTITY")
+
+        for llm_available in (True, False):
+            result = _interpret_fast_path(
+                state,
+                text,
+                skip_numeric_shortcut=llm_available,
+                llm_available=llm_available,
+            )
+            assert result is not None, f"llm_available={llm_available}"
+            assert (
+                result["raw_analysis"]["path"]
+                == "fast_path_deterministic_pricing_tiers"
+            ), f"llm_available={llm_available} -> {result['raw_analysis']}"
+            entities = result["extracted_entities"]
+            assert entities["quantity"] == 600
+            assert entities["unit"] == "LITRE"
+            assert len(entities["pricing_tiers"]) == 2
+            assert "price" not in entities, (
+                f"un prix scalaire inventé est réapparu : {entities!r}"
+            )
+
+    def test_an_incomplete_deterministic_tier_extraction_falls_back_to_the_llm(
+        self, monkeypatch
+    ):
+        # (2026-09-21, refonte STRUCTURELLE) Ce test ne rejoue PAS un
+        # incident déjà vu : il prouve que le DOUBLE FILET du fast-path
+        # protège contre une FUTURE forme de perte, pas encore rencontrée.
+        # Simule, via monkeypatch, un moteur `parse_packaging_message`
+        # BOGUÉ qui "oublie" silencieusement le second palier (10 L/900)
+        # ET qui se déclare pourtant complet (`unexplained_numbers` vide,
+        # `ambiguous` faux) — soit exactement le mode de défaillance que le
+        # moteur seul ne peut pas détecter. Le recoupement avec
+        # `scan_number_candidates` (une segmentation DIFFÉRENTE du même
+        # texte) doit alors rattraper l'incohérence et faire RENONCER le
+        # fast-path : jamais un `pricing_tiers` tronqué publié en silence,
+        # le message atteint le micro-prompt ACTIVE_SLOT.
+        import ladini.graphs.agents.market_coach.interpreter.routing as routing_module
+        from ladini.domain.quantity_unit import PackagingParse
+
+        def _incomplete_parse(_text):
+            return PackagingParse(
+                pricing_tiers=(
+                    {
+                        "quantity": 5.0,
+                        "unit": "L",
+                        "price": 500.0,
+                        "packaging": "bidon",
+                    },
+                ),
+            )
+
+        monkeypatch.setattr(
+            routing_module, "parse_packaging_message", _incomplete_parse
+        )
+
+        interp = make_input_interpreter("PRODUCER")
+        state = _slot_state(
+            normalized_text=(
+                "Le bidon de 5 L coute 500 fcfa et celui de 10 L coute 900 fcfa"
+            ),
+            expected_input="QUANTITY",
+        )
+        llm = ScriptedLLM(
+            {
+                "disposition": "ANSWER",
+                "extracted_entities": {
+                    "pricing_tiers": [
+                        {"quantity": 5.0, "unit": "L", "price": 500.0, "packaging": "bidon"},
+                        {"quantity": 10.0, "unit": "L", "price": 900.0, "packaging": "bidon"},
+                    ],
+                },
+                "confidence": 0.9,
+            }
+        )
+        result = run(interp(state, StubRuntime(llm=llm)))
+
+        # Le fast-path déterministe a renoncé — la résolution est bien
+        # passée par le LLM (au moins un appel), jamais par le résultat
+        # tronqué du fast-path.
+        assert llm.calls >= 1, (
+            "le fast-path déterministe aurait dû renoncer face à une "
+            "extraction incomplète, forçant un appel LLM — aucun appel "
+            "n'a eu lieu, le résultat tronqué a probablement été accepté "
+            "tel quel"
+        )
+        assert result["raw_analysis"]["path"] != "fast_path_deterministic_pricing_tiers"
+        assert len(result["extracted_entities"].get("pricing_tiers") or []) == 2
+
     def test_a_real_slot_answer_keeps_the_same_goal_and_extracts_entities(self):
         interp = make_input_interpreter("PRODUCER")
         state = _slot_state(normalized_text="500 kg", expected_input="QUANTITY")
@@ -635,3 +814,41 @@ class TestFullPipelineSafety:
         # uniquement) — la déviation est donc correctement forcée vers
         # cognitive_guard, jamais vers un bypass memory_update direct.
         assert route == "to_cognitive"
+
+    def test_incomplete_fragment_deterministically_reaches_recovery_not_generic_clarify(self):
+        # (2026-09-21, correctif UX réel) — bout en bout : interpréteur ->
+        # `cognitive_guard`, pour EXACTEMENT le scénario signalé (fragment
+        # incomplet "j ai" pendant la collecte de quantité en cours de
+        # tunnel). AVANT ce correctif, la sortie dépendait d'un 2e appel LLM
+        # aveugle — non déterministe, parfois la bonne bannière de reprise,
+        # parfois un texte de clarification générique donnant l'impression
+        # que l'agent avait perdu le fil. Verrouille ici que le chemin est
+        # désormais TOUJOURS le même pour ce cas : un seul appel LLM, et
+        # `cognitive_decision.action == "recover_active_tunnel"` (jamais
+        # `CLARIFY`/`START_OR_PLAN_GOAL`).
+        from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
+        from tests.conftest import make_state
+
+        llm = ScriptedLLM(
+            {
+                "disposition": "ANSWER",
+                "extracted_entities": {},
+                "confidence": 0.15,
+            }
+        )
+        interp = make_input_interpreter("PRODUCER")
+        state = _slot_state(normalized_text="j ai", expected_input="QUANTITY")
+        interp_result = run(interp(state, StubRuntime(llm=llm)))
+
+        assert llm.calls == 1  # jamais un 2e appel de classification aveugle
+        assert interp_result["interpreted_event"] == "UNKNOWN"
+
+        merged_state = make_state(**{**state, **interp_result})
+        decision = run(cognitive_guard(merged_state, None))
+
+        assert decision["cognitive_decision"]["action"] == "recover_active_tunnel"
+        assert decision["response_strategy"] == "RECOVERY"
+        # Le tunnel/goal en cours n'est jamais abandonné pour un 1er essai
+        # flou — l'utilisateur reste dans SON flux "mise en vente", juste
+        # re-sollicité sur le même champ.
+        assert decision["current_goal"] == "SALES_PUBLISH_PRODUCT"

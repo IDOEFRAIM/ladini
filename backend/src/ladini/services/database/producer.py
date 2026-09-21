@@ -1908,13 +1908,31 @@ class ProducerMgmtMixin(BaseMixin):
 
         # Restitution du stock — identique au chemin acheteur. Boucle vide
         # (donc sans effet, correctement) pour une commande RFQ.
-        for item in order.items or []:
-            if item.product:
-                product = await current_session.scalar(
-                    select(Product)
-                    .where(Product.id == item.product_id)
-                    .with_for_update()
-                )
+        #
+        # (2026-09-21, audit latence — N+1) : 1 requête verrouillée pour TOUS
+        # les produits de la commande (avant : 1 `SELECT ... FOR UPDATE` par
+        # item, mesuré ~72ms chacun sur ce déploiement). `ORDER BY Product.id`
+        # : ordre d'acquisition des verrous déterministe, même discipline
+        # anti-deadlock que `services/database/buyer.py::cancel_pending_order`
+        # (son miroir acheteur, corrigé de façon identique le même jour).
+        item_product_ids = sorted(
+            {item.product_id for item in (order.items or []) if item.product and item.product_id},
+            key=str,
+        )
+        if item_product_ids:
+            products_by_id: Dict[Any, Product] = {
+                p.id: p
+                for p in (
+                    await current_session.scalars(
+                        select(Product)
+                        .where(Product.id.in_(item_product_ids))
+                        .order_by(Product.id)
+                        .with_for_update()
+                    )
+                ).all()
+            }
+            for item in order.items or []:
+                product = products_by_id.get(item.product_id) if item.product else None
                 if product:
                     # `resolve_stock_debit` renvoie un `float` ; `quantity_for_sale`
                     # est une colonne `Numeric` (chargée en `decimal.Decimal`) —
@@ -1925,7 +1943,11 @@ class ProducerMgmtMixin(BaseMixin):
                     # buyer.py`, `available = float(product.quantity_for_sale
                     # or 0.0)` avant l'arithmétique) : convertir explicitement
                     # avant d'opérer, jamais d'opérateur augmenté sur la
-                    # colonne Decimal directement.
+                    # colonne Decimal directement. Relire
+                    # `product.quantity_for_sale` (pas une variable capturée
+                    # avant la boucle) : si DEUX lignes de la même commande
+                    # portent le même produit, la 2e doit voir le recrédit de
+                    # la 1re déjà appliqué sur le MÊME objet `product`.
                     product.quantity_for_sale = float(
                         product.quantity_for_sale or 0.0
                     ) + resolve_stock_debit(item)

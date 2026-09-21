@@ -33,10 +33,11 @@ from typing import Any, Dict, List, Optional, Tuple
 from ladini.core.idempotency import get_cached as _get_cached_value
 from ladini.core.idempotency import set_cached as _set_cached_value
 from ladini.domain.quantity_unit import (
-    extract_deterministic_pricing_tiers,
+    all_numbers_accounted_for,
     extract_unit_only_from_text,
+    packaged_compound_total,
     parse_compound_quantity,
-    parse_packaged_compound_quantity,
+    parse_packaging_message,
     parse_quantity_unit_from_text,
     scan_number_candidates,
 )
@@ -998,6 +999,82 @@ def _interpret_fast_path(
         _qty_unit_candidates = [
             c for c in candidates if c["unit"] and not c["near_currency"]
         ]
+
+        # ── ANALYSE "packaging / multi-tarification" : UNE SEULE PASSE ──
+        # (2026-09-21, refonte STRUCTURELLE) `scan_number_candidates`
+        # ci-dessus reste ce qui AIGUILLE (fenêtre glissante, aucune notion
+        # de clause) ; l'EXTRACTION réelle de ce thème, elle, vient
+        # désormais d'un seul et même moteur, `parse_packaging_message` —
+        # au lieu de trois analyses indépendantes du même texte qui
+        # pouvaient diverger sans que rien ne le détecte (cause commune des
+        # incidents 2026-08-29 / 08-30 / 09-14 / 09-19 / 09-21 : voir le
+        # commentaire de section dans `domain/quantity_unit.py`). Quantité
+        # globale ET paliers tarifaires d'un même message sortent donc
+        # maintenant de la MÊME segmentation en clauses, et le moteur dit
+        # lui-même s'il reste un nombre qu'il n'explique pas.
+        _packaging = parse_packaging_message(text)
+
+        # ── MULTI-TARIFICATION RÉSOLUE DÉTERMINISTEMENT ──
+        # "le bidon de 5 L coûte 500 fcfa et celui de 10 L coûte 900 fcfa",
+        # avec ou sans quantité globale ("j'ai 600 L de lait...") devant.
+        # Condition d'entrée : la CONFIANCE DU MOTEUR, rien d'autre — 2+
+        # paliers reconnus, aucune clause ambiguë, aucun nombre inexpliqué.
+        #
+        # (2026-09-21) Cette résolution était auparavant enfouie sous
+        # `skip_numeric_shortcut` (un drapeau qui signifie "un LLM est
+        # disponible sur ce runtime") : sans LLM, le message retombait sur
+        # le pick "premier nombre près d'une devise" et publiait un prix
+        # FAUX (mesuré : 5 FCFA/L au lieu des deux paliers, quantité
+        # perdue). Une extraction 100% déterministe et complète n'a aucune
+        # raison de dépendre de la présence d'un LLM — c'est au contraire
+        # le cas où elle est le plus nécessaire. Elle passe donc AVANT les
+        # raccourcis numériques ; quand le moteur n'est pas certain, rien
+        # ne change (on retombe sur les branches existantes ci-dessous).
+        if (
+            _packaging.pricing_tiers
+            and not _packaging.ambiguous
+            and not _packaging.unexplained_numbers
+        ):
+            _tier_entities: Dict[str, Any] = {
+                "pricing_tiers": [dict(t) for t in _packaging.pricing_tiers]
+            }
+            # La quantité globale vient de la MÊME analyse en clauses que
+            # les paliers, pas d'un second parseur qu'il faudrait recouper :
+            # une clause est un palier OU une quantité globale, jamais les
+            # deux, et jamais ni l'une ni l'autre en silence. C'est ce qui
+            # ferme l'incident récurrent "600 L de lait... le bidon de 5 L
+            # coûte 500 fcfa..." (quantité globale perdue, l'agent la
+            # redemandait juste après avoir accusé réception des tarifs).
+            if _packaging.quantity is not None and _packaging.unit:
+                _tier_entities["quantity"] = _packaging.quantity
+                _tier_entities["unit"] = _packaging.unit
+            # Double filet, volontairement conservé : le moteur signale
+            # déjà tout nombre qu'il n'explique pas, mais
+            # `scan_number_candidates` reste une segmentation DIFFÉRENTE du
+            # même texte (fenêtre glissante vs clauses) — les faire se
+            # recouper ici détecte une divergence entre les deux AVANT
+            # qu'elle n'atteigne un brouillon. En cas de désaccord on ne
+            # renvoie rien : les branches suivantes, puis le LLM, décident.
+            if all_numbers_accounted_for(
+                [c["value"] for c in candidates], _tier_entities
+            ):
+                return {
+                    "interpreted_event": (
+                        "UPDATE" if expected == "CONFIRMATION" else "ANSWER"
+                    ),
+                    "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+                    "interpreter_confidence": 0.98,
+                    "extracted_entities": _tier_entities,
+                    "raw_analysis": {
+                        "path": "fast_path_deterministic_pricing_tiers"
+                    },
+                }
+            logger.info(
+                "[Interpreter fast-path] pricing_tiers déterministe en "
+                "désaccord avec le balayage numérique — repli sur le LLM "
+                "plutôt qu'un résultat partiel"
+            )
+
         # Jamais quand un prix traîne AILLEURS dans le même message ("60
         # bidons de 5L et 30 bidons de 20L. prix : 3000fcfa/L...") : ce
         # parseur ne sait sommer QUE des groupes quantité×conditionnement, il
@@ -1012,7 +1089,7 @@ def _interpret_fast_path(
             and len(_qty_unit_candidates) >= 2
             and not any(c["near_currency"] for c in candidates)
         ):
-            _packaged = parse_packaged_compound_quantity(clean)
+            _packaged = packaged_compound_total(_packaging)
             if _packaged.quantity is not None and _packaged.unit is not None:
                 return {
                     "interpreted_event": "ANSWER",
@@ -1043,31 +1120,18 @@ def _interpret_fast_path(
         # ses paliers tarifaires après un récap déjà faux) — dans les deux
         # cas, 2+ nombres près d'une devise ne peuvent être résolus qu'en
         # perdant de l'information si on force une seule paire ici.
+        #
+        # (2026-09-21) Cette branche est redevenue une ABSTENTION PURE : la
+        # tentative déterministe qu'elle contenait a été remontée plus haut
+        # (voir "MULTI-TARIFICATION RÉSOLUE DÉTERMINISTEMENT"), où elle ne
+        # dépend plus de `skip_numeric_shortcut`. Si on arrive ici, c'est
+        # que le moteur n'a PAS su résoudre le message sans ambiguïté —
+        # donc exactement le cas où il faut laisser la main au LLM.
         _currency_candidates = [c for c in candidates if c["near_currency"]]
         if (
             (skip_numeric_shortcut or (_confirmation_correction and llm_available))
             and len(_currency_candidates) >= 2
         ):
-            # Avant de laisser la main au LLM (peu fiable ici — voir
-            # `extract_deterministic_pricing_tiers`, incident 2026-08-30 : la
-            # MÊME phrase a produit `pricing_tiers` correctement une fois puis
-            # échoué la fois suivante, même modèle/température=0.0, non-
-            # déterminisme MoE connu côté Groq) : tente le parseur
-            # déterministe. S'il livre un résultat SANS AMBIGUÏTÉ, on n'a même
-            # plus besoin d'appeler le LLM pour ce message — plus rapide ET
-            # fiable à 100%. S'il échoue (structure non reconnue), on laisse
-            # la main au LLM comme avant (`return None`).
-            deterministic_tiers = extract_deterministic_pricing_tiers(text)
-            if deterministic_tiers:
-                return {
-                    "interpreted_event": (
-                        "UPDATE" if expected == "CONFIRMATION" else "ANSWER"
-                    ),
-                    "detected_intent": str(locked_goal or "UNKNOWN").upper(),
-                    "interpreter_confidence": 0.98,
-                    "extracted_entities": {"pricing_tiers": deterministic_tiers},
-                    "raw_analysis": {"path": "fast_path_deterministic_pricing_tiers"},
-                }
             return None
 
         # Réponse composée non-ambiguë ("775 kg d'oignon et le kg coûte 175

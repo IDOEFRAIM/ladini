@@ -22,12 +22,31 @@ from ladini.graphs.agents.market_coach.llm_gateway.types import (
 # passerelle bedrock-mantle — ex: `anthropic.claude-haiku-4-5` renvoyait
 # HTTP 400 "does not support the '/v1/chat/completions' API". Complété au
 # fil des incidents réels, jamais deviné à l'avance.
+#
+# §BUG CORRIGÉ ICI (2026-09-21, incident réel de production) : "invalid_
+# request_error" a été RETIRÉ de cette liste. Ce n'est pas un signal de
+# config — c'est le `type` GÉNÉRIQUE qu'OpenAI/Groq posent sur QUASIMENT
+# toute erreur 400 cliente, y compris un échec de validation JSON d'UNE
+# seule génération (`code: "json_validate_failed"`, réponse
+# `failed_generation` vide — le modèle a simplement mal formé cette
+# réponse-là, rien à voir avec le candidat lui-même). Observé tel quel en
+# prod : `groq:openai/gpt-oss-20b` (candidat PRIMARY, par ailleurs sain)
+# marqué CONFIG sur ce seul message, mis en cooldown ET déclenchant une
+# alerte CRITICAL "MODEL_CONFIG_ERROR" — exactement la confusion que ce
+# module dit vouloir éviter (§15, docstring de tête : "un bug applicatif
+# ne doit jamais compter comme une panne LLM"). Combiné à un second
+# candidat réellement en panne (404 sur un autre provider), ce faux
+# positif a fait chuter TOUS les candidats du profil pour la durée du
+# cooldown. Les fragments restants ("does not support", "model not
+# found", ...) désignent tous explicitement un problème de MODÈLE/
+# CANDIDAT, jamais une simple erreur 400 générique — ils suffisent à
+# couvrir l'incident historique (2026-09-02) que cette liste documentait
+# déjà à l'origine.
 _CONFIG_ERROR_MESSAGE_FRAGMENTS = (
     "does not support",
     "model not found",
     "unsupported model",
     "invalid model",
-    "invalid_request_error",
     "unknown model",
     "no such model",
 )

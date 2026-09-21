@@ -250,6 +250,16 @@ class TestOwnershipIsNowCorrectByConstruction:
                     return order
                 return None
 
+            async def scalars(self, stmt):
+                # (2026-09-21, audit latence — N+1) : `cancel_confirmed_order`
+                # verrouille désormais tous les produits en une requête
+                # `IN (...)` — cette commande n'a qu'une ligne, même produit
+                # que `.scalar()` ci-dessus renvoyait déjà sans distinction.
+                # `.all()` : le code réel appelle `(await session.scalars(...)).all()`.
+                sql = self._sql(stmt)
+                matched = [order.items[0].product] if "marketplace.products" in sql else []
+                return types.SimpleNamespace(all=lambda: matched)
+
             async def execute(self, stmt):
                 from sqlalchemy.sql.dml import Insert as _Insert
 
