@@ -68,7 +68,7 @@ ENV PYTHONUNBUFFERED=1 \
     BUILD_TIMESTAMP=${BUILD_TIMESTAMP}
 
 LABEL org.opencontainers.image.title="ladini-api" \
-      org.opencontainers.image.source="https://github.com/IDOEFRAIM/AgriConnect" \
+      org.opencontainers.image.source="https://github.com/IDOEFRAIM/ladini" \
       org.opencontainers.image.revision="${GIT_SHA}" \
       org.opencontainers.image.version="${RELEASE_VERSION}" \
       org.opencontainers.image.created="${BUILD_TIMESTAMP}"

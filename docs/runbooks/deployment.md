@@ -262,7 +262,7 @@ sudo usermod -aG docker "$USER" ; newgrp docker
 sudo bash infra/firewall/ufw.sh
 
 # 3. Checkout + .env
-git clone https://github.com/IDOEFRAIM/AgriConnect "$DEPLOY_DIR" && cd "$DEPLOY_DIR"
+git clone https://github.com/IDOEFRAIM/ladini "$DEPLOY_DIR" && cd "$DEPLOY_DIR"
 cp .env.example .env && "${EDITOR:-vi}" .env      # remplir TOUS les [REQUIS]
 
 # 4. Login registry (pour pull)
