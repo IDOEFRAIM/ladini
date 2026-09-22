@@ -122,6 +122,7 @@ celery_app = Celery(
         "ladini.workers.crons.preorder_reconciliation",
         "ladini.workers.crons.sales_publish_reconciliation",
         "ladini.workers.crons.recurring_need_matching",
+        "ladini.workers.crons.recurring_supply_digest",
         "ladini.workers.crons.agent_telemetry_retention",
         "ladini.workers.payments.paydunya_ipn_task",
         "ladini.workers.media.product_photo_task",

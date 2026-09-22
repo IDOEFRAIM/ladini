@@ -13,6 +13,14 @@ from ladini.core.formatting import fmt_num as _fmt_num
 
 AUCTION_INVITE_PRODUCER = "AUCTION_INVITE_PRODUCER"
 NEW_PRODUCT_ALERT_BUYER = "NEW_PRODUCT_ALERT_BUYER"
+# (Phase 4, approvisionnement récurrent) : UN digest par (acheteur, date) — jamais une notification
+# par besoin/producteur (voir `workers/automation/recurring_supply_digest_service.py`). Le corps est
+# déjà entièrement rendu par `domain/recurring_supply/digest.py::build_digest_text` (fonction pure,
+# testée séparément) au moment de l'ENQUEUE — `payload["body"]` porte directement le texte final,
+# contrairement aux autres templates qui rendent depuis des champs structurés à l'ENVOI. Choix
+# délibéré : le digest dépend d'un calcul (agrégation, tri, somme) déjà fait et testé côté service,
+# le refaire ici dupliquerait cette logique sans aucun bénéfice.
+RECURRING_SUPPLY_DIGEST_BUYER = "RECURRING_SUPPLY_DIGEST_BUYER"
 AUCTION_WON_PRODUCER = "AUCTION_WON_PRODUCER"
 PREORDER_RESERVED_PRODUCER = "PREORDER_RESERVED_PRODUCER"
 ESCROW_PAYMENT_RECEIVED_BUYER = "ESCROW_PAYMENT_RECEIVED_BUYER"
@@ -246,8 +254,13 @@ def _render_order_confirmed_by_producer_buyer(p: Dict[str, Any]) -> str:
     )
 
 
+def _render_recurring_supply_digest_buyer(p: Dict[str, Any]) -> str:
+    return str(p.get("body") or "Vous avez une nouvelle disponibilité d'approvisionnement Ladini.")
+
+
 _RENDERERS = {
     AUCTION_INVITE_PRODUCER: _render_auction_invite,
+    RECURRING_SUPPLY_DIGEST_BUYER: _render_recurring_supply_digest_buyer,
     NEW_PRODUCT_ALERT_BUYER: _render_new_product_alert,
     AUCTION_WON_PRODUCER: _render_auction_won,
     PREORDER_RESERVED_PRODUCER: _render_preorder_reserved,

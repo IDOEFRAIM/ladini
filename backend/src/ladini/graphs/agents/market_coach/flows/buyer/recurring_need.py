@@ -17,8 +17,11 @@ Mandat §18 : aucune réponse utilisateur ne mentionne occurrence/CAS/recurring_
 from __future__ import annotations
 
 import logging
+import time
+from decimal import Decimal
 from typing import Any, Dict, List
 
+from ladini.domain.recurring_supply.digest import AllocationLine, build_detail_text
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     clear_pending_interaction,
@@ -40,6 +43,12 @@ from ladini.graphs.agents.market_coach.services.mcp.gateway import (
 from ladini.graphs.agents.market_coach.utils import MarketRuntime, slot_has_value
 
 logger = logging.getLogger("Ladini.Market.RecurringNeed")
+
+# Menu "mes besoins" / détail (mandat Phase 4 §6) — même durée que la confirmation générique
+# (`nodes/confirmation_gate.py::_CONFIRMATION_TTL_SECONDS`) : passé ce délai, une réponse numérique
+# ne cible plus rien de fiable, on réaffiche la liste plutôt que d'appliquer un choix périmé.
+_MENU_TTL_SECONDS = 600.0
+_BACK_WORDS = ("retour", "besoin", "mes besoins")
 
 _DRAFT_FIELDS = (
     "product",
@@ -225,11 +234,57 @@ def _render_update_confirmation(action: str, product_label: str) -> str:
 
 
 # =====================================================================
-# GET_MY_NEEDS — liste + sous-menu
+# GET_MY_NEEDS — liste (avec disponibilité) + détail d'un besoin (mandat Phase 4 §5/§6/§7)
+#
+# Pas de nouvel intent GET_MATCH_PROPOSALS : GET_MY_NEEDS sert les deux vues ("mes besoins" ET
+# "disponibilité/détail"), reliées par UN SEUL menu numéroté réutilisant `PendingInteraction`
+# (`InteractionKind.SELECTION_MENU`) — jamais `InteractionKind.SELECTION`, qui n'existe pas dans ce
+# contrat (voir `core/pending_interaction.py`). Le mapping numéro→cible est stocké dans
+# `working_memory["recurring_need_menu"]` (même idiome que `order_tracking.py::available_mapping`,
+# en plus léger : pas besoin de son `order_tracking_context` dédié pour un menu à 2 niveaux).
 # =====================================================================
 
 
 async def _get_my_needs_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+    resolved = _resolve_menu_reply(state)
+    if resolved is not None:
+        kind, target = resolved
+        if kind == "DETAIL":
+            return await _show_need_detail(state, mc_runtime, target)
+        if kind == "INVALID":
+            return await _render_needs_list(state, mc_runtime, notice="Je n'ai pas compris ce choix.\n\n")
+        # kind == "LIST" (retour / mes besoins) — retombe sur la liste fraîche ci-dessous.
+    return await _render_needs_list(state, mc_runtime)
+
+
+def _resolve_menu_reply(state: Dict[str, Any]):
+    """`None` : aucun menu actif pour CE goal (première visite, ou menu d'un autre tunnel — jamais
+    touché). Sinon `("LIST"|"DETAIL"|"INVALID", target)`."""
+    pending = state.get("pending_interaction") or {}
+    if not isinstance(pending, dict) or pending.get("kind") != "SELECTION_MENU" or pending.get("goal") != "GET_MY_NEEDS":
+        return None
+    menu = (state.get("working_memory") or {}).get("recurring_need_menu")
+    if not isinstance(menu, dict):
+        return None
+    if time.time() - float(pending.get("created_at") or 0) > _MENU_TTL_SECONDS:
+        return None  # périmé — traité comme une première visite, silencieusement (même convention que confirmation_gate)
+
+    payload = state.get("transaction_payload") or {}
+    index = str(payload.get("selection_index") or "").strip()
+    text_lower = str(state.get("normalized_text") or state.get("user_query") or "").strip().lower()
+
+    mapping: Dict[str, str] = menu.get("mapping") or {}
+    chosen = mapping.get(index)
+    if chosen is None and any(word in text_lower for word in _BACK_WORDS):
+        chosen = "LIST"
+    if chosen is None:
+        return ("INVALID", None)
+    if chosen == "LIST":
+        return ("LIST", None)
+    return ("DETAIL", chosen)
+
+
+async def _render_needs_list(state: Dict[str, Any], mc_runtime: MarketRuntime, *, notice: str = "") -> Dict[str, Any]:
     phone = state.get("user_phone")
     gw = RecurringSupplyGateway(mc_runtime)
     try:
@@ -239,20 +294,20 @@ async def _get_my_needs_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -
 
     items: List[Dict[str, Any]] = result.get("items") or []
     if not items:
-        return {"final_response": "Vous n'avez pas encore de besoin récurrent enregistré.", "status": "COMPLETED"}
+        return {"final_response": f"{notice}Vous n'avez pas encore de besoin récurrent enregistré.", "status": "COMPLETED"}
 
-    lines = ["Vos approvisionnements :", ""]
+    lines = [f"{notice}Vos approvisionnements :", ""]
+    mapping: Dict[str, str] = {}
     for i, item in enumerate(items, start=1):
         lines.append(f"{i}. {_render_need_line(item)}")
-    lines += ["", "1. Modifier", "2. Mettre en pause/reprendre", "3. Annuler", "4. Retour"]
+        mapping[str(i)] = str(item["recurring_need_id"])
+    lines += ["", "Répondez avec le numéro d'un besoin pour voir sa disponibilité."]
+
     return {
         "final_response": "\n".join(lines),
         "status": "COMPLETED",
-        **set_pending_interaction(
-            InteractionKind.SELECTION,
-            goal="GET_MY_NEEDS",
-            candidates=tuple(str(i.get("recurring_need_id")) for i in items),
-        ),
+        "working_memory": {"recurring_need_menu": {"mapping": mapping, "created_at": time.time()}},
+        **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
     }
 
 
@@ -263,7 +318,51 @@ def _render_need_line(item: Dict[str, Any]) -> str:
         "ONE_OFF": "une fois",
     }.get(item.get("recurrence_type"), "jour")
     status = "actif" if item.get("status") == "ACTIVE" else "en pause" if item.get("status") == "PAUSED" else "annulé"
-    return f"{item.get('product', '?').capitalize()} — {item.get('quantity')} {item.get('unit')}/{freq} — {status}"
+    label = f"{item.get('product', '?').capitalize()} — {item.get('quantity')} {item.get('unit')}/{freq} — {status}"
+    requested, matched = item.get("requested_quantity"), item.get("matched_quantity")
+    if requested is not None and matched is not None:
+        emoji = "✅" if matched >= requested and requested > 0 else "❌" if matched <= 0 else "⚠️"
+        label += f" — {emoji} {_fmt_qty(matched)}/{_fmt_qty(requested)} {item.get('unit')} disponibles demain"
+    return label
+
+
+def _fmt_qty(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
+async def _show_need_detail(state: Dict[str, Any], mc_runtime: MarketRuntime, recurring_need_id: str) -> Dict[str, Any]:
+    phone = state.get("user_phone")
+    gw = RecurringSupplyGateway(mc_runtime)
+    try:
+        detail = await gw.get_recurring_need_detail(phone=str(phone), recurring_need_id=recurring_need_id)
+    except MCPCallError:
+        return {"final_response": "Je n'ai pas pu récupérer ce détail.", "status": "COMPLETED"}
+    if not isinstance(detail, dict) or detail.get("status") != "success":
+        return {"final_response": "Je n'ai pas pu récupérer ce détail.", "status": "COMPLETED"}
+
+    allocations = [
+        AllocationLine(
+            producer_label=a["producer_label"],
+            quantity=Decimal(str(a["quantity"])),
+            unit_price=Decimal(str(a["unit_price"])),
+            unit=a["unit"],
+        )
+        for a in detail.get("allocations") or []
+    ]
+    text = build_detail_text(
+        product=detail["product"],
+        requested_quantity=Decimal(str(detail["requested_quantity"])),
+        unit=detail["unit"],
+        allocations=allocations,
+    )
+    return {
+        "final_response": text,
+        "status": "COMPLETED",
+        "working_memory": {
+            "recurring_need_menu": {"mapping": {"1": "LIST", "2": "LIST"}, "created_at": time.time()}
+        },
+        **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
+    }
 
 
 async def _resolve_target_need(gw: RecurringSupplyGateway, phone: Any, payload: Dict[str, Any]):

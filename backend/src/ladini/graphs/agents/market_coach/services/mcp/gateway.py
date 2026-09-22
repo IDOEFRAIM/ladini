@@ -618,6 +618,9 @@ class RecurringSupplyGateway(_BaseGateway):
     async def list_my_recurring_needs(self, phone: str) -> Dict[str, Any]:
         return await self._call("list_my_recurring_needs", phone=phone)
 
+    async def get_recurring_need_detail(self, phone: str, recurring_need_id: str) -> Dict[str, Any]:
+        return await self._call("get_recurring_need_detail", phone=phone, recurring_need_id=recurring_need_id)
+
 
 __all__ = [
     "MCPCallError",

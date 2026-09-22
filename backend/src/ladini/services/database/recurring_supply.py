@@ -58,7 +58,7 @@ import uuid
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 
 from ladini.domain.models import (
     RecurringNeed,
@@ -223,8 +223,10 @@ class RecurringSupplyMixin(BaseMixin):
     # ─── READ ─────────────────────────────────────────────────────────
 
     async def list_my_recurring_needs(self, phone: str) -> Dict[str, Any]:
-        """Les besoins de l'acheteur + leur prochaine occurrence ouverte — UNE requête jointe (mandat
-        §19, pas de N+1 : jamais 1 requête d'occurrence par besoin listé)."""
+        """Les besoins de l'acheteur + leur prochaine occurrence OPEN/MATCHED (disponibilité
+        incluse — mandat Phase 4 §7 : `GET_MY_NEEDS` affiche aussi la disponibilité, pas de nouvel
+        intent `GET_MATCH_PROPOSALS`) — UNE requête jointe (mandat §19, pas de N+1 : jamais 1
+        requête d'occurrence par besoin listé)."""
         current_session = self.session
         if not current_session:
             raise BusinessRuleException("Session indisponible.")
@@ -247,7 +249,7 @@ class RecurringSupplyMixin(BaseMixin):
                 select(RecurringNeedOccurrence)
                 .where(
                     RecurringNeedOccurrence.recurring_need_id.in_(need_ids),
-                    RecurringNeedOccurrence.status == "OPEN",
+                    RecurringNeedOccurrence.status.in_(("OPEN", "MATCHED")),
                 )
                 .order_by(RecurringNeedOccurrence.recurring_need_id, RecurringNeedOccurrence.occurrence_date.asc())
             )
@@ -269,9 +271,84 @@ class RecurringSupplyMixin(BaseMixin):
                     "next_occurrence_date": (
                         next_occ.occurrence_date.date().isoformat() if next_occ else None
                     ),
+                    "next_occurrence_id": str(next_occ.id) if next_occ else None,
+                    "requested_quantity": float(next_occ.requested_quantity) if next_occ else None,
+                    "matched_quantity": float(next_occ.quantity_matched) if next_occ else None,
                 }
             )
         return {"status": "success", "items": items}
+
+    async def get_recurring_need_detail(self, phone: str, recurring_need_id: str) -> Dict[str, Any]:
+        """Détail d'UNE occurrence : besoin, disponibilité trouvée, fournisseurs + prix (mandat §5).
+        Lecture seule — ne modifie jamais `need_allocations`/`recurring_need_occurrences` (c'est le
+        rôle exclusif du moteur de matching, Phase 3). UNE requête jointe pour les allocations
+        (producteur + libellé), jamais une par allocation."""
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+        _user_obj, buyer_profile = await self.get_buyer_profile(phone=str(phone))
+        buyer_id = buyer_profile.id
+
+        need_row = (
+            await current_session.execute(
+                select(RecurringNeed, SubCategory.name)
+                .join(SubCategory, RecurringNeed.sub_category_id == SubCategory.id)
+                .where(RecurringNeed.id == recurring_need_id, RecurringNeed.buyer_id == buyer_id)
+            )
+        ).first()
+        if need_row is None:
+            raise BusinessRuleException("Besoin introuvable.")
+        need, sub_category_name = need_row
+
+        occurrence = await current_session.scalar(
+            select(RecurringNeedOccurrence)
+            .where(
+                RecurringNeedOccurrence.recurring_need_id == need.id,
+                RecurringNeedOccurrence.status.in_(("OPEN", "MATCHED")),
+            )
+            .order_by(RecurringNeedOccurrence.occurrence_date.asc())
+            .limit(1)
+        )
+        if occurrence is None:
+            return {
+                "status": "success",
+                "product": sub_category_name,
+                "requested_quantity": float(need.quantity),
+                "unit": need.unit,
+                "occurrence_date": None,
+                "allocations": [],
+            }
+
+        alloc_rows = (
+            await current_session.execute(
+                text(
+                    "SELECT na.quantity, na.unit_price, na.unit, "
+                    "COALESCE(pr.business_name, 'Producteur') AS producer_label "
+                    "FROM marketplace.need_allocations na "
+                    "JOIN marketplace.producers pr ON pr.id = na.producer_id "
+                    "WHERE na.occurrence_id = :occurrence_id AND na.status = 'PROPOSED' "
+                    "ORDER BY na.unit_price ASC, producer_label ASC"
+                ),
+                {"occurrence_id": occurrence.id},
+            )
+        ).mappings().all()
+
+        return {
+            "status": "success",
+            "product": sub_category_name,
+            "requested_quantity": float(occurrence.requested_quantity),
+            "unit": occurrence.unit,
+            "occurrence_date": occurrence.occurrence_date.date().isoformat(),
+            "allocations": [
+                {
+                    "producer_label": row["producer_label"],
+                    "quantity": float(row["quantity"]),
+                    "unit_price": float(row["unit_price"]),
+                    "unit": row["unit"],
+                }
+                for row in alloc_rows
+            ],
+        }
 
     # ─── UPDATE ───────────────────────────────────────────────────────
 

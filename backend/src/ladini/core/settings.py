@@ -558,6 +558,17 @@ class Settings(BaseSettings):
     RECURRING_MATCH_UPCOMING_INTERVAL_SECONDS: float = 3600.0
     RECURRING_MATCH_UPCOMING_WINDOW_HOURS: float = 48.0
 
+    # --- Digest d'approvisionnement récurrent (Phase 4, 2026-09) ---
+    # Cadence Beat — 1×/jour suffit au pilote (mandat §8), jamais l'heure codée en dur : ce dépôt
+    # n'a pas de planification crontab (`celery.schedules.crontab`), seulement des intervalles
+    # (mêmes conventions que le reste de `beat_schedule.py`) — un déclenchement toutes les
+    # `RECURRING_SUPPLY_DIGEST_INTERVAL_SECONDS` reste idempotent (dedup par signature) si le tick
+    # tombe plus d'une fois sur la même date.
+    RECURRING_SUPPLY_DIGEST_INTERVAL_SECONDS: float = 86400.0
+    # Combien de jours à l'avance le digest regarde (mandat §3 : "les besoins de demain") — 1 par
+    # défaut, configurable si le terrain a besoin d'une fenêtre légèrement différente.
+    RECURRING_SUPPLY_DIGEST_DAY_OFFSET: int = 1
+
     # Disjoncteur — défauts repris tels quels de l'ancien `_CircuitBreaker`
     # process-local de get_llm.py (3 échecs / 30s), désormais partagés via
     # Redis entre tous les workers (API + Celery + MCP).

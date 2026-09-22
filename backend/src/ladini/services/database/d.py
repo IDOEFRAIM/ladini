@@ -93,8 +93,9 @@ class AgriDatabaseService(
         "get_prohibited_terms",
         # Escrow reads
         "list_producer_escrowed_orders",
-        # Approvisionnement récurrent (Phase 2)
+        # Approvisionnement récurrent (Phase 2/4)
         "list_my_recurring_needs",
+        "get_recurring_need_detail",
     }
 
     # ==================================================================

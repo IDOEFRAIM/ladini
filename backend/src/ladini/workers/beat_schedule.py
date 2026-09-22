@@ -91,4 +91,14 @@ BEAT_SCHEDULE: Dict[str, Dict[str, Any]] = {
             "expires": max(1.0, settings.RECURRING_MATCH_UPCOMING_INTERVAL_SECONDS - 60)
         },
     },
+    # Digest d'approvisionnement (Phase 4) : 1 notification par (acheteur, date), jamais une par
+    # besoin — voir `workers/automation/recurring_supply_digest_service.py`. Idempotent par
+    # construction (dedupe_key signée) : un tick de plus sur la même date n'envoie rien de plus.
+    "recurring-supply-digest": {
+        "task": "workers.recurring_supply_digest",
+        "schedule": settings.RECURRING_SUPPLY_DIGEST_INTERVAL_SECONDS,
+        "options": {
+            "expires": max(1.0, settings.RECURRING_SUPPLY_DIGEST_INTERVAL_SECONDS - 300)
+        },
+    },
 }
