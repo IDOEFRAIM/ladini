@@ -84,6 +84,11 @@ from ladini.domain.orders.models import (
     Payment,
 )
 from ladini.domain.orm_base import Base, _uuid4
+from ladini.domain.recurring_supply.models import (
+    NeedAllocation,
+    RecurringNeed,
+    RecurringNeedOccurrence,
+)
 from ladini.domain.telemetry import AgentLlmCall, AgentToolCall, AgentTurn
 
 __all__ = [
@@ -92,6 +97,10 @@ __all__ = [
     "AgentTurn",
     "Base",
     "_uuid4",
+    # approvisionnement récurrent (Phase 1 — fondation de données)
+    "RecurringNeed",
+    "RecurringNeedOccurrence",
+    "NeedAllocation",
     # auth
     "User",
     "Account",

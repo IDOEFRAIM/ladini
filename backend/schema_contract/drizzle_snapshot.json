@@ -1,6 +1,6 @@
 {
-  "id": "b68bb80a-4cbe-4c98-8419-6754128e79db",
-  "prevId": "d166b2ca-7689-4f7a-97b7-9534a24beb2d",
+  "id": "28fabd36-31e9-4cab-b3e9-f6ba52d566cd",
+  "prevId": "b68bb80a-4cbe-4c98-8419-6754128e79db",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3523,6 +3523,247 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "marketplace.need_allocations": {
+      "name": "need_allocations",
+      "schema": "marketplace",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "occurrence_id": {
+          "name": "occurrence_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "producer_id": {
+          "name": "producer_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "product_id": {
+          "name": "product_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "quantity": {
+          "name": "quantity",
+          "type": "numeric(14, 3)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "unit_price": {
+          "name": "unit_price",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "unit": {
+          "name": "unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'PROPOSED'"
+        },
+        "order_item_id": {
+          "name": "order_item_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "need_allocations_occurrence_producer_product_uq": {
+          "name": "need_allocations_occurrence_producer_product_uq",
+          "columns": [
+            {
+              "expression": "occurrence_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "producer_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "product_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "need_allocations_occurrence_idx": {
+          "name": "need_allocations_occurrence_idx",
+          "columns": [
+            {
+              "expression": "occurrence_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "need_allocations_producer_idx": {
+          "name": "need_allocations_producer_idx",
+          "columns": [
+            {
+              "expression": "producer_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "need_allocations_product_idx": {
+          "name": "need_allocations_product_idx",
+          "columns": [
+            {
+              "expression": "product_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "need_allocations_order_item_idx": {
+          "name": "need_allocations_order_item_idx",
+          "columns": [
+            {
+              "expression": "order_item_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "need_allocations_occurrence_id_recurring_need_occurrences_id_fk": {
+          "name": "need_allocations_occurrence_id_recurring_need_occurrences_id_fk",
+          "tableFrom": "need_allocations",
+          "tableTo": "recurring_need_occurrences",
+          "schemaTo": "marketplace",
+          "columnsFrom": [
+            "occurrence_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "need_allocations_producer_id_producers_id_fk": {
+          "name": "need_allocations_producer_id_producers_id_fk",
+          "tableFrom": "need_allocations",
+          "tableTo": "producers",
+          "schemaTo": "marketplace",
+          "columnsFrom": [
+            "producer_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "need_allocations_product_id_products_id_fk": {
+          "name": "need_allocations_product_id_products_id_fk",
+          "tableFrom": "need_allocations",
+          "tableTo": "products",
+          "schemaTo": "marketplace",
+          "columnsFrom": [
+            "product_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "need_allocations_order_item_id_order_items_id_fk": {
+          "name": "need_allocations_order_item_id_order_items_id_fk",
+          "tableFrom": "need_allocations",
+          "tableTo": "order_items",
+          "schemaTo": "marketplace",
+          "columnsFrom": [
+            "order_item_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "need_allocations_quantity_chk": {
+          "name": "need_allocations_quantity_chk",
+          "value": "\"marketplace\".\"need_allocations\".\"quantity\" > 0"
+        },
+        "need_allocations_unit_price_chk": {
+          "name": "need_allocations_unit_price_chk",
+          "value": "\"marketplace\".\"need_allocations\".\"unit_price\" >= 0"
+        },
+        "need_allocations_status_chk": {
+          "name": "need_allocations_status_chk",
+          "value": "\"marketplace\".\"need_allocations\".\"status\" IN ('PROPOSED','ACCEPTED','REJECTED','EXPIRED','CONVERTED')"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "marketplace.order_disputes": {
       "name": "order_disputes",
       "schema": "marketplace",
@@ -5501,6 +5742,401 @@
       },
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "marketplace.recurring_need_occurrences": {
+      "name": "recurring_need_occurrences",
+      "schema": "marketplace",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "recurring_need_id": {
+          "name": "recurring_need_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "occurrence_date": {
+          "name": "occurrence_date",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requested_quantity": {
+          "name": "requested_quantity",
+          "type": "numeric(14, 3)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "unit": {
+          "name": "unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'OPEN'"
+        },
+        "quantity_matched": {
+          "name": "quantity_matched",
+          "type": "numeric(14, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "quantity_confirmed": {
+          "name": "quantity_confirmed",
+          "type": "numeric(14, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "quantity_delivered": {
+          "name": "quantity_delivered",
+          "type": "numeric(14, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "notified_at": {
+          "name": "notified_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "accepted_at": {
+          "name": "accepted_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "order_group_id": {
+          "name": "order_group_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "recurring_need_occurrences_need_date_uq": {
+          "name": "recurring_need_occurrences_need_date_uq",
+          "columns": [
+            {
+              "expression": "recurring_need_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurrence_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "recurring_need_occurrences_status_date_idx": {
+          "name": "recurring_need_occurrences_status_date_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurrence_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "recurring_need_occurrences_recurring_need_id_recurring_needs_id_fk": {
+          "name": "recurring_need_occurrences_recurring_need_id_recurring_needs_id_fk",
+          "tableFrom": "recurring_need_occurrences",
+          "tableTo": "recurring_needs",
+          "schemaTo": "marketplace",
+          "columnsFrom": [
+            "recurring_need_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "recurring_need_occurrences_requested_qty_chk": {
+          "name": "recurring_need_occurrences_requested_qty_chk",
+          "value": "\"marketplace\".\"recurring_need_occurrences\".\"requested_quantity\" > 0"
+        },
+        "recurring_need_occurrences_matched_qty_chk": {
+          "name": "recurring_need_occurrences_matched_qty_chk",
+          "value": "\"marketplace\".\"recurring_need_occurrences\".\"quantity_matched\" >= 0"
+        },
+        "recurring_need_occurrences_confirmed_qty_chk": {
+          "name": "recurring_need_occurrences_confirmed_qty_chk",
+          "value": "\"marketplace\".\"recurring_need_occurrences\".\"quantity_confirmed\" >= 0"
+        },
+        "recurring_need_occurrences_delivered_qty_chk": {
+          "name": "recurring_need_occurrences_delivered_qty_chk",
+          "value": "\"marketplace\".\"recurring_need_occurrences\".\"quantity_delivered\" >= 0"
+        },
+        "recurring_need_occurrences_version_chk": {
+          "name": "recurring_need_occurrences_version_chk",
+          "value": "\"marketplace\".\"recurring_need_occurrences\".\"version\" >= 1"
+        },
+        "recurring_need_occurrences_status_chk": {
+          "name": "recurring_need_occurrences_status_chk",
+          "value": "\"marketplace\".\"recurring_need_occurrences\".\"status\" IN ('OPEN','SKIPPED','MATCHED','PROPOSED','ACCEPTED','PARTIALLY_ACCEPTED','REJECTED','EXPIRED','FULFILLED','PARTIALLY_FULFILLED','UNFULFILLED','CANCELLED')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "marketplace.recurring_needs": {
+      "name": "recurring_needs",
+      "schema": "marketplace",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "buyer_id": {
+          "name": "buyer_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "sub_category_id": {
+          "name": "sub_category_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "quantity": {
+          "name": "quantity",
+          "type": "numeric(14, 3)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "unit": {
+          "name": "unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'KG'"
+        },
+        "recurrence_type": {
+          "name": "recurrence_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "weekly_days": {
+          "name": "weekly_days",
+          "type": "integer[]",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "excluded_weekdays": {
+          "name": "excluded_weekdays",
+          "type": "integer[]",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "starts_at": {
+          "name": "starts_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "ends_at": {
+          "name": "ends_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'ACTIVE'"
+        },
+        "paused_until": {
+          "name": "paused_until",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "max_price_per_unit": {
+          "name": "max_price_per_unit",
+          "type": "numeric(12, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "recurring_needs_buyer_idx": {
+          "name": "recurring_needs_buyer_idx",
+          "columns": [
+            {
+              "expression": "buyer_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "recurring_needs_subcategory_status_idx": {
+          "name": "recurring_needs_subcategory_status_idx",
+          "columns": [
+            {
+              "expression": "sub_category_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "recurring_needs_buyer_id_buyer_profiles_id_fk": {
+          "name": "recurring_needs_buyer_id_buyer_profiles_id_fk",
+          "tableFrom": "recurring_needs",
+          "tableTo": "buyer_profiles",
+          "schemaTo": "marketplace",
+          "columnsFrom": [
+            "buyer_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        },
+        "recurring_needs_sub_category_id_sub_categories_id_fk": {
+          "name": "recurring_needs_sub_category_id_sub_categories_id_fk",
+          "tableFrom": "recurring_needs",
+          "tableTo": "sub_categories",
+          "schemaTo": "governance",
+          "columnsFrom": [
+            "sub_category_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "restrict",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "recurring_needs_quantity_chk": {
+          "name": "recurring_needs_quantity_chk",
+          "value": "\"marketplace\".\"recurring_needs\".\"quantity\" > 0"
+        },
+        "recurring_needs_max_price_chk": {
+          "name": "recurring_needs_max_price_chk",
+          "value": "\"marketplace\".\"recurring_needs\".\"max_price_per_unit\" IS NULL OR \"marketplace\".\"recurring_needs\".\"max_price_per_unit\" >= 0"
+        },
+        "recurring_needs_recurrence_type_chk": {
+          "name": "recurring_needs_recurrence_type_chk",
+          "value": "\"marketplace\".\"recurring_needs\".\"recurrence_type\" IN ('DAILY','WEEKLY_DAYS','WEEKLY','ONE_OFF')"
+        },
+        "recurring_needs_status_chk": {
+          "name": "recurring_needs_status_chk",
+          "value": "\"marketplace\".\"recurring_needs\".\"status\" IN ('ACTIVE','PAUSED','CANCELLED')"
+        },
+        "recurring_needs_weekly_days_chk": {
+          "name": "recurring_needs_weekly_days_chk",
+          "value": "\"marketplace\".\"recurring_needs\".\"recurrence_type\" <> 'WEEKLY_DAYS' OR \"marketplace\".\"recurring_needs\".\"weekly_days\" IS NOT NULL"
+        }
+      },
       "isRLSEnabled": false
     },
     "marketplace.seed_allocations": {

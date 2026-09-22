@@ -52,7 +52,17 @@ Définit les règles métier collectives, le découpage territorial de la coopé
 *   **Classes clés :** `CooperativeZone`, `Category`, `StandardPrice`, `QualityNorm`, `RegulatoryAudit`.
 *   **Concepts clés :** Prix planchers, normes de qualité agroalimentaire, audits de conformité.
 
-### 6. Intelligence & Agentic Engine (`intelligence/`)
+### 6. Approvisionnement récurrent (`recurring_supply/`)
+Fondation de données du besoin récurrent (Phase 1, 2026-09) — distinct de `orders.Auction`/`Bid` (appel
+d'offres ponctuel, un seul gagnant) : une règle permanente d'acheteur qui se matérialise en occurrences
+datées, chacune pouvant être couverte par plusieurs fournisseurs.
+*   **Classes clés :** `RecurringNeed`, `RecurringNeedOccurrence`, `NeedAllocation`.
+*   **Concepts clés :** occurrence = snapshot immuable d'un jour (l'historique ne bouge pas si le besoin
+    est modifié après coup) ; `NeedAllocation` = ligne PostgreSQL réelle (FK + CHECK), jamais un JSON.
+*   **Hors scope Phase 1 :** domaine applicatif (draft conversationnel), intents, matching, conversion en
+    commande, livraison — schéma uniquement pour l'instant.
+
+### 7. Intelligence & Agentic Engine (`intelligence/`)
 Stocke les contextes de décision des agents autonomes et la file d'attente des messages asynchrones.
 *   **Classes clés :** `Conversation`, `AgentContextMemory`, `OutboxMessage`, `AgentActionLog`, `AgentTask`, `KnowledgeExtraction`.
 *   **Concepts clés :** Persistance de la mémoire à long terme des agents, pattern Outbox pour les événements inter-services, audits des décisions IA.

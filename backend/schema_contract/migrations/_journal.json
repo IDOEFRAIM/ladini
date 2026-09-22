@@ -15,6 +15,13 @@
       "when": 1789971268108,
       "tag": "0001_agent_telemetry",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790049820007,
+      "tag": "0002_recurring_supply",
+      "breakpoints": true
     }
   ]
 }

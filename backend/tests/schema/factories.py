@@ -61,3 +61,30 @@ class Graph:
     def extra_producer(self):
         u = insert(self.cur, "auth.users", phone=uniq("+226"))
         return insert(self.cur, "marketplace.producers", user_id=u)
+
+    # ── Approvisionnement récurrent (Phase 1) ────────────────────────────
+
+    def recurring_need(self, **over):
+        now = datetime.utcnow()
+        cols = dict(
+            buyer_id=self.buyer, sub_category_id=self.sub_category, quantity=40, unit="KG",
+            recurrence_type="DAILY", starts_at=now,
+        )
+        cols.update(over)
+        return insert(self.cur, "marketplace.recurring_needs", **cols)
+
+    def occurrence(self, need=None, **over):
+        now = datetime.utcnow()
+        cols = dict(
+            recurring_need_id=need or self.recurring_need(), occurrence_date=now, requested_quantity=40, unit="KG",
+        )
+        cols.update(over)
+        return insert(self.cur, "marketplace.recurring_need_occurrences", **cols)
+
+    def allocation(self, occurrence=None, producer=None, product=None, **over):
+        cols = dict(
+            occurrence_id=occurrence or self.occurrence(), producer_id=producer or self.producer,
+            product_id=product or self.product, quantity=10, unit_price=100, unit="KG",
+        )
+        cols.update(over)
+        return insert(self.cur, "marketplace.need_allocations", **cols)
