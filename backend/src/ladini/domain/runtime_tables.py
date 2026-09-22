@@ -72,6 +72,14 @@ sales_publish_drafts = Table(
     schema="marketplace",
 )
 
+recurring_need_drafts = Table(
+    "recurring_need_drafts",
+    Base.metadata,
+    *_draft_columns(),
+    Index("ix_recurring_need_drafts_conversation", "conversation_id"),
+    schema="marketplace",
+)
+
 mcp_idempotency_records = Table(
     "mcp_idempotency_records",
     Base.metadata,
@@ -105,5 +113,6 @@ __all__ = [
     "mcp_idempotency_records",
     "preorder_drafts",
     "procurement_drafts",
+    "recurring_need_drafts",
     "sales_publish_drafts",
 ]

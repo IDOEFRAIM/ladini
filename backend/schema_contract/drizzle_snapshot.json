@@ -1,6 +1,6 @@
 {
-  "id": "28fabd36-31e9-4cab-b3e9-f6ba52d566cd",
-  "prevId": "b68bb80a-4cbe-4c98-8419-6754128e79db",
+  "id": "c2b74df9-e09f-4e21-acdf-75314ef71d56",
+  "prevId": "28fabd36-31e9-4cab-b3e9-f6ba52d566cd",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -8792,6 +8792,79 @@
       "indexes": {
         "ix_procurement_drafts_conversation": {
           "name": "ix_procurement_drafts_conversation",
+          "columns": [
+            {
+              "expression": "conversation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "marketplace.recurring_need_drafts": {
+      "name": "recurring_need_drafts",
+      "schema": "marketplace",
+      "columns": {
+        "draft_id": {
+          "name": "draft_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "conversation_id": {
+          "name": "conversation_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "payload": {
+          "name": "payload",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "ix_recurring_need_drafts_conversation": {
+          "name": "ix_recurring_need_drafts_conversation",
           "columns": [
             {
               "expression": "conversation_id",

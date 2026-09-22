@@ -23,6 +23,7 @@ from ladini.services.database.marketplace import MarketplaceMixin
 from ladini.services.database.moderation import ModerationMixin
 from ladini.services.database.producer import ProducerMgmtMixin
 from ladini.services.database.product import ProductMixin
+from ladini.services.database.recurring_supply import RecurringSupplyMixin
 from ladini.services.database.utils import UtilsMixin
 
 
@@ -36,6 +37,7 @@ class AgriDatabaseService(
     ProducerMgmtMixin,
     ProductMixin,
     AuctionMixin,
+    RecurringSupplyMixin,
     ModerationMixin,
     EscrowMixin,
 ):
@@ -91,6 +93,8 @@ class AgriDatabaseService(
         "get_prohibited_terms",
         # Escrow reads
         "list_producer_escrowed_orders",
+        # Approvisionnement récurrent (Phase 2)
+        "list_my_recurring_needs",
     }
 
     # ==================================================================

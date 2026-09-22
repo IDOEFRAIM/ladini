@@ -398,6 +398,16 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # docs/MARKET_COACH_GRAPH_ARCHITECTURE_REVIEW_2026-09-08.md §P0-1.
     sales_publish_draft: Annotated[Optional[Dict[str, Any]], replace_value]
 
+    # (Phase 2, 2026-09) : `domain/recurring_need_draft.py::RecurringNeedDraft`
+    # sérialisé — MÊME contrat que `procurement_draft`/`preorder_draft`/
+    # `sales_publish_draft` ci-dessus (`replace_value`, jamais `merge_dict`).
+    # DÉCLARÉ ICI explicitement (voir l'incident `sales_publish_draft`
+    # documenté juste au-dessus : un canal écrit sans être déclaré dans ce
+    # schéma d'état est silencieusement supprimé par LangGraph sur un graphe
+    # COMPILÉ, jamais lors d'un appel direct de nœud — donc invisible aux
+    # tests qui appellent le flow directement).
+    recurring_need_draft: Annotated[Optional[Dict[str, Any]], replace_value]
+
     last_agent_question: Annotated[Optional[str], replace_value]
 
     expected_candidates: Annotated[List[str], replace_list]

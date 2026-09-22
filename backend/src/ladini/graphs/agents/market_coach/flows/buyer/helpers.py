@@ -21,6 +21,9 @@ from ladini.graphs.agents.market_coach.core.goals import (
 from ladini.graphs.agents.market_coach.core.goals import (
     BUYER_PREORDER_GOALS as PREORDER_GOALS,
 )
+from ladini.graphs.agents.market_coach.core.goals import (
+    BUYER_RECURRING_NEED_GOALS as RECURRING_NEED_GOALS,
+)
 
 # =====================================================================
 # GOAL SETS — aliases de compat ; source canonique : core/goals.py
@@ -472,6 +475,7 @@ __all__ = [
     "NEGOTIATION_GOALS",
     "ORDER_TRACKING_GOALS",
     "AUCTION_TRACKING_GOALS",
+    "RECURRING_NEED_GOALS",
     "READ_ONLY_INTENTS",
     "ESCALATE_KEYWORDS",
     "infer_product_from_text",

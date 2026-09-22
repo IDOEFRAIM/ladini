@@ -122,7 +122,7 @@ _EXPECTED_INPUT_ALLOWED_FIELDS: Dict[str, frozenset] = {
     category: fields_for_expected_input(category) | _EXPECTED_INPUT_EXTRA_FIELDS.get(category, frozenset())
     for category in (
         "PRODUCT", "QUANTITY", "PRICE", "UNIT", "LOCATION", "DATE",
-        "FARM_NAME", "MOVEMENT_TYPE",
+        "FARM_NAME", "MOVEMENT_TYPE", "RECURRENCE",
     )
 }
 

@@ -269,6 +269,11 @@ _EXPECTED_INPUT_MAP: Dict[str, str] = {
     # (`fields_for_expected_input`, plus bas) le couvre maintenant par
     # construction, plus de copie manuelle qui peut décrocher.
     "expected_harvest_date": "DATE",
+    # Approvisionnement récurrent (Phase 2) — "chaque jour", "certains jours",
+    # "chaque semaine" : catégorie propre, aucune des catégories existantes
+    # (PRODUCT/QUANTITY/UNIT/PRICE/LOCATION/DATE/FARM_NAME/MOVEMENT_TYPE) ne
+    # correspond à une fréquence de récurrence.
+    "recurrence_type": "RECURRENCE",
 }
 
 # ---------------------------------------------------------------------------

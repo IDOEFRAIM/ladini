@@ -38,6 +38,7 @@ from ladini.graphs.agents.market_coach.core.goals import (
     BUYER_NEGOTIATION_GOALS,
     BUYER_ORDER_TRACKING_GOALS,
     BUYER_PREORDER_GOALS,
+    BUYER_RECURRING_NEED_GOALS,
     PRODUCER_ESCROW_GOALS,
     PRODUCER_RESOLVER_GOALS,
     PRODUCER_UPDATE_GOALS,
@@ -271,6 +272,7 @@ class DomainRouter:
                 target="to_order_tracking",
             ),
             RouteRule(goals=BUYER_PREORDER_GOALS, target="to_resolver"),
+            RouteRule(goals=BUYER_RECURRING_NEED_GOALS, target="to_resolver"),
             RouteRule(goals=PRODUCER_RESOLVER_GOALS, target="to_resolver"),
             RouteRule(goals=PRODUCER_UPDATE_GOALS, target="to_resolver"),
             RouteRule(goals=PRODUCER_ESCROW_GOALS, target="to_resolver"),
@@ -326,4 +328,5 @@ __all__ = [
     "BUYER_NEGOTIATION_GOALS",
     "BUYER_ORDER_TRACKING_GOALS",
     "BUYER_AUCTION_TRACKING_GOALS",
+    "BUYER_RECURRING_NEED_GOALS",
 ]

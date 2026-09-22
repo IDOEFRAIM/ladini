@@ -558,6 +558,67 @@ class EscrowGateway(_BaseGateway):
         )
 
 
+class RecurringSupplyGateway(_BaseGateway):
+    """Approvisionnement récurrent (Phase 2) — `services/database/recurring_supply.py`."""
+
+    async def create_recurring_need(
+        self,
+        phone: str,
+        product_query: str,
+        quantity: float,
+        unit: str,
+        recurrence_type: str,
+        weekly_days: Any = None,
+        excluded_weekdays: Any = None,
+        starts_at: Any = None,
+        ends_at: Any = None,
+        max_price_per_unit: Any = None,
+        idempotency_key: Any = None,
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "create_recurring_need",
+            phone=phone,
+            product_query=product_query,
+            quantity=quantity,
+            unit=unit,
+            recurrence_type=recurrence_type,
+            weekly_days=weekly_days,
+            excluded_weekdays=excluded_weekdays,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            max_price_per_unit=max_price_per_unit,
+            idempotency_key=idempotency_key,
+        )
+
+    async def update_recurring_need(
+        self,
+        phone: str,
+        recurring_need_id: str,
+        action: str,
+        quantity: Any = None,
+        recurrence_type: Any = None,
+        weekly_days: Any = None,
+        excluded_weekdays: Any = None,
+        paused_until: Any = None,
+        occurrence_date: Any = None,
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "update_recurring_need",
+            phone=phone,
+            recurring_need_id=recurring_need_id,
+            action=action,
+            quantity=quantity,
+            recurrence_type=recurrence_type,
+            weekly_days=weekly_days,
+            excluded_weekdays=excluded_weekdays,
+            paused_until=paused_until,
+            occurrence_date=occurrence_date,
+        )
+
+    async def list_my_recurring_needs(self, phone: str) -> Dict[str, Any]:
+        return await self._call("list_my_recurring_needs", phone=phone)
+
+
 __all__ = [
     "MCPCallError",
     "ProfileGateway",
@@ -571,4 +632,5 @@ __all__ = [
     "ModerationGateway",
     "AgentActionGateway",
     "EscrowGateway",
+    "RecurringSupplyGateway",
 ]

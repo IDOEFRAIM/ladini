@@ -372,6 +372,70 @@ INTENT_CONFIG = {
     # technique (ou pire, rouvrir la surface de contournement si le
     # handler neutralisé était un jour "réparé" par inadvertance) — un seul
     # chemin métier vers la sélection du gagnant, jamais deux.
+    # =======================================================================
+    # DOMAINE : APPROVISIONNEMENT RÉCURRENT (Phase 2, 2026-09) — besoin
+    # PERMANENT d'un acheteur ("40 kg de tomate chaque jour"), distinct de
+    # PROCUREMENT_CREATE_REQUEST (appel d'offres ponctuel, un seul gagnant)
+    # ET de BUYER_REQUEST/BUYER_ADD_TO_CART (achat immédiat). `handled_by_flow`
+    # : gère sa PROPRE confirmation via `RecurringNeedDraft` (même pattern CAS
+    # que PROCUREMENT_CREATE_REQUEST), jamais confirmation_gate/
+    # mcp_tool_executor génériques — voir flows/buyer/recurring_need.py.
+    # =======================================================================
+    "CREATE_RECURRING_NEED": {
+        "tool_name": "create_recurring_need",
+        "required": ["product", "quantity", "unit", "recurrence_type"],
+        "action_type": "WRITE",
+        "requires_farm": False,
+        "handled_by_flow": True,
+        "label": (
+            "Besoin d'approvisionnement RÉCURRENT/PERMANENT (ex: \"40 kg de "
+            "tomates chaque jour\") — PAS un achat ponctuel (BUYER_REQUEST) "
+            "ni un appel d'offres (PROCUREMENT_CREATE_REQUEST)"
+        ),
+        "label_map": {
+            "product": "produit souhaité",
+            "quantity": "quantité par occurrence",
+            "unit": "unité",
+            "recurrence_type": "fréquence (chaque jour, certains jours, chaque semaine, une seule fois)",
+            "weekly_days": "jours de la semaine concernés",
+            "excluded_weekdays": "jours exclus (ex: sauf le dimanche)",
+            "max_price_per_unit": "prix maximum accepté (optionnel)",
+        },
+    },
+    # Modifie un besoin récurrent DÉJÀ CRÉÉ : quantité/fréquence permanente,
+    # pause, reprise, annulation, exception ponctuelle — UNE seule action
+    # structurée (voir services/database/recurring_supply.py::
+    # RECURRING_NEED_ACTIONS), jamais un intent séparé par verbe (mandat
+    # Phase 2 §6 : "ne crée pas des intents séparés pour chacune de ces
+    # actions"). Le besoin visé est résolu conversationnellement (liste des
+    # besoins actifs de l'acheteur), jamais demandé comme UUID brut — même
+    # principe que PROCUREMENT_UPDATE_REQUEST.
+    "UPDATE_RECURRING_NEED": {
+        "tool_name": "update_recurring_need",
+        "required": [],
+        "action_type": "WRITE",
+        "requires_farm": False,
+        "handled_by_flow": True,
+        "label": (
+            "Modifie/suspend/reprend/annule un besoin récurrent EXISTANT "
+            "(ex: \"passe mes tomates à 25 kg\", \"suspend cette semaine\", "
+            "\"demain seulement 10 kg\") — PAS une création (CREATE_RECURRING_NEED)"
+        ),
+        "label_map": {
+            "product": "produit concerné",
+            "quantity": "nouvelle quantité",
+            "occurrence_date": "date concernée",
+        },
+    },
+    "GET_MY_NEEDS": {
+        "tool_name": "list_my_recurring_needs",
+        "required": [],
+        "action_type": "READ",
+        "requires_farm": False,
+        "handled_by_flow": True,
+        "label": "Liste mes besoins d'approvisionnement récurrents",
+        "label_map": {},
+    },
     "BUYER_REQUEST": {
         "tool_name": "search_products",
         "required": ["product"],
@@ -921,6 +985,13 @@ _TUNNEL_ASSIGNMENTS = {
     # (déjà routé vers order_tracking_resolver) : la sélection de l'appel
     # d'offres à modifier réutilise la même liste que BUYER_LIST_AUCTIONS.
     "PROCUREMENT_UPDATE_REQUEST": "auction_tracking",
+    # Approvisionnement récurrent (Phase 2) — gère sa propre confirmation
+    # (CREATE via RecurringNeedDraft, UPDATE/GET sans draft, résolution
+    # conversationnelle), jamais confirmation_gate/mcp_tool_executor
+    # génériques. Un seul tunnel pour les 3 : voir flows/buyer/recurring_need.py.
+    "CREATE_RECURRING_NEED": "recurring_need",
+    "UPDATE_RECURRING_NEED": "recurring_need",
+    "GET_MY_NEEDS": "recurring_need",
     # PRODUCER — intents entièrement pris en charge par
     # producer_auction_resolver (jamais confirmation_gate/mcp_tool_executor).
     "MARKET_BROWSE_REQUESTS": "producer_auction",
@@ -1035,6 +1106,10 @@ INTENT_ROLE = {
     # PROCUREMENT — buyer
     "PROCUREMENT_CREATE_REQUEST": "BUYER",
     "PROCUREMENT_UPDATE_REQUEST": "BUYER",
+    # Approvisionnement récurrent (Phase 2) — buyer only
+    "CREATE_RECURRING_NEED": "BUYER",
+    "UPDATE_RECURRING_NEED": "BUYER",
+    "GET_MY_NEEDS": "BUYER",
     "BUYER_REQUEST": "BUYER",
     # BUYER transactional tunnel (Panier → Précommande → Négociation)
     "BUYER_ADD_TO_CART": "BUYER",

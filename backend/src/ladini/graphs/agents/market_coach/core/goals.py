@@ -40,6 +40,11 @@ BUYER_PREORDER_GOALS: FrozenSet[str] = _goals_for_tunnel("preorder") | {
 BUYER_NEGOTIATION_GOALS: FrozenSet[str] = _goals_for_tunnel("negotiation")
 BUYER_ORDER_TRACKING_GOALS: FrozenSet[str] = _goals_for_tunnel("order_tracking")
 BUYER_AUCTION_TRACKING_GOALS: FrozenSet[str] = _goals_for_tunnel("auction_tracking")
+# Approvisionnement récurrent (Phase 2) — CREATE gère sa propre confirmation
+# via RecurringNeedDraft, UPDATE/GET n'ont pas de confirmation générique non
+# plus (résolution conversationnelle) — jamais confirmation_gate/
+# mcp_tool_executor génériques pour ce tunnel.
+BUYER_RECURRING_NEED_GOALS: FrozenSet[str] = _goals_for_tunnel("recurring_need")
 
 ALL_BUYER_TUNNEL_GOALS: FrozenSet[str] = (
     BUYER_CART_GOALS
@@ -47,6 +52,7 @@ ALL_BUYER_TUNNEL_GOALS: FrozenSet[str] = (
     | BUYER_NEGOTIATION_GOALS
     | BUYER_ORDER_TRACKING_GOALS
     | BUYER_AUCTION_TRACKING_GOALS
+    | BUYER_RECURRING_NEED_GOALS
 )
 
 # ── PRODUCER — intents pris en charge par producer_auction_resolver ──
@@ -81,6 +87,7 @@ _KNOWN_TUNNELS = frozenset(
         "producer_auction",
         "producer_update",
         "producer_escrow",
+        "recurring_need",
     }
 )
 
@@ -194,6 +201,7 @@ __all__ = [
     "BUYER_NEGOTIATION_GOALS",
     "BUYER_ORDER_TRACKING_GOALS",
     "BUYER_AUCTION_TRACKING_GOALS",
+    "BUYER_RECURRING_NEED_GOALS",
     "ALL_BUYER_TUNNEL_GOALS",
     "PRODUCER_RESOLVER_GOALS",
     "PRODUCER_UPDATE_GOALS",

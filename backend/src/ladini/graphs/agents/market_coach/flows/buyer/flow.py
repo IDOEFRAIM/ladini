@@ -32,6 +32,7 @@ from .helpers import (
     NEGOTIATION_GOALS,
     ORDER_TRACKING_GOALS,
     PREORDER_GOALS,
+    RECURRING_NEED_GOALS,
     clear_active_goal,
     draft_block_response,
     draft_requires_completion,
@@ -295,6 +296,13 @@ async def buyer_context_resolver(
         )
 
         return _finalize(await order_tracking_resolver(state, mc_runtime))
+
+    if goal in RECURRING_NEED_GOALS:
+        from ladini.graphs.agents.market_coach.flows.buyer.recurring_need import (
+            recurring_need_flow,
+        )
+
+        return _finalize(await recurring_need_flow(state, mc_runtime))
 
     # ── Default: planning or draft gate ───────────────────────────────
     draft = state.get("draft_payload")
