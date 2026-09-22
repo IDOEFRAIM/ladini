@@ -546,6 +546,18 @@ class Settings(BaseSettings):
     SALES_EXECUTING_STALE_SECONDS: float = 900.0
     SALES_RECONCILIATION_INTERVAL_SECONDS: float = 300.0
 
+    # --- Matching de l'approvisionnement récurrent (Phase 3, 2026-09) ---
+    # Filet de sécurité fréquent : produits publiés/réapprovisionnés (`products.updated_at`) dans les
+    # `RECURRING_MATCH_RECENT_WINDOW_MINUTES` dernières minutes, rematchés par sous-catégorie — même
+    # fenêtre glissante que `ProximityMatchingService.run(recent_days=...)`, en minutes plutôt qu'en
+    # jours (mandat §12 : quasi-immédiat, pas un scan complet).
+    RECURRING_MATCH_RECENT_PRODUCTS_INTERVAL_SECONDS: float = 120.0
+    RECURRING_MATCH_RECENT_WINDOW_MINUTES: float = 5.0
+    # Rematch temporel léger (mandat §13) : occurrences OPEN/MATCHED dues dans les prochaines
+    # `RECURRING_MATCH_UPCOMING_WINDOW_HOURS` heures — jamais l'historique complet.
+    RECURRING_MATCH_UPCOMING_INTERVAL_SECONDS: float = 3600.0
+    RECURRING_MATCH_UPCOMING_WINDOW_HOURS: float = 48.0
+
     # Disjoncteur — défauts repris tels quels de l'ancien `_CircuitBreaker`
     # process-local de get_llm.py (3 échecs / 30s), désormais partagés via
     # Redis entre tous les workers (API + Celery + MCP).

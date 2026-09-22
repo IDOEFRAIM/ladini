@@ -81,6 +81,16 @@ class Graph:
         cols.update(over)
         return insert(self.cur, "marketplace.recurring_need_occurrences", **cols)
 
+    def product_for(self, producer=None, **over):
+        """Un produit catalogue publié (`is_available=True` par défaut) — pour peupler plusieurs
+        offres concurrentes d'une même sous-catégorie (Phase 3 : matching multi-fournisseurs)."""
+        cols = dict(
+            category_label="Céréales", price=100, unit="KG", quantity_for_sale=50,
+            producer_id=producer or self.producer, sub_category_id=self.sub_category, is_available=True,
+        )
+        cols.update(over)
+        return insert(self.cur, "marketplace.products", **cols)
+
     def allocation(self, occurrence=None, producer=None, product=None, **over):
         cols = dict(
             occurrence_id=occurrence or self.occurrence(), producer_id=producer or self.producer,

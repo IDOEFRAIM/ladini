@@ -72,4 +72,23 @@ BEAT_SCHEDULE: Dict[str, Dict[str, Any]] = {
             "expires": max(1.0, settings.SALES_RECONCILIATION_INTERVAL_SECONDS - 30)
         },
     },
+    # Matching de l'approvisionnement récurrent (Phase 3) : filet de sécurité fréquent — même principe
+    # que "proximity-matching" (fenêtre glissante sur les produits récemment publiés/réapprovisionnés),
+    # jamais un scan complet des besoins.
+    "recurring-match-recent-products": {
+        "task": "workers.recurring_match_recent_products",
+        "schedule": settings.RECURRING_MATCH_RECENT_PRODUCTS_INTERVAL_SECONDS,
+        "options": {
+            "expires": max(1.0, settings.RECURRING_MATCH_RECENT_PRODUCTS_INTERVAL_SECONDS - 30)
+        },
+    },
+    # Rematch temporel léger (mandat §13) : occurrences dues bientôt, au cas où un changement de stock
+    # serait passé entre deux fenêtres du cron ci-dessus (Beat n'est jamais garanti sans retard).
+    "recurring-match-upcoming-occurrences": {
+        "task": "workers.recurring_match_upcoming_occurrences",
+        "schedule": settings.RECURRING_MATCH_UPCOMING_INTERVAL_SECONDS,
+        "options": {
+            "expires": max(1.0, settings.RECURRING_MATCH_UPCOMING_INTERVAL_SECONDS - 60)
+        },
+    },
 }
