@@ -791,10 +791,30 @@ class CartDomainService:
                     "⚠️ La vérification du stock n'a pas abouti. Veuillez réessayer."
                 )
 
+            # §FAILLE CORRIGÉE ICI (2026-09-22, incident réel de production) :
+            # un acheteur en rupture de stock partielle répond très naturellement
+            # « non, je prends les 43 » — refuse l'appel d'offres mais veut
+            # BASCULER sur ce qui est réellement disponible, un 3e choix que le
+            # message ne proposait même pas explicitement. `available` (le
+            # STOCK réel, jamais le `stock_check_qty` demandé initialement) est
+            # désormais mémorisé ici, en mémoire de travail, comme vérité
+            # déterministe pour le tour suivant (`buyer_request_resolver`,
+            # `flows/buyer/procurement.py`) — plutôt que de forcer ce tour-là à
+            # re-deviner un nombre dans du texte libre sans savoir à quoi le
+            # comparer. Uniquement pour une vraie pénurie chiffrée (jamais pour
+            # `product_not_found`, où `available` est `None` et prendre "ce qui
+            # est disponible" n'a pas de sens).
+            available_hint = ""
+            if available is not None:
+                available_hint = (
+                    f"\n👉 Ou répondez *{_fmt_num(available)}* pour prendre "
+                    f"directement le stock disponible."
+                )
             escalation = (
                 "\n\n🙋 Souhaitez-vous lancer un *appel d'offres* pour que les producteurs "
                 "s'engagent à fournir cette quantité ?\n"
                 "👉 Répondez *oui* pour lancer, ou *non* pour autre chose."
+                + available_hint
             )
             wm = dict(state.get("working_memory") or {})
             wm.update(
@@ -804,6 +824,9 @@ class CartDomainService:
                     "buyer_request_last_product": display_name,
                 }
             )
+            if available is not None:
+                wm["buyer_request_available_quantity"] = available
+                wm["buyer_request_available_unit"] = unit_lbl
             payload_seed = {"product": display_name}
             # Même correction : l'appel d'offres proposé en repli doit porter la
             # quantité RÉELLE en unité de base (`unit` ci-dessous), pas un

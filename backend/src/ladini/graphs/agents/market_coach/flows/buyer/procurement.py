@@ -299,6 +299,71 @@ async def buyer_request_resolver(
         # de `_CONFIRM_EXACT_PHRASES`) a été supprimé.
         if interpreted_event == "CONFIRM" or normalized_text in ESCALATE_KEYWORDS:
             return _escalate(_ESCALATION_MSG)
+
+        # §FAILLE CORRIGÉE ICI (2026-09-22, incident réel de production) :
+        # un acheteur en rupture de stock partielle répond très naturellement
+        # « non, je prends les 43 » — un 3e choix, ni CONFIRM (lancer l'appel
+        # d'offres) ni un simple REJECT (abandonner), que rien ne gérait :
+        # `interpreted_event` retombait sur autre chose que CONFIRM/REJECT
+        # (compound message), ce bloc ne matchait alors NI l'un NI l'autre
+        # branche et laissait passer la quantité PÉRIMÉE de la demande
+        # initiale (900, celle qui avait justement échoué) jusqu'à la
+        # confirmation finale — l'acheteur se retrouvait à re-confirmer la
+        # quantité même que le système venait de refuser, jamais celle qu'il
+        # venait de demander.
+        #
+        # Détection DÉTERMINISTE (pas une devinette LLM) : `available_quantity`
+        # a été mémorisé par `cart_service.py` au moment même où ce choix a
+        # été posé — c'est la vérité du STOCK réel, jamais un nombre à
+        # re-deviner sans référence. Un SEUL nombre nu dans la réponse (pas de
+        # devise à proximité, jamais 2+ candidats ambigus — même discipline
+        # que partout ailleurs dans l'interpréteur) est alors lu comme la
+        # quantité CORRIGÉE que l'acheteur veut réellement, quel que soit le
+        # nombre exact (il peut vouloir MOINS que le stock disponible) — pas
+        # besoin qu'il corresponde pile à `available_quantity` : `cart_management`
+        # revalide le stock normalement en aval, avec le contrôle déjà
+        # existant et déjà testé (pas de logique de clamp dupliquée ici).
+        available_qty = working_memory.get("buyer_request_available_quantity")
+        if available_qty is not None:
+            from ladini.domain.quantity_unit import scan_number_candidates
+
+            bare_candidates = [
+                c
+                for c in scan_number_candidates(normalized_text)
+                if not c.near_currency and c.value > 0
+            ]
+            if len(bare_candidates) == 1:
+                corrected_qty = bare_candidates[0].value
+                available_unit = (
+                    working_memory.get("buyer_request_available_unit") or unit
+                )
+                wm = dict(working_memory)
+                for key in (
+                    "buyer_request_waiting_choice",
+                    "buyer_request_catalog_checked",
+                    "buyer_request_last_product",
+                    "buyer_request_available_quantity",
+                    "buyer_request_available_unit",
+                ):
+                    wm[key] = None
+                syn_payload = dict(payload)
+                syn_payload["product"] = product_name
+                syn_payload["quantity"] = corrected_qty
+                if available_unit:
+                    syn_payload["unit"] = available_unit
+                synthetic = dict(state)
+                synthetic["transaction_payload"] = syn_payload
+                synthetic["working_memory"] = wm
+                synthetic["current_goal"] = "BUYER_ADD_TO_CART"
+                logger.info(
+                    "buyer_request_resolver: waiting_choice + quantité "
+                    "corrigée (%s) détectée dans la réponse — bascule "
+                    "directe vers cart_management au lieu d'un appel "
+                    "d'offres/reset",
+                    corrected_qty,
+                )
+                return await cart_management(synthetic, mc_runtime)
+
         if interpreted_event == "REJECT":
             wm = dict(working_memory)
             # None-overwrite (merge_dict) — voir explication plus haut : un pop
