@@ -93,6 +93,15 @@ _ALLOWED_TRANSITIONS: Dict[RecurringNeedDraftStatus, frozenset] = {
     RecurringNeedDraftStatus.CANCELLED: frozenset(),
 }
 
+_TERMINAL_STATUSES = frozenset(
+    {
+        RecurringNeedDraftStatus.EXECUTED,
+        RecurringNeedDraftStatus.FAILED,
+        RecurringNeedDraftStatus.EXECUTION_UNKNOWN,
+        RecurringNeedDraftStatus.CANCELLED,
+    }
+)
+
 
 @dataclass(frozen=True)
 class RecurringNeedDraft:
@@ -213,6 +222,13 @@ class RecurringNeedDraft:
 
     def execution_payload(self) -> Dict[str, Any]:
         return {f: getattr(self, f) for f in _FIELD_NAMES if slot_has_value(getattr(self, f))}
+
+    def is_terminal(self) -> bool:
+        """`True` une fois EXECUTED/FAILED/EXECUTION_UNKNOWN/CANCELLED — les 4
+        statuts sans transition sortante dans `_ALLOWED_TRANSITIONS`. Un draft
+        terminal n'a plus vocation à rester le draft ACTIF du state — voir
+        `flows/buyer/recurring_need.py::_apply_response_plan`."""
+        return self.status in _TERMINAL_STATUSES
 
 
 def _fmt_num(value: Optional[float]) -> str:

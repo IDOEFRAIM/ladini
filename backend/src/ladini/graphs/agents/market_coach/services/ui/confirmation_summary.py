@@ -370,9 +370,18 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         quantity_line or payload.get("quantity_display") or payload.get("quantity")
     )
     if fallback_quantity not in (None, "", [], {}):
+        # Bug réel confirmé (2026-09-23, "10 KG KG") : `quantity_line` (via
+        # `_format_quantity`) porte DÉJÀ l'unité ("10 KG") — lui rajouter
+        # `{display_unit or converted_unit}" en dupliquait l'unité. Seuls les
+        # deux replis bruts (`quantity_display`/`quantity`, de simples
+        # nombres sans unité) en ont encore besoin ici.
+        quantity_text = (
+            str(fallback_quantity)
+            if fallback_quantity is quantity_line
+            else f"{fallback_quantity} {display_unit or converted_unit}"
+        )
         return (
-            f"Confirmez-vous cette opération pour {fallback_quantity}"
-            f" {display_unit or converted_unit}"
+            f"Confirmez-vous cette opération pour {quantity_text}"
             + (f" de *{product}*" if product not in (None, "", [], {}) else "")
             + " ?"
         )

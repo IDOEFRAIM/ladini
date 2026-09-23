@@ -81,6 +81,21 @@ class TestConfirmationSummary:
         s = build_confirmation_summary("SOME_UNMAPPED_GOAL", {})
         assert "SOME_UNMAPPED_GOAL" not in s
 
+    def test_unknown_goal_with_quantity_never_duplicates_the_unit(self):
+        """Bug réel confirmé (2026-09-23, "10 KG KG") : le fallback générique
+        (goal sans gabarit dédié — même mauvais-aiguillage que le test
+        ci-dessus) rajoutait `{display_unit}` APRÈS `quantity_line`, qui
+        porte déjà l'unité (`_format_quantity` -> "10 KG"). Observé en
+        production sur un besoin récurrent mal aiguillé vers ce récap
+        générique : "Confirmez-vous cette opération pour 10 KG KG de
+        *tomate* ?"."""
+        s = build_confirmation_summary(
+            "SOME_UNMAPPED_GOAL", {"product": "tomate", "quantity": 10, "unit": "KG"}
+        )
+        assert "KG KG" not in s
+        assert "10 KG" in s
+        assert "tomate" in s
+
     def test_procurement_create_request_shows_the_price_unit(self):
         """Régression production (2026-08) : le récap d'un appel d'offres
         affichait « 300 FCFA » sans unité — ambigu (par kg ? par tonne ?),

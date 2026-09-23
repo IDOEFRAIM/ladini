@@ -89,8 +89,23 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
 
     draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
     extracted = {k: v for k, v in payload.items() if k in _DRAFT_FIELDS and slot_has_value(v)}
+    if interpreted_event == "NEW_TASK":
+        # Nouvelle demande (`interpreter/state_router.py::choose_interpretation_route`
+        # ne renvoie la route NEW_TASK que SANS tunnel/champ/confirmation actif
+        # pour ce goal) : un draft éventuellement encore présent dans le state —
+        # terminé (EXECUTED/FAILED/CANCELLED) OU simplement abandonné en cours de
+        # route — n'a plus rien à voir avec CE message. Jamais réutilisé pour une
+        # nouvelle demande (mandat state-leak §7/§9, bug réel 2026-09-23 : "20 kg
+        # d'oignon" ré-affichait le récapitulatif tomate au lieu d'un nouveau
+        # draft). `resolve_domain_action` ne connaît de toute façon pas l'événement
+        # "NEW_TASK" (seulement CONFIRM/REJECT/UPDATE/ANSWER) — sans ce repli, un
+        # NEW_TASK tombait sur `NoRecurringNeedAction`, jamais un nouveau draft.
+        draft = None
+        domain_event = "UPDATE" if extracted else "ANSWER"
+    else:
+        domain_event = interpreted_event or ("UPDATE" if extracted else "ANSWER")
     action = resolve_domain_action(
-        interpreted_event=interpreted_event or ("UPDATE" if extracted else "ANSWER"),
+        interpreted_event=domain_event,
         extracted_entities=extracted,
         pending_target=pending_target,
     )
@@ -136,11 +151,18 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
 
 
 def _apply_response_plan(plan) -> Dict[str, Any]:
+    # Un draft TERMINAL (EXECUTED/FAILED/EXECUTION_UNKNOWN/CANCELLED) n'a plus
+    # vocation à rester "le" draft actif du state — sinon il ressurgit et se
+    # fait réutiliser par erreur sur le tour suivant (voir le repli NEW_TASK
+    # ci-dessus, qui protège déjà contre ce cas ; ce reset est la seconde
+    # ligne de défense, et empêche aussi l'état de grossir indéfiniment avec
+    # de vieux drafts déjà finalisés).
+    keep_draft = plan.draft is not None and not plan.draft.is_terminal()
     patch: Dict[str, Any] = {
         "final_response": plan.final_response,
         "response_strategy": plan.response_strategy,
         "status": plan.graph_status,
-        "recurring_need_draft": plan.draft.to_dict() if plan.draft else None,
+        "recurring_need_draft": plan.draft.to_dict() if keep_draft else None,
     }
     if plan.terminal_goal_reset:
         patch["current_goal"] = None
