@@ -62,6 +62,24 @@ class NewTaskPricingTier(BaseModel):
     packaging: Optional[str] = None
 
 
+class NewTaskRecurringItem(BaseModel):
+    """Un produit additionnel PORTANT SA PROPRE quantité/unité, pour une demande de
+    besoin récurrent visant plusieurs produits à la fois en un seul message (ex:
+    "10 kg de tomate et 20 kg d'oignon tous les jours sauf dimanche") — modèle sur
+    `NewTaskPricingTier` ci-dessus : `additional_products` (liste de noms nus, plus
+    bas) ne porte aucune quantité individuelle, insuffisant pour construire un
+    `RecurringNeedDraft` par produit (bug réel confirmé 2026-09-23 : l'oignon
+    disparaissait silencieusement, `flows/buyer/recurring_need.py::_create_flow` ne
+    lisant que `product`/`quantity`/`unit`, seul le draft tomate était créé, sans
+    aucun avertissement)."""
+
+    model_config = {"extra": "forbid"}
+
+    product: Optional[str] = None
+    quantity: Optional[float] = None
+    unit: Optional[str] = None
+
+
 class NewTaskEntities(BaseModel):
     """Uniquement des informations DÉJÀ DITES dans CE message — jamais un ID
     technique (spec §11), jamais un champ possédé par une autre route (spec
@@ -96,6 +114,13 @@ class NewTaskEntities(BaseModel):
     weekly_days: List[int] = []
     excluded_weekdays: List[int] = []
     max_price_per_unit: Optional[float] = None
+    # Chantier multi-produits CREATE_RECURRING_NEED (2026-09-23, suite du correctif
+    # state-leak ci-dessus) : UN item structuré {product, quantity, unit} par
+    # produit additionnel, PARTAGEANT la même récurrence/dates/prix max que le
+    # premier produit (`product`/`quantity`/`unit` plus haut) — jamais mélangé avec
+    # `additional_products` (noms nus, sans quantité, pour les AUTRES intentions,
+    # ex: BUYER_REQUEST). Voir `new_task_prompts.py` pour la règle d'extraction.
+    additional_items: List[NewTaskRecurringItem] = []
 
 
 class NewTaskInterpretation(BaseModel):
@@ -218,6 +243,7 @@ def adapt_new_task_to_canonical(
 __all__ = [
     "NewTaskDisposition",
     "NewTaskPricingTier",
+    "NewTaskRecurringItem",
     "NewTaskEntities",
     "NewTaskInterpretation",
     "NewTaskPromptContext",

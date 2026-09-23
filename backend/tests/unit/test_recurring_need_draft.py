@@ -61,6 +61,72 @@ def test_weekly_days_with_days_listed_is_complete():
     assert d.is_complete()
 
 
+# ── chantier multi-produits (2026-09-23) ─────────────────────────────────
+
+def test_a_complete_additional_item_does_not_block_completion():
+    d = RecurringNeedDraft.new(
+        "d1", product="tomate", quantity=10, unit="KG", recurrence_type="DAILY",
+        additional_items=[{"product": "oignon", "quantity": 20, "unit": "KG"}],
+    )
+    assert d.is_complete()
+    assert d.missing_fields() == []
+
+
+def test_an_incomplete_additional_item_blocks_completion():
+    """Filet de sécurité défensif — `_clean_additional_items` (flow) est censé filtrer un item
+    partiel avant qu'il n'atteigne le draft, mais le domaine ne fait jamais confiance à cet
+    invariant sans le vérifier lui-même."""
+    d = RecurringNeedDraft.new(
+        "d1", product="tomate", quantity=10, unit="KG", recurrence_type="DAILY",
+        additional_items=[{"product": "oignon", "quantity": None, "unit": "KG"}],
+    )
+    assert not d.is_complete()
+    assert "quantity" in d.missing_fields()
+
+
+def test_render_summary_lists_every_product_not_only_the_first():
+    d = RecurringNeedDraft.new(
+        "d1", product="tomate", quantity=10, unit="KG", recurrence_type="DAILY",
+        additional_items=[{"product": "oignon", "quantity": 20, "unit": "KG"}],
+    )
+    summary = d.render_summary()
+    assert "Tomate : 10 KG" in summary
+    assert "Oignon : 20 KG" in summary
+
+
+def test_with_updates_replaces_the_whole_additional_items_list():
+    d = RecurringNeedDraft.new(
+        "d1", product="tomate", quantity=10, unit="KG", recurrence_type="DAILY",
+        additional_items=[{"product": "oignon", "quantity": 20, "unit": "KG"}],
+    )
+    d2 = d.with_updates(additional_items=[{"product": "laitue", "quantity": 5, "unit": "KG"}])
+    assert d2.version == 2
+    assert d2.additional_items == [{"product": "laitue", "quantity": 5, "unit": "KG"}]
+
+
+def test_execution_payload_includes_additional_items_when_present():
+    d = RecurringNeedDraft.new(
+        "d1", product="tomate", quantity=10, unit="KG", recurrence_type="DAILY",
+        additional_items=[{"product": "oignon", "quantity": 20, "unit": "KG"}],
+    )
+    payload = d.execution_payload()
+    assert payload["additional_items"] == [{"product": "oignon", "quantity": 20, "unit": "KG"}]
+
+
+def test_execution_payload_omits_additional_items_when_absent():
+    d = RecurringNeedDraft.new("d1", product="tomate", quantity=10, unit="KG", recurrence_type="DAILY")
+    assert "additional_items" not in d.execution_payload()
+
+
+def test_to_dict_and_from_dict_round_trip_additional_items():
+    d = RecurringNeedDraft.new(
+        "d1", product="tomate", quantity=10, unit="KG", recurrence_type="DAILY",
+        additional_items=[{"product": "oignon", "quantity": 20, "unit": "KG"}],
+    )
+    restored = RecurringNeedDraft.from_dict(d.to_dict())
+    assert restored.additional_items == [{"product": "oignon", "quantity": 20, "unit": "KG"}]
+
+
 # ── with_updates : version bump seulement si un champ change ────────────
 
 def test_with_updates_bumps_version_when_a_field_actually_changes():

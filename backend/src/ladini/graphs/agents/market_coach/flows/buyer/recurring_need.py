@@ -54,6 +54,7 @@ _DRAFT_FIELDS = (
     "product",
     "quantity",
     "unit",
+    "additional_items",
     "recurrence_type",
     "weekly_days",
     "excluded_weekdays",
@@ -61,6 +62,26 @@ _DRAFT_FIELDS = (
     "ends_at",
     "max_price_per_unit",
 )
+
+
+def _clean_additional_items(raw: Any) -> List[Dict[str, Any]]:
+    """Ne garde que les items `{product, quantity, unit}` COMPLETS (chantier
+    multi-produits, 2026-09-23) — un item partiel (ex: un nom de produit
+    supplémentaire sans sa propre quantité/unité) n'a rien de fiable à créer
+    comme besoin récurrent à part entière et reste silencieusement ignoré ICI
+    (même principe que `additional_products`, jamais pire), mais un item
+    COMPLET n'est plus jamais perdu — c'était le bug réel : "10 kg de tomate
+    et 20 kg d'oignon tous les jours" ne créait qu'un draft tomate."""
+    if not isinstance(raw, list):
+        return []
+    cleaned: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        product, quantity, unit = item.get("product"), item.get("quantity"), item.get("unit")
+        if slot_has_value(product) and slot_has_value(quantity) and slot_has_value(unit):
+            cleaned.append({"product": str(product).strip(), "quantity": quantity, "unit": str(unit).strip()})
+    return cleaned
 
 
 async def recurring_need_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
@@ -89,6 +110,12 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
 
     draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
     extracted = {k: v for k, v in payload.items() if k in _DRAFT_FIELDS and slot_has_value(v)}
+    if "additional_items" in extracted:
+        cleaned_items = _clean_additional_items(extracted["additional_items"])
+        if cleaned_items:
+            extracted["additional_items"] = cleaned_items
+        else:
+            extracted.pop("additional_items")
     if interpreted_event == "NEW_TASK":
         # Nouvelle demande (`interpreter/state_router.py::choose_interpretation_route`
         # ne renvoie la route NEW_TASK que SANS tunnel/champ/confirmation actif
@@ -116,20 +143,46 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         executing = outcome.draft
         try:
             gw = RecurringSupplyGateway(mc_runtime)
-            mcp_result = await gw.create_recurring_need(
-                phone=str(phone),
-                product_query=executing.product,
-                quantity=executing.quantity,
-                unit=executing.unit,
-                recurrence_type=executing.recurrence_type,
-                weekly_days=executing.weekly_days,
-                excluded_weekdays=executing.excluded_weekdays,
-                starts_at=executing.starts_at,
-                ends_at=executing.ends_at,
-                max_price_per_unit=executing.max_price_per_unit,
-                idempotency_key=f"recurring_need:{executing.draft_id}:{executing.version}",
-            )
-            exec_result = RecurringNeedExecutionResult(success=True, external_id=mcp_result.get("recurring_need_id"))
+            if executing.additional_items:
+                # Chantier multi-produits (2026-09-23) : un SEUL besoin récurrent ne suffit
+                # plus — `create_recurring_needs` (pluriel) crée TOUS les produits de cette
+                # demande dans UNE SEULE transaction côté service (rollback complet si l'un
+                # d'eux échoue, ex: résolution catalogue impossible pour l'un des produits —
+                # jamais une création partielle silencieuse).
+                items = [
+                    {"product_query": executing.product, "quantity": executing.quantity, "unit": executing.unit}
+                ] + [
+                    {"product_query": it.get("product"), "quantity": it.get("quantity"), "unit": it.get("unit")}
+                    for it in executing.additional_items
+                ]
+                mcp_result = await gw.create_recurring_needs(
+                    phone=str(phone),
+                    items=items,
+                    recurrence_type=executing.recurrence_type,
+                    weekly_days=executing.weekly_days,
+                    excluded_weekdays=executing.excluded_weekdays,
+                    starts_at=executing.starts_at,
+                    ends_at=executing.ends_at,
+                    max_price_per_unit=executing.max_price_per_unit,
+                    idempotency_key=f"recurring_need:{executing.draft_id}:{executing.version}",
+                )
+                created_ids = ",".join(str(it.get("recurring_need_id")) for it in mcp_result.get("items") or [])
+                exec_result = RecurringNeedExecutionResult(success=True, external_id=created_ids or None)
+            else:
+                mcp_result = await gw.create_recurring_need(
+                    phone=str(phone),
+                    product_query=executing.product,
+                    quantity=executing.quantity,
+                    unit=executing.unit,
+                    recurrence_type=executing.recurrence_type,
+                    weekly_days=executing.weekly_days,
+                    excluded_weekdays=executing.excluded_weekdays,
+                    starts_at=executing.starts_at,
+                    ends_at=executing.ends_at,
+                    max_price_per_unit=executing.max_price_per_unit,
+                    idempotency_key=f"recurring_need:{executing.draft_id}:{executing.version}",
+                )
+                exec_result = RecurringNeedExecutionResult(success=True, external_id=mcp_result.get("recurring_need_id"))
         except MCPCallError as exc:
             logger.warning("recurring_need.create_failed | draft=%s | %s", executing.draft_id, exc)
             exec_result = RecurringNeedExecutionResult(success=False, error=str(exc))

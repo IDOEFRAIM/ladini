@@ -65,6 +65,7 @@ _FIELD_NAMES = (
     "starts_at",
     "ends_at",
     "max_price_per_unit",
+    "additional_items",
 )
 # `starts_at` n'est PAS requis : non renseigné, il est par défaut "demain" au moment de l'exécution
 # (mandat §4 — "À partir de demain." dans l'exemple validé), calculé par le service (impur), jamais ici.
@@ -118,6 +119,14 @@ class RecurringNeedDraft:
     starts_at: Optional[str] = None
     ends_at: Optional[str] = None
     max_price_per_unit: Optional[float] = None
+    # Chantier multi-produits (2026-09-23) : `[{"product", "quantity", "unit"}, ...]` —
+    # produits SUPPLÉMENTAIRES au-delà de `product`/`quantity`/`unit` ci-dessus, PARTAGEANT
+    # la même récurrence/dates/prix max (même principe que `SalesPublishDraft.pricing_tiers` :
+    # un champ liste sur UN SEUL draft, jamais explosé en plusieurs drafts — un seul
+    # `draft_id`/`version`/`ConfirmationTarget` couvre toute la demande). Chaque item n'est
+    # ajouté ici QUE complet (product+quantity+unit) — voir
+    # `flows/buyer/recurring_need.py::_clean_additional_items`.
+    additional_items: Optional[List[Dict[str, Any]]] = None
     created_at: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
@@ -196,6 +205,8 @@ class RecurringNeedDraft:
         # l'utilisateur avant confirmation plutôt que rejeté par la base après coup.
         if self.recurrence_type == "WEEKLY_DAYS" and not self.weekly_days:
             return False
+        if not _additional_items_complete(self.additional_items):
+            return False
         return True
 
     def missing_fields(self) -> List[str]:
@@ -204,16 +215,23 @@ class RecurringNeedDraft:
             missing.append("product")
         if self.recurrence_type == "WEEKLY_DAYS" and not self.weekly_days and "weekly_days" not in missing:
             missing.append("weekly_days")
+        # Un item additionnel incomplet ne devrait normalement jamais atteindre le draft
+        # (`_clean_additional_items` le filtre déjà en amont) — filet de sécurité générique
+        # plutôt qu'un message dédié pour ce cas censé rester inatteignable en pratique.
+        if not _additional_items_complete(self.additional_items) and "quantity" not in missing:
+            missing.append("quantity")
         return missing
 
     def render_summary(self) -> str:
-        """Projection PURE (mandat §18 : jamais les mots occurrence/CAS/recurring_need/version)."""
+        """Projection PURE (mandat §18 : jamais les mots occurrence/CAS/recurring_need/version).
+        Liste CHAQUE produit de la demande (mandat multi-produits 2026-09-23) — jamais seulement
+        le premier."""
         if not self.is_complete():
             return "Votre besoin d'approvisionnement en cours de construction."
-        label = self.product or "ce produit"
-        qty = _fmt_num(self.quantity)
-        freq = _render_frequency(self.recurrence_type, self.weekly_days, self.excluded_weekdays)
-        lines = [f"{label.capitalize()} : {qty} {self.unit}", freq]
+        lines = [_render_item_line(self.product, self.quantity, self.unit)]
+        for item in self.additional_items or []:
+            lines.append(_render_item_line(item.get("product"), item.get("quantity"), item.get("unit")))
+        lines.append(_render_frequency(self.recurrence_type, self.weekly_days, self.excluded_weekdays))
         if slot_has_value(self.starts_at):
             lines.append(f"À partir du {self.starts_at}.")
         else:
@@ -235,6 +253,22 @@ def _fmt_num(value: Optional[float]) -> str:
     if value is None:
         return ""
     return f"{value:g}"
+
+
+def _additional_items_complete(items: Optional[List[Dict[str, Any]]]) -> bool:
+    for item in items or []:
+        if not slot_has_value(item.get("product")):
+            return False
+        if not slot_has_value(item.get("quantity")):
+            return False
+        if not slot_has_value(item.get("unit")):
+            return False
+    return True
+
+
+def _render_item_line(product: Optional[str], quantity: Optional[float], unit: Optional[str]) -> str:
+    label = product or "ce produit"
+    return f"{label.capitalize()} : {_fmt_num(quantity)} {unit}"
 
 
 _WEEKDAY_LABELS = {1: "lundi", 2: "mardi", 3: "mercredi", 4: "jeudi", 5: "vendredi", 6: "samedi", 7: "dimanche"}

@@ -24,7 +24,6 @@ from ladini.graphs.agents.market_coach.interpreter.new_task_micro import (
     run_new_task_microprompt,
 )
 from ladini.graphs.agents.market_coach.interpreter.new_task_prompts import (
-    NEW_TASK_PROMPT_VERSION,
     build_new_task_system_prompt,
     build_new_task_user_prompt,
 )
@@ -201,6 +200,27 @@ class TestEntityExtractionNeverHallucinates:
         assert ents["product"] == "œufs"
         assert ents["additional_products"] == ["laitue"]
         assert "," not in ents["product"] and " et " not in ents["product"]
+
+    def test_multiple_recurring_products_each_keep_their_own_quantity_and_unit(self):
+        """Chantier multi-produits CREATE_RECURRING_NEED (2026-09-23, suite du
+        correctif state-leak) : contrairement à `additional_products` (noms nus),
+        `additional_items` porte quantité+unité PAR produit — plus aucune perte
+        silencieuse de l'oignon."""
+        outcome, result, _ = run(self._run(
+            {
+                "disposition": "NEW_TASK", "intent": "CREATE_RECURRING_NEED", "confidence": 0.9,
+                "entities": {
+                    "product": "tomate", "quantity": 10.0, "unit": "kg",
+                    "additional_items": [{"product": "oignon", "quantity": 20.0, "unit": "kg"}],
+                    "recurrence_type": "DAILY", "excluded_weekdays": [7],
+                },
+            },
+            text="j ai besoin de 10 kg de tomate et 20 kg d oignon tous les jours sauf dimanche",
+        ))
+        ents = result["extracted_entities"]
+        assert ents["product"] == "tomate"
+        assert ents["quantity"] == 10.0
+        assert ents["additional_items"] == [{"product": "oignon", "quantity": 20.0, "unit": "kg"}]
 
     def test_price_and_quantity_are_never_swapped(self):
         # "892 kg de maïs à 250 FCFA/kg" -> quantity=892/KG, price=250/KG —

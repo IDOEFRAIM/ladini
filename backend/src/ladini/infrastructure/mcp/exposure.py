@@ -122,6 +122,7 @@ MCP_EXPOSED_TOOLS: frozenset[str] = frozenset(
         "get_auctions",
         # ── Approvisionnement récurrent (Phase 2/4) ─────────────────────────
         "create_recurring_need",
+        "create_recurring_needs",
         "update_recurring_need",
         "list_my_recurring_needs",
         "get_recurring_need_detail",

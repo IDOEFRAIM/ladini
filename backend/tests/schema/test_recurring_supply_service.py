@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 import ladini.services.database.recurring_supply as recurring_supply_module
 from ladini.domain.models import RecurringNeed, RecurringNeedOccurrence
 from ladini.services.database.auction import AuctionMixin
+from ladini.services.database.errors import BusinessRuleException
 from ladini.services.database.moderation import ModerationMixin
 from ladini.services.database.producer import ProducerMgmtMixin
 from ladini.services.database.recurring_supply import RecurringSupplyMixin
@@ -185,6 +186,87 @@ def test_materializing_the_same_window_twice_creates_no_duplicate(market):
     second_call_created, total = _run(market[0], fn)
     assert second_call_created == 0
     assert total == 7
+
+
+# ── création multi-produits, atomique (chantier 2026-09-23) ─────────────
+
+def test_create_recurring_needs_creates_one_need_per_item(market):
+    async def fn(session):
+        result = await _svc(session, market).create_recurring_needs(
+            phone="+226",
+            items=[
+                {"product_query": "tomate", "quantity": 10, "unit": "KG"},
+                {"product_query": "oignon", "quantity": 20, "unit": "KG"},
+            ],
+            recurrence_type="DAILY",
+        )
+        needs = (
+            await session.execute(select(RecurringNeed).where(RecurringNeed.buyer_id == market[2].id))
+        ).scalars().all()
+        return result, needs
+
+    result, needs = _run(market[0], fn)
+    assert result["status"] == "success"
+    assert len(result["items"]) == 2
+    assert len(needs) == 2
+    assert {n.quantity for n in needs} == {10, 20}
+
+
+def test_create_recurring_needs_materializes_occurrences_for_every_item(market):
+    async def fn(session):
+        result = await _svc(session, market).create_recurring_needs(
+            phone="+226",
+            items=[
+                {"product_query": "tomate", "quantity": 10, "unit": "KG"},
+                {"product_query": "oignon", "quantity": 20, "unit": "KG"},
+            ],
+            recurrence_type="DAILY",
+        )
+        occurrence_counts = []
+        for item in result["items"]:
+            rows = (
+                await session.execute(
+                    select(RecurringNeedOccurrence).where(
+                        RecurringNeedOccurrence.recurring_need_id == uuid.UUID(item["recurring_need_id"])
+                    )
+                )
+            ).scalars().all()
+            occurrence_counts.append(len(rows))
+        return occurrence_counts
+
+    occurrence_counts = _run(market[0], fn)
+    assert occurrence_counts == [7, 7]
+
+
+def test_create_recurring_needs_rolls_back_everything_if_one_item_fails(market):
+    """Mandat multi-produits (2026-09-23) : un produit invalide dans le 2e item ne doit JAMAIS
+    laisser le 1er item déjà créé — rollback complet, jamais de création partielle silencieuse."""
+
+    async def fn(session):
+        svc = _svc(session, market)
+        raised = False
+        try:
+            await svc.create_recurring_needs(
+                phone="+226",
+                items=[
+                    {"product_query": "tomate", "quantity": 10, "unit": "KG"},
+                    {"product_query": "", "quantity": 20, "unit": "KG"},  # produit manquant
+                ],
+                recurrence_type="DAILY",
+            )
+        except BusinessRuleException:
+            raised = True
+            # Même geste que `@transactional(write=True)` sur exception (`base_service.py`) —
+            # ce test reproduit le rollback réel, jamais seulement l'absence d'exception.
+            await session.rollback()
+        needs = (
+            await session.execute(select(RecurringNeed).where(RecurringNeed.buyer_id == market[2].id))
+        ).scalars().all()
+        return raised, needs
+
+    raised, needs = _run(market[0], fn)
+    assert raised, "un produit vide doit lever BusinessRuleException, jamais réussir silencieusement"
+    assert needs == [], "aucun besoin ne doit rester créé si un item échoue — rollback complet attendu"
 
 
 # ── mise à jour permanente : occurrences futures OPEN uniquement ────────

@@ -590,6 +590,34 @@ class RecurringSupplyGateway(_BaseGateway):
             idempotency_key=idempotency_key,
         )
 
+    async def create_recurring_needs(
+        self,
+        phone: str,
+        items: Any,
+        recurrence_type: str,
+        weekly_days: Any = None,
+        excluded_weekdays: Any = None,
+        starts_at: Any = None,
+        ends_at: Any = None,
+        max_price_per_unit: Any = None,
+        idempotency_key: Any = None,
+    ) -> Dict[str, Any]:
+        """Variante plurielle (chantier multi-produits, 2026-09-23) — `items` est une liste de
+        `{"product_query", "quantity", "unit"}`, tous créés dans UNE SEULE transaction côté service
+        (voir `services/database/recurring_supply.py::create_recurring_needs`)."""
+        return await self._call(
+            "create_recurring_needs",
+            phone=phone,
+            items=items,
+            recurrence_type=recurrence_type,
+            weekly_days=weekly_days,
+            excluded_weekdays=excluded_weekdays,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            max_price_per_unit=max_price_per_unit,
+            idempotency_key=idempotency_key,
+        )
+
     async def update_recurring_need(
         self,
         phone: str,

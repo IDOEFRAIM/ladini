@@ -4,6 +4,9 @@ Trois opérations, mandat §12 : `create_recurring_need`, `update_recurring_need
 `list_my_recurring_needs`. Même conventions que `AuctionMixin` (résolution acheteur/produit,
 `self.session` fourni par le service composé, exceptions `BusinessRuleException`) — pas de 4ᵉ manière
 de faire, pas de couche `repository.py` séparée (aucun mixin de ce paquet n'en a une).
+`create_recurring_needs` (pluriel, chantier multi-produits 2026-09-23) est une variante de
+`create_recurring_need` — même produit unitaire (`_insert_one_recurring_need`), appelée N fois pour N
+produits partageant la même récurrence, jamais une 4ᵉ opération distincte.
 
 ## Ownership (mandat §12)
 
@@ -137,15 +140,14 @@ class RecurringSupplyMixin(BaseMixin):
         max_price_per_unit: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Crée un `RecurringNeed` PUIS matérialise la fenêtre J→J+7 d'occurrences, dans une seule
-        transaction (mandat §14). `starts_at` non fourni = demain (mandat §4 : "À partir de demain.")."""
+        transaction (mandat §14). `starts_at` non fourni = demain (mandat §4 : "À partir de demain.").
+        UN seul produit — voir `create_recurring_needs` (pluriel) pour PLUSIEURS produits partageant la
+        même récurrence, créés atomiquement (chantier multi-produits, 2026-09-23)."""
         current_session = self.session
         if not current_session:
             raise BusinessRuleException("Session indisponible.")
 
         user_obj, buyer_profile = await self.get_buyer_profile(phone=str(phone))
-        buyer_id = buyer_profile.id
-
-        sub_cat = await self._resolve_sub_category(product_query)
 
         start_date = _parse_date(starts_at) or (_today() + timedelta(days=1))
         end_date = _parse_date(ends_at)
@@ -157,6 +159,110 @@ class RecurringSupplyMixin(BaseMixin):
             starts_at=start_date,
             ends_at=end_date,
         )
+
+        result = await self._insert_one_recurring_need(
+            buyer_id=buyer_profile.id,
+            product_query=product_query,
+            quantity=quantity,
+            unit=unit,
+            recurrence_type=recurrence_type,
+            weekly_days=weekly_days,
+            excluded_weekdays=excluded_weekdays,
+            start_date=start_date,
+            end_date=end_date,
+            max_price_per_unit=max_price_per_unit,
+            rule=rule,
+        )
+
+        logger.info(
+            "recurring_need.created | recurring_need_id=%s | buyer_id=%s | occurrences=%s",
+            result["recurring_need_id"], buyer_profile.id, result["occurrences_created"],
+        )
+        return {"status": "success", **result}
+
+    async def create_recurring_needs(
+        self,
+        phone: str,
+        items: List[Dict[str, Any]],
+        recurrence_type: str,
+        weekly_days: Optional[List[int]] = None,
+        excluded_weekdays: Optional[List[int]] = None,
+        starts_at: Optional[Any] = None,
+        ends_at: Optional[Any] = None,
+        max_price_per_unit: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Variante plurielle de `create_recurring_need` (chantier multi-produits, 2026-09-23) : crée
+        PLUSIEURS `RecurringNeed` (un par item de `items`, chacun `{"product_query", "quantity",
+        "unit"}`) PARTAGEANT la même récurrence/dates/prix max, chacun avec ses propres occurrences,
+        dans UNE SEULE transaction — même discipline que `create_recurring_need` (mandat §14), étendue
+        à N produits : un item dont le produit ne résout à aucune sous-catégorie (`BusinessRuleException`
+        propagée, jamais interceptée ici) fait échouer TOUS les items déjà insérés dans CET appel
+        (rollback complet porté par `@transactional(write=True)`, appliqué UNE fois pour tout l'appel —
+        jamais de création partielle silencieuse)."""
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+        if not items:
+            raise BusinessRuleException("Aucun produit fourni.")
+
+        user_obj, buyer_profile = await self.get_buyer_profile(phone=str(phone))
+
+        start_date = _parse_date(starts_at) or (_today() + timedelta(days=1))
+        end_date = _parse_date(ends_at)
+
+        rule = RecurrenceRule(
+            recurrence_type=recurrence_type,
+            weekly_days=weekly_days or (),
+            excluded_weekdays=excluded_weekdays or (),
+            starts_at=start_date,
+            ends_at=end_date,
+        )
+
+        created: List[Dict[str, Any]] = []
+        for item in items:
+            result = await self._insert_one_recurring_need(
+                buyer_id=buyer_profile.id,
+                product_query=item["product_query"],
+                quantity=item["quantity"],
+                unit=item["unit"],
+                recurrence_type=recurrence_type,
+                weekly_days=weekly_days,
+                excluded_weekdays=excluded_weekdays,
+                start_date=start_date,
+                end_date=end_date,
+                max_price_per_unit=max_price_per_unit,
+                rule=rule,
+            )
+            created.append(result)
+
+        logger.info(
+            "recurring_need.created_batch | buyer_id=%s | count=%s | recurring_need_ids=%s",
+            buyer_profile.id, len(created), [c["recurring_need_id"] for c in created],
+        )
+        return {"status": "success", "items": created}
+
+    async def _insert_one_recurring_need(
+        self,
+        *,
+        buyer_id: Any,
+        product_query: str,
+        quantity: float,
+        unit: str,
+        recurrence_type: str,
+        weekly_days: Optional[List[int]],
+        excluded_weekdays: Optional[List[int]],
+        start_date: date,
+        end_date: Optional[date],
+        max_price_per_unit: Optional[float],
+        rule: RecurrenceRule,
+    ) -> Dict[str, Any]:
+        """UN `RecurringNeed` + ses occurrences — partagée par `create_recurring_need` (1 produit) et
+        `create_recurring_needs` (N produits, même récurrence/dates). Aucun flush/commit propre à cette
+        insertion : le flush (`current_session.flush()`) rend juste l'id disponible pour matérialiser
+        les occurrences tout de suite ; le commit reste entièrement porté par l'appelant racine
+        (`@transactional(write=True)`), donc partagé par TOUS les items d'un même appel `create_recurring_needs`."""
+        current_session = self.session
+        sub_cat = await self._resolve_sub_category(product_query)
 
         need = RecurringNeed(
             id=uuid.uuid4(),
@@ -176,17 +282,12 @@ class RecurringSupplyMixin(BaseMixin):
         await current_session.flush()
 
         window_end = _today() + timedelta(days=OCCURRENCE_WINDOW_DAYS)
-        created = await self._materialize_occurrences(need, rule, from_date=_today(), to_date=window_end)
+        occurrences_created = await self._materialize_occurrences(need, rule, from_date=_today(), to_date=window_end)
 
-        logger.info(
-            "recurring_need.created | recurring_need_id=%s | buyer_id=%s | occurrences=%s",
-            need.id, buyer_id, created,
-        )
         return {
-            "status": "success",
             "recurring_need_id": str(need.id),
             "sub_category": sub_cat.name,
-            "occurrences_created": created,
+            "occurrences_created": occurrences_created,
         }
 
     async def _materialize_occurrences(

@@ -339,6 +339,10 @@ async def _finalize(
         {k: v for k, v in tier.items() if v is not None}
         for tier in raw_entities.get("pricing_tiers") or []
     ]
+    raw_entities["additional_items"] = [
+        {k: v for k, v in item.items() if v is not None}
+        for item in raw_entities.get("additional_items") or []
+    ]
     entities = _remap_entities(raw_entities)
 
     # Garde anti-ancrage (incident réel vécu : le LLM "s'ancre" parfois sur

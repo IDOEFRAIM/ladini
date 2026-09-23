@@ -21,7 +21,6 @@ import typing
 from typing import Any, Dict, List, Optional
 
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
-    InteractionKind,
     get_pending_interaction,
     to_tunnel_category,
 )
@@ -268,11 +267,17 @@ class TestRecurringNeedCancellation:
             _run_turn(state, interpreter, runtime, text="j ai besoin de 10 kg de tomate tous les jours sauf les dimanches")
         )
         assert to_tunnel_category(get_pending_interaction(state)) == "CONFIRMATION"
+        draft_id_before_cancel = (state.get("recurring_need_draft") or {}).get("draft_id")
+        assert draft_id_before_cancel
 
         # "annuler" est reconnu par le filet déterministe REJECT
         # (`_REJECT_EXACT_PHRASES`) — aucun ScriptedLLM nécessaire ici.
         _turn2, state = run(_run_turn(state, interpreter, runtime, text="annuler"))
         assert len(created_needs) == 0, "aucune écriture DB ne doit avoir eu lieu sur un refus"
+        assert to_tunnel_category(get_pending_interaction(state)) == "NONE", (
+            "la PendingInteraction de confirmation doit être consommée par le refus, "
+            f"pending={get_pending_interaction(state)}"
+        )
 
         runtime.llm = ScriptedLLM(
             _new_task_payload("CREATE_RECURRING_NEED", product="oignon", quantity=20.0, unit="KG", excluded_weekdays=[7])
@@ -284,6 +289,11 @@ class TestRecurringNeedCancellation:
         response = (state.get("final_response") or "").lower()
         assert "tomate" not in response, f"contamination tomate après annulation : {response!r}"
         assert "oignon" in response
+        draft_id_after_new_request = (state.get("recurring_need_draft") or {}).get("draft_id")
+        assert draft_id_after_new_request and draft_id_after_new_request != draft_id_before_cancel, (
+            "une demande après annulation doit obtenir un NOUVEAU draft_id, jamais la réutilisation "
+            f"de l'ancien ({draft_id_before_cancel!r} -> {draft_id_after_new_request!r})"
+        )
 
         _turn4, state = run(_run_turn(state, interpreter, runtime, text="ok"))
         assert len(created_needs) == 1
@@ -399,3 +409,272 @@ class TestRecurringNeedConfirmationIdempotency:
         _turn4, state = run(_run_turn(state, interpreter, runtime, text="ok"))
         assert len(created_needs) == 2
         assert created_needs[1]["product_query"] == "oignon"
+
+
+class TestRecurringNeedMultipleProductsInOneMessage:
+    """Chantier multi-produits (2026-09-23), suite du correctif state-leak ci-dessus : quand
+    PLUSIEURS produits sont donnés dans le MÊME message ("10 kg de tomate et 20 kg d'oignon tous
+    les jours sauf dimanche"), l'oignon ne doit plus jamais disparaître silencieusement — un SEUL
+    draft doit porter les DEUX produits, et la confirmation doit déclencher UN SEUL appel MCP
+    atomique `create_recurring_needs` (pluriel), jamais deux appels séparés `create_recurring_need`."""
+
+    def test_a_single_message_with_two_products_creates_both_atomically(self):
+        created_batches: List[Dict[str, Any]] = []
+
+        def _create_recurring_needs(**kwargs: Any) -> Dict[str, Any]:
+            items = kwargs.get("items") or []
+            result_items = [
+                {
+                    "recurring_need_id": f"need-{len(created_batches)}-{i}",
+                    "sub_category": it["product_query"],
+                    "occurrences_created": 7,
+                }
+                for i, it in enumerate(items)
+            ]
+            created_batches.append(kwargs)
+            return {"status": "success", "items": result_items}
+
+        runtime = StubRuntime(responses={"create_recurring_needs": _create_recurring_needs})
+        interpreter = make_input_interpreter("BUYER")
+        state = _initial_state()
+
+        runtime.llm = ScriptedLLM(
+            {
+                "disposition": "NEW_TASK",
+                "intent": "CREATE_RECURRING_NEED",
+                "confidence": 0.95,
+                "entities": {
+                    "product": "tomate",
+                    "quantity": 10.0,
+                    "unit": "KG",
+                    "additional_items": [{"product": "oignon", "quantity": 20.0, "unit": "KG"}],
+                    "recurrence_type": "DAILY",
+                    "excluded_weekdays": [7],
+                },
+            }
+        )
+        turn1, state = run(
+            _run_turn(
+                state, interpreter, runtime,
+                text="j ai besoin de 10 kg de tomate et 20 kg d oignon tous les jours sauf les dimanches",
+            )
+        )
+        assert turn1["detected_intent"] == "CREATE_RECURRING_NEED", turn1.get("raw_analysis")
+        assert state["status"] == "WAITING_INPUT"
+        response = (state.get("final_response") or "").lower()
+        assert "tomate" in response and "oignon" in response, (
+            f"le récapitulatif doit lister les DEUX produits, jamais seulement la tomate : {response!r}"
+        )
+
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft is not None
+        assert draft.product == "tomate"
+        assert draft.quantity == 10.0
+        assert draft.additional_items == [{"product": "oignon", "quantity": 20.0, "unit": "KG"}]
+
+        _turn2, state = run(_run_turn(state, interpreter, runtime, text="ok"))
+        assert len(created_batches) == 1, "la confirmation doit déclencher UN SEUL appel atomique multi-produits"
+        assert "create_recurring_need" not in runtime.calls, (
+            "un draft multi-produits ne doit jamais passer par l'appel MCP singulier — "
+            f"appels observés : {runtime.calls}"
+        )
+        batch_items = created_batches[0]["items"]
+        assert [it["product_query"] for it in batch_items] == ["tomate", "oignon"]
+        assert [it["quantity"] for it in batch_items] == [10.0, 20.0]
+        assert state["status"] == "COMPLETED"
+
+
+class TestStateIsFullyCleanAfterSuccess:
+    """Mission lifecycle audit (2026-09-23, post multi-produit) : une confirmation réussie ne doit
+    laisser AUCUN état transactionnel actif derrière elle — pas seulement un bon message utilisateur
+    (mandat §5/§6/§9 de l'audit). Vérifie l'état complet, pas seulement `final_response`."""
+
+    def test_every_transactional_field_is_cleared_after_a_successful_confirmation(self):
+        created_needs: List[Dict[str, Any]] = []
+
+        def _create_recurring_need(**kwargs: Any) -> Dict[str, Any]:
+            created_needs.append(kwargs)
+            return {"status": "success", "recurring_need_id": "need-1"}
+
+        runtime = StubRuntime(responses={"create_recurring_need": _create_recurring_need})
+        interpreter = make_input_interpreter("BUYER")
+        state = _initial_state()
+
+        runtime.llm = ScriptedLLM(
+            _new_task_payload("CREATE_RECURRING_NEED", product="tomate", quantity=10.0, unit="KG", excluded_weekdays=[7])
+        )
+        _turn1, state = run(
+            _run_turn(state, interpreter, runtime, text="j ai besoin de 10 kg de tomate tous les jours sauf les dimanches")
+        )
+        assert to_tunnel_category(get_pending_interaction(state)) == "CONFIRMATION"
+
+        _turn2, state = run(_run_turn(state, interpreter, runtime, text="ok"))
+        assert len(created_needs) == 1
+
+        # État transactionnel COMPLET — pas seulement le texte envoyé à l'utilisateur.
+        assert state.get("current_goal") is None, f"current_goal doit être nettoyé, reste : {state.get('current_goal')!r}"
+        assert state.get("recurring_need_draft") is None, "le draft terminé (EXECUTED) ne doit jamais rester actif"
+        assert to_tunnel_category(get_pending_interaction(state)) == "NONE", (
+            f"aucune PendingInteraction ne doit survivre à une confirmation réussie : {state.get('pending_interaction')!r}"
+        )
+        assert state.get("transaction_payload") == {}, (
+            f"transaction_payload doit être vidé, reste : {state.get('transaction_payload')!r}"
+        )
+        assert state.get("status") == "COMPLETED"
+
+
+class TestRealCorrectionUpdatesTheSameDraft:
+    """Mission scénario C (§8/§16) : "10 kg tomate" -> "Confirmer ?" -> "modifier" -> correction
+    réelle -> "ok". Une VRAIE continuation doit préserver le MÊME `draft_id` de bout en bout, jamais
+    en créer un nouveau — contrairement au cas NEW_TASK (state-leak, testé plus haut). Le LLM est
+    scripté pour renvoyer UNKNOWN sur "modifier" ET sur la correction elle-même (pire cas réaliste :
+    un classifieur sans aucun signal exploitable sur un message nu) — la garde déterministe
+    d'extraction quantité+unité (`entities.py`) doit à elle seule appliquer la correction, sans
+    jamais dépendre du jugement du LLM ici."""
+
+    def test_modifier_then_a_real_correction_never_creates_a_new_draft(self):
+        created_needs: List[Dict[str, Any]] = []
+
+        def _create_recurring_need(**kwargs: Any) -> Dict[str, Any]:
+            created_needs.append(kwargs)
+            return {"status": "success", "recurring_need_id": "need-1"}
+
+        runtime = StubRuntime(responses={"create_recurring_need": _create_recurring_need})
+        interpreter = make_input_interpreter("BUYER")
+        state = _initial_state()
+
+        runtime.llm = ScriptedLLM(
+            _new_task_payload("CREATE_RECURRING_NEED", product="tomate", quantity=10.0, unit="KG", excluded_weekdays=[7])
+        )
+        _turn1, state = run(
+            _run_turn(state, interpreter, runtime, text="j ai besoin de 10 kg de tomate tous les jours sauf les dimanches")
+        )
+        draft_id_1 = (state.get("recurring_need_draft") or {}).get("draft_id")
+        assert draft_id_1
+
+        # "modifier" nu — aucune information exploitable, le classifieur ne DOIT rien inventer.
+        runtime.llm = ScriptedLLM({"disposition": "UNKNOWN", "confidence": 0.3, "entities": {}})
+        _turn2, state = run(_run_turn(state, interpreter, runtime, text="modifier"))
+        assert len(created_needs) == 0, "aucune écriture DB avant confirmation explicite"
+        draft_id_2 = (state.get("recurring_need_draft") or {}).get("draft_id")
+        assert draft_id_2 == draft_id_1, "un simple 'modifier' nu ne doit jamais réinitialiser le draft"
+        assert (state.get("recurring_need_draft") or {}).get("quantity") == 10.0, "rien n'a encore changé"
+
+        # Correction réelle — LLM toujours UNKNOWN (pire cas) : seule l'extraction déterministe
+        # doit permettre à "15 kg" d'atteindre le draft.
+        runtime.llm = ScriptedLLM({"disposition": "UNKNOWN", "confidence": 0.3, "entities": {}})
+        _turn3, state = run(_run_turn(state, interpreter, runtime, text="mets plutot 15 kg"))
+        draft_id_3 = (state.get("recurring_need_draft") or {}).get("draft_id")
+        assert draft_id_3 == draft_id_1, "une correction réelle continue le MÊME draft, n'en crée jamais un nouveau"
+        assert (state.get("recurring_need_draft") or {}).get("quantity") == 15.0, (
+            f"la correction '15 kg' n'a pas atteint le draft : {state.get('recurring_need_draft')!r}"
+        )
+        assert (state.get("recurring_need_draft") or {}).get("product") == "tomate", "le produit déjà connu doit survivre"
+
+        _turn4, state = run(_run_turn(state, interpreter, runtime, text="ok"))
+        assert len(created_needs) == 1, "une seule création, jamais une par tour intermédiaire"
+        assert created_needs[0]["quantity"] == 15.0, "c'est la quantité CORRIGÉE qui doit être persistée, jamais l'originale"
+        assert created_needs[0]["product_query"] == "tomate"
+
+
+class TestMultiItemDraftNeverLeaksIntoTheNextSingleItemRequest:
+    """Mission scénario D (§10/§16/§18) : un draft multi-produits confirmé (tomate + oignon) ne doit
+    JAMAIS laisser `additional_items` (ni le produit principal) réapparaître dans une demande
+    mono-produit ultérieure sans rapport — même invariant que le state-leak mono-produit historique,
+    étendu à la nouvelle liste `additional_items`."""
+
+    def test_a_new_single_item_request_after_a_confirmed_multi_item_draft_starts_fully_clean(self):
+        created_batches: List[Dict[str, Any]] = []
+        created_needs: List[Dict[str, Any]] = []
+
+        def _create_recurring_needs(**kwargs: Any) -> Dict[str, Any]:
+            items = kwargs.get("items") or []
+            created_batches.append(kwargs)
+            return {
+                "status": "success",
+                "items": [
+                    {"recurring_need_id": f"multi-{i}", "sub_category": it["product_query"], "occurrences_created": 7}
+                    for i, it in enumerate(items)
+                ],
+            }
+
+        def _create_recurring_need(**kwargs: Any) -> Dict[str, Any]:
+            created_needs.append(kwargs)
+            return {"status": "success", "recurring_need_id": "need-carotte"}
+
+        runtime = StubRuntime(
+            responses={
+                "create_recurring_needs": _create_recurring_needs,
+                "create_recurring_need": _create_recurring_need,
+            }
+        )
+        interpreter = make_input_interpreter("BUYER")
+        state = _initial_state()
+
+        runtime.llm = ScriptedLLM(
+            {
+                "disposition": "NEW_TASK",
+                "intent": "CREATE_RECURRING_NEED",
+                "confidence": 0.95,
+                "entities": {
+                    "product": "tomate",
+                    "quantity": 10.0,
+                    "unit": "KG",
+                    "additional_items": [{"product": "oignon", "quantity": 20.0, "unit": "KG"}],
+                    "recurrence_type": "DAILY",
+                    "excluded_weekdays": [7],
+                },
+            }
+        )
+        _turn1, state = run(
+            _run_turn(
+                state, interpreter, runtime,
+                text="j ai besoin de 10 kg de tomate et 20 kg d oignon tous les jours sauf les dimanches",
+            )
+        )
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft.additional_items == [{"product": "oignon", "quantity": 20.0, "unit": "KG"}]
+        multi_draft_id = draft.draft_id
+
+        _turn2, state = run(_run_turn(state, interpreter, runtime, text="ok"))
+        assert len(created_batches) == 1, "la confirmation multi-produits doit déclencher l'appel atomique"
+        assert state.get("recurring_need_draft") is None, "le draft multi-produits terminé ne doit jamais rester actif"
+
+        # Nouvelle demande MONO-produit, sans rapport — ne doit JAMAIS voir tomate/oignon.
+        runtime.llm = ScriptedLLM(
+            {
+                "disposition": "NEW_TASK",
+                "intent": "CREATE_RECURRING_NEED",
+                "confidence": 0.95,
+                "entities": {
+                    "product": "carotte",
+                    "quantity": 30.0,
+                    "unit": "KG",
+                    "recurrence_type": "WEEKLY_DAYS",
+                    "weekly_days": [5],
+                },
+            }
+        )
+        turn3, state = run(
+            _run_turn(state, interpreter, runtime, text="j ai besoin de 30 kg de carotte tous les vendredis")
+        )
+        assert turn3["detected_intent"] == "CREATE_RECURRING_NEED", turn3.get("raw_analysis")
+        response = (state.get("final_response") or "").lower()
+        assert "tomate" not in response and "oignon" not in response, (
+            f"contamination du draft multi-produits précédent détectée : {response!r}"
+        )
+        assert "carotte" in response
+
+        carotte_draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert carotte_draft is not None
+        assert carotte_draft.draft_id != multi_draft_id, "un NOUVEAU draft_id est attendu, jamais la réutilisation du draft multi-produits"
+        assert carotte_draft.product == "carotte"
+        assert carotte_draft.quantity == 30.0
+        assert not carotte_draft.additional_items, (
+            f"additional_items ne doit JAMAIS hériter de l'ancien draft tomate+oignon : {carotte_draft.additional_items!r}"
+        )
+
+        _turn4, state = run(_run_turn(state, interpreter, runtime, text="ok"))
+        assert len(created_needs) == 1, "le besoin carotte doit passer par l'appel MCP singulier (mono-produit), jamais le pluriel"
+        assert created_needs[0]["product_query"] == "carotte"
+        assert len(created_batches) == 1, "aucun second appel multi-produits ne doit être déclenché pour une demande mono-produit"

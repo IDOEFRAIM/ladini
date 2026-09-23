@@ -24,7 +24,7 @@ from ladini.graphs.agents.market_coach.interpreter.new_task_contract import (
 # À incrémenter à CHAQUE changement comportemental — composante de la clé de
 # cache LLM ET dimension Langfuse (`prompt_version`), même discipline que
 # `STRUCTURED_ACTION_PROMPT_VERSION`/`ACTIVE_SLOT_PROMPT_VERSION`.
-NEW_TASK_PROMPT_VERSION = "new_task_v6"
+NEW_TASK_PROMPT_VERSION = "new_task_v7"
 
 _SYSTEM_PROMPT_HEADER = """\
 Tu interprètes un NOUVEAU message utilisateur dans Market Sense, un \
@@ -110,6 +110,9 @@ donnée dans le message utilisateur ci-dessous (jamais une année devinée). \
 - `recurrence_type`/`weekly_days`/`excluded_weekdays`/`max_price_per_unit` \
 (CREATE_RECURRING_NEED) : DAILY/WEEKLY_DAYS(+weekly_days)/WEEKLY/ONE_OFF ; \
 ISO 1=lundi..7=dimanche ; "sauf dimanche" = DAILY + excluded_weekdays=[7].
+- `additional_items` (CREATE_RECURRING_NEED) : produits en plus, avec leur \
+quantité+unité, en objets {"product","quantity","unit"} — jamais \
+`additional_products`.
 
 EXEMPLE (quantité en groupes de conditionnements + prix de référence + \
 tarifs par conditionnement, combinés dans le MÊME message) :
@@ -134,7 +137,9 @@ Réponds strictement avec cet objet JSON, sans aucun autre texte :
 "deadline": "<YYYY-MM-DD|null>", "zone": "<str|null>", \
 "farm_name": "<str|null>", "recurrence_type": \
 "<DAILY|WEEKLY_DAYS|WEEKLY|ONE_OFF|null>", "weekly_days": [<1-7>, ...], \
-"excluded_weekdays": [<1-7>, ...], "max_price_per_unit": <float|null>}}
+"excluded_weekdays": [<1-7>, ...], "max_price_per_unit": <float|null>, \
+"additional_items": [{"product": "<str|null>", "quantity": <float|null>, \
+"unit": "<str|null>"}, ...]}}
 """
 
 
