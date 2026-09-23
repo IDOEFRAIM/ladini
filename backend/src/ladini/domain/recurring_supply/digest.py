@@ -99,9 +99,15 @@ def build_digest_text(needs: Sequence[NeedAvailability]) -> str:
         f"Disponibilité globale : {_fmt(total_matched)}/{_fmt(total_requested)}",
         f"{full_count} de vos {len(needs)} besoins ont une disponibilité complète.",
         "",
-        "1. Voir les détails",
-        "2. Mes besoins",
     ]
+    if total_matched > 0:
+        # Confirmation directe (mandat digest, VS4 pilote) : uniquement quand il existe
+        # RÉELLEMENT quelque chose à confirmer (CAS 8 : un digest sans proposition actionable
+        # n'affiche AUCUNE action de confirmation) — vocabulaire aligné avec le fast-path
+        # déterministe (`interpreter/routing.py::_bare_confirmation_for_recurring_supply_digest`).
+        lines += ["Répondez *confirmer* pour valider, *modifier* pour ajuster, ou *pas demain*."]
+    else:
+        lines += ["1. Voir les détails", "2. Mes besoins"]
     return "\n".join(lines)
 
 

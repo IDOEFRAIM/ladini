@@ -47,8 +47,25 @@ def test_several_products_are_all_listed_in_the_given_order():
     assert tomate_idx < oignon_idx < poulet_idx
 
 
-def test_the_footer_menu_is_always_present():
+def test_an_actionable_digest_offers_direct_confirmation():
+    """VS4 pilote (confirmation depuis le digest) : dès qu'une disponibilité existe, le digest
+    invite explicitement à confirmer/modifier/refuser directement — jamais un simple "voir les
+    détails" qui forcerait à naviguer (mandat CAS 8, en creux : le contraire du cas sans rien)."""
     text = build_digest_text([n("tomate", 40, 40)])
+    assert "confirmer" in text.lower()
+    assert "modifier" in text.lower()
+    assert "pas demain" in text.lower()
+
+
+def test_an_actionable_digest_never_shows_the_read_only_menu():
+    text = build_digest_text([n("tomate", 40, 40)])
+    assert "1. Voir les détails" not in text and "2. Mes besoins" not in text
+
+
+def test_a_non_actionable_digest_never_offers_a_confirmation_action():
+    """CAS 8 du mandat : aucune disponibilité nulle part -> aucun bouton/action de confirmation."""
+    text = build_digest_text([n("tomate", 40, 0), n("poulet", 30, 0)])
+    assert "confirmer" not in text.lower()
     assert "1. Voir les détails" in text and "2. Mes besoins" in text
 
 

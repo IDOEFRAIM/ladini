@@ -168,8 +168,19 @@ def _apply_response_plan(plan) -> Dict[str, Any]:
 async def _update_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
     phone = state.get("user_phone")
     payload: Dict[str, Any] = state.get("transaction_payload") or {}
-    gw = RecurringSupplyGateway(mc_runtime)
 
+    # Réponse au digest (mandat digest, VS4 pilote) : "CONFIRM_MATCH"/"REJECT_MATCH" — émis
+    # UNIQUEMENT par `interpreter/routing.py::_bare_confirmation_for_recurring_supply_digest`,
+    # jamais un intent séparé (budget de tokens du prompt LLM déjà saturé, voir son docstring).
+    # Bifurque AVANT toute résolution par nom de produit : "CONFIRMER TOUT" s'applique à TOUS
+    # les besoins actionnables de l'acheteur, jamais à un seul résolu par ambiguïté de nom.
+    _payload_action = str(payload.get("action") or "").upper().strip()
+    if _payload_action in ("CONFIRM_MATCH", "REJECT_MATCH"):
+        return await _respond_to_digest_flow(
+            state, mc_runtime, action="CONFIRM" if _payload_action == "CONFIRM_MATCH" else "REJECT"
+        )
+
+    gw = RecurringSupplyGateway(mc_runtime)
     resolved = await _resolve_target_need(gw, phone, payload)
     if resolved is None:
         return {"final_response": "Vous n'avez aucun besoin actif pour l'instant.", "status": "COMPLETED"}
@@ -406,6 +417,71 @@ async def _respond_to_match(
     else:
         message = "✅ C'est confirmé, votre commande est en cours de préparation."
     return {"final_response": message, "status": "COMPLETED", "result": result}
+
+
+# =====================================================================
+# Confirmation directe depuis le DIGEST (mandat digest, VS4 pilote), atteinte
+# via `UPDATE_RECURRING_NEED` + `action` = "CONFIRM_MATCH"/"REJECT_MATCH"
+# (voir `_update_flow` ci-dessus — aucun intent dédié, budget LLM saturé).
+# Le digest agrège TOUS les besoins d'un acheteur en UN message
+# ("CONFIRMER TOUT") ; contrairement à `_respond_to_match` (ciblé sur UN
+# besoin, depuis l'écran détail), ici l'action s'applique à TOUTES les
+# occurrences actionnables du moment — exactement ce que le digest a
+# montré, jamais plus, jamais moins.
+# =====================================================================
+
+
+async def _respond_to_digest_flow(
+    state: Dict[str, Any], mc_runtime: MarketRuntime, *, action: str
+) -> Dict[str, Any]:
+    phone = state.get("user_phone")
+    gw = RecurringSupplyGateway(mc_runtime)
+    try:
+        listing = await gw.list_my_recurring_needs(phone=str(phone))
+    except MCPCallError:
+        return {"final_response": "Je n'ai pas pu récupérer vos approvisionnements.", "status": "COMPLETED"}
+
+    items = listing.get("items") or []
+    # Seuls les besoins avec une disponibilité RÉELLEMENT trouvée (mandat CAS 5 : une réponse
+    # tardive sur une proposition déjà traitée/expirée ne doit jamais créer de commande) —
+    # `accept_match_proposal` referait de toute façon ce contrôle par besoin, mais le filtrer ici
+    # évite un message générique "rien à confirmer" répété autant de fois qu'il y a de besoins.
+    actionable = [i for i in items if float(i.get("matched_quantity") or 0) > 0]
+    if not actionable:
+        return {
+            "final_response": "Il n'y a rien à confirmer pour le moment — votre prochaine proposition arrivera bientôt.",
+            "status": "COMPLETED",
+        }
+
+    confirmed_products: List[str] = []
+    failed_products: List[str] = []
+    for item in actionable:
+        try:
+            await gw.accept_match_proposal(
+                phone=str(phone), recurring_need_id=item["recurring_need_id"], action=action
+            )
+            confirmed_products.append(item["product"])
+        except MCPCallError as exc:
+            # Idempotence (mandat §6) : un 2e ACCEPT/REJECT sur une occurrence déjà traitée échoue
+            # proprement côté service (occurrence hors OPEN/MATCHED) — jamais une 2e commande. Un
+            # échec ici est donc attendu en cas de double-tap, pas forcément une vraie erreur.
+            logger.info(
+                "recurring_need.digest_response_skipped | need=%s | action=%s | %s",
+                item["recurring_need_id"], action, exc,
+            )
+            failed_products.append(item["product"])
+
+    if action == "REJECT":
+        message = "D'accord, rien ne sera livré demain — vos besoins habituels restent actifs."
+    elif confirmed_products:
+        message = "✅ C'est confirmé, vos commandes sont en cours de préparation."
+    else:
+        message = "Je n'ai pas pu confirmer votre approvisionnement — réessayez dans un instant."
+    return {
+        "final_response": message,
+        "status": "COMPLETED",
+        "result": {"confirmed": confirmed_products, "skipped": failed_products},
+    }
 
 
 async def _resolve_target_need(gw: RecurringSupplyGateway, phone: Any, payload: Dict[str, Any]):

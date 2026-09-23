@@ -1600,6 +1600,88 @@ async def _bare_confirmation_for_pending_producer_order(
     }
 
 
+# Vocabulaire SPÉCIFIQUE au digest récurrent — jamais fusionné dans
+# `_CONFIRM_EXACT_PHRASES`/`_REJECT_EXACT_PHRASES` (partagées avec le filet
+# `CONFIRM_ACTION` générique et le prompt LLM, qui documente MOT POUR MOT ce
+# même vocabulaire — voir leur commentaire de tête) : ces phrases-ci
+# répondent au wording EXACT du digest (UX pilote "CONFIRMER TOUT / PAS
+# DEMAIN"), hors de ce périmètre partagé.
+_DIGEST_REJECT_EXTRA_PHRASES = frozenset({"pas cette fois", "pas demain", "rien demain"})
+_DIGEST_MODIFY_PHRASES = frozenset({"modifier", "changer"})
+
+
+async def _bare_confirmation_for_recurring_supply_digest(
+    mc_runtime: Any, phone: str, bare_text: str
+) -> Optional[Dict[str, Any]]:
+    """Réponse au DIGEST quotidien d'approvisionnement récurrent
+    (`RecurringSupplyDigestService`) — message PROACTIF (outbox WhatsApp),
+    JAMAIS un tour de conversation : aucun `PendingInteraction` n'ancre la
+    réponse, exactement le même problème que
+    `_bare_confirmation_for_pending_producer_order` (voir son docstring),
+    ici côté acheteur pour l'approvisionnement récurrent plutôt que le
+    producteur pour ses ventes.
+
+    Vérification déterministe et BORNÉE, même discipline : ne répond QUE si
+    `bare_text` est un mot d'accord/refus/modification FERMÉ ET que
+    l'acheteur a RÉELLEMENT au moins un besoin récurrent enregistré
+    (`list_my_recurring_needs`) — sinon ce filet ne s'applique pas, le
+    message retombe sur la classification normale (LLM, qui reconnaît
+    aussi `RESPOND_RECURRING_SUPPLY_PROPOSAL` pour les paraphrases libres).
+    « CONFIRMER TOUT » s'applique à TOUTES les propositions actionnables du
+    moment (mandat digest : un digest agrège tous les besoins d'un
+    acheteur en UN seul message, jamais un par besoin) — la résolution fine
+    ("y a-t-il vraiment quelque chose à confirmer ?", CAS 5 : proposition
+    déjà traitée/expirée) reste la responsabilité du flow
+    (`flows/buyer/recurring_need.py::_respond_to_digest_flow`), jamais
+    dupliquée ici.
+
+    Budget de tokens du prompt `new_task_v2` déjà à saturation (spec §50,
+    `tests/interpreter/test_new_task_micro.py::TestPromptSizeGuard`) : PAS de
+    nouvel intent dédié ici — `action="CONFIRM_MATCH"`/`"REJECT_MATCH"` est
+    émis sous l'intent `UPDATE_RECURRING_NEED`, DÉJÀ au catalogue (coût
+    marginal nul), exactement l'esprit "réutilise l'existant". `_update_flow`
+    (`flows/buyer/recurring_need.py`) reconnaît ces deux valeurs et bifurque
+    vers `_respond_to_digest_flow` AVANT toute résolution par nom de produit
+    (mandat : "CONFIRMER TOUT" s'applique à TOUS les besoins actionnables,
+    jamais un seul résolu par ambiguïté de nom)."""
+    bare_text = _fix_bare_confirmation_typo(bare_text)
+    if bare_text in _DIGEST_MODIFY_PHRASES:
+        action = None
+        detected_intent = "GET_MY_NEEDS"
+    elif bare_text in _CONFIRM_EXACT_PHRASES:
+        action = "CONFIRM_MATCH"
+        detected_intent = "UPDATE_RECURRING_NEED"
+    elif bare_text in _REJECT_EXACT_PHRASES or bare_text in _DIGEST_REJECT_EXTRA_PHRASES:
+        action = "REJECT_MATCH"
+        detected_intent = "UPDATE_RECURRING_NEED"
+    else:
+        return None
+    if not phone:
+        return None
+    try:
+        from ladini.graphs.agents.market_coach.services.mcp.gateway import (
+            RecurringSupplyGateway,
+        )
+
+        result = await RecurringSupplyGateway(mc_runtime).list_my_recurring_needs(phone=phone)
+    except Exception as exc:
+        logger.warning(
+            "[Interpreter] bare_confirmation_recurring_supply_digest: "
+            "list_my_recurring_needs a échoué (%s) — repli sur la classification normale",
+            exc,
+        )
+        return None
+    if not (result or {}).get("items"):
+        return None
+    return {
+        "interpreted_event": "NEW_TASK",
+        "detected_intent": detected_intent,
+        "interpreter_confidence": 0.95,
+        "extracted_entities": ({"action": action} if action else {}),
+        "raw_analysis": {"path": "bare_confirmation_recurring_supply_digest"},
+    }
+
+
 def make_input_interpreter(role: str = "PRODUCER"):
     """Crée un nœud `input_interpreter`.
 
@@ -1788,6 +1870,26 @@ def make_input_interpreter(role: str = "PRODUCER"):
                     _pending_check["detected_intent"],
                 )
                 return _pending_check
+
+        # 1.6 RÉPONSE AU DIGEST D'APPROVISIONNEMENT RÉCURRENT, SANS TUNNEL
+        # ACTIF (mandat digest, VS4 pilote) — même garde qu'en 1.5 (aucun
+        # tunnel verrouillé), restreinte au rôle BUYER (le digest ne
+        # concerne que les acheteurs). Voir le docstring de
+        # `_bare_confirmation_for_recurring_supply_digest` pour le contexte
+        # complet.
+        if not locked_goal and role_up == "BUYER" and not onboarding_active:
+            # `_bare_confirm_text` a déjà été calculé ci-dessus : le bloc 1.5
+            # (`role_up in ("PRODUCER", "BUYER")`) couvre STRICTEMENT ce cas
+            # BUYER, donc la variable existe toujours ici.
+            _digest_check = await _bare_confirmation_for_recurring_supply_digest(
+                mc_runtime, str(state.get("user_phone") or ""), _bare_confirm_text
+            )
+            if _digest_check is not None:
+                logger.info(
+                    "[Interpreter] Réponse au digest récurrent résolue -> %s",
+                    _digest_check["detected_intent"],
+                )
+                return _digest_check
 
         # 2. Sécurité d'exécution de l'infrastructure
         if llm is None:

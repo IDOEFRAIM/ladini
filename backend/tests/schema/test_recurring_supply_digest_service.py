@@ -104,7 +104,7 @@ def test_a_buyer_with_four_needs_gets_exactly_one_notification(pg_dsn):
     assert len(rows) == 1
     body = rows[0].payload["body"]
     assert all(p in body for p in ("Tomate", "Oignon", "Pdt", "Poulet"))
-    assert "1. Voir les détails" in body
+    assert "confirmer" in body.lower()  # au moins une disponibilité (tomate 40/40) -> confirmable
 
 
 def test_the_digest_never_promises_a_reservation(pg_dsn):
