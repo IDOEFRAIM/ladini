@@ -45,8 +45,10 @@ from ladini.graphs.agents.market_coach.services.mcp.gateway import (
     AuctionGateway,
     EscrowGateway,
     FarmGateway,
+    MCPCallError,
     OrderTrackingGateway,
     ProductGateway,
+    RecurringSupplyGateway,
     StockGateway,
 )
 from ladini.graphs.agents.market_coach.utils import (
@@ -488,6 +490,109 @@ async def _resolve_order_for_delivery_payment(
             kind="order_delivery_payment",
             preformatted_text=menu,
         ),
+    }
+
+
+# =====================================================================
+# LIVRAISON — "en route" / "livré" (VS5 pilote, approvisionnement récurrent)
+# =====================================================================
+# Réutilise `RecurringSupplyMixin.mark_order_delivery_status` (services/
+# database/recurring_supply.py) — scope STRICT `order_type ==
+# "RECURRING_SUPPLY"`, jamais le chemin préorder/RFQ paiement-à-la-livraison
+# (`_resolve_order_for_delivery_payment` ci-dessus, inchangé).
+
+_DELIVERY_TRANSITION_LABELS = {
+    "MARK_IN_TRANSIT": ("PENDING", "en route", "Aucune commande en attente de départ."),
+    "MARK_DELIVERED": ("IN_TRANSIT", "livrée", "Aucune commande en route à marquer livrée."),
+}
+
+
+async def _resolve_delivery_transition(
+    mc_runtime: MarketRuntime, phone: str, payload: Dict[str, Any], action: str
+) -> Dict[str, Any]:
+    """Résout QUELLE commande le producteur vise pour "en route"/"livré" —
+    même gabarit que `_resolve_order_for_delivery_payment` juste au-dessus :
+    auto-sélection si un seul candidat ACTIONNABLE, menu numéroté strict
+    sinon, jamais de choix implicite."""
+    expected_from, verb, empty_message = _DELIVERY_TRANSITION_LABELS[action]
+    if not phone:
+        return {
+            "status": "ERROR",
+            "response_strategy": "ERROR",
+            "final_response": "Numéro de téléphone introuvable, impossible d'agir sur cette commande.",
+            "ag_ui_component": None,
+        }
+
+    gw = OrderTrackingGateway(mc_runtime)
+    result = await gw.get_producer_orders(phone=str(phone))
+    all_orders = result.get("data") or []
+    candidates = [
+        o
+        for o in all_orders
+        if str(o.get("order_type") or "").upper() == "RECURRING_SUPPLY"
+        and str(o.get("delivery_status") or "PENDING").upper() == expected_from
+    ]
+    if not candidates:
+        return {
+            "status": "ERROR",
+            "validation_errors": ["no_order_for_delivery_transition"],
+            "response_strategy": "ERROR",
+            "final_response": empty_message,
+            "ag_ui_component": None,
+        }
+
+    chosen = (
+        candidates[0]
+        if len(candidates) == 1
+        else _resolve_selected_candidate(payload, candidates, "order_id", lambda c: c.get("order_id"))
+    )
+
+    if chosen is None:
+        mapping: Dict[str, str] = {}
+        lines = ["📦 *Plusieurs commandes concernées. Choisissez le bon numéro :*"]
+        options: List[MenuOption] = []
+        for i, o in enumerate(candidates, start=1):
+            ref = o.get("reference") or str(o.get("order_id") or "")[:8].upper()
+            buyer = o.get("buyer_name") or "Acheteur"
+            label = f"#{ref} ({buyer})"
+            lines.append(f"{i}. {label}")
+            mapping[str(i)] = str(o.get("order_id"))
+            options.append(MenuOption(index=str(i), label=label, value=mapping[str(i)]))
+        menu = "\n".join(lines)
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(InteractionKind.SELECTION_MENU),
+            "response_strategy": "SELECTION_MENU",
+            "final_response": menu,
+            "ag_ui_component": None,
+            "pending_menu": MenuRequest(
+                title="Commandes concernées", options=options, kind="order_delivery_transition",
+                preformatted_text=menu,
+            ),
+        }
+
+    order_id = chosen.get("order_id")
+    rs_gw = RecurringSupplyGateway(mc_runtime)
+    try:
+        mcp_result = await rs_gw.mark_order_delivery_status(
+            phone=str(phone), order_id=str(order_id), action=action
+        )
+    except MCPCallError as exc:
+        logger.warning(
+            "delivery_transition_failed | order=%s | action=%s | %s", order_id, action, exc
+        )
+        return {
+            "final_response": "Je n'ai pas pu mettre à jour cette commande.",
+            "status": "COMPLETED",
+            "ag_ui_component": None,
+        }
+
+    ref = str(order_id)[:8].upper()
+    return {
+        "final_response": f"✅ Commande #{ref} marquée {verb}.",
+        "status": "COMPLETED",
+        "ag_ui_component": None,
+        "result": mcp_result,
     }
 
 
@@ -2275,6 +2380,21 @@ async def producer_context_resolver(
     if goal == "PRODUCER_CONFIRM_DELIVERY_PAYMENT" and not payload.get("order_id"):
         return await _resolve_order_for_delivery_payment(mc_runtime, str(phone), payload)
 
+    # 3quinquies. Livraison (VS5 pilote) : "en route"/"livré" — AVANT le
+    # dispatch générique PRODUCER_CONFIRM_ORDER ci-dessous, exactement le
+    # même principe que PRODUCER_CONFIRM_DELIVERY_PAYMENT juste au-dessus
+    # (résout la commande visée avant tout autre traitement). Émis
+    # UNIQUEMENT par le fast-path déterministe `interpreter/routing.py::
+    # _bare_confirmation_for_delivery_transition` (budget de tokens du
+    # prompt LLM déjà saturé — aucun nouvel intent dédié, voir son
+    # docstring), jamais par le LLM.
+    if goal == "PRODUCER_CONFIRM_ORDER" and payload.get("action") in (
+        "MARK_IN_TRANSIT", "MARK_DELIVERED",
+    ):
+        return await _resolve_delivery_transition(
+            mc_runtime, str(phone), payload, str(payload.get("action"))
+        )
+
     # 3ter/3quater. Action (confirmer/annuler) sur une commande reçue —
     # tunnel auto-suffisant fusionné (2026-09-15, voir docstring de section
     # `_resolve_pending_order_action` : la classification NEW_TASK d'un
@@ -2300,6 +2420,7 @@ __all__ = [
     "_resolve_auction",
     "_resolve_my_bids",
     "_resolve_order_for_delivery_payment",
+    "_resolve_delivery_transition",
     "_resolve_order_for_cancellation",
     "_resolve_order_for_confirmation",
     "_resolve_pending_order_action",

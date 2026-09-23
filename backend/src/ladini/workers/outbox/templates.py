@@ -21,6 +21,11 @@ NEW_PRODUCT_ALERT_BUYER = "NEW_PRODUCT_ALERT_BUYER"
 # délibéré : le digest dépend d'un calcul (agrégation, tri, somme) déjà fait et testé côté service,
 # le refaire ici dupliquerait cette logique sans aucun bénéfice.
 RECURRING_SUPPLY_DIGEST_BUYER = "RECURRING_SUPPLY_DIGEST_BUYER"
+# VS5 pilote (livraison/réception) : envoyé quand le producteur signale
+# `MARK_DELIVERED` (`RecurringSupplyMixin.mark_order_delivery_status`) —
+# demande la réception, jamais une simple information passive (mandat
+# ÉTAPE 6 : "Votre commande est-elle arrivée correctement ?").
+RECURRING_SUPPLY_ORDER_DELIVERED_BUYER = "RECURRING_SUPPLY_ORDER_DELIVERED_BUYER"
 AUCTION_WON_PRODUCER = "AUCTION_WON_PRODUCER"
 PREORDER_RESERVED_PRODUCER = "PREORDER_RESERVED_PRODUCER"
 ESCROW_PAYMENT_RECEIVED_BUYER = "ESCROW_PAYMENT_RECEIVED_BUYER"
@@ -244,6 +249,16 @@ def _render_order_cancelled_by_producer_buyer(p: Dict[str, Any]) -> str:
     )
 
 
+def _render_recurring_supply_order_delivered_buyer(p: Dict[str, Any]) -> str:
+    order_number = str(p.get("order_number") or "")
+    return (
+        f"🚚 Votre commande #{order_number} a été livrée.\n\n"
+        "Votre commande est-elle arrivée correctement ?\n\n"
+        "1. ✅ Tout est bon\n"
+        "2. ⚠️ Il y a un problème"
+    )
+
+
 def _render_order_confirmed_by_producer_buyer(p: Dict[str, Any]) -> str:
     order_number = str(p.get("order_number") or "")
     return (
@@ -261,6 +276,7 @@ def _render_recurring_supply_digest_buyer(p: Dict[str, Any]) -> str:
 _RENDERERS = {
     AUCTION_INVITE_PRODUCER: _render_auction_invite,
     RECURRING_SUPPLY_DIGEST_BUYER: _render_recurring_supply_digest_buyer,
+    RECURRING_SUPPLY_ORDER_DELIVERED_BUYER: _render_recurring_supply_order_delivered_buyer,
     NEW_PRODUCT_ALERT_BUYER: _render_new_product_alert,
     AUCTION_WON_PRODUCER: _render_auction_won,
     PREORDER_RESERVED_PRODUCER: _render_preorder_reserved,

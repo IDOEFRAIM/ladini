@@ -1682,6 +1682,128 @@ async def _bare_confirmation_for_recurring_supply_digest(
     }
 
 
+# Vocabulaire SPÉCIFIQUE à la transition de livraison (VS5 pilote) — même
+# discipline que le digest juste au-dessus : jamais fusionné dans les
+# ensembles partagés `_CONFIRM_EXACT_PHRASES`/`_REJECT_EXACT_PHRASES`.
+_DELIVERY_IN_TRANSIT_PHRASES = frozenset({"en route", "parti", "c'est parti", "expedie", "expédié"})
+_DELIVERY_DELIVERED_PHRASES = frozenset({"livre", "livré", "livree", "livrée", "c'est livre", "c'est livré"})
+
+
+async def _bare_confirmation_for_delivery_transition(
+    mc_runtime: Any, phone: str, bare_text: str
+) -> Optional[Dict[str, Any]]:
+    """PRODUCTEUR — "en route"/"livré" sur une commande `recurring_supply`
+    (VS5 pilote). Même discipline BORNÉE que les fast-paths voisins :
+    vocabulaire fermé ET exactement UNE commande dans l'état de départ
+    attendu (`get_producer_orders`, filtré ici même — même source que
+    `_bare_confirmation_for_pending_producer_order`) — sinon repli sur la
+    classification normale (jamais un choix deviné parmi plusieurs
+    commandes). Émet `PRODUCER_CONFIRM_ORDER` (déjà au catalogue, coût
+    marginal nul — budget du prompt `new_task_v2` déjà saturé, spec §50)
+    avec `action="MARK_IN_TRANSIT"|"MARK_DELIVERED"` ; `producer_context_
+    resolver` (flows/producer/flow.py) bifurque vers `_resolve_delivery_
+    transition` AVANT le tunnel générique de confirmation de vente. Le
+    paramètre `bare_text` est déjà normalisé par l'appelant (même
+    expression que `_bare_confirm_text`, bloc 1.5) — pas de re-strip ici."""
+    if bare_text in _DELIVERY_IN_TRANSIT_PHRASES:
+        action, expected_from = "MARK_IN_TRANSIT", "PENDING"
+    elif bare_text in _DELIVERY_DELIVERED_PHRASES:
+        action, expected_from = "MARK_DELIVERED", "IN_TRANSIT"
+    else:
+        return None
+    if not phone:
+        return None
+    try:
+        from ladini.graphs.agents.market_coach.services.mcp.gateway import (
+            OrderTrackingGateway,
+        )
+
+        result = await OrderTrackingGateway(mc_runtime).get_producer_orders(phone=phone)
+    except Exception as exc:
+        logger.warning(
+            "[Interpreter] bare_confirmation_delivery_transition: "
+            "get_producer_orders a échoué (%s) — repli sur la classification normale",
+            exc,
+        )
+        return None
+    orders = (result or {}).get("data") or []
+    candidates = [
+        o
+        for o in orders
+        if str(o.get("order_type") or "").upper() == "RECURRING_SUPPLY"
+        and str(o.get("delivery_status") or "PENDING").upper() == expected_from
+    ]
+    if len(candidates) != 1:
+        return None
+    return {
+        "interpreted_event": "NEW_TASK",
+        "detected_intent": "PRODUCER_CONFIRM_ORDER",
+        "interpreter_confidence": 0.95,
+        "extracted_entities": {"action": action},
+        "raw_analysis": {"path": "bare_confirmation_delivery_transition"},
+    }
+
+
+# Vocabulaire SPÉCIFIQUE à la réception (VS5 pilote) — idem, jamais fusionné
+# dans les ensembles partagés.
+_RECEPTION_OK_PHRASES = frozenset({"tout est bon", "tout va bien", "c'est bon", "cest bon", "rien a signaler"})
+_RECEPTION_ISSUE_PHRASES = frozenset({"il y a un probleme", "il y a un problème", "probleme", "problème"})
+
+
+async def _bare_confirmation_for_order_reception(
+    mc_runtime: Any, phone: str, bare_text: str
+) -> Optional[Dict[str, Any]]:
+    """ACHETEUR — "tout est bon"/"il y a un problème" en réponse au message
+    proactif de réception (VS5 pilote, `RECURRING_SUPPLY_ORDER_DELIVERED_
+    BUYER`, aucun `PendingInteraction`). Même discipline BORNÉE : vocabulaire
+    fermé ET exactement une commande `DELIVERED` pour cet acheteur
+    (`RecurringSupplyGateway.list_my_deliverable_orders`, dédiée à ce besoin
+    — `get_buyer_orders_dashboard` ne renvoie qu'un menu texte prérendu,
+    sans champs structurés `order_type`/`delivery_status`) — sinon repli sur
+    la classification normale. Émet `BUYER_CHECK_ORDER_STATUS` (déjà au
+    catalogue, coût marginal nul) avec `action="RECEIVED_OK"|
+    "RECEIVED_ISSUE"` ; `order_tracking_resolver` bifurque vers
+    `_record_reception_flow` (flows/buyer/order_tracking.py). Le détail de
+    l'incident (type précis, quantité) est demandé ENSUITE, via un menu
+    numéroté classique (`PendingInteraction` réel, cette fois) — ce
+    fast-path ne fait que déclencher le premier pas, jamais deviner un
+    type d'incident. Le paramètre `bare_text` est déjà normalisé par
+    l'appelant (même expression que `_bare_confirm_text`, bloc 1.5) — pas
+    de re-strip ici."""
+    if bare_text in _RECEPTION_OK_PHRASES:
+        action = "RECEIVED_OK"
+    elif bare_text in _RECEPTION_ISSUE_PHRASES:
+        action = "RECEIVED_ISSUE"
+    else:
+        return None
+    if not phone:
+        return None
+    try:
+        from ladini.graphs.agents.market_coach.services.mcp.gateway import (
+            RecurringSupplyGateway,
+        )
+
+        result = await RecurringSupplyGateway(mc_runtime).list_my_deliverable_orders(
+            phone=phone, delivery_status="DELIVERED"
+        )
+    except Exception as exc:
+        logger.warning(
+            "[Interpreter] bare_confirmation_order_reception: "
+            "list_my_deliverable_orders a échoué (%s) — repli sur la classification normale",
+            exc,
+        )
+        return None
+    if len((result or {}).get("items") or []) != 1:
+        return None
+    return {
+        "interpreted_event": "NEW_TASK",
+        "detected_intent": "BUYER_CHECK_ORDER_STATUS",
+        "interpreter_confidence": 0.95,
+        "extracted_entities": {"action": action},
+        "raw_analysis": {"path": "bare_confirmation_order_reception"},
+    }
+
+
 def make_input_interpreter(role: str = "PRODUCER"):
     """Crée un nœud `input_interpreter`.
 
@@ -1890,6 +2012,34 @@ def make_input_interpreter(role: str = "PRODUCER"):
                     _digest_check["detected_intent"],
                 )
                 return _digest_check
+
+        # 1.7 TRANSITION DE LIVRAISON ("en route"/"livré"), SANS TUNNEL ACTIF
+        # (VS5 pilote) — rôle PRODUCER uniquement. Voir le docstring de
+        # `_bare_confirmation_for_delivery_transition`.
+        if not locked_goal and role_up == "PRODUCER" and not onboarding_active:
+            _delivery_check = await _bare_confirmation_for_delivery_transition(
+                mc_runtime, str(state.get("user_phone") or ""), _bare_confirm_text
+            )
+            if _delivery_check is not None:
+                logger.info(
+                    "[Interpreter] Transition de livraison résolue -> action=%s",
+                    _delivery_check["extracted_entities"].get("action"),
+                )
+                return _delivery_check
+
+        # 1.8 RÉCEPTION ("tout est bon"/"il y a un problème"), SANS TUNNEL
+        # ACTIF (VS5 pilote) — rôle BUYER uniquement. Voir le docstring de
+        # `_bare_confirmation_for_order_reception`.
+        if not locked_goal and role_up == "BUYER" and not onboarding_active:
+            _reception_check = await _bare_confirmation_for_order_reception(
+                mc_runtime, str(state.get("user_phone") or ""), _bare_confirm_text
+            )
+            if _reception_check is not None:
+                logger.info(
+                    "[Interpreter] Réception résolue -> action=%s",
+                    _reception_check["extracted_entities"].get("action"),
+                )
+                return _reception_check
 
         # 2. Sécurité d'exécution de l'infrastructure
         if llm is None:

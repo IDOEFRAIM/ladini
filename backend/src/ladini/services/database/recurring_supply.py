@@ -53,6 +53,7 @@ chaque jour.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -61,13 +62,16 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select, text, update
 
 from ladini.domain.models import (
+    BuyerProfile,
     NeedAllocation,
     Order,
     OrderItem,
+    OrderStatusHistory,
     Product,
     RecurringNeed,
     RecurringNeedOccurrence,
     SubCategory,
+    User,
 )
 from ladini.domain.recurring_supply.recurrence import (
     OCCURRENCE_WINDOW_DAYS,
@@ -101,6 +105,15 @@ RECURRING_NEED_ACTIONS = (
 # REJECT répondent à une PROPOSITION déjà calculée (allocations `PROPOSED`, Phase 3) — deux moments
 # métier différents, jamais mélangés dans le même enum d'action.
 MATCH_RESPONSE_ACTIONS = ("ACCEPT", "REJECT")
+
+# VS5 pilote — livraison/réception. `Order.delivery_status`/`Order.status` réutilisés tels quels
+# (texte libre, aucune contrainte CHECK) : seules de NOUVELLES VALEURS s'y ajoutent, aucune
+# nouvelle colonne/table pour ces deux mécanismes.
+_DELIVERY_TRANSITIONS = {
+    "MARK_IN_TRANSIT": ("PENDING", "IN_TRANSIT"),
+    "MARK_DELIVERED": ("IN_TRANSIT", "DELIVERED"),
+}
+_RECEPTION_OUTCOMES = ("RECEIVED", "RECEIVED_WITH_ISSUE")
 
 
 def _today() -> date:
@@ -528,6 +541,252 @@ class RecurringSupplyMixin(BaseMixin):
             "order_ids": created_order_ids,
             "quantity_confirmed": converted_quantity,
         }
+
+    # ─── LIVRAISON / RÉCEPTION (VS5 pilote) ────────────────────────────
+
+    async def mark_order_delivery_status(
+        self, phone: str, order_id: str, action: str
+    ) -> Dict[str, Any]:
+        """PRODUCTEUR — fait avancer `Order.delivery_status` d'UN cran :
+        `PENDING -> IN_TRANSIT` (« en route ») ou `IN_TRANSIT -> DELIVERED`
+        (« livré »). Réutilise `Order.delivery_status` tel quel (aucune
+        nouvelle colonne/table) — seules de NOUVELLES VALEURS de texte libre
+        s'y ajoutent (aucune contrainte CHECK sur cette colonne). Historisé
+        via `OrderStatusHistory` (`status_type="DELIVERY"`), déjà la
+        convention de ce dépôt (voir `ProducerMgmtMixin.confirm_delivery_
+        and_payment`), jamais une nouvelle table.
+
+        Scope STRICT `order_type == "RECURRING_SUPPLY"` : les autres
+        parcours de livraison (préorder/RFQ paiement-à-la-livraison, voir
+        `confirm_delivery_and_payment`) ne passent JAMAIS par cette méthode
+        — mandat §5/CAS 12, aucune régression sur le flux historique.
+
+        Idempotent : rejouer la MÊME transition (double "en route"/"livré")
+        renvoie un succès inchangé, jamais une erreur ni une 2ᵉ écriture
+        d'historique. Une transition hors séquence (ex: PENDING -> DELIVERED
+        directement, ou depuis un état déjà terminal) est refusée."""
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+        action = str(action or "").upper().strip()
+        if action not in _DELIVERY_TRANSITIONS:
+            raise BusinessRuleException(f"Action inconnue : {action}")
+        expected_from, to_status = _DELIVERY_TRANSITIONS[action]
+
+        _user_obj, producer_profile = await self.get_producer_profile(phone=str(phone))
+        order = await self._load_recurring_supply_order_for_update(order_id)
+
+        owns = await current_session.scalar(
+            select(OrderItem.id)
+            .join(Product, Product.id == OrderItem.product_id)
+            .where(OrderItem.order_id == order.id, Product.producer_id == producer_profile.id)
+            .limit(1)
+        )
+        if owns is None:
+            raise BusinessRuleException(
+                "Commande introuvable ou non autorisée.", reason="not_owner"
+            )
+        if str(order.status or "").upper() == "CANCELLED":
+            raise BusinessRuleException("Cette commande est annulée.", reason="order_cancelled")
+
+        current = str(order.delivery_status or "PENDING").upper()
+        if current == to_status:
+            return {
+                "status": "success",
+                "outcome": "UNCHANGED",
+                "order_id": str(order.id),
+                "delivery_status": current,
+            }
+        if current != expected_from:
+            raise BusinessRuleException(
+                f"Transition invalide (statut actuel : {current}).",
+                reason="invalid_transition",
+            )
+
+        order.delivery_status = to_status
+        current_session.add(
+            OrderStatusHistory(
+                id=uuid.uuid4(),
+                order_id=order.id,
+                status_type="DELIVERY",
+                from_status=expected_from,
+                to_status=to_status,
+                actor_id=producer_profile.id,
+            )
+        )
+
+        if to_status == "DELIVERED":
+            # Demande la réception — jamais une simple information passive (mandat ÉTAPE 6).
+            # Même mécanique Outbox que `confirm_order_by_producer` (MÊME transaction).
+            buyer_row = (
+                await current_session.execute(
+                    select(User.phone)
+                    .join(BuyerProfile, BuyerProfile.user_id == User.id)
+                    .where(BuyerProfile.id == order.buyer_id)
+                    .limit(1)
+                )
+            ).first()
+            buyer_phone = buyer_row[0] if buyer_row else None
+            if buyer_phone:
+                from ladini.workers.outbox import templates as _outbox_templates
+                from ladini.workers.repositories import outbox_repo as _outbox_repo
+
+                await _outbox_repo.enqueue(
+                    current_session,
+                    [
+                        {
+                            "channel": "WHATSAPP",
+                            "recipient_phone": buyer_phone,
+                            "template_key": _outbox_templates.RECURRING_SUPPLY_ORDER_DELIVERED_BUYER,
+                            "payload": {"order_number": str(order.id)[:8].upper()},
+                            "dedupe_key": f"RECURRING_SUPPLY_DELIVERED_BUYER:{order.id}",
+                        }
+                    ],
+                )
+
+        await current_session.flush()
+        logger.info(
+            "recurring_supply.delivery_status_updated | order_id=%s | %s -> %s",
+            order.id, expected_from, to_status,
+        )
+        return {
+            "status": "success",
+            "outcome": "UPDATED",
+            "order_id": str(order.id),
+            "delivery_status": to_status,
+        }
+
+    async def record_order_reception(
+        self,
+        phone: str,
+        order_id: str,
+        outcome: str,
+        issue_type: Optional[str] = None,
+        detail: Optional[str] = None,
+        received_quantity: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """ACHETEUR — enregistre la réception d'une commande `DELIVERED` :
+        `RECEIVED` (« tout est bon ») ou `RECEIVED_WITH_ISSUE` (« il y a un
+        problème »). `Order.status` passe `COMPLETED` UNIQUEMENT sur
+        `RECEIVED` — un `RECEIVED_WITH_ISSUE` laisse `status` inchangé
+        (`CONFIRMED`) : la résolution reste HUMAINE (mandat §8, jamais de
+        remboursement/avoir/pénalité automatique), le statut le signale.
+
+        L'incident (type/détail/quantité reçue) est stocké dans
+        `OrderStatusHistory.note`, en JSON — AUCUNE nouvelle table
+        (`OrderDispute` existe mais est un mécanisme ESCROW, couplé à
+        `escrow_wallet_id`/`disputed_amount`/`escrow_payout_status`, hors de
+        propos pour un incident non-monétaire sur une commande payée hors
+        plateforme — mandat §7 : réutiliser seulement ce qui convient
+        RÉELLEMENT, jamais forcer un mauvais ajustement).
+
+        Idempotent : une commande déjà `RECEIVED`/`RECEIVED_WITH_ISSUE` ne
+        peut plus être re-réceptionnée — le premier résultat gagne,
+        jamais un second signalement qui écraserait le premier."""
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+        outcome = str(outcome or "").upper().strip()
+        if outcome not in _RECEPTION_OUTCOMES:
+            raise BusinessRuleException(f"Résultat inconnu : {outcome}")
+
+        _user_obj, buyer_profile = await self.get_buyer_profile(phone=str(phone))
+        order = await self._load_recurring_supply_order_for_update(order_id)
+        if str(order.buyer_id) != str(buyer_profile.id):
+            raise BusinessRuleException(
+                "Commande introuvable ou non autorisée.", reason="not_owner"
+            )
+
+        current = str(order.delivery_status or "PENDING").upper()
+        if current in _RECEPTION_OUTCOMES:
+            return {
+                "status": "success",
+                "outcome": "ALREADY_RECORDED",
+                "order_id": str(order.id),
+                "delivery_status": current,
+            }
+        if current != "DELIVERED":
+            raise BusinessRuleException(
+                f"Cette commande n'a pas encore été livrée (statut : {current}).",
+                reason="not_delivered",
+            )
+
+        order.delivery_status = outcome
+        note = None
+        if outcome == "RECEIVED_WITH_ISSUE":
+            note = json.dumps(
+                {"issue_type": issue_type, "detail": detail, "received_quantity": received_quantity},
+                ensure_ascii=False,
+            )
+        else:
+            order.status = "COMPLETED"
+            order.confirmed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        current_session.add(
+            OrderStatusHistory(
+                id=uuid.uuid4(),
+                order_id=order.id,
+                status_type="DELIVERY",
+                from_status="DELIVERED",
+                to_status=outcome,
+                actor_id=buyer_profile.id,
+                note=note,
+            )
+        )
+        await current_session.flush()
+        logger.info(
+            "recurring_supply.reception_recorded | order_id=%s | outcome=%s", order.id, outcome
+        )
+        return {
+            "status": "success",
+            "outcome": "RECORDED",
+            "order_id": str(order.id),
+            "delivery_status": outcome,
+        }
+
+    async def list_my_deliverable_orders(self, phone: str, delivery_status: str) -> Dict[str, Any]:
+        """Lecture bornée, réservée au fast-path déterministe (VS5 pilote,
+        `interpreter/routing.py::_bare_confirmation_for_order_reception`) :
+        commandes `RECURRING_SUPPLY` de CET acheteur dans UN `delivery_
+        status` précis. N'existe QUE parce qu'aucune méthode déjà en place
+        (`get_buyer_orders_dashboard`, `get_active_orders_context_by_phone`)
+        ne renvoie `order_type`/`delivery_status` de façon structurée —
+        jamais un doublon d'une lecture déjà exploitable telle quelle."""
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+        _user_obj, buyer_profile = await self.get_buyer_profile(phone=str(phone))
+        rows = (
+            await current_session.execute(
+                select(Order.id).where(
+                    Order.buyer_id == buyer_profile.id,
+                    Order.order_type == "RECURRING_SUPPLY",
+                    Order.delivery_status == str(delivery_status or "").upper(),
+                )
+            )
+        ).scalars().all()
+        return {"status": "success", "items": [{"order_id": str(r)} for r in rows]}
+
+    async def _load_recurring_supply_order_for_update(self, order_id: Any) -> Order:
+        """Charge et verrouille (`FOR UPDATE`) une commande, en exigeant `order_type ==
+        'RECURRING_SUPPLY'` — jamais un chemin de livraison partagé avec les autres types de
+        commande (préorder/RFQ), qui restent gérés par leurs mécanismes existants inchangés."""
+        current_session = self.session
+        try:
+            o_uuid = uuid.UUID(str(order_id))
+        except (TypeError, ValueError):
+            raise BusinessRuleException("Identifiant de commande invalide.") from None
+        order = await current_session.scalar(
+            select(Order).where(Order.id == o_uuid).with_for_update()
+        )
+        if order is None:
+            raise BusinessRuleException("Commande introuvable.", reason="order_not_found")
+        if str(order.order_type or "").upper() != "RECURRING_SUPPLY":
+            raise BusinessRuleException(
+                "Cette commande suit un autre parcours de livraison.",
+                reason="wrong_order_type",
+            )
+        return order
 
     # ─── UPDATE ───────────────────────────────────────────────────────
 

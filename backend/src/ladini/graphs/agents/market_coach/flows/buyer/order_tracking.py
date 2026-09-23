@@ -62,6 +62,7 @@ from ladini.graphs.agents.market_coach.services.mcp.gateway import (
     AuctionGateway,
     MCPCallError,
     OrderTrackingGateway,
+    RecurringSupplyGateway,
 )
 from ladini.graphs.agents.market_coach.utils import (
     MarketRuntime,
@@ -1916,6 +1917,323 @@ async def proactive_order_check(
 
 
 # =====================================================================
+# 6b. RÉCEPTION — "tout est bon" / "il y a un problème" (VS5 pilote)
+# =====================================================================
+# Mini-machine à états auto-suffisante (même gabarit que
+# `_resolve_auction_for_update`) : ce flow gère lui-même sa propre suite de
+# tours (menu d'incident, puis UNE question de détail) via `working_memory`
+# — jamais `confirmation_gate`/`mcp_tool_executor` génériques, qui ne savent
+# pas enchaîner un menu puis un champ libre. Déclenché UNIQUEMENT par
+# `payload.action in ("RECEIVED_OK", "RECEIVED_ISSUE")` (posé par
+# `interpreter/routing.py::_bare_confirmation_for_order_reception`, jamais
+# par le LLM — mandat §10) ou par la poursuite d'un cycle déjà entamé
+# (`working_memory.reception_phase`).
+
+_RECEPTION_ISSUE_TYPES: Dict[str, str] = {
+    "1": "QUANTITY",
+    "2": "QUALITY",
+    "3": "DELAY",
+    "4": "WRONG_PRODUCT",
+    "5": "OTHER",
+}
+_RECEPTION_ISSUE_LABELS: Dict[str, str] = {
+    "QUANTITY": "Quantité incorrecte",
+    "QUALITY": "Qualité insuffisante",
+    "DELAY": "Retard",
+    "WRONG_PRODUCT": "Mauvais produit",
+    "OTHER": "Autre",
+}
+_RECEPTION_SKIP_WORDS = {"passer", "aucun", "aucune", "non", "skip", "rien"}
+
+
+def _clear_reception_wm(working: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        **working,
+        "reception_order_id": None,
+        "reception_phase": None,
+        "reception_issue_type": None,
+        "reception_pending_action": None,
+        "active_goal": None,
+    }
+
+
+def _reception_issue_menu(order_id: str, working: Dict[str, Any]) -> Dict[str, Any]:
+    lines = [
+        "⚠️ *Quel est le problème ?*",
+        "1. Quantité incorrecte",
+        "2. Qualité insuffisante",
+        "3. Retard",
+        "4. Mauvais produit",
+        "5. Autre",
+    ]
+    menu_text = "\n".join(lines)
+    options = [
+        MenuOption(index=idx, label=label, value=code)
+        for idx, code in _RECEPTION_ISSUE_TYPES.items()
+        for label in [_RECEPTION_ISSUE_LABELS[code]]
+    ]
+    return {
+        "status": "WAITING_INPUT",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
+        "response_strategy": "SELECTION_MENU",
+        "current_goal": "BUYER_CHECK_ORDER_STATUS",
+        "final_response": menu_text,
+        "available_mapping": dict(_RECEPTION_ISSUE_TYPES),
+        "working_memory": {
+            **working,
+            "reception_order_id": str(order_id),
+            "reception_phase": "AWAIT_ISSUE_TYPE",
+            "active_goal": "BUYER_CHECK_ORDER_STATUS",
+        },
+        "ag_ui_component": None,
+        "pending_menu": MenuRequest(
+            title="Type de problème",
+            options=options,
+            kind="reception_issue_type",
+            preformatted_text=menu_text,
+        ),
+    }
+
+
+async def _finalize_reception(
+    mc_runtime: MarketRuntime,
+    phone: str,
+    order_id: str,
+    outcome: str,
+    working: Dict[str, Any],
+    issue_type: Optional[str] = None,
+    detail: Optional[str] = None,
+    received_quantity: Optional[float] = None,
+) -> Dict[str, Any]:
+    gw = RecurringSupplyGateway(mc_runtime)
+    try:
+        result = await gw.record_order_reception(
+            phone=phone,
+            order_id=str(order_id),
+            outcome=outcome,
+            issue_type=issue_type,
+            detail=detail,
+            received_quantity=received_quantity,
+        )
+    except MCPCallError as exc:
+        logger.warning(
+            "record_order_reception_failed | order=%s | outcome=%s | %s",
+            order_id,
+            outcome,
+            exc,
+        )
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "ERROR",
+            "final_response": "Je n'ai pas pu enregistrer la réception de cette commande.",
+            "working_memory": _clear_reception_wm(working),
+            "ag_ui_component": None,
+        }
+    if not is_success_response(result):
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "ERROR",
+            "final_response": result.get("message")
+            or "Je n'ai pas pu enregistrer la réception de cette commande.",
+            "working_memory": _clear_reception_wm(working),
+            "ag_ui_component": None,
+        }
+    final_response = (
+        "✅ Merci ! Réception confirmée, commande clôturée."
+        if outcome == "RECEIVED"
+        else "Merci, c'est noté. Notre équipe revient vers vous."
+    )
+    return {
+        "status": "COMPLETED",
+        "response_strategy": "SUCCESS",
+        "final_response": final_response,
+        "order_tracking_context": _tracking_ctx_patch(order_id),
+        "working_memory": _clear_reception_wm(working),
+        "ag_ui_component": None,
+    }
+
+
+async def _record_reception_flow(
+    state: Dict[str, Any],
+    mc_runtime: MarketRuntime,
+) -> Dict[str, Any]:
+    phone = str(state.get("user_phone") or "")
+    if not phone:
+        return _error("Numéro de téléphone introuvable.")
+
+    payload = dict(state.get("transaction_payload") or {})
+    working = dict(state.get("working_memory") or {})
+    phase = str(working.get("reception_phase") or "").upper()
+
+    # --- Phase AWAIT_ISSUE_TYPE : sélection du type d'incident ---
+    if phase == "AWAIT_ISSUE_TYPE":
+        order_id = working.get("reception_order_id")
+        selection_idx = payload.get("selection_index")
+        issue_type = _RECEPTION_ISSUE_TYPES.get(str(selection_idx)) if selection_idx is not None else None
+        if not order_id or not issue_type:
+            # Réponse non reconnue : réaffiche le même menu (jamais de choix deviné).
+            return _reception_issue_menu(order_id or "", working) if order_id else _error(
+                "Je n'ai pas pu identifier la commande concernée."
+            )
+        if issue_type == "QUANTITY":
+            return {
+                "status": "WAITING_INPUT",
+                **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="received_quantity"),
+                "response_strategy": "ASK_MISSING_FIELD",
+                "current_goal": "BUYER_CHECK_ORDER_STATUS",
+                "final_response": "Combien avez-vous réellement reçu ?",
+                "working_memory": {
+                    **working,
+                    "reception_order_id": str(order_id),
+                    "reception_phase": "AWAIT_DETAIL",
+                    "reception_issue_type": issue_type,
+                    "active_goal": "BUYER_CHECK_ORDER_STATUS",
+                },
+                "ag_ui_component": None,
+            }
+        if issue_type in ("QUALITY", "OTHER"):
+            return {
+                "status": "WAITING_INPUT",
+                **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="reception_detail"),
+                "response_strategy": "ASK_MISSING_FIELD",
+                "current_goal": "BUYER_CHECK_ORDER_STATUS",
+                "final_response": (
+                    "Un détail à ajouter ? (facultatif — répondez *passer* pour ignorer)"
+                ),
+                "working_memory": {
+                    **working,
+                    "reception_order_id": str(order_id),
+                    "reception_phase": "AWAIT_DETAIL",
+                    "reception_issue_type": issue_type,
+                    "active_goal": "BUYER_CHECK_ORDER_STATUS",
+                },
+                "ag_ui_component": None,
+            }
+        # DELAY / WRONG_PRODUCT : pas de détail supplémentaire nécessaire.
+        return await _finalize_reception(
+            mc_runtime, phone, str(order_id), "RECEIVED_WITH_ISSUE", working, issue_type=issue_type
+        )
+
+    # --- Phase AWAIT_DETAIL : UNE question de détail, selon le type choisi ---
+    if phase == "AWAIT_DETAIL":
+        order_id = working.get("reception_order_id")
+        issue_type = working.get("reception_issue_type")
+        if not order_id or not issue_type:
+            return _error("Je n'ai pas pu identifier la commande concernée.")
+        text = str(state.get("normalized_text") or state.get("user_query") or "").strip()
+        if issue_type == "QUANTITY":
+            qty_result = parse_quantity_unit_from_text(text)
+            received_quantity = qty_result.quantity if qty_result else None
+            if received_quantity is None:
+                try:
+                    received_quantity = float(text.replace(",", ".").strip())
+                except ValueError:
+                    received_quantity = None
+            if received_quantity is None:
+                return {
+                    "status": "WAITING_INPUT",
+                    **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="received_quantity"),
+                    "response_strategy": "ASK_MISSING_FIELD",
+                    "current_goal": "BUYER_CHECK_ORDER_STATUS",
+                    "final_response": "Merci d'indiquer juste un nombre, ex: 35.",
+                    "working_memory": working,
+                    "ag_ui_component": None,
+                }
+            return await _finalize_reception(
+                mc_runtime,
+                phone,
+                str(order_id),
+                "RECEIVED_WITH_ISSUE",
+                working,
+                issue_type=issue_type,
+                received_quantity=received_quantity,
+            )
+        _clean = text.lower().strip(" .!?,;: ")
+        detail = None if _clean in _RECEPTION_SKIP_WORDS else text[:500]
+        return await _finalize_reception(
+            mc_runtime,
+            phone,
+            str(order_id),
+            "RECEIVED_WITH_ISSUE",
+            working,
+            issue_type=issue_type,
+            detail=detail,
+        )
+
+    # --- Phase AWAIT_ORDER_SELECT : désambiguïsation multi-commandes ---
+    if phase == "AWAIT_ORDER_SELECT":
+        action = working.get("reception_pending_action")
+        selection_idx = payload.get("selection_index")
+        mapping = state.get("available_mapping") or {}
+        order_id = mapping.get(str(selection_idx)) if selection_idx is not None else None
+        if not order_id or action not in ("RECEIVED_OK", "RECEIVED_ISSUE"):
+            return _error("Je n'ai pas pu identifier la commande concernée.")
+        if action == "RECEIVED_OK":
+            return await _finalize_reception(mc_runtime, phone, str(order_id), "RECEIVED", working)
+        return _reception_issue_menu(str(order_id), working)
+
+    # --- Entrée : premier tour, "tout est bon" / "il y a un problème" ---
+    action = payload.get("action")
+    if action not in ("RECEIVED_OK", "RECEIVED_ISSUE"):
+        return await check_order_status(state, mc_runtime)
+
+    gw = RecurringSupplyGateway(mc_runtime)
+    try:
+        result = await gw.list_my_deliverable_orders(phone=phone, delivery_status="DELIVERED")
+    except Exception as exc:
+        logger.exception("list_my_deliverable_orders | error: %s", exc)
+        return _error("Service temporairement indisponible.")
+    items = (result or {}).get("items") or []
+    if not items:
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "SUCCESS",
+            "final_response": "Aucune commande livrée en attente de réception pour le moment.",
+            "ag_ui_component": None,
+        }
+    if len(items) > 1:
+        mapping = {str(i): str(it["order_id"]) for i, it in enumerate(items, start=1)}
+        options = [
+            MenuOption(
+                index=idx,
+                label=f"Commande #{oid[:8].upper()}",
+                value=oid,
+            )
+            for idx, oid in mapping.items()
+        ]
+        menu_text = "\n".join(
+            ["📦 *Plusieurs commandes livrées. Laquelle concernez-vous ?*"]
+            + [f"{idx}. Commande #{oid[:8].upper()}" for idx, oid in mapping.items()]
+        )
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(InteractionKind.SELECTION_MENU),
+            "response_strategy": "SELECTION_MENU",
+            "current_goal": "BUYER_CHECK_ORDER_STATUS",
+            "final_response": menu_text,
+            "available_mapping": mapping,
+            "working_memory": {
+                **working,
+                "reception_phase": "AWAIT_ORDER_SELECT",
+                "reception_pending_action": action,
+                "active_goal": "BUYER_CHECK_ORDER_STATUS",
+            },
+            "ag_ui_component": None,
+            "pending_menu": MenuRequest(
+                title="Commandes livrées",
+                options=options,
+                kind="reception_order_select",
+                preformatted_text=menu_text,
+            ),
+        }
+
+    order_id = str(items[0]["order_id"])
+    if action == "RECEIVED_OK":
+        return await _finalize_reception(mc_runtime, phone, order_id, "RECEIVED", working)
+    return _reception_issue_menu(order_id, working)
+
+
+# =====================================================================
 # 7. ORCHESTRATOR
 # =====================================================================
 
@@ -2007,6 +2325,20 @@ async def order_tracking_resolver(
         and not payload.get("bid_id")
     ):
         return await check_auction_status(state, mc_runtime)
+
+    # 3bis. Réception (VS5 pilote) : action carriée sur BUYER_CHECK_ORDER_
+    # STATUS ("action" in transaction_payload, voir `interpreter/routing.py::
+    # _bare_confirmation_for_order_reception`), OU poursuite d'un cycle de
+    # réception déjà entamé (menu d'incident / question de détail).
+    if goal == "BUYER_CHECK_ORDER_STATUS" and (
+        payload.get("action") in ("RECEIVED_OK", "RECEIVED_ISSUE")
+        or str(working.get("reception_phase") or "") in (
+            "AWAIT_ISSUE_TYPE",
+            "AWAIT_DETAIL",
+            "AWAIT_ORDER_SELECT",
+        )
+    ):
+        return await _record_reception_flow(state, mc_runtime)
 
     if goal == "BUYER_CHECK_ORDER_STATUS":
         return await check_order_status(state, mc_runtime)

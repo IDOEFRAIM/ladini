@@ -628,6 +628,37 @@ class RecurringSupplyGateway(_BaseGateway):
             "accept_match_proposal", phone=phone, recurring_need_id=recurring_need_id, action=action
         )
 
+    async def mark_order_delivery_status(
+        self, phone: str, order_id: str, action: str
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "mark_order_delivery_status", phone=phone, order_id=order_id, action=action
+        )
+
+    async def list_my_deliverable_orders(self, phone: str, delivery_status: str) -> Dict[str, Any]:
+        return await self._call(
+            "list_my_deliverable_orders", phone=phone, delivery_status=delivery_status
+        )
+
+    async def record_order_reception(
+        self,
+        phone: str,
+        order_id: str,
+        outcome: str,
+        issue_type: Any = None,
+        detail: Any = None,
+        received_quantity: Any = None,
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "record_order_reception",
+            phone=phone,
+            order_id=order_id,
+            outcome=outcome,
+            issue_type=issue_type,
+            detail=detail,
+            received_quantity=received_quantity,
+        )
+
 
 __all__ = [
     "MCPCallError",
