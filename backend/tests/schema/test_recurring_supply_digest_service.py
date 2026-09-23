@@ -18,7 +18,13 @@ from factories import Graph, insert, uniq
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from ladini.domain.models import NotificationOutbox, Product, RecurringNeedOccurrence
+from ladini.domain.models import (
+    NotificationOutbox,
+    Order,
+    OrderItem,
+    Product,
+    RecurringNeedOccurrence,
+)
 from ladini.workers.automation.recurring_supply_digest_service import (
     RecurringSupplyDigestService,
 )
@@ -245,12 +251,20 @@ def test_no_order_is_created_and_no_stock_is_touched(pg_dsn):
 
     async def fn(session):
         await RecurringSupplyDigestService(session).run(target_date=d)
-        from sqlalchemy import text
 
-        orders = (await session.execute(text("SELECT count(*) FROM marketplace.orders"))).scalar()
-        order_items = (await session.execute(text("SELECT count(*) FROM marketplace.order_items"))).scalar()
+        # `pg_dsn` est une base PARTAGÉE par tout le module de test (voir docstring de tête) — un
+        # `count(*)` GLOBAL sur `orders`/`order_items` verrait aussi les commandes d'AUTRES tests
+        # (ex: `test_recurring_need_confirmation_service.py::accept_match_proposal`, VS4 pilote, qui
+        # en crée légitimement). On filtre donc sur CE produit/CET acheteur précisément — la
+        # propriété testée reste identique : ce digest, lui, n'a rien créé.
+        orders = (
+            await session.execute(select(Order).where(Order.buyer_id == g.buyer))
+        ).scalars().all()
+        order_items = (
+            await session.execute(select(OrderItem).where(OrderItem.product_id == prod))
+        ).scalars().all()
         product = await session.get(Product, prod)
-        return orders, order_items, product
+        return len(orders), len(order_items), product
 
     orders, order_items, product = _run(pg_dsn, fn)
     assert orders == 0 and order_items == 0

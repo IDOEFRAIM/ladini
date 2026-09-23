@@ -251,6 +251,8 @@ async def _get_my_needs_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -
         kind, target = resolved
         if kind == "DETAIL":
             return await _show_need_detail(state, mc_runtime, target)
+        if kind in ("CONFIRM", "REJECT"):
+            return await _respond_to_match(state, mc_runtime, recurring_need_id=target, action=kind)
         if kind == "INVALID":
             return await _render_needs_list(state, mc_runtime, notice="Je n'ai pas compris ce choix.\n\n")
         # kind == "LIST" (retour / mes besoins) — retombe sur la liste fraîche ci-dessous.
@@ -259,7 +261,8 @@ async def _get_my_needs_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -
 
 def _resolve_menu_reply(state: Dict[str, Any]):
     """`None` : aucun menu actif pour CE goal (première visite, ou menu d'un autre tunnel — jamais
-    touché). Sinon `("LIST"|"DETAIL"|"INVALID", target)`."""
+    touché). Sinon `("LIST"|"DETAIL"|"CONFIRM"|"REJECT"|"INVALID", target)`. `target` est un
+    `recurring_need_id` pour `DETAIL`/`CONFIRM`/`REJECT`, `None` pour `LIST`/`INVALID`."""
     pending = state.get("pending_interaction") or {}
     if not isinstance(pending, dict) or pending.get("kind") != "SELECTION_MENU" or pending.get("goal") != "GET_MY_NEEDS":
         return None
@@ -281,6 +284,11 @@ def _resolve_menu_reply(state: Dict[str, Any]):
         return ("INVALID", None)
     if chosen == "LIST":
         return ("LIST", None)
+    # "CONFIRM:<recurring_need_id>" / "REJECT:<recurring_need_id>" (VS4) — préfixe fermé, jamais
+    # deviné : une valeur de mapping mal formée retombe sur DETAIL, jamais sur une action muette.
+    for prefix, kind in (("CONFIRM:", "CONFIRM"), ("REJECT:", "REJECT")):
+        if chosen.startswith(prefix):
+            return (kind, chosen[len(prefix):])
     return ("DETAIL", chosen)
 
 
@@ -349,20 +357,55 @@ async def _show_need_detail(state: Dict[str, Any], mc_runtime: MarketRuntime, re
         )
         for a in detail.get("allocations") or []
     ]
+    confirmable = bool(allocations)
     text = build_detail_text(
         product=detail["product"],
         requested_quantity=Decimal(str(detail["requested_quantity"])),
         unit=detail["unit"],
         allocations=allocations,
+        confirmable=confirmable,
+    )
+    mapping = (
+        {"1": f"CONFIRM:{recurring_need_id}", "2": f"REJECT:{recurring_need_id}", "3": "LIST"}
+        if confirmable
+        else {"1": "LIST", "2": "LIST"}
     )
     return {
         "final_response": text,
         "status": "COMPLETED",
-        "working_memory": {
-            "recurring_need_menu": {"mapping": {"1": "LIST", "2": "LIST"}, "created_at": time.time()}
-        },
+        "working_memory": {"recurring_need_menu": {"mapping": mapping, "created_at": time.time()}},
         **set_pending_interaction(InteractionKind.SELECTION_MENU, goal="GET_MY_NEEDS"),
     }
+
+
+async def _respond_to_match(
+    state: Dict[str, Any], mc_runtime: MarketRuntime, *, recurring_need_id: str, action: str
+) -> Dict[str, Any]:
+    """Confirme ("CONFIRM") ou refuse ("REJECT") la proposition affichée par `_show_need_detail` —
+    VS4 pilote. `RecurringSupplyGateway.accept_match_proposal` réutilise le moteur de commande
+    existant (voir `services/database/recurring_supply.py::accept_match_proposal`) ; ce nœud ne
+    fait que traduire son résultat en message WhatsApp, jamais de logique métier ici."""
+    phone = state.get("user_phone")
+    gw = RecurringSupplyGateway(mc_runtime)
+    try:
+        result = await gw.accept_match_proposal(
+            phone=str(phone), recurring_need_id=recurring_need_id, action=action
+        )
+    except MCPCallError as exc:
+        logger.warning(
+            "recurring_need.match_response_failed | need=%s | action=%s | %s",
+            recurring_need_id, action, exc,
+        )
+        return {
+            "final_response": "Je n'ai pas pu enregistrer votre réponse — réessayez dans un instant.",
+            "status": "COMPLETED",
+        }
+
+    if action == "REJECT":
+        message = "D'accord, pas de livraison cette fois — votre besoin habituel reste actif."
+    else:
+        message = "✅ C'est confirmé, votre commande est en cours de préparation."
+    return {"final_response": message, "status": "COMPLETED", "result": result}
 
 
 async def _resolve_target_need(gw: RecurringSupplyGateway, phone: Any, payload: Dict[str, Any]):

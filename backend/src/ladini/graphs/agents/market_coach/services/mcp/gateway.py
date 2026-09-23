@@ -621,6 +621,13 @@ class RecurringSupplyGateway(_BaseGateway):
     async def get_recurring_need_detail(self, phone: str, recurring_need_id: str) -> Dict[str, Any]:
         return await self._call("get_recurring_need_detail", phone=phone, recurring_need_id=recurring_need_id)
 
+    async def accept_match_proposal(
+        self, phone: str, recurring_need_id: str, action: str
+    ) -> Dict[str, Any]:
+        return await self._call(
+            "accept_match_proposal", phone=phone, recurring_need_id=recurring_need_id, action=action
+        )
+
 
 __all__ = [
     "MCPCallError",

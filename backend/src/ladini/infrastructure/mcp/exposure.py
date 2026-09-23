@@ -125,6 +125,7 @@ MCP_EXPOSED_TOOLS: frozenset[str] = frozenset(
         "update_recurring_need",
         "list_my_recurring_needs",
         "get_recurring_need_detail",
+        "accept_match_proposal",
         "get_auction_bids",
         "get_auctions_bids",
         "get_producer_auctions",

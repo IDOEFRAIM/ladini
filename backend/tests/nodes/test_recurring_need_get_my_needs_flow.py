@@ -89,15 +89,91 @@ def test_selecting_a_valid_index_shows_the_need_detail():
     assert "Coopérative A" in result["final_response"]
     assert "40 KG — 500 FCFA/KG" in result["final_response"]
     assert "Total estimé : 20000 FCFA" in result["final_response"]
-    assert "vérifiée lors de votre confirmation" in result["final_response"]
-    assert "confirmer" not in result["final_response"].lower().replace("confirmation", "")
+    # VS4 (pilote) : une disponibilité trouvée offre désormais explicitement de confirmer — le
+    # mandat "jamais réservé/garanti avant confirmation" reste respecté (voir digest.py), seule
+    # l'ABSENCE de bouton "confirmer" avant cette phase a changé.
+    assert "1. Confirmer" in result["final_response"]
+    assert "2. Pas cette fois" in result["final_response"]
 
 
-def test_the_detail_screen_sets_its_own_back_menu():
+def test_the_detail_screen_never_promises_a_reservation_before_confirmation():
+    pending_menu_state = _list_state_after_first_visit()
+    result = _run(pending_menu_state, {"get_recurring_need_detail": _DETAIL_RESPONSE})
+    forbidden = ("réservé", "garanti")
+    assert not any(w in result["final_response"].lower() for w in forbidden)
+
+
+def test_the_detail_screen_sets_a_confirm_reject_menu_when_something_is_available():
     pending_menu_state = _list_state_after_first_visit()
     result = _run(pending_menu_state, {"get_recurring_need_detail": _DETAIL_RESPONSE})
     assert result["pending_interaction"]["kind"] == "SELECTION_MENU"
+    assert result["working_memory"]["recurring_need_menu"]["mapping"] == {
+        "1": "CONFIRM:need-tomate",
+        "2": "REJECT:need-tomate",
+        "3": "LIST",
+    }
+
+
+def test_the_detail_screen_offers_no_confirmation_when_nothing_is_available():
+    pending_menu_state = _list_state_after_first_visit()
+    empty_detail = {**_DETAIL_RESPONSE, "allocations": []}
+    result = _run(pending_menu_state, {"get_recurring_need_detail": empty_detail})
+    assert "Confirmer" not in result["final_response"]
     assert result["working_memory"]["recurring_need_menu"]["mapping"] == {"1": "LIST", "2": "LIST"}
+
+
+# ── confirmer / refuser une proposition (VS4) ──────────────────────────────
+
+def _detail_state_after_selection():
+    return make_state(
+        current_goal="GET_MY_NEEDS",
+        transaction_payload={"selection_index": "1"},
+        pending_interaction={"kind": "SELECTION_MENU", "goal": "GET_MY_NEEDS", "created_at": time.time()},
+        working_memory={
+            "recurring_need_menu": {
+                "mapping": {"1": "CONFIRM:need-tomate", "2": "REJECT:need-tomate", "3": "LIST"},
+                "created_at": time.time(),
+            }
+        },
+    )
+
+
+def test_confirming_calls_the_gateway_and_returns_a_success_message():
+    state = _detail_state_after_selection()
+    result = _run(
+        state,
+        {
+            "accept_match_proposal": {
+                "status": "success",
+                "occurrence_id": "occ-tomate",
+                "action": "ACCEPT",
+                "order_ids": ["order-1"],
+                "quantity_confirmed": 40,
+            }
+        },
+    )
+    assert "confirmé" in result["final_response"].lower()
+    assert result["status"] == "COMPLETED"
+
+
+def test_rejecting_calls_the_gateway_and_never_mentions_an_order():
+    state = _detail_state_after_selection()
+    state["transaction_payload"] = {"selection_index": "2"}
+    result = _run(
+        state,
+        {"accept_match_proposal": {"status": "success", "occurrence_id": "occ-tomate", "action": "REJECT"}},
+    )
+    assert "besoin habituel reste actif" in result["final_response"]
+    assert "commande" not in result["final_response"].lower()
+
+
+def test_option_three_returns_to_the_list_without_calling_the_gateway():
+    state = _detail_state_after_selection()
+    state["transaction_payload"] = {"selection_index": "3"}
+    # Aucune réponse stubée pour accept_match_proposal : si le code l'appelait quand même,
+    # StubRuntime lèverait — la réussite du test prouve que l'appel n'a jamais eu lieu.
+    result = _run(state, {"list_my_recurring_needs": _NEEDS_RESPONSE})
+    assert "Vos approvisionnements" in result["final_response"]
 
 
 # ── retour depuis le détail ────────────────────────────────────────────────

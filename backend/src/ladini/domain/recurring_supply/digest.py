@@ -124,6 +124,7 @@ def build_detail_text(
     requested_quantity: Decimal,
     unit: str,
     allocations: Sequence[AllocationLine],
+    confirmable: bool = False,
 ) -> str:
     matched_quantity = sum((a.quantity for a in allocations), Decimal(0))
     lines = [f"🍅 {product.capitalize()} — demain", ""]
@@ -143,11 +144,20 @@ def build_detail_text(
         lines.append(f"Total estimé : {_fmt(total)} FCFA")
 
     lines.append("")
-    # Mandat CONTRAINTE MAJEURE : jamais "réservé"/"garanti" avant la Phase 5.
-    lines.append("Cette disponibilité sera vérifiée lors de votre confirmation.")
-    lines.append("")
-    lines.append("1. Retour")
-    lines.append("2. Mes besoins")
+    if confirmable:
+        # Phase 5 (VS4 pilote) : une allocation reste indicative jusqu'à CETTE confirmation —
+        # le stock n'est débité et la commande créée qu'à l'action "Confirmer" (mandat CONTRAINTE
+        # MAJEURE ci-dessus toujours respecté : rien n'est "réservé" avant ce geste explicite).
+        lines.append("Voulez-vous confirmer cet approvisionnement ?")
+        lines.append("")
+        lines.append("1. Confirmer")
+        lines.append("2. Pas cette fois")
+        lines.append("3. Retour")
+    else:
+        lines.append("Cette disponibilité sera vérifiée lors de votre confirmation.")
+        lines.append("")
+        lines.append("1. Retour")
+        lines.append("2. Mes besoins")
     return "\n".join(lines)
 
 

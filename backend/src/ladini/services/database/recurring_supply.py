@@ -55,12 +55,16 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select, text, update
 
 from ladini.domain.models import (
+    NeedAllocation,
+    Order,
+    OrderItem,
+    Product,
     RecurringNeed,
     RecurringNeedOccurrence,
     SubCategory,
@@ -72,6 +76,7 @@ from ladini.domain.recurring_supply.recurrence import (
 )
 
 from .base import BaseMixin
+from .common import normalize_phone
 from .errors import BusinessRuleException
 
 logger = logging.getLogger("ladini.services.database.recurring_supply")
@@ -90,6 +95,12 @@ RECURRING_NEED_ACTIONS = (
     "OCCURRENCE_OVERRIDE",
     "OCCURRENCE_SKIP",
 )
+
+# `accept_match_proposal` — distinct de `RECURRING_NEED_ACTIONS` (mandat VS4 pilote) : celles-ci
+# modifient la RÈGLE (`recurring_needs`) ou une exception d'occurrence AVANT tout matching ; ACCEPT/
+# REJECT répondent à une PROPOSITION déjà calculée (allocations `PROPOSED`, Phase 3) — deux moments
+# métier différents, jamais mélangés dans le même enum d'action.
+MATCH_RESPONSE_ACTIONS = ("ACCEPT", "REJECT")
 
 
 def _today() -> date:
@@ -348,6 +359,174 @@ class RecurringSupplyMixin(BaseMixin):
                 }
                 for row in alloc_rows
             ],
+        }
+
+    # ─── CONFIRMATION (VS4 pilote) ────────────────────────────────────
+
+    async def accept_match_proposal(self, phone: str, recurring_need_id: str, action: str) -> Dict[str, Any]:
+        """Confirme ou refuse la proposition d'approvisionnement de la PROCHAINE occurrence
+        matchée d'un besoin (UX pilote : "CONFIRMER TOUT" / "PAS DEMAIN").
+
+        `ACCEPT` convertit CHAQUE allocation `PROPOSED` de cette occurrence en commande — UNE
+        commande PAR PRODUCTEUR, corrélées par `order_group_id` (même convention que
+        `Order.checkout_group_id`, voir `buyer.py::create_preorder`) — réutilise le moteur de
+        commande existant tel quel : aucune nouvelle table, aucun nouveau statut de commande,
+        aucun paiement. Statut initial `PENDING_PRODUCER_CONFIRMATION` : le producteur doit
+        encore accuser réception, via les MÊMES intents `PRODUCER_CONFIRM_ORDER`/
+        `PRODUCER_CANCEL_ORDER` que le reste du catalogue — aucun nouveau mécanisme producteur.
+
+        Débite `Product.quantity_for_sale` ICI, jamais avant : Phase 3 (`domain/recurring_supply/
+        matching.py`) laisse délibérément ce champ intact — une allocation `PROPOSED` n'est qu'une
+        réservation logique jusqu'à cette confirmation réelle de l'acheteur.
+
+        `REJECT` ne crée aucune commande, ne débite aucun stock — l'occurrence passe `REJECTED`.
+
+        Verrouille l'occurrence ET ses allocations (`FOR UPDATE`) pour empêcher un double accept
+        concurrent (deux tours WhatsApp presque simultanés) de convertir deux fois les mêmes
+        allocations ou de créer deux jeux de commandes."""
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+        action = str(action or "").upper().strip()
+        if action not in MATCH_RESPONSE_ACTIONS:
+            raise BusinessRuleException(f"Action inconnue : {action}")
+
+        user_obj, buyer_profile = await self.get_buyer_profile(phone=str(phone))
+        buyer_id = buyer_profile.id
+
+        need = await current_session.scalar(
+            select(RecurringNeed).where(
+                RecurringNeed.id == recurring_need_id, RecurringNeed.buyer_id == buyer_id
+            )
+        )
+        if need is None:
+            raise BusinessRuleException("Besoin introuvable.")
+
+        occurrence = await current_session.scalar(
+            select(RecurringNeedOccurrence)
+            .where(
+                RecurringNeedOccurrence.recurring_need_id == need.id,
+                RecurringNeedOccurrence.status.in_(("OPEN", "MATCHED")),
+                RecurringNeedOccurrence.quantity_matched > 0,
+            )
+            .order_by(RecurringNeedOccurrence.occurrence_date.asc())
+            .limit(1)
+            .with_for_update()
+        )
+        if occurrence is None:
+            raise BusinessRuleException("Aucune proposition en attente pour ce besoin.")
+
+        allocations = (
+            (
+                await current_session.execute(
+                    select(NeedAllocation)
+                    .where(
+                        NeedAllocation.occurrence_id == occurrence.id,
+                        NeedAllocation.status == "PROPOSED",
+                    )
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if not allocations:
+            raise BusinessRuleException("Aucune proposition en attente pour ce besoin.")
+
+        if action == "REJECT":
+            for alloc in allocations:
+                alloc.status = "REJECTED"
+            occurrence.status = "REJECTED"
+            occurrence.version = occurrence.version + 1
+            await current_session.flush()
+            logger.info("recurring_need.match_rejected | occurrence_id=%s", occurrence.id)
+            return {"status": "success", "occurrence_id": str(occurrence.id), "action": "REJECT"}
+
+        # ACCEPT — une commande par producteur, débit du stock produit par produit.
+        order_group_id = uuid.uuid4()
+        by_producer: Dict[str, List[NeedAllocation]] = {}
+        for alloc in allocations:
+            by_producer.setdefault(str(alloc.producer_id), []).append(alloc)
+
+        created_order_ids: List[str] = []
+        converted_quantity = 0.0
+        for allocs in by_producer.values():
+            order = Order(
+                id=uuid.uuid4(),
+                buyer_id=buyer_id,
+                zone_id=getattr(user_obj, "zone_id", None),
+                customer_name=getattr(buyer_profile, "establishment_name", None)
+                or getattr(user_obj, "name", None),
+                customer_phone=normalize_phone(str(phone), required=False),
+                total_amount=0.0,
+                subtotal=0.0,
+                status="PENDING_PRODUCER_CONFIRMATION",
+                payment_status="PENDING",
+                delivery_status="PENDING",
+                payment_method="CASH",
+                source="WHATSAPP",
+                order_type="RECURRING_SUPPLY",
+                is_agent_order=True,
+                expected_fulfillment_date=occurrence.occurrence_date,
+                checkout_group_id=order_group_id,
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+            current_session.add(order)
+            await current_session.flush()
+
+            order_total = 0.0
+            for alloc in allocs:
+                product = await current_session.get(Product, alloc.product_id)
+                if product is None:
+                    raise BusinessRuleException("Produit introuvable pour une allocation.")
+                available = float(product.quantity_for_sale or 0.0)
+                debit = float(alloc.quantity)
+                if available < debit:
+                    raise BusinessRuleException(
+                        f"Stock insuffisant pour {product.name} (disponible : {available})."
+                    )
+                product.quantity_for_sale = available - debit
+
+                item = OrderItem(
+                    id=uuid.uuid4(),
+                    order_id=order.id,
+                    product_id=product.id,
+                    quantity=debit,
+                    price_at_sale=float(alloc.unit_price),
+                )
+                current_session.add(item)
+                await current_session.flush()
+
+                alloc.status = "CONVERTED"
+                alloc.order_item_id = item.id
+                order_total += debit * float(alloc.unit_price)
+                converted_quantity += debit
+
+            order.subtotal = order_total
+            order.total_amount = order_total
+            created_order_ids.append(str(order.id))
+
+        occurrence.quantity_confirmed = converted_quantity
+        occurrence.order_group_id = order_group_id
+        occurrence.accepted_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        occurrence.status = (
+            "ACCEPTED"
+            if converted_quantity >= float(occurrence.requested_quantity)
+            else "PARTIALLY_ACCEPTED"
+        )
+        occurrence.version = occurrence.version + 1
+        await current_session.flush()
+
+        logger.info(
+            "recurring_need.match_accepted | occurrence_id=%s | orders=%s | quantity=%s",
+            occurrence.id, created_order_ids, converted_quantity,
+        )
+        return {
+            "status": "success",
+            "occurrence_id": str(occurrence.id),
+            "action": "ACCEPT",
+            "order_ids": created_order_ids,
+            "quantity_confirmed": converted_quantity,
         }
 
     # ─── UPDATE ───────────────────────────────────────────────────────

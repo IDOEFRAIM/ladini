@@ -69,6 +69,7 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     # Approvisionnement récurrent (Phase 2/4)
     "create_recurring_need": PermissionScope.DB_DATA_WRITE,
     "update_recurring_need": PermissionScope.DB_DATA_WRITE,
+    "accept_match_proposal": PermissionScope.DB_DATA_WRITE,
     "list_my_recurring_needs": PermissionScope.DB_READ_ONLY,
     "get_recurring_need_detail": PermissionScope.DB_READ_ONLY,
     "place_bid": PermissionScope.DB_DATA_WRITE,

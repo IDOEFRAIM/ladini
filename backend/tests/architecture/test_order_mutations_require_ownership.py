@@ -197,6 +197,14 @@ class TestOneNewOrderOneProducer:
             "src/ladini/services/database/marketplace.py",
             # OrderService : code mort confirmé (zéro appelant)
             "src/ladini/services/database/order_service.py",
+            # accept_match_proposal (VS4, approvisionnement récurrent) —
+            # même structure que le checkout groupé : `by_producer` regroupe
+            # les allocations PAR producteur AVANT toute création de commande,
+            # une commande naît de CE regroupement (jamais l'inverse), voir
+            # `test_recurring_need_confirmation_service.py::
+            # test_accepting_a_multi_producer_occurrence_creates_one_order_per_producer`
+            # (PostgreSQL réel) qui prouve 2 producteurs -> 2 commandes.
+            "src/ladini/services/database/recurring_supply.py",
         }
         assert sites <= expected, (
             f"Nouveau site de création d'`OrderItem` : {sites - expected}. "
