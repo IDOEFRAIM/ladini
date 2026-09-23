@@ -24,7 +24,7 @@ from ladini.graphs.agents.market_coach.interpreter.new_task_contract import (
 # À incrémenter à CHAQUE changement comportemental — composante de la clé de
 # cache LLM ET dimension Langfuse (`prompt_version`), même discipline que
 # `STRUCTURED_ACTION_PROMPT_VERSION`/`ACTIVE_SLOT_PROMPT_VERSION`.
-NEW_TASK_PROMPT_VERSION = "new_task_v5"
+NEW_TASK_PROMPT_VERSION = "new_task_v6"
 
 _SYSTEM_PROMPT_HEADER = """\
 Tu interprètes un NOUVEAU message utilisateur dans Market Sense, un \
@@ -107,6 +107,9 @@ Vide (`[]`) s'il n'y a qu'un seul tarif.
 toujours au format `YYYY-MM-DD`, calculées à partir de la date de référence \
 donnée dans le message utilisateur ci-dessous (jamais une année devinée). \
 `null` si non précisé.
+- `recurrence_type`/`weekly_days`/`excluded_weekdays`/`max_price_per_unit` \
+(CREATE_RECURRING_NEED) : DAILY/WEEKLY_DAYS(+weekly_days)/WEEKLY/ONE_OFF ; \
+ISO 1=lundi..7=dimanche ; "sauf dimanche" = DAILY + excluded_weekdays=[7].
 
 EXEMPLE (quantité en groupes de conditionnements + prix de référence + \
 tarifs par conditionnement, combinés dans le MÊME message) :
@@ -129,7 +132,9 @@ Réponds strictement avec cet objet JSON, sans aucun autre texte :
 "packaging": "<str|null>"}, ...], "estimated_available_at": \
 "<YYYY-MM-DD|null>", "expected_harvest_date": "<YYYY-MM-DD|null>", \
 "deadline": "<YYYY-MM-DD|null>", "zone": "<str|null>", \
-"farm_name": "<str|null>"}}
+"farm_name": "<str|null>", "recurrence_type": \
+"<DAILY|WEEKLY_DAYS|WEEKLY|ONE_OFF|null>", "weekly_days": [<1-7>, ...], \
+"excluded_weekdays": [<1-7>, ...], "max_price_per_unit": <float|null>}}
 """
 
 

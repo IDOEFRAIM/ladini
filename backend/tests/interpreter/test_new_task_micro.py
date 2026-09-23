@@ -311,10 +311,18 @@ class TestRepairRetryIsCappedAtOne:
 
 
 class TestPromptSizeGuard:
+    # Seuils relevés de 2200 à 2260 (2026-09-23) : `recurrence_type`/
+    # `weekly_days`/`excluded_weekdays`/`max_price_per_unit` ajoutés au
+    # schéma (bug réel — CREATE_RECURRING_NEED ne pouvait structurellement
+    # jamais faire transiter une récurrence, voir TestRecurringNeedWith
+    # ExcludedWeekday plus bas). +60 tokens pour un champ `required` du
+    # catalogue reste très loin de l'ancien prompt à 5000 tokens que cette
+    # garde vise réellement à empêcher (spec §50) — jamais une dérive non
+    # justifiée.
     def test_system_prompt_never_regresses_towards_the_old_5000_token_prompt(self):
         system_prompt = build_new_task_system_prompt(CATALOG)
         estimated_tokens = int(len(system_prompt.split()) * 1.3)
-        assert estimated_tokens < 2200, (
+        assert estimated_tokens < 2260, (
             f"system_prompt new_task_v2 ~{estimated_tokens} tokens — "
             "seuil de garde anti-régression dépassé (spec §50)"
         )
@@ -325,7 +333,7 @@ class TestPromptSizeGuard:
             _ctx(), "je veux vendre 20 sacs de mais a 250 le kilo"
         )
         total_tokens = int((len(system_prompt.split()) + len(user_prompt.split())) * 1.3)
-        assert 800 <= total_tokens <= 2200
+        assert 800 <= total_tokens <= 2260
 
 
 class TestMaxTokensIsExplicitAndLargeEnough:
@@ -455,3 +463,105 @@ class TestOnlyNewTaskRouteUsesTheMicroprompt:
         result = run(interp(state, StubRuntime(llm=ScriptedLLM(legacy_payload))))
         assert result["interpreted_event"] == "NEW_TASK"
         assert result["detected_intent"] == "BUYER_REQUEST"
+
+
+# =====================================================================
+# J. BESOIN RÉCURRENT AVEC JOUR EXCLU (bug réel 2026-09-23, non-régression)
+#
+# "J'ai besoin de 20 kg de tomate tous les jours sauf les dimanches" était
+# classé BUYER_REQUEST en production ("produit non disponible dans notre
+# catalogue" — `flows/buyer/cart.py`) au lieu de CREATE_RECURRING_NEED.
+# Cause racine, confirmée en lisant le code (jamais devinée) : le contrat
+# `NewTaskEntities` (extra="forbid") ne portait AUCUN champ
+# `recurrence_type`/`weekly_days`/`excluded_weekdays`/`max_price_per_unit`
+# — alors que `INTENT_CONFIG["CREATE_RECURRING_NEED"]["required"]` EXIGE
+# `recurrence_type`. Le micro-prompt NEW_TASK ne pouvait donc structurellement
+# jamais faire transiter une récurrence, quel que soit le jugement du LLM.
+# Ce test fige le CONTRAT (schéma + wiring), jamais le jugement du LLM lui-
+# même — voir la philosophie de `tests/architecture/
+# test_recurring_need_intent_wiring.py`. La résolution catalogue elle-même
+# (`RecurringSupplyMixin._resolve_sub_category`, `SubCategory` — jamais un
+# `Product` en stock) était déjà correcte avant ce correctif et reste
+# inchangée ici.
+# =====================================================================
+
+
+class TestRecurringNeedWithExcludedWeekday:
+    _RECURRING_TEXT = "J'ai besoin de 20 kg de tomate tous les jours sauf les dimanches"
+    _RECURRING_PAYLOAD = {
+        "disposition": "NEW_TASK",
+        "intent": "CREATE_RECURRING_NEED",
+        "confidence": 0.95,
+        "entities": {
+            "product": "tomate",
+            "quantity": 20.0,
+            "unit": "KG",
+            "recurrence_type": "DAILY",
+            "excluded_weekdays": [7],
+        },
+    }
+
+    def test_recurrence_entities_no_longer_trigger_a_schema_validation_error(self):
+        """Le coeur du bug : ce payload — exactement ce qu'un LLM bien
+        informé doit produire pour ce message — levait une ValidationError
+        `extra_forbidden` sur `recurrence_type`/`excluded_weekdays` avant ce
+        correctif, jamais un défaut de jugement du LLM scripté ici."""
+        rt, gateway = _runtime(self._RECURRING_PAYLOAD)
+        outcome, result = run(
+            run_new_task_microprompt(
+                {"message_sid": None}, rt, self._RECURRING_TEXT, _ctx(), None, CATALOG
+            )
+        )
+        assert outcome == NewTaskOutcome.RESULT
+        assert len(gateway.calls) == 1  # schéma valide dès le 1er essai, aucun repair déclenché
+        assert result["interpreted_event"] == "NEW_TASK"
+        assert result["detected_intent"] == "CREATE_RECURRING_NEED"
+        ents = result["extracted_entities"]
+        assert ents["product"] == "tomate"
+        assert ents["quantity"] == 20.0
+        assert ents["unit"] == "KG"
+        assert ents["recurrence_type"] == "DAILY"
+        assert ents["excluded_weekdays"] == [7]
+
+    def test_full_interpreter_routes_to_recurring_need_tunnel_never_cart(self):
+        """Bout en bout via `make_input_interpreter` : le message doit
+        atteindre le tunnel `recurring_need` (`flows/buyer/recurring_need.py`)
+        — JAMAIS `cart` (`flows/buyer/cart.py`, propriétaire du message
+        "produit non disponible dans notre catalogue" observé en prod) ni
+        exiger un `Product` actuellement en stock."""
+        interp = make_input_interpreter("BUYER")
+        state = make_state(
+            normalized_text=self._RECURRING_TEXT, expected_input="NONE", user_role="BUYER"
+        )
+        result = run(interp(state, StubRuntime(llm=ScriptedLLM(dict(self._RECURRING_PAYLOAD)))))
+        assert result["detected_intent"] == "CREATE_RECURRING_NEED"
+        assert result["interpreted_event"] == "NEW_TASK"
+        assert INTENT_CONFIG["CREATE_RECURRING_NEED"]["tunnel"] == "recurring_need"
+        assert INTENT_CONFIG["CREATE_RECURRING_NEED"]["tunnel"] != "cart"
+        ents = result["extracted_entities"]
+        assert ents["recurrence_type"] == "DAILY"
+        assert ents["excluded_weekdays"] == [7]
+
+    def test_punctual_purchase_of_the_same_product_still_uses_the_old_cart_flow(self):
+        """Test miroir explicitement requis (non-régression) : "je cherche 20
+        kg de tomate maintenant" reste BUYER_REQUEST -> tunnel `cart`, jamais
+        absorbé par le nouveau tunnel `recurring_need`."""
+        payload = {
+            "disposition": "NEW_TASK",
+            "intent": "BUYER_REQUEST",
+            "confidence": 0.9,
+            "entities": {"product": "tomate", "quantity": 20.0, "unit": "KG"},
+        }
+        interp = make_input_interpreter("BUYER")
+        state = make_state(
+            normalized_text="Je cherche 20 kg de tomate maintenant",
+            expected_input="NONE",
+            user_role="BUYER",
+        )
+        result = run(interp(state, StubRuntime(llm=ScriptedLLM(payload))))
+        assert result["detected_intent"] == "BUYER_REQUEST"
+        assert result["interpreted_event"] == "NEW_TASK"
+        # BUYER_REQUEST reste hors du tunnel recurring_need (resté à l'écart
+        # du tunnel dédié cart.py lui-même — `_TUNNELLESS_FLOW_INTENTS`,
+        # core/goals.py — jamais absorbé par le nouveau tunnel).
+        assert INTENT_CONFIG["BUYER_REQUEST"].get("tunnel") != "recurring_need"

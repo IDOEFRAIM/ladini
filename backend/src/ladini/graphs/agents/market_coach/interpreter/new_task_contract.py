@@ -84,6 +84,18 @@ class NewTaskEntities(BaseModel):
     deadline: Optional[str] = None
     zone: Optional[str] = None
     farm_name: Optional[str] = None
+    # CREATE_RECURRING_NEED (spec Phase 2 §3, `intent.py::INTENT_CONFIG` —
+    # `recurrence_type` y est un champ `required`, `weekly_days`/
+    # `excluded_weekdays`/`max_price_per_unit` sont dans son `label_map`) :
+    # absents d'ici avant ce correctif (2026-09-23, bug réel confirmé —
+    # "20 kg de tomate tous les jours sauf les dimanches" retombait sur
+    # BUYER_REQUEST, `extra="forbid"` rendant IMPOSSIBLE toute extraction de
+    # récurrence par ce micro-prompt). Voir `new_task_prompts.py` pour les
+    # règles d'extraction correspondantes.
+    recurrence_type: Optional[str] = None
+    weekly_days: List[int] = []
+    excluded_weekdays: List[int] = []
+    max_price_per_unit: Optional[float] = None
 
 
 class NewTaskInterpretation(BaseModel):
