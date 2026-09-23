@@ -99,9 +99,11 @@ def test_a_single_sufficient_offer_partially_covers_a_100kg_need(market):
     assert occurrence.status == "OPEN"  # couverture partielle : reste ouvert (mandat §9)
 
 
-# ── multi-fournisseurs ───────────────────────────────────────────────────
+# ── fournisseur unique — jamais de combinaison automatique (mandat matching pilote) ───────
 
-def test_three_offers_are_combined_to_exactly_cover_the_need(market):
+def test_a_single_full_coverage_offer_is_chosen_over_smaller_partial_ones(market):
+    """Ex-« trois offres combinées » : A=40, B=35 (aucun ne couvre seul 100) et C=100 (couvre
+    seul). Le chemin nominal pilote ne combine JAMAIS A+B+C — il prend C seul, exactement 100."""
     dsn, g, need, occ = market
     conn = psycopg2.connect(dsn)
     with conn, conn.cursor() as cur:
@@ -109,19 +111,122 @@ def test_three_offers_are_combined_to_exactly_cover_the_need(market):
         pB, pC = g.extra_producer(), g.extra_producer()
         g.product_for(producer=g.producer, quantity_for_sale=40, price=100)
         g.product_for(producer=pB, quantity_for_sale=35, price=100)
-        g.product_for(producer=pC, quantity_for_sale=50, price=100)
+        g.product_for(producer=pC, quantity_for_sale=100, price=100)
     conn.close()
 
     async def fn(session):
         report = await NeedMatchingService(session).rematch_occurrence(occ)
         allocs = await _allocations(session, occ)
         occurrence = await _occurrence(session, occ)
-        return report, allocs, occurrence
+        return report, allocs, occurrence, pC
 
-    report, allocs, occurrence = _run(dsn, fn)
-    assert sum(a.quantity for a in allocs) == 100
+    report, allocs, occurrence, pC = _run(dsn, fn)
+    assert len(allocs) == 1
+    assert str(allocs[0].producer_id) == str(pC)
+    assert float(allocs[0].quantity) == 100
     assert occurrence.quantity_matched == 100
     assert occurrence.status == "MATCHED"
+
+
+def test_two_partial_offers_summing_exactly_to_the_need_are_never_combined(market):
+    """CAS 6 du mandat : A=20 + B=20 pour un besoin de 40 — la somme couvrirait exactement, mais
+    le chemin nominal pilote ne les combine JAMAIS automatiquement. Une seule ligne, 20/40."""
+    dsn, g, need, occ = market  # `market` : besoin de 100 kg — on aligne l'occurrence sur 40 ici
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "update marketplace.recurring_need_occurrences set requested_quantity = 40 where id = %s",
+            (str(occ),),
+        )
+        g.cur = cur
+        pB = g.extra_producer()
+        g.product_for(producer=g.producer, quantity_for_sale=20, price=100)
+        g.product_for(producer=pB, quantity_for_sale=20, price=100)
+
+    async def fn(session):
+        await NeedMatchingService(session).rematch_occurrence(occ)
+        allocs = await _allocations(session, occ)
+        occurrence = await _occurrence(session, occ)
+        return allocs, occurrence
+
+    allocs, occurrence = _run(dsn, fn)
+    assert len(allocs) == 1
+    assert float(allocs[0].quantity) == 20
+    assert occurrence.quantity_matched == 20
+    assert occurrence.status == "OPEN"  # couverture partielle explicite, jamais masquée
+
+
+# ── fiabilité (mandat matching pilote) ────────────────────────────────────
+
+def test_a_producer_with_enough_honored_history_outranks_a_cheaper_unproven_one(market):
+    dsn, g, need, occ = market
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+        g.cur = cur
+        reliable_producer = g.producer  # 3 commandes RECURRING_SUPPLY honorées
+        for _ in range(3):
+            order = insert(
+                cur, "marketplace.orders", buyer_id=g.buyer, total_amount=1000,
+                status="CONFIRMED", order_type="RECURRING_SUPPLY",
+            )
+            insert(cur, "marketplace.order_items", order_id=order, product_id=g.product, quantity=1, price_at_sale=100)
+        cheap_unproven = g.extra_producer()
+        g.product_for(producer=reliable_producer, quantity_for_sale=100, price=150)
+        g.product_for(producer=cheap_unproven, quantity_for_sale=100, price=90)
+
+    async def fn(session):
+        await NeedMatchingService(session).rematch_occurrence(occ)
+        return await _allocations(session, occ)
+
+    allocs = _run(dsn, fn)
+    assert str(allocs[0].producer_id) == str(reliable_producer)
+
+
+def test_below_the_sample_threshold_reliability_is_ignored_price_decides(market):
+    """Un seul historique (< `_MIN_RELIABILITY_SAMPLE`) ne doit produire AUCUNE fausse précision —
+    le prix décide, exactement comme si aucun historique n'existait."""
+    dsn, g, need, occ = market
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+        g.cur = cur
+        one_sample_producer = g.producer
+        order = insert(
+            cur, "marketplace.orders", buyer_id=g.buyer, total_amount=1000,
+            status="CONFIRMED", order_type="RECURRING_SUPPLY",
+        )
+        insert(cur, "marketplace.order_items", order_id=order, product_id=g.product, quantity=1, price_at_sale=100)
+        cheap_producer = g.extra_producer()
+        g.product_for(producer=one_sample_producer, quantity_for_sale=100, price=150)
+        g.product_for(producer=cheap_producer, quantity_for_sale=100, price=90)
+
+    async def fn(session):
+        await NeedMatchingService(session).rematch_occurrence(occ)
+        return await _allocations(session, occ)
+
+    allocs = _run(dsn, fn)
+    assert str(allocs[0].producer_id) == str(cheap_producer)
+
+
+def test_a_producer_who_cancels_late_is_never_preferred_on_reliability_over_an_untested_one(market):
+    """3 annulations tardives (`cancellation_role='PRODUCER'`) -> fiabilité connue et BASSE — un
+    concurrent sans aucun historique doit rester au moins équivalent, jamais moins bon."""
+    dsn, g, need, occ = market
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+        g.cur = cur
+        unreliable_producer = g.producer
+        for _ in range(3):
+            order = insert(
+                cur, "marketplace.orders", buyer_id=g.buyer, total_amount=1000,
+                status="CANCELLED", cancellation_role="PRODUCER", order_type="RECURRING_SUPPLY",
+            )
+            insert(cur, "marketplace.order_items", order_id=order, product_id=g.product, quantity=1, price_at_sale=100)
+        untested_producer = g.extra_producer()
+        g.product_for(producer=unreliable_producer, quantity_for_sale=100, price=90)  # moins cher mais peu fiable
+        g.product_for(producer=untested_producer, quantity_for_sale=100, price=150)
+
+    async def fn(session):
+        await NeedMatchingService(session).rematch_occurrence(occ)
+        return await _allocations(session, occ)
+
+    allocs = _run(dsn, fn)
+    assert str(allocs[0].producer_id) == str(untested_producer)
 
 
 # ── stock insuffisant ────────────────────────────────────────────────────
@@ -384,15 +489,13 @@ def test_two_concurrent_workers_matching_the_same_occurrence_never_duplicate_all
 def test_matching_uses_a_bounded_number_of_queries_regardless_of_candidate_count(market):
     dsn, g, need, occ = market
 
-    def seed(n):
+    def seed(n, price=100):
         conn = psycopg2.connect(dsn)
         with conn, conn.cursor() as cur:
             g.cur = cur
             for _ in range(n):
-                g.product_for(producer=g.extra_producer(), quantity_for_sale=5)
+                g.product_for(producer=g.extra_producer(), quantity_for_sale=5, price=price)
         conn.close()
-
-    seed(3)
 
     def match():
         async def fn(session):
@@ -400,10 +503,19 @@ def test_matching_uses_a_bounded_number_of_queries_regardless_of_candidate_count
 
         return _run_counted(dsn, fn)
 
+    # Le chemin nominal pilote (source unique) ne persiste qu'UNE allocation — `changed` ne dépend
+    # donc plus du nombre de candidats mais de si LE GAGNANT change d'un appel à l'autre. Un candidat
+    # imbattable au prix (jamais dépassé par les concurrents ajoutés ensuite, tous à prix=100) fixe
+    # le gagnant une fois pour toutes : les deux mesures comparées ci-dessous ont alors le même
+    # `changed=False`, condition pour une comparaison de requêtes valable (sinon l'UPDATE occurrence
+    # conditionnel fausserait la comparaison, sans rapport avec un vrai N+1).
+    seed(1, price=1)
+    match()  # état initial (changed=True la 1re fois) — non mesuré
+
+    seed(3)
     _r_small, sql_small = match()
 
     seed(20)
-
     _r_big, sql_big = match()
 
     assert len(sql_big) == len(sql_small), f"N+1 : {len(sql_small)} requêtes pour peu de candidats, {len(sql_big)} pour plus"

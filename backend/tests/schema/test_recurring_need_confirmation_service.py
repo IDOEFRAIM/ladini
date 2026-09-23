@@ -224,6 +224,48 @@ def test_accepting_a_partial_match_leaves_the_occurrence_partially_accepted(mark
     assert occurrence.status == "PARTIALLY_ACCEPTED"
 
 
+# ── idempotence (mandat §8) ─────────────────────────────────────────────────
+
+def test_accepting_twice_never_creates_a_second_set_of_orders(market):
+    """Un ACCEPT répété (double-tap WhatsApp, retry réseau) ne doit ni dupliquer les commandes ni
+    re-débiter le stock — la 2e tentative échoue proprement (occurrence déjà ACCEPTED, hors du filtre
+    OPEN/MATCHED), jamais silencieusement une 2e conversion."""
+    dsn, g, _user, _profile, _need, occ = market
+
+    async def fn(session):
+        return await _svc(session, market).accept_match_proposal(
+            phone="+226", recurring_need_id=str(_need_id(market)), action="ACCEPT"
+        )
+
+    first = _run(dsn, fn)
+    with pytest.raises(BusinessRuleException):
+        _run(dsn, fn)
+
+    async def check(session):
+        orders = (
+            await session.execute(select(Order).where(Order.buyer_id == _profile.id))
+        ).scalars().all()
+        return orders
+
+    orders = _run(dsn, check)
+    assert len(orders) == 1
+    assert str(orders[0].id) == first["order_ids"][0]
+    assert _product_stock(dsn, g.test_product) == 10.0  # débité UNE seule fois (50 - 40)
+
+
+def test_rejecting_twice_is_refused_cleanly_the_second_time(market):
+    dsn, g, _user, _profile, _need, occ = market
+
+    async def fn(session):
+        return await _svc(session, market).accept_match_proposal(
+            phone="+226", recurring_need_id=str(_need_id(market)), action="REJECT"
+        )
+
+    _run(dsn, fn)
+    with pytest.raises(BusinessRuleException):
+        _run(dsn, fn)
+
+
 # ── protections ────────────────────────────────────────────────────────────
 
 def test_no_pending_proposal_is_a_clean_business_error(market):

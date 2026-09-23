@@ -36,7 +36,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ladini.domain.models import NeedAllocation
-from ladini.domain.recurring_supply.matching import Allocation, MatchCandidate, allocate
+from ladini.domain.recurring_supply.matching import (
+    Allocation,
+    MatchCandidate,
+    allocate_single_source,
+)
 
 logger = logging.getLogger("ladini.workers.automation.need_matching")
 
@@ -81,6 +85,27 @@ _OCCURRENCE_FOR_UPDATE_SQL = text(
     "WHERE o.id = :occurrence_id "
     "FOR UPDATE OF o"
 )
+
+# ── Fiabilité producteur (mandat matching pilote, 2026-09-23) ──────────────
+# Aucune nouvelle table/colonne : réutilise `Order.status`/`Order.cancellation_role` (déjà écrits
+# par `ProducerMgmtMixin.confirm_order_by_producer`/`cancel_confirmed_order`, voir `services/
+# database/producer.py`) et `Order.order_type` (posé par `accept_match_proposal`, VS4). Un producteur
+# n'a AUCUN historique `RECURRING_SUPPLY` -> `resolved=0` -> traité comme "signal inconnu" par
+# `_load_reliability`, jamais comme "0% fiable" (mandat : pas de fausse précision).
+_RELIABILITY_SQL = text(
+    "SELECT p.producer_id AS producer_id, "
+    "count(*) FILTER (WHERE o.status = 'CANCELLED' AND o.cancellation_role = 'PRODUCER') AS producer_cancelled, "
+    "count(*) FILTER (WHERE o.status IN ('CONFIRMED', 'CANCELLED')) AS resolved "
+    "FROM marketplace.orders o "
+    "JOIN marketplace.order_items oi ON oi.order_id = o.id "
+    "JOIN marketplace.products p ON p.id = oi.product_id "
+    "WHERE o.order_type = 'RECURRING_SUPPLY' AND p.producer_id = ANY(:producer_ids) "
+    "GROUP BY p.producer_id"
+)
+# En dessous de ce nombre de commandes RÉSOLUES (honorée ou annulée), un ratio serait bruité par un
+# seul incident/coup de chance — mandat : "ne crée pas une fausse précision" plutôt qu'un seuil
+# scientifique. Valeur délibérément basse (pilote, peu de volume) ; ajustable sans migration.
+_MIN_RELIABILITY_SAMPLE = 3
 
 _BUYER_ZONE_SQL = text(
     "SELECT u.zone_id FROM marketplace.buyer_profiles bp "
@@ -172,6 +197,7 @@ class NeedMatchingService:
                 await self.session.execute(_CANDIDATES_SQL, {"sub_category_id": row["sub_category_id"]})
             ).mappings().all()
             report.candidate_count = len(candidate_rows)
+            reliability = await self._load_reliability({str(c["producer_id"]) for c in candidate_rows})
             candidates = [
                 MatchCandidate(
                     producer_id=str(c["producer_id"]),
@@ -180,11 +206,17 @@ class NeedMatchingService:
                     unit_price=float(c["price"] or 0),
                     available_quantity=float(c["quantity_for_sale"]),
                     same_zone=bool(buyer_zone) and c["zone_id"] == buyer_zone,
+                    reliability=reliability.get(str(c["producer_id"])),
                 )
                 for c in candidate_rows
             ]
 
-            new_allocations = allocate(
+            # Chemin nominal pilote (mandat matching, 2026-09-23) : source UNIQUE, jamais une
+            # combinaison automatique — voir `domain/recurring_supply/matching.py::
+            # allocate_single_source` pour l'ordre exact (fournisseur unique > fiabilité > prix >
+            # zone > partiel individuel). L'ancien `allocate()` glouton multi-source N'EST PAS
+            # supprimé (toujours exporté par ce module) — simplement plus appelé ICI.
+            new_allocations = allocate_single_source(
                 requested_quantity=float(row["requested_quantity"]),
                 unit=row["unit"],
                 candidates=candidates,
@@ -214,6 +246,25 @@ class NeedMatchingService:
             return report
         finally:
             report.duration_ms = int((time.monotonic() - started) * 1000)
+
+    async def _load_reliability(self, producer_ids: set) -> Dict[str, Optional[float]]:
+        """Une requête bornée (mandat §14 : jamais un round-trip par candidat) — `{producer_id:
+        ratio}` pour les seuls producteurs candidats de CETTE occurrence. Absent du résultat ou
+        échantillon `< _MIN_RELIABILITY_SAMPLE` -> `None` (signal inconnu, jamais 0.0 : un producteur
+        neuf n'est pas "peu fiable", il n'a simplement pas encore d'historique)."""
+        if not producer_ids:
+            return {}
+        rows = (
+            await self.session.execute(_RELIABILITY_SQL, {"producer_ids": list(producer_ids)})
+        ).mappings().all()
+        result: Dict[str, Optional[float]] = {}
+        for r in rows:
+            resolved = int(r["resolved"] or 0)
+            if resolved < _MIN_RELIABILITY_SAMPLE:
+                continue
+            cancelled = int(r["producer_cancelled"] or 0)
+            result[str(r["producer_id"])] = (resolved - cancelled) / resolved
+        return result
 
     async def _persist_allocations(self, occurrence_id: Any, occ_row: Any, new_allocations: Sequence[Allocation]) -> bool:
         """Upsert idempotent + expiration des allocations devenues invalides (mandat §8) ; ne bump
