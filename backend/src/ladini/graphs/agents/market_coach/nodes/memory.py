@@ -275,6 +275,29 @@ async def memory_update(
         for _transient in ("selection_index", "selected_value", "resolved_id"):
             if _transient not in extracted:
                 payload.pop(_transient, None)
+
+    # Bug réel production (2026-09-24, lifecycle de clarification `ambiguous_groups`) : même
+    # classe de fuite que ci-dessus, sur deux clés-LISTE du micro-prompt NEW_TASK
+    # (`ambiguous_groups`/`additional_items`, `interpreter/new_task_contract.py`). Le filtre
+    # générique `slot_has_value` juste plus bas (ligne ~680, "for key, value in extracted.items():
+    # if not slot_has_value(value): continue") ne COPIE jamais une liste vide dans `payload` —
+    # correct pour ne pas écraser une vraie valeur par du bruit, mais ça laisse aussi
+    # `payload["ambiguous_groups"]` d'UN tour précédent survivre indéfiniment dès que le tour
+    # suivant n'a plus rien à y mettre (`extracted_entities` est le MÊME canal `merge_dict`, donc
+    # même sans valeur cette clé n'est jamais "absente" une fois écrite une fois — voir
+    # `interpreter/new_task_micro.py::_finalize`, qui l'inclut désormais toujours, même `[]`,
+    # justement pour rendre CE nettoyage possible). Résultat observé sans ce nettoyage : après
+    # "14 coqs et 57 moutons chèvres chaque semaine", TOUT message suivant sans nouvelle
+    # ambiguïté rejouait la MÊME clarification, indéfiniment.
+    # `payload.pop(...)` (comme au-dessus pour selection_index/...) ne suffit PAS ici : `merge_dict`
+    # (`agents/reducers.py`) construit son résultat en partant de l'ANCIENNE valeur du canal et
+    # n'écrase QUE les clés PRÉSENTES dans le nouveau dict retourné — une clé simplement ABSENTE
+    # (parce que "poppée" localement) reste donc telle quelle dans l'ancienne valeur, jamais
+    # effacée. Il faut l'assigner explicitement à `None` (une clé PRÉSENTE avec cette valeur EST
+    # bien prise en compte par `merge_dict`) pour qu'elle disparaisse réellement du payload fusionné.
+    for _list_field in ("ambiguous_groups", "additional_items"):
+        if not extracted.get(_list_field):
+            payload[_list_field] = None
     onboarding_profile = dict(state.get("onboarding_profile") or {})
 
     def _rehydrate_onboarding_slot(

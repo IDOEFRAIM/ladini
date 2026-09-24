@@ -348,6 +348,21 @@ async def _finalize(
         for group in raw_entities.get("ambiguous_groups") or []
     ]
     entities = _remap_entities(raw_entities)
+    # Bug réel production (2026-09-24, "lifecycle de clarification ambiguous_groups") :
+    # `_remap_entities` (générique, partagé par toutes les routes) élimine toute valeur
+    # "vide" (`slot_has_value([]) == False`) — correct pour un scalaire absent, mais `state[
+    # "extracted_entities"]`/`transaction_payload` sont tous deux des canaux `merge_dict`
+    # (`core/state.py`) : une clé OMISE du patch de CE tour n'efface jamais l'ancienne valeur,
+    # elle la LAISSE TELLE QUELLE. Résultat observé : après une clarification "57 moutons
+    # chèvres", TOUT message suivant sans nouvelle ambiguïté (ex: "je veux 14 coqs chaque
+    # semaine") gardait l'ANCIEN `ambiguous_groups` pour toujours — la clarification devenait
+    # collante ("sticky"), rejouée à l'identique quel que soit le nouveau message. `additional_
+    # items` partage exactement la même forme (liste, même schéma NEW_TASK) et le même risque
+    # structurel, corrigé ici par prudence symétrique. Ces deux clés sont donc TOUJOURS
+    # présentes dans `entities` (même `[]`), pour que `merge_dict` écrase bien l'ancienne
+    # valeur à chaque tour au lieu de la laisser survivre indéfiniment.
+    entities["additional_items"] = raw_entities["additional_items"]
+    entities["ambiguous_groups"] = raw_entities["ambiguous_groups"]
 
     # Garde anti-ancrage (incident réel vécu : le LLM "s'ancre" parfois sur
     # une unité mentionnée plus tôt dans la conversation — ex: TONNE — et

@@ -19,8 +19,10 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     clear_pending_interaction,
     get_pending_interaction,
     set_pending_interaction,
+    to_tunnel_category,
 )
 from ladini.graphs.agents.market_coach.core.slots import (
+    SLOT_FILLING_INPUTS,
     field_priority,
     get_slot,
 )
@@ -465,7 +467,26 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
     # doit PAS toucher le cycle de vie vit maintenant dans une constante
     # canonique unique (`SUBFLOW_OWNED_KINDS`, core/pending_interaction.py) —
     # tout nouveau sous-flux s'y ajoute, jamais dans un littéral local ici.
-    if get_pending_interaction(state).kind not in SUBFLOW_OWNED_KINDS:
+    # Bug réel production (2026-09-24, lifecycle de clarification `ambiguous_groups`) : même
+    # classe d'incident que le commentaire ci-dessus (2026-09-10, `PROVIDE_LOCATION` effacé en
+    # boucle), pour un `ENTER_FIELD` dont le nom de champ n'est PAS un slot métier enregistré
+    # (`core/slots.py::SLOT_FILLING_INPUTS` — ex: "ambiguous_quantity",
+    # `flows/buyer/recurring_need.py`) : un "sous-flux" au sens de `SUBFLOW_OWNED_KINDS`, mais qui
+    # partage le kind générique `ENTER_FIELD` avec de VRAIS slots enregistrés (produit/quantité/
+    # unité...) — donc jamais ajoutable tel quel à `SUBFLOW_OWNED_KINDS` (qui exclurait alors
+    # TOUT `ENTER_FIELD`, cassant le "validated_complete" normal des slots réels). Ce nœud
+    # "voyait" `current_goal=CREATE_RECURRING_NEED` déjà complet (produit/quantité/récurrence
+    # connus depuis le tour précédent) et effaçait donc le `PendingInteraction` avant même que
+    # `flows/buyer/recurring_need.py::_resolve_ambiguous_group_reply` n'ait la moindre chance de
+    # lire la réponse à sa propre question — même distinction "slot enregistré vs. mini-flux
+    # dédié" que `interpreter/state_router.py::choose_interpretation_route` utilise déjà pour
+    # ACTIVE_SLOT, appliquée ici symétriquement.
+    _pending_now = get_pending_interaction(state)
+    _is_unregistered_enter_field = (
+        _pending_now.kind == InteractionKind.ENTER_FIELD
+        and to_tunnel_category(_pending_now) not in SLOT_FILLING_INPUTS
+    )
+    if _pending_now.kind not in SUBFLOW_OWNED_KINDS and not _is_unregistered_enter_field:
         result.update(clear_pending_interaction("validated_complete"))
 
     return _finalize_validator_response(state, result)

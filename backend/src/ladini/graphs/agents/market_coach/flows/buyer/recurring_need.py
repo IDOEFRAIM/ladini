@@ -22,6 +22,10 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from ladini.domain.quantity_unit import default_unit_for_product
+from ladini.domain.recurring_supply.ambiguous_group import (
+    AmbiguousResolutionKind,
+    resolve_ambiguous_group_reply,
+)
 from ladini.domain.recurring_supply.digest import AllocationLine, build_detail_text
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
@@ -29,9 +33,11 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     set_pending_interaction,
 )
 from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
+    CancelRecurringNeedDraft,
     ConfirmRecurringNeedDraft,
     RecurringNeedDraft,
     RecurringNeedExecutionResult,
+    UpdateRecurringNeedDraft,
     apply_domain_action,
     build_response_plan,
     finalize_after_execution,
@@ -100,13 +106,55 @@ def _fmt_ambiguous_num(value: Any) -> str:
     return str(value or "")
 
 
-def _ambiguous_quantity_clarification(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+# Lifecycle de clarification `ambiguous_groups` (mandat 2026-09-24, suite du correctif
+# "coq/moutons/chèvres") : la première question ("TOTAL ou DE CHAQUE ?") était déjà correcte,
+# mais RIEN dans ce fichier ne savait consommer la réponse qui la suit — `state_router.py`
+# envoie TOUJOURS ce genre de réponse libre vers la route NEW_TASK (le nom de champ
+# "ambiguous_quantity" n'est pas dans `core/slots.py::SLOT_FILLING_INPUTS`, donc jamais éligible
+# à ACTIVE_SLOT), donc la réponse est reclassée comme un message totalement neuf, sans aucun lien
+# avec la question posée. Trois conséquences observées : (1) `ambiguous_groups` restait "collant"
+# d'un tour à l'autre (fixé séparément dans `interpreter/new_task_micro.py::_finalize` — un canal
+# `merge_dict` qui n'efface jamais une clé omise) ; (2) une réponse qui résolvait pourtant
+# clairement l'ambiguïté ("50 moutons et 7 chèvres") tombait sur le prompt générique "il me faut
+# juste ambiguous_quantity" ; (3) une tâche autonome totalement neuve pendant la clarification
+# restait bloquée derrière elle.
+#
+# Design : le groupe ambigu (total + candidats) est stocké dans `PendingInteraction.target` —
+# structuré (mandat §3), jamais aplati dans un slot scalaire — au moment où la question est
+# posée. Au tour suivant, `_resolve_ambiguous_group_reply` (appelé AVANT toute autre logique de
+# `_create_flow`) tente de résoudre le texte libre contre CE groupe précis
+# (`domain/recurring_supply/ambiguous_group.py`, mécanique générale pour N candidats — jamais un
+# patch textuel "mouton/chèvre"). `None` signifie "ce message ne répond pas à la clarification" :
+# l'appelant le traite alors comme une tâche autonome distincte (mandat §8), sans qu'aucune
+# action explicite ne soit nécessaire ici pour "laisser gagner" la nouvelle tâche.
+_ABANDON_PHRASES = ("laisse tomber", "laisse", "annule", "oublie ça", "oublie ca")
+
+
+def _is_bare_abandon(text: str) -> bool:
+    """Un abandon PUR ("laisse tomber", seul) — pas "laisse, je veux 30 poulets..." (mandat §9),
+    qui doit au contraire retomber sur le traitement NEW_TASK normal ci-dessous pour construire
+    le nouveau draft, sans message d'annulation dédié."""
+    folded = text.strip().lower().strip(" .!")
+    for phrase in sorted(_ABANDON_PHRASES, key=len, reverse=True):
+        if folded == phrase:
+            return True
+    return False
+
+
+def _ambiguous_quantity_clarification(
+    payload: Dict[str, Any], draft: Optional[RecurringNeedDraft]
+) -> Optional[Dict[str, Any]]:
     """Bug réel production (2026-09-24) : "14 coq et 57 moutons chèvres chaque semaine"
     retombait sur le catalogue — cause racine distincte (voir `new_task_contract.py::
     NewTaskAmbiguousGroup`), mais la donnée elle-même ("57 moutons chèvres") reste ambiguë
     même une fois correctement classée CREATE_RECURRING_NEED : UNE quantité pour PLUSIEURS
     produits, sans mot indiquant un total ou une quantité par produit. Ni fusionnée en un
-    produit incohérent, ni répartie en devinant — on demande, `None` si rien d'ambigu."""
+    produit incohérent, ni répartie en devinant — on demande, `None` si rien d'ambigu.
+
+    `draft` : le draft DÉJÀ mis à jour avec le reste du message (produit principal, quantité,
+    récurrence...) AVANT cet appel — persisté tel quel dans la réponse pour que le tour suivant
+    (résolution de l'ambiguïté) le retrouve intact, au lieu de le construire seulement APRÈS
+    résolution (qui perdait alors le produit principal, jamais rattaché à aucun draft)."""
     groups = payload.get("ambiguous_groups")
     if not isinstance(groups, list) or not groups:
         return None
@@ -117,7 +165,8 @@ def _ambiguous_quantity_clarification(payload: Dict[str, Any]) -> Optional[Dict[
     if len(candidates) < 2:
         return None
 
-    qty_text = _fmt_ambiguous_num(group.get("quantity"))
+    total_quantity = group.get("quantity")
+    qty_text = _fmt_ambiguous_num(total_quantity)
     unit = group.get("unit")
     unit_text = f" {unit}" if slot_has_value(unit) else ""
     labels = [c.capitalize() for c in candidates]
@@ -130,10 +179,84 @@ def _ambiguous_quantity_clarification(payload: Dict[str, Any]) -> Optional[Dict[
         "final_response": message,
         "response_strategy": "CLARIFICATION",
         "status": "WAITING_INPUT",
+        "recurring_need_draft": draft.to_dict() if draft is not None else None,
         **set_pending_interaction(
-            InteractionKind.ENTER_FIELD, goal="CREATE_RECURRING_NEED", field_name="ambiguous_quantity"
+            InteractionKind.ENTER_FIELD,
+            goal="CREATE_RECURRING_NEED",
+            field_name="ambiguous_quantity",
+            candidates=tuple(candidates),
+            target={"total_quantity": total_quantity, "unit": unit, "candidates": candidates},
         ),
     }
+
+
+def _resolve_ambiguous_group_reply(state: Dict[str, Any], pending: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Traite un tour où `PendingInteraction` attend une résolution `ambiguous_quantity` (mandat
+    §1-§10). Retourne un patch state si CE message concerne la clarification (résolu, invalide,
+    ou abandon explicite) ; `None` si le message n'y répond manifestement pas — l'appelant le
+    traite alors comme une tâche autonome distincte (mandat §8 : "le PendingInteraction ne doit
+    pas gagner automatiquement")."""
+    target = pending.get("target") if isinstance(pending, dict) else None
+    if not isinstance(target, dict):
+        return None
+    candidates = [str(c).strip() for c in (target.get("candidates") or []) if slot_has_value(c)]
+    total_quantity = target.get("total_quantity")
+    if len(candidates) < 2 or not slot_has_value(total_quantity):
+        return None
+
+    text = str(state.get("normalized_text") or state.get("user_query") or "")
+    draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+
+    if _is_bare_abandon(text):
+        if draft is not None and draft.status.value == "DRAFT":
+            cancelled = apply_domain_action(draft, CancelRecurringNeedDraft()).draft
+        else:
+            cancelled = None
+        return {
+            "final_response": "D'accord, j'annule cette demande.",
+            "response_strategy": "SUCCESS",
+            "status": "COMPLETED",
+            "recurring_need_draft": cancelled.to_dict() if cancelled is not None else None,
+            **clear_pending_interaction("ambiguous_group_abandoned"),
+        }
+
+    resolution = resolve_ambiguous_group_reply(
+        text, total_quantity=float(total_quantity), candidates=candidates
+    )
+    if resolution.kind == AmbiguousResolutionKind.NOT_A_RESOLUTION:
+        return None
+
+    if resolution.kind == AmbiguousResolutionKind.INVALID:
+        return {
+            "final_response": resolution.message,
+            "response_strategy": "CLARIFICATION",
+            "status": "WAITING_INPUT",
+            "recurring_need_draft": draft.to_dict() if draft is not None else None,
+            **set_pending_interaction(
+                InteractionKind.ENTER_FIELD,
+                goal="CREATE_RECURRING_NEED",
+                field_name="ambiguous_quantity",
+                candidates=tuple(candidates),
+                target=target,
+            ),
+        }
+
+    # RESOLVED — fusionne les allocations dans `additional_items`, sur le draft EXISTANT (produit
+    # principal déjà présent depuis le tour de la question, mandat §10 "reprise du draft" : jamais
+    # un second draft indépendant). L'unité du GROUPE ambigu ("unite", générique — voir le prompt
+    # `new_task_prompts.py`, jamais une unité littérale PAR produit) n'est jamais utilisée telle
+    # quelle : même règle que `_clean_additional_items` — l'unité canonique dépend du PRODUIT
+    # résolu (TETE pour l'élevage, KG sinon), pas d'un champ générique posé avant même de savoir
+    # de quels produits il s'agissait.
+    existing_items = list(draft.additional_items or []) if draft is not None else []
+    new_items = [
+        {"product": product, "quantity": qty, "unit": default_unit_for_product(product)}
+        for product, qty in resolution.allocations.items()
+    ]
+    action = UpdateRecurringNeedDraft(fields={"additional_items": existing_items + new_items})
+    outcome = apply_domain_action(draft, action)
+    plan = build_response_plan(outcome)
+    return _apply_response_plan(plan)
 
 
 async def recurring_need_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
@@ -160,14 +283,21 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
     pending = state.get("pending_interaction") or {}
     pending_target = pending.get("target") if isinstance(pending, dict) else None
 
-    # Bug réel production (2026-09-24) : "14 coq et 57 moutons chèvres chaque semaine" —
-    # avant même de toucher un draft (nouveau ou existant), une quantité ambiguë (UN nombre
-    # pour PLUSIEURS produits, sans répartition) doit être clarifiée EXPLICITEMENT, jamais
-    # devinée. Vérifié en premier, quel que soit `interpreted_event` : une donnée ambiguë ne
-    # doit jamais atteindre `resolve_domain_action`/le draft, même partiellement.
-    ambiguous_response = _ambiguous_quantity_clarification(payload)
-    if ambiguous_response is not None:
-        return ambiguous_response
+    # Lifecycle de clarification `ambiguous_groups` (mandat 2026-09-24) : une réponse à la
+    # question "TOTAL ou DE CHAQUE ?" arrive TOUJOURS via la route NEW_TASK (voir le commentaire
+    # de `_resolve_ambiguous_group_reply`) — vérifiée en PREMIER, avant tout le reste, pour ne
+    # jamais laisser "50 moutons et 7 chèvres" être (mal)classée comme une tâche indépendante.
+    # `None` = ce message ne répond pas à la clarification (tâche autonome distincte, mandat §8) :
+    # on continue alors normalement ci-dessous, exactement comme si aucune clarification n'était
+    # en attente — le `pending_interaction` périmé sera remplacé par celui que produit CE tour.
+    if (
+        isinstance(pending, dict)
+        and pending.get("kind") == "ENTER_FIELD"
+        and pending.get("field") == "ambiguous_quantity"
+    ):
+        resolution_patch = _resolve_ambiguous_group_reply(state, pending)
+        if resolution_patch is not None:
+            return resolution_patch
 
     draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
     extracted = {k: v for k, v in payload.items() if k in _DRAFT_FIELDS and slot_has_value(v)}
@@ -211,6 +341,19 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         pending_target=pending_target,
     )
     outcome = apply_domain_action(draft, action)
+
+    # Vérifiée APRÈS la mise à jour du draft (pas avant, contrairement à l'ancienne version) :
+    # le produit principal/quantité/récurrence de CE message sont déjà fusionnés dans
+    # `outcome.draft` au moment où on bloque la confirmation prématurée — sans ça, le tour de
+    # résolution suivant (`_resolve_ambiguous_group_reply`) ne retrouvait plus jamais le produit
+    # principal (mandat §10 "reprise du draft"), puisque `transaction_payload` est purgé
+    # inconditionnellement par `goal_planner` RÈGLE 5 dès qu'un `NEW_TASK` est reclassé — ce
+    # draft (canal `replace_value`, jamais purgé) est le SEUL état qui survit fiablement au tour
+    # suivant.
+    if isinstance(action, UpdateRecurringNeedDraft):
+        ambiguous_response = _ambiguous_quantity_clarification(payload, outcome.draft)
+        if ambiguous_response is not None:
+            return ambiguous_response
 
     if isinstance(action, ConfirmRecurringNeedDraft) and outcome.draft is not None and outcome.draft.status.value == "EXECUTING":
         # DRAFT -> CONFIRMED -> EXECUTING déjà persisté en mémoire de tour (CAS) — appel MCP réel.

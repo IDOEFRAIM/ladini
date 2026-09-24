@@ -1087,7 +1087,16 @@ class TestWeeklyRecurrenceThroughTheRealOrchestrator:
             )
         )
         assert "create_recurring_need" not in runtime.calls, "aucune création tant que la quantité reste ambiguë"
-        assert state.get("recurring_need_draft") is None, "aucun draft inventé avec un produit fusionné/une quantité devinée"
+        # Mandat lifecycle `ambiguous_groups` (2026-09-24, §10 "reprise du draft") : le draft
+        # N'EST PLUS `None` ici — le produit principal (coq) est désormais persisté DÈS ce tour
+        # (mandat §10), pour que la résolution de l'ambiguïté au tour suivant le retrouve intact
+        # (`transaction_payload` est purgé sans condition par `goal_planner` RÈGLE 5 au tour
+        # suivant — seul le draft, canal `replace_value`, survit fiablement). Ni fusion en un seul
+        # produit incohérent, ni répartition inventée : `additional_items` reste vide tant que le
+        # groupe ambigu n'est pas résolu.
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft is not None and draft.product == "coq" and draft.quantity == 14.0
+        assert not draft.additional_items
         response = (state.get("final_response") or "").lower()
         assert "mouton" in response and "chevre" in response
         assert "57" in response
@@ -1198,3 +1207,200 @@ class TestAdditionalItemWithoutALiteralUnitStillSurvives:
             f"la chèvre ne doit jamais disparaître faute d'unité littérale : {draft.additional_items!r}"
         )
         assert "Chevre : 20 TETE" in draft.render_summary()
+
+
+# =====================================================================
+# LIFECYCLE DE CLARIFICATION `ambiguous_groups` (mandat 2026-09-24, suite) : la première question
+# ("TOTAL ou DE CHAQUE ?") était déjà correcte, mais rien ne savait consommer sa réponse — la
+# route NEW_TASK reclasse TOUJOURS ce genre de réponse libre comme un message indépendant
+# (`ambiguous_quantity` n'est pas un slot enregistré, voir `interpreter/state_router.py`). Les 6
+# scénarios ci-dessous couvrent exactement les TEST 1-6 du mandat, par le VRAI point d'entrée
+# (interpreter -> cognitive_guard -> goal_planner -> memory_update -> validator ->
+# buyer_context_resolver), même thread/état entre les tours.
+# =====================================================================
+
+
+def _ambiguous_turn1_llm() -> ScriptedLLM:
+    return ScriptedLLM({
+        "disposition": "NEW_TASK", "intent": "CREATE_RECURRING_NEED", "confidence": 0.92,
+        "entities": {
+            "product": "coq", "quantity": 14.0, "unit": "unite", "recurrence_type": "WEEKLY",
+            "ambiguous_groups": [{"quantity": 57.0, "unit": "unite", "candidates": ["mouton", "chevre"]}],
+        },
+    })
+
+
+def _unclassifiable_reply_llm() -> ScriptedLLM:
+    """Une réponse comme "50 moutons et 7 chèvres" ne correspond à aucune intention du catalogue
+    — un vrai appel LLM renverrait plausiblement UNKNOWN ici. `_resolve_ambiguous_group_reply`
+    n'a de toute façon pas besoin d'une classification utile : il lit le texte brut directement,
+    AVANT que `resolve_domain_action` ne s'appuie sur `detected_intent`."""
+    return ScriptedLLM({"disposition": "UNKNOWN", "intent": None, "confidence": 0.0, "entities": {}})
+
+
+class TestAmbiguousGroupClarificationLifecycle:
+    def _turn1(self):
+        state = _initial_state()
+        runtime = StubRuntime(responses={"create_recurring_need": lambda **kw: {"status": "success", "recurring_need_id": "x"}})
+        runtime.llm = _ambiguous_turn1_llm()
+        interpreter = make_input_interpreter("BUYER")
+        turn1, state = run(
+            _run_turn_with_cognitive_guard(
+                state, interpreter, runtime, text="je veux 14 coqs et 57 moutons chevres chaque semaine"
+            )
+        )
+        return turn1, state, runtime, interpreter
+
+    # ── structure exacte avant correction (LIVRABLE §1/§2) ────────────────
+
+    def test_turn1_clarification_structure(self):
+        turn1, state, _runtime, _interp = self._turn1()
+        assert "57" in turn1["final_response"] and "TOTAL" in turn1["final_response"]
+        pending = state.get("pending_interaction") or {}
+        assert pending.get("kind") == "ENTER_FIELD"
+        assert pending.get("field") == "ambiguous_quantity"
+        target = pending.get("target") or {}
+        assert target.get("total_quantity") == 57.0
+        assert set(target.get("candidates") or []) == {"mouton", "chevre"}
+        # Le produit principal est déjà persisté dans le draft (mandat §10 "reprise du draft") —
+        # jamais seulement dans `transaction_payload`, purgé sans condition par `goal_planner`
+        # RÈGLE 5 dès le tour suivant.
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft is not None and draft.product == "coq" and draft.quantity == 14.0
+        assert draft.recurrence_type == "WEEKLY"
+        assert not draft.additional_items
+
+    # ── TEST 1 — quantités explicites ─────────────────────────────────────
+
+    def test_explicit_quantities_resolve_and_confirm(self):
+        _turn1, state, runtime, interpreter = self._turn1()
+        runtime.llm = _unclassifiable_reply_llm()
+        turn2, state = run(
+            _run_turn_with_cognitive_guard(state, interpreter, runtime, text="50 moutons et 7 chevres")
+        )
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft is not None
+        assert draft.product == "coq" and draft.quantity == 14.0
+        assert draft.additional_items == [
+            {"product": "mouton", "quantity": 50.0, "unit": "TETE"},
+            {"product": "chevre", "quantity": 7.0, "unit": "TETE"},
+        ]
+        assert state.get("pending_interaction", {}).get("kind") == "CONFIRM_ACTION"
+        assert "confirmer" in turn2["final_response"].lower()
+
+    # ── TEST 2 — "le reste" ────────────────────────────────────────────────
+
+    def test_rest_of_the_total_resolves_and_confirms(self):
+        _turn1, state, runtime, interpreter = self._turn1()
+        runtime.llm = _unclassifiable_reply_llm()
+        turn2, state = run(
+            _run_turn_with_cognitive_guard(
+                state, interpreter, runtime, text="c est 20 mouton et le reste pour les chevres"
+            )
+        )
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft.additional_items == [
+            {"product": "mouton", "quantity": 20.0, "unit": "TETE"},
+            {"product": "chevre", "quantity": 37.0, "unit": "TETE"},
+        ]
+        assert state.get("pending_interaction", {}).get("kind") == "CONFIRM_ACTION"
+        assert "confirmer" in turn2["final_response"].lower()
+
+    # ── TEST 3 — "de chaque" ───────────────────────────────────────────────
+
+    def test_each_of_the_total_resolves_and_confirms(self):
+        _turn1, state, runtime, interpreter = self._turn1()
+        runtime.llm = _unclassifiable_reply_llm()
+        turn2, state = run(
+            _run_turn_with_cognitive_guard(state, interpreter, runtime, text="57 de chaque")
+        )
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft.additional_items == [
+            {"product": "mouton", "quantity": 57.0, "unit": "TETE"},
+            {"product": "chevre", "quantity": 57.0, "unit": "TETE"},
+        ]
+        assert state.get("pending_interaction", {}).get("kind") == "CONFIRM_ACTION"
+
+    # ── TEST 4 — somme invalide ────────────────────────────────────────────
+
+    def test_an_invalid_sum_asks_for_a_targeted_correction_without_persisting_anything(self):
+        _turn1, state, runtime, interpreter = self._turn1()
+        runtime.llm = _unclassifiable_reply_llm()
+        turn2, state = run(
+            _run_turn_with_cognitive_guard(state, interpreter, runtime, text="20 moutons et 20 chevres")
+        )
+        assert "create_recurring_need" not in runtime.calls
+        assert "create_recurring_needs" not in runtime.calls
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        # Le draft reste ACTIF (produit principal toujours là), mais sans les allocations
+        # invalides — la clarification ciblée reste la seule issue de ce tour.
+        assert draft is not None and draft.status.value == "DRAFT"
+        assert not draft.additional_items
+        pending = state.get("pending_interaction") or {}
+        assert pending.get("kind") == "ENTER_FIELD" and pending.get("field") == "ambiguous_quantity"
+        assert "40" in turn2["final_response"] and "57" in turn2["final_response"]
+
+    # ── TEST 5 — interruption par une tâche autonome ───────────────────────
+
+    def test_an_unrelated_autonomous_task_interrupts_the_clarification(self):
+        _turn1, state, runtime, interpreter = self._turn1()
+        runtime.llm = ScriptedLLM({
+            "disposition": "NEW_TASK", "intent": "CREATE_RECURRING_NEED", "confidence": 0.92,
+            "entities": {"product": "coq", "quantity": 14.0, "unit": "unite", "recurrence_type": "WEEKLY"},
+        })
+        turn2, state = run(
+            _run_turn_with_cognitive_guard(state, interpreter, runtime, text="je veux 14 coqs chaque semaine")
+        )
+        response = turn2["final_response"].lower()
+        assert "57" not in response and "moutons" not in response and "total" not in response
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft is not None and draft.product == "coq" and draft.quantity == 14.0
+        assert not draft.additional_items, "l'ancien groupe ambigu ne doit pas survivre à la nouvelle tâche"
+        assert state.get("pending_interaction", {}).get("field") != "ambiguous_quantity"
+
+    # ── TEST 6 — abandon explicite ─────────────────────────────────────────
+
+    def test_a_bare_abandon_cancels_the_draft_and_the_clarification(self):
+        _turn1, state, runtime, interpreter = self._turn1()
+        runtime.llm = _unclassifiable_reply_llm()
+        turn2, state = run(
+            _run_turn_with_cognitive_guard(state, interpreter, runtime, text="laisse tomber")
+        )
+        assert "create_recurring_need" not in runtime.calls
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft is None or draft.status.value == "CANCELLED"
+        pending = state.get("pending_interaction")
+        assert not pending or pending.get("kind") != "ENTER_FIELD"
+
+    # ── mandat §13 : persistance atomique des 3 produits SEULEMENT après confirmation ──
+
+    def test_confirming_after_resolution_creates_all_three_products_in_one_atomic_call(self):
+        """Mandat §13 : aucun `recurring_need` permanent tant que l'ambiguïté n'est pas résolue ET
+        confirmée — puis les 3 produits (coq, mouton, chèvre) dans un SEUL appel transactionnel
+        (`create_recurring_needs`, pluriel — voir `services/database/recurring_supply.py`,
+        rollback complet si l'un des 3 échoue), jamais 3 créations indépendantes."""
+        _turn1, state, runtime, interpreter = self._turn1()
+        assert "create_recurring_need" not in runtime.calls and "create_recurring_needs" not in runtime.calls
+
+        captured_items = {}
+
+        def _capture(**kw):
+            captured_items.update(kw)
+            return {"status": "success", "items": [{"recurring_need_id": f"id-{i}"} for i in range(3)]}
+
+        runtime._responses["create_recurring_needs"] = _capture
+        runtime.llm = _unclassifiable_reply_llm()
+        turn2, state = run(
+            _run_turn_with_cognitive_guard(state, interpreter, runtime, text="50 moutons et 7 chevres")
+        )
+        assert "create_recurring_needs" not in runtime.calls, "pas encore confirmé — aucune persistance"
+
+        runtime.llm = ScriptedLLM({"disposition": "CONFIRM", "intent": None, "confidence": 0.95, "entities": {}})
+        turn3, state = run(_run_turn_with_cognitive_guard(state, interpreter, runtime, text="oui"))
+
+        assert runtime.calls.count("create_recurring_needs") == 1
+        assert "create_recurring_need" not in runtime.calls, "jamais l'appel singulier une fois multi-produits"
+        assert len(captured_items.get("items") or []) == 3
+        products = {it["product_query"] for it in captured_items["items"]}
+        assert products == {"coq", "mouton", "chevre"}
+        assert "c'est noté" in turn3["final_response"].lower()

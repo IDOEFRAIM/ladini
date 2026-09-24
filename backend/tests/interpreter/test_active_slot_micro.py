@@ -312,7 +312,11 @@ class TestDeviationVsUpdateVsRejectSemanticBoundary:
         result = run(interp(state, StubRuntime(llm=llm)))
         assert llm.calls == 2
         assert result["interpreted_event"] == "NEW_TASK"
-        assert result["extracted_entities"] == {"product": "riz"}
+        # `additional_items`/`ambiguous_groups` sont désormais TOUJOURS présentes (même `[]`) dans
+        # la sortie du micro-prompt NEW_TASK — voir `interpreter/new_task_micro.py::_finalize`
+        # (bug réel production 2026-09-24 : ces deux clés, sur un canal `merge_dict`, restaient
+        # sinon "collantes" d'un tour à l'autre dès qu'elles étaient omises).
+        assert result["extracted_entities"] == {"product": "riz", "additional_items": [], "ambiguous_groups": []}
 
     def test_bare_abandonment_with_nothing_else_is_reject_not_deviation(self):
         interp = make_input_interpreter("PRODUCER")
