@@ -261,3 +261,56 @@ class TestUpstreamInterruptionsAreRatifiedByTheSameOwner:
             )
             assert switched is True, f"scénario non appliqué : {extra}"
             assert approved is True, f"interruption appliquée sans approbation : {extra}"
+
+
+class TestIsShortNeverOverridesAnApprovedInterruption:
+    """Bug B3 (Phase 2 hardening) : `goal_planner`'s `is_short` heuristic (longueur du
+    message, rien d'autre) ne vérifiait pas `event` — un message court ré-verrouillait
+    l'ANCIEN goal même quand `cognitive_guard` avait déjà réécrit `interpreted_event` en
+    "INTERRUPTION" (seul signal fiable d'une approbation). `is_short` doit TOUJOURS
+    s'effacer devant une décision déjà prise par le propriétaire unique."""
+
+    def test_a_short_message_still_interrupts_once_the_owner_approves(self):
+        r = _chain(
+            normalized_text="maïs",
+            interpreted_event="NEW_TASK",
+            detected_intent="BUYER_ADD_TO_CART",
+            interpreter_confidence=0.95,
+            current_goal="CREATE_RECURRING_NEED",
+            expected_input="CONFIRMATION",
+            working_memory={"active_goal": "CREATE_RECURRING_NEED"},
+        )
+        assert r["guard"]["cognitive_decision"]["action"] == ConversationAction.INTERRUPT_ACTIVE_GOAL
+        assert r["planner"]["current_goal"] == "BUYER_ADD_TO_CART"
+
+    def test_a_short_message_without_approval_still_locks_the_active_goal(self):
+        """Contrôle négatif : `is_short` doit continuer de s'appliquer normalement quand
+        AUCUNE interruption n'a été approuvée (comportement inchangé)."""
+        r = _chain(
+            normalized_text="oui",
+            interpreted_event="NEW_TASK",
+            detected_intent="UNKNOWN",
+            interpreter_confidence=0.0,
+            current_goal="CREATE_RECURRING_NEED",
+            expected_input="CONFIRMATION",
+            working_memory={"active_goal": "CREATE_RECURRING_NEED"},
+        )
+        assert r["guard"]["cognitive_decision"]["action"] != ConversationAction.INTERRUPT_ACTIVE_GOAL
+        assert r["planner"]["current_goal"] == "CREATE_RECURRING_NEED"
+
+    def test_the_navigation_breakout_short_message_case_still_interrupts(self):
+        """`riz`/`prix`-style short messages that resolve to a NAVIGATION_BREAKOUT_GOALS
+        member are approved via the breakout path (not confidence) — must also survive
+        `is_short`."""
+        breakout_goal = next(iter(NAVIGATION_BREAKOUT_GOALS))
+        r = _chain(
+            normalized_text="prix",
+            interpreted_event="NEW_TASK",
+            detected_intent=breakout_goal,
+            interpreter_confidence=0.10,
+            current_goal="CREATE_RECURRING_NEED",
+            expected_input="CONFIRMATION",
+            working_memory={"active_goal": "CREATE_RECURRING_NEED"},
+        )
+        assert r["guard"]["cognitive_decision"]["action"] == ConversationAction.INTERRUPT_ACTIVE_GOAL
+        assert r["planner"]["current_goal"] == breakout_goal

@@ -433,7 +433,6 @@ class TestK_NewRequestAfterCompleted:
 
 
 class TestL_ShortApprovedInterruption:
-    @pytest.mark.xfail(strict=True, reason="B3: goal_planner.is_short annule l'interruption approuvée (et fusionne 'maïs' dans le draft)")
     def test_mais_interrupts_and_never_mutates_the_previous_draft(self, conv):
         conv.send("je veux 14 coqs chaque semaine", llm=_coq())
         t = conv.send("maïs", llm=new_task("BUYER_ADD_TO_CART", product="maïs"))

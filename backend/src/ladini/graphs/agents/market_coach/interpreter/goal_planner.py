@@ -581,7 +581,15 @@ async def goal_planner(
         updates["working_memory"] = _lock(current_goal)
         return _with_goal_metadata(updates)
 
-    if is_short and current_goal:
+    # (Phase 2 hardening, bug B3) : `event == "INTERRUPTION"` ne peut arriver ici QUE
+    # réécrit par `cognitive_guard` — SEUL propriétaire de la décision d'interruption
+    # (voir la docstring de `cognitive_guard`) — quand il a explicitement APPROUVÉ
+    # l'interruption. Cette heuristique (longueur du message, ni plus ni moins) doit
+    # toujours s'effacer devant une décision déjà prise en amont : avant ce correctif,
+    # un message court ("maïs", "riz", "prix") ré-verrouillait ICI l'ANCIEN goal sans
+    # même regarder `event`, annulant silencieusement une interruption pourtant déjà
+    # approuvée — RULE 4 (juste en dessous) n'était alors jamais atteinte.
+    if is_short and current_goal and event != "INTERRUPTION":
         updates["current_goal"] = current_goal
         updates["detected_intent"] = str(current_goal).upper()
         updates["goal_status"] = (
