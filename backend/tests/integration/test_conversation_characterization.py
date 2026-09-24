@@ -218,7 +218,6 @@ class TestG_Correction:
         assert t.pending_after.kind.value == "CONFIRM_ACTION"
         assert _created(conv) == []
 
-    @pytest.mark.xfail(strict=True, reason="policy C/D: correction multi-item ambiguë devinée (remplacement total) au lieu d'une clarification")
     def test_ambiguous_multi_item_correction_asks_instead_of_guessing(self, conv):
         conv.send("je veux 14 coqs et 20 chèvres chaque semaine", llm=_coq_chevre())
         t = conv.send(
@@ -228,6 +227,98 @@ class TestG_Correction:
         draft = t.draft()
         assert draft["product"] == "coq" and draft["additional_items"], "le draft ne doit pas être deviné"
         assert t.pending_after.kind.value != "CONFIRM_ACTION"
+
+
+class TestG_CorrectionPolicy:
+    """Politique Phase 2 (C/D) sur le graphe réel."""
+
+    def test_a_reformulation_during_confirmation_is_a_correction_never_a_cancellation(self, conv):
+        """« non, plutôt 23 bœufs » : le LLM classe ce message NEW_TASK/même intention (le
+        système prompt distingue REJECT — un refus PUR — d'un message qui reformule une
+        valeur), `cognitive_guard` ne l'interrompt pas (même intention que le goal courant),
+        et le flow le traite comme une correction du draft en cours, jamais une annulation."""
+        t1 = conv.send("je veux 14 coqs chaque semaine", llm=_coq())
+        t = conv.send(
+            "non, plutôt 23 boeufs",
+            llm=new_task("CREATE_RECURRING_NEED", confidence=0.9, product="boeuf", quantity=23.0),
+        )
+        draft = t.draft()
+        assert draft["draft_id"] == t1.draft()["draft_id"], "même draft, version +1"
+        assert (draft["product"], draft["quantity"], draft["recurrence_type"]) == ("boeuf", 23.0, "WEEKLY")
+        assert conv.drafts.status_of(draft["draft_id"]) == "DRAFT"
+        assert t.decision.get("action") == "CONTINUE_ACTIVE_GOAL", "même intention : jamais une interruption"
+
+    def test_naming_an_item_of_a_multi_item_draft_changes_only_that_item(self, conv):
+        conv.send("je veux 14 coqs et 20 chèvres chaque semaine", llm=_coq_chevre())
+        t = conv.send(
+            "mets plutôt les chèvres à 23",
+            llm=new_task("CREATE_RECURRING_NEED", product="chèvres", quantity=23.0, correction_scope="ITEM"),
+        )
+        draft = t.draft()
+        assert (draft["product"], draft["quantity"]) == ("coq", 14.0)
+        assert [(i["product"], i["quantity"]) for i in draft["additional_items"]] == [("chèvre", 23.0)]
+
+    def test_an_explicit_replace_all_replaces_every_item(self, conv):
+        conv.send("je veux 14 coqs et 20 chèvres chaque semaine", llm=_coq_chevre())
+        t = conv.send(
+            "remplace tout par 23 boeufs",
+            llm=new_task("CREATE_RECURRING_NEED", product="boeuf", quantity=23.0, correction_scope="ALL"),
+        )
+        draft = t.draft()
+        assert (draft["product"], draft["quantity"], draft["recurrence_type"]) == ("boeuf", 23.0, "WEEKLY")
+        assert not draft.get("additional_items")
+
+    def test_the_ambiguous_correction_is_kept_in_the_question(self, conv):
+        conv.send("je veux 14 coqs et 20 chèvres chaque semaine", llm=_coq_chevre())
+        t = conv.send("non plutôt 23 boeufs", llm=new_task("CREATE_RECURRING_NEED", product="boeuf", quantity=23.0))
+        pending = t.pending_after
+        assert (pending.kind.value, pending.field) == ("ENTER_FIELD", "correction_scope")
+        assert pending.target["fields"] == {"product": "boeuf", "quantity": 23.0}
+
+    @pytest.mark.xfail(strict=True, reason="H2/C7: la réponse à la question de portée n'a pas encore de consommateur")
+    def test_answering_the_scope_question_applies_the_kept_correction(self, conv):
+        conv.send("je veux 14 coqs et 20 chèvres chaque semaine", llm=_coq_chevre())
+        conv.send("non plutôt 23 boeufs", llm=new_task("CREATE_RECURRING_NEED", product="boeuf", quantity=23.0))
+        t = conv.send("tout remplacer", llm=_UNKNOWN)
+        assert t.draft()["product"] == "boeuf" and not t.draft().get("additional_items")
+
+    def test_a_new_autonomous_request_cancels_the_superseded_draft_durably(self, conv):
+        # Premier draft laissé INCOMPLET (ENTER_FIELD recurrence_type, éligible ACTIVE_SLOT —
+        # pas de confirmation) pour isoler CETTE propriété de H5 (fast-path numérique pendant
+        # une CONFIRMATION), couvert séparément ci-dessous par un xfail permanent. La réponse
+        # de l'utilisateur passe d'abord par le micro-prompt ACTIVE_SLOT (contrat DEVIATION),
+        # qui retombe ensuite sur le classifieur NEW_TASK — script LLM sensible au prompt reçu
+        # pour honorer les DEUX contrats dans le même tour.
+        def _deviate_then_new_task(kwargs):
+            import json as _json
+
+            if "DEVIATION" in _json.dumps(kwargs.get("messages") or []):
+                return {"disposition": "DEVIATION", "extracted_entities": {}, "confidence": 0.9}
+            return new_task("CREATE_RECURRING_NEED", product="tomate", quantity=20.0, unit="KG", recurrence_type="DAILY")
+
+        t1 = conv.send("je veux 14 coqs", llm=new_task("CREATE_RECURRING_NEED", product="coq", quantity=14.0))
+        assert t1.pending_after.field == "recurrence_type"
+        conv.send("je veux 20 kg de tomate tous les jours", llm=_deviate_then_new_task)
+        assert conv.drafts.status_of(t1.draft()["draft_id"]) == "CANCELLED", "jamais d'orphelin en DRAFT"
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "H5: le raccourci déterministe fast-path (une seule valeur numérique typée) "
+        "s'exécute AVANT tout appel LLM, même pendant la confirmation d'un tout autre draft "
+        "récurrent — il vole silencieusement le nombre (quantité) et perd le reste du message "
+        "(produit, fréquence), écrasant le draft en cours au lieu de préserver la nouvelle "
+        "demande. Cette classe de bug relève de l'ownership unique de decide_turn (commit 6) : "
+        "un raccourci déterministe ne doit jamais pouvoir décider seul qu'un message est une "
+        "réponse au slot courant sans consulter la même politique que le LLM."
+    ))
+    def test_a_fresh_full_request_during_an_unrelated_confirmation_is_never_swallowed_by_the_numeric_shortcut(self, conv):
+        t1 = conv.send("je veux 14 coqs chaque semaine", llm=_coq())
+        t = conv.send(
+            "je veux 20 kg de tomate tous les jours",
+            llm=new_task("CREATE_RECURRING_NEED", product="tomate", quantity=20.0, unit="KG", recurrence_type="DAILY"),
+        )
+        draft = t.draft()
+        assert draft["product"] == "tomate", f"le draft coq a été corrompu par le raccourci numérique : {draft!r}"
+        assert conv.drafts.status_of(t1.draft()["draft_id"]) == "CANCELLED"
 
 
 # =====================================================================
@@ -244,14 +335,13 @@ class TestHM_Cancellation:
         assert t.draft() is None
         assert t.pending_after.kind.value == "NONE"
 
-    @pytest.mark.xfail(strict=True, reason="B1/B2: annulation réussie réécrite WAITING_INPUT, active_goal et payload survivent")
     def test_m_successful_cancellation_leaves_no_transactional_state(self, conv):
-        conv.send("je veux 14 coqs chaque semaine", llm=_coq())
+        t1 = conv.send("je veux 14 coqs chaque semaine", llm=_coq())
         t = conv.send("laisse tomber", llm={"disposition": "REJECT", "intent": None, "confidence": 0.9, "entities": {}})
         assert _created(conv) == []
         assert _no_active_transaction(t.after) == []
+        assert conv.drafts.status_of(t1.draft()["draft_id"]) == "CANCELLED"
 
-    @pytest.mark.xfail(strict=True, reason="B1/B2: le goal annulé ressuscite au tour suivant")
     def test_m_the_turn_after_a_cancellation_starts_clean(self, conv):
         conv.send("je veux 14 coqs chaque semaine", llm=_coq())
         conv.send("laisse tomber", llm={"disposition": "REJECT", "intent": None, "confidence": 0.9, "entities": {}})
@@ -359,7 +449,6 @@ class TestL_ShortApprovedInterruption:
 
 
 class TestN_RejectionIsTerminal:
-    @pytest.mark.xfail(strict=True, reason="B1/B2: après 'non', le tour suivant re-demande la confirmation du draft rejeté")
     def test_the_rejected_goal_never_resurfaces(self, conv):
         conv.send("je veux 14 coqs chaque semaine", llm=_coq())
         t2 = conv.send("non")
@@ -368,7 +457,6 @@ class TestN_RejectionIsTerminal:
         assert t3.goal_before is None
         assert "confirmez" not in t3.response.lower()
 
-    @pytest.mark.xfail(strict=True, reason="B1/B2: 'oui' après un refus répond « C'est noté » (faux succès)")
     def test_a_late_oui_after_rejection_claims_nothing(self, conv):
         conv.send("je veux 14 coqs chaque semaine", llm=_coq())
         conv.send("non")

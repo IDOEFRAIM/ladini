@@ -22,9 +22,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ladini.core.idempotency import claim_once
+from ladini.domain.product_identity import same_product
+from ladini.domain.quantity_unit import default_unit_for_product
 from ladini.graphs.agents.market_coach.core.confirmation_target import (
     ConfirmationTarget,
 )
@@ -183,10 +185,16 @@ class RecurringNeedDraft:
             )
         return replace(self, status=new_status, **extra)
 
-    def with_updates(self, **fields: Any) -> "RecurringNeedDraft":
+    def with_updates(self, *, clear: Tuple[str, ...] = (), **fields: Any) -> "RecurringNeedDraft":
         """Voir `ProcurementDraft.with_updates` — même contrat exact (bump seulement si un champ change
-        réellement, `IllegalDraftTransition` si le draft n'est plus `DRAFT`)."""
+        réellement, `IllegalDraftTransition` si le draft n'est plus `DRAFT`).
+
+        `clear` : champs à VIDER explicitement (une valeur vide dans `fields` signifie « rien de
+        dit », jamais « effacer » — même distinction ABSENT/DELETE que les reducers d'état)."""
         changed: Dict[str, Any] = {}
+        for key in clear:
+            if key in _FIELD_NAMES and slot_has_value(getattr(self, key)):
+                changed[key] = None
         for key, value in fields.items():
             if key not in _FIELD_NAMES or not slot_has_value(value):
                 continue
@@ -322,6 +330,16 @@ def _render_frequency(
 @dataclass(frozen=True)
 class UpdateRecurringNeedDraft:
     fields: Dict[str, Any]
+    clear: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CorrectionNeedsScope:
+    """La correction ne désigne pas sans ambiguïté l'item visé d'un draft multi-produits
+    (« non plutôt 23 bœufs » après « 14 coqs et 20 chèvres ») : on DEMANDE, jamais deviné."""
+
+    fields: Dict[str, Any]
+    candidates: Tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -353,10 +371,72 @@ class NoRecurringNeedAction:
 
 DomainAction = Union[
     UpdateRecurringNeedDraft,
+    CorrectionNeedsScope,
     ConfirmRecurringNeedDraft,
     CancelRecurringNeedDraft,
     NoRecurringNeedAction,
 ]
+
+
+_SHARED_FIELDS = ("recurrence_type", "weekly_days", "excluded_weekdays", "starts_at", "ends_at", "max_price_per_unit")
+_ITEM_FIELDS = ("product", "quantity", "unit")
+CORRECTION_SCOPE_ALL = "ALL"
+
+
+def _items_of(draft: RecurringNeedDraft) -> List[Dict[str, Any]]:
+    return [{"product": draft.product, "quantity": draft.quantity, "unit": draft.unit}] + [
+        dict(it) for it in (draft.additional_items or [])
+    ]
+
+
+def _replacement_item(draft_product: Any, item: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(item)
+    new_product = item.get("product")
+    if new_product and not same_product(new_product, draft_product) and not slot_has_value(item.get("unit")):
+        # nouveau produit sans unité dite : l'unité de l'ancien produit n'a plus de sens
+        out["unit"] = default_unit_for_product(new_product)
+    return out
+
+
+def plan_correction(
+    draft: RecurringNeedDraft, fields: Dict[str, Any], *, scope: Optional[str] = None
+) -> Union[UpdateRecurringNeedDraft, CorrectionNeedsScope, "NoRecurringNeedAction"]:
+    """Correction d'un draft EN COURS — décision déterministe, le LLM ne fait que proposer
+    `scope` (« ALL » = remplacer toute la demande). Règles (politique Phase 2) :
+      - paramètres partagés (fréquence, jours, dates, prix max) : toujours appliqués ;
+      - demande reformulée en entier (`additional_items` fourni) : remplace tous les items ;
+      - draft à UN item, ou scope ALL : l'item est remplacé (items additionnels vidés) ;
+      - draft multi-items : l'item NOMMÉ (même produit canonique) est modifié ;
+      - sinon (item non désigné) : CorrectionNeedsScope — on demande, jamais deviné.
+    """
+    fields = {k: v for k, v in fields.items() if k in _FIELD_NAMES and slot_has_value(v)}
+    shared = {k: fields[k] for k in _SHARED_FIELDS if k in fields}
+    item = {k: fields[k] for k in _ITEM_FIELDS if k in fields}
+    if fields.get("additional_items"):
+        return UpdateRecurringNeedDraft(fields={**shared, **_replacement_item(draft.product, item),
+                                                "additional_items": fields["additional_items"]})
+    if not item:
+        return UpdateRecurringNeedDraft(fields=shared) if shared else NoRecurringNeedAction(reason="empty_correction")
+    items = _items_of(draft)
+    if len(items) == 1 or str(scope or "").upper() == CORRECTION_SCOPE_ALL:
+        return UpdateRecurringNeedDraft(
+            fields={**shared, **_replacement_item(draft.product, item)},
+            clear=("additional_items",) if len(items) > 1 else (),
+        )
+    named = item.get("product")
+    for index, existing in enumerate(items):
+        if named and same_product(named, existing.get("product")):
+            changes = {k: v for k, v in item.items() if k != "product"}
+            if not changes:
+                break  # produit nommé sans nouvelle valeur (« annule la chèvre ») : non supporté -> demander
+            if index == 0:
+                return UpdateRecurringNeedDraft(fields={**shared, **changes})
+            updated = [dict(it) for it in draft.additional_items or []]
+            updated[index - 1] = {**updated[index - 1], **changes}
+            return UpdateRecurringNeedDraft(fields={**shared, "additional_items": updated})
+    return CorrectionNeedsScope(
+        fields=fields, candidates=tuple(str(it.get("product")) for it in items if it.get("product"))
+    )
 
 
 def resolve_domain_action(
@@ -373,6 +453,12 @@ def resolve_domain_action(
     if event == "CONFIRM":
         return ConfirmRecurringNeedDraft(target=ConfirmationTarget.from_dict(pending_target))
     if event == "REJECT":
+        # Politique Phase 2 : un refus SANS nouvelle valeur termine la proposition
+        # (CANCELLED) ; un refus PORTEUR de valeurs (« non, plutôt 23 bœufs ») est une
+        # CORRECTION — jamais jetée (voir `plan_correction`, appliquée par le flow).
+        fields = {k: v for k, v in (extracted_entities or {}).items() if k in _FIELD_NAMES and slot_has_value(v)}
+        if fields:
+            return UpdateRecurringNeedDraft(fields=fields)
         return CancelRecurringNeedDraft()
     if event in {"UPDATE", "ANSWER"}:
         fields = {k: v for k, v in (extracted_entities or {}).items() if k in _FIELD_NAMES and slot_has_value(v)}
@@ -405,6 +491,7 @@ class RecurringNeedOutcomeKind(str, Enum):
     RECURRING_NEED_EXECUTION_UNKNOWN = "RECURRING_NEED_EXECUTION_UNKNOWN"
     RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
     RESUME_EXECUTION = "RESUME_EXECUTION"
+    NEEDS_CORRECTION_SCOPE = "NEEDS_CORRECTION_SCOPE"
     VERSION_CONFLICT = "VERSION_CONFLICT"
 
 
@@ -449,7 +536,7 @@ def apply_domain_action(
     if isinstance(action, UpdateRecurringNeedDraft):
         base = draft or RecurringNeedDraft.new(draft_id=_new_draft_id())
         try:
-            new_draft = base.with_updates(**action.fields)
+            new_draft = base.with_updates(clear=action.clear, **action.fields)
         except IllegalDraftTransition:
             return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.DRAFT_FINALIZED, draft=base)
         if new_draft is base and draft is not None:
@@ -460,6 +547,9 @@ def apply_domain_action(
             else RecurringNeedOutcomeKind.DRAFT_UPDATED
         )
         return RecurringNeedOutcome(kind=kind, draft=new_draft)
+
+    if isinstance(action, CorrectionNeedsScope):
+        return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.NEEDS_CORRECTION_SCOPE, draft=draft)
 
     if isinstance(action, ConfirmRecurringNeedDraft):
         assert draft is not None  # garanti par le garde NO_DRAFT ci-dessus
@@ -619,10 +709,25 @@ def build_response_plan(
             pending_target=({"draft_id": draft.draft_id, "draft_version": draft.version} if draft else None),
         )
 
+    if kind == RecurringNeedOutcomeKind.NEEDS_CORRECTION_SCOPE:
+        products = [it.get("product") for it in _items_of(draft)] if draft else []
+        listed = ", ".join(str(p) for p in products if p)
+        return RecurringNeedResponsePlan(
+            final_response=(
+                f"Votre demande contient plusieurs produits ({listed}). Voulez-vous tout remplacer, "
+                "ou seulement l'un d'eux ? Précisez le produit à modifier, ou répondez *tout remplacer*."
+            ),
+            response_strategy="CLARIFICATION",
+            graph_status="WAITING_INPUT",
+            draft=draft,
+            pending_kind="ENTER_FIELD",
+            pending_field="correction_scope",
+        )
+
     if kind == RecurringNeedOutcomeKind.CANCELLED:
         return RecurringNeedResponsePlan(
             final_response="D'accord, annulé.",
-            response_strategy="CLARIFICATION",
+            response_strategy="SUCCESS",
             graph_status="COMPLETED",
             draft=None,
             terminal_goal_reset=True,
@@ -736,6 +841,8 @@ __all__ = [
     "IllegalDraftTransition",
     "ConfirmationTarget",
     "UpdateRecurringNeedDraft",
+    "CorrectionNeedsScope",
+    "plan_correction",
     "ConfirmRecurringNeedDraft",
     "CancelRecurringNeedDraft",
     "NoRecurringNeedAction",

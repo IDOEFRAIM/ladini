@@ -296,7 +296,7 @@ async def memory_update(
     # (parce que "poppée" localement) reste donc telle quelle dans l'ancienne valeur, jamais
     # effacée. Il faut l'assigner explicitement à `None` (une clé PRÉSENTE avec cette valeur EST
     # bien prise en compte par `merge_dict`) pour qu'elle disparaisse réellement du payload fusionné.
-    for _list_field in ("ambiguous_groups", "additional_items"):
+    for _list_field in ("ambiguous_groups", "additional_items", "correction_scope"):
         if not extracted.get(_list_field):
             payload[_list_field] = None
     onboarding_profile = dict(state.get("onboarding_profile") or {})

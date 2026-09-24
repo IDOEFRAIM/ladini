@@ -1,6 +1,5 @@
 import logging
 import re
-import unicodedata
 import uuid
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -25,6 +24,7 @@ from ladini.domain.models import (
     User,
     Zone,
 )
+from ladini.domain.product_identity import canonical_product_key
 
 from .base import BaseMixin
 from .category import _is_confident_category_match
@@ -42,22 +42,8 @@ _MAX_PHOTOS_PER_LOT = (
 
 
 def _normalize_product_label(value: str) -> str:
-    """Low-tech normalizer to align plural/diacritics variations for product names."""
-    if value is None:
-        return ""
-    text = str(value).strip().lower()
-    if not text:
-        return ""
-    text = text.replace("œ", "oe").replace("æ", "ae")
-    text = unicodedata.normalize("NFKD", text)
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    tokens: List[str] = []
-    for token in text.split():
-        cleaned = "".join(ch for ch in token if ch.isalnum())
-        if len(cleaned) > 3 and cleaned.endswith("s"):
-            cleaned = cleaned[:-1]
-        tokens.append(cleaned)
-    return " ".join(t for t in tokens if t)
+    """Alias historique — voir `ladini.domain.product_identity.canonical_product_key`."""
+    return str(canonical_product_key(value))
 
 
 class AuctionMixin(BaseMixin):

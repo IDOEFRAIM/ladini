@@ -39,6 +39,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     resolve_pending_interaction,
     set_pending_interaction,
 )
+from ladini.graphs.agents.market_coach.core.state import entities_said_this_turn
 from ladini.graphs.agents.market_coach.domain.preorder_draft import (
     PreorderDraft,
     PreorderDraftStatus,
@@ -327,7 +328,7 @@ async def resolve_preorder_confirmation(
 
     action = resolve_domain_action(
         interpreted_event=interpreted_event,
-        extracted_entities=state.get("extracted_entities") or {},
+        extracted_entities=entities_said_this_turn(state),
         pending_target=pending_target,
         resolved_location=resolved_location,
     )

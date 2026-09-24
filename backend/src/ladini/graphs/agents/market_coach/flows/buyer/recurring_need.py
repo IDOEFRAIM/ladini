@@ -33,6 +33,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     clear_pending_interaction,
     set_pending_interaction,
 )
+from ladini.graphs.agents.market_coach.core.state import entities_said_this_turn
 from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
     CancelRecurringNeedDraft,
     ConfirmRecurringNeedDraft,
@@ -47,6 +48,7 @@ from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
     confirm_claim_key,
     execution_key,
     finalize_after_execution,
+    plan_correction,
     resolve_domain_action,
 )
 from ladini.graphs.agents.market_coach.services.mcp.gateway import (
@@ -315,7 +317,16 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         else:
             extracted.pop("additional_items")
 
+    said = _said_this_turn(state)
+    if draft is not None and draft.status == RecurringNeedDraftStatus.DRAFT and _pending_targets(pending, draft):
+        if _is_correction(interpreted_event, said):
+            return await _correct(draft, said, state, conversation_id)
+
     if interpreted_event in ("NEW_TASK", "INTERRUPTION"):
+        if draft is not None and draft.status == RecurringNeedDraftStatus.DRAFT:
+            # Nouvelle demande autonome : l'ancien draft éditable est CLOS durablement
+            # (jamais laissé orphelin en DRAFT dans la table).
+            await _persist(draft, apply_domain_action(draft, CancelRecurringNeedDraft()).draft, conversation_id)
         draft = None
         domain_event = "UPDATE" if extracted else "ANSWER"
     else:
@@ -323,7 +334,10 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
 
     action = resolve_domain_action(
         interpreted_event=domain_event,
-        extracted_entities=extracted,
+        # Un refus ne se juge que sur ce qui est dit MAINTENANT : le payload accumulé
+        # (produit/quantité des tours précédents) ferait passer un simple « non » pour
+        # une correction porteuse de valeurs.
+        extracted_entities=said if domain_event == "REJECT" else extracted,
         pending_target=pending_target,
     )
 
@@ -343,6 +357,69 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         if ambiguous_response is not None:
             return ambiguous_response
     return _apply_response_plan(build_response_plan(outcome))
+
+
+def _said_this_turn(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Champs du draft DITS dans CE message : `extracted_entities` du tour, moins les clés
+    héritées par `cognitive_guard` (`cognitive_decision.carried_entities`). Jamais
+    `transaction_payload`, qui accumule les tours précédents (fréquence, ancienne unité...)."""
+    entities = entities_said_this_turn(state)
+    said = {k: v for k, v in entities.items() if k in _DRAFT_FIELDS and slot_has_value(v)}
+    if "additional_items" in said:
+        cleaned = _clean_additional_items(said["additional_items"])
+        if cleaned:
+            said["additional_items"] = cleaned
+        else:
+            said.pop("additional_items")
+    return said
+
+
+def _pending_targets(pending: Any, draft: RecurringNeedDraft) -> bool:
+    """La question en attente porte-t-elle sur CE draft ?"""
+    if not isinstance(pending, dict):
+        return False
+    pending_dict: Dict[str, Any] = pending
+    raw_target = pending_dict.get("target")
+    target: Dict[str, Any] = raw_target if isinstance(raw_target, dict) else {}
+    if pending_dict.get("kind") == "CONFIRM_ACTION":
+        return bool(target.get("draft_id") == draft.draft_id)
+    return pending_dict.get("kind") == "ENTER_FIELD" and pending_dict.get("goal") == "CREATE_RECURRING_NEED"
+
+
+def _is_correction(interpreted_event: str, said: Dict[str, Any]) -> bool:
+    """Politique Phase 2 (C) — décision déterministe sur la STRUCTURE du message :
+      - REJECT porteur de valeurs (« non, plutôt 23 bœufs ») -> correction ;
+      - même intention reformulée SANS sa propre fréquence -> correction du draft en cours
+        (une nouvelle demande autonome redit sa fréquence : « je veux 30 poulets chaque
+        semaine » reste une nouvelle demande, voir test F)."""
+    if not said:
+        return False
+    if interpreted_event == "REJECT":
+        return True
+    return interpreted_event in ("NEW_TASK", "INTERRUPTION") and not said.get("recurrence_type")
+
+
+async def _correct(
+    draft: RecurringNeedDraft, said: Dict[str, Any], state: Dict[str, Any], conversation_id: str
+) -> Dict[str, Any]:
+    scope = (state.get("extracted_entities") or {}).get("correction_scope")
+    action = plan_correction(draft, said, scope=scope)
+    outcome = apply_domain_action(draft, action)
+    await _persist(draft, outcome.draft, conversation_id)
+    patch = _apply_response_plan(build_response_plan(outcome))
+    if outcome.kind == RecurringNeedOutcomeKind.NEEDS_CORRECTION_SCOPE:
+        # La correction proposée est conservée dans la question (jamais jetée) : la réponse
+        # ne fera que désigner sa portée.
+        patch.update(
+            set_pending_interaction(
+                InteractionKind.ENTER_FIELD,
+                goal="CREATE_RECURRING_NEED",
+                field_name="correction_scope",
+                candidates=tuple(getattr(action, "candidates", ()) or ()),
+                target={"draft_id": draft.draft_id, "fields": said},
+            )
+        )
+    return patch
 
 
 async def _persist(
