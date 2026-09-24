@@ -14,7 +14,6 @@ from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
     RecurringNeedDraft,
     RecurringNeedDraftStatus,
     RecurringNeedOutcomeKind,
-    RejectRecurringNeedConfirmation,
     UpdateRecurringNeedDraft,
     apply_domain_action,
     resolve_domain_action,
@@ -249,12 +248,31 @@ def test_confirming_a_cancelled_draft_is_finalized():
 
 
 # ── rejet / annulation ────────────────────────────────────────────────────
+#
+# Anomalie résiduelle corrigée (2026-09-24) : contrairement à PROCUREMENT/PREORDER (dont le
+# REJECT pendant confirmation est un rejet "doux" — le draft reste DRAFT, l'utilisateur peut
+# continuer à le corriger), CREATE_RECURRING_NEED n'a pas cette notion : un "non"/"annuler" est
+# TOUJOURS définitif. `resolve_domain_action` construisait auparavant un
+# `RejectRecurringNeedConfirmation` qui laissait le draft orphelin en `DRAFT` (jamais confirmable
+# ensuite faute de `pending_interaction`, mais jamais formellement `CANCELLED` non plus) — REJECT
+# route maintenant vers le `CancelRecurringNeedDraft` déjà existant, réutilisé tel quel.
 
-def test_rejecting_a_confirmation_leaves_the_draft_untouched():
+def test_resolve_domain_action_maps_reject_event_to_cancel_not_a_soft_reject():
+    """« non » ET « annuler » sont le MÊME `interpreted_event="REJECT"` côté interpréteur
+    (`_REJECT_EXACT_PHRASES`) — le domaine ne distingue pas les deux mots, seulement l'événement."""
+    action = resolve_domain_action(interpreted_event="REJECT", extracted_entities={}, pending_target=None)
+    assert isinstance(action, CancelRecurringNeedDraft)
+
+
+def test_a_reject_event_cancels_the_draft_definitively():
     d = RecurringNeedDraft.new("d1", product="tomate", quantity=40, unit="KG", recurrence_type="DAILY")
-    outcome = apply_domain_action(d, RejectRecurringNeedConfirmation())
-    assert outcome.kind == RecurringNeedOutcomeKind.CONFIRMATION_REJECTED
-    assert outcome.draft == d
+    action = resolve_domain_action(interpreted_event="REJECT", extracted_entities={}, pending_target=None)
+    outcome = apply_domain_action(d, action)
+    assert outcome.kind == RecurringNeedOutcomeKind.CANCELLED
+    assert outcome.draft.status == RecurringNeedDraftStatus.CANCELLED, (
+        "un rejet doit RÉELLEMENT persister le statut CANCELLED — jamais laisser le draft "
+        "orphelin en DRAFT (l'anomalie corrigée ici)"
+    )
 
 
 def test_cancelling_a_draft_moves_it_to_cancelled():
@@ -262,3 +280,38 @@ def test_cancelling_a_draft_moves_it_to_cancelled():
     outcome = apply_domain_action(d, CancelRecurringNeedDraft())
     assert outcome.kind == RecurringNeedOutcomeKind.CANCELLED
     assert outcome.draft.status == RecurringNeedDraftStatus.CANCELLED
+
+
+def test_cancelling_an_already_cancelled_draft_is_finalized_not_re_cancelled():
+    """Idempotence d'un REJECT rejoué (webhook redélivré) contre un draft DÉJÀ `CANCELLED` —
+    jamais une 2ᵉ transition (qui lèverait `IllegalDraftTransition`, `CANCELLED` n'ayant aucune
+    transition sortante), jamais un crash : même repli `DRAFT_FINALIZED` que pour un CONFIRM
+    tardif sur un draft déjà terminal."""
+    d = RecurringNeedDraft.new("d1", product="tomate", quantity=40, unit="KG", recurrence_type="DAILY")
+    cancelled = apply_domain_action(d, CancelRecurringNeedDraft()).draft
+    replay_outcome = apply_domain_action(cancelled, CancelRecurringNeedDraft())
+    assert replay_outcome.kind == RecurringNeedOutcomeKind.DRAFT_FINALIZED
+    assert replay_outcome.draft.status == RecurringNeedDraftStatus.CANCELLED
+
+
+def test_confirming_a_cancelled_draft_never_reactivates_it():
+    """Confirmation tardive ("ok" arrivé après coup) contre un draft déjà `CANCELLED` — jamais
+    une exécution, jamais une réactivation. Complète `test_confirming_a_cancelled_draft_is_
+    finalized` ci-dessus en vérifiant explicitement le statut final, pas seulement le kind."""
+    d = RecurringNeedDraft.new("d1", product="tomate", quantity=40, unit="KG", recurrence_type="DAILY")
+    cancelled = apply_domain_action(d, CancelRecurringNeedDraft()).draft
+    target = ConfirmationTarget(draft_id=cancelled.draft_id, draft_version=cancelled.version)
+    outcome = apply_domain_action(cancelled, ConfirmRecurringNeedDraft(target=target), claim=_always_claim)
+    assert outcome.kind == RecurringNeedOutcomeKind.DRAFT_FINALIZED
+    assert outcome.draft.status == RecurringNeedDraftStatus.CANCELLED, "jamais réactivé vers EXECUTING"
+
+
+def test_updating_a_cancelled_draft_is_finalized_not_modified():
+    """Une tentative de MODIFICATION (pas juste de confirmation) sur un draft déjà `CANCELLED`
+    doit aussi être refusée — `with_updates` lève `IllegalDraftTransition`, interceptée par
+    `apply_domain_action` (`UpdateRecurringNeedDraft` branch) plutôt que de laisser fuiter."""
+    d = RecurringNeedDraft.new("d1", product="tomate", quantity=40, unit="KG", recurrence_type="DAILY")
+    cancelled = apply_domain_action(d, CancelRecurringNeedDraft()).draft
+    outcome = apply_domain_action(cancelled, UpdateRecurringNeedDraft(fields={"quantity": 99}))
+    assert outcome.kind == RecurringNeedOutcomeKind.DRAFT_FINALIZED
+    assert outcome.draft.quantity == 40, "la quantité d'origine ne doit jamais être altérée après annulation"

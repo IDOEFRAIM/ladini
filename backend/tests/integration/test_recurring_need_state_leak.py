@@ -20,6 +20,8 @@ from __future__ import annotations
 import typing
 from typing import Any, Dict, List, Optional
 
+import pytest
+
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
@@ -27,6 +29,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
 from ladini.graphs.agents.market_coach.core.state import MarketAgentState
 from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
     RecurringNeedDraft,
+    RecurringNeedDraftStatus,
 )
 from ladini.graphs.agents.market_coach.flows.buyer.flow import (
     buyer_context_resolver,
@@ -678,3 +681,236 @@ class TestMultiItemDraftNeverLeaksIntoTheNextSingleItemRequest:
         assert len(created_needs) == 1, "le besoin carotte doit passer par l'appel MCP singulier (mono-produit), jamais le pluriel"
         assert created_needs[0]["product_query"] == "carotte"
         assert len(created_batches) == 1, "aucun second appel multi-produits ne doit être déclenché pour une demande mono-produit"
+
+
+# =====================================================================
+# ANOMALIE RÉSIDUELLE (2026-09-24) : un rejet ("non"/"annuler") pendant la confirmation
+# laissait le draft en `DRAFT`, orphelin (plus de `PendingInteraction` pour le référencer, mais
+# jamais formellement `CANCELLED`) au lieu d'utiliser `CancelRecurringNeedDraft` (déjà existant,
+# déjà correctement câblé pour TOUT le reste — CAS, persistance, protection contre une
+# confirmation/modification tardive). Corrigé dans `resolve_domain_action` : REJECT ->
+# `CancelRecurringNeedDraft()`. Les tests ci-dessous couvrent le contrat attendu :
+#
+#   Création -> rejet définitif -> CANCELLED -> aucune création DB -> state propre
+#   CANCELLED -> confirmation/rejeu tardif -> aucune exécution, jamais de réactivation
+#   CANCELLED -> nouvelle demande -> nouveau draft, totalement indépendant
+# =====================================================================
+
+
+class TestExplicitRejectionWordsBothCancelDefinitively:
+    """Mission §7.1/§7.2 : "non" ET "annuler" sont deux mots DISTINCTS mais le MÊME
+    `interpreted_event="REJECT"` côté interpréteur (`_REJECT_EXACT_PHRASES`) — les deux doivent
+    produire le même résultat définitif, jamais une simple pause "doux" (contrairement à
+    PROCUREMENT/PREORDER, voir `recurring_need_draft.py::CancelRecurringNeedDraft`)."""
+
+    @pytest.mark.parametrize("rejection_word", ["non", "annuler"])
+    def test_the_rejection_is_definitive_and_writes_nothing(self, rejection_word):
+        created_needs: List[Dict[str, Any]] = []
+
+        def _create_recurring_need(**kwargs: Any) -> Dict[str, Any]:
+            created_needs.append(kwargs)
+            return {"status": "success", "recurring_need_id": "need-1"}
+
+        runtime = StubRuntime(responses={"create_recurring_need": _create_recurring_need})
+        interpreter = make_input_interpreter("BUYER")
+        state = _initial_state()
+
+        runtime.llm = ScriptedLLM(
+            _new_task_payload("CREATE_RECURRING_NEED", product="tomate", quantity=20.0, unit="KG")
+        )
+        _turn1, state = run(
+            _run_turn(state, interpreter, runtime, text="j ai besoin de 20 kg de tomates tous les jours")
+        )
+        assert to_tunnel_category(get_pending_interaction(state)) == "CONFIRMATION"
+
+        _turn2, state = run(_run_turn(state, interpreter, runtime, text=rejection_word))
+        assert len(created_needs) == 0, f"aucune écriture DB après un rejet ({rejection_word!r})"
+        assert state.get("recurring_need_draft") is None, "le draft rejeté ne doit jamais rester actif"
+        assert to_tunnel_category(get_pending_interaction(state)) == "NONE"
+        assert state.get("current_goal") is None
+        assert state.get("transaction_payload") == {}
+
+
+class TestLateConfirmationAfterCancellationNeverReactivates:
+    """Mission §3 : "Draft A -> CANCELLED ; ancien message 'OK' -> aucune création, aucune
+    réactivation du draft." Le "ok" tardif est un mot bare identique à celui qui aurait confirmé
+    — seule la PendingInteraction/l'état ayant changé entre-temps doit empêcher la réactivation,
+    jamais une comparaison de texte."""
+
+    def test_ok_replayed_after_cancellation_creates_nothing(self):
+        created_needs: List[Dict[str, Any]] = []
+
+        def _create_recurring_need(**kwargs: Any) -> Dict[str, Any]:
+            created_needs.append(kwargs)
+            return {"status": "success", "recurring_need_id": "need-1"}
+
+        runtime = StubRuntime(responses={"create_recurring_need": _create_recurring_need})
+        interpreter = make_input_interpreter("BUYER")
+        state = _initial_state()
+
+        runtime.llm = ScriptedLLM(
+            _new_task_payload("CREATE_RECURRING_NEED", product="tomate", quantity=20.0, unit="KG")
+        )
+        _turn1, state = run(
+            _run_turn(state, interpreter, runtime, text="j ai besoin de 20 kg de tomates tous les jours")
+        )
+        _turn2, state = run(_run_turn(state, interpreter, runtime, text="non"))
+        assert len(created_needs) == 0
+        assert state.get("recurring_need_draft") is None
+
+        # "ok" arrive APRÈS l'annulation — plus aucune PendingInteraction ne le rattache à
+        # quoi que ce soit ; le classifieur n'a plus le contexte "confirmation en attente" et
+        # ne doit rien halluciner de fiable (UNKNOWN, sans entité).
+        runtime.llm = ScriptedLLM({"disposition": "UNKNOWN", "confidence": 0.3, "entities": {}})
+        _turn3, state = run(_run_turn(state, interpreter, runtime, text="ok"))
+        assert len(created_needs) == 0, "un \"ok\" tardif après annulation ne doit JAMAIS créer le besoin"
+        assert state.get("recurring_need_draft") is None, "aucune réactivation du draft annulé"
+        assert to_tunnel_category(get_pending_interaction(state)) == "NONE"
+
+
+class TestRejectReplayIsIdempotent:
+    """Mission §4 : une redélivrance webhook peut renvoyer DEUX FOIS le même événement REJECT
+    contre le MÊME état de départ (c'est la définition d'une redélivrance — jamais un 2ᵉ tour
+    distinct où le premier rejet a déjà fait avancer l'état). Le résultat final doit rester
+    Draft A = CANCELLED, aucune opération métier exécutée, aucune interaction réactivée. Annuler
+    n'a — contrairement à confirmer — aucun effet externe (pas d'appel MCP), donc aucun mécanisme
+    de claim/dédup dédié n'est nécessaire ici : la pure transition d'état est déjà idempotente par
+    construction (même état de départ -> même résultat)."""
+
+    def test_a_redelivered_reject_never_creates_a_side_effect(self):
+        created_needs: List[Dict[str, Any]] = []
+
+        def _create_recurring_need(**kwargs: Any) -> Dict[str, Any]:
+            created_needs.append(kwargs)
+            return {"status": "success", "recurring_need_id": "need-1"}
+
+        runtime = StubRuntime(responses={"create_recurring_need": _create_recurring_need})
+        interpreter = make_input_interpreter("BUYER")
+        state = _initial_state()
+
+        runtime.llm = ScriptedLLM(
+            _new_task_payload("CREATE_RECURRING_NEED", product="tomate", quantity=20.0, unit="KG")
+        )
+        _turn1, state_before_reject = run(
+            _run_turn(state, interpreter, runtime, text="j ai besoin de 20 kg de tomates tous les jours")
+        )
+        assert to_tunnel_category(get_pending_interaction(state_before_reject)) == "CONFIRMATION"
+
+        _redelivery_a, state_after_a = run(_run_turn(state_before_reject, interpreter, runtime, text="non"))
+        assert len(created_needs) == 0
+        assert state_after_a.get("recurring_need_draft") is None
+
+        # Rejoué contre le MÊME état de départ (redélivrance webhook), pas contre state_after_a.
+        _redelivery_b, state_after_b = run(_run_turn(state_before_reject, interpreter, runtime, text="non"))
+        assert len(created_needs) == 0, "la redélivrance ne doit déclencher aucune opération métier"
+        assert state_after_b.get("recurring_need_draft") is None
+        assert to_tunnel_category(get_pending_interaction(state_after_b)) == "NONE", (
+            "le nettoyage doit rester idempotent — jamais de PendingInteraction réactivée par le rejeu"
+        )
+
+
+class TestStaleConfirmationTargetNeverTouchesANewerDraft:
+    """Mission §3 : "l'ancien événement de confirmation du draft A ne doit jamais confirmer ou
+    modifier le draft B." Construit directement l'état pathologique (cible de confirmation
+    périmée pointant vers A, alors que B est désormais le draft actif) — le scénario réel
+    (PendingInteraction toujours réécrite pour B) ne le produit jamais naturellement, mais le
+    garde-fou `ConfirmationTarget.matches` (draft_id ET version) doit le refuser structurellement
+    si jamais un événement de confirmation périmé refaisait surface."""
+
+    def test_a_stale_target_from_a_cancelled_draft_is_rejected_against_the_new_draft(self):
+        from ladini.graphs.agents.market_coach.flows.buyer.recurring_need import (
+            recurring_need_flow,
+        )
+
+        draft_b = RecurringNeedDraft.new(
+            draft_id="draft-B-oignon", product="oignon", quantity=20.0, unit="KG", recurrence_type="DAILY"
+        )
+        state = {
+            "current_goal": "CREATE_RECURRING_NEED",
+            "user_phone": "+22670000000",
+            "interpreted_event": "CONFIRM",
+            "transaction_payload": {},
+            "recurring_need_draft": draft_b.to_dict(),
+            # Cible périmée : draft_id A, complètement étranger à B.
+            "pending_interaction": {
+                "kind": "CONFIRM_ACTION",
+                "target": {"draft_id": "draft-A-tomate-cancelled", "draft_version": 3},
+            },
+        }
+        runtime = StubRuntime()
+        patch = run(recurring_need_flow(state, runtime))
+
+        assert "create_recurring_need" not in runtime.calls, "jamais d'exécution sur une cible périmée"
+        still_draft_b = RecurringNeedDraft.from_dict(patch.get("recurring_need_draft"))
+        assert still_draft_b is not None
+        assert still_draft_b.draft_id == "draft-B-oignon", "B doit rester intact, jamais touché par la cible de A"
+        assert still_draft_b.status == RecurringNeedDraftStatus.DRAFT, "B ne doit jamais passer à EXECUTING"
+
+
+class TestMultiItemDraftRejectedCreatesNothing:
+    """Mission §6/§7.7 : tomate + oignon -> REJECT -> aucun des deux besoins ne doit être
+    enregistré (ni via l'appel singulier ni via l'appel atomique pluriel), et une demande
+    ultérieure ne doit récupérer aucun élément de `additional_items`."""
+
+    def test_rejecting_a_multi_item_draft_creates_neither_product(self):
+        created_needs: List[Dict[str, Any]] = []
+        created_batches: List[Dict[str, Any]] = []
+
+        def _create_recurring_need(**kwargs: Any) -> Dict[str, Any]:
+            created_needs.append(kwargs)
+            return {"status": "success", "recurring_need_id": "need-1"}
+
+        def _create_recurring_needs(**kwargs: Any) -> Dict[str, Any]:
+            created_batches.append(kwargs)
+            return {"status": "success", "items": []}
+
+        runtime = StubRuntime(
+            responses={
+                "create_recurring_need": _create_recurring_need,
+                "create_recurring_needs": _create_recurring_needs,
+            }
+        )
+        interpreter = make_input_interpreter("BUYER")
+        state = _initial_state()
+
+        runtime.llm = ScriptedLLM(
+            {
+                "disposition": "NEW_TASK",
+                "intent": "CREATE_RECURRING_NEED",
+                "confidence": 0.95,
+                "entities": {
+                    "product": "tomate",
+                    "quantity": 10.0,
+                    "unit": "KG",
+                    "additional_items": [{"product": "oignon", "quantity": 20.0, "unit": "KG"}],
+                    "recurrence_type": "DAILY",
+                },
+            }
+        )
+        _turn1, state = run(
+            _run_turn(state, interpreter, runtime, text="j ai besoin de 10 kg de tomate et 20 kg d oignon tous les jours")
+        )
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft.additional_items == [{"product": "oignon", "quantity": 20.0, "unit": "KG"}]
+
+        _turn2, state = run(_run_turn(state, interpreter, runtime, text="annuler"))
+        assert len(created_needs) == 0
+        assert len(created_batches) == 0, "aucun appel atomique multi-produits après un rejet"
+        assert state.get("recurring_need_draft") is None
+
+        # Nouvelle demande mono-produit — ne doit récupérer AUCUN residu de tomate/oignon.
+        runtime.llm = ScriptedLLM(
+            {
+                "disposition": "NEW_TASK",
+                "intent": "CREATE_RECURRING_NEED",
+                "confidence": 0.95,
+                "entities": {"product": "carotte", "quantity": 30.0, "unit": "KG", "recurrence_type": "DAILY"},
+            }
+        )
+        turn3, state = run(_run_turn(state, interpreter, runtime, text="j ai besoin de 30 kg de carotte tous les jours"))
+        response = (state.get("final_response") or "").lower()
+        assert "tomate" not in response and "oignon" not in response
+        carotte_draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert not carotte_draft.additional_items, (
+            f"additional_items ne doit jamais survivre à un rejet : {carotte_draft.additional_items!r}"
+        )

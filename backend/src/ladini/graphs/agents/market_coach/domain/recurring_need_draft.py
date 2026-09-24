@@ -307,12 +307,19 @@ class ConfirmRecurringNeedDraft:
 
 
 @dataclass(frozen=True)
-class RejectRecurringNeedConfirmation:
-    pass
-
-
-@dataclass(frozen=True)
 class CancelRecurringNeedDraft:
+    """Abandon EXPLICITE et définitif du draft — contrairement à `ProcurementDraft`/
+    `PreorderDraft` (dont le REJECT pendant confirmation est un rejet "doux", qui laisse le
+    draft en `DRAFT` pour que l'utilisateur continue de le corriger), CREATE_RECURRING_NEED
+    n'a pas cette notion de rejet doux : un "non"/"annuler" sur la confirmation d'un besoin
+    récurrent est TOUJOURS définitif (mandat lifecycle, 2026-09-24 — anomalie résiduelle
+    identifiée après le correctif state-leak : `resolve_domain_action` construisait un
+    `RejectRecurringNeedConfirmation` qui laissait le draft en `DRAFT`, orphelin, au lieu de
+    `CANCELLED`). Une demande de MODIFICATION ("modifier") n'emprunte de toute façon jamais
+    ce chemin — elle n'est structurellement jamais dans le vocabulaire REJECT
+    (`interpreter/routing.py::_REJECT_EXACT_PHRASES`), donc aucune confusion possible entre
+    "annuler" et "modifier" ici."""
+
     pass
 
 
@@ -324,7 +331,6 @@ class NoRecurringNeedAction:
 DomainAction = Union[
     UpdateRecurringNeedDraft,
     ConfirmRecurringNeedDraft,
-    RejectRecurringNeedConfirmation,
     CancelRecurringNeedDraft,
     NoRecurringNeedAction,
 ]
@@ -336,13 +342,15 @@ def resolve_domain_action(
     extracted_entities: Dict[str, Any],
     pending_target: Optional[Dict[str, Any]],
 ) -> DomainAction:
-    """Voir `procurement_draft.resolve_domain_action` — même contrat exact."""
+    """Voir `procurement_draft.resolve_domain_action` — même contrat, SAUF pour REJECT : voir
+    `CancelRecurringNeedDraft` pour la justification du rejet définitif (pas de rejet "doux"
+    ici, contrairement à PROCUREMENT/PREORDER)."""
     event = str(interpreted_event or "").upper().strip()
 
     if event == "CONFIRM":
         return ConfirmRecurringNeedDraft(target=ConfirmationTarget.from_dict(pending_target))
     if event == "REJECT":
-        return RejectRecurringNeedConfirmation()
+        return CancelRecurringNeedDraft()
     if event in {"UPDATE", "ANSWER"}:
         fields = {k: v for k, v in (extracted_entities or {}).items() if k in _FIELD_NAMES and slot_has_value(v)}
         if fields:
@@ -363,7 +371,6 @@ class RecurringNeedOutcomeKind(str, Enum):
     CONFIRMED_READY_FOR_EXECUTION = "CONFIRMED_READY_FOR_EXECUTION"
     STALE_TARGET = "STALE_TARGET"
     NO_TARGET = "NO_TARGET"
-    CONFIRMATION_REJECTED = "CONFIRMATION_REJECTED"
     CANCELLED = "CANCELLED"
     NO_DRAFT = "NO_DRAFT"
     DRAFT_FINALIZED = "DRAFT_FINALIZED"
@@ -451,14 +458,16 @@ def apply_domain_action(
         executing = draft._confirm_to_executing()
         return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.CONFIRMED_READY_FOR_EXECUTION, draft=executing)
 
-    if isinstance(action, RejectRecurringNeedConfirmation):
-        if draft is None:
-            return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.NO_DRAFT, draft=None)
-        return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.CONFIRMATION_REJECTED, draft=draft)
-
     if isinstance(action, CancelRecurringNeedDraft):
         if draft is None:
             return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.NO_DRAFT, draft=None)
+        # Un draft déjà hors DRAFT (CANCELLED — replay d'un REJECT déjà traité —, ou tout autre
+        # statut terminal/en vol) ne peut pas être re-annulé : `with_status` lèverait
+        # `IllegalDraftTransition` (`_ALLOWED_TRANSITIONS[CANCELLED]` est vide). Même garde que
+        # `ConfirmRecurringNeedDraft` ci-dessus pour un statut non-DRAFT — réutilise le même
+        # DRAFT_FINALIZED, jamais un 2ᵉ mécanisme de statut "déjà terminé".
+        if draft.status != RecurringNeedDraftStatus.DRAFT:
+            return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.DRAFT_FINALIZED, draft=draft)
         return RecurringNeedOutcome(
             kind=RecurringNeedOutcomeKind.CANCELLED, draft=draft.with_status(RecurringNeedDraftStatus.CANCELLED)
         )
@@ -571,14 +580,6 @@ def build_response_plan(
             pending_target=({"draft_id": draft.draft_id, "draft_version": draft.version} if draft else None),
         )
 
-    if kind == RecurringNeedOutcomeKind.CONFIRMATION_REJECTED:
-        return RecurringNeedResponsePlan(
-            final_response="D'accord, ce n'est pas encore confirmé. Que voulez-vous changer ?",
-            response_strategy="SUCCESS",
-            graph_status="PLANNING",
-            draft=draft,
-        )
-
     if kind == RecurringNeedOutcomeKind.CANCELLED:
         return RecurringNeedResponsePlan(
             final_response="D'accord, annulé.",
@@ -689,7 +690,6 @@ __all__ = [
     "ConfirmationTarget",
     "UpdateRecurringNeedDraft",
     "ConfirmRecurringNeedDraft",
-    "RejectRecurringNeedConfirmation",
     "CancelRecurringNeedDraft",
     "NoRecurringNeedAction",
     "DomainAction",
