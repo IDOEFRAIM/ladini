@@ -80,6 +80,23 @@ class NewTaskRecurringItem(BaseModel):
     unit: Optional[str] = None
 
 
+class NewTaskAmbiguousGroup(BaseModel):
+    """UNE quantité donnée pour PLUSIEURS noms de produits SANS répartition explicite (ex:
+    "57 moutons chèvres" — deux animaux, un seul nombre, aucun mot indiquant un total ou une
+    quantité par produit). Bug réel confirmé 2026-09-24 : le micro-prompt, sans ce champ, n'avait
+    d'autre choix que d'inventer une répartition (product="mouton"/"chèvre" à 57 chacun) ou de
+    fusionner en un produit incohérent ("moutons chevres") — jamais fiable dans les deux cas
+    (spec §4 : "ne jamais inventer une information absente"). `candidates` porte les noms tels
+    quels, `flows/buyer/recurring_need.py` construit la question de clarification, JAMAIS ce
+    micro-prompt lui-même."""
+
+    model_config = {"extra": "forbid"}
+
+    quantity: Optional[float] = None
+    unit: Optional[str] = None
+    candidates: List[str] = []
+
+
 class NewTaskEntities(BaseModel):
     """Uniquement des informations DÉJÀ DITES dans CE message — jamais un ID
     technique (spec §11), jamais un champ possédé par une autre route (spec
@@ -121,6 +138,11 @@ class NewTaskEntities(BaseModel):
     # `additional_products` (noms nus, sans quantité, pour les AUTRES intentions,
     # ex: BUYER_REQUEST). Voir `new_task_prompts.py` pour la règle d'extraction.
     additional_items: List[NewTaskRecurringItem] = []
+    # (2026-09-24, bug réel production — "14 coq et 57 moutons chèvres chaque semaine") :
+    # UNE quantité pour PLUSIEURS produits sans répartition claire — voir
+    # `NewTaskAmbiguousGroup`, jamais dans `additional_items` (qui suppose une quantité PAR
+    # produit déjà connue).
+    ambiguous_groups: List[NewTaskAmbiguousGroup] = []
 
 
 class NewTaskInterpretation(BaseModel):
@@ -244,6 +266,7 @@ __all__ = [
     "NewTaskDisposition",
     "NewTaskPricingTier",
     "NewTaskRecurringItem",
+    "NewTaskAmbiguousGroup",
     "NewTaskEntities",
     "NewTaskInterpretation",
     "NewTaskPromptContext",

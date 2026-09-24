@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import time
 from decimal import Decimal
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ladini.domain.recurring_supply.digest import AllocationLine, build_detail_text
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
@@ -84,6 +84,48 @@ def _clean_additional_items(raw: Any) -> List[Dict[str, Any]]:
     return cleaned
 
 
+def _fmt_ambiguous_num(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        return f"{value:g}"
+    return str(value or "")
+
+
+def _ambiguous_quantity_clarification(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Bug réel production (2026-09-24) : "14 coq et 57 moutons chèvres chaque semaine"
+    retombait sur le catalogue — cause racine distincte (voir `new_task_contract.py::
+    NewTaskAmbiguousGroup`), mais la donnée elle-même ("57 moutons chèvres") reste ambiguë
+    même une fois correctement classée CREATE_RECURRING_NEED : UNE quantité pour PLUSIEURS
+    produits, sans mot indiquant un total ou une quantité par produit. Ni fusionnée en un
+    produit incohérent, ni répartie en devinant — on demande, `None` si rien d'ambigu."""
+    groups = payload.get("ambiguous_groups")
+    if not isinstance(groups, list) or not groups:
+        return None
+    group = groups[0]
+    if not isinstance(group, dict):
+        return None
+    candidates = [str(c).strip() for c in (group.get("candidates") or []) if slot_has_value(c)]
+    if len(candidates) < 2:
+        return None
+
+    qty_text = _fmt_ambiguous_num(group.get("quantity"))
+    unit = group.get("unit")
+    unit_text = f" {unit}" if slot_has_value(unit) else ""
+    labels = [c.capitalize() for c in candidates]
+    message = (
+        f"{qty_text}{unit_text} pour {' et '.join(labels)} — c'est {qty_text} au TOTAL à "
+        f"répartir entre les deux, ou {qty_text} DE CHAQUE ({', '.join(labels)}) ?\n\n"
+        "Merci de préciser une quantité pour chaque produit."
+    )
+    return {
+        "final_response": message,
+        "response_strategy": "CLARIFICATION",
+        "status": "WAITING_INPUT",
+        **set_pending_interaction(
+            InteractionKind.ENTER_FIELD, goal="CREATE_RECURRING_NEED", field_name="ambiguous_quantity"
+        ),
+    }
+
+
 async def recurring_need_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
     goal = str(state.get("current_goal") or "").upper()
     if goal == "CREATE_RECURRING_NEED":
@@ -108,6 +150,15 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
     pending = state.get("pending_interaction") or {}
     pending_target = pending.get("target") if isinstance(pending, dict) else None
 
+    # Bug réel production (2026-09-24) : "14 coq et 57 moutons chèvres chaque semaine" —
+    # avant même de toucher un draft (nouveau ou existant), une quantité ambiguë (UN nombre
+    # pour PLUSIEURS produits, sans répartition) doit être clarifiée EXPLICITEMENT, jamais
+    # devinée. Vérifié en premier, quel que soit `interpreted_event` : une donnée ambiguë ne
+    # doit jamais atteindre `resolve_domain_action`/le draft, même partiellement.
+    ambiguous_response = _ambiguous_quantity_clarification(payload)
+    if ambiguous_response is not None:
+        return ambiguous_response
+
     draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
     extracted = {k: v for k, v in payload.items() if k in _DRAFT_FIELDS and slot_has_value(v)}
     if "additional_items" in extracted:
@@ -116,7 +167,7 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
             extracted["additional_items"] = cleaned_items
         else:
             extracted.pop("additional_items")
-    if interpreted_event == "NEW_TASK":
+    if interpreted_event in ("NEW_TASK", "INTERRUPTION"):
         # Nouvelle demande (`interpreter/state_router.py::choose_interpretation_route`
         # ne renvoie la route NEW_TASK que SANS tunnel/champ/confirmation actif
         # pour ce goal) : un draft éventuellement encore présent dans le state —
@@ -127,6 +178,19 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         # draft). `resolve_domain_action` ne connaît de toute façon pas l'événement
         # "NEW_TASK" (seulement CONFIRM/REJECT/UPDATE/ANSWER) — sans ce repli, un
         # NEW_TASK tombait sur `NoRecurringNeedAction`, jamais un nouveau draft.
+        #
+        # "INTERRUPTION" (2026-09-24, bug réel production — "14 coq et 57 moutons
+        # chèvres chaque semaine" retombait sur le catalogue) : quand un AUTRE
+        # tunnel est encore actif (ex: BUYER_REQUEST coincé en attente "oui/non"
+        # pour un vieil appel d'offres jamais répondu), `cognitive_guard`
+        # (`nodes/cognitive.py`, RÈGLE d'interruption) rebaptise l'événement
+        # "INTERRUPTION" — jamais "NEW_TASK" — quand il approuve le passage à une
+        # intention concurrente à confiance suffisante. Sémantiquement IDENTIQUE à
+        # NEW_TASK du point de vue de CE draft (une demande fraîche vient de
+        # déloger un tunnel sans rapport) ; sans ce repli, `resolve_domain_action`
+        # ne reconnaît pas non plus "INTERRUPTION" et retombait sur
+        # `NoRecurringNeedAction` — le message correctement classé
+        # CREATE_RECURRING_NEED n'aboutissait alors à AUCUN draft, AUCUNE réponse.
         draft = None
         domain_event = "UPDATE" if extracted else "ANSWER"
     else:

@@ -343,6 +343,10 @@ async def _finalize(
         {k: v for k, v in item.items() if v is not None}
         for item in raw_entities.get("additional_items") or []
     ]
+    raw_entities["ambiguous_groups"] = [
+        {k: v for k, v in group.items() if v is not None}
+        for group in raw_entities.get("ambiguous_groups") or []
+    ]
     entities = _remap_entities(raw_entities)
 
     # Garde anti-ancrage (incident réel vécu : le LLM "s'ancre" parfois sur

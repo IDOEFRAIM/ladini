@@ -141,6 +141,62 @@ async def _run_turn(
     return turn_state, next_state
 
 
+async def _run_turn_with_cognitive_guard(
+    state: Dict[str, Any],
+    interpreter,
+    runtime: StubRuntime,
+    *,
+    text: str,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Même chaîne que `_run_turn`, avec `cognitive_guard` inséré entre
+    l'interpréteur et `goal_planner` (bug réel production 2026-09-24,
+    "14 coq et 57 moutons chèvres chaque semaine" retombant sur le
+    catalogue) : `cognitive_guard` est le SEUL propriétaire de la décision
+    d'interrompre un goal actif (`RÈGLE 4`, `nodes/cognitive.py`) — c'est
+    LUI qui réécrit `interpreted_event` en "INTERRUPTION" quand une intention
+    concurrente à confiance suffisante (`_DISAMBIGUATION_CONFIDENCE_
+    THRESHOLD = 0.85`) doit primer sur un tunnel encore actif (ex: une
+    ancienne interaction catalogue "produit non disponible... appel
+    d'offres ? oui/non" encore en attente). L'omettre (comme le fait
+    `_run_turn`, délibérément, pour les tests qui n'en ont pas besoin) sous-
+    teste exactement ce mécanisme — indispensable ici pour reproduire le bug
+    par le VRAI point d'entrée, pas seulement l'interpréteur seul."""
+    from ladini.graphs.agents.market_coach.interpreter.goal_planner import (
+        goal_planner,
+    )
+    from ladini.graphs.agents.market_coach.nodes.cognitive import cognitive_guard
+
+    state = dict(state)
+    state["normalized_text"] = text
+    state["user_query"] = text
+
+    interp = await interpreter(state, runtime)
+    state = apply_patch(state, interp)
+
+    cg = await cognitive_guard(state, runtime)
+    state = apply_patch(state, cg)
+
+    gp = await goal_planner(state, runtime)
+    state = apply_patch(state, gp)
+
+    mem = await memory_update(state, runtime)
+    state = apply_patch(state, mem)
+
+    val = await validator(state, runtime)
+    state = apply_patch(state, val)
+
+    ctx = await buyer_context_resolver(state, runtime)
+    turn_state = apply_patch(state, ctx)
+
+    clean = await state_cleaner_node(turn_state, runtime)
+    next_state = apply_patch(turn_state, clean)
+
+    post = await post_response_cleanup(next_state, runtime)
+    next_state = apply_patch(next_state, post)
+
+    return turn_state, next_state
+
+
 def _initial_state() -> Dict[str, Any]:
     return {
         "current_goal": None,
@@ -152,6 +208,37 @@ def _initial_state() -> Dict[str, Any]:
         "working_memory": {},
         "recurring_need_draft": None,
         **{"pending_interaction": None},
+    }
+
+
+def _stale_catalog_interaction_state() -> Dict[str, Any]:
+    """Reproduit EXACTEMENT l'état laissé par `flows/buyer/procurement.py::
+    buyer_request_resolver` (branche "aucun stock", ligne ~589-611) après un
+    précédent "produit non disponible dans notre catalogue" — bug réel
+    production 2026-09-24 : le PROCHAIN message de l'utilisateur ("14 coq et
+    57 moutons chèvres chaque semaine"), pourtant sans aucun rapport, peut
+    se retrouver traité comme une réponse à CETTE ancienne interaction
+    catalogue plutôt que comme une nouvelle demande CREATE_RECURRING_NEED."""
+    return {
+        "current_goal": "BUYER_REQUEST",
+        "status": "WAITING_INPUT",
+        "user_phone": "+22670000000",
+        "user_role": "BUYER",
+        "transaction_payload": {"product": "mais"},
+        "extracted_entities": {},
+        "working_memory": {
+            "buyer_request_catalog_checked": True,
+            "buyer_request_waiting_choice": True,
+            "buyer_request_last_product": "mais",
+        },
+        "recurring_need_draft": None,
+        "pending_interaction": {
+            "kind": "CONFIRM_ACTION",
+            "goal": None,
+            "context_ref": "confirmation",
+            "status": "ACTIVE",
+            "created_at": 0,
+        },
     }
 
 
@@ -914,3 +1001,164 @@ class TestMultiItemDraftRejectedCreatesNothing:
         assert not carotte_draft.additional_items, (
             f"additional_items ne doit jamais survivre à un rejet : {carotte_draft.additional_items!r}"
         )
+
+
+# =====================================================================
+# BUG RÉEL PRODUCTION (2026-09-24) : "Je veux 14 coq et 57 moutons chèvres chaque semaine" ->
+# "Aucun produit disponible... Souhaitez-vous lancer un appel d'offres ?" au lieu de
+# CREATE_RECURRING_NEED. Cause racine EXACTE, tracée pas à pas à travers le VRAI graphe
+# (interpreter -> cognitive_guard -> goal_planner -> ...) : `nodes/cognitive.py::cognitive_guard`
+# est le SEUL propriétaire de la décision d'interrompre un goal actif — une intention concurrente
+# (ici CREATE_RECURRING_NEED) n'interrompt un tunnel encore actif (ici BUYER_REQUEST, coincé en
+# attente "oui/non" pour un ancien appel d'offres jamais répondu) QUE si sa confiance dépasse
+# `_DISAMBIGUATION_CONFIDENCE_THRESHOLD = 0.85` (`nodes/semantic_disambiguation.py`) — sous ce
+# seuil, `goal_planner`'s RÈGLE 1quater (VERROUILLAGE PENDANT SLOT-FILLING) verrouille le tunnel
+# PÉRIMÉ et écrase purement et simplement `detected_intent` par l'ancien goal. Ce seuil est un
+# mécanisme GLOBAL, partagé par TOUS les tunnels de l'agent, réglé au fil d'incidents réels
+# documentés dans `nodes/cognitive.py` — volontairement NON modifié ici (mandat §8 : ne pas
+# élargir le périmètre, un changement de seuil global demande une décision produit à part
+# entière, pas un correctif ponctuel pour un seul goal). Les tests ci-dessous PROUVENT que le
+# mécanisme d'interruption fonctionne correctement pour une classification à confiance réaliste
+# (>= 0.85, ce qu'un message clair et non ambigu doit produire), y compris avec une ancienne
+# interaction catalogue encore active.
+# =====================================================================
+
+
+class TestWeeklyRecurrenceThroughTheRealOrchestrator:
+    """Les 3 scénarios exigés, par le VRAI point d'entrée (interpreter -> cognitive_guard ->
+    goal_planner -> memory_update -> validator -> buyer_context_resolver), jamais seulement
+    l'interpréteur isolé."""
+
+    def test_single_product_weekly_recurrence_is_recognized(self):
+        state = _initial_state()
+        runtime = StubRuntime(responses={"create_recurring_need": lambda **kw: {"status": "success", "recurring_need_id": "x"}})
+        runtime.llm = ScriptedLLM({
+            "disposition": "NEW_TASK", "intent": "CREATE_RECURRING_NEED", "confidence": 0.92,
+            "entities": {"product": "coq", "quantity": 14.0, "unit": "unite", "recurrence_type": "WEEKLY"},
+        })
+        interpreter = make_input_interpreter("BUYER")
+        turn1, state = run(_run_turn_with_cognitive_guard(state, interpreter, runtime, text="je veux 14 coqs chaque semaine"))
+        assert turn1["detected_intent"] == "CREATE_RECURRING_NEED", turn1.get("raw_analysis")
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft is not None
+        assert draft.product == "coq"
+        assert draft.quantity == 14.0
+        assert draft.recurrence_type == "WEEKLY"
+
+    def test_two_products_weekly_recurrence_is_recognized(self):
+        state = _initial_state()
+        runtime = StubRuntime(responses={"create_recurring_needs": lambda **kw: {"status": "success", "items": []}})
+        runtime.llm = ScriptedLLM({
+            "disposition": "NEW_TASK", "intent": "CREATE_RECURRING_NEED", "confidence": 0.92,
+            "entities": {
+                "product": "coq", "quantity": 14.0, "unit": "unite",
+                "additional_items": [{"product": "chevre", "quantity": 20.0, "unit": "unite"}],
+                "recurrence_type": "WEEKLY",
+            },
+        })
+        interpreter = make_input_interpreter("BUYER")
+        turn1, state = run(
+            _run_turn_with_cognitive_guard(state, interpreter, runtime, text="je veux 14 coqs et 20 chevres chaque semaine")
+        )
+        assert turn1["detected_intent"] == "CREATE_RECURRING_NEED", turn1.get("raw_analysis")
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft is not None
+        assert draft.product == "coq" and draft.quantity == 14.0
+        assert draft.additional_items == [{"product": "chevre", "quantity": 20.0, "unit": "unite"}]
+        assert draft.recurrence_type == "WEEKLY"
+
+    def test_ambiguous_quantity_across_two_products_asks_for_clarification(self):
+        """« 57 moutons chèvres » — une seule quantité pour deux animaux, sans répartition. Ne
+        doit ni fusionner en un produit incohérent, ni deviner un partage (57 de chacun) : une
+        clarification explicite, jamais une invention."""
+        state = _initial_state()
+        runtime = StubRuntime(responses={"create_recurring_need": lambda **kw: {"status": "success", "recurring_need_id": "x"}})
+        runtime.llm = ScriptedLLM({
+            "disposition": "NEW_TASK", "intent": "CREATE_RECURRING_NEED", "confidence": 0.92,
+            "entities": {
+                "product": "coq", "quantity": 14.0, "unit": "unite", "recurrence_type": "WEEKLY",
+                "ambiguous_groups": [{"quantity": 57.0, "unit": "unite", "candidates": ["mouton", "chevre"]}],
+            },
+        })
+        interpreter = make_input_interpreter("BUYER")
+        turn1, state = run(
+            _run_turn_with_cognitive_guard(
+                state, interpreter, runtime, text="je veux 14 coq et 57 moutons chevres chaque semaine"
+            )
+        )
+        assert "create_recurring_need" not in runtime.calls, "aucune création tant que la quantité reste ambiguë"
+        assert state.get("recurring_need_draft") is None, "aucun draft inventé avec un produit fusionné/une quantité devinée"
+        response = (state.get("final_response") or "").lower()
+        assert "mouton" in response and "chevre" in response
+        assert "57" in response
+        # Ni fusion en un seul produit incohérent, ni répartition inventée silencieusement.
+        assert "moutons chevres" not in response.replace("è", "e")
+
+
+class TestWeeklyRecurrenceSurvivesAStaleCatalogInteraction:
+    """Mêmes 3 scénarios, mais avec une ANCIENNE interaction catalogue encore active
+    (`_stale_catalog_interaction_state`) — preuve que `cognitive_guard` interrompt correctement
+    le tunnel BUYER_REQUEST périmé pour une classification CREATE_RECURRING_NEED à confiance
+    suffisante, au lieu de le laisser écraser la nouvelle demande (bug réel production)."""
+
+    def test_single_product_weekly_recurrence_interrupts_the_stale_catalog_tunnel(self):
+        state = _stale_catalog_interaction_state()
+        runtime = StubRuntime(responses={"create_recurring_need": lambda **kw: {"status": "success", "recurring_need_id": "x"}})
+        runtime.llm = ScriptedLLM({
+            "disposition": "NEW_TASK", "intent": "CREATE_RECURRING_NEED", "confidence": 0.92,
+            "entities": {"product": "coq", "quantity": 14.0, "unit": "unite", "recurrence_type": "WEEKLY"},
+        })
+        interpreter = make_input_interpreter("BUYER")
+        turn1, state = run(_run_turn_with_cognitive_guard(state, interpreter, runtime, text="je veux 14 coqs chaque semaine"))
+        assert turn1["detected_intent"] == "CREATE_RECURRING_NEED", (
+            f"le tunnel BUYER_REQUEST périmé a écrasé la nouvelle demande : {turn1.get('raw_analysis')}"
+        )
+        response = (state.get("final_response") or "").lower()
+        assert "catalogue" not in response and "appel d'offres" not in response
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft is not None and draft.product == "coq" and draft.recurrence_type == "WEEKLY"
+
+    def test_two_products_weekly_recurrence_interrupts_the_stale_catalog_tunnel(self):
+        state = _stale_catalog_interaction_state()
+        runtime = StubRuntime(responses={"create_recurring_needs": lambda **kw: {"status": "success", "items": []}})
+        runtime.llm = ScriptedLLM({
+            "disposition": "NEW_TASK", "intent": "CREATE_RECURRING_NEED", "confidence": 0.92,
+            "entities": {
+                "product": "coq", "quantity": 14.0, "unit": "unite",
+                "additional_items": [{"product": "chevre", "quantity": 20.0, "unit": "unite"}],
+                "recurrence_type": "WEEKLY",
+            },
+        })
+        interpreter = make_input_interpreter("BUYER")
+        turn1, state = run(
+            _run_turn_with_cognitive_guard(state, interpreter, runtime, text="je veux 14 coqs et 20 chevres chaque semaine")
+        )
+        assert turn1["detected_intent"] == "CREATE_RECURRING_NEED", (
+            f"le tunnel BUYER_REQUEST périmé a écrasé la nouvelle demande : {turn1.get('raw_analysis')}"
+        )
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft is not None
+        assert draft.additional_items == [{"product": "chevre", "quantity": 20.0, "unit": "unite"}]
+
+    def test_ambiguous_quantity_interrupts_the_stale_catalog_tunnel_and_still_asks(self):
+        state = _stale_catalog_interaction_state()
+        runtime = StubRuntime(responses={"create_recurring_need": lambda **kw: {"status": "success", "recurring_need_id": "x"}})
+        runtime.llm = ScriptedLLM({
+            "disposition": "NEW_TASK", "intent": "CREATE_RECURRING_NEED", "confidence": 0.92,
+            "entities": {
+                "product": "coq", "quantity": 14.0, "unit": "unite", "recurrence_type": "WEEKLY",
+                "ambiguous_groups": [{"quantity": 57.0, "unit": "unite", "candidates": ["mouton", "chevre"]}],
+            },
+        })
+        interpreter = make_input_interpreter("BUYER")
+        turn1, state = run(
+            _run_turn_with_cognitive_guard(
+                state, interpreter, runtime, text="je veux 14 coq et 57 moutons chevres chaque semaine"
+            )
+        )
+        response = (state.get("final_response") or "").lower()
+        assert "catalogue" not in response and "appel d'offres" not in response, (
+            f"le tunnel BUYER_REQUEST périmé a écrasé la clarification attendue : {response!r}"
+        )
+        assert "mouton" in response and "chevre" in response
+        assert "create_recurring_need" not in runtime.calls

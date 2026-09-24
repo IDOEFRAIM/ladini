@@ -339,10 +339,18 @@ class TestPromptSizeGuard:
     # catalogue reste très loin de l'ancien prompt à 5000 tokens que cette
     # garde vise réellement à empêcher (spec §50) — jamais une dérive non
     # justifiée.
+    # Seuils relevés de 2260 à 2340 (2026-09-24) : `ambiguous_groups` ajouté
+    # au schéma (bug réel production — "14 coq et 57 moutons chèvres chaque
+    # semaine" : sans ce champ, le micro-prompt devait soit inventer une
+    # répartition (57 de chaque), soit fusionner en un produit incohérent —
+    # les deux interdits par la spec §4 "ne jamais inventer une information
+    # absente"). +~50 tokens pour éviter une invention de données reste très
+    # loin de l'ancien prompt à 5000 tokens que cette garde vise réellement à
+    # empêcher (spec §50).
     def test_system_prompt_never_regresses_towards_the_old_5000_token_prompt(self):
         system_prompt = build_new_task_system_prompt(CATALOG)
         estimated_tokens = int(len(system_prompt.split()) * 1.3)
-        assert estimated_tokens < 2260, (
+        assert estimated_tokens < 2340, (
             f"system_prompt new_task_v2 ~{estimated_tokens} tokens — "
             "seuil de garde anti-régression dépassé (spec §50)"
         )
@@ -353,7 +361,7 @@ class TestPromptSizeGuard:
             _ctx(), "je veux vendre 20 sacs de mais a 250 le kilo"
         )
         total_tokens = int((len(system_prompt.split()) + len(user_prompt.split())) * 1.3)
-        assert 800 <= total_tokens <= 2260
+        assert 800 <= total_tokens <= 2340
 
 
 class TestMaxTokensIsExplicitAndLargeEnough:
