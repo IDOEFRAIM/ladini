@@ -59,7 +59,11 @@ from ladini.graphs.agents.market_coach.services.mcp.gateway import (
     MCPCallError,
     RecurringSupplyGateway,
 )
-from ladini.graphs.agents.market_coach.utils import MarketRuntime, slot_has_value
+from ladini.graphs.agents.market_coach.utils import (
+    MarketRuntime,
+    canonical_unit_label,
+    slot_has_value,
+)
 from ladini.services.database import recurring_need_draft_store
 from ladini.services.database.draft_store_support import cas_finalize
 
@@ -109,7 +113,16 @@ def _clean_additional_items(raw: Any) -> List[Dict[str, Any]]:
             continue
         product, quantity, unit = item.get("product"), item.get("quantity"), item.get("unit")
         if slot_has_value(product) and slot_has_value(quantity):
-            resolved_unit = str(unit).strip() if slot_has_value(unit) else default_unit_for_product(product)
+            # (Phase 2 hardening, commit 8, P1 audit 2026-09-24) : un `unit` littéral extrait
+            # par le LLM pour un item ADDITIONNEL passait tel quel (`str(unit).strip()`), sans
+            # jamais traverser `canonical_unit_label` — le MÊME normalisateur que l'item
+            # PRINCIPAL (via `nodes/memory.py::_resolve_unit_value`, qui l'appelle aussi). Deux
+            # items du même draft pouvaient donc porter deux graphies différentes de la même
+            # unité ("tête" brut vs "TETE" canonique), invisibles à toute comparaison littérale
+            # ultérieure (regroupement, dédup, tests d'unité partagée).
+            resolved_unit = (
+                canonical_unit_label(unit) if slot_has_value(unit) else default_unit_for_product(product)
+            )
             cleaned.append({"product": str(product).strip(), "quantity": quantity, "unit": resolved_unit})
     return cleaned
 

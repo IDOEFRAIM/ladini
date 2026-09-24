@@ -274,12 +274,30 @@ _CANONICAL_UNIT_MAP: Dict[str, str] = {
     "PIÈCE": "UNITE",
     "PIECES": "UNITE",
     "PIÈCES": "UNITE",
-    "TETE": "UNITE",
-    "TÊTE": "UNITE",
-    "TETES": "UNITE",
-    "TÊTES": "UNITE",
-    "HEAD": "UNITE",
-    "HEADS": "UNITE",
+    # (Phase 2 hardening, commit 8, P1 de l'audit du 2026-09-24) : TETE n'est PAS un
+    # synonyme d'UNITE — c'est son PROPRE canonique, distinct, pour l'élevage compté à la
+    # tête (voir `domain/quantity_unit.py::default_unit_for_product`, seule source de
+    # vérité pour "quelle unité par défaut pour ce produit", et
+    # `nodes/memory.py::_PRIMARY_CANONICAL_UNITS`, qui liste déjà TETE et UNITE comme DEUX
+    # unités canoniques séparées). Avant ce correctif, cette table les confondait :
+    # `canonical_unit_label("tete")` renvoyait "UNITE", ce qui faisait écrire "UNITE" dans
+    # `payload["unit"]` dès qu'une réponse à "quelle unité ?" passait par
+    # `nodes/memory.py::_resolve_unit_value` (qui appelle CETTE fonction) — l'item
+    # PRINCIPAL d'un draft récurrent d'élevage perdait ainsi silencieusement son unité
+    # TETE, tandis que les items ADDITIONNELS (jamais passés par ce chemin — voir
+    # `default_unit_for_product` appelé directement dans
+    # `flows/buyer/recurring_need.py`) gardaient TETE : deux items du MÊME draft, pour du
+    # bétail, avec deux valeurs `unit` littéralement différentes ("UNITE" vs "TETE") —
+    # toute comparaison littérale ultérieure (regroupement, dédup, l'assertion `{it["unit"]
+    # for it in items} == {"TETE"}`) échouait silencieusement à les reconnaître comme la
+    # même unité. `HEAD`/`HEADS` (synonymes anglais déjà présents) suivent le même
+    # correctif — "une tête" reste TETE, jamais généralisé en "une unité".
+    "TETE": "TETE",
+    "TÊTE": "TETE",
+    "TETES": "TETE",
+    "TÊTES": "TETE",
+    "HEAD": "TETE",
+    "HEADS": "TETE",
 }
 
 

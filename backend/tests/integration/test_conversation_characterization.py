@@ -94,12 +94,19 @@ class TestA_SingleLivestockWeekly:
         assert t.goal_after is None
         assert _no_active_transaction(t.after) == []
 
-    @pytest.mark.xfail(strict=True, reason="B5/H1: récapitulatif générique (UNITE, sans fréquence) au lieu du draft (TETE)")
-    def test_the_same_unit_and_frequency_are_shown_before_and_after_confirmation(self, conv):
+    def test_the_same_unit_is_shown_before_and_after_confirmation(self, conv):
+        """B5 (audit 2026-09-24, fermé commit 8) : `utils.py::_CANONICAL_UNIT_MAP` confondait
+        TETE (unité canonique propre à l'élevage — `domain/quantity_unit.py::
+        default_unit_for_product`) avec UNITE (générique) — une réponse passée par
+        `nodes/memory.py::_resolve_unit_value` réécrivait silencieusement "tete" en "UNITE"."""
         t1 = conv.send("je veux 14 coqs chaque semaine", llm=_coq())
         t2 = conv.send("oui")
         assert "TETE" in t2.response
         assert "UNITE" not in t1.response and "TETE" in t1.response
+
+    @pytest.mark.xfail(strict=True, reason="H1: le récapitulatif générique avant confirmation n'affiche pas la fréquence (recurrence_type/weekly_days) — seul RecurringNeedDraft.render_summary() la connaît, le builder générique de confirmation_gate ne le consulte pas")
+    def test_the_frequency_is_shown_before_confirmation(self, conv):
+        t1 = conv.send("je veux 14 coqs chaque semaine", llm=_coq())
         assert "semaine" in t1.response.lower()
 
 
@@ -122,6 +129,25 @@ class TestB_TwoItems:
 
     def test_both_items_share_one_canonical_unit(self, conv):
         conv.send("je veux 14 coqs et 20 chèvres chaque semaine", llm=_coq_chevre())
+        conv.send("oui")
+        items = _created(conv)[0][1]["items"]
+        assert {it["unit"] for it in items} == {"TETE"}
+
+    def test_both_items_share_one_canonical_unit_even_with_mismatched_raw_spelling(self, conv):
+        """P1 (audit 2026-09-24, fermé commit 8) : `utils.py::canonical_unit_label` confondait
+        TETE (unité canonique de l'élevage) avec UNITE (générique) — et `_clean_additional_items`
+        ne canonicalisait PAS du tout la graphie brute d'un item additionnel ("tête" minuscule
+        accentué, tel que le LLM peut le renvoyer), contrairement à l'item principal. Les deux
+        chemins doivent désormais produire EXACTEMENT "TETE", quelle que soit la graphie reçue."""
+        t = conv.send(
+            "je veux 14 coqs et 20 chèvres chaque semaine",
+            llm=_coq(unit="TETE", additional_items=[{"product": "chèvre", "quantity": 20.0, "unit": "tête"}]),
+        )
+        draft = t.draft()
+        assert draft["unit"] == "TETE"
+        assert draft["additional_items"][0]["unit"] == "TETE", (
+            f"unité additionnelle non canonicalisée : {draft['additional_items']!r}"
+        )
         conv.send("oui")
         items = _created(conv)[0][1]["items"]
         assert {it["unit"] for it in items} == {"TETE"}

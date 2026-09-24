@@ -389,6 +389,16 @@ async def memory_update(
         nonlocal product_slot_changed, clear_vendor_ctx
         if not slot_has_value(value):
             return
+        # (Phase 2 hardening, commit 8, P1 audit 2026-09-24) : SEUL le chemin `expected_input
+        # == "UNIT"` (réponse explicite à "quelle unité ?", voir `_resolve_unit_value` plus
+        # haut) canonicalisait l'unité — une extraction NEW_TASK/UPDATE ordinaire ("j'ai 14
+        # têtes de coqs") écrivait la valeur BRUTE du LLM directement dans `payload["unit"]`.
+        # Un seul point de canonicalisation, ici, pour TOUTE écriture du slot `unit` — jamais
+        # un second normalisateur par call site qui pourrait diverger (voir aussi
+        # `flows/buyer/recurring_need.py::_clean_additional_items`, même correctif miroir pour
+        # les items additionnels).
+        if field == "unit" and isinstance(value, str):
+            value = canonical_unit_label(value, value)
         current_value = payload.get(field)
         if not slot_has_value(current_value):
             payload[field] = value
