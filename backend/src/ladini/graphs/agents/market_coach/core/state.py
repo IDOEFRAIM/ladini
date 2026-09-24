@@ -26,6 +26,7 @@ from typing_extensions import Annotated, TypedDict
 from ladini.agents.reducers import (  # noqa: F401
     _KEEP,
     _KeepSentinel,
+    mark_deleted,
     merge_dict,
     replace_list,
     replace_value,
@@ -39,6 +40,9 @@ from ladini.agents.reducers import (  # noqa: F401
 # (`state["active_cart"]`, etc.) reste strictement plat — rien à réécrire
 # côté nodes ou résolveurs de contexte.
 # =====================================================================
+from ladini.graphs.agents.market_coach.core.pending_interaction import (
+    DISAMBIGUATION_MENU_GOAL_SHIM,
+)
 from ladini.graphs.agents.market_coach.flows.buyer.state import BuyerContext
 from ladini.graphs.agents.market_coach.flows.producer.state import ProducerContext
 
@@ -685,6 +689,53 @@ def resolve_current_goal(state: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+# =====================================================================
+# API CANONIQUE D'ÉCRITURE DU GOAL (Phase 2 hardening, commit 6, mandat §18)
+# =====================================================================
+# `resolve_current_goal` ci-dessus est le point de LECTURE canonique unique.
+# Ces deux fonctions sont son symétrique en ÉCRITURE pour la représentation
+# de secours `working_memory.active_goal` (celle que `resolve_current_goal`
+# consulte quand `current_goal` est retombé à `None` entre deux tours — voir
+# sa docstring). `current_goal` lui-même reste, par contrat (voir docstring
+# de module ci-dessus), écrit UNIQUEMENT par `goal_planner` via `updates[...]`
+# directement : ce n'est pas une représentation concurrente à unifier, c'est
+# LA source primaire dont ceci est le repli, et `goal_planner` est son seul
+# propriétaire déclaré — rien à canoniser de plus là sans dupliquer un
+# mécanisme qui n'a qu'un seul écrivain.
+#
+# Portée délibérément étroite (mandat §22, "ne bascule pas tout d'un coup") :
+# seules `active_goal`/`step_index` sont couvertes ici. Le purge plus large du
+# menu/sélection (`goal_planner._clear_goal_lock`, qui appelle `clear_goal_lock`
+# ci-dessous PUIS efface en plus ses propres clés de menu) reste une
+# responsabilité propre à `goal_planner` — un sur-ensemble orthogonal, pas une
+# seconde représentation du goal lui-même.
+def lock_goal(
+    working_memory: Optional[Dict[str, Any]], goal: Optional[str]
+) -> Dict[str, Any]:
+    """SET/TRANSITION : verrouille `goal` comme repli `active_goal` dans
+    `working_memory`. Un appel avec un NOUVEAU goal transitionne implicitement
+    depuis l'ancien (la clé est écrasée) ; un appel avec le MÊME goal ne fait
+    que le réaffirmer sans réinitialiser `step_index` (`setdefault`) — un tour
+    qui confirme un goal déjà actif ne doit pas remettre sa progression à
+    zéro. Jamais verrouillé pour le goal factice `DISAMBIGUATION_MENU_GOAL_SHIM`
+    (un menu de désambiguïsation n'est pas un goal métier résumable)."""
+    wm = dict(working_memory or {})
+    if goal and goal != DISAMBIGUATION_MENU_GOAL_SHIM:
+        wm["active_goal"] = goal
+        wm.setdefault("step_index", 0)
+    return wm
+
+
+def clear_goal_lock(working_memory: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """CLEAR : efface `active_goal`/`step_index` avec la sémantique DELETE
+    (`mark_deleted`, jamais `.pop()` — un `.pop()` avant un patch `merge_dict`
+    est un no-op silencieux, bug B1/commit C2 : l'ABSENCE d'une clé dans un
+    patch `merge_dict` signifie "inchangé", pas "supprimé")."""
+    wm = dict(working_memory or {})
+    mark_deleted(wm, "active_goal", "step_index")
+    return wm
+
+
 __all__ = [
     "MarketAgentState",
     "entities_said_this_turn",
@@ -696,4 +747,6 @@ __all__ = [
     "merge_dict",
     "_KEEP",
     "resolve_current_goal",
+    "lock_goal",
+    "clear_goal_lock",
 ]

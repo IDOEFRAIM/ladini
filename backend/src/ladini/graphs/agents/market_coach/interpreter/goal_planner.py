@@ -23,7 +23,11 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     set_pending_interaction,
     to_tunnel_category,
 )
-from ladini.graphs.agents.market_coach.core.state import resolve_current_goal
+from ladini.graphs.agents.market_coach.core.state import (
+    clear_goal_lock,
+    lock_goal,
+    resolve_current_goal,
+)
 from ladini.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
 from ladini.graphs.agents.market_coach.interpreter.intent import (
     INTENT_CONFIG,
@@ -44,13 +48,18 @@ from ladini.graphs.agents.market_coach.utils import MarketRuntime
 
 logger = logging.getLogger("Ladini.Market.GoalPlanner")
 
-# Verrous de tunnel propres au goal_planner (≠ clés de menu). L'union purgée
-# sur REJECT = ces verrous + tout l'état de menu/sélection (importé ci-dessus).
 # (2026-09-08) `locked_intent` retiré — pur doublon de `active_goal`, écrit à
 # l'identique sur CHAQUE site (audit : aucune divergence trouvée nulle part
 # dans le repo) — voir `core/state.py::resolve_current_goal`.
-_TUNNEL_LOCK_KEYS = ("active_goal", "step_index")
-_GOAL_LOCK_CLEAR_KEYS = (*_TUNNEL_LOCK_KEYS, *_MENU_SELECTION_KEYS, *_MENU_CACHE_KEYS)
+#
+# (Phase 2 hardening, commit 6, mandat §18) : le verrou de tunnel lui-même
+# (`active_goal`/`step_index`) est désormais posé/effacé par l'API canonique
+# `core/state.py::lock_goal`/`clear_goal_lock` (voir `_lock`/`_clear_goal_lock`
+# ci-dessous) — les anciennes constantes `_TUNNEL_LOCK_KEYS`/
+# `_GOAL_LOCK_CLEAR_KEYS` de ce module ont été retirées car elles ne feraient
+# plus que dupliquer, sans jamais diverger, la liste que ces deux fonctions
+# encodent déjà. L'union purgée sur REJECT reste : ce verrou canonique + tout
+# l'état de menu/sélection propre à ce module (importé ci-dessus).
 
 
 # ── Shared constants (also used by routing.py interpreter) ──────────
@@ -266,24 +275,26 @@ async def goal_planner(
     def _lock(
         goal: Optional[str], extra: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        wm = dict(working)
-        if goal and goal != DISAMBIGUATION_MENU_GOAL_SHIM:
-            wm["active_goal"] = goal
-            wm.setdefault("step_index", 0)
+        # (Phase 2 hardening, commit 6, mandat §18) : le SET/TRANSITION de
+        # `active_goal`/`step_index` passe par l'API canonique
+        # `core/state.py::lock_goal` — une seule fonction pour cette
+        # représentation, au lieu d'une réimplémentation locale à ce fichier.
+        wm: Dict[str, Any] = lock_goal(working, goal)
         if extra:
             wm.update(extra)
         return wm
 
     def _clear_goal_lock() -> Dict[str, Any]:
-        """Sur REJECT/annulation : supprime les verrous de tunnel ET tout
-        l'état de menu/sélection (univers de clés partagé avec nodes/cleanup.py,
-        source unique — cf. `_GOAL_LOCK_CLEAR_KEYS`), pour ne pas laisser un
-        menu périmé actif après l'abandon de l'intention en cours."""
+        """Sur REJECT/annulation : supprime le verrou de tunnel canonique
+        (`active_goal`/`step_index`, via `core/state.py::clear_goal_lock`) ET
+        tout l'état de menu/sélection (univers de clés partagé avec
+        `nodes/cleanup.py`, source unique), pour ne pas laisser un menu périmé
+        actif après l'abandon de l'intention en cours."""
         # `merge_dict` ignore une clé ABSENTE : retirer la clé (`pop`) laissait
         # `active_goal` intact et ressuscitait le goal rejeté au tour suivant
         # (audit B1). DELETE efface réellement.
-        wm = dict(working)
-        mark_deleted(wm, *_GOAL_LOCK_CLEAR_KEYS)
+        wm: Dict[str, Any] = clear_goal_lock(working)
+        mark_deleted(wm, *_MENU_SELECTION_KEYS, *_MENU_CACHE_KEYS)
         return wm
 
     def _purge_transaction_state() -> Dict[str, Any]:
