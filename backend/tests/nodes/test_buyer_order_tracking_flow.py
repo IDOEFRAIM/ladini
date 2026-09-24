@@ -17,6 +17,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
+from tests.harness.state import clears
 
 
 def rt(responses=None):
@@ -311,7 +312,7 @@ class TestCancelOrder:
         runtime = rt({"cancel_pending_order": {"status": "success", "message": "Commande annulée."}})
         result = run(cancel_order(state, runtime))
         assert result["status"] == "COMPLETED"
-        assert "cancel_reason" not in result["transaction_payload"]
+        assert clears(result["transaction_payload"], "cancel_reason")
 
     def test_status_blocked_message_when_order_is_not_pending(self):
         from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import cancel_order

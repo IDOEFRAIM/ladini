@@ -69,10 +69,11 @@ def build_procurement_escalation(
     # rien — une sélection périmée pouvait être ré-appliquée au tour suivant.
     next_payload["selection_index"] = None
     next_payload["selected_value"] = None
-    if next_payload.pop("_auto_quantity_fill", False):
-        # `_auto_quantity_fill` est un drapeau LOCAL (jamais persisté), le pop
-        # est correct ici ; `quantity` en revanche est un vrai slot persisté.
+    if next_payload.get("_auto_quantity_fill"):
         next_payload["quantity"] = None
+    # Drapeau local : effacé explicitement (un `pop` le laisserait survivre dans
+    # le canal merge_dict s'il y avait déjà été écrit).
+    next_payload["_auto_quantity_fill"] = None
 
     form_data: Dict[str, Any] = dict(existing_form_data or {})
     if next_payload.get("product") not in (None, "", [], {}):
@@ -234,14 +235,15 @@ async def buyer_request_resolver(
 
     # --- Entity resolution ---
     product_name = resolve_product(payload, stable_entities, state)
-    inferred_from_text = bool(payload.pop("_product_from_text", False))
+    inferred_from_text = bool(payload.get("_product_from_text"))
+    payload["_product_from_text"] = None
     unit = resolve_unit(payload, stable_entities)
     payload.setdefault("product", product_name)
 
     text_has_digits = any(ch.isdigit() for ch in normalized_text)
     reset_quantity = inferred_from_text and not text_has_digits
     if reset_quantity:
-        payload.pop("quantity", None)
+        payload["quantity"] = None  # `pop` ne réinitialisait rien (merge_dict)
 
     def _escalate(
         message: str,

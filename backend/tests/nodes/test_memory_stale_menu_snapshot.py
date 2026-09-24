@@ -29,6 +29,7 @@ from ladini.graphs.agents.market_coach.services.menu_snapshot import (
     menu_snapshot_store,
 )
 from tests.conftest import StubRuntime, make_state, run
+from tests.harness.state import clears
 
 
 class TestPricingTierMappingKindIsProtected:
@@ -100,7 +101,7 @@ class TestPricingTierMappingKindIsProtected:
             },
         )
         result = run(memory_update(st, StubRuntime()))
-        assert "selection_index" not in result["transaction_payload"], (
+        assert clears(result["transaction_payload"], "selection_index"), (
             "this documents the bug mechanism itself — an unprotected/stale "
             "mapping_kind DOES lose selection_index to an unrelated snapshot"
         )

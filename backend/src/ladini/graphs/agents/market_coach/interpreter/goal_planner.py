@@ -10,6 +10,7 @@ import logging
 import re as _re
 from typing import Any, Dict, Optional
 
+from ladini.agents.reducers import mark_deleted
 from ladini.graphs.agents.market_coach.core.conversation_decision import (
     ConversationAction,
 )
@@ -277,9 +278,11 @@ async def goal_planner(
         l'état de menu/sélection (univers de clés partagé avec nodes/cleanup.py,
         source unique — cf. `_GOAL_LOCK_CLEAR_KEYS`), pour ne pas laisser un
         menu périmé actif après l'abandon de l'intention en cours."""
+        # `merge_dict` ignore une clé ABSENTE : retirer la clé (`pop`) laissait
+        # `active_goal` intact et ressuscitait le goal rejeté au tour suivant
+        # (audit B1). DELETE efface réellement.
         wm = dict(working)
-        for k in _GOAL_LOCK_CLEAR_KEYS:
-            wm.pop(k, None)
+        mark_deleted(wm, *_GOAL_LOCK_CLEAR_KEYS)
         return wm
 
     def _purge_transaction_state() -> Dict[str, Any]:

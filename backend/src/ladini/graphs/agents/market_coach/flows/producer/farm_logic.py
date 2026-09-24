@@ -131,7 +131,7 @@ async def ensure_farm_node(
             "résolution normale forcée.",
             claimed_farm_id,
         )
-        payload.pop("farm_id", None)
+        payload["farm_id"] = None
 
     if state.get("farm_creation_attempted"):
         logger.info(

@@ -198,8 +198,8 @@ async def buyer_context_resolver(
         # create_preorder lui-même (preorder_choice_from_index).
         if interpreted_event == "CONFIRM" and not next_payload.get("selection_index"):
             next_payload["resolved_id"] = "PREORDER_CONFIRM"
-            next_payload.pop("selection_index", None)
-            next_payload.pop("selected_value", None)
+            next_payload["selection_index"] = None
+            next_payload["selected_value"] = None
         next_state["transaction_payload"] = next_payload
         return _finalize(await create_preorder(next_state, mc_runtime))
 

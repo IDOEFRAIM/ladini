@@ -385,6 +385,37 @@ class TestN_RejectionIsTerminal:
         assert "noté" not in t.response.lower()
 
 
+class TestN_RejectDuringSlotFilling:
+    """B1 : un REJECT hors confirmation effaçait `current_goal` mais PAS
+    `working_memory.active_goal` (clé retirée par `pop`, ignorée par merge_dict)."""
+
+    _REJECT_SLOT = {"disposition": "REJECT", "extracted_entities": {}, "confidence": 0.9}
+
+    def _start(self, conv):
+        t = conv.send("je veux 14 coqs", llm=new_task("CREATE_RECURRING_NEED", product="coq", quantity=14.0))
+        assert (t.pending_after.kind.value, t.pending_after.field) == ("ENTER_FIELD", "recurrence_type")
+
+    def test_the_goal_lock_is_really_released(self, conv):
+        self._start(conv)
+        t = conv.send("stop", llm=self._REJECT_SLOT)
+        assert t.event == "REJECT"
+        assert t.goal_after is None
+        assert "active_goal" not in (t.after.get("working_memory") or {})
+
+    def test_the_next_turn_does_not_resurrect_the_goal(self, conv):
+        self._start(conv)
+        conv.send("stop", llm=self._REJECT_SLOT)
+        t = conv.send("bonjour", llm=new_task("GREETING", confidence=0.6))
+        assert t.goal_before is None
+        assert "confirmez" not in t.response.lower()
+
+    @pytest.mark.xfail(strict=True, reason="C5: recurring_need_draft absent de _purge_transaction_state")
+    def test_the_abandoned_draft_does_not_survive(self, conv):
+        self._start(conv)
+        t = conv.send("stop", llm=self._REJECT_SLOT)
+        assert t.draft() is None
+
+
 # =====================================================================
 # O. deux messages quasi simultanés
 # =====================================================================

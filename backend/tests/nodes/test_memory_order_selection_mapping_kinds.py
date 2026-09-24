@@ -25,6 +25,7 @@ import pytest
 
 from ladini.graphs.agents.market_coach.nodes.memory import memory_update
 from tests.conftest import StubRuntime, make_state, run
+from tests.harness.state import clears
 
 
 @pytest.mark.parametrize(
@@ -51,4 +52,4 @@ class TestOrderResolverMenuKindsResolveOrderId:
         assert payload.get("order_id") == "order-uuid-1"
         # Consommé une fois résolu — sinon le resolver le relirait à tort au
         # tour suivant comme un NOUVEAU choix.
-        assert "selection_index" not in payload
+        assert clears(payload, "selection_index")
