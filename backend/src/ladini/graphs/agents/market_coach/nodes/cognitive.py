@@ -17,6 +17,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
+from ladini.graphs.agents.market_coach.core.state import resolve_current_goal
 from ladini.graphs.agents.market_coach.core.tunnel_manager import (
     INTERRUPTION_CONFIDENCE_THRESHOLD,
 )
@@ -215,7 +216,24 @@ async def cognitive_guard(
     confidence = float(state.get("interpreter_confidence") or 0.0)
     pending = get_pending_interaction(state)
     expected_input = to_tunnel_category(pending)
-    current_goal = state.get("current_goal")
+    # Bug réel production (2026-09-24) : `state.get("current_goal")` seul est aveugle au tunnel
+    # léger de `procurement.py::buyer_request_resolver` ("waiting_choice" — un `CONFIRM_ACTION`
+    # sans champ verrouillé), qui laisse `current_goal` redevenir `None` entre deux tours
+    # (`nodes/cleanup.py::post_response_cleanup`) tout en gardant le goal actif dans
+    # `working_memory.active_goal` — exactement le repli que `resolve_current_goal` existe pour
+    # centraliser (`core/state.py`, refonte 2026-09-08 "purge de redondance"), mais que ce fichier
+    # avait manqué : `nodes/cognitive.py` lisait encore l'ancienne chaîne directe alors que
+    # `goal_planner`/`router`/`routing`/`strategy` utilisent déjà toutes `resolve_current_goal`.
+    # Conséquence tracée pas à pas via le VRAI graphe compilé + un VRAI appel Groq : ce nœud, seul
+    # propriétaire documenté de la décision d'interruption, ne voyait AUCUN tunnel actif ici
+    # (`if current_goal` était `False`) et n'arbitrait donc jamais rien — `goal_planner`,
+    # lui, recouvrait bien `BUYER_REQUEST` via `resolve_current_goal` et reverrouillait
+    # aveuglément (RÈGLE 1quater) une classification CREATE_RECURRING_NEED pourtant correcte et à
+    # confiance élevée (0.95), sans que ce nœud n'ait even été consulté. `buyer_request_resolver`
+    # basculait alors silencieusement vers `cart_management` (product+quantity présents) —
+    # "14 coqs chaque semaine" devenait une tentative d'achat immédiat d'un produit absent du
+    # catalogue au lieu d'un besoin récurrent.
+    current_goal = resolve_current_goal(state)
     payload = dict(state.get("transaction_payload") or {})
     text_lower = (state.get("normalized_text") or state.get("user_query") or "").lower()
     retry_count = int(state.get("retry_count") or 0)
@@ -232,6 +250,27 @@ async def cognitive_guard(
     # canal n'a jamais existé (voir interpreter/routing.py), la branche
     # gauche de ce `or` était morte.
     user_role = str(state.get("user_role") or "").upper()
+
+    # Bug réel production (2026-09-24, mandat "coq/chèvre/mouton chaque semaine") :
+    # `recurrence_type` n'existe QUE dans le schéma d'entités de CREATE_RECURRING_NEED
+    # (`interpreter/new_task_contract.py::NewTaskEntities` — aucun autre goal ne le
+    # renseigne, jamais deviné par le prompt). Sa seule présence est donc une preuve
+    # STRUCTURELLE — pas une confiance à arbitrer — qu'un besoin récurrent complet et
+    # non ambigu vient d'être exprimé, exactement le même principe que
+    # `NAVIGATION_BREAKOUT_GOALS` ci-dessous (une demande de navigation n'est pas non
+    # plus une "intention métier concurrente à arbitrer"). Sans ce bypass, tracé pas à
+    # pas via le VRAI graphe compilé + un VRAI appel Groq : l'interpréteur classifie
+    # correctement CREATE_RECURRING_NEED, mais si la confiance retournée reste
+    # sous `_DISAMBIGUATION_CONFIDENCE_THRESHOLD` (0.85, seuil global volontairement
+    # non touché ici — mandat §13, "pas de modification globale dangereuse"),
+    # l'interruption est refusée, `goal_planner` reverrouille l'ancien
+    # `current_goal=BUYER_REQUEST`, et `buyer_request_resolver` bascule alors
+    # silencieusement vers `cart_management` (product+quantity présents) — un besoin
+    # récurrent complet se transformait en tentative d'achat immédiat d'un produit
+    # absent du catalogue.
+    has_complete_recurring_signal = bool(
+        str((state.get("extracted_entities") or {}).get("recurrence_type") or "").strip()
+    )
 
     updates: Dict[str, Any] = {}
     decision: Dict[str, Any] = {
@@ -313,12 +352,17 @@ async def cognitive_guard(
         and (
             detected_intent in NAVIGATION_BREAKOUT_GOALS
             or confidence >= _DISAMBIGUATION_CONFIDENCE_THRESHOLD
+            or (detected_intent == "CREATE_RECURRING_NEED" and has_complete_recurring_signal)
         )
     ):
         interrupt_reason = (
             "critical_navigation_breakout"
             if detected_intent in NAVIGATION_BREAKOUT_GOALS
-            else "competing_intent_high_confidence"
+            else (
+                "complete_recurring_need_signal"
+                if detected_intent == "CREATE_RECURRING_NEED" and has_complete_recurring_signal
+                else "competing_intent_high_confidence"
+            )
         )
         updates.update(
             {

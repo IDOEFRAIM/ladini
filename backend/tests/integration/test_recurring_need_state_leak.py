@@ -1162,3 +1162,39 @@ class TestWeeklyRecurrenceSurvivesAStaleCatalogInteraction:
         )
         assert "mouton" in response and "chevre" in response
         assert "create_recurring_need" not in runtime.calls
+
+
+class TestAdditionalItemWithoutALiteralUnitStillSurvives:
+    """Bug réel (trouvé en auditant 4f796bd, jamais couvert par ses propres tests — ceux-ci
+    fournissaient `unit: "unite"` pour "chevre" dans le script LLM, ce qu'un vrai appel Groq ne
+    renvoie jamais pour "20 chevres" : `new_task_prompts.py` interdit explicitement de deviner une
+    unité absente du texte littéral). Le slot `unit` de premier niveau a un défaut par produit
+    (`default_unit_for_product`/`core/slots.py` — TETE pour l'élevage), mais
+    `_clean_additional_items` (`flows/buyer/recurring_need.py`) exigeait une unité déjà présente
+    sur CHAQUE item et rejetait silencieusement l'item sinon — "14 coqs et 20 chèvres chaque
+    semaine" ne créait donc qu'un draft coq, la chèvre disparaissant sans aucun avertissement."""
+
+    def test_a_livestock_additional_item_without_a_literal_unit_is_not_dropped(self):
+        state = _initial_state()
+        runtime = StubRuntime(responses={"create_recurring_needs": lambda **kw: {"status": "success", "items": []}})
+        runtime.llm = ScriptedLLM({
+            "disposition": "NEW_TASK", "intent": "CREATE_RECURRING_NEED", "confidence": 0.92,
+            "entities": {
+                "product": "coq", "quantity": 14.0, "unit": "unite",
+                # Aucune unité littérale pour "chevre" dans le message ("20 chevres" ne contient
+                # aucun mot d'unité) — exactement ce que le vrai micro-prompt renvoie ici.
+                "additional_items": [{"product": "chevre", "quantity": 20.0, "unit": None}],
+                "recurrence_type": "WEEKLY",
+            },
+        })
+        interpreter = make_input_interpreter("BUYER")
+        turn1, state = run(
+            _run_turn_with_cognitive_guard(state, interpreter, runtime, text="je veux 14 coqs et 20 chevres chaque semaine")
+        )
+        assert turn1["detected_intent"] == "CREATE_RECURRING_NEED", turn1.get("raw_analysis")
+        draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+        assert draft is not None
+        assert draft.additional_items == [{"product": "chevre", "quantity": 20.0, "unit": "TETE"}], (
+            f"la chèvre ne doit jamais disparaître faute d'unité littérale : {draft.additional_items!r}"
+        )
+        assert "Chevre : 20 TETE" in draft.render_summary()

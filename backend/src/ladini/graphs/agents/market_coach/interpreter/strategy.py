@@ -77,12 +77,21 @@ async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
         or existing_strategy == "INTERRUPTION_HANDLER"
     ):
         # If upstream nodes already produced a concrete UI (menu/form), keep it.
+        # `CLARIFICATION` ajouté ici (bug réel production 2026-09-24) : quand une
+        # `INTERRUPTION` approuvée (voir `nodes/cognitive.py`) atterrit sur un flow qui pose
+        # SA PROPRE clarification avant tout draft (ex: `flows/buyer/recurring_need.py::
+        # _ambiguous_quantity_clarification` pour "57 moutons chèvres" — une quantité ambiguë
+        # entre plusieurs produits), cette branche écrasait le message de clarification déjà
+        # construit par le générique "Je passe à : ... j'attendais ambiguous_quantity" —
+        # exactement le même bug de classe que `render_clarification` écrasant la réponse LLM de
+        # `clarification_node` (voir [[rendering-adaptivity-audit-2026-08]]).
         if existing_strategy in {
             "SELECTION_MENU",
             "ASK_MISSING_FIELD",
             "ERROR",
             "CONFIRMATION",
             "SUCCESS",
+            "CLARIFICATION",
         }:
             updates: Dict[str, Any] = {"response_strategy": existing_strategy}
             if existing_strategy == "CONFIRMATION":

@@ -84,6 +84,15 @@ class TestInterruption:
         result = rs(response_strategy="INTERRUPTION_HANDLER", expected_input="NONE")
         assert result["response_strategy"] == "INTERRUPTION_HANDLER"
 
+    def test_a_flows_own_clarification_survives_an_approved_interruption(self):
+        """Bug réel production (2026-09-24) : une INTERRUPTION approuvée qui atterrit sur un flow
+        posant SA PROPRE clarification avant tout draft (ex: `flows/buyer/recurring_need.py::
+        _ambiguous_quantity_clarification`, "57 moutons chèvres") voyait ce message concret
+        écrasé par le générique "Je passe à : ... j'attendais X" — `CLARIFICATION` doit être
+        traité comme un UI concret déjà produit, au même titre que `ASK_MISSING_FIELD`."""
+        result = rs(interruption_detected=True, response_strategy="CLARIFICATION")
+        assert result["response_strategy"] == "CLARIFICATION"
+
 
 class TestReject:
     def test_reject_always_clarifies_regardless_of_missing_fields(self):

@@ -21,6 +21,7 @@ import time
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
+from ladini.domain.quantity_unit import default_unit_for_product
 from ladini.domain.recurring_supply.digest import AllocationLine, build_detail_text
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
@@ -65,13 +66,21 @@ _DRAFT_FIELDS = (
 
 
 def _clean_additional_items(raw: Any) -> List[Dict[str, Any]]:
-    """Ne garde que les items `{product, quantity, unit}` COMPLETS (chantier
-    multi-produits, 2026-09-23) — un item partiel (ex: un nom de produit
-    supplémentaire sans sa propre quantité/unité) n'a rien de fiable à créer
-    comme besoin récurrent à part entière et reste silencieusement ignoré ICI
-    (même principe que `additional_products`, jamais pire), mais un item
-    COMPLET n'est plus jamais perdu — c'était le bug réel : "10 kg de tomate
-    et 20 kg d'oignon tous les jours" ne créait qu'un draft tomate."""
+    """Ne garde que les items `{product, quantity, unit}` exploitables (chantier
+    multi-produits, 2026-09-23) — un item sans produit ni quantité n'a rien de
+    fiable à créer comme besoin récurrent à part entière et reste silencieusement
+    ignoré ICI (même principe que `additional_products`, jamais pire), mais un
+    item avec produit+quantité n'est plus jamais perdu — c'était le bug réel :
+    "10 kg de tomate et 20 kg d'oignon tous les jours" ne créait qu'un draft
+    tomate.
+
+    Une unité manquante n'est PLUS un motif de rejet (bug réel production
+    2026-09-24 : "14 coqs et 20 chèvres chaque semaine" perdait la chèvre —
+    l'interpréteur ne devine jamais d'unité littéralement absente du message,
+    voir `new_task_prompts.py`, mais le slot `unit` de premier niveau bénéficie
+    déjà d'un défaut par produit via `default_unit_for_product`/`core/slots.py`
+    quand l'animal se compte en TÊTE ; un item `additional_items` n'a jamais
+    reçu ce même filet, alors qu'il suit exactement la même règle métier)."""
     if not isinstance(raw, list):
         return []
     cleaned: List[Dict[str, Any]] = []
@@ -79,8 +88,9 @@ def _clean_additional_items(raw: Any) -> List[Dict[str, Any]]:
         if not isinstance(item, dict):
             continue
         product, quantity, unit = item.get("product"), item.get("quantity"), item.get("unit")
-        if slot_has_value(product) and slot_has_value(quantity) and slot_has_value(unit):
-            cleaned.append({"product": str(product).strip(), "quantity": quantity, "unit": str(unit).strip()})
+        if slot_has_value(product) and slot_has_value(quantity):
+            resolved_unit = str(unit).strip() if slot_has_value(unit) else default_unit_for_product(product)
+            cleaned.append({"product": str(product).strip(), "quantity": quantity, "unit": resolved_unit})
     return cleaned
 
 

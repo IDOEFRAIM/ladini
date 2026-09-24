@@ -98,6 +98,57 @@ class TestOwnerIsCognitiveGuard:
         assert r["planner"]["current_goal"] == "BUYER_VIEW_CART"
         assert r["planner"]["suspended_goal"] == "SALES_PUBLISH_PRODUCT"
 
+    def test_a_complete_recurring_need_interrupts_a_stale_tunnel_below_the_confidence_threshold(self):
+        """Bug réel production (2026-09-24), tracé via le VRAI graphe compilé + un VRAI appel
+        Groq (pas seulement ce test unitaire) : "je veux 14 coqs chaque semaine" envoyé pendant
+        qu'un vieux tunnel BUYER_REQUEST attend encore "oui/non" pour un appel d'offres — l'appel
+        Groq réel classifie correctement CREATE_RECURRING_NEED, mais à une confiance sous 0.85 ;
+        sans ce bypass, `goal_planner` reverrouillait BUYER_REQUEST (RÈGLE 1quater) et
+        `buyer_request_resolver` basculait alors silencieusement vers `cart_management`
+        (product+quantity présents), perdant `recurrence_type` et affichant "produit non
+        disponible" au lieu de créer le besoin récurrent. `recurrence_type` n'existe QUE dans le
+        schéma CREATE_RECURRING_NEED (jamais deviné) : sa présence est une preuve structurelle
+        d'un besoin complet, au même titre qu'un breakout de navigation — jamais un relâchement
+        du seuil de confiance global (mandat §13)."""
+        r = _chain(
+            interpreted_event="NEW_TASK",
+            detected_intent="CREATE_RECURRING_NEED",
+            interpreter_confidence=0.55,
+            extracted_entities={"product": "coq", "quantity": 14.0, "unit": "TETE", "recurrence_type": "WEEKLY"},
+            current_goal="BUYER_REQUEST",
+            expected_input="CONFIRMATION",
+            working_memory={
+                "buyer_request_waiting_choice": True,
+                "buyer_request_catalog_checked": True,
+                "buyer_request_last_product": "mais",
+            },
+        )
+        decision = r["guard"]["cognitive_decision"]
+        assert decision["action"] == ConversationAction.INTERRUPT_ACTIVE_GOAL
+        assert decision["reason"] == "complete_recurring_need_signal"
+        assert r["planner"]["current_goal"] == "CREATE_RECURRING_NEED"
+        assert r["planner"]["suspended_goal"] == "BUYER_REQUEST"
+
+    def test_create_recurring_need_without_a_recurrence_type_still_needs_the_confidence_threshold(self):
+        """Garde-fou négatif : sans `recurrence_type` (donc sans preuve structurelle d'un besoin
+        récurrent complet — ex: un fragment mal classé), le bypass ne doit JAMAIS s'appliquer ; le
+        seuil de confiance global reste la seule porte, exactement comme avant ce correctif."""
+        r = _chain(
+            interpreted_event="NEW_TASK",
+            detected_intent="CREATE_RECURRING_NEED",
+            interpreter_confidence=0.55,
+            extracted_entities={"product": "coq", "quantity": 14.0, "unit": "TETE"},
+            current_goal="BUYER_REQUEST",
+            expected_input="CONFIRMATION",
+            working_memory={"buyer_request_waiting_choice": True},
+        )
+        assert r["guard"].get("interpreted_event") != "INTERRUPTION"
+        assert (
+            r["guard"]["cognitive_decision"]["action"]
+            != ConversationAction.INTERRUPT_ACTIVE_GOAL
+        )
+        assert r["planner"]["current_goal"] == "BUYER_REQUEST"
+
     def test_breakout_also_crosses_a_hard_confirmation_slot(self):
         r = _chain(
             interpreted_event="NEW_TASK",
