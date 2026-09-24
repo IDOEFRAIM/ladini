@@ -535,6 +535,10 @@ class Settings(BaseSettings):
     # d'un tour agent (45 s) et celui d'un appel MCP.
     RECURRING_NEED_EXECUTING_STALE_SECONDS: float = 120.0
     RECURRING_NEED_RECONCILIATION_INTERVAL_SECONDS: float = 120.0
+    # Décision produit Phase 2 (G) : un draft resté DRAFT (jamais confirmé) sans activité
+    # depuis ce délai est abandonné — annulé durablement (jamais supprimé silencieusement,
+    # jamais réactivable) plutôt que laissé orphelin en base indéfiniment.
+    RECURRING_NEED_ABANDONED_DRAFT_SECONDS: float = 86400.0
 
     # --- Réconciliation PREORDER (2026-09-03, clôture escrow/IPN) ---
     # Même principe que PROCUREMENT ci-dessus, appliqué aux 2 statuts

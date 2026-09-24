@@ -490,7 +490,6 @@ class TestN_RejectDuringSlotFilling:
         assert t.goal_before is None
         assert "confirmez" not in t.response.lower()
 
-    @pytest.mark.xfail(strict=True, reason="C5: recurring_need_draft absent de _purge_transaction_state")
     def test_the_abandoned_draft_does_not_survive(self, conv):
         self._start(conv)
         t = conv.send("stop", llm=self._REJECT_SLOT)

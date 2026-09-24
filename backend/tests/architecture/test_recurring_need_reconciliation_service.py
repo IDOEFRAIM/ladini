@@ -4,11 +4,17 @@ confirmation (garde durable), jamais un doublon. Le contrat de la garde est celu
 `tests/schema/test_recurring_need_confirmation_ledger.py`."""
 from __future__ import annotations
 
+from ladini.graphs.agents.market_coach.core.confirmation_target import (
+    ConfirmationTarget,
+)
 from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
     RecurringNeedDraft,
+    apply_domain_action,
 )
 from ladini.services.reconciliation.recurring_need_reconciliation_service import (
     ReconciliationOutcome,
+    cancel_abandoned,
+    find_abandoned_candidates,
     find_in_doubt_candidates,
     reconcile,
 )
@@ -101,3 +107,62 @@ def test_overlapping_reconciliation_passes_never_duplicate(recurring_draft_table
     for _ in range(3):
         run(reconcile(draft, "+226", executor=_executor(server)))
     assert server.executions == 1
+
+
+# =====================================================================
+# Décision G — draft abandonné (jamais confirmé) au-delà du TTL configuré
+# =====================================================================
+
+
+def _abandoned(table, draft_id="a-1", *, age_seconds=None) -> RecurringNeedDraft:
+    draft = RecurringNeedDraft.new(
+        draft_id=draft_id, product="coq", quantity=14.0, unit="TETE", recurrence_type="WEEKLY"
+    )
+    run(table.insert(draft, conversation_id="+226"))
+    if age_seconds:
+        table.age(draft_id, age_seconds)
+    return run(table.load(draft_id))
+
+
+def test_only_stale_draft_status_drafts_are_abandoned_candidates(recurring_draft_table):
+    _abandoned(recurring_draft_table, "fresh")
+    _abandoned(recurring_draft_table, "stale", age_seconds=3600)
+    from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
+        RecurringNeedDraftStatus,
+    )
+
+    executing = _in_doubt(recurring_draft_table, "executing")
+    run(
+        recurring_draft_table.compare_and_swap(
+            "executing", expected_version=executing.version, new_draft=executing
+        )
+    )
+    assert executing.status is RecurringNeedDraftStatus.EXECUTING  # jamais candidat ici
+
+    candidates = run(find_abandoned_candidates(older_than_seconds=120))
+    assert [d.draft_id for d, _ in candidates] == ["stale"]
+
+
+def test_an_abandoned_draft_is_durably_cancelled(recurring_draft_table):
+    draft = _abandoned(recurring_draft_table, age_seconds=90000)
+    assert run(cancel_abandoned(draft)) is True
+    assert recurring_draft_table.status_of(draft.draft_id) == "CANCELLED"
+
+
+def test_a_draft_that_moved_since_the_candidate_scan_is_left_alone(recurring_draft_table):
+    """Course avec un tour utilisateur concurrent : le draft a été confirmé entre le scan des
+    candidats et l'annulation — jamais écrasé aveuglément (CAS)."""
+    draft = _abandoned(recurring_draft_table, age_seconds=90000)
+    target = ConfirmationTarget(draft_id=draft.draft_id, draft_version=draft.version)
+    from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
+        ConfirmRecurringNeedDraft,
+    )
+
+    executing = apply_domain_action(draft, ConfirmRecurringNeedDraft(target=target), claim=lambda k: True).draft
+    run(
+        recurring_draft_table.compare_and_swap(
+            draft.draft_id, expected_version=draft.version, new_draft=executing
+        )
+    )
+    assert run(cancel_abandoned(draft)) is False  # `draft` est le candidat PÉRIMÉ du scan
+    assert recurring_draft_table.status_of(draft.draft_id) == "EXECUTING"

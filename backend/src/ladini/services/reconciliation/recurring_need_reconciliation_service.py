@@ -22,9 +22,11 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from ladini.core.settings import settings
 from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
+    CancelRecurringNeedDraft,
     RecurringNeedDraft,
     RecurringNeedDraftStatus,
     RecurringNeedExecutionResult,
+    apply_domain_action,
     finalize_after_execution,
 )
 from ladini.services.database import recurring_need_draft_store
@@ -127,9 +129,39 @@ async def reconcile(
     return ReconciliationResult(final.draft_id, outcome, final.status.value)
 
 
+async def find_abandoned_candidates(
+    older_than_seconds: Optional[float] = None,
+) -> List[Tuple[RecurringNeedDraft, str]]:
+    threshold = (
+        older_than_seconds
+        if older_than_seconds is not None
+        else settings.RECURRING_NEED_ABANDONED_DRAFT_SECONDS
+    )
+    candidates: List[Tuple[RecurringNeedDraft, str]] = await recurring_need_draft_store.find_abandoned(
+        older_than_seconds=threshold
+    )
+    return candidates
+
+
+async def cancel_abandoned(draft: RecurringNeedDraft) -> bool:
+    """Décision G : un draft jamais confirmé, sans activité depuis le seuil configuré, est
+    annulé DURABLEMENT (CAS — jamais un `UPDATE` aveugle, un autre tour a pu le faire
+    avancer entre-temps). `True` si CETTE annulation a gagné la course."""
+    current = await recurring_need_draft_store.load(draft.draft_id) or draft
+    if current.status != RecurringNeedDraftStatus.DRAFT:
+        return False  # a bougé depuis le candidat (confirmé, déjà annulé...) : rien à faire
+    cancelled = apply_domain_action(current, CancelRecurringNeedDraft()).draft
+    swapped: bool = await recurring_need_draft_store.compare_and_swap(
+        current.draft_id, expected_version=current.version, new_draft=cancelled
+    )
+    return swapped
+
+
 __all__ = [
     "ReconciliationOutcome",
     "ReconciliationResult",
     "find_in_doubt_candidates",
+    "find_abandoned_candidates",
+    "cancel_abandoned",
     "reconcile",
 ]

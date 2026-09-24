@@ -16,6 +16,8 @@ logger = logging.getLogger("Ladini.Workers.Cron.RecurringNeedReconciliation")
 
 async def _run() -> dict:
     from ladini.services.reconciliation.recurring_need_reconciliation_service import (
+        cancel_abandoned,
+        find_abandoned_candidates,
         find_in_doubt_candidates,
         reconcile,
     )
@@ -25,7 +27,19 @@ async def _run() -> dict:
     for draft, conversation_id in candidates:
         result = await reconcile(draft, conversation_id)
         outcomes[draft.draft_id] = result.outcome.value
-    return {"candidates_found": len(candidates), "outcomes": outcomes}
+
+    abandoned = await find_abandoned_candidates()
+    cancelled = 0
+    for draft, _conversation_id in abandoned:
+        if await cancel_abandoned(draft):
+            cancelled += 1
+
+    return {
+        "candidates_found": len(candidates),
+        "outcomes": outcomes,
+        "abandoned_found": len(abandoned),
+        "abandoned_cancelled": cancelled,
+    }
 
 
 @celery_app.task(name="workers.recurring_need_reconciliation", bind=True, max_retries=1)

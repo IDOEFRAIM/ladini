@@ -14,6 +14,7 @@ from ladini.agents.reducers import mark_deleted
 from ladini.graphs.agents.market_coach.core.conversation_decision import (
     ConversationAction,
 )
+from ladini.graphs.agents.market_coach.core.draft_registry import draft_reset_patch
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     DISAMBIGUATION_MENU_GOAL_SHIM,
     InteractionKind,
@@ -340,9 +341,7 @@ async def goal_planner(
             # de correspondance) — les trois sont donc purgés symétriquement
             # ici, au même titre que `draft_payload`/`vendor_selection_context`
             # ci-dessus, sur tout VRAI changement de goal.
-            "procurement_draft": None,
-            "preorder_draft": None,
-            "sales_publish_draft": None,
+            **draft_reset_patch(),  # les 4 drafts déclarés dans core/draft_registry.py
             # (2026-09-02) Politique d'invalidation centralisée (mandat §8) :
             # un switch de goal/intention efface aussi le discriminant
             # canonique — sans ceci, un `pending_interaction` persisté
