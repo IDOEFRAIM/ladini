@@ -120,6 +120,32 @@ DISAMBIGUATION_MENU_GOAL_SHIM = "DISAMBIGUATION_PENDING"
 
 
 class InteractionStatus(str, Enum):
+    """Vocabulaire CONCEPTUEL du cycle de vie (mandat Phase 2 C7 §7) — ces 4 statuts terminaux
+    ne sont PAS écrits littéralement comme valeur de `PendingInteraction.status` en pratique
+    (`ACTIVE` reste la seule valeur réellement posée, voir `set_pending_interaction`) : le
+    reducer `replace_value` de `pending_interaction` (voir `core/state.py`) fait qu'une
+    interaction ne "devient" jamais RESOLVED/CANCELLED/EXPIRED sur PLACE — elle est REMPLACÉE
+    (par `None` via `clear_pending_interaction`/`resolve_pending_interaction`, ou par une
+    NOUVELLE interaction via `replace_pending_interaction`/un nouveau `set_pending_interaction`).
+    Ajouter un second signal ("status=CANCELLED" ET "state=None") dupliquerait la même
+    information sous deux formes qui pourraient diverger — exactement la classe de bug que ce
+    module existe pour éliminer (voir sa docstring). Ces 4 valeurs restent déclarées pour NOMMER
+    sans ambiguïté, dans les tests et la documentation, à QUEL remplacement chaque transition
+    correspond :
+      - RESOLVED  = `resolve_pending_interaction()`/un résolveur de flow renvoie `None` après
+        avoir traité une réponse valide (voir `tests/architecture/
+        test_pending_interaction_lifecycle.py::TestConsumedNeverReactivates`).
+      - CANCELLED = `clear_pending_interaction(...)` sur "annule"/"laisse tomber" (même politique
+        C4 que le draft associé).
+      - EXPIRED   = `is_pending_expired` fait résoudre `get_pending_interaction` à `NONE` malgré
+        un état persisté encore présent (TTL, voir plus bas) — jamais un `.status` réécrit sur
+        l'ancien objet, qui reste tel quel en base tant que rien ne le remplace explicitement.
+      - REPLACED  = `replace_pending_interaction`/un nouveau `set_pending_interaction` pour une
+        AUTRE interaction (ex: correction invalide -> même champ redemandé avec un nouveau
+        `target` ; ou `goal_planner._purge_transaction_state` sur un vrai changement de goal,
+        qui vide `pending_interaction` au même titre que les drafts — "SUPERSEDED" au sens du
+        mandat)."""
+
     ACTIVE = "ACTIVE"
     RESOLVED = "RESOLVED"
     CANCELLED = "CANCELLED"
@@ -252,20 +278,68 @@ def replace_pending_interaction(
 
 
 # =====================================================================
+# TTL (Phase 2 hardening, commit 7, décision produit F : 30 minutes par défaut,
+# configurable via `settings.PENDING_INTERACTION_TTL_SECONDS` — voir core/settings.py pour
+# la distinction explicite avec le TTL, différent, du draft abandonné (décision G, 24h)).
+# =====================================================================
+
+
+def pending_interaction_ttl_seconds() -> float:
+    """Point de configuration UNIQUE — jamais une constante recopiée localement à chaque site
+    d'appel (import différé, même discipline que les autres lectures de `settings` dans ce
+    package — voir `flows/buyer/preorder_confirmation.py`)."""
+    from ladini.core.settings import settings
+
+    return float(settings.PENDING_INTERACTION_TTL_SECONDS)
+
+
+def is_pending_expired(
+    pending: "PendingInteraction", now: float, *, ttl_seconds: Optional[float] = None
+) -> bool:
+    """Fonction PURE — jamais un `datetime.now()`/`time.time()` interne : l'appelant fournit
+    `now` explicitement (l'heure réelle du tour en production, une valeur fixe dans les tests),
+    pour que ce calcul reste déterministe et testable sans horloge murale.
+
+    `pending.kind == NONE` (rien en attente) ou `created_at` absent (0.0 — jamais posé par
+    `set_pending_interaction`, qui horodate toujours) ne peuvent pas expirer : il n'y a rien à
+    faire expirer. Politique de frontière : strictement `>` le TTL (exactement 30:00 est encore
+    ACTIF, 30:00.001 est EXPIRED) — documenté ici plutôt que laissé implicite au premier site
+    d'appel qui aurait choisi l'un ou l'autre sans le dire."""
+    if pending.kind == InteractionKind.NONE or not pending.created_at:
+        return False
+    ttl = pending_interaction_ttl_seconds() if ttl_seconds is None else ttl_seconds
+    return (now - pending.created_at) > ttl
+
+
+# =====================================================================
 # Résolution — lecture canonique
 # =====================================================================
 
 
-def get_pending_interaction(state: Dict[str, Any]) -> PendingInteraction:
+def get_pending_interaction(
+    state: Dict[str, Any], *, now: Optional[float] = None
+) -> PendingInteraction:
     """Résolveur canonique unique — priorité :
 
     1. Tunnel panier (producteur/palier/quantité) — dérivé à neuf de
        `vendor_selection_context`/`tier_selection_context` via
-       `build_selection_context`, jamais périmable par construction.
+       `build_selection_context`, jamais périmable par construction (aucun
+       `created_at`, donc jamais soumis au TTL ci-dessous : il ne peut par
+       construction jamais référencer un ANCIEN produit, voir le point 3/4 de
+       la docstring de module — expirer n'y ajouterait rien).
     2. État persisté explicite (`state["pending_interaction"]`), écrit par
        `confirmation_gate`/`gps_delivery_gate`/`validator`/
-       `clarification_node`/`semantic_disambiguation`.
+       `clarification_node`/`semantic_disambiguation` — sauf s'il a EXPIRÉ
+       (Phase 2 hardening, commit 7, décision F : TTL 30 min par défaut, voir
+       `is_pending_expired`) : ce SEUL point de résolution étant consulté par
+       TOUS les appelants (routage, `cognitive_guard`, tunnel, flows...), y
+       enforcer l'expiration ici la fait respecter PARTOUT d'un coup — jamais
+       un second point de contrôle qui pourrait diverger.
     3. `NONE`.
+
+    `now` : override explicite pour les tests (déterministe, pas d'horloge
+    murale) — `None` (comportement de production) lit `time.time()` une SEULE
+    fois ici, jamais un `datetime.now()` recopié à chaque site de lecture.
 
     Import local de `selection_actions` : évite tout risque de cycle
     (`core` → `domain` reste feuille, mais gardé local par précaution,
@@ -309,7 +383,11 @@ def get_pending_interaction(state: Dict[str, Any]) -> PendingInteraction:
 
     persisted = state.get("pending_interaction")
     if persisted:
-        return PendingInteraction.from_dict(persisted)
+        interaction = PendingInteraction.from_dict(persisted)
+        effective_now = time.time() if now is None else now
+        if is_pending_expired(interaction, effective_now):
+            return PendingInteraction()
+        return interaction
 
     return legacy_confirmation_bridge(state) or PendingInteraction()
 
@@ -458,4 +536,6 @@ __all__ = [
     "legacy_confirmation_bridge",
     "check_invariants",
     "to_tunnel_category",
+    "is_pending_expired",
+    "pending_interaction_ttl_seconds",
 ]

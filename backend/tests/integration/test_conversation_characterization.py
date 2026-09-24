@@ -148,7 +148,6 @@ class TestCDE_AmbiguousGroup:
         assert t.draft()["product"] == "coq"
         assert _created(conv) == []
 
-    @pytest.mark.xfail(strict=True, reason="H2: réponse à une clarification structurée classée UNKNOWN -> RECOVER, le flow propriétaire du pending n'est jamais exécuté")
     def test_d_explicit_split_resolves_to_three_items(self, conv):
         conv.send("je veux 14 coqs et 57 moutons chèvres chaque semaine", llm=_coq_moutons_chevres())
         t = conv.send("50 moutons et 7 chèvres", llm=_UNKNOWN)
@@ -173,7 +172,6 @@ class TestCDE_AmbiguousGroup:
         assert [(i["product"], i["quantity"]) for i in draft["additional_items"]] == [("mouton", 50.0), ("chevre", 7.0)]
         assert t.pending_after.kind.value == "CONFIRM_ACTION"
 
-    @pytest.mark.xfail(strict=True, reason="H2: réponse à une clarification structurée classée UNKNOWN -> RECOVER, le flow propriétaire du pending n'est jamais exécuté")
     def test_e_the_rest_is_computed(self, conv):
         conv.send("je veux 14 coqs et 57 moutons chèvres chaque semaine", llm=_coq_moutons_chevres())
         t = conv.send("20 moutons et le reste pour les chèvres", llm=_UNKNOWN)
@@ -275,7 +273,6 @@ class TestG_CorrectionPolicy:
         assert (pending.kind.value, pending.field) == ("ENTER_FIELD", "correction_scope")
         assert pending.target["fields"] == {"product": "boeuf", "quantity": 23.0}
 
-    @pytest.mark.xfail(strict=True, reason="H2/C7: la réponse à la question de portée n'a pas encore de consommateur")
     def test_answering_the_scope_question_applies_the_kept_correction(self, conv):
         conv.send("je veux 14 coqs et 20 chèvres chaque semaine", llm=_coq_chevre())
         conv.send("non plutôt 23 boeufs", llm=new_task("CREATE_RECURRING_NEED", product="boeuf", quantity=23.0))
@@ -344,7 +341,6 @@ class TestG_CorrectionPolicy:
 
 
 class TestHM_Cancellation:
-    @pytest.mark.xfail(strict=True, reason="H2: réponse à une clarification structurée classée UNKNOWN -> RECOVER, le flow propriétaire du pending n'est jamais exécuté")
     def test_h_bare_abandon_during_clarification_cancels_the_draft(self, conv):
         conv.send("je veux 14 coqs et 57 moutons chèvres chaque semaine", llm=_coq_moutons_chevres())
         t = conv.send("laisse tomber", llm=_UNKNOWN)
@@ -530,3 +526,147 @@ class TestO_ConcurrentMessages:
             assert not result.interleaved, "deux tours de la même conversation se sont entrelacés"
             turns_before = int(result.before.get("turn_count") or 0)
             assert int(result.after.get("turn_count") or 0) == turns_before + 2, "lost update"
+
+
+# =====================================================================
+# P. "weekly_days" — champ manquant du registre canonique (mandat C7 §4)
+# =====================================================================
+
+
+class TestP_WeeklyDays:
+    """`recurrence_type=WEEKLY_DAYS` laisse `weekly_days` manquant -> l'agent demande "quels
+    jours ?" (ENTER_FIELD). Avant l'ajout de `weekly_days` à `core/slots.py::
+    _EXPECTED_INPUT_MAP`, cette catégorie n'appartenait pas à `SLOT_FILLING_INPUTS` :
+    `interpreter/state_router.py::choose_interpretation_route` routait alors la réponse
+    ("lundi mercredi vendredi") vers le classifieur NEW_TASK complet plutôt que vers
+    ACTIVE_SLOT (léger, conscient du tunnel) — un `interpreted_event=NEW_TASK` y annule
+    silencieusement le draft en cours (`flows/buyer/recurring_need.py::_create_flow`,
+    branche "nouvelle demande autonome"), perdant produit/quantité déjà collectés."""
+
+    def test_the_weekly_days_reply_updates_the_same_draft_and_consumes_the_pending(self, conv):
+        t1 = conv.send(
+            "je veux 20 kg de tomate certains jours de la semaine",
+            llm=new_task("CREATE_RECURRING_NEED", product="tomate", quantity=20.0, unit="KG",
+                         recurrence_type="WEEKLY_DAYS"),
+        )
+        assert t1.pending_after.kind.value == "ENTER_FIELD"
+        assert t1.pending_after.field == "weekly_days"
+        draft_id = t1.draft()["draft_id"]
+
+        t2 = conv.send(
+            "lundi mercredi vendredi",
+            llm={"disposition": "ANSWER", "extracted_entities": {"weekly_days": [1, 3, 5]}, "confidence": 0.9},
+        )
+        draft = t2.draft()
+        assert draft["draft_id"] == draft_id, "la réponse doit mettre à jour LE MÊME draft, jamais en recréer un"
+        assert draft["product"] == "tomate" and draft["quantity"] == 20.0, "produit/quantité déjà collectés perdus"
+        assert sorted(draft["weekly_days"]) == [1, 3, 5]
+        assert t2.pending_after.kind.value == "CONFIRM_ACTION", "pending consommé, on avance vers la confirmation"
+
+
+# =====================================================================
+# Q. TTL de PendingInteraction (30 min, mandat C7 §8/§9/§10 — décision F)
+# =====================================================================
+
+
+class TestQ_PendingInteractionTTL:
+    def test_an_expired_pending_no_longer_captures_the_next_message(self, conv):
+        """`core/pending_interaction.py::is_pending_expired` en unité prouve la frontière
+        30:00 ; ce test prouve le VRAI effet bout-en-bout : passé le TTL, une confirmation
+        `CONFIRM_ACTION` en attente ne bloque plus rien — le tour suivant est routé comme si
+        rien n'était en attente, sans ressusciter l'ancien goal (invariant §9 : jamais mélangé
+        avec le TTL, différent, du draft abandonné à 24h — voir C5)."""
+        t1 = conv.send("je veux 14 coqs chaque semaine", llm=_coq())
+        assert t1.pending_after.kind.value == "CONFIRM_ACTION"
+        stale = dict(conv.state()["pending_interaction"])
+        conv.seed({"pending_interaction": {**stale, "created_at": stale["created_at"] - 1900.0}})
+
+        t2 = conv.send(
+            "je veux 20 kg de tomate tous les jours",
+            llm=new_task("CREATE_RECURRING_NEED", product="tomate", quantity=20.0, unit="KG", recurrence_type="DAILY"),
+        )
+        assert t2.pending_before.kind.value == "NONE", "le pending périmé doit déjà être NONE au début du tour"
+        draft = t2.draft()
+        assert draft["product"] == "tomate", f"le pending périmé a capturé le message : {draft!r}"
+        # La persistance IMMÉDIATE (DB) de l'annulation du VIEUX draft coq est une propriété
+        # SÉPARÉE (voir H6, TestH6_OrphanedDraftOnUnconditionalPurge ci-dessous) — pas encore
+        # garantie ici : `goal_planner` purge `recurring_need_draft` de l'ÉTAT avant que
+        # `_create_flow` ait pu voir l'ancien draft pour le persister CANCELLED. Le draft coq
+        # reste néanmoins récupérable par la réconciliation "draft abandonné" (C5, 24h) — jamais
+        # perdu, seulement pas encore annulé IMMÉDIATEMENT dans ce cas précis.
+
+    def test_a_pending_well_within_the_ttl_is_unaffected(self, conv):
+        """Contrôle négatif : reculer l'horodatage de quelques secondes (toujours dans le TTL)
+        ne doit RIEN changer au comportement normal — la garde ne doit pas être trop agressive."""
+        conv.send("je veux 14 coqs chaque semaine", llm=_coq())
+        stale = dict(conv.state()["pending_interaction"])
+        conv.seed({"pending_interaction": {**stale, "created_at": stale["created_at"] - 5.0}})
+        t2 = conv.send("oui")
+        assert t2.llm_calls == 0
+        assert len(_created(conv)) == 1
+
+
+class TestH6_OrphanedDraftOnUnconditionalPurge:
+    """H6 (découvert en écrivant TestQ_PendingInteractionTTL ci-dessus, commit 7) :
+    `interpreter/goal_planner.py`, la règle `event == "NEW_TASK"` (~ligne 847), purge
+    INCONDITIONNELLEMENT `recurring_need_draft` (et les 3 autres drafts du registre,
+    `core/draft_registry.py`) vers `None` dès qu'AUCUNE `PendingInteraction` n'est active
+    (`already_expecting=False`) — AVANT que `flows/buyer/recurring_need.py::_create_flow` ait pu
+    voir l'ANCIEN draft pour le persister CANCELLED en base (`_persist`). Le draft reste
+    en DRAFT en base, orphelin — récupéré au pire par la réconciliation "draft abandonné" 24h
+    (C5), jamais perdu, mais pas annulé IMMÉDIATEMENT comme l'invariant C4/C5 (`_create_flow`)
+    le garantit dans TOUS les autres cas testés (`TestG_CorrectionPolicy::
+    test_a_new_autonomous_request_cancels_the_superseded_draft_durably`, qui elle passe : la
+    différence est qu'un `PendingInteraction` ENTER_FIELD y est encore actif, ce qui fait
+    prendre à `goal_planner` une branche PLUS TÔT qui ne purge pas — voir RULE 1/1bis, plus haut
+    dans ce fichier — et laisse `_create_flow` décider seul). Avant commit 7 (TTL), ce chemin
+    n'était structurellement jamais atteint avec un draft DRAFT encore vivant (un pending était
+    TOUJOURS actif dans ce cas) — l'expiration TTL le rend désormais atteignable.
+
+    Fix probable (hors périmètre de C7, big-bang à éviter) : `core/draft_registry.py` pourrait
+    porter, par draft, une action de cancellation domaine à appliquer AVANT la purge plutôt
+    qu'un simple reset d'état — mais cela touche les 4 domaines (procurement/preorder/
+    sales_publish/recurring_need) et leurs 4 stores, à traiter comme un commit dédié."""
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "H6: goal_planner purge inconditionnellement recurring_need_draft (event=NEW_TASK, "
+        "aucune PendingInteraction active) avant que _create_flow ait pu persister l'annulation "
+        "de l'ancien draft DRAFT — orphelin en base jusqu'à la réconciliation 24h (C5), jamais "
+        "perdu mais pas annulé immédiatement comme partout ailleurs."
+    ))
+    def test_a_live_draft_purged_without_an_active_pending_is_cancelled_in_the_store(self, conv):
+        t1 = conv.send("je veux 14 coqs chaque semaine", llm=_coq())
+        stale = dict(conv.state()["pending_interaction"])
+        conv.seed({"pending_interaction": {**stale, "created_at": stale["created_at"] - 1900.0}})
+        conv.send(
+            "je veux 20 kg de tomate tous les jours",
+            llm=new_task("CREATE_RECURRING_NEED", product="tomate", quantity=20.0, unit="KG", recurrence_type="DAILY"),
+        )
+        assert conv.drafts.status_of(t1.draft()["draft_id"]) == "CANCELLED"
+
+
+# =====================================================================
+# R. un pending CONSOMMÉ ne capture plus rien au tour suivant (mandat C7 §7/§15 TEST G)
+# =====================================================================
+
+
+class TestR_ConsumedPendingNeverReactivates:
+    def test_a_resolved_structured_clarification_is_never_consulted_again(self, conv):
+        """`ambiguous_quantity` est résolu (RESOLVED) au tour 2 -> le pending passe à
+        CONFIRM_ACTION. Un 3e message, même s'il RESSEMBLE à une réponse de répartition
+        ("50/50" ou un texte quelconque), ne doit JAMAIS repasser par
+        `_resolve_ambiguous_group_reply` : ce résolveur n'est consulté QUE quand
+        `pending.field == 'ambiguous_quantity'`, qui n'est plus le cas une fois consommé."""
+        conv.send("je veux 14 coqs et 57 moutons chèvres chaque semaine", llm=_coq_moutons_chevres())
+        t2 = conv.send("50 moutons et 7 chèvres", llm=_UNKNOWN)
+        assert t2.pending_after.kind.value == "CONFIRM_ACTION"
+        assert t2.pending_after.field != "ambiguous_quantity"
+
+        # Un 3e message qui, s'il était (à tort) encore traité par le résolveur de clarification,
+        # y serait interprété comme une répartition — mais le pending est déjà CONFIRM_ACTION,
+        # donc il doit atteindre la confirmation normale à la place.
+        t3 = conv.send("oui")
+        assert t3.llm_calls == 0
+        created = _created(conv)
+        assert len(created) == 1 and len(created[0][1]["items"]) == 3
+

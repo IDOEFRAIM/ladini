@@ -9,6 +9,7 @@ from ladini.graphs.agents.market_coach.core.conversation_decision import (
 from ladini.graphs.agents.market_coach.core.conversation_reset import (
     reset_abandoned_conversation_context,
 )
+from ladini.graphs.agents.market_coach.core.field_registry import STRUCTURED_FIELDS
 from ladini.graphs.agents.market_coach.core.goals import (
     NAVIGATION_BREAKOUT_GOALS,
 )
@@ -440,7 +441,35 @@ async def cognitive_guard(
     # tombait dans la récupération/abandon de tunnel ci-dessous au lieu de
     # jamais atteindre le resolver qui sait gérer location_shared.
     location_shared = bool(state.get("location_shared"))
-    if event == "UNKNOWN" and in_tunnel and not location_shared:
+    # (Phase 2 hardening, commit 7, bug H2 — GÉNÉRALISATION de l'exclusion
+    # `location_shared` ci-dessus, même classe de bug) : une PendingInteraction
+    # `ENTER_FIELD` déclarée STRUCTURED dans `core/field_registry.py` (candidats
+    # + quantité totale pour "ambiguous_quantity", draft + champs dits pour
+    # "correction_scope"...) sait résoudre ELLE-MÊME une réponse que le
+    # classifieur LLM générique n'a pas su étiqueter (`event=UNKNOWN`) — voir
+    # `flows/buyer/recurring_need.py::_resolve_ambiguous_group_reply`, qui
+    # reparse `normalized_text` directement, sans dépendre d'`extracted_
+    # entities`, et renvoie explicitement `None` si CE message ne concerne
+    # manifestement pas la clarification (l'appelant retombe alors sur le
+    # traitement autonome normal). Avant ce correctif, `cognitive_guard`
+    # interceptait TOUJOURS ces réponses en RECOVER, jetant le message sans
+    # jamais laisser le propriétaire de l'interaction se prononcer. Le
+    # registre (pas seulement `target is not None`) est la source de
+    # l'exemption : un champ SCALAIRE simple (ex: "product"/"price") n'a lui
+    # aucune résolution propre hors du classifieur générique et reste donc
+    # couvert par la RECOVER ci-dessous, inchangée, même s'il portait
+    # accidentellement un `target`.
+    structured_field_owns_resolution = (
+        pending.kind == InteractionKind.ENTER_FIELD
+        and pending.target is not None
+        and pending.field in STRUCTURED_FIELDS
+    )
+    if (
+        event == "UNKNOWN"
+        and in_tunnel
+        and not location_shared
+        and not structured_field_owns_resolution
+    ):
         if retry_count >= 2:
             logger.warning(
                 "[CognitiveGuard] Max retries reached for goal=%s — abandoning tunnel",

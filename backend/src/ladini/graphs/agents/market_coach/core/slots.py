@@ -274,6 +274,18 @@ _EXPECTED_INPUT_MAP: Dict[str, str] = {
     # (PRODUCT/QUANTITY/UNIT/PRICE/LOCATION/DATE/FARM_NAME/MOVEMENT_TYPE) ne
     # correspond à une fréquence de récurrence.
     "recurrence_type": "RECURRENCE",
+    # (Phase 2 hardening, commit 7, gap connu depuis l'audit du 2026-09-24) : jours de la
+    # semaine concernés quand `recurrence_type == "WEEKLY_DAYS"` (voir
+    # `domain/recurring_need_draft.py::RecurringNeedDraft.missing_fields`). Catégorie propre,
+    # distincte de RECURRENCE (qui répond à "quelle fréquence ?", pas "quels jours précis ?").
+    # Absent d'ici, ce champ manquant tombait sur `expected_input=NONE` -> `SLOT_FILLING_INPUTS`
+    # ne le contenait pas -> `interpreter/state_router.py::choose_interpretation_route` route
+    # alors vers NEW_TASK (le classifieur COMPLET, "nouvelle tâche autonome") au lieu
+    # d'ACTIVE_SLOT (léger, conscient du tunnel) — une réponse valide ("lundi mercredi
+    # vendredi") pouvait alors être classée `interpreted_event=NEW_TASK`, ce qui fait
+    # `flows/buyer/recurring_need.py::_create_flow` ANNULER le draft en cours et repartir sur
+    # un nouveau draft ne contenant QUE les jours, perdant produit/quantité déjà collectés.
+    "weekly_days": "WEEKLY_DAYS",
 }
 
 # ---------------------------------------------------------------------------

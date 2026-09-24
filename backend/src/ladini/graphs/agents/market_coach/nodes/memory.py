@@ -11,6 +11,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     to_tunnel_category,
 )
 from ladini.graphs.agents.market_coach.core.slots import (
+    SLOT_FILLING_INPUTS,
     build_alias_mirrors,
     fields_for_expected_input,
 )
@@ -118,12 +119,16 @@ _EXPECTED_INPUT_EXTRA_FIELDS: Dict[str, frozenset] = {
     ),
     "PRICE": frozenset({"price_unit", "pricing_tiers"}),
 }
+#: (Phase 2 hardening, commit 7) : la liste des CATÉGORIES elle-même était encore recopiée à la
+#: main ici — une 3e copie du même ensemble que `core/slots.py::SLOT_FILLING_INPUTS` (déjà
+#: dérivé de `_EXPECTED_INPUT_MAP.values()`), le exact "double dérive" que le commentaire
+#: ci-dessus (2026-09-09) documentait pourtant déjà comme corrigé pour les CHAMPS. `WEEKLY_DAYS`
+#: (ajouté au registre pour fermer le gap `weekly_days`) aurait dû être recopié ici À LA MAIN une
+#: 3e fois sans cette dérivation — désormais impossible à oublier : toute catégorie ajoutée à
+#: `_EXPECTED_INPUT_MAP` apparaît ici automatiquement.
 _EXPECTED_INPUT_ALLOWED_FIELDS: Dict[str, frozenset] = {
     category: fields_for_expected_input(category) | _EXPECTED_INPUT_EXTRA_FIELDS.get(category, frozenset())
-    for category in (
-        "PRODUCT", "QUANTITY", "PRICE", "UNIT", "LOCATION", "DATE",
-        "FARM_NAME", "MOVEMENT_TYPE", "RECURRENCE",
-    )
+    for category in SLOT_FILLING_INPUTS
 }
 
 # _ALIAS_MIRRORS is now derived from core/slots.py (single source of truth).

@@ -540,6 +540,17 @@ class Settings(BaseSettings):
     # jamais réactivable) plutôt que laissé orphelin en base indéfiniment.
     RECURRING_NEED_ABANDONED_DRAFT_SECONDS: float = 86400.0
 
+    # --- PendingInteraction TTL (Phase 2 hardening, commit 7, décision produit F) ---
+    # Distinct de RECURRING_NEED_ABANDONED_DRAFT_SECONDS ci-dessus : deux concepts séparés qui
+    # ne doivent JAMAIS être confondus (mandat C7 §9) — celui-ci borne combien de temps une
+    # QUESTION posée à l'utilisateur (`PendingInteraction`) reste valide avant qu'une réponse
+    # tardive ne soit plus considérée comme s'y adressant ; l'autre borne combien de temps un
+    # DRAFT jamais confirmé survit avant annulation. Une PendingInteraction expirée redevient
+    # NONE pour le tour courant (voir `core/pending_interaction.py::is_pending_expired`) — le
+    # draft associé, lui, suit son propre cycle de vie (abandonné séparément après 24h, ou
+    # toujours repris normalement si l'utilisateur répond enfin dans les temps de CE délai-ci).
+    PENDING_INTERACTION_TTL_SECONDS: float = 1800.0
+
     # --- Réconciliation PREORDER (2026-09-03, clôture escrow/IPN) ---
     # Même principe que PROCUREMENT ci-dessus, appliqué aux 2 statuts
     # PREORDER pouvant rester bloqués : `EXECUTING` (appel
