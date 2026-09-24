@@ -631,6 +631,21 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     # Voir `flows/buyer/state.py` et `flows/producer/state.py`.
 
 
+def entities_said_this_turn(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Entités DITES dans le message courant : `extracted_entities` du tour, moins les clés
+    héritées par `cognitive_guard` (`cognitive_decision.carried_entities`, jamais dites ici).
+
+    Source unique pour toute décision qui dépend de « qu'a dit l'utilisateur MAINTENANT ? »
+    (ex. un refus porteur de valeurs = correction, un « non » nu = refus). Jamais
+    `transaction_payload`, qui accumule les tours précédents."""
+    if not isinstance(state, dict):
+        return {}
+    entities = dict(state.get("extracted_entities") or {})
+    for key in (state.get("cognitive_decision") or {}).get("carried_entities") or ():
+        entities.pop(key, None)
+    return entities
+
+
 def resolve_current_goal(state: Dict[str, Any]) -> Optional[str]:
     """Résout le goal métier RÉELLEMENT en cours pour CE tour (2026-09-08,
     purge de redondance).
@@ -672,6 +687,7 @@ def resolve_current_goal(state: Dict[str, Any]) -> Optional[str]:
 
 __all__ = [
     "MarketAgentState",
+    "entities_said_this_turn",
     "BuyerContext",
     "ProducerContext",
     "UserEvent",

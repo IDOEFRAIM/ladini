@@ -27,6 +27,7 @@ from ladini.graphs.agents.market_coach.interpreter.strategy import (
 )
 from ladini.graphs.agents.market_coach.nodes.memory import memory_update
 from tests.conftest import StubRuntime, make_state, run
+from tests.harness.state import clears
 
 
 class TestMemoryUpdateRelaysTheFlagToStateRoot:
@@ -62,12 +63,12 @@ class TestMemoryUpdateRelaysTheFlagToStateRoot:
             "les raisons doivent suivre le même relais que le drapeau"
         )
         payload = result.get("transaction_payload") or {}
-        assert "slot_enrichment_force_clarification" not in payload, (
+        assert clears(payload, "slot_enrichment_force_clarification"), (
             "le drapeau ne doit plus polluer transaction_payload une fois "
             "relayé — sinon il pourrait fuiter dans un récapitulatif ou un "
             "argument MCP résolu depuis ce dict"
         )
-        assert "clarification_reasons" not in payload
+        assert clears(payload, "clarification_reasons")
 
     def test_no_validation_error_means_no_flag_at_all(self):
         """Non-régression : le chemin nominal (pas d'échec LLM) ne doit

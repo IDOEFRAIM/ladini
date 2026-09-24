@@ -179,7 +179,7 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
         )
     if strip_structural:
         for structural_key in ("quantity", "unit", "price"):
-            payload.pop(structural_key, None)
+            payload[structural_key] = None  # `pop` laissait l'ancienne valeur (merge_dict)
 
     if not goal:
         return _finalize_validator_response(
@@ -332,7 +332,7 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
                 and contract_field not in missing
             ):
                 # Re-demander le champ fautif comme s'il manquait.
-                payload.pop(contract_field, None)
+                payload[contract_field] = None  # `pop` gardait la valeur rejetée (merge_dict)
                 missing.insert(0, contract_field)
             logger.info(
                 "[Validator] Contrat %s rejeté (champ=%s): %s",

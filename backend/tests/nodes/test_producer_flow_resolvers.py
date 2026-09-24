@@ -15,6 +15,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
+from tests.harness.state import clears
 
 
 def rt(responses=None):
@@ -441,7 +442,7 @@ class TestResolveDefaultFarm:
         ]}})
         result = run(_resolve_default_farm(runtime, "+2260", {"selection_index": 2}))
         assert result["transaction_payload"]["farm_id"] == "f2"
-        assert "selection_index" not in result["transaction_payload"]
+        assert clears(result["transaction_payload"], "selection_index")
 
     def test_multiple_farms_without_selection_shows_a_menu(self):
         from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_default_farm

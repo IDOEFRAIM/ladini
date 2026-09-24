@@ -16,6 +16,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
 )
+from tests.harness.state import clears
 
 
 def rt(responses=None):
@@ -85,7 +86,7 @@ class TestBuildProcurementEscalation:
         payload = {"quantity": 50, "_auto_quantity_fill": True}
         result = build_procurement_escalation(payload, {}, "mais", "KG", "msg")
         assert result["transaction_payload"]["quantity"] is None
-        assert "_auto_quantity_fill" not in result["transaction_payload"]
+        assert clears(result["transaction_payload"], "_auto_quantity_fill")
 
     def test_working_memory_locks_the_goal_and_clears_stale_flags(self):
         from ladini.graphs.agents.market_coach.flows.buyer.procurement import build_procurement_escalation

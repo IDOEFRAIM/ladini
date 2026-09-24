@@ -62,6 +62,9 @@ def _build_proactive_hint(
     return f"Progression : {pct}% — encore {len(remaining)} infos nécessaires."
 
 
+_CARRY_FORWARD_KEYS = ("product", "unit", "zone_name")
+
+
 def _entity_carry_forward(
     state: Dict[str, Any],
     current_goal: Optional[str],
@@ -72,7 +75,7 @@ def _entity_carry_forward(
     stable = state.get("stable_entities") or {}
     entities = dict(state.get("extracted_entities") or {})
     carried = False
-    for key in ("product", "unit", "zone_name"):
+    for key in _CARRY_FORWARD_KEYS:
         if not entities.get(key) and stable.get(key):
             entities[key] = stable[key]
             carried = True
@@ -315,8 +318,15 @@ async def cognitive_guard(
 
     carried_entities = _entity_carry_forward(state, current_goal, in_tunnel)
     if carried_entities:
+        said = state.get("extracted_entities") or {}
         updates["extracted_entities"] = carried_entities
         decision["entity_carry_forward"] = True
+        # Clés HÉRITÉES (jamais dites dans CE message) : un consommateur qui doit distinguer
+        # « dit maintenant » de « hérité » (ex. une correction de draft, où l'unité de
+        # l'ancien produit serait fausse pour le nouveau) les exclut.
+        decision["carried_entities"] = [
+            k for k in _CARRY_FORWARD_KEYS if not said.get(k) and carried_entities.get(k)
+        ]
 
     # (2026-09-08, refonte responsabilités des nœuds d'entrée, mandat §7 —
     # "amélioration obligatoire") : cette interruption ne vérifiait AUCUNE

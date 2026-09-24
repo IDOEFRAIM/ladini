@@ -24,6 +24,11 @@ from ladini.graphs.agents.market_coach.core.state import resolve_current_goal
 logger = logging.getLogger("Ladini.Market.IntentRouter")
 
 
+#: Statuts de tour qui marquent la FIN d'une transaction (voir `nodes/cleaner.py`, qui
+#: purge l'état transactionnel sur ces mêmes statuts).
+_TERMINAL_TURN_STATUSES = frozenset({"COMPLETED", "FAILED", "ERROR"})
+
+
 async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str, Any]:
     """Routeur AG-UI agentic — détermine la stratégie de réponse en tenant
     compte de la décision cognitive, de la progression, et du contexte."""
@@ -116,6 +121,18 @@ async def response_strategy(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
         return {"response_strategy": "INTERRUPTION_HANDLER", "ag_ui_component": None}
 
     # Global explicit cancel/refusal should never be blocked by missing_fields.
+    # Un état métier TERMINAL posé ce tour par le flow (annulation, refus, création, échec)
+    # a priorité sur la stratégie conversationnelle : il ne redevient jamais une « attente
+    # utilisateur ». Avant, un REJECT réussi (status=COMPLETED) était réécrit en
+    # CLARIFICATION/WAITING_INPUT -> `state_cleaner` ne voyait jamais la fin du goal et le
+    # goal annulé ressuscitait au tour suivant (audit B2).
+    if interpreted_event == "REJECT" and status in _TERMINAL_TURN_STATUSES:
+        return {
+            "response_strategy": "ERROR" if status in {"FAILED", "ERROR"} else "SUCCESS",
+            "status": status,
+            "ag_ui_component": None,
+        }
+
     if interpreted_event == "REJECT":
         return {
             "response_strategy": "CLARIFICATION",

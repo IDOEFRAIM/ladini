@@ -142,7 +142,14 @@ class TestGenericRejectStillFullyResets:
 # du même fait métier — voir domain/procurement_draft.py, docstring).
 # =====================================================================
 
-class TestProcurementRejectPreservesTheDraft:
+class TestProcurementRejectIsTerminal:
+    """Politique Phase 2 (décision produit B/C, 2026-09-24) — REMPLACE l'ancien « rejet
+    doux » (`TestProcurementRejectPreservesTheDraft`), qui gardait le draft et le goal
+    verrouillés : le goal ressuscitait au tour suivant et « répondez *annuler* » (lui-même
+    classé REJECT) bouclait sur le même rejet doux.
+      - « non » nu à la confirmation -> la proposition est TERMINÉE (draft CANCELLED) ;
+      - « non » porteur de valeurs -> CORRECTION du même draft (version +1), jamais jetée."""
+
     def _draft_confirmation_state(self, **overrides):
         draft = ProcurementDraft.new(
             draft_id="d1", product="carottes", quantity=500, unit="KG", price=300
@@ -159,31 +166,32 @@ class TestProcurementRejectPreservesTheDraft:
         }
         return state, draft
 
-    def test_reject_does_not_clear_current_goal(self):
+    def test_a_bare_no_ends_the_proposal(self):
         state, _ = self._draft_confirmation_state()
         result = run(confirmation_gate(state, None))
-        assert "current_goal" not in result, "ne doit pas être touché — préservé via merge_dict"
-
-    def test_reject_preserves_every_draft_field_unchanged(self):
-        state, draft = self._draft_confirmation_state()
-        result = run(confirmation_gate(state, None))
-        preserved = ProcurementDraft.from_dict(result["procurement_draft"])
-        assert preserved.product == draft.product
-        assert preserved.quantity == draft.quantity
-        assert preserved.price == draft.price
-        assert preserved.version == draft.version, "un REJECT ne bump jamais la version"
-
-    def test_reject_clears_only_the_confirmation_target(self):
-        state, _ = self._draft_confirmation_state()
-        result = run(confirmation_gate(state, None))
+        assert result.get("procurement_draft") is None
+        assert result["current_goal"] is None
+        assert result["status"] == "COMPLETED"
         assert to_tunnel_category(get_pending_interaction(result)) == "NONE"
-        assert result["status"] == "PLANNING"
+        assert "annulée" in result["final_response"].lower()
 
-    def test_reject_invites_a_correction_in_the_message(self):
-        state, _ = self._draft_confirmation_state()
+    def test_a_no_carrying_values_is_a_correction_of_the_same_draft(self):
+        state, draft = self._draft_confirmation_state(extracted_entities={"quantity": 300})
         result = run(confirmation_gate(state, None))
-        assert "modifier" in result["final_response"]
-        assert "annuler" in result["final_response"]
+        corrected = ProcurementDraft.from_dict(result["procurement_draft"])
+        assert corrected.draft_id == draft.draft_id
+        assert corrected.quantity == 300 and corrected.product == draft.product
+        assert corrected.version == draft.version + 1
+        assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
+
+    def test_carried_forward_entities_never_turn_a_bare_no_into_a_correction(self):
+        state, _ = self._draft_confirmation_state(
+            extracted_entities={"product": "carottes"},
+            cognitive_decision={"carried_entities": ["product"]},
+        )
+        result = run(confirmation_gate(state, None))
+        assert result.get("procurement_draft") is None
+        assert result["status"] == "COMPLETED"
 
 
 # =====================================================================

@@ -33,6 +33,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     resolve_pending_interaction,
     set_pending_interaction,
 )
+from ladini.graphs.agents.market_coach.core.state import entities_said_this_turn
 from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
     SalesPublishDraft,
     SalesPublishResponsePlan,
@@ -71,7 +72,7 @@ async def resolve_sales_confirmation(
     (voir `bootstrap_sales_publish_draft` pour la création v1, hors de ce
     module, appelée par `nodes/confirmation_gate.py`)."""
     interpreted_event = str(state.get("interpreted_event") or "").upper()
-    extracted_entities = state.get("extracted_entities") or {}
+    extracted_entities = entities_said_this_turn(state)
     pending_target = _target_of(state.get("pending_interaction"))
 
     cached = state.get("sales_publish_draft") or {}

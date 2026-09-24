@@ -512,8 +512,11 @@ def resolve_domain_action(
     if event == "CONFIRM":
         return ConfirmPreorderDraft(target=ConfirmationTarget.from_dict(pending_target))
 
+    # Politique Phase 2 : « non » à une confirmation TERMINE la proposition (CANCELLED,
+    # jamais un « rejet doux » qui laissait le goal verrouillé et ressuscitait au tour
+    # suivant — et bouclait sur « répondez *annuler* », lui-même classé REJECT).
     if event == "REJECT":
-        return RejectPreorderConfirmation()
+        return CancelPreorderDraft()
 
     if event == "CANCEL":
         return CancelPreorderDraft()

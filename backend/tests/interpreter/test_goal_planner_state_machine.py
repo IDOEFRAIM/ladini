@@ -18,6 +18,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
 )
 from ladini.graphs.agents.market_coach.interpreter.goal_planner import goal_planner
 from tests.conftest import make_state, run
+from tests.harness.state import clears
 
 # La traduction `expected_input="PRODUCT"/"CONFIRMATION"/...` → écriture RÉELLE
 # de `pending_interaction` vit maintenant dans `make_state` elle-même (source
@@ -252,7 +253,7 @@ class TestRule1Reject:
         assert r["current_goal"] is None
         assert r["goal_status"] == "IDLE"
         assert r["response_strategy"] == "CLARIFICATION"
-        assert "active_goal" not in r["working_memory"] or r["working_memory"].get("active_goal") is None
+        assert clears(r["working_memory"], "active_goal")
 
     def test_reject_during_confirmation_is_left_to_confirmation_gate(self):
         """`confirmation_gate` gère le VRAI refus pendant CONFIRMATION — le

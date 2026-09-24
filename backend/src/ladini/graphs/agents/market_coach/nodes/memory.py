@@ -190,8 +190,9 @@ def _mirror_aliases(container: Dict[str, Any]) -> None:
         for alias in aliases:
             if slot_has_value(value):
                 container[alias] = value
-            else:
-                container.pop(alias, None)
+            elif alias in container:
+                # `pop` laissait l'ancien alias vivant dans le canal merge_dict.
+                container[alias] = None
 
 
 def _values_equal(a: Any, b: Any) -> bool:
@@ -274,7 +275,7 @@ async def memory_update(
     if _interpreted_event_upper != "SELECTION":
         for _transient in ("selection_index", "selected_value", "resolved_id"):
             if _transient not in extracted:
-                payload.pop(_transient, None)
+                payload[_transient] = None  # `pop` ne nettoyait rien (merge_dict)
 
     # Bug réel production (2026-09-24, lifecycle de clarification `ambiguous_groups`) : même
     # classe de fuite que ci-dessus, sur deux clés-LISTE du micro-prompt NEW_TASK
@@ -295,7 +296,7 @@ async def memory_update(
     # (parce que "poppée" localement) reste donc telle quelle dans l'ancienne valeur, jamais
     # effacée. Il faut l'assigner explicitement à `None` (une clé PRÉSENTE avec cette valeur EST
     # bien prise en compte par `merge_dict`) pour qu'elle disparaisse réellement du payload fusionné.
-    for _list_field in ("ambiguous_groups", "additional_items"):
+    for _list_field in ("ambiguous_groups", "additional_items", "correction_scope"):
         if not extracted.get(_list_field):
             payload[_list_field] = None
     onboarding_profile = dict(state.get("onboarding_profile") or {})
@@ -349,7 +350,7 @@ async def memory_update(
 
     def _cascade_clear(fields) -> None:
         for field in fields:
-            payload.pop(field, None)
+            payload[field] = None  # `pop` ne nettoyait rien (merge_dict)
 
     def _clean_upper(value: Any) -> Optional[str]:
         if not slot_has_value(value):
@@ -390,7 +391,7 @@ async def memory_update(
                 # Une vraie extraction efface le drapeau posé par le défaut
                 # non-confirmé de `validation.py::_apply_slot_defaults` —
                 # voir `unit_was_assumed`.
-                payload.pop("unit_was_assumed", None)
+                payload["unit_was_assumed"] = None
             return
         if _values_equal(current_value, value):
             return
@@ -405,17 +406,17 @@ async def memory_update(
         _record_correction(field, current_value, value)
         if field == "product":
             _cascade_clear(_PRODUCT_CASCADE_FIELDS)
-            stable.pop("product", None)
-            stable.pop("quantity", None)
-            stable.pop("price", None)
-            stable.pop("unit", None)
-            stable.pop("stock_id", None)
+            stable["product"] = None
+            stable["quantity"] = None
+            stable["price"] = None
+            stable["unit"] = None
+            stable["stock_id"] = None
             product_slot_changed = True
             clear_vendor_ctx = True
         elif field == "unit":
             _cascade_clear(_UNIT_CASCADE_FIELDS)
-            stable.pop("unit", None)
-            payload.pop("unit_was_assumed", None)
+            stable["unit"] = None
+            payload["unit_was_assumed"] = None
         payload[field] = value
 
     def _normalize_menu_text(value: str | None) -> str:
@@ -783,12 +784,12 @@ async def memory_update(
         # alimente `lookup_arg_value` (résolution d'arguments MCP) et le
         # récapitulatif de confirmation — un booléen de contrôle interne n'a
         # rien à y faire.
-        _force_clarification = bool(
-            payload.pop("slot_enrichment_force_clarification", False)
-        )
+        _force_clarification = bool(payload.get("slot_enrichment_force_clarification"))
+        payload["slot_enrichment_force_clarification"] = None
         # Même mésadresse, même correctif — `strategy.py:52` relit
         # `clarification_reasons` depuis la RACINE de l'état lui aussi.
-        _clarification_reasons = payload.pop("clarification_reasons", None)
+        _clarification_reasons = payload.get("clarification_reasons")
+        payload["clarification_reasons"] = None
 
     # --- AG-UI: free-text resolution of ListMenu labels ---
     user_free_text = (
@@ -932,8 +933,8 @@ async def memory_update(
             # `available_mapping_kind="pricing_tier"` and clear the stale
             # snapshot/mapping explicitly for exactly this reason).
             if mapping_kind not in ("product_vendor", "pricing_tier"):
-                payload.pop("selection_index", None)
-                payload.pop("selected_value", None)
+                payload["selection_index"] = None
+                payload["selected_value"] = None
 
     # --- Dérive quantity/price/unit depuis pricing_tiers si absents ---
     # (2026-08-30) : un producteur donnant plusieurs tarifs/conditionnements

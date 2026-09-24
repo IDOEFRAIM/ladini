@@ -21,6 +21,7 @@ un choix implicite sur une action destructrice)."""
 from __future__ import annotations
 
 from tests.conftest import StubRuntime, run
+from tests.harness.state import clears
 
 
 def rt(responses=None):
@@ -158,7 +159,7 @@ class TestResolveProductForUnpublish:
         assert result["status"] == "PLANNING"
         assert result["transaction_payload"]["product_id"] == "prod-2"
         # Les jetons de sélection ne doivent jamais fuir dans le payload exécuté.
-        assert "selection_index" not in result["transaction_payload"]
+        assert clears(result["transaction_payload"], "selection_index")
 
     def test_product_id_already_resolved_by_memory_update_is_used_directly(self):
         """Incident réel (2026-09-15) — voir le miroir

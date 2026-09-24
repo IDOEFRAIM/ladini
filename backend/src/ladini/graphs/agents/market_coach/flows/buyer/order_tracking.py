@@ -19,6 +19,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ladini.agents.reducers import mark_deleted
 from ladini.core.formatting import fmt_num as _fmt_num
 from ladini.domain.quantity_unit import parse_quantity_unit_from_text
 from ladini.graphs.agents.market_coach.core.goals import (
@@ -750,8 +751,7 @@ async def cancel_order(
     msg = result.get("message") or ""
 
     if status == "success":
-        cleaned_payload = {**payload}
-        cleaned_payload.pop("cancel_reason", None)
+        cleaned_payload = mark_deleted({**payload}, "cancel_reason")
         return {
             "status": "COMPLETED",
             "response_strategy": "SUCCESS",

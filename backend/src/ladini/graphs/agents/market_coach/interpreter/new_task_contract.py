@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -143,6 +143,10 @@ class NewTaskEntities(BaseModel):
     # `NewTaskAmbiguousGroup`, jamais dans `additional_items` (qui suppose une quantité PAR
     # produit déjà connue).
     ambiguous_groups: List[NewTaskAmbiguousGroup] = []
+    # Correction d'une demande en cours : portée PROPOSÉE par le LLM (« ALL » = tout
+    # remplacer, « ITEM » = un produit nommé). Validée par le domaine
+    # (`domain/recurring_need_draft.py::plan_correction`), jamais appliquée à l'aveugle.
+    correction_scope: Optional[Literal["ALL", "ITEM"]] = None
 
 
 class NewTaskInterpretation(BaseModel):

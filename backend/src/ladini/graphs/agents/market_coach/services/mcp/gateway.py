@@ -574,6 +574,8 @@ class RecurringSupplyGateway(_BaseGateway):
         ends_at: Any = None,
         max_price_per_unit: Any = None,
         idempotency_key: Any = None,
+        draft_id: Any = None,
+        draft_version: Any = None,
     ) -> Dict[str, Any]:
         return await self._call(
             "create_recurring_need",
@@ -588,6 +590,8 @@ class RecurringSupplyGateway(_BaseGateway):
             ends_at=ends_at,
             max_price_per_unit=max_price_per_unit,
             idempotency_key=idempotency_key,
+            draft_id=draft_id,
+            draft_version=draft_version,
         )
 
     async def create_recurring_needs(
@@ -601,6 +605,8 @@ class RecurringSupplyGateway(_BaseGateway):
         ends_at: Any = None,
         max_price_per_unit: Any = None,
         idempotency_key: Any = None,
+        draft_id: Any = None,
+        draft_version: Any = None,
     ) -> Dict[str, Any]:
         """Variante plurielle (chantier multi-produits, 2026-09-23) — `items` est une liste de
         `{"product_query", "quantity", "unit"}`, tous créés dans UNE SEULE transaction côté service
@@ -616,6 +622,8 @@ class RecurringSupplyGateway(_BaseGateway):
             ends_at=ends_at,
             max_price_per_unit=max_price_per_unit,
             idempotency_key=idempotency_key,
+            draft_id=draft_id,
+            draft_version=draft_version,
         )
 
     async def update_recurring_need(

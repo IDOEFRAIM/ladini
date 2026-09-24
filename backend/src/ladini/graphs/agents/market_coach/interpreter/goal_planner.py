@@ -10,9 +10,11 @@ import logging
 import re as _re
 from typing import Any, Dict, Optional
 
+from ladini.agents.reducers import mark_deleted
 from ladini.graphs.agents.market_coach.core.conversation_decision import (
     ConversationAction,
 )
+from ladini.graphs.agents.market_coach.core.draft_registry import draft_reset_patch
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     DISAMBIGUATION_MENU_GOAL_SHIM,
     InteractionKind,
@@ -277,9 +279,11 @@ async def goal_planner(
         l'état de menu/sélection (univers de clés partagé avec nodes/cleanup.py,
         source unique — cf. `_GOAL_LOCK_CLEAR_KEYS`), pour ne pas laisser un
         menu périmé actif après l'abandon de l'intention en cours."""
+        # `merge_dict` ignore une clé ABSENTE : retirer la clé (`pop`) laissait
+        # `active_goal` intact et ressuscitait le goal rejeté au tour suivant
+        # (audit B1). DELETE efface réellement.
         wm = dict(working)
-        for k in _GOAL_LOCK_CLEAR_KEYS:
-            wm.pop(k, None)
+        mark_deleted(wm, *_GOAL_LOCK_CLEAR_KEYS)
         return wm
 
     def _purge_transaction_state() -> Dict[str, Any]:
@@ -337,9 +341,7 @@ async def goal_planner(
             # de correspondance) — les trois sont donc purgés symétriquement
             # ici, au même titre que `draft_payload`/`vendor_selection_context`
             # ci-dessus, sur tout VRAI changement de goal.
-            "procurement_draft": None,
-            "preorder_draft": None,
-            "sales_publish_draft": None,
+            **draft_reset_patch(),  # les 4 drafts déclarés dans core/draft_registry.py
             # (2026-09-02) Politique d'invalidation centralisée (mandat §8) :
             # un switch de goal/intention efface aussi le discriminant
             # canonique — sans ceci, un `pending_interaction` persisté
@@ -579,7 +581,15 @@ async def goal_planner(
         updates["working_memory"] = _lock(current_goal)
         return _with_goal_metadata(updates)
 
-    if is_short and current_goal:
+    # (Phase 2 hardening, bug B3) : `event == "INTERRUPTION"` ne peut arriver ici QUE
+    # réécrit par `cognitive_guard` — SEUL propriétaire de la décision d'interruption
+    # (voir la docstring de `cognitive_guard`) — quand il a explicitement APPROUVÉ
+    # l'interruption. Cette heuristique (longueur du message, ni plus ni moins) doit
+    # toujours s'effacer devant une décision déjà prise en amont : avant ce correctif,
+    # un message court ("maïs", "riz", "prix") ré-verrouillait ICI l'ANCIEN goal sans
+    # même regarder `event`, annulant silencieusement une interruption pourtant déjà
+    # approuvée — RULE 4 (juste en dessous) n'était alors jamais atteinte.
+    if is_short and current_goal and event != "INTERRUPTION":
         updates["current_goal"] = current_goal
         updates["detected_intent"] = str(current_goal).upper()
         updates["goal_status"] = (

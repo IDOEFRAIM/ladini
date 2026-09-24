@@ -15,6 +15,7 @@ import logging
 import re as _re
 from typing import Any, Callable, Dict, List, Optional
 
+from ladini.agents.reducers import mark_deleted
 from ladini.core.formatting import fmt_num as _fmt_num
 from ladini.domain.quantity_unit import (
     extract_deterministic_pricing_tiers,
@@ -289,7 +290,7 @@ async def _resolve_default_farm(
         if farm_id:
             new_payload = dict(payload)
             new_payload["farm_id"] = str(farm_id)
-            new_payload.pop("selection_index", None)
+            mark_deleted(new_payload, "selection_index")
             return {
                 "status": "PLANNING",
                 "transaction_payload": new_payload,
@@ -454,8 +455,7 @@ async def _resolve_order_for_delivery_payment(
         order_id = chosen.get("order_id")
         new_payload = dict(payload)
         new_payload["order_id"] = str(order_id)
-        new_payload.pop("selection_index", None)
-        new_payload.pop("selected_value", None)
+        mark_deleted(new_payload, "selection_index", "selected_value")
         return {
             "status": "PLANNING",
             "transaction_payload": new_payload,
@@ -673,8 +673,7 @@ async def _resolve_order_for_cancellation(
     if chosen:
         new_payload = dict(payload)
         new_payload["order_id"] = str(chosen.get("order_id"))
-        new_payload.pop("selection_index", None)
-        new_payload.pop("selected_value", None)
+        mark_deleted(new_payload, "selection_index", "selected_value")
         return {
             "status": "PLANNING",
             "transaction_payload": new_payload,
@@ -769,8 +768,7 @@ async def _resolve_order_for_confirmation(
     if chosen:
         new_payload = dict(payload)
         new_payload["order_id"] = str(chosen.get("order_id"))
-        new_payload.pop("selection_index", None)
-        new_payload.pop("selected_value", None)
+        mark_deleted(new_payload, "selection_index", "selected_value")
         return {
             "status": "PLANNING",
             "transaction_payload": new_payload,
@@ -1116,8 +1114,7 @@ async def _resolve_product_for_unpublish(
             }
         new_payload = dict(payload)
         new_payload["product_id"] = str(product_id)
-        new_payload.pop("selection_index", None)
-        new_payload.pop("selected_value", None)
+        mark_deleted(new_payload, "selection_index", "selected_value")
         return {
             "status": "PLANNING",
             "transaction_payload": new_payload,

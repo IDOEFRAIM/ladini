@@ -136,6 +136,12 @@ _FIELDS: Tuple[FieldSpec, ...] = (
     # (2026-09-08, P0-1 audit architectural) — même raison que
     # procurement_draft/preorder_draft. Voir core/state.py pour l'incident.
     FieldSpec("sales_publish_draft", FieldLifecycle.DURABLE),
+    # (Phase 2 hardening, P1) : `recurring_need_draft` — voir `core/draft_registry.py`.
+    # Manquait ici pendant plusieurs mois (audit 2026-09-24) : sans cette déclaration, le
+    # shrink Tier-3 du checkpointer pouvait le supprimer silencieusement sous pression de
+    # taille, perdant une transaction en cours sans message d'erreur. `test_draft_registry_
+    # completeness.py` interdit désormais qu'un draft déclaré dans le registre manque ici.
+    FieldSpec("recurring_need_draft", FieldLifecycle.DURABLE),
     # (2026-09-08, P1-4 audit architectural) : DURABLE — doit survivre au
     # tour SUIVANT pour empêcher une seconde tentative de création tant que
     # le même goal farm-critique n'est pas résolu. Nettoyé explicitement au

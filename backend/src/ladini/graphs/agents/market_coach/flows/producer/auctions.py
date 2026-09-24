@@ -29,6 +29,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from ladini.agents.reducers import mark_deleted
 from ladini.core.formatting import fmt_num as _fmt_num
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
@@ -714,9 +715,8 @@ async def ask_modify_price(
 
     payload = dict(state.get("transaction_payload") or {})
     payload["bid_id"] = str(bid_id)
-    payload.pop("selection_index", None)
-    payload.pop("selected_value", None)
-    payload.pop("price", None)
+    # Le prix actuel doit vraiment disparaître pour être redemandé.
+    mark_deleted(payload, "selection_index", "selected_value", "price")
 
     wm = _bid_wm(
         state,

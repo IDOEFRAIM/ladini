@@ -2897,7 +2897,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
                     validation_status,
                     remapped_entities.get("unit"),
                 )
-                remapped_entities.pop("unit", None)
+                remapped_entities["unit"] = None
             elif remapped_entities.get("unit"):
                 # Message sans unité, mais le LLM en renvoie une en se déclarant
                 # VALID : il n'a aucun appui textuel — c'est une supposition
@@ -2908,7 +2908,7 @@ def make_input_interpreter(role: str = "PRODUCER"):
                     "[Interpreter] Unité LLM '%s' sans appui dans le texte — écartée (filet anti-ancrage).",
                     remapped_entities.get("unit"),
                 )
-                remapped_entities.pop("unit", None)
+                remapped_entities["unit"] = None
 
         # ── QUANTITÉ COMPOSÉE (incident réel 2026-09-03) : « 2 tonnes et
         # 250 kg » — le LLM a renvoyé quantity=2/unit=TONNE, silencieusement

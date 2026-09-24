@@ -43,6 +43,7 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     resolve_pending_interaction,
     set_pending_interaction,
 )
+from ladini.graphs.agents.market_coach.core.state import entities_said_this_turn
 from ladini.graphs.agents.market_coach.domain.procurement_draft import (
     ProcurementDraft,
     ProcurementOutcome,
@@ -93,7 +94,7 @@ async def resolve_procurement_confirmation(
     TRAVAIL, rafraîchie à la fin de CE tour avec ce que la DB a réellement
     accepté — jamais l'inverse."""
     interpreted_event = str(state.get("interpreted_event") or "").upper()
-    extracted_entities = state.get("extracted_entities") or {}
+    extracted_entities = entities_said_this_turn(state)
     pending_target = _target_of(state.get("pending_interaction"))
 
     cached = state.get("procurement_draft") or {}

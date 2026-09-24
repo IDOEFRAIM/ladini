@@ -12,6 +12,7 @@ déjà confirmée n'a plus de raison d'être reconfirmée."""
 from __future__ import annotations
 
 from tests.conftest import StubRuntime, run
+from tests.harness.state import clears
 
 
 def rt(responses=None):
@@ -91,7 +92,7 @@ class TestResolveOrderForConfirmation:
         )
         result = run(_resolver()(runtime, "+22670000001", {"selection_index": 2}))
         assert result["transaction_payload"]["order_id"] == "ord-2"
-        assert "selection_index" not in result["transaction_payload"]
+        assert clears(result["transaction_payload"], "selection_index")
 
     def test_order_id_already_resolved_by_memory_update_is_used_directly(self):
         """Incident réel (2026-09-15) — voir le miroir

@@ -384,8 +384,13 @@ def resolve_domain_action(
     if event == "CONFIRM":
         return ConfirmProcurementDraft(target=ConfirmationTarget.from_dict(pending_target))
 
+    # Politique Phase 2 : « non » à une confirmation TERMINE la proposition (CANCELLED,
+    # jamais un « rejet doux » qui laissait le goal verrouillé et ressuscitait au tour
+    # suivant — et bouclait sur « répondez *annuler* », lui-même classé REJECT). Un refus
+    # PORTEUR de valeurs (« non, plutôt 300 kg ») est une CORRECTION, jamais jetée.
     if event == "REJECT":
-        return RejectProcurementConfirmation()
+        fields = {k: v for k, v in (extracted_entities or {}).items() if k in _FIELD_NAMES and slot_has_value(v)}
+        return UpdateProcurementDraft(fields=fields) if fields else CancelProcurementDraft()
 
     if event in {"UPDATE", "ANSWER"}:
         fields = {
@@ -779,7 +784,7 @@ def build_response_plan(
     if kind == ProcurementOutcomeKind.CANCELLED:
         return ProcurementResponsePlan(
             final_response="Opération annulée. Que souhaitez-vous faire ?",
-            response_strategy="CLARIFICATION",
+            response_strategy="SUCCESS",
             graph_status="COMPLETED",
             draft=None,
             terminal_goal_reset=True,

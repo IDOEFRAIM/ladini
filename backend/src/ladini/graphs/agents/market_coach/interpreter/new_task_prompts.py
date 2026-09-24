@@ -117,6 +117,8 @@ quantité+unité, en objets {"product","quantity","unit"} — jamais \
 produits SANS répartition claire ("57 moutons chèvres") → jamais fusionné \
 en un produit, jamais réparti — objet {"quantity","unit","candidates":[...]} \
 dans `ambiguous_groups`, jamais dans `product`/`additional_items`.
+- `correction_scope` : "ALL" si l'utilisateur dit de tout remplacer, "ITEM" s'il \
+vise un produit précis, sinon null.
 
 EXEMPLE (quantité en groupes de conditionnements + prix de référence + \
 tarifs par conditionnement, combinés dans le MÊME message) :
@@ -144,7 +146,8 @@ Réponds strictement avec cet objet JSON, sans aucun autre texte :
 "excluded_weekdays": [<1-7>, ...], "max_price_per_unit": <float|null>, \
 "additional_items": [{"product": "<str|null>", "quantity": <float|null>, \
 "unit": "<str|null>"}, ...], "ambiguous_groups": [{"quantity": <float|null>, \
-"unit": "<str|null>", "candidates": ["<str>", ...]}, ...]}}
+"unit": "<str|null>", "candidates": ["<str>", ...]}, ...], \
+"correction_scope": "ALL|ITEM|null"}}
 """
 
 

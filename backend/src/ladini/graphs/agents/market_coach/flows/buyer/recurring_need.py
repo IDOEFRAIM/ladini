@@ -21,6 +21,7 @@ import time
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
+from ladini.core.idempotency import release
 from ladini.domain.quantity_unit import default_unit_for_product
 from ladini.domain.recurring_supply.ambiguous_group import (
     AmbiguousResolutionKind,
@@ -32,15 +33,22 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     clear_pending_interaction,
     set_pending_interaction,
 )
+from ladini.graphs.agents.market_coach.core.state import entities_said_this_turn
 from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
     CancelRecurringNeedDraft,
     ConfirmRecurringNeedDraft,
     RecurringNeedDraft,
+    RecurringNeedDraftStatus,
     RecurringNeedExecutionResult,
+    RecurringNeedOutcome,
+    RecurringNeedOutcomeKind,
     UpdateRecurringNeedDraft,
     apply_domain_action,
     build_response_plan,
+    confirm_claim_key,
+    execution_key,
     finalize_after_execution,
+    plan_correction,
     resolve_domain_action,
 )
 from ladini.graphs.agents.market_coach.services.mcp.gateway import (
@@ -48,6 +56,8 @@ from ladini.graphs.agents.market_coach.services.mcp.gateway import (
     RecurringSupplyGateway,
 )
 from ladini.graphs.agents.market_coach.utils import MarketRuntime, slot_has_value
+from ladini.services.database import recurring_need_draft_store
+from ladini.services.database.draft_store_support import cas_finalize
 
 logger = logging.getLogger("Ladini.Market.RecurringNeed")
 
@@ -190,7 +200,9 @@ def _ambiguous_quantity_clarification(
     }
 
 
-def _resolve_ambiguous_group_reply(state: Dict[str, Any], pending: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+async def _resolve_ambiguous_group_reply(
+    state: Dict[str, Any], pending: Dict[str, Any], conversation_id: str
+) -> Optional[Dict[str, Any]]:
     """Traite un tour où `PendingInteraction` attend une résolution `ambiguous_quantity` (mandat
     §1-§10). Retourne un patch state si CE message concerne la clarification (résolu, invalide,
     ou abandon explicite) ; `None` si le message n'y répond manifestement pas — l'appelant le
@@ -210,6 +222,7 @@ def _resolve_ambiguous_group_reply(state: Dict[str, Any], pending: Dict[str, Any
     if _is_bare_abandon(text):
         if draft is not None and draft.status.value == "DRAFT":
             cancelled = apply_domain_action(draft, CancelRecurringNeedDraft()).draft
+            await _persist(draft, cancelled, conversation_id)
         else:
             cancelled = None
         return {
@@ -255,6 +268,7 @@ def _resolve_ambiguous_group_reply(state: Dict[str, Any], pending: Dict[str, Any
     ]
     action = UpdateRecurringNeedDraft(fields={"additional_items": existing_items + new_items})
     outcome = apply_domain_action(draft, action)
+    await _persist(draft, outcome.draft, conversation_id)
     plan = build_response_plan(outcome)
     return _apply_response_plan(plan)
 
@@ -278,24 +292,19 @@ async def recurring_need_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) 
 
 async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
     phone = state.get("user_phone")
+    conversation_id = str(phone or state.get("session_id") or "")
     payload: Dict[str, Any] = state.get("transaction_payload") or {}
     interpreted_event = str(state.get("interpreted_event") or "").upper().strip()
     pending = state.get("pending_interaction") or {}
     pending_target = pending.get("target") if isinstance(pending, dict) else None
 
-    # Lifecycle de clarification `ambiguous_groups` (mandat 2026-09-24) : une réponse à la
-    # question "TOTAL ou DE CHAQUE ?" arrive TOUJOURS via la route NEW_TASK (voir le commentaire
-    # de `_resolve_ambiguous_group_reply`) — vérifiée en PREMIER, avant tout le reste, pour ne
-    # jamais laisser "50 moutons et 7 chèvres" être (mal)classée comme une tâche indépendante.
-    # `None` = ce message ne répond pas à la clarification (tâche autonome distincte, mandat §8) :
-    # on continue alors normalement ci-dessous, exactement comme si aucune clarification n'était
-    # en attente — le `pending_interaction` périmé sera remplacé par celui que produit CE tour.
+    # Réponse à une clarification "quantité ambiguë" en attente (mandat §1-§10).
     if (
         isinstance(pending, dict)
         and pending.get("kind") == "ENTER_FIELD"
         and pending.get("field") == "ambiguous_quantity"
     ):
-        resolution_patch = _resolve_ambiguous_group_reply(state, pending)
+        resolution_patch = await _resolve_ambiguous_group_reply(state, pending, conversation_id)
         if resolution_patch is not None:
             return resolution_patch
 
@@ -307,117 +316,250 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
             extracted["additional_items"] = cleaned_items
         else:
             extracted.pop("additional_items")
+
+    said = _said_this_turn(state)
+    if draft is not None and draft.status == RecurringNeedDraftStatus.DRAFT and _pending_targets(pending, draft):
+        if _is_correction(interpreted_event, said):
+            return await _correct(draft, said, state, conversation_id)
+
     if interpreted_event in ("NEW_TASK", "INTERRUPTION"):
-        # Nouvelle demande (`interpreter/state_router.py::choose_interpretation_route`
-        # ne renvoie la route NEW_TASK que SANS tunnel/champ/confirmation actif
-        # pour ce goal) : un draft éventuellement encore présent dans le state —
-        # terminé (EXECUTED/FAILED/CANCELLED) OU simplement abandonné en cours de
-        # route — n'a plus rien à voir avec CE message. Jamais réutilisé pour une
-        # nouvelle demande (mandat state-leak §7/§9, bug réel 2026-09-23 : "20 kg
-        # d'oignon" ré-affichait le récapitulatif tomate au lieu d'un nouveau
-        # draft). `resolve_domain_action` ne connaît de toute façon pas l'événement
-        # "NEW_TASK" (seulement CONFIRM/REJECT/UPDATE/ANSWER) — sans ce repli, un
-        # NEW_TASK tombait sur `NoRecurringNeedAction`, jamais un nouveau draft.
-        #
-        # "INTERRUPTION" (2026-09-24, bug réel production — "14 coq et 57 moutons
-        # chèvres chaque semaine" retombait sur le catalogue) : quand un AUTRE
-        # tunnel est encore actif (ex: BUYER_REQUEST coincé en attente "oui/non"
-        # pour un vieil appel d'offres jamais répondu), `cognitive_guard`
-        # (`nodes/cognitive.py`, RÈGLE d'interruption) rebaptise l'événement
-        # "INTERRUPTION" — jamais "NEW_TASK" — quand il approuve le passage à une
-        # intention concurrente à confiance suffisante. Sémantiquement IDENTIQUE à
-        # NEW_TASK du point de vue de CE draft (une demande fraîche vient de
-        # déloger un tunnel sans rapport) ; sans ce repli, `resolve_domain_action`
-        # ne reconnaît pas non plus "INTERRUPTION" et retombait sur
-        # `NoRecurringNeedAction` — le message correctement classé
-        # CREATE_RECURRING_NEED n'aboutissait alors à AUCUN draft, AUCUNE réponse.
+        if draft is not None and draft.status == RecurringNeedDraftStatus.DRAFT:
+            # Nouvelle demande autonome : l'ancien draft éditable est CLOS durablement
+            # (jamais laissé orphelin en DRAFT dans la table).
+            await _persist(draft, apply_domain_action(draft, CancelRecurringNeedDraft()).draft, conversation_id)
         draft = None
         domain_event = "UPDATE" if extracted else "ANSWER"
     else:
         domain_event = interpreted_event or ("UPDATE" if extracted else "ANSWER")
+
     action = resolve_domain_action(
         interpreted_event=domain_event,
-        extracted_entities=extracted,
+        # Un refus ne se juge que sur ce qui est dit MAINTENANT : le payload accumulé
+        # (produit/quantité des tours précédents) ferait passer un simple « non » pour
+        # une correction porteuse de valeurs.
+        extracted_entities=said if domain_event == "REJECT" else extracted,
         pending_target=pending_target,
     )
-    outcome = apply_domain_action(draft, action)
 
-    # Vérifiée APRÈS la mise à jour du draft (pas avant, contrairement à l'ancienne version) :
-    # le produit principal/quantité/récurrence de CE message sont déjà fusionnés dans
-    # `outcome.draft` au moment où on bloque la confirmation prématurée — sans ça, le tour de
-    # résolution suivant (`_resolve_ambiguous_group_reply`) ne retrouvait plus jamais le produit
-    # principal (mandat §10 "reprise du draft"), puisque `transaction_payload` est purgé
-    # inconditionnellement par `goal_planner` RÈGLE 5 dès qu'un `NEW_TASK` est reclassé — ce
-    # draft (canal `replace_value`, jamais purgé) est le SEUL état qui survit fiablement au tour
-    # suivant.
+    if isinstance(action, ConfirmRecurringNeedDraft) and draft is not None:
+        # PostgreSQL est l'AUTORITÉ au moment de confirmer : l'état LangGraph n'est qu'une
+        # projection (il peut être en retard d'un tour si un tour précédent a été perdu
+        # après un COMMIT métier).
+        authoritative = await recurring_need_draft_store.load(draft.draft_id)
+        if authoritative is not None:
+            draft = authoritative
+        return await _confirm(draft, action, state, mc_runtime, conversation_id)
+
+    outcome = apply_domain_action(draft, action)
+    await _persist(draft, outcome.draft, conversation_id)
     if isinstance(action, UpdateRecurringNeedDraft):
         ambiguous_response = _ambiguous_quantity_clarification(payload, outcome.draft)
         if ambiguous_response is not None:
             return ambiguous_response
+    return _apply_response_plan(build_response_plan(outcome))
 
-    if isinstance(action, ConfirmRecurringNeedDraft) and outcome.draft is not None and outcome.draft.status.value == "EXECUTING":
-        # DRAFT -> CONFIRMED -> EXECUTING déjà persisté en mémoire de tour (CAS) — appel MCP réel.
-        executing = outcome.draft
-        try:
-            gw = RecurringSupplyGateway(mc_runtime)
-            if executing.additional_items:
-                # Chantier multi-produits (2026-09-23) : un SEUL besoin récurrent ne suffit
-                # plus — `create_recurring_needs` (pluriel) crée TOUS les produits de cette
-                # demande dans UNE SEULE transaction côté service (rollback complet si l'un
-                # d'eux échoue, ex: résolution catalogue impossible pour l'un des produits —
-                # jamais une création partielle silencieuse).
-                items = [
-                    {"product_query": executing.product, "quantity": executing.quantity, "unit": executing.unit}
-                ] + [
-                    {"product_query": it.get("product"), "quantity": it.get("quantity"), "unit": it.get("unit")}
-                    for it in executing.additional_items
-                ]
-                mcp_result = await gw.create_recurring_needs(
-                    phone=str(phone),
-                    items=items,
-                    recurrence_type=executing.recurrence_type,
-                    weekly_days=executing.weekly_days,
-                    excluded_weekdays=executing.excluded_weekdays,
-                    starts_at=executing.starts_at,
-                    ends_at=executing.ends_at,
-                    max_price_per_unit=executing.max_price_per_unit,
-                    idempotency_key=f"recurring_need:{executing.draft_id}:{executing.version}",
-                )
-                created_ids = ",".join(str(it.get("recurring_need_id")) for it in mcp_result.get("items") or [])
-                exec_result = RecurringNeedExecutionResult(success=True, external_id=created_ids or None)
-            else:
-                mcp_result = await gw.create_recurring_need(
-                    phone=str(phone),
-                    product_query=executing.product,
-                    quantity=executing.quantity,
-                    unit=executing.unit,
-                    recurrence_type=executing.recurrence_type,
-                    weekly_days=executing.weekly_days,
-                    excluded_weekdays=executing.excluded_weekdays,
-                    starts_at=executing.starts_at,
-                    ends_at=executing.ends_at,
-                    max_price_per_unit=executing.max_price_per_unit,
-                    idempotency_key=f"recurring_need:{executing.draft_id}:{executing.version}",
-                )
-                exec_result = RecurringNeedExecutionResult(success=True, external_id=mcp_result.get("recurring_need_id"))
-        except MCPCallError as exc:
-            logger.warning("recurring_need.create_failed | draft=%s | %s", executing.draft_id, exc)
-            exec_result = RecurringNeedExecutionResult(success=False, error=str(exc))
-        finalized = finalize_after_execution(executing, exec_result)
-        from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
-            RecurringNeedOutcome,
-            RecurringNeedOutcomeKind,
+
+def _said_this_turn(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Champs du draft DITS dans CE message : `extracted_entities` du tour, moins les clés
+    héritées par `cognitive_guard` (`cognitive_decision.carried_entities`). Jamais
+    `transaction_payload`, qui accumule les tours précédents (fréquence, ancienne unité...)."""
+    entities = entities_said_this_turn(state)
+    said = {k: v for k, v in entities.items() if k in _DRAFT_FIELDS and slot_has_value(v)}
+    if "additional_items" in said:
+        cleaned = _clean_additional_items(said["additional_items"])
+        if cleaned:
+            said["additional_items"] = cleaned
+        else:
+            said.pop("additional_items")
+    return said
+
+
+def _pending_targets(pending: Any, draft: RecurringNeedDraft) -> bool:
+    """La question en attente porte-t-elle sur CE draft ?"""
+    if not isinstance(pending, dict):
+        return False
+    pending_dict: Dict[str, Any] = pending
+    raw_target = pending_dict.get("target")
+    target: Dict[str, Any] = raw_target if isinstance(raw_target, dict) else {}
+    if pending_dict.get("kind") == "CONFIRM_ACTION":
+        return bool(target.get("draft_id") == draft.draft_id)
+    return pending_dict.get("kind") == "ENTER_FIELD" and pending_dict.get("goal") == "CREATE_RECURRING_NEED"
+
+
+def _is_correction(interpreted_event: str, said: Dict[str, Any]) -> bool:
+    """Politique Phase 2 (C) — décision déterministe sur la STRUCTURE du message :
+      - REJECT porteur de valeurs (« non, plutôt 23 bœufs ») -> correction ;
+      - même intention reformulée SANS sa propre fréquence -> correction du draft en cours
+        (une nouvelle demande autonome redit sa fréquence : « je veux 30 poulets chaque
+        semaine » reste une nouvelle demande, voir test F)."""
+    if not said:
+        return False
+    if interpreted_event == "REJECT":
+        return True
+    return interpreted_event in ("NEW_TASK", "INTERRUPTION") and not said.get("recurrence_type")
+
+
+async def _correct(
+    draft: RecurringNeedDraft, said: Dict[str, Any], state: Dict[str, Any], conversation_id: str
+) -> Dict[str, Any]:
+    scope = (state.get("extracted_entities") or {}).get("correction_scope")
+    action = plan_correction(draft, said, scope=scope)
+    outcome = apply_domain_action(draft, action)
+    await _persist(draft, outcome.draft, conversation_id)
+    patch = _apply_response_plan(build_response_plan(outcome))
+    if outcome.kind == RecurringNeedOutcomeKind.NEEDS_CORRECTION_SCOPE:
+        # La correction proposée est conservée dans la question (jamais jetée) : la réponse
+        # ne fera que désigner sa portée.
+        patch.update(
+            set_pending_interaction(
+                InteractionKind.ENTER_FIELD,
+                goal="CREATE_RECURRING_NEED",
+                field_name="correction_scope",
+                candidates=tuple(getattr(action, "candidates", ()) or ()),
+                target={"draft_id": draft.draft_id, "fields": said},
+            )
         )
+    return patch
 
-        kind = (
-            RecurringNeedOutcomeKind.RECURRING_NEED_CREATED
-            if exec_result.success
-            else RecurringNeedOutcomeKind.RECURRING_NEED_FAILED
+
+async def _persist(
+    before: Optional[RecurringNeedDraft], after: Optional[RecurringNeedDraft], conversation_id: str
+) -> bool:
+    """Persiste la transition `before -> after` (INSERT d'un nouveau draft, CAS sinon).
+    `True` si l'état `after` est durable. Un échec n'est BLOQUANT que pour le passage en
+    exécution (voir `_confirm`) ; pour une simple édition, le tour continue (mode dégradé,
+    journalisé par le store)."""
+    if after is None or after is before:
+        return True
+    if before is None or before.draft_id != after.draft_id:
+        return bool(await recurring_need_draft_store.insert(after, conversation_id=conversation_id))
+    if before.version == after.version:
+        return True
+    swapped = await recurring_need_draft_store.compare_and_swap(
+        after.draft_id, expected_version=before.version, new_draft=after
+    )
+    if swapped:
+        return True
+    if await recurring_need_draft_store.load(after.draft_id) is None:
+        # Draft né avant la persistance (ou insertion initiale perdue) : on l'enregistre.
+        return bool(await recurring_need_draft_store.insert(after, conversation_id=conversation_id))
+    return False
+
+
+async def _confirm(
+    draft: RecurringNeedDraft,
+    action: ConfirmRecurringNeedDraft,
+    state: Dict[str, Any],
+    mc_runtime: MarketRuntime,
+    conversation_id: str,
+) -> Dict[str, Any]:
+    outcome = apply_domain_action(draft, action)
+    if outcome.kind == RecurringNeedOutcomeKind.CONFIRMED_READY_FOR_EXECUTION:
+        # EXECUTING est durable AVANT tout appel MCP : sans registre durable, aucune
+        # exécution (la garde PostgreSQL de `recurring_supply.py` l'exige de toute façon).
+        if not await _persist(draft, outcome.draft, conversation_id):
+            current = await recurring_need_draft_store.load(draft.draft_id)
+            if current is not None and current.is_in_doubt():
+                return await _execute(current, state, mc_runtime)  # une autre confirmation a gagné
+            if current is not None and current.status == RecurringNeedDraftStatus.EXECUTED:
+                return _apply_response_plan(
+                    build_response_plan(
+                        RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.ALREADY_EXECUTED, draft=current)
+                    )
+                )
+            release(confirm_claim_key(draft))  # sinon chaque « oui » suivant répondrait « en cours »
+            logger.error("recurring_need.executing_not_durable | draft=%s", draft.draft_id)
+            return {
+                "final_response": (
+                    "Un incident technique m'empêche d'enregistrer votre confirmation pour le moment. "
+                    "Répondez *oui* dans un instant pour réessayer."
+                ),
+                "response_strategy": "CONFIRMATION",
+                "status": "WAITING_INPUT",
+                "recurring_need_draft": draft.to_dict(),
+            }
+        return await _execute(outcome.draft, state, mc_runtime)
+    if outcome.kind == RecurringNeedOutcomeKind.RESUME_EXECUTION:
+        return await _execute(outcome.draft, state, mc_runtime)
+    return _apply_response_plan(build_response_plan(outcome))
+
+
+def _is_business_failure(result: Any) -> bool:
+    """Réponse MCP `{"status": "error"}` : le service a levé AVANT commit (transaction
+    annulée) — échec DÉFINITIF, jamais un succès (bug réel : la réponse était lue comme
+    un succès et l'utilisateur recevait « C'est noté ! » sans rien en base)."""
+    return not isinstance(result, dict) or str(result.get("status") or "").lower() in {"error", "failed", "failure"}
+
+
+def _created_ids(result: Dict[str, Any]) -> Optional[str]:
+    if result.get("items"):
+        return ",".join(str(it.get("recurring_need_id")) for it in result.get("items") or []) or None
+    return result.get("recurring_need_id")
+
+
+async def _execute(
+    executing: RecurringNeedDraft, state: Dict[str, Any], mc_runtime: MarketRuntime
+) -> Dict[str, Any]:
+    """Exécute (ou reprend) LA confirmation `(draft_id, execution_version)`. Idempotent :
+    la garde PostgreSQL rejoue le résultat si cette confirmation a déjà abouti."""
+    phone = state.get("user_phone")
+    gw = RecurringSupplyGateway(mc_runtime)
+    common = {
+        "phone": str(phone),
+        "recurrence_type": executing.recurrence_type,
+        "weekly_days": executing.weekly_days,
+        "excluded_weekdays": executing.excluded_weekdays,
+        "starts_at": executing.starts_at,
+        "ends_at": executing.ends_at,
+        "max_price_per_unit": executing.max_price_per_unit,
+        "idempotency_key": execution_key(executing),
+        "draft_id": executing.draft_id,
+        "draft_version": executing.execution_version,
+    }
+    try:
+        if executing.additional_items:
+            items = [{"product_query": executing.product, "quantity": executing.quantity, "unit": executing.unit}] + [
+                {"product_query": it.get("product"), "quantity": it.get("quantity"), "unit": it.get("unit")}
+                for it in executing.additional_items
+            ]
+            mcp_result = await gw.create_recurring_needs(items=items, **common)
+        else:
+            mcp_result = await gw.create_recurring_need(
+                product_query=executing.product, quantity=executing.quantity, unit=executing.unit, **common
+            )
+    except Exception as exc:  # transport/timeout : l'issue côté base est INCONNUE
+        logger.warning("recurring_need.execution_ambiguous | draft=%s | %s", executing.draft_id, exc)
+        return await _settle(executing, RecurringNeedExecutionResult(success=False, ambiguous=True, error=str(exc)))
+
+    if _is_business_failure(mcp_result):
+        logger.warning(
+            "recurring_need.create_failed | draft=%s | %s", executing.draft_id, (mcp_result or {}).get("message")
         )
-        outcome = RecurringNeedOutcome(kind=kind, draft=finalized)
+        return await _settle(
+            executing, RecurringNeedExecutionResult(success=False, error=str((mcp_result or {}).get("message") or ""))
+        )
+    return await _settle(executing, RecurringNeedExecutionResult(success=True, external_id=_created_ids(mcp_result)))
 
-    plan = build_response_plan(outcome)
-    return _apply_response_plan(plan)
+
+async def _settle(executing: RecurringNeedDraft, result: RecurringNeedExecutionResult) -> Dict[str, Any]:
+    """Enregistre l'issue d'une exécution. La base peut déjà la connaître (la garde du
+    service passe le draft à EXECUTED dans la transaction des besoins) : en cas de course
+    perdue, la version relue fait foi."""
+    if result.ambiguous and executing.status == RecurringNeedDraftStatus.EXECUTION_UNKNOWN:
+        finalized = executing  # déjà en doute : rien de nouveau à écrire
+    else:
+        finalized = finalize_after_execution(executing, result)
+    _persisted, final = await cas_finalize(
+        compare_and_swap=recurring_need_draft_store.compare_and_swap,
+        load=recurring_need_draft_store.load,
+        original=executing,
+        finalized=finalized,
+    )
+    kind = {
+        RecurringNeedDraftStatus.EXECUTED: RecurringNeedOutcomeKind.RECURRING_NEED_CREATED,
+        RecurringNeedDraftStatus.FAILED: RecurringNeedOutcomeKind.RECURRING_NEED_FAILED,
+    }.get(final.status, RecurringNeedOutcomeKind.RECURRING_NEED_EXECUTION_UNKNOWN)
+    return _apply_response_plan(build_response_plan(RecurringNeedOutcome(kind=kind, draft=final)))
 
 
 def _apply_response_plan(plan) -> Dict[str, Any]:
