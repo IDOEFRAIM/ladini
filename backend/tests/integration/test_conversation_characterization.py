@@ -65,13 +65,6 @@ def _no_active_transaction(state: Dict[str, Any]) -> list:
 @pytest.fixture()
 def conv():
     with ConversationHarness(role="BUYER", channel="whatsapp") as harness:
-        harness.runtime.responses["create_recurring_need"] = lambda **kw: {
-            "status": "success", "recurring_need_id": "need-1",
-        }
-        harness.runtime.responses["create_recurring_needs"] = lambda **kw: {
-            "status": "success",
-            "items": [{"recurring_need_id": f"need-{i}"} for i, _ in enumerate(kw.get("items") or [])],
-        }
         yield harness
 
 

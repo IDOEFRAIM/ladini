@@ -529,6 +529,13 @@ class Settings(BaseSettings):
     # Cadence du job de réconciliation périodique (Celery Beat).
     PROCUREMENT_RECONCILIATION_INTERVAL_SECONDS: float = 300.0
 
+    # --- Réconciliation des besoins récurrents (Phase 2 hardening) ---
+    # Au-delà de ce délai, une confirmation EXECUTING/EXECUTION_UNKNOWN n'est plus « en vol » :
+    # la réconciliation la rejoue (sans risque, garde PostgreSQL). Doit dépasser le timeout
+    # d'un tour agent (45 s) et celui d'un appel MCP.
+    RECURRING_NEED_EXECUTING_STALE_SECONDS: float = 120.0
+    RECURRING_NEED_RECONCILIATION_INTERVAL_SECONDS: float = 120.0
+
     # --- Réconciliation PREORDER (2026-09-03, clôture escrow/IPN) ---
     # Même principe que PROCUREMENT ci-dessus, appliqué aux 2 statuts
     # PREORDER pouvant rester bloqués : `EXECUTING` (appel

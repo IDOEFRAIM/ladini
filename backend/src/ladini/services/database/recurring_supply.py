@@ -88,6 +88,27 @@ from .errors import BusinessRuleException
 
 logger = logging.getLogger("ladini.services.database.recurring_supply")
 
+# ── Registre durable des confirmations (`marketplace.recurring_need_drafts`) ──────────
+# Une confirmation conversationnelle = `(draft_id, execution_version)`. La ligne du draft
+# est verrouillée (`FOR UPDATE`) puis passée à EXECUTED DANS LA MÊME TRANSACTION que
+# l'insertion des besoins : soit les deux sont commités, soit aucun. Conséquences :
+#   - un retry de la même confirmation (HTTP, Celery, timeout MCP, « oui » répété,
+#     réconciliation) trouve EXECUTED et REJOUE le résultat stocké — jamais un 2e jeu ;
+#   - deux exécutions concurrentes sont sérialisées par le verrou de ligne ;
+#   - un timeout client après COMMIT n'est plus ambigu : la ligne dit ce qui s'est passé.
+# SQL brut sur le payload JSON : ce service ne dépend pas du module de draft conversationnel
+# (`graphs/.../recurring_need_draft.py`, voir test_service_does_not_depend_on_graph_domain).
+_CONFIRMATION_LOCK_SQL = text(
+    "SELECT status, version, payload FROM marketplace.recurring_need_drafts "
+    "WHERE draft_id = :draft_id FOR UPDATE"
+)
+_CONFIRMATION_DONE_SQL = text(
+    "UPDATE marketplace.recurring_need_drafts "
+    "SET status = 'EXECUTED', version = :version, payload = :payload, updated_at = now() "
+    "WHERE draft_id = :draft_id"
+)
+_EXECUTABLE_DRAFT_STATUSES = ("EXECUTING", "EXECUTION_UNKNOWN")
+
 # Une occurrence encore à cet état n'a reçu aucune réponse fournisseur — seule une mise à jour
 # permanente ou une exception ponctuelle peut encore la faire changer sans piétiner du travail déjà
 # engagé (matching, acceptation, livraison — tous hors scope Phase 2, mais le schéma les anticipe).
@@ -123,7 +144,64 @@ def _today() -> date:
     return datetime.now().date()
 
 
+def _decode_payload(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, (str, bytes)):
+        try:
+            decoded = json.loads(raw)
+            return decoded if isinstance(decoded, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+    return {}
+
+
 class RecurringSupplyMixin(BaseMixin):
+
+    async def _open_confirmation(
+        self, draft_id: Optional[str], draft_version: Optional[int]
+    ) -> tuple:
+        """Verrouille la confirmation `(draft_id, draft_version)`.
+
+        Retourne `(replay, ledger)` : `replay` = résultat déjà enregistré (à renvoyer tel
+        quel, rien à insérer) ; `ledger` = contexte à passer à `_close_confirmation` après
+        l'insertion. `(None, None)` quand aucun draft n'est fourni (appel hors conversation)."""
+        if not draft_id:
+            return None, None
+        if draft_version is None:
+            raise BusinessRuleException("Version de confirmation manquante.")
+        session = self.session
+        if session is None:
+            raise BusinessRuleException("Session indisponible.")
+        row = (await session.execute(_CONFIRMATION_LOCK_SQL, {"draft_id": str(draft_id)})).mappings().first()
+        if row is None:
+            raise BusinessRuleException("Demande introuvable : confirmation impossible.")
+        payload = _decode_payload(row["payload"])
+        if payload.get("execution_version") != int(draft_version):
+            raise BusinessRuleException("Cette confirmation n'est plus à jour.")
+        if row["status"] == "EXECUTED":
+            stored = payload.get("execution_result")
+            if isinstance(stored, dict):
+                logger.info("recurring_need.confirmation_replayed | draft_id=%s | version=%s", draft_id, draft_version)
+                return {**stored, "replayed": True}, None
+            raise BusinessRuleException("Demande déjà traitée.")
+        if row["status"] not in _EXECUTABLE_DRAFT_STATUSES:
+            raise BusinessRuleException(f"Demande non confirmable (statut {row['status']}).")
+        return None, {"draft_id": str(draft_id), "version": int(row["version"]), "payload": payload}
+
+    async def _close_confirmation(self, ledger: Optional[Dict[str, Any]], result: Dict[str, Any]) -> None:
+        """Passe la confirmation à EXECUTED dans la transaction courante (celle des besoins)."""
+        if ledger is None:
+            return
+        new_version = ledger["version"] + 1
+        payload = {**ledger["payload"], "status": "EXECUTED", "version": new_version, "execution_result": result}
+        session = self.session
+        if session is None:
+            raise BusinessRuleException("Session indisponible.")
+        await session.execute(
+            _CONFIRMATION_DONE_SQL,
+            {"draft_id": ledger["draft_id"], "version": new_version, "payload": json.dumps(payload, default=str)},
+        )
     # ─── CREATE ───────────────────────────────────────────────────────
 
     async def create_recurring_need(
@@ -138,6 +216,8 @@ class RecurringSupplyMixin(BaseMixin):
         starts_at: Optional[Any] = None,
         ends_at: Optional[Any] = None,
         max_price_per_unit: Optional[float] = None,
+        draft_id: Optional[str] = None,
+        draft_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Crée un `RecurringNeed` PUIS matérialise la fenêtre J→J+7 d'occurrences, dans une seule
         transaction (mandat §14). `starts_at` non fourni = demain (mandat §4 : "À partir de demain.").
@@ -146,6 +226,10 @@ class RecurringSupplyMixin(BaseMixin):
         current_session = self.session
         if not current_session:
             raise BusinessRuleException("Session indisponible.")
+
+        replay, ledger = await self._open_confirmation(draft_id, draft_version)
+        if replay is not None:
+            return {"status": "success", **replay}
 
         user_obj, buyer_profile = await self.get_buyer_profile(phone=str(phone))
 
@@ -174,6 +258,7 @@ class RecurringSupplyMixin(BaseMixin):
             rule=rule,
         )
 
+        await self._close_confirmation(ledger, result)
         logger.info(
             "recurring_need.created | recurring_need_id=%s | buyer_id=%s | occurrences=%s",
             result["recurring_need_id"], buyer_profile.id, result["occurrences_created"],
@@ -190,6 +275,8 @@ class RecurringSupplyMixin(BaseMixin):
         starts_at: Optional[Any] = None,
         ends_at: Optional[Any] = None,
         max_price_per_unit: Optional[float] = None,
+        draft_id: Optional[str] = None,
+        draft_version: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Variante plurielle de `create_recurring_need` (chantier multi-produits, 2026-09-23) : crée
         PLUSIEURS `RecurringNeed` (un par item de `items`, chacun `{"product_query", "quantity",
@@ -204,6 +291,10 @@ class RecurringSupplyMixin(BaseMixin):
             raise BusinessRuleException("Session indisponible.")
         if not items:
             raise BusinessRuleException("Aucun produit fourni.")
+
+        replay, ledger = await self._open_confirmation(draft_id, draft_version)
+        if replay is not None:
+            return {"status": "success", **replay}
 
         user_obj, buyer_profile = await self.get_buyer_profile(phone=str(phone))
 
@@ -235,6 +326,7 @@ class RecurringSupplyMixin(BaseMixin):
             )
             created.append(result)
 
+        await self._close_confirmation(ledger, {"items": created})
         logger.info(
             "recurring_need.created_batch | buyer_id=%s | count=%s | recurring_need_ids=%s",
             buyer_profile.id, len(created), [c["recurring_need_id"] for c in created],

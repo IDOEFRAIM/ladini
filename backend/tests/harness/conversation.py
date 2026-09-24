@@ -501,6 +501,15 @@ class ConversationHarness:
         self.store = store or InMemoryWorkspaceStore()
         self.redis = redis or FakeRedis()
         self.dispatcher = RecordingDispatcher()
+        from tests.harness.recurring import (
+            InMemoryDraftTable,
+            RecurringSupplyServerDouble,
+        )
+
+        self.drafts = InMemoryDraftTable()
+        self.server = RecurringSupplyServerDouble(self.drafts)
+        self.runtime.responses["create_recurring_need"] = self.server.create_recurring_need
+        self.runtime.responses["create_recurring_needs"] = self.server.create_recurring_needs
         self.turns: List[TurnResult] = []
         self._node_log: List[Tuple[str, Dict[str, Any]]] = []
         self._task_log: List[int] = []
@@ -560,6 +569,11 @@ class ConversationHarness:
         stack.enter_context(mock.patch.object(api_tasks, "_orchestrator", orchestrator))
         stack.enter_context(mock.patch.object(webchat_route, "_orchestrator", orchestrator))
         stack.enter_context(mock.patch.object(turn_telemetry, "finish_and_persist", _no_persist))
+        from tests.harness.recurring import install_draft_table
+
+        install_draft_table(
+            self.drafts, lambda obj, name, value: stack.enter_context(mock.patch.object(obj, name, value))
+        )
         # Celery en mode eager : `.apply()` exécute la tâche dans ce process et ses
         # `autoretry_for` rejouent RÉELLEMENT la tâche (sans broker, sans countdown).
         previous_eager = celery_app.conf.task_always_eager

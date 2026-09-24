@@ -248,3 +248,21 @@ def make_state(**overrides: Any) -> Dict[str, Any]:
 @pytest.fixture()
 def state_factory():
     return make_state
+
+
+# =====================================================================
+# PERSISTANCE DES DRAFTS DE BESOIN RÉCURRENT (frontière base de données)
+# =====================================================================
+
+
+@pytest.fixture(autouse=True)
+def recurring_draft_table(request, monkeypatch):
+    """Doublure en mémoire de `services/database/recurring_need_draft_store.py` pour toute
+    la suite (même philosophie « aucune base » que le reste de ce fichier). Les tests
+    `tests/schema/` exercent au contraire le VRAI store contre PostgreSQL."""
+    if "/tests/schema/" in str(request.node.fspath).replace("\\", "/"):
+        yield None
+        return
+    from tests.harness.recurring import InMemoryDraftTable, install_draft_table
+
+    yield install_draft_table(InMemoryDraftTable(), monkeypatch.setattr)

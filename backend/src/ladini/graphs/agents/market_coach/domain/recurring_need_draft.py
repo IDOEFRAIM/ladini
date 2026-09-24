@@ -1,23 +1,20 @@
 """RecurringNeedDraft — canonical, versioned transactional entity for the
 CREATE_RECURRING_NEED conversational flow (creation of a recurring supply need).
 
-Même pattern que `procurement_draft.py`/`preorder_draft.py` (mandat Phase 2 §1/§3 : réutiliser le
-Draft/CAS existant, ne pas en inventer un 4ᵉ) : objet immuable, une seule représentation canonique,
-`version` qui bump à chaque mutation réelle, confirmation liée à `(draft_id, version)`
-(`ConfirmationTarget`, réutilisé tel quel — pas de 4ᵉ copie), claim Redis pour l'idempotence de la
-confirmation, machine à états `DRAFT → CONFIRMED → EXECUTING → EXECUTED/FAILED/EXECUTION_UNKNOWN` ou
-`CANCELLED`.
+Même pattern que `procurement_draft.py`/`preorder_draft.py` : objet immuable, `version` qui
+bump à chaque mutation réelle, confirmation liée à `(draft_id, version)` (`ConfirmationTarget`),
+machine à états `DRAFT -> CONFIRMED -> EXECUTING -> EXECUTED | FAILED`, `EXECUTION_UNKNOWN`
+(issue inconnue, reprenable) ou `CANCELLED`.
 
-## Ce que ce module NE fait PAS
+Durabilité (Phase 2, P0) : chaque mutation est persistée dans `marketplace.recurring_need_drafts`
+(`services/database/recurring_need_draft_store.py`) ; EXECUTING y est écrit AVANT l'appel MCP.
+`execution_version` (fixée au passage en EXECUTING) identifie LA confirmation : la ligne du draft
+sert de registre durable, verrouillée et passée à EXECUTED par `services/database/recurring_supply.py`
+dans la même transaction que les besoins. Une confirmation ne produit donc qu'un seul jeu de
+besoins, quels que soient les retries. Le claim Redis n'est qu'une optimisation anti-course.
 
-Il ne modifie jamais un `RecurringNeed` déjà créé — c'est `UPDATE_RECURRING_NEED`
-(`services/database/recurring_supply.py::update_recurring_need`) qui s'en charge, SANS draft (l'objet
-modifié est déjà persisté et identifié, pas en cours de construction conversationnelle — voir le
-rapport de Phase 2 pour la justification, même choix que `PROCUREMENT_UPDATE_REQUEST`).
-Il ne fait pas le matching ni la génération des occurrences lui-même — `execution_payload()` produit
-le dict que l'outil MCP `create_recurring_need` consomme ; c'est CE service qui, dans une seule
-transaction, insère `recurring_needs` PUIS matérialise la fenêtre J→J+7 d'occurrences
-(`domain/recurring_supply/recurrence.py::generate_occurrence_dates`, fonction pure).
+Il ne modifie jamais un `RecurringNeed` déjà créé — c'est `UPDATE_RECURRING_NEED` qui s'en charge,
+SANS draft.
 """
 
 from __future__ import annotations
@@ -90,7 +87,11 @@ _ALLOWED_TRANSITIONS: Dict[RecurringNeedDraftStatus, frozenset] = {
     ),
     RecurringNeedDraftStatus.EXECUTED: frozenset(),
     RecurringNeedDraftStatus.FAILED: frozenset(),
-    RecurringNeedDraftStatus.EXECUTION_UNKNOWN: frozenset(),
+    # En doute (issue réseau/timeout après envoi) : la réconciliation ou un nouvel « oui »
+    # relance la MÊME exécution (garde PostgreSQL, voir `execution_key`) puis tranche.
+    RecurringNeedDraftStatus.EXECUTION_UNKNOWN: frozenset(
+        {RecurringNeedDraftStatus.EXECUTED, RecurringNeedDraftStatus.FAILED}
+    ),
     RecurringNeedDraftStatus.CANCELLED: frozenset(),
 }
 
@@ -98,9 +99,14 @@ _TERMINAL_STATUSES = frozenset(
     {
         RecurringNeedDraftStatus.EXECUTED,
         RecurringNeedDraftStatus.FAILED,
-        RecurringNeedDraftStatus.EXECUTION_UNKNOWN,
         RecurringNeedDraftStatus.CANCELLED,
     }
+)
+
+# Statuts où une exécution a été LANCÉE sans issue connue : ni actifs pour l'édition, ni
+# terminaux. Une nouvelle confirmation y reprend la même exécution (idempotente en base).
+IN_DOUBT_STATUSES = frozenset(
+    {RecurringNeedDraftStatus.EXECUTING, RecurringNeedDraftStatus.EXECUTION_UNKNOWN}
 )
 
 
@@ -128,6 +134,11 @@ class RecurringNeedDraft:
     # `flows/buyer/recurring_need.py::_clean_additional_items`.
     additional_items: Optional[List[Dict[str, Any]]] = None
     created_at: float = 0.0
+    # Version à laquelle l'exécution a été lancée (DRAFT -> EXECUTING) : identifie LA
+    # confirmation logique, fixe jusqu'à l'issue (EXECUTED/FAILED), même si le statut passe
+    # par EXECUTION_UNKNOWN. Clé d'idempotence durable côté PostgreSQL.
+    execution_version: Optional[int] = None
+    execution_result: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -136,6 +147,8 @@ class RecurringNeedDraft:
             "status": self.status.value,
             **{f: getattr(self, f) for f in _FIELD_NAMES},
             "created_at": self.created_at,
+            "execution_version": self.execution_version,
+            "execution_result": self.execution_result,
         }
 
     @classmethod
@@ -151,6 +164,8 @@ class RecurringNeedDraft:
             version=int(d.get("version") or 1),
             status=status,
             created_at=float(d.get("created_at") or 0.0),
+            execution_version=int(d["execution_version"]) if d.get("execution_version") is not None else None,
+            execution_result=d.get("execution_result") if isinstance(d.get("execution_result"), dict) else None,
             **{f: d.get(f) for f in _FIELD_NAMES},
         )
 
@@ -194,7 +209,10 @@ class RecurringNeedDraft:
     def _confirm_to_executing(self) -> "RecurringNeedDraft":
         confirmed = self._transition(RecurringNeedDraftStatus.CONFIRMED)
         executing = confirmed._transition(RecurringNeedDraftStatus.EXECUTING)
-        return replace(executing, version=self.version + 1)
+        return replace(executing, version=self.version + 1, execution_version=self.version + 1)
+
+    def is_in_doubt(self) -> bool:
+        return self.status in IN_DOUBT_STATUSES
 
     def is_complete(self) -> bool:
         if not all(slot_has_value(getattr(self, f)) for f in _REQUIRED_FOR_COMPLETION):
@@ -247,6 +265,11 @@ class RecurringNeedDraft:
         terminal n'a plus vocation à rester le draft ACTIF du state — voir
         `flows/buyer/recurring_need.py::_apply_response_plan`."""
         return self.status in _TERMINAL_STATUSES
+
+    def item_count(self) -> int:
+        """Nombre de produits portés par la demande (principal + additionnels)."""
+        primary = 1 if (slot_has_value(self.product) or slot_has_value(self.sub_category_id)) else 0
+        return primary + len(self.additional_items or [])
 
 
 def _fmt_num(value: Optional[float]) -> str:
@@ -381,6 +404,7 @@ class RecurringNeedOutcomeKind(str, Enum):
     ALREADY_FAILED = "ALREADY_FAILED"
     RECURRING_NEED_EXECUTION_UNKNOWN = "RECURRING_NEED_EXECUTION_UNKNOWN"
     RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
+    RESUME_EXECUTION = "RESUME_EXECUTION"
     VERSION_CONFLICT = "VERSION_CONFLICT"
 
 
@@ -395,11 +419,18 @@ def _confirm_claim_key(draft: RecurringNeedDraft) -> str:
     return f"recurring_need_confirm:{draft.draft_id}:{draft.version}"
 
 
+def confirm_claim_key(draft: RecurringNeedDraft) -> str:
+    """Clé du claim Redis de confirmation (optimisation anti-course ; la garantie durable
+    est la ligne PostgreSQL du draft). Exposée pour que l'appelant la LIBÈRE si le passage
+    durable en EXECUTING échoue — sinon chaque « oui » suivant répondrait « en cours »."""
+    return _confirm_claim_key(draft)
+
+
 def execution_key(draft: RecurringNeedDraft) -> str:
     """Clé d'idempotence métier passée en `idempotency_key=` sur l'appel MCP `create_recurring_need` —
     voir `procurement_draft.execution_key` pour la justification complète (dédup serveur réelle,
     `mcp_idempotency_store`, vérifiée dans `infrastructure/mcp/runtime.py`)."""
-    return f"recurring_need:{draft.draft_id}:{draft.version}"
+    return f"recurring_need:{draft.draft_id}:{draft.execution_version or draft.version}"
 
 
 def apply_domain_action(
@@ -431,16 +462,21 @@ def apply_domain_action(
         return RecurringNeedOutcome(kind=kind, draft=new_draft)
 
     if isinstance(action, ConfirmRecurringNeedDraft):
+        assert draft is not None  # garanti par le garde NO_DRAFT ci-dessus
         if action.target is None:
             return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.NO_TARGET, draft=draft)
         if draft.status == RecurringNeedDraftStatus.EXECUTED:
             return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.ALREADY_EXECUTED, draft=draft)
         if draft.status == RecurringNeedDraftStatus.FAILED:
             return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.ALREADY_FAILED, draft=draft)
-        if draft.status == RecurringNeedDraftStatus.EXECUTION_UNKNOWN:
-            return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.RECONCILIATION_REQUIRED, draft=draft)
-        if draft.status == RecurringNeedDraftStatus.EXECUTING:
-            return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.ALREADY_EXECUTING, draft=draft)
+        if draft.is_in_doubt():
+            # Même demande, issue inconnue : on relance LA MÊME exécution (même
+            # `execution_version`) — sans risque de doublon, la garde PostgreSQL rejoue le
+            # résultat si elle a déjà abouti. Seule l'identité du draft est vérifiée : la
+            # version affichée peut être antérieure (l'état du tour précédent a pu être perdu).
+            if action.target.draft_id != draft.draft_id:
+                return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.STALE_TARGET, draft=draft)
+            return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.RESUME_EXECUTION, draft=draft)
         if draft.status == RecurringNeedDraftStatus.CANCELLED:
             return RecurringNeedOutcome(kind=RecurringNeedOutcomeKind.DRAFT_FINALIZED, draft=draft)
         if draft.status != RecurringNeedDraftStatus.DRAFT:
@@ -503,7 +539,10 @@ def finalize_after_execution(draft: RecurringNeedDraft, result: RecurringNeedExe
         target_status = RecurringNeedDraftStatus.EXECUTED
     else:
         target_status = RecurringNeedDraftStatus.FAILED
-    return draft.with_status(target_status)
+    finalized = draft.with_status(target_status)
+    if result.success:
+        return replace(finalized, execution_result={"external_id": result.external_id})
+    return finalized
 
 
 def _new_draft_id() -> str:
@@ -619,7 +658,7 @@ def build_response_plan(
             final_response="", response_strategy="SUCCESS", graph_status="PLANNING", draft=draft, pending_untouched=True
         )
 
-    if kind == RecurringNeedOutcomeKind.CONFIRMED_READY_FOR_EXECUTION:
+    if kind in (RecurringNeedOutcomeKind.CONFIRMED_READY_FOR_EXECUTION, RecurringNeedOutcomeKind.RESUME_EXECUTION):
         return RecurringNeedResponsePlan(
             final_response="", response_strategy="SUCCESS", graph_status="EXECUTING", draft=draft, ready_for_execution=True
         )
@@ -673,11 +712,18 @@ def build_response_plan(
         )
 
     if kind == RecurringNeedOutcomeKind.RECURRING_NEED_EXECUTION_UNKNOWN:
+        # Le draft RESTE actif (en doute) : un nouvel « oui » relance la même exécution,
+        # sans jamais créer de doublon (garde PostgreSQL par draft/version).
         return RecurringNeedResponsePlan(
-            final_response="Un incident technique m'empêche de confirmer l'enregistrement — on vérifie.",
-            response_strategy="ERROR",
-            graph_status="COMPLETED",
+            final_response=(
+                "Je n'ai pas reçu la confirmation d'enregistrement (incident technique). "
+                "Répondez *oui* pour vérifier et finaliser — aucun doublon ne sera créé."
+            ),
+            response_strategy="CONFIRMATION",
+            graph_status="WAITING_INPUT",
             draft=draft,
+            pending_kind="CONFIRM_ACTION" if draft else None,
+            pending_target=({"draft_id": draft.draft_id, "draft_version": draft.version} if draft else None),
         )
 
     raise AssertionError(f"RecurringNeedOutcomeKind non couvert par build_response_plan: {kind!r}")
@@ -686,6 +732,7 @@ def build_response_plan(
 __all__ = [
     "RecurringNeedDraftStatus",
     "RecurringNeedDraft",
+    "IN_DOUBT_STATUSES",
     "IllegalDraftTransition",
     "ConfirmationTarget",
     "UpdateRecurringNeedDraft",
@@ -698,6 +745,7 @@ __all__ = [
     "RecurringNeedOutcome",
     "apply_domain_action",
     "execution_key",
+    "confirm_claim_key",
     "RecurringNeedExecutionResult",
     "adapt_mcp_result",
     "finalize_after_execution",

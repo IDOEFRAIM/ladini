@@ -40,6 +40,16 @@ BEAT_SCHEDULE: Dict[str, Dict[str, Any]] = {
     # Réconciliation des ProcurementDraft bloqués en EXECUTING (2026-09-03,
     # mandat recovery) — cadence configurable, jamais codée en dur ici (voir
     # `settings.PROCUREMENT_RECONCILIATION_INTERVAL_SECONDS`).
+    # Confirmations de besoin récurrent restées en doute (timeout/crash après envoi) :
+    # rejeu SÛR de la même confirmation (garde PostgreSQL), voir
+    # `services/reconciliation/recurring_need_reconciliation_service.py`.
+    "recurring-need-reconciliation": {
+        "task": "workers.recurring_need_reconciliation",
+        "schedule": settings.RECURRING_NEED_RECONCILIATION_INTERVAL_SECONDS,
+        "options": {
+            "expires": max(1.0, settings.RECURRING_NEED_RECONCILIATION_INTERVAL_SECONDS - 30)
+        },
+    },
     "procurement-reconciliation": {
         "task": "workers.procurement_reconciliation",
         "schedule": settings.PROCUREMENT_RECONCILIATION_INTERVAL_SECONDS,

@@ -119,6 +119,7 @@ celery_app = Celery(
         "ladini.workers.crons.outbox_dispatch",
         "ladini.workers.crons.order_expiry",
         "ladini.workers.crons.procurement_reconciliation",
+        "ladini.workers.crons.recurring_need_reconciliation",
         "ladini.workers.crons.preorder_reconciliation",
         "ladini.workers.crons.sales_publish_reconciliation",
         "ladini.workers.crons.recurring_need_matching",
