@@ -1,0 +1,2 @@
+ALTER TABLE "marketplace"."recurring_needs" DROP CONSTRAINT "recurring_needs_recurrence_type_chk";--> statement-breakpoint
+ALTER TABLE "marketplace"."recurring_needs" ADD CONSTRAINT "recurring_needs_recurrence_type_chk" CHECK ("marketplace"."recurring_needs"."recurrence_type" IN ('DAILY','WEEKLY_DAYS','WEEKLY','ONE_OFF','MONTHLY'));

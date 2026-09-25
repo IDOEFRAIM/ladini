@@ -58,7 +58,7 @@ class RecurringNeed(Base):
             name="recurring_needs_max_price_chk",
         ),
         CheckConstraint(
-            "recurrence_type IN ('DAILY','WEEKLY_DAYS','WEEKLY','ONE_OFF')",
+            "recurrence_type IN ('DAILY','WEEKLY_DAYS','WEEKLY','ONE_OFF','MONTHLY')",
             name="recurring_needs_recurrence_type_chk",
         ),
         CheckConstraint("status IN ('ACTIVE','PAUSED','CANCELLED')", name="recurring_needs_status_chk"),
@@ -78,7 +78,7 @@ class RecurringNeed(Base):
     )
     quantity = Column(Numeric(14, 3), nullable=False)
     unit = Column(Text, default="KG", nullable=False, server_default=text("'KG'"))
-    # DAILY | WEEKLY_DAYS | WEEKLY | ONE_OFF — volontairement fermé (pas de RRULE/cron générique).
+    # DAILY | WEEKLY_DAYS | WEEKLY | ONE_OFF | MONTHLY — volontairement fermé (pas de RRULE/cron générique).
     recurrence_type = Column(Text, nullable=False)
     # Jours ISO (1=lundi..7=dimanche) — utilisé seulement si recurrence_type = WEEKLY_DAYS.
     weekly_days = Column(PG_ARRAY(Integer), nullable=True)

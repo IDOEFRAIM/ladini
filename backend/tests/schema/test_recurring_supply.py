@@ -33,6 +33,88 @@ def _expect(db, exc, fn):
     cur.execute("ROLLBACK TO SAVEPOINT chk")
 
 
+# ── Migration 0004 (MONTHLY) appliquée en PLACE sur une base déjà à 0003 ────
+# Phase 3 (mandat MONTHLY §9.H/§10) : contrairement aux autres tests de ce fichier
+# (base vide → TOUTES les migrations via `pg_dsn`), celui-ci reproduit une vraie
+# MISE À NIVEAU — une base déjà migrée jusqu'à 0003, portant des données réelles,
+# ne rejoue QUE 0004 — exactement le scénario de déploiement (jamais une base
+# reconstruite de zéro en production).
+
+def test_migration_0004_applies_in_place_without_touching_existing_data():
+    import db_tools
+    import psycopg2
+
+    admin = db_tools.admin_dsn()
+    if not admin:
+        pytest.skip("SCHEMA_TEST_DSN non défini — test PostgreSQL de migration ignoré en local.")
+
+    dsn, drop = db_tools.create_database(admin)
+    try:
+        files = db_tools.migration_files()
+        assert [f.stem for f in files][-1] == "0004_add_monthly_recurrence", (
+            "ce test suppose que 0004_add_monthly_recurrence est la dernière migration du journal"
+        )
+        pre_0004, only_0004 = files[:-1], files[-1:]
+
+        conn = psycopg2.connect(dsn)
+        try:
+            # 1) Base migrée seulement jusqu'à 0003 (avant MONTHLY).
+            with conn:
+                with conn.cursor() as cur:
+                    for f in pre_0004:
+                        for stmt in (s.strip() for s in f.read_text(encoding="utf-8").split(db_tools.BREAKPOINT)):
+                            if stmt:
+                                cur.execute(stmt)
+
+            # 2) Données réelles créées AVANT 0004 — DAILY et WEEKLY, valeurs déjà valides.
+            cur = conn.cursor()
+            g = Graph(cur)
+            conn.commit()
+            daily_id = g.recurring_need(recurrence_type="DAILY", quantity=20)
+            weekly_id = g.recurring_need(recurrence_type="WEEKLY", quantity=14)
+            conn.commit()
+            cur.execute(
+                "select id, recurrence_type, quantity from marketplace.recurring_needs order by created_at"
+            )
+            before = cur.fetchall()
+            assert {r[0] for r in before} == {daily_id, weekly_id}
+
+            with pytest.raises(errors.CheckViolation):
+                g.recurring_need(recurrence_type="MONTHLY")
+            conn.rollback()
+
+            # 3) Applique UNIQUEMENT 0004 — jamais une base reconstruite de zéro.
+            with conn:
+                with conn.cursor() as cur2:
+                    for stmt in (s.strip() for s in only_0004[0].read_text(encoding="utf-8").split(db_tools.BREAKPOINT)):
+                        if stmt:
+                            cur2.execute(stmt)
+
+            # 4) Les 2 lignes créées AVANT 0004 sont EXACTEMENT intactes (aucune quantité changée,
+            # aucune ligne perdue, aucun id changé).
+            cur = conn.cursor()
+            cur.execute(
+                "select id, recurrence_type, quantity from marketplace.recurring_needs order by created_at"
+            )
+            after = cur.fetchall()
+            assert after == before, f"des données existantes ont changé après 0004 : {before!r} -> {after!r}"
+
+            # 5) MONTHLY est maintenant accepté ; YEARLY reste rejeté.
+            g2 = Graph(cur)
+            conn.commit()
+            monthly_id = g2.recurring_need(recurrence_type="MONTHLY", quantity=90)
+            conn.commit()
+            cur.execute("select recurrence_type from marketplace.recurring_needs where id=%s", (monthly_id,))
+            assert cur.fetchone() == ("MONTHLY",)
+            with pytest.raises(errors.CheckViolation):
+                g2.recurring_need(recurrence_type="YEARLY")
+            conn.rollback()
+        finally:
+            conn.close()
+    finally:
+        drop()
+
+
 # ── Les 3 tables existent après migration (base vide → migrations) ──────────
 
 def test_the_three_tables_exist_after_migration(pg_dsn):
@@ -139,7 +221,8 @@ def test_at_most_one_allocation_per_occurrence_producer_and_product(db, g):
 CHECK_VIOLATIONS = [
     ("recurring_needs.quantity <= 0", lambda g: g.recurring_need(quantity=0)),
     ("recurring_needs.max_price_per_unit < 0", lambda g: g.recurring_need(max_price_per_unit=-1)),
-    ("recurring_needs.recurrence_type invalide", lambda g: g.recurring_need(recurrence_type="MONTHLY")),
+    # "MONTHLY" est désormais une valeur valide (Phase 3) — "YEARLY" reste hors du domaine pilote.
+    ("recurring_needs.recurrence_type invalide", lambda g: g.recurring_need(recurrence_type="YEARLY")),
     ("recurring_needs.status invalide", lambda g: g.recurring_need(status="DONE")),
     ("recurring_needs.WEEKLY_DAYS sans jours", lambda g: g.recurring_need(recurrence_type="WEEKLY_DAYS")),
     ("recurring_need_occurrences.requested_quantity <= 0", lambda g: g.occurrence(requested_quantity=0)),
@@ -163,6 +246,17 @@ def test_weekly_days_recurrence_is_accepted_when_days_are_listed(g):
     need = g.recurring_need(recurrence_type="WEEKLY_DAYS", weekly_days=[1, 3, 5])
     g.cur.execute("select weekly_days from marketplace.recurring_needs where id=%s", (need,))
     assert g.cur.fetchone() == ([1, 3, 5],)
+
+
+@pytest.mark.parametrize("recurrence_type", ["DAILY", "WEEKLY", "MONTHLY", "ONE_OFF"])
+def test_every_supported_recurrence_type_is_accepted(g, recurrence_type):
+    """Phase 3 (mandat MONTHLY) : chaque valeur du contrat Drizzle canonique
+    (`recurring_needs_recurrence_type_chk`) doit être acceptée par la vraie CHECK
+    PostgreSQL, pas seulement par le domaine Python — miroir positif de
+    `test_check_constraints_reject_invalid_values` ci-dessus."""
+    need = g.recurring_need(recurrence_type=recurrence_type)
+    g.cur.execute("select recurrence_type from marketplace.recurring_needs where id=%s", (need,))
+    assert g.cur.fetchone() == (recurrence_type,)
 
 
 # ── Propriété fondamentale : l'historique d'une occurrence ne bouge pas si le besoin est modifié ──
