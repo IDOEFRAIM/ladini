@@ -71,6 +71,11 @@ class TestMessagingProviderAlias:
     def test_default_is_unchanged_when_neither_name_is_set(self):
         assert Settings(_env_file=None).MESSAGING_PROVIDER == "whatsapp_cloud"
 
+    def test_a_blank_canonical_provider_never_shadows_a_filled_alias(self, monkeypatch):
+        monkeypatch.setenv("MESSAGING_PROVIDER", "")
+        monkeypatch.setenv("WHATSAPP_PROVIDER", "meta")
+        assert Settings(_env_file=None).MESSAGING_PROVIDER == "whatsapp_cloud"
+
 
 class TestWhatsAppCloudApiFieldAliases:
     def test_meta_whatsapp_token_alias(self, monkeypatch):
@@ -102,6 +107,27 @@ class TestWhatsAppCloudApiFieldAliases:
         assert s.WHATSAPP_PHONE_NUMBER_ID == "canonical_id"
         assert s.WHATSAPP_WEBHOOK_VERIFY_TOKEN == "canonical_verify"
         assert s.WHATSAPP_GRAPH_API_VERSION == "v99.0"
+
+    def test_a_blank_canonical_token_never_shadows_a_filled_alias(self, monkeypatch):
+        """Incident réel 2026-09-25 : `AliasChoices("WHATSAPP_CLOUD_API_TOKEN",
+        "META_WHATSAPP_TOKEN")` seul fait gagner le premier nom PRÉSENT dans
+        l'environnement, même vide — pas le premier NON VIDE. Un `.env` qui
+        déclare encore `WHATSAPP_CLOUD_API_TOKEN=` (héritage de `.env.example`)
+        à côté d'un `META_WHATSAPP_TOKEN=EAAG...` fraîchement rempli lisait donc
+        silencieusement la chaîne vide. `_prefer_non_empty_alias_over_blank_
+        canonical` doit fermer ce trou : une valeur canonique VIDE ne doit
+        jamais l'emporter sur un alias REMPLI."""
+        monkeypatch.setenv("WHATSAPP_CLOUD_API_TOKEN", "")
+        monkeypatch.setenv("META_WHATSAPP_TOKEN", "EAAG_fresh_token")
+        assert Settings(_env_file=None).WHATSAPP_CLOUD_API_TOKEN == "EAAG_fresh_token"
+
+    def test_a_filled_canonical_token_still_wins_over_a_filled_alias(self, monkeypatch):
+        """Symétrique du test précédent : quand les DEUX portent une vraie
+        valeur, le nom canonique reste prioritaire (jamais un flip-flop selon
+        l'ordre d'écriture du .env)."""
+        monkeypatch.setenv("WHATSAPP_CLOUD_API_TOKEN", "canonical_wins")
+        monkeypatch.setenv("META_WHATSAPP_TOKEN", "alias_loses")
+        assert Settings(_env_file=None).WHATSAPP_CLOUD_API_TOKEN == "canonical_wins"
 
 
 class TestTwilioPhoneNumberAlias:

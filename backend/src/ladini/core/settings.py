@@ -10,7 +10,7 @@ Usage:
 import logging
 import os
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Dict
 
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings
@@ -268,6 +268,42 @@ class Settings(BaseSettings):
         default="whatsapp_cloud",
         validation_alias=AliasChoices("MESSAGING_PROVIDER", "WHATSAPP_PROVIDER"),
     )
+
+    #: (Incident 2026-09-25) Bug corrigé DANS CE COMMIT : `AliasChoices("CANONICAL",
+    #: "ALIAS")` fait gagner le PREMIER nom PRÉSENT dans l'environnement, même vide —
+    #: pas le premier NON VIDE. Un `.env` qui déclare encore `WHATSAPP_CLOUD_API_TOKEN=`
+    #: (héritage de `.env.example`) à côté d'un `META_WHATSAPP_TOKEN=EAAG...` fraîchement
+    #: rempli lisait donc silencieusement la chaîne VIDE — `is_configured()` bloquait
+    #: alors l'envoi AVANT même l'appel HTTP, jamais l'erreur 401 "Authentication Error"
+    #: réellement observée (celle-ci vient d'un token non-vide mais expiré/invalide côté
+    #: Meta) ; documenté ici car c'est le même risque de précédence pour TOUTE paire
+    #: canonique/alias ci-dessous — jamais laissé faire par accident une seconde fois.
+    _ALIASED_ENV_FALLBACKS: ClassVar[Dict[str, str]] = {
+        "MESSAGING_PROVIDER": "WHATSAPP_PROVIDER",
+        "WHATSAPP_CLOUD_API_TOKEN": "META_WHATSAPP_TOKEN",
+        "WHATSAPP_PHONE_NUMBER_ID": "META_WHATSAPP_PHONE_NUMBER_ID",
+        "WHATSAPP_WEBHOOK_VERIFY_TOKEN": "META_WHATSAPP_VERIFY_TOKEN",
+        "WHATSAPP_GRAPH_API_VERSION": "META_GRAPH_API_VERSION",
+        "TWILIO_WHATSAPP_NUMBER": "TWILIO_PHONE_NUMBER",
+    }
+
+    @model_validator(mode="after")
+    def _prefer_non_empty_alias_over_blank_canonical(self) -> "Settings":
+        """Relit `os.environ` DIRECTEMENT (jamais le champ déjà résolu par
+        `AliasChoices`, dont on vient de documenter le piège ci-dessus) : le nom
+        canonique gagne s'il porte une VALEUR RÉELLE, sinon on retombe sur l'alias
+        s'il en porte une — jamais l'inverse, jamais "premier présent, peu importe
+        la valeur". Doit s'exécuter AVANT `_normalize_messaging_provider` (ordre de
+        définition = ordre d'exécution pour les `model_validator(mode="after")` de
+        pydantic v2) pour que "meta" posé via l'alias soit bien normalisé ensuite."""
+        for canonical, alias in self._ALIASED_ENV_FALLBACKS.items():
+            canonical_env = os.environ.get(canonical, "").strip()
+            if canonical_env:
+                continue
+            alias_env = os.environ.get(alias, "").strip()
+            if alias_env:
+                setattr(self, canonical, alias_env)
+        return self
 
     @model_validator(mode="after")
     def _normalize_messaging_provider(self) -> "Settings":
