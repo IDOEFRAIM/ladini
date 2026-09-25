@@ -15,6 +15,7 @@ Ces tests sont permanents (mandat Phase 2 §5).
 from __future__ import annotations
 
 from typing import Any, Dict
+from unittest import mock
 
 import pytest
 
@@ -694,4 +695,107 @@ class TestR_ConsumedPendingNeverReactivates:
         assert t3.llm_calls == 0
         created = _created(conv)
         assert len(created) == 1 and len(created[0][1]["items"]) == 3
+
+
+# =====================================================================
+# S. panne à mi-tour, entre la persistance domaine et le flush workspace
+# (mandat C10 : preuve contre "partial-turn persistence")
+# =====================================================================
+
+
+class TestS_MidTurnCrashAfterDomainPersist:
+    """Fenêtre d'échec RÉELLE et reproduite (mandat C10 §"atomic turn snapshot") :
+    `flows/buyer/recurring_need.py` (comme toute mutation transactionnelle de ce moteur)
+    persiste durablement le draft DOMAINE (`_persist`, CAS versionné) AVANT de retourner son
+    patch d'état à LangGraph. LangGraph ne persiste l'état du WORKSPACE lui-même qu'à la fin
+    du tour (`orchestrator.py::_flush_workspace` — voir `workspace/checkpointer.py::
+    aput_writes`, "NO database call", tout est staged en RAM jusqu'au flush). Si le PROCESSUS
+    meurt (kill -9, OOM, panne hôte — jamais une exception Python : celles-ci sont déjà
+    rattrapées par `Orchestrator.handle()` qui flush MÊME sur erreur, voir son `except
+    Exception`) exactement entre les deux, la table du draft montre la NOUVELLE valeur mais
+    l'état workspace (qui pilote le tour SUIVANT) montre encore l'ANCIENNE — un split-brain
+    entre les deux magasins durables.
+
+    Fermer ENTIÈREMENT cette fenêtre exigerait une transaction distribuée entre deux magasins
+    indépendants (workspace vs draft) — hors périmètre d'un chantier de durcissement (mandat :
+    pas de big-bang). Le filet de sécurité EXISTANT (CAS partout + réconciliation "draft
+    abandonné" 24h, C5) borne déjà l'impact à : correction perdue pour CE tour (l'utilisateur
+    la retape), jamais une double création, jamais une conversation bloquée, jamais un draft
+    orphelin permanent. Ces tests PROUVENT ces 3 garanties précises plutôt que de prétendre
+    fermer une fenêtre qu'aucun test Python ne peut réellement fermer (un vrai kill -9 ne se
+    simule pas par une exception — celle-ci est délibérément injectée ICI juste après le
+    `_persist` domaine, pour se placer exactement dans la fenêtre visée)."""
+
+    def test_a_correction_that_crashes_right_after_its_domain_persist_is_never_lost_twice(self, conv):
+        """Le draft domaine porte la correction (persistée) ; l'état workspace, lui, ne l'a
+        jamais vue (jamais retournée à LangGraph) — split-brain reproduit. Le tour SUIVANT ne
+        doit ni planter, ni dupliquer, ni ressusciter un état incohérent : il repart propre."""
+        import ladini.graphs.agents.market_coach.flows.buyer.recurring_need as rn
+
+        t1 = conv.send("je veux 14 coqs chaque semaine", llm=_coq())
+        draft_id = t1.draft()["draft_id"]
+
+        async def crashing_correct(draft, said, state, conversation_id):
+            action = rn.plan_correction(
+                draft, said, scope=(state.get("extracted_entities") or {}).get("correction_scope")
+            )
+            outcome = rn.apply_domain_action(draft, action)
+            await rn._persist(draft, outcome.draft, conversation_id)
+            raise RuntimeError("panne processus simulée juste après la persistance domaine")
+
+        with mock.patch.object(rn, "_correct", crashing_correct):
+            t2 = conv.send(
+                "non plutôt 23 boeufs",
+                llm=new_task("CREATE_RECURRING_NEED", product="boeuf", quantity=23.0),
+            )
+        assert t2.error is None, "une panne mi-tour ne doit jamais remonter comme une exception non gérée"
+
+        # Split-brain confirmé : le magasin domaine a la correction, l'état workspace ne l'a pas.
+        db_draft = conv._run(conv.drafts.load(draft_id))
+        assert (db_draft.product, db_draft.quantity) == ("boeuf", 23.0)
+        assert t2.after.get("recurring_need_draft", {}).get("product") == "coq"
+
+        # Garantie 1 : le tour SUIVANT n'est jamais bloqué (pas de crash-loop, pas de pending
+        # fantôme qui capturerait un message sans rapport).
+        t3 = conv.send("bonjour", llm=new_task("GREETING", confidence=0.6))
+        assert t3.error is None
+
+        # Garantie 2 : jamais de double création — le draft orphelin ("boeuf") ne peut plus
+        # être confirmé par une conversation qui ne le connaît plus (il n'apparaît dans aucun
+        # `current_goal`/`pending_interaction` retrouvable).
+        assert _created(conv) == []
+
+        # Garantie 3 : le draft orphelin reste repérable par la réconciliation "draft abandonné"
+        # 24h (C5) — jamais perdu silencieusement de la base, jamais réactivable autrement.
+        assert conv.drafts.status_of(draft_id) == "DRAFT"
+
+    def test_a_cancellation_that_crashes_right_after_its_domain_persist_still_recovers_cleanly(self, conv):
+        """Même fenêtre, sur le chemin d'annulation (`CancelRecurringNeedDraft`) : le draft est
+        déjà CANCELLED en base quand la panne survient — un état TERMINAL, donc aucun risque
+        de réutilisation ultérieure même si l'état workspace ne le reflète jamais."""
+        import ladini.graphs.agents.market_coach.flows.buyer.recurring_need as rn
+
+        t1 = conv.send("je veux 14 coqs chaque semaine", llm=_coq())
+        draft_id = t1.draft()["draft_id"]
+
+        original_persist = rn._persist
+
+        async def crashing_persist(before, after, conversation_id):
+            result = await original_persist(before, after, conversation_id)
+            assert result is True, "la persistance domaine elle-même doit réussir avant la panne simulée"
+            raise RuntimeError("panne processus simulée juste après la persistance domaine")
+
+        with mock.patch.object(rn, "_persist", crashing_persist):
+            t2 = conv.send(
+                "laisse tomber",
+                llm={"disposition": "REJECT", "intent": None, "confidence": 0.9, "entities": {}},
+            )
+        assert t2.error is None
+
+        db_draft = conv._run(conv.drafts.load(draft_id))
+        assert db_draft.status.value == "CANCELLED"
+
+        t3 = conv.send("bonjour", llm=new_task("GREETING", confidence=0.6))
+        assert t3.error is None
+        assert _created(conv) == []
 
