@@ -539,6 +539,15 @@ class Settings(BaseSettings):
     # depuis ce délai est abandonné — annulé durablement (jamais supprimé silencieusement,
     # jamais réactivable) plutôt que laissé orphelin en base indéfiniment.
     RECURRING_NEED_ABANDONED_DRAFT_SECONDS: float = 86400.0
+    # Réapprovisionnement des occurrences (Phase 3 MONTHLY) : `_insert_one_recurring_need`
+    # (services/database/recurring_supply.py) ne matérialise les occurrences QU'UNE FOIS, à la
+    # création, sur `[aujourd'hui, aujourd'hui+OCCURRENCE_WINDOW_DAYS]` — gap préexistant à TOUS
+    # les types de récurrence (déjà vrai pour DAILY/WEEKLY), mais rendu bloquant par MONTHLY (un
+    # besoin mensuel ne recevrait alors jamais plus d'UNE occurrence, jamais une 2e). Ce cron
+    # rejoue `_materialize_occurrences` (idempotent, `ON CONFLICT DO NOTHING`) pour chaque
+    # `RecurringNeed` ACTIVE — générique à tous les types, aucune branche MONTHLY spécifique.
+    # Cadence journalière : suffit à garder `OCCURRENCE_WINDOW_DAYS` (7 j) de marge glissante.
+    RECURRING_NEED_OCCURRENCE_REPLENISHMENT_INTERVAL_SECONDS: float = 86400.0
 
     # --- PendingInteraction TTL (Phase 2 hardening, commit 7, décision produit F) ---
     # Distinct de RECURRING_NEED_ABANDONED_DRAFT_SECONDS ci-dessus : deux concepts séparés qui

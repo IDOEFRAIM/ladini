@@ -573,6 +573,196 @@ class TestP_WeeklyDays:
 
 
 # =====================================================================
+# MONTHLY (Phase 3, mandat "ajouter MONTHLY sans rouvrir l'architecture", §29)
+#
+# MONTHLY est une VALEUR de plus de `recurrence_type` — aucun nouveau chemin
+# conversationnel : chaque test ci-dessous est le miroir EXACT d'un test
+# WEEKLY déjà existant plus haut (TestA/B/CDE/F/G/HM/K/I), seule la fréquence
+# change. Si un de ces tests échouait alors que son équivalent WEEKLY passe,
+# ce serait la preuve que MONTHLY a rouvert l'architecture conversationnelle
+# — exactement ce que ce chantier interdit.
+# =====================================================================
+
+
+def _lait_mensuel(**extra: Any) -> Dict[str, Any]:
+    return new_task(
+        "CREATE_RECURRING_NEED", product="lait", quantity=90.0, unit="L", recurrence_type="MONTHLY", **extra
+    )
+
+
+def _chevres_mensuelles(**extra: Any) -> Dict[str, Any]:
+    return new_task("CREATE_RECURRING_NEED", product="chèvre", quantity=35.0, recurrence_type="MONTHLY", **extra)
+
+
+def _coq_chevre_mensuel() -> Dict[str, Any]:
+    return new_task(
+        "CREATE_RECURRING_NEED", product="coq", quantity=14.0, recurrence_type="MONTHLY",
+        additional_items=[{"product": "chèvre", "quantity": 20.0}],
+    )
+
+
+def _coq_moutons_chevres_mensuel() -> Dict[str, Any]:
+    return new_task(
+        "CREATE_RECURRING_NEED", product="coq", quantity=14.0, recurrence_type="MONTHLY",
+        ambiguous_groups=[{"quantity": 57.0, "candidates": ["mouton", "chevre"]}],
+    )
+
+
+class TestMonthlyA_SingleItemMilk:
+    """A. "j'ai besoin de 90 L de lait chaque mois" — LE test du bug historique (mandat §30)
+    est couvert séparément (`tests/interpreter/test_new_task_micro.py::TestRecurringNeedMonthly`,
+    au niveau de l'interpréteur) ; celui-ci vérifie le même message bout-en-bout sur le VRAI
+    graphe compilé, miroir exact de `TestA_SingleLivestockWeekly`."""
+
+    def test_draft_is_built_and_confirmation_is_requested(self, conv):
+        t = conv.send("j'ai besoin de 90 L de lait chaque mois", llm=_lait_mensuel())
+        assert t.error is None
+        assert t.event == "NEW_TASK" and t.intent == "CREATE_RECURRING_NEED"
+        assert t.goal_after == "CREATE_RECURRING_NEED"
+        assert t.tunnel_after == "recurring_need"
+        draft = t.draft()
+        assert draft["status"] == "DRAFT"
+        assert (draft["product"], draft["quantity"], draft["recurrence_type"]) == ("lait", 90.0, "MONTHLY")
+        assert t.pending_after.kind.value == "CONFIRM_ACTION"
+
+    def test_confirmation_creates_exactly_one_need_and_leaves_a_clean_state(self, conv):
+        conv.send("j'ai besoin de 90 L de lait chaque mois", llm=_lait_mensuel())
+        t = conv.send("oui")
+        assert len(_created(conv)) == 1
+        assert t.goal_after is None
+        assert _no_active_transaction(t.after) == []
+
+
+class TestMonthlyB_SingleItemGoats:
+    """B. "je veux 35 chèvres chaque mois" — second smoke-test à un seul item (produit/unité
+    différents de A), même invariant."""
+
+    def test_draft_is_built_and_confirmation_is_requested(self, conv):
+        t = conv.send("je veux 35 chèvres chaque mois", llm=_chevres_mensuelles())
+        draft = t.draft()
+        assert (draft["product"], draft["quantity"], draft["recurrence_type"]) == ("chèvre", 35.0, "MONTHLY")
+        assert t.pending_after.kind.value == "CONFIRM_ACTION"
+
+
+class TestMonthlyC_TwoItems:
+    """C. "je veux 14 coqs et 20 chèvres chaque mois" — miroir exact de `TestB_TwoItems`."""
+
+    def test_both_items_reach_the_draft_and_the_single_atomic_create(self, conv):
+        t1 = conv.send("je veux 14 coqs et 20 chèvres chaque mois", llm=_coq_chevre_mensuel())
+        draft = t1.draft()
+        assert draft["product"] == "coq" and draft["recurrence_type"] == "MONTHLY"
+        assert [it["product"] for it in draft["additional_items"]] == ["chèvre"]
+        conv.send("oui")
+        created = _created(conv)
+        assert [tool for tool, _ in created] == ["create_recurring_needs"]
+        items = created[0][1]["items"]
+        assert [(it["product_query"], it["quantity"]) for it in items] == [("coq", 14.0), ("chèvre", 20.0)]
+
+
+class TestMonthlyD_AmbiguousGroup:
+    """D. "je veux 14 coqs et 57 moutons chèvres chaque mois" — miroir exact de
+    `TestCDE_AmbiguousGroup`."""
+
+    def test_ambiguous_quantity_asks_a_structured_clarification(self, conv):
+        t = conv.send("je veux 14 coqs et 57 moutons chèvres chaque mois", llm=_coq_moutons_chevres_mensuel())
+        assert "57" in t.response
+        pending = t.pending_after
+        assert (pending.kind.value, pending.field) == ("ENTER_FIELD", "ambiguous_quantity")
+        assert t.draft()["product"] == "coq" and t.draft()["recurrence_type"] == "MONTHLY"
+        assert _created(conv) == []
+
+    def test_explicit_split_resolves_to_three_items_and_keeps_the_frequency(self, conv):
+        conv.send("je veux 14 coqs et 57 moutons chèvres chaque mois", llm=_coq_moutons_chevres_mensuel())
+        t = conv.send("50 moutons et 7 chèvres", llm=_UNKNOWN)
+        draft = t.draft()
+        assert draft["recurrence_type"] == "MONTHLY"
+        items = draft["additional_items"]
+        assert [(i["product"], i["quantity"]) for i in items] == [("mouton", 50.0), ("chevre", 7.0)]
+        conv.send("oui")
+        created = _created(conv)
+        assert len(created) == 1 and len(created[0][1]["items"]) == 3
+
+
+class TestMonthlyE_Correction:
+    """E. "non plutôt 23 boeufs" pendant une confirmation MONTHLY — miroir exact de
+    `TestG_CorrectionPolicy::test_a_reformulation_during_confirmation_is_a_correction_never_a_cancellation` :
+    ne doit JAMAIS réintroduire H5/H7 (la fréquence MONTHLY doit survivre, la correction reste
+    une correction, jamais une nouvelle tâche ni une clarification inutile)."""
+
+    def test_a_reformulation_during_confirmation_is_a_correction_and_keeps_monthly(self, conv):
+        t1 = conv.send("je veux 35 chèvres chaque mois", llm=_chevres_mensuelles())
+        t = conv.send(
+            "non plutôt 23 boeufs",
+            llm=new_task("CREATE_RECURRING_NEED", confidence=0.9, product="boeuf", quantity=23.0),
+        )
+        draft = t.draft()
+        assert draft["draft_id"] == t1.draft()["draft_id"], "même draft, version +1"
+        assert (draft["product"], draft["quantity"], draft["recurrence_type"]) == ("boeuf", 23.0, "MONTHLY")
+        assert conv.drafts.status_of(draft["draft_id"]) == "DRAFT"
+        assert t.decision.get("action") == "CONTINUE_ACTIVE_GOAL", "même intention : jamais une interruption"
+
+
+class TestMonthlyF_Interruption:
+    """F. Pendant une confirmation MONTHLY, "je veux 30 poulets chaque semaine" — miroir exact
+    de `TestF_NewTaskDuringClarification` : le draft MONTHLY précédent est abandonné/superseded
+    selon le lifecycle existant, le nouveau draft est WEEKLY — la fréquence précédente ne doit
+    jamais fuiter dans le nouveau draft (mandat §15)."""
+
+    def test_a_new_weekly_request_supersedes_the_monthly_draft_without_leaking_its_frequency(self, conv):
+        t1 = conv.send("je veux 35 chèvres chaque mois", llm=_chevres_mensuelles())
+        t = conv.send(
+            "je veux 30 poulets chaque semaine",
+            llm=new_task("CREATE_RECURRING_NEED", product="poulet", quantity=30.0, recurrence_type="WEEKLY"),
+        )
+        draft = t.draft()
+        assert (draft["product"], draft["quantity"], draft["recurrence_type"]) == ("poulet", 30.0, "WEEKLY")
+        assert draft["draft_id"] != t1.draft()["draft_id"]
+        assert conv.drafts.status_of(t1.draft()["draft_id"]) == "CANCELLED"
+
+
+class TestMonthlyG_Cancellation:
+    """G. "annule" pendant une confirmation MONTHLY — miroir exact de `TestHM_Cancellation`."""
+
+    def test_cancellation_leaves_no_transactional_state(self, conv):
+        t1 = conv.send("je veux 35 chèvres chaque mois", llm=_chevres_mensuelles())
+        t = conv.send("annule", llm={"disposition": "REJECT", "intent": None, "confidence": 0.9, "entities": {}})
+        assert _created(conv) == []
+        assert _no_active_transaction(t.after) == []
+        assert conv.drafts.status_of(t1.draft()["draft_id"]) == "CANCELLED"
+
+
+class TestMonthlyH_NewRequestAfterCompleted:
+    """H. Nouvelle tâche après un draft MONTHLY COMPLETED — miroir exact de
+    `TestK_NewRequestAfterCompleted`."""
+
+    def test_a_new_request_starts_a_fresh_draft(self, conv):
+        t1 = conv.send("je veux 35 chèvres chaque mois", llm=_chevres_mensuelles())
+        first_id = t1.draft()["draft_id"]
+        conv.send("oui")
+        t3 = conv.send(
+            "je veux 20 kg de tomate tous les jours",
+            llm=new_task("CREATE_RECURRING_NEED", product="tomate", quantity=20.0, unit="KG", recurrence_type="DAILY"),
+        )
+        draft = t3.draft()
+        assert draft["draft_id"] != first_id
+        assert (draft["product"], draft["recurrence_type"]) == ("tomate", "DAILY")
+        assert "chèvre" not in t3.response.lower()
+
+
+class TestMonthlyI_StaleCatalogThenRecurring:
+    """I. Vieux tunnel catalogue actif -> nouvelle demande MONTHLY — miroir exact de
+    `TestI_StaleCatalogThenRecurring`."""
+
+    def test_a_clear_monthly_request_escapes_the_stale_catalog_tunnel(self, conv):
+        conv.seed(_stale_catalog_state())
+        t = conv.send("je veux 35 chèvres chaque mois", llm=_chevres_mensuelles())
+        assert t.goal_before == "BUYER_REQUEST"
+        assert t.goal_after == "CREATE_RECURRING_NEED"
+        assert t.draft()["recurrence_type"] == "MONTHLY"
+        assert "appel d'offres" not in t.response.lower()
+
+
+# =====================================================================
 # Q. TTL de PendingInteraction (30 min, mandat C7 §8/§9/§10 — décision F)
 # =====================================================================
 

@@ -108,8 +108,9 @@ toujours au format `YYYY-MM-DD`, calculées à partir de la date de référence 
 donnée dans le message utilisateur ci-dessous (jamais une année devinée). \
 `null` si non précisé.
 - `recurrence_type`/`weekly_days`/`excluded_weekdays`/`max_price_per_unit` \
-(CREATE_RECURRING_NEED) : DAILY/WEEKLY_DAYS(+weekly_days)/WEEKLY/ONE_OFF ; \
-ISO 1=lundi..7=dimanche ; "sauf dimanche" = DAILY + excluded_weekdays=[7].
+(CREATE_RECURRING_NEED) : DAILY/WEEKLY_DAYS(+weekly_days)/WEEKLY/MONTHLY/ \
+ONE_OFF ; ISO 1=lundi..7=dimanche ; "sauf dimanche" = DAILY + \
+excluded_weekdays=[7].
 - `additional_items` (CREATE_RECURRING_NEED) : produits en plus, avec leur \
 quantité+unité, en objets {"product","quantity","unit"} — jamais \
 `additional_products`.
@@ -142,7 +143,7 @@ Réponds strictement avec cet objet JSON, sans aucun autre texte :
 "<YYYY-MM-DD|null>", "expected_harvest_date": "<YYYY-MM-DD|null>", \
 "deadline": "<YYYY-MM-DD|null>", "zone": "<str|null>", \
 "farm_name": "<str|null>", "recurrence_type": \
-"<DAILY|WEEKLY_DAYS|WEEKLY|ONE_OFF|null>", "weekly_days": [<1-7>, ...], \
+"<DAILY|WEEKLY_DAYS|WEEKLY|MONTHLY|ONE_OFF|null>", "weekly_days": [<1-7>, ...], \
 "excluded_weekdays": [<1-7>, ...], "max_price_per_unit": <float|null>, \
 "additional_items": [{"product": "<str|null>", "quantity": <float|null>, \
 "unit": "<str|null>"}, ...], "ambiguous_groups": [{"quantity": <float|null>, \

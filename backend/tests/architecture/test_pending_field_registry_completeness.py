@@ -102,7 +102,7 @@ class TestDynamicMissingFieldsAreAllKnownFields:
         # Toutes les combinaisons plausibles de champs manquants, y compris weekly_days
         # (recurrence_type=WEEKLY_DAYS) — voir TestP_WeeklyDays dans les tests de
         # characterization pour la reproduction bout-en-bout de ce gap précis.
-        for recurrence_type in ("WEEKLY", "DAILY", "WEEKLY_DAYS", "ONE_OFF", None):
+        for recurrence_type in ("WEEKLY", "DAILY", "WEEKLY_DAYS", "MONTHLY", "ONE_OFF", None):
             draft = RecurringNeedDraft.new(draft_id="registry-check", recurrence_type=recurrence_type)
             for field in draft.missing_fields():
                 assert is_known_field(field), f"missing_fields() a produit '{field}', inconnu du registre"

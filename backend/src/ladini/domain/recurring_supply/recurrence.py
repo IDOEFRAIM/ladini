@@ -1,16 +1,27 @@
 """Récurrence de l'approvisionnement — fonctions PURES, sans DB, sans LLM, entièrement déterministes.
 
 Mandat Phase 2 (§7) : le LLM comprend l'utilisateur, CE module décide des dates. Pas de RRULE, pas
-d'expression cron — seulement les 4 cas nécessaires au pilote : `DAILY`, `WEEKLY_DAYS`, `WEEKLY`,
-`ONE_OFF`. Toute date passée à ces fonctions doit être fournie par l'appelant (jamais `datetime.now()`
-ici) : c'est ce qui rend le module testable avec des dates fixes, y compris aux limites (fin de mois,
-29 février, changement d'année).
+d'expression cron — seulement les 5 cas nécessaires au pilote : `DAILY`, `WEEKLY_DAYS`, `WEEKLY`,
+`MONTHLY`, `ONE_OFF`. Toute date passée à ces fonctions doit être fournie par l'appelant (jamais
+`datetime.now()` ici) : c'est ce qui rend le module testable avec des dates fixes, y compris aux
+limites (fin de mois, 29 février, changement d'année).
 
 Convention des jours : ISO 8601 (1=lundi .. 7=dimanche), la même que `date.isoweekday()`.
+
+## MONTHLY (Phase 3, mandat "ajouter MONTHLY sans rouvrir l'architecture") — sémantique
+
+Un besoin MONTHLY est dû le MÊME jour du mois que `starts_at` (l'« ancre », `starts_at.day`, JAMAIS
+recalculée à partir d'une occurrence précédente — voir `_monthly_due_day` ci-dessous). Quand ce jour
+n'existe pas dans le mois cible (ex: ancre=31, février), on retombe sur le DERNIER jour valide de ce
+mois — jamais sur un jour dérivé de l'occurrence précédente : "31 janvier → 28 février → 31 mars",
+jamais "31 janvier → 28 février → 28 mars". Aucune fonction séparée `next_monthly_occurrence` n'est
+nécessaire : `_is_due`, appelée jour par jour par `generate_occurrence_dates` (comme les 4 autres
+types), suffit — MONTHLY est une VALEUR de plus du même moteur déterministe, pas un nouveau moteur.
 """
 
 from __future__ import annotations
 
+from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Sequence
@@ -18,7 +29,7 @@ from typing import Sequence
 # Fenêtre de matérialisation par défaut à la création/à l'extension quotidienne d'un besoin (mandat §8).
 OCCURRENCE_WINDOW_DAYS = 7
 
-RECURRENCE_TYPES = ("DAILY", "WEEKLY_DAYS", "WEEKLY", "ONE_OFF")
+RECURRENCE_TYPES = ("DAILY", "WEEKLY_DAYS", "WEEKLY", "MONTHLY", "ONE_OFF")
 
 
 class InvalidRecurrenceRule(ValueError):
@@ -56,6 +67,14 @@ def _as_date(value: date | datetime) -> date:
     return value.date() if isinstance(value, datetime) else value
 
 
+def _monthly_due_day(year: int, month: int, anchor_day: int) -> int:
+    """Le jour du mois `(year, month)` dû pour une ancre `anchor_day` (1..31) — l'ancre elle-même
+    si le mois est assez long, sinon le DERNIER jour valide de ce mois. `anchor_day` vient TOUJOURS
+    de `starts_at.day` telle quelle (jamais du jour d'une occurrence précédente) : c'est ce qui
+    garantit "31 janvier → 28 février → 31 mars" plutôt qu'une dérive vers "28 mars"."""
+    return min(anchor_day, monthrange(year, month)[1])
+
+
 def _is_due(rule: RecurrenceRule, day: date) -> bool:
     """Un jour donné est-il concerné par la règle, avant application des exclusions ?"""
     weekday = day.isoweekday()
@@ -65,6 +84,9 @@ def _is_due(rule: RecurrenceRule, day: date) -> bool:
         return weekday in rule.weekly_days
     if rule.recurrence_type == "WEEKLY":
         return weekday == _as_date(rule.starts_at).isoweekday()
+    if rule.recurrence_type == "MONTHLY":
+        anchor = _as_date(rule.starts_at)
+        return day.day == _monthly_due_day(day.year, day.month, anchor.day)
     if rule.recurrence_type == "ONE_OFF":
         return day == _as_date(rule.starts_at)
     raise InvalidRecurrenceRule(rule.recurrence_type)  # pragma: no cover — __post_init__ l'exclut déjà

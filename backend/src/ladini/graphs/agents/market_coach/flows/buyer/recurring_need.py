@@ -870,7 +870,9 @@ async def _render_needs_list(state: Dict[str, Any], mc_runtime: MarketRuntime, *
 def _render_need_line(item: Dict[str, Any]) -> str:
     freq = {
         "DAILY": "jour",
+        "WEEKLY_DAYS": "semaine",
         "WEEKLY": "semaine",
+        "MONTHLY": "mois",
         "ONE_OFF": "une fois",
     }.get(item.get("recurrence_type"), "jour")
     status = "actif" if item.get("status") == "ACTIVE" else "en pause" if item.get("status") == "PAUSED" else "annulé"

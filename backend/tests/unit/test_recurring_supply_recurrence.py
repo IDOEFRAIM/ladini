@@ -63,6 +63,92 @@ def test_weekly_repeats_on_the_start_date_weekday_only():
     assert got == [d("2026-09-01"), d("2026-09-08"), d("2026-09-15")]
 
 
+# ── MONTHLY (Phase 3, mandat MONTHLY) ─────────────────────────────────────
+# Sémantique : même jour du mois que `starts_at` (l'ancre, `starts_at.day`, JAMAIS recalculée à
+# partir de l'occurrence précédente). Si ce jour n'existe pas dans le mois cible, dernier jour
+# valide de CE mois — jamais dérivé du résultat précédent ("31 janvier -> 28 février -> 31 mars",
+# jamais "-> 28 mars").
+
+def test_monthly_repeats_on_the_same_day_of_month_when_it_always_exists():
+    rule = RecurrenceRule(recurrence_type="MONTHLY", starts_at=d("2026-01-15"))
+    got = generate_occurrence_dates(rule, from_date=d("2026-01-15"), to_date=d("2026-02-15"))
+    assert got == [d("2026-01-15"), d("2026-02-15")]
+
+
+def test_monthly_anchor_31_clamps_to_the_last_day_of_a_shorter_month():
+    rule = RecurrenceRule(recurrence_type="MONTHLY", starts_at=d("2026-01-31"))
+    got = generate_occurrence_dates(rule, from_date=d("2026-01-31"), to_date=d("2026-02-28"))
+    assert got == [d("2026-01-31"), d("2026-02-28")]
+
+
+def test_monthly_anchor_31_reaches_the_31st_again_in_a_31_day_month():
+    """L'ancre reste 31, jamais dérivée du 28 février : "31 janvier -> 28 février -> 31 mars",
+    jamais "-> 28 mars" (mandat §3)."""
+    rule = RecurrenceRule(recurrence_type="MONTHLY", starts_at=d("2026-01-31"))
+    got = generate_occurrence_dates(rule, from_date=d("2026-01-31"), to_date=d("2026-03-31"))
+    assert got == [d("2026-01-31"), d("2026-02-28"), d("2026-03-31")]
+
+
+def test_monthly_anchor_30_clamps_in_february_then_reaches_30_in_march():
+    rule = RecurrenceRule(recurrence_type="MONTHLY", starts_at=d("2026-01-30"))
+    got = generate_occurrence_dates(rule, from_date=d("2026-01-30"), to_date=d("2026-03-30"))
+    assert got == [d("2026-01-30"), d("2026-02-28"), d("2026-03-30")]
+
+
+def test_monthly_anchor_29_clamps_to_28_in_a_non_leap_february():
+    rule = RecurrenceRule(recurrence_type="MONTHLY", starts_at=d("2027-01-29"))
+    got = generate_occurrence_dates(rule, from_date=d("2027-01-29"), to_date=d("2027-02-28"))
+    assert got == [d("2027-01-29"), d("2027-02-28")]
+
+
+def test_monthly_anchor_29_reaches_29_in_a_leap_february():
+    rule = RecurrenceRule(recurrence_type="MONTHLY", starts_at=d("2028-01-29"))
+    got = generate_occurrence_dates(rule, from_date=d("2028-01-29"), to_date=d("2028-02-29"))
+    assert got == [d("2028-01-29"), d("2028-02-29")]
+
+
+def test_monthly_anchor_31_across_a_leap_february_then_31_day_march():
+    rule = RecurrenceRule(recurrence_type="MONTHLY", starts_at=d("2028-01-31"))
+    got = generate_occurrence_dates(rule, from_date=d("2028-01-31"), to_date=d("2028-03-31"))
+    assert got == [d("2028-01-31"), d("2028-02-29"), d("2028-03-31")]
+
+
+def test_monthly_anchor_31_across_a_non_leap_february_then_31_day_march():
+    rule = RecurrenceRule(recurrence_type="MONTHLY", starts_at=d("2027-01-31"))
+    got = generate_occurrence_dates(rule, from_date=d("2027-01-31"), to_date=d("2027-03-31"))
+    assert got == [d("2027-01-31"), d("2027-02-28"), d("2027-03-31")]
+
+
+def test_monthly_anchor_is_february_29th_itself_reaches_march_29th():
+    """L'ancre peut être le 29 février d'une année bissextile — le comportement suit alors
+    exactement la même règle d'ancre (mandat §27 : "comportement défini par anchor semantics")."""
+    rule = RecurrenceRule(recurrence_type="MONTHLY", starts_at=d("2028-02-29"))
+    got = generate_occurrence_dates(rule, from_date=d("2028-02-29"), to_date=d("2028-03-29"))
+    assert got == [d("2028-02-29"), d("2028-03-29")]
+
+
+def test_monthly_anchor_31_across_august_september_october():
+    rule = RecurrenceRule(recurrence_type="MONTHLY", starts_at=d("2026-08-31"))
+    got = generate_occurrence_dates(rule, from_date=d("2026-08-31"), to_date=d("2026-10-31"))
+    assert got == [d("2026-08-31"), d("2026-09-30"), d("2026-10-31")]
+
+
+def test_monthly_respects_ends_at_boundary_inclusive_then_stops():
+    rule = RecurrenceRule(recurrence_type="MONTHLY", starts_at=d("2026-01-15"), ends_at=d("2026-02-15"))
+    got = generate_occurrence_dates(rule, from_date=d("2026-01-01"), to_date=d("2026-03-31"))
+    assert got == [d("2026-01-15"), d("2026-02-15")]
+
+
+def test_monthly_excluded_weekday_still_applies_generically():
+    """`excluded_weekdays` s'applique à TOUS les types de récurrence (module docstring) — MONTHLY
+    n'a pas de sémantique propre pour ce champ, il hérite du comportement générique existant."""
+    rule = RecurrenceRule(recurrence_type="MONTHLY", starts_at=d("2026-01-15"), excluded_weekdays=[4])
+    # 2026-01-15 est un jeudi (isoweekday 4) -> exclu ce mois-ci précisément.
+    assert d("2026-01-15").isoweekday() == 4
+    got = generate_occurrence_dates(rule, from_date=d("2026-01-15"), to_date=d("2026-02-15"))
+    assert got == [d("2026-02-15")]
+
+
 # ── ONE_OFF ──────────────────────────────────────────────────────────────
 
 def test_one_off_produces_exactly_one_date_if_in_window():
@@ -139,8 +225,9 @@ def test_an_out_of_range_iso_weekday_is_rejected():
 
 
 def test_an_unknown_recurrence_type_is_rejected():
+    # "MONTHLY" est désormais un type valide (Phase 3) — "YEARLY" reste hors du domaine pilote.
     with pytest.raises(InvalidRecurrenceRule):
-        RecurrenceRule(recurrence_type="MONTHLY", starts_at=d("2026-09-01"))
+        RecurrenceRule(recurrence_type="YEARLY", starts_at=d("2026-09-01"))
 
 
 def test_a_reversed_window_yields_nothing():

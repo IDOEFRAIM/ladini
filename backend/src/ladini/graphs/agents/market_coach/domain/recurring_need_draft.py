@@ -317,6 +317,8 @@ def _render_frequency(
         return f"Les {days}{suffix}."
     if recurrence_type == "WEEKLY":
         return f"Chaque semaine{suffix}."
+    if recurrence_type == "MONTHLY":
+        return f"Chaque mois{suffix}."
     if recurrence_type == "ONE_OFF":
         return "Une seule fois."
     return ""
@@ -650,7 +652,7 @@ _MISSING_FIELD_LABELS = {
     "product": "le produit souhaité",
     "quantity": "la quantité",
     "unit": "l'unité (kg, unités...)",
-    "recurrence_type": "la fréquence (chaque jour, certains jours, chaque semaine, une seule fois)",
+    "recurrence_type": "la fréquence (chaque jour, certains jours, chaque semaine, chaque mois, une seule fois)",
     "weekly_days": "les jours de la semaine concernés",
 }
 
