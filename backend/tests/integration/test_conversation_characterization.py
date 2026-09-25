@@ -325,43 +325,15 @@ class TestG_CorrectionPolicy:
         conv.send("je veux 20 kg de tomate tous les jours", llm=_deviate_then_new_task)
         assert conv.drafts.status_of(t1.draft()["draft_id"]) == "CANCELLED", "jamais d'orphelin en DRAFT"
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "H5 (analysé en détail commit 6, non résolu — voir PHASE2_HANDOFF.md) : "
-        "interpreter/routing.py::_interpret_fast_path, branche `_confirmation_correction` "
-        "(env. lignes 1189-1221), déclenche dès que expected=='CONFIRMATION' ET qu'un SEUL "
-        "nombre typé (quantité XOR prix) est trouvé dans le message — SANS jamais vérifier "
-        "s'il reste, au-delà de ce nombre, un contenu substantiel non expliqué (ici "
-        "'de tomate tous les jours'). Root cause distincte de son voisinage immédiat : "
-        "gater cette branche sur `llm_available` (tenté et reverté) casse "
-        "TestCompoundQuantityAntiTruncationGuard (test_compound_quantity_in_text_overrides_a_"
-        "truncated_llm_value, test_a_single_quantity_pair_is_left_untouched) et "
-        "test_the_full_interpreter_pipeline_keeps_the_correct_quantity : ces tests prouvent "
-        "que ce même raccourci DOIT gagner sur le LLM même quand celui-ci est disponible, "
-        "car le LLM tronque parfois une quantité composée ('2 tonnes et 250 kg' -> '2 TONNE') "
-        "— `llm_available` ne distingue donc pas 'correction du sujet en cours' de 'nouveau "
-        "sujet sans rapport', les deux cas ayant llm_available=True. Une distinction correcte "
-        "exigerait soit (a) reconnaître qu'un NOM DE PRODUIT est mentionné — impossible sans "
-        "lexique figé par produit (interdit par le mandat) ou un lookup catalogue que ce "
-        "fast-path pré-LLM n'a pas, soit (b) que `decide_turn`/`classify_turn` (core/turn_policy.py, "
-        "actuellement SHADOW ONLY par choix explicite du mandat §21-22) devienne AUTORITAIRE et "
-        "s'exécute AVANT ce raccourci pour trancher NEW_TASK vs CORRECT — un changement "
-        "structurel volontairement hors périmètre de C6 à C14 (mandat : 'seulement lorsque la "
-        "matrice est solide'). À rouvrir explicitement lors du commit qui rend `decide_turn` "
-        "autoritaire (post-C14), ou plus tôt si C8 (normalisation canonique produit/unité) "
-        "introduit un signal générique 'ce message nomme un produit absent du draft courant' "
-        "réutilisable ici sans lexique ad hoc. "
-        "Réévalué au commit 12 (mandat Phase 2 §12, 'reconsidérer sa place conceptuelle') : "
-        "C11 a bien branché classify_turn()/TurnTrace sur CHAQUE tour (core/turn_trace.py), "
-        "mais strictement en SHADOW — jamais consommé par un routeur/flow (garde AST "
-        "inchangée, tests/unit/test_turn_policy_classification.py). Aucun commit C7-C11 n'a "
-        "introduit de mécanisme de PROPRIÉTÉ DE TOUR (turn ownership) qui permettrait à "
-        "`_confirmation_correction` de distinguer correction-du-sujet-en-cours de "
-        "nouveau-sujet-sans-rapport sans lexique ad hoc. La condition de fermeture ci-dessus "
-        "reste donc inchangée et entière : xfail strict maintenu, à rouvrir seulement quand "
-        "`decide_turn` devient autoritaire (post-C14) ou qu'un signal générique de nommage de "
-        "produit apparaît."
-    ))
     def test_a_fresh_full_request_during_an_unrelated_confirmation_is_never_swallowed_by_the_numeric_shortcut(self, conv):
+        # H5 FERMÉ (Phase 2.5) : `_interpret_fast_path` ne décide plus rien pour
+        # `_confirmation_correction` dès qu'un classifieur réel est disponible (il
+        # s'abstient, `return None` — voir routing.py) ; c'est désormais le
+        # classifieur RÉEL (new_task_v2) qui voit tout le message et remonte
+        # `recurrence_type`, et `core/turn_policy.py::decide_active_draft_reply`
+        # (appelé depuis `flows/buyer/recurring_need.py::_create_flow`) qui
+        # tranche NEW_TASK plutôt que CORRECT dès que ce signal est présent —
+        # exactement le mandat §9 cas (E)/(F).
         t1 = conv.send("je veux 14 coqs chaque semaine", llm=_coq())
         t = conv.send(
             "je veux 20 kg de tomate tous les jours",

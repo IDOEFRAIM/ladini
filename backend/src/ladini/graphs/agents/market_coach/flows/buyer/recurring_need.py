@@ -37,10 +37,18 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     clear_pending_interaction,
     set_pending_interaction,
 )
-from ladini.graphs.agents.market_coach.core.state import entities_said_this_turn
+from ladini.graphs.agents.market_coach.core.state import (
+    entities_said_this_turn,
+    resolve_current_goal,
+)
+from ladini.graphs.agents.market_coach.core.turn_policy import (
+    TurnAction,
+    decide_active_draft_reply,
+)
 from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
     CancelRecurringNeedDraft,
     ConfirmRecurringNeedDraft,
+    NoRecurringNeedAction,
     RecurringNeedDraft,
     RecurringNeedDraftStatus,
     RecurringNeedExecutionResult,
@@ -394,8 +402,41 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
 
     said = _said_this_turn(state)
     if draft is not None and draft.status == RecurringNeedDraftStatus.DRAFT and _pending_targets(pending, draft):
-        if _is_correction(interpreted_event, said):
+        # (Phase 2.5, H7) : frontière AUTORITAIRE unique — voir
+        # `core/turn_policy.py::decide_active_draft_reply`. Avant, `_is_correction`
+        # ne regardait QUE l'absence de `recurrence_type` dans `said`, aveugle à la
+        # confiance et à l'intent réellement détecté : un message hors-sujet à
+        # faible confiance ("maïs", `confidence=0.4`, `detected_intent` différent du
+        # goal actif) passait pour une correction et corrompait le draft actif.
+        # `decide_active_draft_reply` a maintenant en main la classification RÉELLE
+        # (jamais le fast-path pré-LLM, désactivé pour ce cas — voir
+        # `interpreter/routing.py::_interpret_fast_path`) : CORRECT applique la
+        # correction comme avant, CLARIFY ne mute RIEN (redemande confirmation du
+        # draft INCHANGÉ plutôt que de deviner), et tout le reste retombe sur la
+        # branche NEW_TASK ci-dessous (nouvelle tâche indépendante, ancien draft clos).
+        #
+        # `cognitive_decision.intent` — PAS `state["detected_intent"]` : dès que
+        # `cognitive_guard` choisit CONTINUE_ACTIVE_GOAL (goal non interrompu),
+        # `goal_planner` (RULE 2, plusieurs branches "re-verrouille le goal")
+        # RÉÉCRIT `detected_intent` sur `current_goal` dans le patch d'état — un
+        # choix délibéré pour le reste du tour, mais qui EFFACE, au moment où ce
+        # flow s'exécute, le signal même dont cette décision a besoin (l'intent
+        # ORIGINAL, avant tout verrouillage). `cognitive_decision.intent` est
+        # écrit une fois par `cognitive_guard` et jamais retouché ensuite — seule
+        # source encore fidèle à la classification réelle de CE tour.
+        _turn_action = decide_active_draft_reply(
+            interpreted_event=interpreted_event,
+            said_entities=said,
+            detected_intent=(state.get("cognitive_decision") or {}).get("intent"),
+            current_goal=resolve_current_goal(state),
+        )
+        if _turn_action == TurnAction.CORRECT:
             return await _correct(draft, said, state, conversation_id)
+        if _turn_action == TurnAction.CLARIFY:
+            outcome = apply_domain_action(
+                draft, NoRecurringNeedAction(reason="ambiguous_correction_vs_new_task")
+            )
+            return _apply_response_plan(build_response_plan(outcome))
 
     if interpreted_event in ("NEW_TASK", "INTERRUPTION"):
         if draft is not None and draft.status == RecurringNeedDraftStatus.DRAFT:
@@ -459,19 +500,6 @@ def _pending_targets(pending: Any, draft: RecurringNeedDraft) -> bool:
     if pending_dict.get("kind") == "CONFIRM_ACTION":
         return bool(target.get("draft_id") == draft.draft_id)
     return pending_dict.get("kind") == "ENTER_FIELD" and pending_dict.get("goal") == "CREATE_RECURRING_NEED"
-
-
-def _is_correction(interpreted_event: str, said: Dict[str, Any]) -> bool:
-    """Politique Phase 2 (C) — décision déterministe sur la STRUCTURE du message :
-      - REJECT porteur de valeurs (« non, plutôt 23 bœufs ») -> correction ;
-      - même intention reformulée SANS sa propre fréquence -> correction du draft en cours
-        (une nouvelle demande autonome redit sa fréquence : « je veux 30 poulets chaque
-        semaine » reste une nouvelle demande, voir test F)."""
-    if not said:
-        return False
-    if interpreted_event == "REJECT":
-        return True
-    return interpreted_event in ("NEW_TASK", "INTERRUPTION") and not said.get("recurrence_type")
 
 
 async def _correct(

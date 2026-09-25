@@ -1,4 +1,6 @@
-"""`decide_turn` — vocabulaire canonique d'un tour, en mode SHADOW (Phase 2 hardening).
+"""`decide_turn` — vocabulaire canonique d'un tour. SHADOW pour `classify_turn`
+(observabilité, Phase 2), AUTORITAIRE pour `decide_active_draft_reply` UNIQUEMENT
+(Phase 2.5, H5/H7 — voir sa propre docstring pour la frontière exacte).
 
 Aujourd'hui, la décision « ce tour est-il une nouvelle tâche, une continuation, une
 interruption, une correction... ? » est répartie sur 3 couches qui écrivent chacune leur
@@ -17,6 +19,23 @@ commit 11 par `core/turn_trace.py::capture_pre_cleanup` (voir sa docstring de mo
 rend visible, tour après tour, comment le comportement RÉEL se répartit dans ce
 vocabulaire — la matrice nécessaire avant qu'un futur chantier puisse envisager de le
 rendre autoritaire.
+
+## Phase 2.5 — `decide_active_draft_reply` devient AUTORITAIRE, sur UNE frontière étroite
+
+H5/H7 (mandat Phase 2.5, 2026-09-25) partageaient un invariant manquant commun : la
+question « ce message reçu pendant la confirmation/correction d'un draft actif CORRIGE-t-il
+ce draft, ou démarre-t-il une tâche INDÉPENDANTE ? » était re-décidée localement, deux fois,
+par deux heuristiques narrow et incomplètes — `interpreter/routing.py::_interpret_fast_path`
+(H5, un simple nombre typé pendant une CONFIRMATION) et `flows/buyer/recurring_need.py::
+_is_correction` (H7, l'absence de `recurrence_type`, aveugle à la confiance et à l'intent
+détecté). Aucune des deux ne voyait le contexte complet. `decide_active_draft_reply`
+centralise cette UNE question — rien de plus : elle ne décide PAS l'interruption
+(`cognitive_guard` en reste seul propriétaire), ne décide PAS le routage du goal
+(`goal_planner`), seulement CORRECT vs NEW_TASK vs CLARIFY pour un message qui a DÉJÀ
+traversé l'interpréteur réel (jamais le fast-path pré-LLM, désormais désactivé pour ce cas
+précis — voir `_interpret_fast_path`) et que `cognitive_guard` a DÉJÀ laissé passer sans
+interrompre. Un seul appelant aujourd'hui (`recurring_need.py`) — garde architecturale
+dans `tests/architecture/test_turn_policy_authoritative_boundary.py`.
 """
 from __future__ import annotations
 
@@ -118,4 +137,69 @@ def classify_turn(
     return TurnClassification(TurnAction.UNKNOWN, f"unclassified:{event}")
 
 
-__all__ = ["TurnAction", "TurnClassification", "classify_turn"]
+def decide_active_draft_reply(
+    *,
+    interpreted_event: Optional[str],
+    said_entities: Optional[Dict[str, Any]],
+    detected_intent: Optional[str],
+    current_goal: Optional[str],
+) -> TurnAction:
+    """SEUL point d'entrée AUTORITAIRE de ce module (voir docstring de module,
+    section Phase 2.5) — appelé une fois que `cognitive_guard` a déjà laissé
+    passer le tour sans interrompre le goal actif, pour trancher CE tour entre
+    CORRECT (le draft actif absorbe `said_entities`), NEW_TASK (le draft actif
+    reste intact, une tâche indépendante démarre ailleurs) et CLARIFY (ni l'un
+    ni l'autre n'est assez sûr — ne jamais deviner, cf. mandat Phase 2.5 §10).
+
+    N'invente rien : elle relit `interpreted_event`/`said_entities` produits
+    par l'interpréteur RÉEL (jamais le fast-path pré-LLM — désactivé pour ce
+    cas, voir `_interpret_fast_path`) et le `detected_intent` qu'il a extrait,
+    contre le `current_goal` déjà résolu par l'appelant. Un signal fort et déjà
+    existant qu'une tâche est isolée et complète — `recurrence_type` présent
+    dans `said_entities` — l'emporte : mandat §9 cas (E)/(F) (« je veux 30
+    poulets chaque semaine » pendant une confirmation ne doit jamais voler son
+    nombre au draft en cours). Sans ce signal, seule une divergence claire entre
+    l'intent détecté et le goal actif justifie CLARIFY plutôt que CORRECT —
+    l'ambiguïté ne doit jamais se résoudre par une mutation silencieuse.
+    """
+    event = str(interpreted_event or "").upper().strip()
+
+    # Un REJECT/NEW_TASK/INTERRUPTION SANS aucune valeur dite ce tour n'a rien
+    # à corriger — même filet que l'ancien `_is_correction` (« if not said:
+    # return False »), reproduit ici à l'identique avant toute nouvelle logique.
+    if event == "REJECT":
+        return TurnAction.CORRECT if said_entities else TurnAction.REJECT
+
+    # Le classifieur n'a dégagé AUCUNE intention exploitable (UNKNOWN — pas
+    # "une intention différente", juste "aucune"), mais CE message porte
+    # quand même une valeur structurée alors qu'une question précise est en
+    # attente sur CE draft (`_pending_targets`, garanti par l'appelant). Une
+    # quantité/unité isolée, sans produit ni intention propre, ne peut
+    # structurellement PAS démarrer une tâche indépendante — elle ne peut
+    # que répondre à la question posée. Filet de dernier recours,
+    # symétrique au chemin legacy (`interpreter/entities.py::
+    # _fallback_quantity_unit_from_text`), pour le pire cas où même le LLM
+    # échoue à classifier (voir `TestRealCorrectionUpdatesTheSameDraft`).
+    if event == "UNKNOWN" and said_entities:
+        return TurnAction.CORRECT
+
+    if event not in ("NEW_TASK", "INTERRUPTION"):
+        return TurnAction.ANSWER_PENDING
+
+    if not said_entities or said_entities.get("recurrence_type"):
+        return TurnAction.NEW_TASK
+
+    intent_up = str(detected_intent or "").upper().strip()
+    goal_up = str(current_goal or "").upper().strip()
+    if intent_up and intent_up != "UNKNOWN" and goal_up and intent_up != goal_up:
+        return TurnAction.CLARIFY
+
+    return TurnAction.CORRECT
+
+
+__all__ = [
+    "TurnAction",
+    "TurnClassification",
+    "classify_turn",
+    "decide_active_draft_reply",
+]

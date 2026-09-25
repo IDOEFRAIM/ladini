@@ -31,7 +31,11 @@ from typing import Any, Dict, Optional, Tuple
 from pydantic import ValidationError
 
 from ladini.core.idempotency import get_cached, increment, set_cached
-from ladini.domain.quantity_unit import extract_unit_only_from_text
+from ladini.domain.quantity_unit import (
+    extract_unit_only_from_text,
+    parse_compound_quantity,
+    parse_quantity_unit_from_text,
+)
 from ladini.graphs.agents.market_coach.interpreter.entities import (
     _fallback_quantity_unit_from_text,
     _remap_entities,
@@ -364,6 +368,31 @@ async def _finalize(
     entities["additional_items"] = raw_entities["additional_items"]
     entities["ambiguous_groups"] = raw_entities["ambiguous_groups"]
 
+    # FALLBACK numérique (parité avec le chemin legacy, `routing.py`) : un
+    # message SANS AUCUNE quantité extraite par le LLM (disposition UNKNOWN à
+    # confiance nulle sur un message nu, ex: "mets plutot 15 kg" — pire cas
+    # réaliste, testé par `TestRealCorrectionUpdatesTheSameDraft`) doit quand
+    # même atteindre le draft si le texte porte lui-même un nombre+unité sans
+    # ambiguïté. Manquait à ce micro-prompt tant que `_interpret_fast_path`
+    # interceptait par avance tout message NEW_TASK/CONFIRMATION porteur d'un
+    # nombre (H5, `_confirmation_correction`, désormais désactivée dès qu'un
+    # classifieur réel est disponible) : ce micro-prompt n'était alors jamais
+    # atteint pour ce motif. Jamais l'inverse — on n'écrase pas une quantité
+    # que le LLM a positivement fournie (voir la garde anti-ancrage ci-après
+    # pour CE cas). Suspendu pour un message multi-produits
+    # (`additional_items` non vide) : un item a déjà sa PROPRE quantité, la
+    # deviner par un simple scan du texte entier reviendrait à confondre les
+    # quantités de plusieurs produits distincts.
+    _adjacent = (
+        {}
+        if raw_entities.get("additional_items")
+        else (_fallback_quantity_unit_from_text(text) or {})
+    )
+    if entities.get("quantity") is None and _adjacent.get("quantity") is not None:
+        entities["quantity"] = _adjacent["quantity"]
+        if _adjacent.get("unit"):
+            entities["unit"] = _adjacent["unit"]
+
     # Garde anti-ancrage (incident réel vécu : le LLM "s'ancre" parfois sur
     # une unité mentionnée plus tôt dans la conversation — ex: TONNE — et
     # continue de la répéter malgré des corrections explicites en kg dans
@@ -373,7 +402,6 @@ async def _finalize(
     # legacy (`routing.py`, même principe) : le TEXTE de l'utilisateur
     # prime TOUJOURS sur une unité posée par le LLM.
     if entities.get("quantity") is not None:
-        _adjacent = _fallback_quantity_unit_from_text(text) or {}
         _text_unit = _adjacent.get("unit") or extract_unit_only_from_text(text)
         if _text_unit:
             if entities.get("unit") != _text_unit:
@@ -384,6 +412,41 @@ async def _finalize(
             # risquer une unité fantôme (le défaut du registre s'applique
             # ensuite en aval, comme avant cette garde).
             entities.pop("unit", None)
+
+    # ── QUANTITÉ COMPOSÉE (Phase 2.5, parité avec le chemin legacy) ──
+    # Même garde ANTI-TRONCATURE que `routing.py` (incident réel 2026-09-03,
+    # "2 tonnes et 250 kg" → LLM tronqué en "2 TONNE") — jusqu'ici câblée
+    # UNIQUEMENT sur le chemin legacy, jamais ici, pour la même raison que le
+    # fallback ci-dessus. Neutre quand le texte ne porte qu'une seule paire ou
+    # des unités non convertibles (résultat alors identique, aucune
+    # correction). Suspendue pour un message multi-produits : sommer TOUTES
+    # les quantités convertibles du texte confondrait les quantités de
+    # plusieurs produits distincts (chacun garde la SIENNE, extraite par le
+    # LLM par produit — `parse_compound_quantity` ne raisonne, lui, qu'en
+    # termes d'un seul total de texte).
+    if entities.get("quantity") is not None and not raw_entities.get("additional_items"):
+        _compound = parse_compound_quantity(text)
+        if (
+            _compound.unit == "KG"
+            and _compound.quantity is not None
+            and (
+                entities.get("quantity") != _compound.quantity
+                or entities.get("unit") != _compound.unit
+            )
+        ):
+            _single = parse_quantity_unit_from_text(text)
+            if _compound.quantity != _single.quantity:
+                logger.warning(
+                    "[Interpreter NEW_TASK] Quantité composée détectée dans le "
+                    "texte ('%s' → %.1f KG) — retenue contre LLM=%r/%r "
+                    "(anti-troncature).",
+                    text,
+                    _compound.quantity,
+                    entities.get("quantity"),
+                    entities.get("unit"),
+                )
+                entities["quantity"] = _compound.quantity
+                entities["unit"] = _compound.unit
 
     if "product" in entities:
         entities["product"] = await _validate_and_sanitize_product(

@@ -118,27 +118,14 @@ class TestLowConfidence:
         assert t.goal_after == "CREATE_RECURRING_NEED"
         assert t.pending_after.kind.value == "CONFIRM_ACTION"
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "H7 (découvert commit 12, même famille que H5 — voir son xfail dans "
-        "test_conversation_characterization.py) : `flows/buyer/recurring_need.py::"
-        "_is_correction` (ligne ~474) traite TOUT message NEW_TASK sans `recurrence_type` "
-        "explicite comme une correction du draft EN COURS ('même intention reformulée SANS "
-        "sa propre fréquence'), sans jamais vérifier que le produit nommé a un rapport "
-        "quelconque avec le draft actif. Un message à confiance trop faible pour interrompre "
-        "(< INTERRUPTION_CONFIDENCE_THRESHOLD=0.60, donc `cognitive_guard` choisit "
-        "CONTINUE_ACTIVE_GOAL par défaut, `nodes/cognitive.py` ligne 164) tombe dans cette "
-        "branche et écrase silencieusement `draft.product` par un produit SANS RAPPORT "
-        "('maïs' remplace 'coq') — la CONFIRMATION suivante ('oui') créerait alors le MAUVAIS "
-        "produit, sans qu'aucune clarification n'ait jamais été demandée. Root cause "
-        "identique à H5 dans sa nature (aucun signal générique 'ce produit est étranger au "
-        "draft courant' disponible sans lexique figé) mais un chemin de déclenchement "
-        "DIFFÉRENT (ici `_is_correction`, pas `_interpret_fast_path::_confirmation_ "
-        "correction`) : les deux sites devront être corrigés ensemble le jour où "
-        "`decide_turn`/`classify_turn` (core/turn_policy.py) devient autoritaire (post-C14, "
-        "même condition de fermeture que H5), ou plus tôt si un signal produit générique "
-        "apparaît."
-    ))
     def test_a_low_confidence_new_task_naming_an_unrelated_product_never_corrupts_the_pending_draft(self, conv):
+        # H7 FERMÉ (Phase 2.5, même invariant que H5) : `_is_correction` est
+        # remplacé par `core/turn_policy.py::decide_active_draft_reply`, qui
+        # compare `detected_intent` ("BUYER_ADD_TO_CART") au goal actif
+        # ("CREATE_RECURRING_NEED") — divergents et non-`UNKNOWN` — et rend
+        # CLARIFY plutôt que CORRECT : le draft actif n'est PAS muté (repose
+        # sur `NoRecurringNeedAction`/`DRAFT_UNCHANGED`, voir `_create_flow`),
+        # la confirmation en cours est simplement redemandée.
         conv.send("je veux 14 coqs chaque semaine", llm=_coq())
         t = conv.send("maïs", llm=new_task("BUYER_ADD_TO_CART", product="maïs", confidence=0.4))
         draft = t.draft()
