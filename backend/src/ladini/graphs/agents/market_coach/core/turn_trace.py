@@ -320,16 +320,10 @@ def last_trace() -> Optional[TurnTrace]:
     return _last_trace
 
 
-def current_builder() -> Optional[_TurnTraceBuilder]:
-    """Exposé pour les tests uniquement (vérifier qu'une capture est bien en cours)."""
-    return _current.get()
-
-
 __all__ = [
     "TurnTrace",
     "start",
     "capture_pre_cleanup",
     "finish",
-    "current_builder",
     "last_trace",
 ]
