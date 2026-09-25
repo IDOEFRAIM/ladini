@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from ladini.graphs.agents.market_coach.core import turn_trace
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     CART_TUNNEL_KINDS,
     InteractionKind,
@@ -123,6 +124,7 @@ _EPHEMERAL_REPLACE_FIELDS = {
     "blocked_user_query": None,
     "error_message": None,
     "technical_details": None,
+    "error_class": None,
     "pending_menu": None,
     "reply_audio_url": None,
     "proactive_hint": None,
@@ -159,6 +161,12 @@ _EPHEMERAL_REPLACE_FIELDS = {
 async def post_response_cleanup(
     state: Dict[str, Any], mc_runtime: Any
 ) -> Dict[str, Any]:
+    # (Phase 2 hardening, commit 11) : CE nœud est le DERNIER avant que ses propres
+    # resets n'effacent intent/confiance/goal/pending — le SEUL point où `TurnTrace`
+    # peut encore les lire. Capture PURE (jamais un patch, jamais une lecture qui
+    # influence ce qui suit) — voir `core/turn_trace.py` pour le contrat complet.
+    turn_trace.capture_pre_cleanup(state)
+
     pending = state.get("pending_cleanup")
     status = str(state.get("status") or "").upper().strip()
     # (2026-09-02, "no legacy shim") : plus de lecture de `expected_input` —

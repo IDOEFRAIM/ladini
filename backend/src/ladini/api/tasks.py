@@ -291,6 +291,7 @@ def process_agent_task(
             location_lat=location_lat,
             location_lon=location_lon,
             message_sid=message_sid,
+            channel="WHATSAPP",
         )
 
     # --- Executor + dispatch sous LA MÊME frontière d'erreur : une

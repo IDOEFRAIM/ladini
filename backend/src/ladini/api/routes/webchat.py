@@ -146,6 +146,7 @@ async def _run(request: WebChatRequest, workspace_type: str) -> WebChatResponse:
         user_query=request.message,
         workspace_type=workspace_type,
         force_role=True,
+        channel="WEBCHAT",
     )
     return WebChatResponse(
         reply=result.get("final_response", ""),

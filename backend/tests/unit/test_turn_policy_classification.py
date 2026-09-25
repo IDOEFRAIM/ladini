@@ -158,15 +158,18 @@ def test_missing_event_defaults_to_unknown_and_is_classified_deterministically()
 
 def test_turn_policy_is_shadow_only_not_authoritative():
     """Garde architecturale : `classify_turn`/`TurnClassification` ne doit être IMPORTÉ,
-    aujourd'hui, que par ce test et (plus tard) `core/turn_telemetry.py` — jamais par un
-    module qui route un tour en production. Si ce test casse en ajoutant un import dans un
-    nœud/flow, c'est le signal qu'on bascule `decide_turn` en autoritaire SANS l'avoir
-    décidé explicitement (mandat Phase 2 §21-22 : passage en 2 temps)."""
+    aujourd'hui, que par ce test et par `core/turn_trace.py` (commit 11 — la seule
+    consommation légitime : peupler `TurnTrace.turn_decision` pour l'observabilité, jamais
+    pour router/décider quoi que ce soit, voir `turn_trace.py::capture_pre_cleanup` et sa
+    propre docstring de module) — jamais par un nœud/flow qui route un tour en production.
+    Si ce test casse en ajoutant un import ailleurs, c'est le signal qu'on bascule
+    `decide_turn` en autoritaire SANS l'avoir décidé explicitement (mandat Phase 2 §21-22 :
+    passage en 2 temps)."""
     from ladini.graphs.agents.market_coach import core as _core_pkg
 
     core_dir = Path(inspect.getfile(_core_pkg)).parent
     package_root = core_dir.parent
-    allowed_importers = {"turn_policy.py", "turn_telemetry.py"}
+    allowed_importers = {"turn_policy.py", "turn_trace.py"}
     offenders = []
     for path in package_root.rglob("*.py"):
         if path.name in allowed_importers:

@@ -399,6 +399,13 @@ def _safe_node(
                 "status": "ERROR",
                 "error_message": f"Erreur technique dans le noeud '{name}'.",
                 "technical_details": str(exc),
+                # (Phase 2 hardening, commit 11) : nom de classe SEUL (jamais le message,
+                # potentiellement sensible — voir `technical_details` déjà ci-dessus pour
+                # ça) — lu par `core/turn_trace.py::capture_pre_cleanup` pour peupler
+                # `TurnTrace.error_class` sur les erreurs qui n'atteignent JAMAIS
+                # `Orchestrator.handle()` (ce wrapper les avale ici, le graphe "réussit"
+                # ensuite du point de vue de l'orchestrateur).
+                "error_class": type(exc).__name__,
             }
         finally:
             ToolScopeManager.reset_scope(scope_token)

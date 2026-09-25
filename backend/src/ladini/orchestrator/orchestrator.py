@@ -22,6 +22,7 @@ from typing import Any, Dict, Optional
 from ladini.core.conversation_lock import conversation_turn_lock
 from ladini.core.idempotency import get_cached as _get_role_hint
 from ladini.core.idempotency import release as _release_role_hint
+from ladini.graphs.agents.market_coach.core import turn_trace
 from ladini.graphs.agents.market_coach.utils import build_runtime, ensure_dict
 from ladini.graphs.factory import GraphFactory
 from ladini.graphs.roles import normalize_role
@@ -162,6 +163,7 @@ class Orchestrator:
         location_lat: float | None = None,
         location_lon: float | None = None,
         message_sid: str | None = None,
+        channel: str = "WHATSAPP",
     ) -> Dict[str, Any]:
         workspace_id = (phone or "anonymous").strip()
 
@@ -174,9 +176,28 @@ class Orchestrator:
         # sans code dupliqué par canal.
         async with conversation_turn_lock(workspace_id, timeout_seconds=_AGENT_TIMEOUT_SECONDS):
             ws = await self.resolver.resolve(workspace_id, workspace_type)
-
             guard = _WorkspaceRunGuard(ws, self._checkpointer, max_steps=_MAX_AGENT_STEPS)
             guard.attach()
+            # (Phase 2 hardening, commit 11) : ouvre la capture `TurnTrace` avec l'état TEL
+            # QUE LE TOUR PRÉCÉDENT L'A LAISSÉ — le seul endroit où lire "goal AVANT ce
+            # tour"/"pending AVANT ce tour" sans le confondre avec ce que CE tour va
+            # produire. `ws.metadata` n'est qu'un snapshot OPS minimal
+            # (`build_metadata_from_state`, ex. juste `pending_interaction_kind`, pas le
+            # dict complet — voir sa docstring) : la source DURABLE et complète de l'état
+            # métier plat d'un tour est le checkpoint LangGraph lui-même
+            # (`checkpoint["channel_values"]`), la même chose que LangGraph décode en
+            # interne pour reprendre le thread — jamais une reconstruction parallèle qui
+            # pourrait diverger. `_load_before_state` réutilise donc le checkpointer déjà
+            # attaché (`guard.attach()` ci-dessus vient de le pinner en RAM) au lieu d'une
+            # 2e lecture DB. Voir `core/turn_trace.py` pour le reste de la capture (avant
+            # nettoyage) et la fermeture (tous les chemins de sortie, ci-dessous).
+            before_state = await self._load_before_state(workspace_id)
+            turn_trace.start(
+                conversation_phone=phone,
+                message_id=message_sid,
+                channel=channel,
+                before_state=before_state,
+            )
             start_ts = time.monotonic()
             try:
                 final = await asyncio.wait_for(
@@ -205,6 +226,7 @@ class Orchestrator:
                     exc,
                 )
                 _tt_error("AGENT_CIRCUIT_BREAKER", "INTERNAL")
+                turn_trace.finish(error_class="AgentCircuitBreaker")
                 await self._flush_workspace(ws, reason="circuit_breaker")
                 return self._build_failure_response(ws, workspace_id)
             except asyncio.TimeoutError:
@@ -218,6 +240,7 @@ class Orchestrator:
                     (user_query or "")[:160],
                 )
                 _tt_error("AGENT_TIMEOUT", "TIMEOUT")
+                turn_trace.finish(error_class="TimeoutError")
                 await self._flush_workspace(ws, reason="timeout")
                 return self._build_failure_response(ws, workspace_id)
             except Exception as exc:  # pragma: no cover - safety net
@@ -232,6 +255,7 @@ class Orchestrator:
                     exc_info=True,
                 )
                 _tt_error(type(exc).__name__, "INTERNAL")
+                turn_trace.finish(error_class=type(exc).__name__)
                 await self._flush_workspace(ws, reason="agent_error")
                 return self._build_failure_response(ws, workspace_id)
             else:
@@ -245,6 +269,7 @@ class Orchestrator:
                     final.get("status"),
                 )
                 _tt_final(final)  # télémétrie du tour (best-effort, sans effet sur le métier)
+                turn_trace.finish()
                 langgraph_blob = (
                     copy.deepcopy(ws.agent_state)
                     if isinstance(ws.agent_state, dict)
@@ -540,6 +565,24 @@ class Orchestrator:
         else:
             ws.locked_agent = None
         ws.mark_dirty()
+
+    async def _load_before_state(self, workspace_id: str) -> Dict[str, Any]:
+        """État métier plat du DERNIER checkpoint LangGraph de ce thread — best-effort,
+        UNIQUEMENT pour `TurnTrace` (Phase 2 hardening, commit 11) : une erreur ici ne
+        doit jamais faire échouer le tour réel. `{}` sur un thread neuf (aucun
+        checkpoint) — comportement attendu, pas une erreur."""
+        try:
+            config = {"configurable": {"thread_id": workspace_id}}
+            tup = await self._checkpointer.aget_tuple(config)
+            if tup is None:
+                return {}
+            channel_values = tup.checkpoint.get("channel_values")
+            return channel_values if isinstance(channel_values, dict) else {}
+        except Exception:  # pragma: no cover - défensif, jamais vers l'appelant
+            logger.debug(
+                "turn_trace before_state ignoré | workspace=%s", workspace_id, exc_info=True
+            )
+            return {}
 
     async def _flush_workspace(self, ws: Workspace, *, reason: str) -> None:
         if not ws.is_dirty:

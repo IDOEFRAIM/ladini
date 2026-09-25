@@ -12,10 +12,11 @@ bascule pas tout d'un coup »).
 `classify_turn` ne DÉCIDE donc RIEN — elle ÉTIQUETTE, dans le vocabulaire canonique cible,
 ce que les couches existantes ont DÉJÀ décidé (`cognitive_decision`/`interpreted_event`/la
 transition de goal réellement appliquée par `goal_planner`). Aucune couche ne consomme
-encore son résultat pour router : c'est une fonction pure d'OBSERVABILITÉ, appelée par la
-télémétrie de tour (voir `core/turn_telemetry.py`), qui rend visible, tour après tour,
-comment le comportement RÉEL se répartit dans ce vocabulaire — la matrice nécessaire avant
-qu'un futur chantier puisse envisager de le rendre autoritaire.
+encore son résultat pour router : c'est une fonction pure d'OBSERVABILITÉ, branchée en
+commit 11 par `core/turn_trace.py::capture_pre_cleanup` (voir sa docstring de module), qui
+rend visible, tour après tour, comment le comportement RÉEL se répartit dans ce
+vocabulaire — la matrice nécessaire avant qu'un futur chantier puisse envisager de le
+rendre autoritaire.
 """
 from __future__ import annotations
 

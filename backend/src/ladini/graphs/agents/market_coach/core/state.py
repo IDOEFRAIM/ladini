@@ -254,6 +254,13 @@ class MarketAgentState(BuyerContext, ProducerContext, TypedDict, total=False):
     error_message: Annotated[Optional[str], replace_value]
     technical_details: Annotated[Optional[str], replace_value]
 
+    # (Phase 2 hardening, commit 11) : nom de classe SEUL de l'exception avalée par
+    # `_safe_node` — voir sa docstring de champ `technical_details` ci-dessus pour le
+    # même raisonnement de survie au checkpoint. Lu par `core/turn_trace.py::
+    # capture_pre_cleanup` pour peupler `TurnTrace.error_class` sur les erreurs de
+    # nœud, qui n'atteignent jamais les blocs `except` d'`Orchestrator.handle()`.
+    error_class: Annotated[Optional[str], replace_value]
+
     # ================================================================
     # 4. INTERPRETER OUTPUT
     # ================================================================
