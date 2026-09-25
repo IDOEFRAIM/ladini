@@ -17,7 +17,6 @@ bug fixed earlier in this engagement.
 from __future__ import annotations
 
 import importlib
-import os
 import time
 
 import pytest
@@ -71,6 +70,32 @@ def fresh_telemetry(monkeypatch):
 
     importlib.reload(telemetry_module)
     yield telemetry_module
+
+    # (Phase 2 hardening, commit 13) : chaque test de ce fichier construit un VRAI
+    # MeterProvider/TracerProvider avec un exporteur pointé sur un port injoignable
+    # (127.0.0.1:1) — leur lecteur/processeur tourne sur un thread d'arrière-plan qui,
+    # sans arrêt explicite, continue à tenter des exports RÉELS pour le reste du process
+    # pytest (résidu observé : `RuntimeError: release unlocked lock` en sortie de suite
+    # complète, gRPC déclenché en pleine exécution d'un test SANS RAPPORT). Recharger le
+    # module (ci-dessous) ne les arrête PAS : il ne fait que réinitialiser NOS variables
+    # de module, le thread du SDK garde ses propres références. `shutdown()` n'honore pas
+    # forcément son timeout contre un collector injoignable (voir `flush()` dans
+    # telemetry.py, régression déjà mesurée à 20s+) — lancé ici sur un thread démon
+    # jetable pour que cet arrêt, même lent, ne bloque JAMAIS la fin de CE test.
+    import threading
+
+    # `MeterProvider.shutdown(timeout_millis=...)` et `TracerProvider.shutdown()` (SANS
+    # paramètre — signature différente entre les deux SDK) : un lambda par provider plutôt
+    # qu'un seul appel générique, pour ne pas deviner une signature commune qui n'existe pas.
+    meter_provider = telemetry_module._otel_meter_provider
+    tracer_provider = telemetry_module._otel_tracer_provider
+    if meter_provider is not None:
+        threading.Thread(
+            target=lambda: meter_provider.shutdown(timeout_millis=1), daemon=True
+        ).start()
+    if tracer_provider is not None:
+        threading.Thread(target=tracer_provider.shutdown, daemon=True).start()
+
     importlib.reload(telemetry_module)  # restore a clean module for later tests
 
 
