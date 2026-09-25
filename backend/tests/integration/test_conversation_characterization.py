@@ -349,7 +349,17 @@ class TestG_CorrectionPolicy:
         "matrice est solide'). À rouvrir explicitement lors du commit qui rend `decide_turn` "
         "autoritaire (post-C14), ou plus tôt si C8 (normalisation canonique produit/unité) "
         "introduit un signal générique 'ce message nomme un produit absent du draft courant' "
-        "réutilisable ici sans lexique ad hoc."
+        "réutilisable ici sans lexique ad hoc. "
+        "Réévalué au commit 12 (mandat Phase 2 §12, 'reconsidérer sa place conceptuelle') : "
+        "C11 a bien branché classify_turn()/TurnTrace sur CHAQUE tour (core/turn_trace.py), "
+        "mais strictement en SHADOW — jamais consommé par un routeur/flow (garde AST "
+        "inchangée, tests/unit/test_turn_policy_classification.py). Aucun commit C7-C11 n'a "
+        "introduit de mécanisme de PROPRIÉTÉ DE TOUR (turn ownership) qui permettrait à "
+        "`_confirmation_correction` de distinguer correction-du-sujet-en-cours de "
+        "nouveau-sujet-sans-rapport sans lexique ad hoc. La condition de fermeture ci-dessus "
+        "reste donc inchangée et entière : xfail strict maintenu, à rouvrir seulement quand "
+        "`decide_turn` devient autoritaire (post-C14) ou qu'un signal générique de nommage de "
+        "produit apparaît."
     ))
     def test_a_fresh_full_request_during_an_unrelated_confirmation_is_never_swallowed_by_the_numeric_shortcut(self, conv):
         t1 = conv.send("je veux 14 coqs chaque semaine", llm=_coq())
