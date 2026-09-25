@@ -33,7 +33,7 @@ import copy
 import json
 import time
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from unittest import mock
@@ -446,14 +446,23 @@ class ConcurrentResult:
     before: Dict[str, Any]
     after: Dict[str, Any]
     responses: List[Any]
+    #: Conservés à titre indicatif seulement (débogage) — PAS la source de `interleaved` (voir
+    #: `send_concurrently`, qui explique pourquoi cette métrique par tâche asyncio est un faux
+    #: ami : un seul tour séquentiel produit déjà `task_segments > distinct_turns`).
     task_segments: int
     distinct_turns: int
+    #: (start, end) en `time.monotonic()` de CHAQUE appel à `Orchestrator.handle` — la source
+    #: réelle de `interleaved`, ci-dessous.
+    handle_intervals: List[Tuple[float, float]] = field(default_factory=list)
+    _interleaved: bool = False
 
     @property
     def interleaved(self) -> bool:
-        """Vrai si les nœuds de deux tours se sont exécutés en alternance — c.-à-d. si
-        deux tours de la même conversation ont muté l'état EN MÊME TEMPS."""
-        return self.task_segments > self.distinct_turns
+        """Vrai si deux appels à `Orchestrator.handle` (de la MÊME conversation) se sont
+        chevauchés dans le temps — la seule définition sans ambiguïté de "deux tours ont
+        muté l'état en même temps". Calculé sur de VRAIS intervalles de `time.monotonic()`,
+        pas sur une heuristique d'identité de tâche asyncio (voir `send_concurrently`)."""
+        return self._interleaved
 
 
 # =====================================================================
@@ -671,8 +680,19 @@ class ConversationHarness:
     ) -> "ConcurrentResult":
         """Envoie plusieurs messages de la MÊME conversation « en même temps » (même
         boucle, `asyncio.gather`) — comme deux requêtes webchat simultanées, ou deux
-        workers Celery. Le script LLM est choisi par texte du message."""
+        workers Celery. Le script LLM est choisi par texte du message.
+
+        Détection de l'entrelacement (Phase 2 hardening, commit 9) : par INTERVALLES DE
+        TEMPS réels autour de la SECTION CRITIQUE de `core/conversation_lock.py::
+        conversation_turn_lock` (entre l'acquisition et la libération du verrou) — PAS
+        autour de l'appel `Orchestrator.handle` lui-même (un 2ᵉ appel EN ATTENTE du verrou
+        est déjà "en vol" pendant que le 1er tourne — ce n'est pas un chevauchement du
+        TRAVAIL réel), ni par identité de tâche asyncio (`id(asyncio.current_task())` : faux
+        ami vérifié empiriquement — l'exécuteur LangGraph fait déjà tourner les nœuds d'UN
+        SEUL tour séquentiel sur plusieurs tâches asyncio internes différentes, donnant un
+        faux positif permanent indépendant de toute vraie concurrence)."""
         from ladini.api.routes.webchat import WebChatRequest, _run
+        from ladini.orchestrator import orchestrator as orchestrator_module
 
         assert channel == "webchat", "seul le canal synchrone peut être rejoué en parallèle ici"
         scripts = {text: script for text, script in messages}
@@ -693,14 +713,34 @@ class ConversationHarness:
         self._task_log.clear()
         workspace_type = "buyer" if self.role == "BUYER" else "producer"
 
+        intervals: List[Tuple[float, float]] = []
+        original_lock = orchestrator_module.conversation_turn_lock
+
+        @asynccontextmanager
+        async def _timed_lock(conversation_id: str, *, timeout_seconds: float):
+            async with original_lock(conversation_id, timeout_seconds=timeout_seconds) as acquired:
+                start = time.monotonic()
+                try:
+                    yield acquired
+                finally:
+                    intervals.append((start, time.monotonic()))
+
         async def _all():
-            return await asyncio.gather(
-                *[_run(WebChatRequest(message=text, phone_number=self.phone), workspace_type) for text, _ in messages],
-                return_exceptions=True,
-            )
+            with mock.patch.object(orchestrator_module, "conversation_turn_lock", _timed_lock):
+                return await asyncio.gather(
+                    *[
+                        _run(WebChatRequest(message=text, phone_number=self.phone), workspace_type)
+                        for text, _ in messages
+                    ],
+                    return_exceptions=True,
+                )
 
         outs = self._run(_all())
         self.runtime.llm.script = None
+        intervals.sort()
+        interleaved = any(
+            intervals[i][1] > intervals[i + 1][0] for i in range(len(intervals) - 1)
+        )
         compressed: List[int] = []
         for task_id in self._task_log:
             if not compressed or compressed[-1] != task_id:
@@ -711,6 +751,8 @@ class ConversationHarness:
             responses=[o.reply if not isinstance(o, BaseException) else o for o in outs],
             task_segments=len(compressed),
             distinct_turns=len(set(self._task_log)),
+            handle_intervals=intervals,
+            _interleaved=interleaved,
         )
 
     def _send_webchat(self, text: str):

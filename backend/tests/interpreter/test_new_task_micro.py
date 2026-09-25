@@ -593,3 +593,61 @@ class TestRecurringNeedWithExcludedWeekday:
         # du tunnel dédié cart.py lui-même — `_TUNNELLESS_FLOW_INTENTS`,
         # core/goals.py — jamais absorbé par le nouveau tunnel).
         assert INTENT_CONFIG["BUYER_REQUEST"].get("tunnel") != "recurring_need"
+
+
+# =====================================================================
+# K. BESOIN MENSUEL (bug réel initial, mandat Phase 3 MONTHLY §30, non-régression)
+#
+# "j'ai besoin de 90 L de lait chaque mois" partait vers le catalogue puis le
+# packaging puis l'appel d'offres : `recurrence_type` n'admettait pas MONTHLY
+# — ni dans le prompt système du micro-prompt NEW_TASK (`new_task_prompts.py`,
+# l'enum montré au LLM), ni dans le domaine (`RECURRENCE_TYPES`). Même famille
+# de bug que J ci-dessus (une valeur de récurrence structurellement invisible
+# du micro-prompt/domaine fait perdre CREATE_RECURRING_NEED), cause DIFFÉRENTE
+# (une VALEUR manquante de l'enum, pas un CHAMP manquant du contrat).
+# =====================================================================
+
+
+class TestRecurringNeedMonthly:
+    _RECURRING_TEXT = "j'ai besoin de 90 L de lait chaque mois"
+    _RECURRING_PAYLOAD = {
+        "disposition": "NEW_TASK",
+        "intent": "CREATE_RECURRING_NEED",
+        "confidence": 0.95,
+        "entities": {
+            "product": "lait",
+            "quantity": 90.0,
+            "unit": "L",
+            "recurrence_type": "MONTHLY",
+        },
+    }
+
+    def test_the_historical_bug_message_no_longer_falls_back_to_catalog(self):
+        """LE test permanent exigé par le mandat (§30) : ce message précis doit
+        désormais produire exactement le même type de transaction que son
+        équivalent WEEKLY — jamais un repli catalogue/packaging/appel d'offres."""
+        interp = make_input_interpreter("BUYER")
+        state = make_state(
+            normalized_text=self._RECURRING_TEXT, expected_input="NONE", user_role="BUYER"
+        )
+        result = run(interp(state, StubRuntime(llm=ScriptedLLM(dict(self._RECURRING_PAYLOAD)))))
+        assert result["detected_intent"] == "CREATE_RECURRING_NEED"
+        assert result["interpreted_event"] == "NEW_TASK"
+        assert INTENT_CONFIG["CREATE_RECURRING_NEED"]["tunnel"] == "recurring_need"
+        assert INTENT_CONFIG["CREATE_RECURRING_NEED"]["tunnel"] != "cart"
+        ents = result["extracted_entities"]
+        assert ents["product"] == "lait"
+        assert ents["quantity"] == 90.0
+        assert ents["unit"] == "LITRE"  # "L" canonicalisé par canonical_unit_label
+        assert ents["recurrence_type"] == "MONTHLY"
+
+    def test_monthly_entities_pass_schema_validation_on_the_first_attempt(self):
+        rt, gateway = _runtime(self._RECURRING_PAYLOAD)
+        outcome, result = run(
+            run_new_task_microprompt(
+                {"message_sid": None}, rt, self._RECURRING_TEXT, _ctx(), None, CATALOG
+            )
+        )
+        assert outcome == NewTaskOutcome.RESULT
+        assert len(gateway.calls) == 1  # schéma valide dès le 1er essai, aucun repair déclenché
+        assert result["extracted_entities"]["recurrence_type"] == "MONTHLY"

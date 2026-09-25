@@ -198,12 +198,20 @@ class TestCompoundQuantityAntiTruncationGuard:
     TestUnitAnchoringGuard : le texte de l'utilisateur prime sur une
     extraction LLM possiblement partielle."""
 
+    # Schéma new_task_v2 (disposition/intent/confidence/entities) — pas l'ancien
+    # format legacy (interpreted_event/detected_intent/extracted_entities) : depuis
+    # Phase 2.5 (fermeture H5), `_interpret_fast_path` s'abstient (`return None`)
+    # pour une correction chiffrée pendant une CONFIRMATION dès qu'un classifieur
+    # réel existe — le message est donc RÉELLEMENT classifié par le micro-prompt
+    # NEW_TASK (`interpreter/new_task_micro.py`), plus jamais court-circuité par le
+    # fast-path avant lui. Le comportement testé ici (le texte prime sur une
+    # extraction LLM tronquée) doit donc être garanti là où l'extraction a
+    # RÉELLEMENT lieu désormais — voir `new_task_micro.py::_finalize`.
     TRUNCATED = {
-        "interpreted_event": "UPDATE",
-        "detected_intent": "PROCUREMENT_CREATE_REQUEST",
-        "interpreter_confidence": 0.9,
-        "validation_status": "VALID",
-        "extracted_entities": {"quantity": 2.0, "unit": "TONNE"},
+        "disposition": "NEW_TASK",
+        "intent": "PROCUREMENT_CREATE_REQUEST",
+        "confidence": 0.9,
+        "entities": {"quantity": 2.0, "unit": "TONNE"},
     }
 
     def _interpret(self, text, llm_payload=None):
@@ -237,7 +245,7 @@ class TestCompoundQuantityAntiTruncationGuard:
         """Neutre quand le texte ne porte qu'UNE SEULE paire — pas de faux
         déclenchement sur une quantité simple correctement extraite."""
         payload = dict(self.TRUNCATED)
-        payload["extracted_entities"] = {"quantity": 3.0, "unit": "TONNE"}
+        payload["entities"] = {"quantity": 3.0, "unit": "TONNE"}
         r = self._interpret("je veux 3 tonnes de tomates", payload)
         ents = r["extracted_entities"]
         assert ents.get("quantity") == 3.0
@@ -247,7 +255,7 @@ class TestCompoundQuantityAntiTruncationGuard:
         """« 2 tonnes et 3 sacs » n'est pas sommable (SAC n'a pas d'équivalent
         KG universel) — aucune correction, on laisse le LLM/simple parse."""
         payload = dict(self.TRUNCATED)
-        payload["extracted_entities"] = {"quantity": 2.0, "unit": "TONNE"}
+        payload["entities"] = {"quantity": 2.0, "unit": "TONNE"}
         r = self._interpret("je veux 2 tonnes et 3 sacs", payload)
         ents = r["extracted_entities"]
         assert ents.get("quantity") == 2.0

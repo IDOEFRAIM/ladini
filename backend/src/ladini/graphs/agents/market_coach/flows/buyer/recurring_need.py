@@ -27,16 +27,28 @@ from ladini.domain.recurring_supply.ambiguous_group import (
     AmbiguousResolutionKind,
     resolve_ambiguous_group_reply,
 )
+from ladini.domain.recurring_supply.correction_scope import (
+    CorrectionScopeResolutionKind,
+    resolve_correction_scope_reply,
+)
 from ladini.domain.recurring_supply.digest import AllocationLine, build_detail_text
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     clear_pending_interaction,
     set_pending_interaction,
 )
-from ladini.graphs.agents.market_coach.core.state import entities_said_this_turn
+from ladini.graphs.agents.market_coach.core.state import (
+    entities_said_this_turn,
+    resolve_current_goal,
+)
+from ladini.graphs.agents.market_coach.core.turn_policy import (
+    TurnAction,
+    decide_active_draft_reply,
+)
 from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
     CancelRecurringNeedDraft,
     ConfirmRecurringNeedDraft,
+    NoRecurringNeedAction,
     RecurringNeedDraft,
     RecurringNeedDraftStatus,
     RecurringNeedExecutionResult,
@@ -55,7 +67,11 @@ from ladini.graphs.agents.market_coach.services.mcp.gateway import (
     MCPCallError,
     RecurringSupplyGateway,
 )
-from ladini.graphs.agents.market_coach.utils import MarketRuntime, slot_has_value
+from ladini.graphs.agents.market_coach.utils import (
+    MarketRuntime,
+    canonical_unit_label,
+    slot_has_value,
+)
 from ladini.services.database import recurring_need_draft_store
 from ladini.services.database.draft_store_support import cas_finalize
 
@@ -105,7 +121,16 @@ def _clean_additional_items(raw: Any) -> List[Dict[str, Any]]:
             continue
         product, quantity, unit = item.get("product"), item.get("quantity"), item.get("unit")
         if slot_has_value(product) and slot_has_value(quantity):
-            resolved_unit = str(unit).strip() if slot_has_value(unit) else default_unit_for_product(product)
+            # (Phase 2 hardening, commit 8, P1 audit 2026-09-24) : un `unit` littéral extrait
+            # par le LLM pour un item ADDITIONNEL passait tel quel (`str(unit).strip()`), sans
+            # jamais traverser `canonical_unit_label` — le MÊME normalisateur que l'item
+            # PRINCIPAL (via `nodes/memory.py::_resolve_unit_value`, qui l'appelle aussi). Deux
+            # items du même draft pouvaient donc porter deux graphies différentes de la même
+            # unité ("tête" brut vs "TETE" canonique), invisibles à toute comparaison littérale
+            # ultérieure (regroupement, dédup, tests d'unité partagée).
+            resolved_unit = (
+                canonical_unit_label(unit) if slot_has_value(unit) else default_unit_for_product(product)
+            )
             cleaned.append({"product": str(product).strip(), "quantity": quantity, "unit": resolved_unit})
     return cleaned
 
@@ -221,15 +246,18 @@ async def _resolve_ambiguous_group_reply(
 
     if _is_bare_abandon(text):
         if draft is not None and draft.status.value == "DRAFT":
-            cancelled = apply_domain_action(draft, CancelRecurringNeedDraft()).draft
-            await _persist(draft, cancelled, conversation_id)
-        else:
-            cancelled = None
+            await _persist(draft, apply_domain_action(draft, CancelRecurringNeedDraft()).draft, conversation_id)
+        # (Phase 2 hardening, commit 7) : un draft CANCELLED (terminal, C4) n'a plus vocation à
+        # rester "le" draft actif de l'état — sinon il ressurgit et se fait réutiliser par erreur
+        # au tour suivant (voir exactement la même règle appliquée par `_apply_response_plan`,
+        # `keep_draft = plan.draft is not None and not plan.draft.is_terminal()` — ce chemin
+        # d'annulation, écrit à la main plutôt que via `build_response_plan`, avait divergé de
+        # cette convention en conservant le dict du draft déjà terminal).
         return {
             "final_response": "D'accord, j'annule cette demande.",
             "response_strategy": "SUCCESS",
             "status": "COMPLETED",
-            "recurring_need_draft": cancelled.to_dict() if cancelled is not None else None,
+            "recurring_need_draft": None,
             **clear_pending_interaction("ambiguous_group_abandoned"),
         }
 
@@ -273,6 +301,58 @@ async def _resolve_ambiguous_group_reply(
     return _apply_response_plan(plan)
 
 
+async def _resolve_correction_scope_reply(
+    state: Dict[str, Any], pending: Dict[str, Any], conversation_id: str
+) -> Optional[Dict[str, Any]]:
+    """Traite un tour où `PendingInteraction` attend une résolution `correction_scope` (mandat
+    Phase 2 C7 §5/§13 — H2/C7). Même contrat que `_resolve_ambiguous_group_reply` : retourne un
+    patch state si CE message répond à la question de portée (résolu ou abandon explicite),
+    `None` si le message n'y répond manifestement pas — l'appelant le traite alors comme une
+    tâche autonome distincte."""
+    target = pending.get("target") if isinstance(pending, dict) else None
+    if not isinstance(target, dict):
+        return None
+    fields = target.get("fields")
+    if not isinstance(fields, dict) or not fields:
+        return None
+    candidates = [str(c).strip() for c in (pending.get("candidates") or []) if slot_has_value(c)]
+    if len(candidates) < 2:
+        return None
+
+    text = str(state.get("normalized_text") or state.get("user_query") or "")
+    draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+
+    if _is_bare_abandon(text):
+        if draft is not None and draft.status.value == "DRAFT":
+            await _persist(draft, apply_domain_action(draft, CancelRecurringNeedDraft()).draft, conversation_id)
+        return {
+            "final_response": "D'accord, j'annule cette demande.",
+            "response_strategy": "SUCCESS",
+            "status": "COMPLETED",
+            "recurring_need_draft": None,
+            **clear_pending_interaction("correction_scope_abandoned"),
+        }
+
+    resolution = resolve_correction_scope_reply(text, candidates=candidates)
+    if resolution.kind == CorrectionScopeResolutionKind.NOT_A_RESOLUTION:
+        return None
+
+    action = plan_correction(draft, fields, scope=resolution.scope)
+    outcome = apply_domain_action(draft, action)
+    await _persist(draft, outcome.draft, conversation_id)
+    return _apply_response_plan(build_response_plan(outcome))
+
+
+#: Table de dispatch des champs STRUCTURED de ce goal — DOIT couvrir exactement
+#: `core/field_registry.py::STRUCTURED_FIELDS` restreint aux champs propriété de
+#: CREATE_RECURRING_NEED (garanti par `tests/architecture/
+#: test_pending_field_registry_completeness.py`, pas seulement par convention).
+_STRUCTURED_FIELD_RESOLVERS = {
+    "ambiguous_quantity": _resolve_ambiguous_group_reply,
+    "correction_scope": _resolve_correction_scope_reply,
+}
+
+
 async def recurring_need_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
     goal = str(state.get("current_goal") or "").upper()
     if goal == "CREATE_RECURRING_NEED":
@@ -298,15 +378,18 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
     pending = state.get("pending_interaction") or {}
     pending_target = pending.get("target") if isinstance(pending, dict) else None
 
-    # Réponse à une clarification "quantité ambiguë" en attente (mandat §1-§10).
-    if (
-        isinstance(pending, dict)
-        and pending.get("kind") == "ENTER_FIELD"
-        and pending.get("field") == "ambiguous_quantity"
-    ):
-        resolution_patch = await _resolve_ambiguous_group_reply(state, pending, conversation_id)
-        if resolution_patch is not None:
-            return resolution_patch
+    # Réponse à une clarification STRUCTURED en attente (mandat Phase 2 C7 §5/§13 — H2) :
+    # `core/field_registry.py::STRUCTURED_FIELDS` déclare QUELS champs de ce goal ont un
+    # résolveur dédié capable de traiter la réponse même quand le classifieur générique renvoie
+    # UNKNOWN (`nodes/cognitive.py` les exempte symétriquement du RECOVER générique — les deux
+    # tables sont verrouillées ensemble par
+    # `tests/architecture/test_pending_field_registry_completeness.py`).
+    if isinstance(pending, dict) and pending.get("kind") == "ENTER_FIELD":
+        resolver = _STRUCTURED_FIELD_RESOLVERS.get(str(pending.get("field") or ""))
+        if resolver is not None:
+            resolution_patch = await resolver(state, pending, conversation_id)
+            if resolution_patch is not None:
+                return resolution_patch
 
     draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
     extracted = {k: v for k, v in payload.items() if k in _DRAFT_FIELDS and slot_has_value(v)}
@@ -319,8 +402,41 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
 
     said = _said_this_turn(state)
     if draft is not None and draft.status == RecurringNeedDraftStatus.DRAFT and _pending_targets(pending, draft):
-        if _is_correction(interpreted_event, said):
+        # (Phase 2.5, H7) : frontière AUTORITAIRE unique — voir
+        # `core/turn_policy.py::decide_active_draft_reply`. Avant, `_is_correction`
+        # ne regardait QUE l'absence de `recurrence_type` dans `said`, aveugle à la
+        # confiance et à l'intent réellement détecté : un message hors-sujet à
+        # faible confiance ("maïs", `confidence=0.4`, `detected_intent` différent du
+        # goal actif) passait pour une correction et corrompait le draft actif.
+        # `decide_active_draft_reply` a maintenant en main la classification RÉELLE
+        # (jamais le fast-path pré-LLM, désactivé pour ce cas — voir
+        # `interpreter/routing.py::_interpret_fast_path`) : CORRECT applique la
+        # correction comme avant, CLARIFY ne mute RIEN (redemande confirmation du
+        # draft INCHANGÉ plutôt que de deviner), et tout le reste retombe sur la
+        # branche NEW_TASK ci-dessous (nouvelle tâche indépendante, ancien draft clos).
+        #
+        # `cognitive_decision.intent` — PAS `state["detected_intent"]` : dès que
+        # `cognitive_guard` choisit CONTINUE_ACTIVE_GOAL (goal non interrompu),
+        # `goal_planner` (RULE 2, plusieurs branches "re-verrouille le goal")
+        # RÉÉCRIT `detected_intent` sur `current_goal` dans le patch d'état — un
+        # choix délibéré pour le reste du tour, mais qui EFFACE, au moment où ce
+        # flow s'exécute, le signal même dont cette décision a besoin (l'intent
+        # ORIGINAL, avant tout verrouillage). `cognitive_decision.intent` est
+        # écrit une fois par `cognitive_guard` et jamais retouché ensuite — seule
+        # source encore fidèle à la classification réelle de CE tour.
+        _turn_action = decide_active_draft_reply(
+            interpreted_event=interpreted_event,
+            said_entities=said,
+            detected_intent=(state.get("cognitive_decision") or {}).get("intent"),
+            current_goal=resolve_current_goal(state),
+        )
+        if _turn_action == TurnAction.CORRECT:
             return await _correct(draft, said, state, conversation_id)
+        if _turn_action == TurnAction.CLARIFY:
+            outcome = apply_domain_action(
+                draft, NoRecurringNeedAction(reason="ambiguous_correction_vs_new_task")
+            )
+            return _apply_response_plan(build_response_plan(outcome))
 
     if interpreted_event in ("NEW_TASK", "INTERRUPTION"):
         if draft is not None and draft.status == RecurringNeedDraftStatus.DRAFT:
@@ -384,19 +500,6 @@ def _pending_targets(pending: Any, draft: RecurringNeedDraft) -> bool:
     if pending_dict.get("kind") == "CONFIRM_ACTION":
         return bool(target.get("draft_id") == draft.draft_id)
     return pending_dict.get("kind") == "ENTER_FIELD" and pending_dict.get("goal") == "CREATE_RECURRING_NEED"
-
-
-def _is_correction(interpreted_event: str, said: Dict[str, Any]) -> bool:
-    """Politique Phase 2 (C) — décision déterministe sur la STRUCTURE du message :
-      - REJECT porteur de valeurs (« non, plutôt 23 bœufs ») -> correction ;
-      - même intention reformulée SANS sa propre fréquence -> correction du draft en cours
-        (une nouvelle demande autonome redit sa fréquence : « je veux 30 poulets chaque
-        semaine » reste une nouvelle demande, voir test F)."""
-    if not said:
-        return False
-    if interpreted_event == "REJECT":
-        return True
-    return interpreted_event in ("NEW_TASK", "INTERRUPTION") and not said.get("recurrence_type")
 
 
 async def _correct(
@@ -767,7 +870,9 @@ async def _render_needs_list(state: Dict[str, Any], mc_runtime: MarketRuntime, *
 def _render_need_line(item: Dict[str, Any]) -> str:
     freq = {
         "DAILY": "jour",
+        "WEEKLY_DAYS": "semaine",
         "WEEKLY": "semaine",
+        "MONTHLY": "mois",
         "ONE_OFF": "une fois",
     }.get(item.get("recurrence_type"), "jour")
     status = "actif" if item.get("status") == "ACTIVE" else "en pause" if item.get("status") == "PAUSED" else "annulé"

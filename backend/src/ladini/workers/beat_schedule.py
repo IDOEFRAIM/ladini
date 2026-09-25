@@ -50,6 +50,19 @@ BEAT_SCHEDULE: Dict[str, Dict[str, Any]] = {
             "expires": max(1.0, settings.RECURRING_NEED_RECONCILIATION_INTERVAL_SECONDS - 30)
         },
     },
+    # Réapprovisionnement des occurrences (Phase 3, mandat MONTHLY §17/§18) : la fenêtre
+    # `[aujourd'hui, aujourd'hui+OCCURRENCE_WINDOW_DAYS]` n'était matérialisée QU'UNE FOIS, à la
+    # création (`services/database/recurring_supply.py::_insert_one_recurring_need`) — le module
+    # documentait déjà ce cron comme prévu ("réconciliation Celery Beat qui étendra la fenêtre
+    # chaque jour") mais il n'avait jamais été câblé. Générique à TOUS les types de récurrence,
+    # aucune branche MONTHLY.
+    "recurring-need-occurrence-replenishment": {
+        "task": "workers.recurring_need_occurrence_replenishment",
+        "schedule": settings.RECURRING_NEED_OCCURRENCE_REPLENISHMENT_INTERVAL_SECONDS,
+        "options": {
+            "expires": max(1.0, settings.RECURRING_NEED_OCCURRENCE_REPLENISHMENT_INTERVAL_SECONDS - 3600)
+        },
+    },
     "procurement-reconciliation": {
         "task": "workers.procurement_reconciliation",
         "schedule": settings.PROCUREMENT_RECONCILIATION_INTERVAL_SECONDS,

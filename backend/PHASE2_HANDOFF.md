@@ -1,5 +1,14 @@
 # PHASE 2 — HANDOFF (reprise par une autre session Claude)
 
+> **STATUT (2026-09-25) : PHASE 2 TERMINÉE.** C1 à C14 sont commités et pushés sur
+> cette branche. Le livrable final (25 points, GO/NO-GO) est
+> `docs/PHASE2_HARDENING_FINAL_REPORT_2026-09-25.md` — le lire EN PREMIER avant de
+> reprendre quoi que ce soit sur ce moteur (MONTHLY, Phase 5, ou tout autre
+> chantier) : il contient la recommandation GO/NO-GO et les risques ouverts
+> (notamment H5/H7, condition de blocage explicite pour Phase 5). Le reste de ce
+> fichier est conservé tel quel comme trace historique de la reprise C6→C14 ; ne
+> plus le traiter comme un plan à exécuter.
+
 Branche: `claude/nice-mccarthy-muxhk2` (repo `idoefraim/ladini`, dossier `backend/`).
 Mission complète : voir le message utilisateur original (très long, en français,
 "PHASE 2: HARDENING PROFOND DU MOTEUR CONVERSATIONNEL LADINI"), qui contient toutes

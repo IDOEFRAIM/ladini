@@ -1064,7 +1064,7 @@ class TestWeeklyRecurrenceThroughTheRealOrchestrator:
         draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
         assert draft is not None
         assert draft.product == "coq" and draft.quantity == 14.0
-        assert draft.additional_items == [{"product": "chevre", "quantity": 20.0, "unit": "unite"}]
+        assert draft.additional_items == [{"product": "chevre", "quantity": 20.0, "unit": "UNITE"}]  # canonicalisé (commit 8, même normalisateur que le primaire)
         assert draft.recurrence_type == "WEEKLY"
 
     def test_ambiguous_quantity_across_two_products_asks_for_clarification(self):
@@ -1147,7 +1147,7 @@ class TestWeeklyRecurrenceSurvivesAStaleCatalogInteraction:
         )
         draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
         assert draft is not None
-        assert draft.additional_items == [{"product": "chevre", "quantity": 20.0, "unit": "unite"}]
+        assert draft.additional_items == [{"product": "chevre", "quantity": 20.0, "unit": "UNITE"}]  # canonicalisé (commit 8, même normalisateur que le primaire)
 
     def test_ambiguous_quantity_interrupts_the_stale_catalog_tunnel_and_still_asks(self):
         state = _stale_catalog_interaction_state()

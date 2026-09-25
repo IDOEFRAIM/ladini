@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -23,6 +24,22 @@ import pytest
 _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+
+# (Phase 2 hardening, commit 13) : `ladini.core.settings.settings` est un singleton
+# construit à la PREMIÈRE importation du module, n'importe où dans la session pytest
+# (voir le même constat dans `tests/unit/test_telemetry_worker_metrics.py`). Quelques
+# tests architecturaux (`tests/architecture/test_entry_block_topology.py`,
+# `test_cognitive_decisions_are_consumed_or_removed.py`) compilent le VRAI graphe SANS
+# fournir de `mc_runtime`/`llm_client` explicite — `MarketRuntime.llm` retombe alors sur
+# `get_llm()`, qui exige `GROQ_API_KEY`/`LADINI_APIKEY` pour construire le SDK Groq (aucun
+# appel réseau à la construction, juste un client — la clé n'a jamais besoin d'être
+# valide). `setdefault` : ne touche RIEN si une vraie clé est déjà fournie (CI de
+# déploiement, tests qui veulent un vrai LLM) — cette valeur n'est qu'un repli pour que la
+# suite STRUCTURELLE (jamais un appel LLM réel : ce module entier documente "AUCUN LLM
+# réel") tourne sans variable d'environnement à poser manuellement. Posé ICI (avant tout
+# import de `ladini.*`, au tout premier import de ce conftest par pytest) et nulle part en
+# code de production — jamais une clé factice câblée dans `settings.py`/`get_llm.py`.
+os.environ.setdefault("GROQ_API_KEY", "test-suite-placeholder-key")
 
 
 def run(coro):

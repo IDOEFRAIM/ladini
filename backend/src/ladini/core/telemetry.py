@@ -47,6 +47,14 @@ _current_trace_meta: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
 _langfuse_client: Optional[Any] = None
 _otel_tracer: Optional[Any] = None
 _otel_meter_provider: Optional[Any] = None
+#: Le `TracerProvider` construit ici (pas seulement le `Tracer` dérivé, déjà exposé par
+#: `_otel_tracer`) — introspection pour les TESTS uniquement (Phase 2 hardening, commit 13),
+#: même discipline que `_otel_meter_provider` : sans ce handle, un test qui construit un
+#: VRAI `TracerProvider`/`BatchSpanProcessor` pointé sur un endpoint injoignable (voir
+#: `tests/unit/test_telemetry_worker_metrics.py`) n'a aucun moyen d'appeler `.shutdown()`
+#: dessus à la fin du test — le thread d'export tourne alors pour le reste du process
+#: pytest (résidu, jamais un crash immédiat mais une source d'erreurs différées).
+_otel_tracer_provider: Optional[Any] = None
 _initialized = False
 
 # Traces Langfuse déjà créées ce process-ci (évite de recréer la même trace).
@@ -314,7 +322,7 @@ def _metric(name: str) -> Optional[Any]:
 # ─────────────────────────────────────────────────────────────────────
 def init_telemetry(service_name: str = "ladini") -> None:
     """Initialise OTel + Prometheus + Langfuse selon les settings. Idempotent."""
-    global _initialized, _otel_tracer, _langfuse_client
+    global _initialized, _otel_tracer, _otel_tracer_provider, _langfuse_client
     if _initialized:
         return
     _initialized = True
@@ -357,6 +365,7 @@ def init_telemetry(service_name: str = "ladini") -> None:
                     )
                 )
             trace.set_tracer_provider(provider)
+            _otel_tracer_provider = provider
             _otel_tracer = trace.get_tracer(service_name)
             logger.info("[telemetry] OpenTelemetry initialisé (endpoint=%s).", endpoint)
         except Exception as exc:

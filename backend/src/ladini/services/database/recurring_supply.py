@@ -408,6 +408,50 @@ class RecurringSupplyMixin(BaseMixin):
         result = await current_session.execute(stmt)
         return result.rowcount or 0
 
+    async def replenish_occurrence_windows(self) -> Dict[str, Any]:
+        """Réapprovisionnement générique (Phase 3, mandat MONTHLY §17/§18) : rejoue
+        `_materialize_occurrences` sur `[aujourd'hui, aujourd'hui+OCCURRENCE_WINDOW_DAYS]` pour
+        CHAQUE `RecurringNeed` `ACTIVE` — le mécanisme que ce module documentait déjà comme prévu
+        (voir la docstring de module, §Idempotence : "la réconciliation Celery Beat (Phase 3) qui
+        étendra la fenêtre chaque jour") mais qui n'avait jamais été câblé : `create_recurring_need`
+        ne matérialisait la fenêtre QU'UNE FOIS, à la création — gap préexistant à TOUS les types de
+        récurrence, rendu bloquant par MONTHLY (un besoin mensuel ne recevrait alors jamais plus
+        d'UNE occurrence). Générique à tous les types (aucune branche MONTHLY) : `generate_occurrence_
+        dates` sait déjà, pour chacun, quels jours de CETTE fenêtre sont dus. Idempotent (`ON CONFLICT
+        DO NOTHING`, comme `_insert_one_recurring_need`) : un rejeu sur la même fenêtre ne crée aucun
+        doublon, donc un chevauchement de deux passages du cron ne pose aucun problème. `PAUSED`/
+        `CANCELLED` sont exclus : une pause ne doit pas se voir régénérer des occurrences pendant
+        qu'elle dure (mandat §9, voir docstring de module)."""
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+
+        window_end = _today() + timedelta(days=OCCURRENCE_WINDOW_DAYS)
+        needs = (
+            await current_session.execute(select(RecurringNeed).where(RecurringNeed.status == "ACTIVE"))
+        ).scalars().all()
+
+        needs_examined = 0
+        occurrences_created = 0
+        for need in needs:
+            rule = RecurrenceRule(
+                recurrence_type=need.recurrence_type,
+                weekly_days=need.weekly_days or (),
+                excluded_weekdays=need.excluded_weekdays or (),
+                starts_at=need.starts_at,
+                ends_at=need.ends_at,
+            )
+            needs_examined += 1
+            occurrences_created += await self._materialize_occurrences(
+                need, rule, from_date=_today(), to_date=window_end
+            )
+
+        logger.info(
+            "recurring_need.occurrence_window_replenished | needs_examined=%s | occurrences_created=%s",
+            needs_examined, occurrences_created,
+        )
+        return {"needs_examined": needs_examined, "occurrences_created": occurrences_created}
+
     async def _resolve_sub_category(self, product_query: str) -> SubCategory:
         """Même résolution catalogue que `AuctionMixin.create_auction` (fuzzy trigram + auto-
         provisioning) — un besoin récurrent exprime un besoin acheteur, pas un article de catalogue

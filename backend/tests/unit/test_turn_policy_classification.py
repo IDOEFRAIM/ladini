@@ -156,30 +156,77 @@ def test_missing_event_defaults_to_unknown_and_is_classified_deterministically()
     assert result.action is TurnAction.CLARIFY  # UNKNOWN -> CLARIFY, jamais une exception
 
 
-def test_turn_policy_is_shadow_only_not_authoritative():
-    """Garde architecturale : `classify_turn`/`TurnClassification` ne doit être IMPORTÉ,
-    aujourd'hui, que par ce test et (plus tard) `core/turn_telemetry.py` — jamais par un
-    module qui route un tour en production. Si ce test casse en ajoutant un import dans un
-    nœud/flow, c'est le signal qu'on bascule `decide_turn` en autoritaire SANS l'avoir
-    décidé explicitement (mandat Phase 2 §21-22 : passage en 2 temps)."""
-    from ladini.graphs.agents.market_coach import core as _core_pkg
-
-    core_dir = Path(inspect.getfile(_core_pkg)).parent
-    package_root = core_dir.parent
-    allowed_importers = {"turn_policy.py", "turn_telemetry.py"}
-    offenders = []
+def _turn_policy_imported_names(package_root: Path, self_files: set) -> dict:
+    """{fichier relatif: {noms importés depuis `core.turn_policy`}} pour tout le
+    package, `self_files` (le module lui-même + ses lecteurs légitimes déjà
+    couverts ailleurs) exclu. Une whitelist par SYMBOLE (pas par simple présence
+    du mot `turn_policy` dans l'import) : `TurnAction`/`decide_active_draft_reply`
+    (AUTORITAIRE, Phase 2.5) doivent pouvoir circuler vers leur UNIQUE appelant
+    légitime sans desserrer la garde SHADOW de `classify_turn`/`TurnClassification`."""
+    imports: dict = {}
     for path in package_root.rglob("*.py"):
-        if path.name in allowed_importers:
+        if path.name in self_files:
             continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         except SyntaxError:
             continue
+        names: set = set()
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module and "turn_policy" in node.module:
-                offenders.append(str(path.relative_to(package_root)))
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if "turn_policy" in alias.name:
-                        offenders.append(str(path.relative_to(package_root)))
-    assert offenders == [], offenders
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.module
+                and node.module.endswith("core.turn_policy")
+            ):
+                names.update(alias.name for alias in node.names)
+        if names:
+            imports[str(path.relative_to(package_root))] = names
+    return imports
+
+
+def test_turn_policy_is_shadow_only_not_authoritative():
+    """Garde architecturale : `classify_turn`/`TurnClassification` ne doit être IMPORTÉ,
+    aujourd'hui, que par `core/turn_trace.py` (commit 11 — la seule consommation légitime :
+    peupler `TurnTrace.turn_decision` pour l'observabilité, jamais pour router/décider quoi
+    que ce soit, voir `turn_trace.py::capture_pre_cleanup` et sa propre docstring de module)
+    — jamais par un nœud/flow qui route un tour en production. Si ce test casse en ajoutant
+    un import ailleurs, c'est le signal qu'on bascule CE vocabulaire SHADOW en autoritaire
+    sans l'avoir décidé explicitement (mandat Phase 2 §21-22 : passage en 2 temps) —
+    distinct de `decide_active_draft_reply`, volontairement AUTORITAIRE depuis Phase 2.5
+    sur sa propre frontière étroite, gardée séparément ci-dessous."""
+    from ladini.graphs.agents.market_coach import core as _core_pkg
+
+    core_dir = Path(inspect.getfile(_core_pkg)).parent
+    package_root = core_dir.parent
+    imports = _turn_policy_imported_names(package_root, {"turn_policy.py"})
+    offenders = {
+        path: names & {"classify_turn", "TurnClassification"}
+        for path, names in imports.items()
+        if path != "core/turn_trace.py" and (names & {"classify_turn", "TurnClassification"})
+    }
+    assert offenders == {}, offenders
+
+
+def test_decide_active_draft_reply_has_exactly_one_authoritative_caller():
+    """Garde architecturale (Phase 2.5, mandat §12-13) : `decide_active_draft_reply` est
+    AUTORITAIRE — contrairement à `classify_turn` — mais sur UNE frontière étroite et
+    documentée (voir sa docstring dans `core/turn_policy.py`) : le point où un message reçu
+    pendant qu'un draft `CREATE_RECURRING_NEED` est en attente (CONFIRM_ACTION/ENTER_FIELD)
+    tranche correction vs tâche indépendante. Un SEUL appelant aujourd'hui
+    (`flows/buyer/recurring_need.py`) : si ce test casse en ajoutant un import ailleurs,
+    c'est le signal d'un big-bang non voulu (mandat §12 : 'ne bascule pas tout d'un coup') —
+    en particulier `interpreter/routing.py` (le fast-path) ne doit JAMAIS l'importer : le
+    fast-path NE DÉCIDE PAS un tour (mandat §11), il ne fait qu'exécuter une décision déjà
+    établie par ce point d'autorité, jamais l'inverse."""
+    from ladini.graphs.agents.market_coach import core as _core_pkg
+
+    core_dir = Path(inspect.getfile(_core_pkg)).parent
+    package_root = core_dir.parent
+    imports = _turn_policy_imported_names(package_root, {"turn_policy.py"})
+    allowed_callers = {"flows/buyer/recurring_need.py"}
+    offenders = {
+        path: names & {"decide_active_draft_reply"}
+        for path, names in imports.items()
+        if path not in allowed_callers and (names & {"decide_active_draft_reply"})
+    }
+    assert offenders == {}, offenders

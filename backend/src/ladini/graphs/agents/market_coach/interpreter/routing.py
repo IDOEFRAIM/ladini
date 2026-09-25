@@ -1186,7 +1186,29 @@ def _interpret_fast_path(
                 "raw_analysis": {"path": "fast_path_slot_numeric_compound_answer"},
             }
 
-        if _confirmation_correction:
+        # (Phase 2.5, H5) : cette branche ne DÉCIDE plus rien dès qu'un vrai
+        # classifieur existe pour trancher — elle ne fait que préserver, le
+        # cas échéant, l'ancien comportement déterministe pour les runtimes
+        # SANS classifieur réel (tests bas niveau, environnements sans LLM
+        # configuré). Un simple nombre tapé pendant une CONFIRMATION n'a
+        # ENCORE aucune preuve d'appartenir au brouillon actif : il peut tout
+        # aussi bien porter une tâche nouvelle et indépendante et isolable
+        # ("je veux 30 poulets chaque semaine" pendant la confirmation d'un
+        # tout autre produit — incident H5). Fabriquer ici `interpreted_event`
+        # AVANT tout passage par l'interpréteur/`cognitive_guard` revient à
+        # trancher "correction vs nouvelle tâche" sans le contexte complet
+        # (goal actif, confiance, intent détecté) — exactement l'invariant
+        # manquant identifié en Phase 2.5. Avec un classifieur réel
+        # disponible, on s'abstient (`return None`) : le message suit le
+        # chemin NEW_TASK normal, et c'est `decide_active_draft_reply`
+        # (`core/turn_policy.py`), avec la classification RÉELLE en main, qui
+        # tranche correction vs tâche indépendante — jamais ce raccourci.
+        # L'EXACTITUDE de la valeur (somme d'une quantité composée que le LLM
+        # pourrait tronquer) reste, elle, garantie séparément par la surcouche
+        # de correction posée sur le point de passage unique
+        # (`input_interpreter` — voir `_apply_confirmation_value_overlay`),
+        # qui ne décide RIEN mais corrige la valeur d'un tour déjà classifié.
+        if _confirmation_correction and not llm_available:
             # Une seule valeur typée sans ambiguïté (quantité OU prix, pas les
             # deux) : correction ciblée d'un seul champ du brouillon. Si le
             # nombre n'est PAS typé (aucune unité/devise détectée), on ne
@@ -1233,6 +1255,17 @@ def _interpret_fast_path(
                         "slot": "price",
                     },
                 }
+            return None
+        elif _confirmation_correction:
+            # `llm_available` : un classifieur réel existe, la correction
+            # explicite de valeur ci-dessus est désactivée (frontière H5).
+            # `return None` explicite ici, PAS une simple absence de retour :
+            # sans lui, ce nombre retomberait dans le bloc générique "cas
+            # simple non-ambigu restant" un peu plus bas (`skip_numeric_shortcut`
+            # y vaut toujours False pour CONFIRMATION — il ne filtre que
+            # PRICE/QUANTITY, voir son calcul dans `input_interpreter`), qui
+            # le fast-patherait quand même en ANSWER/UPDATE et annulerait
+            # silencieusement l'abstention voulue ci-dessus.
             return None
 
         # Cas simple non-ambigu restant (un seul nombre, mais typé sans

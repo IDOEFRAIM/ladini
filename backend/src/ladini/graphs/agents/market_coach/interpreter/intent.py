@@ -396,7 +396,7 @@ INTENT_CONFIG = {
             "product": "produit souhaité",
             "quantity": "quantité par occurrence",
             "unit": "unité",
-            "recurrence_type": "fréquence (chaque jour, certains jours, chaque semaine, une seule fois)",
+            "recurrence_type": "fréquence (chaque jour, certains jours, chaque semaine, chaque mois, une seule fois)",
             "weekly_days": "jours de la semaine concernés",
             "excluded_weekdays": "jours exclus (ex: sauf le dimanche)",
             "max_price_per_unit": "prix maximum accepté (optionnel)",
