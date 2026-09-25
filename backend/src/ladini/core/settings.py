@@ -10,7 +10,7 @@ Usage:
 import logging
 import os
 from pathlib import Path
-from typing import ClassVar, Dict
+from typing import ClassVar
 
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings
@@ -255,76 +255,13 @@ class Settings(BaseSettings):
     # "whatsapp_cloud" (API Meta directe, moins chère) ou "twilio" (repli —
     # tout le code Twilio reste en place pour un rollback instantané en cas de
     # souci avec l'intégration directe). Bascule un seul flag, aucune
-    # réécriture nécessaire dans les deux sens. Alias `WHATSAPP_PROVIDER`
-    # (mandat "adaptation webhook Meta/Twilio", 2026-09-25) : nom alternatif
-    # accepté en plus du nom canonique — jamais un second flag concurrent (les
-    # deux noms d'env peuplent EXACTEMENT le même champ). La valeur "meta"
-    # (posée par ce même mandat) est normalisée en "whatsapp_cloud" par
-    # `_normalize_messaging_provider` ci-dessous — chaque site d'appel
-    # existant (`response_dispatch.py`, `whatsapp_webhook.py`, `workers/
-    # outbox/channels/whatsapp.py`) ne teste QUE `== "twilio"`, donc les
-    # accepter comme synonymes n'exige de changement nulle part ailleurs.
-    MESSAGING_PROVIDER: str = Field(
-        default="whatsapp_cloud",
-        validation_alias=AliasChoices("MESSAGING_PROVIDER", "WHATSAPP_PROVIDER"),
-    )
-
-    #: (Incident 2026-09-25) Bug corrigé DANS CE COMMIT : `AliasChoices("CANONICAL",
-    #: "ALIAS")` fait gagner le PREMIER nom PRÉSENT dans l'environnement, même vide —
-    #: pas le premier NON VIDE. Un `.env` qui déclare encore `WHATSAPP_CLOUD_API_TOKEN=`
-    #: (héritage de `.env.example`) à côté d'un `META_WHATSAPP_TOKEN=EAAG...` fraîchement
-    #: rempli lisait donc silencieusement la chaîne VIDE — `is_configured()` bloquait
-    #: alors l'envoi AVANT même l'appel HTTP, jamais l'erreur 401 "Authentication Error"
-    #: réellement observée (celle-ci vient d'un token non-vide mais expiré/invalide côté
-    #: Meta) ; documenté ici car c'est le même risque de précédence pour TOUTE paire
-    #: canonique/alias ci-dessous — jamais laissé faire par accident une seconde fois.
-    _ALIASED_ENV_FALLBACKS: ClassVar[Dict[str, str]] = {
-        "MESSAGING_PROVIDER": "WHATSAPP_PROVIDER",
-        "WHATSAPP_CLOUD_API_TOKEN": "META_WHATSAPP_TOKEN",
-        "WHATSAPP_PHONE_NUMBER_ID": "META_WHATSAPP_PHONE_NUMBER_ID",
-        "WHATSAPP_WEBHOOK_VERIFY_TOKEN": "META_WHATSAPP_VERIFY_TOKEN",
-        "WHATSAPP_GRAPH_API_VERSION": "META_GRAPH_API_VERSION",
-        "TWILIO_WHATSAPP_NUMBER": "TWILIO_PHONE_NUMBER",
-    }
-
-    @model_validator(mode="after")
-    def _prefer_non_empty_alias_over_blank_canonical(self) -> "Settings":
-        """Relit `os.environ` DIRECTEMENT (jamais le champ déjà résolu par
-        `AliasChoices`, dont on vient de documenter le piège ci-dessus) : le nom
-        canonique gagne s'il porte une VALEUR RÉELLE, sinon on retombe sur l'alias
-        s'il en porte une — jamais l'inverse, jamais "premier présent, peu importe
-        la valeur". Doit s'exécuter AVANT `_normalize_messaging_provider` (ordre de
-        définition = ordre d'exécution pour les `model_validator(mode="after")` de
-        pydantic v2) pour que "meta" posé via l'alias soit bien normalisé ensuite."""
-        for canonical, alias in self._ALIASED_ENV_FALLBACKS.items():
-            canonical_env = os.environ.get(canonical, "").strip()
-            if canonical_env:
-                continue
-            alias_env = os.environ.get(alias, "").strip()
-            if alias_env:
-                setattr(self, canonical, alias_env)
-        return self
-
-    @model_validator(mode="after")
-    def _normalize_messaging_provider(self) -> "Settings":
-        normalized = str(self.MESSAGING_PROVIDER or "").strip().lower()
-        if normalized == "meta":
-            self.MESSAGING_PROVIDER = "whatsapp_cloud"
-        elif normalized:
-            self.MESSAGING_PROVIDER = normalized
-        return self
+    # réécriture nécessaire dans les deux sens.
+    MESSAGING_PROVIDER: str = "whatsapp_cloud"
 
     # --- Twilio / WhatsApp (repli — voir MESSAGING_PROVIDER) ---
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
-    # Format Twilio natif attendu : "whatsapp:+<E164>" (ex: "whatsapp:+14155238886")
-    # — utilisé tel quel comme `from_=` par le SDK (`workers/outbox/channels/
-    # whatsapp.py::_send_sync_twilio`). Alias `TWILIO_PHONE_NUMBER` (mandat
-    # "adaptation webhook Meta/Twilio", 2026-09-25).
-    TWILIO_WHATSAPP_NUMBER: str = Field(
-        default="",
-        validation_alias=AliasChoices("TWILIO_WHATSAPP_NUMBER", "TWILIO_PHONE_NUMBER"),
-    )
+    TWILIO_WHATSAPP_NUMBER: str = ""
     # URL publique EXACTE sous laquelle Twilio appelle le webhook (sans slash
     # final, ex: "https://api.mondomaine.com"). Twilio signe cette URL ; derrière
     # un reverse proxy, `request.url` porte l'hôte interne et la signature ne
@@ -407,19 +344,9 @@ class Settings(BaseSettings):
 
     # --- WhatsApp Cloud API (Meta directe — provider par défaut) ---
     # Récupérés dans Meta for Developers → votre app → WhatsApp → API Setup.
-    # Chaque champ accepte aussi son alias `META_...` (mandat "adaptation
-    # webhook Meta/Twilio", 2026-09-25) — même discipline que `MESSAGING_
-    # PROVIDER`/`WHATSAPP_PROVIDER` ci-dessus : un seul champ, deux noms d'env
-    # acceptés, jamais une seconde variable à synchroniser manuellement.
-    WHATSAPP_CLOUD_API_TOKEN: str = Field(
-        default="",  # Access token permanent (System User)
-        validation_alias=AliasChoices("WHATSAPP_CLOUD_API_TOKEN", "META_WHATSAPP_TOKEN"),
-    )
-    WHATSAPP_PHONE_NUMBER_ID: str = Field(
-        default="",  # ID du numéro expéditeur (pas le numéro lui-même)
-        validation_alias=AliasChoices(
-            "WHATSAPP_PHONE_NUMBER_ID", "META_WHATSAPP_PHONE_NUMBER_ID"
-        ),
+    WHATSAPP_CLOUD_API_TOKEN: str = ""  # Access token permanent (System User)
+    WHATSAPP_PHONE_NUMBER_ID: str = (
+        ""  # ID du numéro expéditeur (pas le numéro lui-même)
     )
     WHATSAPP_BUSINESS_ACCOUNT_ID: str = (
         ""  # WABA ID (pour la gestion des templates, optionnel ici)
@@ -427,22 +354,14 @@ class Settings(BaseSettings):
     # Chaîne arbitraire que VOUS choisissez et déclarez dans Meta lors de la
     # configuration du webhook — sert uniquement à la vérification GET
     # initiale (hub.verify_token), jamais utilisée après.
-    WHATSAPP_WEBHOOK_VERIFY_TOKEN: str = Field(
-        default="",
-        validation_alias=AliasChoices(
-            "WHATSAPP_WEBHOOK_VERIFY_TOKEN", "META_WHATSAPP_VERIFY_TOKEN"
-        ),
-    )
+    WHATSAPP_WEBHOOK_VERIFY_TOKEN: str = ""
     # Secret de l'app Meta — sert à vérifier la signature HMAC (header
     # X-Hub-Signature-256) de chaque webhook entrant. Sans lui, N'IMPORTE QUI
     # peut poster un faux message sur l'endpoint webhook.
     WHATSAPP_APP_SECRET: str = ""
     # Version de l'API Graph — à faire évoluer périodiquement (Meta déprécie
     # les anciennes versions après ~2 ans).
-    WHATSAPP_GRAPH_API_VERSION: str = Field(
-        default="v21.0",
-        validation_alias=AliasChoices("WHATSAPP_GRAPH_API_VERSION", "META_GRAPH_API_VERSION"),
-    )
+    WHATSAPP_GRAPH_API_VERSION: str = "v21.0"
     # Boutons interactifs natifs (max 3, sans template pré-approuvé — contrairement
     # à Twilio Content API). Activé par défaut : c'est justement l'un des
     # avantages de l'API directe. Désactiver retombe sur le texte brut
