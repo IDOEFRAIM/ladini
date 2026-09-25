@@ -19,6 +19,7 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
+from ladini.core.conversation_lock import conversation_turn_lock
 from ladini.core.idempotency import get_cached as _get_role_hint
 from ladini.core.idempotency import release as _release_role_hint
 from ladini.graphs.agents.market_coach.utils import build_runtime, ensure_dict
@@ -163,95 +164,104 @@ class Orchestrator:
         message_sid: str | None = None,
     ) -> Dict[str, Any]:
         workspace_id = (phone or "anonymous").strip()
-        ws = await self.resolver.resolve(workspace_id, workspace_type)
 
-        guard = _WorkspaceRunGuard(ws, self._checkpointer, max_steps=_MAX_AGENT_STEPS)
-        guard.attach()
-        start_ts = time.monotonic()
-        try:
-            final = await asyncio.wait_for(
-                self._run_market(
-                    ws,
-                    user_query,
-                    phone,
-                    force_role=force_role,
-                    interactive_id=interactive_id,
-                    location_shared=location_shared,
-                    location_outcome=location_outcome,
-                    location_lat=location_lat,
-                    location_lon=location_lon,
-                    message_sid=message_sid,
-                ),
-                timeout=_AGENT_TIMEOUT_SECONDS,
-            )
-        except AgentCircuitBreaker as exc:
-            elapsed_ms = round((time.monotonic() - start_ts) * 1000, 1)
-            logger.error(
-                "AGENT_CIRCUIT_BREAKER | workspace=%s | type=%s | max_steps=%s | duration_ms=%s | error=%s",
-                workspace_id,
-                ws.workspace_type,
-                _MAX_AGENT_STEPS,
-                elapsed_ms,
-                exc,
-            )
-            _tt_error("AGENT_CIRCUIT_BREAKER", "INTERNAL")
-            await self._flush_workspace(ws, reason="circuit_breaker")
-            return self._build_failure_response(ws, workspace_id)
-        except asyncio.TimeoutError:
-            elapsed_ms = round((time.monotonic() - start_ts) * 1000, 1)
-            logger.error(
-                "AGENT_TIMEOUT | workspace=%s | type=%s | timeout=%ss | elapsed_ms=%s | query=%r",
-                workspace_id,
-                ws.workspace_type,
-                _AGENT_TIMEOUT_SECONDS,
-                elapsed_ms,
-                (user_query or "")[:160],
-            )
-            _tt_error("AGENT_TIMEOUT", "TIMEOUT")
-            await self._flush_workspace(ws, reason="timeout")
-            return self._build_failure_response(ws, workspace_id)
-        except Exception as exc:  # pragma: no cover - safety net
-            elapsed_ms = round((time.monotonic() - start_ts) * 1000, 1)
-            logger.error(
-                "AGENT_ERROR | agent=%s | workspace=%s | type=%s | duration_ms=%s | error=%s",
-                ws.active_agent,
-                workspace_id,
-                ws.workspace_type,
-                elapsed_ms,
-                exc,
-                exc_info=True,
-            )
-            _tt_error(type(exc).__name__, "INTERNAL")
-            await self._flush_workspace(ws, reason="agent_error")
-            return self._build_failure_response(ws, workspace_id)
-        else:
-            elapsed_ms = round((time.monotonic() - start_ts) * 1000, 1)
-            logger.info(
-                "AGENT_COMPLETED | workspace=%s | type=%s | duration_ms=%s | goal=%s | status=%s",
-                workspace_id,
-                ws.workspace_type,
-                elapsed_ms,
-                final.get("current_goal"),
-                final.get("status"),
-            )
-            _tt_final(final)  # télémétrie du tour (best-effort, sans effet sur le métier)
-            langgraph_blob = (
-                copy.deepcopy(ws.agent_state)
-                if isinstance(ws.agent_state, dict)
-                else None
-            )
-            self._sync_workspace(ws, final, langgraph_blob)
-            await self._flush_workspace(ws, reason="completed")
-            return {
-                "final_response": final.get("final_response", _FALLBACK_RESPONSE),
-                "agent": ws.active_agent,
-                "workspace_id": workspace_id,
-                # Indice pour la couche d'envoi (tasks.py) : ce tour se termine-t-il
-                # sur une décision qui gagnerait à être rendue en boutons/liste ?
-                "interactive": self._interactive_hint(final),
-            }
-        finally:
-            guard.detach()
+        # (Phase 2 hardening, commit 9, mandat décision E) : sérialise TOUT le tour — de la
+        # résolution du Workspace à sa persistance finale — par conversation, avec une attente
+        # bornée. Sans ceci, deux messages quasi simultanés (deux requêtes webchat, deux
+        # workers Celery) sur le MÊME numéro pouvaient lire le même état de départ et écrire
+        # chacun leur patch sans jamais voir celui de l'autre (lost update). Point d'entrée
+        # UNIQUE (`Orchestrator.handle`) — webchat ET WhatsApp en bénéficient tous les deux
+        # sans code dupliqué par canal.
+        async with conversation_turn_lock(workspace_id, timeout_seconds=_AGENT_TIMEOUT_SECONDS):
+            ws = await self.resolver.resolve(workspace_id, workspace_type)
+
+            guard = _WorkspaceRunGuard(ws, self._checkpointer, max_steps=_MAX_AGENT_STEPS)
+            guard.attach()
+            start_ts = time.monotonic()
+            try:
+                final = await asyncio.wait_for(
+                    self._run_market(
+                        ws,
+                        user_query,
+                        phone,
+                        force_role=force_role,
+                        interactive_id=interactive_id,
+                        location_shared=location_shared,
+                        location_outcome=location_outcome,
+                        location_lat=location_lat,
+                        location_lon=location_lon,
+                        message_sid=message_sid,
+                    ),
+                    timeout=_AGENT_TIMEOUT_SECONDS,
+                )
+            except AgentCircuitBreaker as exc:
+                elapsed_ms = round((time.monotonic() - start_ts) * 1000, 1)
+                logger.error(
+                    "AGENT_CIRCUIT_BREAKER | workspace=%s | type=%s | max_steps=%s | duration_ms=%s | error=%s",
+                    workspace_id,
+                    ws.workspace_type,
+                    _MAX_AGENT_STEPS,
+                    elapsed_ms,
+                    exc,
+                )
+                _tt_error("AGENT_CIRCUIT_BREAKER", "INTERNAL")
+                await self._flush_workspace(ws, reason="circuit_breaker")
+                return self._build_failure_response(ws, workspace_id)
+            except asyncio.TimeoutError:
+                elapsed_ms = round((time.monotonic() - start_ts) * 1000, 1)
+                logger.error(
+                    "AGENT_TIMEOUT | workspace=%s | type=%s | timeout=%ss | elapsed_ms=%s | query=%r",
+                    workspace_id,
+                    ws.workspace_type,
+                    _AGENT_TIMEOUT_SECONDS,
+                    elapsed_ms,
+                    (user_query or "")[:160],
+                )
+                _tt_error("AGENT_TIMEOUT", "TIMEOUT")
+                await self._flush_workspace(ws, reason="timeout")
+                return self._build_failure_response(ws, workspace_id)
+            except Exception as exc:  # pragma: no cover - safety net
+                elapsed_ms = round((time.monotonic() - start_ts) * 1000, 1)
+                logger.error(
+                    "AGENT_ERROR | agent=%s | workspace=%s | type=%s | duration_ms=%s | error=%s",
+                    ws.active_agent,
+                    workspace_id,
+                    ws.workspace_type,
+                    elapsed_ms,
+                    exc,
+                    exc_info=True,
+                )
+                _tt_error(type(exc).__name__, "INTERNAL")
+                await self._flush_workspace(ws, reason="agent_error")
+                return self._build_failure_response(ws, workspace_id)
+            else:
+                elapsed_ms = round((time.monotonic() - start_ts) * 1000, 1)
+                logger.info(
+                    "AGENT_COMPLETED | workspace=%s | type=%s | duration_ms=%s | goal=%s | status=%s",
+                    workspace_id,
+                    ws.workspace_type,
+                    elapsed_ms,
+                    final.get("current_goal"),
+                    final.get("status"),
+                )
+                _tt_final(final)  # télémétrie du tour (best-effort, sans effet sur le métier)
+                langgraph_blob = (
+                    copy.deepcopy(ws.agent_state)
+                    if isinstance(ws.agent_state, dict)
+                    else None
+                )
+                self._sync_workspace(ws, final, langgraph_blob)
+                await self._flush_workspace(ws, reason="completed")
+                return {
+                    "final_response": final.get("final_response", _FALLBACK_RESPONSE),
+                    "agent": ws.active_agent,
+                    "workspace_id": workspace_id,
+                    # Indice pour la couche d'envoi (tasks.py) : ce tour se termine-t-il
+                    # sur une décision qui gagnerait à être rendue en boutons/liste ?
+                    "interactive": self._interactive_hint(final),
+                }
+            finally:
+                guard.detach()
 
     @staticmethod
     def _interactive_hint(final: Dict[str, Any]) -> Optional[Dict[str, Any]]:

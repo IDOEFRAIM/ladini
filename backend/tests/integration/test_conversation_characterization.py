@@ -540,7 +540,6 @@ class TestN_RejectDuringSlotFilling:
 
 
 class TestO_ConcurrentMessages:
-    @pytest.mark.xfail(strict=True, reason="B6: aucune sérialisation par conversation")
     def test_two_simultaneous_messages_never_run_concurrently(self):
         with ConversationHarness(role="BUYER", channel="webchat") as conv:
             conv.send("bonjour", llm=new_task("GREETING", confidence=0.6))
