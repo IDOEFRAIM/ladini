@@ -1648,6 +1648,16 @@ async def _bare_confirmation_for_pending_producer_order(
 _DIGEST_REJECT_EXTRA_PHRASES = frozenset({"pas cette fois", "pas demain", "rien demain"})
 _DIGEST_MODIFY_PHRASES = frozenset({"modifier", "changer"})
 
+# (2026-09-26, mandat digest §9) : "pas demain pour l'oignon" — variante NOMMÉE de "pas demain"
+# (`_DIGEST_REJECT_EXTRA_PHRASES` ci-dessus), qui elle rejette TOUS les besoins actionnables du
+# digest. Le libellé du produit n'est jamais deviné hors de ce texte : `_DIGEST_SKIP_PRODUCT_RE`
+# ne fait qu'isoler le SUFFIXE après "pour" — la résolution réelle contre les besoins RÉELS de
+# l'acheteur (un seul candidat, sinon abstention) reste à `_digest_skip_named_product`
+# ci-dessous, même discipline BORNÉE que le reste de ce fast-path.
+_DIGEST_SKIP_PRODUCT_RE = _re.compile(
+    r"^pas\s+(?:demain|cette\s+fois)\s+pour\s+(?:l['’]|le\s+|la\s+|les\s+)?(.+)$"
+)
+
 
 async def _bare_confirmation_for_recurring_supply_digest(
     mc_runtime: Any, phone: str, bare_text: str
@@ -1684,9 +1694,28 @@ async def _bare_confirmation_for_recurring_supply_digest(
     (mandat : "CONFIRMER TOUT" s'applique à TOUS les besoins actionnables,
     jamais un seul résolu par ambiguïté de nom)."""
     bare_text = _fix_bare_confirmation_typo(bare_text)
-    if bare_text in _DIGEST_MODIFY_PHRASES:
-        action = None
-        detected_intent = "GET_MY_NEEDS"
+    product_hint: Optional[str] = None
+    _skip_named = _DIGEST_SKIP_PRODUCT_RE.match(bare_text)
+    if _skip_named:
+        # (mandat digest §9) : "pas demain pour l'oignon" — ne rejette QUE ce besoin nommé,
+        # jamais tous les besoins actionnables (contrairement à "pas demain" bare ci-dessous).
+        # Même sentinel `action` que CONFIRM_MATCH/REJECT_MATCH (pas de nouvel intent LLM) ;
+        # `product_hint` porte le texte NU tel que dit, résolu contre les besoins RÉELS de
+        # l'acheteur par `flows/buyer/recurring_need.py::_digest_skip_named_product` — jamais
+        # deviné ici.
+        action = "DIGEST_SKIP_PRODUCT"
+        detected_intent = "UPDATE_RECURRING_NEED"
+        product_hint = _skip_named.group(1).strip()
+    elif bare_text in _DIGEST_MODIFY_PHRASES:
+        # (2026-09-26, mandat digest §5) : AVANT, ceci émettait `GET_MY_NEEDS` (pas d'`action`,
+        # donc pas de menu numéroté ni d'ancrage — un simple listing générique en lecture seule,
+        # jamais de vraie modification). "modifier" ouvre désormais le mini-flow dédié
+        # (`flows/buyer/recurring_need.py::_digest_modify_flow`) sous le MÊME intent
+        # `UPDATE_RECURRING_NEED` (aucun nouveau littéral d'intent LLM, même contrainte de budget
+        # de tokens documentée ci-dessus) — `action="DIGEST_MODIFY_MENU"` est un sentinel INTERNE
+        # reconnu uniquement par `_update_flow`, jamais transmis à `update_recurring_need` (MCP).
+        action = "DIGEST_MODIFY_MENU"
+        detected_intent = "UPDATE_RECURRING_NEED"
     elif bare_text in _CONFIRM_EXACT_PHRASES:
         action = "CONFIRM_MATCH"
         detected_intent = "UPDATE_RECURRING_NEED"
@@ -1712,11 +1741,14 @@ async def _bare_confirmation_for_recurring_supply_digest(
         return None
     if not (result or {}).get("items"):
         return None
+    entities: Dict[str, Any] = {"action": action} if action else {}
+    if product_hint:
+        entities["product"] = product_hint
     return {
         "interpreted_event": "NEW_TASK",
         "detected_intent": detected_intent,
         "interpreter_confidence": 0.95,
-        "extracted_entities": ({"action": action} if action else {}),
+        "extracted_entities": entities,
         "raw_analysis": {"path": "bare_confirmation_recurring_supply_digest"},
     }
 
@@ -2033,22 +2065,49 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 return _pending_check
 
         # 1.6 RÉPONSE AU DIGEST D'APPROVISIONNEMENT RÉCURRENT, SANS TUNNEL
-        # ACTIF (mandat digest, VS4 pilote) — même garde qu'en 1.5 (aucun
-        # tunnel verrouillé), restreinte au rôle BUYER (le digest ne
-        # concerne que les acheteurs). Voir le docstring de
+        # ACTIF (mandat digest, VS4 pilote ; élargi 2026-09-26, mandat digest
+        # §1/§4 — incident réel racine n°1) — même garde structurelle qu'en
+        # 1.5 (aucun tunnel verrouillé) : ANCIENNEMENT restreinte à
+        # `role_up == "BUYER"`, ce qui supposait que le rôle COMPILÉ du
+        # graphe (`role_up`, figé à la construction — voir
+        # `core/graph_builder.py::build_graph`/`orchestrator.py::_run_market`,
+        # résolu depuis `Workspace.workspace_type`, lui-même STICKY d'un tour
+        # à l'autre) refléterait fidèlement "cette personne est en train de
+        # répondre à SON digest acheteur" — faux pour un compte double-rôle
+        # (producteur ET acheteur, ex: un producteur qui a aussi des besoins
+        # récurrents) dont le workspace reste par défaut "producer" tant
+        # qu'aucun tour BUYER n'a eu lieu récemment : `role_up` valait alors
+        # "PRODUCER" pour la réponse au digest, ce bloc entier était sauté,
+        # et "modifier" retombait sur la classification générique ->
+        # `clarification_node` -> repli LLM générique (incident reproduit
+        # tel quel, voir tests/integration/test_recurring_supply_digest_routing.py
+        # ::TestRootCauseRoleMismatch). Élargi à `role_up in ("PRODUCER",
+        # "BUYER")` (même périmètre que 1.5, même garantie d'innocuité : la
+        # fonction ci-dessous s'abstient déjà explicitement — `return None`
+        # — si `list_my_recurring_needs` ne renvoie aucun besoin réel pour ce
+        # numéro, donc un producteur SANS besoin récurrent n'est jamais
+        # affecté). Voir le docstring de
         # `_bare_confirmation_for_recurring_supply_digest` pour le contexte
         # complet.
-        if not locked_goal and role_up == "BUYER" and not onboarding_active:
+        if not locked_goal and role_up in ("PRODUCER", "BUYER") and not onboarding_active:
             # `_bare_confirm_text` a déjà été calculé ci-dessus : le bloc 1.5
-            # (`role_up in ("PRODUCER", "BUYER")`) couvre STRICTEMENT ce cas
-            # BUYER, donc la variable existe toujours ici.
+            # (`role_up in ("PRODUCER", "BUYER")`) couvre STRICTEMENT ce cas,
+            # donc la variable existe toujours ici.
             _digest_check = await _bare_confirmation_for_recurring_supply_digest(
                 mc_runtime, str(state.get("user_phone") or ""), _bare_confirm_text
             )
             if _digest_check is not None:
+                # Log structuré (mandat digest §14) — jamais de secret/PII brute (le
+                # numéro n'est pas loggé ici, seul le rôle compilé et l'action résolue).
                 logger.info(
-                    "[Interpreter] Réponse au digest récurrent résolue -> %s",
-                    _digest_check["detected_intent"],
+                    "recurring_supply_digest.reply_routed | pending_type=%s | "
+                    "pending_state=DIGEST_AWAIT_ACTION | role=%s | user_reply=%s | "
+                    "resolved_action=%s",
+                    InteractionKind.RECURRING_SUPPLY_DIGEST_ACTION.value,
+                    role_up,
+                    _bare_confirm_text,
+                    _digest_check.get("extracted_entities", {}).get("action")
+                    or _digest_check.get("detected_intent"),
                 )
                 return _digest_check
 

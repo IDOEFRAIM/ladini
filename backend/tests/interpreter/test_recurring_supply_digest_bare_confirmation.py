@@ -5,8 +5,12 @@ producteur) : réponse à un message PROACTIF (le digest quotidien
 disponibilité RÉELLE d'un besoin — vérification déterministe, jamais un résultat deviné.
 
 Aucun nouvel intent LLM (budget du prompt `new_task_v2` déjà saturé, spec §50) : ce fast-path
-émet `UPDATE_RECURRING_NEED` + `action="CONFIRM_MATCH"|"REJECT_MATCH"` (déjà au catalogue),
-ou `GET_MY_NEEDS` pour "modifier" (idem)."""
+émet toujours `UPDATE_RECURRING_NEED` (déjà au catalogue) avec un `action` sentinel interne —
+`"CONFIRM_MATCH"`/`"REJECT_MATCH"` (inchangés), ou `"DIGEST_MODIFY_MENU"` pour "modifier"/
+"changer" (mandat digest 2026-09-26, §5 : AVANT ce mandat, "modifier" émettait `GET_MY_NEEDS`
+sans `action`, un simple listing en lecture seule sans jamais ouvrir de vraie modification
+guidée — voir `flows/buyer/recurring_need.py::_digest_modify_flow_start` pour le mini-flow
+que ce sentinel déclenche désormais)."""
 from __future__ import annotations
 
 from ladini.graphs.agents.market_coach.interpreter.routing import (
@@ -66,15 +70,38 @@ class TestRejectWords:
 
 
 class TestModifyWord:
-    def test_modifier_redirects_to_get_my_needs(self):
+    def test_modifier_opens_the_digest_modify_menu(self):
         result = run(_bare_confirmation_for_recurring_supply_digest(rt(_WITH_NEEDS), "+226700", "modifier"))
         assert result is not None
-        assert result["detected_intent"] == "GET_MY_NEEDS"
-        assert result["extracted_entities"] == {}
+        assert result["detected_intent"] == "UPDATE_RECURRING_NEED"
+        assert result["extracted_entities"] == {"action": "DIGEST_MODIFY_MENU"}
 
-    def test_changer_also_redirects_to_get_my_needs(self):
+    def test_changer_also_opens_the_digest_modify_menu(self):
         result = run(_bare_confirmation_for_recurring_supply_digest(rt(_WITH_NEEDS), "+226700", "changer"))
-        assert result is not None and result["detected_intent"] == "GET_MY_NEEDS"
+        assert result is not None and result["extracted_entities"]["action"] == "DIGEST_MODIFY_MENU"
+
+    def test_no_recurring_need_at_all_defers_to_normal_classification(self):
+        result = run(_bare_confirmation_for_recurring_supply_digest(rt(_NO_NEEDS), "+226700", "modifier"))
+        assert result is None
+
+
+class TestPasDemainPourNamedProduct:
+    """Mandat digest §9 : "pas demain pour l'oignon" ne rejette QUE ce besoin nommé — distinct
+    de "pas demain" bare (`TestRejectWords`), qui rejette TOUS les besoins actionnables."""
+
+    def test_pas_demain_pour_extracts_the_product_hint(self):
+        result = run(
+            _bare_confirmation_for_recurring_supply_digest(rt(_WITH_NEEDS), "+226700", "pas demain pour l'oignon")
+        )
+        assert result is not None
+        assert result["detected_intent"] == "UPDATE_RECURRING_NEED"
+        assert result["extracted_entities"] == {"action": "DIGEST_SKIP_PRODUCT", "product": "oignon"}
+
+    def test_pas_demain_pour_la_tomate_also_matches(self):
+        result = run(
+            _bare_confirmation_for_recurring_supply_digest(rt(_WITH_NEEDS), "+226700", "pas demain pour la tomate")
+        )
+        assert result is not None and result["extracted_entities"]["product"] == "tomate"
 
 
 class TestProtections:
