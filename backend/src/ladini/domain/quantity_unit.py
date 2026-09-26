@@ -179,6 +179,24 @@ def parse_compound_quantity(text: str) -> QuantityUnitResult:
     return parse_quantity_unit_from_text(text)
 
 
+def find_convertible_quantity_pairs(text: str) -> "list[QuantityUnitResult]":
+    """Toutes les paires quantité+unité RECONNUES ET convertibles en KG (KG/TONNE), dans
+    l'ordre d'apparition dans *text* — contrairement à `parse_compound_quantity` (qui ne
+    renvoie QUE leur somme, en supposant qu'elles décrivent TOUTES la même quantité), sert à un
+    appelant qui doit comparer chaque paire individuellement à une quantité déjà connue (garde
+    générique "quantité orpheline", incident réel 2026-09-26 — voir
+    `new_task_micro.py::_finalize`, "150 kg tomate et 200 kg chaque semaine" : deux paires
+    convertibles, mais PAS la même quantité fragmentée — une deuxième quantité, orpheline)."""
+    if not text:
+        return []
+    out: "list[QuantityUnitResult]" = []
+    for m in _QUANTITY_UNIT_RE.finditer(text):
+        qty_val, mapped_unit = _extract_match(m)
+        if qty_val is not None and mapped_unit in _UNIT_TO_KG:
+            out.append(QuantityUnitResult(quantity=qty_val, unit=mapped_unit))
+    return out
+
+
 def convert_quantity(quantity: float, from_unit: str, to_unit: str) -> Optional[float]:
     """Convert *quantity* from one canonical unit to another.
 
@@ -1415,6 +1433,7 @@ __all__ = [
     "QuantityUnitResult",
     "parse_quantity_unit_from_text",
     "parse_compound_quantity",
+    "find_convertible_quantity_pairs",
     "parse_packaged_compound_quantity",
     "extract_deterministic_pricing_tiers",
     "extract_single_pricing_tier_correction",

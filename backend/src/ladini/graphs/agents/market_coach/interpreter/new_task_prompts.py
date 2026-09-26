@@ -24,7 +24,7 @@ from ladini.graphs.agents.market_coach.interpreter.new_task_contract import (
 # À incrémenter à CHAQUE changement comportemental — composante de la clé de
 # cache LLM ET dimension Langfuse (`prompt_version`), même discipline que
 # `STRUCTURED_ACTION_PROMPT_VERSION`/`ACTIVE_SLOT_PROMPT_VERSION`.
-NEW_TASK_PROMPT_VERSION = "new_task_v8"
+NEW_TASK_PROMPT_VERSION = "new_task_v9"
 
 _SYSTEM_PROMPT_HEADER = """\
 Tu interprètes un NOUVEAU message utilisateur dans Market Sense, un \
@@ -118,6 +118,12 @@ quantité+unité, en objets {"product","quantity","unit"} — jamais \
 produits SANS répartition claire ("57 moutons chèvres") → jamais fusionné \
 en un produit, jamais réparti — objet {"quantity","unit","candidates":[...]} \
 dans `ambiguous_groups`, jamais dans `product`/`additional_items`.
+- `orphan_quantities` (CREATE_RECURRING_NEED) : une quantité+unité SANS AUCUN nom de \
+produit accolé (zéro candidat — sinon `additional_items`/`ambiguous_groups` ci-dessus). \
+Ex: "150 kg de tomates et 200 kg chaque semaine" → le second "200 kg" va dans \
+`orphan_quantities` ({"quantity":200.0,"unit":"KG"}), JAMAIS ajouté à `quantity`. Jamais \
+un prix, une durée ("pendant 3 mois"), ou un groupe de conditionnement du MÊME produit \
+(déjà totalisé dans `quantity`, règle ci-dessus).
 - `correction_scope` : "ALL" si l'utilisateur dit de tout remplacer, "ITEM" s'il \
 vise un produit précis, sinon null.
 
@@ -148,6 +154,7 @@ Réponds strictement avec cet objet JSON, sans aucun autre texte :
 "additional_items": [{"product": "<str|null>", "quantity": <float|null>, \
 "unit": "<str|null>"}, ...], "ambiguous_groups": [{"quantity": <float|null>, \
 "unit": "<str|null>", "candidates": ["<str>", ...]}, ...], \
+"orphan_quantities": [{"quantity": <float|null>, "unit": "<str|null>"}, ...], \
 "correction_scope": "ALL|ITEM|null"}}
 """
 

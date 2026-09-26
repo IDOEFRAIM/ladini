@@ -97,6 +97,30 @@ class NewTaskAmbiguousGroup(BaseModel):
     candidates: List[str] = []
 
 
+class NewTaskOrphanQuantity(BaseModel):
+    """UNE quantité mentionnée dans le message SANS AUCUN nom de produit qui lui soit
+    rattaché — ni le produit principal, ni un candidat pour `ambiguous_groups` (ci-dessus, qui
+    suppose au moins DEUX noms candidats). Ex: "150 kg tomates et 200 kg chaque semaine" : le
+    second "200 kg" ne nomme aucun produit du tout. Distinct de `additional_items` (produit
+    connu + sa propre quantité, plus haut) : ici, c'est ZÉRO nom, jamais un produit deviné.
+
+    Bug réel production (2026-09-26, "150 kg tomate et 200 kg chaque semaine") : avant ce
+    champ, le LLM n'avait NULLE PART où mettre cette quantité (`additional_items` exige un
+    `product`, `ambiguous_groups` exige ≥2 `candidates`) — elle était donc soit silencieusement
+    perdue, soit (pire, le bug réellement observé) refusionnée dans la quantité du produit déjà
+    connu par une garde Python anti-troncature (`new_task_micro.py::_finalize`, pensée pour "2
+    tonnes et 250 kg" — UNE SEULE quantité fragmentée en plusieurs nombres, jamais deux
+    quantités DISTINCTES) qui ne savait pas faire la différence entre les deux cas :
+    150+200=350 de tomates, jamais dit par l'utilisateur. `flows/buyer/recurring_need.py`
+    construit la question de clarification ("à quel produit correspondent les 200 KG ?"),
+    JAMAIS ce micro-prompt lui-même — même principe que `NewTaskAmbiguousGroup`."""
+
+    model_config = {"extra": "forbid"}
+
+    quantity: Optional[float] = None
+    unit: Optional[str] = None
+
+
 class NewTaskEntities(BaseModel):
     """Uniquement des informations DÉJÀ DITES dans CE message — jamais un ID
     technique (spec §11), jamais un champ possédé par une autre route (spec
@@ -143,6 +167,10 @@ class NewTaskEntities(BaseModel):
     # `NewTaskAmbiguousGroup`, jamais dans `additional_items` (qui suppose une quantité PAR
     # produit déjà connue).
     ambiguous_groups: List[NewTaskAmbiguousGroup] = []
+    # (2026-09-26, bug réel production — "150 kg tomate et 200 kg chaque semaine") : voir
+    # `NewTaskOrphanQuantity` ci-dessus — UNE quantité, ZÉRO nom de produit. Jamais dans
+    # `additional_items` (qui exige un produit) ni `ambiguous_groups` (qui exige ≥2 candidats).
+    orphan_quantities: List[NewTaskOrphanQuantity] = []
     # Correction d'une demande en cours : portée PROPOSÉE par le LLM (« ALL » = tout
     # remplacer, « ITEM » = un produit nommé). Validée par le domaine
     # (`domain/recurring_need_draft.py::plan_correction`), jamais appliquée à l'aveugle.
@@ -271,6 +299,7 @@ __all__ = [
     "NewTaskPricingTier",
     "NewTaskRecurringItem",
     "NewTaskAmbiguousGroup",
+    "NewTaskOrphanQuantity",
     "NewTaskEntities",
     "NewTaskInterpretation",
     "NewTaskPromptContext",

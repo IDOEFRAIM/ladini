@@ -347,10 +347,18 @@ class TestPromptSizeGuard:
     # absente"). +~50 tokens pour éviter une invention de données reste très
     # loin de l'ancien prompt à 5000 tokens que cette garde vise réellement à
     # empêcher (spec §50).
+    # Seuils relevés de 2340 à 2430 (2026-09-26) : `orphan_quantities` ajouté
+    # au schéma (bug réel production — "150 kg tomate et 200 kg chaque
+    # semaine" : sans ce champ, une garde Python anti-troncature refusionnait
+    # la deuxième quantité, sans produit, dans celle du produit déjà connu —
+    # 150+200 devenait 350, jamais dit par l'utilisateur). +~90 tokens pour
+    # donner au LLM un endroit où mettre une quantité SANS produit reste très
+    # loin de l'ancien prompt à 5000 tokens que cette garde vise réellement à
+    # empêcher (spec §50).
     def test_system_prompt_never_regresses_towards_the_old_5000_token_prompt(self):
         system_prompt = build_new_task_system_prompt(CATALOG)
         estimated_tokens = int(len(system_prompt.split()) * 1.3)
-        assert estimated_tokens < 2340, (
+        assert estimated_tokens < 2430, (
             f"system_prompt new_task_v2 ~{estimated_tokens} tokens — "
             "seuil de garde anti-régression dépassé (spec §50)"
         )
@@ -361,7 +369,7 @@ class TestPromptSizeGuard:
             _ctx(), "je veux vendre 20 sacs de mais a 250 le kilo"
         )
         total_tokens = int((len(system_prompt.split()) + len(user_prompt.split())) * 1.3)
-        assert 800 <= total_tokens <= 2340
+        assert 800 <= total_tokens <= 2430
 
 
 class TestMaxTokensIsExplicitAndLargeEnough:

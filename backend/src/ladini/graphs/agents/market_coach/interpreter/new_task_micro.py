@@ -32,7 +32,9 @@ from pydantic import ValidationError
 
 from ladini.core.idempotency import get_cached, increment, set_cached
 from ladini.domain.quantity_unit import (
+    convert_quantity,
     extract_unit_only_from_text,
+    find_convertible_quantity_pairs,
     parse_compound_quantity,
     parse_quantity_unit_from_text,
 )
@@ -351,6 +353,10 @@ async def _finalize(
         {k: v for k, v in group.items() if v is not None}
         for group in raw_entities.get("ambiguous_groups") or []
     ]
+    raw_entities["orphan_quantities"] = [
+        {k: v for k, v in orphan.items() if v is not None}
+        for orphan in raw_entities.get("orphan_quantities") or []
+    ]
     entities = _remap_entities(raw_entities)
     # Bug réel production (2026-09-24, "lifecycle de clarification ambiguous_groups") :
     # `_remap_entities` (générique, partagé par toutes les routes) élimine toute valeur
@@ -362,11 +368,15 @@ async def _finalize(
     # semaine") gardait l'ANCIEN `ambiguous_groups` pour toujours — la clarification devenait
     # collante ("sticky"), rejouée à l'identique quel que soit le nouveau message. `additional_
     # items` partage exactement la même forme (liste, même schéma NEW_TASK) et le même risque
-    # structurel, corrigé ici par prudence symétrique. Ces deux clés sont donc TOUJOURS
-    # présentes dans `entities` (même `[]`), pour que `merge_dict` écrase bien l'ancienne
-    # valeur à chaque tour au lieu de la laisser survivre indéfiniment.
+    # structurel, corrigé ici par prudence symétrique. `orphan_quantities` (2026-09-26, voir
+    # `new_task_contract.py::NewTaskOrphanQuantity`) partage la MÊME forme et le MÊME risque —
+    # ajoutée ici dès sa création plutôt que de laisser un futur oubli la rendre "collante" à son
+    # tour. Ces trois clés sont donc TOUJOURS présentes dans `entities` (même `[]`), pour que
+    # `merge_dict` écrase bien l'ancienne valeur à chaque tour au lieu de la laisser survivre
+    # indéfiniment.
     entities["additional_items"] = raw_entities["additional_items"]
     entities["ambiguous_groups"] = raw_entities["ambiguous_groups"]
+    entities["orphan_quantities"] = raw_entities["orphan_quantities"]
 
     # FALLBACK numérique (parité avec le chemin legacy, `routing.py`) : un
     # message SANS AUCUNE quantité extraite par le LLM (disposition UNKNOWN à
@@ -382,10 +392,13 @@ async def _finalize(
     # pour CE cas). Suspendu pour un message multi-produits
     # (`additional_items` non vide) : un item a déjà sa PROPRE quantité, la
     # deviner par un simple scan du texte entier reviendrait à confondre les
-    # quantités de plusieurs produits distincts.
+    # quantités de plusieurs produits distincts. Même suspension pour
+    # `orphan_quantities` non vide (2026-09-26) : une quantité SANS produit est déjà identifiée
+    # ailleurs dans le texte — un simple scan risquerait de la reprendre ici comme si elle était
+    # celle du produit principal.
     _adjacent = (
         {}
-        if raw_entities.get("additional_items")
+        if raw_entities.get("additional_items") or raw_entities.get("orphan_quantities")
         else (_fallback_quantity_unit_from_text(text) or {})
     )
     if entities.get("quantity") is None and _adjacent.get("quantity") is not None:
@@ -413,18 +426,62 @@ async def _finalize(
             # ensuite en aval, comme avant cette garde).
             entities.pop("unit", None)
 
-    # ── QUANTITÉ COMPOSÉE (Phase 2.5, parité avec le chemin legacy) ──
-    # Même garde ANTI-TRONCATURE que `routing.py` (incident réel 2026-09-03,
-    # "2 tonnes et 250 kg" → LLM tronqué en "2 TONNE") — jusqu'ici câblée
-    # UNIQUEMENT sur le chemin legacy, jamais ici, pour la même raison que le
-    # fallback ci-dessus. Neutre quand le texte ne porte qu'une seule paire ou
-    # des unités non convertibles (résultat alors identique, aucune
-    # correction). Suspendue pour un message multi-produits : sommer TOUTES
-    # les quantités convertibles du texte confondrait les quantités de
-    # plusieurs produits distincts (chacun garde la SIENNE, extraite par le
-    # LLM par produit — `parse_compound_quantity` ne raisonne, lui, qu'en
-    # termes d'un seul total de texte).
-    if entities.get("quantity") is not None and not raw_entities.get("additional_items"):
+    # ── QUANTITÉ COMPOSÉE vs QUANTITÉ ORPHELINE (Phase 2.5 + correctif 2026-09-26) ──
+    # Un produit est-il nommé CE tour ? Distingue deux familles de messages structurellement
+    # IDENTIQUES pour un simple scan de texte ("N1 unité1 [produit] et N2 unité2") mais
+    # sémantiquement opposées : (a) une correction de quantité SEULE, sans produit re-nommé
+    # (le produit est déjà connu du tour précédent — ex: "non j'ai dit 2 tonnes et 250 kg") : le
+    # texte ENTIER ne décrit qu'UNE seule quantité, fragmentée/tronquée par le LLM ; (b) un
+    # message qui NOMME un produit ET porte un second nombre — incident réel 2026-09-26, "150 kg
+    # tomate et 200 kg chaque semaine" : le second nombre n'est PAS une fraction de la quantité
+    # du produit nommé, c'est une DEUXIÈME quantité dont le produit reste à préciser. Aucune
+    # regex ne peut distinguer ces deux cas sur la forme seule (voir le rapport de mission) — le
+    # signal fiable est : un produit a-t-il été dit CE tour ?
+    _named_product_this_turn = bool(raw_entities.get("product"))
+    if (
+        _named_product_this_turn
+        and (decision.intent or "").upper() == "CREATE_RECURRING_NEED"
+        and entities.get("quantity") is not None
+        and not raw_entities.get("additional_items")
+        and not raw_entities.get("orphan_quantities")
+    ):
+        # Garde métier générique (mandat §10, 2026-09-26) : le texte porte-t-il une DEUXIÈME
+        # quantité convertible que ni le LLM (`orphan_quantities`, ci-dessus — le cas normal une
+        # fois le prompt à jour) ni `additional_items` n'expliquent ? Filet de sécurité
+        # STRUCTUREL (jamais un mot précis en dur) pour le cas où le LLM n'a pas suivi la
+        # consigne : jamais une somme implicite dans la quantité du produit déjà connu — la
+        # quantité EXCÉDENTAIRE devient elle-même un orphelin, jamais perdue ni fusionnée.
+        _pairs = find_convertible_quantity_pairs(text)
+        if len(_pairs) >= 2 and entities.get("unit"):
+            _primary_kg = convert_quantity(entities["quantity"], entities["unit"], "KG")
+            _extra = [
+                p
+                for p in _pairs
+                if _primary_kg is None or convert_quantity(p.quantity, p.unit, "KG") != _primary_kg
+            ]
+            if _extra and len(_extra) < len(_pairs):
+                _orphan = _extra[0]
+                logger.warning(
+                    "[Interpreter NEW_TASK] Quantité orpheline détectée dans le texte "
+                    "('%s' → %.1f %s en plus de %r/%r) — clarification requise, jamais "
+                    "une somme implicite.",
+                    text,
+                    _orphan.quantity,
+                    _orphan.unit,
+                    entities.get("quantity"),
+                    entities.get("unit"),
+                )
+                entities["orphan_quantities"] = [
+                    {"quantity": _orphan.quantity, "unit": _orphan.unit}
+                ]
+    elif entities.get("quantity") is not None and not raw_entities.get("additional_items") and not raw_entities.get("orphan_quantities"):
+        # Même garde ANTI-TRONCATURE que `routing.py` (incident réel 2026-09-03, "2 tonnes et
+        # 250 kg" → LLM tronqué en "2 TONNE") — jusqu'ici câblée UNIQUEMENT sur le chemin legacy.
+        # Neutre quand le texte ne porte qu'une seule paire ou des unités non convertibles
+        # (résultat alors identique, aucune correction). Ne s'applique QUE quand aucun produit
+        # n'est nommé ce tour (voir ci-dessus) : c'est précisément ce qui la rend sûre — un
+        # message SANS produit re-nommé ne peut décrire qu'UNE seule quantité en cours de
+        # correction, jamais une deuxième quantité pour un AUTRE produit.
         _compound = parse_compound_quantity(text)
         if (
             _compound.unit == "KG"
