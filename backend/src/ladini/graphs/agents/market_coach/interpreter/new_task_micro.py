@@ -34,6 +34,7 @@ from ladini.core.idempotency import get_cached, increment, set_cached
 from ladini.domain.quantity_unit import (
     convert_quantity,
     extract_unit_only_from_text,
+    find_bare_number_candidates,
     find_convertible_quantity_pairs,
     parse_compound_quantity,
     parse_quantity_unit_from_text,
@@ -446,34 +447,59 @@ async def _finalize(
         and not raw_entities.get("orphan_quantities")
     ):
         # Garde métier générique (mandat §10, 2026-09-26) : le texte porte-t-il une DEUXIÈME
-        # quantité convertible que ni le LLM (`orphan_quantities`, ci-dessus — le cas normal une
+        # quantité candidate que ni le LLM (`orphan_quantities`, ci-dessus — le cas normal une
         # fois le prompt à jour) ni `additional_items` n'expliquent ? Filet de sécurité
-        # STRUCTUREL (jamais un mot précis en dur) pour le cas où le LLM n'a pas suivi la
-        # consigne : jamais une somme implicite dans la quantité du produit déjà connu — la
-        # quantité EXCÉDENTAIRE devient elle-même un orphelin, jamais perdue ni fusionnée.
-        _pairs = find_convertible_quantity_pairs(text)
-        if len(_pairs) >= 2 and entities.get("unit"):
-            _primary_kg = convert_quantity(entities["quantity"], entities["unit"], "KG")
-            _extra = [
-                p
-                for p in _pairs
-                if _primary_kg is None or convert_quantity(p.quantity, p.unit, "KG") != _primary_kg
-            ]
-            if _extra and len(_extra) < len(_pairs):
-                _orphan = _extra[0]
-                logger.warning(
-                    "[Interpreter NEW_TASK] Quantité orpheline détectée dans le texte "
-                    "('%s' → %.1f %s en plus de %r/%r) — clarification requise, jamais "
-                    "une somme implicite.",
-                    text,
-                    _orphan.quantity,
-                    _orphan.unit,
-                    entities.get("quantity"),
-                    entities.get("unit"),
-                )
-                entities["orphan_quantities"] = [
-                    {"quantity": _orphan.quantity, "unit": _orphan.unit}
+        # STRUCTUREL (jamais un mot précis en dur, jamais un nom d'espèce/d'animal) pour le cas
+        # où le LLM n'a pas suivi la consigne : jamais une somme implicite dans la quantité du
+        # produit déjà connu — la quantité EXCÉDENTAIRE devient elle-même un orphelin, jamais
+        # perdue ni fusionnée. Deux formes, ni l'une ni l'autre spécifique à un produit précis :
+        if entities.get("unit") in ("KG", "TONNE"):
+            # (a) quantité de poids/volume — "150 kg tomate et 200 kg chaque semaine" : la
+            # deuxième quantité porte elle-même une unité littérale convertible.
+            _pairs = find_convertible_quantity_pairs(text)
+            if len(_pairs) >= 2:
+                _primary_kg = convert_quantity(entities["quantity"], entities["unit"], "KG")
+                _extra = [
+                    p
+                    for p in _pairs
+                    if _primary_kg is None or convert_quantity(p.quantity, p.unit, "KG") != _primary_kg
                 ]
+                if _extra and len(_extra) < len(_pairs):
+                    _orphan = _extra[0]
+                    logger.warning(
+                        "[Interpreter NEW_TASK] Quantité orpheline détectée dans le texte "
+                        "('%s' → %.1f %s en plus de %r/%r) — clarification requise, jamais "
+                        "une somme implicite.",
+                        text,
+                        _orphan.quantity,
+                        _orphan.unit,
+                        entities.get("quantity"),
+                        entities.get("unit"),
+                    )
+                    entities["orphan_quantities"] = [
+                        {"quantity": _orphan.quantity, "unit": _orphan.unit}
+                    ]
+        else:
+            # (b) quantité SANS unité de poids/volume littérale — bétail compté en TETE ("40
+            # chèvres et 20 chaque semaine"), sac/panier sans répétition du mot ("3 sacs de riz
+            # et 2 chaque semaine"), ou tout produit compté sans mot d'unité du tout. Incident
+            # réel 2026-09-26 (suite) : `find_convertible_quantity_pairs` ne voit QUE le
+            # KG/TONNE — un nombre nu comme "20" lui est structurellement invisible, laissant
+            # ces cas entièrement dépendants du LLM. `find_bare_number_candidates` (jamais un mot
+            # d'espèce/d'animal — seulement durée/prix/plage, des rôles GÉNÉRIQUES) comble ce
+            # trou pour tout produit compté sans unité littérale, pas seulement le bétail.
+            _bare = find_bare_number_candidates(text, exclude_values=[entities["quantity"]])
+            if _bare:
+                _orphan_qty = _bare[0]
+                logger.warning(
+                    "[Interpreter NEW_TASK] Quantité orpheline SANS unité détectée dans le "
+                    "texte ('%s' → %.1f en plus de %r) — clarification requise, jamais une "
+                    "somme implicite.",
+                    text,
+                    _orphan_qty,
+                    entities.get("quantity"),
+                )
+                entities["orphan_quantities"] = [{"quantity": _orphan_qty, "unit": None}]
     elif entities.get("quantity") is not None and not raw_entities.get("additional_items") and not raw_entities.get("orphan_quantities"):
         # Même garde ANTI-TRONCATURE que `routing.py` (incident réel 2026-09-03, "2 tonnes et
         # 250 kg" → LLM tronqué en "2 TONNE") — jusqu'ici câblée UNIQUEMENT sur le chemin legacy.

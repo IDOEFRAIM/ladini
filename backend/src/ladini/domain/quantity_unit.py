@@ -11,7 +11,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 UNIT_SYNONYMS: Dict[str, str] = {
     "k": "KG",
@@ -195,6 +195,94 @@ def find_convertible_quantity_pairs(text: str) -> "list[QuantityUnitResult]":
         if qty_val is not None and mapped_unit in _UNIT_TO_KG:
             out.append(QuantityUnitResult(quantity=qty_val, unit=mapped_unit))
     return out
+
+
+_BARE_NUMBER_TOKEN_RE = re.compile(r"\d+(?:[.,]\d+)?|[A-Za-zÀ-ÖØ-öø-ÿ]+")
+
+#: Un nombre immédiatement suivi d'un de ces mots est une DURÉE ("pendant 2 semaines") ou une
+#: CADENCE ("chaque 2 semaines" — le mot "chaque" précède, mais c'est bien le mot de durée
+#: directement APRÈS le nombre qui le distingue d'une quantité), jamais une quantité de produit.
+_DURATION_WORDS = frozenset(
+    {
+        "jour", "jours", "semaine", "semaines", "mois", "an", "ans", "annee", "annees",
+        "heure", "heures", "trimestre", "trimestres",
+    }
+)
+
+#: Un nombre immédiatement suivi OU précédé d'un de ces mots est un PRIX, jamais une quantité de
+#: produit (déjà porté par `price`/`price_unit`, extraits séparément par le LLM).
+_CURRENCY_WORDS = frozenset({"fcfa", "cfa", "franc", "francs", "f"})
+
+#: "150 à 200 kg" : une PLAGE, une seule quantité éventuelle — jamais deux quantités candidates
+#: distinctes. "à" accent-plié ("a") par `normalize_unit_token`, comme tout le reste du module.
+_RANGE_CONNECTOR_WORDS = frozenset({"a"})
+
+
+def find_bare_number_candidates(
+    text: str, *, exclude_values: "Iterable[float]" = ()
+) -> "list[float]":
+    """Nombres NUS (sans unité littérale accolée) dans *text*, dans l'ordre d'apparition —
+    candidats à une DEUXIÈME quantité de produit sans unité écrite (bétail compté en TETE,
+    sacs/paniers sans répétition du mot, ou tout produit compté à l'unité). Complète
+    `find_convertible_quantity_pairs` (qui ne voit que KG/TONNE) pour le même usage : détecter
+    une quantité candidate que ni le produit principal ni `additional_items` n'expliquent, SANS
+    jamais reconnaître un nom de produit précis (aucun mot d'espèce/d'animal ici — seulement des
+    marqueurs GÉNÉRIQUES de rôle sémantique : durée, prix, plage).
+
+    Exclut, génériquement :
+    - un nombre suivi d'une unité littérale RECONNUE (déjà couvert par
+      `find_convertible_quantity_pairs`/le parseur d'unité — jamais compté deux fois ici) ;
+    - un nombre suivi d'un mot de DURÉE — couvre aussi la CADENCE ("chaque N semaines") ;
+    - un nombre suivi OU précédé d'un mot de PRIX/devise ;
+    - un nombre faisant partie d'une PLAGE ("N1 à N2") — les deux bornes sont exclues ;
+    - les valeurs de `exclude_values` (typiquement la quantité déjà attribuée au produit
+      principal), à `1e-9` près.
+
+    Incident réel 2026-09-26 (suite) : "40 chèvres et 20 chaque semaine" — aucun mot d'unité
+    littéral pour "20", donc invisible à `find_convertible_quantity_pairs` ; sans cette fonction,
+    le filet Python de `new_task_micro.py::_finalize` ne détectait QUE les quantités orphelines
+    en kg/tonne, laissant le bétail (et tout produit compté sans mot d'unité) entièrement
+    dépendant du LLM pour `orphan_quantities`."""
+    if not text:
+        return []
+    tokens = _BARE_NUMBER_TOKEN_RE.findall(text)
+
+    def _as_number(tok: str) -> Optional[float]:
+        try:
+            return float(tok.replace(",", "."))
+        except ValueError:
+            return None
+
+    numeric: "list[tuple[int, float]]" = []
+    for i, tok in enumerate(tokens):
+        val = _as_number(tok)
+        if val is not None:
+            numeric.append((i, val))
+
+    excluded_positions: set = set()
+    for i, _val in numeric:
+        prev_word = normalize_unit_token(tokens[i - 1]) if i > 0 else ""
+        next_tok = tokens[i + 1] if i + 1 < len(tokens) else ""
+        next_word = normalize_unit_token(next_tok)
+        if next_tok and normalize_unit(next_tok) is not None:
+            excluded_positions.add(i)
+        if next_word in _DURATION_WORDS:
+            excluded_positions.add(i)
+        if next_word in _CURRENCY_WORDS or prev_word in _CURRENCY_WORDS:
+            excluded_positions.add(i)
+        if next_word in _RANGE_CONNECTOR_WORDS and i + 2 < len(tokens) and _as_number(tokens[i + 2]) is not None:
+            excluded_positions.add(i)
+            excluded_positions.add(i + 2)
+
+    excluded_values = list(exclude_values)
+    result: "list[float]" = []
+    for i, val in numeric:
+        if i in excluded_positions:
+            continue
+        if any(abs(val - ev) < 1e-9 for ev in excluded_values):
+            continue
+        result.append(val)
+    return result
 
 
 def convert_quantity(quantity: float, from_unit: str, to_unit: str) -> Optional[float]:
@@ -1434,6 +1522,7 @@ __all__ = [
     "parse_quantity_unit_from_text",
     "parse_compound_quantity",
     "find_convertible_quantity_pairs",
+    "find_bare_number_candidates",
     "parse_packaged_compound_quantity",
     "extract_deterministic_pricing_tiers",
     "extract_single_pricing_tier_correction",

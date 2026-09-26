@@ -1158,3 +1158,152 @@ class TestQ_OrphanQuantity:
         assert (draft["product"], draft["quantity"]) == ("tomate", 150.0)
         assert [(i["product"], i["quantity"]) for i in draft["additional_items"]] == [("oignon", 250.0)]
 
+
+# =====================================================================
+# R. Quantité orpheline SANS unité littérale (suite du bug 2026-09-26) : le
+#    filet de TestQ_OrphanQuantity ne voit que le KG/TONNE — "40 chèvres et
+#    20 chaque semaine" (bétail compté en TETE, aucun mot d'unité écrit)
+#    échappait entièrement à la détection Python, laissant le risque
+#    ENTIER reposer sur le LLM. `find_bare_number_candidates` (générique :
+#    durée/prix/plage, jamais un nom d'espèce) comble ce trou.
+# =====================================================================
+
+
+def _chevre_weekly(**extra: Any) -> Dict[str, Any]:
+    return new_task(
+        "CREATE_RECURRING_NEED", product="chevre", quantity=40.0, recurrence_type="WEEKLY", **extra,
+    )
+
+
+class TestR_BareOrphanQuantity:
+    def test_a_bare_orphan_quantity_triggers_clarification_never_a_sum(self, conv):
+        """Cas A : reproduit EXACTEMENT le scénario du suivi bloquant — le LLM ne renvoie NI
+        `additional_items` NI `orphan_quantities` (stub réaliste d'un modèle qui n'a pas
+        (encore) suivi la consigne du prompt) : c'est le filet Python SEUL, sur un nombre SANS
+        aucune unité littérale ('20', pas '20 kg'), qui doit détecter l'orphelin. Avant ce
+        correctif, ce tour allait directement à CONFIRM_ACTION avec quantity=40 et '20'
+        silencieusement perdu (jamais sommé à 60 dans ce cas précis, mais jamais non plus
+        signalé — voir le rapport de mission pour la preuve par `git stash`)."""
+        t = conv.send(
+            "j ai besoin de 40 chevres et 20 chaque semaine", llm=_chevre_weekly()
+        )
+        assert t.error is None
+        draft = t.draft()
+        assert (draft["product"], draft["quantity"], draft["unit"]) == ("chevre", 40.0, "TETE")
+        assert "60" not in t.response
+        assert "20" in t.response
+        pending = t.pending_after
+        assert (pending.kind.value, pending.field) == ("ENTER_FIELD", "orphan_quantity")
+        assert pending.target == {"quantity": 20.0, "unit": None}
+        assert _created(conv) == []
+
+    def test_b_two_named_livestock_products_reach_the_draft_directly(self, conv):
+        """Cas B : les deux quantités ont chacune un produit explicite (le LLM peuple
+        `additional_items`) — aucune ambiguïté, la garde orpheline ne doit rien changer."""
+        t = conv.send(
+            "j ai besoin de 40 chevres et 20 moutons chaque semaine",
+            llm=_chevre_weekly(additional_items=[{"product": "mouton", "quantity": 20.0, "unit": "TETE"}]),
+        )
+        draft = t.draft()
+        assert (draft["product"], draft["quantity"], draft["unit"]) == ("chevre", 40.0, "TETE")
+        assert [(i["product"], i["quantity"], i["unit"]) for i in draft["additional_items"]] == [
+            ("mouton", 20.0, "TETE")
+        ]
+        assert t.pending_after.kind.value == "CONFIRM_ACTION"
+
+    def test_c_a_duration_is_never_read_as_a_bare_orphan_quantity(self, conv):
+        """Cas C : 'pendant 2 semaines' est une DURÉE (mot de durée immédiatement après le
+        nombre) — jamais une deuxième quantité, quelle que soit l'unité du produit principal."""
+        t = conv.send("40 chevres pendant 2 semaines", llm=_chevre_weekly())
+        draft = t.draft()
+        assert (draft["product"], draft["quantity"]) == ("chevre", 40.0)
+        assert not draft.get("additional_items")
+        assert t.pending_after.kind.value == "CONFIRM_ACTION"
+
+    def test_d_a_price_is_never_read_as_a_bare_orphan_quantity(self, conv):
+        """Cas D : '20000 FCFA la tête' est un PRIX (mot de devise immédiatement après le
+        nombre) — jamais une deuxième quantité de bétail."""
+        t = conv.send(
+            "40 chevres a 20000 fcfa la tete chaque semaine",
+            llm=_chevre_weekly(price=20000.0, price_unit="TETE"),
+        )
+        draft = t.draft()
+        assert (draft["product"], draft["quantity"]) == ("chevre", 40.0)
+        assert not draft.get("additional_items")
+        assert t.pending_after.kind.value == "CONFIRM_ACTION"
+
+    def test_e_a_cadence_is_never_read_as_a_bare_orphan_quantity(self, conv):
+        """Cas E : 'chaque 2 semaines' — le nombre de la CADENCE est immédiatement suivi d'un
+        mot de durée, exactement comme 'pendant 2 semaines' (même garde générique) — jamais une
+        deuxième quantité."""
+        t = conv.send("40 chevres chaque 2 semaines", llm=_chevre_weekly())
+        draft = t.draft()
+        assert draft["quantity"] == 40.0
+        assert not draft.get("additional_items")
+        # (le champ 'field' peut être 'weekly_days'/autre selon le modèle de récurrence — seul
+        # le NON-déclenchement de la clarification orpheline importe ici)
+        assert t.pending_after.field != "orphan_quantity"
+
+    def test_f_completing_the_missing_livestock_product_reaches_full_confirmation_and_creation(self, conv):
+        """Cas F, bout en bout : clarification -> réponse 'moutons' -> draft complet à 2 items ->
+        confirmation -> création atomique."""
+        t1 = conv.send(
+            "j ai besoin de 40 chevres et 20 chaque semaine", llm=_chevre_weekly()
+        )
+        assert t1.pending_after.field == "orphan_quantity"
+
+        t2 = conv.send("moutons", llm=_UNKNOWN)
+        draft = t2.draft()
+        assert (draft["product"], draft["quantity"], draft["unit"]) == ("chevre", 40.0, "TETE")
+        assert [(i["product"], i["quantity"], i["unit"]) for i in draft["additional_items"]] == [
+            ("moutons", 20.0, "TETE")
+        ]
+        assert t2.pending_after.kind.value == "CONFIRM_ACTION"
+
+        t3 = conv.send("oui")
+        assert t3.llm_calls == 0
+        created = _created(conv)
+        assert [tool for tool, _ in created] == ["create_recurring_needs"]
+        items = created[0][1]["items"]
+        assert [(it["product_query"], it["quantity"]) for it in items] == [
+            ("chevre", 40.0), ("moutons", 20.0),
+        ]
+
+    def test_g_poultry_bare_orphan_quantity_never_becomes_a_sum(self, conv):
+        """Cas G : généralisation au-delà du bétail caprin/ovin — même mécanisme générique
+        (aucun mot 'poulet' en dur dans le garde-fou), sur une autre espèce."""
+        t = conv.send(
+            "10 poulets et 5 chaque semaine",
+            llm=new_task("CREATE_RECURRING_NEED", product="poulet", quantity=10.0, recurrence_type="WEEKLY"),
+        )
+        draft = t.draft()
+        assert (draft["product"], draft["quantity"]) == ("poulet", 10.0)
+        assert "15" not in t.response
+        assert t.pending_after.field == "orphan_quantity"
+        assert t.pending_after.target == {"quantity": 5.0, "unit": None}
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "Limite honnête (mandat suivi 2026-09-26, §7 cas H) : la garde orpheline générique "
+            "détecte bien la clarification pour '8 caisses de tomates et 4 chaque semaine' "
+            "(prouvé par ailleurs), mais 'CAISSE' n'est PAS une unité canonique du domaine "
+            "(absente de `UNIT_SYNONYMS`, `domain/quantity_unit.py`) — le produit principal lui-"
+            "même retombe donc sur le défaut KG plutôt que de préserver 'caisse', une limite "
+            "PRÉEXISTANTE du système d'unités (pas introduite ici) que ce correctif n'étend pas "
+            "le mandat à résoudre. Ce test fixe le comportement voulu UNE FOIS 'CAISSE' un "
+            "défaut canonique reconnu — jamais un hack ad hoc ici."
+        ),
+    )
+    def test_h_crates_orphan_quantity_preserves_the_crate_unit(self, conv):
+        t = conv.send(
+            "8 caisses de tomates et 4 chaque semaine",
+            llm=new_task(
+                "CREATE_RECURRING_NEED", product="tomate", quantity=8.0, unit="CAISSE",
+                recurrence_type="WEEKLY",
+            ),
+        )
+        draft = t.draft()
+        assert draft["unit"] == "CAISSE"
+        assert t.pending_after.field == "orphan_quantity"
+
