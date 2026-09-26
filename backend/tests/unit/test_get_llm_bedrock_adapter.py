@@ -130,12 +130,18 @@ class TestBedrockAdapterMessageTranslation:
         assert "llm-error" in out.choices[0].message.content
 
 
-class TestBedrockThrottlingFallback:
-    def test_falls_back_to_the_fast_model_on_throttling(self, monkeypatch):
-        from ladini.core.settings import settings
+class TestBedrockThrottlingNeverCrossesProvider:
+    """(2026-09-26, audit LLM_GATEWAY_EXHAUSTED) : `_BedrockAdapter` ne doit
+    JAMAIS retenter `settings.LLM_MODEL` (un ID Groq, notation slash) contre
+    l'API Converse native — ce `modelId` n'a jamais cette forme côté Bedrock,
+    l'appel de repli échouerait systématiquement et masquerait le VRAI
+    throttle initial. Remplace l'ancien comportement (repli cross-provider)
+    qui était exactement cette classe de bug — voir le même correctif sur
+    `_GroqAdapter` (paramètre `provider=`)."""
 
-        monkeypatch.setattr(settings, "LLM_MODEL", "fast-model")
-
+    def test_throttling_error_propagates_without_a_cross_provider_retry(
+        self, monkeypatch
+    ):
         class _ThrottleExc(Exception):
             pass
 
@@ -143,19 +149,18 @@ class TestBedrockThrottlingFallback:
             get_llm_mod, "_is_bedrock_throttling_error", lambda exc: isinstance(exc, _ThrottleExc)
         )
 
-        client = _FakeBedrockClient(
-            response=_converse_response("réponse dégradée"),
-            raise_first=_ThrottleExc("throttled"),
-        )
+        client = _FakeBedrockClient(raise_first=_ThrottleExc("throttled"))
         adapter = _BedrockAdapter(client)
 
-        out = adapter.chat.completions.create(
-            model="slow-reasoning-model", messages=[{"role": "user", "content": "hi"}]
-        )
+        try:
+            adapter.chat.completions.create(
+                model="slow-reasoning-model", messages=[{"role": "user", "content": "hi"}]
+            )
+            raise AssertionError("expected the original throttling error to propagate")
+        except _ThrottleExc:
+            pass
 
-        assert len(client.calls) == 2
-        assert client.calls[1]["modelId"] == "fast-model"
-        assert out.choices[0].message.content == "réponse dégradée"
+        assert len(client.calls) == 1
 
     def test_does_not_fall_back_on_a_non_throttling_error(self):
         client = _FakeBedrockClient(raise_first=RuntimeError("boom, not throttling"))

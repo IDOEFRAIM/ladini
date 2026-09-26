@@ -780,9 +780,15 @@ def _default_client_for_provider(provider: str) -> Any:
     )
 
     if provider == "groq":
-        return _GroqAdapter(get_groq_sdk())
+        return _GroqAdapter(get_groq_sdk(), provider="groq")
     if provider == "bedrock_gateway":
-        return _GroqAdapter(get_openai_compatible_sdk())
+        # (2026-09-26, audit LLM_GATEWAY_EXHAUSTED) : `provider=` distingue
+        # cette passerelle Bedrock (compatible OpenAI) du vrai SDK Groq —
+        # les deux partagent `_GroqAdapter` (même protocole HTTP), mais SEUL
+        # le vrai Groq doit tenter le repli legacy `_fallback_model_for` sur
+        # 429 (un ID Groq notation slash n'a aucun sens pour cette
+        # passerelle) — voir `core/get_llm.py::_GroqAdapter._create_via_primary`.
+        return _GroqAdapter(get_openai_compatible_sdk(), provider="bedrock_gateway")
     if provider == "bedrock_native":
         return _BedrockAdapter(get_bedrock_client())
     raise LLMGatewayExhausted(

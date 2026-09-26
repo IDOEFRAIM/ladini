@@ -6,7 +6,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from ladini.graphs.agents.market_coach.llm_gateway.registry import ModelRegistry
+from ladini.graphs.agents.market_coach.llm_gateway.registry import (
+    ModelRegistry,
+    validate_config,
+)
 from ladini.graphs.agents.market_coach.llm_gateway.types import LLMProfile
 
 
@@ -18,6 +21,10 @@ def _settings(**overrides) -> SimpleNamespace:
         LLM_REASONING_PRIMARY="bedrock_gateway:deepseek.v3.2",
         LLM_REASONING_FALLBACK_1="bedrock_gateway:openai.gpt-oss-120b",
         LLM_REASONING_FALLBACK_2="groq:llama-3.3-70b-versatile",
+        LLM_INTERPRETER_PRIMARY="groq:openai/gpt-oss-20b",
+        LLM_INTERPRETER_FALLBACK_1="bedrock_gateway:qwen.qwen3-32b",
+        LLM_INTERPRETER_FALLBACK_2="",
+        OPENAI_BASE_URL="https://bedrock-gateway.internal.example/v1",
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -70,3 +77,46 @@ class TestLoadFromSettings:
         )
         assert registry.candidates_for(LLMProfile.FAST) == []
         assert registry.primary_model_name(LLMProfile.FAST) is None
+
+
+class TestValidateConfig:
+    """(2026-09-26, audit LLM_GATEWAY_EXHAUSTED, §15) : détection SANS appel
+    réseau des configurations manifestement invalides — voir
+    `availability.py`, dont le commentaire documente déjà que l'absence
+    d'`OPENAI_BASE_URL` est une mauvaise CIBLE (API OpenAI publique) jamais
+    détectée comme CREDENTIAL_MISSING."""
+
+    def test_valid_configuration_has_no_issues(self):
+        assert validate_config(_settings()) == []
+
+    def test_bedrock_gateway_candidate_without_openai_base_url_is_flagged(self):
+        issues = validate_config(_settings(OPENAI_BASE_URL=""))
+        assert any("OPENAI_BASE_URL" in issue and "vide" in issue for issue in issues)
+
+    def test_bedrock_gateway_candidate_pointing_at_public_openai_is_flagged(self):
+        issues = validate_config(_settings(OPENAI_BASE_URL="https://api.openai.com/v1"))
+        assert any("api.openai.com" in issue for issue in issues)
+
+    def test_a_profile_with_no_candidates_is_flagged(self):
+        issues = validate_config(
+            _settings(
+                LLM_FAST_PRIMARY="", LLM_FAST_FALLBACK_1="", LLM_FAST_FALLBACK_2=""
+            )
+        )
+        assert any("aucun candidat configuré" in issue for issue in issues)
+
+    def test_a_duplicated_candidate_within_one_profile_is_flagged(self):
+        issues = validate_config(
+            _settings(
+                LLM_REASONING_PRIMARY="bedrock_gateway:deepseek.v3.2",
+                LLM_REASONING_FALLBACK_1="bedrock_gateway:deepseek.v3.2",
+                LLM_REASONING_FALLBACK_2="",
+            )
+        )
+        assert any("dupliqué" in issue for issue in issues)
+
+    def test_registry_construction_logs_but_never_raises_on_invalid_config(self):
+        """§15 : visibilité immédiate dans les logs de démarrage, jamais un
+        crash — `ModelRegistry()` est instancié dans trop de contextes
+        (tests, scripts) pour qu'un `raise` ici soit sûr sans revue dédiée."""
+        ModelRegistry(_settings(OPENAI_BASE_URL=""))  # ne doit pas lever
