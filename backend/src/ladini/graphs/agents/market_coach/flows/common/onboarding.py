@@ -65,6 +65,12 @@ async def onboarding_node(
         role=_pick("role", ob_profile, tx_payload) or state.get("user_role"),
         zone_name=_pick("zone_name", ob_profile, tx_payload) or state.get("zone_name"),
         zone_id=_pick("zone_id", ob_profile, tx_payload) or state.get("zone_id"),
+        declared_location=(
+            _pick("declared_location", ob_profile, tx_payload) or state.get("declared_location")
+        ),
+        coverage_status=(
+            _pick("coverage_status", ob_profile, tx_payload) or state.get("coverage_status")
+        ),
         prompt=str(state.get("onboarding_mode") or ""),
         explain_count=int(ob_profile.get("explain_count") or 0),
     )
@@ -126,6 +132,8 @@ async def onboarding_node(
         "role": resolved.role or ob_state.role,
         "zone_name": resolved.zone_name or ob_state.zone_name,
         "zone_id": resolved.zone_id or ob_state.zone_id,
+        "declared_location": resolved.declared_location or ob_state.declared_location,
+        "coverage_status": resolved.coverage_status or ob_state.coverage_status,
         "explain_count": resolved.explain_count,
     }
     updates["transaction_payload"] = dict(updates["onboarding_profile"])

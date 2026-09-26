@@ -203,6 +203,12 @@ class BaseMixin:
 
         raw_zone = data.get("zone_id")
         zone_uuid = uuid.UUID(str(raw_zone)) if raw_zone else None
+        # (mandat onboarding 2026-09-26, migration 0005) : `coverage_status` a un défaut DB
+        # ('COVERED') pour les appelants qui n'en fournissent pas (parité avant/après ce
+        # correctif) — mais l'onboarding fournit toujours une valeur explicite dès que la zone
+        # a été traitée (voir agents/onboarding.py::_step_create_profile).
+        coverage_status = data.get("coverage_status")
+        declared_location = data.get("declared_location")
 
         try:
             new_user = User(
@@ -210,6 +216,8 @@ class BaseMixin:
                 name=data.get("name", "Utilisateur"),
                 role=data.get("role", "BUYER").upper(),
                 zone_id=zone_uuid,
+                declared_location=declared_location,
+                **({"coverage_status": coverage_status} if coverage_status else {}),
                 onboarding_completed=True,
             )
             current_session.add(new_user)
@@ -703,15 +711,77 @@ class BaseMixin:
             )
             return {"status": "error", "message": str(e)}
 
+    async def get_zone_hierarchy_by_name(self, name: str) -> Dict[str, Any]:
+        """Résout *name* à N'IMPORTE QUEL niveau (région OU ville/village — sans la
+        restriction `parent_id IS NULL` de `get_zone_by_name`), puis remonte la chaîne
+        `parent_id` jusqu'à la région racine correspondante.
+
+        Mandat onboarding 2026-09-26 : "Somgandé" (jamais seedée en base comme région
+        racine) doit pouvoir se rattacher à sa région englobante ("Ouagadougou") SI ET
+        SEULEMENT SI cette hiérarchie existe déjà dans `governance.zones` — ne DEVINE
+        jamais un rattachement absent du référentiel (aucun nom de localité/région en dur
+        ici, contrairement à l'ancien comportement documenté dans
+        docs/ONBOARDING_ZONE_REGION_LEVEL_2026-09-18.md). `status: "error"` si rien ne
+        matche à aucun niveau — l'appelant traite alors la localité comme hors couverture
+        plutôt que d'inventer un rattachement.
+
+        Borne anti-cycle (`_MAX_HOPS`) : `parent_id` est une FK auto-référencée sans
+        contrainte d'acyclicité côté DB — une chaîne corrompue ne doit jamais boucler
+        indéfiniment ici."""
+        current_session = self.session
+        if not current_session:
+            raise RuntimeError("Database session missing.")
+
+        _MAX_HOPS = 5
+        try:
+            stmt = (
+                select(Zone)
+                .where(Zone.name.op("%")(name))
+                .order_by(func.similarity(Zone.name, name).desc())
+                .limit(1)
+            )
+            result = await current_session.execute(stmt)
+            matched = result.scalar_one_or_none()
+            if matched is None:
+                return {"status": "error", "message": f"Zone '{name}' introuvable."}
+
+            root = matched
+            hops = 0
+            while root.parent_id is not None and hops < _MAX_HOPS:
+                parent = await current_session.get(Zone, root.parent_id)
+                if parent is None:
+                    break
+                root = parent
+                hops += 1
+
+            return {
+                "status": "success",
+                "data": {
+                    "matched": {"id": str(matched.id), "name": matched.name},
+                    "root": (
+                        {"id": str(root.id), "name": root.name}
+                        if root.parent_id is None
+                        else None
+                    ),
+                },
+            }
+        except Exception as e:
+            logger.error(
+                f"[BaseMixin] Erreur lors de la résolution hiérarchique de zone '{name}': {e}"
+            )
+            return {"status": "error", "message": str(e)}
+
     async def get_available_zones(self) -> list[dict[str, Any]]:
         """
         Récupère la liste des zones RACINES disponibles ("région" au sens de
         `buyer.py` — `parent_id IS NULL`), pas les villes/villages enfants.
 
-        (2026-09-18, retour produit onboarding) — cette liste alimente le
-        texte "Zones valides : ..." proposé à l'utilisateur quand sa saisie ne
-        matche rien (voir `agents/onboarding.py::_build_zone_catalog_hint`).
-        Proposer des villes précises listait souvent des localités que
+        (2026-09-18, retour produit onboarding ; comportement de rejet retiré le
+        2026-09-26 — voir `agents/onboarding.py::_resolve_zone`, qui ne bloque plus
+        jamais l'onboarding sur une zone non couverte) — catalogue public générique
+        des zones de service, exposé en ressource MCP en lecture seule (voir
+        `infrastructure/mcp/exposure.py`). Proposer des villes précises listait souvent
+        des localités que
         l'utilisateur ne reconnaît pas forcément lui-même ; les régions,
         moins nombreuses et plus larges, sont plus facilement reconnaissables
         et évitent une deuxième non-correspondance. Voir `get_zone_by_name`

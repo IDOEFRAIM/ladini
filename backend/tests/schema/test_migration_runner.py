@@ -81,7 +81,12 @@ async def test_a_prexisting_real_format_tracking_table_with_0000_to_0003_leaves_
     dsn, drop = db_tools.create_database(admin)
     try:
         entries = _real_migration_entries()
-        already_applied, still_pending = entries[:4], entries[4:]
+        already_applied = entries[:4]
+        # Borné à 0004 (jamais `entries[4:]` brut) : ce test reproduit l'incident #2 EXACT, où
+        # 0004 était la SEULE migration neuve — une migration ajoutée plus tard (ex: 0005) ne
+        # doit pas faire dévier cette assertion de précondition (voir aussi `up_to_tag`
+        # ci-dessous, qui borne le RUN lui-même de la même façon).
+        still_pending = [e for e in entries[4:] if e.tag == "0004_add_monthly_recurrence"]
         assert [e.tag for e in still_pending] == ["0004_add_monthly_recurrence"]
 
         # 1) Applique 0000..0003 au SQL brut (jamais via le runner — on ne
@@ -119,8 +124,11 @@ async def test_a_prexisting_real_format_tracking_table_with_0000_to_0003_leaves_
         finally:
             conn.close()
 
-        # 3) Le runner ne doit voir QUE 0004 en attente.
-        report = await apply_pending_migrations(dsn)
+        # 3) Le runner ne doit voir QUE 0004 en attente. `up_to_tag` borne ce test à
+        # l'incident #2 EXACT (0004 seule migration neuve à l'époque) — sans lui, une
+        # migration ajoutée plus tard (ex: 0005) serait AUSSI candidate, ce qui ne
+        # reproduirait plus le scénario historique précis que ce test verrouille.
+        report = await apply_pending_migrations(dsn, up_to_tag="0004_add_monthly_recurrence")
         assert report.tracked_count_before == 4
         assert report.current_before == "0003_recurring_need_drafts"
         assert report.pending == ["0004_add_monthly_recurrence"]
@@ -159,8 +167,8 @@ async def test_a_prexisting_real_format_tracking_table_with_0000_to_0003_leaves_
         finally:
             conn.close()
 
-        # 4) Deuxième run : plus rien en attente, aucun doublon.
-        second = await apply_pending_migrations(dsn)
+        # 4) Deuxième run (même borne) : plus rien en attente, aucun doublon.
+        second = await apply_pending_migrations(dsn, up_to_tag="0004_add_monthly_recurrence")
         assert second.tracked_count_before == 5
         assert second.pending == []
         assert second.applied == []
@@ -179,8 +187,10 @@ async def test_a_prexisting_real_format_tracking_table_with_0000_to_0003_leaves_
 
 
 async def test_bootstrap_from_an_empty_db_with_no_tracking_table_applies_everything():
-    """Mandat §6.C : table de tracking ABSENTE + DB vide -> bootstrap complet
-    0000..0004, le runner crée la table au format réel (jamais `tag`)."""
+    """Mandat §6.C : table de tracking ABSENTE + DB vide -> bootstrap complet de TOUTES les
+    migrations connues du journal local, le runner crée la table au format réel (jamais
+    `tag`). Compte/dernière migration lus DYNAMIQUEMENT (`_real_migration_entries()`) — jamais
+    un nombre en dur, pour ne plus jamais avoir à toucher ce test au prochain ajout."""
     import db_tools
     import psycopg2
 
@@ -189,6 +199,7 @@ async def test_bootstrap_from_an_empty_db_with_no_tracking_table_applies_everyth
     admin = _require_admin_dsn()
     dsn, drop = db_tools.create_database(admin)
     try:
+        entries = _real_migration_entries()
         conn = psycopg2.connect(dsn)
         try:
             conn.autocommit = True
@@ -203,8 +214,8 @@ async def test_bootstrap_from_an_empty_db_with_no_tracking_table_applies_everyth
         report = await apply_pending_migrations(dsn)
         assert report.tracked_count_before == 0
         assert report.current_before is None
-        assert len(report.applied) == 5
-        assert report.applied[-1] == "0004_add_monthly_recurrence"
+        assert len(report.applied) == len(entries)
+        assert report.applied[-1] == entries[-1].tag
 
         conn = psycopg2.connect(dsn)
         try:
