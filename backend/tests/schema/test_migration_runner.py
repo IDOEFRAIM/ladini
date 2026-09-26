@@ -1,11 +1,20 @@
 """`ladini.schema_migrations.runner` — le runner qui remplace la branche morte
 `if [ -f backend/alembic.ini ]` dans `scripts/cluster_deploy.sh`/
-`node_deploy.sh` (voir `runner.py` pour l'incident complet, 2026-09-26).
+`node_deploy.sh` (voir `runner.py` pour l'incident #1, 2026-09-26).
+
+Incident #2 (2026-09-26, même jour) : la 1re version de ce runner inventait
+un schéma de tracking (`id, tag, applied_at`) au lieu du format Drizzle RÉEL
+déjà présent en production (`id, hash, created_at bigint`, `hash` = SHA256
+du fichier). Les tests ci-dessous partent maintenant explicitement d'une
+table de tracking pré-existante AU FORMAT RÉEL (jamais recréée par le
+runner lui-même) — exactement ce que les tests précédents ne faisaient pas
+(ils créaient toujours une base fraîche, donc le `CREATE TABLE IF NOT
+EXISTS` du runner créait sa propre table et se comparait trivialement à
+elle-même).
 
 Contrairement à `test_recurring_supply.py::test_migration_0004_applies_in_
 place_without_touching_existing_data` (qui rejoue le SQL brut à la main pour
-prouver que 0004 lui-même est sûr), CE fichier teste le RUNNER — l'étape de
-déploiement qui, avant ce correctif, n'était jamais invoquée du tout."""
+prouver que 0004 lui-même est sûr), CE fichier teste le RUNNER."""
 from __future__ import annotations
 
 import json
@@ -25,37 +34,82 @@ def _require_admin_dsn():
     return admin
 
 
-async def test_fresh_db_applies_only_up_to_0003_then_0004_separately():
-    """Reproduit exactement le scénario du mandat §6 : DB à 0003, puis release
-    contenant 0004 -> le runner applique SEULEMENT ce qui manque."""
+def _seed_real_format_tracking_table(dsn, rows):
+    """Crée `__drizzle_migrations` EXACTEMENT au format réel de production
+    (`id, hash, created_at bigint`) et y insère `rows` (liste de
+    `(hash, created_at)`) — jamais via le runner : ce module simule l'état
+    DÉJÀ présent en base AVANT que le runner ne tourne, pour ne plus jamais
+    laisser un test créer sa propre table de référence et la comparer à
+    elle-même (root cause de l'incident #2)."""
+    import psycopg2
+
+    conn = psycopg2.connect(dsn)
+    try:
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute(
+            "CREATE TABLE __drizzle_migrations (id SERIAL PRIMARY KEY, hash TEXT NOT NULL, created_at BIGINT)"
+        )
+        for h, created_at in rows:
+            cur.execute(
+                "INSERT INTO __drizzle_migrations (hash, created_at) VALUES (%s, %s)",
+                (h, created_at),
+            )
+    finally:
+        conn.close()
+
+
+def _real_migration_entries():
+    """Les 5 migrations RÉELLES du repo (`schema_contract/migrations/`),
+    hash SHA256 calculé par le runner lui-même — jamais une valeur inventée
+    ici : si un fichier change, ce test le voit immédiatement."""
+    from ladini.schema_migrations.runner import migration_entries
+
+    return migration_entries()
+
+
+async def test_a_prexisting_real_format_tracking_table_with_0000_to_0003_leaves_only_0004_pending():
+    """LE scénario exact de l'incident #2 : `__drizzle_migrations` existe
+    déjà, au format réel, avec 0000..0003 déjà trackées par leur hash —
+    seule 0004 doit être détectée comme pending, jamais un rejeu de 0000..0003."""
     import db_tools
+    import psycopg2
 
     from ladini.schema_migrations.runner import apply_pending_migrations
 
     admin = _require_admin_dsn()
     dsn, drop = db_tools.create_database(admin)
     try:
-        report_1 = await apply_pending_migrations(
-            dsn, up_to_tag="0003_recurring_need_drafts"
-        )
-        assert report_1.current_before is None
-        assert report_1.pending == [
-            "0000_baseline",
-            "0001_agent_telemetry",
-            "0002_recurring_supply",
-            "0003_recurring_need_drafts",
-        ]
-        assert report_1.applied == report_1.pending
+        entries = _real_migration_entries()
+        already_applied, still_pending = entries[:4], entries[4:]
+        assert [e.tag for e in still_pending] == ["0004_add_monthly_recurrence"]
 
-        # MONTHLY doit encore être refusé par le CHECK à ce stade (voir aussi
-        # test_recurring_supply.py::test_migration_0004_applies_in_place_...
-        # pour la couverture détaillée de ce CHECK) — confirme qu'on est
-        # bien parti d'une base réellement à 0003, pas déjà à 0004.
-        import psycopg2
-        from factories import Graph
-
+        # 1) Applique 0000..0003 au SQL brut (jamais via le runner — on ne
+        # veut PAS que le runner écrive lui-même la ligne de tracking ici,
+        # sinon ce test ne prouverait rien sur le format qu'IL produit).
         conn = psycopg2.connect(dsn)
         try:
+            with conn:
+                with conn.cursor() as cur:
+                    for e in already_applied:
+                        for stmt in (
+                            s.strip() for s in e.path.read_text(encoding="utf-8").split("--> statement-breakpoint")
+                        ):
+                            if stmt:
+                                cur.execute(stmt)
+        finally:
+            conn.close()
+
+        # 2) Table de tracking RÉELLE, pré-existante, format réel de prod.
+        _seed_real_format_tracking_table(
+            dsn, [(e.hash, e.when) for e in already_applied]
+        )
+
+        # MONTHLY doit encore être refusé (base réellement à 0003).
+        conn = psycopg2.connect(dsn)
+        try:
+            from factories import Graph
+
             cur = conn.cursor()
             g = Graph(cur)
             conn.commit()
@@ -65,49 +119,152 @@ async def test_fresh_db_applies_only_up_to_0003_then_0004_separately():
         finally:
             conn.close()
 
-        report_2 = await apply_pending_migrations(dsn)
-        assert report_2.current_before == "0003_recurring_need_drafts"
-        assert report_2.pending == ["0004_add_monthly_recurrence"]
-        assert report_2.applied == ["0004_add_monthly_recurrence"]
+        # 3) Le runner ne doit voir QUE 0004 en attente.
+        report = await apply_pending_migrations(dsn)
+        assert report.tracked_count_before == 4
+        assert report.current_before == "0003_recurring_need_drafts"
+        assert report.pending == ["0004_add_monthly_recurrence"]
+        assert report.applied == ["0004_add_monthly_recurrence"]
+
+        # MONTHLY accepté après.
+        conn = psycopg2.connect(dsn)
+        try:
+            from factories import Graph
+
+            cur = conn.cursor()
+            g = Graph(cur)
+            conn.commit()
+            g.recurring_need(recurrence_type="MONTHLY")
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Ligne de tracking pour 0004 ajoutée, format réel respecté, jamais
+        # de colonne `tag` (le format historique n'est pas modifié).
+        conn = psycopg2.connect(dsn)
+        try:
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute("select column_name from information_schema.columns where table_name = '__drizzle_migrations'")
+            columns = {r[0] for r in cur.fetchall()}
+            assert columns == {"id", "hash", "created_at"}, columns
+
+            cur.execute("select hash, created_at from __drizzle_migrations order by id")
+            rows = cur.fetchall()
+            assert len(rows) == 5
+            assert rows[-1] == (
+                still_pending[0].hash,
+                still_pending[0].when,
+            )
+        finally:
+            conn.close()
+
+        # 4) Deuxième run : plus rien en attente, aucun doublon.
+        second = await apply_pending_migrations(dsn)
+        assert second.tracked_count_before == 5
+        assert second.pending == []
+        assert second.applied == []
+        assert second.current_before == "0004_add_monthly_recurrence"
 
         conn = psycopg2.connect(dsn)
         try:
             conn.autocommit = True
             cur = conn.cursor()
-            cur.execute(
-                "select tag from __drizzle_migrations order by applied_at"
-            )
-            tracked = [r[0] for r in cur.fetchall()]
-            assert tracked == [
-                "0000_baseline",
-                "0001_agent_telemetry",
-                "0002_recurring_supply",
-                "0003_recurring_need_drafts",
-                "0004_add_monthly_recurrence",
-            ]
+            cur.execute("select count(*) from __drizzle_migrations")
+            assert cur.fetchone()[0] == 5, "aucun doublon attendu"
         finally:
             conn.close()
     finally:
         drop()
 
 
-async def test_second_run_after_full_migration_is_a_true_no_op():
-    """Idempotence (mandat §4/§6) : rejouer le runner sur une DB déjà à jour
-    ne touche rien et ne lève rien."""
+async def test_bootstrap_from_an_empty_db_with_no_tracking_table_applies_everything():
+    """Mandat §6.C : table de tracking ABSENTE + DB vide -> bootstrap complet
+    0000..0004, le runner crée la table au format réel (jamais `tag`)."""
     import db_tools
+    import psycopg2
 
     from ladini.schema_migrations.runner import apply_pending_migrations
 
     admin = _require_admin_dsn()
     dsn, drop = db_tools.create_database(admin)
     try:
-        first = await apply_pending_migrations(dsn)
-        assert first.applied  # toutes les migrations, base neuve
+        conn = psycopg2.connect(dsn)
+        try:
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute(
+                "select 1 from information_schema.tables where table_name = '__drizzle_migrations'"
+            )
+            assert cur.fetchone() is None, "précondition : pas de table de tracking avant le run"
+        finally:
+            conn.close()
 
-        second = await apply_pending_migrations(dsn)
-        assert second.pending == []
-        assert second.applied == []
-        assert second.current_before == "0004_add_monthly_recurrence"
+        report = await apply_pending_migrations(dsn)
+        assert report.tracked_count_before == 0
+        assert report.current_before is None
+        assert len(report.applied) == 5
+        assert report.applied[-1] == "0004_add_monthly_recurrence"
+
+        conn = psycopg2.connect(dsn)
+        try:
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute(
+                "select column_name from information_schema.columns where table_name = '__drizzle_migrations'"
+            )
+            assert {r[0] for r in cur.fetchall()} == {"id", "hash", "created_at"}
+        finally:
+            conn.close()
+    finally:
+        drop()
+
+
+async def test_a_hash_in_tracking_unknown_to_the_local_journal_is_a_hard_failure():
+    """Mandat §6.A : la base "sait" avoir appliqué plus de migrations que le
+    journal local n'en connaît — jamais silencieux, jamais une tentative de
+    deviner ce qu'il faudrait faire."""
+    import db_tools
+
+    from ladini.schema_migrations.runner import MigrationDrift, apply_pending_migrations
+
+    admin = _require_admin_dsn()
+    dsn, drop = db_tools.create_database(admin)
+    try:
+        entries = _real_migration_entries()
+        # 6 lignes trackées pour seulement 5 migrations connues du journal —
+        # la 6e ("fantôme") ne correspond à AUCUN fichier local.
+        _seed_real_format_tracking_table(
+            dsn,
+            [(e.hash, e.when) for e in entries] + [("f" * 64, 999999999999)],
+        )
+
+        with pytest.raises(MigrationDrift):
+            await apply_pending_migrations(dsn)
+    finally:
+        drop()
+
+
+async def test_a_changed_historical_migration_hash_is_a_hard_failure():
+    """Mandat §6.B : le hash trackée pour une migration déjà appliquée ne
+    correspond plus au fichier local (fichier modifié après coup) -> drift,
+    jamais une tentative de réappliquer à l'aveugle."""
+    import db_tools
+
+    from ladini.schema_migrations.runner import MigrationDrift, apply_pending_migrations
+
+    admin = _require_admin_dsn()
+    dsn, drop = db_tools.create_database(admin)
+    try:
+        entries = _real_migration_entries()
+        rows = [(e.hash, e.when) for e in entries[:4]]
+        # Corrompt le hash de la 3e migration déjà "appliquée" (0002) — un
+        # hash différent de ce que le fichier local calcule aujourd'hui.
+        rows[2] = ("0" * 64, rows[2][1])
+        _seed_real_format_tracking_table(dsn, rows)
+
+        with pytest.raises(MigrationDrift):
+            await apply_pending_migrations(dsn)
     finally:
         drop()
 
@@ -115,10 +272,11 @@ async def test_second_run_after_full_migration_is_a_true_no_op():
 async def test_a_broken_migration_stops_the_run_and_leaves_no_trace(tmp_path):
     """Migration cassée -> `MigrationFailure`, rien n'est enregistré pour
     elle (le prochain run la retenterait, jamais un rejeu silencieux d'une
-    migration `réussie`), et — point central du mandat §6/§7 — le process
+    migration `réussie`), et — point central du mandat — le process
     appelant (`scripts/*.sh`, via le CLI) doit voir un échec net, jamais un
     "migrations appliquées" mensonger."""
     import db_tools
+    import psycopg2
 
     from ladini.schema_migrations.runner import (
         MigrationFailure,
@@ -154,17 +312,14 @@ async def test_a_broken_migration_stops_the_run_and_leaves_no_trace(tmp_path):
             await apply_pending_migrations(dsn, migrations_dir=migrations_dir)
         assert exc_info.value.tag == "0001_broken"
 
-        import psycopg2
-
         conn = psycopg2.connect(dsn)
         try:
             conn.autocommit = True
             cur = conn.cursor()
-            cur.execute("select tag from __drizzle_migrations")
-            tracked = [r[0] for r in cur.fetchall()]
+            cur.execute("select count(*) from __drizzle_migrations")
             # 0000_ok est bien passée (sa propre transaction a commité) ;
             # 0001_broken n'a JAMAIS été marquée appliquée.
-            assert tracked == ["0000_ok"]
+            assert cur.fetchone()[0] == 1
 
             cur.execute(
                 "select table_name from information_schema.tables where table_name = 'ok_table'"
