@@ -49,6 +49,11 @@ class TestFreeTextConfirmationIsDeterministic:
             "okay", "Okay", "OKAY", "oui", "Oui", "ok", "d'accord", "daccord",
             "je confirme", "je suis d'accord", "c'est bon", "parfait",
             "oui.", "oui !", "  oui  ",
+            # Incident réel (2026-09-26) : la forme doublée d'emphase, très
+            # courante en français, ne matchait ni "oui" seul en exact match
+            # — retombait sur le LLM, qui a échoué pendant une panne du
+            # gateway (récap réaffiché au lieu de CONFIRM).
+            "oui oui", "Oui oui", "oui oui.",
         ],
     )
     def test_a_confirmation_word_always_resolves_to_confirm(self, text):
@@ -61,7 +66,9 @@ class TestFreeTextConfirmationIsDeterministic:
         assert result["interpreted_event"] == "CONFIRM"
         assert result["interpreter_confidence"] >= 0.9
 
-    @pytest.mark.parametrize("text", ["non", "annule", "stop", "je refuse"])
+    @pytest.mark.parametrize(
+        "text", ["non", "annule", "stop", "je refuse", "non non"]
+    )
     def test_a_rejection_word_always_resolves_to_reject(self, text):
         state = _confirmation_state(text)
         result = _interpret_fast_path(state, text)

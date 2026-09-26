@@ -77,7 +77,22 @@ class Settings(BaseSettings):
     # Si un modèle Qwen est vraiment souhaité, vérifier d'ABORD son nom
     # exact dans le catalogue Groq (console.groq.com/docs/models) — jamais
     # copier un nom depuis la documentation d'un autre fournisseur.
-    LLM_MODEL: str = "qwen/qwen3.6-27b"
+    #
+    # 3e incident du même type (2026-09-26, audit LLM_GATEWAY_EXHAUSTED) :
+    # "qwen/qwen3.6-27b" retombait exactement dans le piège que le
+    # paragraphe ci-dessus décrit déjà — jamais vérifié dans le catalogue
+    # Groq (ni "qwen3.6" ni "27b" n'existent dans la gamme Qwen3 réelle), et
+    # absent du SDK `groq` vendored (`groq/resources/chat/completions.py`,
+    # `groq/types/chat/completion_create_params.py`), qui liste en
+    # revanche explicitement "qwen/qwen3-32b" — la même taille de modèle
+    # (32B) déjà utilisée avec preuve de fonctionnement côté Bedrock
+    # (`LLM_FAST_PRIMARY`/`LLM_INTERPRETER_FALLBACK_1` = "...:qwen.qwen3-32b"
+    # ci-dessous), seule la notation provider change. Chaque appel Groq
+    # avec l'ancienne valeur échouait en 404 `model_not_found` — et, pire,
+    # ce réglage sert AUSSI de repli automatique sur 429
+    # (`get_llm.py::_fallback_model_for`), donc un simple rate-limit sur le
+    # modèle principal se transformait en échec total de l'appel LLM.
+    LLM_MODEL: str = "qwen/qwen3-32b"
     # Modèle de raisonnement — tout goal métier complexe (interprétation
     # d'intent, planification de goal, génération de réponse). Utilisé par
     # `graphs/agents/market_coach/llm_router.py` via ROUTING_MAP ci-dessous.

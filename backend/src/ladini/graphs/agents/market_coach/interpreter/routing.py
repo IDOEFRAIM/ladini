@@ -109,10 +109,17 @@ logger = logging.getLogger("Ladini.Market.InterpreterRouting")
 # Vocabulaire fermé, EXACT MATCH uniquement sur texte normalisé — reprend
 # mot pour mot les exemples déjà documentés dans le prompt LLM ci-dessous
 # (§ "CONFIRM"/"REJECT"), jamais une liste inventée séparément.
+#
+# "oui oui"/"non non" (incident réel, 2026-09-26) : la forme doublée
+# (emphase, très courante en français) ne matchait ni "oui" ni "non" en
+# EXACT MATCH sur `_bare` — le message retombait sur la classification LLM,
+# qui a échoué pendant une panne du gateway LLM, laissant la confirmation
+# sans réponse (récap réaffiché au lieu de CONFIRM). Ajout littéral au
+# vocabulaire fermé existant, pas une nouvelle heuristique/regex.
 # =====================================================================
 _CONFIRM_EXACT_PHRASES = frozenset(
     {
-        "oui", "ok", "okay", "d'accord", "daccord", "je confirme",
+        "oui", "oui oui", "ok", "okay", "d'accord", "daccord", "je confirme",
         "je suis d'accord", "je suis daccord", "c'est bon", "cest bon",
         "ca va", "ça va", "parfait", "vas-y", "vasy", "valide", "confirmer",
         "confirme", "confirmé", "yes",
@@ -120,8 +127,8 @@ _CONFIRM_EXACT_PHRASES = frozenset(
 )
 _REJECT_EXACT_PHRASES = frozenset(
     {
-        "non", "annule", "annuler", "stop", "pas d'accord", "pas daccord",
-        "je ne confirme pas", "je refuse", "no",
+        "non", "non non", "annule", "annuler", "stop", "pas d'accord",
+        "pas daccord", "je ne confirme pas", "je refuse", "no",
     }
 )
 

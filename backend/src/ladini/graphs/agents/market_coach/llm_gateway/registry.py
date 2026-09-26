@@ -138,6 +138,76 @@ def load_registry(settings=None) -> Dict[LLMProfile, List[ModelCandidate]]:
     return registry
 
 
+# (2026-09-26, audit LLM_GATEWAY_EXHAUSTED, §15) : hôte de l'API publique
+# OpenAI — jamais une valeur légitime pour `OPENAI_BASE_URL` quand un
+# candidat `bedrock_gateway` est configuré. `get_openai_compatible_sdk()`
+# (core/get_llm.py) pointe le SDK OpenAI directement sur l'API publique si
+# `OPENAI_BASE_URL` est vide, ce qui n'est PAS une impossibilité détectée par
+# `availability.py` (mauvaise CIBLE, pas une absence de credential) : un
+# candidat `bedrock_gateway` avec un ID au format Bedrock (ex: "qwen.qwen3-
+# 32b") envoyé à ce host échoue en 404 "model not found" qui RESSEMBLE en
+# tout point à un vrai 404 Bedrock, sans jamais l'être.
+_PUBLIC_OPENAI_HOSTS = frozenset({"api.openai.com"})
+
+
+def validate_config(settings=None) -> List[str]:
+    """Détecte, SANS appel réseau, les configurations manifestement
+    invalides (§15) : ne fait QUE lire `settings`/le registry déjà chargé.
+    Retourne une liste de messages (vide = rien à signaler) — l'appelant
+    décide de logger, alerter, ou (pas encore fait ici, voir rapport final)
+    lever une exception au démarrage : ce module ne connaît pas le contexte
+    (tests, script ponctuel, process serveur) dans lequel il tourne."""
+    if settings is None:
+        from ladini.core.settings import settings as _settings
+
+        settings = _settings
+
+    issues: List[str] = []
+    by_profile = load_registry(settings)
+
+    openai_base_url = str(getattr(settings, "OPENAI_BASE_URL", "") or "").strip()
+    from urllib.parse import urlparse
+
+    base_host = urlparse(openai_base_url).hostname if openai_base_url else None
+
+    for profile, candidates in by_profile.items():
+        if not candidates:
+            issues.append(
+                f"profile={profile.value}: aucun candidat configuré "
+                "(NO_CANDIDATES_CONFIGURED à l'exécution)."
+            )
+            continue
+
+        seen_keys: set[str] = set()
+        for candidate in candidates:
+            if candidate.key in seen_keys:
+                issues.append(
+                    f"profile={profile.value}: candidat dupliqué {candidate.key!r} "
+                    "dans la même chaîne de repli."
+                )
+            seen_keys.add(candidate.key)
+
+            if candidate.provider == "bedrock_gateway" and candidate.enabled:
+                if not openai_base_url:
+                    issues.append(
+                        f"profile={profile.value} candidate={candidate.key}: "
+                        "provider=bedrock_gateway configuré mais OPENAI_BASE_URL "
+                        "est vide — les requêtes cibleront silencieusement l'API "
+                        "OpenAI publique au lieu de la passerelle Bedrock "
+                        "(voir availability.py, mauvaise CIBLE jamais détectée "
+                        "comme CREDENTIAL_MISSING)."
+                    )
+                elif base_host in _PUBLIC_OPENAI_HOSTS:
+                    issues.append(
+                        f"profile={profile.value} candidate={candidate.key}: "
+                        f"OPENAI_BASE_URL pointe sur l'API OpenAI publique "
+                        f"({base_host!r}) alors qu'un candidat bedrock_gateway "
+                        "est configuré — cible probablement incorrecte."
+                    )
+
+    return issues
+
+
 class ModelRegistry:
     """Wrapper léger — charge une fois, expose `candidates_for(profile)`.
     Pas de rechargement automatique (un changement de `.env` nécessite un
@@ -145,6 +215,13 @@ class ModelRegistry:
 
     def __init__(self, settings=None):
         self._by_profile = load_registry(settings)
+        # (2026-09-26, §15) : logging seul, jamais un crash au constructeur —
+        # `ModelRegistry()` est instancié dans des contextes trop variés
+        # (tests, scripts, process serveur) pour qu'un `raise` ici soit sûr
+        # sans une revue dédiée. Un problème listé ici reste immédiatement
+        # visible dans les logs de démarrage (grep "LLM_CONFIG_INVALID").
+        for issue in validate_config(settings):
+            logger.error("LLM_CONFIG_INVALID | %s", issue)
 
     def candidates_for(self, profile: LLMProfile) -> List[ModelCandidate]:
         return [c for c in self._by_profile.get(profile, []) if c.enabled]

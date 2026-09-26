@@ -439,7 +439,13 @@ class _GroqAdapter:
     This adapter performs a lazy delegation and keeps imports local.
     """
 
-    def __init__(self, raw_client: Any, fallback_client: Optional[Any] = None):
+    def __init__(
+        self,
+        raw_client: Any,
+        fallback_client: Optional[Any] = None,
+        *,
+        provider: str = "groq",
+    ):
         self._raw = raw_client
         # Repli propre inter-provider (2026-08-31, incident AGENT_TIMEOUT) :
         # un client SDK brut (ex: Groq) à essayer si `raw_client` (ex: la
@@ -447,6 +453,14 @@ class _GroqAdapter:
         # pas de repli configuré, comportement inchangé.
         self._fallback_client = fallback_client
         self._circuit = _CircuitBreaker()
+        # (2026-09-26, audit LLM_GATEWAY_EXHAUSTED) : `provider` distingue le
+        # vrai SDK Groq de la passerelle `bedrock_gateway` compatible OpenAI
+        # — les deux partagent cette même classe (protocole identique), mais
+        # SEUL le premier doit tenter le repli legacy `_fallback_model_for`
+        # (`settings.LLM_MODEL`, un ID Groq en notation slash) sur 429 — voir
+        # `_create_via_primary`. Défaut "groq" : comportement inchangé pour
+        # tous les appelants existants qui ne passent pas ce paramètre.
+        self._provider = provider
 
     class _Chat:
         def __init__(self, parent: "_GroqAdapter"):
@@ -584,7 +598,24 @@ class _GroqAdapter:
                             # erreurs (auth, 5xx, timeout…) pour ne pas masquer
                             # un vrai incident ni doubler la latence pour rien.
                             is_rate_limit = _is_rate_limit_error(call_exc)
-                            fallback_model = _fallback_model_for(_model)
+                            # (2026-09-26, audit LLM_GATEWAY_EXHAUSTED) : ce
+                            # repli tente `settings.LLM_MODEL` (un ID Groq,
+                            # notation slash) directement SUR LE MÊME client —
+                            # n'a de sens que si CE client est réellement
+                            # Groq. Cette classe est PARTAGÉE avec la
+                            # passerelle `bedrock_gateway` (protocole OpenAI
+                            # identique, voir `get_llm()`/`_default_client_
+                            # for_provider`) : sans cette garde, un throttle
+                            # Bedrock tentait aussi ce même ID Groq contre la
+                            # passerelle Bedrock (échec quasi garanti, 404
+                            # masquant le VRAI throttle initial à la
+                            # classification d'erreur du LLM Gateway — voir
+                            # `llm_gateway/error_classification.py`).
+                            fallback_model = (
+                                _fallback_model_for(_model)
+                                if self._parent._provider == "groq"
+                                else None
+                            )
                             if is_rate_limit and fallback_model:
                                 logger.warning(
                                     "GROQ_RATE_LIMIT_FALLBACK | model=%s -> %s | %s",
@@ -746,26 +777,28 @@ class _BedrockAdapter:
                 try:
                     response = _call(_model)
                 except Exception as call_exc:
-                    is_throttled = _is_bedrock_throttling_error(call_exc)
-                    fallback_model = _fallback_model_for(_model)
-                    if is_throttled and fallback_model:
+                    # (2026-09-26, audit LLM_GATEWAY_EXHAUSTED) : ce chemin
+                    # natif boto3/Converse ne doit JAMAIS tenter
+                    # `_fallback_model_for` (`settings.LLM_MODEL`, un ID Groq
+                    # en notation slash) — un `modelId` Bedrock natif n'a
+                    # jamais cette forme, l'appel de repli échouerait
+                    # systématiquement et masquerait le VRAI throttle Bedrock
+                    # initial (même classe de bug que l'incident historique
+                    # documenté sur `_GroqAdapter` plus haut dans ce fichier —
+                    # ce repli n'a de sens que sur le vrai SDK Groq). Propage
+                    # l'exception d'origine telle quelle : le LLM Gateway
+                    # (`llm_gateway/gateway.py`) gère le repli inter-candidats
+                    # correctement scopé.
+                    if _is_bedrock_throttling_error(call_exc):
                         logger.warning(
-                            "BEDROCK_THROTTLE_FALLBACK | model=%s -> %s | %s",
+                            "BEDROCK_THROTTLE | model=%s | %s — pas de repli "
+                            "cross-provider, propagation au LLM Gateway",
                             _model,
-                            fallback_model,
                             call_exc,
                         )
-                        try:
-                            response = _call(fallback_model)
-                            _model = fallback_model
-                        except Exception as fallback_exc:
-                            _err = f"{type(fallback_exc).__name__}: {fallback_exc}"
-                            _emit(None, None)
-                            raise fallback_exc
-                    else:
-                        _err = f"{type(call_exc).__name__}: {call_exc}"
-                        _emit(None, None)
-                        raise
+                    _err = f"{type(call_exc).__name__}: {call_exc}"
+                    _emit(None, None)
+                    raise
 
                 try:
                     text = response["output"]["message"]["content"][0]["text"]
@@ -874,7 +907,9 @@ def get_llm(llm_client: Optional[Any] = None) -> Optional[Any]:
                         "(GROQ_API_KEY absent ou init échouée) — pas de fallback configuré.",
                         exc_info=True,
                     )
-                adapter = _GroqAdapter(raw, fallback_client=fallback_client)
+                adapter = _GroqAdapter(
+                    raw, fallback_client=fallback_client, provider="bedrock_gateway"
+                )
                 _LLM_SINGLETON = adapter
                 logger.info(
                     "LLM bedrock adapter initialized (OpenAI-compatible gateway, "
