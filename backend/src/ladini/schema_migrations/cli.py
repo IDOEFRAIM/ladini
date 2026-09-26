@@ -9,21 +9,30 @@ format demandé pour ne plus jamais annoncer "migrations appliquées" sans
 preuve :
 
     migration source: drizzle schema_contract
+    tracking table: public.__drizzle_migrations
+    applied hashes: 4
     current: 0003_recurring_need_drafts
     pending: 0004_add_monthly_recurrence
     applied: 0004_add_monthly_recurrence
 
 Code de sortie : 0 si le run s'est terminé sans erreur (y compris "rien à
-faire"), 1 si `DATABASE_URL` est absent, 2 si une migration a échoué (le
-process appelant — `dc run --rm`, voir cluster_deploy.sh — doit alors
-considérer le déploiement comme NON réussi et ne PAS basculer le trafic)."""
+faire"), 1 si `DATABASE_URL` est absent, 2 si une migration a échoué, 3 si
+un drift de tracking a été détecté AVANT toute tentative d'application
+(voir `MigrationDrift` — jamais silencieux, jamais une tentative de
+deviner). Le process appelant (`dc run --rm`, voir cluster_deploy.sh) doit
+alors considérer le déploiement comme NON réussi et ne PAS basculer le
+trafic, quel que soit le code parmi {1, 2, 3}."""
 from __future__ import annotations
 
 import asyncio
 import os
 import sys
 
-from ladini.schema_migrations.runner import MigrationFailure, apply_pending_migrations
+from ladini.schema_migrations.runner import (
+    MigrationDrift,
+    MigrationFailure,
+    apply_pending_migrations,
+)
 
 
 def _dsn_from_env() -> str:
@@ -41,6 +50,15 @@ def main() -> int:
 
     try:
         report = asyncio.run(apply_pending_migrations(dsn))
+    except MigrationDrift as exc:
+        for line in [
+            "migration source: drizzle schema_contract",
+            f"FATAL: drift de tracking détecté — {exc}",
+            "AUCUNE migration tentée, AUCUN rollout applicatif ne doit continuer. "
+            "Intervention manuelle requise (voir MigrationDrift dans runner.py).",
+        ]:
+            print(line, file=sys.stderr)
+        return 3
     except MigrationFailure as exc:
         for line in [
             "migration source: drizzle schema_contract",

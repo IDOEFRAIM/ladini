@@ -7,6 +7,7 @@ Voir `runner.py` pour le détail. Point d'entrée public :
 from __future__ import annotations
 
 from .runner import (
+    MigrationDrift,
     MigrationFailure,
     MigrationRunReport,
     apply_pending_migrations,
@@ -14,6 +15,7 @@ from .runner import (
 )
 
 __all__ = [
+    "MigrationDrift",
     "MigrationFailure",
     "MigrationRunReport",
     "apply_pending_migrations",
