@@ -90,10 +90,25 @@ def test_every_foreign_key_column_is_indexed(drizzle_schema):
 
 def test_no_runtime_ddl_in_backend_source():
     """Le backend ne crée/modifie JAMAIS le schéma : ni create_all, ni CREATE/ALTER/DROP dans une chaîne.
-    Le schéma vient exclusivement des migrations Drizzle."""
+    Le schéma vient exclusivement des migrations Drizzle.
+
+    UNE exception sanctionnée (2026-09-26, incident migration delivery) :
+    `schema_migrations/runner.py` — LE runner qui APPLIQUE les migrations
+    Drizzle — auto-crée sa propre table de suivi (`__drizzle_migrations`,
+    `CREATE TABLE IF NOT EXISTS`) au premier lancement contre une base
+    vierge. Ce n'est pas "le backend qui mute son schéma métier au runtime"
+    (ce que cette règle interdit) : c'est l'outil de migration lui-même qui
+    pose SES PROPRES métadonnées de suivi — exactement ce que fait tout
+    outil de migration (Alembic, Flyway, et `drizzle-kit` lui-même en
+    interne) avant de pouvoir lire "qu'est-ce qui est déjà appliqué ?".
+    Cette table est déjà exclue des comparaisons de schéma (voir
+    `conftest.py::pg_schema`, `k[1] != "__drizzle_migrations"`)."""
     ddl = re.compile(r"^\s*(CREATE|ALTER|DROP)\s+(UNIQUE\s+)?(TABLE|INDEX|EXTENSION|SCHEMA|TYPE|SEQUENCE)\b", re.I)
+    MIGRATION_RUNNER_BOOTSTRAP = SRC / "schema_migrations" / "runner.py"
     offenders = []
     for p in SRC.rglob("*.py"):
+        if p == MIGRATION_RUNNER_BOOTSTRAP:
+            continue
         try:
             tree = ast.parse(p.read_text(encoding="utf-8"))
         except SyntaxError:

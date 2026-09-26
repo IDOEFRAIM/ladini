@@ -54,16 +54,18 @@ def migration_files() -> list[Path]:
 
 
 def apply_migrations(dsn: str) -> None:
-    """Rejoue les migrations officielles, dans l'ordre du journal, une transaction par fichier."""
-    import psycopg2
+    """Rejoue les migrations officielles, dans l'ordre du journal, une transaction par fichier.
 
-    conn = psycopg2.connect(dsn)
-    try:
-        for f in migration_files():
-            stmts = [s.strip() for s in f.read_text(encoding="utf-8").split(BREAKPOINT) if s.strip()]
-            with conn:
-                with conn.cursor() as cur:
-                    for s in stmts:
-                        cur.execute(s)
-    finally:
-        conn.close()
+    (2026-09-26, incident migration delivery) : délègue au runner de
+    production partagé (`ladini.schema_migrations.runner`) — UN SEUL moteur
+    d'application de migrations, jamais un second réimplémenté ici. Sur une
+    base fraîche (le cas d'usage de ce module — voir la docstring de
+    fichier), `__drizzle_migrations` n'existe pas encore : TOUTES les
+    migrations sont "pending", donc le comportement observable est
+    inchangé (rejoue tout, dans l'ordre), avec en bonus le tracking déjà
+    posé pour la prochaine fois."""
+    import asyncio
+
+    from ladini.schema_migrations.runner import apply_pending_migrations
+
+    asyncio.run(apply_pending_migrations(dsn))
