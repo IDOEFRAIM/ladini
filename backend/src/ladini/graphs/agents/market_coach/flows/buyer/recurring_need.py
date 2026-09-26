@@ -35,6 +35,8 @@ from ladini.domain.recurring_supply.digest import AllocationLine, build_detail_t
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     clear_pending_interaction,
+    get_pending_interaction,
+    resolve_pending_interaction,
     set_pending_interaction,
 )
 from ladini.graphs.agents.market_coach.core.state import (
@@ -832,6 +834,21 @@ async def _update_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
     phone = state.get("user_phone")
     payload: Dict[str, Any] = state.get("transaction_payload") or {}
 
+    # Tours SUIVANTS du mini-flow "modifier -> menu -> quantité -> override" (mandat digest
+    # §5/§12) : ancrés par un `PendingInteraction(RECURRING_SUPPLY_DIGEST_ACTION)` durable —
+    # VÉRIFIÉ EN PREMIER, avant tout `transaction_payload["action"]` ci-dessous. Raison
+    # structurelle : `transaction_payload` n'est PAS réinitialisé entre les tours d'un même
+    # goal verrouillé (seul un changement de goal le purge, `goal_planner.py::
+    # _purge_transaction_state`) — le sentinel `action="DIGEST_MODIFY_MENU"` posé au tour où
+    # "modifier" a été tapé restait donc visible aux tours SUIVANTS ("1", "40 kg"), et sans
+    # cette priorité, `_update_flow` rouvrait le menu à chaque tour au lieu de faire progresser
+    # le mini-flow déjà en cours (bug constaté en écrivant le test E2E du mandat §16 — voir
+    # tests/integration/test_recurring_supply_digest_routing.py). Une fois ce `PendingInteraction`
+    # actif, il fait autorité — jamais le sentinel `action`, qui ne décrit que le tour d'ORIGINE.
+    _digest_pending = get_pending_interaction(state)
+    if _digest_pending.kind == InteractionKind.RECURRING_SUPPLY_DIGEST_ACTION:
+        return await _digest_modify_flow_continue(state, mc_runtime, _digest_pending)
+
     # Réponse au digest (mandat digest, VS4 pilote) : "CONFIRM_MATCH"/"REJECT_MATCH" — émis
     # UNIQUEMENT par `interpreter/routing.py::_bare_confirmation_for_recurring_supply_digest`,
     # jamais un intent séparé (budget de tokens du prompt LLM déjà saturé, voir son docstring).
@@ -842,6 +859,18 @@ async def _update_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         return await _respond_to_digest_flow(
             state, mc_runtime, action="CONFIRM" if _payload_action == "CONFIRM_MATCH" else "REJECT"
         )
+
+    # "modifier"/"changer" en réponse au digest (mandat digest §5, 2026-09-26) : ouvre le menu
+    # numéroté des besoins de DEMAIN (émis par `interpreter/routing.py::
+    # _bare_confirmation_for_recurring_supply_digest`, jamais un intent séparé — même
+    # sentinel-dans-`action` que CONFIRM_MATCH/REJECT_MATCH ci-dessus).
+    if _payload_action == "DIGEST_MODIFY_MENU":
+        return await _digest_modify_flow_start(state, mc_runtime)
+
+    # "pas demain pour l'oignon" (mandat digest §9) : skip d'UN SEUL besoin nommé, jamais tous
+    # les besoins actionnables (`REJECT_MATCH` ci-dessus reste le chemin "pas demain" bare).
+    if _payload_action == "DIGEST_SKIP_PRODUCT":
+        return await _digest_skip_named_product(state, mc_runtime, str(payload.get("product") or ""))
 
     gw = RecurringSupplyGateway(mc_runtime)
     resolved = await _resolve_target_need(gw, phone, payload)
@@ -1146,6 +1175,289 @@ async def _respond_to_digest_flow(
         "final_response": message,
         "status": "COMPLETED",
         "result": {"confirmed": confirmed_products, "skipped": failed_products},
+    }
+
+
+# =====================================================================
+# "modifier" en réponse au digest — mini-flow guidé (mandat digest §5/§6/§12, 2026-09-26)
+#
+# État explicite, porté par `PendingInteraction(RECURRING_SUPPLY_DIGEST_ACTION).target`
+# (mandat §12 : "pas de chaînes implicites dispersées") :
+#   DIGEST_AWAIT_ACTION     — pas de `PendingInteraction` persisté : le premier "modifier" bare
+#                             (voir `interpreter/routing.py`) est traité SANS état préalable.
+#   DIGEST_AWAIT_SELECTION  — menu numéroté affiché, attend un index (2+ besoins actionnables).
+#   DIGEST_AWAIT_QUANTITY   — besoin choisi (ou seul besoin actionnable), attend une quantité.
+#   DIGEST_CONFIRM_OVERRIDE — transition interne (même tour que la quantité reçue, voir mandat
+#                             §16 : l'override s'applique DIRECTEMENT, sans confirmation
+#                             supplémentaire) — jamais persistée, nommée ici pour les logs (§14).
+#   DIGEST_DONE             — l'override est appliqué, `pending_interaction` est résolu (NONE).
+#
+# Réutilise `update_recurring_need(action="OCCURRENCE_OVERRIDE", ...)`, DÉJÀ implémenté et
+# testé côté service (`services/database/recurring_supply.py`) — CAS sur `occurrence.version`,
+# refuse une occurrence hors `OPEN/MATCHED` — jamais un second moteur de mutation ; ce mini-flow
+# ne fait qu'orchestrer les tours conversationnels qui y mènent.
+# =====================================================================
+
+_DIGEST_AWAIT_SELECTION = "DIGEST_AWAIT_SELECTION"
+_DIGEST_AWAIT_QUANTITY = "DIGEST_AWAIT_QUANTITY"
+
+
+async def _digest_actionable_items(gw: RecurringSupplyGateway, phone: Any) -> List[Dict[str, Any]]:
+    """Besoins ayant une occurrence de DEMAIN encore ouverte — exactement le périmètre montré par
+    le digest (`RecurringSupplyDigestService`/`domain/recurring_supply/digest.py`), jamais la
+    liste complète (`GET_MY_NEEDS`, qui inclut aussi les besoins sans occurrence active). Un
+    besoin à 0 KG disponible (ex: "Oignon : 0/75") reste modifiable ICI — contrairement à
+    `_respond_to_digest_flow` (CONFIRM/REJECT), qui ne porte que sur ce qui a été RÉELLEMENT
+    matché (`matched_quantity > 0`)."""
+    result = await gw.list_my_recurring_needs(phone=str(phone))
+    items = result.get("items") or []
+    return [i for i in items if i.get("next_occurrence_id")]
+
+
+def _digest_menu_entities(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "index": i,
+            "recurring_need_id": item["recurring_need_id"],
+            "occurrence_id": item["next_occurrence_id"],
+            "occurrence_date": item["next_occurrence_date"],
+            "product": item["product"],
+            "unit": item.get("unit"),
+            "requested_quantity": item.get("requested_quantity"),
+            "matched_quantity": item.get("matched_quantity"),
+        }
+        for i, item in enumerate(items, start=1)
+    ]
+
+
+def _digest_menu_text(items: List[Dict[str, Any]], *, notice: str = "") -> str:
+    lines = [f"{notice}Quel besoin veux-tu modifier pour demain ?", ""]
+    for entry in items:
+        matched, requested = entry.get("matched_quantity"), entry.get("requested_quantity")
+        avail = (
+            f" ({_fmt_qty(matched)}/{_fmt_qty(requested)} {entry['unit']} disponibles)"
+            if matched is not None and requested is not None
+            else ""
+        )
+        lines.append(f"{entry['index']}. {str(entry['product']).capitalize()}{avail}")
+    lines += ["", "Réponds avec le numéro."]
+    return "\n".join(lines)
+
+
+def _digest_quantity_prompt(product: str) -> str:
+    return f"Quelle quantité veux-tu pour *{product}* demain ?"
+
+
+async def _digest_modify_flow_start(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[str, Any]:
+    phone = state.get("user_phone")
+    gw = RecurringSupplyGateway(mc_runtime)
+    try:
+        items = await _digest_actionable_items(gw, phone)
+    except MCPCallError as exc:
+        logger.warning("recurring_supply_digest.modify_start_failed | error_class=%s", type(exc).__name__)
+        return {"final_response": "Je n'ai pas pu récupérer vos approvisionnements.", "status": "COMPLETED"}
+
+    if not items:
+        return {
+            "final_response": "Il n'y a rien à modifier pour le moment — votre prochain digest arrivera bientôt.",
+            "status": "COMPLETED",
+        }
+
+    entries = _digest_menu_entities(items)
+    logger.info(
+        "recurring_supply_digest.modify_started | pending_state=%s | occurrence_ids=%s | needs_count=%s",
+        _DIGEST_AWAIT_SELECTION if len(entries) > 1 else _DIGEST_AWAIT_QUANTITY,
+        [e["occurrence_id"] for e in entries],
+        len(entries),
+    )
+
+    if len(entries) == 1:
+        # Un seul besoin actionnable : mandat §5 n'exige un menu QUE s'il faut choisir — même
+        # esprit que `_resolve_target_need`, qui saute la question quand un seul besoin existe.
+        chosen = entries[0]
+        return {
+            "final_response": _digest_quantity_prompt(chosen["product"]),
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(
+                InteractionKind.RECURRING_SUPPLY_DIGEST_ACTION,
+                goal="UPDATE_RECURRING_NEED",
+                target={"sub_state": _DIGEST_AWAIT_QUANTITY, "selected": chosen},
+            ),
+        }
+
+    return {
+        "final_response": _digest_menu_text(entries),
+        "status": "WAITING_INPUT",
+        **set_pending_interaction(
+            InteractionKind.RECURRING_SUPPLY_DIGEST_ACTION,
+            goal="UPDATE_RECURRING_NEED",
+            target={"sub_state": _DIGEST_AWAIT_SELECTION, "items": entries},
+        ),
+    }
+
+
+async def _digest_modify_flow_continue(
+    state: Dict[str, Any], mc_runtime: MarketRuntime, pending: Any
+) -> Dict[str, Any]:
+    target = dict(pending.target or {})
+    sub_state = target.get("sub_state")
+    payload = state.get("transaction_payload") or {}
+
+    if sub_state == _DIGEST_AWAIT_SELECTION:
+        items: List[Dict[str, Any]] = target.get("items") or []
+        index = payload.get("selection_index")
+        chosen = next((it for it in items if it.get("index") == index), None) if index is not None else None
+        if chosen is None:
+            logger.info("recurring_supply_digest.modify_selection_invalid | pending_state=%s", sub_state)
+            return {
+                "final_response": _digest_menu_text(items, notice="Je n'ai pas compris ce choix.\n\n"),
+                "status": "WAITING_INPUT",
+                **set_pending_interaction(
+                    InteractionKind.RECURRING_SUPPLY_DIGEST_ACTION,
+                    goal="UPDATE_RECURRING_NEED",
+                    target={"sub_state": _DIGEST_AWAIT_SELECTION, "items": items},
+                ),
+            }
+        logger.info(
+            "recurring_supply_digest.modify_selected | pending_state=%s | occurrence_id=%s",
+            _DIGEST_AWAIT_QUANTITY,
+            chosen.get("occurrence_id"),
+        )
+        return {
+            "final_response": _digest_quantity_prompt(chosen["product"]),
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(
+                InteractionKind.RECURRING_SUPPLY_DIGEST_ACTION,
+                goal="UPDATE_RECURRING_NEED",
+                target={"sub_state": _DIGEST_AWAIT_QUANTITY, "selected": chosen},
+            ),
+        }
+
+    if sub_state == _DIGEST_AWAIT_QUANTITY:
+        selected: Dict[str, Any] = target.get("selected") or {}
+        quantity = payload.get("quantity")
+        if not slot_has_value(quantity):
+            logger.info("recurring_supply_digest.modify_quantity_missing | pending_state=%s", sub_state)
+            return {
+                "final_response": (
+                    f"Je n'ai pas compris la quantité. {_digest_quantity_prompt(selected.get('product', ''))}"
+                ),
+                "status": "WAITING_INPUT",
+                **set_pending_interaction(
+                    InteractionKind.RECURRING_SUPPLY_DIGEST_ACTION,
+                    goal="UPDATE_RECURRING_NEED",
+                    target={"sub_state": _DIGEST_AWAIT_QUANTITY, "selected": selected},
+                ),
+            }
+
+        # `slot_has_value(quantity)` (ci-dessus) garantit déjà une valeur exploitable à
+        # l'exécution — ce narrowing explicite n'est là que pour mypy (`quantity` reste
+        # typé `Any | None` via `transaction_payload`, jamais affiné par un simple contrôle
+        # de vérité).
+        quantity_value = float(quantity) if isinstance(quantity, (int, float, str)) else 0.0
+
+        phone = state.get("user_phone")
+        gw = RecurringSupplyGateway(mc_runtime)
+        try:
+            # DIGEST_CONFIRM_OVERRIDE (mandat §12) — transition interne, MÊME tour : le mandat
+            # §16 attend l'override appliqué dès cette quantité reçue, sans confirmation
+            # supplémentaire. Occurrence UNIQUEMENT (mandat §5 : "ne pas modifier automatiquement
+            # le recurring need permanent") — `RecurringNeed.quantity` n'est jamais touché ici.
+            await gw.update_recurring_need(
+                phone=str(phone),
+                recurring_need_id=selected["recurring_need_id"],
+                action="OCCURRENCE_OVERRIDE",
+                occurrence_date=selected["occurrence_date"],
+                quantity=quantity_value,
+            )
+        except MCPCallError as exc:
+            logger.warning(
+                "recurring_supply_digest.modify_override_failed | occurrence_id=%s | error_class=%s",
+                selected.get("occurrence_id"),
+                type(exc).__name__,
+            )
+            return {
+                "final_response": "Je n'ai pas pu appliquer ce changement — réessayez dans un instant.",
+                "status": "COMPLETED",
+                **resolve_pending_interaction(),
+            }
+
+        logger.info(
+            "recurring_supply_digest.modify_override_applied | pending_state=DIGEST_DONE | "
+            "occurrence_id=%s | quantity=%s",
+            selected.get("occurrence_id"),
+            quantity_value,
+        )
+        unit = payload.get("unit") or selected.get("unit") or ""
+        product_label = selected.get("product", "")
+        return {
+            "final_response": (
+                f"✅ C'est noté : *{_fmt_qty(quantity_value)} {unit}* de {product_label} pour demain "
+                "uniquement — votre besoin habituel n'a pas changé."
+            ),
+            "status": "COMPLETED",
+            **resolve_pending_interaction(),
+        }
+
+    # sub_state inconnu (corruption défensive, ex: TTL/migration future) : abandon propre plutôt
+    # qu'une boucle silencieuse sur un état qu'on ne sait plus interpréter.
+    logger.warning("recurring_supply_digest.modify_unknown_sub_state | pending_state=%s", sub_state)
+    return {
+        "final_response": "Je n'ai pas pu poursuivre cette modification — dites-moi ce que vous voulez changer.",
+        "status": "COMPLETED",
+        **resolve_pending_interaction(),
+    }
+
+
+async def _digest_skip_named_product(
+    state: Dict[str, Any], mc_runtime: MarketRuntime, product_hint: str
+) -> Dict[str, Any]:
+    """"pas demain pour l'oignon" (mandat digest §9) — skip l'occurrence de DEMAIN d'UN SEUL
+    besoin nommé, jamais tous les besoins actionnables (voir `_respond_to_digest_flow`, chemin
+    "pas demain" bare). Résolution par nom BORNÉE : abstention (question) si zéro ou plusieurs
+    besoins actionnables correspondent — jamais un choix deviné."""
+    phone = state.get("user_phone")
+    gw = RecurringSupplyGateway(mc_runtime)
+    try:
+        items = await _digest_actionable_items(gw, phone)
+    except MCPCallError as exc:
+        logger.warning("recurring_supply_digest.skip_product_failed | error_class=%s", type(exc).__name__)
+        return {"final_response": "Je n'ai pas pu récupérer vos approvisionnements.", "status": "COMPLETED"}
+
+    hint = product_hint.strip().lower()
+    matches = [i for i in items if hint and hint in str(i.get("product") or "").lower()]
+    if len(matches) != 1:
+        names = ", ".join(str(i["product"]) for i in items) if items else "aucun"
+        return {
+            "final_response": f"Je n'ai pas trouvé de besoin correspondant. Vos besoins de demain : {names}.",
+            "status": "COMPLETED",
+        }
+
+    target = matches[0]
+    try:
+        await gw.update_recurring_need(
+            phone=str(phone),
+            recurring_need_id=target["recurring_need_id"],
+            action="OCCURRENCE_SKIP",
+            occurrence_date=target["next_occurrence_date"],
+        )
+    except MCPCallError as exc:
+        logger.warning(
+            "recurring_supply_digest.skip_product_apply_failed | occurrence_id=%s | error_class=%s",
+            target.get("next_occurrence_id"),
+            type(exc).__name__,
+        )
+        return {"final_response": "Je n'ai pas pu appliquer ce changement — réessayez dans un instant.", "status": "COMPLETED"}
+
+    logger.info(
+        "recurring_supply_digest.skip_product_applied | occurrence_id=%s",
+        target.get("next_occurrence_id"),
+    )
+    return {
+        "final_response": (
+            f"D'accord, pas de {target['product']} demain — le reste de vos besoins habituels reste actif."
+        ),
+        "status": "COMPLETED",
     }
 
 

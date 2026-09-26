@@ -65,6 +65,16 @@ class InteractionKind(str, Enum):
     CLARIFY_INTENT = "CLARIFY_INTENT"
     SELECTION_MENU = "SELECTION_MENU"
     VERIFY_OTP = "VERIFY_OTP"
+    #: Réponse à un digest d'approvisionnement récurrent PROACTIF (mandat digest 2026-09-26).
+    #: Contrairement à `CONFIRM_MATCH`/`REJECT_MATCH` (bare, sans état — voir
+    #: `interpreter/routing.py::_bare_confirmation_for_recurring_supply_digest`), "modifier"
+    #: ouvre un mini-flow à PLUSIEURS tours (menu numéroté -> quantité -> override) qui a
+    #: besoin d'un ancrage durable entre ces tours : `target["sub_state"]` porte l'état explicite
+    #: (`DIGEST_AWAIT_SELECTION`/`DIGEST_AWAIT_QUANTITY`, voir `flows/buyer/recurring_need.py`
+    #: pour les 5 valeurs nommées du mandat — les 3 autres ne sont jamais persistées, purement
+    #: documentaires : `DIGEST_AWAIT_ACTION` est l'absence même de `pending_interaction`,
+    #: `DIGEST_CONFIRM_OVERRIDE`/`DIGEST_DONE` sont des transitions internes au même tour).
+    RECURRING_SUPPLY_DIGEST_ACTION = "RECURRING_SUPPLY_DIGEST_ACTION"
 
 
 # Kinds résolus dynamiquement depuis le tunnel panier (jamais depuis l'état
@@ -93,6 +103,7 @@ SUBFLOW_OWNED_KINDS = frozenset(
         InteractionKind.CONFIRM_ACTION,
         InteractionKind.PROVIDE_LOCATION,
         InteractionKind.VERIFY_OTP,
+        InteractionKind.RECURRING_SUPPLY_DIGEST_ACTION,
     }
 )
 
@@ -293,6 +304,15 @@ def pending_interaction_ttl_seconds() -> float:
     return float(settings.PENDING_INTERACTION_TTL_SECONDS)
 
 
+def recurring_supply_digest_pending_ttl_seconds() -> float:
+    """TTL du seul kind `RECURRING_SUPPLY_DIGEST_ACTION` — voir `settings.
+    RECURRING_SUPPLY_DIGEST_PENDING_TTL_SECONDS` pour la justification (le digest arrive le matin,
+    une réponse en fin de journée reste légitime ; 30 min, le défaut générique, ne suffirait pas)."""
+    from ladini.core.settings import settings
+
+    return float(settings.RECURRING_SUPPLY_DIGEST_PENDING_TTL_SECONDS)
+
+
 def is_pending_expired(
     pending: "PendingInteraction", now: float, *, ttl_seconds: Optional[float] = None
 ) -> bool:
@@ -385,7 +405,15 @@ def get_pending_interaction(
     if persisted:
         interaction = PendingInteraction.from_dict(persisted)
         effective_now = time.time() if now is None else now
-        if is_pending_expired(interaction, effective_now):
+        # TTL spécifique, plus long (mandat digest §2) : voir
+        # `recurring_supply_digest_pending_ttl_seconds` pour la justification — un seul point de
+        # dérogation, jamais un second calcul de TTL dupliqué à un autre site de lecture.
+        ttl_override = (
+            recurring_supply_digest_pending_ttl_seconds()
+            if interaction.kind == InteractionKind.RECURRING_SUPPLY_DIGEST_ACTION
+            else None
+        )
+        if is_pending_expired(interaction, effective_now, ttl_seconds=ttl_override):
             return PendingInteraction()
         return interaction
 
@@ -510,6 +538,16 @@ def to_tunnel_category(pending: "PendingInteraction") -> str:
     # cassait le fast-path "2 bidons" après un palier déjà résolu.
     if pending.kind in (InteractionKind.ENTER_PACKAGE_COUNT, InteractionKind.ENTER_QUANTITY):
         return "QUANTITY"
+    if pending.kind == InteractionKind.RECURRING_SUPPLY_DIGEST_ACTION:
+        # Réutilise TEL QUEL le vocabulaire SELECTION/QUANTITY générique déjà consommé par
+        # `_interpret_fast_path` (index numérique nu -> `selection_index` ; nombre avec unité ->
+        # `quantity`/`unit`) — voir `flows/buyer/recurring_need.py::_digest_modify_flow` pour les
+        # 2 seules valeurs persistées de `target["sub_state"]` (mandat digest §12 : "pas de
+        # chaînes implicites dispersées" — ce mapping-ci est le SEUL endroit qui les interprète).
+        sub_state = str((pending.target or {}).get("sub_state") or "")
+        if sub_state == "DIGEST_AWAIT_QUANTITY":
+            return "QUANTITY"
+        return "SELECTION"
     if pending.kind in CART_TUNNEL_KINDS or pending.kind == InteractionKind.SELECTION_MENU:
         return "SELECTION"
     if pending.kind == InteractionKind.CONFIRM_ACTION:
@@ -537,5 +575,7 @@ __all__ = [
     "check_invariants",
     "to_tunnel_category",
     "is_pending_expired",
+    "pending_interaction_ttl_seconds",
+    "recurring_supply_digest_pending_ttl_seconds",
     "pending_interaction_ttl_seconds",
 ]

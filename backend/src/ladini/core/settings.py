@@ -620,6 +620,12 @@ class Settings(BaseSettings):
     # Combien de jours à l'avance le digest regarde (mandat §3 : "les besoins de demain") — 1 par
     # défaut, configurable si le terrain a besoin d'une fenêtre légèrement différente.
     RECURRING_SUPPLY_DIGEST_DAY_OFFSET: int = 1
+    # TTL du `PendingInteraction(RECURRING_SUPPLY_DIGEST_ACTION)` ouvert par "modifier" (mandat
+    # digest §2, 2026-09-26) — DISTINCT de `PENDING_INTERACTION_TTL_SECONDS` (30 min, bien trop
+    # court : le digest arrive le matin, la réponse peut légitimement venir en fin de journée,
+    # jusqu'à la veille du prochain digest). 20h : assez pour couvrir une journée entière depuis
+    # l'envoi matinal sans jamais chevaucher le digest du lendemain.
+    RECURRING_SUPPLY_DIGEST_PENDING_TTL_SECONDS: float = 72000.0
 
     # Disjoncteur — défauts repris tels quels de l'ancien `_CircuitBreaker`
     # process-local de get_llm.py (3 échecs / 30s), désormais partagés via
