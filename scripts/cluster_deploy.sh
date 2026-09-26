@@ -248,38 +248,59 @@ log "   GIT_SHA=${GIT_SHA} BUILD_TIMESTAMP=${BUILD_TIMESTAMP}"
 log "5/9 · migrations base de données (UNE SEULE FOIS, depuis l'orchestrateur)…"
 STAGE_MIGRATE_DONE=0
 MIG_CLASS="ROLLBACK_SAFE"
-if [ -f "${LADINI_ROOT}/backend/alembic.ini" ]; then
-  git -C "$LADINI_ROOT" cat-file -e "${GIT_SHA}^{commit}" 2>/dev/null \
-    || git -C "$LADINI_ROOT" fetch --quiet origin "$GIT_SHA" 2>/dev/null \
-    || warn "   commit ${GIT_SHA} introuvable localement même après fetch — classification migration en best-effort (fallback MIGRATION_REQUIRES_MANUAL_RECOVERY si le diff échoue)."
+# ═════════════════════════════════════════════════════════════════════
+# §BUG CORRIGÉ ICI (2026-09-26, incident migration delivery) : cette étape
+# était gardée par `if [ -f backend/alembic.ini ]` — fichier qui n'existe
+# NULLE PART dans ce repo (Alembic n'a jamais été configuré ; voir le
+# commentaire de tête de `check_migrations.sh` : "Drizzle définit et migre ;
+# le backend n'exécute plus aucun DDL"). Résultat : la classification
+# ci-dessous tournait bien, mais AUCUNE migration Drizzle
+# (`backend/schema_contract/migrations/`) n'était jamais réellement
+# appliquée — sur AUCUNE release depuis la mise en place de ce pipeline.
+# `0004_add_monthly_recurrence.sql` était présent sur chaque node, référencé
+# dans `_journal.json`, jamais rejoué contre la vraie base : le `CHECK
+# recurrence_type_chk` de prod n'a jamais vu MONTHLY malgré un code
+# applicatif qui l'acceptait déjà — `create_recurring_need` échouait en
+# CheckViolationError, masqué à l'agent par la sanitisation générique
+# d'erreurs DB. Remplacé par le runner officiel partagé
+# (`ladini.schema_migrations`, `backend/tests/schema/db_tools.py` réutilise
+# EXACTEMENT le même moteur — voir sa docstring) : lit `_journal.json`,
+# n'applique que ce qui manque (table `__drizzle_migrations`), échoue fort.
+# Plus de `if` sur un fichier qui n'existera jamais : cette étape tourne
+# TOUJOURS, et son échec bloque TOUJOURS le déploiement.
+# ═════════════════════════════════════════════════════════════════════
+git -C "$LADINI_ROOT" cat-file -e "${GIT_SHA}^{commit}" 2>/dev/null \
+  || git -C "$LADINI_ROOT" fetch --quiet origin "$GIT_SHA" 2>/dev/null \
+  || warn "   commit ${GIT_SHA} introuvable localement même après fetch — classification migration en best-effort (fallback MIGRATION_REQUIRES_MANUAL_RECOVERY si le diff échoue)."
 
-  FROM_SHA="${PREVIOUS_GIT_SHA:-${GIT_SHA}~1}"
-  MIG_CLASS="$(migration_class_between "$FROM_SHA" "$GIT_SHA" || echo MIGRATION_REQUIRES_MANUAL_RECOVERY)"
-  log "   classification migration : ${MIG_CLASS}  (${FROM_SHA}..${GIT_SHA})"
+FROM_SHA="${PREVIOUS_GIT_SHA:-${GIT_SHA}~1}"
+MIG_CLASS="$(migration_class_between "$FROM_SHA" "$GIT_SHA" || echo MIGRATION_REQUIRES_MANUAL_RECOVERY)"
+log "   classification migration : ${MIG_CLASS}  (${FROM_SHA}..${GIT_SHA})"
 
-  # Verrou LOCAL PAR NODE (LOCK_DIR — le même que deploy.sh/node_deploy.sh),
-  # tenu UNIQUEMENT le temps de ces deux commandes : elles mutent le compose
-  # stack LOCAL de la machine orchestratrice (pgbouncer up, migration DB) —
-  # exactement le genre d'opération que ce verrou existe pour protéger,
-  # peu importe que ce soit ICI (l'orchestrateur) ou node_deploy.sh (un
-  # node) qui la déclenche. Acquis puis RELÂCHÉ avant la boucle SSH
-  # ci-dessous (étape 5/9) — jamais tenu pendant le rollout lui-même, donc
-  # jamais en conflit avec node_deploy.sh acquérant ce même verrou sur un
-  # node co-localisé (voir §DEADLOCK dans lib.sh : ce sont deux verrous
-  # DISTINCTS de toute façon, mais celui-ci en particulier n'a pas de raison
-  # de rester tenu plus longtemps que la mutation qu'il protège).
-  acquire_lock
-  RELEASE_VERSION="$TARGET_RELEASE" dc --profile app up -d --wait --wait-timeout 60 pgbouncer \
-    || die "PgBouncer local (orchestrateur) non healthy — DB injoignable depuis cette machine (.env DB_HOST/USER/PASSWORD/NAME ?). Aucun node n'a été touché."
-  RELEASE_VERSION="$TARGET_RELEASE" dc --profile app run --rm --no-deps -w /app/backend \
-    api alembic upgrade head \
-    || die "alembic upgrade head a échoué depuis l'orchestrateur — AUCUN node n'a été touché (la migration s'applique AVANT tout rollout applicatif)."
-  release_lock
-  STAGE_MIGRATE_DONE=1
-  log "   migrations appliquées (une fois, pour tout le cluster)."
-else
-  warn "   backend/alembic.ini absent → migrations Alembic SAUTÉES (schéma géré hors-Alembic)."
-fi
+# Verrou LOCAL PAR NODE (LOCK_DIR — le même que deploy.sh/node_deploy.sh),
+# tenu UNIQUEMENT le temps de ces deux commandes : elles mutent le compose
+# stack LOCAL de la machine orchestratrice (pgbouncer up, migration DB) —
+# exactement le genre d'opération que ce verrou existe pour protéger,
+# peu importe que ce soit ICI (l'orchestrateur) ou node_deploy.sh (un
+# node) qui la déclenche. Acquis puis RELÂCHÉ avant la boucle SSH
+# ci-dessous (étape 5/9) — jamais tenu pendant le rollout lui-même, donc
+# jamais en conflit avec node_deploy.sh acquérant ce même verrou sur un
+# node co-localisé (voir §DEADLOCK dans lib.sh : ce sont deux verrous
+# DISTINCTS de toute façon, mais celui-ci en particulier n'a pas de raison
+# de rester tenu plus longtemps que la mutation qu'il protège).
+acquire_lock
+RELEASE_VERSION="$TARGET_RELEASE" dc --profile app up -d --wait --wait-timeout 60 pgbouncer \
+  || die "PgBouncer local (orchestrateur) non healthy — DB injoignable depuis cette machine (.env DB_HOST/USER/PASSWORD/NAME ?). Aucun node n'a été touché."
+# `python -m ladini.schema_migrations.cli` (asyncpg direct, statement_cache_size=0 —
+# voir sa docstring pour l'incompatibilité PgBouncer transaction-mode/prepared
+# statements) affiche explicitement current/pending/applied — jamais un
+# "migrations appliquées" muet. Sortie non nulle = migration cassée = deploy
+# STOP ici, avant tout rollout : aucun node n'est jamais touché sur cet échec.
+RELEASE_VERSION="$TARGET_RELEASE" dc --profile app run --rm --no-deps -w /app/backend/src \
+  api python -m ladini.schema_migrations.cli \
+  || die "L'application des migrations Drizzle a échoué depuis l'orchestrateur (voir le détail ci-dessus) — AUCUN node n'a été touché, AUCUN rollback automatique (intervention manuelle requise sur la migration en échec)."
+release_lock
+STAGE_MIGRATE_DONE=1
 
 # ═════════════════════════════════════════════════════════════════════
 # 5/6/7. Rolling deploy par node — UN À LA FOIS, dans l'ordre de

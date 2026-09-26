@@ -269,23 +269,26 @@ else
   # PRÉCÉDENT : le lire ici pointerait un cran trop loin en arrière (N-2 au
   # lieu de N-1).
   # ═══════════════════════════════════════════════════════════════════
-  if [ -f "${LADINI_ROOT}/backend/alembic.ini" ]; then
-    if [ -n "$CURRENT_RELEASE" ]; then
-      git -C "$LADINI_ROOT" cat-file -e "${GIT_SHA}^{commit}" 2>/dev/null \
-        || git -C "$LADINI_ROOT" fetch --quiet origin "$GIT_SHA" 2>/dev/null \
-        || warn "   commit ${GIT_SHA} introuvable localement même après fetch — classification migration en best-effort (fallback MIGRATION_REQUIRES_MANUAL_RECOVERY si le diff échoue)."
-      CURRENT_GIT_SHA="$(read_release_field "$CURRENT_FILE" GIT_SHA 2>/dev/null || true)"
-      FROM_SHA="${CURRENT_GIT_SHA:-${GIT_SHA}~1}"
-      MIG_CLASS="$(migration_class_between "$FROM_SHA" "$GIT_SHA" || echo MIGRATION_REQUIRES_MANUAL_RECOVERY)"
-    fi
-    log "   classification migration : ${MIG_CLASS} (${FROM_SHA:-<inconnu>}..${GIT_SHA})"
-    RELEASE_VERSION="$TARGET_RELEASE" dc "${PROFILE_ARGS[@]}" run --rm --no-deps -w /app/backend \
-      api alembic upgrade head \
-      || fail "migrate" "alembic upgrade head a échoué — bascule annulée, ce node tourne toujours sur l'ancien code"
-    log "   migrations appliquées."
-  else
-    warn "   backend/alembic.ini absent → migrations Alembic SAUTÉES (schéma géré hors-Alembic)."
+  # §BUG CORRIGÉ ICI (2026-09-26, incident migration delivery) : cette étape
+  # était gardée par `if [ -f backend/alembic.ini ]`, un fichier qui n'existe
+  # nulle part dans ce repo — voir le commentaire équivalent dans
+  # `cluster_deploy.sh` pour l'incident complet (0004_add_monthly_recurrence
+  # jamais réellement appliqué en prod malgré une classification qui
+  # tournait). Remplacé par le runner Drizzle officiel partagé
+  # (`ladini.schema_migrations`) : plus de `if` sur un fichier fantôme,
+  # cette étape tourne TOUJOURS et son échec bloque TOUJOURS la bascule.
+  if [ -n "$CURRENT_RELEASE" ]; then
+    git -C "$LADINI_ROOT" cat-file -e "${GIT_SHA}^{commit}" 2>/dev/null \
+      || git -C "$LADINI_ROOT" fetch --quiet origin "$GIT_SHA" 2>/dev/null \
+      || warn "   commit ${GIT_SHA} introuvable localement même après fetch — classification migration en best-effort (fallback MIGRATION_REQUIRES_MANUAL_RECOVERY si le diff échoue)."
+    CURRENT_GIT_SHA="$(read_release_field "$CURRENT_FILE" GIT_SHA 2>/dev/null || true)"
+    FROM_SHA="${CURRENT_GIT_SHA:-${GIT_SHA}~1}"
+    MIG_CLASS="$(migration_class_between "$FROM_SHA" "$GIT_SHA" || echo MIGRATION_REQUIRES_MANUAL_RECOVERY)"
   fi
+  log "   classification migration : ${MIG_CLASS} (${FROM_SHA:-<inconnu>}..${GIT_SHA})"
+  RELEASE_VERSION="$TARGET_RELEASE" dc "${PROFILE_ARGS[@]}" run --rm --no-deps -w /app/backend/src \
+    api python -m ladini.schema_migrations.cli \
+    || fail "migrate" "L'application des migrations Drizzle a échoué (voir le détail ci-dessus) — bascule annulée, ce node tourne toujours sur l'ancien code."
 fi
 
 # ── 5. Bascule applicative (rôles demandés uniquement) ────────────
