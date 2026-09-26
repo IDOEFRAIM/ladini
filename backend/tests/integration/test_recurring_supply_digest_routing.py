@@ -28,6 +28,7 @@ import pytest
 from ladini.graphs.agents.market_coach.core import (
     pending_interaction as pending_interaction_module,
 )
+from ladini.services.database.recurring_supply import MATCH_RESPONSE_ACTIONS
 from tests.harness import ConversationHarness, new_task
 
 pytestmark = pytest.mark.integration
@@ -62,10 +63,20 @@ _TWO_NEEDS = [
 ]
 
 _ONE_NEED = [_TWO_NEEDS[0]]
+# Distinct de `_ONE_NEED` (oignon, `matched_quantity=0` — volontaire pour les tests "modifier",
+# où l'absence de match ne doit pas bloquer une modification) : `accept_match_proposal` ne porte
+# que sur les besoins avec une disponibilité RÉELLEMENT trouvée (`_respond_to_digest_flow`'s
+# `actionable` filter, `matched_quantity > 0`) — les tests CONFIRM/ACCEPT ont besoin d'un besoin
+# qui passe ce filtre.
+_ONE_MATCHED_NEED = [_TWO_NEEDS[1]]
 
 
 def _override_calls(turn):
     return [c for c in turn.mcp_calls if c[0] == "update_recurring_need"]
+
+
+def _match_calls(turn):
+    return [c for c in turn.mcp_calls if c[0] == "accept_match_proposal"]
 
 
 # =====================================================================
@@ -117,20 +128,22 @@ class TestA_ModifierNeverFallsToGenericFallback:
 
 
 class TestBC_ConfirmAndSkipAllPreserved:
-    def test_confirmer_still_confirms_the_whole_digest(self):
-        # Non-régression PURE (mandat §8/§17 : ne jamais toucher la sémantique de "confirmer") —
-        # `_respond_to_digest_flow` passe `action="CONFIRM"` à `accept_match_proposal`, PAS
-        # "ACCEPT" (le seul nom accepté par `MATCH_RESPONSE_ACTIONS` côté service réel,
-        # `services/database/recurring_supply.py`) : un désaccord préexistant, hors du périmètre
-        # de ce mandat (routage de "modifier", pas la sémantique de "confirmer" elle-même) —
-        # signalé dans le rapport de livraison, PAS corrigé ici. Ce test verrouille le
-        # comportement observé AVANT/APRÈS ce mandat, inchangé par ce correctif.
+    def test_confirmer_sends_the_canonical_accept_action_to_the_service(self):
+        # (2026-09-26, mandat "mismatch CONFIRM vs ACCEPT") : CE test verrouillait auparavant
+        # `action == "CONFIRM"` — le bug lui-même — au nom de "ne jamais toucher la sémantique de
+        # confirmer". Corrigé : la SÉMANTIQUE de "confirmer" (accepter la proposition, créer les
+        # commandes) est inchangée, seul le MOT envoyé au service change, de "CONFIRM" (jamais
+        # accepté par `MATCH_RESPONSE_ACTIONS`, `services/database/recurring_supply.py` — chaque
+        # appel réel à `accept_match_proposal`, y compris toute la suite Postgres dédiée
+        # `tests/schema/test_recurring_need_confirmation_service.py`, utilise "ACCEPT") à "ACCEPT".
+        # Garder l'ancien verrou aurait figé un bug déjà prouvé, contrairement au mandat §7.
         with ConversationHarness(role="BUYER", channel="whatsapp") as conv:
             conv.runtime.responses["list_my_recurring_needs"] = {"status": "success", "items": _TWO_NEEDS}
             t = conv.send("confirmer", llm=_UNKNOWN)
             calls = [c for c in t.mcp_calls if c[0] == "accept_match_proposal"]
             assert calls, "accept_match_proposal doit toujours être appelé pour 'confirmer'"
-            assert all(kw["action"] == "CONFIRM" for _, kw in calls)
+            assert all(kw["action"] == "ACCEPT" for _, kw in calls)
+            assert all(kw["action"] in MATCH_RESPONSE_ACTIONS for _, kw in calls)
 
     def test_pas_demain_still_rejects_every_actionable_need(self):
         with ConversationHarness(role="BUYER", channel="whatsapp") as conv:
@@ -139,6 +152,91 @@ class TestBC_ConfirmAndSkipAllPreserved:
             calls = [c for c in t.mcp_calls if c[0] == "accept_match_proposal"]
             assert calls
             assert all(kw["action"] == "REJECT" for _, kw in calls)
+
+
+# =====================================================================
+# Mandat "mismatch CONFIRM vs ACCEPT" (2026-09-26) — tests A-G
+# =====================================================================
+
+
+class TestConfirmAcceptContract:
+    """`_respond_to_digest_flow` envoyait `action="CONFIRM"` à `RecurringSupplyGateway.
+    accept_match_proposal`, alors que le service réel (`services/database/recurring_supply.py`)
+    ne connaît que `MATCH_RESPONSE_ACTIONS = ("ACCEPT", "REJECT")` — chaque appel réel à
+    `accept_match_proposal`, un mot hors de ce contrat aurait levé `BusinessRuleException("Action
+    inconnue")`. Corrigé via un mapping explicite (`_DIGEST_RESPONSE_TO_SERVICE_ACTION`), validé
+    au chargement du module contre le contrat canonique importé."""
+
+    def test_A_confirmer_maps_to_the_canonical_accept_action(self):
+        with ConversationHarness(role="BUYER", channel="whatsapp") as conv:
+            conv.runtime.responses["list_my_recurring_needs"] = {"status": "success", "items": _ONE_MATCHED_NEED}
+            t = conv.send("confirmer", llm=_UNKNOWN)
+            calls = _match_calls(t)
+            assert len(calls) == 1
+            assert calls[0][1]["action"] == "ACCEPT"
+
+    def test_B_ok_maps_to_the_same_canonical_accept_action(self):
+        # "ok" fait partie du vocabulaire fermé déjà réutilisé par le fast-path digest
+        # (`_CONFIRM_EXACT_PHRASES`, partagé avec la confirmation générique) — même résultat que
+        # "confirmer" attendu.
+        with ConversationHarness(role="BUYER", channel="whatsapp") as conv:
+            conv.runtime.responses["list_my_recurring_needs"] = {"status": "success", "items": _ONE_MATCHED_NEED}
+            t = conv.send("ok", llm=_UNKNOWN)
+            calls = _match_calls(t)
+            assert len(calls) == 1
+            assert calls[0][1]["action"] == "ACCEPT"
+
+    def test_C_double_confirmation_is_idempotent_never_duplicated(self):
+        with ConversationHarness(role="BUYER", channel="whatsapp") as conv:
+            conv.runtime.responses["list_my_recurring_needs"] = {"status": "success", "items": _ONE_MATCHED_NEED}
+            first = conv.send("confirmer", llm=_UNKNOWN, message_id="wamid.CONFIRM-DIGEST-1")
+            replay = conv.send("confirmer", llm=_UNKNOWN, message_id="wamid.CONFIRM-DIGEST-1")
+            assert len(_match_calls(first)) == 1
+            assert not _match_calls(replay)
+            assert replay.nodes == [], "un message déjà traité ne doit pas rejouer le graphe"
+
+    def test_D_modifier_never_goes_through_accept_match_proposal(self):
+        with ConversationHarness(role="BUYER", channel="whatsapp") as conv:
+            conv.runtime.responses["list_my_recurring_needs"] = {"status": "success", "items": _TWO_NEEDS}
+            t1 = conv.send("modifier", llm=_UNKNOWN)
+            assert not _match_calls(t1)
+            t2 = conv.send("1", llm=_UNKNOWN)
+            t3 = conv.send("40 kg", llm=_UNKNOWN)
+            assert not _match_calls(t2)
+            assert not _match_calls(t3)
+
+    def test_E_pas_demain_never_sends_accept(self):
+        with ConversationHarness(role="BUYER", channel="whatsapp") as conv:
+            conv.runtime.responses["list_my_recurring_needs"] = {"status": "success", "items": _TWO_NEEDS}
+            t = conv.send("pas demain", llm=_UNKNOWN)
+            calls = _match_calls(t)
+            assert calls
+            assert all(kw["action"] == "REJECT" for _, kw in calls)
+            assert all(kw["action"] != "ACCEPT" for _, kw in calls)
+
+    @pytest.mark.parametrize("channel", ["whatsapp", "webchat"])
+    def test_F_confirmer_sends_accept_on_both_channels(self, channel):
+        with ConversationHarness(role="BUYER", channel=channel) as conv:
+            conv.runtime.responses["list_my_recurring_needs"] = {"status": "success", "items": _ONE_MATCHED_NEED}
+            t = conv.send("confirmer", llm=_UNKNOWN)
+            calls = _match_calls(t)
+            assert len(calls) == 1
+            assert calls[0][1]["action"] == "ACCEPT"
+
+    def test_G_every_action_sent_to_the_service_belongs_to_the_canonical_contract(self):
+        """Test de contrat générique (mandat §6.G) : quel que soit le mot conversationnel
+        ("confirmer", "ok", "pas demain", "non"...), la valeur RÉELLEMENT envoyée au service
+        appartient toujours à `MATCH_RESPONSE_ACTIONS` — jamais un mot conversationnel qui fuite
+        tel quel."""
+        with ConversationHarness(role="BUYER", channel="whatsapp") as conv:
+            for text in ("confirmer", "oui", "ok", "pas demain", "non"):
+                conv.runtime.responses["list_my_recurring_needs"] = {"status": "success", "items": _ONE_MATCHED_NEED}
+                t = conv.send(text, llm=_UNKNOWN)
+                for _, kwargs in _match_calls(t):
+                    assert kwargs["action"] in MATCH_RESPONSE_ACTIONS, (
+                        f"'{text}' a envoyé action={kwargs['action']!r}, hors du contrat "
+                        f"canonique {MATCH_RESPONSE_ACTIONS}"
+                    )
 
 
 # =====================================================================

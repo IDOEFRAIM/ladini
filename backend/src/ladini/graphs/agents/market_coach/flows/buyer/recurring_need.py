@@ -79,6 +79,7 @@ from ladini.graphs.agents.market_coach.utils import (
 )
 from ladini.services.database import recurring_need_draft_store
 from ladini.services.database.draft_store_support import cas_finalize
+from ladini.services.database.recurring_supply import MATCH_RESPONSE_ACTIONS
 
 logger = logging.getLogger("Ladini.Market.RecurringNeed")
 
@@ -1125,6 +1126,30 @@ async def _respond_to_match(
 # =====================================================================
 
 
+# (2026-09-26, mandat "mismatch CONFIRM vs ACCEPT") : `_respond_to_digest_flow` reçoit `action`
+# au vocabulaire CONVERSATIONNEL ("CONFIRM"/"REJECT" — celui de `interpreter/routing.py::
+# _bare_confirmation_for_recurring_supply_digest`, qui émet `action="CONFIRM_MATCH"/"REJECT_MATCH"`
+# sous l'intent `UPDATE_RECURRING_NEED`) mais devait le transmettre TEL QUEL à
+# `RecurringSupplyGateway.accept_match_proposal` — qui parle, lui, le vocabulaire SERVICE de
+# `services/database/recurring_supply.py::MATCH_RESPONSE_ACTIONS = ("ACCEPT", "REJECT")`. "CONFIRM"
+# n'y a jamais figuré : chaque appel réel à `accept_match_proposal` (production ET la suite de
+# tests dédiée contre PostgreSQL réel, `tests/schema/test_recurring_need_confirmation_service.py`)
+# utilise "ACCEPT" — jamais "CONFIRM". Le mismatch était invisible en test parce que le double de
+# gateway du harnais (`tests/harness/conversation.py`) enregistre les kwargs sans les valider,
+# contrairement au VRAI service (`RecurringSupplyMixin.accept_match_proposal`, qui lève
+# `BusinessRuleException("Action inconnue : CONFIRM")`) — capturée ici par `except MCPCallError`,
+# donc silencieusement comptée comme un échec ("Je n'ai pas pu confirmer..."), jamais une vraie
+# confirmation. "REJECT" n'a jamais eu ce problème (même mot des deux côtés) — seule la moitié
+# CONFIRM->ACCEPT de la table est non triviale. Mapping EXPLICITE (mandat §8 : jamais un
+# renommage implicite), validé contre le contrat canonique importé, jamais un enum recréé.
+_DIGEST_RESPONSE_TO_SERVICE_ACTION = {"CONFIRM": "ACCEPT", "REJECT": "REJECT"}
+assert set(_DIGEST_RESPONSE_TO_SERVICE_ACTION.values()) <= set(MATCH_RESPONSE_ACTIONS), (
+    "_DIGEST_RESPONSE_TO_SERVICE_ACTION doit rester un sous-ensemble du contrat canonique "
+    "MATCH_RESPONSE_ACTIONS — toute divergence future doit casser l'import, pas silencieusement "
+    "envoyer une valeur inconnue au service."
+)
+
+
 async def _respond_to_digest_flow(
     state: Dict[str, Any], mc_runtime: MarketRuntime, *, action: str
 ) -> Dict[str, Any]:
@@ -1147,12 +1172,20 @@ async def _respond_to_digest_flow(
             "status": "COMPLETED",
         }
 
+    service_action = _DIGEST_RESPONSE_TO_SERVICE_ACTION[action]
     confirmed_products: List[str] = []
     failed_products: List[str] = []
     for item in actionable:
         try:
             await gw.accept_match_proposal(
-                phone=str(phone), recurring_need_id=item["recurring_need_id"], action=action
+                phone=str(phone), recurring_need_id=item["recurring_need_id"], action=service_action
+            )
+            # Log structuré (mandat §8) : le mapping conversation -> service reste visible même
+            # quand les deux mots coïncident (REJECT->REJECT) — jamais implicite en observabilité.
+            logger.info(
+                "recurring_supply_digest.confirm_action_mapped | need=%s | resolved_action=%s | "
+                "service_action=%s | result=success",
+                item["recurring_need_id"], action, service_action,
             )
             confirmed_products.append(item["product"])
         except MCPCallError as exc:
@@ -1160,8 +1193,9 @@ async def _respond_to_digest_flow(
             # proprement côté service (occurrence hors OPEN/MATCHED) — jamais une 2e commande. Un
             # échec ici est donc attendu en cas de double-tap, pas forcément une vraie erreur.
             logger.info(
-                "recurring_need.digest_response_skipped | need=%s | action=%s | %s",
-                item["recurring_need_id"], action, exc,
+                "recurring_supply_digest.confirm_action_mapped | need=%s | resolved_action=%s | "
+                "service_action=%s | result=failed | error_class=%s",
+                item["recurring_need_id"], action, service_action, type(exc).__name__,
             )
             failed_products.append(item["product"])
 
