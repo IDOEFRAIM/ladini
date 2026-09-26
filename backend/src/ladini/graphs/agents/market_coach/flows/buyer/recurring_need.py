@@ -63,6 +63,9 @@ from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
     plan_correction,
     resolve_domain_action,
 )
+from ladini.graphs.agents.market_coach.interpreter.entities import (
+    _sanitize_product_candidate,
+)
 from ladini.graphs.agents.market_coach.services.mcp.gateway import (
     MCPCallError,
     RecurringSupplyGateway,
@@ -301,6 +304,125 @@ async def _resolve_ambiguous_group_reply(
     return _apply_response_plan(plan)
 
 
+def _orphan_quantity_clarification(
+    payload: Dict[str, Any], draft: Optional[RecurringNeedDraft]
+) -> Optional[Dict[str, Any]]:
+    """Bug réel production (2026-09-26, "150 kg tomate et 200 kg chaque semaine") : une
+    DEUXIÈME quantité mentionnée dans le message SANS AUCUN produit qui lui soit rattaché (voir
+    `new_task_contract.py::NewTaskOrphanQuantity`) — ni fusionnée dans la quantité du produit
+    déjà connu (l'ancien bug : 150+200 devenait 350 de tomates), ni silencieusement perdue. On
+    demande à quel produit elle correspond, `None` si rien d'orphelin dans ce tour.
+
+    `draft` : même contrat que `_ambiguous_quantity_clarification` — le draft DÉJÀ mis à jour
+    avec le reste du message (produit principal, quantité, récurrence...) AVANT cet appel,
+    persisté tel quel dans la réponse pour que le tour suivant (le produit manquant) le
+    retrouve intact plutôt que de repartir d'un draft vide."""
+    orphans = payload.get("orphan_quantities")
+    if not isinstance(orphans, list) or not orphans:
+        return None
+    orphan = orphans[0]
+    if not isinstance(orphan, dict):
+        return None
+    quantity = orphan.get("quantity")
+    if not slot_has_value(quantity):
+        return None
+    unit = orphan.get("unit")
+    qty_text = _fmt_ambiguous_num(quantity)
+    unit_text = f" {unit}" if slot_has_value(unit) else ""
+
+    known_prefix = ""
+    if draft is not None and slot_has_value(draft.product) and slot_has_value(draft.quantity):
+        known_unit = f" {draft.unit}" if slot_has_value(draft.unit) else ""
+        known_prefix = (
+            f"J'ai bien noté {_fmt_ambiguous_num(draft.quantity)}{known_unit} de "
+            f"{draft.product}. "
+        )
+    message = f"{known_prefix}À quel produit correspondent les {qty_text}{unit_text} ?"
+    return {
+        "final_response": message,
+        "response_strategy": "CLARIFICATION",
+        "status": "WAITING_INPUT",
+        "recurring_need_draft": draft.to_dict() if draft is not None else None,
+        **set_pending_interaction(
+            InteractionKind.ENTER_FIELD,
+            goal="CREATE_RECURRING_NEED",
+            field_name="orphan_quantity",
+            target={"quantity": quantity, "unit": unit},
+        ),
+    }
+
+
+async def _resolve_orphan_quantity_reply(
+    state: Dict[str, Any], pending: Dict[str, Any], conversation_id: str
+) -> Optional[Dict[str, Any]]:
+    """Traite un tour où `PendingInteraction` attend une résolution `orphan_quantity` (mandat
+    §6-§7, 2026-09-26). Même contrat que `_resolve_ambiguous_group_reply` : `None` si le message
+    ne répond manifestement pas à la clarification — l'appelant le traite alors comme une tâche
+    autonome distincte (ex: "je veux 30 poulets chaque semaine" pendant la clarification,
+    mandat §5 — jamais lu comme un nom de produit)."""
+    target = pending.get("target") if isinstance(pending, dict) else None
+    if not isinstance(target, dict):
+        return None
+    quantity = target.get("quantity")
+    if not slot_has_value(quantity):
+        return None
+    unit = target.get("unit")
+
+    text = str(state.get("normalized_text") or state.get("user_query") or "")
+    draft = RecurringNeedDraft.from_dict(state.get("recurring_need_draft"))
+
+    if _is_bare_abandon(text):
+        if draft is not None and draft.status.value == "DRAFT":
+            await _persist(draft, apply_domain_action(draft, CancelRecurringNeedDraft()).draft, conversation_id)
+        return {
+            "final_response": "D'accord, j'annule cette demande.",
+            "response_strategy": "SUCCESS",
+            "status": "COMPLETED",
+            "recurring_need_draft": None,
+            **clear_pending_interaction("orphan_quantity_abandoned"),
+        }
+
+    # Un chiffre dans la réponse est un signal fiable et GÉNÉRIQUE (jamais un mot précis en dur)
+    # qu'il ne s'agit PAS d'un simple nom de produit répondant "à quel produit ?" — une tâche
+    # autonome nouvelle en porte quasi toujours un (une quantité, une fréquence...), alors qu'un
+    # nom de produit seul ("oignons", "des oignons") n'en porte jamais.
+    if any(ch.isdigit() for ch in text):
+        return None
+
+    product = _sanitize_product_candidate(text)
+    if not product:
+        qty_text = _fmt_ambiguous_num(quantity)
+        unit_text = f" {unit}" if slot_has_value(unit) else ""
+        return {
+            "final_response": (
+                "Je n'ai pas reconnu de produit dans votre réponse. À quel produit "
+                f"correspondent les {qty_text}{unit_text} ?"
+            ),
+            "response_strategy": "CLARIFICATION",
+            "status": "WAITING_INPUT",
+            "recurring_need_draft": draft.to_dict() if draft is not None else None,
+            **set_pending_interaction(
+                InteractionKind.ENTER_FIELD,
+                goal="CREATE_RECURRING_NEED",
+                field_name="orphan_quantity",
+                target=target,
+            ),
+        }
+
+    # RESOLVED — ajoute le produit nommé à `additional_items`, sur le draft EXISTANT (produit
+    # principal déjà présent depuis le tour de la question, même règle que
+    # `_resolve_ambiguous_group_reply` : jamais un second draft indépendant).
+    existing_items = list(draft.additional_items or []) if draft is not None else []
+    resolved_unit = (
+        canonical_unit_label(unit) if slot_has_value(unit) else default_unit_for_product(product)
+    )
+    new_item = {"product": product, "quantity": quantity, "unit": resolved_unit}
+    action = UpdateRecurringNeedDraft(fields={"additional_items": existing_items + [new_item]})
+    outcome = apply_domain_action(draft, action)
+    await _persist(draft, outcome.draft, conversation_id)
+    return _apply_response_plan(build_response_plan(outcome))
+
+
 async def _resolve_correction_scope_reply(
     state: Dict[str, Any], pending: Dict[str, Any], conversation_id: str
 ) -> Optional[Dict[str, Any]]:
@@ -350,6 +472,7 @@ async def _resolve_correction_scope_reply(
 _STRUCTURED_FIELD_RESOLVERS = {
     "ambiguous_quantity": _resolve_ambiguous_group_reply,
     "correction_scope": _resolve_correction_scope_reply,
+    "orphan_quantity": _resolve_orphan_quantity_reply,
 }
 
 
@@ -472,6 +595,9 @@ async def _create_flow(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict
         ambiguous_response = _ambiguous_quantity_clarification(payload, outcome.draft)
         if ambiguous_response is not None:
             return ambiguous_response
+        orphan_response = _orphan_quantity_clarification(payload, outcome.draft)
+        if orphan_response is not None:
+            return orphan_response
     return _apply_response_plan(build_response_plan(outcome))
 
 

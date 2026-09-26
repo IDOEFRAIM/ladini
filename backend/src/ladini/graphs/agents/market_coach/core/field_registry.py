@@ -80,6 +80,11 @@ FIELD_REGISTRY: Tuple[FieldContract, ...] = (
         FieldContractKind.STRUCTURED,
         "flows/buyer/recurring_need.py::_resolve_correction_scope_reply",
     ),
+    FieldContract(
+        "orphan_quantity",
+        FieldContractKind.STRUCTURED,
+        "flows/buyer/recurring_need.py::_resolve_orphan_quantity_reply",
+    ),
     FieldContract("order_id", FieldContractKind.MINI_FLOW, "flows/buyer/order_tracking.py"),
     FieldContract("cancellation_reason", FieldContractKind.MINI_FLOW, "flows/buyer/order_tracking.py"),
     FieldContract(

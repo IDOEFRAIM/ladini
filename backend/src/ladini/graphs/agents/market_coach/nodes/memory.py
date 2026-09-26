@@ -301,7 +301,12 @@ async def memory_update(
     # (parce que "poppée" localement) reste donc telle quelle dans l'ancienne valeur, jamais
     # effacée. Il faut l'assigner explicitement à `None` (une clé PRÉSENTE avec cette valeur EST
     # bien prise en compte par `merge_dict`) pour qu'elle disparaisse réellement du payload fusionné.
-    for _list_field in ("ambiguous_groups", "additional_items", "correction_scope"):
+    # `orphan_quantities` (2026-09-26, `new_task_contract.py::NewTaskOrphanQuantity`) partage
+    # exactement la même forme (liste, même schéma NEW_TASK) et le même risque de collage —
+    # sans cette entrée, "150 kg tomate et 200 kg chaque semaine" (orphelin détecté) suivi de
+    # "je veux 30 poulets chaque semaine" (tâche neuve, sans aucun orphelin) rejouait la
+    # clarification "à quel produit correspondent les 200 KG ?" sur le NOUVEAU draft poulet.
+    for _list_field in ("ambiguous_groups", "additional_items", "orphan_quantities", "correction_scope"):
         if not extracted.get(_list_field):
             payload[_list_field] = None
     onboarding_profile = dict(state.get("onboarding_profile") or {})
