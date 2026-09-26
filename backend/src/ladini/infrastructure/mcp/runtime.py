@@ -278,6 +278,7 @@ def _log_call(tool_name: str, params: dict[str, Any], response: str) -> None:
 _PUBLIC_CATALOG_TOOLS: frozenset[str] = frozenset(
     {
         "get_zone_by_name",
+        "get_zone_hierarchy_by_name",
         "get_available_zones",
         # Donnée de référence publique (liste de termes bannis) — aucune donnée
         # utilisateur, appelée sans identité par le gate de modération.

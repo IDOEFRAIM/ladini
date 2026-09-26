@@ -18,6 +18,12 @@ export const users = authSchema.table('users', {
   role: roleEnum('role').default('USER').notNull(),
   identityVerified: boolean('identity_verified').default(false),
   zoneId: uuid('zone_id'),
+  // Localisation/couverture (migration backend 0005_add_location_coverage) : `declaredLocation`
+  // est le texte brut donné par l'utilisateur, `coverageStatus` (COVERED|NEARBY|
+  // OUT_OF_COVERAGE|WAITLIST) distingue la couverture opérationnelle de `zoneId` — voir
+  // backend/src/ladini/domain/identity/models.py::User pour l'invariant complet.
+  declaredLocation: text('declared_location'),
+  coverageStatus: text('coverage_status').default('COVERED').notNull(),
   deletedAt: timestamp('deleted_at'),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull().$onUpdate(() => new Date()),

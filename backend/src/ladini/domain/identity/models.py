@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
@@ -35,6 +36,10 @@ class User(Base):
         Index("users_created_idx", "created_at"),
         Index("users_role_idx", "role"),
         Index("users_zone_idx", "zone_id"),
+        CheckConstraint(
+            "coverage_status IN ('COVERED','NEARBY','OUT_OF_COVERAGE','WAITLIST')",
+            name="users_coverage_status_chk",
+        ),
         {"schema": "auth"},
     )
 
@@ -58,6 +63,20 @@ class User(Base):
     role = Column(Text, default="USER", nullable=False, server_default=text("'USER'"))
     identity_verified = Column(Boolean, default=False, server_default=text("false"))
     zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id", ondelete="SET NULL"))
+    # Localisation/couverture (mandat onboarding 2026-09-26, migration 0005) : `zone_id` reste
+    # LA zone de SERVICE (opérationnelle, ce que `zone_matching`/le reste du système consomme
+    # déjà) — `declared_location` est le texte BRUT jamais transformé/deviné que l'utilisateur a
+    # donné ("Somgandé"), toujours conservé même quand aucune zone de service ne lui correspond.
+    # `coverage_status` distingue : COVERED (zone de service résolue directement), NEARBY
+    # (localité connue rattachée à une zone de service parente, `zone_id` = cette zone parente),
+    # OUT_OF_COVERAGE (aucune correspondance — profil créé quand même, `zone_id` NULL), WAITLIST
+    # (réservé à une future fonctionnalité de notification d'ouverture de zone, jamais assigné
+    # par ce correctif). Invariant du mandat : l'onboarding ne bloque JAMAIS sur la couverture —
+    # seuls les SERVICES dépendent de `coverage_status`/`zone_id`, jamais la création du profil.
+    declared_location = Column(Text)
+    coverage_status = Column(
+        Text, default="COVERED", nullable=False, server_default=text("'COVERED'")
+    )
     # Modération / abus : blocage (annulations répétées) & bannissement (produits interdits).
     account_status = Column(
         Text,

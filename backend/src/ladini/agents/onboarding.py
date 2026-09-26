@@ -3,11 +3,19 @@
 Design
 ------
 - ONE LLM call per turn extracts every field it can (role, name, zone, confirm).
-- No hardcoded acknowledgement lexicon: only the LLM decides YES/NO.
+- Confirmation during CONFIRM_DETAILS is checked FIRST against the canonical
+  deterministic phrase set (`confirmation_phrases.py`, shared with
+  `interpreter/routing.py`'s `_interpret_fast_path` — no second, onboarding-only
+  lexicon): only free-text OUTSIDE that closed vocabulary falls back to the LLM's
+  own YES/NO judgment (mandat 2026-09-26, "'ok' ne confirme pas le profil" — see
+  `_fast_confirm_from_text`).
 - Any slot can be updated at any moment, including after a confirmation
   prompt — a change re-triggers confirmation with the new summary.
 - ``step`` is derived from what is filled, not from a rigid sequence.
-"""         
+- Zone resolution never blocks profile creation (mandat 2026-09-26,
+  "onboarding != éligibilité logistique") — see `_resolve_zone`/
+  `ZoneResolution` for the COVERED/NEARBY/OUT_OF_COVERAGE trichotomy.
+"""
 from __future__ import annotations
 
 import ast
@@ -16,6 +24,11 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Coroutine, Dict, List, Optional
+
+from ladini.agents.confirmation_phrases import (
+    _CONFIRM_EXACT_PHRASES,
+    _REJECT_EXACT_PHRASES,
+)
 
 logger = logging.getLogger("Ladini.Agents.Onboarding")
 
@@ -41,6 +54,15 @@ class OnboardingState:
     role: Optional[str] = None
     zone_name: Optional[str] = None
     zone_id: Optional[str] = None
+    # Localisation/couverture (mandat 2026-09-26, migration 0005) : `declared_location` est le
+    # texte BRUT donné par l'utilisateur ("Somgandé"), jamais transformé/deviné — conservé même
+    # quand aucune zone de service ne lui correspond (invariant : "onboarding != éligibilité
+    # logistique", jamais de blocage sur la couverture). `coverage_status` (COVERED|NEARBY|
+    # OUT_OF_COVERAGE) n'est posé qu'UNE FOIS par valeur de zone traitée — `None` signifie "la
+    # zone n'a pas encore été résolue ce tour-ci" (voir la garde dans `run_onboarding_step`, qui
+    # évite de re-résoudre indéfiniment la même valeur déjà tranchée).
+    declared_location: Optional[str] = None
+    coverage_status: Optional[str] = None
     error: Optional[str] = None
     prompt: str = ""
     completed: bool = False
@@ -59,7 +81,10 @@ class OnboardingState:
             missing.append("role")
         if not self.name:
             missing.append("name")
-        if not self.zone_id and not self.zone_name:
+        # La zone est "manquante" tant qu'aucune décision de couverture n'a été prise — une
+        # fois `coverage_status` posé (même OUT_OF_COVERAGE, `zone_id` alors NULL), la question
+        # est TRANCHÉE et ne doit plus être reposée (invariant : onboarding non bloquant).
+        if not self.zone_id and not self.zone_name and not self.coverage_status:
             missing.append("zone")
         return missing
 
@@ -81,6 +106,8 @@ class OnboardingResult:
             "user_name": self.state.name,
             "zone_name": self.state.zone_name,
             "zone_id": self.state.zone_id,
+            "declared_location": self.state.declared_location,
+            "coverage_status": self.state.coverage_status,
         }
         if self.state.completed:
             updates["is_onboarding"] = False
@@ -90,6 +117,8 @@ class OnboardingResult:
             updates["user_role"] = self.state.role
             updates["zone_name"] = self.state.zone_name
             updates["zone_id"] = self.state.zone_id
+            updates["declared_location"] = self.state.declared_location
+            updates["coverage_status"] = self.state.coverage_status
             updates["user_context_loaded"] = True
             if self.state.created_profile:
                 updates["user_id"] = str(self.state.created_profile.get("id", ""))
@@ -135,9 +164,18 @@ def _merge_extracted(
     raw_zone = extracted.get("zone")
     if raw_zone:
         zone = str(raw_zone).strip()
-        if zone and zone.upper() != (ob_state.zone_name or "").upper():
+        # Comparé à `zone_name` OU `declared_location` : une localité déjà tranchée
+        # OUT_OF_COVERAGE n'a plus de `zone_name` (voir plus bas) mais garde son
+        # `declared_location` — sans ce second terme, répéter la MÊME localité non couverte
+        # d'un tour à l'autre la ferait paraître "changée" à chaque fois et relancerait une
+        # résolution DB inutile (jamais un bug fonctionnel, juste un coût réseau superflu et
+        # une confirmation ré-invalidée à tort).
+        previous = (ob_state.zone_name or ob_state.declared_location or "").upper()
+        if zone and zone.upper() != previous:
             ob_state.zone_name = zone
             ob_state.zone_id = None
+            ob_state.declared_location = None
+            ob_state.coverage_status = None
             ob_state._filled_slots["zone"] = True
             changed = True
 
@@ -215,58 +253,6 @@ def _unwrap_tool_payload(raw: Any, *, _depth: int = 0) -> Optional[Dict[str, Any
     return None
 
 
-def _extract_zone_labels(raw: Any) -> List[str]:
-    labels: List[str] = []
-
-    def _handle_entry(entry: Any) -> None:
-        if isinstance(entry, dict):
-            label = entry.get("label") or entry.get("name")
-        else:
-            label = str(entry).strip()
-        if label:
-            labels.append(str(label).strip())
-
-    def _walk(obj: Any) -> None:
-        if isinstance(obj, list):
-            for item in obj:
-                _walk(item)
-            return
-        if isinstance(obj, dict):
-            for key in ("data", "zones", "items", "results"):
-                val = obj.get(key)
-                if isinstance(val, list):
-                    _walk(val)
-                    return
-            _handle_entry(obj)
-            return
-        if isinstance(obj, str):
-            stripped = obj.strip()
-            if stripped.startswith(("[", "{")):
-                try:
-                    parsed = json.loads(stripped)
-                    _walk(parsed)
-                    return
-                except Exception:
-                    pass
-                try:
-                    parsed = ast.literal_eval(stripped)
-                    _walk(parsed)
-                    return
-                except Exception:
-                    pass
-            parts = [p.strip() for p in stripped.split(",") if p.strip()]
-            if len(parts) > 1:
-                for part in parts:
-                    _handle_entry(part)
-            else:
-                _handle_entry(stripped)
-            return
-        _handle_entry(obj)
-
-    _walk(raw)
-    return list(dict.fromkeys(labels))
-
-
 BulkExtractor = Callable[[str, str], Coroutine[Any, Any, Dict[str, Optional[str]]]]
 
 
@@ -279,8 +265,8 @@ def _context_hint_for_llm(ob_state: OnboardingState) -> str:
         known.append(f"role={ob_state.role}")
     if ob_state.name:
         known.append(f"nom={ob_state.name}")
-    if ob_state.zone_name or ob_state.zone_id:
-        known.append(f"zone={ob_state.zone_name or ob_state.zone_id}")
+    if ob_state.zone_name or ob_state.zone_id or ob_state.declared_location:
+        known.append(f"zone={ob_state.zone_name or ob_state.declared_location or ob_state.zone_id}")
     missing = ", ".join(ob_state.missing_slots()) or "aucun"
     return (
         f"Deja connu : {', '.join(known) or 'rien'}. Encore manquant : {missing}. "
@@ -372,8 +358,23 @@ def _ack_line(ob_state: OnboardingState) -> str:
             parts.append(
                 "Super, un producteur qui veut vendre plus — on va faire du bon travail ensemble !"
             )
-    if ob_state._filled_slots.get("zone") and ob_state.zone_name:
-        parts.append(f"Zone notée : *{ob_state.zone_name}* ✅")
+    if ob_state._filled_slots.get("zone"):
+        # Trois issues possibles de la résolution de zone (voir `_resolve_zone`) : jamais un
+        # rejet sec (mandat 2026-09-26, "onboarding != éligibilité logistique") — la localité
+        # déclarée est TOUJOURS conservée et l'onboarding continue dans tous les cas.
+        if ob_state.coverage_status == "NEARBY" and ob_state.zone_name:
+            parts.append(
+                f"J'ai noté *{ob_state.declared_location}* — je te rattache à "
+                f"*{ob_state.zone_name}* pour nos services 📍"
+            )
+        elif ob_state.coverage_status == "OUT_OF_COVERAGE" and ob_state.declared_location:
+            parts.append(
+                f"J'ai bien noté *{ob_state.declared_location}*. Ladini n'y est pas encore "
+                "présent, mais je peux quand même créer ton profil et te prévenir dès "
+                "l'ouverture de la zone ! 🙌"
+            )
+        elif ob_state.zone_name:
+            parts.append(f"Zone notée : *{ob_state.zone_name}* ✅")
     return " ".join(parts)
 
 
@@ -383,7 +384,7 @@ def _missing_labels(ob_state: OnboardingState) -> List[str]:
         labels.append("si tu achètes ou tu produis")
     if not ob_state.name:
         labels.append("ton nom")
-    if not ob_state.zone_id:
+    if not ob_state.zone_id and not ob_state.coverage_status:
         labels.append("ta région")
     return labels
 
@@ -398,12 +399,11 @@ _FIELD_QUESTIONS: Dict[str, str] = {
     "name": (
         "Comment tu t'appelles patron ? _(comme ça je te reconnais à chaque fois !)_"
     ),
-    # (2026-09-18, retour produit) : demande la RÉGION (large), pas la ville
-    # précise — voir services/database/base.py::get_zone_by_name/
-    # get_available_zones, désormais restreintes aux zones racines
-    # (parent_id IS NULL) pour la même raison : une région a beaucoup plus de
-    # chances d'être déjà en base qu'une localité précise, donc moins
-    # d'allers-retours "zone introuvable" pendant l'onboarding.
+    # (2026-09-18, retour produit) : demande la RÉGION (large) en premier réflexe — plus
+    # facilement reconnaissable par l'utilisateur qu'une ville précise. Depuis le 2026-09-26,
+    # une réponse plus précise ("Somgandé") n'est cependant plus jamais un motif de blocage :
+    # voir `_resolve_zone`, qui accepte N'IMPORTE QUELLE localité et rattache/déclare hors
+    # couverture plutôt que de redemander une "région valide".
     "zone": (
         "Tu es dans quelle *région* ? "
         "_(pour te connecter avec les meilleurs partenaires près de chez toi)_ 📍"
@@ -506,9 +506,29 @@ async def run_onboarding_step(
             or entities.get("location")
         )
 
+    # Confirmation DÉTERMINISTE en premier (mandat 2026-09-26, "'ok' ne confirme pas le
+    # profil") — vocabulaire fermé CANONIQUE (`confirmation_phrases.py`, le MÊME que
+    # `interpreter/routing.py::_interpret_fast_path` pour tous les autres flows, jamais un
+    # second lexique propre à l'onboarding), consulté UNIQUEMENT quand une confirmation est
+    # réellement active (`CONFIRM_DETAILS` — mandat §8 : "'ok' ne doit être interprété comme
+    # confirmation QUE si une confirmation active existe"). Un match EXACT signifie que le
+    # message entier n'est QUE cette phrase — rien d'autre à extraire, l'appel LLM est donc
+    # sauté entièrement (même principe que le fast-path déterministe partout ailleurs : "un
+    # oui exact ne doit jamais coûter un appel LLM").
+    _confirmation_active = ob_state.step == OnboardingStep.CONFIRM_DETAILS
+    _bare_text = text.strip(" .!?,;:").lower()
+    _fast_confirm: Optional[str] = None
+    if _confirmation_active:
+        if _bare_text in _CONFIRM_EXACT_PHRASES:
+            _fast_confirm = "YES"
+        elif _bare_text in _REJECT_EXACT_PHRASES:
+            _fast_confirm = "NO"
+
     is_question = False
     llm_reply: Optional[str] = None
-    if text and llm_extract_all:
+    if _fast_confirm is not None:
+        extracted["confirm"] = _fast_confirm
+    elif text and llm_extract_all:
         try:
             llm_out = await llm_extract_all(text, _context_hint_for_llm(ob_state))
         except Exception:
@@ -521,35 +541,30 @@ async def run_onboarding_step(
 
     changed = _merge_extracted(ob_state, extracted)
 
-    # Zone : validate against catalog only if we have a name but no id yet.
-    if ob_state.zone_name and not ob_state.zone_id:
-        await _resolve_zone_id(ob_state, mcp_runtime)
-        if not ob_state.zone_id:
-            failed = ob_state.zone_name
-            ob_state.zone_name = None
-            hint = await _build_zone_catalog_hint(mcp_runtime)
-            if hint:
-                msg = (
-                    f"Je n'ai pas trouve la region '{failed}'. "
-                    f"Merci d'indiquer une region valide.{hint}"
-                )
-            else:
-                # Pas d'exemples de noms en dur ici (2026-09-18) : lister des
-                # régions précises qu'on ne peut pas garantir présentes dans
-                # CETTE base serait pire que pas d'exemple du tout — le hint
-                # dynamique ci-dessus (`_build_zone_catalog_hint`) est la
-                # seule source fiable de noms réels ; ce message ne sert que
-                # de repli quand même CE hint est indisponible.
-                msg = (
-                    f"Je n'ai pas pu verifier la region '{failed}'. "
-                    "Indiquez le nom de votre region."
-                )
-            ob_state.step = OnboardingStep.COLLECT_ROLE
-            return OnboardingResult(state=ob_state, response_text=msg)
+    # Zone : résolue au plus UNE fois par valeur (voir la garde `coverage_status is None` —
+    # sans elle, une localité déjà tranchée OUT_OF_COVERAGE relancerait une requête DB à
+    # CHAQUE tour suivant). Mandat 2026-09-26 : JAMAIS de rejet sec bloquant — les 3 issues
+    # de `_resolve_zone` (COVERED/NEARBY/OUT_OF_COVERAGE) laissent TOUJOURS l'onboarding
+    # continuer dans le MÊME tour (voir `_ack_line` pour le message adapté à chacune).
+    if ob_state.zone_name and not ob_state.zone_id and ob_state.coverage_status is None:
+        declared = ob_state.zone_name
+        resolution = await _resolve_zone(declared, mcp_runtime)
+        ob_state.declared_location = declared
+        ob_state.coverage_status = resolution.status
+        ob_state.zone_id = resolution.zone_id
+        ob_state.zone_name = resolution.zone_name
+        ob_state._filled_slots["zone"] = True
 
     confirm = extracted.get("confirm")
+    # La zone est "réglée" dès que `coverage_status` est posé — COVERED/NEARBY (zone_id connu)
+    # ET OUT_OF_COVERAGE (zone_id volontairement NULL) comptent également comme réglée :
+    # l'invariant du mandat est que la COUVERTURE ne conditionne jamais la création du profil,
+    # seulement les services qui en dépendront ensuite.
     all_present = bool(
-        ob_state.role and ob_state.name and ob_state.zone_id and ob_state.phone
+        ob_state.role
+        and ob_state.name
+        and ob_state.phone
+        and (ob_state.zone_id or ob_state.coverage_status)
     )
 
     # Create : all slots filled, explicit YES, nothing modified this turn.
@@ -592,70 +607,80 @@ async def run_onboarding_step(
     return OnboardingResult(state=ob_state, response_text=prompt)
 
 
-async def _resolve_zone_id(ob_state: OnboardingState, mcp_runtime: Any) -> bool:
-    if not ob_state.zone_name or ob_state.zone_id or mcp_runtime is None:
-        return bool(ob_state.zone_id)
+@dataclass(frozen=True)
+class ZoneResolution:
+    """Issue de `_resolve_zone` — jamais un simple booléen (mandat 2026-09-26) : la
+    couverture a TROIS états distincts, pas juste trouvé/pas-trouvé."""
+
+    #: "COVERED" (zone de service résolue directement), "NEARBY" (localité connue rattachée
+    #: à une zone de service parente — `zone_id`/`zone_name` portent alors CETTE zone
+    #: parente, jamais la localité elle-même), "OUT_OF_COVERAGE" (aucune correspondance à
+    #: aucun niveau — `zone_id`/`zone_name` restent `None`).
+    status: str
+    zone_id: Optional[str] = None
+    zone_name: Optional[str] = None
+
+
+async def _resolve_zone(declared_location: str, mcp_runtime: Any) -> ZoneResolution:
+    """Résout *declared_location* (le texte BRUT de l'utilisateur) en zone de SERVICE,
+    JAMAIS en bloquant : voir `ZoneResolution` pour les 3 issues possibles.
+
+    1. Zone RACINE (région) — comportement historique inchangé (`get_zone_by_name`,
+       `parent_id IS NULL`, voir docs/ONBOARDING_ZONE_REGION_LEVEL_2026-09-18.md).
+    2. Sinon, résolution HIÉRARCHIQUE (mandat 2026-09-26) : *declared_location* matche une
+       localité connue à N'IMPORTE QUEL niveau (`get_zone_hierarchy_by_name`) dont la région
+       racine EST une zone de service — rattachement automatique à cette région (ex: un
+       quartier rattaché à sa ville-région englobante), JAMAIS deviné/halluciné : uniquement
+       si cette hiérarchie existe déjà dans `governance.zones` (aucun nom de localité/région
+       en dur ici — voir `test_zone_not_found_error_message_never_cites_hardcoded_city_
+       examples`, qui verrouille précisément cette absence).
+    3. Sinon, HORS COUVERTURE — jamais un rejet : `declared_location` reste seul de vérité,
+       `zone_id` reste `None`, l'onboarding continue quand même (voir l'appelant)."""
+    if not declared_location or mcp_runtime is None:
+        return ZoneResolution(status="OUT_OF_COVERAGE")
 
     try:
         zone_response = await mcp_runtime.call_db(
-            "get_zone_by_name", name=ob_state.zone_name
+            "get_zone_by_name", name=declared_location
         )
-        logger.debug("[_resolve_zone_id] raw response: %s", zone_response)
         payload = _unwrap_tool_payload(zone_response)
-
-        if isinstance(payload, dict):
-            if payload.get("ok") is False or payload.get("status") == "error":
-                logger.warning(
-                    "[_resolve_zone_id] MCP error for '%s': %s",
-                    ob_state.zone_name,
-                    payload.get("error") or payload.get("message"),
-                )
-                return False
+        if isinstance(payload, dict) and payload.get("status") != "error":
             zone_id = payload.get("zone_id") or payload.get("id")
             zone_label = (
                 payload.get("zone_name") or payload.get("name") or payload.get("label")
             )
-
             if zone_id:
-                ob_state.zone_id = str(zone_id)
-            if zone_label:
-                ob_state.zone_name = str(zone_label)
+                return ZoneResolution(
+                    status="COVERED", zone_id=str(zone_id), zone_name=str(zone_label or declared_location)
+                )
     except Exception as exc:
         logger.error(
-            "[_resolve_zone_id] Exception for '%s': %s",
-            ob_state.zone_name,
+            "[_resolve_zone] Exception (région) pour '%s': %s",
+            declared_location,
             exc,
             exc_info=True,
         )
-        return False
-
-    return bool(ob_state.zone_id)
-
-
-async def _build_zone_catalog_hint(mcp_runtime: Any) -> str:
-    if mcp_runtime is None:
-        return ""
 
     try:
-        zone_catalog = await mcp_runtime.call_db("get_available_zones") or []
-        # NB: on n'appelle PAS `_unwrap_tool_payload` ici — elle est conçue
-        # pour dérouler un objet UNIQUE (`Optional[Dict]`) et, sur une
-        # liste, retourne dès que le PREMIER élément se déroule avec succès
-        # au lieu de la liste entière. Sur une réponse `get_available_zones`
-        # (plusieurs zones), ça ne gardait que la toute première ville de la
-        # DB — d'où l'incident "l'agent ne cite que Bobo Dioulasso comme
-        # zone valide" (2026-08-26). `_extract_zone_labels` déroule déjà
-        # correctement l'enveloppe {"data": [...]} elle-même, sur la liste
-        # complète.
-        labels = _extract_zone_labels(zone_catalog)
-        if labels:
-            sample = ", ".join(labels[:10])
-            return f" Zones valides : {sample}."
+        hierarchy_response = await mcp_runtime.call_db(
+            "get_zone_hierarchy_by_name", name=declared_location
+        )
+        payload = _unwrap_tool_payload(hierarchy_response)
+        if isinstance(payload, dict) and payload.get("status") != "error":
+            root = payload.get("root")
+            if isinstance(root, dict) and root.get("id"):
+                return ZoneResolution(
+                    status="NEARBY", zone_id=str(root["id"]), zone_name=str(root.get("name") or "")
+                )
     except Exception as exc:
-        logger.warning("[_build_zone_catalog_hint] %s", exc)
-        return ""
+        logger.error(
+            "[_resolve_zone] Exception (hiérarchie) pour '%s': %s",
+            declared_location,
+            exc,
+            exc_info=True,
+        )
 
-    return ""
+    return ZoneResolution(status="OUT_OF_COVERAGE")
 
 
 def _confirmation_component() -> Dict[str, Any]:
@@ -677,7 +702,14 @@ def _build_confirmation_prompt(ob_state: OnboardingState) -> str:
     role_label = (
         "Acheteur" if role == "BUYER" else "Producteur" if role == "PRODUCER" else role
     )
-    zone = ob_state.zone_name or "(non renseignée)"
+    if ob_state.zone_id and ob_state.zone_name:
+        zone = ob_state.zone_name
+    elif ob_state.declared_location:
+        # OUT_OF_COVERAGE (mandat 2026-09-26) : la localité déclarée reste affichée telle
+        # quelle — jamais une zone de service inventée pour "faire joli" dans le récap.
+        zone = f"{ob_state.declared_location} (hors couverture actuelle)"
+    else:
+        zone = "(non renseignée)"
     return (
         f"Patron, voici ton récapitulatif :\n"
         f"👤 *Nom :* {name}\n"
@@ -732,6 +764,11 @@ async def _step_create_profile(
         "name": ob_state.name,
         "role": ob_state.role,
         "zone_id": ob_state.zone_id,
+        "declared_location": ob_state.declared_location,
+        # Mandat 2026-09-26 : jamais NULL en base une fois le profil créé — la zone a
+        # forcément été traitée pour que `all_present` soit vrai (voir `run_onboarding_step`),
+        # mais un défaut explicite protège quand même contre un état amont incohérent.
+        "coverage_status": ob_state.coverage_status or "COVERED",
     }
 
     try:

@@ -171,6 +171,7 @@ TOOL_SCOPE_MAP: dict[str, PermissionScope] = {
     "get_product_category_unit_config": PermissionScope.DB_READ_ONLY,
     "get_transaction_summary": PermissionScope.DB_READ_ONLY,
     "get_zone_by_name": PermissionScope.DB_READ_ONLY,
+    "get_zone_hierarchy_by_name": PermissionScope.DB_READ_ONLY,
     "list_producer_productions": PermissionScope.DB_READ_ONLY,
     "check_price_anomaly": PermissionScope.DB_READ_ONLY,
     "validate_stock_availability_atomic": PermissionScope.DB_READ_ONLY,

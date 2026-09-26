@@ -50,11 +50,14 @@ def test_migration_0004_applies_in_place_without_touching_existing_data():
 
     dsn, drop = db_tools.create_database(admin)
     try:
+        # Localisé par NOM, jamais "la dernière migration du journal" (une migration ajoutée
+        # après 0004 — ex: 0005_add_location_coverage — ne doit pas faire dévier ce test, qui
+        # reproduit spécifiquement la mise à niveau 0003 -> 0004).
         files = db_tools.migration_files()
-        assert [f.stem for f in files][-1] == "0004_add_monthly_recurrence", (
-            "ce test suppose que 0004_add_monthly_recurrence est la dernière migration du journal"
-        )
-        pre_0004, only_0004 = files[:-1], files[-1:]
+        stems = [f.stem for f in files]
+        assert "0004_add_monthly_recurrence" in stems, "migration 0004 introuvable dans le journal"
+        idx_0004 = stems.index("0004_add_monthly_recurrence")
+        pre_0004, only_0004 = files[:idx_0004], files[idx_0004 : idx_0004 + 1]
 
         conn = psycopg2.connect(dsn)
         try:

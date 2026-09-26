@@ -30,6 +30,10 @@ from datetime import date
 from string import Template
 from typing import Any, Dict, List, Optional, Tuple
 
+from ladini.agents.confirmation_phrases import (
+    _CONFIRM_EXACT_PHRASES,
+    _REJECT_EXACT_PHRASES,
+)
 from ladini.core.idempotency import get_cached as _get_cached_value
 from ladini.core.idempotency import set_cached as _set_cached_value
 from ladini.domain.quantity_unit import (
@@ -116,21 +120,16 @@ logger = logging.getLogger("Ladini.Market.InterpreterRouting")
 # qui a échoué pendant une panne du gateway LLM, laissant la confirmation
 # sans réponse (récap réaffiché au lieu de CONFIRM). Ajout littéral au
 # vocabulaire fermé existant, pas une nouvelle heuristique/regex.
+#
+# (2026-09-26, mandat onboarding "'ok' ne confirme pas le profil") : SOURCE
+# UNIQUE désormais `ladini.agents.confirmation_phrases` (déplacé, jamais
+# dupliqué, voir l'import en tête de fichier) — `agents/onboarding.py` (module
+# volontairement sans dépendance à `graphs.*`) réutilise EXACTEMENT ce même
+# vocabulaire pour sa propre confirmation de profil, au lieu d'un second
+# moteur ad hoc. "ok ok"/"valider"/"je valide"/"tout est bon"/"go" ajoutés au
+# passage (déjà des synonymes évidents des entrées existantes, jamais
+# couverts avant).
 # =====================================================================
-_CONFIRM_EXACT_PHRASES = frozenset(
-    {
-        "oui", "oui oui", "ok", "okay", "d'accord", "daccord", "je confirme",
-        "je suis d'accord", "je suis daccord", "c'est bon", "cest bon",
-        "ca va", "ça va", "parfait", "vas-y", "vasy", "valide", "confirmer",
-        "confirme", "confirmé", "yes",
-    }
-)
-_REJECT_EXACT_PHRASES = frozenset(
-    {
-        "non", "non non", "annule", "annuler", "stop", "pas d'accord",
-        "pas daccord", "je ne confirme pas", "je refuse", "no",
-    }
-)
 
 
 def _fix_bare_confirmation_typo(text: str) -> str:

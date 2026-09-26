@@ -1,6 +1,6 @@
 {
-  "id": "4a4b9bdf-7245-4685-8cb3-6472cdc7acfe",
-  "prevId": "c2b74df9-e09f-4e21-acdf-75314ef71d56",
+  "id": "3981dcb4-e1ca-4e75-986e-5086dffb58ef",
+  "prevId": "4a4b9bdf-7245-4685-8cb3-6472cdc7acfe",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -317,6 +317,19 @@
           "primaryKey": false,
           "notNull": false
         },
+        "declared_location": {
+          "name": "declared_location",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "coverage_status": {
+          "name": "coverage_status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'COVERED'"
+        },
         "onboarding_completed": {
           "name": "onboarding_completed",
           "type": "boolean",
@@ -467,7 +480,12 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "users_coverage_status_chk": {
+          "name": "users_coverage_status_chk",
+          "value": "\"auth\".\"users\".\"coverage_status\" IN ('COVERED','NEARBY','OUT_OF_COVERAGE','WAITLIST')"
+        }
+      },
       "isRLSEnabled": false
     },
     "governance.categories": {

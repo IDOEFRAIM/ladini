@@ -150,6 +150,7 @@ MCP_EXPOSED_TOOLS: frozenset[str] = frozenset(
         "check_price_anomaly",
         "get_available_zones",
         "get_zone_by_name",
+        "get_zone_hierarchy_by_name",
         "get_product_category_unit_config",
         # ── Modération / signaux ─────────────────────────────────────────
         "get_prohibited_terms",

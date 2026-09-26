@@ -174,37 +174,38 @@ class TestFamilyRelationIsNotMisreadAsAName:
         assert ob_state.name == "Ibrahim"
 
 
-class TestZoneCatalogHintListsAllValidZones:
-    """Incident réel (2026-08-26) : un utilisateur dit "je suis à Ouaga
-    Mall", la zone ne résout pas, et l'agent ne cite que *Bobo Dioulasso*
-    comme zone valide dans son message d'erreur — alors que la DB contient
-    plusieurs villes/provinces.
-
-    Cause : `_build_zone_catalog_hint` passait la réponse LISTE de
-    `get_available_zones` à `_unwrap_tool_payload`, une fonction conçue pour
-    dérouler un objet UNIQUE (`Optional[Dict]`, utilisée ailleurs pour
-    `get_zone_by_name`). Sur une liste, elle retourne dès que le PREMIER
-    élément se déroule avec succès — donc juste la première ville de la DB,
-    le reste jeté silencieusement."""
+class TestZoneResolutionNeverBlocksOnboarding:
+    """Mandat 2026-09-26 : une localité qui ne résout à AUCUN niveau (ni région, ni
+    rattachement hiérarchique) ne doit plus jamais bloquer l'onboarding avec un message sec
+    listant des "zones valides" — remplace l'ancien `TestZoneCatalogHintListsAllValidZones`
+    (incident 2026-08-26), dont le comportement verrouillé (rejet + liste) est précisément
+    celui que ce mandat retire. Voir `test_onboarding_zone_region_level.py` pour les tests
+    dédiés au resolver DB lui-même (`get_zone_by_name`/`get_zone_hierarchy_by_name`)."""
 
     class _ZoneStub:
-        def __init__(self, zones):
-            self.zones = zones
+        def __init__(self, *, region_found=False, hierarchy_root=None):
+            self._region_found = region_found
+            self._hierarchy_root = hierarchy_root
 
         async def call_db(self, tool_name: str, **kwargs: Any):
             if tool_name == "get_zone_by_name":
+                if self._region_found:
+                    return {"status": "success", "data": {"id": "z1", "name": kwargs.get("name")}}
                 return {"status": "error", "message": "introuvable"}
-            if tool_name == "get_available_zones":
-                return {"status": "success", "data": self.zones}
+            if tool_name == "get_zone_hierarchy_by_name":
+                if self._hierarchy_root:
+                    return {
+                        "status": "success",
+                        "data": {
+                            "matched": {"id": "child-1", "name": kwargs.get("name")},
+                            "root": self._hierarchy_root,
+                        },
+                    }
+                return {"status": "error", "message": "introuvable"}
             raise AssertionError(f"outil inattendu: {tool_name}")
 
-    def test_the_hint_lists_every_valid_zone_not_just_the_first(self):
-        runtime = self._ZoneStub([
-            {"id": "z1", "label": "Bobo Dioulasso"},
-            {"id": "z2", "label": "Ouagadougou"},
-            {"id": "z3", "label": "Koudougou"},
-            {"id": "z4", "label": "Banfora"},
-        ])
+    def test_a_locality_matching_nothing_at_all_never_blocks_the_onboarding(self):
+        runtime = self._ZoneStub(region_found=False, hierarchy_root=None)
         ob_state = OnboardingState(step=OnboardingStep.COLLECT_ROLE, phone="+22670000001")
         result = run(run_onboarding_step(
             ob_state,
@@ -212,8 +213,26 @@ class TestZoneCatalogHintListsAllValidZones:
             runtime,
             llm_extract_all=_extractor(zone="Ouaga mall"),
         ))
-        for expected in ("Bobo Dioulasso", "Ouagadougou", "Koudougou", "Banfora"):
-            assert expected in result.response_text, (
-                f"'{expected}' manquant du message — seule une partie du "
-                f"catalogue est citée : {result.response_text!r}"
-            )
+        assert "valide" not in result.response_text.lower()
+        assert "Ouaga mall" in result.response_text
+        assert ob_state.declared_location == "Ouaga mall"
+        assert ob_state.coverage_status == "OUT_OF_COVERAGE"
+        assert ob_state.zone_id is None
+        # L'onboarding continue (autres champs manquants demandés), jamais bloqué en
+        # COLLECT_ROLE avec le SEUL message de rejet comme avant.
+        assert "nom" in result.response_text.lower()
+
+    def test_a_locality_attached_to_a_known_parent_zone_is_accepted_transparently(self):
+        runtime = self._ZoneStub(hierarchy_root={"id": "root-1", "name": "Ouagadougou"})
+        ob_state = OnboardingState(step=OnboardingStep.COLLECT_ROLE, phone="+22670000001")
+        result = run(run_onboarding_step(
+            ob_state,
+            "Je suis à Somgande",
+            runtime,
+            llm_extract_all=_extractor(zone="Somgande"),
+        ))
+        assert ob_state.declared_location == "Somgande"
+        assert ob_state.coverage_status == "NEARBY"
+        assert ob_state.zone_id == "root-1"
+        assert ob_state.zone_name == "Ouagadougou"
+        assert "Ouagadougou" in result.response_text
