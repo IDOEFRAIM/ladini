@@ -57,8 +57,17 @@ class RecurringNeed(Base):
             "max_price_per_unit IS NULL OR max_price_per_unit >= 0",
             name="recurring_needs_max_price_chk",
         ),
+        # Phase 3 (MONTHLY) : la migration 0004 DROP puis ADD cette contrainte sous le MÊME nom —
+        # seule façon d'élargir un CHECK en PostgreSQL (pas d'ALTER CONSTRAINT en place). Ce n'est
+        # PAS une contraction : le nouvel ensemble de valeurs est un SUR-ensemble strict de
+        # l'ancien (+MONTHLY, rien retiré) — tout code n'ayant jamais entendu parler de MONTHLY
+        # continue d'écrire DAILY/WEEKLY_DAYS/WEEKLY/ONE_OFF sans le moindre changement de
+        # comportement. `scripts/check_migrations.sh` ne distingue pas ce cas (widen) d'un DROP
+        # CONSTRAINT réellement destructeur par simple lecture du texte du diff — élargissement
+        # explicitement approuvé par le propriétaire du dépôt (2026-09-26), voir le message du
+        # commit qui introduit cette note (`migration-contract-approved:`).
         CheckConstraint(
-            "recurrence_type IN ('DAILY','WEEKLY_DAYS','WEEKLY','ONE_OFF')",
+            "recurrence_type IN ('DAILY','WEEKLY_DAYS','WEEKLY','ONE_OFF','MONTHLY')",
             name="recurring_needs_recurrence_type_chk",
         ),
         CheckConstraint("status IN ('ACTIVE','PAUSED','CANCELLED')", name="recurring_needs_status_chk"),
@@ -78,7 +87,7 @@ class RecurringNeed(Base):
     )
     quantity = Column(Numeric(14, 3), nullable=False)
     unit = Column(Text, default="KG", nullable=False, server_default=text("'KG'"))
-    # DAILY | WEEKLY_DAYS | WEEKLY | ONE_OFF — volontairement fermé (pas de RRULE/cron générique).
+    # DAILY | WEEKLY_DAYS | WEEKLY | ONE_OFF | MONTHLY — volontairement fermé (pas de RRULE/cron générique).
     recurrence_type = Column(Text, nullable=False)
     # Jours ISO (1=lundi..7=dimanche) — utilisé seulement si recurrence_type = WEEKLY_DAYS.
     weekly_days = Column(PG_ARRAY(Integer), nullable=True)

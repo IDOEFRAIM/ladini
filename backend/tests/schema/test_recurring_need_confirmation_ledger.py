@@ -16,10 +16,12 @@ from types import SimpleNamespace
 import psycopg2
 import pytest
 from factories import Graph
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from test_recurring_supply_service import FIXED_TODAY
 
 import ladini.services.database.recurring_supply as recurring_supply_module
+from ladini.domain.models import RecurringNeed
 from ladini.graphs.agents.market_coach.domain.recurring_need_draft import (
     RecurringNeedDraft,
     RecurringNeedDraftStatus,
@@ -78,9 +80,9 @@ def _with_real_store(dsn, monkeypatch, coro_factory):
     return asyncio.run(go())
 
 
-def _executing_draft(draft_id: str) -> RecurringNeedDraft:
+def _executing_draft(draft_id: str, recurrence_type: str = "DAILY") -> RecurringNeedDraft:
     draft = RecurringNeedDraft.new(
-        draft_id=draft_id, product="tomate", quantity=40.0, unit="KG", recurrence_type="DAILY"
+        draft_id=draft_id, product="tomate", quantity=40.0, unit="KG", recurrence_type=recurrence_type
     )
     return draft._confirm_to_executing()
 
@@ -259,6 +261,29 @@ def test_two_concurrent_executions_of_one_confirmation_create_one_set(market, mo
     assert _needs_count(market.dsn, market.buyer_id) == 1
 
 
+def test_two_concurrent_executions_of_one_monthly_confirmation_create_one_set(market, monkeypatch):
+    """Phase 3 (mandat MONTHLY §17) : même garde C9 que DAILY ci-dessus — deux exécutions
+    concurrentes de LA MÊME confirmation MONTHLY ne créent jamais deux besoins. Réutilise
+    exactement `_call`/`_executing_draft`, aucune nouvelle infrastructure de concurrence."""
+    draft = _executing_draft("ledger-monthly-concurrent", recurrence_type="MONTHLY")
+
+    async def scenario():
+        await store.insert(draft, conversation_id="+226")
+        engines = [create_async_engine(_async_dsn(market.dsn)) for _ in range(2)]
+        try:
+            return await asyncio.gather(
+                *[_call(e, market, draft, recurrence_type="MONTHLY", starts_at="2026-01-31") for e in engines]
+            )
+        finally:
+            for e in engines:
+                await e.dispose()
+
+    results = _with_real_store(market.dsn, monkeypatch, scenario)
+    assert {r["recurring_need_id"] for r in results} == {results[0]["recurring_need_id"]}
+    assert sorted(bool(r.get("replayed")) for r in results) == [False, True]
+    assert _needs_count(market.dsn, market.buyer_id) == 1
+
+
 def test_a_multi_item_confirmation_is_all_or_nothing_and_replayable(market, monkeypatch):
     draft = _executing_draft("ledger-6")
     items = [
@@ -302,6 +327,54 @@ def test_a_multi_item_confirmation_is_all_or_nothing_and_replayable(market, monk
     assert status == "EXECUTED"
     stored = payload if isinstance(payload, dict) else json.loads(payload)
     assert len(stored["execution_result"]["items"]) == 2
+
+
+def test_a_multi_item_monthly_confirmation_creates_both_needs_atomically_and_is_replayable(market, monkeypatch):
+    """Phase 3 (mandat MONTHLY §15/§16) : "coq 14 + chèvre 20, MONTHLY" après UNE seule
+    confirmation logique — 2 `recurring_needs`, même règle MONTHLY, occurrences matérialisées
+    pour chacun, transaction atomique, rejouable sans doublon. Miroir exact du test DAILY
+    ci-dessus, aucune nouvelle infrastructure."""
+    draft = _executing_draft("ledger-monthly-multi", recurrence_type="MONTHLY")
+    items = [
+        {"product_query": "coq", "quantity": 14, "unit": "TETE"},
+        {"product_query": "chèvre", "quantity": 20, "unit": "TETE"},
+    ]
+
+    async def scenario():
+        await store.insert(draft, conversation_id="+226")
+        engine = create_async_engine(_async_dsn(market.dsn))
+        try:
+            async def batch(its):
+                async with AsyncSession(engine, expire_on_commit=False) as session:
+                    svc = _Svc(session, market.user, market.profile)
+                    try:
+                        out = await svc.create_recurring_needs(
+                            phone="+226", items=its, recurrence_type="MONTHLY", starts_at="2026-01-31",
+                            draft_id=draft.draft_id, draft_version=draft.execution_version,
+                        )
+                    except BaseException:
+                        await session.rollback()
+                        raise
+                    await session.commit()
+                    return out
+
+            first = await batch(items)
+            replay = await batch(items)
+            async with AsyncSession(engine, expire_on_commit=False) as session:
+                needs = (
+                    await session.execute(select(RecurringNeed).where(RecurringNeed.buyer_id == market.buyer_id))
+                ).scalars().all()
+            return first, replay, needs
+        finally:
+            await engine.dispose()
+
+    first, replay, needs = _with_real_store(market.dsn, monkeypatch, scenario)
+    assert len(first["items"]) == 2 and replay["replayed"] is True
+    assert [i["recurring_need_id"] for i in replay["items"]] == [i["recurring_need_id"] for i in first["items"]]
+    assert _needs_count(market.dsn, market.buyer_id) == 2
+    assert {n.recurrence_type for n in needs} == {"MONTHLY"}
+    status, _version, _payload = _draft_row(market.dsn, "ledger-monthly-multi")
+    assert status == "EXECUTED"
 
 
 def test_the_ledger_sql_matches_the_migrated_table(pg_dsn):

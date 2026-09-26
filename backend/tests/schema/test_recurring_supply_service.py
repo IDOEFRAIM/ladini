@@ -188,6 +188,47 @@ def test_materializing_the_same_window_twice_creates_no_duplicate(market):
     assert total == 7
 
 
+# ── réapprovisionnement générique des occurrences (Phase 3, mandat MONTHLY §14) ──
+
+def test_monthly_replenishment_materializes_successive_month_end_occurrences_without_duplicates(market, monkeypatch):
+    """`replenish_occurrence_windows` — le mécanisme manquant identifié par le mandat MONTHLY :
+    sans lui, un besoin MONTHLY (ancre 31 janvier) ne recevrait jamais plus d'UNE occurrence.
+    Ancre fixe (jamais dérivée de l'occurrence précédente) : 31 janvier -> 28 février -> 31 mars.
+    Un second passage à la MÊME date ne doit créer aucun doublon (contrainte unique
+    (recurring_need_id, occurrence_date))."""
+    monkeypatch.setattr(recurring_supply_module, "_today", lambda: date(2026, 1, 31))
+    result = _run(market[0], lambda session: _create(session, market, recurrence_type="MONTHLY", starts_at="2026-01-31"))
+    need_id = uuid.UUID(result["recurring_need_id"])
+
+    async def occurrence_dates(session):
+        occs = (
+            await session.execute(
+                select(RecurringNeedOccurrence).where(RecurringNeedOccurrence.recurring_need_id == need_id)
+            )
+        ).scalars().all()
+        return sorted(o.occurrence_date.date() for o in occs)
+
+    async def replenish(session):
+        return await _svc(session, market).replenish_occurrence_windows()
+
+    # Création : fenêtre J->J+7 depuis le 31 janvier -> seule l'occurrence du 31 janvier lui-même.
+    assert _run(market[0], occurrence_dates) == [date(2026, 1, 31)]
+
+    # 22 février (2026 n'est pas bissextile) : le 28 février entre dans la fenêtre J->J+7.
+    monkeypatch.setattr(recurring_supply_module, "_today", lambda: date(2026, 2, 22))
+    _run(market[0], replenish)
+    assert _run(market[0], occurrence_dates) == [date(2026, 1, 31), date(2026, 2, 28)]
+
+    # 25 mars : le 31 mars entre dans la fenêtre J->J+7 — l'ancre reste 31, jamais dérivée du 28.
+    monkeypatch.setattr(recurring_supply_module, "_today", lambda: date(2026, 3, 25))
+    _run(market[0], replenish)
+    assert _run(market[0], occurrence_dates) == [date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31)]
+
+    # Second passage à la MÊME date : idempotent, aucun doublon.
+    _run(market[0], replenish)
+    assert _run(market[0], occurrence_dates) == [date(2026, 1, 31), date(2026, 2, 28), date(2026, 3, 31)]
+
+
 # ── création multi-produits, atomique (chantier 2026-09-23) ─────────────
 
 def test_create_recurring_needs_creates_one_need_per_item(market):

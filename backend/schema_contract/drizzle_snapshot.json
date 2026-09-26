@@ -1,6 +1,6 @@
 {
-  "id": "c2b74df9-e09f-4e21-acdf-75314ef71d56",
-  "prevId": "28fabd36-31e9-4cab-b3e9-f6ba52d566cd",
+  "id": "4a4b9bdf-7245-4685-8cb3-6472cdc7acfe",
+  "prevId": "c2b74df9-e09f-4e21-acdf-75314ef71d56",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -6126,7 +6126,7 @@
         },
         "recurring_needs_recurrence_type_chk": {
           "name": "recurring_needs_recurrence_type_chk",
-          "value": "\"marketplace\".\"recurring_needs\".\"recurrence_type\" IN ('DAILY','WEEKLY_DAYS','WEEKLY','ONE_OFF')"
+          "value": "\"marketplace\".\"recurring_needs\".\"recurrence_type\" IN ('DAILY','WEEKLY_DAYS','WEEKLY','ONE_OFF','MONTHLY')"
         },
         "recurring_needs_status_chk": {
           "name": "recurring_needs_status_chk",
