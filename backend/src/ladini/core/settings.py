@@ -518,20 +518,26 @@ class Settings(BaseSettings):
     # + micro-prompts SELECTION/ACTIVE_SLOT/...) — délibérément SÉPARÉ de
     # LLM_FAST_* (INPUT_NORMALIZATION/SECURITY_MODERATION/STATE_CLEANER,
     # inchangés) et de LLM_REASONING_* (génération de réponse, inchangé).
-    # Objectif du chantier : "MarketCoach Interpreter → Groq →
+    # Objectif du chantier initial : "MarketCoach Interpreter → Groq →
     # llama-3.1-8b-instant". Validation LIVE (2026-09-12) : ce modèle
     # renvoie un 404 "does not exist or you do not have access to it" —
     # EXACT même décommissionnement Groq déjà documenté ci-dessus (incident
     # 2026-09-05, `llama-3.1-8b-instant`/`llama-3.3-70b-versatile` retirés le
-    # 2026-06-17). Le gateway a basculé silencieusement sur FALLBACK_1 pour
-    # les 15/15 appels de validation — AUCUN n'a réellement touché Groq. Le
-    # remplacement recommandé par Groq pour `llama-3.1-8b-instant`, DÉJÀ
-    # vérifié fonctionnel dans ce repo (voir `LLM_FAST_FALLBACK_1` ci-dessus),
-    # est utilisé ici à la place — même famille "instant/économique", pas
-    # `openai/gpt-oss-120b` (réservé REASONING, jamais un fallback
-    # silencieux de premier niveau ici).
-    LLM_INTERPRETER_PRIMARY: str = "groq:openai/gpt-oss-20b"
-    LLM_INTERPRETER_FALLBACK_1: str = "bedrock_gateway:qwen.qwen3-32b"
+    # 2026-06-17). Remplacé alors par `openai/gpt-oss-20b`, posé PRIMAIRE
+    # pour la vitesse/coût sur ce profil de classification — voir l'audit
+    # LLM_GATEWAY_EXHAUSTED du 2026-09-26 pour le détail de cette période.
+    #
+    # (2026-09-26, décision produit explicite) : Bedrock (`bedrock_gateway`)
+    # devient le PRIMAIRE — Groq passe en repli (conservé, pas retiré : le
+    # disjoncteur du LLM Gateway bascule dessus automatiquement si Bedrock
+    # échoue, voir `llm_gateway/gateway.py`/`circuit_breaker.py`). Ce choix
+    # suppose `OPENAI_BASE_URL` correctement configuré en prod vers la
+    # vraie passerelle Bedrock (voir `scripts/smoke_test_llm_providers.py`
+    # et `llm_gateway/registry.py::validate_config()`, qui l'aurait signalé
+    # au démarrage sinon) — sans quoi ce candidat visait silencieusement
+    # l'API OpenAI publique (voir availability.py).
+    LLM_INTERPRETER_PRIMARY: str = "bedrock_gateway:qwen.qwen3-32b"
+    LLM_INTERPRETER_FALLBACK_1: str = "groq:openai/gpt-oss-20b"
     LLM_INTERPRETER_FALLBACK_2: str = ""
     # --- Réconciliation PROCUREMENT (2026-09-03, phase 1 recovery) ---
     # Fenêtre au-delà de laquelle un `ProcurementDraft` `EXECUTING` est

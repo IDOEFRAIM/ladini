@@ -23,10 +23,9 @@ LLM dédié à l'interpréteur MarketCoach.
 
 Un profil `LLMProfile.INTERPRETER` dédié, résolu par ses propres réglages
 (`LLM_INTERPRETER_PRIMARY`/`_FALLBACK_1`/`_FALLBACK_2`, défaut
-`groq:openai/gpt-oss-20b` — voir settings.py : `llama-3.1-8b-instant`,
-demandé initialement, s'est révélé décommissionné côté Groq lors de la
-validation live 2026-09-12, remplacé par le modèle déjà vérifié fonctionnel
-ailleurs dans ce repo) — utilisé par :
+`bedrock_gateway:qwen.qwen3-32b` primaire / `groq:openai/gpt-oss-20b` en
+repli depuis le 2026-09-26 — voir settings.py pour l'historique complet,
+Groq ayant été primaire entre le 2026-09-12 et cette date) — utilisé par :
   - `interpreter/selection_micro.py` (micro-prompt SELECTION) ;
   - `interpreter/routing.py` (interpréteur unifié legacy — NEW_TASK/
     ACTIVE_SLOT/STRUCTURED_ACTION, MÊME prompt/schéma/règles, SEUL le
@@ -45,23 +44,29 @@ from ladini.core.settings import settings as real_settings
 
 
 class TestInterpreterProfileIsLoadedFromItsOwnDedicatedSettings:
-    def test_default_settings_resolve_the_interpreter_profile_to_groq(self):
+    """(2026-09-26, décision produit explicite, post-audit
+    LLM_GATEWAY_EXHAUSTED) : Bedrock devient le PRIMAIRE du profil
+    INTERPRETER — Groq passe en repli (conservé, pas retiré). Remplace la
+    règle précédente (spec §4 du chantier State Router, "jamais Bedrock en
+    position 0") qui reflétait un choix antérieur, différent — voir
+    settings.py pour l'historique complet des deux décisions."""
+
+    def test_default_settings_resolve_the_interpreter_profile_to_bedrock(self):
         registry = load_registry(real_settings)
         candidates = registry[LLMProfile.INTERPRETER]
         assert candidates, "aucun candidat configuré pour LLMProfile.INTERPRETER"
         primary = candidates[0]
-        assert primary.provider == "groq"
-        assert primary.model == "openai/gpt-oss-20b"
+        assert primary.provider == "bedrock_gateway"
+        assert primary.model == "qwen.qwen3-32b"
 
-    def test_interpreter_primary_is_never_bedrock_with_default_groq_config(self):
-        # Spec §4 : "ne pas utiliser Bedrock sur le chemin principal de
-        # l'interpréteur" — le PRIMAIRE doit être Groq quand la config par
-        # défaut (Groq) est active ; un repli Bedrock en position 2+ reste
-        # acceptable (résilience), jamais en position 0.
+    def test_groq_remains_configured_as_a_fallback_not_removed(self):
+        # Bedrock primaire ne veut pas dire "Groq retiré" — la résilience
+        # (disjoncteur -> repli) reste le point de cette chaîne à plusieurs
+        # candidats.
         registry = load_registry(real_settings)
-        primary = registry[LLMProfile.INTERPRETER][0]
-        assert primary.provider != "bedrock_native"
-        assert primary.provider != "bedrock_gateway"
+        providers = [c.provider for c in registry[LLMProfile.INTERPRETER]]
+        assert "groq" in providers
+        assert providers.index("groq") > 0, "Groq doit rester un repli, jamais le primaire"
 
     def test_interpreter_model_is_configurable_via_settings(self):
         # Spec §1 : "il doit être configurable" — pas un modèle en dur dans
