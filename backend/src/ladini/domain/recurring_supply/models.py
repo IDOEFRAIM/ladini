@@ -63,7 +63,9 @@ class RecurringNeed(Base):
         # l'ancien (+MONTHLY, rien retiré) — tout code n'ayant jamais entendu parler de MONTHLY
         # continue d'écrire DAILY/WEEKLY_DAYS/WEEKLY/ONE_OFF sans le moindre changement de
         # comportement. `scripts/check_migrations.sh` ne distingue pas ce cas (widen) d'un DROP
-        # CONSTRAINT réellement destructeur par simple lecture du texte du diff.
+        # CONSTRAINT réellement destructeur par simple lecture du texte du diff — élargissement
+        # explicitement approuvé par le propriétaire du dépôt (2026-09-26), voir le message du
+        # commit qui introduit cette note (`migration-contract-approved:`).
         CheckConstraint(
             "recurrence_type IN ('DAILY','WEEKLY_DAYS','WEEKLY','ONE_OFF','MONTHLY')",
             name="recurring_needs_recurrence_type_chk",
