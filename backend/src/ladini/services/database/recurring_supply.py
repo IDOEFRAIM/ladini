@@ -1225,4 +1225,4 @@ def _parse_date(value: Optional[Any]) -> Optional[date]:
     raise BusinessRuleException(f"Date invalide : {value!r}")
 
 
-__all__ = ["RecurringSupplyMixin", "RECURRING_NEED_ACTIONS"]
+__all__ = ["RecurringSupplyMixin", "RECURRING_NEED_ACTIONS", "MATCH_RESPONSE_ACTIONS"]

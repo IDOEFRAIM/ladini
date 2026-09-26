@@ -61,7 +61,10 @@ def test_cas1_confirm_with_one_actionable_need_calls_accept_for_that_need():
     )
     result = run(recurring_need_flow(_confirm_state(), runtime))
 
-    assert seen == [{"phone": "+22670000000", "recurring_need_id": "need-tomate", "action": "CONFIRM"}]
+    # (2026-09-26, mandat "mismatch CONFIRM vs ACCEPT") : `accept_match_proposal` ne parle que le
+    # vocabulaire `MATCH_RESPONSE_ACTIONS = ("ACCEPT", "REJECT")` — "CONFIRM" (verrouillé ici
+    # auparavant) n'a jamais été une valeur valide côté service réel.
+    assert seen == [{"phone": "+22670000000", "recurring_need_id": "need-tomate", "action": "ACCEPT"}]
     assert "confirmé" in result["final_response"].lower()
     assert result["status"] == "COMPLETED"
 
@@ -118,7 +121,7 @@ def test_cas3_confirming_a_partial_match_still_calls_accept_normally():
     )
     result = run(recurring_need_flow(_confirm_state(), runtime))
 
-    assert len(seen) == 1 and seen[0]["action"] == "CONFIRM"
+    assert len(seen) == 1 and seen[0]["action"] == "ACCEPT"
     assert "confirmé" in result["final_response"].lower()
 
 
