@@ -76,8 +76,9 @@ async def excess_supply(request: Request) -> dict[str, Any]:
 async def timeseries(request: Request) -> dict[str, Any]:
     q = request.query_params
     try:
-        start: Optional[date] = api._day(q.get("from"), "from")
-        end: Optional[date] = api._day(q.get("to"), "to")
+        raw_start: Optional[date] = api._day(q.get("from"), "from")
+        raw_end: Optional[date] = api._day(q.get("to"), "to")
+        start, end = api.resolve_window(raw_start, raw_end)
     except api.ApiError as exc:
         raise HTTPException(status_code=exc.status, detail=exc.message) from None
     return await _serve("timeseries", q, api.timeseries, start=start, end=end)

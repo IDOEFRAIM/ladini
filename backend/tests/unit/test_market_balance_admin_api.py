@@ -50,29 +50,43 @@ class TestZoneIdShim:
 
 
 class TestTimeseriesWindowValidation:
-    def test_reversed_window_is_rejected(self):
+    """`resolve_window` is deliberately pure and called BEFORE any database session is opened
+    (see the router) — a reversed/oversized window must fail with ApiError(400) without ever
+    touching `MarketBalanceService`/a session, never surface as a 500 from a session that was
+    never needed (the exact bug this test locks: CI caught it as a 500 on the first push)."""
+
+    def test_reversed_window_is_rejected_without_touching_a_session(self):
         from datetime import date
 
         from ladini.services.analytics.market_balance_admin_api import (
             ApiError,
-            timeseries,
+            resolve_window,
         )
-        from tests.conftest import run
 
-        with pytest.raises(ApiError):
-            run(timeseries(object(), None, start=date(2026, 9, 10), end=date(2026, 9, 1)))
+        with pytest.raises(ApiError) as e:
+            resolve_window(date(2026, 9, 10), date(2026, 9, 1))
+        assert e.value.status == 400
 
-    def test_oversized_window_is_rejected(self):
+    def test_oversized_window_is_rejected_without_touching_a_session(self):
         from datetime import date
 
         from ladini.services.analytics.market_balance_admin_api import (
             ApiError,
-            timeseries,
+            resolve_window,
         )
-        from tests.conftest import run
 
-        with pytest.raises(ApiError):
-            run(timeseries(object(), None, start=date(2020, 1, 1), end=date(2026, 9, 1)))
+        with pytest.raises(ApiError) as e:
+            resolve_window(date(2020, 1, 1), date(2026, 9, 1))
+        assert e.value.status == 400
+
+    def test_missing_bounds_default_to_the_standard_window(self):
+        from ladini.services.analytics.market_balance_admin_api import (
+            DEFAULT_WINDOW_DAYS,
+            resolve_window,
+        )
+
+        s, e = resolve_window(None, None)
+        assert (e - s).days + 1 == DEFAULT_WINDOW_DAYS
 
 
 class TestAuthorization:

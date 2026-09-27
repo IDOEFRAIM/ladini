@@ -136,7 +136,10 @@ async def excess_supply(session: AsyncSession, p: Params, *, limit: int) -> dict
     return {**_meta(), **result}
 
 
-async def timeseries(session: AsyncSession, p: Params, *, start: Optional[date], end: Optional[date]) -> dict[str, Any]:
+def resolve_window(start: Optional[date], end: Optional[date]) -> tuple[date, date]:
+    """Pure validation, deliberately called BEFORE any database session is opened (the router
+    calls this ahead of `_serve`) — a reversed/oversized window must return 400, never a 500 from
+    touching a session that was never needed."""
     today = datetime.now(timezone.utc).date()
     e = end or today
     s = start or e - timedelta(days=DEFAULT_WINDOW_DAYS - 1)
@@ -144,9 +147,13 @@ async def timeseries(session: AsyncSession, p: Params, *, start: Optional[date],
         raise ApiError(400, "'from' doit être antérieur ou égal à 'to'.")
     if (e - s).days + 1 > MAX_WINDOW_DAYS:
         raise ApiError(400, f"Fenêtre trop large (maximum {MAX_WINDOW_DAYS} jours).")
+    return s, e
+
+
+async def timeseries(session: AsyncSession, p: Params, *, start: date, end: date) -> dict[str, Any]:
     svc = MarketBalanceService(session)
     filters = await resolve_filters(session, p)
-    result = await svc.get_balance_timeseries(s, e, filters=filters)
+    result = await svc.get_balance_timeseries(start, end, filters=filters)
     return {**_meta(), **result}
 
 
@@ -165,6 +172,6 @@ async def health(session: AsyncSession, *, now: Optional[datetime] = None) -> di
 
 
 __all__ = [
-    "ApiError", "Params", "parse_params", "resolve_filters", "overview", "current", "demand_gaps",
-    "excess_supply", "timeseries", "filter_options", "health",
+    "ApiError", "Params", "parse_params", "resolve_filters", "resolve_window", "overview", "current",
+    "demand_gaps", "excess_supply", "timeseries", "filter_options", "health",
 ]
