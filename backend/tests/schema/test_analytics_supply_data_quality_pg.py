@@ -48,20 +48,32 @@ def world(pg_dsn):
     return pg_dsn, g
 
 
-def _checks(dsn, day):
-    return _run(dsn, lambda s: run_supply_data_quality_checks(s, day, day))
+def _checks(dsn, day, *, product_ids=None):
+    return _run(dsn, lambda s: run_supply_data_quality_checks(s, day, day, product_ids=product_ids))
 
 
 class TestSellableProductInvariants:
+    """These 4 checks scan `marketplace.products` as a live snapshot (no
+    `created_at` window makes sense for "is this bad right now") — so, unlike
+    the event checks below, they're scoped to `product_ids=[the one product
+    this test created]`. `producer_id` alone isn't precise enough: `Graph`
+    itself creates a base scaffolding product (unspecified quantity/
+    availability -> DB defaults `quantity_for_sale=0, is_available=TRUE`,
+    i.e. itself "available but not sellable") under the SAME producer as
+    every `product_for()` call, and CI's session-scoped shared database also
+    accumulates every OTHER schema test's own products — without exact
+    product-id scoping, "clean catalog" assertions fail on rows this test
+    never created."""
+
     def test_clean_catalog_raises_no_issue(self, world):
         dsn, g = world
         day = _fresh_day()
         conn = psycopg2.connect(dsn)
         with conn, conn.cursor() as cur:
             g.cur = cur
-            g.product_for(quantity_for_sale=100, is_available=True)
+            pid = g.product_for(quantity_for_sale=100, is_available=True)
         conn.close()
-        issues = _checks(dsn, day)
+        issues = _checks(dsn, day, product_ids=[pid])
         assert not any(i.check in ("sellable_product_negative_quantity", "available_product_not_actually_sellable") for i in issues)
 
     def test_available_with_negative_quantity_is_an_error(self, world):
@@ -70,9 +82,9 @@ class TestSellableProductInvariants:
         conn = psycopg2.connect(dsn)
         with conn, conn.cursor() as cur:
             g.cur = cur
-            g.product_for(quantity_for_sale=-5, is_available=True)
+            pid = g.product_for(quantity_for_sale=-5, is_available=True)
         conn.close()
-        issues = _checks(dsn, day)
+        issues = _checks(dsn, day, product_ids=[pid])
         found = [i for i in issues if i.check == "sellable_product_negative_quantity"]
         assert found and found[0].severity == "ERROR"
 
@@ -82,9 +94,9 @@ class TestSellableProductInvariants:
         conn = psycopg2.connect(dsn)
         with conn, conn.cursor() as cur:
             g.cur = cur
-            g.product_for(quantity_for_sale=0, is_available=True)
+            pid = g.product_for(quantity_for_sale=0, is_available=True)
         conn.close()
-        issues = _checks(dsn, day)
+        issues = _checks(dsn, day, product_ids=[pid])
         found = [i for i in issues if i.check == "available_product_not_actually_sellable"]
         assert found and found[0].severity == "WARNING"
 
@@ -97,9 +109,9 @@ class TestSellableProductInvariants:
         conn = psycopg2.connect(dsn)
         with conn, conn.cursor() as cur:
             g.cur = cur
-            g.product_for(quantity_for_sale=0, is_available=False)
+            pid = g.product_for(quantity_for_sale=0, is_available=False)
         conn.close()
-        issues = _checks(dsn, day)
+        issues = _checks(dsn, day, product_ids=[pid])
         assert not any(i.check == "available_product_not_actually_sellable" for i in issues)
 
 
