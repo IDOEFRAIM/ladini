@@ -67,6 +67,79 @@ def test_quality_reports_counts_only_never_row_detail_text():
     assert "detail" not in out["issues"][0]  # only counts leave this CLI, never free-text row detail
 
 
+def test_verify_kpis_flags_a_mismatch_between_dashboard_and_source(monkeypatch):
+    from ladini.domain.analytics.metric_layer import MetricResult
+
+    class _Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalar(self):
+            return self._rows[0][0]
+
+        def mappings(self):
+            return self
+
+        def one(self):
+            return self._rows[0]
+
+    # Une seule ligne par requête source, dans l'ordre d'appel de cmd_verify_kpis (active_buyers,
+    # needs_created, search events, tender response, recurring coverage, unmatched demand).
+    answers = iter([
+        _Result([(3,)]),  # active_buyers source
+        _Result([(9999,)]),  # needs_created source — volontairement DIFFÉRENT du dashboard
+        _Result([{"performed": 10, "succeeded": 4}]),
+        _Result([{"created": 5, "with_bid": 2}]),
+        _Result([{"requested": 100, "matched": 60}]),
+        _Result([(15,)]),  # unmatched demand source, matches the dashboard value below
+    ])
+
+    class _Session:
+        async def execute(self, *_a, **_k):
+            return next(answers)
+
+        async def scalar(self, *_a, **_k):
+            return next(answers).scalar()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+    def _metric(name, **over):
+        base = dict(metric_name=name, value=3, numerator=3, denominator=None, unit=None, status="OK", period={})
+        base.update(over)
+        return MetricResult(**base)
+
+    async def fake_get_metric(self, name, start, end, *, compare=True, filters=None):
+        return {
+            "active_buyers": _metric("active_buyers", value=3, unit="buyers"),
+            "needs_created": _metric("needs_created", value=3, unit="count"),  # dashboard=3, source=9999 -> mismatch
+            "direct_search_success_rate": _metric("direct_search_success_rate", value=0.4, unit="ratio"),
+            "tender_response_rate": _metric("tender_response_rate", value=0.4, unit="ratio"),
+        }[name]
+
+    async def fake_breakdown(self, name, start, end, *, dimension, filters=None):
+        return [{"sub_category_id": "s1", "canonical_unit": "KG", "numerator": 60, "denominator": 100, "value": 0.6}]
+
+    async def fake_unmatched(self, start, end, *, filters=None, group_by=()):
+        return {"rows": [{"sub_category_id": "s1", "canonical_unit": "KG", "unmatched": 15.0}]}
+
+    monkeypatch.setattr(ops_cli.AnalyticsService, "get_metric", fake_get_metric)
+    monkeypatch.setattr(ops_cli.AnalyticsService, "get_metric_breakdown", fake_breakdown)
+    monkeypatch.setattr(ops_cli.AnalyticsService, "get_unfulfilled_demand", fake_unmatched)
+    with patch.object(ops_cli, "worker_session", lambda: _Session()):
+        out = run(ops_cli.cmd_verify_kpis(14))
+
+    by_metric = {c["metric"]: c for c in out["checks"]}
+    assert by_metric["active_buyers"]["match"] is True
+    assert by_metric["needs_created"]["match"] is False  # 3 != 9999, surfaced, never silently ignored
+    assert by_metric["recurring_coverage_rate"]["match"] is True
+    assert by_metric["unmatched_demand"]["match"] is True
+    assert out["all_match"] is False  # one mismatch is enough to fail the whole check
+
+
 def test_main_prints_exactly_one_json_line(capsys):
     with patch.object(ops_cli, "worker_session", _fake_worker_session), \
          patch.object(ops_cli, "backfill_quantity_delivered", AsyncMock(return_value=0)), \
