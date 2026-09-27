@@ -130,3 +130,24 @@ def test_mark_failed_backs_off_then_goes_dead_after_five_attempts():
     for expected in ("PENDING", "PENDING", "PENDING", "PENDING", "DEAD"):
         run(repo.mark_failed(_S(), 1, error="x"))
         assert row.status == expected
+
+
+def test_claim_leases_rows_and_reclaims_expired_sending_rows():
+    from datetime import datetime, timedelta
+
+    from ladini.workers.repositories import analytics_outbox_repo as repo
+
+    captured = {}
+    rows = [SimpleNamespace(id=1, status="SENDING", next_attempt_at=None)]
+
+    class _Session:
+        async def execute(self, stmt):
+            captured["sql"] = str(stmt.compile(dialect=postgresql.dialect()))
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: rows))
+
+        async def flush(self):
+            pass
+
+    run(repo.claim_due(_Session(), limit=5))
+    assert "OR" in captured["sql"] and "next_attempt_at <=" in captured["sql"]
+    assert rows[0].next_attempt_at > datetime.utcnow() + timedelta(minutes=5)  # lease posé

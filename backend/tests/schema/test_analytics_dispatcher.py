@@ -106,3 +106,18 @@ def test_second_drain_and_same_key_enqueue_never_duplicate_the_business_event(pg
     _drain(pg_dsn, monkeypatch)
     rows, status = _rows(pg_dsn, key)
     assert len(rows) == 1 and status == [("SENT",)]
+
+
+def test_row_stuck_in_sending_after_a_crash_is_reclaimed_after_its_lease(pg_dsn, buyer, monkeypatch):
+    key = uniq("RECURRING_NEED_CREATED")
+    _enqueue(pg_dsn, key=key, entity_id=uuid.uuid4(), buyer_id=buyer)
+    conn = psycopg2.connect(pg_dsn)
+    with conn, conn.cursor() as cur:  # simule un worker mort après le claim, lease expiré
+        cur.execute(
+            "update analytics.event_outbox set status='SENDING', next_attempt_at = now() - interval '1 minute' where dedupe_key=%s",
+            (key,),
+        )
+    conn.close()
+    _drain(pg_dsn, monkeypatch)
+    rows, status = _rows(pg_dsn, key)
+    assert len(rows) == 1 and status == [("SENT",)]

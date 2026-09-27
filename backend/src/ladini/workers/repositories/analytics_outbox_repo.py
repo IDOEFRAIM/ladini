@@ -16,13 +16,17 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ladini.domain.analytics.models import EventOutboxRecord
 
 _BACKOFF_MINUTES = [1, 5, 15, 60, 180]
+# A claimed row (SENDING) is leased this long. If the worker crashes between claim and mark_sent/
+# mark_failed, the row becomes claimable again after the lease instead of being stuck forever;
+# landing is idempotent (ON CONFLICT idempotency_key) so a re-drain can never duplicate an event.
+_CLAIM_LEASE = timedelta(minutes=10)
 
 
 def backoff_delay(attempts: int) -> timedelta:
@@ -51,7 +55,10 @@ async def claim_due(session: AsyncSession, *, limit: int = 100) -> List[EventOut
     now = datetime.utcnow()
     stmt = (
         select(EventOutboxRecord)
-        .where(EventOutboxRecord.status == "PENDING", EventOutboxRecord.next_attempt_at <= now)
+        .where(
+            or_(EventOutboxRecord.status == "PENDING", EventOutboxRecord.status == "SENDING"),
+            EventOutboxRecord.next_attempt_at <= now,
+        )
         .order_by(EventOutboxRecord.next_attempt_at.asc())
         .limit(limit)
         .with_for_update(skip_locked=True)
@@ -59,6 +66,7 @@ async def claim_due(session: AsyncSession, *, limit: int = 100) -> List[EventOut
     rows = list((await session.execute(stmt)).scalars().all())
     for row in rows:
         row.status = "SENDING"
+        row.next_attempt_at = now + _CLAIM_LEASE
     await session.flush()
     return rows
 
