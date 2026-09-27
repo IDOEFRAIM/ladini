@@ -995,6 +995,226 @@ recurring_occurrences = _register_count(
     ("marketplace.recurring_need_occurrences",))
 
 
+# ---------------------------------------------------------------------------
+# PRODUCER (Phase C) — the 8 pilot KPIs stabilized in PRODUCER_ANALYTICS_
+# ARCHITECTURE.md §48, now applied to the live registry. Definitions only
+# (descriptive metadata) — the executable wiring lives in
+# `producer_metric_layer.py::BINDINGS_PRODUCER`/`UNAVAILABLE_PRODUCER`,
+# resolved by `ProducerAnalyticsService`, same decoupling as the buyer side.
+# ---------------------------------------------------------------------------
+
+active_producers = _register(
+    MetricDefinition(
+        name="active_producers",
+        description="Distinct producers with at least one qualifying activity fact in the window.",
+        business_definition=(
+            "COUNT(DISTINCT producer_id) over `producer_daily_metrics`, whose rows only exist for a "
+            "(day, producer) with >= 1 qualifying fact: a product published for sale, a sellable "
+            "quantity change, a bid received, or an order confirmed/delivered. Never Producer.status "
+            "(always PENDING, no admin-approval workflow exists — see PRODUCER_ANALYTICS_ARCHITECTURE.md §2)."
+        ),
+        journey=Journey.GLOBAL,
+        aggregation_type=AggregationType.COUNT,
+        numerator="COUNT(DISTINCT producer_id)",
+        denominator=None,
+        unit_behavior="DIMENSIONLESS_COUNT",
+        supported_dimensions=("date", "zone"),
+        supported_time_windows=_STANDARD_WINDOWS,
+        source_entities=("analytics.producer_daily_metrics",),
+        reconstructible_historically=Reconstructibility.YES,
+        reconstructible_note="Built from transactional Order/OrderItem/Product/Bid tables, recomputable for any past day.",
+    )
+)
+
+available_supply = _register(
+    MetricDefinition(
+        name="available_supply",
+        description="LIVE gauge: currently sellable quantity, per canonical unit — never a historical series.",
+        business_definition=(
+            "SUM(Product.quantity_for_sale) for is_available=TRUE, quantity>0 products, read from the "
+            "most recent `producer_supply_daily_snapshot` day. A SNAPSHOT, not additive across days — "
+            "summing several days would double-count standing inventory, not measure new supply."
+        ),
+        journey=Journey.SUPPLY,
+        aggregation_type=AggregationType.SUM,
+        numerator="SUM(available_quantity)",
+        denominator=None,
+        unit_behavior="PHYSICAL_UNIT_SEGMENTED",
+        supported_dimensions=("zone", "category", "sub_category"),
+        supported_time_windows=("LIVE",),
+        source_entities=("analytics.producer_supply_daily_snapshot",),
+        reconstructible_historically=Reconstructibility.NO,
+        reconstructible_note="No historical ledger of is_available/quantity_for_sale existed before this snapshot job's first run.",
+    )
+)
+
+time_to_first_sale = _register(
+    MetricDefinition(
+        name="time_to_first_sale",
+        description="Median (p50) days from a producer's activation (first published product) to their first delivered sale.",
+        business_definition=(
+            "percentile_cont(0.5) of (first successful/delivered sale date - first PRODUCT_PUBLISHED_FOR_SALE "
+            "date), over producers activated in the window. A duration, not a rate."
+        ),
+        journey=Journey.GLOBAL,
+        aggregation_type=AggregationType.SUM,  # duration/median, not a ratio — see WEIGHTED_RATIO note above
+        numerator="percentile_cont(0.5) WITHIN GROUP (ORDER BY days)",
+        denominator=None,
+        unit_behavior="DURATION_DAYS",
+        supported_dimensions=("date",),
+        supported_time_windows=_STANDARD_WINDOWS,
+        source_entities=("analytics.business_events", "marketplace.orders", "marketplace.order_items"),
+        reconstructible_historically=Reconstructibility.PARTIAL,
+        reconstructible_note="Only activations observable via PRODUCT_PUBLISHED_FOR_SALE (Phase B forward) are covered.",
+    )
+)
+
+producer_order_fulfillment_rate = _register(
+    MetricDefinition(
+        name="producer_order_fulfillment_rate",
+        description="Delivered producer orders / confirmed producer orders, all 3 journeys combined.",
+        business_definition=(
+            "WeightedRate(delivered orders, confirmed orders) across DIRECT+TENDER+RECURRING. Confirmed = "
+            "the firm commitment per journey (DIRECT: Order.status CONFIRMED; TENDER/RECURRING: the order's "
+            "own creation, no separate confirmation step exists for either)."
+        ),
+        journey=Journey.GLOBAL,
+        aggregation_type=AggregationType.WEIGHTED_RATIO,
+        numerator="SUM(orders_delivered_direct + orders_delivered_tender + orders_delivered_recurring)",
+        denominator="SUM(orders_confirmed_direct + orders_confirmed_tender + orders_confirmed_recurring)",
+        unit_behavior="DIMENSIONLESS_RATIO",
+        supported_dimensions=("date", "zone"),
+        supported_time_windows=_STANDARD_WINDOWS,
+        source_entities=("marketplace.orders", "marketplace.order_items", "marketplace.bids"),
+        reconstructible_historically=Reconstructibility.YES,
+        reconstructible_note="Built from transactional tables, recomputable for any past day.",
+    )
+)
+
+producer_quantity_fulfillment_rate = _register(
+    MetricDefinition(
+        name="producer_quantity_fulfillment_rate",
+        description="Delivered quantity / confirmed quantity (DIRECT+RECURRING only — TENDER has no OrderItem).",
+        business_definition=(
+            "WeightedRate(delivered quantity, confirmed quantity) per canonical unit, DIRECT+RECURRING only. "
+            "TENDER is structurally absent (no per-unit inventory linkage exists for a tender order — "
+            "PRODUCER_ANALYTICS_ARCHITECTURE.md §3.2 finding I), not degraded to 0."
+        ),
+        journey=Journey.GLOBAL,
+        aggregation_type=AggregationType.WEIGHTED_RATIO,
+        numerator="SUM(delivered_quantity_direct + delivered_quantity_recurring)",
+        denominator="SUM(confirmed_quantity_direct + confirmed_quantity_recurring)",
+        unit_behavior="PHYSICAL_UNIT_SEGMENTED",
+        supported_dimensions=("date",),
+        supported_time_windows=_STANDARD_WINDOWS,
+        source_entities=("marketplace.orders", "marketplace.order_items"),
+        reconstructible_historically=Reconstructibility.PARTIAL,
+        reconstructible_note="Reliable for DIRECT+RECURRING; UNAVAILABLE for TENDER by construction, not by data gap.",
+    )
+)
+
+producer_delivered_gmv = _register(
+    MetricDefinition(
+        name="producer_delivered_gmv",
+        description="Revenue attributable to a producer from delivered orders, all 3 journeys combined.",
+        business_definition=(
+            "SUM(Order.total_amount) for delivered orders. Each DIRECT/TENDER/RECURRING order maps to "
+            "exactly one producer (cart splitting DIRECT, winning bid TENDER, one order per producer "
+            "RECURRING), so the order total is already the correct attribution — no item-level split needed."
+        ),
+        journey=Journey.GLOBAL,
+        aggregation_type=AggregationType.SUM,
+        numerator="SUM(delivered_gmv_direct + delivered_gmv_tender + delivered_gmv_recurring)",
+        denominator=None,
+        unit_behavior="MONETARY_FCFA",
+        supported_dimensions=("date", "zone"),
+        supported_time_windows=_STANDARD_WINDOWS,
+        source_entities=("marketplace.orders",),
+        reconstructible_historically=Reconstructibility.YES,
+        reconstructible_note="Built from transactional Order.total_amount, recomputable for any past day.",
+    )
+)
+
+delivered_gmv_per_active_producer = _register(
+    MetricDefinition(
+        name="delivered_gmv_per_active_producer",
+        description="Average delivered revenue per active producer, same window.",
+        business_definition="SUM(producer_delivered_gmv) / COUNT(DISTINCT active_producers). Null (never 0) when there are no active producers.",
+        journey=Journey.GLOBAL,
+        aggregation_type=AggregationType.WEIGHTED_RATIO,
+        numerator="SUM(delivered_gmv_direct + delivered_gmv_tender + delivered_gmv_recurring)",
+        denominator="COUNT(DISTINCT producer_id)",
+        unit_behavior="MONETARY_FCFA",
+        supported_dimensions=("date", "zone"),
+        supported_time_windows=_STANDARD_WINDOWS,
+        source_entities=("analytics.producer_daily_metrics",),
+        reconstructible_historically=Reconstructibility.YES,
+        reconstructible_note="Pure derivation of active_producers + producer_delivered_gmv, both recomputable for any past day.",
+    )
+)
+
+repeat_producer_rate = _register(
+    MetricDefinition(
+        name="repeat_producer_rate",
+        description="Producers with >= 2 delivered orders / producers with >= 1, inside the window (window PROVISIONAL).",
+        business_definition=(
+            "count(producers with >= 2 delivered orders) / count(producers with >= 1), recomputed at the "
+            "window level (never an average of daily repeat rates). Window is not yet calibrated against "
+            "real cadence data — segment by category before treating it as a stable target."
+        ),
+        journey=Journey.GLOBAL,
+        aggregation_type=AggregationType.WEIGHTED_RATIO,
+        numerator="count(*) FILTER (WHERE delivered_orders >= 2)",
+        denominator="count(*) FILTER (WHERE delivered_orders >= 1)",
+        unit_behavior="DIMENSIONLESS_RATIO",
+        supported_dimensions=("date", "zone"),
+        supported_time_windows=_STANDARD_WINDOWS,
+        source_entities=("analytics.producer_daily_metrics",),
+        reconstructible_historically=Reconstructibility.YES,
+        reconstructible_note="Built from transactional order-delivery facts, recomputable for any past day; only the window length is provisional.",
+    )
+)
+
+#: Producer metrics deliberately NOT computed — same convention as `UNAVAILABLE_PRODUCER`
+#: in `producer_metric_layer.py` (kept in sync manually; both must list the same names).
+producer_sell_through_rate = _register(
+    MetricDefinition(
+        name="producer_sell_through_rate",
+        description="UNAVAILABLE — a positive quantity delta cannot be distinguished from a correction/reconciliation.",
+        business_definition="Not computed: see PRODUCER_ANALYTICS_ARCHITECTURE.md §4/§42 for the full reasoning.",
+        journey=Journey.SUPPLY,
+        aggregation_type=AggregationType.WEIGHTED_RATIO,
+        numerator="SUM(positive PRODUCT_SELLABLE_QUANTITY_CHANGED deltas) — NOT COMPUTED, see business_definition",
+        denominator="SUM(available_quantity at period start) — NOT COMPUTED, see business_definition",
+        unit_behavior="DIMENSIONLESS_RATIO",
+        supported_dimensions=("date", "zone"),
+        supported_time_windows=_STANDARD_WINDOWS,
+        source_entities=("analytics.business_events",),
+        reconstructible_historically=Reconstructibility.NO,
+        reconstructible_note="Deliberately not built — restock-vs-correction semantics remain undecided.",
+    )
+)
+
+producer_paid_gmv = _register(
+    MetricDefinition(
+        name="producer_paid_gmv",
+        description="UNAVAILABLE as a distinct metric — identical to producer_delivered_gmv in this codebase today.",
+        business_definition="PAID_OUT/PAID are set atomically with DELIVERED (no delayed-payout path exists) — not renamed/duplicated.",
+        journey=Journey.GLOBAL,
+        aggregation_type=AggregationType.SUM,
+        numerator="SUM(Order.total_amount WHERE payment_status IN ('PAID_OUT', 'PAID')) — same query as producer_delivered_gmv",
+        denominator=None,
+        unit_behavior="MONETARY_FCFA",
+        supported_dimensions=("date", "zone"),
+        supported_time_windows=_STANDARD_WINDOWS,
+        source_entities=("marketplace.orders",),
+        reconstructible_historically=Reconstructibility.NO,
+        reconstructible_note="Re-open if a delayed-payout path is ever introduced.",
+        alias_of="producer_delivered_gmv",
+    )
+)
+
+
 def get_metric(name: str) -> MetricDefinition:
     try:
         return METRICS[name]
