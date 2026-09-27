@@ -4,7 +4,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta
 
-from psycopg2.extras import Json
+from psycopg2.extras import Json, register_uuid
+
+register_uuid()  # les tests passent des uuid.UUID Python directement à psycopg2
 
 
 def insert(cur, table: str, **cols):

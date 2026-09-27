@@ -212,7 +212,7 @@ def load_sqlalchemy(metadata) -> Schema:
 
 # ── Extracteur PostgreSQL ──────────────────────────────────────────────────
 
-_SCHEMAS = ("public", "auth", "governance", "marketplace", "intelligence")
+_SCHEMAS = ("public", "auth", "governance", "marketplace", "intelligence", "analytics")
 
 _Q_COLS = """
 select n.nspname, c.relname, a.attname, format_type(a.atttypid, a.atttypmod),
