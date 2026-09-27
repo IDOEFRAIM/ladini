@@ -18,7 +18,7 @@ price/packaging).
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -75,6 +75,16 @@ def _unit_factor(unit: str) -> float:
     if u in _VOLUME_FACTORS:
         return _VOLUME_FACTORS[u]
     return 1.0  # famille singleton : jamais convertie, facteur neutre
+
+
+# Alias publics (2026-09-27, Analytics Phase B) : cette table MASS/VOLUME est
+# la plus complète du dépôt (seule à connaître G/GRAMME, absent de
+# `domain/quantity_unit.py::_UNIT_TO_KG`) — `domain/analytics/units.py` la
+# réutilise telle quelle pour la compatibilité d'agrégation au lieu d'en
+# recopier une 4e version. Ne PAS dupliquer `_MASS_FACTORS`/`_VOLUME_FACTORS`
+# ailleurs ; étendre ICI si une nouvelle unité convertible apparaît.
+unit_family: Callable[[str], str] = _unit_family
+unit_factor: Callable[[str], float] = _unit_factor
 
 
 class PricingTierError(ValueError):
