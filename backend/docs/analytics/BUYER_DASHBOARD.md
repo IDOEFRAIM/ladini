@@ -98,3 +98,34 @@ Recharts (single library, React 19 compatible, small API, SVG). One line per uni
 - North Star, recurring fulfillment and delivered quantities are lower bounds (need buyer-confirmed RECEIVED).
 - Buyer-level cards cannot be filtered by category/sub-category (the buyer table has no such dimension) and say so.
 - Day boundaries are UTC; recompute lag (6-hourly refresh) is surfaced through freshness.
+
+## Production deployment status (2026-09-27)
+
+| Item | Status |
+|---|---|
+| Backend PR #18 (`/internal/analytics/buyers/*`) | merged, release `sha-adcaf64` deployed (`deploy.yml`, production): migrations 0006, 0007, 0008 applied by the official runner, smoke tests OK, worker + beat recreated healthy |
+| Frontend PR #6 (cockpit + Next.js adapter) | **open, deliberately NOT merged** (see blocker) |
+| `INTERNAL_API_TOKEN` | GitHub `production` environment secret present; the backend reads it from the app env. Match with the frontend server value NOT verified (no access to Vercel env) |
+| `LADINI_BACKEND_URL` (Vercel, server-only) | not verifiable from CI tooling; **cannot be `https://api.ladini.tech`** (see blocker) |
+| Refresh / jobs, first recompute, `backfill_quantity_delivered`, KPI-vs-SQL checks, cockpit E2E | **not executed**: no server (SSH/DB) or Vercel access in the closing session |
+
+### Blocker found: the public API does not route `/internal/*`
+`infra/reverse-proxy/Caddyfile` proxies only `/api/webhook*`, `/api/webchat/*`, `/health*`, `/version`; everything else is a 404
+(same rule that keeps `/api/market/*`, `/admin/*`, `/metrics` private). Verified on production after the deploy:
+`https://api.ladini.tech/internal/analytics/buyers/health` -> 404 with or without a token. A Vercel server therefore cannot reach the
+analytics API through `api.ladini.tech`. Decide one path before merging the frontend:
+1. private connectivity (tunnel / private network / fixed egress) from the Next.js server to the API container, with `LADINI_BACKEND_URL` pointing at it;
+2. explicitly whitelist `/internal/analytics/*` in the Caddyfile (a policy change: the surface stays token-protected and fail-closed, but becomes internet-reachable);
+3. host the adapter where it can reach the internal network.
+Do not add a `NEXT_PUBLIC_*` variable in any case.
+
+### Required env vars
+Frontend server (Vercel, all environments that use the cockpit): `LADINI_BACKEND_URL`, `INTERNAL_API_TOKEN` (same value as the backend's).
+Backend: `INTERNAL_API_TOKEN` (already used by `/api/market/*`), optional `ANALYTICS_CACHE_TTL_SECONDS`, `ANALYTICS_DAILY_LOOKBACK_DAYS`.
+
+### Operational checklist after the blocker is resolved
+1. Confirm the token match with a 200 on `GET <backend>/internal/analytics/buyers/health` (token in the header, never in logs/URLs).
+2. Trigger a first recompute instead of waiting for the 6-hourly beat: `recompute_recent(worker_session, 14)` (or `recompute_range` for a chosen window) in the worker container.
+3. `backfill_quantity_delivered(session)` is one idempotent `UPDATE ... FROM (SELECT ... RECEIVED orders of CONVERTED allocations)` touching only occurrences whose stored value differs from the source of truth; it has no dry-run, so count first with the data-quality check `quantity_delivered_drift`, then run once and expect 0 on the second run.
+4. Compare at least five KPIs to independent SQL (active_buyers, needs_created, direct_search_success_rate, tender_response_rate, recurring_coverage_rate with SUM(matched)/SUM(requested) on the same window and unit, one unmatched-demand sub-category).
+5. Check `health` (Healthy / Warning / Stale) and freshness, then merge the frontend PR and repeat the checks through `/admin/analytics/buyers`.

@@ -208,7 +208,7 @@ instrumenting `DIRECT_ORDER_CONFIRMED`.
 
 ## 16. Phase E — admin API and buyer cockpit (implemented)
 
-Status: **Phase E done** (Phase D.5 merged first). Server-to-server adapter (Next.js `requireAdmin` -> FastAPI `/internal/analytics/buyers/*`
+Status: **Phase E implemented and backend deployed; NOT closed** — the frontend is unmerged pending a network path from Vercel to the API (see BUYER_DASHBOARD.md, production deployment status). Server-to-server adapter (Next.js `requireAdmin` -> FastAPI `/internal/analytics/buyers/*`
 with the internal token -> `AnalyticsService`), page `/admin/analytics/buyers`, Recharts for trends, short fail-open cache. No KPI formula
 exists in TypeScript. Full description, endpoints, metric mapping, reliability/units/targets/freshness rules: [BUYER_DASHBOARD.md](BUYER_DASHBOARD.md).
 Still open: real targets, global `fulfillment_rate`, search -> order attribution, producer analytics (not started), AWS/AI layers (not started).
