@@ -322,6 +322,20 @@ if _has_role app; then
   [ -n "$CADDY_ID" ] \
     || fail "up" "reverse proxy Caddy: conteneur introuvable"
 
+  # `docker compose up -d` ne recrée PAS le conteneur pour un simple
+  # changement de contenu du `Caddyfile` (bind-mount, pas dans l'image) :
+  # sans cette étape, un `git checkout` qui met à jour ce fichier laisserait
+  # Caddy tourner indéfiniment avec l'ANCIENNE config déjà chargée en
+  # mémoire, alors que le fichier sur disque a bien changé — un déploiement
+  # "vert" qui ne fait en réalité rien (bug trouvé lors de l'exposition de
+  # `/internal/analytics/*`, 2026-09-27). `caddy reload` relit le fichier et
+  # bascule sans coupure via l'API admin locale (celle déjà utilisée par le
+  # healthcheck du service, `:2019/config/`) ; un échec ici bloque le
+  # déploiement au lieu de laisser croire que la nouvelle route est active.
+  log "   rechargement de la configuration Caddy…"
+  docker exec "$CADDY_ID" caddy reload --config /etc/caddy/Caddyfile --force \
+    || fail "up" "reverse proxy Caddy: rechargement de configuration en échec"
+
   CADDY_STATUS=""
   for _i in $(seq 1 90); do
     CADDY_STATUS="$(

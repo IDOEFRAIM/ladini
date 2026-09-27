@@ -1,0 +1,111 @@
+# ═════════════════════════════════════════════════════════════════════
+# analytics_ops.yml — opérations Buyer Analytics ponctuelles, avec
+# approbation humaine (même environnement GitHub `production`/`staging`
+# que deploy.yml, même runner self-hosted déjà présent SUR l'hôte : aucun
+# SSH entrant depuis un runner GitHub-hosted, exactement comme deploy.yml).
+#
+# Chaque action lance `python -m ladini.services.analytics.ops_cli <cmd>`
+# DANS le conteneur `worker` déjà déployé (même image/env que le code de
+# prod, jamais de SQL manuel depuis ce workflow) et n'imprime que le JSON
+# résumé retourné par la CLI (compteurs, jamais de secret ni de ligne
+# métier). `verify_public_route` ne touche à rien : il prouve depuis
+# l'extérieur que `/internal/analytics/*` est bien fail-closed (sans/avec
+# mauvais jeton -> refus, jamais 404) en lisant le VRAI jeton déployé dans
+# le `.env` applicatif du node (jamais dupliqué dans un secret séparé),
+# sans jamais l'imprimer.
+# ═════════════════════════════════════════════════════════════════════
+name: Analytics ops (manual approval)
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Opération à exécuter"
+        required: true
+        type: choice
+        options: [verify_public_route, recompute, drift, backfill, quality]
+      target:
+        description: "Cible"
+        required: true
+        default: staging
+        type: choice
+        options: [staging, production]
+      lookback_days:
+        description: "recompute uniquement : fenêtre glissante en jours"
+        required: false
+        default: "14"
+
+concurrency:
+  group: analytics-ops-${{ github.event.inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    name: ${{ github.event.inputs.action }} → ${{ github.event.inputs.target }}
+    runs-on: [self-hosted, linux, x64, production]
+    environment: ${{ github.event.inputs.target }}
+    steps:
+      - name: Exécuter l'opération sur ladini-app-1
+        shell: bash
+        env:
+          DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
+          ACTION: ${{ github.event.inputs.action }}
+          LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days }}
+        run: |
+          set -Eeuo pipefail
+
+          [ -n "${DEPLOY_DIR:-}" ] || { echo "FATAL: DEPLOY_DIR absent"; exit 1; }
+          [ -d "$DEPLOY_DIR/.git" ] || { echo "FATAL: $DEPLOY_DIR n'est pas un checkout Git"; exit 1; }
+          cd "$DEPLOY_DIR"
+
+          COMPOSE_FILE="$DEPLOY_DIR/docker-compose.prod.yml"
+          ENV_FILE="$DEPLOY_DIR/.env"
+          [ -f "$ENV_FILE" ] || { echo "FATAL: $ENV_FILE absent — aucune release applicative déployée ici"; exit 1; }
+          dc() { docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"; }
+
+          run_cli() {
+            dc exec -T worker python -m ladini.services.analytics.ops_cli "$@"
+          }
+
+          case "$ACTION" in
+            recompute)
+              run_cli recompute --lookback-days "${LOOKBACK_DAYS:-14}"
+              ;;
+            drift)
+              run_cli drift
+              ;;
+            backfill)
+              run_cli backfill
+              ;;
+            quality)
+              run_cli quality
+              ;;
+            verify_public_route)
+              # Lit le jeton RÉELLEMENT déployé (celui que FastAPI valide) — jamais
+              # un secret GitHub séparé qui pourrait diverger. `set +x` explicite :
+              # cette valeur ne doit jamais apparaître dans les logs, même en debug.
+              set +x
+              TOKEN="$(grep -E '^INTERNAL_API_TOKEN=' "$ENV_FILE" | head -n1 | cut -d= -f2-)"
+              DOMAIN="$(grep -E '^PUBLIC_DOMAIN=' "$DEPLOY_DIR/infra/reverse-proxy/.env" | head -n1 | cut -d= -f2-)"
+              [ -n "$TOKEN" ] || { echo "FATAL: INTERNAL_API_TOKEN absent du .env déployé"; exit 1; }
+              [ -n "$DOMAIN" ] || { echo "FATAL: PUBLIC_DOMAIN absent du .env du reverse proxy"; exit 1; }
+              URL="https://${DOMAIN}/internal/analytics/buyers/health"
+
+              no_token=$(curl -s -o /dev/null -m 15 -w '%{http_code}' "$URL")
+              wrong_token=$(curl -s -o /dev/null -m 15 -w '%{http_code}' -H "X-Internal-Token: not-the-token" "$URL")
+              good_token=$(curl -s -o /dev/null -m 15 -w '%{http_code}' -H "X-Internal-Token: ${TOKEN}" "$URL")
+              unset TOKEN
+
+              echo "{\"action\":\"verify_public_route\",\"url\":\"${URL}\",\"no_token_status\":${no_token},\"wrong_token_status\":${wrong_token},\"good_token_status\":${good_token}}"
+
+              [ "$no_token" != "404" ] || { echo "::error::route toujours 404 — Caddy ne proxifie pas /internal/analytics/*"; exit 1; }
+              [ "$no_token" = "401" ] || [ "$no_token" = "503" ] || { echo "::error::sans jeton attendu 401/503, reçu $no_token"; exit 1; }
+              [ "$wrong_token" = "401" ] || [ "$wrong_token" = "503" ] || { echo "::error::mauvais jeton attendu 401/503, reçu $wrong_token"; exit 1; }
+              [ "$good_token" = "200" ] || { echo "::error::bon jeton attendu 200, reçu $good_token — token Vercel/backend potentiellement désynchronisé"; exit 1; }
+              echo "✓ /internal/analytics/* : fail-closed confirmé, bon jeton -> 200"
+              ;;
+            *)
+              echo "FATAL: action inconnue: $ACTION"
+              exit 1
+              ;;
+          esac
