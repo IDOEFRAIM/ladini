@@ -4,7 +4,9 @@
 
 **Phase B status: IMPLEMENTED (merged)** — see §35-49. The bug fix, the two new SUPPLY events, `producer_id` enrichment, and the exhaustive writer instrumentation are real, tested code, merged via [ladini#27](https://github.com/IDOEFRAIM/ladini/pull/27) + [ladinifront#7](https://github.com/IDOEFRAIM/ladinifront/pull/7).
 
-**Phase C status: IMPLEMENTED** — see §50 onward. The 8 pilot KPIs from §48 are now live and queryable (`ProducerAnalyticsService`), backed by 3 new daily-aggregate tables (migration `0010`). Full design record in `docs/analytics/PRODUCER_METRIC_LAYER.md` — this section only summarizes what changed and points there for detail, to avoid duplicating (and drifting from) that document. No dashboard, no Admin API, no Market Balance, no Sell-Through/full Demand-Exposure formula — still exactly as scoped OUT in §34/§49, deferred to Phase D.
+**Phase C status: IMPLEMENTED** — see §50 onward. The 8 pilot KPIs from §48 are now live and queryable (`ProducerAnalyticsService`), backed by 3 new daily-aggregate tables (migration `0010`). Full design record in `docs/analytics/PRODUCER_METRIC_LAYER.md` — this section only summarizes what changed and points there for detail, to avoid duplicating (and drifting from) that document.
+
+**Phase D status: IMPLEMENTED (PR open, not yet merged)** — a mandatory MIXED_UNITS micro-gate on `available_supply` passed with zero production-code change, then the Admin API (`/internal/analytics/producers/*`) and the `/admin/analytics/producers` dashboard were built, mirroring the Buyer Analytics Phase E architecture exactly (same `requireAdmin` -> internal-token router -> service layering, same response contract, same reused UI components). Sell-Through and Demand Exposure remain UNAVAILABLE, exactly as §4/§7/§42/§51 concluded — no formula invented. Market Balance (Demand vs Supply) is explicitly out of scope, per instruction. Full design record in `docs/analytics/PRODUCER_DASHBOARD.md` — this section only summarizes what changed and points there for detail.
 
 ---
 
