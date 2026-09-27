@@ -1,6 +1,6 @@
 # Buyer Analytics Architecture
 
-Status: **Phase B (taxonomy, units, metric dictionary) — DONE.** Phase A (audit) and the pre-Phase-B repository cleanup gate are done; see [ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md](../ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md) and [ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md](../ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md). Phase C (business_events table + emission, aggregates, AnalyticsService, admin endpoints, dashboard) has not started.
+Status: **Phase C (business_events persistence, outbox emitter, DIRECT/TENDER/RECURRING instrumentation) — DONE.** Phases A/B: see [ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md](../ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md) and [ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md](../ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md). Event list and definitions: [BUSINESS_EVENT_CATALOG.md](BUSINESS_EVENT_CATALOG.md). Phase D (daily aggregates, AnalyticsService, admin endpoints, dashboard) has not started.
 
 Code lives in `backend/src/ladini/domain/analytics/`:
 - `units.py` — canonical unit / measurement-family classification.
@@ -173,11 +173,19 @@ Fixed both with the minimal diff (new dict entries only, no restructuring), test
 6. **New in Phase C**: `RecurringNeedOccurrence.quantity_delivered` has zero writers anywhere in the codebase (see §11.5.1.A) — `recurring_delivered_quantity` has no real data source until this is fixed or replaced.
 7. **New in Phase C**: the RECURRING North Star/GMV/fulfillment signal depends on `occurrence.order_group_id`, which has no FK — a real but imperfect join, not a hard guarantee (could silently miss/misattribute an order if the correlation value is ever wrong).
 
-## Phase C plan (recommendation, not started)
+## 13. Phase C pipeline (implemented)
 
-1. Verify DELIVERED-vs-FULFILLED semantics (limitation 3) before wiring the North Star.
-2. Stand up `analytics.business_events` (real migration, both repos in sync from day one this time) + the outbox-pattern emitter, starting with the DIRECT/TENDER/RECURRING events already catalogued here.
-3. First daily aggregates (`analytics.{buyer,direct,tender,recurring}_daily_metrics`), numerators/denominators stored separately per §5.
-4. `analytics.metric_targets` migration, seeded from real observed rates, not guesses.
-5. `AnalyticsService` (backend, deterministic — reads the dictionary, never recomputes a metric's meaning) + first `/api/admin/analytics/*` endpoints on the **Next.js** side (it already owns Postgres access for telemetry/dashboard, per the Phase A audit) using `adminEndpoint()`/`requireAdmin()`, matching the existing monitoring-cockpit convention.
-6. Frontend: a chart library decision is still open (none exists in `frontag` — Phase A finding); TS types for the metric dictionary/filters can be generated from this file's shape.
+- **Tables** (schema `analytics`, Drizzle migration `0006`, mirrored in SQLAlchemy): `business_events`, `event_outbox`, `metric_targets`.
+- **Emit**: `BusinessEventEmitter.emit()` inserts one row into `analytics.event_outbox` (`ON CONFLICT (dedupe_key) DO NOTHING`) **in the caller's own transaction** — the business fact and its event intent commit or roll back together. No network call, no extra lookup; a broken emit rolls the business transaction back (a bug to fix, not to swallow).
+- **Drain**: `AnalyticsEventDispatcher` (Celery Beat) — phase 1 claims a batch `FOR UPDATE SKIP LOCKED` (to `SENDING`, committed); phase 2 inserts into `business_events` (`ON CONFLICT (idempotency_key) DO NOTHING`) and marks `SENT`, one transaction per row; failures back off (1/5/15/60/180 min) and become `DEAD` after 5 attempts. A Phase C review found and fixed a bug here: the payload key `metadata` resolved to Declarative's `MetaData` instead of the `metadata_` column, which would have failed every event.
+- **Idempotency**: keys identify the business fact (`{EVENT}:{entity_id}`), never a message id, so WhatsApp/Celery replays and cron overlaps collapse to one event.
+- **Read-only trap**: methods routed through `AgriDatabaseService._READ_ONLY_METHODS` never commit; `search_products` was removed from that set because it now writes an outbox row (guarded by `tests/architecture/test_event_emitting_methods_are_transactional.py`).
+- **Atomicity map**: DIRECT/TENDER/RECURRING mixin call-sites use the same session as the fact (`@transactional(write=True)`). `NeedMatchingService` and `RecurringSupplyDigestService` emit in the same session and a single `commit()` covers fact and outbox row. The only asynchronous gap is outbox to `business_events` (by design). Matching wraps its work in a best-effort try/except: an emit failure there rolls that occurrence's match back and is retried by the next cron pass.
+- **Performance**: the critical path adds one indexed same-database INSERT per event and zero external calls. Recurring replenishment adds one query per cron run (buyer zone + sub-category canonical unit for all active needs), not per need. Matching emits only when the allocation set changed; the digest emits only for newly queued digests. `search_products` now commits a (tiny) write transaction instead of a read-only one.
+
+## Phase D plan (recommendation, not started)
+
+1. First daily aggregates (`analytics.{buyer,direct,tender,recurring}_daily_metrics`), numerators/denominators stored separately per section 5; treat `DIRECT_ORDER_CONFIRMED` and recurring delivered quantity as unavailable (see the catalog).
+2. Decide the `quantity_delivered` question (write it from the `RECEIVED` transition, or derive delivery from the linked order) before any recurring fulfillment metric ships.
+3. `AnalyticsService` (deterministic, reads the dictionary) + `/api/admin/analytics/*` endpoints on the Next.js side; metric-target seeding from observed rates.
+4. Frontend chart library decision (none exists in `frontag`).
