@@ -23,7 +23,7 @@ on:
         description: "Opération à exécuter"
         required: true
         type: choice
-        options: [verify_public_route, recompute, drift, backfill, quality, verify_kpis, debug_caddy, debug_repo, force_recreate_caddy]
+        options: [verify_public_route, recompute, drift, backfill, quality, verify_kpis, smoke_endpoints, debug_caddy, debug_repo, force_recreate_caddy]
       target:
         description: "Cible"
         required: true
@@ -82,6 +82,36 @@ jobs:
               ;;
             verify_kpis)
               run_cli verify-kpis
+              ;;
+            smoke_endpoints)
+              # Preuve E2E des endpoints internes avec le VRAI jeton déployé (jamais imprimé) : le
+              # corps des réponses est un JSON agrégé (compteurs/quantités), jamais de PII/secret —
+              # sûr à faire apparaître dans ce log.
+              set +x
+              TOKEN="$(grep -E '^INTERNAL_API_TOKEN=' "$ENV_FILE" | head -n1 | cut -d= -f2-)"
+              DOMAIN="$(grep -E '^PUBLIC_DOMAIN=' "$DEPLOY_DIR/infra/reverse-proxy/.env" | head -n1 | cut -d= -f2-)"
+              BASE="https://${DOMAIN}/internal/analytics/buyers"
+              hit() {
+                local path="$1"
+                echo "── GET ${path} ──"
+                code=$(curl -s -m 20 -o /tmp/resp.json -w '%{http_code}' -H "X-Internal-Token: ${TOKEN}" "${BASE}${path}")
+                echo "status=${code}"
+                head -c 2000 /tmp/resp.json; echo
+                [ "$code" = "200" ] || { echo "::error::${path} -> ${code}"; exit 1; }
+                grep -qiE 'nan|infinity' /tmp/resp.json && { echo "::error::NaN/Infinity in ${path}"; exit 1; } || true
+              }
+              hit "/overview?from=2026-09-14&to=2026-09-27"
+              hit "/direct?from=2026-09-14&to=2026-09-27"
+              hit "/tenders?from=2026-09-14&to=2026-09-27"
+              hit "/recurring?from=2026-09-14&to=2026-09-27"
+              hit "/unmatched-demand?from=2026-09-14&to=2026-09-27"
+              hit "/filters"
+              hit "/health"
+              hit "/metrics/recurring_coverage_rate/timeseries?from=2026-09-14&to=2026-09-27"
+              hit "/metrics/recurring_coverage_rate/breakdown?from=2026-09-14&to=2026-09-27&dimension=sub_category_id"
+              hit "/compare?metric=needs_created&from=2026-09-14&to=2026-09-27"
+              unset TOKEN
+              echo "✓ tous les endpoints internes répondent 200 avec des JSON propres"
               ;;
             verify_public_route)
               # Lit le jeton RÉELLEMENT déployé (celui que FastAPI valide) — jamais
