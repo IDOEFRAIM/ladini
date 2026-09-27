@@ -1084,6 +1084,53 @@ async def _show_need_detail(state: Dict[str, Any], mc_runtime: MarketRuntime, re
     }
 
 
+# (2026-09-26, mandat "mismatch CONFIRM vs ACCEPT" ; élargi 2026-09-26 au 2e call-site) : les DEUX
+# appelants de `RecurringSupplyGateway.accept_match_proposal` — `_respond_to_match` (menu détail
+# `GET_MY_NEEDS`, ci-dessous) et `_respond_to_digest_flow` (réponse au digest, plus bas) — reçoivent
+# leur `action` au vocabulaire CONVERSATIONNEL ("CONFIRM"/"REJECT") mais doivent la transmettre au
+# service dans SON vocabulaire, `services/database/recurring_supply.py::MATCH_RESPONSE_ACTIONS =
+# ("ACCEPT", "REJECT")`. "CONFIRM" n'y a jamais figuré : chaque appel réel à `accept_match_proposal`
+# (production ET la suite de tests dédiée contre PostgreSQL réel,
+# `tests/schema/test_recurring_need_confirmation_service.py`) utilise "ACCEPT" — jamais "CONFIRM".
+# Le mismatch était invisible en test parce que le double de gateway du harnais (`tests/harness/
+# conversation.py`) enregistre les kwargs sans les valider, contrairement au VRAI service
+# (`RecurringSupplyMixin.accept_match_proposal`, qui lève `BusinessRuleException("Action inconnue :
+# CONFIRM")`) — capturée par le `except MCPCallError` de chaque appelant et silencieusement comptée
+# comme un échec, jamais une vraie confirmation. "REJECT" n'a jamais eu ce problème (même mot des
+# deux côtés) — seule la moitié CONFIRM->ACCEPT de la table est non triviale.
+#
+# UNE SEULE table, partagée par les deux appelants (mandat : "une seule source de vérité", jamais
+# une 2e table dupliquée) — validée à l'import contre le contrat canonique importé, jamais un enum
+# recréé. `_to_match_service_action` échoue fort (AssertionError, même idiome que `services/
+# database/recurring_supply.py::update_recurring_need`'s `raise AssertionError(action) # pragma: no
+# cover` pour un branchement déjà filtré en amont) plutôt que de transmettre silencieusement une
+# valeur hors contrat — les deux appelants ne peuvent structurellement passer que "CONFIRM"/
+# "REJECT" (fermé par leurs propres appelants), donc cette branche ne devrait jamais s'exécuter ;
+# si elle le fait un jour, c'est un bug à un autre endroit qui doit remonter fort, pas un 3e mot
+# inventé qui atteindrait le service.
+_MATCH_RESPONSE_TO_SERVICE_ACTION = {"CONFIRM": "ACCEPT", "REJECT": "REJECT"}
+assert set(_MATCH_RESPONSE_TO_SERVICE_ACTION.values()) <= set(MATCH_RESPONSE_ACTIONS), (
+    "_MATCH_RESPONSE_TO_SERVICE_ACTION doit rester un sous-ensemble du contrat canonique "
+    "MATCH_RESPONSE_ACTIONS — toute divergence future doit casser l'import, pas silencieusement "
+    "envoyer une valeur inconnue au service."
+)
+
+
+def _to_match_service_action(resolved_action: str) -> str:
+    """Frontière conversation -> service (mandat §5) : ne transmet JAMAIS `resolved_action` tel
+    quel à `accept_match_proposal` — toujours en le faisant d'abord passer par la table canonique
+    ci-dessus. Lève si `resolved_action` n'y figure pas, plutôt qu'un fallback deviné."""
+    service_action = _MATCH_RESPONSE_TO_SERVICE_ACTION.get(resolved_action)
+    if service_action is None:
+        logger.error(
+            "recurring_supply.match_response_action_unmapped | resolved_action=%s", resolved_action
+        )
+        raise AssertionError(
+            f"Action de réponse non mappée vers le contrat service : {resolved_action!r}"
+        )
+    return service_action
+
+
 async def _respond_to_match(
     state: Dict[str, Any], mc_runtime: MarketRuntime, *, recurring_need_id: str, action: str
 ) -> Dict[str, Any]:
@@ -1092,21 +1139,30 @@ async def _respond_to_match(
     existant (voir `services/database/recurring_supply.py::accept_match_proposal`) ; ce nœud ne
     fait que traduire son résultat en message WhatsApp, jamais de logique métier ici."""
     phone = state.get("user_phone")
+    service_action = _to_match_service_action(action)
     gw = RecurringSupplyGateway(mc_runtime)
     try:
         result = await gw.accept_match_proposal(
-            phone=str(phone), recurring_need_id=recurring_need_id, action=action
+            phone=str(phone), recurring_need_id=recurring_need_id, action=service_action
         )
     except MCPCallError as exc:
         logger.warning(
-            "recurring_need.match_response_failed | need=%s | action=%s | %s",
-            recurring_need_id, action, exc,
+            "recurring_supply.match_response_mapped | need=%s | resolved_action=%s | "
+            "service_action=%s | result=failed | error_class=%s",
+            recurring_need_id, action, service_action, type(exc).__name__,
         )
         return {
             "final_response": "Je n'ai pas pu enregistrer votre réponse — réessayez dans un instant.",
             "status": "COMPLETED",
         }
 
+    # Log structuré (mandat §8) : même convention que `_respond_to_digest_flow` — le mapping
+    # conversation -> service reste visible même quand les deux mots coïncident (REJECT->REJECT).
+    logger.info(
+        "recurring_supply.match_response_mapped | need=%s | resolved_action=%s | "
+        "service_action=%s | result=success",
+        recurring_need_id, action, service_action,
+    )
     if action == "REJECT":
         message = "D'accord, pas de livraison cette fois — votre besoin habituel reste actif."
     else:
@@ -1124,30 +1180,6 @@ async def _respond_to_match(
 # occurrences actionnables du moment — exactement ce que le digest a
 # montré, jamais plus, jamais moins.
 # =====================================================================
-
-
-# (2026-09-26, mandat "mismatch CONFIRM vs ACCEPT") : `_respond_to_digest_flow` reçoit `action`
-# au vocabulaire CONVERSATIONNEL ("CONFIRM"/"REJECT" — celui de `interpreter/routing.py::
-# _bare_confirmation_for_recurring_supply_digest`, qui émet `action="CONFIRM_MATCH"/"REJECT_MATCH"`
-# sous l'intent `UPDATE_RECURRING_NEED`) mais devait le transmettre TEL QUEL à
-# `RecurringSupplyGateway.accept_match_proposal` — qui parle, lui, le vocabulaire SERVICE de
-# `services/database/recurring_supply.py::MATCH_RESPONSE_ACTIONS = ("ACCEPT", "REJECT")`. "CONFIRM"
-# n'y a jamais figuré : chaque appel réel à `accept_match_proposal` (production ET la suite de
-# tests dédiée contre PostgreSQL réel, `tests/schema/test_recurring_need_confirmation_service.py`)
-# utilise "ACCEPT" — jamais "CONFIRM". Le mismatch était invisible en test parce que le double de
-# gateway du harnais (`tests/harness/conversation.py`) enregistre les kwargs sans les valider,
-# contrairement au VRAI service (`RecurringSupplyMixin.accept_match_proposal`, qui lève
-# `BusinessRuleException("Action inconnue : CONFIRM")`) — capturée ici par `except MCPCallError`,
-# donc silencieusement comptée comme un échec ("Je n'ai pas pu confirmer..."), jamais une vraie
-# confirmation. "REJECT" n'a jamais eu ce problème (même mot des deux côtés) — seule la moitié
-# CONFIRM->ACCEPT de la table est non triviale. Mapping EXPLICITE (mandat §8 : jamais un
-# renommage implicite), validé contre le contrat canonique importé, jamais un enum recréé.
-_DIGEST_RESPONSE_TO_SERVICE_ACTION = {"CONFIRM": "ACCEPT", "REJECT": "REJECT"}
-assert set(_DIGEST_RESPONSE_TO_SERVICE_ACTION.values()) <= set(MATCH_RESPONSE_ACTIONS), (
-    "_DIGEST_RESPONSE_TO_SERVICE_ACTION doit rester un sous-ensemble du contrat canonique "
-    "MATCH_RESPONSE_ACTIONS — toute divergence future doit casser l'import, pas silencieusement "
-    "envoyer une valeur inconnue au service."
-)
 
 
 async def _respond_to_digest_flow(
@@ -1172,7 +1204,7 @@ async def _respond_to_digest_flow(
             "status": "COMPLETED",
         }
 
-    service_action = _DIGEST_RESPONSE_TO_SERVICE_ACTION[action]
+    service_action = _to_match_service_action(action)
     confirmed_products: List[str] = []
     failed_products: List[str] = []
     for item in actionable:

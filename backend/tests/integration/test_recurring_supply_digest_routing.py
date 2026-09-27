@@ -164,7 +164,8 @@ class TestConfirmAcceptContract:
     accept_match_proposal`, alors que le service réel (`services/database/recurring_supply.py`)
     ne connaît que `MATCH_RESPONSE_ACTIONS = ("ACCEPT", "REJECT")` — chaque appel réel à
     `accept_match_proposal`, un mot hors de ce contrat aurait levé `BusinessRuleException("Action
-    inconnue")`. Corrigé via un mapping explicite (`_DIGEST_RESPONSE_TO_SERVICE_ACTION`), validé
+    inconnue")`. Corrigé via un mapping explicite (`_MATCH_RESPONSE_TO_SERVICE_ACTION`, PARTAGÉ
+    avec `_respond_to_match` — voir `tests/nodes/test_recurring_need_get_my_needs_flow.py`), validé
     au chargement du module contre le contrat canonique importé."""
 
     def test_A_confirmer_maps_to_the_canonical_accept_action(self):
