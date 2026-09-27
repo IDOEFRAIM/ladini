@@ -78,6 +78,13 @@
       "when": 1790530199611,
       "tag": "0010_producer_daily_metrics",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1790542388173,
+      "tag": "0011_market_balance_daily_snapshot",
+      "breakpoints": true
     }
   ]
 }
