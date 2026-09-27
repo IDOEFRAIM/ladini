@@ -24,7 +24,10 @@ from ladini.services.database.auction import AuctionMixin
 
 
 def _auction(**overrides):
-    base = dict(id=uuid.uuid4(), status="OPEN")
+    base = dict(
+        id=uuid.uuid4(), status="OPEN", buyer_id=uuid.uuid4(), target_zone_id=None,
+        sub_category_id=uuid.uuid4(), quantity=10.0, unit="TONNE",
+    )
     base.update(overrides)
     return types.SimpleNamespace(**base)
 

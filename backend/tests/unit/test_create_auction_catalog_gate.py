@@ -85,7 +85,7 @@ def _service(*, scalar_values=None, subcategories=None, prohibited_terms=None):
             return self._session
 
         async def get_buyer_profile(self, phone):
-            return SimpleNamespace(zone_id="z1"), SimpleNamespace(id="b1")
+            return SimpleNamespace(id="u1", zone_id="z1"), SimpleNamespace(id="b1")
 
         async def get_prohibited_terms(self):
             return {"terms": prohibited_terms or []}

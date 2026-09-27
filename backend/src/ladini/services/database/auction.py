@@ -10,6 +10,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
 from ladini.core.formatting import fmt_num as _fmt_num
+from ladini.domain.analytics.business_events import BusinessEventName
+from ladini.domain.analytics.emitter import BusinessEventEmitter
+from ladini.domain.analytics.metric_dictionary import Journey
 
 # Importation stricte des modèles requis pour le domaine des enchères
 from ladini.domain.models import (
@@ -24,9 +27,6 @@ from ladini.domain.models import (
     User,
     Zone,
 )
-from ladini.domain.analytics.business_events import BusinessEventName
-from ladini.domain.analytics.emitter import BusinessEventEmitter
-from ladini.domain.analytics.metric_dictionary import Journey
 from ladini.domain.product_identity import canonical_product_key
 
 from .base import BaseMixin
@@ -613,7 +613,7 @@ class AuctionMixin(BaseMixin):
 
         # 1. Résolution via le nouveau BaseMixin (Retourne un Tuple d'objets SQL)
         try:
-            _, producer_obj = await self.get_producer_profile(phone=str(phone))
+            producer_user, producer_obj = await self.get_producer_profile(phone=str(phone))
         except ValueError as e:
             logger.warning(f"⚠️ Échec de résolution producteur pour {phone} : {str(e)}")
             raise BusinessRuleException(
@@ -710,7 +710,7 @@ class AuctionMixin(BaseMixin):
             event_name=BusinessEventName.TENDER_BID_RECEIVED,
             journey=Journey.TENDER,
             actor_type="PRODUCER",
-            actor_id=producer_id,
+            actor_id=producer_user.id,
             buyer_id=auction.buyer_id,
             producer_id=producer_id,
             zone_id=auction.target_zone_id,

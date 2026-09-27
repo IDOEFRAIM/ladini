@@ -45,6 +45,7 @@ def _bid(**overrides):
     base = dict(
         id=uuid.uuid4(),
         auction_id=uuid.uuid4(),
+        producer_id=uuid.uuid4(),
         offered_price=250.0,
         status="PENDING",
         is_winner=False,
@@ -60,6 +61,7 @@ def _auction(**overrides):
         quantity=10.0,
         unit="TONNE",
         target_zone_id=None,
+        sub_category_id=uuid.uuid4(),
         status="OPEN",
         winner_bid_id=None,
     )

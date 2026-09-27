@@ -30,6 +30,11 @@ from __future__ import annotations
 from ladini.domain import (
     runtime_tables,  # noqa: F401  (tables d'état runtime, miroir de Drizzle)
 )
+from ladini.domain.analytics.models import (
+    BusinessEventRecord,
+    EventOutboxRecord,
+    MetricTargetRecord,
+)
 from ladini.domain.catalog.models import (
     CropCycle,
     Expense,
@@ -89,7 +94,6 @@ from ladini.domain.recurring_supply.models import (
     RecurringNeed,
     RecurringNeedOccurrence,
 )
-from ladini.domain.analytics.models import BusinessEventRecord, EventOutboxRecord, MetricTargetRecord
 from ladini.domain.telemetry import AgentLlmCall, AgentToolCall, AgentTurn
 
 __all__ = [

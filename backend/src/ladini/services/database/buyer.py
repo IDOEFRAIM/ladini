@@ -8,6 +8,9 @@ from sqlalchemy import case, desc, func, literal, or_, select, update
 from sqlalchemy.orm import joinedload, selectinload
 
 from ladini.core.formatting import fmt_num as _fmt_num
+from ladini.domain.analytics.business_events import BusinessEventName
+from ladini.domain.analytics.emitter import BusinessEventEmitter
+from ladini.domain.analytics.metric_dictionary import Journey
 
 # Import des modèles alignés sur le schéma
 from ladini.domain.models import (
@@ -27,9 +30,6 @@ from ladini.domain.models import (
     User,
     Zone,
 )
-from ladini.domain.analytics.business_events import BusinessEventName
-from ladini.domain.analytics.emitter import BusinessEventEmitter
-from ladini.domain.analytics.metric_dictionary import Journey
 from ladini.domain.order_policy import (
     validate_minimum_order_quantity,
 )

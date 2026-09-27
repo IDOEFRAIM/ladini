@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -37,6 +38,9 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ladini.domain.analytics.business_events import BusinessEventName
+from ladini.domain.analytics.emitter import BusinessEventEmitter
+from ladini.domain.analytics.metric_dictionary import Journey
 from ladini.domain.recurring_supply.digest import (
     NeedAvailability,
     build_digest_text,
@@ -172,6 +176,31 @@ class RecurringSupplyDigestService:
             ):
                 if dedupe_key in inserted_keys:
                     all_occ_ids.extend(occ_ids)
+                    # Analytics Phase C — définition OFFICIELLE : "digest mis en file d'envoi avec
+                    # succès" (ligne `notification_outbox` insérée), PAS "reçu par l'acheteur sur
+                    # WhatsApp" (aucun accusé provider n'existe ici). Même transaction que l'INSERT
+                    # outbox (commit unique plus bas). Émis seulement pour les clés RÉELLEMENT
+                    # insérées : un cron rejoué (même dedupe_key) ne réémet rien. entity_id =
+                    # uuid5(dedupe_key) : déterministe, la colonne `entity_id` étant un UUID.
+                    digest_entity_id = uuid.uuid5(uuid.NAMESPACE_URL, dedupe_key)
+                    await BusinessEventEmitter(self.session).emit(
+                        event_name=BusinessEventName.RECURRING_DIGEST_SENT,
+                        journey=Journey.RECURRING,
+                        actor_type="SYSTEM",
+                        buyer_id=buyer_id,
+                        entity_type="RECURRING_DIGEST",
+                        entity_id=digest_entity_id,
+                        idempotency_key=f"RECURRING_DIGEST_SENT:{dedupe_key}",
+                        metadata={
+                            "occurrence_date": target_date.isoformat(),
+                            "occurrence_count": report.occurrence_count,
+                            "full_count": report.full_count,
+                            "partial_count": report.partial_count,
+                            "unavailable_count": report.unavailable_count,
+                            "digest_version": report.digest_version,
+                            "delivery_guarantee": "QUEUED_FOR_OUTBOUND_DELIVERY",
+                        },
+                    )
                     logger.info("recurring_digest.enqueued | %s", report.as_dict())
                 else:
                     report.enqueued = False

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List
@@ -43,11 +44,20 @@ def _to_job(row: Any) -> Dict[str, Any]:
 
 
 _DATETIME_FIELDS = ("occurred_at", "created_at")
+_UUID_FIELDS = ("actor_id", "buyer_id", "producer_id", "entity_id", "category_id", "sub_category_id", "zone_id")
 
 
 def _payload_to_record_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
     kwargs = dict(payload)
     kwargs.pop("created_at", None)  # server_default=now() — always the LANDING time, not the fact time
+    # `metadata` is the ORM attribute name of Declarative's MetaData, so the JSONB column is mapped
+    # as `metadata_` (DB column "metadata"): passing `metadata=` to `.values()` would crash every row.
+    if "metadata" in kwargs:
+        kwargs["metadata_"] = kwargs.pop("metadata")
+    for field_name in _UUID_FIELDS:
+        value = kwargs.get(field_name)
+        if isinstance(value, str):
+            kwargs[field_name] = uuid.UUID(value)
     for field_name in _DATETIME_FIELDS:
         value = kwargs.get(field_name)
         if isinstance(value, str):

@@ -158,7 +158,7 @@ class BusinessEventEmitter:
     async def emit_order_delivered(self, order: Any) -> bool:
         """Shared by every `Order.delivery_status = "DELIVERED"`/"FULFILLED"
         write site (escrow OTP verification, cash-on-delivery producer
-        confirmation, walk-in `record_sale`) — see the Phase C DELIVERED-vs-
+        confirmation; walk-in `record_sale` `FULFILLED` orders have no buyer and are not a buyer-journey event) — see the Phase C DELIVERED-vs-
         FULFILLED decision in the architecture doc (§11.5.1.A) for why this
         is order_type-conditional rather than one flat rule.
 

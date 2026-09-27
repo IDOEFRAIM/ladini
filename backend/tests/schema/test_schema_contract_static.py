@@ -70,6 +70,8 @@ FK_WITHOUT_INDEX_OK: dict[tuple[str, str, str], str] = {
     ("intelligence", "demand_signals", "zone_id"): "idem user_id",
     ("marketplace", "buyer_profiles", "verified_by_id"): "audit de vérification ; suppression d'admin = opération rare",
     ("marketplace", "seed_distribution_attempts", "actor_id"): "table site à faible volume",
+    ("analytics", "business_events", "producer_id"): "table analytics append-only à fort volume d'écriture ; jamais filtrée par producteur en Phase C (Phase D indexera si une requête l'exige) ; suppression parent (SET NULL) très rare",
+    ("analytics", "business_events", "category_id"): "idem producer_id ; les catégories ne sont pratiquement jamais supprimées",
 }
 
 

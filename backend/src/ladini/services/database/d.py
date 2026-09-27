@@ -70,7 +70,10 @@ class AgriDatabaseService(
         "get_stocks",
         "get_stock_movements",
         "list_products",
-        "search_products",
+        # `search_products` n'est PAS ici (analytics Phase C) : il écrit désormais l'intention
+        # d'event DIRECT_SEARCH_* dans l'outbox analytics — une transaction read-only ne
+        # commitant jamais, ces events seraient perdus en silence. Voir
+        # tests/architecture/test_event_emitting_methods_are_transactional.py.
         "get_orders",
         "get_producer_stocks",
         # Auctions / bids (reads)
