@@ -467,3 +467,68 @@ class TestSupplySnapshot:
         assert res.unit is None
         by_unit = {b["canonical_unit"]: b["value"] for b in res.breakdown}
         assert by_unit == {"KG": 250.0, "TETE": 12.0}
+
+
+def _event(cur, *, event_name, journey, actor_type, entity_type, occurred_at, producer_id):
+    return insert(
+        cur, "analytics.business_events", event_name=event_name, journey=journey, actor_type=actor_type,
+        entity_type=entity_type, entity_id=uuid.uuid4(), occurred_at=occurred_at,
+        idempotency_key=f"{event_name}:{uuid.uuid4()}", producer_id=producer_id,
+    )
+
+
+class TestTimeToFirstSale:
+    """Closes the one disclosed gap from Phase C (`PRODUCER_ANALYTICS_ARCHITECTURE.md` §52's
+    "known, disclosed gap"): a real-Postgres proof of activation -> first delivered sale ->
+    exact duration, and of the null/excluded contract for a producer with no successful sale."""
+
+    def test_activation_to_first_delivered_sale_is_an_exact_duration_not_an_estimate(self, world):
+        dsn, g = world
+        day = _fresh_day()
+        window_end = day + timedelta(days=20)
+        never_sold = g.extra_producer()
+        conn = psycopg2.connect(dsn)
+        with conn, conn.cursor() as cur:
+            # Activation (first sellable product published) for the producer that DOES sell.
+            _event(cur, event_name="PRODUCT_PUBLISHED_FOR_SALE", journey="SUPPLY", actor_type="PRODUCER",
+                   entity_type="PRODUCT", occurred_at=datetime(day.year, day.month, day.day, 8), producer_id=g.producer)
+            # First delivered sale, exactly 5 days later (5.0 days, no ambiguity).
+            sale_day = day + timedelta(days=5)
+            _event(cur, event_name="DIRECT_ORDER_DELIVERED", journey="DIRECT", actor_type="SYSTEM",
+                   entity_type="ORDER", occurred_at=datetime(sale_day.year, sale_day.month, sale_day.day, 8), producer_id=g.producer)
+            # A later, non-first delivered sale for the SAME producer — must not change the
+            # first-sale duration (MIN, not the last or an average).
+            later_day = day + timedelta(days=15)
+            _event(cur, event_name="DIRECT_ORDER_DELIVERED", journey="DIRECT", actor_type="SYSTEM",
+                   entity_type="ORDER", occurred_at=datetime(later_day.year, later_day.month, later_day.day, 8), producer_id=g.producer)
+            # A second producer: activated in the same window, but NEVER sells anything.
+            _event(cur, event_name="PRODUCT_PUBLISHED_FOR_SALE", journey="SUPPLY", actor_type="PRODUCER",
+                   entity_type="PRODUCT", occurred_at=datetime(day.year, day.month, day.day, 9), producer_id=never_sold)
+        conn.close()
+
+        async def metric(s):
+            return await ProducerAnalyticsService(s).get_metric("time_to_first_sale", day, window_end, compare=False)
+
+        res = _run(dsn, metric)
+        assert res.status.value == "PARTIAL"
+        assert res.value == pytest.approx(5.0)
+        # Only the producer with an actual sale counts — the never-sold producer is excluded
+        # from the aggregate entirely (not folded in as a 0 or a null that would corrupt the median).
+        assert res.denominator == 1
+
+    def test_a_producer_activated_but_never_selling_yields_no_data_not_a_fake_zero(self, world):
+        dsn, g = world
+        day = _fresh_day()
+        conn = psycopg2.connect(dsn)
+        with conn, conn.cursor() as cur:
+            _event(cur, event_name="PRODUCT_PUBLISHED_FOR_SALE", journey="SUPPLY", actor_type="PRODUCER",
+                   entity_type="PRODUCT", occurred_at=datetime(day.year, day.month, day.day, 8), producer_id=g.producer)
+        conn.close()
+
+        async def metric(s):
+            return await ProducerAnalyticsService(s).get_metric("time_to_first_sale", day, day + timedelta(days=10), compare=False)
+
+        res = _run(dsn, metric)
+        assert res.status.value == "NO_DATA"
+        assert res.value is None  # never a fabricated 0 — no sale ever happened to measure
+        assert res.denominator is None
