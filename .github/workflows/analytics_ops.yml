@@ -23,7 +23,7 @@ on:
         description: "Opération à exécuter"
         required: true
         type: choice
-        options: [verify_public_route, recompute, drift, backfill, quality]
+        options: [verify_public_route, recompute, drift, backfill, quality, debug_caddy]
       target:
         description: "Cible"
         required: true
@@ -103,6 +103,23 @@ jobs:
               [ "$wrong_token" = "401" ] || [ "$wrong_token" = "503" ] || { echo "::error::mauvais jeton attendu 401/503, reçu $wrong_token"; exit 1; }
               [ "$good_token" = "200" ] || { echo "::error::bon jeton attendu 200, reçu $good_token — token Vercel/backend potentiellement désynchronisé"; exit 1; }
               echo "✓ /internal/analytics/* : fail-closed confirmé, bon jeton -> 200"
+              ;;
+            debug_caddy)
+              # Diagnostic temporaire (2026-09-27, mise en service /internal/analytics/*) :
+              # aucune donnée sensible — juste le Caddyfile réellement chargé par le
+              # conteneur en cours d'exécution et son état admin, pour comprendre
+              # pourquoi la route reste 404 malgré un reload sans erreur.
+              CADDY_ID="$(cd "$DEPLOY_DIR/infra/reverse-proxy" && docker compose --env-file .env ps -q caddy)"
+              [ -n "$CADDY_ID" ] || { echo "FATAL: conteneur caddy introuvable"; exit 1; }
+              echo "── Caddyfile chargé dans le conteneur ($CADDY_ID) ──"
+              docker exec "$CADDY_ID" cat /etc/caddy/Caddyfile
+              echo "── docker compose ps (reverse-proxy) ──"
+              (cd "$DEPLOY_DIR/infra/reverse-proxy" && docker compose --env-file .env ps)
+              echo "── config active via l'API admin Caddy ──"
+              docker exec "$CADDY_ID" wget -qO- http://127.0.0.1:2019/config/ || true
+              echo
+              echo "── test loopback direct (contourne DNS/Cloudflare) ──"
+              docker exec "$CADDY_ID" wget -qS -O /dev/null --header="Host: $(grep -E '^PUBLIC_DOMAIN=' "$DEPLOY_DIR/infra/reverse-proxy/.env" | cut -d= -f2-)" http://127.0.0.1/internal/analytics/buyers/health 2>&1 || true
               ;;
             *)
               echo "FATAL: action inconnue: $ACTION"
