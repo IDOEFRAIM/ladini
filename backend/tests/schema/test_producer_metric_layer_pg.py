@@ -28,7 +28,16 @@ _DAYS = iter(range(1, 2000))
 
 
 def _fresh_day() -> date:
-    return date(2023, 1, 1) + timedelta(days=next(_DAYS))
+    # Base date deliberately DIFFERENT from `test_analytics_metric_layer_pg.py`'s own
+    # `_fresh_day()` (also `range(1, 2000)`, also starting at day 1): the schema DB is
+    # shared across the whole pytest session (see module docstring), so two independent
+    # `_DAYS` generators both counting from 1 against the SAME base date collide on their
+    # very first call — a buyer-side order/auction/occurrence created for "day 1" then
+    # shows up as a foreign fact on producer-side aggregates computed for that identical
+    # calendar day (proven live: `producer_daily_metrics`/`active_producers` picked up an
+    # extra producer, `2026-09-27`). 2000 days (~5.48y) from 2023-01-01 ends ~2028-06-24;
+    # starting here at 2030-01-01 leaves a multi-year margin against that other file.
+    return date(2030, 1, 1) + timedelta(days=next(_DAYS))
 
 
 def _run(dsn, fn):
@@ -109,10 +118,23 @@ class TestRecomputeIdempotencyAndLateEvents:
             g.cur = cur
             _direct_order(cur, g, day=day)
         conn.close()
+        # Business columns only: `id` and `computed_at` legitimately change on every DELETE+INSERT
+        # recompute (fresh UUID, fresh timestamp) even when nothing about the underlying facts did.
+        row_sql = (
+            "select to_jsonb(t) - 'id' - 'computed_at' from analytics.producer_daily_metrics t"
+            " where metric_date = %s and producer_id = %s"
+        )
         first = _recompute(dsn, day)
+        first_row = _sql(dsn, row_sql, (day, str(g.producer)))
         second = _recompute(dsn, day)
+        second_row = _sql(dsn, row_sql, (day, str(g.producer)))
+        # `recompute_day` is GLOBAL (recomputes every producer active that day, not just this
+        # test's), so the shared schema DB could in principle carry another producer's fact on
+        # the exact same calendar day — comparing THIS producer's own row is what idempotency
+        # actually claims; the raw write counts (`first`/`second`) are asserted too, but only as
+        # a secondary signal, never the primary proof.
+        assert first_row == second_row and first_row  # this producer's row is byte-identical on replay
         assert first == second
-        assert first["producer_daily_metrics"] == 1
 
     def test_a_late_delivery_updates_the_original_cohort_row(self, world):
         dsn, g = world
@@ -167,8 +189,11 @@ class TestActiveProducersDistinctCount:
         row = _sql(dsn, "select products_published from analytics.producer_daily_metrics where metric_date = %s and producer_id = %s", (day, str(g.producer)))
         assert row == [(1,)]
 
+        # Scoped to this test's own zone (unique per `Graph`, see factories.py): `active_producers`
+        # only supports a `zone_id` filter (no `producer_id`), and the shared schema DB can carry
+        # another producer active on the very same calendar day.
         async def metric(s):
-            return await ProducerAnalyticsService(s).get_metric("active_producers", day, day, compare=False)
+            return await ProducerAnalyticsService(s).get_metric("active_producers", day, day, filters={"zone_id": str(g.zone)}, compare=False)
 
         assert _run(dsn, metric).value == 1.0
 
@@ -402,8 +427,14 @@ class TestSupplySnapshot:
         conn.close()
         _run(dsn, lambda s: snapshot_producer_supply(s, today))
 
+        # `snapshot_producer_supply` re-snapshots ALL currently-available products system-wide
+        # (never scoped to one producer/test — see its docstring), and "today" is necessarily the
+        # SAME real calendar day for every test in this class/session, so an unfiltered read would
+        # sum every other test's still-available products too (routinely spanning several units,
+        # i.e. MIXED_UNITS -> value=None). Scoped to this test's own sub-category (unique per
+        # `Graph`) to read exactly what THIS test wrote.
         async def metric(s):
-            return await ProducerAnalyticsService(s).get_metric("available_supply", today, today, compare=False)
+            return await ProducerAnalyticsService(s).get_metric("available_supply", today, today, filters={"sub_category_id": str(g.sub_category)}, compare=False)
 
         res = _run(dsn, metric)
         assert res.value == 250.0 and res.unit == "KG"
