@@ -92,7 +92,22 @@ UNAVAILABLE_PRODUCER: dict[str, str] = {
 }
 
 
+def reliability_of_producer(name: str) -> str:
+    """Same static classification as `metric_layer.py::reliability_of`, for the producer-side
+    special metrics (`ProducerAnalyticsService._SPECIAL_METRICS`) that have no `Binding` at all."""
+    if name in UNAVAILABLE_PRODUCER:
+        return "UNAVAILABLE"
+    if name in ("active_producers", "available_supply", "delivered_gmv_per_active_producer"):
+        return "RELIABLE"
+    if name in ("time_to_first_sale", "repeat_producer_rate"):
+        return "PARTIAL"
+    binding = BINDINGS_PRODUCER.get(name)
+    if binding is None:
+        raise KeyError(name)
+    return "PARTIAL" if binding.status == DataStatus.PARTIAL else "RELIABLE"
+
+
 __all__ = [
     "TABLE_PRODUCER", "TABLE_PRODUCER_QUANTITY", "TABLE_PRODUCER_SUPPLY", "TABLE_DIMENSIONS_PRODUCER",
-    "BINDINGS_PRODUCER", "UNAVAILABLE_PRODUCER",
+    "BINDINGS_PRODUCER", "UNAVAILABLE_PRODUCER", "reliability_of_producer",
 ]
