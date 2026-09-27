@@ -1,6 +1,6 @@
 # Buyer Analytics Architecture
 
-Status: **Phase C — DONE (merged, CI green on real PostgreSQL). Phase D (daily aggregates, idempotent refresh, metric layer / `AnalyticsService`) — implemented on `analytics/phase-d-metric-layer`, see [METRIC_LAYER.md](METRIC_LAYER.md).** Phase E (admin API + dashboard) has not started. Phases A/B: [ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md](../ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md), [ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md](../ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md). Event list: [BUSINESS_EVENT_CATALOG.md](BUSINESS_EVENT_CATALOG.md).
+Status: **Phase C and D — DONE and merged. Phase D.5 — DONE and merged.** Phase E (admin API + dashboard): backend merged and deployed to production, real server-to-server auth/route/KPI proof done — see section 16 and [BUYER_DASHBOARD.md](BUYER_DASHBOARD.md); frontend merge blocked on Vercel env configuration (human action required). Phases A/B: [ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md](../ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md), [ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md](../ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md). Event list: [BUSINESS_EVENT_CATALOG.md](BUSINESS_EVENT_CATALOG.md).
 
 Code lives in `backend/src/ladini/domain/analytics/`:
 - `units.py` — canonical unit / measurement-family classification.
@@ -208,7 +208,7 @@ instrumenting `DIRECT_ORDER_CONFIRMED`.
 
 ## 16. Phase E — admin API and buyer cockpit (implemented)
 
-Status: **Phase E implemented and backend deployed; NOT closed** — the frontend is unmerged pending a network path from Vercel to the API (see BUYER_DASHBOARD.md, production deployment status). Server-to-server adapter (Next.js `requireAdmin` -> FastAPI `/internal/analytics/buyers/*`
+Status: **Phase E backend DONE, deployed, and proven live in production** (Caddy route, fail-closed auth, first recompute, drift/backfill, 6/6 KPI cross-checks, 10/10 endpoint smoke — see BUYER_DASHBOARD.md's "Live production evidence"). **NOT fully closed**: the frontend PR is unmerged, blocked on Vercel environment variables that only a human with Vercel access can set (`LADINI_BACKEND_URL`, `INTERNAL_API_TOKEN`) — the Caddy network blocker that previously prevented this is resolved. Server-to-server adapter (Next.js `requireAdmin` -> FastAPI `/internal/analytics/buyers/*`
 with the internal token -> `AnalyticsService`), page `/admin/analytics/buyers`, Recharts for trends, short fail-open cache. No KPI formula
 exists in TypeScript. Full description, endpoints, metric mapping, reliability/units/targets/freshness rules: [BUYER_DASHBOARD.md](BUYER_DASHBOARD.md).
 Still open: real targets, global `fulfillment_rate`, search -> order attribution, producer analytics (not started), AWS/AI layers (not started).

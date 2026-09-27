@@ -99,33 +99,87 @@ Recharts (single library, React 19 compatible, small API, SVG). One line per uni
 - Buyer-level cards cannot be filtered by category/sub-category (the buyer table has no such dimension) and say so.
 - Day boundaries are UTC; recompute lag (6-hourly refresh) is surfaced through freshness.
 
-## Production deployment status (2026-09-27)
+## Production deployment status (updated 2026-09-27, second pass)
 
 | Item | Status |
 |---|---|
-| Backend PR #18 (`/internal/analytics/buyers/*`) | merged, release `sha-adcaf64` deployed (`deploy.yml`, production): migrations 0006, 0007, 0008 applied by the official runner, smoke tests OK, worker + beat recreated healthy |
-| Frontend PR #6 (cockpit + Next.js adapter) | **open, deliberately NOT merged** (see blocker) |
-| `INTERNAL_API_TOKEN` | GitHub `production` environment secret present; the backend reads it from the app env. Match with the frontend server value NOT verified (no access to Vercel env) |
-| `LADINI_BACKEND_URL` (Vercel, server-only) | not verifiable from CI tooling; **cannot be `https://api.ladini.tech`** (see blocker) |
-| Refresh / jobs, first recompute, `backfill_quantity_delivered`, KPI-vs-SQL checks, cockpit E2E | **not executed**: no server (SSH/DB) or Vercel access in the closing session |
+| Backend PRs #18, #20, #21, #22, #23, #24 | merged; production release `sha-ba90cea` deployed (`deploy.yml`): migrations 0006-0008 applied, smoke OK, worker/beat/Caddy healthy |
+| `/internal/analytics/*` reachable from the public domain | **DONE** — Caddy now proxies exactly this sub-path (see below); everything else under `/internal/*`, all of `/admin/*`, `/api/market/*`, `/metrics` still 404 |
+| FastAPI auth on that route | fail-closed, confirmed live: no token -> 401, wrong token -> 401, real deployed token -> 200 (never printed; read from the deployed `.env` by a workflow step and used only in an HTTP header) |
+| First recompute / drift / backfill / data quality | **DONE**, live production data (below) |
+| 6-way KPI cross-check (dashboard vs a fresh independent query on the transactional tables) | **DONE, all 6 match**, on real production data |
+| 10-endpoint smoke test with the real token | **DONE, all 200**, clean JSON, real taxonomy/mixed-units/PARTIAL/NO_TARGET behavior confirmed live |
+| Frontend PR #6 (cockpit + Next.js adapter) | **still open, deliberately NOT merged** — blocked on Vercel access (below) |
+| `INTERNAL_API_TOKEN` | CONFIGURED on the backend (GitHub `production` environment secret, read into the app env) and **MATCH CONFIRMED** (the live 200 above proves it). Vercel-side value: **not verifiable, no Vercel access** |
+| `LADINI_BACKEND_URL` (Vercel, server-only) | now correctly `https://api.ladini.tech` (the blocker below is resolved) — **cannot verify or set it in Vercel** |
 
-### Blocker found: the public API does not route `/internal/*`
-`infra/reverse-proxy/Caddyfile` proxies only `/api/webhook*`, `/api/webchat/*`, `/health*`, `/version`; everything else is a 404
-(same rule that keeps `/api/market/*`, `/admin/*`, `/metrics` private). Verified on production after the deploy:
-`https://api.ladini.tech/internal/analytics/buyers/health` -> 404 with or without a token. A Vercel server therefore cannot reach the
-analytics API through `api.ladini.tech`. Decide one path before merging the frontend:
-1. private connectivity (tunnel / private network / fixed egress) from the Next.js server to the API container, with `LADINI_BACKEND_URL` pointing at it;
-2. explicitly whitelist `/internal/analytics/*` in the Caddyfile (a policy change: the surface stays token-protected and fail-closed, but becomes internet-reachable);
-3. host the adapter where it can reach the internal network.
-Do not add a `NEXT_PUBLIC_*` variable in any case.
+### Blocker resolved: Caddy now routes `/internal/analytics/*`
+`infra/reverse-proxy/Caddyfile` gained one precise `@analytics_internal path /internal/analytics/*` block, proxying to the API exactly
+like the existing public paths — nothing else under `/internal/*` (there is nothing else there today) or under `/admin/*`, `/api/market/*`,
+`/metrics` is opened. FastAPI's own router-level `Depends(require_internal_token)` remains the real gate.
 
-### Required env vars
-Frontend server (Vercel, all environments that use the cockpit): `LADINI_BACKEND_URL`, `INTERNAL_API_TOKEN` (same value as the backend's).
+**A second, real bug was found and fixed while rolling this out**: Caddy bind-mounts `Caddyfile` as a single *file*, which Docker pins to
+the inode present at mount time. The deploy's `git checkout -- infra/` replaces that file via rename (a new inode), so the
+already-running container's mount kept pointing at the old, orphaned inode — `docker exec caddy reload` faithfully reloaded the STALE
+content and reported success (a "green" deploy that silently changed nothing). Proven live: the file on disk already had the new route
+while `docker exec caddy cat /etc/caddy/Caddyfile` still showed the old one. Fixed in `node_deploy.sh`: the Caddy service is now
+`--force-recreate`d on every deploy instead of reloaded, which re-establishes the bind mount on the current inode. Verified on the very
+next real deploy (`sha-ba90cea`): the route survived without any manual recovery step.
+
+### Vercel blocker — still open, human action required
+I have no Vercel CLI/token/dashboard access from this environment (no `vercel` binary, no `VERCEL_*`/Vercel-related secret anywhere in
+either GitHub repo). Per the closing mission's own instruction, this stops the frontend rollout here rather than guessing. A human needs to,
+in the Vercel project settings for `ladinifront` (Production environment, and Preview if the cockpit should be testable pre-merge):
+1. Set `LADINI_BACKEND_URL=https://api.ladini.tech` (server-only — **never** `NEXT_PUBLIC_LADINI_BACKEND_URL`).
+2. Set `INTERNAL_API_TOKEN` to the exact same value as the backend's (the GitHub `production` environment secret of the same name) —
+   server-only, never `NEXT_PUBLIC_*`.
+3. Merge PR #6, let it deploy, then re-run the checklist below through the real `/admin/analytics/buyers` page (browser + admin session)
+   to get genuine browser-level proof — everything server-to-server has already been proven from the backend side (this document).
+
+### Live production evidence (window 2026-09-14 → 2026-09-27, real pilot data)
+- **Recompute**: `recompute_recent` over 14 days recomputed 15 calendar days; the 3 most recent days carry real rows
+  (`direct_daily_metrics`, `recurring_daily_metrics`, `buyer_daily_metrics`); older days in the window are legitimately empty (pilot start).
+- **`quantity_delivered` drift**: 0 occurrences diverging from the RECEIVED-order source of truth. **Backfill**: 0 rows updated (consistent
+  with 0 drift) — there was no historical drift to correct in this pilot's data, so `backfill_quantity_delivered` was a confirmed no-op, not
+  skipped out of caution.
+- **Data quality** (last 30 days): 1 benign `WARNING` — `stale_refresh` on `tender_daily_metrics`, because there has been **zero** tender
+  activity ever in this pilot (the table has no rows to refresh, not a broken job). No `ERROR`-severity issue.
+- **6-way KPI cross-check** (`verify-kpis`, dashboard value vs. a query against `marketplace.*`/`analytics.business_events` computed fresh
+  in the same run, never against the stored aggregate): **all 6 matched** — `active_buyers` (2 = 2), `needs_created` (7 = 7),
+  `direct_search_success_rate` (no data either side), `tender_response_rate` (no data either side), `recurring_coverage_rate` (4 groups,
+  0 mismatches, after a first run found and fixed a real bug — see next paragraph), `unmatched_demand` for the largest sub-category
+  (250 KG = 250 KG).
+- **A real verification bug found and fixed in the same closing pass**: the first `verify-kpis` run flagged `recurring_coverage_rate` as a
+  mismatch (dashboard denominator 487 vs. a same-unit-only source query's 425) — production genuinely has a G→KG occurrence, and the
+  check's *own* source query had excluded it by only summing occurrences already in their sub-category's `priority_unit`. Fixed by
+  re-aggregating raw occurrence rows through the same pure, unit-tested `resolve_canonical`/`to_canonical_quantity` helper and comparing
+  group-by-group (`sub_category_id` × `canonical_unit`) instead of one loose total; re-run confirmed 0 mismatches. Not a Metric Layer bug —
+  a bug in the independent check that the check itself caught before being trusted.
+- **Mixed units confirmed live** (not just in tests): `recurring_requested_quantity` for the whole window returns `status: MIXED_UNITS`,
+  `value: null`, and a breakdown of `{"KG": 425.0}` / `{"TETE": 62.0}` — no combined number anywhere.
+- **North Star live**: `successful_procurement_rate` returns `status: PARTIAL`, a `breakdown` with DIRECT/TENDER/RECURRING plus a
+  `"DIRECT+TENDER (reliable_scope)"` entry, and RECURRING explicitly marked `"reliability": "PARTIAL"` while the others are `"RELIABLE"`.
+- **Targets**: every metric in this window returned `target: null`, `target_status: "NO_TARGET"` — none seeded, as intended.
+- **Health**: `"status": "Healthy"`, last refresh ~33 minutes old at check time, 0 quality issues surfaced through the health endpoint
+  (the tender `stale_refresh` warning above is filtered out of `health` by design — a table with zero rows ever is not "unhealthy").
+- **10/10 internal endpoints** (`overview`, `direct`, `tenders`, `recurring`, `unmatched-demand`, `filters`, `health`,
+  `metrics/.../timeseries`, `metrics/.../breakdown`, `compare`) returned HTTP 200 with clean JSON — no `NaN`, no `Infinity`, no 500.
+- **`/filters`** returned the real taxonomy: 5 categories, 9 sub-categories, 4 Burkina Faso zones (Bobo-Dioulasso, Ouagadougou, Pabré,
+  Saaba) — confirming this is genuinely live data, not a fixture.
+
+### Required env vars (unchanged)
+Frontend server (Vercel): `LADINI_BACKEND_URL`, `INTERNAL_API_TOKEN` (server-only, never `NEXT_PUBLIC_*`).
 Backend: `INTERNAL_API_TOKEN` (already used by `/api/market/*`), optional `ANALYTICS_CACHE_TTL_SECONDS`, `ANALYTICS_DAILY_LOOKBACK_DAYS`.
 
-### Operational checklist after the blocker is resolved
-1. Confirm the token match with a 200 on `GET <backend>/internal/analytics/buyers/health` (token in the header, never in logs/URLs).
-2. Trigger a first recompute instead of waiting for the 6-hourly beat: `recompute_recent(worker_session, 14)` (or `recompute_range` for a chosen window) in the worker container.
-3. `backfill_quantity_delivered(session)` is one idempotent `UPDATE ... FROM (SELECT ... RECEIVED orders of CONVERTED allocations)` touching only occurrences whose stored value differs from the source of truth; it has no dry-run, so count first with the data-quality check `quantity_delivered_drift`, then run once and expect 0 on the second run.
-4. Compare at least five KPIs to independent SQL (active_buyers, needs_created, direct_search_success_rate, tender_response_rate, recurring_coverage_rate with SUM(matched)/SUM(requested) on the same window and unit, one unmatched-demand sub-category).
-5. Check `health` (Healthy / Warning / Stale) and freshness, then merge the frontend PR and repeat the checks through `/admin/analytics/buyers`.
+### Operational tooling added while closing this out
+`.github/workflows/analytics_ops.yml` (manual approval, same self-hosted runner/environment as `deploy.yml`) exposes: `recompute`,
+`drift`, `backfill`, `quality`, `verify_kpis`, `smoke_endpoints`, `verify_public_route`, plus the one-off `debug_caddy`/`debug_repo`/
+`force_recreate_caddy` actions used to find and fix the Caddy bug above (kept as a recovery lever). Every action prints only aggregate
+JSON/counts — no secret, no PII, ever.
+
+### Remaining checklist (blocked on the human Vercel steps above)
+1. Set the two Vercel env vars, merge #6, confirm the Vercel deploy.
+2. Open `/admin/analytics/buyers` as an admin session; confirm the same 200/data already proven server-to-server now render correctly
+   through the browser, and that a non-admin gets 403 / an unauthenticated visitor gets redirected — this is the one check that
+   genuinely needs a browser and could not be done from here.
+3. Re-run `analytics_ops.yml -> smoke_endpoints` occasionally as real traffic accumulates (tender/direct-search data is currently sparse).
