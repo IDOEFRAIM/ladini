@@ -249,8 +249,10 @@ class MarketBalanceService:
         age = (now - last) if last is not None else None
         stale_after = timedelta(hours=36)
         stale = age is None or age > stale_after
-        return {"last_refresh": last.isoformat() if last else None, "age_seconds": int(age.total_seconds()) if age is not None else None,
-                "stale": stale, "stale_after_hours": int(stale_after.total_seconds() // 3600)}
+        last_iso = last.isoformat() if last else None
+        return {"last_refresh": last_iso, "age_seconds": int(age.total_seconds()) if age is not None else None,
+                "stale": stale, "stale_after_hours": int(stale_after.total_seconds() // 3600),
+                "tables": {"market_balance_daily_snapshot": last_iso}}
 
 
 __all__ = ["MarketBalanceService", "BalanceRow", "DEMAND_RELIABILITY", "SUPPLY_RELIABILITY"]
