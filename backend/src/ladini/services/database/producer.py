@@ -15,6 +15,7 @@ from sqlalchemy.orm import (
 )
 
 from ladini.core.formatting import fmt_num as _fmt_num
+from ladini.domain.analytics.emitter import BusinessEventEmitter
 from ladini.domain.models import (
     Bid,
     BuyerProfile,
@@ -1777,6 +1778,7 @@ class ProducerMgmtMixin(BaseMixin):
             )
 
         await current_session.flush()
+        await BusinessEventEmitter(current_session).emit_order_delivered(order)
 
         order_ref = str(order.id)[:8].upper()
         amount_txt = _fmt_num(order.total_amount)

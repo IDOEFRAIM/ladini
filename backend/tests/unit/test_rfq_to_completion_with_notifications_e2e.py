@@ -38,7 +38,7 @@ async def _async_return(value):
 def _auction(**overrides):
     base = dict(
         id=uuid.uuid4(), buyer_id=uuid.uuid4(), quantity=10.0, unit="TONNE",
-        target_zone_id=None, status="OPEN", winner_bid_id=None,
+        target_zone_id=None, sub_category_id=uuid.uuid4(), status="OPEN", winner_bid_id=None,
     )
     base.update(overrides)
     return types.SimpleNamespace(**base)

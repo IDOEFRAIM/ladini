@@ -50,9 +50,26 @@ class TestOtherCanonicalUnitsAreUnaffected:
         assert canonical_unit_label("tonnes") == "TONNE"
         assert canonical_unit_label("sacs") == "SAC"
 
-    def test_an_unrecognized_unit_passes_through_unchanged(self):
-        assert canonical_unit_label("litre") == "LITRE"
-
     def test_an_empty_value_returns_the_default(self):
         assert canonical_unit_label("", default="KG") == "KG"
         assert canonical_unit_label(None, default="TETE") == "TETE"
+
+
+class TestLitreIsARealCanonicalEntryNotAnAccidentalFallthrough:
+    """Analytics Phase C (2026-09-27): before this fix, `_CANONICAL_UNIT_MAP`
+    had NO entry for LITRE at all — `canonical_unit_label("LITRE")` only
+    "worked" via the `.get(unit, unit)` fallback (the input echoed back
+    unchanged), which meant "L" and "LITRES" were NOT folded to "LITRE"
+    (they came back as "L"/"LITRES" verbatim). Combined with `nodes/
+    memory.py::_PRIMARY_CANONICAL_UNITS` missing "LITRE" entirely, a buyer
+    answering "litre" to "quelle unité ?" was silently rejected — see
+    `test_resolve_unit_value_litre.py` for that half of the regression."""
+
+    def test_all_spellings_normalize_to_litre(self):
+        for raw in ("l", "L", "litre", "LITRE", "litres", "LITRES"):
+            assert canonical_unit_label(raw) == "LITRE", raw
+
+    def test_litre_family_is_volume(self):
+        from ladini.domain.analytics.units import measurement_family_of
+
+        assert measurement_family_of(canonical_unit_label("litre")) == "VOLUME"

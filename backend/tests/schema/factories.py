@@ -4,7 +4,12 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta
 
+from psycopg2.extensions import QuotedString, register_adapter
 from psycopg2.extras import Json
+
+# Adaptation en ENTRÉE seulement (les lectures restent des str, comme avant) : certains tests
+# passent des uuid.UUID Python directement à psycopg2.
+register_adapter(uuid.UUID, lambda u: QuotedString(str(u)))
 
 
 def insert(cur, table: str, **cols):

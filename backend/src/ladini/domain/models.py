@@ -30,6 +30,11 @@ from __future__ import annotations
 from ladini.domain import (
     runtime_tables,  # noqa: F401  (tables d'état runtime, miroir de Drizzle)
 )
+from ladini.domain.analytics.models import (
+    BusinessEventRecord,
+    EventOutboxRecord,
+    MetricTargetRecord,
+)
 from ladini.domain.catalog.models import (
     CropCycle,
     Expense,
@@ -97,6 +102,10 @@ __all__ = [
     "AgentTurn",
     "Base",
     "_uuid4",
+    # analytics (Phase C)
+    "EventOutboxRecord",
+    "BusinessEventRecord",
+    "MetricTargetRecord",
     # approvisionnement récurrent (Phase 1 — fondation de données)
     "RecurringNeed",
     "RecurringNeedOccurrence",

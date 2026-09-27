@@ -283,3 +283,27 @@ def recurring_draft_table(request, monkeypatch):
     from tests.harness.recurring import InMemoryDraftTable, install_draft_table
 
     yield install_draft_table(InMemoryDraftTable(), monkeypatch.setattr)
+
+
+# =====================================================================
+# OUTBOX ANALYTICS (frontière base de données)
+# =====================================================================
+
+
+@pytest.fixture(autouse=True)
+def analytics_outbox_no_db(request, monkeypatch):
+    """Les call-sites métier (create_auction, place_bid, select_winning_bid, livraison…) écrivent
+    désormais une intention d'event via `analytics_outbox_repo.enqueue` (un INSERT PostgreSQL). Les
+    tests unitaires à session factice n'ont pas de vraie base : l'INSERT est neutralisé ici, comme
+    le store de drafts ci-dessus. Exclus : `tests/schema/` (vrai PostgreSQL) et les fichiers
+    `test_analytics_*` qui testent l'outbox/l'emitter eux-mêmes (ils posent leurs propres doublures)."""
+    path = str(request.node.fspath).replace("\\", "/")
+    if "/tests/schema/" in path or Path(path).name.startswith("test_analytics_"):
+        yield
+        return
+
+    async def _enqueue(session, *, event_name, journey, payload, dedupe_key):
+        return True
+
+    monkeypatch.setattr("ladini.workers.repositories.analytics_outbox_repo.enqueue", _enqueue)
+    yield

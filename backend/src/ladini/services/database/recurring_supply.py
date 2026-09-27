@@ -60,10 +60,15 @@ import json
 import logging
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select, text, update
 
+from ladini.domain.analytics.business_events import BusinessEventName
+from ladini.domain.analytics.emitter import BusinessEventEmitter
+from ladini.domain.analytics.metric_dictionary import Journey
+from ladini.domain.analytics.units import resolve_subcategory_canonical_unit
 from ladini.domain.models import (
     BuyerProfile,
     NeedAllocation,
@@ -256,6 +261,8 @@ class RecurringSupplyMixin(BaseMixin):
             end_date=end_date,
             max_price_per_unit=max_price_per_unit,
             rule=rule,
+            actor_id=user_obj.id,
+            zone_id=getattr(user_obj, "zone_id", None),
         )
 
         await self._close_confirmation(ledger, result)
@@ -323,6 +330,8 @@ class RecurringSupplyMixin(BaseMixin):
                 end_date=end_date,
                 max_price_per_unit=max_price_per_unit,
                 rule=rule,
+                actor_id=user_obj.id,
+                zone_id=getattr(user_obj, "zone_id", None),
             )
             created.append(result)
 
@@ -347,6 +356,8 @@ class RecurringSupplyMixin(BaseMixin):
         end_date: Optional[date],
         max_price_per_unit: Optional[float],
         rule: RecurrenceRule,
+        actor_id: Any = None,
+        zone_id: Any = None,
     ) -> Dict[str, Any]:
         """UN `RecurringNeed` + ses occurrences — partagée par `create_recurring_need` (1 produit) et
         `create_recurring_needs` (N produits, même récurrence/dates). Aucun flush/commit propre à cette
@@ -373,8 +384,37 @@ class RecurringSupplyMixin(BaseMixin):
         current_session.add(need)
         await current_session.flush()
 
+        # Analytics Phase C : le VRAI RecurringNeed vient d'être flushé (jamais un draft), dans la
+        # transaction racine — l'intention d'event est commitée/rollbackée avec le besoin.
+        canonical_unit = resolve_subcategory_canonical_unit(sub_cat)
+        await BusinessEventEmitter(current_session).emit(
+            event_name=BusinessEventName.RECURRING_NEED_CREATED,
+            journey=Journey.RECURRING,
+            actor_type="BUYER",
+            actor_id=actor_id,
+            buyer_id=buyer_id,
+            zone_id=zone_id,
+            entity_type="RECURRING_NEED",
+            entity_id=need.id,
+            idempotency_key=f"RECURRING_NEED_CREATED:{need.id}",
+            sub_category_id=sub_cat.id,
+            quantity=float(need.quantity),
+            unit=need.unit,
+            canonical_unit_override=canonical_unit,
+            metadata={"recurrence_type": recurrence_type},
+        )
+
         window_end = _today() + timedelta(days=OCCURRENCE_WINDOW_DAYS)
-        occurrences_created = await self._materialize_occurrences(need, rule, from_date=_today(), to_date=window_end)
+        occurrences_created = await self._materialize_occurrences(
+            need,
+            rule,
+            from_date=_today(),
+            to_date=window_end,
+            actor_type="BUYER",
+            actor_id=actor_id,
+            zone_id=zone_id,
+            canonical_unit=canonical_unit,
+        )
 
         return {
             "recurring_need_id": str(need.id),
@@ -383,7 +423,16 @@ class RecurringSupplyMixin(BaseMixin):
         }
 
     async def _materialize_occurrences(
-        self, need: RecurringNeed, rule: RecurrenceRule, *, from_date: date, to_date: date
+        self,
+        need: RecurringNeed,
+        rule: RecurrenceRule,
+        *,
+        from_date: date,
+        to_date: date,
+        actor_type: str = "SYSTEM",
+        actor_id: Any = None,
+        zone_id: Any = None,
+        canonical_unit: Optional[str] = None,
     ) -> int:
         """Idempotent (mandat §8) : `ON CONFLICT (recurring_need_id, occurrence_date) DO NOTHING` —
         un deuxième appel sur la même fenêtre produit 0 doublon. Chaque occurrence SNAPSHOTTE
@@ -405,8 +454,31 @@ class RecurringSupplyMixin(BaseMixin):
 
         stmt = pg_insert(RecurringNeedOccurrence).values(rows)
         stmt = stmt.on_conflict_do_nothing(index_elements=["recurring_need_id", "occurrence_date"])
-        result = await current_session.execute(stmt)
-        return result.rowcount or 0
+        returning_stmt = stmt.returning(RecurringNeedOccurrence.id, RecurringNeedOccurrence.occurrence_date)
+        inserted = (await current_session.execute(returning_stmt)).all()
+
+        # Analytics Phase C : SEUL point de création d'occurrences (création initiale ET cron de
+        # réapprovisionnement passent ici). `RETURNING` ne renvoie QUE les lignes réellement
+        # insérées : un `ON CONFLICT DO NOTHING` (rejeu/chevauchement de cron) n'émet donc rien.
+        emitter = BusinessEventEmitter(current_session)
+        for occ_id, occ_date in inserted:
+            await emitter.emit(
+                event_name=BusinessEventName.RECURRING_OCCURRENCE_CREATED,
+                journey=Journey.RECURRING,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                buyer_id=need.buyer_id,
+                zone_id=zone_id,
+                entity_type="RECURRING_OCCURRENCE",
+                entity_id=occ_id,
+                idempotency_key=f"RECURRING_OCCURRENCE_CREATED:{occ_id}",
+                sub_category_id=need.sub_category_id,
+                quantity=float(need.quantity),
+                unit=need.unit,
+                canonical_unit_override=canonical_unit,
+                metadata={"recurring_need_id": str(need.id), "occurrence_date": occ_date.date().isoformat()},
+            )
+        return len(inserted)
 
     async def replenish_occurrence_windows(self) -> Dict[str, Any]:
         """Réapprovisionnement générique (Phase 3, mandat MONTHLY §17/§18) : rejoue
@@ -430,6 +502,24 @@ class RecurringSupplyMixin(BaseMixin):
         needs = (
             await current_session.execute(select(RecurringNeed).where(RecurringNeed.status == "ACTIVE"))
         ).scalars().all()
+        # Une seule requête pour la zone acheteur + l'unité canonique de la sous-catégorie de TOUS
+        # les besoins actifs (analytics Phase C) — jamais un lookup par besoin.
+        dims = {
+            row.need_id: (row.zone_id, row.priority_unit)
+            for row in (
+                await current_session.execute(
+                    select(
+                        RecurringNeed.id.label("need_id"),
+                        User.zone_id.label("zone_id"),
+                        SubCategory.priority_unit.label("priority_unit"),
+                    )
+                    .join(BuyerProfile, BuyerProfile.id == RecurringNeed.buyer_id)
+                    .join(User, User.id == BuyerProfile.user_id)
+                    .join(SubCategory, SubCategory.id == RecurringNeed.sub_category_id)
+                    .where(RecurringNeed.status == "ACTIVE")
+                )
+            ).all()
+        }
 
         needs_examined = 0
         occurrences_created = 0
@@ -442,8 +532,14 @@ class RecurringSupplyMixin(BaseMixin):
                 ends_at=need.ends_at,
             )
             needs_examined += 1
+            zone_id, priority_unit = dims.get(need.id, (None, None))
             occurrences_created += await self._materialize_occurrences(
-                need, rule, from_date=_today(), to_date=window_end
+                need,
+                rule,
+                from_date=_today(),
+                to_date=window_end,
+                zone_id=zone_id,
+                canonical_unit=resolve_subcategory_canonical_unit(SimpleNamespace(priority_unit=priority_unit)),
             )
 
         logger.info(
@@ -767,6 +863,31 @@ class RecurringSupplyMixin(BaseMixin):
         occurrence.version = occurrence.version + 1
         await current_session.flush()
 
+        # Analytics Phase C : émis APRÈS la persistance réelle de l'acceptation (commandes créées,
+        # allocations CONVERTED, occurrence ACCEPTED), même transaction. Clé = l'occurrence : elle
+        # ne peut être acceptée qu'UNE fois (le statut sort de OPEN/MATCHED), donc un message
+        # WhatsApp rejoué échoue plus haut (BusinessRuleException) et, à défaut, ON CONFLICT DO NOTHING.
+        await BusinessEventEmitter(current_session).emit(
+            event_name=BusinessEventName.RECURRING_DIGEST_ACCEPTED,
+            journey=Journey.RECURRING,
+            actor_type="BUYER",
+            actor_id=user_obj.id,
+            buyer_id=buyer_id,
+            zone_id=getattr(user_obj, "zone_id", None),
+            entity_type="RECURRING_OCCURRENCE",
+            entity_id=occurrence.id,
+            idempotency_key=f"RECURRING_DIGEST_ACCEPTED:{occurrence.id}",
+            sub_category_id=need.sub_category_id,
+            quantity=converted_quantity,
+            unit=occurrence.unit,
+            amount=sum(float(a.quantity) * float(a.unit_price) for a in allocations),
+            metadata={
+                "recurring_need_id": str(need.id),
+                "order_group_id": str(order_group_id),
+                "occurrence_status": occurrence.status,
+            },
+        )
+
         logger.info(
             "recurring_need.match_accepted | occurrence_id=%s | orders=%s | quantity=%s",
             occurrence.id, created_order_ids, converted_quantity,
@@ -1071,7 +1192,12 @@ class RecurringSupplyMixin(BaseMixin):
         if action == "OCCURRENCE_OVERRIDE":
             return await self._apply_occurrence_override(need, occurrence_date=_parse_date(occurrence_date), quantity=quantity)
         if action == "OCCURRENCE_SKIP":
-            return await self._apply_occurrence_skip(need, occurrence_date=_parse_date(occurrence_date))
+            return await self._apply_occurrence_skip(
+                need,
+                occurrence_date=_parse_date(occurrence_date),
+                actor_id=_user_obj.id,
+                zone_id=getattr(_user_obj, "zone_id", None),
+            )
         raise AssertionError(action)  # pragma: no cover — filtré par RECURRING_NEED_ACTIONS ci-dessus
 
     async def _apply_permanent_update(
@@ -1185,7 +1311,14 @@ class RecurringSupplyMixin(BaseMixin):
         logger.info("occurrence.updated | occurrence_id=%s | requested_quantity=%s", occ.id, quantity)
         return {"status": "success", "occurrence_id": str(occ.id), "requested_quantity": float(quantity)}
 
-    async def _apply_occurrence_skip(self, need: RecurringNeed, *, occurrence_date: Optional[date]) -> Dict[str, Any]:
+    async def _apply_occurrence_skip(
+        self,
+        need: RecurringNeed,
+        *,
+        occurrence_date: Optional[date],
+        actor_id: Any = None,
+        zone_id: Any = None,
+    ) -> Dict[str, Any]:
         if occurrence_date is None:
             raise BusinessRuleException("Date requise.")
         occ = await self._get_mutable_occurrence(need, occurrence_date)
@@ -1193,6 +1326,24 @@ class RecurringSupplyMixin(BaseMixin):
         occ.status = "SKIPPED"
         occ.version = occ.version + 1
         await current_session.flush()
+        # Analytics Phase C : fonction de skip commune à toutes les formulations utilisateur ; le
+        # fait métier = l'occurrence réellement passée à SKIPPED (une 2e tentative échoue dans
+        # `_get_mutable_occurrence`, et la clé est de toute façon unique par occurrence).
+        await BusinessEventEmitter(current_session).emit(
+            event_name=BusinessEventName.RECURRING_OCCURRENCE_SKIPPED,
+            journey=Journey.RECURRING,
+            actor_type="BUYER",
+            actor_id=actor_id,
+            buyer_id=need.buyer_id,
+            zone_id=zone_id,
+            entity_type="RECURRING_OCCURRENCE",
+            entity_id=occ.id,
+            idempotency_key=f"RECURRING_OCCURRENCE_SKIPPED:{occ.id}",
+            sub_category_id=need.sub_category_id,
+            quantity=float(occ.requested_quantity),
+            unit=occ.unit,
+            metadata={"recurring_need_id": str(need.id)},
+        )
         logger.info("occurrence.skipped | occurrence_id=%s", occ.id)
         return {"status": "success", "occurrence_id": str(occ.id)}
 

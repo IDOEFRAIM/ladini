@@ -1,6 +1,6 @@
 {
-  "id": "3981dcb4-e1ca-4e75-986e-5086dffb58ef",
-  "prevId": "4a4b9bdf-7245-4685-8cb3-6472cdc7acfe",
+  "id": "a46b6431-f577-4c2a-841f-2479a7149161",
+  "prevId": "e40e4720-240f-4e78-9657-ff49af0ef30f",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -9805,6 +9805,657 @@
         "agent_turns_duration_chk": {
           "name": "agent_turns_duration_chk",
           "value": "\"intelligence\".\"agent_turns\".\"duration_ms\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "analytics.business_events": {
+      "name": "business_events",
+      "schema": "analytics",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "event_name": {
+          "name": "event_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "journey": {
+          "name": "journey",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actor_type": {
+          "name": "actor_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "actor_id": {
+          "name": "actor_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "buyer_id": {
+          "name": "buyer_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "producer_id": {
+          "name": "producer_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "entity_type": {
+          "name": "entity_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "entity_id": {
+          "name": "entity_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "category_id": {
+          "name": "category_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "sub_category_id": {
+          "name": "sub_category_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "zone_id": {
+          "name": "zone_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "quantity": {
+          "name": "quantity",
+          "type": "numeric(14, 3)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "unit": {
+          "name": "unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "canonical_quantity": {
+          "name": "canonical_quantity",
+          "type": "numeric(14, 3)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "canonical_unit": {
+          "name": "canonical_unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "measurement_family": {
+          "name": "measurement_family",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "amount": {
+          "name": "amount",
+          "type": "numeric(14, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "currency": {
+          "name": "currency",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'XOF'"
+        },
+        "metadata": {
+          "name": "metadata",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
+        },
+        "occurred_at": {
+          "name": "occurred_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "business_events_idempotency_key_uq": {
+          "name": "business_events_idempotency_key_uq",
+          "columns": [
+            {
+              "expression": "idempotency_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "business_events_event_name_idx": {
+          "name": "business_events_event_name_idx",
+          "columns": [
+            {
+              "expression": "event_name",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "business_events_journey_idx": {
+          "name": "business_events_journey_idx",
+          "columns": [
+            {
+              "expression": "journey",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "business_events_occurred_at_idx": {
+          "name": "business_events_occurred_at_idx",
+          "columns": [
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "business_events_buyer_idx": {
+          "name": "business_events_buyer_idx",
+          "columns": [
+            {
+              "expression": "buyer_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "business_events_entity_idx": {
+          "name": "business_events_entity_idx",
+          "columns": [
+            {
+              "expression": "entity_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "entity_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "business_events_sub_category_idx": {
+          "name": "business_events_sub_category_idx",
+          "columns": [
+            {
+              "expression": "sub_category_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "business_events_zone_idx": {
+          "name": "business_events_zone_idx",
+          "columns": [
+            {
+              "expression": "zone_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "business_events_buyer_id_buyer_profiles_id_fk": {
+          "name": "business_events_buyer_id_buyer_profiles_id_fk",
+          "tableFrom": "business_events",
+          "tableTo": "buyer_profiles",
+          "schemaTo": "marketplace",
+          "columnsFrom": [
+            "buyer_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "business_events_producer_id_producers_id_fk": {
+          "name": "business_events_producer_id_producers_id_fk",
+          "tableFrom": "business_events",
+          "tableTo": "producers",
+          "schemaTo": "marketplace",
+          "columnsFrom": [
+            "producer_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "business_events_category_id_categories_id_fk": {
+          "name": "business_events_category_id_categories_id_fk",
+          "tableFrom": "business_events",
+          "tableTo": "categories",
+          "schemaTo": "governance",
+          "columnsFrom": [
+            "category_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "business_events_sub_category_id_sub_categories_id_fk": {
+          "name": "business_events_sub_category_id_sub_categories_id_fk",
+          "tableFrom": "business_events",
+          "tableTo": "sub_categories",
+          "schemaTo": "governance",
+          "columnsFrom": [
+            "sub_category_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "business_events_zone_id_zones_id_fk": {
+          "name": "business_events_zone_id_zones_id_fk",
+          "tableFrom": "business_events",
+          "tableTo": "zones",
+          "schemaTo": "governance",
+          "columnsFrom": [
+            "zone_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "business_events_event_name_chk": {
+          "name": "business_events_event_name_chk",
+          "value": "\"analytics\".\"business_events\".\"event_name\" IN ('DIRECT_SEARCH_PERFORMED','DIRECT_SEARCH_SUCCEEDED','DIRECT_ORDER_CREATED','DIRECT_ORDER_CONFIRMED','DIRECT_ORDER_DELIVERED','DIRECT_ORDER_FAILED','TENDER_CREATED','TENDER_PUBLISHED','TENDER_BID_RECEIVED','TENDER_WINNER_SELECTED','TENDER_ORDER_CREATED','TENDER_DELIVERED','RECURRING_NEED_CREATED','RECURRING_OCCURRENCE_CREATED','RECURRING_MATCH_FOUND','RECURRING_DIGEST_SENT','RECURRING_DIGEST_ACCEPTED','RECURRING_DIGEST_MODIFIED','RECURRING_OCCURRENCE_SKIPPED','RECURRING_OCCURRENCE_CONFIRMED','RECURRING_OCCURRENCE_DELIVERED')"
+        },
+        "business_events_journey_chk": {
+          "name": "business_events_journey_chk",
+          "value": "\"analytics\".\"business_events\".\"journey\" IN ('DIRECT','TENDER','RECURRING')"
+        },
+        "business_events_actor_type_chk": {
+          "name": "business_events_actor_type_chk",
+          "value": "\"analytics\".\"business_events\".\"actor_type\" IN ('BUYER','PRODUCER','SYSTEM','ADMIN')"
+        },
+        "business_events_measurement_family_chk": {
+          "name": "business_events_measurement_family_chk",
+          "value": "\"analytics\".\"business_events\".\"measurement_family\" IS NULL OR \"analytics\".\"business_events\".\"measurement_family\" IN ('MASS','VOLUME','COUNT','PACKAGE','OTHER')"
+        },
+        "business_events_quantity_non_negative_chk": {
+          "name": "business_events_quantity_non_negative_chk",
+          "value": "\"analytics\".\"business_events\".\"quantity\" IS NULL OR \"analytics\".\"business_events\".\"quantity\" >= 0"
+        },
+        "business_events_amount_non_negative_chk": {
+          "name": "business_events_amount_non_negative_chk",
+          "value": "\"analytics\".\"business_events\".\"amount\" IS NULL OR \"analytics\".\"business_events\".\"amount\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "analytics.event_outbox": {
+      "name": "event_outbox",
+      "schema": "analytics",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "event_name": {
+          "name": "event_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "journey": {
+          "name": "journey",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "payload": {
+          "name": "payload",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "dedupe_key": {
+          "name": "dedupe_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'PENDING'"
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "last_error": {
+          "name": "last_error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "next_attempt_at": {
+          "name": "next_attempt_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "event_outbox_dedupe_key_uq": {
+          "name": "event_outbox_dedupe_key_uq",
+          "columns": [
+            {
+              "expression": "dedupe_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "event_outbox_claim_idx": {
+          "name": "event_outbox_claim_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "next_attempt_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "event_outbox_status_chk": {
+          "name": "event_outbox_status_chk",
+          "value": "\"analytics\".\"event_outbox\".\"status\" IN ('PENDING','SENDING','SENT','FAILED','DEAD')"
+        },
+        "event_outbox_journey_chk": {
+          "name": "event_outbox_journey_chk",
+          "value": "\"analytics\".\"event_outbox\".\"journey\" IN ('DIRECT','TENDER','RECURRING')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "analytics.metric_targets": {
+      "name": "metric_targets",
+      "schema": "analytics",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "metric_name": {
+          "name": "metric_name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scope_type": {
+          "name": "scope_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scope_id": {
+          "name": "scope_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "target_value": {
+          "name": "target_value",
+          "type": "numeric(10, 4)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "warning_threshold": {
+          "name": "warning_threshold",
+          "type": "numeric(10, 4)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "critical_threshold": {
+          "name": "critical_threshold",
+          "type": "numeric(10, 4)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "valid_from": {
+          "name": "valid_from",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "valid_until": {
+          "name": "valid_until",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "metric_targets_metric_scope_idx": {
+          "name": "metric_targets_metric_scope_idx",
+          "columns": [
+            {
+              "expression": "metric_name",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "scope_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "scope_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "metric_targets_scope_type_chk": {
+          "name": "metric_targets_scope_type_chk",
+          "value": "\"analytics\".\"metric_targets\".\"scope_type\" IN ('GLOBAL','JOURNEY','CATEGORY','SUBCATEGORY','ZONE')"
+        },
+        "metric_targets_scope_id_matches_scope_type_chk": {
+          "name": "metric_targets_scope_id_matches_scope_type_chk",
+          "value": "(\"analytics\".\"metric_targets\".\"scope_type\" = 'GLOBAL' AND \"analytics\".\"metric_targets\".\"scope_id\" IS NULL) OR (\"analytics\".\"metric_targets\".\"scope_type\" <> 'GLOBAL' AND \"analytics\".\"metric_targets\".\"scope_id\" IS NOT NULL)"
         }
       },
       "isRLSEnabled": false

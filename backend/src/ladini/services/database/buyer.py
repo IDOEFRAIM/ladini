@@ -8,6 +8,9 @@ from sqlalchemy import case, desc, func, literal, or_, select, update
 from sqlalchemy.orm import joinedload, selectinload
 
 from ladini.core.formatting import fmt_num as _fmt_num
+from ladini.domain.analytics.business_events import BusinessEventName
+from ladini.domain.analytics.emitter import BusinessEventEmitter
+from ladini.domain.analytics.metric_dictionary import Journey
 
 # Import des modèles alignés sur le schéma
 from ladini.domain.models import (
@@ -247,7 +250,7 @@ class BuyerMixin(BaseMixin):
                 }
 
             # Résolution du profil de l'acheteur
-            user_obj, _ = await self.get_buyer_profile(phone=phone)
+            user_obj, buyer_profile = await self.get_buyer_profile(phone=phone)
             target_uuid = user_obj.zone_id if user_obj else None
             parent_id = None
 
@@ -369,6 +372,44 @@ class BuyerMixin(BaseMixin):
                 (await current_session.execute(catalog_stmt)).mappings().all()
             )
             future_rows = (await current_session.execute(future_stmt)).mappings().all()
+            result_count = len(catalog_rows) + len(future_rows)
+
+            # Analytics Phase C : un event par recherche RÉELLEMENT EXÉCUTÉE
+            # (cette méthode, pas une frappe/autocomplete — mission §7). Clé
+            # d'idempotence sur un id frais : une recherche n'a pas de
+            # "transition métier" à rejouer comme un Order/Auction, le
+            # dédoublonnage WhatsApp/Celery est déjà porté par le dédoublonnage
+            # de tâche au niveau message (voir test_process_agent_task_message_dedup.py).
+            search_event_id = uuid.uuid4()
+            await BusinessEventEmitter(current_session).emit(
+                event_name=BusinessEventName.DIRECT_SEARCH_PERFORMED,
+                journey=Journey.DIRECT,
+                actor_type="BUYER",
+                actor_id=user_obj.id if user_obj else None,
+                buyer_id=buyer_profile.id if buyer_profile else None,
+                zone_id=target_uuid,
+                entity_type="SEARCH",
+                entity_id=search_event_id,
+                idempotency_key=f"DIRECT_SEARCH_PERFORMED:{search_event_id}",
+                metadata={"query": clean_product, "result_count": result_count},
+            )
+            if result_count > 0:
+                # "Succès" = au moins un résultat ÉLIGIBLE retourné (mission §7) —
+                # le filtrage (quantity_for_sale>0, is_available, etc.) est déjà
+                # fait par catalog_stmt/future_stmt ci-dessus, donc result_count>0
+                # signifie exactement ça, pas un simple "la requête n'a pas planté".
+                await BusinessEventEmitter(current_session).emit(
+                    event_name=BusinessEventName.DIRECT_SEARCH_SUCCEEDED,
+                    journey=Journey.DIRECT,
+                    actor_type="BUYER",
+                    actor_id=user_obj.id if user_obj else None,
+                    buyer_id=buyer_profile.id if buyer_profile else None,
+                    zone_id=target_uuid,
+                    entity_type="SEARCH",
+                    entity_id=search_event_id,
+                    idempotency_key=f"DIRECT_SEARCH_SUCCEEDED:{search_event_id}",
+                    metadata={"query": clean_product, "result_count": result_count},
+                )
 
             if not catalog_rows and not future_rows:
                 return {
@@ -554,6 +595,7 @@ class BuyerMixin(BaseMixin):
 
         running_total = 0.0
         summary_items = []
+        line_items_for_event: List[Dict[str, Any]] = []
 
         for item in sorted_items:
             p_id = item.get("product_id")
@@ -671,12 +713,38 @@ class BuyerMixin(BaseMixin):
                 float(product.quantity_for_sale or 0.0) - stock_debit
             )
             summary_items.append(f"{product.name} (x{qty} {product.unit or 'u'})")
+            line_items_for_event.append(
+                {"sub_category_id": product.sub_category_id, "quantity": stock_debit, "unit": product.unit}
+            )
 
         if not summary_items:
             raise BusinessRuleException("Le panier ne contient aucun article valide.")
 
         new_order.total_amount = running_total
         await current_session.flush()
+
+        # Analytics Phase C : un panier peut mélanger des sous-catégories/unités
+        # incompatibles (mission §5/§9) — on ne force ni quantity/unit ni
+        # sub_category_id à l'échelle de la COMMANDE quand elle contient
+        # plusieurs articles ; ces dimensions ne sont posées que pour le cas
+        # mono-article (le plus fréquent), jamais devinées pour le reste.
+        single_item = line_items_for_event[0] if len(line_items_for_event) == 1 else None
+        await BusinessEventEmitter(current_session).emit(
+            event_name=BusinessEventName.DIRECT_ORDER_CREATED,
+            journey=Journey.DIRECT,
+            actor_type="BUYER",
+            actor_id=user_obj.id,
+            buyer_id=profile_obj.id,
+            zone_id=user_obj.zone_id,
+            entity_type="ORDER",
+            entity_id=new_order.id,
+            idempotency_key=f"DIRECT_ORDER_CREATED:{new_order.id}",
+            sub_category_id=single_item["sub_category_id"] if single_item else None,
+            quantity=single_item["quantity"] if single_item else None,
+            unit=single_item["unit"] if single_item else None,
+            amount=running_total,
+            metadata={"item_count": len(line_items_for_event)},
+        )
 
         return {
             "status": "success",

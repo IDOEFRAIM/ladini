@@ -35,6 +35,9 @@ from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ladini.domain.analytics.business_events import BusinessEventName
+from ladini.domain.analytics.emitter import BusinessEventEmitter
+from ladini.domain.analytics.metric_dictionary import Journey
 from ladini.domain.models import NeedAllocation
 from ladini.domain.recurring_supply.matching import (
     Allocation,
@@ -224,7 +227,7 @@ class NeedMatchingService:
             )
             report.allocation_count = len(new_allocations)
 
-            changed = await self._persist_allocations(occurrence_id, row, new_allocations)
+            changed = await self._persist_allocations(occurrence_id, row, new_allocations, buyer_zone=buyer_zone)
             report.changed = changed
             report.matched_quantity = sum(a.quantity for a in new_allocations)
 
@@ -266,7 +269,9 @@ class NeedMatchingService:
             result[str(r["producer_id"])] = (resolved - cancelled) / resolved
         return result
 
-    async def _persist_allocations(self, occurrence_id: Any, occ_row: Any, new_allocations: Sequence[Allocation]) -> bool:
+    async def _persist_allocations(
+        self, occurrence_id: Any, occ_row: Any, new_allocations: Sequence[Allocation], *, buyer_zone: Any = None
+    ) -> bool:
         """Upsert idempotent + expiration des allocations devenues invalides (mandat §8) ; ne bump
         `version` QUE si l'ensemble des allocations ACTIVES a réellement changé (mandat §10)."""
         before = (await self.session.execute(_ACTIVE_ALLOCATIONS_SQL, {"occurrence_id": occurrence_id})).all()
@@ -300,7 +305,49 @@ class NeedMatchingService:
                     "updated_at": now,
                 },
             )
-            await self.session.execute(stmt)
+            returning_stmt = stmt.returning(
+                NeedAllocation.id,
+                NeedAllocation.producer_id,
+                NeedAllocation.product_id,
+                NeedAllocation.quantity,
+                NeedAllocation.unit_price,
+                NeedAllocation.unit,
+            )
+            persisted = (await self.session.execute(returning_stmt)).all()
+
+            # Analytics Phase C : 1 event = 1 allocation matérialisée. La clé suit l'`id` de la ligne
+            # `need_allocations` — stable à travers les rematchs, car l'upsert
+            # (occurrence, producteur, produit) CONSERVE l'id existant (le `uuid4()` proposé dans
+            # `rows` n'est retenu qu'à l'insertion réelle). Un retry/rematch identique => même clé
+            # => ON CONFLICT DO NOTHING ; une allocation qui change de quantité/prix garde son
+            # event initial (le fait "match trouvé" ne se répète pas). Émis seulement si l'ensemble
+            # actif a réellement changé, pour ne pas ajouter d'écritures à un rematch inerte.
+            if before_signature != {
+                (a.producer_id, a.product_id, float(a.quantity), float(a.unit_price)) for a in new_allocations
+            }:
+                emitter = BusinessEventEmitter(self.session)
+                for alloc_id, producer_id, product_id, quantity, unit_price, unit in persisted:
+                    await emitter.emit(
+                        event_name=BusinessEventName.RECURRING_MATCH_FOUND,
+                        journey=Journey.RECURRING,
+                        actor_type="SYSTEM",
+                        buyer_id=occ_row["buyer_id"],
+                        producer_id=producer_id,
+                        zone_id=buyer_zone,
+                        entity_type="NEED_ALLOCATION",
+                        entity_id=alloc_id,
+                        idempotency_key=f"RECURRING_MATCH_FOUND:{alloc_id}",
+                        sub_category_id=occ_row["sub_category_id"],
+                        quantity=float(quantity),
+                        unit=unit,
+                        amount=float(quantity) * float(unit_price),
+                        metadata={
+                            "occurrence_id": str(occurrence_id),
+                            "recurring_need_id": str(occ_row["need_id"]),
+                            "product_id": str(product_id),
+                            "unit_price": float(unit_price),
+                        },
+                    )
             kept_producer_ids = [a.producer_id for a in new_allocations]
             kept_product_ids = [a.product_id for a in new_allocations]
         else:

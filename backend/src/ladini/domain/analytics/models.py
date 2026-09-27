@@ -1,0 +1,179 @@
+"""SQLAlchemy mirror of the `analytics` schema (Phase C).
+
+Source of truth: Drizzle (`src/db/schema/analytics.ts`, frontend repo) — these
+classes are its exact mirror, verified by `tests/schema/`. No table creation
+happens here; the Drizzle migration is the only source of DDL.
+
+Named `*Record` to stay distinct from this package's Phase B dataclasses
+(`business_events.py::BusinessEvent`, `metric_targets.py::MetricTarget`),
+which are in-memory validated contracts, not ORM rows — an emitter
+constructs the dataclass first (validation), then persists it as the
+matching `*Record` row.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    Text,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+
+from ladini.domain.orm_base import Base, _uuid4
+
+
+def _tz() -> DateTime:
+    return DateTime(timezone=True)
+
+
+_EVENT_NAMES_SQL = (
+    "'DIRECT_SEARCH_PERFORMED','DIRECT_SEARCH_SUCCEEDED','DIRECT_ORDER_CREATED',"
+    "'DIRECT_ORDER_CONFIRMED','DIRECT_ORDER_DELIVERED','DIRECT_ORDER_FAILED',"
+    "'TENDER_CREATED','TENDER_PUBLISHED','TENDER_BID_RECEIVED','TENDER_WINNER_SELECTED',"
+    "'TENDER_ORDER_CREATED','TENDER_DELIVERED',"
+    "'RECURRING_NEED_CREATED','RECURRING_OCCURRENCE_CREATED','RECURRING_MATCH_FOUND',"
+    "'RECURRING_DIGEST_SENT','RECURRING_DIGEST_ACCEPTED','RECURRING_DIGEST_MODIFIED',"
+    "'RECURRING_OCCURRENCE_SKIPPED','RECURRING_OCCURRENCE_CONFIRMED','RECURRING_OCCURRENCE_DELIVERED'"
+)
+
+
+class EventOutboxRecord(Base):
+    """Transactional-outbox intent row — written in the SAME session/
+    transaction as the business action (same discipline as
+    `intelligence.notification_outbox`), drained asynchronously by
+    `workers/crons/analytics_event_drain.py` into `BusinessEventRecord`."""
+
+    __tablename__ = "event_outbox"
+    __table_args__ = (
+        Index("event_outbox_dedupe_key_uq", "dedupe_key", unique=True),
+        Index("event_outbox_claim_idx", "status", "next_attempt_at"),
+        CheckConstraint(
+            "status IN ('PENDING','SENDING','SENT','FAILED','DEAD')",
+            name="event_outbox_status_chk",
+        ),
+        CheckConstraint("journey IN ('DIRECT','TENDER','RECURRING')", name="event_outbox_journey_chk"),
+        {"schema": "analytics"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    event_name = Column(Text, nullable=False)
+    journey = Column(Text, nullable=False)
+    payload = Column(JSONB, nullable=False)
+    dedupe_key = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, server_default=text("'PENDING'"))
+    attempts = Column(Integer, nullable=False, server_default=text("0"))
+    last_error = Column(Text)
+    next_attempt_at = Column(_tz(), server_default=func.now(), nullable=False)
+    created_at = Column(_tz(), server_default=func.now(), nullable=False)
+
+
+class BusinessEventRecord(Base):
+    """The durable, append-only business fact. Never written directly by
+    business-flow code — only by the outbox drain worker, from a validated
+    `business_events.py::BusinessEvent` dataclass."""
+
+    __tablename__ = "business_events"
+    __table_args__ = (
+        Index("business_events_idempotency_key_uq", "idempotency_key", unique=True),
+        Index("business_events_event_name_idx", "event_name", "occurred_at"),
+        Index("business_events_journey_idx", "journey", "occurred_at"),
+        Index("business_events_occurred_at_idx", "occurred_at"),
+        Index("business_events_buyer_idx", "buyer_id", "occurred_at"),
+        Index("business_events_entity_idx", "entity_type", "entity_id"),
+        Index("business_events_sub_category_idx", "sub_category_id", "occurred_at"),
+        Index("business_events_zone_idx", "zone_id", "occurred_at"),
+        CheckConstraint(f"event_name IN ({_EVENT_NAMES_SQL})", name="business_events_event_name_chk"),
+        CheckConstraint("journey IN ('DIRECT','TENDER','RECURRING')", name="business_events_journey_chk"),
+        CheckConstraint(
+            "actor_type IN ('BUYER','PRODUCER','SYSTEM','ADMIN')",
+            name="business_events_actor_type_chk",
+        ),
+        CheckConstraint(
+            "measurement_family IS NULL OR measurement_family IN ('MASS','VOLUME','COUNT','PACKAGE','OTHER')",
+            name="business_events_measurement_family_chk",
+        ),
+        CheckConstraint(
+            "quantity IS NULL OR quantity >= 0", name="business_events_quantity_non_negative_chk"
+        ),
+        CheckConstraint("amount IS NULL OR amount >= 0", name="business_events_amount_non_negative_chk"),
+        {"schema": "analytics"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+
+    event_name = Column(Text, nullable=False)
+    journey = Column(Text, nullable=False)
+
+    actor_type = Column(Text, nullable=False)
+    actor_id = Column(PG_UUID(as_uuid=True))
+
+    buyer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.buyer_profiles.id", ondelete="SET NULL"))
+    producer_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id", ondelete="SET NULL"))
+
+    entity_type = Column(Text, nullable=False)
+    entity_id = Column(PG_UUID(as_uuid=True), nullable=False)
+
+    category_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.categories.id", ondelete="SET NULL"))
+    sub_category_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.sub_categories.id", ondelete="SET NULL"))
+    zone_id = Column(PG_UUID(as_uuid=True), ForeignKey("governance.zones.id", ondelete="SET NULL"))
+
+    quantity = Column(Numeric(14, 3))
+    unit = Column(Text)
+    canonical_quantity = Column(Numeric(14, 3))
+    canonical_unit = Column(Text)
+    measurement_family = Column(Text)
+
+    amount = Column(Numeric(14, 2))
+    currency = Column(Text, nullable=False, server_default=text("'XOF'"))
+
+    metadata_ = Column("metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
+    occurred_at = Column(_tz(), nullable=False)
+    created_at = Column(_tz(), server_default=func.now(), nullable=False)
+
+    idempotency_key = Column(Text, nullable=False)
+
+
+class MetricTargetRecord(Base):
+    __tablename__ = "metric_targets"
+    __table_args__ = (
+        Index("metric_targets_metric_scope_idx", "metric_name", "scope_type", "scope_id"),
+        CheckConstraint(
+            "scope_type IN ('GLOBAL','JOURNEY','CATEGORY','SUBCATEGORY','ZONE')",
+            name="metric_targets_scope_type_chk",
+        ),
+        CheckConstraint(
+            "(scope_type = 'GLOBAL' AND scope_id IS NULL) OR (scope_type <> 'GLOBAL' AND scope_id IS NOT NULL)",
+            name="metric_targets_scope_id_matches_scope_type_chk",
+        ),
+        {"schema": "analytics"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+
+    metric_name = Column(Text, nullable=False)
+    scope_type = Column(Text, nullable=False)
+    scope_id = Column(PG_UUID(as_uuid=True))
+
+    target_value = Column(Numeric(10, 4), nullable=False)
+    warning_threshold = Column(Numeric(10, 4))
+    critical_threshold = Column(Numeric(10, 4))
+
+    valid_from = Column(Date, nullable=False)
+    valid_until = Column(Date)
+
+    created_at = Column(_tz(), server_default=func.now(), nullable=False)
+    updated_at = Column(_tz(), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+__all__ = ["EventOutboxRecord", "BusinessEventRecord", "MetricTargetRecord"]

@@ -10,6 +10,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
 from ladini.core.formatting import fmt_num as _fmt_num
+from ladini.domain.analytics.business_events import BusinessEventName
+from ladini.domain.analytics.emitter import BusinessEventEmitter
+from ladini.domain.analytics.metric_dictionary import Journey
 
 # Importation stricte des modèles requis pour le domaine des enchères
 from ladini.domain.models import (
@@ -376,6 +379,23 @@ class AuctionMixin(BaseMixin):
         current_session.add(new_auction)
         await current_session.flush()
 
+        await BusinessEventEmitter(current_session).emit(
+            event_name=BusinessEventName.TENDER_CREATED,
+            journey=Journey.TENDER,
+            actor_type="BUYER",
+            actor_id=user_obj.id,
+            buyer_id=buyer_id,
+            zone_id=target_zone_id,
+            entity_type="AUCTION",
+            entity_id=new_auction.id,
+            idempotency_key=f"TENDER_CREATED:{new_auction.id}",
+            sub_category_id=sub_cat.id,
+            quantity=float(qty),
+            unit=unit.upper().strip(),
+            amount=float(qty) * float(max_price),
+            metadata={"max_price_per_unit": float(max_price)},
+        )
+
         qty_txt = _fmt_num(qty)
         unit_txt = unit.upper().strip()
         price_txt = _fmt_num(max_price)
@@ -593,7 +613,7 @@ class AuctionMixin(BaseMixin):
 
         # 1. Résolution via le nouveau BaseMixin (Retourne un Tuple d'objets SQL)
         try:
-            _, producer_obj = await self.get_producer_profile(phone=str(phone))
+            producer_user, producer_obj = await self.get_producer_profile(phone=str(phone))
         except ValueError as e:
             logger.warning(f"⚠️ Échec de résolution producteur pour {phone} : {str(e)}")
             raise BusinessRuleException(
@@ -685,6 +705,23 @@ class AuctionMixin(BaseMixin):
 
         current_session.add(new_bid)
         await current_session.flush()
+
+        await BusinessEventEmitter(current_session).emit(
+            event_name=BusinessEventName.TENDER_BID_RECEIVED,
+            journey=Journey.TENDER,
+            actor_type="PRODUCER",
+            actor_id=producer_user.id,
+            buyer_id=auction.buyer_id,
+            producer_id=producer_id,
+            zone_id=auction.target_zone_id,
+            entity_type="BID",
+            entity_id=new_bid.id,
+            idempotency_key=f"TENDER_BID_RECEIVED:{new_bid.id}",
+            sub_category_id=auction.sub_category_id,
+            quantity=float(auction.quantity),
+            unit=auction.unit,
+            amount=float(offered_price) * float(auction.quantity),
+        )
 
         return {
             "status": "success",
@@ -1611,6 +1648,39 @@ class AuctionMixin(BaseMixin):
 
         current_session.add(new_order)
         await current_session.flush()
+
+        await BusinessEventEmitter(current_session).emit(
+            event_name=BusinessEventName.TENDER_WINNER_SELECTED,
+            journey=Journey.TENDER,
+            actor_type="BUYER",
+            buyer_id=auction.buyer_id,
+            producer_id=bid.producer_id,
+            zone_id=auction.target_zone_id,
+            entity_type="AUCTION",
+            entity_id=auction.id,
+            idempotency_key=f"TENDER_WINNER_SELECTED:{auction.id}",
+            sub_category_id=auction.sub_category_id,
+            quantity=float(auction.quantity),
+            unit=auction.unit,
+            amount=total,
+            metadata={"winning_bid_id": str(bid.id)},
+        )
+        await BusinessEventEmitter(current_session).emit(
+            event_name=BusinessEventName.TENDER_ORDER_CREATED,
+            journey=Journey.TENDER,
+            actor_type="BUYER",
+            buyer_id=auction.buyer_id,
+            producer_id=bid.producer_id,
+            zone_id=auction.target_zone_id,
+            entity_type="ORDER",
+            entity_id=new_order.id,
+            idempotency_key=f"TENDER_ORDER_CREATED:{new_order.id}",
+            sub_category_id=auction.sub_category_id,
+            quantity=float(auction.quantity),
+            unit=auction.unit,
+            amount=total,
+            metadata={"auction_id": str(auction.id)},
+        )
 
         # Notifie le producteur gagnant ET les producteurs perdants via
         # l'outbox (même transaction que la commande : si le commit échoue,

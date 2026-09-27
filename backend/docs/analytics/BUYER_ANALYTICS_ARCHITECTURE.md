@@ -1,6 +1,6 @@
 # Buyer Analytics Architecture
 
-Status: **Phase B (taxonomy, units, metric dictionary) — DONE.** Phase A (audit) and the pre-Phase-B repository cleanup gate are done; see [ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md](../ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md) and [ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md](../ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md). Phase C (business_events table + emission, aggregates, AnalyticsService, admin endpoints, dashboard) has not started.
+Status: **Phase C (business_events persistence, outbox emitter, DIRECT/TENDER/RECURRING instrumentation) — DONE.** Phases A/B: see [ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md](../ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md) and [ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md](../ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md). Event list and definitions: [BUSINESS_EVENT_CATALOG.md](BUSINESS_EVENT_CATALOG.md). Phase D (daily aggregates, AnalyticsService, admin endpoints, dashboard) has not started.
 
 Code lives in `backend/src/ladini/domain/analytics/`:
 - `units.py` — canonical unit / measurement-family classification.
@@ -133,19 +133,59 @@ Recorded per-metric in the dictionary (`reconstructible_historically` + `reconst
 
 No historical value is fabricated for a NO/PARTIAL metric anywhere in this codebase — that's a Phase C data-quality invariant, not just a phase B talking point.
 
+## 11.5 Phase C decisions (2026-09-27)
+
+**1.A — DELIVERED vs FULFILLED, resolved by tracing every writer of `Order.delivery_status`:**
+
+They are **not synonyms**. Each belongs to a distinct flow:
+
+| Value | Written by | Meaning |
+|---|---|---|
+| `FULFILLED` | `record_sale` only, at Order creation (`order_type=DIRECT_SALE`) | Buyer physically present at an instant walk-in exchange — no separate delivery step exists for this flow, so it's terminal by construction. |
+| `DELIVERED` | `EscrowMixin.verify_delivery_otp` (buyer-supplied OTP), `ProducerMgmtMixin.confirm_delivery_and_payment` (cash-on-delivery, one producer gesture) | Terminal for STANDARD/PREORDER/tender-linked orders. |
+| `DELIVERED` (same literal, different flow) | `RecurringSupplyMixin.mark_order_delivery_status`, `order_type=RECURRING_SUPPLY` only | **Intermediate**, producer-declared, NOT yet buyer-confirmed. |
+| `RECEIVED` | `RecurringSupplyMixin.record_order_reception`, buyer-only | The real "buyer confirms successful receipt" state for RECURRING_SUPPLY orders — sets `Order.status='COMPLETED'`. |
+| `RECEIVED_WITH_ISSUE` | Same method | Explicitly excluded from "success" — leaves `Order.status='CONFIRMED'`, resolution stays human (mandate: never an automatic refund/penalty). |
+
+**Decision**: "satisfied/delivered" for `successful_procurement_rate`/`fulfillment_rate`/`delivered_gmv` is **order_type-conditional**, not a flat literal set:
+- `order_type != 'RECURRING_SUPPLY'` → `delivery_status IN ('DELIVERED', 'FULFILLED')`.
+- `order_type == 'RECURRING_SUPPLY'` → `delivery_status == 'RECEIVED'` only.
+
+Locked in by `tests/unit/test_analytics_metric_dictionary.py::TestDeliveredVsFulfilledContract`.
+
+**Real bug found while tracing this** (not a unit-model issue — a schema/instrumentation gap): `RecurringNeedOccurrence.quantity_delivered` has **zero writers anywhere in the codebase**. Phase B's dictionary wrongly assumed it was historically populated (`Reconstructibility.YES`); corrected to `NO` for `recurring_delivered_quantity`, and `PARTIAL` for `delivered_gmv`/`recurring_fulfillment_rate`/`successful_procurement_rate`'s RECURRING contribution (the only real signal is the linked RECURRING_SUPPLY Order's `delivery_status`, joined via `occurrence.order_group_id` — nullable, no FK, per the Phase A finding). This column being dead is itself a Phase D/E candidate (either start writing it from the RECEIVED transition, or retire the metric in favor of the order-join approach).
+
+**1.B — LITRE fixed, minimally, with tests:**
+
+Two real, live bugs (not touched in Phase B, since fixing them then would have been scope creep into "ne transforme pas le moteur métier" before this session's explicit go-ahead):
+- `market_coach/utils.py::_CANONICAL_UNIT_MAP` had no entry for `L`/`LITRE`/`LITRES` at all (only worked for the exact string "LITRE" by accidental fallthrough — "L" and "LITRES" came back unfolded).
+- `market_coach/nodes/memory.py::_PRIMARY_CANONICAL_UNITS` was missing `"LITRE"` since the unit's addition to the registry (2026-08-29), so `_resolve_unit_value` rejected a valid "litre" answer to "quelle unité ?" outright.
+
+Fixed both with the minimal diff (new dict entries only, no restructuring), tested in `tests/unit/test_canonical_unit_label.py::TestLitreIsARealCanonicalEntryNotAnAccidentalFallthrough` and the new `tests/unit/test_resolve_unit_value_litre.py`. Confirmed via the full `test_conversation_characterization.py`/`test_state_machine_transition_matrix.py`/`test_new_task_micro.py`/`test_services_and_tools.py` suites that nothing else regressed.
+
 ## 12. Known limitations (carried forward, not fixed in this phase)
 
-1. `market_coach/utils.py::_CANONICAL_UNIT_MAP` and `market_coach/nodes/memory.py::_PRIMARY_CANONICAL_UNITS` are a 3rd/4th unit-vocabulary surface, one of them (`_PRIMARY_CANONICAL_UNITS`) demonstrably missing `LITRE` since 2026-08-29 — a live conversational-agent bug, out of scope here (touching it risks the "ne transforme pas le moteur métier" boundary this whole engagement has respected since Phase A).
+1. ~~`market_coach/utils.py::_CANONICAL_UNIT_MAP`/`_PRIMARY_CANONICAL_UNITS` missing LITRE~~ — **fixed in Phase C**, see §11.5.1.B. The two tables still exist as separate surfaces from `quantity_unit.py::UNIT_SYNONYMS` (a 3rd/4th unit-vocabulary risk in general) — not unified, only the specific LITRE gap was closed; a full consolidation remains a future candidate, not done here.
 2. `Product.category_label` (free text) vs `Product.sub_category_id` (FK) can disagree — pre-existing, not fixed here.
-3. `Order.delivery_status`'s `DELIVERED` vs `FULFILLED` semantic needs a one-time verification before Phase C computes the North Star for real.
+3. ~~`Order.delivery_status`'s `DELIVERED` vs `FULFILLED` semantic needs verification~~ — **resolved in Phase C**, see §11.5.1.A.
 4. `select_winning_bid` doesn't write `OrderStatusHistory` — a real, pre-existing gap (Phase A finding) that limits `tender_fulfillment_rate`'s historical fidelity; not fixed here.
 5. The future-production-preorder subsystem (`MarketOffer`/`preorder_draft.py`) has no journey mapping yet.
+6. **New in Phase C**: `RecurringNeedOccurrence.quantity_delivered` has zero writers anywhere in the codebase (see §11.5.1.A) — `recurring_delivered_quantity` has no real data source until this is fixed or replaced.
+7. **New in Phase C**: the RECURRING North Star/GMV/fulfillment signal depends on `occurrence.order_group_id`, which has no FK — a real but imperfect join, not a hard guarantee (could silently miss/misattribute an order if the correlation value is ever wrong).
 
-## Phase C plan (recommendation, not started)
+## 13. Phase C pipeline (implemented)
 
-1. Verify DELIVERED-vs-FULFILLED semantics (limitation 3) before wiring the North Star.
-2. Stand up `analytics.business_events` (real migration, both repos in sync from day one this time) + the outbox-pattern emitter, starting with the DIRECT/TENDER/RECURRING events already catalogued here.
-3. First daily aggregates (`analytics.{buyer,direct,tender,recurring}_daily_metrics`), numerators/denominators stored separately per §5.
-4. `analytics.metric_targets` migration, seeded from real observed rates, not guesses.
-5. `AnalyticsService` (backend, deterministic — reads the dictionary, never recomputes a metric's meaning) + first `/api/admin/analytics/*` endpoints on the **Next.js** side (it already owns Postgres access for telemetry/dashboard, per the Phase A audit) using `adminEndpoint()`/`requireAdmin()`, matching the existing monitoring-cockpit convention.
-6. Frontend: a chart library decision is still open (none exists in `frontag` — Phase A finding); TS types for the metric dictionary/filters can be generated from this file's shape.
+- **Tables** (schema `analytics`, Drizzle migration `0006`, mirrored in SQLAlchemy): `business_events`, `event_outbox`, `metric_targets`.
+- **Emit**: `BusinessEventEmitter.emit()` inserts one row into `analytics.event_outbox` (`ON CONFLICT (dedupe_key) DO NOTHING`) **in the caller's own transaction** — the business fact and its event intent commit or roll back together. No network call, no extra lookup; a broken emit rolls the business transaction back (a bug to fix, not to swallow).
+- **Drain**: `AnalyticsEventDispatcher` (Celery Beat) — phase 1 claims a batch `FOR UPDATE SKIP LOCKED` (to `SENDING`, committed); phase 2 inserts into `business_events` (`ON CONFLICT (idempotency_key) DO NOTHING`) and marks `SENT`, one transaction per row; failures back off (1/5/15/60/180 min) and become `DEAD` after 5 attempts. A Phase C review found and fixed a bug here: the payload key `metadata` resolved to Declarative's `MetaData` instead of the `metadata_` column, which would have failed every event.
+- **Idempotency**: keys identify the business fact (`{EVENT}:{entity_id}`), never a message id, so WhatsApp/Celery replays and cron overlaps collapse to one event.
+- **Read-only trap**: methods routed through `AgriDatabaseService._READ_ONLY_METHODS` never commit; `search_products` was removed from that set because it now writes an outbox row (guarded by `tests/architecture/test_event_emitting_methods_are_transactional.py`).
+- **Atomicity map**: DIRECT/TENDER/RECURRING mixin call-sites use the same session as the fact (`@transactional(write=True)`). `NeedMatchingService` and `RecurringSupplyDigestService` emit in the same session and a single `commit()` covers fact and outbox row. The only asynchronous gap is outbox to `business_events` (by design). Matching wraps its work in a best-effort try/except: an emit failure there rolls that occurrence's match back and is retried by the next cron pass.
+- **Performance**: the critical path adds one indexed same-database INSERT per event and zero external calls. Recurring replenishment adds one query per cron run (buyer zone + sub-category canonical unit for all active needs), not per need. Matching emits only when the allocation set changed; the digest emits only for newly queued digests. `search_products` now commits a (tiny) write transaction instead of a read-only one.
+
+## Phase D plan (recommendation, not started)
+
+1. First daily aggregates (`analytics.{buyer,direct,tender,recurring}_daily_metrics`), numerators/denominators stored separately per section 5; treat `DIRECT_ORDER_CONFIRMED` and recurring delivered quantity as unavailable (see the catalog).
+2. Decide the `quantity_delivered` question (write it from the `RECEIVED` transition, or derive delivery from the linked order) before any recurring fulfillment metric ships.
+3. `AnalyticsService` (deterministic, reads the dictionary) + `/api/admin/analytics/*` endpoints on the Next.js side; metric-target seeding from observed rates.
+4. Frontend chart library decision (none exists in `frontag`).

@@ -298,6 +298,17 @@ _CANONICAL_UNIT_MAP: Dict[str, str] = {
     "TÊTES": "TETE",
     "HEAD": "TETE",
     "HEADS": "TETE",
+    # Analytics Phase C (2026-09-27) : LITRE n'avait AUCUNE entrée ici (ni "L"
+    # ni "LITRES" ne se repliaient sur "LITRE" — seul le mot déjà exact
+    # "LITRE" passait, par le fallback `.get(unit, unit)`, pas par une vraie
+    # règle). Combiné à l'absence de "LITRE" dans `_PRIMARY_CANONICAL_UNITS`
+    # plus bas, une réponse "litre"/"L"/"litres" à "quelle unité ?" était
+    # rejetée alors que LITRE est un canonique pleinement supporté partout
+    # ailleurs (`domain/quantity_unit.py::VALID_UNITS`, `domain/pricing_tiers.py`)
+    # depuis son ajout au registre le 2026-08-29.
+    "L": "LITRE",
+    "LITRE": "LITRE",
+    "LITRES": "LITRE",
 }
 
 
