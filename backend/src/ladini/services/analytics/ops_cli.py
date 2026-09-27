@@ -17,6 +17,10 @@ import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
+from ladini.domain.analytics.daily_aggregation import (
+    resolve_canonical,
+    to_canonical_quantity,
+)
 from ladini.services.analytics.analytics_service import AnalyticsService
 from ladini.services.analytics.daily_metrics_refresh import (
     DIRECT_COHORT_TS,
@@ -141,23 +145,32 @@ async def cmd_verify_kpis(days: int) -> dict:
                        "source_numerator": row["with_bid"], "source_denominator": row["created"],
                        "source": src_value, "match": _close(dashboard.value, src_value)})
 
-        # 5. recurring_coverage_rate — restricted to occurrences already in their own priority_unit
-        # (no G->KG conversion replicated here), so the comparison is exact, not approximate.
+        # 5. recurring_coverage_rate — independent re-aggregation from RAW occurrence rows (not from
+        # the stored `recurring_daily_metrics` table), grouped exactly like the dashboard breakdown
+        # (sub_category_id x canonical_unit) using the same pure, separately-unit-tested conversion
+        # helper (`resolve_canonical`/`to_canonical_quantity`) — never a same-unit-only shortcut, so
+        # a real G->KG occurrence is included on both sides instead of silently excluded from one.
         dashboard_rows = await svc.get_metric_breakdown("recurring_coverage_rate", start, end, dimension="sub_category_id")
-        row = (await session.execute(text(
-            "SELECT COALESCE(sum(oc.requested_quantity),0) AS requested, COALESCE(sum(oc.quantity_matched),0) AS matched"
+        dashboard_by_group = {(str(r["sub_category_id"]), r["canonical_unit"]): r for r in dashboard_rows}
+        raw_rows = (await session.execute(text(
+            "SELECT n.sub_category_id, oc.unit, oc.requested_quantity, oc.quantity_matched, sc.priority_unit"
             " FROM marketplace.recurring_need_occurrences oc JOIN marketplace.recurring_needs n ON n.id = oc.recurring_need_id"
             " JOIN governance.sub_categories sc ON sc.id = n.sub_category_id"
-            " WHERE oc.status NOT IN ('SKIPPED','CANCELLED') AND oc.unit = sc.priority_unit"
-            " AND oc.occurrence_date >= :s AND oc.occurrence_date < :e"
-        ), {"s": start_dt, "e": end_dt})).mappings().one()
-        src_value = (float(row["matched"]) / float(row["requested"])) if row["requested"] else None
-        dash_same_unit_num = sum(r["numerator"] or 0 for r in dashboard_rows)
-        dash_same_unit_den = sum(r["denominator"] or 0 for r in dashboard_rows)
-        checks.append({"metric": "recurring_coverage_rate", "note": "same-unit subset only (occurrences already in their sub-category's priority_unit)",
-                       "dashboard_numerator": dash_same_unit_num, "dashboard_denominator": dash_same_unit_den,
-                       "source_numerator": float(row["matched"]), "source_denominator": float(row["requested"]),
-                       "source": src_value, "match": _close(dash_same_unit_num, float(row["matched"])) and _close(dash_same_unit_den, float(row["requested"]))})
+            " WHERE oc.status NOT IN ('SKIPPED','CANCELLED') AND oc.occurrence_date >= :s AND oc.occurrence_date < :e"
+        ), {"s": start_dt, "e": end_dt})).mappings().all()
+        source_by_group: dict = {}
+        for r in raw_rows:
+            canonical = resolve_canonical(r["unit"], r["priority_unit"])
+            g = source_by_group.setdefault((str(r["sub_category_id"]), canonical), {"requested": 0.0, "matched": 0.0})
+            g["requested"] += float(to_canonical_quantity(r["requested_quantity"], r["unit"], canonical))
+            g["matched"] += float(to_canonical_quantity(r["quantity_matched"], r["unit"], canonical))
+        group_mismatches = [
+            {"sub_category_id": k[0], "canonical_unit": k[1], "dashboard": dashboard_by_group.get(k), "source": v}
+            for k, v in source_by_group.items()
+            if not (dashboard_by_group.get(k) and _close(dashboard_by_group[k]["numerator"], v["matched"]) and _close(dashboard_by_group[k]["denominator"], v["requested"]))
+        ] + [{"sub_category_id": k[0], "canonical_unit": k[1], "dashboard": v, "source": None} for k, v in dashboard_by_group.items() if k not in source_by_group]
+        checks.append({"metric": "recurring_coverage_rate", "groups_compared": len(source_by_group),
+                       "group_mismatches": group_mismatches, "match": not group_mismatches})
 
         # 6. unmatched demand for one sub-category (the largest one in the window, if any).
         unmatched = await svc.get_unfulfilled_demand(start, end, group_by=("sub_category_id",))

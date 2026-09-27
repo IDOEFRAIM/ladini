@@ -83,14 +83,17 @@ def test_verify_kpis_flags_a_mismatch_between_dashboard_and_source(monkeypatch):
         def one(self):
             return self._rows[0]
 
+        def all(self):
+            return self._rows
+
     # Une seule ligne par requête source, dans l'ordre d'appel de cmd_verify_kpis (active_buyers,
-    # needs_created, search events, tender response, recurring coverage, unmatched demand).
+    # needs_created, search events, tender response, recurring coverage raw rows, unmatched demand).
     answers = iter([
         _Result([(3,)]),  # active_buyers source
         _Result([(9999,)]),  # needs_created source — volontairement DIFFÉRENT du dashboard
         _Result([{"performed": 10, "succeeded": 4}]),
         _Result([{"created": 5, "with_bid": 2}]),
-        _Result([{"requested": 100, "matched": 60}]),
+        _Result([{"sub_category_id": "s1", "unit": "KG", "requested_quantity": 100, "quantity_matched": 60, "priority_unit": "KG"}]),
         _Result([(15,)]),  # unmatched demand source, matches the dashboard value below
     ])
 
@@ -121,7 +124,7 @@ def test_verify_kpis_flags_a_mismatch_between_dashboard_and_source(monkeypatch):
         }[name]
 
     async def fake_breakdown(self, name, start, end, *, dimension, filters=None):
-        return [{"sub_category_id": "s1", "canonical_unit": "KG", "numerator": 60, "denominator": 100, "value": 0.6}]
+        return [{"sub_category_id": "s1", "canonical_unit": "KG", "numerator": 60.0, "denominator": 100.0, "value": 0.6}]
 
     async def fake_unmatched(self, start, end, *, filters=None, group_by=()):
         return {"rows": [{"sub_category_id": "s1", "canonical_unit": "KG", "unmatched": 15.0}]}
@@ -138,6 +141,77 @@ def test_verify_kpis_flags_a_mismatch_between_dashboard_and_source(monkeypatch):
     assert by_metric["recurring_coverage_rate"]["match"] is True
     assert by_metric["unmatched_demand"]["match"] is True
     assert out["all_match"] is False  # one mismatch is enough to fail the whole check
+
+
+def test_verify_kpis_recurring_coverage_compares_per_group_not_a_loose_total(monkeypatch):
+    """Regression: an earlier version summed the WHOLE dashboard breakdown against a source query
+    restricted to one unit, so a real conversion (G->KG) inflated the dashboard total unnoticed. This
+    proves the check is now per (sub_category, canonical_unit) group, not a loose grand total."""
+    from ladini.domain.analytics.metric_layer import MetricResult
+
+    class _Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalar(self):
+            return self._rows[0][0]
+
+        def mappings(self):
+            return self
+
+        def one(self):
+            return self._rows[0]
+
+        def all(self):
+            return self._rows
+
+    answers = iter([
+        _Result([(0,)]), _Result([(0,)]), _Result([{"performed": 0, "succeeded": 0}]), _Result([{"created": 0, "with_bid": 0}]),
+        # Raw rows: two occurrences of the SAME sub-category, one already in KG, one in G (converted to KG).
+        _Result([
+            {"sub_category_id": "s1", "unit": "KG", "requested_quantity": 100, "quantity_matched": 60, "priority_unit": "KG"},
+            {"sub_category_id": "s1", "unit": "G", "requested_quantity": 2000, "quantity_matched": 1000, "priority_unit": "KG"},
+        ]),
+        _Result([(0,)]),
+    ])
+
+    class _Session:
+        async def execute(self, *_a, **_k):
+            return next(answers)
+
+        async def scalar(self, *_a, **_k):
+            return next(answers).scalar()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_a):
+            return False
+
+    def _metric(name, **over):
+        base = dict(metric_name=name, value=None, numerator=None, denominator=None, unit=None, status="NO_DATA", period={})
+        base.update(over)
+        return MetricResult(**base)
+
+    async def fake_get_metric(self, name, start, end, *, compare=True, filters=None):
+        return _metric(name)
+
+    async def fake_unmatched(self, start, end, *, filters=None, group_by=()):
+        return {"rows": []}
+
+    # Dashboard only reflects the FIRST occurrence (bug scenario): 60/100, missing the G->KG one (1/2 KG).
+    async def fake_breakdown_missing_conversion(self, name, start, end, *, dimension, filters=None):
+        return [{"sub_category_id": "s1", "canonical_unit": "KG", "numerator": 60.0, "denominator": 100.0, "value": 0.6}]
+
+    monkeypatch.setattr(ops_cli.AnalyticsService, "get_metric", fake_get_metric)
+    monkeypatch.setattr(ops_cli.AnalyticsService, "get_metric_breakdown", fake_breakdown_missing_conversion)
+    monkeypatch.setattr(ops_cli.AnalyticsService, "get_unfulfilled_demand", fake_unmatched)
+    with patch.object(ops_cli, "worker_session", lambda: _Session()):
+        out = run(ops_cli.cmd_verify_kpis(14))
+
+    coverage = next(c for c in out["checks"] if c["metric"] == "recurring_coverage_rate")
+    assert coverage["match"] is False
+    assert coverage["group_mismatches"][0]["source"] == {"requested": 102.0, "matched": 61.0}
 
 
 def test_main_prints_exactly_one_json_line(capsys):
