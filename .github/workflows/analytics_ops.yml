@@ -23,7 +23,7 @@ on:
         description: "Opération à exécuter"
         required: true
         type: choice
-        options: [verify_public_route, recompute, drift, backfill, quality]
+        options: [verify_public_route, recompute, drift, backfill, quality, debug_caddy, debug_repo, force_recreate_caddy]
       target:
         description: "Cible"
         required: true
@@ -103,6 +103,59 @@ jobs:
               [ "$wrong_token" = "401" ] || [ "$wrong_token" = "503" ] || { echo "::error::mauvais jeton attendu 401/503, reçu $wrong_token"; exit 1; }
               [ "$good_token" = "200" ] || { echo "::error::bon jeton attendu 200, reçu $good_token — token Vercel/backend potentiellement désynchronisé"; exit 1; }
               echo "✓ /internal/analytics/* : fail-closed confirmé, bon jeton -> 200"
+              ;;
+            force_recreate_caddy)
+              # Recovery ponctuelle (2026-09-27) : le Caddyfile sur disque a déjà la
+              # nouvelle route (confirmé par debug_repo) mais le conteneur, démarré
+              # avant, garde un bind-mount épinglé sur l'ancien inode (voir
+              # node_deploy.sh, même commentaire). Recrée SEULEMENT `caddy`,
+              # rien d'autre — image et .env inchangés, aucune autre route touchée.
+              (cd "$DEPLOY_DIR/infra/reverse-proxy" && docker compose --env-file .env up -d --force-recreate caddy)
+              CADDY_ID="$(cd "$DEPLOY_DIR/infra/reverse-proxy" && docker compose --env-file .env ps -q caddy)"
+              for _i in $(seq 1 60); do
+                st="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$CADDY_ID" 2>/dev/null || true)"
+                [ "$st" = "healthy" ] && break
+                sleep 1
+              done
+              echo "caddy status: ${st:-unknown}"
+              [ "$st" = "healthy" ] || { echo "::error::caddy non healthy après recréation"; exit 1; }
+              echo "── vérification : la nouvelle route apparaît dans le fichier monté ──"
+              docker exec "$CADDY_ID" grep -n "analytics_internal" /etc/caddy/Caddyfile
+              ;;
+            debug_repo)
+              echo "── DEPLOY_DIR == /opt/ladini/app ? ──"
+              [ "$DEPLOY_DIR" = "/opt/ladini/app" ] && echo yes || echo "no (differs)"
+              echo "── HEAD du checkout à DEPLOY_DIR ──"
+              git -C "$DEPLOY_DIR" rev-parse HEAD
+              git -C "$DEPLOY_DIR" log -1 --oneline
+              echo "── état du fichier Caddyfile suivi par git à ce HEAD ──"
+              git -C "$DEPLOY_DIR" status --porcelain -- infra/reverse-proxy/Caddyfile || true
+              git -C "$DEPLOY_DIR" diff --stat HEAD -- infra/reverse-proxy/Caddyfile || true
+              echo "── contenu tel qu'il devrait être au HEAD courant (git show) ──"
+              git -C "$DEPLOY_DIR" show HEAD:infra/reverse-proxy/Caddyfile | grep -n "analytics_internal" || echo "(absent du HEAD indexé)"
+              echo "── contenu réellement sur disque (host) ──"
+              grep -n "analytics_internal" "$DEPLOY_DIR/infra/reverse-proxy/Caddyfile" || echo "(absent du fichier sur disque)"
+              md5sum "$DEPLOY_DIR/infra/reverse-proxy/Caddyfile"
+              stat -c '%y %n' "$DEPLOY_DIR/infra/reverse-proxy/Caddyfile"
+              echo "── autres checkouts /opt/ladini* éventuels ──"
+              find /opt -maxdepth 3 -iname "Caddyfile" 2>/dev/null
+              ;;
+            debug_caddy)
+              # Diagnostic temporaire (2026-09-27, mise en service /internal/analytics/*) :
+              # aucune donnée sensible — juste le Caddyfile réellement chargé par le
+              # conteneur en cours d'exécution et son état admin, pour comprendre
+              # pourquoi la route reste 404 malgré un reload sans erreur.
+              CADDY_ID="$(cd "$DEPLOY_DIR/infra/reverse-proxy" && docker compose --env-file .env ps -q caddy)"
+              [ -n "$CADDY_ID" ] || { echo "FATAL: conteneur caddy introuvable"; exit 1; }
+              echo "── Caddyfile chargé dans le conteneur ($CADDY_ID) ──"
+              docker exec "$CADDY_ID" cat /etc/caddy/Caddyfile
+              echo "── docker compose ps (reverse-proxy) ──"
+              (cd "$DEPLOY_DIR/infra/reverse-proxy" && docker compose --env-file .env ps)
+              echo "── config active via l'API admin Caddy ──"
+              docker exec "$CADDY_ID" wget -qO- http://127.0.0.1:2019/config/ || true
+              echo
+              echo "── test loopback direct (contourne DNS/Cloudflare) ──"
+              docker exec "$CADDY_ID" wget -qS -O /dev/null --header="Host: $(grep -E '^PUBLIC_DOMAIN=' "$DEPLOY_DIR/infra/reverse-proxy/.env" | cut -d= -f2-)" http://127.0.0.1/internal/analytics/buyers/health 2>&1 || true
               ;;
             *)
               echo "FATAL: action inconnue: $ACTION"

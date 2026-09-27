@@ -309,9 +309,24 @@ if _has_role app; then
 
   log "   démarrage/vérification du reverse proxy Caddy…"
 
+  # `--force-recreate caddy` (jamais un simple `up -d`, ni un `caddy reload`
+  # après coup) : le `Caddyfile` est bind-monté comme FICHIER — Docker épingle
+  # l'inode au montage. `git checkout -- ...` remplace ce fichier par
+  # renommage (nouvel inode), donc le montage du conteneur DÉJÀ démarré
+  # continue de pointer vers l'ancien inode, désormais orphelin. Un
+  # `docker exec caddy reload` relit alors fidèlement… l'ANCIEN contenu, sans
+  # jamais signaler d'erreur : un déploiement "vert" qui ne fait en réalité
+  # rien (bug trouvé et prouvé lors de l'exposition de `/internal/
+  # analytics/*`, 2026-09-27 — `docker exec caddy cat /etc/caddy/Caddyfile`
+  # montrait l'ancienne config alors que le fichier sur disque avait déjà la
+  # nouvelle). Seule la RECRÉATION du conteneur refait le montage sur
+  # l'inode courant ; Caddy redémarre en quelques secondes (TLS/certificats
+  # persistent dans le volume `caddy_data`, inchangé), et si le déploiement
+  # n'a touché aucun fichier de ce service, `--force-recreate` reste un
+  # redémarrage sans effet de bord (mêmes image/config qu'avant).
   (
     cd "$PROXY_DIR"
-    docker compose --env-file .env up -d
+    docker compose --env-file .env up -d --force-recreate caddy
   ) || fail "up" "reverse proxy Caddy: docker compose up a échoué"
 
   CADDY_ID="$(
@@ -321,20 +336,6 @@ if _has_role app; then
 
   [ -n "$CADDY_ID" ] \
     || fail "up" "reverse proxy Caddy: conteneur introuvable"
-
-  # `docker compose up -d` ne recrée PAS le conteneur pour un simple
-  # changement de contenu du `Caddyfile` (bind-mount, pas dans l'image) :
-  # sans cette étape, un `git checkout` qui met à jour ce fichier laisserait
-  # Caddy tourner indéfiniment avec l'ANCIENNE config déjà chargée en
-  # mémoire, alors que le fichier sur disque a bien changé — un déploiement
-  # "vert" qui ne fait en réalité rien (bug trouvé lors de l'exposition de
-  # `/internal/analytics/*`, 2026-09-27). `caddy reload` relit le fichier et
-  # bascule sans coupure via l'API admin locale (celle déjà utilisée par le
-  # healthcheck du service, `:2019/config/`) ; un échec ici bloque le
-  # déploiement au lieu de laisser croire que la nouvelle route est active.
-  log "   rechargement de la configuration Caddy…"
-  docker exec "$CADDY_ID" caddy reload --config /etc/caddy/Caddyfile --force \
-    || fail "up" "reverse proxy Caddy: rechargement de configuration en échec"
 
   CADDY_STATUS=""
   for _i in $(seq 1 90); do
