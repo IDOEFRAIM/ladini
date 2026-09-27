@@ -58,6 +58,19 @@ class TestRecurringUnits:
         assert len(rows) == 1 and rows[0]["requested_quantity"] == Decimal("102.000") or rows[0]["requested_quantity"] == Decimal("102")
 
 
+class TestRecurringDelivered:
+    def test_delivered_quantity_is_converted_to_the_canonical_unit_and_summed(self):
+        r = aggregate_recurring(DAY, [
+            _rec(unit="G", requested_quantity=3000, quantity_matched=3000, quantity_confirmed=3000, delivered_quantity=1000),
+            _rec(requested_quantity=10, quantity_matched=10, quantity_confirmed=10, delivered_quantity=10),
+        ])[0]
+        assert r["delivered_quantity"] == Decimal("11") and r["confirmed_quantity"] == Decimal("13")
+
+    def test_skipped_occurrences_contribute_no_delivered_quantity(self):
+        r = aggregate_recurring(DAY, [_rec(status="SKIPPED", delivered_quantity=5)])[0]
+        assert r["delivered_quantity"] == Decimal("0")
+
+
 class TestRecurringRules:
     def test_unmatched_is_requested_minus_matched_per_occurrence_never_negative(self):
         rows = aggregate_recurring(DAY, [
@@ -125,6 +138,16 @@ class TestDirect:
         assert (r["orders_created"], r["orders_delivered"]) == (3, 2)
         assert r["delivered_value"] == Decimal("2000")
 
+    def test_confirmed_counts_and_delivered_never_exceed_confirmed(self):
+        r = aggregate_direct(DAY, [
+            _order(confirmed=True), _order(confirmed=True, delivery_status="DELIVERED"),
+            _order(delivery_status="DELIVERED"),  # delivered but flag unset: delivery implies confirmed
+            _order(),  # created only
+            _order(status="CANCELLED", confirmed=True),  # confirmed then cancelled: still a confirmed fact
+        ], [])[0]
+        assert (r["orders_created"], r["orders_confirmed"], r["orders_delivered"]) == (5, 4, 2)
+        assert r["orders_delivered"] <= r["orders_confirmed"] and r["confirmed_value"] == Decimal("4000")
+
     def test_cancelled_orders_are_needs_but_carry_no_potential_value(self):
         r = aggregate_direct(DAY, [_order(status="CANCELLED"), _order()], [])[0]
         assert r["orders_created"] == 2 and r["created_value"] == Decimal("1000")
@@ -167,6 +190,7 @@ class TestBuyer:
         r2 = next(r for r in rows if r["buyer_id"] == str(b2))
         assert (r2["needs_tender"], r2["satisfied_tender"], r2["confirmed_gmv_tender"]) == (1, 1, Decimal("500"))
 
-    def test_no_confirmed_direct_column_exists(self):
-        row = aggregate_buyer(DAY, [_order()], [], [], [])[0]
-        assert not any(k.startswith("confirmed_gmv_direct") for k in row)
+    def test_confirmed_direct_gmv_counts_only_confirmed_or_delivered_orders(self):
+        b = uuid.uuid4()
+        row = aggregate_buyer(DAY, [_order(buyer_id=b, confirmed=True), _order(buyer_id=b, delivery_status="DELIVERED"), _order(buyer_id=b)], [], [], [])[0]
+        assert row["confirmed_gmv_direct"] == Decimal("2000")

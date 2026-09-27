@@ -2122,6 +2122,10 @@ class ProducerMgmtMixin(BaseMixin):
 
         order.status = "CONFIRMED"
 
+        # Analytics : l'acceptation producteur est LA transition d'engagement ferme d'une commande
+        # DIRECT (PENDING_PRODUCER_CONFIRMATION -> CONFIRMED) ; jamais émis pour tender/recurring.
+        await BusinessEventEmitter(current_session).emit_direct_order_confirmed(order, actor_type="PRODUCER")
+
         current_session.add(
             OrderStatusHistory(
                 id=uuid.uuid4(),

@@ -57,6 +57,13 @@
       "when": 1790483420040,
       "tag": "0007_analytics_daily_metrics",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790485200918,
+      "tag": "0008_analytics_d5_confirmed_delivered",
+      "breakpoints": true
     }
   ]
 }

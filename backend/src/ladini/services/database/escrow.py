@@ -326,6 +326,12 @@ class EscrowMixin(BaseMixin):
             order.total_amount = running_total
         await current_session.flush()
 
+        # Analytics : le paiement escrow sécurisé fait sortir la commande de DRAFT ET la fait passer
+        # CONFIRMED (engagement ferme) dans la même transaction.
+        emitter = BusinessEventEmitter(current_session)
+        await emitter.emit_direct_order_created(order)
+        await emitter.emit_direct_order_confirmed(order, actor_type="SYSTEM")
+
         # Notifications — Outbox (pattern existant), jamais d'envoi direct ici.
         from ladini.workers.outbox import templates as _tpl
         from ladini.workers.repositories import outbox_repo as _outbox_repo

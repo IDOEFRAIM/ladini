@@ -14,6 +14,12 @@ from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ladini.services.analytics.daily_metrics_refresh import (
+    DELIVERED_QUANTITY_SUBQUERY,
+    DIRECT_COHORT_TS,
+    DIRECT_ORDER_WHERE,
+)
+
 STALE_AFTER = timedelta(hours=36)
 _EPS = 0.0005
 
@@ -30,6 +36,16 @@ class QualityIssue:
 _GRAINS = {
     "analytics.buyer_daily_metrics": "metric_date, buyer_id",
     "analytics.direct_daily_metrics": "metric_date, zone_id, category_id, sub_category_id",
+    "analytics.tender_daily_metrics": "metric_date, zone_id, category_id, sub_category_id",
+    "analytics.recurring_daily_metrics": "metric_date, zone_id, category_id, sub_category_id, canonical_unit",
+}
+
+# Days with source facts but no aggregate row (a refresh that never ran / failed for that day).
+_MISSING_DAYS = {
+    "analytics.direct_daily_metrics": (
+        f"SELECT DISTINCT {DIRECT_COHORT_TS}::date AS d FROM marketplace.orders o WHERE {DIRECT_ORDER_WHERE} "
+        f"AND {DIRECT_COHORT_TS} >= :s AND {DIRECT_COHORT_TS} < :e"
+    ),
     "analytics.tender_daily_metrics": "metric_date, zone_id, category_id, sub_category_id",
     "analytics.recurring_daily_metrics": "metric_date, zone_id, category_id, sub_category_id, canonical_unit",
 }
@@ -69,6 +85,21 @@ async def run_data_quality_checks(
     n = await scalar(f"SELECT count(*) FROM {rec} WHERE {win} AND confirmed_quantity > matched_quantity + {_EPS}", p)
     if n:
         issues.append(QualityIssue("confirmed_gt_matched", rec, "WARNING", n, "confirmed_quantity exceeds matched_quantity."))
+
+    n = await scalar(f"SELECT count(*) FROM {rec} WHERE {win} AND delivered_quantity > confirmed_quantity + {_EPS}", p)
+    if n:
+        issues.append(QualityIssue("delivered_gt_confirmed", rec, "ERROR", n, "delivered_quantity exceeds confirmed_quantity."))
+    n = await scalar(
+        "SELECT count(*) FROM marketplace.recurring_need_occurrences oc "
+        f"LEFT JOIN ({DELIVERED_QUANTITY_SUBQUERY}) d ON d.occurrence_id = oc.id "
+        "WHERE oc.occurrence_date >= :s AND oc.occurrence_date < :e AND oc.quantity_delivered <> COALESCE(d.q, 0)",
+        {"s": s_dt, "e": e_dt})
+    if n:
+        issues.append(QualityIssue("quantity_delivered_drift", "marketplace.recurring_need_occurrences", "WARNING", n,
+                                   "quantity_delivered differs from the RECEIVED-order source of truth (run backfill_quantity_delivered)."))
+    n = await scalar(f"SELECT count(*) FROM analytics.direct_daily_metrics WHERE {win} AND orders_delivered > orders_confirmed", p)
+    if n:
+        issues.append(QualityIssue("delivered_gt_confirmed_orders", "analytics.direct_daily_metrics", "ERROR", n, "orders_delivered exceeds orders_confirmed."))
 
     rows = (await session.execute(text(f"SELECT DISTINCT canonical_unit FROM {rec} WHERE {win} AND measurement_family = 'OTHER'"), p)).all()
     if rows:

@@ -414,14 +414,18 @@ direct_search_success_rate = _register(
     )
 )
 
-direct_search_to_order_rate = _register(
+direct_orders_per_search = _register(
     MetricDefinition(
-        name="direct_search_to_order_rate",
-        description="Share of DIRECT searches followed by an order from the same buyer.",
-        business_definition="WeightedRate(searches followed by an Order within a short attribution window, all searches).",
+        name="direct_orders_per_search",
+        description="DIRECT orders created per search executed, over the same window.",
+        business_definition=(
+            "SUM(orders created) / SUM(searches executed) over the window. A WINDOW-LEVEL ratio: there is no "
+            "search_id -> cart -> order attribution, so it is NOT a per-session conversion funnel and can exceed 1. "
+            "(Renamed from `direct_search_to_order_rate` in Phase D.5 to stop implying attribution.)"
+        ),
         journey=Journey.DIRECT,
         aggregation_type=AggregationType.WEIGHTED_RATIO,
-        numerator="SUM(searches with a following order)",
+        numerator="SUM(orders_created)",
         denominator="SUM(searches)",
         unit_behavior="DIMENSIONLESS_RATIO",
         supported_dimensions=_STANDARD_DIMENSIONS,
@@ -436,7 +440,12 @@ direct_fulfillment_rate = _register(
     MetricDefinition(
         name="direct_fulfillment_rate",
         description="fulfillment_rate scoped to DIRECT.",
-        business_definition="fulfillment_rate WHERE journey = DIRECT.",
+        business_definition=(
+            "delivered DIRECT orders / confirmed DIRECT orders (cohort by the order becoming a need). Confirmed = the firm "
+            "commitment: Order.status CONFIRMED (producer acceptance or secured escrow payment), evidenced by the "
+            "DIRECT_ORDER_CONFIRMED event (Phase D.5) or, before instrumentation, the current status CONFIRMED/COMPLETED/delivered. "
+            "A delivered order is always confirmed, so the rate is <= 1."
+        ),
         journey=Journey.DIRECT,
         aggregation_type=AggregationType.WEIGHTED_RATIO,
         numerator="SUM(delivered orders)",
@@ -445,8 +454,8 @@ direct_fulfillment_rate = _register(
         supported_dimensions=_STANDARD_DIMENSIONS,
         supported_time_windows=_STANDARD_WINDOWS,
         source_entities=("marketplace.orders",),
-        reconstructible_historically=Reconstructibility.YES,
-        reconstructible_note="Order.status/delivery_status/payment_status are historically populated.",
+        reconstructible_historically=Reconstructibility.PARTIAL,
+        reconstructible_note="Before the Phase D.5 event, an order confirmed and later cancelled is not recoverable (status no longer says it was confirmed): the denominator is then a slight under-count.",
         alias_of="fulfillment_rate",
     )
 )
@@ -688,12 +697,12 @@ recurring_confirmed_quantity = _register(
 recurring_delivered_quantity = _register(
     MetricDefinition(
         name="recurring_delivered_quantity",
-        description="Total quantity delivered across recurring occurrences.",
+        description="Quantity of recurring supply confirmed RECEIVED by the buyer.",
         business_definition=(
-            "Intended: SUM(occurrence.quantity_delivered). REAL FINDING (Phase C): this column has "
-            "ZERO writers anywhere in the codebase — declared on RecurringNeedOccurrence, never "
-            "assigned by any service/worker. Until it (or an equivalent) is actually written, this "
-            "metric has no data source; do not compute it as a silent 0."
+            "SUM(occurrence.quantity_delivered) where quantity_delivered = SUM(OrderItem.quantity) of the occurrence's CONVERTED "
+            "allocations whose RECURRING_SUPPLY order is delivery_status = RECEIVED (Phase D.5: the column now has a writer, "
+            "recomputed - never incremented - in the transaction of the RECEIVED transition). RECEIVED_WITH_ISSUE is not counted "
+            "(its received quantity is only free text): a lower bound."
         ),
         journey=Journey.RECURRING,
         aggregation_type=AggregationType.SUM,
@@ -702,13 +711,9 @@ recurring_delivered_quantity = _register(
         unit_behavior="ONLY_COMPATIBLE_CANONICAL_UNITS",
         supported_dimensions=_STANDARD_DIMENSIONS,
         supported_time_windows=_STANDARD_WINDOWS,
-        source_entities=("marketplace.recurring_need_occurrences",),
-        reconstructible_historically=Reconstructibility.NO,
-        reconstructible_note=(
-            "NO: quantity_delivered is a dead column (no writer). Phase C+ must either start "
-            "writing it from the RECURRING_SUPPLY order lifecycle (RECEIVED transition) or drop "
-            "this metric in favor of one derived from Order.delivery_status directly."
-        ),
+        source_entities=("marketplace.recurring_need_occurrences", "marketplace.need_allocations", "marketplace.order_items", "marketplace.orders"),
+        reconstructible_historically=Reconstructibility.PARTIAL,
+        reconstructible_note="Aggregates read the RECEIVED-order join directly, so history is recomputable; it still depends on the buyer's RECEIVED confirmation.",
     )
 )
 
@@ -810,27 +815,23 @@ recurring_skip_rate = _register(
 recurring_fulfillment_rate = _register(
     MetricDefinition(
         name="recurring_fulfillment_rate",
-        description="fulfillment_rate scoped to RECURRING.",
+        description="Share of confirmed recurring quantity that the buyer confirmed RECEIVED.",
         business_definition=(
-            "fulfillment_rate WHERE journey = RECURRING (confirmed = quantity_confirmed > 0, "
-            "delivered = the occurrence's linked RECURRING_SUPPLY Order reaching delivery_status="
-            "'RECEIVED', via occurrence.order_group_id — NOT quantity_delivered, which is a dead "
-            "column with zero writers, see module docstring)."
+            "SUM(quantity_delivered) / SUM(quantity_confirmed), per canonical unit. Phase D.5 changed the Phase B formula "
+            "(occurrence COUNT of linked orders RECEIVED / occurrences with quantity_confirmed > 0) to a quantity ratio now that "
+            "quantity_delivered is exact; the occurrence-count view remains available as `recurring_received_occurrence_rate`. "
+            "Lower bound: a buyer who never confirms reception reads as undelivered."
         ),
         journey=Journey.RECURRING,
         aggregation_type=AggregationType.WEIGHTED_RATIO,
-        numerator="COUNT(occurrences whose linked order reached RECEIVED)",
-        denominator="SUM(quantity_confirmed > 0 occurrences)",
-        unit_behavior="DIMENSIONLESS_RATIO",
+        numerator="SUM(quantity_delivered)",
+        denominator="SUM(quantity_confirmed)",
+        unit_behavior="ONLY_COMPATIBLE_CANONICAL_UNITS",
         supported_dimensions=_STANDARD_DIMENSIONS,
         supported_time_windows=_STANDARD_WINDOWS,
-        source_entities=("marketplace.recurring_need_occurrences", "marketplace.orders"),
+        source_entities=("marketplace.recurring_need_occurrences", "marketplace.need_allocations", "marketplace.orders"),
         reconstructible_historically=Reconstructibility.PARTIAL,
-        reconstructible_note=(
-            "PARTIAL: quantity_confirmed is historically populated, but the delivered signal "
-            "depends on the order_group_id join, which has no FK (Phase A finding)."
-        ),
-        alias_of="fulfillment_rate",
+        reconstructible_note="Exact join by construction (allocation.order_item_id), but needs the buyer's RECEIVED confirmation.",
     )
 )
 
@@ -892,6 +893,24 @@ direct_orders_created = _register(
         source_entities=("marketplace.orders",),
         reconstructible_historically=Reconstructibility.YES,
         reconstructible_note="Order.created_at.",
+    )
+)
+
+direct_orders_confirmed = _register(
+    MetricDefinition(
+        name="direct_orders_confirmed",
+        description="DIRECT orders that reached the firm commitment (Order.status CONFIRMED).",
+        business_definition="COUNT(DIRECT orders WHERE DIRECT_ORDER_CONFIRMED was emitted OR status IN (CONFIRMED, COMPLETED) OR delivered). Confirmed = producer acceptance (confirm_order_by_producer) or secured escrow payment (mark_escrow_paid).",
+        journey=Journey.DIRECT,
+        aggregation_type=AggregationType.COUNT,
+        numerator="SUM(orders_confirmed)",
+        denominator=None,
+        unit_behavior="DIMENSIONLESS_COUNT",
+        supported_dimensions=("date", "zone", "category", "sub_category"),
+        supported_time_windows=_STANDARD_WINDOWS,
+        source_entities=("marketplace.orders", "analytics.business_events (DIRECT_ORDER_CONFIRMED, Phase D.5)"),
+        reconstructible_historically=Reconstructibility.PARTIAL,
+        reconstructible_note="Current status recovers confirmed orders that were not cancelled afterwards.",
     )
 )
 

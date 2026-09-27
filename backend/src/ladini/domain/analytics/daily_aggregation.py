@@ -66,6 +66,9 @@ class DirectOrderFact:
     total_amount: Any
     status: str
     delivery_status: str
+    #: Firm commitment reached (SQL: business event DIRECT_ORDER_CONFIRMED, or Order.status
+    #: CONFIRMED/COMPLETED). Delivered orders are always counted confirmed (see direct_is_confirmed).
+    confirmed: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,9 @@ class RecurringFact:
     orders_count: int
     received_orders_count: int
     received_value: Any
+    #: SUM of the items of this occurrence's CONVERTED allocations whose order is RECEIVED
+    #: (source of truth; the `quantity_delivered` column is written from the same rule).
+    delivered_quantity: Any = 0
 
 
 @dataclass(frozen=True)
@@ -131,6 +137,12 @@ def direct_is_need(f: DirectOrderFact) -> bool:
 def direct_is_delivered(f: DirectOrderFact) -> bool:
     """DIRECT/TENDER lifecycle: DELIVERED or FULFILLED (see the Phase C delivery rule)."""
     return f.delivery_status in DELIVERED_DELIVERY_STATUSES
+
+
+def direct_is_confirmed(f: DirectOrderFact) -> bool:
+    """Confirmed = the firm commitment was reached. A delivered order was necessarily confirmed
+    (delivery requires Order.status CONFIRMED), so delivered <= confirmed always holds."""
+    return f.confirmed or direct_is_delivered(f)
 
 
 def direct_potential_value(f: DirectOrderFact) -> Decimal:
@@ -191,8 +203,8 @@ def aggregate_direct(day: date, orders: Iterable[DirectOrderFact], searches: Ite
         if key not in rows:
             rows[key] = {
                 "metric_date": day, "zone_id": key[0], "category_id": key[1], "sub_category_id": key[2],
-                "searches": 0, "successful_searches": 0, "orders_created": 0, "orders_delivered": 0,
-                "created_value": _ZERO, "delivered_value": _ZERO,
+                "searches": 0, "successful_searches": 0, "orders_created": 0, "orders_confirmed": 0,
+                "orders_delivered": 0, "created_value": _ZERO, "confirmed_value": _ZERO, "delivered_value": _ZERO,
             }
         return rows[key]
 
@@ -208,6 +220,9 @@ def aggregate_direct(day: date, orders: Iterable[DirectOrderFact], searches: Ite
         r = row(o.zone_id, o.category_id, o.sub_category_id)
         r["orders_created"] += 1
         r["created_value"] += direct_potential_value(o)
+        if direct_is_confirmed(o):
+            r["orders_confirmed"] += 1
+            r["confirmed_value"] += _dec(o.total_amount)
         if direct_is_delivered(o):
             r["orders_delivered"] += 1
             r["delivered_value"] += _dec(o.total_amount)
@@ -257,7 +272,7 @@ def aggregate_recurring(day: date, facts: Iterable[RecurringFact]) -> list[dict[
             "occurrences_notified": 0, "occurrences_accepted": 0, "occurrences_skipped": 0,
             "occurrences_with_orders": 0, "occurrences_all_received": 0, "needs_with_occurrence": 0,
             "requested_quantity": _ZERO, "matched_quantity": _ZERO, "confirmed_quantity": _ZERO,
-            "unmatched_quantity": _ZERO, "potential_value": _ZERO, "confirmed_value": _ZERO, "received_value": _ZERO,
+            "delivered_quantity": _ZERO, "unmatched_quantity": _ZERO, "potential_value": _ZERO, "confirmed_value": _ZERO, "received_value": _ZERO,
         })
         needs_seen.setdefault(key, set()).add(str(f.need_id))
         r["occurrences_total"] += 1
@@ -283,6 +298,7 @@ def aggregate_recurring(day: date, facts: Iterable[RecurringFact]) -> list[dict[
         r["requested_quantity"] += requested
         r["matched_quantity"] += matched
         r["confirmed_quantity"] += confirmed
+        r["delivered_quantity"] += to_canonical_quantity(f.delivered_quantity, f.unit, canonical)
         r["unmatched_quantity"] += max(requested - matched, _ZERO)
         r["potential_value"] += _dec(f.potential_value)
         r["confirmed_value"] += _dec(f.confirmed_value)
@@ -312,7 +328,7 @@ def aggregate_buyer(
                 "needs_direct": 0, "needs_tender": 0, "needs_recurring": 0,
                 "satisfied_direct": 0, "satisfied_tender": 0, "satisfied_recurring": 0,
                 "potential_gmv_direct": _ZERO, "potential_gmv_tender": _ZERO, "potential_gmv_recurring": _ZERO,
-                "confirmed_gmv_tender": _ZERO, "confirmed_gmv_recurring": _ZERO,
+                "confirmed_gmv_direct": _ZERO, "confirmed_gmv_tender": _ZERO, "confirmed_gmv_recurring": _ZERO,
                 "delivered_gmv_direct": _ZERO, "delivered_gmv_tender": _ZERO, "delivered_gmv_recurring": _ZERO,
                 "digests_queued": 0, "digests_accepted": 0,
             }
@@ -328,6 +344,8 @@ def aggregate_buyer(
             continue
         r["needs_direct"] += 1
         r["potential_gmv_direct"] += direct_potential_value(o)
+        if direct_is_confirmed(o):
+            r["confirmed_gmv_direct"] += _dec(o.total_amount)
         if direct_is_delivered(o):
             r["satisfied_direct"] += 1
             r["delivered_gmv_direct"] += _dec(o.total_amount)

@@ -172,6 +172,8 @@ class BusinessEventEmitter:
         order_type = str(getattr(order, "order_type", "") or "").upper()
         if order_type == "RECURRING_SUPPLY":
             return False
+        if getattr(order, "market_offer_id", None) is not None:
+            return False  # future-production reservation: not part of the DIRECT/TENDER journeys
         is_tender = getattr(order, "auction_id", None) is not None
         event_name = BusinessEventName.TENDER_DELIVERED if is_tender else BusinessEventName.DIRECT_ORDER_DELIVERED
         journey = Journey.TENDER if is_tender else Journey.DIRECT
@@ -185,6 +187,70 @@ class BusinessEventEmitter:
             entity_id=order.id,
             idempotency_key=f"{event_name.value}:{order.id}",
             amount=float(order.total_amount) if getattr(order, "total_amount", None) is not None else None,
+        )
+
+    # ------------------------------------------------------------------ DIRECT lifecycle
+    #
+    # The canonical DIRECT buyer flow is `create_preorder_draft` (one Order per producer,
+    # order_type=PREORDER, status DRAFT = an unconfirmed cart, NOT a need) ->
+    # `confirm_preorder_draft` (buyer confirms: the order leaves DRAFT, stock is debited) ->
+    # producer acceptance (`confirm_order_by_producer`) or escrow payment (`mark_escrow_paid`),
+    # both writing Order.status = CONFIRMED -> delivery. `finalize_multi_order` is a dead legacy path.
+
+    @staticmethod
+    def _is_direct_order(order: Any) -> bool:
+        """Buyer catalog order: not a tender order, not a recurring-supply order, not a
+        future-production reservation, and owned by a buyer profile."""
+        return (
+            getattr(order, "auction_id", None) is None
+            and str(getattr(order, "order_type", "") or "").upper() != "RECURRING_SUPPLY"
+            and getattr(order, "market_offer_id", None) is None
+            and getattr(order, "buyer_id", None) is not None
+        )
+
+    async def emit_direct_order_created(self, order: Any) -> bool:
+        """DIRECT_ORDER_CREATED: the buyer's order became a real need (left DRAFT). Sub-category
+        (and quantity/unit for a single untiered line) are taken from the order's items only when
+        they are already loaded on the instance — never a lazy load, never a guess."""
+        if not self._is_direct_order(order):
+            return False
+        items = list(order.__dict__.get("items") or [])
+        products = [getattr(i, "product", None) for i in items]
+        subs = {getattr(p, "sub_category_id", None) for p in products if p is not None}
+        sub_category_id = next(iter(subs)) if len(subs) == 1 and None not in subs else None
+        single = items[0] if len(items) == 1 and getattr(items[0], "tier_id", None) is None else None
+        product = getattr(single, "product", None) if single is not None else None
+        return await self.emit(
+            event_name=BusinessEventName.DIRECT_ORDER_CREATED,
+            journey=Journey.DIRECT,
+            actor_type="BUYER",
+            buyer_id=order.buyer_id,
+            zone_id=getattr(order, "zone_id", None),
+            entity_type="ORDER",
+            entity_id=order.id,
+            idempotency_key=f"DIRECT_ORDER_CREATED:{order.id}",
+            sub_category_id=sub_category_id,
+            quantity=float(single.quantity) if single is not None and product is not None else None,
+            unit=getattr(product, "unit", None) if product is not None else None,
+            amount=float(order.total_amount or 0.0),
+        )
+
+    async def emit_direct_order_confirmed(self, order: Any, *, actor_type: str) -> bool:
+        """DIRECT_ORDER_CONFIRMED: the order reached Order.status = CONFIRMED (producer accepted
+        it, or the escrow payment was secured) — the firm, executable commitment that delivery
+        requires. Called only AFTER that status is persisted; recurring/tender orders never emit."""
+        if not self._is_direct_order(order):
+            return False
+        return await self.emit(
+            event_name=BusinessEventName.DIRECT_ORDER_CONFIRMED,
+            journey=Journey.DIRECT,
+            actor_type=actor_type,
+            buyer_id=order.buyer_id,
+            zone_id=getattr(order, "zone_id", None),
+            entity_type="ORDER",
+            entity_id=order.id,
+            idempotency_key=f"DIRECT_ORDER_CONFIRMED:{order.id}",
+            amount=float(order.total_amount or 0.0),
         )
 
 

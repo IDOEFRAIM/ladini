@@ -2395,6 +2395,12 @@ class BuyerMixin(BaseMixin):
                 grp_order.gps_lng = delivery_lon
         await current_session.flush()
 
+        # Analytics : l'ordre quitte DRAFT (le panier devient un vrai besoin acheteur) — c'est LE
+        # fait DIRECT_ORDER_CREATED (un brouillon abandonné n'est pas un besoin). Une commande par
+        # producteur => un event par commande, clé sur l'order_id.
+        for grp_order in group_orders:
+            await BusinessEventEmitter(current_session).emit_direct_order_created(grp_order)
+
         # (2026-09-04, F2 — notification producteur préorder direct) : GAP
         # RÉEL fermé ici — ce chemin (paiement à la livraison,
         # `ESCROW_PAYMENT_ENABLED=False`) n'enfilait AUCUNE notification

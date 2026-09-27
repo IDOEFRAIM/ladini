@@ -123,7 +123,7 @@ class TestReconstructibilityIsHonest:
         # Mission: "ne fabrique aucun historique manquant" — no search log
         # exists anywhere in the codebase (Phase A finding), so these must
         # never claim YES.
-        for name in ("direct_searches", "direct_search_success_rate", "direct_search_to_order_rate"):
+        for name in ("direct_searches", "direct_search_success_rate", "direct_orders_per_search"):
             assert get_metric(name).reconstructible_historically == Reconstructibility.NO
 
     def test_recurring_quantity_metrics_are_reconstructible(self):
@@ -135,14 +135,16 @@ class TestReconstructibilityIsHonest:
         ):
             assert get_metric(name).reconstructible_historically == Reconstructibility.YES
 
-    def test_recurring_delivered_quantity_is_honestly_not_reconstructible(self):
-        # Phase C finding: RecurringNeedOccurrence.quantity_delivered has
-        # zero writers anywhere in the codebase — a dead column. Phase B
-        # wrongly assumed YES; this must never silently regress back to a
-        # false claim.
+    def test_recurring_delivered_quantity_is_a_lower_bound_never_claimed_complete(self):
+        # Phase D.5: the column now has a writer (recomputed from RECEIVED orders in the RECEIVED
+        # transaction). It stays PARTIAL: it depends on the buyer's RECEIVED confirmation and
+        # RECEIVED_WITH_ISSUE is not counted. Must never be claimed fully reconstructible.
         metric = get_metric("recurring_delivered_quantity")
-        assert metric.reconstructible_historically == Reconstructibility.NO
-        assert "zero writers" in metric.business_definition or "dead column" in metric.reconstructible_note
+        assert metric.reconstructible_historically == Reconstructibility.PARTIAL
+        assert "lower bound" in metric.business_definition
+
+    def test_direct_fulfillment_is_partial_historically(self):
+        assert get_metric("direct_fulfillment_rate").reconstructible_historically == Reconstructibility.PARTIAL
 
 
 class TestDeliveredVsFulfilledContract:
