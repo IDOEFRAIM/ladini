@@ -21,10 +21,10 @@ UUID (`00000000-…`, "not attributable") instead of NULL for dimensions so the 
 
 | Table | Grain (unique index) | Cohort date | Main columns |
 |---|---|---|---|
-| `buyer_daily_metrics` | `(metric_date, buyer_id)` | need creation date (recurring: demand date) | `needs_{direct,tender,recurring}`, `satisfied_*`, `potential_gmv_*`, `confirmed_gmv_{tender,recurring}`, `delivered_gmv_*`, `digests_queued/accepted` (event-day basis) |
-| `direct_daily_metrics` | `(metric_date, zone, category, sub_category)` | order `created_at` | `searches`, `successful_searches`, `orders_created`, `orders_delivered`, `created_value`, `delivered_value` |
+| `buyer_daily_metrics` | `(metric_date, buyer_id)` | need creation date (recurring: demand date) | `needs_{direct,tender,recurring}`, `satisfied_*`, `potential_gmv_*`, `confirmed_gmv_{direct,tender,recurring}`, `delivered_gmv_*`, `digests_queued/accepted` (event-day basis) |
+| `direct_daily_metrics` | `(metric_date, zone, category, sub_category)` | the day the order became a need (`preorder_converted_at` for PREORDER checkouts, `created_at` for legacy STANDARD) | `searches`, `successful_searches`, `orders_created`, `orders_confirmed`, `orders_delivered`, `created_value`, `confirmed_value`, `delivered_value` |
 | `tender_daily_metrics` | `(metric_date, zone, category, sub_category)` | auction `created_at` | `tenders_created`, `tenders_with_bid`, `bids_received`, `tenders_with_winner`, `tender_orders_created/delivered`, `first_bid_latency_seconds_sum/count`, `potential/committed/delivered_value` |
-| `recurring_daily_metrics` | `(metric_date, zone, category, sub_category, canonical_unit)` | occurrence `occurrence_date` | `occurrences_{total,active,fully_covered,notified,accepted,skipped,with_orders,all_received}`, `needs_with_occurrence`, `requested/matched/confirmed/unmatched_quantity`, `potential/confirmed/received_value` |
+| `recurring_daily_metrics` | `(metric_date, zone, category, sub_category, canonical_unit)` | occurrence `occurrence_date` | `occurrences_{total,active,fully_covered,notified,accepted,skipped,with_orders,all_received}`, `needs_with_occurrence`, `requested/matched/confirmed/delivered/unmatched_quantity`, `potential/confirmed/received_value` |
 
 Grain choices: `buyer_daily_metrics` is per buyer-day so `COUNT(DISTINCT buyer_id)` and repeat buyers stay exact over any
 window (one row per *active* buyer-day — bounded by pilot volume). Journey tables stop at sub-category (no buyer, no
@@ -58,17 +58,50 @@ the service flags windows younger than 7 days (`MATURITY_DAYS`).
 ## Metrics
 
 Implemented (`metric_layer.BINDINGS`): `needs_created`, `successful_procurement_rate` (PARTIAL), `potential_gmv` (PARTIAL),
-`confirmed_gmv` (PARTIAL, excludes DIRECT), `delivered_gmv` (PARTIAL), `active_buyers`, `repeat_buyer_rate` (PARTIAL);
-DIRECT `direct_searches`, `direct_search_success_rate`, `direct_search_to_order_rate` (PARTIAL), `direct_orders_created`,
-`direct_order_delivery_rate`; TENDER `tenders_created`, `tender_response_rate`, `average_bids_per_tender`,
-`time_to_first_bid`, `tender_winner_rate`, `tender_fulfillment_rate` (PARTIAL), `tender_gmv`; RECURRING requested/matched/
-confirmed/unmatched quantity, `recurring_coverage_rate`, `recurring_full_coverage_rate`, `recurring_acceptance_rate`,
-`recurring_skip_rate` (denominator = all occurrences), `recurring_received_occurrence_rate` (PARTIAL), `recurring_gmv`.
+`confirmed_gmv`, `delivered_gmv` (PARTIAL), `active_buyers`, `repeat_buyer_rate` (PARTIAL);
+DIRECT `direct_searches`, `direct_search_success_rate`, `direct_orders_per_search`, `direct_orders_created`, `direct_orders_confirmed`,
+`direct_order_delivery_rate` (delivered / created), `direct_fulfillment_rate` (delivered / confirmed), `direct_gmv` (confirmed value);
+TENDER `tenders_created`, `tender_response_rate`, `average_bids_per_tender`, `time_to_first_bid`, `tender_winner_rate`,
+`tender_fulfillment_rate` (PARTIAL), `tender_gmv`; RECURRING requested/matched/confirmed/unmatched quantity,
+`recurring_delivered_quantity` (PARTIAL), `recurring_fulfillment_rate` (= delivered / confirmed quantity, PARTIAL),
+`recurring_coverage_rate`, `recurring_full_coverage_rate`, `recurring_acceptance_rate`, `recurring_skip_rate`
+(denominator = all occurrences), `recurring_received_occurrence_rate` (PARTIAL), `recurring_gmv`.
 
-**UNAVAILABLE (value `null` + reason, never a proxy)**: `fulfillment_rate`, `direct_fulfillment_rate`, `direct_gmv`
-(DIRECT confirmation not instrumented); `recurring_delivered_quantity` and `recurring_fulfillment_rate`
-(`quantity_delivered` has no writer); `recurring_modification_rate` (not instrumented); `active_recurring_needs`
+**UNAVAILABLE (value `null` + reason, never a proxy)**: global `fulfillment_rate` (no per-journey confirmed counts at buyer level
+yet — use the three per-journey rates), `recurring_modification_rate` (not instrumented), `active_recurring_needs`
 (gauge history not stored).
+
+### `direct_orders_per_search` (was `direct_search_to_order_rate`)
+`SUM(orders created) / SUM(searches executed)` over the window. There is no `search_id -> cart -> order` attribution, so it is
+**not** a conversion rate and can exceed 1. Renamed in Phase D.5 (nothing had exposed the old name yet) so no consumer reads
+it as a funnel. A real funnel would need a search identifier carried through the cart to the order (not built).
+
+### DIRECT cohort and confirmed
+The real DIRECT flow is the PREORDER checkout (draft -> buyer confirmation -> producer acceptance / escrow -> delivery); the
+cohort excludes drafts never converted, tender orders, future-production reservations (`market_offer_id`), recurring supply
+and walk-in sales. `orders_confirmed` counts orders that reached `Order.status = CONFIRMED` (evidenced by DIRECT_ORDER_CONFIRMED,
+or the current status CONFIRMED/COMPLETED; a delivered order is always counted confirmed, so delivered <= confirmed).
+Limit: before the event existed, confirmed-then-cancelled orders cannot be recovered.
+
+### RECURRING `quantity_delivered` — proof and rule (Phase D.5)
+Traced in code (`accept_match_proposal`, `record_order_reception`, `matching.py`):
+1. An occurrence yields **one Order per producer**, all with `checkout_group_id == occurrence.order_group_id` (fresh uuid per
+   acceptance; an occurrence is accepted once, under `FOR UPDATE`, status leaving OPEN/MATCHED) — group <-> occurrence is 1:1.
+2. Each order has **one OrderItem per allocation** (`need_allocations.order_item_id`; allocation unique per
+   occurrence/producer/product). An item belongs to exactly one order, hence one occurrence.
+3. Item quantity = allocation quantity, and matching only pairs a product whose unit equals the occurrence unit **literally**,
+   so it is already in the occurrence unit.
+4. `RECEIVED` is the buyer's "tout est bon" for the whole order; a partial receipt can only be `RECEIVED_WITH_ISSUE`, whose
+   quantity is free text in `OrderStatusHistory.note` — deliberately NOT counted.
+5. Replays: an order already `RECEIVED`/`RECEIVED_WITH_ISSUE` returns `ALREADY_RECORDED`; several producers = several
+   independent orders.
+
+Decision: exact mapping proven. `record_order_reception` (RECEIVED) recomputes
+`quantity_delivered = SUM(item.quantity)` over the occurrence's CONVERTED allocations whose RECURRING_SUPPLY order is RECEIVED,
+in the same transaction (recompute, never increment: a retry gives the same value; it cannot exceed `quantity_confirmed`).
+Aggregates read the same join directly (history recomputable); `backfill_quantity_delivered` aligns the column for receptions
+that pre-date the writer; a data-quality check flags drift. It stays a **lower bound** (needs the buyer's confirmation, issue
+receptions not counted), hence PARTIAL.
 
 ## North Star — Successful Procurement Rate
 
@@ -76,14 +109,14 @@ confirmed/unmatched quantity, `recurring_coverage_rate`, `recurring_full_coverag
 - DIRECT/TENDER satisfied = order delivered (`DELIVERED`/`FULFILLED`) — reliable.
 - RECURRING satisfied = occurrence whose orders are **all** `RECEIVED`. The relation is exact by construction:
   `accept_match_proposal` writes `occurrence.order_group_id` and the orders' `checkout_group_id` in the same
-  transaction. It does **not** depend on `quantity_delivered`. It is still a lower bound (a buyer who never confirms is
+  transaction. It does **not** read `quantity_delivered`. It is still a lower bound (a buyer who never confirms is
   counted unsatisfied) and the join has no FK, hence the global metric is flagged **PARTIAL**, never presented as a
   complete delivery rate. Cancelled needs stay in the denominator; skipped/cancelled occurrences are not needs.
 
 ## Unfulfilled demand
 
 `get_unfulfilled_demand` = **UNMATCHED demand** (`requested − matched`, per occurrence, per canonical unit). It measures
-the matching engine, not delivery; undelivered demand is reported as unavailable.
+the matching engine, not delivery. `undelivered_confirmed` (= confirmed − delivered) is reported separately and never called unmatched.
 
 ## Targets
 
@@ -111,7 +144,14 @@ stale refresh (> 36 h). Negative values are impossible (CHECK constraints).
 ## Known limits
 
 - Search/digest metrics have no history before the Phase C deploy.
-- `direct_search_to_order_rate` is a window ratio, not a per-session funnel.
+- `direct_orders_per_search` is a window ratio, not a per-session funnel.
 - `quantity_matched` is the *current* matching state (rematching overwrites it) — recurring coverage of past days
   reflects the latest state, not a snapshot.
 - Refresh is batch (6-hourly), not streaming.
+
+## Why the North Star stays PARTIAL (Phase D.5 review)
+DIRECT and TENDER satisfaction is a delivered order (proof: a persisted delivery transition). RECURRING satisfaction requires the
+buyer's explicit `RECEIVED` confirmation, so a buyer who never answers reads as unsatisfied, and the join has no FK. The journeys
+therefore do not share the same quality of proof; the response carries `status = PARTIAL`, the per-journey `breakdown` and the
+`reliable_scope` (DIRECT+TENDER) so a dashboard can show the value, the flag and the notes. It is never labelled fully reliable.
+Targets: none are seeded; `target = null` / `NO_TARGET` is a normal response ("Aucun objectif configuré").

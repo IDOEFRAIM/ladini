@@ -49,10 +49,27 @@ logger = logging.getLogger("Ladini.Analytics.DailyMetricsRefresh")
 
 _UUID_COLUMNS = ("buyer_id", "zone_id", "category_id", "sub_category_id")
 
+#: Cohort timestamp of a DIRECT need: a catalog checkout (`create_preorder_draft`) is an order_type
+#: PREORDER Order that is only a cart while DRAFT — the need exists when the buyer confirms it
+#: (`preorder_converted_at`). The legacy STANDARD path has no draft stage (created_at).
+DIRECT_COHORT_TS = "(CASE WHEN o.order_type = 'PREORDER' THEN o.preorder_converted_at ELSE o.created_at END)"
+#: Which orders belong to the DIRECT journey (shared with the data-quality checks). Excludes tender
+#: orders (auction_id), future-production reservations (market_offer_id), recurring supply, walk-in
+#: sales (no buyer) and unconfirmed carts / abandoned drafts.
+DIRECT_ORDER_WHERE = (
+    "o.auction_id IS NULL AND o.market_offer_id IS NULL AND o.buyer_id IS NOT NULL "
+    "AND (o.order_type = 'STANDARD' OR (o.order_type = 'PREORDER' AND o.preorder_converted_at IS NOT NULL)) "
+    "AND o.status NOT IN ('DRAFT', 'SUPERSEDED')"
+)
+
 _DIRECT_ORDERS_SQL = text(
-    """
+    f"""
     SELECT o.buyer_id, COALESCE(o.zone_id, u.zone_id) AS zone_id, sc.category_id AS category_id,
-           sc.id AS sub_category_id, o.total_amount, o.status, o.delivery_status
+           sc.id AS sub_category_id, o.total_amount, o.status, o.delivery_status,
+           (o.status IN ('CONFIRMED', 'COMPLETED') OR EXISTS (
+               SELECT 1 FROM analytics.business_events be
+               WHERE be.event_name = 'DIRECT_ORDER_CONFIRMED' AND be.entity_type = 'ORDER' AND be.entity_id = o.id
+           )) AS confirmed
     FROM marketplace.orders o
     LEFT JOIN marketplace.buyer_profiles bp ON bp.id = o.buyer_id
     LEFT JOIN auth.users u ON u.id = bp.user_id
@@ -64,8 +81,7 @@ _DIRECT_ORDERS_SQL = text(
         WHERE oi.order_id = o.id
     ) x ON true
     LEFT JOIN governance.sub_categories sc ON sc.id = x.sub_category_id
-    WHERE o.created_at >= :start AND o.created_at < :end
-      AND o.auction_id IS NULL AND o.order_type = 'STANDARD' AND o.buyer_id IS NOT NULL
+    WHERE {DIRECT_COHORT_TS} >= :start AND {DIRECT_COHORT_TS} < :end AND {DIRECT_ORDER_WHERE}
     ORDER BY o.id
     """
 )
@@ -119,7 +135,12 @@ _RECURRING_SQL = text(
                AND o.order_type = 'RECURRING_SUPPLY' AND o.delivery_status = 'RECEIVED') AS received_orders_count,
            COALESCE((SELECT sum(o.total_amount) FROM marketplace.orders o
              WHERE oc.order_group_id IS NOT NULL AND o.checkout_group_id = oc.order_group_id
-               AND o.order_type = 'RECURRING_SUPPLY' AND o.delivery_status = 'RECEIVED'), 0) AS received_value
+               AND o.order_type = 'RECURRING_SUPPLY' AND o.delivery_status = 'RECEIVED'), 0) AS received_value,
+           COALESCE((SELECT sum(oi.quantity) FROM marketplace.need_allocations na
+                       JOIN marketplace.order_items oi ON oi.id = na.order_item_id
+                       JOIN marketplace.orders o ON o.id = oi.order_id
+                      WHERE na.occurrence_id = oc.id AND na.status = 'CONVERTED'
+                        AND o.order_type = 'RECURRING_SUPPLY' AND o.delivery_status = 'RECEIVED'), 0) AS delivered_quantity
     FROM marketplace.recurring_need_occurrences oc
     JOIN marketplace.recurring_needs n ON n.id = oc.recurring_need_id
     JOIN marketplace.buyer_profiles bp ON bp.id = n.buyer_id
@@ -200,6 +221,27 @@ class DailyMetricsRefresher:
         return {k: (_as_uuid(v) if k in _UUID_COLUMNS else v) for k, v in row.items()}
 
 
+DELIVERED_QUANTITY_SUBQUERY = """
+    SELECT na.occurrence_id AS occurrence_id, sum(oi.quantity) AS q
+    FROM marketplace.need_allocations na
+    JOIN marketplace.order_items oi ON oi.id = na.order_item_id
+    JOIN marketplace.orders o ON o.id = oi.order_id
+    WHERE na.status = 'CONVERTED' AND o.order_type = 'RECURRING_SUPPLY' AND o.delivery_status = 'RECEIVED'
+    GROUP BY na.occurrence_id
+"""
+
+
+async def backfill_quantity_delivered(session: AsyncSession) -> int:
+    """One-off, idempotent: align `RecurringNeedOccurrence.quantity_delivered` with the source of
+    truth for occurrences received BEFORE the writer existed (the writer keeps it aligned afterwards).
+    Returns the number of occurrences updated; a second run returns 0."""
+    result = await session.execute(text(
+        "UPDATE marketplace.recurring_need_occurrences oc SET quantity_delivered = d.q, version = oc.version + 1 "
+        f"FROM ({DELIVERED_QUANTITY_SUBQUERY}) d WHERE d.occurrence_id = oc.id AND oc.quantity_delivered <> d.q"
+    ))
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
 async def recompute_range(session_factory: Any, start: date, end: date) -> dict[str, dict[str, int]]:
     """Recompute every day in [start, end] (inclusive), one transaction per day so one bad day never
     rolls back the others. `session_factory` is an async context manager yielding a committing
@@ -218,4 +260,4 @@ async def recompute_recent(session_factory: Any, lookback_days: int = 14, *, tod
     return await recompute_range(session_factory, today - timedelta(days=lookback_days), today)
 
 
-__all__ = ["DailyMetricsRefresher", "recompute_range", "recompute_recent"]
+__all__ = ["DailyMetricsRefresher", "recompute_range", "recompute_recent", "backfill_quantity_delivered"]

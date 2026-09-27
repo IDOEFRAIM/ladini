@@ -1,6 +1,6 @@
 {
-  "id": "74e5de1d-6488-4d7f-bff4-5f2cf55f4c0d",
-  "prevId": "a46b6431-f577-4c2a-841f-2479a7149161",
+  "id": "6c0cbb31-5023-4f2b-b94d-2a480d86791f",
+  "prevId": "74e5de1d-6488-4d7f-bff4-5f2cf55f4c0d",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -10310,6 +10310,13 @@
           "notNull": true,
           "default": "'0'"
         },
+        "confirmed_gmv_direct": {
+          "name": "confirmed_gmv_direct",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
         "confirmed_gmv_tender": {
           "name": "confirmed_gmv_tender",
           "type": "numeric(16, 2)",
@@ -10420,6 +10427,10 @@
           "name": "buyer_daily_metrics_counts_chk",
           "value": "\"analytics\".\"buyer_daily_metrics\".\"needs_direct\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"needs_tender\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"needs_recurring\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"satisfied_direct\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"satisfied_tender\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"satisfied_recurring\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"digests_queued\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"digests_accepted\" >= 0"
         },
+        "buyer_daily_metrics_confirmed_direct_chk": {
+          "name": "buyer_daily_metrics_confirmed_direct_chk",
+          "value": "\"analytics\".\"buyer_daily_metrics\".\"confirmed_gmv_direct\" >= 0"
+        },
         "buyer_daily_metrics_money_chk": {
           "name": "buyer_daily_metrics_money_chk",
           "value": "\"analytics\".\"buyer_daily_metrics\".\"potential_gmv_direct\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"potential_gmv_tender\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"potential_gmv_recurring\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"confirmed_gmv_tender\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"confirmed_gmv_recurring\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"delivered_gmv_direct\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"delivered_gmv_tender\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"delivered_gmv_recurring\" >= 0"
@@ -10492,6 +10503,20 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
+        },
+        "orders_confirmed": {
+          "name": "orders_confirmed",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "confirmed_value": {
+          "name": "confirmed_value",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
         },
         "created_value": {
           "name": "created_value",
@@ -10570,6 +10595,10 @@
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {
+        "direct_daily_metrics_confirmed_chk": {
+          "name": "direct_daily_metrics_confirmed_chk",
+          "value": "\"analytics\".\"direct_daily_metrics\".\"orders_confirmed\" >= 0 AND \"analytics\".\"direct_daily_metrics\".\"confirmed_value\" >= 0"
+        },
         "direct_daily_metrics_counts_chk": {
           "name": "direct_daily_metrics_counts_chk",
           "value": "\"analytics\".\"direct_daily_metrics\".\"searches\" >= 0 AND \"analytics\".\"direct_daily_metrics\".\"successful_searches\" >= 0 AND \"analytics\".\"direct_daily_metrics\".\"orders_created\" >= 0 AND \"analytics\".\"direct_daily_metrics\".\"orders_delivered\" >= 0 AND \"analytics\".\"direct_daily_metrics\".\"created_value\" >= 0 AND \"analytics\".\"direct_daily_metrics\".\"delivered_value\" >= 0"
@@ -10954,6 +10983,13 @@
           "notNull": true,
           "default": "'0'"
         },
+        "delivered_quantity": {
+          "name": "delivered_quantity",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
         "unmatched_quantity": {
           "name": "unmatched_quantity",
           "type": "numeric(16, 3)",
@@ -11058,6 +11094,10 @@
         "recurring_daily_metrics_counts_chk": {
           "name": "recurring_daily_metrics_counts_chk",
           "value": "\"analytics\".\"recurring_daily_metrics\".\"occurrences_total\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"occurrences_active\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"occurrences_fully_covered\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"occurrences_notified\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"occurrences_accepted\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"occurrences_skipped\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"occurrences_with_orders\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"occurrences_all_received\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"needs_with_occurrence\" >= 0"
+        },
+        "recurring_daily_metrics_delivered_chk": {
+          "name": "recurring_daily_metrics_delivered_chk",
+          "value": "\"analytics\".\"recurring_daily_metrics\".\"delivered_quantity\" >= 0"
         },
         "recurring_daily_metrics_qty_chk": {
           "name": "recurring_daily_metrics_qty_chk",

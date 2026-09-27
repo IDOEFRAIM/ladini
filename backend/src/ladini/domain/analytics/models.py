@@ -187,6 +187,7 @@ class BuyerDailyMetricRecord(Base):
     __table_args__ = (
         Index("buyer_daily_metrics_grain_uq", "metric_date", "buyer_id", unique=True),
         Index("buyer_daily_metrics_date_zone_idx", "metric_date", "zone_id"),
+        CheckConstraint("confirmed_gmv_direct >= 0", name="buyer_daily_metrics_confirmed_direct_chk"),
         CheckConstraint("needs_direct >= 0 AND needs_tender >= 0 AND needs_recurring >= 0 AND satisfied_direct >= 0 AND satisfied_tender >= 0 AND satisfied_recurring >= 0 AND digests_queued >= 0 AND digests_accepted >= 0", name="buyer_daily_metrics_counts_chk"),
         CheckConstraint("potential_gmv_direct >= 0 AND potential_gmv_tender >= 0 AND potential_gmv_recurring >= 0 AND confirmed_gmv_tender >= 0 AND confirmed_gmv_recurring >= 0 AND delivered_gmv_direct >= 0 AND delivered_gmv_tender >= 0 AND delivered_gmv_recurring >= 0", name="buyer_daily_metrics_money_chk"),
         {"schema": "analytics"},
@@ -205,6 +206,7 @@ class BuyerDailyMetricRecord(Base):
     potential_gmv_direct = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
     potential_gmv_tender = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
     potential_gmv_recurring = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    confirmed_gmv_direct = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
     confirmed_gmv_tender = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
     confirmed_gmv_recurring = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
     delivered_gmv_direct = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
@@ -220,6 +222,7 @@ class DirectDailyMetricRecord(Base):
     __table_args__ = (
         Index("direct_daily_metrics_grain_uq", "metric_date", "zone_id", "category_id", "sub_category_id", unique=True),
         Index("direct_daily_metrics_date_idx", "metric_date"),
+        CheckConstraint("orders_confirmed >= 0 AND confirmed_value >= 0", name="direct_daily_metrics_confirmed_chk"),
         CheckConstraint("searches >= 0 AND successful_searches >= 0 AND orders_created >= 0 AND orders_delivered >= 0 AND created_value >= 0 AND delivered_value >= 0", name="direct_daily_metrics_counts_chk"),
         {"schema": "analytics"},
     )
@@ -233,6 +236,8 @@ class DirectDailyMetricRecord(Base):
     successful_searches = Column(Integer, nullable=False, server_default=text("0"))
     orders_created = Column(Integer, nullable=False, server_default=text("0"))
     orders_delivered = Column(Integer, nullable=False, server_default=text("0"))
+    orders_confirmed = Column(Integer, nullable=False, server_default=text("0"))
+    confirmed_value = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
     created_value = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
     delivered_value = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
     computed_at = Column(_tz(), server_default=func.now(), nullable=False)
@@ -271,6 +276,7 @@ class RecurringDailyMetricRecord(Base):
     __table_args__ = (
         Index("recurring_daily_metrics_grain_uq", "metric_date", "zone_id", "category_id", "sub_category_id", "canonical_unit", unique=True),
         Index("recurring_daily_metrics_date_idx", "metric_date"),
+        CheckConstraint("delivered_quantity >= 0", name="recurring_daily_metrics_delivered_chk"),
         CheckConstraint("measurement_family IN ('MASS','VOLUME','COUNT','PACKAGE','OTHER')", name="recurring_daily_metrics_family_chk"),
         CheckConstraint("occurrences_total >= 0 AND occurrences_active >= 0 AND occurrences_fully_covered >= 0 AND occurrences_notified >= 0 AND occurrences_accepted >= 0 AND occurrences_skipped >= 0 AND occurrences_with_orders >= 0 AND occurrences_all_received >= 0 AND needs_with_occurrence >= 0", name="recurring_daily_metrics_counts_chk"),
         CheckConstraint("requested_quantity >= 0 AND matched_quantity >= 0 AND confirmed_quantity >= 0 AND unmatched_quantity >= 0 AND potential_value >= 0 AND confirmed_value >= 0 AND received_value >= 0", name="recurring_daily_metrics_qty_chk"),
@@ -296,6 +302,7 @@ class RecurringDailyMetricRecord(Base):
     requested_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
     matched_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
     confirmed_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    delivered_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
     unmatched_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
     potential_value = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
     confirmed_value = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))

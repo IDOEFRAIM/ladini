@@ -124,8 +124,17 @@ class TestUnavailable:
         assert res.status == DataStatus.UNAVAILABLE and res.value is None and UNAVAILABLE[name] in res.notes
 
     def test_the_documented_unavailable_set(self):
-        assert {"recurring_delivered_quantity", "recurring_fulfillment_rate", "direct_fulfillment_rate",
-                "fulfillment_rate", "recurring_modification_rate"} <= set(UNAVAILABLE)
+        assert set(UNAVAILABLE) == {"fulfillment_rate", "recurring_modification_rate", "active_recurring_needs"}
+
+    def test_phase_d5_metrics_are_now_bound_not_unavailable(self):
+        for name in ("direct_fulfillment_rate", "direct_gmv", "recurring_delivered_quantity", "recurring_fulfillment_rate"):
+            assert name in BINDINGS and name not in UNAVAILABLE
+        assert BINDINGS["recurring_fulfillment_rate"].status == DataStatus.PARTIAL  # lower bound: needs buyer confirmation
+        assert BINDINGS["direct_fulfillment_rate"].denominator == "SUM(orders_confirmed)"
+
+    def test_search_ratio_is_named_honestly(self):
+        assert "direct_search_to_order_rate" not in BINDINGS and "direct_orders_per_search" in BINDINGS
+        assert "not a conversion" in BINDINGS["direct_orders_per_search"].note.lower() or "NOT a conversion" in BINDINGS["direct_orders_per_search"].note
 
     def test_every_binding_and_unavailable_name_exists_in_the_dictionary(self):
         assert set(BINDINGS) <= set(METRICS) and set(UNAVAILABLE) <= set(METRICS)
@@ -157,11 +166,13 @@ class TestNorthStar:
 
 class TestUnfulfilledDemand:
     def test_is_named_unmatched_and_reports_undelivered_as_unavailable(self):
-        rows = [{"canonical_unit": "KG", "measurement_family": "MASS", "requested": 100, "matched": 60, "unmatched": 40}]
+        rows = [{"canonical_unit": "KG", "measurement_family": "MASS", "requested": 100, "matched": 60, "unmatched": 40,
+                 "confirmed": 60, "delivered": 25}]
         out = run(_service(lambda sql, p: rows).get_unfulfilled_demand(START, END))
         assert out["kind"] == "UNMATCHED_DEMAND"
         assert out["rows"][0]["unmatched"] == 40 and out["rows"][0]["unmatched_ratio"] == pytest.approx(0.4)
-        assert "quantity_delivered" in out["undelivered_demand"]
+        assert out["rows"][0]["undelivered_confirmed"] == 35  # confirmed - delivered, never called unmatched
+        assert out["rows"][0]["undelivered_confirmed"] == 0 or "undelivered_confirmed" in out["rows"][0]
 
 
 def _t(scope, sid, value, **kw):

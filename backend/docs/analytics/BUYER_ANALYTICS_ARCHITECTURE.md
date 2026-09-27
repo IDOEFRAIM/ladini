@@ -193,3 +193,15 @@ bound); recurring quantity fulfillment and DIRECT confirmation metrics stay UNAV
 Phase E candidates: admin API on the Next.js side calling the service contract, dashboard/charts (library decision still
 open), seeding real targets, resolving `quantity_delivered` (write it from the RECEIVED transition or retire it), and
 instrumenting `DIRECT_ORDER_CONFIRMED`.
+
+## 15. Phase D.5 — gaps closed before the dashboard
+
+- `RecurringNeedOccurrence.quantity_delivered`: **RELIABLE (lower bound)** — exact mapping proven, idempotent writer added in the RECEIVED
+  transaction (see METRIC_LAYER.md). `recurring_delivered_quantity` / `recurring_fulfillment_rate` are now bound (PARTIAL).
+- `DIRECT_ORDER_CONFIRMED`: **INSTRUMENTED** on the two canonical `-> CONFIRMED` transitions; `direct_fulfillment_rate` and `direct_gmv` are bound.
+  Audit finding fixed on the way: `DIRECT_ORDER_CREATED` had been wired to a dead path and the DIRECT aggregates filtered `STANDARD` only,
+  missing the real PREORDER checkout cohort.
+- `direct_search_to_order_rate` renamed `direct_orders_per_search` (window ratio, not attributed).
+- North Star stays PARTIAL. Targets stay unseeded.
+- Still open: global `fulfillment_rate` (needs per-journey confirmed counts at buyer level), `recurring_modification_rate`,
+  `active_recurring_needs` history, session-level search->order attribution.

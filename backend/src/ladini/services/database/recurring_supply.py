@@ -63,7 +63,7 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 
 from ladini.domain.analytics.business_events import BusinessEventName
 from ladini.domain.analytics.emitter import BusinessEventEmitter
@@ -1092,6 +1092,8 @@ class RecurringSupplyMixin(BaseMixin):
             )
         )
         await current_session.flush()
+        if outcome == "RECEIVED":
+            await self._refresh_occurrence_quantity_delivered(order)
         logger.info(
             "recurring_supply.reception_recorded | order_id=%s | outcome=%s", order.id, outcome
         )
@@ -1101,6 +1103,52 @@ class RecurringSupplyMixin(BaseMixin):
             "order_id": str(order.id),
             "delivery_status": outcome,
         }
+
+    async def _refresh_occurrence_quantity_delivered(self, order: Order) -> Optional[float]:
+        """Recompute (never increment) `RecurringNeedOccurrence.quantity_delivered` from the source
+        of truth, in the SAME transaction as the RECEIVED transition.
+
+        Exactness proof (see docs/analytics/METRIC_LAYER.md): `accept_match_proposal` creates ONE order
+        per producer, all with `checkout_group_id == occurrence.order_group_id` (a fresh uuid per
+        acceptance; an occurrence is accepted once, under FOR UPDATE), and ONE `OrderItem` per
+        allocation (`need_allocations.order_item_id`, allocation unique per occurrence/producer/product).
+        Matching only pairs a product whose unit literally equals the occurrence unit, so item
+        quantities are in the occurrence unit. `RECEIVED` = the buyer's "tout est bon" for the whole
+        order; `RECEIVED_WITH_ISSUE` carries only a free-text quantity and is deliberately NOT counted
+        (delivered is then a lower bound). Being a SUM over CONVERTED allocations whose order is
+        RECEIVED, a replay/retry yields the identical value and it can never exceed `quantity_confirmed`.
+        """
+        group_id = order.checkout_group_id
+        if group_id is None:
+            return None
+        current_session = self.session
+        if not current_session:
+            raise BusinessRuleException("Session indisponible.")
+        occurrence = await current_session.scalar(
+            select(RecurringNeedOccurrence)
+            .where(RecurringNeedOccurrence.order_group_id == group_id)
+            .with_for_update()
+        )
+        if occurrence is None:
+            return None
+        delivered = await current_session.scalar(
+            select(func.coalesce(func.sum(OrderItem.quantity), 0))
+            .select_from(NeedAllocation)
+            .join(OrderItem, OrderItem.id == NeedAllocation.order_item_id)
+            .join(Order, Order.id == OrderItem.order_id)
+            .where(
+                NeedAllocation.occurrence_id == occurrence.id,
+                NeedAllocation.status == "CONVERTED",
+                Order.order_type == "RECURRING_SUPPLY",
+                Order.delivery_status == "RECEIVED",
+            )
+        )
+        delivered = float(delivered or 0)
+        if float(occurrence.quantity_delivered or 0) != delivered:
+            occurrence.quantity_delivered = delivered
+            occurrence.version = occurrence.version + 1
+            await current_session.flush()
+        return delivered
 
     async def list_my_deliverable_orders(self, phone: str, delivery_status: str) -> Dict[str, Any]:
         """Lecture bornée, réservée au fast-path déterministe (VS5 pilote,

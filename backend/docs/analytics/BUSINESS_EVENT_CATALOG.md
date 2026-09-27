@@ -11,9 +11,9 @@ no emitter — never inferred from a proxy).
 |---|---|---|---|---|---|---|---|
 | DIRECT_SEARCH_PERFORMED | DIRECT | A catalog search was actually executed | `BuyerMixin.search_products`, after the two queries ran | SEARCH (fresh uuid) | `DIRECT_SEARCH_PERFORMED:{search_uuid}` | NO (no search log ever existed) | INSTRUMENTED |
 | DIRECT_SEARCH_SUCCEEDED | DIRECT | The executed search returned ≥ 1 eligible row (`catalog_rows + future_rows > 0`; eligibility is the query's own filters: available, stock > 0…) | same call | SEARCH | `DIRECT_SEARCH_SUCCEEDED:{search_uuid}` | NO | INSTRUMENTED |
-| DIRECT_ORDER_CREATED | DIRECT | Order row persisted from a cart/preorder | `BuyerMixin.create_preorder`, after `total_amount` flush | ORDER | `DIRECT_ORDER_CREATED:{order_id}` | PARTIAL (Order.created_at) | INSTRUMENTED |
-| DIRECT_ORDER_CONFIRMED | DIRECT | Order confirmed by the producer | — | — | — | PARTIAL | **NOT_INSTRUMENTED** |
-| DIRECT_ORDER_DELIVERED | DIRECT | Non-tender, non-recurring order reached terminal delivery | `verify_delivery_otp` (escrow), `confirm_delivery_and_payment` (cash) via `emit_order_delivered` | ORDER | `DIRECT_ORDER_DELIVERED:{order_id}` | PARTIAL (no delivered_at column) | INSTRUMENTED |
+| DIRECT_ORDER_CREATED | DIRECT | The buyer's order became a real need: it LEFT `DRAFT` (a draft is only a cart) | `BuyerMixin.confirm_preorder_draft` (cash flow, one event per producer order) and `EscrowMixin.mark_escrow_paid` (escrow flow) via `emit_direct_order_created` | ORDER | `DIRECT_ORDER_CREATED:{order_id}` | PARTIAL (`preorder_converted_at`) | INSTRUMENTED (D.5: moved off the dead `finalize_multi_order`) |
+| DIRECT_ORDER_CONFIRMED | DIRECT | The order reached the firm, executable commitment: `Order.status = CONFIRMED` | `ProducerMgmtMixin.confirm_order_by_producer` (PENDING_PRODUCER_CONFIRMATION -> CONFIRMED) and `EscrowMixin.mark_escrow_paid` (payment secured -> CONFIRMED), via `emit_direct_order_confirmed`; never for tender / recurring / future-production orders | ORDER | `DIRECT_ORDER_CONFIRMED:{order_id}` (both writers share it: at most one event) | PARTIAL (current status recovers non-cancelled orders) | INSTRUMENTED (Phase D.5) |
+| DIRECT_ORDER_DELIVERED | DIRECT | Non-tender, non-recurring, non-reservation order reached terminal delivery | `verify_delivery_otp` (escrow), `confirm_delivery_and_payment` (cash) via `emit_order_delivered` | ORDER | `DIRECT_ORDER_DELIVERED:{order_id}` | PARTIAL (no delivered_at column) | INSTRUMENTED |
 | DIRECT_ORDER_FAILED | DIRECT | — | — | — | — | NO | NOT_INSTRUMENTED |
 | TENDER_CREATED | TENDER | Auction row persisted | `AuctionMixin.create_auction` | AUCTION | `TENDER_CREATED:{auction_id}` | YES (Auction.created_at) | INSTRUMENTED |
 | TENDER_PUBLISHED | TENDER | — | — | — | — | — | NOT_INSTRUMENTED (no distinct publish transition: creation = publication) |
@@ -33,19 +33,22 @@ no emitter — never inferred from a proxy).
 
 ## Details
 
-### DIRECT_ORDER_CONFIRMED — NOT_INSTRUMENTED
-*Reason:* no single reliable canonical business transition currently identified. "Confirmed" is reached through
-several independent paths (`confirm_order_by_producer`, cash confirmation, escrow flows, the preorder confirm
-in the conversational layer) that set different fields (`Order.status`, `payment_status`, `confirmed_at`), and
-`confirmed_at` is also reused for *delivery* confirmation (`verify_delivery_otp` and `confirm_delivery_and_payment`
-write it at delivery time). Deducing "confirmed" from any of these would double-count or mislabel.
+### DIRECT lifecycle and DIRECT_ORDER_CONFIRMED (audited in Phase D.5)
+The canonical DIRECT buyer flow (`create_preorder_draft`) creates one Order per producer with `order_type = PREORDER` and
+status `DRAFT` (an unconfirmed cart, not a need). Then:
 
-*What is needed to instrument it:* one service-level function that owns the `PENDING_PRODUCER_CONFIRMATION → CONFIRMED`
-transition for non-recurring, non-tender orders (or an `OrderStatusHistory` row written for every such transition),
-emitted with key `DIRECT_ORDER_CONFIRMED:{order_id}`.
+1. `confirm_preorder_draft` (buyer confirms; stock debited): the order leaves DRAFT -> `PENDING_PRODUCER_CONFIRMATION`
+   (cash) — **DIRECT_ORDER_CREATED**. On the escrow path the order leaves DRAFT in `mark_escrow_paid`.
+2. Firm commitment = `Order.status = CONFIRMED`, written by exactly two persisted transitions:
+   producer acceptance (`confirm_order_by_producer`) or secured escrow payment (`mark_escrow_paid`) — **DIRECT_ORDER_CONFIRMED**.
+   It is the precondition of delivery (`confirm_delivery_and_payment` requires `CONFIRMED`; the OTP flow requires an escrowed order).
+3. Delivery (`verify_delivery_otp` / `confirm_delivery_and_payment`) — **DIRECT_ORDER_DELIVERED**.
 
-*Impact:* `order_confirmation_rate`-style metrics have no real-time source; they can only be approximated from the
-current `Order.status`, which drops orders that were later cancelled or delivered. Phase D must not publish them as exact.
+Previously found and fixed: `DIRECT_ORDER_CREATED` was emitted from `finalize_multi_order`, a dead legacy path (`STANDARD` orders),
+so it never fired for the real flow. Other writers of `Order.status` are tender (`select_winning_bid`, excluded), recurring
+(excluded), cancellations, and `update_order_status` (arbitrary, removed from the MCP scopes; not a business transition).
+An order confirmed then cancelled keeps its DIRECT_ORDER_CONFIRMED fact; before this event existed such orders are not
+recoverable from the status alone (slight under-count of confirmed history).
 
 ### Delivery rule (DELIVERED / FULFILLED / RECEIVED)
 Order-type conditional, implemented once in `BusinessEventEmitter.emit_order_delivered`:
@@ -75,8 +78,8 @@ keep their own unit as canonical target (no extra lookup on those paths).
 System-driven events (matching, digest, cron replenishment, delivery helper) use `actor_type = SYSTEM`.
 
 ## Known data-quality gaps (never back-filled)
-1. `RecurringNeedOccurrence.quantity_delivered` has no writer → no recurring delivered quantity, historical or live.
-2. `DIRECT_ORDER_CONFIRMED` not instrumented (above).
+1. ~~`RecurringNeedOccurrence.quantity_delivered` has no writer~~ — writer added in Phase D.5 (see METRIC_LAYER.md); history is recomputed from the RECEIVED-order join, and `backfill_quantity_delivered` aligns the column.
+2. ~~`DIRECT_ORDER_CONFIRMED` not instrumented~~ — instrumented in Phase D.5; earlier confirmed-then-cancelled orders are not recoverable.
 3. `select_winning_bid` writes no `OrderStatusHistory` → tender timeline history is partial.
 4. Search events (`DIRECT_SEARCH_*`) have no history before Phase C.
 5. Events for facts created before the Phase C deploy do not exist; only forward data is trustworthy.

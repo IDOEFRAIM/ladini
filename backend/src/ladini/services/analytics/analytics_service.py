@@ -265,8 +265,8 @@ class AnalyticsService:
         return {n: (await self.get_metric(n, start, end, filters=filters)).as_dict() for n in names}
 
     async def get_direct_metrics(self, start: date, end: date, *, filters: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
-        return await self._many(("direct_searches", "direct_search_success_rate", "direct_search_to_order_rate", "direct_orders_created",
-                                 "direct_order_delivery_rate", "direct_fulfillment_rate", "direct_gmv"), start, end, filters)
+        return await self._many(("direct_searches", "direct_search_success_rate", "direct_orders_per_search", "direct_orders_created",
+                                 "direct_orders_confirmed", "direct_order_delivery_rate", "direct_fulfillment_rate", "direct_gmv"), start, end, filters)
 
     async def get_tender_metrics(self, start: date, end: date, *, filters: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
         return await self._many(("tenders_created", "tender_response_rate", "average_bids_per_tender", "time_to_first_bid",
@@ -283,7 +283,7 @@ class AnalyticsService:
     ) -> dict[str, Any]:
         """RECURRING UNMATCHED demand (requested - matched), per canonical unit. It is what the
         matching engine could not cover — NOT demand that was matched but never delivered
-        (undelivered quantity is UNAVAILABLE: `quantity_delivered` has no writer)."""
+        (`undelivered_confirmed` = confirmed - delivered is reported separately and never called unmatched)."""
         allowed = TABLE_DIMENSIONS[TABLE_RECURRING]
         for g in group_by:
             if g not in allowed or g == "canonical_unit":
@@ -292,7 +292,8 @@ class AnalyticsService:
         cols = ", ".join(list(group_by) + ["canonical_unit", "measurement_family"])
         sql = (
             f"SELECT {cols}, SUM(requested_quantity) AS requested, SUM(matched_quantity) AS matched, "
-            f"SUM(unmatched_quantity) AS unmatched FROM {TABLE_RECURRING} "
+            f"SUM(unmatched_quantity) AS unmatched, SUM(confirmed_quantity) AS confirmed, "
+            f"SUM(delivered_quantity) AS delivered FROM {TABLE_RECURRING} "
             f"WHERE metric_date >= :s AND metric_date <= :e{where} GROUP BY {cols} ORDER BY {cols}"
         )
         rows = (await self.session.execute(text(sql), {"s": start, "e": end, **params})).mappings().all()
@@ -301,11 +302,14 @@ class AnalyticsService:
             d = {k: (str(v) if isinstance(v, uuid.UUID) else v) for k, v in dict(r).items()}
             d["requested"], d["matched"], d["unmatched"] = float(r["requested"]), float(r["matched"]), float(r["unmatched"])
             d["unmatched_ratio"] = compute_value(d["unmatched"], d["requested"])
+            confirmed, delivered = float(r["confirmed"]), float(r["delivered"])
+            d["confirmed"], d["delivered"] = confirmed, delivered
+            d["undelivered_confirmed"] = max(confirmed - delivered, 0.0)
             out.append(d)
         return {
             "kind": "UNMATCHED_DEMAND",
             "definition": "SUM(GREATEST(requested - matched, 0)) over active recurring occurrences, per canonical unit.",
-            "undelivered_demand": UNAVAILABLE["recurring_delivered_quantity"],
+            "undelivered_confirmed": "confirmed - delivered per row: confirmed supply the buyer has not (yet) confirmed RECEIVED (lower-bound signal; not the same as unmatched).",
             "period": {"start": start.isoformat(), "end": end.isoformat()},
             "rows": out,
         }
