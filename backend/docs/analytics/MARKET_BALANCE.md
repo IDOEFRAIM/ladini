@@ -236,15 +236,57 @@ warning.
 ## 14. API and dashboard
 
 See `PRODUCER_DASHBOARD.md`/`BUYER_DASHBOARD.md` for the (unchanged) surrounding architecture this
-reuses. Endpoints and page sections are documented together with their implementation below,
-updated as each is built (§20 onward in the mission — tracked in this same file's later sections
-once implemented, to avoid two documents drifting apart).
+reuses: `requireAdmin()` → `analyticsProxy(..., 'market-balance')` → `require_internal_token` router
+→ `MarketBalanceService`. `analyticsProxy`'s `namespace` parameter gained `'market-balance'`
+(backward compatible, buyer/producer callers unchanged); `ALLOWED_PARAMS` gained `zone_scope`/
+`canonical_unit` (this phase's own filter names — it has no `journey` filter and no `buyer_id`/
+`producer_id` grain).
+
+**Endpoints** (`/internal/analytics/market-balance/*`, all GET):
+
+| Endpoint | Content |
+|---|---|
+| `overview` | Totals per canonical unit only (never a cross-unit figure): open demand, available supply, potential coverable, potential coverage rate, demand gap, excess supply, and which `demand_scope`s contributed |
+| `current` | Every current balance row (zone × category × sub-category × canonical unit), with zone/category/sub-category labels attached |
+| `demand-gaps` | Rows with `demand_gap_quantity > 0`, **grouped by canonical unit** and sorted descending within each group (§26 — never a single ranking mixing incompatible units) |
+| `excess-supply` | Same shape as `demand-gaps`, for `excess_supply_quantity > 0` (§27) |
+| `timeseries` | Per-day totals per canonical unit over `from`/`to` (only real snapshot days — §16/§18); the window is validated (`resolve_window`) **before** any database session is opened, so a bad window is a 400, never a 500 |
+| `filters` | Real taxonomy (categories, sub-categories, zones) — the same reader the buyer/producer cockpits already use |
+| `health` | `Healthy`/`Warning`/`Stale`, freshness of `market_balance_daily_snapshot` itself plus its two upstream dependencies (the producer supply snapshot it reads, the recurring/tender demand it queries live) |
+
+Filters: `zone_scope` (expands to the zone + all descendants, reusing `admin_api.resolve_filters`
+via a small shim), `category_id`, `sub_category_id`, `canonical_unit`. No `breakdown`/`compare`
+HTTP endpoints were added — the mission's own ÉTAPE 22 endpoint list does not include them, and
+ÉTAPE 29's drill-down ("une table filtrable suffit") is satisfied by the `current` matrix table
+alone; `MarketBalanceService.get_balance_breakdown`/`compare_balance_periods` exist and are tested
+at the service layer for future use, without HTTP exposure yet.
+
+**Dashboard** (`/admin/analytics/market-balance`, `features/analytics/ui/MarketBalancePage.tsx`):
+1. **Filters**: zone (hierarchy), category, sub-category — no period selector (the main view is
+   always the current live snapshot, per §16's "no fake backfill" rule).
+2. **Overview cards**, one per canonical unit: open demand, available supply, potential coverage
+   %, demand gap, excess supply, and the `reliable_scope` badges that contributed.
+3. **Demand gaps** and **excess supply**: two separate grouped tables (by canonical unit), each with
+   an explicit "signal" subtitle — "Signal de sourcing" / "Signal d'acquisition" — framed as a
+   signal, never a directive ("vous devez recruter X"), per the mission's own ÉTAPE 28 instruction.
+   Each row also shows a reliability badge when the underlying scope is not fully `RELIABLE`.
+4. **Pilot matrix**: every current row, filterable via the same zone/category/sub-category state —
+   satisfies ÉTAPE 25/29 without a dedicated breakdown/drill-down endpoint.
+5. **Health badge** with last refresh, reused unchanged from the buyer cockpit.
+6. A footer note states DIRECT's exclusion and TENDER's PARTIAL caveat explicitly — never hidden.
+
+No map was built (ÉTAPE 30 — explicitly out of scope for the pilot).
 
 ## 15. Data quality
 
-See `run_market_balance_quality_checks` (implemented alongside the service): unit incompatible
-comparison, orphan sub-category, missing zone, negative demand/supply, duplicate snapshot grain,
-stale supply snapshot, stale demand refresh, stale market-balance snapshot itself.
+`run_market_balance_quality_checks` (`services/analytics/data_quality.py`): duplicate snapshot
+grain, unknown canonical unit (`measurement_family='OTHER'`), incompatible aggregation (a
+sub-category appearing under more than one measurement family), orphan sub-category (a
+`sub_category_id` no longer present in `governance.sub_categories` — this table has no FK there,
+unlike `business_events`, so this is a real possible drift, not a defensive no-op), stale refresh
+of `market_balance_daily_snapshot` itself, and stale upstream (the producer supply snapshot it
+reads). Negative quantities are already prevented by CHECK constraints, per the module's own
+established convention (checks here cover what a constraint cannot express).
 
 ## 16. Historical coverage
 
