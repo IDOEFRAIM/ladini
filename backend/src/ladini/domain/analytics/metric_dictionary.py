@@ -792,12 +792,12 @@ recurring_modification_rate = _register(
 recurring_skip_rate = _register(
     MetricDefinition(
         name="recurring_skip_rate",
-        description="Of digested occurrences, the share the buyer explicitly skipped.",
-        business_definition="WeightedRate(COUNT(occurrences WHERE status = 'SKIPPED'), COUNT(occurrences with notified_at set)).",
+        description="Share of the day's recurring occurrences the buyer explicitly skipped.",
+        business_definition="WeightedRate(COUNT(occurrences WHERE status = 'SKIPPED'), COUNT(occurrences)) over the occurrences of the window (Phase D: relevant occurrences = all non-deleted ones; a skip can happen before any digest).",
         journey=Journey.RECURRING,
         aggregation_type=AggregationType.WEIGHTED_RATIO,
         numerator="COUNT(occurrences SKIPPED)",
-        denominator="COUNT(occurrences with notified_at set)",
+        denominator="COUNT(occurrences)",
         unit_behavior="DIMENSIONLESS_RATIO",
         supported_dimensions=_STANDARD_DIMENSIONS,
         supported_time_windows=_STANDARD_WINDOWS,
@@ -850,6 +850,84 @@ recurring_gmv = _register(
         reconstructible_historically=Reconstructibility.YES,
         reconstructible_note="Same as confirmed_gmv.",
         alias_of="confirmed_gmv",
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Phase D additions — honest replacements for metrics whose dictionary definition
+# depends on data that does not exist (see metric_layer.UNAVAILABLE).
+# ---------------------------------------------------------------------------
+
+direct_order_delivery_rate = _register(
+    MetricDefinition(
+        name="direct_order_delivery_rate",
+        description="Of DIRECT orders created in the window, the share that reached delivery.",
+        business_definition="WeightedRate(COUNT(orders delivery_status IN (DELIVERED, FULFILLED)), COUNT(orders created)) — cohort by creation date. NOT `direct_fulfillment_rate` (delivered/confirmed): confirmation is not instrumented.",
+        journey=Journey.DIRECT,
+        aggregation_type=AggregationType.WEIGHTED_RATIO,
+        numerator="SUM(orders_delivered)",
+        denominator="SUM(orders_created)",
+        unit_behavior="DIMENSIONLESS_RATIO",
+        supported_dimensions=("date", "zone", "category", "sub_category"),
+        supported_time_windows=_STANDARD_WINDOWS,
+        source_entities=("marketplace.orders",),
+        reconstructible_historically=Reconstructibility.YES,
+        reconstructible_note="Order.created_at + current delivery_status; every historical day is recomputable.",
+    )
+)
+
+direct_orders_created = _register(
+    MetricDefinition(
+        name="direct_orders_created",
+        description="DIRECT (catalog cart) orders created in the window.",
+        business_definition="COUNT(orders WHERE auction_id IS NULL, order_type = STANDARD, buyer known, status NOT IN (DRAFT, SUPERSEDED)).",
+        journey=Journey.DIRECT,
+        aggregation_type=AggregationType.COUNT,
+        numerator="SUM(orders_created)",
+        denominator=None,
+        unit_behavior="DIMENSIONLESS_COUNT",
+        supported_dimensions=("date", "zone", "category", "sub_category"),
+        supported_time_windows=_STANDARD_WINDOWS,
+        source_entities=("marketplace.orders",),
+        reconstructible_historically=Reconstructibility.YES,
+        reconstructible_note="Order.created_at.",
+    )
+)
+
+recurring_unmatched_quantity = _register(
+    MetricDefinition(
+        name="recurring_unmatched_quantity",
+        description="Recurring demand the matching engine could not cover (requested - matched).",
+        business_definition="SUM(GREATEST(requested_quantity - quantity_matched, 0)) over non-withdrawn occurrences, per canonical unit. UNMATCHED demand only — never 'undelivered' demand.",
+        journey=Journey.RECURRING,
+        aggregation_type=AggregationType.SUM,
+        numerator="SUM(unmatched_quantity)",
+        denominator=None,
+        unit_behavior="ONLY_COMPATIBLE_CANONICAL_UNITS",
+        supported_dimensions=("date", "zone", "category", "sub_category"),
+        supported_time_windows=_STANDARD_WINDOWS,
+        source_entities=("marketplace.recurring_need_occurrences",),
+        reconstructible_historically=Reconstructibility.PARTIAL,
+        reconstructible_note="quantity_matched is the CURRENT matching state (rematching overwrites it), not a historical snapshot of what was matched that day.",
+    )
+)
+
+recurring_received_occurrence_rate = _register(
+    MetricDefinition(
+        name="recurring_received_occurrence_rate",
+        description="Of accepted recurring occurrences, the share whose orders were all confirmed RECEIVED by the buyer.",
+        business_definition="WeightedRate(COUNT(occurrences whose RECURRING_SUPPLY orders (checkout_group_id = occurrence.order_group_id) are ALL delivery_status RECEIVED), COUNT(occurrences ACCEPTED or PARTIALLY_ACCEPTED)). Occurrence-level; a lower bound because non-response is not receipt.",
+        journey=Journey.RECURRING,
+        aggregation_type=AggregationType.WEIGHTED_RATIO,
+        numerator="SUM(occurrences_all_received)",
+        denominator="SUM(occurrences_accepted)",
+        unit_behavior="DIMENSIONLESS_RATIO",
+        supported_dimensions=("date", "zone", "category", "sub_category"),
+        supported_time_windows=_STANDARD_WINDOWS,
+        source_entities=("marketplace.recurring_need_occurrences", "marketplace.orders"),
+        reconstructible_historically=Reconstructibility.PARTIAL,
+        reconstructible_note="Exact join by construction (order_group_id and checkout_group_id are written in the same transaction) but requires the buyer's RECEIVED confirmation.",
     )
 )
 

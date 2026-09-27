@@ -1,6 +1,6 @@
 {
-  "id": "a46b6431-f577-4c2a-841f-2479a7149161",
-  "prevId": "e40e4720-240f-4e78-9657-ff49af0ef30f",
+  "id": "74e5de1d-6488-4d7f-bff4-5f2cf55f4c0d",
+  "prevId": "a46b6431-f577-4c2a-841f-2479a7149161",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -10217,6 +10217,366 @@
       },
       "isRLSEnabled": false
     },
+    "analytics.buyer_daily_metrics": {
+      "name": "buyer_daily_metrics",
+      "schema": "analytics",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "metric_date": {
+          "name": "metric_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "buyer_id": {
+          "name": "buyer_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "zone_id": {
+          "name": "zone_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "needs_direct": {
+          "name": "needs_direct",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "needs_tender": {
+          "name": "needs_tender",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "needs_recurring": {
+          "name": "needs_recurring",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "satisfied_direct": {
+          "name": "satisfied_direct",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "satisfied_tender": {
+          "name": "satisfied_tender",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "satisfied_recurring": {
+          "name": "satisfied_recurring",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "potential_gmv_direct": {
+          "name": "potential_gmv_direct",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "potential_gmv_tender": {
+          "name": "potential_gmv_tender",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "potential_gmv_recurring": {
+          "name": "potential_gmv_recurring",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "confirmed_gmv_tender": {
+          "name": "confirmed_gmv_tender",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "confirmed_gmv_recurring": {
+          "name": "confirmed_gmv_recurring",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "delivered_gmv_direct": {
+          "name": "delivered_gmv_direct",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "delivered_gmv_tender": {
+          "name": "delivered_gmv_tender",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "delivered_gmv_recurring": {
+          "name": "delivered_gmv_recurring",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "digests_queued": {
+          "name": "digests_queued",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "digests_accepted": {
+          "name": "digests_accepted",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "computed_at": {
+          "name": "computed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "buyer_daily_metrics_grain_uq": {
+          "name": "buyer_daily_metrics_grain_uq",
+          "columns": [
+            {
+              "expression": "metric_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "buyer_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "buyer_daily_metrics_date_zone_idx": {
+          "name": "buyer_daily_metrics_date_zone_idx",
+          "columns": [
+            {
+              "expression": "metric_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "zone_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "buyer_daily_metrics_counts_chk": {
+          "name": "buyer_daily_metrics_counts_chk",
+          "value": "\"analytics\".\"buyer_daily_metrics\".\"needs_direct\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"needs_tender\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"needs_recurring\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"satisfied_direct\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"satisfied_tender\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"satisfied_recurring\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"digests_queued\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"digests_accepted\" >= 0"
+        },
+        "buyer_daily_metrics_money_chk": {
+          "name": "buyer_daily_metrics_money_chk",
+          "value": "\"analytics\".\"buyer_daily_metrics\".\"potential_gmv_direct\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"potential_gmv_tender\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"potential_gmv_recurring\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"confirmed_gmv_tender\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"confirmed_gmv_recurring\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"delivered_gmv_direct\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"delivered_gmv_tender\" >= 0 AND \"analytics\".\"buyer_daily_metrics\".\"delivered_gmv_recurring\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "analytics.direct_daily_metrics": {
+      "name": "direct_daily_metrics",
+      "schema": "analytics",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "metric_date": {
+          "name": "metric_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "zone_id": {
+          "name": "zone_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "category_id": {
+          "name": "category_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "sub_category_id": {
+          "name": "sub_category_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "searches": {
+          "name": "searches",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "successful_searches": {
+          "name": "successful_searches",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "orders_created": {
+          "name": "orders_created",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "orders_delivered": {
+          "name": "orders_delivered",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "created_value": {
+          "name": "created_value",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "delivered_value": {
+          "name": "delivered_value",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "computed_at": {
+          "name": "computed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "direct_daily_metrics_grain_uq": {
+          "name": "direct_daily_metrics_grain_uq",
+          "columns": [
+            {
+              "expression": "metric_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "zone_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "category_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sub_category_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "direct_daily_metrics_date_idx": {
+          "name": "direct_daily_metrics_date_idx",
+          "columns": [
+            {
+              "expression": "metric_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "direct_daily_metrics_counts_chk": {
+          "name": "direct_daily_metrics_counts_chk",
+          "value": "\"analytics\".\"direct_daily_metrics\".\"searches\" >= 0 AND \"analytics\".\"direct_daily_metrics\".\"successful_searches\" >= 0 AND \"analytics\".\"direct_daily_metrics\".\"orders_created\" >= 0 AND \"analytics\".\"direct_daily_metrics\".\"orders_delivered\" >= 0 AND \"analytics\".\"direct_daily_metrics\".\"created_value\" >= 0 AND \"analytics\".\"direct_daily_metrics\".\"delivered_value\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
     "analytics.event_outbox": {
       "name": "event_outbox",
       "schema": "analytics",
@@ -10456,6 +10816,437 @@
         "metric_targets_scope_id_matches_scope_type_chk": {
           "name": "metric_targets_scope_id_matches_scope_type_chk",
           "value": "(\"analytics\".\"metric_targets\".\"scope_type\" = 'GLOBAL' AND \"analytics\".\"metric_targets\".\"scope_id\" IS NULL) OR (\"analytics\".\"metric_targets\".\"scope_type\" <> 'GLOBAL' AND \"analytics\".\"metric_targets\".\"scope_id\" IS NOT NULL)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "analytics.recurring_daily_metrics": {
+      "name": "recurring_daily_metrics",
+      "schema": "analytics",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "metric_date": {
+          "name": "metric_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "zone_id": {
+          "name": "zone_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "category_id": {
+          "name": "category_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "sub_category_id": {
+          "name": "sub_category_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "canonical_unit": {
+          "name": "canonical_unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "measurement_family": {
+          "name": "measurement_family",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "occurrences_total": {
+          "name": "occurrences_total",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "occurrences_active": {
+          "name": "occurrences_active",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "occurrences_fully_covered": {
+          "name": "occurrences_fully_covered",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "occurrences_notified": {
+          "name": "occurrences_notified",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "occurrences_accepted": {
+          "name": "occurrences_accepted",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "occurrences_skipped": {
+          "name": "occurrences_skipped",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "occurrences_with_orders": {
+          "name": "occurrences_with_orders",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "occurrences_all_received": {
+          "name": "occurrences_all_received",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "needs_with_occurrence": {
+          "name": "needs_with_occurrence",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "requested_quantity": {
+          "name": "requested_quantity",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "matched_quantity": {
+          "name": "matched_quantity",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "confirmed_quantity": {
+          "name": "confirmed_quantity",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "unmatched_quantity": {
+          "name": "unmatched_quantity",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "potential_value": {
+          "name": "potential_value",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "confirmed_value": {
+          "name": "confirmed_value",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "received_value": {
+          "name": "received_value",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "computed_at": {
+          "name": "computed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "recurring_daily_metrics_grain_uq": {
+          "name": "recurring_daily_metrics_grain_uq",
+          "columns": [
+            {
+              "expression": "metric_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "zone_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "category_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sub_category_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "canonical_unit",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "recurring_daily_metrics_date_idx": {
+          "name": "recurring_daily_metrics_date_idx",
+          "columns": [
+            {
+              "expression": "metric_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "recurring_daily_metrics_family_chk": {
+          "name": "recurring_daily_metrics_family_chk",
+          "value": "\"analytics\".\"recurring_daily_metrics\".\"measurement_family\" IN ('MASS','VOLUME','COUNT','PACKAGE','OTHER')"
+        },
+        "recurring_daily_metrics_counts_chk": {
+          "name": "recurring_daily_metrics_counts_chk",
+          "value": "\"analytics\".\"recurring_daily_metrics\".\"occurrences_total\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"occurrences_active\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"occurrences_fully_covered\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"occurrences_notified\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"occurrences_accepted\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"occurrences_skipped\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"occurrences_with_orders\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"occurrences_all_received\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"needs_with_occurrence\" >= 0"
+        },
+        "recurring_daily_metrics_qty_chk": {
+          "name": "recurring_daily_metrics_qty_chk",
+          "value": "\"analytics\".\"recurring_daily_metrics\".\"requested_quantity\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"matched_quantity\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"confirmed_quantity\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"unmatched_quantity\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"potential_value\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"confirmed_value\" >= 0 AND \"analytics\".\"recurring_daily_metrics\".\"received_value\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "analytics.tender_daily_metrics": {
+      "name": "tender_daily_metrics",
+      "schema": "analytics",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "metric_date": {
+          "name": "metric_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "zone_id": {
+          "name": "zone_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "category_id": {
+          "name": "category_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "sub_category_id": {
+          "name": "sub_category_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "tenders_created": {
+          "name": "tenders_created",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "tenders_with_bid": {
+          "name": "tenders_with_bid",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "bids_received": {
+          "name": "bids_received",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "tenders_with_winner": {
+          "name": "tenders_with_winner",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "tender_orders_created": {
+          "name": "tender_orders_created",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "tender_orders_delivered": {
+          "name": "tender_orders_delivered",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "first_bid_latency_seconds_sum": {
+          "name": "first_bid_latency_seconds_sum",
+          "type": "numeric(18, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "first_bid_latency_count": {
+          "name": "first_bid_latency_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "potential_value": {
+          "name": "potential_value",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "committed_value": {
+          "name": "committed_value",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "delivered_value": {
+          "name": "delivered_value",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "computed_at": {
+          "name": "computed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "tender_daily_metrics_grain_uq": {
+          "name": "tender_daily_metrics_grain_uq",
+          "columns": [
+            {
+              "expression": "metric_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "zone_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "category_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sub_category_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "tender_daily_metrics_date_idx": {
+          "name": "tender_daily_metrics_date_idx",
+          "columns": [
+            {
+              "expression": "metric_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "tender_daily_metrics_counts_chk": {
+          "name": "tender_daily_metrics_counts_chk",
+          "value": "\"analytics\".\"tender_daily_metrics\".\"tenders_created\" >= 0 AND \"analytics\".\"tender_daily_metrics\".\"tenders_with_bid\" >= 0 AND \"analytics\".\"tender_daily_metrics\".\"bids_received\" >= 0 AND \"analytics\".\"tender_daily_metrics\".\"tenders_with_winner\" >= 0 AND \"analytics\".\"tender_daily_metrics\".\"tender_orders_created\" >= 0 AND \"analytics\".\"tender_daily_metrics\".\"tender_orders_delivered\" >= 0 AND \"analytics\".\"tender_daily_metrics\".\"first_bid_latency_seconds_sum\" >= 0 AND \"analytics\".\"tender_daily_metrics\".\"first_bid_latency_count\" >= 0 AND \"analytics\".\"tender_daily_metrics\".\"potential_value\" >= 0 AND \"analytics\".\"tender_daily_metrics\".\"committed_value\" >= 0 AND \"analytics\".\"tender_daily_metrics\".\"delivered_value\" >= 0"
         }
       },
       "isRLSEnabled": false

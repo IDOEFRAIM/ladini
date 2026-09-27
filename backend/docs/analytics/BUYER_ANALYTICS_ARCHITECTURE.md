@@ -1,6 +1,6 @@
 # Buyer Analytics Architecture
 
-Status: **Phase C (business_events persistence, outbox emitter, DIRECT/TENDER/RECURRING instrumentation) — DONE.** Phases A/B: see [ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md](../ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md) and [ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md](../ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md). Event list and definitions: [BUSINESS_EVENT_CATALOG.md](BUSINESS_EVENT_CATALOG.md). Phase D (daily aggregates, AnalyticsService, admin endpoints, dashboard) has not started.
+Status: **Phase C — DONE (merged, CI green on real PostgreSQL). Phase D (daily aggregates, idempotent refresh, metric layer / `AnalyticsService`) — implemented on `analytics/phase-d-metric-layer`, see [METRIC_LAYER.md](METRIC_LAYER.md).** Phase E (admin API + dashboard) has not started. Phases A/B: [ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md](../ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md), [ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md](../ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md). Event list: [BUSINESS_EVENT_CATALOG.md](BUSINESS_EVENT_CATALOG.md).
 
 Code lives in `backend/src/ladini/domain/analytics/`:
 - `units.py` — canonical unit / measurement-family classification.
@@ -183,9 +183,13 @@ Fixed both with the minimal diff (new dict entries only, no restructuring), test
 - **Atomicity map**: DIRECT/TENDER/RECURRING mixin call-sites use the same session as the fact (`@transactional(write=True)`). `NeedMatchingService` and `RecurringSupplyDigestService` emit in the same session and a single `commit()` covers fact and outbox row. The only asynchronous gap is outbox to `business_events` (by design). Matching wraps its work in a best-effort try/except: an emit failure there rolls that occurrence's match back and is retried by the next cron pass.
 - **Performance**: the critical path adds one indexed same-database INSERT per event and zero external calls. Recurring replenishment adds one query per cron run (buyer zone + sub-category canonical unit for all active needs), not per need. Matching emits only when the allocation set changed; the digest emits only for newly queued digests. `search_products` now commits a (tiny) write transaction instead of a read-only one.
 
-## Phase D plan (recommendation, not started)
+## 14. Phase D (implemented) and what remains
 
-1. First daily aggregates (`analytics.{buyer,direct,tender,recurring}_daily_metrics`), numerators/denominators stored separately per section 5; treat `DIRECT_ORDER_CONFIRMED` and recurring delivered quantity as unavailable (see the catalog).
-2. Decide the `quantity_delivered` question (write it from the `RECEIVED` transition, or derive delivery from the linked order) before any recurring fulfillment metric ships.
-3. `AnalyticsService` (deterministic, reads the dictionary) + `/api/admin/analytics/*` endpoints on the Next.js side; metric-target seeding from observed rates.
-4. Frontend chart library decision (none exists in `frontag`).
+Implemented: four daily aggregate tables (migration 0007), idempotent per-day refresh with a rolling 14-day window,
+`AnalyticsService`, target resolution, data-quality checks — details, grains, sources and limits in
+[METRIC_LAYER.md](METRIC_LAYER.md). North Star is exposed as **PARTIAL** (RECURRING receipts are a buyer-confirmed lower
+bound); recurring quantity fulfillment and DIRECT confirmation metrics stay UNAVAILABLE.
+
+Phase E candidates: admin API on the Next.js side calling the service contract, dashboard/charts (library decision still
+open), seeding real targets, resolving `quantity_delivered` (write it from the RECEIVED transition or retire it), and
+instrumenting `DIRECT_ORDER_CONFIRMED`.

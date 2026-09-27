@@ -32,8 +32,12 @@ from ladini.domain import (
 )
 from ladini.domain.analytics.models import (
     BusinessEventRecord,
+    BuyerDailyMetricRecord,
+    DirectDailyMetricRecord,
     EventOutboxRecord,
     MetricTargetRecord,
+    RecurringDailyMetricRecord,
+    TenderDailyMetricRecord,
 )
 from ladini.domain.catalog.models import (
     CropCycle,
@@ -106,6 +110,11 @@ __all__ = [
     "EventOutboxRecord",
     "BusinessEventRecord",
     "MetricTargetRecord",
+    # analytics (Phase D)
+    "BuyerDailyMetricRecord",
+    "DirectDailyMetricRecord",
+    "TenderDailyMetricRecord",
+    "RecurringDailyMetricRecord",
     # approvisionnement récurrent (Phase 1 — fondation de données)
     "RecurringNeed",
     "RecurringNeedOccurrence",

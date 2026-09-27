@@ -31,6 +31,14 @@ BEAT_SCHEDULE: Dict[str, Dict[str, Any]] = {
         "schedule": 30.0,
         "options": {"expires": 25},
     },
+    # Analytics Phase D : recalcul idempotent des agrégats quotidiens (fenêtre glissante de
+    # 14 jours pour absorber les livraisons tardives). Toutes les 6 h : coût négligeable à
+    # l'échelle pilote, et un tick manqué est rattrapé par le suivant.
+    "analytics-daily-metrics": {
+        "task": "workers.analytics_daily_metrics",
+        "schedule": 21600.0,
+        "options": {"expires": 3600},
+    },
     # Matching de proximité : moins urgent, lot plus large.
     "proximity-matching": {
         "task": "workers.proximity_matching",
