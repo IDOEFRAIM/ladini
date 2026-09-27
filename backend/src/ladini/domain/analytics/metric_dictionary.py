@@ -951,6 +951,45 @@ recurring_received_occurrence_rate = _register(
 )
 
 
+# Phase E — plain counts the cockpit shows next to the rates (numerators/denominators already stored).
+def _register_count(name, journey, column, description, source):
+    return _register(
+        MetricDefinition(
+            name=name,
+            description=description,
+            business_definition=description,
+            journey=journey,
+            aggregation_type=AggregationType.COUNT,
+            numerator=f"SUM({column})",
+            denominator=None,
+            unit_behavior="DIMENSIONLESS_COUNT",
+            supported_dimensions=("date", "zone", "category", "sub_category"),
+            supported_time_windows=_STANDARD_WINDOWS,
+            source_entities=source,
+            reconstructible_historically=Reconstructibility.PARTIAL,
+            reconstructible_note="Daily aggregate of the underlying transactional state (see METRIC_LAYER.md).",
+        )
+    )
+
+
+direct_successful_searches = _register_count(
+    "direct_successful_searches", Journey.DIRECT, "successful_searches",
+    "DIRECT searches that returned at least one eligible result.", ("analytics.business_events",))
+direct_orders_delivered = _register_count(
+    "direct_orders_delivered", Journey.DIRECT, "orders_delivered",
+    "DIRECT orders (cohort) that reached delivery.", ("marketplace.orders",))
+tenders_with_bid = _register_count(
+    "tenders_with_bid", Journey.TENDER, "tenders_with_bid", "Tenders that received at least one bid.", ("marketplace.auctions", "marketplace.bids"))
+tender_orders_created = _register_count(
+    "tender_orders_created", Journey.TENDER, "tender_orders_created", "Orders created from tender winners.", ("marketplace.orders",))
+tender_orders_delivered = _register_count(
+    "tender_orders_delivered", Journey.TENDER, "tender_orders_delivered", "Tender orders that reached delivery.", ("marketplace.orders",))
+recurring_occurrences = _register_count(
+    "recurring_occurrences", Journey.RECURRING, "occurrences_active",
+    "Recurring occurrences the buyer maintains (not skipped/cancelled) on the demand dates of the window.",
+    ("marketplace.recurring_need_occurrences",))
+
+
 def get_metric(name: str) -> MetricDefinition:
     try:
         return METRICS[name]

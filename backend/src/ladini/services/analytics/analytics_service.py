@@ -61,12 +61,18 @@ class AnalyticsService:
     @staticmethod
     def _where(table: str, filters: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
         allowed = TABLE_DIMENSIONS[table]
-        clauses, params = [], {}
+        clauses: list[str] = []
+        params: dict[str, Any] = {}
         for key, value in (filters or {}).items():
-            if value is None:
+            if value is None or key == "zone_scope":
                 continue
             if key not in allowed:
                 raise ValueError(f"Filter '{key}' is not a dimension of {table} (allowed: {allowed}).")
+            if isinstance(value, (list, tuple, set, frozenset)):
+                # e.g. a zone and all its descendants (governance.zones hierarchy).
+                clauses.append(f"{key} = ANY(:f_{key})")
+                params[f"f_{key}"] = [uuid.UUID(str(v)) if key in _UUID_FILTERS else v for v in value]
+                continue
             clauses.append(f"{key} = :f_{key}")
             params[f"f_{key}"] = uuid.UUID(str(value)) if key in _UUID_FILTERS else value
         return ("".join(f" AND {c}" for c in clauses), params)
@@ -116,7 +122,8 @@ class AnalyticsService:
         if res.value is None:
             return
         target = resolve_target(
-            await self._targets(res.metric_name), on=end, zone_id=filters.get("zone_id"),
+            await self._targets(res.metric_name), on=end, zone_id=filters.get("zone_scope") or (
+                filters.get("zone_id") if isinstance(filters.get("zone_id"), (str, uuid.UUID)) else None),
             category_id=filters.get("category_id"), sub_category_id=filters.get("sub_category_id"),
             journey=None if binding_journey == "GLOBAL" else binding_journey,
         )
@@ -319,6 +326,8 @@ class AnalyticsService:
     ) -> list[dict[str, Any]]:
         if granularity not in _BUCKETS:
             raise ValueError(f"granularity must be one of {tuple(_BUCKETS)}")
+        if name in ("active_buyers", "successful_procurement_rate"):
+            return await self._buyer_timeseries(name, start, end, granularity, filters or {})
         b = self._binding_or_raise(name)
         rows = await self._rows(b, start, end, filters or {}, group=("canonical_unit",) if b.physical else (), bucket=granularity)
         return [
@@ -326,6 +335,23 @@ class AnalyticsService:
              "numerator": _f(r["num"]), "denominator": _f(r["den"]), "value": compute_value(_f(r["num"]), _f(r["den"]))}
             for r in rows
         ]
+
+    async def _buyer_timeseries(self, name: str, start: date, end: date, granularity: str, filters: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """Distinct active buyers per bucket (a buyer counted once per bucket, not summed across days) and
+        the North Star per bucket as SUM(satisfied)/SUM(needs)."""
+        where, params = self._where(TABLE_BUYER, filters)
+        trunc = f"date_trunc('{_BUCKETS[granularity]}', metric_date)::date"
+        if name == "active_buyers":
+            sql = (f"SELECT {trunc} AS bucket, count(DISTINCT buyer_id) AS num, NULL AS den FROM {TABLE_BUYER} "
+                   f"WHERE metric_date >= :s AND metric_date <= :e AND (needs_direct + needs_tender + needs_recurring) > 0{where} "
+                   "GROUP BY bucket ORDER BY bucket")
+        else:
+            sql = (f"SELECT {trunc} AS bucket, SUM(satisfied_direct + satisfied_tender + satisfied_recurring) AS num, "
+                   f"SUM(needs_direct + needs_tender + needs_recurring) AS den FROM {TABLE_BUYER} "
+                   f"WHERE metric_date >= :s AND metric_date <= :e{where} GROUP BY bucket ORDER BY bucket")
+        result = await self.session.execute(text(sql), {"s": start, "e": end, **params})
+        return [{"bucket": r["bucket"].isoformat(), "numerator": _f(r["num"]), "denominator": _f(r["den"]),
+                 "value": compute_value(_f(r["num"]), _f(r["den"]))} for r in result.mappings().all()]
 
     async def get_metric_breakdown(
         self, name: str, start: date, end: date, *, dimension: str, filters: Optional[Mapping[str, Any]] = None,
