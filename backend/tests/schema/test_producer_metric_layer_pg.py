@@ -486,9 +486,10 @@ class TestTimeToFirstSale:
         dsn, g = world
         day = _fresh_day()
         window_end = day + timedelta(days=20)
-        never_sold = g.extra_producer()
         conn = psycopg2.connect(dsn)
         with conn, conn.cursor() as cur:
+            g.cur = cur
+            never_sold = g.extra_producer()
             # Activation (first sellable product published) for the producer that DOES sell.
             _event(cur, event_name="PRODUCT_PUBLISHED_FOR_SALE", journey="SUPPLY", actor_type="PRODUCER",
                    entity_type="PRODUCT", occurred_at=datetime(day.year, day.month, day.day, 8), producer_id=g.producer)
