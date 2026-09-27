@@ -196,6 +196,22 @@ class TestPayloadShaping:
         _series_binding("active_producers", p)
         _series_binding("producer_delivered_gmv", p)
 
+    def test_where_ignores_zone_scope_a_resolve_filters_artifact_not_a_real_dimension(self):
+        """`admin_api.resolve_filters` (buyer, reused as-is for producers — see `producer_admin_api.resolve_filters`)
+        always injects a `zone_scope` key alongside the expanded `zone_id` list, for target resolution only. The
+        service's own `_where` must ignore it like the buyer's own `_where` already does, or every producer metric
+        request carrying a zone filter would blow up with 'zone_scope is not a dimension' (a real bug this test
+        would have caught before it reached CI)."""
+        from ladini.domain.analytics.producer_metric_layer import TABLE_PRODUCER
+        from ladini.services.analytics.producer_analytics_service import (
+            ProducerAnalyticsService,
+        )
+
+        z = str(uuid.uuid4())
+        where, params = ProducerAnalyticsService._where(TABLE_PRODUCER, {"zone_id": [z], "zone_scope": z})
+        assert "zone_scope" not in where and "zone_scope" not in params
+        assert "zone_id" in where
+
     def test_breakdown_dimension_must_match_the_bindings_own_table(self):
         from ladini.domain.analytics.producer_metric_layer import (
             BINDINGS_PRODUCER,
