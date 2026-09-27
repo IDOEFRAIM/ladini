@@ -28,16 +28,20 @@ _DAYS = iter(range(1, 2000))
 
 
 def _fresh_day() -> date:
-    # Base date deliberately DIFFERENT from `test_analytics_metric_layer_pg.py`'s own
-    # `_fresh_day()` (also `range(1, 2000)`, also starting at day 1): the schema DB is
-    # shared across the whole pytest session (see module docstring), so two independent
-    # `_DAYS` generators both counting from 1 against the SAME base date collide on their
-    # very first call — a buyer-side order/auction/occurrence created for "day 1" then
-    # shows up as a foreign fact on producer-side aggregates computed for that identical
-    # calendar day (proven live: `producer_daily_metrics`/`active_producers` picked up an
-    # extra producer, `2026-09-27`). 2000 days (~5.48y) from 2023-01-01 ends ~2028-06-24;
-    # starting here at 2030-01-01 leaves a multi-year margin against that other file.
-    return date(2030, 1, 1) + timedelta(days=next(_DAYS))
+    # Base date deliberately DIFFERENT from every other `tests/schema/*.py` file's own
+    # `_fresh_day()`-style generator (several share this exact `range(1, 2000)` + "base
+    # year, day 1" pattern: 2019/2021/2022/2023/2027 bases seen across this directory) —
+    # the schema DB is shared across the whole pytest session (see module docstring), so
+    # two independent counters starting at 1 against the SAME base date collide on their
+    # very first call: a buyer-side order/auction/occurrence created for "day 1" then
+    # showed up as a foreign fact on producer-side day-level aggregates (proven live
+    # against `test_analytics_metric_layer_pg.py`'s 2023-01-01 base, 2026-09-27).
+    # `recompute_day`/`snapshot_producer_supply` both refuse a day AFTER the real
+    # clock's "today" (see their own guards), so the base must also stay comfortably in
+    # the past: 2000 days (~5.48y) from 2010-01-01 ends ~2015-06-24 — before every other
+    # base found in this directory (earliest is 2019), and nowhere near "future" for
+    # decades.
+    return date(2010, 1, 1) + timedelta(days=next(_DAYS))
 
 
 def _run(dsn, fn):
