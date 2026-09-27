@@ -17,7 +17,10 @@ import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
+from ladini.services.analytics.analytics_service import AnalyticsService
 from ladini.services.analytics.daily_metrics_refresh import (
+    DIRECT_COHORT_TS,
+    DIRECT_ORDER_WHERE,
     backfill_quantity_delivered,
     recompute_recent,
 )
@@ -69,6 +72,111 @@ async def cmd_quality(days: int) -> dict:
     }
 
 
+def _close(a, b, tol: float = 0.01) -> bool:
+    if a is None or b is None:
+        return bool(a == b)
+    return abs(float(a) - float(b)) <= tol
+
+
+async def cmd_verify_kpis(days: int) -> dict:
+    """Cross-check the daily aggregates (what the dashboard reads) against a FRESH pull from the
+    transactional/business_events source of truth, over the same window — proves the stored
+    aggregate isn't stale or wrong, not just that the code runs. Never a comparison against itself:
+    every `source_*` value below is computed by an independent query, not by re-reading
+    `analytics.*_daily_metrics`."""
+    from sqlalchemy import text
+
+    end = datetime.now(timezone.utc).date()
+    start = end - timedelta(days=days - 1)
+    start_dt, end_dt = datetime.combine(start, datetime.min.time()), datetime.combine(end + timedelta(days=1), datetime.min.time())
+    start_tz, end_tz = start_dt.replace(tzinfo=timezone.utc), end_dt.replace(tzinfo=timezone.utc)
+    period = {"start": start.isoformat(), "end": end.isoformat()}
+    checks = []
+
+    async with worker_session() as session:
+        svc = AnalyticsService(session)
+
+        # 1. active_buyers
+        dashboard = await svc.get_metric("active_buyers", start, end, compare=False)
+        source = await session.scalar(text(
+            "SELECT count(DISTINCT buyer_id) FROM ("
+            f"  SELECT buyer_id FROM marketplace.orders o WHERE {DIRECT_ORDER_WHERE} AND {DIRECT_COHORT_TS} >= :s AND {DIRECT_COHORT_TS} < :e"
+            "  UNION SELECT buyer_id FROM marketplace.auctions WHERE created_at >= :s AND created_at < :e"
+            "  UNION SELECT n.buyer_id FROM marketplace.recurring_need_occurrences oc JOIN marketplace.recurring_needs n ON n.id = oc.recurring_need_id"
+            "    WHERE oc.status NOT IN ('SKIPPED','CANCELLED') AND oc.occurrence_date >= :s AND oc.occurrence_date < :e"
+            ") x"
+        ), {"s": start_dt, "e": end_dt})
+        checks.append({"metric": "active_buyers", "dashboard": dashboard.value, "source": source, "match": _close(dashboard.value, source)})
+
+        # 2. needs_created
+        dashboard = await svc.get_metric("needs_created", start, end, compare=False)
+        source = await session.scalar(text(
+            f"SELECT (SELECT count(*) FROM marketplace.orders o WHERE {DIRECT_ORDER_WHERE} AND {DIRECT_COHORT_TS} >= :s AND {DIRECT_COHORT_TS} < :e)"
+            " + (SELECT count(*) FROM marketplace.auctions WHERE created_at >= :s AND created_at < :e)"
+            " + (SELECT count(*) FROM marketplace.recurring_need_occurrences WHERE status NOT IN ('SKIPPED','CANCELLED') AND occurrence_date >= :s AND occurrence_date < :e)"
+        ), {"s": start_dt, "e": end_dt})
+        checks.append({"metric": "needs_created", "dashboard": dashboard.value, "source": source, "match": dashboard.value == source})
+
+        # 3. direct_search_success_rate — straight from business_events, bypassing direct_daily_metrics.
+        dashboard = await svc.get_metric("direct_search_success_rate", start, end, compare=False)
+        row = (await session.execute(text(
+            "SELECT count(*) FILTER (WHERE event_name = 'DIRECT_SEARCH_PERFORMED') AS performed,"
+            "       count(*) FILTER (WHERE event_name = 'DIRECT_SEARCH_SUCCEEDED') AS succeeded"
+            " FROM analytics.business_events WHERE journey = 'DIRECT' AND occurred_at >= :s AND occurred_at < :e"
+        ), {"s": start_tz, "e": end_tz})).mappings().one()
+        src_value = (row["succeeded"] / row["performed"]) if row["performed"] else None
+        checks.append({"metric": "direct_search_success_rate", "dashboard": dashboard.value,
+                       "source_numerator": row["succeeded"], "source_denominator": row["performed"],
+                       "source": src_value, "match": _close(dashboard.value, src_value)})
+
+        # 4. tender_response_rate
+        dashboard = await svc.get_metric("tender_response_rate", start, end, compare=False)
+        row = (await session.execute(text(
+            "SELECT count(*) AS created, count(*) FILTER (WHERE EXISTS ("
+            "  SELECT 1 FROM marketplace.bids b WHERE b.auction_id = a.id)) AS with_bid"
+            " FROM marketplace.auctions a WHERE a.created_at >= :s AND a.created_at < :e"
+        ), {"s": start_dt, "e": end_dt})).mappings().one()
+        src_value = (row["with_bid"] / row["created"]) if row["created"] else None
+        checks.append({"metric": "tender_response_rate", "dashboard": dashboard.value,
+                       "source_numerator": row["with_bid"], "source_denominator": row["created"],
+                       "source": src_value, "match": _close(dashboard.value, src_value)})
+
+        # 5. recurring_coverage_rate — restricted to occurrences already in their own priority_unit
+        # (no G->KG conversion replicated here), so the comparison is exact, not approximate.
+        dashboard_rows = await svc.get_metric_breakdown("recurring_coverage_rate", start, end, dimension="sub_category_id")
+        row = (await session.execute(text(
+            "SELECT COALESCE(sum(oc.requested_quantity),0) AS requested, COALESCE(sum(oc.quantity_matched),0) AS matched"
+            " FROM marketplace.recurring_need_occurrences oc JOIN marketplace.recurring_needs n ON n.id = oc.recurring_need_id"
+            " JOIN governance.sub_categories sc ON sc.id = n.sub_category_id"
+            " WHERE oc.status NOT IN ('SKIPPED','CANCELLED') AND oc.unit = sc.priority_unit"
+            " AND oc.occurrence_date >= :s AND oc.occurrence_date < :e"
+        ), {"s": start_dt, "e": end_dt})).mappings().one()
+        src_value = (float(row["matched"]) / float(row["requested"])) if row["requested"] else None
+        dash_same_unit_num = sum(r["numerator"] or 0 for r in dashboard_rows)
+        dash_same_unit_den = sum(r["denominator"] or 0 for r in dashboard_rows)
+        checks.append({"metric": "recurring_coverage_rate", "note": "same-unit subset only (occurrences already in their sub-category's priority_unit)",
+                       "dashboard_numerator": dash_same_unit_num, "dashboard_denominator": dash_same_unit_den,
+                       "source_numerator": float(row["matched"]), "source_denominator": float(row["requested"]),
+                       "source": src_value, "match": _close(dash_same_unit_num, float(row["matched"])) and _close(dash_same_unit_den, float(row["requested"]))})
+
+        # 6. unmatched demand for one sub-category (the largest one in the window, if any).
+        unmatched = await svc.get_unfulfilled_demand(start, end, group_by=("sub_category_id",))
+        top = max(unmatched["rows"], key=lambda r: r["unmatched"], default=None)
+        if top is not None:
+            source_unmatched = await session.scalar(text(
+                "SELECT COALESCE(sum(GREATEST(oc.requested_quantity - oc.quantity_matched, 0)), 0)"
+                " FROM marketplace.recurring_need_occurrences oc JOIN marketplace.recurring_needs n ON n.id = oc.recurring_need_id"
+                " WHERE oc.status NOT IN ('SKIPPED','CANCELLED') AND n.sub_category_id = :sub AND oc.unit = :unit"
+                " AND oc.occurrence_date >= :s AND oc.occurrence_date < :e"
+            ), {"sub": top["sub_category_id"], "unit": top["canonical_unit"], "s": start_dt, "e": end_dt})
+            checks.append({"metric": "unmatched_demand", "sub_category_id": top["sub_category_id"], "canonical_unit": top["canonical_unit"],
+                           "dashboard": top["unmatched"], "source": float(source_unmatched), "match": _close(top["unmatched"], float(source_unmatched))})
+        else:
+            checks.append({"metric": "unmatched_demand", "dashboard": None, "source": None, "match": True, "note": "no recurring demand in this window"})
+
+    return {"action": "verify_kpis", "window": period, "all_match": all(c["match"] for c in checks), "checks": checks}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -78,6 +186,8 @@ def main() -> None:
     sub.add_parser("backfill", help="Idempotently realign quantity_delivered from the source of truth (recompute, never increment).")
     p_quality = sub.add_parser("quality", help="Run the data-quality checks over a window.")
     p_quality.add_argument("--days", type=int, default=30)
+    p_verify = sub.add_parser("verify-kpis", help="Cross-check dashboard metrics against a fresh transactional-source computation.")
+    p_verify.add_argument("--days", type=int, default=14)
     args = parser.parse_args()
 
     handlers = {
@@ -85,6 +195,7 @@ def main() -> None:
         "drift": cmd_drift,
         "backfill": cmd_backfill,
         "quality": lambda: cmd_quality(args.days),
+        "verify-kpis": lambda: cmd_verify_kpis(args.days),
     }
     result = asyncio.run(handlers[args.command]())
     print(json.dumps(result, default=str))

@@ -23,7 +23,7 @@ on:
         description: "Opération à exécuter"
         required: true
         type: choice
-        options: [verify_public_route, recompute, drift, backfill, quality, debug_caddy, debug_repo, force_recreate_caddy]
+        options: [verify_public_route, recompute, drift, backfill, quality, verify_kpis, debug_caddy, debug_repo, force_recreate_caddy]
       target:
         description: "Cible"
         required: true
@@ -79,6 +79,9 @@ jobs:
               ;;
             quality)
               run_cli quality
+              ;;
+            verify_kpis)
+              run_cli verify-kpis
               ;;
             verify_public_route)
               # Lit le jeton RÉELLEMENT déployé (celui que FastAPI valide) — jamais
