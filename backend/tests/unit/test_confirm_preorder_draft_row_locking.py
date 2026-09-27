@@ -80,12 +80,16 @@ class _CapturingSession:
         return None
 
     async def execute(self, _stmt):
-        # (2026-09-04, F2) : `confirm_preorder_draft` résout désormais le(s)
-        # téléphone(s) producteur pour la notification post-confirmation —
-        # aucun producteur simulé dans ce test (pas son objet), la requête
-        # ne renvoie donc rien : la branche notification ne s'active pas,
-        # ce qui reste hors du périmètre de CE test (verrouillage/ordre).
-        return types.SimpleNamespace(first=lambda: None)
+        # (2026-09-04, F2) : `confirm_preorder_draft` résout le(s) téléphone(s)
+        # producteur pour la notification post-confirmation. Depuis Producer
+        # Analytics Phase B, les produits de ce test portent un vrai
+        # `producer_id` (nécessaire pour que la résolution `producer_id` de
+        # `emit_direct_order_created` reste à coût zéro — voir `_product`),
+        # ce qui active cette branche : aucun producteur réel n'est simulé,
+        # donc `.all()` renvoie une liste vide (aucun téléphone résolu) — la
+        # notification elle-même reste hors du périmètre de CE test
+        # (verrouillage/ordre), seulement rendue non-crashante ici.
+        return types.SimpleNamespace(first=lambda: None, all=lambda: [])
 
     async def flush(self):
         pass
@@ -105,7 +109,11 @@ def _service(session):
 def _product(pid, qty=1000.0):
     return types.SimpleNamespace(
         id=pid, name=f"Produit-{str(pid)[:4]}", quantity_for_sale=qty, unit="KG",
-        producer_id=None,  # hors périmètre de ce test (verrouillage/ordre, pas notification F2)
+        # Producer Analytics Phase B: emit_direct_order_created resolves producer_id
+        # from the already-loaded item.product relationship — a real (non-None) id
+        # here keeps that resolution a zero-extra-query read, exactly like production,
+        # so it doesn't add a 3rd captured statement to this file's lock-order count.
+        producer_id=uuid.uuid4(),
     )
 
 

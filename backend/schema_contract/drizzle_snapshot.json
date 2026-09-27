@@ -1,6 +1,6 @@
 {
-  "id": "6c0cbb31-5023-4f2b-b94d-2a480d86791f",
-  "prevId": "74e5de1d-6488-4d7f-bff4-5f2cf55f4c0d",
+  "id": "1844458c-ba81-4ab2-9044-e03acebe30a2",
+  "prevId": "6c0cbb31-5023-4f2b-b94d-2a480d86791f",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -10192,11 +10192,11 @@
       "checkConstraints": {
         "business_events_event_name_chk": {
           "name": "business_events_event_name_chk",
-          "value": "\"analytics\".\"business_events\".\"event_name\" IN ('DIRECT_SEARCH_PERFORMED','DIRECT_SEARCH_SUCCEEDED','DIRECT_ORDER_CREATED','DIRECT_ORDER_CONFIRMED','DIRECT_ORDER_DELIVERED','DIRECT_ORDER_FAILED','TENDER_CREATED','TENDER_PUBLISHED','TENDER_BID_RECEIVED','TENDER_WINNER_SELECTED','TENDER_ORDER_CREATED','TENDER_DELIVERED','RECURRING_NEED_CREATED','RECURRING_OCCURRENCE_CREATED','RECURRING_MATCH_FOUND','RECURRING_DIGEST_SENT','RECURRING_DIGEST_ACCEPTED','RECURRING_DIGEST_MODIFIED','RECURRING_OCCURRENCE_SKIPPED','RECURRING_OCCURRENCE_CONFIRMED','RECURRING_OCCURRENCE_DELIVERED')"
+          "value": "\"analytics\".\"business_events\".\"event_name\" IN ('DIRECT_SEARCH_PERFORMED','DIRECT_SEARCH_SUCCEEDED','DIRECT_ORDER_CREATED','DIRECT_ORDER_CONFIRMED','DIRECT_ORDER_DELIVERED','DIRECT_ORDER_FAILED','TENDER_CREATED','TENDER_PUBLISHED','TENDER_BID_RECEIVED','TENDER_WINNER_SELECTED','TENDER_ORDER_CREATED','TENDER_DELIVERED','RECURRING_NEED_CREATED','RECURRING_OCCURRENCE_CREATED','RECURRING_MATCH_FOUND','RECURRING_DIGEST_SENT','RECURRING_DIGEST_ACCEPTED','RECURRING_DIGEST_MODIFIED','RECURRING_OCCURRENCE_SKIPPED','RECURRING_OCCURRENCE_CONFIRMED','RECURRING_OCCURRENCE_DELIVERED','PRODUCT_PUBLISHED_FOR_SALE','PRODUCT_SELLABLE_QUANTITY_CHANGED')"
         },
         "business_events_journey_chk": {
           "name": "business_events_journey_chk",
-          "value": "\"analytics\".\"business_events\".\"journey\" IN ('DIRECT','TENDER','RECURRING')"
+          "value": "\"analytics\".\"business_events\".\"journey\" IN ('DIRECT','TENDER','RECURRING','SUPPLY')"
         },
         "business_events_actor_type_chk": {
           "name": "business_events_actor_type_chk",
@@ -10725,7 +10725,7 @@
         },
         "event_outbox_journey_chk": {
           "name": "event_outbox_journey_chk",
-          "value": "\"analytics\".\"event_outbox\".\"journey\" IN ('DIRECT','TENDER','RECURRING')"
+          "value": "\"analytics\".\"event_outbox\".\"journey\" IN ('DIRECT','TENDER','RECURRING','SUPPLY')"
         }
       },
       "isRLSEnabled": false

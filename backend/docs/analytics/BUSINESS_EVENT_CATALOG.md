@@ -1,4 +1,4 @@
-# Business Event Catalog (Phase C)
+# Business Event Catalog (Phase C + Producer Analytics Phase B)
 
 Source of truth for what `analytics.business_events` contains. An event is a **past fact**, written as an
 intent into `analytics.event_outbox` **in the same transaction as the business fact**, then landed by the
@@ -30,6 +30,8 @@ no emitter — never inferred from a proxy).
 | RECURRING_OCCURRENCE_SKIPPED | RECURRING | Occurrence persisted as `SKIPPED` | `RecurringSupplyMixin._apply_occurrence_skip` | RECURRING_OCCURRENCE | `RECURRING_OCCURRENCE_SKIPPED:{occurrence_id}` | PARTIAL (status only, no timestamp) | INSTRUMENTED |
 | RECURRING_OCCURRENCE_CONFIRMED | RECURRING | — | — | — | — | — | NOT_INSTRUMENTED (out of scope) |
 | RECURRING_OCCURRENCE_DELIVERED | RECURRING | — | — | — | — | **NO** | NOT_INSTRUMENTED — `quantity_delivered` has no writer; the real signal is `RECEIVED` on the linked order |
+| PRODUCT_PUBLISHED_FOR_SALE | SUPPLY | A product genuinely transitioned non-sellable -> sellable (`is_available=TRUE AND quantity_for_sale>0`) | `ProducerMgmtMixin.create_product`, `ProductMixin.update_product_price_and_qty`, `ProductMixin.toggle_product_availability`, all via `emit_product_published_for_sale` | PRODUCT | `PRODUCT_PUBLISHED_FOR_SALE:{product_id}` (product-id ONLY — deliberately captures only the FIRST transition, see Details) | NO (forward-only; first-transition-only by design) | INSTRUMENTED |
+| PRODUCT_SELLABLE_QUANTITY_CHANGED | SUPPLY | Raw fact: `quantity_for_sale` changed from X to Y — never interpreted as restock/sale/correction | every legitimate writer of `Product.quantity_for_sale` (§40 of `PRODUCER_ANALYTICS_ARCHITECTURE.md` has the exhaustive list), via `emit_product_quantity_changed` | PRODUCT | `PRODUCT_SELLABLE_QUANTITY_CHANGED:{product_id}:{previous}:{new}:{date}` | NO (forward-only from Phase B) | INSTRUMENTED |
 
 ## Details
 
@@ -77,9 +79,29 @@ keep their own unit as canonical target (no extra lookup on those paths).
 `actor_id` = `auth.users.id`; `buyer_id` = `BuyerProfile.id`; `producer_id` = `Producer.id`. `marketplace.clients` is never used.
 System-driven events (matching, digest, cron replenishment, delivery helper) use `actor_type = SYSTEM`.
 
+### Producer usage (Producer Analytics Phase B)
+
+Per-event producer-analytics attribution — which events are usable as a producer-grain source, and how:
+
+| Event | producer_id source | Reconstructibility for producer metrics | Journey | Feeds which producer metric |
+|---|---|---|---|---|
+| DIRECT_ORDER_CREATED | `Order.items[].product.producer_id` (resolved via `_resolve_direct_producer_id`, no actor-derived guess) | PARTIAL (only events landed after this phase carry it; pre-Phase-B rows are `producer_id IS NULL`, recoverable by re-joining `OrderItem`/`Product` at query time) | DIRECT | Producer Order Fulfillment Rate (denominator), Time to First Order |
+| DIRECT_ORDER_CONFIRMED | same resolver | same PARTIAL caveat | DIRECT | Producer Order Fulfillment Rate (numerator eligibility), Delivered/Paid GMV window start |
+| DIRECT_ORDER_DELIVERED | same resolver (shared `emit_order_delivered`) | same PARTIAL caveat | DIRECT | Producer Order/Quantity Fulfillment Rate, Delivered GMV, Time to First (Successful) Sale |
+| TENDER_BID_RECEIVED | `Bid.producer_id` (already present pre-Phase-B) | YES | TENDER | Bid Participation/Win Rate |
+| TENDER_WINNER_SELECTED | `Bid.producer_id` via the winning bid (already present pre-Phase-B) | PARTIAL (one winner per auction, current state recoverable) | TENDER | Win Rate |
+| TENDER_ORDER_CREATED | same (already present pre-Phase-B) | YES | TENDER | Time to First Order (TENDER) |
+| TENDER_DELIVERED | `Order.winning_bid_id -> Bid.producer_id` via `_resolve_tender_producer_id` (shared `emit_order_delivered`) | PARTIAL (same forward-only caveat as DIRECT) | TENDER | Producer Order Fulfillment Rate (order-grain only — no `OrderItem`) |
+| RECURRING_MATCH_FOUND | `NeedAllocation.producer_id` (already present pre-Phase-B, per-allocation) | PARTIAL (allocations get expired/overwritten) | RECURRING | Allocation/Opportunity Rate, Demand Exposure (RECURRING, the only journey with a real signal) |
+| RECURRING_DIGEST_ACCEPTED | none — legitimately occurrence/buyer-grain, deliberately NOT forced to producer-grain (an occurrence can split across N producers) | N/A at the event level; per-producer attribution is a query-time join on `order_group_id` <-> `Order.checkout_group_id` | RECURRING | (indirect — feeds per-producer Order/Quantity Fulfillment via the join, not directly) |
+| PRODUCT_PUBLISHED_FOR_SALE | `Product.producer_id` (direct field read, no resolution needed) | NO (forward-only, first-transition-only) | SUPPLY | Producer Activation, Time to Activation |
+| PRODUCT_SELLABLE_QUANTITY_CHANGED | `Product.producer_id` (direct field read) | NO (forward-only from Phase B) | SUPPLY | future Sell-Through design (raw material only — not itself a metric), Available/Unsold Supply cross-checks |
+
 ## Known data-quality gaps (never back-filled)
 1. ~~`RecurringNeedOccurrence.quantity_delivered` has no writer~~ — writer added in Phase D.5 (see METRIC_LAYER.md); history is recomputed from the RECEIVED-order join, and `backfill_quantity_delivered` aligns the column.
 2. ~~`DIRECT_ORDER_CONFIRMED` not instrumented~~ — instrumented in Phase D.5; earlier confirmed-then-cancelled orders are not recoverable.
 3. `select_winning_bid` writes no `OrderStatusHistory` → tender timeline history is partial.
 4. Search events (`DIRECT_SEARCH_*`) have no history before Phase C.
 5. Events for facts created before the Phase C deploy do not exist; only forward data is trustworthy.
+6. ~~`DIRECT_ORDER_CREATED`/`CONFIRMED`/`emit_order_delivered` had no `producer_id`~~ — enriched in Producer Analytics Phase B; rows landed before this phase still have `producer_id IS NULL` (recoverable via `OrderItem`/`Bid` joins, not from the event alone) — see `run_supply_data_quality_checks`'s `direct_order_event_missing_producer_id` check.
+7. `Product.quantity_for_sale` history only exists from Producer Analytics Phase B forward (`PRODUCT_SELLABLE_QUANTITY_CHANGED`) — any change before this phase's deploy is invisible; restock-vs-correction semantics remain undecided (Sell-Through stays UNAVAILABLE).

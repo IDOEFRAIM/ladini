@@ -143,7 +143,7 @@ class TestDigestAccepted:
             id=uuid.uuid4(), status="MATCHED", version=1, requested_quantity=40, unit="KG",
             quantity_confirmed=0, order_group_id=None, accepted_at=None, occurrence_date=datetime(2026, 9, 16),
         )
-        product = SimpleNamespace(id=uuid.uuid4(), name="tomate", quantity_for_sale=100)
+        product = SimpleNamespace(id=uuid.uuid4(), producer_id=uuid.uuid4(), name="tomate", quantity_for_sale=100)
         scalars = iter([need, occ])
         session = SimpleNamespace(
             scalar=AsyncMock(side_effect=lambda *_a, **_k: next(scalars)),

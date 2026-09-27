@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional, Sequence
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -130,4 +130,79 @@ async def run_data_quality_checks(
     return issues
 
 
-__all__ = ["QualityIssue", "run_data_quality_checks", "STALE_AFTER"]
+async def run_supply_data_quality_checks(
+    session: AsyncSession, start: date, end: date, *, product_ids: Optional[Sequence[Any]] = None,
+) -> list[QualityIssue]:
+    """Producer Analytics Phase B (mission section 16) — raw checks over the
+    SUPPLY-side sources of truth themselves (`marketplace.products`,
+    `analytics.business_events`), not over any daily aggregate (Phase B
+    creates none). Deliberately narrow — only the checks the mission asked
+    for, not a general-purpose product/event linter.
+
+    `product_ids`: the two product-table checks below are live-snapshot
+    checks (no `created_at` column would give them meaningful window
+    semantics — a stale bad product from last month is still bad today), so
+    unlike the event checks they don't filter on `start`/`end`. Pass
+    `product_ids` to scope them to specific products (e.g. right after
+    touching one, or a test asserting on its own fixture only — `producer_id`
+    alone isn't precise enough here, since every producer already owns other
+    products); omit it for the full-catalog scan a scheduled ops run wants."""
+    s_dt = datetime(start.year, start.month, start.day)
+    e_dt = datetime(end.year, end.month, end.day) + timedelta(days=1)
+    issues: list[QualityIssue] = []
+    product_filter = " AND id = ANY(:product_ids)" if product_ids is not None else ""
+    product_params = {"product_ids": list(product_ids)} if product_ids is not None else {}
+
+    async def scalar(sql: str, params: dict) -> int:
+        return int((await session.execute(text(sql), params)).scalar() or 0)
+
+    n = await scalar(
+        "SELECT count(*) FROM marketplace.products WHERE is_available = TRUE AND quantity_for_sale < 0"
+        + product_filter,
+        product_params,
+    )
+    if n:
+        issues.append(QualityIssue(
+            "sellable_product_negative_quantity", "marketplace.products", "ERROR", n,
+            "A product is marked available with a negative quantity_for_sale — the toggle/debit invariant is broken."))
+
+    n = await scalar(
+        "SELECT count(*) FROM marketplace.products WHERE is_available = TRUE "
+        "AND (quantity_for_sale IS NULL OR quantity_for_sale <= 0)" + product_filter,
+        product_params,
+    )
+    if n:
+        issues.append(QualityIssue(
+            "available_product_not_actually_sellable", "marketplace.products", "WARNING", n,
+            "A product is marked available (is_available=TRUE) but has zero/NULL quantity_for_sale — "
+            "visible to buyers yet not truly purchasable."))
+
+    n = await scalar(
+        "SELECT count(*) FROM analytics.business_events "
+        "WHERE journey = 'SUPPLY' AND producer_id IS NULL AND occurred_at >= :s AND occurred_at < :e",
+        {"s": s_dt, "e": e_dt},
+    )
+    if n:
+        issues.append(QualityIssue(
+            "supply_event_missing_producer_id", "analytics.business_events", "ERROR", n,
+            "A SUPPLY-journey event was recorded without a producer_id — every SUPPLY fact is producer-grain by definition."))
+
+    n = await scalar(
+        "SELECT count(*) FROM analytics.business_events "
+        "WHERE journey = 'DIRECT' "
+        "AND event_name IN ('DIRECT_ORDER_CREATED', 'DIRECT_ORDER_CONFIRMED', 'DIRECT_ORDER_DELIVERED') "
+        "AND producer_id IS NULL AND occurred_at >= :s AND occurred_at < :e",
+        {"s": s_dt, "e": e_dt},
+    )
+    if n:
+        issues.append(QualityIssue(
+            "direct_order_event_missing_producer_id", "analytics.business_events", "WARNING", n,
+            "A DIRECT order event has no producer_id — expected only for events landed before Producer "
+            "Analytics Phase B; new occurrences should be investigated."))
+
+    return issues
+
+
+__all__ = [
+    "QualityIssue", "run_data_quality_checks", "run_supply_data_quality_checks", "STALE_AFTER",
+]
