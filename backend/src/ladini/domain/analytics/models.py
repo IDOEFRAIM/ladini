@@ -176,4 +176,139 @@ class MetricTargetRecord(Base):
     updated_at = Column(_tz(), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
-__all__ = ["EventOutboxRecord", "BusinessEventRecord", "MetricTargetRecord"]
+# ---------------------------------------------------------------------------
+# Phase D — daily aggregate tables (mirror of `analytics.ts`, Drizzle = source of truth).
+# Derived + rebuildable, NO foreign keys. Dimensions default to the nil UUID
+# ("not attributable") instead of NULL so the UNIQUE grain index is real.
+# ---------------------------------------------------------------------------
+
+class BuyerDailyMetricRecord(Base):
+    __tablename__ = "buyer_daily_metrics"
+    __table_args__ = (
+        Index("buyer_daily_metrics_grain_uq", "metric_date", "buyer_id", unique=True),
+        Index("buyer_daily_metrics_date_zone_idx", "metric_date", "zone_id"),
+        CheckConstraint("needs_direct >= 0 AND needs_tender >= 0 AND needs_recurring >= 0 AND satisfied_direct >= 0 AND satisfied_tender >= 0 AND satisfied_recurring >= 0 AND digests_queued >= 0 AND digests_accepted >= 0", name="buyer_daily_metrics_counts_chk"),
+        CheckConstraint("potential_gmv_direct >= 0 AND potential_gmv_tender >= 0 AND potential_gmv_recurring >= 0 AND confirmed_gmv_tender >= 0 AND confirmed_gmv_recurring >= 0 AND delivered_gmv_direct >= 0 AND delivered_gmv_tender >= 0 AND delivered_gmv_recurring >= 0", name="buyer_daily_metrics_money_chk"),
+        {"schema": "analytics"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    metric_date = Column(Date, nullable=False)
+    buyer_id = Column(PG_UUID(as_uuid=True), nullable=False)
+    zone_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    needs_direct = Column(Integer, nullable=False, server_default=text("0"))
+    needs_tender = Column(Integer, nullable=False, server_default=text("0"))
+    needs_recurring = Column(Integer, nullable=False, server_default=text("0"))
+    satisfied_direct = Column(Integer, nullable=False, server_default=text("0"))
+    satisfied_tender = Column(Integer, nullable=False, server_default=text("0"))
+    satisfied_recurring = Column(Integer, nullable=False, server_default=text("0"))
+    potential_gmv_direct = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    potential_gmv_tender = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    potential_gmv_recurring = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    confirmed_gmv_tender = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    confirmed_gmv_recurring = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    delivered_gmv_direct = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    delivered_gmv_tender = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    delivered_gmv_recurring = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    digests_queued = Column(Integer, nullable=False, server_default=text("0"))
+    digests_accepted = Column(Integer, nullable=False, server_default=text("0"))
+    computed_at = Column(_tz(), server_default=func.now(), nullable=False)
+
+
+class DirectDailyMetricRecord(Base):
+    __tablename__ = "direct_daily_metrics"
+    __table_args__ = (
+        Index("direct_daily_metrics_grain_uq", "metric_date", "zone_id", "category_id", "sub_category_id", unique=True),
+        Index("direct_daily_metrics_date_idx", "metric_date"),
+        CheckConstraint("searches >= 0 AND successful_searches >= 0 AND orders_created >= 0 AND orders_delivered >= 0 AND created_value >= 0 AND delivered_value >= 0", name="direct_daily_metrics_counts_chk"),
+        {"schema": "analytics"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    metric_date = Column(Date, nullable=False)
+    zone_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    category_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    sub_category_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    searches = Column(Integer, nullable=False, server_default=text("0"))
+    successful_searches = Column(Integer, nullable=False, server_default=text("0"))
+    orders_created = Column(Integer, nullable=False, server_default=text("0"))
+    orders_delivered = Column(Integer, nullable=False, server_default=text("0"))
+    created_value = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    delivered_value = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    computed_at = Column(_tz(), server_default=func.now(), nullable=False)
+
+
+class TenderDailyMetricRecord(Base):
+    __tablename__ = "tender_daily_metrics"
+    __table_args__ = (
+        Index("tender_daily_metrics_grain_uq", "metric_date", "zone_id", "category_id", "sub_category_id", unique=True),
+        Index("tender_daily_metrics_date_idx", "metric_date"),
+        CheckConstraint("tenders_created >= 0 AND tenders_with_bid >= 0 AND bids_received >= 0 AND tenders_with_winner >= 0 AND tender_orders_created >= 0 AND tender_orders_delivered >= 0 AND first_bid_latency_seconds_sum >= 0 AND first_bid_latency_count >= 0 AND potential_value >= 0 AND committed_value >= 0 AND delivered_value >= 0", name="tender_daily_metrics_counts_chk"),
+        {"schema": "analytics"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    metric_date = Column(Date, nullable=False)
+    zone_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    category_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    sub_category_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    tenders_created = Column(Integer, nullable=False, server_default=text("0"))
+    tenders_with_bid = Column(Integer, nullable=False, server_default=text("0"))
+    bids_received = Column(Integer, nullable=False, server_default=text("0"))
+    tenders_with_winner = Column(Integer, nullable=False, server_default=text("0"))
+    tender_orders_created = Column(Integer, nullable=False, server_default=text("0"))
+    tender_orders_delivered = Column(Integer, nullable=False, server_default=text("0"))
+    first_bid_latency_seconds_sum = Column(Numeric(18, 3), nullable=False, server_default=text("'0'"))
+    first_bid_latency_count = Column(Integer, nullable=False, server_default=text("0"))
+    potential_value = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    committed_value = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    delivered_value = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    computed_at = Column(_tz(), server_default=func.now(), nullable=False)
+
+
+class RecurringDailyMetricRecord(Base):
+    __tablename__ = "recurring_daily_metrics"
+    __table_args__ = (
+        Index("recurring_daily_metrics_grain_uq", "metric_date", "zone_id", "category_id", "sub_category_id", "canonical_unit", unique=True),
+        Index("recurring_daily_metrics_date_idx", "metric_date"),
+        CheckConstraint("measurement_family IN ('MASS','VOLUME','COUNT','PACKAGE','OTHER')", name="recurring_daily_metrics_family_chk"),
+        CheckConstraint("occurrences_total >= 0 AND occurrences_active >= 0 AND occurrences_fully_covered >= 0 AND occurrences_notified >= 0 AND occurrences_accepted >= 0 AND occurrences_skipped >= 0 AND occurrences_with_orders >= 0 AND occurrences_all_received >= 0 AND needs_with_occurrence >= 0", name="recurring_daily_metrics_counts_chk"),
+        CheckConstraint("requested_quantity >= 0 AND matched_quantity >= 0 AND confirmed_quantity >= 0 AND unmatched_quantity >= 0 AND potential_value >= 0 AND confirmed_value >= 0 AND received_value >= 0", name="recurring_daily_metrics_qty_chk"),
+        {"schema": "analytics"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    metric_date = Column(Date, nullable=False)
+    zone_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    category_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    sub_category_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    canonical_unit = Column(Text, nullable=False)
+    measurement_family = Column(Text, nullable=False)
+    occurrences_total = Column(Integer, nullable=False, server_default=text("0"))
+    occurrences_active = Column(Integer, nullable=False, server_default=text("0"))
+    occurrences_fully_covered = Column(Integer, nullable=False, server_default=text("0"))
+    occurrences_notified = Column(Integer, nullable=False, server_default=text("0"))
+    occurrences_accepted = Column(Integer, nullable=False, server_default=text("0"))
+    occurrences_skipped = Column(Integer, nullable=False, server_default=text("0"))
+    occurrences_with_orders = Column(Integer, nullable=False, server_default=text("0"))
+    occurrences_all_received = Column(Integer, nullable=False, server_default=text("0"))
+    needs_with_occurrence = Column(Integer, nullable=False, server_default=text("0"))
+    requested_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    matched_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    confirmed_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    unmatched_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    potential_value = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    confirmed_value = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    received_value = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    computed_at = Column(_tz(), server_default=func.now(), nullable=False)
+
+
+__all__ = [
+    "EventOutboxRecord",
+    "BusinessEventRecord",
+    "MetricTargetRecord",
+    "BuyerDailyMetricRecord",
+    "DirectDailyMetricRecord",
+    "TenderDailyMetricRecord",
+    "RecurringDailyMetricRecord",
+]
