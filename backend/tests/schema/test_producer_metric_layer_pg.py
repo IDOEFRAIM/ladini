@@ -442,3 +442,28 @@ class TestSupplySnapshot:
 
         res = _run(dsn, metric)
         assert res.value == 250.0 and res.unit == "KG"
+
+    def test_available_supply_never_sums_incompatible_units(self, world):
+        """Micro-gate (Phase D pre-flight): a scope holding both a KG product and a TETE product
+        must never collapse into one physical number — this is the exact contract
+        `producer_available_supply` (buyer side: `recurring_requested_quantity`) already proves;
+        this test locks the SAME guarantee for the producer-side `available_supply` gauge."""
+        dsn, g = world
+        today = date.today()
+        conn = psycopg2.connect(dsn)
+        with conn, conn.cursor() as cur:
+            g.cur = cur
+            g.product_for(quantity_for_sale=250, is_available=True, unit="KG")
+            g.product_for(quantity_for_sale=12, is_available=True, unit="TETE")
+        conn.close()
+        _run(dsn, lambda s: snapshot_producer_supply(s, today))
+
+        async def metric(s):
+            return await ProducerAnalyticsService(s).get_metric("available_supply", today, today, filters={"sub_category_id": str(g.sub_category)}, compare=False)
+
+        res = _run(dsn, metric)
+        assert res.status.value == "MIXED_UNITS"
+        assert res.value is None  # never a combined "262 units"
+        assert res.unit is None
+        by_unit = {b["canonical_unit"]: b["value"] for b in res.breakdown}
+        assert by_unit == {"KG": 250.0, "TETE": 12.0}

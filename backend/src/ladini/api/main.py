@@ -9,6 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ladini.api.routes.admin import router as admin_router
 from ladini.api.routes.analytics_admin import router as analytics_admin_router
+from ladini.api.routes.analytics_admin_producers import (
+    router as analytics_admin_producers_router,
+)
 from ladini.api.routes.market import router as market_router
 from ladini.api.routes.paydunya_webhook import router as paydunya_router
 from ladini.api.routes.twilio_webhook import (
@@ -186,6 +189,7 @@ app.include_router(
 )  # endpoint réel : /api/webhooks/paydunya-ipn
 app.include_router(admin_router)  # endpoint réel : /admin/llm/health (auth token)
 app.include_router(analytics_admin_router)  # /internal/analytics/buyers/* (token interne, lecture seule)
+app.include_router(analytics_admin_producers_router)  # /internal/analytics/producers/* (token interne, lecture seule)
 
 
 # ── Métadonnées de release (hardening DevOps 2026-09-10) ─────────────

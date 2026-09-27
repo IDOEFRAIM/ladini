@@ -67,7 +67,7 @@ class ProducerAnalyticsService:
         clauses: list[str] = []
         params: dict[str, Any] = {}
         for key, value in (filters or {}).items():
-            if value is None:
+            if value is None or key == "zone_scope":
                 continue
             if key not in allowed:
                 raise ValueError(f"Filter '{key}' is not a dimension of {table} (allowed: {allowed}).")
@@ -125,7 +125,8 @@ class ProducerAnalyticsService:
             return
         target = resolve_target(
             await self._targets(res.metric_name), on=end,
-            zone_id=filters.get("zone_id") if isinstance(filters.get("zone_id"), (str, uuid.UUID)) else None,
+            zone_id=filters.get("zone_scope") or (
+                filters.get("zone_id") if isinstance(filters.get("zone_id"), (str, uuid.UUID)) else None),
             category_id=filters.get("category_id"), sub_category_id=filters.get("sub_category_id"),
             journey=None if binding_journey == "GLOBAL" else binding_journey,
         )
@@ -334,7 +335,8 @@ class ProducerAnalyticsService:
         if len(rows) > 1:
             res.status = DataStatus.MIXED_UNITS
             res.breakdown = [
-                {"canonical_unit": r["canonical_unit"], "value": _f(r["q"]), "product_count": int(r["n"])} for r in rows
+                {"canonical_unit": r["canonical_unit"], "value": _f(r["q"]), "numerator": _f(r["q"]), "product_count": int(r["n"])}
+                for r in rows
             ]
             res.notes.append("Several canonical units in scope: no single physical value; see breakdown.")
             return res
