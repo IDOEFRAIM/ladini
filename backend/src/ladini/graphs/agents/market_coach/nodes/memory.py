@@ -61,7 +61,13 @@ _ADD_TO_CART_DRAFT_FIELDS = {
 # index de sélection.
 
 
-_PRIMARY_CANONICAL_UNITS = {"KG", "TONNE", "SAC", "UNITE", "PANIER", "TETE"}
+# Analytics Phase C (2026-09-27) : "LITRE" manquait ici depuis son ajout au
+# registre canonique le 2026-08-29 (`domain/quantity_unit.py::VALID_UNITS`)
+# — une réponse "litre" à "quelle unité ?" était donc rejetée par
+# `_resolve_unit_value` malgré un canonical_unit_label correct. Voir aussi le
+# correctif jumeau dans `market_coach/utils.py::_CANONICAL_UNIT_MAP` (les
+# alias "L"/"LITRES" ne se repliaient pas non plus sur "LITRE").
+_PRIMARY_CANONICAL_UNITS = {"KG", "TONNE", "SAC", "UNITE", "PANIER", "TETE", "LITRE"}
 
 # expected_input (slot précis en cours) → champs canoniques qu'une réponse
 # ANSWER à ce slot a le droit de modifier. Tout le reste est du bruit/une

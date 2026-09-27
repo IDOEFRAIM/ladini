@@ -23,6 +23,14 @@ BEAT_SCHEDULE: Dict[str, Dict[str, Any]] = {
         "schedule": 30.0,  # toutes les 30 s
         "options": {"expires": 25},
     },
+    # Analytics Phase C : drain event_outbox -> business_events. Même cadence
+    # que l'outbox notification (30s) — pas de raison métier d'être plus lent,
+    # et le batch (100) absorbe largement le volume attendu au démarrage.
+    "analytics-event-drain": {
+        "task": "workers.analytics_event_drain",
+        "schedule": 30.0,
+        "options": {"expires": 25},
+    },
     # Matching de proximité : moins urgent, lot plus large.
     "proximity-matching": {
         "task": "workers.proximity_matching",

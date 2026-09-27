@@ -104,16 +104,43 @@ _STANDARD_WINDOWS = ("DAY", "WEEK", "MONTH", "CUSTOM_RANGE")
 #               instance of expressed demand — see `active_recurring_needs`
 #               below for the template-level gauge instead)
 # "Satisfied" (the North Star's numerator) means the instance's terminal
-# state is a REAL delivery, not merely a match/confirmation:
-#   DIRECT/TENDER -> Order.delivery_status IN ('DELIVERED','FULFILLED')
-#                    (both terminal values found in the codebase; whether
-#                    they are true synonyms or represent different delivery
-#                    sub-flows needs a one-time verification against live
-#                    code before Phase C wires this — see architecture doc
-#                    "Known limitations").
-#   RECURRING     -> occurrence.quantity_delivered >= occurrence.requested_quantity
-#                    (full delivery; partial delivery feeds
-#                    `recurring_coverage_rate` instead, not the North Star).
+# state is a REAL delivery, not merely a match/confirmation. Phase C traced
+# every writer of `Order.delivery_status` (not just the two literal names)
+# and found DELIVERED and FULFILLED are NOT synonyms — they belong to
+# different, non-overlapping flows:
+#   - FULFILLED is written ONCE, at creation, only by `record_sale`
+#     (order_type=DIRECT_SALE, an agent-recorded walk-in sale — the buyer is
+#     physically present at the exchange, so there is no separate delivery
+#     step to track).
+#   - DELIVERED is written by `EscrowMixin.verify_delivery_otp` (buyer
+#     supplies the OTP — buyer-attested), `ProducerMgmtMixin.
+#     confirm_delivery_and_payment` (cash-on-delivery: producer declares
+#     delivery+payment in one gesture — accepted as final for that business
+#     model, order_type STANDARD/PREORDER or tender-linked), AND, for
+#     order_type=RECURRING_SUPPLY specifically, by
+#     `RecurringSupplyMixin.mark_order_delivery_status` as an INTERMEDIATE
+#     producer-declared step (PENDING -> IN_TRANSIT -> DELIVERED) that is
+#     NOT yet buyer-confirmed for that flow: `record_order_reception` then
+#     moves it to RECEIVED ("tout est bon", the real buyer confirmation) or
+#     RECEIVED_WITH_ISSUE (an unresolved problem — never counted as success).
+# Net rule (order_type-conditional, not a single flat literal set):
+#   DIRECT/TENDER (order_type != RECURRING_SUPPLY)
+#       -> Order.delivery_status IN ('DELIVERED', 'FULFILLED')
+#   RECURRING_SUPPLY orders (which back RECURRING occurrences)
+#       -> Order.delivery_status == 'RECEIVED' only — 'DELIVERED' alone is
+#          insufficient (still awaiting buyer confirmation), and
+#          'RECEIVED_WITH_ISSUE' is explicitly excluded.
+# REAL BUG FOUND while tracing this (not fixed here — a schema/instrumentation
+# gap, not a unit-model one): `RecurringNeedOccurrence.quantity_delivered`
+# has ZERO writers anywhere in the codebase — declared on the model, never
+# assigned. Phase B's dictionary wrongly assumed it was historically
+# populated; corrected below (`recurring_delivered_quantity`,
+# `delivered_gmv`'s RECURRING contribution, `recurring_fulfillment_rate` are
+# now Reconstructibility.NO for that reason, not YES). The only real signal
+# for "was this occurrence's supply received" is its RECURRING_SUPPLY
+# Order's delivery_status, joined via `occurrence.order_group_id` — nullable,
+# no FK (Phase A finding) — hence PARTIAL, not YES, for the North Star's
+# RECURRING contribution.
 
 METRICS: dict[str, MetricDefinition] = {}
 
@@ -196,9 +223,11 @@ successful_procurement_rate = _register(
         source_entities=("marketplace.orders", "marketplace.auctions", "marketplace.recurring_need_occurrences"),
         reconstructible_historically=Reconstructibility.PARTIAL,
         reconstructible_note=(
-            "YES for the instance-count/delivery-status parts (all timestamps exist). PARTIAL "
-            "only because the DELIVERED-vs-FULFILLED semantic on Order needs a one-time "
-            "verification pass before Phase C (see architecture doc)."
+            "YES for DIRECT/TENDER (DELIVERED-vs-FULFILLED resolved in Phase C — see module "
+            "docstring: order_type-conditional, both are historically populated terminal states). "
+            "PARTIAL for RECURRING only: the real 'received' signal is the linked RECURRING_SUPPLY "
+            "Order's delivery_status via occurrence.order_group_id, which has no FK — a real but "
+            "imperfect historical join, not a hard guarantee."
         ),
     )
 )
@@ -316,21 +345,28 @@ delivered_gmv = _register(
         name="delivered_gmv",
         description="Value of need instances that were actually delivered — the only GMV figure that is real revenue, not a commitment.",
         business_definition=(
-            "Same formula as confirmed_gmv, additionally gated on the delivered state (DIRECT/"
-            "TENDER: Order.delivery_status IN ('DELIVERED','FULFILLED'); RECURRING: weighted by "
-            "quantity_delivered rather than the full allocated quantity — a partially delivered "
-            "occurrence contributes only its delivered share, never the full allocation)."
+            "Same formula as confirmed_gmv, additionally gated on the delivered state — DIRECT/"
+            "TENDER: Order.delivery_status IN ('DELIVERED','FULFILLED') for order_type != "
+            "RECURRING_SUPPLY, else 'RECEIVED' (see module docstring for the full rule and why). "
+            "RECURRING: NOT weighted by quantity_delivered (that column has zero writers anywhere "
+            "in the codebase — a real gap, see module docstring) — instead gated on the linked "
+            "RECURRING_SUPPLY Order reaching 'RECEIVED' via need_allocations -> occurrence.order_"
+            "group_id, using the full allocated (not partial) quantity, since there is no reliable "
+            "partial-delivery signal today."
         ),
         journey=Journey.GLOBAL,
         aggregation_type=AggregationType.SUM,
-        numerator="SUM(delivered_quantity * confirmed_price)",
+        numerator="SUM(quantity * confirmed_price WHERE delivery is RECEIVED/DELIVERED/FULFILLED per the rule above)",
         denominator=None,
         unit_behavior="CURRENCY_FCFA",
         supported_dimensions=_STANDARD_DIMENSIONS,
         supported_time_windows=_STANDARD_WINDOWS,
         source_entities=("marketplace.orders", "marketplace.bids", "marketplace.need_allocations"),
-        reconstructible_historically=Reconstructibility.YES,
-        reconstructible_note="Same sources as confirmed_gmv, filtered/weighted by delivery columns.",
+        reconstructible_historically=Reconstructibility.PARTIAL,
+        reconstructible_note=(
+            "YES for DIRECT/TENDER. PARTIAL for RECURRING: depends on the imperfect order_group_id "
+            "join (no FK) and cannot reflect partial delivery (quantity_delivered is dead)."
+        ),
     )
 )
 
@@ -653,7 +689,12 @@ recurring_delivered_quantity = _register(
     MetricDefinition(
         name="recurring_delivered_quantity",
         description="Total quantity delivered across recurring occurrences.",
-        business_definition="SUM(occurrence.quantity_delivered).",
+        business_definition=(
+            "Intended: SUM(occurrence.quantity_delivered). REAL FINDING (Phase C): this column has "
+            "ZERO writers anywhere in the codebase — declared on RecurringNeedOccurrence, never "
+            "assigned by any service/worker. Until it (or an equivalent) is actually written, this "
+            "metric has no data source; do not compute it as a silent 0."
+        ),
         journey=Journey.RECURRING,
         aggregation_type=AggregationType.SUM,
         numerator="SUM(quantity_delivered)",
@@ -662,8 +703,12 @@ recurring_delivered_quantity = _register(
         supported_dimensions=_STANDARD_DIMENSIONS,
         supported_time_windows=_STANDARD_WINDOWS,
         source_entities=("marketplace.recurring_need_occurrences",),
-        reconstructible_historically=Reconstructibility.YES,
-        reconstructible_note="quantity_delivered historically populated (delivery correlated via order_group_id).",
+        reconstructible_historically=Reconstructibility.NO,
+        reconstructible_note=(
+            "NO: quantity_delivered is a dead column (no writer). Phase C+ must either start "
+            "writing it from the RECURRING_SUPPLY order lifecycle (RECEIVED transition) or drop "
+            "this metric in favor of one derived from Order.delivery_status directly."
+        ),
     )
 )
 
@@ -766,17 +811,25 @@ recurring_fulfillment_rate = _register(
     MetricDefinition(
         name="recurring_fulfillment_rate",
         description="fulfillment_rate scoped to RECURRING.",
-        business_definition="fulfillment_rate WHERE journey = RECURRING (confirmed = quantity_confirmed > 0, delivered = quantity_delivered >= quantity_confirmed).",
+        business_definition=(
+            "fulfillment_rate WHERE journey = RECURRING (confirmed = quantity_confirmed > 0, "
+            "delivered = the occurrence's linked RECURRING_SUPPLY Order reaching delivery_status="
+            "'RECEIVED', via occurrence.order_group_id — NOT quantity_delivered, which is a dead "
+            "column with zero writers, see module docstring)."
+        ),
         journey=Journey.RECURRING,
         aggregation_type=AggregationType.WEIGHTED_RATIO,
-        numerator="SUM(quantity_delivered, capped at quantity_confirmed)",
-        denominator="SUM(quantity_confirmed)",
-        unit_behavior="ONLY_COMPATIBLE_CANONICAL_UNITS",
+        numerator="COUNT(occurrences whose linked order reached RECEIVED)",
+        denominator="SUM(quantity_confirmed > 0 occurrences)",
+        unit_behavior="DIMENSIONLESS_RATIO",
         supported_dimensions=_STANDARD_DIMENSIONS,
         supported_time_windows=_STANDARD_WINDOWS,
-        source_entities=("marketplace.recurring_need_occurrences",),
-        reconstructible_historically=Reconstructibility.YES,
-        reconstructible_note="Both columns historically populated.",
+        source_entities=("marketplace.recurring_need_occurrences", "marketplace.orders"),
+        reconstructible_historically=Reconstructibility.PARTIAL,
+        reconstructible_note=(
+            "PARTIAL: quantity_confirmed is historically populated, but the delivered signal "
+            "depends on the order_group_id join, which has no FK (Phase A finding)."
+        ),
         alias_of="fulfillment_rate",
     )
 )

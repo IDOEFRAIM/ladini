@@ -89,6 +89,7 @@ from ladini.domain.recurring_supply.models import (
     RecurringNeed,
     RecurringNeedOccurrence,
 )
+from ladini.domain.analytics.models import BusinessEventRecord, EventOutboxRecord, MetricTargetRecord
 from ladini.domain.telemetry import AgentLlmCall, AgentToolCall, AgentTurn
 
 __all__ = [
@@ -97,6 +98,10 @@ __all__ = [
     "AgentTurn",
     "Base",
     "_uuid4",
+    # analytics (Phase C)
+    "EventOutboxRecord",
+    "BusinessEventRecord",
+    "MetricTargetRecord",
     # approvisionnement récurrent (Phase 1 — fondation de données)
     "RecurringNeed",
     "RecurringNeedOccurrence",

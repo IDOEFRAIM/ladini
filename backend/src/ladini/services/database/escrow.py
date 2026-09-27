@@ -24,6 +24,7 @@ from sqlalchemy.orm import selectinload
 
 from ladini.core.formatting import fmt_num as _fmt_num
 from ladini.core.settings import settings
+from ladini.domain.analytics.emitter import BusinessEventEmitter
 from ladini.domain.models import Order, OrderItem, Producer, Product, User
 from ladini.domain.pricing_tiers import (
     resolve_stock_debit,
@@ -508,6 +509,8 @@ class EscrowMixin(BaseMixin):
         order.delivery_otp_locked_until = None
         order.delivery_otp = None
         await current_session.flush()
+
+        await BusinessEventEmitter(current_session).emit_order_delivered(order)
 
         return {
             "status": "success",

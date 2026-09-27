@@ -131,7 +131,35 @@ class TestReconstructibilityIsHonest:
             "recurring_requested_quantity",
             "recurring_matched_quantity",
             "recurring_confirmed_quantity",
-            "recurring_delivered_quantity",
             "recurring_coverage_rate",
         ):
             assert get_metric(name).reconstructible_historically == Reconstructibility.YES
+
+    def test_recurring_delivered_quantity_is_honestly_not_reconstructible(self):
+        # Phase C finding: RecurringNeedOccurrence.quantity_delivered has
+        # zero writers anywhere in the codebase — a dead column. Phase B
+        # wrongly assumed YES; this must never silently regress back to a
+        # false claim.
+        metric = get_metric("recurring_delivered_quantity")
+        assert metric.reconstructible_historically == Reconstructibility.NO
+        assert "zero writers" in metric.business_definition or "dead column" in metric.reconstructible_note
+
+
+class TestDeliveredVsFulfilledContract:
+    """Phase C contract test (mission 1.A): DELIVERED and FULFILLED are not
+    synonyms — locks in the order_type-conditional rule so it can't quietly
+    drift back to a flat 'IN (DELIVERED, FULFILLED)' check that ignores
+    RECURRING_SUPPLY's RECEIVED requirement."""
+
+    def test_north_star_flags_the_recurring_supply_split_not_a_flat_synonym_rule(self):
+        metric = get_metric("successful_procurement_rate")
+        assert "order_group_id" in metric.reconstructible_note
+        assert metric.reconstructible_historically == Reconstructibility.PARTIAL
+
+    def test_delivered_gmv_documents_received_not_delivered_for_recurring(self):
+        metric = get_metric("delivered_gmv")
+        assert "RECEIVED" in metric.business_definition
+        assert "RECURRING_SUPPLY" in metric.business_definition
+
+    def test_delivered_gmv_does_not_claim_full_yes_because_of_recurring(self):
+        assert get_metric("delivered_gmv").reconstructible_historically == Reconstructibility.PARTIAL

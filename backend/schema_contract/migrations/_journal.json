@@ -40,8 +40,15 @@
     {
       "idx": 5,
       "version": "7",
-      "when": 1790453446878,
+      "when": 1790472972314,
       "tag": "0005_add_location_coverage",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790476812970,
+      "tag": "0006_analytics_business_events",
       "breakpoints": true
     }
   ]
