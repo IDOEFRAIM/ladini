@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from ladini.graphs.agents.market_coach.flows.buyer.recurring_need import (
     recurring_need_flow,
 )
+from ladini.services.database.recurring_supply import MATCH_RESPONSE_ACTIONS
 from tests.conftest import StubRuntime, make_state, run
 
 _NEEDS_RESPONSE = {
@@ -174,6 +177,128 @@ def test_option_three_returns_to_the_list_without_calling_the_gateway():
     # StubRuntime lèverait — la réussite du test prouve que l'appel n'a jamais eu lieu.
     result = _run(state, {"list_my_recurring_needs": _NEEDS_RESPONSE})
     assert "Vos approvisionnements" in result["final_response"]
+
+
+# =====================================================================
+# Mandat "2e mismatch CONFIRM vs ACCEPT" (2026-09-26) — tests A-G
+#
+# `_respond_to_match` (menu détail `GET_MY_NEEDS`, ci-dessus) passait `action` — littéralement
+# "CONFIRM"/"REJECT", jamais mappé — à `RecurringSupplyGateway.accept_match_proposal`, alors que
+# le service réel (`services/database/recurring_supply.py::MATCH_RESPONSE_ACTIONS = ("ACCEPT",
+# "REJECT")`) n'accepte jamais "CONFIRM" (même bug que `_respond_to_digest_flow`, corrigé PR #12 —
+# voir `tests/integration/test_recurring_supply_digest_routing.py::TestConfirmAcceptContract`).
+# Corrigé en réutilisant la MÊME table partagée (`_MATCH_RESPONSE_TO_SERVICE_ACTION`/
+# `_to_match_service_action`), jamais une 2e table dupliquée.
+# =====================================================================
+
+
+def _confirm_state(selection_index="1"):
+    return make_state(
+        current_goal="GET_MY_NEEDS",
+        transaction_payload={"selection_index": selection_index},
+        pending_interaction={"kind": "SELECTION_MENU", "goal": "GET_MY_NEEDS", "created_at": time.time()},
+        working_memory={
+            "recurring_need_menu": {
+                "mapping": {"1": "CONFIRM:need-tomate", "2": "REJECT:need-tomate", "3": "LIST"},
+                "created_at": time.time(),
+            }
+        },
+    )
+
+
+class TestMatchResponseServiceContract:
+    def test_A_confirming_sends_the_canonical_accept_action_to_the_service(self):
+        seen = []
+
+        def _accept(**kwargs):
+            seen.append(kwargs)
+            return {"status": "success", "occurrence_id": "occ-tomate", "order_ids": ["order-1"]}
+
+        result = run(recurring_need_flow(_confirm_state("1"), StubRuntime(responses={"accept_match_proposal": _accept})))
+        assert len(seen) == 1
+        assert seen[0]["action"] == "ACCEPT"
+        assert seen[0]["action"] in MATCH_RESPONSE_ACTIONS
+        assert "confirmé" in result["final_response"].lower()
+
+    def test_B_rejecting_sends_the_canonical_reject_action_to_the_service(self):
+        seen = []
+
+        def _accept(**kwargs):
+            seen.append(kwargs)
+            return {"status": "success", "occurrence_id": "occ-tomate"}
+
+        result = run(recurring_need_flow(_confirm_state("2"), StubRuntime(responses={"accept_match_proposal": _accept})))
+        assert len(seen) == 1
+        assert seen[0]["action"] == "REJECT"
+        assert seen[0]["action"] in MATCH_RESPONSE_ACTIONS
+        assert "besoin habituel reste actif" in result["final_response"]
+
+    def test_D_an_unmapped_conversational_action_fails_fast_without_any_db_call(self):
+        """Défense en profondeur (mandat §5) : `_resolve_menu_reply` ne peut structurellement
+        produire que "CONFIRM"/"REJECT" pour ce `kind` — ce test appelle `_respond_to_match`
+        DIRECTEMENT avec une valeur hors de ce contrat fermé pour prouver que la frontière service
+        échoue fort plutôt que de transmettre un mot inconnu."""
+        import asyncio
+
+        from ladini.graphs.agents.market_coach.flows.buyer.recurring_need import (
+            _respond_to_match,
+        )
+
+        state = _confirm_state("1")
+        rt = StubRuntime(responses={})
+
+        async def go():
+            with pytest.raises(AssertionError):
+                await _respond_to_match(state, rt, recurring_need_id="need-tomate", action="MAYBE")
+
+        asyncio.run(go())
+        # `_to_match_service_action` lève AVANT tout appel gateway — `rt.calls` (peuplé par
+        # `call_db`, voir `tests/conftest.py::StubRuntime`) le prouve directement, sans dépendre
+        # d'un comportement de rejet côté double MCP.
+        assert rt.calls == [], "aucun appel service ne doit partir avant la résolution de l'action"
+
+    def test_F_two_different_needs_each_independently_use_accept(self):
+        """Mandat §6.F ("plusieurs matches") transposé à `_respond_to_match` (une confirmation à la
+        fois, depuis l'écran détail, jamais un lot comme le digest) : deux confirmations
+        SUCCESSIVES sur deux besoins différents envoient chacune "ACCEPT", jamais "CONFIRM"."""
+        seen = []
+
+        def _accept(**kwargs):
+            seen.append(kwargs)
+            return {"status": "success"}
+
+        rt = StubRuntime(responses={"accept_match_proposal": _accept})
+        state_a = _confirm_state("1")
+        run(recurring_need_flow(state_a, rt))
+
+        state_b = make_state(
+            current_goal="GET_MY_NEEDS",
+            transaction_payload={"selection_index": "1"},
+            pending_interaction={"kind": "SELECTION_MENU", "goal": "GET_MY_NEEDS", "created_at": time.time()},
+            working_memory={
+                "recurring_need_menu": {
+                    "mapping": {"1": "CONFIRM:need-oignon", "2": "REJECT:need-oignon", "3": "LIST"},
+                    "created_at": time.time(),
+                }
+            },
+        )
+        run(recurring_need_flow(state_b, rt))
+
+        assert len(seen) == 2
+        assert {c["recurring_need_id"] for c in seen} == {"need-tomate", "need-oignon"}
+        assert all(c["action"] == "ACCEPT" for c in seen)
+
+    def test_G_parity_with_the_digest_flow_same_canonical_mapping_function(self):
+        """Mandat §6.G : les deux flows (digest et détail `GET_MY_NEEDS`) doivent appliquer
+        EXACTEMENT le même contrat service — vérifié ici en important la MÊME fonction de mapping
+        que celle exercée côté digest (`tests/integration/test_recurring_supply_digest_routing.py`),
+        preuve qu'il n'existe qu'une seule source de vérité, pas deux tables qui pourraient diverger."""
+        from ladini.graphs.agents.market_coach.flows.buyer.recurring_need import (
+            _to_match_service_action,
+        )
+
+        assert _to_match_service_action("CONFIRM") == "ACCEPT"
+        assert _to_match_service_action("REJECT") == "REJECT"
 
 
 # ── retour depuis le détail ────────────────────────────────────────────────
