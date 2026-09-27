@@ -200,9 +200,99 @@ async def run_supply_data_quality_checks(
             "A DIRECT order event has no producer_id — expected only for events landed before Producer "
             "Analytics Phase B; new occurrences should be investigated."))
 
+    n = await scalar(
+        "SELECT count(*) FROM analytics.business_events "
+        "WHERE journey = 'TENDER' AND event_name IN ('TENDER_ORDER_CREATED', 'TENDER_DELIVERED') "
+        "AND producer_id IS NULL AND occurred_at >= :s AND occurred_at < :e",
+        {"s": s_dt, "e": e_dt},
+    )
+    if n:
+        issues.append(QualityIssue(
+            "tender_order_event_missing_producer_id", "analytics.business_events", "WARNING", n,
+            "A TENDER order event has no producer_id — these have carried it since before Producer "
+            "Analytics Phase B (already resolved via the winning bid), so any occurrence is unexpected."))
+
+    return issues
+
+
+_PRODUCER_GRAINS = {
+    "analytics.producer_daily_metrics": "metric_date, producer_id",
+    "analytics.producer_quantity_daily_metrics": "metric_date, producer_id, canonical_unit",
+    "analytics.producer_supply_daily_snapshot": "metric_date, producer_id, zone_id, category_id, sub_category_id, canonical_unit",
+}
+
+
+async def run_producer_metric_quality_checks(
+    session: AsyncSession, start: date, end: date, *, now: Optional[datetime] = None,
+) -> list[QualityIssue]:
+    """Producer Analytics Phase C (mission section 28) — checks over the Producer
+    Metric Layer's own daily aggregates (`producer_daily_metrics`,
+    `producer_quantity_daily_metrics`, `producer_supply_daily_snapshot`), mirroring
+    `run_data_quality_checks`'s buyer-side conventions (grain uniqueness, staleness,
+    unknown-unit, delivered > confirmed) for these three new tables specifically."""
+    now = now or datetime.now(timezone.utc)
+    today = now.date()
+    win = "metric_date >= :s AND metric_date <= :e"
+    p = {"s": start, "e": end}
+    issues: list[QualityIssue] = []
+
+    async def scalar(sql: str, params: dict) -> int:
+        return int((await session.execute(text(sql), params)).scalar() or 0)
+
+    pdm = "analytics.producer_daily_metrics"
+    for journey in ("direct", "tender", "recurring"):
+        n = await scalar(
+            f"SELECT count(*) FROM {pdm} WHERE {win} AND orders_delivered_{journey} > orders_confirmed_{journey}", p,
+        )
+        if n:
+            issues.append(QualityIssue(
+                f"delivered_gt_confirmed_orders_{journey}", pdm, "ERROR", n,
+                f"orders_delivered_{journey} exceeds orders_confirmed_{journey}."))
+
+    pqm = "analytics.producer_quantity_daily_metrics"
+    for journey in ("direct", "recurring"):
+        n = await scalar(
+            f"SELECT count(*) FROM {pqm} WHERE {win} AND delivered_quantity_{journey} > confirmed_quantity_{journey} + {_EPS}", p,
+        )
+        if n:
+            issues.append(QualityIssue(
+                f"delivered_gt_confirmed_quantity_{journey}", pqm, "ERROR", n,
+                f"delivered_quantity_{journey} exceeds confirmed_quantity_{journey}."))
+
+    for table in (pqm, "analytics.producer_supply_daily_snapshot"):
+        rows = (await session.execute(
+            text(f"SELECT DISTINCT canonical_unit FROM {table} WHERE {win} AND measurement_family = 'OTHER'"), p,
+        )).all()
+        if rows:
+            issues.append(QualityIssue(
+                "unknown_canonical_unit", table, "WARNING", len(rows),
+                "Units outside the registry (cannot be aggregated): " + ", ".join(sorted(str(r[0]) for r in rows))))
+
+    for table, grain in _PRODUCER_GRAINS.items():
+        n = await scalar(f"SELECT count(*) FROM (SELECT 1 FROM {table} GROUP BY {grain} HAVING count(*) > 1) t", {})
+        if n:
+            issues.append(QualityIssue("duplicate_grain", table, "ERROR", n, f"More than one row for the same grain ({grain})."))
+        last = (await session.execute(text(f"SELECT max(computed_at) FROM {table}"))).scalar()
+        if last is None or now - last > STALE_AFTER:
+            issues.append(QualityIssue("stale_refresh", table, "WARNING", 1,
+                                       "No refresh in the last 36h" if last else "Never refreshed."))
+
+    snapshot_today = await scalar(
+        "SELECT count(*) FROM analytics.producer_supply_daily_snapshot WHERE metric_date = :d", {"d": today},
+    )
+    has_sellable_products = await scalar(
+        "SELECT count(*) FROM marketplace.products WHERE is_available = TRUE AND quantity_for_sale > 0", {},
+    )
+    if not snapshot_today and has_sellable_products:
+        issues.append(QualityIssue(
+            "missing_snapshot", "analytics.producer_supply_daily_snapshot", "WARNING", 1,
+            f"No supply snapshot for {today.isoformat()} although sellable products exist — "
+            "snapshot_producer_supply has not run today."))
+
     return issues
 
 
 __all__ = [
-    "QualityIssue", "run_data_quality_checks", "run_supply_data_quality_checks", "STALE_AFTER",
+    "QualityIssue", "run_data_quality_checks", "run_supply_data_quality_checks",
+    "run_producer_metric_quality_checks", "STALE_AFTER",
 ]

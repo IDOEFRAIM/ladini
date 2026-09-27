@@ -312,6 +312,121 @@ class RecurringDailyMetricRecord(Base):
     computed_at = Column(_tz(), server_default=func.now(), nullable=False)
 
 
+# ---------------------------------------------------------------------------
+# Producer Analytics Phase C — daily aggregate tables (mirror of `analytics.ts`,
+# Drizzle = source of truth). Same discipline as the buyer tables above: derived
+# + rebuildable, NO foreign keys, dimensions default to the nil UUID.
+# ---------------------------------------------------------------------------
+
+
+class ProducerDailyMetricRecord(Base):
+    """Grain (metric_date, producer_id). `zone_id` is the PRODUCER's own zone
+    (Producer.zone_id), never the buyer/delivery zone. A row only exists when
+    the producer had >= 1 qualifying fact that day (publish, quantity change,
+    bid received, order confirmed/delivered) — so COUNT(DISTINCT producer_id)
+    over a window is exactly "active producers", no separate flag needed."""
+
+    __tablename__ = "producer_daily_metrics"
+    __table_args__ = (
+        Index("producer_daily_metrics_grain_uq", "metric_date", "producer_id", unique=True),
+        Index("producer_daily_metrics_date_zone_idx", "metric_date", "zone_id"),
+        CheckConstraint(
+            "products_published >= 0 AND quantity_changes >= 0 AND bids_received >= 0 AND "
+            "orders_confirmed_direct >= 0 AND orders_delivered_direct >= 0 AND "
+            "orders_confirmed_tender >= 0 AND orders_delivered_tender >= 0 AND "
+            "orders_confirmed_recurring >= 0 AND orders_delivered_recurring >= 0",
+            name="producer_daily_metrics_counts_chk",
+        ),
+        CheckConstraint(
+            "delivered_gmv_direct >= 0 AND delivered_gmv_tender >= 0 AND delivered_gmv_recurring >= 0",
+            name="producer_daily_metrics_money_chk",
+        ),
+        {"schema": "analytics"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    metric_date = Column(Date, nullable=False)
+    producer_id = Column(PG_UUID(as_uuid=True), nullable=False)
+    zone_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    products_published = Column(Integer, nullable=False, server_default=text("0"))
+    quantity_changes = Column(Integer, nullable=False, server_default=text("0"))
+    bids_received = Column(Integer, nullable=False, server_default=text("0"))
+    orders_confirmed_direct = Column(Integer, nullable=False, server_default=text("0"))
+    orders_delivered_direct = Column(Integer, nullable=False, server_default=text("0"))
+    orders_confirmed_tender = Column(Integer, nullable=False, server_default=text("0"))
+    orders_delivered_tender = Column(Integer, nullable=False, server_default=text("0"))
+    orders_confirmed_recurring = Column(Integer, nullable=False, server_default=text("0"))
+    orders_delivered_recurring = Column(Integer, nullable=False, server_default=text("0"))
+    delivered_gmv_direct = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    delivered_gmv_tender = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    delivered_gmv_recurring = Column(Numeric(16, 2), nullable=False, server_default=text("'0'"))
+    computed_at = Column(_tz(), server_default=func.now(), nullable=False)
+
+
+class ProducerQuantityDailyMetricRecord(Base):
+    """Grain (metric_date, producer_id, canonical_unit) — never KG + L + TETE in
+    one sum. TENDER has no columns here at all (no OrderItem exists for a TENDER
+    order, so no reliable quantity — see PRODUCER_ANALYTICS_ARCHITECTURE.md
+    §3.2/§10): deliberately absent, not always-zero."""
+
+    __tablename__ = "producer_quantity_daily_metrics"
+    __table_args__ = (
+        Index("producer_quantity_daily_metrics_grain_uq", "metric_date", "producer_id", "canonical_unit", unique=True),
+        Index("producer_quantity_daily_metrics_date_idx", "metric_date"),
+        CheckConstraint("measurement_family IN ('MASS','VOLUME','COUNT','PACKAGE','OTHER')", name="producer_quantity_daily_metrics_family_chk"),
+        CheckConstraint(
+            "confirmed_quantity_direct >= 0 AND delivered_quantity_direct >= 0 AND "
+            "confirmed_quantity_recurring >= 0 AND delivered_quantity_recurring >= 0",
+            name="producer_quantity_daily_metrics_qty_chk",
+        ),
+        {"schema": "analytics"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    metric_date = Column(Date, nullable=False)
+    producer_id = Column(PG_UUID(as_uuid=True), nullable=False)
+    canonical_unit = Column(Text, nullable=False)
+    measurement_family = Column(Text, nullable=False)
+    confirmed_quantity_direct = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    delivered_quantity_direct = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    confirmed_quantity_recurring = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    delivered_quantity_recurring = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    computed_at = Column(_tz(), server_default=func.now(), nullable=False)
+
+
+class ProducerSupplyDailySnapshotRecord(Base):
+    """Grain (metric_date, producer_id, zone_id, category_id, sub_category_id,
+    canonical_unit). A SNAPSHOT, never a flow: each row is "the known sellable
+    supply of this producer at the end of this day" — never a quantity added
+    that day, never additive across days. Generated once per day, for TODAY
+    only (never backfilled for a past day — no snapshot exists before this
+    job first runs)."""
+
+    __tablename__ = "producer_supply_daily_snapshot"
+    __table_args__ = (
+        Index(
+            "producer_supply_daily_snapshot_grain_uq", "metric_date", "producer_id", "zone_id",
+            "category_id", "sub_category_id", "canonical_unit", unique=True,
+        ),
+        Index("producer_supply_daily_snapshot_date_idx", "metric_date"),
+        CheckConstraint("measurement_family IN ('MASS','VOLUME','COUNT','PACKAGE','OTHER')", name="producer_supply_daily_snapshot_family_chk"),
+        CheckConstraint("available_quantity >= 0 AND product_count >= 0", name="producer_supply_daily_snapshot_qty_chk"),
+        {"schema": "analytics"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    metric_date = Column(Date, nullable=False)
+    producer_id = Column(PG_UUID(as_uuid=True), nullable=False)
+    zone_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    category_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    sub_category_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    canonical_unit = Column(Text, nullable=False)
+    measurement_family = Column(Text, nullable=False)
+    available_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    product_count = Column(Integer, nullable=False, server_default=text("0"))
+    computed_at = Column(_tz(), server_default=func.now(), nullable=False)
+
+
 __all__ = [
     "EventOutboxRecord",
     "BusinessEventRecord",
@@ -320,4 +435,7 @@ __all__ = [
     "DirectDailyMetricRecord",
     "TenderDailyMetricRecord",
     "RecurringDailyMetricRecord",
+    "ProducerDailyMetricRecord",
+    "ProducerQuantityDailyMetricRecord",
+    "ProducerSupplyDailySnapshotRecord",
 ]

@@ -1,6 +1,6 @@
 {
-  "id": "1844458c-ba81-4ab2-9044-e03acebe30a2",
-  "prevId": "6c0cbb31-5023-4f2b-b94d-2a480d86791f",
+  "id": "1e6a13bb-0ab0-4239-9a81-dd1a49bdf274",
+  "prevId": "1844458c-ba81-4ab2-9044-e03acebe30a2",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -10845,6 +10845,475 @@
         "metric_targets_scope_id_matches_scope_type_chk": {
           "name": "metric_targets_scope_id_matches_scope_type_chk",
           "value": "(\"analytics\".\"metric_targets\".\"scope_type\" = 'GLOBAL' AND \"analytics\".\"metric_targets\".\"scope_id\" IS NULL) OR (\"analytics\".\"metric_targets\".\"scope_type\" <> 'GLOBAL' AND \"analytics\".\"metric_targets\".\"scope_id\" IS NOT NULL)"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "analytics.producer_daily_metrics": {
+      "name": "producer_daily_metrics",
+      "schema": "analytics",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "metric_date": {
+          "name": "metric_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "producer_id": {
+          "name": "producer_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "zone_id": {
+          "name": "zone_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "products_published": {
+          "name": "products_published",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "quantity_changes": {
+          "name": "quantity_changes",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "bids_received": {
+          "name": "bids_received",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "orders_confirmed_direct": {
+          "name": "orders_confirmed_direct",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "orders_delivered_direct": {
+          "name": "orders_delivered_direct",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "orders_confirmed_tender": {
+          "name": "orders_confirmed_tender",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "orders_delivered_tender": {
+          "name": "orders_delivered_tender",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "orders_confirmed_recurring": {
+          "name": "orders_confirmed_recurring",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "orders_delivered_recurring": {
+          "name": "orders_delivered_recurring",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "delivered_gmv_direct": {
+          "name": "delivered_gmv_direct",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "delivered_gmv_tender": {
+          "name": "delivered_gmv_tender",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "delivered_gmv_recurring": {
+          "name": "delivered_gmv_recurring",
+          "type": "numeric(16, 2)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "computed_at": {
+          "name": "computed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "producer_daily_metrics_grain_uq": {
+          "name": "producer_daily_metrics_grain_uq",
+          "columns": [
+            {
+              "expression": "metric_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "producer_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "producer_daily_metrics_date_zone_idx": {
+          "name": "producer_daily_metrics_date_zone_idx",
+          "columns": [
+            {
+              "expression": "metric_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "zone_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "producer_daily_metrics_counts_chk": {
+          "name": "producer_daily_metrics_counts_chk",
+          "value": "\"analytics\".\"producer_daily_metrics\".\"products_published\" >= 0 AND \"analytics\".\"producer_daily_metrics\".\"quantity_changes\" >= 0 AND \"analytics\".\"producer_daily_metrics\".\"bids_received\" >= 0 AND \"analytics\".\"producer_daily_metrics\".\"orders_confirmed_direct\" >= 0 AND \"analytics\".\"producer_daily_metrics\".\"orders_delivered_direct\" >= 0 AND \"analytics\".\"producer_daily_metrics\".\"orders_confirmed_tender\" >= 0 AND \"analytics\".\"producer_daily_metrics\".\"orders_delivered_tender\" >= 0 AND \"analytics\".\"producer_daily_metrics\".\"orders_confirmed_recurring\" >= 0 AND \"analytics\".\"producer_daily_metrics\".\"orders_delivered_recurring\" >= 0"
+        },
+        "producer_daily_metrics_money_chk": {
+          "name": "producer_daily_metrics_money_chk",
+          "value": "\"analytics\".\"producer_daily_metrics\".\"delivered_gmv_direct\" >= 0 AND \"analytics\".\"producer_daily_metrics\".\"delivered_gmv_tender\" >= 0 AND \"analytics\".\"producer_daily_metrics\".\"delivered_gmv_recurring\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "analytics.producer_quantity_daily_metrics": {
+      "name": "producer_quantity_daily_metrics",
+      "schema": "analytics",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "metric_date": {
+          "name": "metric_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "producer_id": {
+          "name": "producer_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "canonical_unit": {
+          "name": "canonical_unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "measurement_family": {
+          "name": "measurement_family",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "confirmed_quantity_direct": {
+          "name": "confirmed_quantity_direct",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "delivered_quantity_direct": {
+          "name": "delivered_quantity_direct",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "confirmed_quantity_recurring": {
+          "name": "confirmed_quantity_recurring",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "delivered_quantity_recurring": {
+          "name": "delivered_quantity_recurring",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "computed_at": {
+          "name": "computed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "producer_quantity_daily_metrics_grain_uq": {
+          "name": "producer_quantity_daily_metrics_grain_uq",
+          "columns": [
+            {
+              "expression": "metric_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "producer_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "canonical_unit",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "producer_quantity_daily_metrics_date_idx": {
+          "name": "producer_quantity_daily_metrics_date_idx",
+          "columns": [
+            {
+              "expression": "metric_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "producer_quantity_daily_metrics_family_chk": {
+          "name": "producer_quantity_daily_metrics_family_chk",
+          "value": "\"analytics\".\"producer_quantity_daily_metrics\".\"measurement_family\" IN ('MASS','VOLUME','COUNT','PACKAGE','OTHER')"
+        },
+        "producer_quantity_daily_metrics_qty_chk": {
+          "name": "producer_quantity_daily_metrics_qty_chk",
+          "value": "\"analytics\".\"producer_quantity_daily_metrics\".\"confirmed_quantity_direct\" >= 0 AND \"analytics\".\"producer_quantity_daily_metrics\".\"delivered_quantity_direct\" >= 0 AND \"analytics\".\"producer_quantity_daily_metrics\".\"confirmed_quantity_recurring\" >= 0 AND \"analytics\".\"producer_quantity_daily_metrics\".\"delivered_quantity_recurring\" >= 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "analytics.producer_supply_daily_snapshot": {
+      "name": "producer_supply_daily_snapshot",
+      "schema": "analytics",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "metric_date": {
+          "name": "metric_date",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "producer_id": {
+          "name": "producer_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "zone_id": {
+          "name": "zone_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "category_id": {
+          "name": "category_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "sub_category_id": {
+          "name": "sub_category_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "canonical_unit": {
+          "name": "canonical_unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "measurement_family": {
+          "name": "measurement_family",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "available_quantity": {
+          "name": "available_quantity",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "product_count": {
+          "name": "product_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "computed_at": {
+          "name": "computed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "producer_supply_daily_snapshot_grain_uq": {
+          "name": "producer_supply_daily_snapshot_grain_uq",
+          "columns": [
+            {
+              "expression": "metric_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "producer_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "zone_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "category_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sub_category_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "canonical_unit",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "producer_supply_daily_snapshot_date_idx": {
+          "name": "producer_supply_daily_snapshot_date_idx",
+          "columns": [
+            {
+              "expression": "metric_date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "producer_supply_daily_snapshot_family_chk": {
+          "name": "producer_supply_daily_snapshot_family_chk",
+          "value": "\"analytics\".\"producer_supply_daily_snapshot\".\"measurement_family\" IN ('MASS','VOLUME','COUNT','PACKAGE','OTHER')"
+        },
+        "producer_supply_daily_snapshot_qty_chk": {
+          "name": "producer_supply_daily_snapshot_qty_chk",
+          "value": "\"analytics\".\"producer_supply_daily_snapshot\".\"available_quantity\" >= 0 AND \"analytics\".\"producer_supply_daily_snapshot\".\"product_count\" >= 0"
         }
       },
       "isRLSEnabled": false

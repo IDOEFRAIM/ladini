@@ -2,7 +2,9 @@
 
 **Phase A status: AUDIT ONLY.** Everything in §1–34 below is either a fact proven by reading the code (cited file:line) or a design decision explicitly flagged as a decision, never invented to fill a gap. Companion to `BUYER_ANALYTICS_ARCHITECTURE.md`, `BUSINESS_EVENT_CATALOG.md`, `METRIC_LAYER.md` — the buyer-side infrastructure this reuses without change.
 
-**Phase B status: IMPLEMENTED** — see §35 onward. The bug fix, the two new SUPPLY events, `producer_id` enrichment, and the exhaustive writer instrumentation described below are real, tested code on branch `analytics/producer-phase-b-instrumentation` (+ the SUPPLY-journey schema migration on `analytics/producer-phase-b-schema` in the `frontag` repo). No dashboard, no `producer_daily_metrics` table, no Sell-Through/Demand-Exposure formula — those stay exactly as scoped OUT in §34, deferred to Phase C.
+**Phase B status: IMPLEMENTED (merged)** — see §35-49. The bug fix, the two new SUPPLY events, `producer_id` enrichment, and the exhaustive writer instrumentation are real, tested code, merged via [ladini#27](https://github.com/IDOEFRAIM/ladini/pull/27) + [ladinifront#7](https://github.com/IDOEFRAIM/ladinifront/pull/7).
+
+**Phase C status: IMPLEMENTED** — see §50 onward. The 8 pilot KPIs from §48 are now live and queryable (`ProducerAnalyticsService`), backed by 3 new daily-aggregate tables (migration `0010`). Full design record in `docs/analytics/PRODUCER_METRIC_LAYER.md` — this section only summarizes what changed and points there for detail, to avoid duplicating (and drifting from) that document. No dashboard, no Admin API, no Market Balance, no Sell-Through/full Demand-Exposure formula — still exactly as scoped OUT in §34/§49, deferred to Phase D.
 
 ---
 
@@ -418,3 +420,34 @@ Mirrors the exact field shape of `domain/analytics/metric_dictionary.py::MetricD
 ## 49. Phase C backlog (unchanged from §34, reconfirmed)
 
 Everything §34 already deferred stays deferred: `producer_daily_metrics` aggregate table, Producer AnalyticsService/Admin API/Dashboard, Market Balance, Sell-Through formula (blocked on an `update_product` restock-vs-correction product decision), Demand Exposure for DIRECT/TENDER (blocked on a decision to build search-impression/tender-notification instrumentation), Producer Retention with category segmentation, `repeat_producer_rate`'s window calibration. Phase B's `PRODUCT_SELLABLE_QUANTITY_CHANGED` history (§39) is the raw material a future Sell-Through design would consume — it does not itself close that gap; history only starts accumulating from this phase forward.
+
+---
+
+# Phase C — Metric Layer (implementation record)
+
+Full detail lives in `docs/analytics/PRODUCER_METRIC_LAYER.md` (tables, refresh mechanics, per-metric mechanism, data quality, known limits) — this section is a pointer + summary, not a duplicate.
+
+## 50. What shipped
+
+Three new tables (migration `0010`, pure EXPAND — `CREATE TABLE`/`CREATE INDEX` only): `producer_daily_metrics` (grain `metric_date, producer_id` — order/GMV counts per journey, plus the activity-signal counts that define "active producer"), `producer_quantity_daily_metrics` (grain `metric_date, producer_id, canonical_unit` — DIRECT+RECURRING quantity fulfillment, TENDER structurally absent), `producer_supply_daily_snapshot` (grain `metric_date, producer_id, zone_id, category_id, sub_category_id, canonical_unit` — a live end-of-day snapshot, never a flow, never reconstructible for a past day).
+
+`ProducerMetricsRefresher.recompute_day` mirrors the buyer layer's `DailyMetricsRefresher` exactly (advisory lock, DELETE+INSERT per day, cohort-by-creation-day). `snapshot_producer_supply` deliberately does NOT share that "any past day" contract — it refuses any day but today, since no historical ledger of product availability exists to reconstruct from.
+
+`ProducerAnalyticsService` (`services/analytics/producer_analytics_service.py`) makes all 8 §48 KPIs queryable via `get_metric`/`get_metric_timeseries`/`get_metric_breakdown`/`compare_periods`, reusing the generic `Binding`/`MetricResult`/`DataStatus`/target-resolution engine from `domain/analytics/metric_layer.py` directly (no duplication, no premature shared base class either). `domain/analytics/metric_dictionary.py::METRICS` now carries live, fully-specified entries for all 8 KPIs plus `producer_sell_through_rate`/`producer_paid_gmv` (both UNAVAILABLE, with their reason, same convention as the buyer side's `active_recurring_needs`/`recurring_modification_rate`).
+
+## 51. Verdict update on §4/§7/§34's open questions
+
+- **`producer_sell_through_rate`**: re-confirmed UNAVAILABLE, unchanged from §4/§42 — the quantity-change history Phase B added is real but does not by itself resolve the restock-vs-correction ambiguity. Not revisited further in Phase C, per mission instruction.
+- **`demand_exposure_rate`**: re-confirmed PARTIAL/UNAVAILABLE per journey, unchanged from §7 — no exposure instrumentation was added in Phase C either. Registered as one UNAVAILABLE entry (the mixed status is not one number) rather than three separate always-would-need-building metrics.
+- **`available_supply`**: Phase C chose **Option B** from the mission's own A/B choice (§2 of the Phase C mission) — daily snapshots (`producer_supply_daily_snapshot`) rather than live-query-only — because it was simple to add and gives a consistent, indexed read path; it remains a pure snapshot, never additive, per the mission's explicit warning.
+- **8 KPIs' reconstructibility, finalized** (was tentative in §48, now verified against the real implementation): `active_producers`, `producer_order_fulfillment_rate`, `producer_delivered_gmv`, `delivered_gmv_per_active_producer`, `repeat_producer_rate` are `Reconstructibility.YES` (built from transactional tables, recomputable for any past day via `recompute_range`). `available_supply` is `Reconstructibility.NO` (snapshot, forward-only). `time_to_first_sale` and `producer_quantity_fulfillment_rate` are `Reconstructibility.PARTIAL` (the former only from Phase B's event forward; the latter reliable for DIRECT+RECURRING, structurally absent for TENDER).
+
+## 52. Tests and gates
+
+Real-Postgres tests in `tests/schema/test_producer_metric_layer_pg.py` (self-skips locally without `SCHEMA_TEST_DSN`, runs for real in CI): recompute idempotency, late-delivery cohort update, distinct active-producer counting across days, multi-producer isolation, unit conversion + KG/TETE never summed, TENDER's structural absence from quantity fulfillment, GMV attribution across all 3 journeys, repeat-producer counting, zero-denominator-yields-null, data quality, grain-uniqueness rejection, and the supply snapshot's past-day refusal + idempotent re-run. Pure aggregation logic (`producer_daily_aggregation.py`) has its own database-free unit tests (`tests/unit/test_producer_daily_aggregation.py`), mirroring `test_analytics_daily_aggregation.py`'s style. Buyer Analytics regression re-verified (metric layer, daily aggregation, business events, metric dictionary, metric targets, schema contract — all green); full unit suite's failure set stays byte-identical to the pre-Phase-C baseline (34/34, all pre-existing/environmental — verified via the same git-stash-comparison methodology as Phase B). Ruff and mypy clean on every new/modified file.
+
+**Known, disclosed gap**: `time_to_first_sale` has no dedicated real-Postgres test in this pass (the aggregation and service-layer logic exist and are documented, including the RECURRING `Order.updated_at` imprecision, but end-to-end proof against real data was not written here) — flagged for a follow-up, not silently skipped.
+
+## 53. Phase D recommendation
+
+Once this is reviewed: build the Admin API + a Producer Dashboard on top of `ProducerAnalyticsService` (mirroring the buyer side's Phase E), add the `time_to_first_sale` Postgres test noted above, and revisit `demand_exposure_rate`/`producer_sell_through_rate` only if/when the underlying instrumentation gaps (search-impression tracking, a restock-vs-correction product decision) are actually closed — not before. Market Balance (Demand vs Supply) becomes buildable once both sides share compatible dimensions — worth checking then whether `recurring_daily_metrics`' `requested_quantity` and `producer_supply_daily_snapshot`'s `available_quantity` are query-joinable as-is (same `sub_category_id`/`zone_id`/`canonical_unit` grain shape) or need reconciliation first.

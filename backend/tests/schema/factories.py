@@ -54,9 +54,12 @@ class Graph:
         cols.update(over)
         return insert(self.cur, "marketplace.auctions", **cols)
 
-    def bid(self, auction, producer=None, **over):
+    def bid(self, auction, producer=None, offered_price=450, **over):
+        # `offered_price` is a named parameter (not folded into `**over`'s default) precisely so a
+        # caller can override it explicitly (`g.bid(a, offered_price=200)`) without
+        # `insert() got multiple values for keyword argument 'offered_price'`.
         return insert(self.cur, "marketplace.bids", auction_id=auction, producer_id=producer or self.producer,
-                      offered_price=450, **over)
+                      offered_price=offered_price, **over)
 
     def order(self, **over):
         cols = dict(total_amount=1000, buyer_id=self.buyer)
