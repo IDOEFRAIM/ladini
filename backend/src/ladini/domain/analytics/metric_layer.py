@@ -129,6 +129,13 @@ BINDINGS: dict[str, Binding] = {b.name: b for b in (
     _b(name="tender_gmv", table=TABLE_TENDER, numerator="SUM(committed_value)", denominator=None, unit="FCFA", journey="TENDER",
        note="quantity x winning offered price of tenders created in the window."),
     # ---- RECURRING --------------------------------------------------------------------------
+    _b(name="direct_successful_searches", table=TABLE_DIRECT, numerator="SUM(successful_searches)", denominator=None, unit="count", journey="DIRECT",
+       note="business_events only; no history before Phase C."),
+    _b(name="direct_orders_delivered", table=TABLE_DIRECT, numerator="SUM(orders_delivered)", denominator=None, unit="count", journey="DIRECT"),
+    _b(name="tenders_with_bid", table=TABLE_TENDER, numerator="SUM(tenders_with_bid)", denominator=None, unit="count", journey="TENDER"),
+    _b(name="tender_orders_created", table=TABLE_TENDER, numerator="SUM(tender_orders_created)", denominator=None, unit="count", journey="TENDER"),
+    _b(name="tender_orders_delivered", table=TABLE_TENDER, numerator="SUM(tender_orders_delivered)", denominator=None, unit="count", journey="TENDER"),
+    _b(name="recurring_occurrences", table=TABLE_RECURRING, numerator="SUM(occurrences_active)", denominator=None, unit="count", journey="RECURRING"),
     _b(name="recurring_requested_quantity", table=TABLE_RECURRING, numerator="SUM(requested_quantity)", denominator=None,
        unit="canonical_unit", journey="RECURRING", physical=True),
     _b(name="recurring_matched_quantity", table=TABLE_RECURRING, numerator="SUM(matched_quantity)", denominator=None,
@@ -171,6 +178,21 @@ UNAVAILABLE: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Value computation
 # ---------------------------------------------------------------------------
+
+
+def reliability_of(name: str) -> str:
+    """Reliability class the dashboard shows next to a metric: RELIABLE (computed from exact facts),
+    PARTIAL (computed, with a documented caveat) or UNAVAILABLE (no trustworthy source)."""
+    if name in UNAVAILABLE:
+        return "UNAVAILABLE"
+    if name in ("active_buyers",):
+        return "RELIABLE"
+    if name == "repeat_buyer_rate":
+        return "PARTIAL"
+    binding = BINDINGS.get(name)
+    if binding is None:
+        raise KeyError(name)
+    return "PARTIAL" if binding.status == DataStatus.PARTIAL else "RELIABLE"
 
 
 def compute_value(numerator: Optional[float], denominator: Optional[float]) -> Optional[float]:
@@ -280,5 +302,5 @@ def unavailable_result(name: str, period: dict[str, str]) -> MetricResult:
 __all__ = [
     "Binding", "BINDINGS", "UNAVAILABLE", "DataStatus", "TargetStatus", "TargetRow", "MetricResult",
     "TABLE_BUYER", "TABLE_DIRECT", "TABLE_TENDER", "TABLE_RECURRING", "TABLE_DIMENSIONS",
-    "TARGET_PRECEDENCE", "compute_value", "resolve_target", "evaluate_target", "unavailable_result",
+    "TARGET_PRECEDENCE", "reliability_of", "compute_value", "resolve_target", "evaluate_target", "unavailable_result",
 ]

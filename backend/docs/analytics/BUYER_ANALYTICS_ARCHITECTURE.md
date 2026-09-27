@@ -205,3 +205,10 @@ instrumenting `DIRECT_ORDER_CONFIRMED`.
 - North Star stays PARTIAL. Targets stay unseeded.
 - Still open: global `fulfillment_rate` (needs per-journey confirmed counts at buyer level), `recurring_modification_rate`,
   `active_recurring_needs` history, session-level search->order attribution.
+
+## 16. Phase E — admin API and buyer cockpit (implemented)
+
+Status: **Phase E done** (Phase D.5 merged first). Server-to-server adapter (Next.js `requireAdmin` -> FastAPI `/internal/analytics/buyers/*`
+with the internal token -> `AnalyticsService`), page `/admin/analytics/buyers`, Recharts for trends, short fail-open cache. No KPI formula
+exists in TypeScript. Full description, endpoints, metric mapping, reliability/units/targets/freshness rules: [BUYER_DASHBOARD.md](BUYER_DASHBOARD.md).
+Still open: real targets, global `fulfillment_rate`, search -> order attribution, producer analytics (not started), AWS/AI layers (not started).
