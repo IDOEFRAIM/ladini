@@ -64,6 +64,13 @@
       "when": 1790485200918,
       "tag": "0008_analytics_d5_confirmed_delivered",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790505450244,
+      "tag": "0009_supply_journey_and_events",
+      "breakpoints": true
     }
   ]
 }

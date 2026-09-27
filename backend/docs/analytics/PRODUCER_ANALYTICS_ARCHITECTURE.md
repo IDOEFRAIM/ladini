@@ -1,6 +1,8 @@
-# Producer Analytics Architecture — Phase A (Audit + Design)
+# Producer Analytics Architecture — Phase A (Audit + Design) + Phase B (Instrumentation)
 
-**Status: AUDIT ONLY. No migration, no event, no table, no dashboard, no code change in this phase.** Everything below is either a fact proven by reading the code (cited file:line) or a design decision explicitly flagged as a decision, never invented to fill a gap. Companion to `BUYER_ANALYTICS_ARCHITECTURE.md`, `BUSINESS_EVENT_CATALOG.md`, `METRIC_LAYER.md` — the buyer-side infrastructure this reuses without change.
+**Phase A status: AUDIT ONLY.** Everything in §1–34 below is either a fact proven by reading the code (cited file:line) or a design decision explicitly flagged as a decision, never invented to fill a gap. Companion to `BUYER_ANALYTICS_ARCHITECTURE.md`, `BUSINESS_EVENT_CATALOG.md`, `METRIC_LAYER.md` — the buyer-side infrastructure this reuses without change.
+
+**Phase B status: IMPLEMENTED** — see §35 onward. The bug fix, the two new SUPPLY events, `producer_id` enrichment, and the exhaustive writer instrumentation described below are real, tested code on branch `analytics/producer-phase-b-instrumentation` (+ the SUPPLY-journey schema migration on `analytics/producer-phase-b-schema` in the `frontag` repo). No dashboard, no `producer_daily_metrics` table, no Sell-Through/Demand-Exposure formula — those stay exactly as scoped OUT in §34, deferred to Phase C.
 
 ---
 
@@ -267,3 +269,152 @@ Demand-side data (buyer needs) already exists in the buyer daily aggregates (`re
 - **Blocked, needs a product decision before any code**: `producer_sell_through_rate` (needs an `update_product` semantics decision: restock vs. correction vs. fixing the toggle bug first) and `demand_exposure_rate` for DIRECT/TENDER (needs a decision on whether to build search-impression/tender-notification instrumentation at all — a real project, not a quick add).
 - **Ready to implement immediately, zero ambiguity**: the 8 KPIs in §28, once `producer_id` is threaded through the 3 emitter gaps in §20 (a small, mechanical change) — everything else needed for them is either already event-instrumented (TENDER_BID_RECEIVED/WINNER_SELECTED/ORDER_CREATED, RECURRING_MATCH_FOUND) or directly queryable from already-historical transactional tables (Order/OrderItem/Bid/OrderStatusHistory), independent of the event stream.
 - **Recommended Phase B scope**: (1) enrich the 3 emitter helpers with `producer_id`; (2) build a `producer_daily_metrics`-style aggregate (no producer dimension exists on any current daily table) mirroring the buyer-side Metric Layer's numerator/denominator-never-rates discipline; (3) implement the 8 KPIs from §28 against it; (4) explicitly defer sell-through, exposure (DIRECT/TENDER), and retention-with-segmentation to a Phase C, pending the product decisions flagged above.
+
+---
+
+# Phase B — Instrumentation (implementation record)
+
+**Scope actually delivered**: the bug fix (§36), the two new SUPPLY events + their writer instrumentation (§37–39), `producer_id` enrichment on the three DIRECT/TENDER emitter gaps identified in §20 (§40), and the KPI-readiness update this unlocks (§43). **Deliberately NOT delivered** (per the mission's own interdiction list, same as §34's Phase C recommendation): `producer_daily_metrics`, any Producer AnalyticsService/Admin API/Dashboard, Market Balance, and no invented Sell-Through/Demand-Exposure formula. Those remain exactly as scoped in §34, now formally the Phase C backlog (§48).
+
+## 36. Bug fix: `toggle_product_availability`
+
+**Cause** (proven in §3.2/§30/§31): the method faked ON/OFF by writing `product.quantity_for_sale = 0.0` (pause) / `1.0` (resume) — a resume after a pause **permanently destroyed** the real quantity (500 KG → paused → resumed → 1 KG, forever). It never touched `Product.is_available`, the boolean that already existed for exactly this purpose (already the column `BuyerMixin.search_products` filters on: `Product.is_available.is_(True)`).
+
+**Fix** (`services/database/product.py::toggle_product_availability`, line 260): flips `product.is_available = not was_available` only. `quantity_for_sale` is never assigned anywhere in the method body (locked in by source-inspection tests, see §46). On the OFF→ON transition, calls `emit_product_published_for_sale` (§38) — the only place besides `create_product` where a product can newly become sellable.
+
+**Migration: NONE.** `is_available` (`marketplace.products`) already existed and was already correctly used elsewhere (buyer search) — the bug was that this one method didn't use it. No schema change was needed for the bug fix itself; the only migration in this phase is the additive SUPPLY-journey/event-name CHECK-constraint change (§45), unrelated to the bug.
+
+**Invariant restored and tested** (§46): pause → quantity unchanged; resume → quantity unchanged; a product at 0 KG still just toggles visibility; buyer search still excludes paused products (pre-existing filter, unaffected); no checkout/matching regression (neither reads this method's write side).
+
+## 37. Source of truth: product availability vs. quantity
+
+Two structurally separate booleans/counters, now correctly separated in every write path:
+
+- **Commercial availability** = `Product.is_available` (bool). Mutated by: `toggle_product_availability` (explicit producer pause/resume), `delete_product` (soft-delete forces it False), `update_product_price_and_qty` (never directly — only the publication-transition side effect reads it, never writes it).
+- **Physical/sellable quantity** = `Product.quantity_for_sale` (float). Mutated only by the writers exhaustively listed in §39 — never as a side effect of an availability toggle anymore.
+- **SELLABLE** (used by both new events' trigger conditions) = `is_available = TRUE AND quantity_for_sale > 0` — the exact same predicate §4/§6 already defined in Phase A, now the operational trigger, not just a proposed definition.
+
+## 38. New event: `PRODUCT_PUBLISHED_FOR_SALE`
+
+Fires **only** on the genuine non-sellable → sellable transition (§37's SELLABLE predicate flipping False→True), never on every update — per the mission's explicit "pas à chaque update." Three call sites, all guarded by an explicit before/after comparison (never an unconditional emit):
+
+| Call site | Guard |
+|---|---|
+| `producer.py::create_product` (line 564, after flush) | `product.is_available and quantity_for_sale > 0` at creation (no "before" state needed — creation is always a transition from nonexistence) |
+| `product.py::update_product_price_and_qty` (line 64) | `was_sellable` captured before the mutation loop; emits only `if is_sellable and not was_sellable` after |
+| `product.py::toggle_product_availability` (line 260) | emits only on the `not was_available and product.is_available` (OFF→ON) branch |
+
+**Payload**: `producer_id`, `entity_type=PRODUCT`, `entity_id=product.id`, `sub_category_id`, `quantity` (the sellable quantity at the moment of publication), `unit`. **Journey**: `SUPPLY`.
+
+**Idempotency**: keyed on `product_id` **alone** (`emitter.py::emit_product_published_for_sale`, line 285) — deliberate, not an oversight. This captures only the **first** such transition per product; a later re-publish after a pause is silently deduped. That is exactly what this event's one current consumer (Producer Activation, §6 — "first sellable product published") needs and nothing more. **If a future metric needs every republish as a distinct fact, this key must change first.**
+
+## 39. New event: `PRODUCT_SELLABLE_QUANTITY_CHANGED`
+
+A **raw fact about the column**, nothing more: "the declared sellable quantity changed from X to Y." Never an interpretation of intent — an increase is not asserted to be a restock, a decrease is not asserted to be a sale (sale debits already have their own DIRECT/TENDER/RECURRING order events; this event exists purely because `Product.quantity_for_sale` had **zero history** before Phase B — confirmed in §3.2/§3.3).
+
+**Payload** (`emitter.py::emit_product_quantity_changed`, line 314): `producer_id`, `entity_type=PRODUCT`, `entity_id=product.id`, `sub_category_id`, `quantity` (the new value), `unit`, and inside `metadata` (the existing generic JSONB extension column, same pattern as every other event in this codebase — no new columns added): `previous_quantity`, `delta`, `source` (a short caller-supplied tag: `producer_adjustment`, `order_debit_direct`, `order_debit_escrow`, `order_debit_recurring`, `order_cancelled_recredit_buyer`, `order_cancelled_recredit_producer`, `soft_delete`). `source` is descriptive metadata only — it never gates whether the event fires. **No-op** (no DB call, returns `False`) when `previous_quantity == new_quantity`.
+
+**Idempotency**: `Product` has no version/revision column, so there is no fully stable per-transition ID — documented explicitly, not glossed over (mission requirement). Keyed on `(product_id, previous_quantity, new_quantity, today's UTC date)`. This collapses a same-day retry of the **identical** transition (the real retry scenario: a replayed task/message reruns the exact same write against the exact same before-state) into one event, while a genuinely repeated transition on a **different** day still produces its own event. **Known, accepted limitation**: it would under-count only if the exact same (previous, new) pair legitimately recurs *twice on the same calendar day* for reasons other than a retry — judged preferable to a random-UUID key, which would miss real retries entirely.
+
+## 40. Exhaustive `Product.quantity_for_sale` writer instrumentation
+
+Every legitimate writer from the §3.2 Phase A audit table, now instrumented (function → reason → transactionality → event):
+
+| Function | Reason | Same transaction as mutation? | Event |
+|---|---|---|---|
+| `producer.py::create_product` | initial sellable quantity at creation | yes (before `session.flush()` returns) | `PRODUCT_PUBLISHED_FOR_SALE` only (no quantity-changed event — there is no "previous" value to compare against at creation) |
+| `product.py::update_product_price_and_qty` | producer-driven adjustment | yes | `PRODUCT_SELLABLE_QUANTITY_CHANGED` (source=`producer_adjustment`) + `PRODUCT_PUBLISHED_FOR_SALE` if this update is also the sellability transition |
+| `product.py::toggle_product_availability` | pause/resume (bug fix, §36) | yes | `PRODUCT_PUBLISHED_FOR_SALE` only on resume — **never** a quantity-changed event, because (post-fix) this method never touches quantity |
+| `product.py::delete_product` | soft-delete zeroing | yes | `PRODUCT_SELLABLE_QUANTITY_CHANGED` (source=`soft_delete`) |
+| `buyer.py::confirm_preorder_draft` (line ~2360) | DIRECT cash-path sale debit | yes | `PRODUCT_SELLABLE_QUANTITY_CHANGED` (source=`order_debit_direct`) |
+| `escrow.py::mark_escrow_paid` (line ~297) | DIRECT escrow-path sale debit | yes | `PRODUCT_SELLABLE_QUANTITY_CHANGED` (source=`order_debit_escrow`) |
+| `recurring_supply.py::accept_match_proposal` (line ~834) | RECURRING allocation-acceptance debit | yes | `PRODUCT_SELLABLE_QUANTITY_CHANGED` (source=`order_debit_recurring`) |
+| `buyer.py` cancellation recredit (line ~1049) | buyer-initiated order cancellation | yes | `PRODUCT_SELLABLE_QUANTITY_CHANGED` (source=`order_cancelled_recredit_buyer`) |
+| `producer.py` cancellation recredit (line ~1953) | producer-initiated order cancellation | yes | `PRODUCT_SELLABLE_QUANTITY_CHANGED` (source=`order_cancelled_recredit_producer`) |
+
+**Deliberately excluded**: `marketplace.py::record_sale`'s phantom-product zeroing (§3.2's last row) — a walk-in-sale bookkeeping artifact, not real catalog supply, out of scope by the same reasoning Phase A already gave it. `buyer.py::finalize_multi_order`'s own `quantity_for_sale` write is **dead code** — zero live callers (verified by grep: only referenced in comments/docs) — deliberately not instrumented; instrumenting dead code would be pure noise.
+
+No central "quantity mutation primitive" was introduced — each call site already had its own before/after value in scope from its own business logic, so each just calls `BusinessEventEmitter(session).emit_product_quantity_changed(product, previous_quantity=..., source=...)` directly, in the same session/transaction as the mutation, before `flush()`/`commit()`. `BusinessEventEmitter` itself remains the single centralization point (mission's actual ask), not a second layer on top of it.
+
+## 41. `producer_id` enrichment — DIRECT / TENDER / RECURRING
+
+**Canonical resolution rule** (never the current conversational actor, per mission instruction): `emitter.py::_resolve_direct_producer_id` (line 159) reads the persisted `Order.items[].product.producer_id` relationship — already-loaded items cost zero extra queries (the common case at every real call site); when not loaded, exactly **one** bounded query (`SELECT Product.producer_id JOIN OrderItem ... LIMIT 1`, never a loop). `_resolve_tender_producer_id` (line 183) reads `Order.winning_bid_id → Bid.producer_id`, one bounded query (an Order has at most one winning Bid).
+
+**Wired into** (closing exactly the 3 gaps §20 identified, no new events created):
+- `emit_direct_order_created` (line 254) — DIRECT_ORDER_CREATED now carries `producer_id`.
+- `emit_direct_order_confirmed` (line 369) — DIRECT_ORDER_CONFIRMED now carries `producer_id`.
+- `emit_order_delivered` (line 195, shared DIRECT+TENDER helper) — branches on `is_tender` (`order.auction_id is not None`) to call the matching resolver; both DIRECT_ORDER_DELIVERED and TENDER_DELIVERED now carry `producer_id`.
+
+**RECURRING**: unchanged, per mission instruction — `RECURRING_MATCH_FOUND` already carried `producer_id` per-allocation (Phase A §20 finding, confirmed still true, no gap to close). `RECURRING_DIGEST_ACCEPTED` deliberately **not** turned into a producer-grain event (§20's own recommendation, re-confirmed): it is legitimately occurrence/buyer-grain (an occurrence can split across N producers), and forcing a flat `producer_id` onto it would misrepresent multi-producer occurrences. Per-producer attribution for RECURRING stays a query-time join (`order_group_id` ↔ `Order.checkout_group_id`), exactly as §20 already recommended — no code change needed there.
+
+**TENDER's other events** (`TENDER_BID_RECEIVED`, `TENDER_WINNER_SELECTED`, `TENDER_ORDER_CREATED`) were re-verified against the branch diff: all three already had `producer_id` before this phase (§20's Phase A finding), confirmed unchanged — no new gap, no duplicate event created.
+
+**Tested** (§46): resolution from already-loaded relationships costs zero DB calls (`session.scalar.assert_not_awaited()`); the bounded-query fallback path is exercised separately; both DIRECT and TENDER branches of `emit_order_delivered` are tested to route to the correct resolver and event name.
+
+## 42. Demand Exposure / Sell-Through — unchanged status, re-confirmed
+
+Per explicit mission instruction, **not touched** in Phase B:
+- **Sell-Through Rate**: still **UNAVAILABLE** (§4/§80's verdict). The new `PRODUCT_SELLABLE_QUANTITY_CHANGED` event only starts accumulating history **from Phase B forward** — restock-vs-correction semantics remain undecided (§39), and no formula is proposed here, exactly as §4 already concluded.
+- **Demand Exposure Rate**: still **PARTIAL** (RECURRING only, via the pre-existing `RECURRING_MATCH_FOUND`) / **UNAVAILABLE** (DIRECT, TENDER) — §7's verdict stands unchanged; no search-impression or tender-notification instrumentation was added, per the mission's explicit "ne pas bloquer Phase B dessus."
+
+## 43. KPI readiness — update from §28's list
+
+| # | KPI | §28 status (Phase A) | Phase B status | What changed |
+|---|---|---|---|---|
+| 1 | active_producers | RELIABLE | RELIABLE | unchanged (§5's definition didn't need `producer_id` enrichment — it reads `Product`/`Bid`/`OrderStatusHistory` directly) |
+| 2 | available_supply | RELIABLE (snapshot only) | RELIABLE (snapshot only) | unchanged, live-gauge only by design (§4/§29) |
+| 3 | time_to_first_sale | RELIABLE | RELIABLE | unchanged — §9 already didn't depend on the event stream's `producer_id` (plain `Order`/`OrderItem`/`Bid` joins) |
+| 4 | producer_order_fulfillment_rate | RELIABLE | RELIABLE | unchanged, same reasoning as #3 |
+| 5 | producer_quantity_fulfillment_rate | RELIABLE (DIRECT/RECURRING), N/A (TENDER) | unchanged | TENDER still has no `OrderItem` — structural, not closed by this phase |
+| 6 | delivered_gmv / paid_gmv | RELIABLE | RELIABLE | unchanged, still the same value in this codebase (§12) |
+| 7 | delivered_gmv_per_active_producer | RELIABLE | RELIABLE | derived from #1+#6, unchanged |
+| 8 | repeat_producer_rate | RELIABLE, window PROVISIONAL | RELIABLE, window still PROVISIONAL | unchanged — §14's window-calibration question is a Phase C data question, not a Phase B instrumentation gap |
+| — | producer_activation_rate / time_to_activation | RELIABLE | RELIABLE, now **event-observable** | §6's definition ("first sellable product published") was already reconstructible from `Product.created_at`; `PRODUCT_PUBLISHED_FOR_SALE` (§38) now also makes it **event-stream-observable**, not just table-observable — a convenience, not a new capability |
+
+**Net effect of Phase B on the §28 top-8**: none of them were blocked on the producer_id/quantity-history gaps in the first place — §28 was already careful to pick only KPIs reconstructible from plain transactional tables. What Phase B actually unlocks is (a) an event-driven path to the same 8 KPIs, as an alternative to table-joins, and (b) the raw material — `PRODUCT_SELLABLE_QUANTITY_CHANGED` history — a future Sell-Through design would need, without yet building that design.
+
+## 44. Data quality checks added
+
+`services/analytics/data_quality.py::run_supply_data_quality_checks` (new function, reuses the existing `QualityIssue` dataclass — no new abstraction): `sellable_product_negative_quantity` (ERROR — `is_available=TRUE AND quantity_for_sale < 0`), `available_product_not_actually_sellable` (WARNING — `is_available=TRUE` but zero/NULL quantity, the exact post-bug-fix sanity check for §36), `supply_event_missing_producer_id` (ERROR — any `journey=SUPPLY` event without `producer_id`), `direct_order_event_missing_producer_id` (WARNING — a DIRECT order event still missing `producer_id`, expected only for pre-Phase-B rows). **Deliberately narrow** — only the checks the mission explicitly asked for (§16), not a general-purpose linter; no unit-validity check was added (would require reusing the Python-side `measurement_family_of` registry inside a raw SQL count, judged premature/gassy for this phase).
+
+## 45. Schema / migration
+
+**Source of truth**: Drizzle (`frontag` repo), per repo convention. `src/db/schema/analytics.ts` extended: `EVENT_NAMES` gained `PRODUCT_PUBLISHED_FOR_SALE`/`PRODUCT_SELLABLE_QUANTITY_CHANGED`; a shared `JOURNEY_VALUES_SQL` constant (`'DIRECT','TENDER','RECURRING','SUPPLY'`) now backs both `event_outbox_journey_chk` and `business_events_journey_chk`. Generated migration `drizzle/0009_supply_journey_and_events.sql` — pure **EXPAND** (DROP+ADD CONSTRAINT pairs, strict superset of the previously-allowed values, zero data loss) — committed and pushed to `origin/analytics/producer-phase-b-schema` (`c757ba6`).
+
+**Backend mirror**: `domain/analytics/models.py`'s `_JOURNEY_VALUES_SQL`/`_EVENT_NAMES_SQL` and both tables' `CheckConstraint`s updated to match; `schema_contract/migrations/0009_supply_journey_and_events.sql` + `drizzle_snapshot.json` + `_journal.json` synced via the repo's own `sync_contract.py` convention. `domain/analytics/business_events.py`'s `BusinessEventName` enum, `EVENT_JOURNEY` dict, and `EVENTS_REQUIRING_QUANTITY` frozenset all extended with the two new names; `metric_dictionary.py`'s `Journey` enum gained `SUPPLY`.
+
+**event_outbox has no `event_name` CHECK constraint** (only `journey`) — confirmed by reading `EventOutboxRecord.__table_args__`; only `business_events` restricts event names. Both tables' `journey` constraints were updated identically.
+
+## 46. Tests
+
+- **`tests/unit/test_product_toggle_availability_bug_fix.py`** (new, 9 tests, all green): source-inspection lock that `quantity_for_sale` is never assigned in `toggle_product_availability`'s body; behavioral tests for pause/resume/zero-quantity preserving quantity; publish-event-fires-only-on-OFF→ON; buyer search still filters on `is_available`.
+- **`tests/unit/test_analytics_emitter.py`** (extended, 21 new tests across `TestEmitProductPublishedForSale`, `TestEmitProductQuantityChanged`, `TestDirectProducerIdResolution`, `TestTenderProducerIdResolution`): idempotency-key stability/replay behavior for both new events; zero-DB-call assertion when Order items are already loaded; bounded-query fallback when not; DIRECT vs. TENDER routing correctness inside `emit_order_delivered`.
+- **`tests/schema/test_analytics_business_events.py`** (extended, +4 tests) and **`tests/schema/test_analytics_event_outbox.py`** (extended, +1 test): real-PostgreSQL proof that the migrated CHECK constraints actually accept `SUPPLY`/the two new event names, that pre-existing journeys/events are unaffected (additive-migration regression lock), and (event_outbox specifically) that both new event names insert cleanly under the `SUPPLY` journey.
+- **`tests/schema/test_analytics_supply_data_quality_pg.py`** (new, 8 tests): real-Postgres exercise of `run_supply_data_quality_checks` — clean catalog raises nothing, negative-quantity-while-available is ERROR, zero-quantity-while-available is WARNING, a paused product at 0 raises nothing (proving the check targets the bug's *symptom*, not the state itself), SUPPLY events with/without `producer_id`, DIRECT order events with/without `producer_id`.
+- **Local run results**: `test_analytics_emitter.py` + `test_product_toggle_availability_bug_fix.py` → **30/30 passed**. All four `tests/schema/*` files (`test_analytics_business_events.py`, `test_analytics_event_outbox.py`, `test_analytics_supply_data_quality_pg.py`) collect cleanly (15/6/8 items respectively) but **self-skip locally** — no `SCHEMA_TEST_DSN` / local PostgreSQL available in this environment (consistent with this repo's established, documented CI-only gap for schema tests — same pattern as prior analytics phases). They run for real under `REQUIRE_SCHEMA_DB=1` in CI.
+- **Buyer Analytics regression**: no Buyer Analytics test file was modified; all touched emitter methods (`emit_direct_order_created/confirmed`, `emit_order_delivered`) only gained an *additional* `producer_id` kwarg passed into the pre-existing `emit()` call — the buyer-facing payload shape (`buyer_id`, `event_name`, `journey`, `amount`, etc.) is unchanged. Full-suite run confirms no new failures (§47).
+
+## 47. Gates
+
+Ruff: `ruff check` on every modified/new file — clean. Full backend test suite and mypy diff-vs-main comparison run and reported in the final delivery message to the user, together with the exact commit list and PR link(s) — not duplicated here to avoid this document going stale the moment CI runs again; treat this doc as the design/implementation record, the chat delivery as the point-in-time gate proof.
+
+## 48. Stabilized Producer Metric Dictionary (definitions only — no code registered)
+
+Mirrors the exact field shape of `domain/analytics/metric_dictionary.py::MetricDefinition` (`name, description/definition, journey, numerator, denominator, unit_behavior, supported_dimensions, reconstructible_historically, reliability, notes`) — stabilizing §25–27's conceptual sketch into concrete per-field definitions for the §28 top-8. **Deliberately NOT `_register()`-ed into the live `METRICS` dict**: doing so would be the first brick of a Producer AnalyticsService (querying it requires either a `producer_daily_metrics` aggregate that doesn't exist yet, or direct transactional joins that would need their own service layer) — both explicitly out of scope for this phase (§22/§48). This section is the Phase C implementation spec, not runnable code.
+
+| # | name | definition | numerator | denominator | unit | journeys | dimensions | reconstructibility | reliability | notes |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | `active_producers` | Distinct producers with ≥1 qualifying action in the window (§5) | `COUNT(DISTINCT producer_id)` over Product created/updated, Bid placed, or order status advanced by this producer | — | count | DIRECT+TENDER+RECURRING (cross-journey) | date, zone, category | YES | RELIABLE | biased by noisy "product updated" signal (§5); tightens once a quantity-affecting-only variant is defined |
+| 2 | `available_supply` | Live sellable supply per producer/product, evaluated now | `SUM(quantity_for_sale)` where `is_available=TRUE` | — | KG/L/TETE/... (per canonical unit, never summed across incompatible units) | SUPPLY | producer, sub_category, zone | NO (snapshot only) | RELIABLE (snapshot only) | never a historical series without forward snapshotting; §39's quantity-changed event is the raw material for a future series, not a series itself |
+| 3 | `time_to_first_sale` | signup/first-sellable-product -> first successful (delivered) sale | `MIN(delivered_order.occurred_at) - product.first_sellable_at` | — (point value per producer, aggregated as AVG/P50) | days | DIRECT+TENDER+RECURRING | producer, category | YES | RELIABLE | two variants exist (Time to First Order vs. Time to First Successful/Delivered Sale, §9) — pilot KPI uses the delivered/successful notion |
+| 4 | `producer_order_fulfillment_rate` | share of confirmed orders that reached delivery | `COUNT(orders delivered)` | `COUNT(orders confirmed)` | ratio | DIRECT+TENDER+RECURRING | producer, journey, zone, category | YES | RELIABLE | works for all 3 journeys (every journey has an Order) |
+| 5 | `producer_quantity_fulfillment_rate` | share of confirmed quantity actually delivered | `SUM(quantity delivered)` | `SUM(quantity confirmed)` | canonical unit (mass/volume family) | DIRECT+RECURRING only | producer, sub_category | PARTIAL | RELIABLE (DIRECT/RECURRING), **UNAVAILABLE (TENDER — no OrderItem)** | do not blend TENDER into a global rate — would silently misrepresent it as quantity-based when it's order-binary only |
+| 6 | `producer_delivered_gmv` / `producer_paid_gmv` | revenue that reached the producer | `SUM(amount)` where `payment_status IN ('PAID_OUT','PAID')` | — | XOF | DIRECT+TENDER+RECURRING | producer, journey, zone, category | YES | RELIABLE | **same value in this codebase today** (§12 — both payment paths set delivered+paid atomically); keep both names reserved in case a delayed-payout path is introduced later, but do not compute two different numbers now |
+| 7 | `delivered_gmv_per_active_producer` | average revenue per active producer | `SUM(producer_delivered_gmv)` | `COUNT(active_producers)` (metric 1) | XOF | GLOBAL (cross-journey) | zone, category | YES | RELIABLE | pure derivation of 1+6, no new source needed |
+| 8 | `repeat_producer_rate` | share of producers with ≥2 successful sales among those with ≥1 | `COUNT(producers with >=2 successful sales)` | `COUNT(producers with >=1 successful sale)` | ratio | DIRECT+TENDER+RECURRING | producer category (for window segmentation) | YES | RELIABLE, window **PROVISIONAL** | no dedicated event — computed from the same delivered-order facts as metric 3/4; window not fixed at 30/60/90d — segment by category before fixing a number (§14) |
+
+**Deliberately excluded from this list** (per §34/§42, re-confirmed, not re-litigated here): `producer_sell_through_rate` (UNAVAILABLE, blocked on an `update_product` semantics decision), `demand_exposure_rate` for DIRECT/TENDER (UNAVAILABLE, blocked on a decision to build impression/notification instrumentation), `producer_retention` (NOT IMPLEMENTED, needs category segmentation first), `PRODUCER_FIRST_SALE` (derivable, not a metric needing its own event — §34).
+
+## 49. Phase C backlog (unchanged from §34, reconfirmed)
+
+Everything §34 already deferred stays deferred: `producer_daily_metrics` aggregate table, Producer AnalyticsService/Admin API/Dashboard, Market Balance, Sell-Through formula (blocked on an `update_product` restock-vs-correction product decision), Demand Exposure for DIRECT/TENDER (blocked on a decision to build search-impression/tender-notification instrumentation), Producer Retention with category segmentation, `repeat_producer_rate`'s window calibration. Phase B's `PRODUCT_SELLABLE_QUANTITY_CHANGED` history (§39) is the raw material a future Sell-Through design would consume — it does not itself close that gap; history only starts accumulating from this phase forward.

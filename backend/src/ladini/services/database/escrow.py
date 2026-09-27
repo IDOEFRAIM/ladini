@@ -295,6 +295,9 @@ class EscrowMixin(BaseMixin):
                 )
                 continue
             product.quantity_for_sale = available - stock_debit
+            await BusinessEventEmitter(current_session).emit_product_quantity_changed(
+                product, previous_quantity=available, source="order_debit_escrow"
+            )
             running_total += float(item.price_at_sale or 0.0) * requested
 
         if insufficient:

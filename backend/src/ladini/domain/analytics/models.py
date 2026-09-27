@@ -43,8 +43,10 @@ _EVENT_NAMES_SQL = (
     "'TENDER_ORDER_CREATED','TENDER_DELIVERED',"
     "'RECURRING_NEED_CREATED','RECURRING_OCCURRENCE_CREATED','RECURRING_MATCH_FOUND',"
     "'RECURRING_DIGEST_SENT','RECURRING_DIGEST_ACCEPTED','RECURRING_DIGEST_MODIFIED',"
-    "'RECURRING_OCCURRENCE_SKIPPED','RECURRING_OCCURRENCE_CONFIRMED','RECURRING_OCCURRENCE_DELIVERED'"
+    "'RECURRING_OCCURRENCE_SKIPPED','RECURRING_OCCURRENCE_CONFIRMED','RECURRING_OCCURRENCE_DELIVERED',"
+    "'PRODUCT_PUBLISHED_FOR_SALE','PRODUCT_SELLABLE_QUANTITY_CHANGED'"
 )
+_JOURNEY_VALUES_SQL = "'DIRECT','TENDER','RECURRING','SUPPLY'"
 
 
 class EventOutboxRecord(Base):
@@ -61,7 +63,7 @@ class EventOutboxRecord(Base):
             "status IN ('PENDING','SENDING','SENT','FAILED','DEAD')",
             name="event_outbox_status_chk",
         ),
-        CheckConstraint("journey IN ('DIRECT','TENDER','RECURRING')", name="event_outbox_journey_chk"),
+        CheckConstraint(f"journey IN ({_JOURNEY_VALUES_SQL})", name="event_outbox_journey_chk"),
         {"schema": "analytics"},
     )
 
@@ -93,7 +95,7 @@ class BusinessEventRecord(Base):
         Index("business_events_sub_category_idx", "sub_category_id", "occurred_at"),
         Index("business_events_zone_idx", "zone_id", "occurred_at"),
         CheckConstraint(f"event_name IN ({_EVENT_NAMES_SQL})", name="business_events_event_name_chk"),
-        CheckConstraint("journey IN ('DIRECT','TENDER','RECURRING')", name="business_events_journey_chk"),
+        CheckConstraint(f"journey IN ({_JOURNEY_VALUES_SQL})", name="business_events_journey_chk"),
         CheckConstraint(
             "actor_type IN ('BUYER','PRODUCER','SYSTEM','ADMIN')",
             name="business_events_actor_type_chk",

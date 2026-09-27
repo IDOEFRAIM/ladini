@@ -832,6 +832,9 @@ class RecurringSupplyMixin(BaseMixin):
                         f"Stock insuffisant pour {product.name} (disponible : {available})."
                     )
                 product.quantity_for_sale = available - debit
+                await BusinessEventEmitter(current_session).emit_product_quantity_changed(
+                    product, previous_quantity=available, source="order_debit_recurring"
+                )
 
                 item = OrderItem(
                     id=uuid.uuid4(),

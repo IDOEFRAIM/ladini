@@ -130,4 +130,65 @@ async def run_data_quality_checks(
     return issues
 
 
-__all__ = ["QualityIssue", "run_data_quality_checks", "STALE_AFTER"]
+async def run_supply_data_quality_checks(
+    session: AsyncSession, start: date, end: date,
+) -> list[QualityIssue]:
+    """Producer Analytics Phase B (mission section 16) — raw checks over the
+    SUPPLY-side sources of truth themselves (`marketplace.products`,
+    `analytics.business_events`), not over any daily aggregate (Phase B
+    creates none). Deliberately narrow — only the checks the mission asked
+    for, not a general-purpose product/event linter."""
+    s_dt = datetime(start.year, start.month, start.day)
+    e_dt = datetime(end.year, end.month, end.day) + timedelta(days=1)
+    issues: list[QualityIssue] = []
+
+    async def scalar(sql: str, params: dict) -> int:
+        return int((await session.execute(text(sql), params)).scalar() or 0)
+
+    n = await scalar(
+        "SELECT count(*) FROM marketplace.products WHERE is_available = TRUE AND quantity_for_sale < 0", {}
+    )
+    if n:
+        issues.append(QualityIssue(
+            "sellable_product_negative_quantity", "marketplace.products", "ERROR", n,
+            "A product is marked available with a negative quantity_for_sale — the toggle/debit invariant is broken."))
+
+    n = await scalar(
+        "SELECT count(*) FROM marketplace.products WHERE is_available = TRUE "
+        "AND (quantity_for_sale IS NULL OR quantity_for_sale <= 0)", {}
+    )
+    if n:
+        issues.append(QualityIssue(
+            "available_product_not_actually_sellable", "marketplace.products", "WARNING", n,
+            "A product is marked available (is_available=TRUE) but has zero/NULL quantity_for_sale — "
+            "visible to buyers yet not truly purchasable."))
+
+    n = await scalar(
+        "SELECT count(*) FROM analytics.business_events "
+        "WHERE journey = 'SUPPLY' AND producer_id IS NULL AND occurred_at >= :s AND occurred_at < :e",
+        {"s": s_dt, "e": e_dt},
+    )
+    if n:
+        issues.append(QualityIssue(
+            "supply_event_missing_producer_id", "analytics.business_events", "ERROR", n,
+            "A SUPPLY-journey event was recorded without a producer_id — every SUPPLY fact is producer-grain by definition."))
+
+    n = await scalar(
+        "SELECT count(*) FROM analytics.business_events "
+        "WHERE journey = 'DIRECT' "
+        "AND event_name IN ('DIRECT_ORDER_CREATED', 'DIRECT_ORDER_CONFIRMED', 'DIRECT_ORDER_DELIVERED') "
+        "AND producer_id IS NULL AND occurred_at >= :s AND occurred_at < :e",
+        {"s": s_dt, "e": e_dt},
+    )
+    if n:
+        issues.append(QualityIssue(
+            "direct_order_event_missing_producer_id", "analytics.business_events", "WARNING", n,
+            "A DIRECT order event has no producer_id — expected only for events landed before Producer "
+            "Analytics Phase B; new occurrences should be investigated."))
+
+    return issues
+
+
+__all__ = [
+    "QualityIssue", "run_data_quality_checks", "run_supply_data_quality_checks", "STALE_AFTER",
+]

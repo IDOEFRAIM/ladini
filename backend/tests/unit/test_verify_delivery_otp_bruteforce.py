@@ -74,6 +74,14 @@ class _Session:
     async def scalars(self, _stmt):
         return _Scalars(self._orders)
 
+    async def scalar(self, _stmt):
+        # Producer Analytics Phase B: verify_delivery_otp's delivery emit now
+        # resolves producer_id (this order has no `items` loaded in __dict__,
+        # a real ORM Order() built directly rather than via a query, so the
+        # resolver falls back to this one bounded query) — resolves to the
+        # same producer this whole file's OTP flow is already scoped to.
+        return PRODUCER_ID
+
     async def flush(self):
         self.flushes += 1
 

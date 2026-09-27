@@ -57,6 +57,19 @@ class TestEventOutboxIdempotentEnqueue:
         with pytest.raises(psycopg2.errors.CheckViolation):
             _insert_or_ignore(cur, event_name="TENDER_CREATED", journey="NOT_A_JOURNEY", dedupe_key=uniq("dedupe"))
 
+    def test_supply_journey_with_new_events_is_accepted(self, db):
+        """Producer Analytics Phase B: migration 0009 added SUPPLY plus the two
+        new event names to this table's CHECK constraints too (not just
+        business_events) — the outbox is the FIRST insert in the write path,
+        so if this constraint were stale every SUPPLY emit would fail here
+        before ever reaching business_events."""
+        cur = db.cursor()
+        for event_name in ("PRODUCT_PUBLISHED_FOR_SALE", "PRODUCT_SELLABLE_QUANTITY_CHANGED"):
+            inserted = _insert_or_ignore(
+                cur, event_name=event_name, journey="SUPPLY", dedupe_key=uniq("dedupe")
+            )
+            assert inserted is True
+
     def test_claim_index_exists_for_the_drain_worker(self, db):
         cur = db.cursor()
         cur.execute(

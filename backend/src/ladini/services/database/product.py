@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from sqlalchemy import and_, desc, func, select
 
+from ladini.domain.analytics.emitter import BusinessEventEmitter
 from ladini.domain.models import Order, OrderItem, Product
 from ladini.domain.pricing_tiers import (
     PricingTierError,
@@ -99,6 +100,9 @@ class ProductMixin(BaseMixin):
                     "message": "Produit introuvable ou non autorisé.",
                 }
 
+            was_sellable = bool(product.is_available) and float(product.quantity_for_sale or 0.0) > 0
+            previous_quantity = float(product.quantity_for_sale or 0.0)
+
             changed: List[str] = []
             if price is not None:
                 product.price = positive_float(price, "price", allow_zero=True)
@@ -136,6 +140,14 @@ class ProductMixin(BaseMixin):
                     "status": "error",
                     "message": "Aucun champ à modifier n'a été fourni.",
                 }
+
+            if quantity is not None:
+                await BusinessEventEmitter(self.session).emit_product_quantity_changed(
+                    product, previous_quantity=previous_quantity, source="producer_adjustment"
+                )
+            is_sellable = bool(product.is_available) and float(product.quantity_for_sale or 0.0) > 0
+            if is_sellable and not was_sellable:
+                await BusinessEventEmitter(self.session).emit_product_published_for_sale(product)
 
             await self.session.flush()
             await self.session.refresh(product)
@@ -249,7 +261,20 @@ class ProductMixin(BaseMixin):
         self, phone: str, product_id: str
     ) -> Dict[str, Any]:
         """
-        Active ou désactive un produit du catalogue (Bascule rapide de la quantité entre 0 et 1).
+        Active ou désactive un produit du catalogue (bascule `is_available`).
+
+        Correctif Producer Analytics Phase B (2026-09-27) — bug de données réel,
+        pas un choix de conception : cette méthode simulait auparavant OFF/ON en
+        écrivant `quantity_for_sale = 0.0`/`1.0`, DÉTRUISANT DÉFINITIVEMENT la
+        quantité réelle à chaque reprise (500 KG mis en pause -> repris ->
+        1.0 KG, pour toujours) — voir docs/analytics/PRODUCER_ANALYTICS_
+        ARCHITECTURE.md §3.2/§30. `is_available` existe déjà exactement pour
+        représenter la disponibilité commerciale, séparément de la quantité
+        physique (déjà le champ que `BuyerMixin.search_products` filtre —
+        `Product.is_available.is_(True)`), donc AUCUNE migration n'est
+        nécessaire : la sémantique correcte existait déjà, elle n'était
+        simplement pas utilisée ici. Invariant restauré : la quantité ne
+        change JAMAIS dans cette méthode, seule la visibilité bascule.
         """
         try:
             phone = clean_text(phone, "phone", required=True)
@@ -275,15 +300,18 @@ class ProductMixin(BaseMixin):
                     "message": "Produit introuvable ou non autorisé.",
                 }
 
-            new_quantity = 0.0 if product.quantity_for_sale > 0 else 1.0
-            product.quantity_for_sale = new_quantity
+            was_available = bool(product.is_available)
+            product.is_available = not was_available
+
+            if product.is_available and not was_available:
+                await BusinessEventEmitter(self.session).emit_product_published_for_sale(product)
 
             await self.session.flush()
             await self.session.refresh(product)
 
             status_msg = (
                 "Produit remis en vente"
-                if new_quantity > 0
+                if product.is_available
                 else "Produit masqué du catalogue"
             )
             product_dict = product.to_dict()
@@ -293,7 +321,7 @@ class ProductMixin(BaseMixin):
             return {
                 "status": "success",
                 "data": product_dict,
-                "active": new_quantity > 0,
+                "active": product.is_available,
                 "message": status_msg,
             }
         except ValueError as e:
@@ -352,9 +380,13 @@ class ProductMixin(BaseMixin):
                 }
 
             if total_count > 0:
+                previous_quantity = float(product.quantity_for_sale or 0.0)
                 product.quantity_for_sale = 0.0
                 product.is_available = False
 
+                await BusinessEventEmitter(self.session).emit_product_quantity_changed(
+                    product, previous_quantity=previous_quantity, source="soft_delete"
+                )
                 await self.session.flush()
                 logger.info(
                     "PRODUCT_SOFT_DELETED: ID %s archivé pour préserver l'historique.",

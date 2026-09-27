@@ -1046,9 +1046,11 @@ class BuyerMixin(BaseMixin):
                     # avant la boucle) : si DEUX lignes de la même commande
                     # portent le même produit, la 2e doit voir le recrédit de
                     # la 1re déjà appliqué sur le MÊME objet `product`.
-                    product.quantity_for_sale = float(
-                        product.quantity_for_sale or 0.0
-                    ) + resolve_stock_debit(item)
+                    previous_quantity = float(product.quantity_for_sale or 0.0)
+                    product.quantity_for_sale = previous_quantity + resolve_stock_debit(item)
+                    await BusinessEventEmitter(current_session).emit_product_quantity_changed(
+                        product, previous_quantity=previous_quantity, source="order_cancelled_recredit_buyer"
+                    )
 
         order.status = "CANCELLED"
         order.cancellation_role = "BUYER"
@@ -2358,6 +2360,9 @@ class BuyerMixin(BaseMixin):
                 continue
 
             product.quantity_for_sale = available - stock_debit
+            await BusinessEventEmitter(current_session).emit_product_quantity_changed(
+                product, previous_quantity=available, source="order_debit_direct"
+            )
             line_total = float(item.price_at_sale or 0.0) * requested
             running_total += line_total
             # Chaque montant est imputé à SA commande — le total d'un

@@ -135,6 +135,71 @@ class TestBusinessEventsInsert:
             )
 
 
+class TestSupplyJourneyEvents:
+    """Producer Analytics Phase B: `SUPPLY` journey + `PRODUCT_PUBLISHED_FOR_SALE`/
+    `PRODUCT_SELLABLE_QUANTITY_CHANGED` were added to the CHECK constraints by
+    migration 0009 — this proves the constraint actually accepts them (not just
+    that the Python-side enum was extended) and that producer_id/entity wiring
+    round-trips through the real column types."""
+
+    def test_product_published_for_sale_inserts_cleanly(self, db):
+        cur = db.cursor()
+        g = Graph(cur)
+        event_id = insert(
+            cur, "analytics.business_events",
+            event_name="PRODUCT_PUBLISHED_FOR_SALE", journey="SUPPLY", actor_type="PRODUCER",
+            producer_id=g.producer, entity_type="PRODUCT", entity_id=g.product,
+            sub_category_id=g.sub_category, quantity=500, unit="KG",
+            occurred_at=_occurred_now(), idempotency_key=uniq("idem"),
+        )
+        assert event_id is not None
+
+    def test_product_sellable_quantity_changed_inserts_cleanly(self, db):
+        cur = db.cursor()
+        g = Graph(cur)
+        event_id = insert(
+            cur, "analytics.business_events",
+            event_name="PRODUCT_SELLABLE_QUANTITY_CHANGED", journey="SUPPLY", actor_type="PRODUCER",
+            producer_id=g.producer, entity_type="PRODUCT", entity_id=g.product,
+            sub_category_id=g.sub_category, quantity=350, unit="KG",
+            metadata={"previous_quantity": 500, "delta": -150, "source": "order_debit_direct"},
+            occurred_at=_occurred_now(), idempotency_key=uniq("idem"),
+        )
+        assert event_id is not None
+
+    def test_supply_journey_rejected_before_this_migration_now_accepted(self, db):
+        """Regression lock on the exact bug this migration fixed: SUPPLY was
+        NOT in the old CHECK constraint (DIRECT/TENDER/RECURRING only)."""
+        cur = db.cursor()
+        g = Graph(cur)
+        # would have raised psycopg2.errors.CheckViolation pre-migration-0009
+        event_id = insert(
+            cur, "analytics.business_events",
+            event_name="PRODUCT_PUBLISHED_FOR_SALE", journey="SUPPLY", actor_type="PRODUCER",
+            producer_id=g.producer, entity_type="PRODUCT", entity_id=g.product,
+            occurred_at=_occurred_now(), idempotency_key=uniq("idem"),
+        )
+        assert event_id is not None
+
+    def test_existing_journeys_still_accepted_after_supply_added(self, db):
+        """The migration must be additive (EXPAND) — DIRECT/TENDER/RECURRING
+        must still work exactly as before SUPPLY was added."""
+        cur = db.cursor()
+        g = Graph(cur)
+        for journey, event_name in (
+            ("DIRECT", "DIRECT_ORDER_CREATED"),
+            ("TENDER", "TENDER_CREATED"),
+            ("RECURRING", "RECURRING_MATCH_FOUND"),
+        ):
+            event_id = insert(
+                cur, "analytics.business_events",
+                event_name=event_name, journey=journey, actor_type="SYSTEM",
+                buyer_id=g.buyer, entity_type="ORDER", entity_id=uuid.uuid4(),
+                occurred_at=_occurred_now(), idempotency_key=uniq("idem"),
+            )
+            assert event_id is not None
+
+
 class TestBusinessEventsIndexesAndConstraints:
     def test_expected_indexes_exist(self, db):
         cur = db.cursor()

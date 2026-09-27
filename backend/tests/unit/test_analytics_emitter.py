@@ -189,3 +189,305 @@ class TestBusinessEventEmitter:
                 )
             )
         called.assert_not_awaited()
+
+
+class TestEmitProductPublishedForSale:
+    def _capture(self, monkeypatch):
+        captured = {}
+
+        async def _fake_enqueue(session, *, event_name, journey, payload, dedupe_key):
+            captured["event_name"] = event_name
+            captured["journey"] = journey
+            captured["payload"] = payload
+            captured["dedupe_key"] = dedupe_key
+            return True
+
+        monkeypatch.setattr(
+            "ladini.domain.analytics.emitter.analytics_outbox_repo.enqueue", _fake_enqueue
+        )
+        return captured
+
+    def test_emits_supply_journey_with_the_producer_id(self, monkeypatch):
+        from ladini.domain.analytics.emitter import BusinessEventEmitter
+
+        captured = self._capture(monkeypatch)
+        product_id = uuid.uuid4()
+        producer_id = uuid.uuid4()
+        product = SimpleNamespace(
+            id=product_id, producer_id=producer_id, sub_category_id=None,
+            quantity_for_sale=50.0, unit="KG",
+        )
+        result = run(BusinessEventEmitter(session=object()).emit_product_published_for_sale(product))
+        assert result is True
+        assert captured["event_name"] == "PRODUCT_PUBLISHED_FOR_SALE"
+        assert captured["journey"] == "SUPPLY"
+        assert captured["dedupe_key"] == f"PRODUCT_PUBLISHED_FOR_SALE:{product_id}"
+        assert captured["payload"]["producer_id"] == str(producer_id)
+        assert captured["payload"]["quantity"] == 50.0
+
+    def test_idempotency_key_is_product_id_only_no_timestamp(self, monkeypatch):
+        """Deliberate design (see the method's own docstring): a re-publish
+        after a later pause reuses the SAME key as the first publish and is
+        silently deduped — intentional, since Producer Activation only needs
+        the first occurrence."""
+        from ladini.domain.analytics.emitter import BusinessEventEmitter
+
+        captured = self._capture(monkeypatch)
+        product_id = uuid.uuid4()
+        product = SimpleNamespace(
+            id=product_id, producer_id=uuid.uuid4(), sub_category_id=None,
+            quantity_for_sale=1.0, unit="KG",
+        )
+        run(BusinessEventEmitter(session=object()).emit_product_published_for_sale(product))
+        key_first = captured["dedupe_key"]
+        run(BusinessEventEmitter(session=object()).emit_product_published_for_sale(product))
+        key_second = captured["dedupe_key"]
+        assert key_first == key_second == f"PRODUCT_PUBLISHED_FOR_SALE:{product_id}"
+
+
+class TestEmitProductQuantityChanged:
+    def _capture(self, monkeypatch):
+        captured = {}
+
+        async def _fake_enqueue(session, *, event_name, journey, payload, dedupe_key):
+            captured["event_name"] = event_name
+            captured["journey"] = journey
+            captured["payload"] = payload
+            captured["dedupe_key"] = dedupe_key
+            return True
+
+        monkeypatch.setattr(
+            "ladini.domain.analytics.emitter.analytics_outbox_repo.enqueue", _fake_enqueue
+        )
+        return captured
+
+    def test_emits_the_delta_and_source_in_metadata(self, monkeypatch):
+        from ladini.domain.analytics.emitter import BusinessEventEmitter
+
+        captured = self._capture(monkeypatch)
+        product = SimpleNamespace(
+            id=uuid.uuid4(), producer_id=uuid.uuid4(), sub_category_id=None,
+            quantity_for_sale=150.0, unit="KG",
+        )
+        result = run(
+            BusinessEventEmitter(session=object()).emit_product_quantity_changed(
+                product, previous_quantity=100.0, source="producer_adjustment"
+            )
+        )
+        assert result is True
+        assert captured["event_name"] == "PRODUCT_SELLABLE_QUANTITY_CHANGED"
+        assert captured["journey"] == "SUPPLY"
+        assert captured["payload"]["quantity"] == 150.0
+        assert captured["payload"]["metadata"]["previous_quantity"] == 100.0
+        assert captured["payload"]["metadata"]["delta"] == 50.0
+        assert captured["payload"]["metadata"]["source"] == "producer_adjustment"
+
+    def test_no_op_when_quantity_is_unchanged(self, monkeypatch):
+        from ladini.domain.analytics.emitter import BusinessEventEmitter
+
+        called = AsyncMock()
+        monkeypatch.setattr(
+            "ladini.domain.analytics.emitter.analytics_outbox_repo.enqueue", called
+        )
+        product = SimpleNamespace(
+            id=uuid.uuid4(), producer_id=uuid.uuid4(), sub_category_id=None,
+            quantity_for_sale=100.0, unit="KG",
+        )
+        result = run(
+            BusinessEventEmitter(session=object()).emit_product_quantity_changed(
+                product, previous_quantity=100.0, source="producer_adjustment"
+            )
+        )
+        assert result is False
+        called.assert_not_awaited()
+
+    def test_idempotency_key_includes_the_before_after_pair_and_today(self, monkeypatch):
+        from datetime import datetime, timezone
+
+        from ladini.domain.analytics.emitter import BusinessEventEmitter
+
+        captured = self._capture(monkeypatch)
+        product = SimpleNamespace(
+            id=uuid.uuid4(), producer_id=uuid.uuid4(), sub_category_id=None,
+            quantity_for_sale=150.0, unit="KG",
+        )
+        run(
+            BusinessEventEmitter(session=object()).emit_product_quantity_changed(
+                product, previous_quantity=100.0, source="producer_adjustment"
+            )
+        )
+        today = datetime.now(timezone.utc).date().isoformat()
+        assert captured["dedupe_key"] == (
+            f"PRODUCT_SELLABLE_QUANTITY_CHANGED:{product.id}:100.0:150.0:{today}"
+        )
+
+    def test_same_transition_replayed_same_day_reuses_the_same_key(self, monkeypatch):
+        """A retry of the identical business write (same product, same
+        before/after pair, same day) must dedupe — proves the key doesn't
+        vary between two calls describing the SAME transition."""
+        from ladini.domain.analytics.emitter import BusinessEventEmitter
+
+        captured = self._capture(monkeypatch)
+        product = SimpleNamespace(
+            id=uuid.uuid4(), producer_id=uuid.uuid4(), sub_category_id=None,
+            quantity_for_sale=150.0, unit="KG",
+        )
+        run(
+            BusinessEventEmitter(session=object()).emit_product_quantity_changed(
+                product, previous_quantity=100.0, source="producer_adjustment"
+            )
+        )
+        key_first = captured["dedupe_key"]
+        run(
+            BusinessEventEmitter(session=object()).emit_product_quantity_changed(
+                product, previous_quantity=100.0, source="producer_adjustment"
+            )
+        )
+        key_second = captured["dedupe_key"]
+        assert key_first == key_second
+
+
+class TestDirectProducerIdResolution:
+    """Mission Phase B step 4/5/6: DIRECT_ORDER_CREATED/CONFIRMED/DELIVERED
+    must carry producer_id, resolved from the persisted Order->OrderItem->
+    Product relationship — never guessed, never N+1 when already loaded."""
+
+    def test_resolves_from_already_loaded_items_without_a_query(self):
+        from ladini.domain.analytics.emitter import BusinessEventEmitter
+
+        producer_id = uuid.uuid4()
+        product = SimpleNamespace(producer_id=producer_id)
+        item = SimpleNamespace(product=product)
+        order = SimpleNamespace(id=uuid.uuid4())
+        order.__dict__["items"] = [item]
+
+        session = SimpleNamespace(scalar=AsyncMock())
+        result = run(BusinessEventEmitter(session)._resolve_direct_producer_id(order))
+        assert result == producer_id
+        session.scalar.assert_not_awaited()  # zero extra query when already loaded
+
+    def test_falls_back_to_one_bounded_query_when_items_not_loaded(self):
+        from ladini.domain.analytics.emitter import BusinessEventEmitter
+
+        producer_id = uuid.uuid4()
+        order = SimpleNamespace(id=uuid.uuid4())  # no "items" in __dict__ at all
+        session = SimpleNamespace(scalar=AsyncMock(return_value=producer_id))
+        result = run(BusinessEventEmitter(session)._resolve_direct_producer_id(order))
+        assert result == producer_id
+        session.scalar.assert_awaited_once()
+
+    def test_emit_direct_order_created_carries_producer_id(self, monkeypatch):
+        from ladini.domain.analytics.emitter import BusinessEventEmitter
+
+        captured = {}
+
+        async def _fake_enqueue(session, *, event_name, journey, payload, dedupe_key):
+            captured.update(payload)
+            return True
+
+        monkeypatch.setattr(
+            "ladini.domain.analytics.emitter.analytics_outbox_repo.enqueue", _fake_enqueue
+        )
+        producer_id = uuid.uuid4()
+        product = SimpleNamespace(producer_id=producer_id, sub_category_id=None, unit="KG")
+        item = SimpleNamespace(product=product, quantity=10.0, tier_id=None)
+        order = SimpleNamespace(
+            id=uuid.uuid4(), buyer_id=uuid.uuid4(), auction_id=None, order_type="PREORDER",
+            market_offer_id=None, zone_id=None, total_amount=1000.0,
+        )
+        order.__dict__["items"] = [item]
+
+        run(BusinessEventEmitter(session=object()).emit_direct_order_created(order))
+        assert captured["producer_id"] == str(producer_id)
+
+    def test_emit_direct_order_confirmed_carries_the_same_producer_id(self, monkeypatch):
+        from ladini.domain.analytics.emitter import BusinessEventEmitter
+
+        captured = {}
+
+        async def _fake_enqueue(session, *, event_name, journey, payload, dedupe_key):
+            captured.update(payload)
+            return True
+
+        monkeypatch.setattr(
+            "ladini.domain.analytics.emitter.analytics_outbox_repo.enqueue", _fake_enqueue
+        )
+        producer_id = uuid.uuid4()
+        product = SimpleNamespace(producer_id=producer_id, sub_category_id=None, unit="KG")
+        item = SimpleNamespace(product=product, quantity=10.0, tier_id=None)
+        order = SimpleNamespace(
+            id=uuid.uuid4(), buyer_id=uuid.uuid4(), auction_id=None, order_type="PREORDER",
+            market_offer_id=None, zone_id=None, total_amount=1000.0,
+        )
+        order.__dict__["items"] = [item]
+
+        run(BusinessEventEmitter(session=object()).emit_direct_order_confirmed(order, actor_type="PRODUCER"))
+        assert captured["producer_id"] == str(producer_id)
+
+
+class TestTenderProducerIdResolution:
+    def test_resolves_via_winning_bid(self):
+        from ladini.domain.analytics.emitter import BusinessEventEmitter
+
+        producer_id = uuid.uuid4()
+        order = SimpleNamespace(winning_bid_id=uuid.uuid4())
+        session = SimpleNamespace(scalar=AsyncMock(return_value=producer_id))
+        result = run(BusinessEventEmitter(session)._resolve_tender_producer_id(order))
+        assert result == producer_id
+        session.scalar.assert_awaited_once()
+
+    def test_none_when_no_winning_bid(self):
+        from ladini.domain.analytics.emitter import BusinessEventEmitter
+
+        order = SimpleNamespace(winning_bid_id=None)
+        session = SimpleNamespace(scalar=AsyncMock())
+        result = run(BusinessEventEmitter(session)._resolve_tender_producer_id(order))
+        assert result is None
+        session.scalar.assert_not_awaited()
+
+    def test_emit_order_delivered_resolves_tender_producer_id(self, monkeypatch):
+        from ladini.domain.analytics.emitter import BusinessEventEmitter
+
+        captured = {}
+
+        async def _fake_enqueue(session, *, event_name, journey, payload, dedupe_key):
+            captured.update(payload)
+            return True
+
+        monkeypatch.setattr(
+            "ladini.domain.analytics.emitter.analytics_outbox_repo.enqueue", _fake_enqueue
+        )
+        producer_id = uuid.uuid4()
+        order = SimpleNamespace(
+            id=uuid.uuid4(), order_type="STANDARD", market_offer_id=None,
+            auction_id=uuid.uuid4(), winning_bid_id=uuid.uuid4(),
+            buyer_id=uuid.uuid4(), zone_id=None, total_amount=500.0,
+        )
+        session = SimpleNamespace(scalar=AsyncMock(return_value=producer_id))
+        run(BusinessEventEmitter(session).emit_order_delivered(order))
+        assert captured["event_name"] == "TENDER_DELIVERED"
+        assert captured["producer_id"] == str(producer_id)
+
+    def test_emit_order_delivered_resolves_direct_producer_id(self, monkeypatch):
+        from ladini.domain.analytics.emitter import BusinessEventEmitter
+
+        captured = {}
+
+        async def _fake_enqueue(session, *, event_name, journey, payload, dedupe_key):
+            captured.update(payload)
+            return True
+
+        monkeypatch.setattr(
+            "ladini.domain.analytics.emitter.analytics_outbox_repo.enqueue", _fake_enqueue
+        )
+        producer_id = uuid.uuid4()
+        product = SimpleNamespace(producer_id=producer_id)
+        item = SimpleNamespace(product=product)
+        order = SimpleNamespace(
+            id=uuid.uuid4(), order_type="PREORDER", market_offer_id=None,
+            auction_id=None, buyer_id=uuid.uuid4(), zone_id=None, total_amount=500.0,
+        )
+        order.__dict__["items"] = [item]
+        run(BusinessEventEmitter(session=object()).emit_order_delivered(order))
+        assert captured["event_name"] == "DIRECT_ORDER_DELIVERED"
+        assert captured["producer_id"] == str(producer_id)

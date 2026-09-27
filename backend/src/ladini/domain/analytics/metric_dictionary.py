@@ -36,6 +36,11 @@ class Journey(str, Enum):
     DIRECT = "DIRECT"
     TENDER = "TENDER"
     RECURRING = "RECURRING"
+    #: Producer Analytics Phase B — supply-side facts (a quantity/visibility
+    #: change on a Product) are not tied to any one buyer journey: the same
+    #: product can be sold via DIRECT, TENDER or RECURRING. Not a 4th buyer
+    #: funnel, a separate axis.
+    SUPPLY = "SUPPLY"
 
 
 class AggregationType(str, Enum):

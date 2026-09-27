@@ -666,6 +666,9 @@ class ProducerMgmtMixin(BaseMixin):
         self.session.add(product)
         await self.session.flush()
 
+        if product.is_available and float(product.quantity_for_sale or 0.0) > 0:
+            await BusinessEventEmitter(self.session).emit_product_published_for_sale(product)
+
         return {
             "status": "success",
             "product_id": product_id,
@@ -1950,9 +1953,11 @@ class ProducerMgmtMixin(BaseMixin):
                     # avant la boucle) : si DEUX lignes de la même commande
                     # portent le même produit, la 2e doit voir le recrédit de
                     # la 1re déjà appliqué sur le MÊME objet `product`.
-                    product.quantity_for_sale = float(
-                        product.quantity_for_sale or 0.0
-                    ) + resolve_stock_debit(item)
+                    previous_quantity = float(product.quantity_for_sale or 0.0)
+                    product.quantity_for_sale = previous_quantity + resolve_stock_debit(item)
+                    await BusinessEventEmitter(current_session).emit_product_quantity_changed(
+                        product, previous_quantity=previous_quantity, source="order_cancelled_recredit_producer"
+                    )
 
         normalized_reason = str(reason or "").strip() or None
         order.status = "CANCELLED"

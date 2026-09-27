@@ -54,6 +54,12 @@ class BusinessEventName(str, Enum):
     RECURRING_OCCURRENCE_CONFIRMED = "RECURRING_OCCURRENCE_CONFIRMED"
     RECURRING_OCCURRENCE_DELIVERED = "RECURRING_OCCURRENCE_DELIVERED"
 
+    # SUPPLY (Producer Analytics Phase B) — raw facts about a Product's
+    # sellable state, never an interpretation of business intent. See
+    # docs/analytics/PRODUCER_ANALYTICS_ARCHITECTURE.md §7/§11.
+    PRODUCT_PUBLISHED_FOR_SALE = "PRODUCT_PUBLISHED_FOR_SALE"
+    PRODUCT_SELLABLE_QUANTITY_CHANGED = "PRODUCT_SELLABLE_QUANTITY_CHANGED"
+
 
 #: journey + whether quantity/unit fields are expected to be populated for
 #: this event — used by the data-quality checks the mission asks for
@@ -81,6 +87,8 @@ EVENT_JOURNEY: dict[BusinessEventName, Journey] = {
     BusinessEventName.RECURRING_OCCURRENCE_SKIPPED: Journey.RECURRING,
     BusinessEventName.RECURRING_OCCURRENCE_CONFIRMED: Journey.RECURRING,
     BusinessEventName.RECURRING_OCCURRENCE_DELIVERED: Journey.RECURRING,
+    BusinessEventName.PRODUCT_PUBLISHED_FOR_SALE: Journey.SUPPLY,
+    BusinessEventName.PRODUCT_SELLABLE_QUANTITY_CHANGED: Journey.SUPPLY,
 }
 
 #: Events that MUST carry quantity+unit (a physical fact, not just a status
@@ -95,6 +103,8 @@ EVENTS_REQUIRING_QUANTITY = frozenset(
         BusinessEventName.RECURRING_MATCH_FOUND,
         BusinessEventName.RECURRING_OCCURRENCE_CONFIRMED,
         BusinessEventName.RECURRING_OCCURRENCE_DELIVERED,
+        BusinessEventName.PRODUCT_PUBLISHED_FOR_SALE,
+        BusinessEventName.PRODUCT_SELLABLE_QUANTITY_CHANGED,
     }
 )
 

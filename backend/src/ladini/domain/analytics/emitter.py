@@ -45,6 +45,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ladini.domain.analytics.business_events import BusinessEvent, BusinessEventName
@@ -155,6 +156,42 @@ class BusinessEventEmitter:
         )
         return bool(inserted)
 
+    async def _resolve_direct_producer_id(self, order: Any) -> Optional[Any]:
+        """Producer Analytics Phase B: the canonical producer_id source for a
+        DIRECT order is the persisted Order->OrderItem->Product relationship
+        — NEVER the current conversational actor (who may be a buyer, an
+        admin, or unrelated to this order) and never guessed from a phone
+        number. A DIRECT order is exactly one producer per Order (cart
+        splitting, see the class docstring above) — uses already-loaded
+        items when present (zero extra query, the common case at every real
+        call site), otherwise ONE bounded query (not a loop, not N+1)."""
+        items = list(order.__dict__.get("items") or [])
+        for item in items:
+            product = getattr(item, "product", None)
+            if product is not None and getattr(product, "producer_id", None) is not None:
+                return product.producer_id
+        from ladini.domain.catalog.models import Product
+        from ladini.domain.orders.models import OrderItem
+
+        return await self.session.scalar(
+            select(Product.producer_id)
+            .join(OrderItem, OrderItem.product_id == Product.id)
+            .where(OrderItem.order_id == order.id)
+            .limit(1)
+        )
+
+    async def _resolve_tender_producer_id(self, order: Any) -> Optional[Any]:
+        """The canonical source for a TENDER order's producer is the winning
+        Bid — `Order.winning_bid_id` -> `Bid.producer_id` — never the
+        current actor. One bounded query (an Order has at most one winning
+        Bid, never a loop over a collection)."""
+        winning_bid_id = getattr(order, "winning_bid_id", None)
+        if winning_bid_id is None:
+            return None
+        from ladini.domain.orders.models import Bid
+
+        return await self.session.scalar(select(Bid.producer_id).where(Bid.id == winning_bid_id))
+
     async def emit_order_delivered(self, order: Any) -> bool:
         """Shared by every `Order.delivery_status = "DELIVERED"`/"FULFILLED"
         write site (escrow OTP verification, cash-on-delivery producer
@@ -177,11 +214,17 @@ class BusinessEventEmitter:
         is_tender = getattr(order, "auction_id", None) is not None
         event_name = BusinessEventName.TENDER_DELIVERED if is_tender else BusinessEventName.DIRECT_ORDER_DELIVERED
         journey = Journey.TENDER if is_tender else Journey.DIRECT
+        producer_id = (
+            await self._resolve_tender_producer_id(order)
+            if is_tender
+            else await self._resolve_direct_producer_id(order)
+        )
         return await self.emit(
             event_name=event_name,
             journey=journey,
             actor_type="SYSTEM",
             buyer_id=getattr(order, "buyer_id", None),
+            producer_id=producer_id,
             zone_id=getattr(order, "zone_id", None),
             entity_type="ORDER",
             entity_id=order.id,
@@ -220,11 +263,13 @@ class BusinessEventEmitter:
         sub_category_id = next(iter(subs)) if len(subs) == 1 and None not in subs else None
         single = items[0] if len(items) == 1 and getattr(items[0], "tier_id", None) is None else None
         product = getattr(single, "product", None) if single is not None else None
+        producer_id = await self._resolve_direct_producer_id(order)
         return await self.emit(
             event_name=BusinessEventName.DIRECT_ORDER_CREATED,
             journey=Journey.DIRECT,
             actor_type="BUYER",
             buyer_id=order.buyer_id,
+            producer_id=producer_id,
             zone_id=getattr(order, "zone_id", None),
             entity_type="ORDER",
             entity_id=order.id,
@@ -235,17 +280,105 @@ class BusinessEventEmitter:
             amount=float(order.total_amount or 0.0),
         )
 
+    # ------------------------------------------------------------------ SUPPLY (Producer Analytics Phase B)
+
+    async def emit_product_published_for_sale(self, product: Any) -> bool:
+        """PRODUCT_PUBLISHED_FOR_SALE — the raw fact that a Product transitioned from
+        not-sellable to sellable (`is_available=True AND quantity_for_sale>0`). Called
+        ONLY at the exact transition (product creation with an initial sellable
+        quantity, or `toggle_product_availability` re-enabling one) — never on every
+        update, per the mission's explicit "pas à chaque update."
+
+        Idempotency: keyed on `product_id` ALONE, deliberately — no timestamp/version
+        component. This means only the FIRST such transition for a given product ever
+        lands (a later re-publish after a pause is silently deduped). That is
+        intentional, not an oversight: this event's only current consumer is Producer
+        Activation ("premier produit réellement vendable publié"), which needs exactly
+        the first occurrence and nothing else. If a future metric needs every
+        republish as a distinct fact, this key must change first — don't assume it
+        already captures that.
+        """
+        return await self.emit(
+            event_name=BusinessEventName.PRODUCT_PUBLISHED_FOR_SALE,
+            journey=Journey.SUPPLY,
+            actor_type="PRODUCER",
+            producer_id=product.producer_id,
+            sub_category_id=getattr(product, "sub_category_id", None),
+            entity_type="PRODUCT",
+            entity_id=product.id,
+            idempotency_key=f"PRODUCT_PUBLISHED_FOR_SALE:{product.id}",
+            quantity=float(product.quantity_for_sale or 0.0),
+            unit=getattr(product, "unit", None),
+        )
+
+    async def emit_product_quantity_changed(
+        self, product: Any, *, previous_quantity: float, source: str
+    ) -> bool:
+        """PRODUCT_SELLABLE_QUANTITY_CHANGED — a RAW fact about the column, nothing
+        more: "the declared sellable quantity changed from X to Y." NEVER an
+        interpretation of business intent — an increase is not asserted to be a
+        restock, a decrease is not asserted to be a sale (sale debits already have
+        their own DIRECT/TENDER/RECURRING order events; this event exists because,
+        before Phase B, `Product.quantity_for_sale` had NO history at all — every
+        `update_product` call silently overwrote the prior value). `source` is a
+        short caller-supplied tag (e.g. "producer_adjustment", "order_debit",
+        "order_cancelled_recredit", "soft_delete") carried in `metadata` for later
+        analysis — it never gates whether the event fires.
+
+        No-op (returns False, no DB call) when `previous_quantity == new_quantity`:
+        not a change, nothing to record.
+
+        Idempotency: Product has no version/revision column, so there is no fully
+        stable per-transition ID (documented per mission instruction, not glossed
+        over). Keyed on `(product_id, previous_quantity, new_quantity, today's date)`
+        — this collapses a same-day retry of the IDENTICAL transition (the real
+        retry scenario: a message/task replay reruns the exact same write against
+        the exact same before-state) into one event, while still letting a genuinely
+        repeated transition on a DIFFERENT day produce its own event. It would only
+        under-count if the exact same (previous, new) pair legitimately recurs
+        TWICE on the SAME calendar day for reasons other than a retry — accepted as
+        a known, narrow limitation rather than a random UUID key that would miss
+        real retries entirely.
+        """
+        new_quantity = float(product.quantity_for_sale or 0.0)
+        previous_quantity = float(previous_quantity or 0.0)
+        if new_quantity == previous_quantity:
+            return False
+        today = datetime.now(timezone.utc).date().isoformat()
+        return await self.emit(
+            event_name=BusinessEventName.PRODUCT_SELLABLE_QUANTITY_CHANGED,
+            journey=Journey.SUPPLY,
+            actor_type="PRODUCER",
+            producer_id=product.producer_id,
+            sub_category_id=getattr(product, "sub_category_id", None),
+            entity_type="PRODUCT",
+            entity_id=product.id,
+            idempotency_key=(
+                f"PRODUCT_SELLABLE_QUANTITY_CHANGED:{product.id}:"
+                f"{previous_quantity}:{new_quantity}:{today}"
+            ),
+            quantity=new_quantity,
+            unit=getattr(product, "unit", None),
+            metadata={
+                "previous_quantity": previous_quantity,
+                "delta": new_quantity - previous_quantity,
+                "source": source,
+            },
+        )
+
     async def emit_direct_order_confirmed(self, order: Any, *, actor_type: str) -> bool:
         """DIRECT_ORDER_CONFIRMED: the order reached Order.status = CONFIRMED (producer accepted
         it, or the escrow payment was secured) — the firm, executable commitment that delivery
         requires. Called only AFTER that status is persisted; recurring/tender orders never emit."""
         if not self._is_direct_order(order):
             return False
+        producer_id = await self._resolve_direct_producer_id(order)
         return await self.emit(
             event_name=BusinessEventName.DIRECT_ORDER_CONFIRMED,
             journey=Journey.DIRECT,
             actor_type=actor_type,
             buyer_id=order.buyer_id,
+            producer_id=producer_id,
             zone_id=getattr(order, "zone_id", None),
             entity_type="ORDER",
             entity_id=order.id,

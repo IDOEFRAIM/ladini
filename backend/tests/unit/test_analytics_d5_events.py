@@ -36,7 +36,13 @@ def _order(**over):
 def _emitter():
     from ladini.domain.analytics.emitter import BusinessEventEmitter
 
-    return BusinessEventEmitter(session=object())
+    # Producer Analytics Phase B: emit_direct_order_created/confirmed now resolve
+    # producer_id, falling back to one bounded query when it can't be read off
+    # already-loaded items (e.g. these fixtures' items never carry a producer_id) —
+    # a real session answers that query; here it resolves to "unknown" (None),
+    # which none of these DIRECT-journey/idempotency/dimension tests assert on.
+    session = SimpleNamespace(scalar=AsyncMock(return_value=None))
+    return BusinessEventEmitter(session=session)
 
 
 class TestDirectOrderConfirmed:
