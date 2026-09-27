@@ -49,8 +49,33 @@
 		}
 	}
 
-	# /metrics, /admin/*, /api/market/* : JAMAIS exposés publiquement
-	# (scrape Prometheus et exploitation passent par le réseau interne / tunnel SSH).
+	# Analytics acheteurs Phase E (2026-09-27) : SEUL sous-chemin de `/internal/*`
+	# exposé publiquement — l'adaptateur serveur Next.js (`requireAdmin` côté
+	# Vercel) doit pouvoir l'atteindre via `api.ladini.tech`. Le reste de
+	# `/internal/*` (aucune autre route n'y vit aujourd'hui) et TOUT `/admin/*`,
+	# `/api/market/*`, `/metrics` restent 404 via le `handle` générique
+	# ci-dessous — cette règle ne les élargit pas.
+	#
+	# Reste fail-closed CÔTÉ APPLICATIF, pas seulement ici : le routeur FastAPI
+	# `/internal/analytics/buyers/*` porte `Depends(require_internal_token)`
+	# au niveau du ROUTER (voir `api/routes/analytics_admin.py`), donc Caddy
+	# ne fait qu'ouvrir le chemin réseau — un appel sans le bon
+	# `X-Internal-Token` reçoit toujours 401/503 depuis FastAPI, jamais 200.
+	@analytics_internal path /internal/analytics/*
+	handle @analytics_internal {
+		reverse_proxy api:8000 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 30s
+			}
+		}
+	}
+
+	# /metrics, /admin/*, /api/market/*, le reste de /internal/* : JAMAIS
+	# exposés publiquement (scrape Prometheus et exploitation passent par le
+	# réseau interne / tunnel SSH).
 	handle {
 		respond "Not Found" 404
 	}
