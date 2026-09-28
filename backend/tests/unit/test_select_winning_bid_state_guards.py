@@ -38,6 +38,7 @@ from sqlalchemy.sql.dml import Update as _UpdateStmt
 from tests.conftest import run
 
 from ladini.services.database.auction import AuctionMixin
+from tests.unit.certified_bids import certified_bid_columns
 from ladini.services.database.errors import BusinessRuleException
 
 
@@ -51,6 +52,8 @@ def _bid(**overrides):
         is_winner=False,
     )
     base.update(overrides)
+    if "offered_price_basis" not in base:
+        base.update(certified_bid_columns(base["offered_price"]))
     return types.SimpleNamespace(**base)
 
 

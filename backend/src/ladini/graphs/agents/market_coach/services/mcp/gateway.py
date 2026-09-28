@@ -147,13 +147,26 @@ class AuctionGateway(_BaseGateway):
         phone: str,
         offered_price: Any,
         message: str | None = None,
+        *,
+        price_basis: str | None = None,
+        price_unit: str | None = None,
+        package_type: str | None = None,
+        package_content_amount: Any = None,
+        package_content_unit: str | None = None,
     ) -> Dict[str, Any]:
+        # Phase B2b : un nouveau bid porte OBLIGATOIREMENT sa base (`price_basis`) — sans elle le serveur
+        # refuse (`price_basis_required`). `_call` retire les `None`.
         return await self._call(
             "place_bid",
             auction_id=auction_id,
             phone=phone.strip(),
             offered_price=offered_price,
             message=message,
+            price_basis=price_basis,
+            price_unit=price_unit,
+            package_type=package_type,
+            package_content_amount=package_content_amount,
+            package_content_unit=package_content_unit,
         )
 
     async def get_my_active_bids(self, phone: str) -> Dict[str, Any]:
@@ -172,10 +185,27 @@ class AuctionGateway(_BaseGateway):
         )
 
     async def update_bid_price(
-        self, bid_id: str, phone: str, new_price: Any
+        self,
+        bid_id: str,
+        phone: str,
+        new_price: Any,
+        *,
+        price_basis: str | None = None,
+        price_unit: str | None = None,
+        package_type: str | None = None,
+        package_content_amount: Any = None,
+        package_content_unit: str | None = None,
     ) -> Dict[str, Any]:
         return await self._call(
-            "update_bid_price", bid_id=bid_id, phone=phone.strip(), new_price=new_price
+            "update_bid_price",
+            bid_id=bid_id,
+            phone=phone.strip(),
+            new_price=new_price,
+            price_basis=price_basis,
+            price_unit=price_unit,
+            package_type=package_type,
+            package_content_amount=package_content_amount,
+            package_content_unit=package_content_unit,
         )
 
     async def get_auctions_bids(self, **kwargs: Any) -> Dict[str, Any]:
@@ -195,7 +225,10 @@ class AuctionGateway(_BaseGateway):
         delivery_lat: float | None = None,
         delivery_lon: float | None = None,
         idempotency_key: str | None = None,
+        expected_award: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
+        # `expected_award` (Phase B2b) : les termes CONFIRMÉS par l'acheteur (empreinte de la décision
+        # certifiée), revalidés côté serveur sous verrou avant d'attribuer.
         # phone requis pour l'identité de contexte MCP (sinon PermissionDenied).
         # `idempotency_key` (2026-09-17, follow-up pre-Hetzner) : accepter
         # une transition d'enchère GAGNANTE crée un `Order` — une action
@@ -210,6 +243,7 @@ class AuctionGateway(_BaseGateway):
             delivery_lat=delivery_lat,
             delivery_lon=delivery_lon,
             idempotency_key=idempotency_key,
+            expected_award=expected_award,
         )
 
 

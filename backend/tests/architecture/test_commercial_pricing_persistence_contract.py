@@ -84,9 +84,9 @@ class TestB_EveryNewBidHasABasisOrIsExplicitlyLegacy:
         _, _, call = sites[0]
         assert any(kw.arg is None and getattr(kw.value, "id", None) == "pricing_columns" for kw in call.keywords)
 
-    def test_place_bid_certifies_the_basis_when_given_and_logs_when_absent(self):
+    def test_place_bid_refuses_a_new_bid_without_a_basis(self):
         src = (DB_SERVICES / "auction.py").read_text(encoding="utf-8")
-        assert "bid_snapshot_columns(" in src and "BID_PRICE_BASIS_UNSPECIFIED" in src
+        assert "bid_snapshot_columns(" in src and "price_basis_required" in src
 
     def test_bid_price_updates_never_write_offered_price_alone(self):
         src = (DB_SERVICES / "auction.py").read_text(encoding="utf-8")

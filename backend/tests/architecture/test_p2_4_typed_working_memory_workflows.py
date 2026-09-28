@@ -30,6 +30,9 @@ _ORIGINAL_STALE_WM_KEYS = frozenset(
     {
         "bid_phase", "pending_bid_auction", "pending_bid_price",
         "pending_modify_bid",
+        # Phase B2b (2026-09-28) : le prix CERTIFIÉ en cours de confirmation (montant + base + provenance) fait
+        # partie de la même mini machine à états `bid_phase` — purgé avec elle à l'abandon du tunnel.
+        "pending_bid_pricing",
         "update_phase", "update_cycle_id", "update_product_id",
         "update_pending",
         "winner_gps_stage",

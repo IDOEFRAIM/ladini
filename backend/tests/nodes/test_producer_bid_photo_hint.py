@@ -10,7 +10,20 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+from decimal import Decimal
+
 from tests.conftest import make_state, run
+
+from ladini.domain.bid_pricing_flow import BidPriceParse, BidPriceStatus
+from ladini.domain.commercial_offer import PriceBasis, Provenance
+
+
+def _resolved(amount="550"):
+    """Prix de bid certifiable : 550 FCFA par KG, dit explicitement."""
+    return BidPriceParse(
+        BidPriceStatus.RESOLVED, amount=Decimal(amount), basis=PriceBasis.PER_BASE_UNIT, price_unit="KG",
+        source=Provenance.USER_EXPLICIT,
+    )
 
 
 class TestSubmitBidPhotoHint:
@@ -29,7 +42,7 @@ class TestSubmitBidPhotoHint:
         )
 
         state = make_state(user_phone="+22670000001")
-        result = run(auctions_mod.submit_bid(state, mc_runtime=None, auction_id="a1", price=550.0))
+        result = run(auctions_mod.submit_bid(state, mc_runtime=None, auction_id="a1", parse=_resolved()))
 
         assert captured == {"phone": "+22670000001", "bid_id": "b1"}
         assert "📸" in result["final_response"]
@@ -53,7 +66,7 @@ class TestSubmitBidPhotoHint:
         )
 
         state = make_state(user_phone="+22670000001")
-        result = run(auctions_mod.submit_bid(state, mc_runtime=None, auction_id="a1", price=550.0))
+        result = run(auctions_mod.submit_bid(state, mc_runtime=None, auction_id="a1", parse=_resolved()))
 
         assert called["count"] == 0
         assert "📸" not in result["final_response"]
@@ -73,7 +86,7 @@ class TestSubmitBidPhotoHint:
         )
 
         state = make_state(user_phone="+22670000001")
-        result = run(auctions_mod.submit_bid(state, mc_runtime=None, auction_id="a1", price=550.0))
+        result = run(auctions_mod.submit_bid(state, mc_runtime=None, auction_id="a1", parse=_resolved()))
 
         assert called["count"] == 0
         assert result["response_strategy"] == "ERROR"

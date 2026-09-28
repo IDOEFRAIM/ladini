@@ -38,12 +38,20 @@ class BidWorkflowState:
         CONFIRM            → prix reçu, confirmation demandée.
         ASK_PRICE_MODIFY   → modification d'offre existante, nouveau prix demandé.
         CONFIRM_MODIFY      → nouveau prix reçu, confirmation demandée.
+        ASK_BASIS[_MODIFY]  → (Phase B2b) montant reçu SANS base fiable : « par tonne ou pour l'ensemble ? ».
+        ASK_PACKAGE[_MODIFY]→ (Phase B2b) prix au conditionnement sans contenu : « quelle quantité ? ».
     """
 
-    PHASES = ("ASK_PRICE", "CONFIRM", "ASK_PRICE_MODIFY", "CONFIRM_MODIFY")
+    PHASES = (
+        "ASK_PRICE", "CONFIRM", "ASK_PRICE_MODIFY", "CONFIRM_MODIFY",
+        "ASK_BASIS", "ASK_PACKAGE", "ASK_BASIS_MODIFY", "ASK_PACKAGE_MODIFY",
+    )
 
     KEYS: FrozenSet[str] = frozenset(
-        {"bid_phase", "pending_bid_auction", "pending_bid_price", "pending_modify_bid"}
+        {
+            "bid_phase", "pending_bid_auction", "pending_bid_price", "pending_modify_bid",
+            "pending_bid_pricing",
+        }
     )
 
     def __init__(self, working_memory: Dict[str, Any]) -> None:

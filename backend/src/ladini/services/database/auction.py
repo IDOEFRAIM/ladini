@@ -2,6 +2,7 @@ import logging
 import re
 import uuid
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from rapidfuzz import fuzz, process
@@ -13,6 +14,7 @@ from ladini.core.formatting import fmt_num as _fmt_num
 from ladini.domain.analytics.business_events import BusinessEventName
 from ladini.domain.analytics.emitter import BusinessEventEmitter
 from ladini.domain.analytics.metric_dictionary import Journey
+from ladini.domain.bid_pricing_flow import render_pricing_label
 
 # Importation stricte des modèles requis pour le domaine des enchères
 from ladini.domain.models import (
@@ -35,7 +37,9 @@ from .common import clean_text, normalize_phone, positive_float
 from .errors import BusinessRuleException
 from .moderation import _fold as _fold_for_moderation
 from .pricing_persistence import (
+    award_decision_for,
     award_total_and_snapshot,
+    bid_display_fields,
     bid_snapshot_columns,
     reprice_bid_columns,
 )
@@ -718,19 +722,25 @@ class AuctionMixin(BaseMixin):
                 ),
             }
 
-        pricing_columns: Dict[str, Any] = {"offered_price": float(offered_price)}
-        if price_basis:
-            pricing_columns = bid_snapshot_columns(
-                amount=offered_price, basis=price_basis, price_unit=price_unit, auction=auction,
-                package_type=package_type, package_content_amount=package_content_amount,
-                package_content_unit=package_content_unit, source="BID_EXPLICIT",
-            )
-        else:
+        # Phase B2b (étape 11) : un NOUVEAU bid porte OBLIGATOIREMENT sa base (« 450000 » seul n'est pas un
+        # prix). Les bids antérieurs restent « base inconnue » ; ils ne peuvent être que requalifiés.
+        if not price_basis:
             logger.warning(
-                "BID_PRICE_BASIS_UNSPECIFIED | auction=%s | producer=%s — bid écrit sans base de prix "
-                "(lecture: base historique inconnue, jamais « par unité de l'enchère »)",
+                "BID_PRICE_BASIS_REQUIRED | auction=%s | producer=%s — nouveau bid refusé: base absente",
                 auction.id, producer_id,
             )
+            raise BusinessRuleException(
+                "Précisez si votre prix est par unité, par conditionnement ou pour l'ensemble du lot.",
+                reason="price_basis_required",
+            )
+        pricing_columns: Dict[str, Any] = bid_snapshot_columns(
+            amount=offered_price, basis=price_basis, price_unit=price_unit, auction=auction,
+            package_type=package_type, package_content_amount=package_content_amount,
+            package_content_unit=package_content_unit, source="BID_EXPLICIT",
+        )
+        logger.info(
+            "BID_PRICING_PERSISTED | auction=%s | producer=%s | basis=%s", auction.id, producer_id, price_basis
+        )
         new_bid = Bid(
             id=uuid.uuid4(),
             auction_id=a_uuid,
@@ -1064,6 +1074,15 @@ class AuctionMixin(BaseMixin):
 
             bids_list = []
             for bid, prod_name in results:
+                # Phase B2b : chaque offre porte SA sémantique de prix (« 450 000 FCFA par tonne » /
+                # « 4 200 000 FCFA pour l'ensemble »), jamais `offered_price` + l'unité de l'enchère.
+                pricing = (
+                    bid_display_fields(bid, auction_obj, producer_name=prod_name)
+                    if auction_row
+                    else {"pricing_label": f"{_fmt_num(bid.offered_price)} FCFA (base de prix inconnue)",
+                          "price_basis": None, "pricing_reliability": "UNKNOWN_BASIS", "comparable_total": None,
+                          "normalized_label": None, "requires_requalification": True, "award_decision": None}
+                )
                 bids_list.append(
                     {
                         "bid_id": str(bid.id),
@@ -1075,8 +1094,17 @@ class AuctionMixin(BaseMixin):
                         "message": bid.message,
                         "delivery": "Non inclus",
                         "images": list(bid.images or []),
+                        **pricing,
                     }
                 )
+            # Classement par TOTAL comparable (jamais par montant brut, toutes bases confondues) ;
+            # les offres non comparables (base inconnue…) viennent après, sans classement inventé.
+            bids_list.sort(
+                key=lambda b: (
+                    0 if b.get("comparable_total") is not None else 1,
+                    float(b["comparable_total"]) if b.get("comparable_total") is not None else 0.0,
+                )
+            )
 
             return {
                 "status": "success",
@@ -1166,6 +1194,8 @@ class AuctionMixin(BaseMixin):
             ):
                 clean_prod_name = prod_name or "Producteur Externe"
 
+                _lot = SimpleNamespace(id=bid.auction_id, quantity=qty, unit=unit, buyer_id=None)
+                _pricing = bid_display_fields(bid, _lot, producer_name=clean_prod_name, with_decision=False)
                 bids_list.append(
                     {
                         "bid_id": str(bid.id),
@@ -1173,12 +1203,13 @@ class AuctionMixin(BaseMixin):
                         "price": bid.offered_price,
                         "producer": clean_prod_name,
                         "images": list(bid.images or []),
+                        **_pricing,
                     }
                 )
 
                 line = (
                     f"\n*{i}. Lot {product_name}* ({qty} {unit})\n"
-                    f"💰 Prix proposé : *{bid.offered_price} CFA*\n"
+                    f"💰 Prix proposé : *{_pricing['pricing_label']}*\n"
                     f"👤 Vendeur : {clean_prod_name}"
                 )
                 menu_lines.append(line)
@@ -1279,7 +1310,9 @@ class AuctionMixin(BaseMixin):
                     bid.status, bool(getattr(bid, "is_winner", False)), auction_status
                 )
                 bid_id = str(bid.id)
-                price_txt = _fmt_num(bid.offered_price)
+                _lot = SimpleNamespace(id=bid.auction_id, quantity=qty, unit=unit, buyer_id=None)
+                _pricing = bid_display_fields(bid, _lot, with_decision=False)
+                price_txt = _pricing["pricing_label"]
                 data.append(
                     {
                         "bid_id": bid_id,
@@ -1293,13 +1326,14 @@ class AuctionMixin(BaseMixin):
                         "status": status_code,
                         "status_label": friendly_status,
                         "images": list(bid.images or []),
+                        **_pricing,
                     }
                 )
                 mapping[str(i)] = bid_id
 
                 line = (
                     f"\n*{i}. Demande de {product_name}* ({qty} {unit})\n"
-                    f"💰 Votre prix : *{price_txt} CFA*\n"
+                    f"💰 Votre prix : *{price_txt}*\n"
                     f"📊 Statut : {friendly_status}"
                 )
                 menu_lines.append(line)
@@ -1517,9 +1551,15 @@ class AuctionMixin(BaseMixin):
         phone: str | None = None,
         delivery_lat: float | None = None,
         delivery_lon: float | None = None,
+        expected_award: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         """
         Désigne l'offre gagnante, passe l'appel d'offre à l'état 'CLOSED'
+
+        ``expected_award`` (Phase B2b) : les TERMES que l'acheteur a confirmés (`fingerprint` d'une
+        `CertifiedAwardDecision`). Revalidés ICI, sous verrou, contre l'état courant du bid : prix, base,
+        quantité, total ou producteur qui ont changé -> refus `award_terms_changed`. Un bid dont la base de
+        prix n'est pas certifiée n'est JAMAIS attribuable (`bid_basis_unknown`) : la base n'est pas déduite.
         et instancie la commande officielle (Order) au sein de la transaction courante.
 
         ``phone`` (optionnel) : numéro de l'acheteur appelant. REQUIS pour que le
@@ -1673,6 +1713,15 @@ class AuctionMixin(BaseMixin):
                 reason="not_owner",
             )
 
+        # Phase B2b : décision d'attribution CERTIFIÉE — base du prix du bid, total dérivé, empreinte des
+        # termes confirmés. Calculée sous verrou et AVANT toute écriture : un bid sans base connue, un prix
+        # incompatible avec l'enchère ou des termes changés depuis la confirmation sont refusés ici.
+        decision = award_decision_for(bid, auction, producer_name=prod_name, expected_award=expected_award)
+        logger.info(
+            "BID_AWARD_CERTIFIED | auction=%s | bid=%s | fingerprint=%s | idempotency_key=%s",
+            auction.id, bid.id, decision.fingerprint[:12], decision.idempotency_key,
+        )
+
         # 1. Mises à jour atomiques des états du Marché
         bid.is_winner = True
         bid.status = "WINNING"
@@ -1710,8 +1759,8 @@ class AuctionMixin(BaseMixin):
         # montant), jamais « prix × quantité de l'enchère » supposé. Bid antérieur sans base : total
         # historique inchangé, aucun instantané (base inconnue). L'instantané gelé vit sur la commande
         # (un appel d'offres n'a pas de `order_items`, faute de produit).
-        _total_dec, award_snapshot = award_total_and_snapshot(bid, auction)
-        total = float(_total_dec)
+        total = float(decision.award_total)
+        award_snapshot = decision.frozen_snapshot()
 
         new_order = Order(
             id=uuid.uuid4(),
@@ -1833,12 +1882,14 @@ class AuctionMixin(BaseMixin):
                 f"🤝 *Félicitations ! Deal conclu.*\n\n"
                 f"Vous avez choisi l'offre de *{clean_prod_name}*.\n"
                 f"📦 Produit : {sub_cat.name}\n"
-                f"💰 Total à payer : *{total} CFA*\n\n"
+                f"💰 Offre retenue : *{render_pricing_label(decision.pricing)}*\n"
+                f"🧾 Total à payer : *{total} CFA*\n\n"
                 f"{producer_status_line}"
             ),
             "summary_producer": (
                 f"🎉 *Bonne nouvelle !*\n\n"
                 f"Votre offre pour {auction.quantity} {auction.unit} de {sub_cat.name} a été retenue !\n"
+                f"💰 Offre : *{render_pricing_label(decision.pricing)}*\n"
                 f"💵 Montant du marché : *{total} CFA*\n\n"
                 f"Veuillez contacter l'acheteur pour coordonner les détails de la livraison."
             ),
@@ -1898,9 +1949,23 @@ class AuctionMixin(BaseMixin):
         }
 
     async def update_bid_price(
-        self, bid_id: str, phone: str, new_price: float
+        self,
+        bid_id: str,
+        phone: str,
+        new_price: float,
+        *,
+        price_basis: str | None = None,
+        price_unit: str | None = None,
+        package_type: str | None = None,
+        package_content_amount: float | None = None,
+        package_content_unit: str | None = None,
     ) -> Dict[str, Any]:
-        """Permet à un producteur de corriger le prix d'une offre encore PENDING."""
+        """Permet à un producteur de corriger le prix d'une offre encore PENDING.
+
+        Phase B2b : `price_basis` fourni -> la base peut CHANGER (« finalement 4 millions pour tout » :
+        PER_BASE_UNIT -> TOTAL_LOT) et un bid ancien (base inconnue) est REQUALIFIÉ ; le snapshot est
+        recalculé. Omis -> même base, nouveau montant ; un bid ancien reste « base inconnue » (jamais
+        déduite ici)."""
         current_session = self.session
         if not current_session:
             raise BusinessRuleException("Session de base de données indisponible.")
@@ -1940,12 +2005,19 @@ class AuctionMixin(BaseMixin):
 
         # l'enchère n'est nécessaire que pour recalculer un snapshot CERTIFIÉ ; un bid ancien (sans base)
         # ne change que de montant, sa base reste inconnue.
-        _auction = (
-            await current_session.get(Auction, bid.auction_id)
-            if getattr(bid, "pricing_snapshot_version", None) is not None
-            else None
-        )
-        for _col, _val in reprice_bid_columns(bid, _auction, new_price).items():
+        _needs_auction = price_basis or getattr(bid, "pricing_snapshot_version", None) is not None
+        _auction = await current_session.get(Auction, bid.auction_id) if _needs_auction else None
+        if price_basis:
+            _cols = bid_snapshot_columns(
+                amount=new_price, basis=price_basis, price_unit=price_unit, auction=_auction,
+                package_type=package_type, package_content_amount=package_content_amount,
+                package_content_unit=package_content_unit, source="BID_EXPLICIT",
+            )
+            logger.info("BID_PRICING_PERSISTED | bid=%s | basis=%s | requalified=%s", bid.id, price_basis,
+                        getattr(bid, "pricing_snapshot_version", None) is None)
+        else:
+            _cols = reprice_bid_columns(bid, _auction, new_price)
+        for _col, _val in _cols.items():
             setattr(bid, _col, _val)
         bid.updated_at = datetime.now()
         await current_session.flush()

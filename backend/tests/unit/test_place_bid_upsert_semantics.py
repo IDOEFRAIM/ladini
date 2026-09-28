@@ -94,7 +94,7 @@ class TestOneBidPerProducerPerAuction:
         svc = _service(session)
 
         result = run(
-            svc.place_bid(auction_id=str(auction.id), phone="+22670000001", offered_price=300.0)
+            svc.place_bid(auction_id=str(auction.id), phone="+22670000001", offered_price=300.0, price_basis="PER_BASE_UNIT", price_unit="TONNE")
         )
 
         assert result["status"] == "success"
@@ -112,7 +112,7 @@ class TestOneBidPerProducerPerAuction:
         svc = _service(session)
 
         result = run(
-            svc.place_bid(auction_id=str(auction.id), phone="+22670000001", offered_price=250.0)
+            svc.place_bid(auction_id=str(auction.id), phone="+22670000001", offered_price=250.0, price_basis="PER_BASE_UNIT", price_unit="TONNE")
         )
 
         assert result["status"] == "success"
@@ -137,7 +137,7 @@ class TestOneBidPerProducerPerAuction:
         with pytest.raises(BusinessRuleException) as exc_info:
             run(
                 svc.place_bid(
-                    auction_id=str(auction.id), phone="+22670000001", offered_price=999.0
+                    auction_id=str(auction.id), phone="+22670000001", offered_price=999.0, price_basis="PER_BASE_UNIT", price_unit="TONNE"
                 )
             )
         assert exc_info.value.reason == "bid_already_processed"

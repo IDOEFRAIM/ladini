@@ -4,9 +4,17 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from ladini.domain.bid_award import CertifiedAwardDecision
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     set_pending_interaction,
+)
+from ladini.graphs.agents.market_coach.flows.buyer.award_decision import (
+    confirmation_message,
+    execute_award,
+    lookup_award,
+    requalification_message,
+    unavailable_message,
 )
 from ladini.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
@@ -48,9 +56,17 @@ def _build_bids_menu(
     for i, b in enumerate(bids, start=1):
         bid_id = str(b.get("bid_id") or b.get("id") or "")
         producer = b.get("producer") or b.get("producer_name") or "Producteur"
-        price = b.get("price") or b.get("offered_price") or "?"
-        lines.append(f"\n*{i}. {producer}* — 💰 {price} CFA")
-        options.append({"index": str(i), "label": f"{producer} — {price} CFA"})
+        # Phase B2b : la sémantique de prix PROPRE à l'offre (base, total), jamais `offered_price` seul.
+        if b.get("pricing_label"):
+            price_txt = str(b["pricing_label"])
+            if b.get("comparable_total") is not None:
+                price_txt += f" (total {b['comparable_total']} FCFA)"
+            elif b.get("requires_requalification"):
+                price_txt += " ⚠️ à préciser par le producteur"
+        else:
+            price_txt = f"{b.get('price') or b.get('offered_price') or '?'} FCFA"
+        lines.append(f"\n*{i}. {producer}* — 💰 {price_txt}")
+        options.append({"index": str(i), "label": f"{producer} — {price_txt}"})
         if bid_id:
             mapping[str(i)] = bid_id
     lines.append("\n_Répondez avec le numéro pour accepter une offre._")
@@ -236,75 +252,140 @@ async def _handle_viewing_offers(
     jamais dépendre d'un paramètre systématiquement `None`."""
     bid_id = payload.get("bid_id")
     if bid_id:
+        # Phase B2b : choisir une ligne ne désigne PAS le gagnant. On construit la décision d'attribution
+        # certifiée (prix + BASE + quantité + total), on l'affiche et on attend la confirmation — jamais
+        # d'attribution sur un numéro de ligne, jamais sur un bid dont la base est inconnue.
         _buyer_phone = phone or nctx.get("buyer_phone") or nctx.get("phone")
-        # Point GPS de livraison — best-effort, contrairement au tunnel
-        # dédié `flows/buyer/order_tracking.py::finalize_winner` (qui
-        # redemande explicitement/confirme le point avant de créer la
-        # commande). Ici, la machine à états négociation n'a pas de slot
-        # multi-tour naturel pour insérer cette confirmation sans une
-        # réécriture plus large — on réutilise silencieusement le point PAR
-        # DÉFAUT du profil s'il existe, sinon la commande est créée sans
-        # (comportement historique, non-régression). Voir
-        # [[gps-delivery-burkina-faso-2026-08]] pour le suivi de cet écart.
-        _delivery_lat: Optional[float] = None
-        _delivery_lon: Optional[float] = None
-        if _buyer_phone:
-            try:
-                from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import (
-                    _get_stored_location,
-                )
+        lookup = await lookup_award(mc_runtime, str(auction_id), str(bid_id), str(_buyer_phone or ""))
+        if lookup.found and lookup.requires_requalification:
+            return {
+                "status": "COMPLETED",
+                "response_strategy": "SUCCESS",
+                "final_response": requalification_message(lookup),
+                "transaction_payload": {"resolved_id": None, "bid_id": None},
+                "negotiation_context": {"__reset__": True},
+                "ag_ui_component": None,
+            }
+        if not lookup.selectable:
+            return {
+                "status": "COMPLETED",
+                "response_strategy": "ERROR",
+                "final_response": unavailable_message(),
+                "transaction_payload": {"resolved_id": None, "bid_id": None},
+                "negotiation_context": {"__reset__": True},
+                "ag_ui_component": None,
+            }
+        assert lookup.decision is not None
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": confirmation_message(lookup),
+            "transaction_payload": {"resolved_id": None, "bid_id": None},
+            "negotiation_context": {
+                **nctx,
+                "phase": "CONFIRM_AWARD",
+                "pending_award": lookup.decision.to_state(),
+            },
+            "ag_ui_component": None,
+        }
 
-                _delivery_lat, _delivery_lon = await _get_stored_location(
-                    mc_runtime, str(_buyer_phone)
-                )
-            except Exception:
-                logger.warning(
-                    "_handle_viewing_offers: échec de lecture du point GPS par défaut"
-                )
-        try:
-            # `idempotency_key` — voir order_tracking.py::finalize_winner pour
-            # la même dérivation (bid_id est déjà l'identifiant stable de
-            # cette action précise, un bid n'est sélectionné gagnant qu'une
-            # fois).
-            win = await AuctionGateway(mc_runtime).select_winning_bid(
-                bid_id=str(bid_id),
-                phone=str(_buyer_phone) if _buyer_phone else None,
-                delivery_lat=_delivery_lat,
-                delivery_lon=_delivery_lon,
-                idempotency_key=f"select_winning_bid:{bid_id}",
-            )
-        except Exception as exc:
-            logger.error("_handle_viewing_offers: select_winning_bid a échoué: %s", exc)
-            return {
-                "status": "COMPLETED",
-                "response_strategy": "ERROR",
-                "final_response": "Impossible de valider cette offre pour le moment. Réessayez dans un instant.",
-                "transaction_payload": {"resolved_id": None},
-                "negotiation_context": {"__reset__": True},
-                "ag_ui_component": None,
-            }
-        if str(win.get("status") or "").lower() != "success":
-            return {
-                "status": "COMPLETED",
-                "response_strategy": "ERROR",
-                "final_response": win.get("message")
-                or "Impossible de valider cette offre.",
-                "transaction_payload": {"resolved_id": None},
-                "negotiation_context": {"__reset__": True},
-                "ag_ui_component": None,
-            }
+    # No bid_id yet — fetch and show bids
+    return await _fetch_and_show_bids(mc_runtime, auction_id, nctx, "VIEWING_OFFERS")
+
+
+# =====================================================================
+# PHASE: CONFIRM_AWARD — l'acheteur confirme une décision d'attribution FIGÉE (Phase B2b)
+# =====================================================================
+
+_AWARD_YES = frozenset({"oui", "ok", "okay", "daccord", "d'accord", "confirme", "confirmer", "je confirme",
+                        "valide", "valider", "yes", "go", "vasy", "parfait", "c'est bon", "cest bon"})
+_AWARD_NO = frozenset({"non", "annuler", "annule", "stop", "cancel", "quitter", "retour", "pas maintenant"})
+
+
+async def _handle_confirm_award(
+    mc_runtime: MarketRuntime,
+    state: Dict[str, Any],
+    nctx: Dict[str, Any],
+    auction_id: str,
+    phone: str,
+) -> Dict[str, Any]:
+    """Exécute la décision CONFIRMÉE (`nctx.pending_award`), après revalidation contre l'état réel. Termes
+    changés -> nouvelle confirmation ; jamais d'attribution sur un objet mutable relu après coup."""
+    event = str(state.get("interpreted_event") or "").upper().strip()
+    text = str(state.get("normalized_text") or state.get("user_query") or "").strip().lower()
+    frozen = CertifiedAwardDecision.from_state(nctx.get("pending_award"))
+
+    def _done(message: str, strategy: str = "SUCCESS") -> Dict[str, Any]:
         return {
             "status": "COMPLETED",
-            "response_strategy": "SUCCESS",
-            "final_response": win.get("summary_buyer") or "✅ Offre acceptée.",
+            "response_strategy": strategy,
+            "final_response": message,
             "current_goal": None,
             "transaction_payload": {"__reset__": True},
             "negotiation_context": {"__reset__": True},
             "ag_ui_component": None,
         }
 
-    # No bid_id yet — fetch and show bids
-    return await _fetch_and_show_bids(mc_runtime, auction_id, nctx, "VIEWING_OFFERS")
+    if frozen is None or event == "REJECT" or text in _AWARD_NO:
+        return _done("D'accord, aucune proposition n'a été retenue. Tapez *mes appels d'offres* pour les revoir.")
+    if not (event == "CONFIRM" or text in _AWARD_YES):
+        note = await llm_deviation_reply(
+            mc_runtime, text, "confirmer le gagnant retenu pour cet appel d'offres (oui/non)",
+        )
+        prompt = "Répondez *oui* pour confirmer le gagnant, ou *non* pour annuler."
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": f"{note}\n\n{prompt}" if note else prompt,
+            "negotiation_context": nctx,
+            "ag_ui_component": None,
+        }
+
+    lookup = await lookup_award(mc_runtime, str(auction_id), frozen.bid_id, phone)
+    if lookup.found and lookup.requires_requalification:
+        return _done(requalification_message(lookup))
+    if not lookup.selectable:
+        return _done(unavailable_message(), "ERROR")
+    assert lookup.decision is not None
+    if lookup.decision.fingerprint != frozen.fingerprint:
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": (
+                "⚠️ Les termes de cette offre ont *changé* entre-temps.\n\n" f"{confirmation_message(lookup)}"
+            ),
+            "negotiation_context": {**nctx, "phase": "CONFIRM_AWARD", "pending_award": lookup.decision.to_state()},
+            "ag_ui_component": None,
+        }
+
+    # Point GPS de livraison — best-effort (voir `[[gps-delivery-burkina-faso-2026-08]]` pour cet écart connu).
+    delivery_lat: Optional[float] = None
+    delivery_lon: Optional[float] = None
+    if phone:
+        try:
+            from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import (
+                _get_stored_location,
+            )
+
+            delivery_lat, delivery_lon = await _get_stored_location(mc_runtime, phone)
+        except Exception:
+            logger.warning("_handle_confirm_award: échec de lecture du point GPS par défaut")
+    try:
+        win = await execute_award(mc_runtime, frozen, phone=phone, delivery_lat=delivery_lat, delivery_lon=delivery_lon)
+    except Exception as exc:
+        logger.error("_handle_confirm_award: select_winning_bid a échoué: %s", exc)
+        business = str(getattr(exc, "error_code", "") or "").upper() == "BUSINESS_ERROR"
+        return _done(
+            str(exc) if business else "Impossible de valider cette offre pour le moment. Réessayez dans un instant.",
+            "ERROR",
+        )
+    if str(win.get("status") or "").lower() != "success":
+        return _done(win.get("message") or "Impossible de valider cette offre.", "ERROR")
+    logger.info("BID_AWARD_EXECUTED | auction=%s | bid=%s | idempotency_key=%s", auction_id, frozen.bid_id, frozen.idempotency_key)
+    return _done(win.get("summary_buyer") or "✅ Offre acceptée.")
 
 
 # =====================================================================
@@ -554,6 +635,9 @@ async def negotiation_gate(
     # Route by negotiation phase
     if auction_id and nphase == "AWAIT_COUNTER_PRICE":
         return await _handle_counter_price(mc_runtime, phone, payload, nctx, auction_id, state)
+
+    if auction_id and nphase == "CONFIRM_AWARD":
+        return await _handle_confirm_award(mc_runtime, state, nctx, auction_id, phone)
 
     if auction_id and nphase == "VIEWING_OFFERS":
         return await _handle_viewing_offers(mc_runtime, payload, nctx, auction_id, phone)

@@ -137,6 +137,14 @@ class NewTaskEntities(BaseModel):
     unit: Optional[str] = None
     price: Optional[float] = None
     price_unit: Optional[str] = None
+    # Phase B2b : SUGGESTIONS du LLM sur la sémantique d'un prix (bids, ventes). Jamais autoritaires :
+    # le DOMAINE (`domain/bid_pricing_flow.py`, `domain/commercial_offer_flow.py`) lit la base dans le texte
+    # ou dans la question posée et les journalise seulement. Volontairement absents du prompt (coût de
+    # tokens, déterminisme) : acceptés s'ils sont émis, jamais demandés.
+    price_basis: Optional[str] = None
+    package_type: Optional[str] = None
+    package_content_amount: Optional[float] = None
+    package_content_unit: Optional[str] = None
     pricing_tiers: List[NewTaskPricingTier] = []
     estimated_available_at: Optional[str] = None
     expected_harvest_date: Optional[str] = None

@@ -282,6 +282,11 @@ _UNIT_AFTER_PRICE_RE = re.compile(
 )
 
 
+#: Public alias (Phase B2b) — le motif « <montant> [FCFA] <marqueur de base> <unité> » est partagé avec le flux
+#: des bids (`domain/bid_pricing_flow.py`) plutôt que dupliqué.
+UNIT_AFTER_PRICE_RE = _UNIT_AFTER_PRICE_RE
+
+
 def price_unit_next_to_amount(text: Any, amount: Optional[float]) -> Optional[str]:
     """Unité canonique que l'utilisateur a collée AU PRIX (« 500f le sachet » -> SAC,
     « 500 fcfa/kg » -> KG), ou `None`.
@@ -697,6 +702,7 @@ __all__ = [
     "parse_package_content",
     "parse_basis_reply",
     "price_unit_next_to_amount",
+    "UNIT_AFTER_PRICE_RE",
     "price_expression_in_text",
     "build_commercial_offer_from_sales_state",
     "price_question",

@@ -184,26 +184,28 @@ class TestSelectWinningBidIdempotencyKey:
     offre" — un bid n'est sélectionné gagnant qu'une fois, donc pas besoin
     d'un objet draft/version comme PROCUREMENT/SALES_PUBLISH."""
 
-    def test_same_bid_id_same_key(self):
-        key = lambda bid_id: f"select_winning_bid:{bid_id}"  # noqa: E731 — même format que order_tracking.py/negotiation.py
-        assert key("bid-123") == key("bid-123")
+    def test_same_terms_same_key(self):
+        """Phase B2b : la clé est celle de la DÉCISION certifiée (mêmes termes = même clé)."""
+        from tests.unit.test_bid_award_decision import decision_for
 
-    def test_different_bid_id_different_key(self):
-        key = lambda bid_id: f"select_winning_bid:{bid_id}"  # noqa: E731
-        assert key("bid-123") != key("bid-456")
+        assert decision_for(450000).idempotency_key == decision_for(450000).idempotency_key
 
-    def test_call_sites_use_the_documented_format(self):
-        """Verrouille le format EXACT utilisé par les deux call sites réels
-        (order_tracking.py::finalize_winner et negotiation.py) — un futur
-        changement de format dans l'un sans l'autre romprait le rejeu si un
-        même bid_id transite par les deux chemins."""
+    def test_changed_terms_change_the_key(self):
+        from tests.unit.test_bid_award_decision import decision_for
+
+        assert decision_for(450000).idempotency_key != decision_for(430000).idempotency_key
+
+    def test_the_single_call_site_uses_the_decision_key(self):
+        """Le SEUL site d'appel (`award_decision.execute_award`) passe la clé de la décision ; les deux tunnels
+        (order_tracking, negotiation) y passent obligatoirement."""
         from ladini.graphs.agents.market_coach.flows.buyer import (
+            award_decision,
             negotiation,
             order_tracking,
         )
 
-        pattern = re.compile(r'idempotency_key=f"select_winning_bid:\{bid_id\}"')
-        ot_src = Path(order_tracking.__file__).read_text(encoding="utf-8")
-        neg_src = Path(negotiation.__file__).read_text(encoding="utf-8")
-        assert pattern.search(ot_src), "order_tracking.py n'utilise plus le format attendu"
-        assert pattern.search(neg_src), "negotiation.py n'utilise plus le format attendu"
+        aw_src = Path(award_decision.__file__).read_text(encoding="utf-8")
+        assert "idempotency_key=decision.idempotency_key" in aw_src
+        assert "expected_award={\"fingerprint\": decision.fingerprint}" in aw_src
+        for module in (order_tracking, negotiation):
+            assert "execute_award(" in Path(module.__file__).read_text(encoding="utf-8")

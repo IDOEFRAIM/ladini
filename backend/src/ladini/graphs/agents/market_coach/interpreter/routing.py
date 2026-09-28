@@ -109,6 +109,7 @@ from ladini.graphs.agents.market_coach.interpreter.prompts import (
     INTERPRETER_USER_PROMPT,
 )
 from ladini.graphs.agents.market_coach.services.domain.commercial_gate import (
+    bid_price_reply_expected,
     commercial_question_from_state,
 )
 from ladini.graphs.agents.market_coach.services.domain.product_validation import (
@@ -2040,6 +2041,19 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 "interpreter_confidence": 0.98,
                 "extracted_entities": {},
                 "raw_analysis": {"path": "commercial_question_fast_path"},
+            }
+
+        # 0.46 RÉPONSE À UNE QUESTION DE PRIX DE BID (Phase B2b, 2026-09-28) : « 450000 » après « quel prix
+        # par tonne ? », « par tonne » après « par tonne ou pour l'ensemble ? ». Lue déterministiquement dans
+        # le contexte de la question (domain/bid_pricing_flow.py) — un prix ne dépend pas d'un classifieur LLM.
+        if not onboarding_active and bid_price_reply_expected(state, text):
+            logger.info("[Interpreter BidPrice] fast-path reply to a bid price question")
+            return {
+                "interpreted_event": "ANSWER",
+                "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+                "interpreter_confidence": 0.98,
+                "extracted_entities": {},
+                "raw_analysis": {"path": "bid_price_fast_path"},
             }
 
         # 0.5 CONTRAT D'ACTION STRUCTURÉE (2026-09-01) : reconstruit à chaque

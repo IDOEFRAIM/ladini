@@ -86,6 +86,12 @@ class _FakeSingleBidSession:
     async def scalar(self, _stmt):
         return self._bid
 
+    async def get(self, _model, _pk):
+        # B2b : corriger le prix d'un bid CERTIFIÉ recharge l'enchère (quantité/unité) pour recalculer son snapshot.
+        import types as _types
+
+        return _types.SimpleNamespace(id=self._bid.auction_id, quantity=10.0, unit="TONNE", buyer_id=None)
+
     async def flush(self):
         pass
 
@@ -155,7 +161,7 @@ class TestFullAuctionLifecycleThenAllPostWinnerAttemptsAreRejected:
         # ── PRODUCER A -> bid 250 ────────────────────────────────────────
         svc_a = _service(_FakePlaceBidSession(auction, None), producer=producer_a)
         session_a1 = svc_a.session
-        result = run(svc_a.place_bid(auction_id=str(auction.id), phone=phone_a, offered_price=250.0))
+        result = run(svc_a.place_bid(auction_id=str(auction.id), phone=phone_a, offered_price=250.0, price_basis="PER_BASE_UNIT", price_unit="TONNE"))
         assert result["status"] == "success"
         bid_a = session_a1.added[0]
         assert bid_a.offered_price == 250.0
@@ -163,7 +169,7 @@ class TestFullAuctionLifecycleThenAllPostWinnerAttemptsAreRejected:
         # ── PRODUCER B -> bid 275 ────────────────────────────────────────
         svc_b = _service(_FakePlaceBidSession(auction, None), producer=producer_b)
         session_b1 = svc_b.session
-        run(svc_b.place_bid(auction_id=str(auction.id), phone=phone_b, offered_price=275.0))
+        run(svc_b.place_bid(auction_id=str(auction.id), phone=phone_b, offered_price=275.0, price_basis="PER_BASE_UNIT", price_unit="TONNE"))
         bid_b = session_b1.added[0]
         assert bid_b.offered_price == 275.0
 
@@ -234,7 +240,7 @@ class TestFullAuctionLifecycleThenAllPostWinnerAttemptsAreRejected:
         producer_c = types.SimpleNamespace(id=uuid.uuid4())
         svc_place_c = _service(_FakePlaceBidSession(auction, None), producer=producer_c)
         with pytest.raises(BusinessRuleException):
-            run(svc_place_c.place_bid(auction_id=str(auction.id), phone="+22670000003", offered_price=280.0))
+            run(svc_place_c.place_bid(auction_id=str(auction.id), phone="+22670000003", offered_price=280.0, price_basis="PER_BASE_UNIT", price_unit="TONNE"))
 
         # -- cancel_auction (acheteur) : l'enchère n'est plus OPEN --
         svc_cancel = _service(_FakeCancelAuctionSession(auction))

@@ -146,10 +146,27 @@ class TestOrderItemSnapshot:
                 with violation(cur, errors.CheckViolation):
                     cur.execute(f"UPDATE marketplace.order_items SET {col} = %s WHERE id = %s", (val, item))
 
-    def test_non_snapshot_columns_stay_editable(self, db, g):
+    def test_the_economic_fields_are_frozen_with_the_snapshot(self, db, g):
+        """B2b (étape 2) : `quantity`, `base_unit_quantity`, `price_at_sale`… ne divergent JAMAIS du snapshot."""
         with db.cursor() as cur:
             item = _item(cur, g, g.order(), base_unit_quantity=2, tier_id="t1", **_sachet_columns())
-            cur.execute("UPDATE marketplace.order_items SET quantity = 5 WHERE id = %s", (item,))
+            for col, val in (("quantity", 5), ("base_unit_quantity", 3), ("price_at_sale", 1), ("tier_id", "t2")):
+                with violation(cur, errors.CheckViolation):
+                    cur.execute(f"UPDATE marketplace.order_items SET {col} = %s WHERE id = %s", (val, item))
+            with violation(cur, errors.CheckViolation):
+                cur.execute("UPDATE marketplace.order_items SET order_id = %s WHERE id = %s", (g.order(), item))
+        row = _row(db, "order_items", item)
+        assert (row.quantity, row.base_unit_quantity, row.price_at_sale) == (D("4.000"), D("2.000"), D("500.00"))
+
+    def test_a_row_without_a_snapshot_stays_editable(self, db, g):
+        with db.cursor() as cur:
+            item = _item(cur, g, g.order())
+            cur.execute("UPDATE marketplace.order_items SET quantity = 5, price_at_sale = 400 WHERE id = %s", (item,))
+
+    def test_an_identical_rewrite_is_not_a_violation(self, db, g):
+        with db.cursor() as cur:
+            item = _item(cur, g, g.order(), base_unit_quantity=2, tier_id="t1", **_sachet_columns())
+            cur.execute("UPDATE marketplace.order_items SET quantity = quantity WHERE id = %s", (item,))
 
     def test_a_legacy_row_can_be_backfilled_once_but_not_rewritten(self, db, g):
         cols = _sachet_columns()
@@ -294,3 +311,81 @@ class TestJsonbSnapshots:
             order = g.order(auction_id=g.auction())
             cur.execute("SELECT award_pricing_snapshot FROM marketplace.orders WHERE id = %s", (order,))
             assert cur.fetchone()[0] is None
+
+
+# =====================================================================
+# Phase B2b — Bid -> Award
+# =====================================================================
+
+
+class TestBidRequalificationAndBasisChange:
+    """Un bid reste modifiable (négociation) : requalifier un bid ANCIEN et changer la base d'un bid certifié doivent
+    passer les CHECK ; une mise à jour PARTIELLE (base changée, unité oubliée) doit être refusée."""
+
+    def _cols(self, **kw):
+        return build_bid_pricing_snapshot(
+            auction_quantity=10, auction_unit="TONNE", **kw
+        ).to_bid_columns()
+
+    def _update(self, cur, bid, cols):
+        sets = ", ".join(f"{k} = %s" for k in cols)
+        cur.execute(f"UPDATE marketplace.bids SET {sets} WHERE id = %s", (*cols.values(), bid))
+
+    def test_a_legacy_bid_is_requalified_then_its_basis_changes_to_total_lot(self, db, g):
+        with db.cursor() as cur:
+            bid = g.bid(g.auction(), offered_price=450000)
+            self._update(cur, bid, self._cols(amount=450000, basis="PER_BASE_UNIT", price_unit="TONNE"))
+            assert bid_pricing_view(_row(db, "bids", bid)).basis == PriceBasis.PER_BASE_UNIT
+            self._update(cur, bid, self._cols(amount=4_000_000, basis="TOTAL_LOT", price_unit=None))
+        view = bid_pricing_view(_row(db, "bids", bid))
+        assert (view.basis, view.snapshot.price_unit, view.amount) == (PriceBasis.TOTAL_LOT, None, D("4000000.00"))
+
+    def test_a_partial_basis_change_is_rejected(self, db, g):
+        with db.cursor() as cur:
+            bid = g.bid(g.auction(), offered_price=450000)
+            self._update(cur, bid, self._cols(amount=450000, basis="PER_BASE_UNIT", price_unit="TONNE"))
+            with violation(cur, errors.CheckViolation):
+                cur.execute("UPDATE marketplace.bids SET offered_price_basis = 'TOTAL_LOT' WHERE id = %s", (bid,))
+
+
+class TestAwardSnapshotFromACertifiedDecision:
+    def test_the_frozen_snapshot_of_a_decision_persists_and_cannot_be_rewritten(self, db, g):
+        from ladini.domain.bid_award import build_award_decision
+
+        snap = build_bid_pricing_snapshot(
+            amount=450000, basis="PER_BASE_UNIT", price_unit="TONNE", auction_quantity=10, auction_unit="TONNE",
+        )
+        decision = build_award_decision(
+            auction_id="a", bid_id="b", producer_id="p", buyer_id="u", producer_name="Gilbert-prod",
+            pricing=snap, auction_quantity=10, auction_unit="TONNE",
+        )
+        frozen = decision.frozen_snapshot()
+        with db.cursor() as cur:
+            auction = g.auction()
+            bid = g.bid(auction)
+            order = g.order(auction_id=auction, winning_bid_id=bid, award_pricing_snapshot=frozen, total_amount=decision.award_total)
+            cur.execute("SELECT award_pricing_snapshot, total_amount FROM marketplace.orders WHERE id = %s", (order,))
+            stored, total = cur.fetchone()
+            assert stored["award"]["fingerprint"] == decision.fingerprint and total == D("4500000.00")
+            assert stored["award"]["total_amount"] == "4500000.00"
+            with violation(cur, errors.CheckViolation):
+                cur.execute(
+                    "UPDATE marketplace.orders SET award_pricing_snapshot = %s WHERE id = %s",
+                    (Json({**frozen, "award": {**frozen["award"], "total_amount": "1"}}), order),
+                )
+
+    def test_a_total_lot_award_stores_the_lot_amount_not_a_multiplied_total(self, db, g):
+        from ladini.domain.bid_award import build_award_decision
+
+        snap = build_bid_pricing_snapshot(
+            amount=4_200_000, basis="TOTAL_LOT", price_unit=None, auction_quantity=10, auction_unit="TONNE",
+        )
+        decision = build_award_decision(
+            auction_id="a", bid_id="b", producer_id="p", buyer_id="u", producer_name="X",
+            pricing=snap, auction_quantity=10, auction_unit="TONNE",
+        )
+        with db.cursor() as cur:
+            auction = g.auction()
+            order = g.order(auction_id=auction, award_pricing_snapshot=decision.frozen_snapshot(), total_amount=decision.award_total)
+            cur.execute("SELECT total_amount, award_pricing_snapshot->>'price_basis' FROM marketplace.orders WHERE id = %s", (order,))
+            assert cur.fetchone() == (D("4200000.00"), "TOTAL_LOT")
