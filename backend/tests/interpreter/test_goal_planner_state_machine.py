@@ -583,6 +583,91 @@ class TestRule1quaterNewTaskDuringSlot:
         assert "suspended_goal" not in r
 
 
+class TestRule1quaterPurgesStaleTransactionState:
+    """(2026-09-28, incident réel — contamination cross-flow
+    SALES_PUBLISH_PRODUCT) : "Vente de 461 000 UNITE de boeufs à 461 000
+    FCFA/UNITE" — une vente antérieure abandonnée avait déjà rempli
+    `quantity`/`price` (jamais donnés dans CETTE conversation), et cette
+    RÈGLE relockait le tunnel SANS purger, laissant les deux nombres
+    survivre jusqu'à la confirmation d'une vente totalement différente
+    (« mes boeufs »). `cognitive_guard` refuse TOUJOURS l'INTERRUPTION
+    quand `detected_intent == current_goal` (nodes/cognitive.py) — le nom du
+    but ne suffit pas à prouver que c'est la MÊME transaction. Cette RÈGLE
+    doit désormais purger exactement comme la RÈGLE 5 (NEW_TASK sans tunnel
+    actif) : `memory_update` réapplique ensuite les entités RÉELLEMENT
+    dites ce tour, rien de légitime n'est perdu."""
+
+    def test_same_goal_new_task_purges_stale_quantity_and_price(self):
+        r = gp(
+            interpreted_event="NEW_TASK",
+            detected_intent="SALES_PUBLISH_PRODUCT",
+            normalized_text="je veux vendre mes boeufs",
+            current_goal="SALES_PUBLISH_PRODUCT",
+            expected_input="PRODUCT",
+            transaction_payload={"quantity": 461000, "price": 461000, "unit": "UNITE"},
+            working_memory={"active_goal": "SALES_PUBLISH_PRODUCT"},
+        )
+        assert r["current_goal"] == "SALES_PUBLISH_PRODUCT"
+        assert r["goal_status"] == "WAITING_INPUT"
+        assert r["transaction_payload"] == {"__reset__": True}, (
+            "les quantity/price d'une tentative abandonnée doivent être "
+            f"purgés, pas relockés tels quels : {r.get('transaction_payload')!r}"
+        )
+
+    def test_an_already_bootstrapped_draft_is_never_purged_here_a_correction_instead(self):
+        """Garde-fou symétrique, ESSENTIEL : cette RÈGLE ne doit purger QUE
+        quand aucun draft versionné n'existe encore pour le but courant —
+        dès qu'un draft existe (`core/draft_registry.py`), un NEW_TASK
+        même-but qui ne restate qu'UNE partie des champs (ex: nouveau
+        produit, ancien prix tu) doit rester une CORRECTION du même draft,
+        jamais un nouveau départ. Preuve exacte : `tests/integration/
+        test_conversation_characterization.py::TestG_CorrectionPolicy::
+        test_a_reformulation_during_confirmation_is_a_correction_never_a_
+        cancellation` ("non, plutôt 23 boeufs" pendant la confirmation d'un
+        draft "14 coqs") régressait — même draft_id attendu, version +1 —
+        avant l'ajout de ce garde-fou."""
+        r = gp(
+            interpreted_event="NEW_TASK",
+            detected_intent="SALES_PUBLISH_PRODUCT",
+            current_goal="SALES_PUBLISH_PRODUCT",
+            expected_input="CONFIRMATION",
+            sales_publish_draft={
+                "draft_id": "already-open-instance",
+                "product": "maïs",
+                "quantity": 300,
+                "price": 5000,
+                "unit": "SAC",
+            },
+            working_memory={"active_goal": "SALES_PUBLISH_PRODUCT"},
+        )
+        assert "sales_publish_draft" not in r, (
+            "un draft déjà ouvert pour CE but est la preuve d'une instance "
+            f"active — il ne doit jamais être purgé ici : {r!r}"
+        )
+        assert "transaction_payload" not in r or r["transaction_payload"] != {
+            "__reset__": True
+        }
+
+    def test_purge_does_not_wipe_pending_interaction_of_an_unrelated_goal(self):
+        """Garde-fou : ce correctif ne doit purger QUE quand RULE 1quater
+        elle-même s'applique (tunnel actif pour le but COURANT) — un but
+        différent, non concerné par cette règle, ne doit rien perdre."""
+        r = gp(
+            interpreted_event="NEW_TASK",
+            detected_intent="BUYER_REQUEST",
+            normalized_text="je veux acheter des oignons",
+            current_goal="BUYER_REQUEST",
+            expected_input="NONE",
+            transaction_payload={"product": "riz", "quantity": 50},
+            working_memory={"active_goal": "BUYER_REQUEST"},
+        )
+        # Sans tunnel actif (`expected_input=="NONE"`), RULE 1quater ne
+        # s'applique pas du tout — c'est la RÈGLE 5 (déjà purgeante sans
+        # condition) qui traite ce cas, comportement inchangé par ce
+        # correctif.
+        assert r["transaction_payload"] == {"__reset__": True}
+
+
 # =====================================================================
 # RÈGLE « is_short » — bruit court en plein tunnel
 # =====================================================================

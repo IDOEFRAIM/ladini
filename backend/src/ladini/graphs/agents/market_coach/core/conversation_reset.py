@@ -26,6 +26,7 @@ from typing import Any, Dict
 from ladini.graphs.agents.market_coach.core.conversation_decision import (
     ConversationAction,
 )
+from ladini.graphs.agents.market_coach.core.draft_registry import draft_reset_patch
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     clear_pending_interaction,
 )
@@ -78,6 +79,15 @@ def reset_abandoned_conversation_context(
         "available_mapping": {},
         "retry_count": 0,
         "confirmation_summary": None,
+        # (2026-09-28, audit lifecycle transactionnel) : les 4 drafts
+        # versionnés (`core/draft_registry.py`) n'étaient pas purgés sur cet
+        # abandon — même classe d'oubli que `nodes/cleaner.py::
+        # state_cleaner_node` (terminal-goal reset), corrigée symétriquement
+        # ici. Un tunnel abandonné pour max retries peut avoir déjà bootstrap
+        # un draft (ex: `sales_publish_draft` partiel) qui doit disparaître
+        # avec le reste du contexte transactionnel, pas survivre pour être
+        # réutilisé sans contrôle par la prochaine tentative du même but.
+        **draft_reset_patch(),
         **clear_pending_interaction("tunnel_abandoned_max_retries"),
         "selected_tool": None,
         "selected_tool_args": {"__reset__": True},

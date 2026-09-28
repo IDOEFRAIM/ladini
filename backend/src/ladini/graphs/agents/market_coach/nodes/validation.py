@@ -163,6 +163,22 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
     prev_goal_upper = str(previous_goal or "").upper()
     goal_changed = bool(previous_goal and goal and prev_goal_upper != goal_upper)
 
+    # (2026-09-28, audit lifecycle transactionnel — incident cross-flow
+    # SALES_PUBLISH_PRODUCT, correctif primaire dans
+    # `interpreter/goal_planner.py`, RÈGLE 1quater) : un backstop équivalent
+    # a été tenté ICI (`interpreted_event == "NEW_TASK"` sans exiger
+    # `goal_changed`) et RETIRÉ — `payload` à ce point porte déjà les
+    # entités de CE tour (`memory_update` s'exécute AVANT ce nœud dans le
+    # graphe, voir `core/graph_builder.py::add_edge("memory_update",
+    # "validator")`) : stripper `quantity`/`unit`/`price` ici sur le seul
+    # critère NEW_TASK détruisait aussi une quantité/prix LÉGITIMEMENT
+    # donnés dans CE message (ex: 1ère tâche d'une conversation, forcément
+    # NEW_TASK — `tests/integration/test_recurring_need_state_leak.py`
+    # régressait avec `quantity=None` au lieu de `10.0`). Le correctif
+    # correct doit purger AVANT `memory_update`, pas après — c'est
+    # exactement ce que fait `goal_planner` (RÈGLE 5 et RÈGLE 1quater), qui
+    # purge puis laisse `memory_update` réappliquer les entités RÉELLEMENT
+    # dites ce tour. Voir docs/agent/TRANSACTION_STATE_LIFECYCLE.md.
     _BUYER_CART_CONTINUITY = frozenset(
         {
             "BUYER_REQUEST",

@@ -14,7 +14,10 @@ from ladini.agents.reducers import mark_deleted
 from ladini.graphs.agents.market_coach.core.conversation_decision import (
     ConversationAction,
 )
-from ladini.graphs.agents.market_coach.core.draft_registry import draft_reset_patch
+from ladini.graphs.agents.market_coach.core.draft_registry import (
+    DRAFT_REGISTRY,
+    draft_reset_patch,
+)
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     DISAMBIGUATION_MENU_GOAL_SHIM,
     InteractionKind,
@@ -183,6 +186,18 @@ def _extract_buyer_product(clean_text: str) -> Optional[str]:
     tokens = _re.findall(r"[a-zàâçéèêëîïôûùüÿñæœ']+", clean_text)
     meaningful = [t for t in tokens if t not in _BUYER_FILLER_WORDS]
     return " ".join(meaningful) if meaningful else None
+
+
+_DRAFT_STATE_KEY_BY_GOAL: Dict[str, str] = {
+    spec.owning_goal: spec.state_key for spec in DRAFT_REGISTRY
+}
+
+
+def _draft_state_key_for_goal(goal: Optional[str]) -> Optional[str]:
+    """État-clé du draft versionné (`core/draft_registry.py`) possédé par
+    `goal`, ou `None` si ce goal n'a pas de draft versionné (ex: le panier
+    acheteur, qui a son propre mécanisme d'identité — `active_cart`)."""
+    return _DRAFT_STATE_KEY_BY_GOAL.get(str(goal or "").upper())
 
 
 # ── Goal planner node ──────────────────────────────────────────────
@@ -586,10 +601,59 @@ async def goal_planner(
         # en "INTERRUPTION", traité par la RÈGLE 4). Réinterroger un second
         # arbitre ici ne pouvait que contredire ce refus. Le planner APPLIQUE
         # la décision : tunnel verrouillé.
+        #
+        # (2026-09-28, incident réel — contamination cross-flow
+        # SALES_PUBLISH_PRODUCT) : ce bloc RELOCKAIT le tunnel SANS jamais
+        # purger `transaction_payload`/les drafts (`_purge_transaction_state`)
+        # — au contraire de la RÈGLE 5 (NEW_TASK sans tunnel actif), qui purge
+        # SANS CONDITION depuis le correctif "deux demandes de suite = même
+        # goal" documenté plus bas. `cognitive_guard` (nodes/cognitive.py)
+        # refuse TOUJOURS l'INTERRUPTION quand `detected_intent ==
+        # current_goal` (même intention que le tunnel déjà ouvert) — ce
+        # n'est PAS un jugement "c'est la même transaction", juste "rien à
+        # arbitrer, le nom du but ne change pas". Un utilisateur qui a
+        # abandonné une vente en cours (quantité/prix déjà saisis, produit
+        # jamais donné) puis revient, dans la fenêtre TTL du tunnel encore
+        # "actif", avec une phrase NEW_TASK complète pour une AUTRE vente du
+        # même type ("je veux vendre mes boeufs") atterrissait ICI : le
+        # tunnel se réaffirmait tel quel, `quantity`/`price` de la vente
+        # abandonnée survivaient intacts, et la confirmation générée plus
+        # tard mélangeait le NOUVEAU produit avec les ANCIENS montants
+        # (incident réel : "Vente de 461 000 UNITE de boeufs à 461 000
+        # FCFA/UNITE" — aucun de ces deux nombres n'avait été dit dans cette
+        # conversation). Le nom du but ("même intention") n'est pas un proxy
+        # fiable pour "même transaction" (voir docs/agent/
+        # TRANSACTION_STATE_LIFECYCLE.md, "Même intent, nouvelle action") —
+        # seule la RÈGLE 5 avait ce correctif ; RÈGLE 1quater partage
+        # exactement le même risque — MAIS pas exactement le même remède : une
+        # purge inconditionnelle ici casse une classe de correction déjà
+        # couverte par les tests (`tests/integration/
+        # test_conversation_characterization.py::TestG_CorrectionPolicy`,
+        # "non, plutôt 23 boeufs" pendant la CONFIRMATION d'un draft "14 coqs")
+        # — un NEW_TASK même-but qui restate PARTIELLEMENT les champs (ex:
+        # nouveau produit, ancienne quantité tue) doit rester une correction
+        # DU MÊME draft tant qu'un draft versionné (`core/draft_registry.py`)
+        # existe déjà pour ce but : c'est justement l'existence de ce draft
+        # qui prouve qu'une INSTANCE de transaction a déjà été ouverte pour
+        # CE tunnel, donc que le tunnel encore actif lui appartient réellement.
+        # Le bug réel, lui, se produisait AVANT qu'un tel draft n'existe —
+        # `sales_publish_draft` n'est bootstrap qu'une fois `product`/
+        # `quantity`/`price` déjà tous réunis (`confirmation_gate.py::
+        # _resolve_sales_draft_based_confirmation`) : la vente "boeufs"
+        # abandonnée n'avait jamais eu de produit, donc jamais de draft — ce
+        # n'était que `transaction_payload` (quantity/price stockés à cru,
+        # sans AUCUNE identité d'instance). Un `transaction_payload` sans
+        # draft n'est jamais la preuve d'une instance active : purger reste
+        # sûr. Voir docs/agent/TRANSACTION_STATE_LIFECYCLE.md, "Même intent,
+        # nouvelle action" pour la règle complète et ses limites.
+        draft_key = _draft_state_key_for_goal(current_goal)
+        has_active_draft_instance = bool(draft_key and state.get(draft_key) is not None)
         updates["current_goal"] = current_goal
         updates["detected_intent"] = str(current_goal).upper()
         updates["goal_status"] = "WAITING_INPUT"
         updates["working_memory"] = _lock(current_goal)
+        if not has_active_draft_instance:
+            updates.update(_purge_transaction_state())
         return _with_goal_metadata(updates)
 
     # (Phase 2 hardening, bug B3) : `event == "INTERRUPTION"` ne peut arriver ici QUE
