@@ -1,5 +1,4 @@
 import logging
-import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -40,6 +39,7 @@ from ladini.domain.pricing_tiers import (
     resolve_tier,
 )
 from ladini.domain.quantity_unit import is_livestock_product
+from ladini.domain.unit_taxonomy import offer_data_quality_flags
 
 from .base import BaseMixin
 from .common import normalize_phone
@@ -58,40 +58,15 @@ def _naive_utc(dt_value: Optional[datetime]) -> Optional[datetime]:
     return dt_value
 
 
-# (2026-09-28, mandat "Commercial Quantity & Pricing Domain Hardening",
-# consolidation P0) : l'ancienne `_LIVESTOCK_KEYWORDS` locale a été RETIRÉE.
-# Bug confirmé par audit : elle testait `keyword in normalized_name` — un
-# SIMPLE SUBSTRING, sans frontière de mot — donc "ane" (âne) matchait à
-# l'intérieur de "banane", classant une banane comme bétail (`unit=TETE`).
-# C'était en plus une DEUXIÈME liste de mots-clés, indépendante et en
-# désaccord avec `domain/quantity_unit.py::LIVESTOCK_PRODUCT_KEYWORDS`
-# (celle-ci en frontière de mot, la source déjà utilisée par
-# `resolve_product_unit`/`slot_enrichment.py` côté producteur) — deux
-# sources de vérité qui pouvaient diverger sur le MÊME produit selon qu'on
-# le voit côté achat ou côté vente. `is_livestock_product` (même module)
-# reste sujet à un faux positif sur un nom composé légitime ("lait de
-# vache" — un mot entier "vache" y apparaît bel et bien) : ce résidu est
-# documenté dans `docs/domain/COMMERCIAL_QUANTITY_PRICING_MODEL.md`, sa
-# vraie fermeture passe par la config taxonomy déjà câblée de bout en bout
-# (`SubCategory.allowed_units`/`priority_unit`, colonnes déjà présentes en
-# base — `services/database/base.py::get_product_category_unit_config`) une
-# fois ces sous-catégories effectivement configurées (donnée, pas code).
-
-
-def _normalize_ascii_lower(text: Optional[str]) -> str:
-    if not text:
-        return ""
-    decomposed = unicodedata.normalize("NFKD", text)
-    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-    return stripped.lower()
-
-
 def _guess_display_unit(product_name: Optional[str], db_unit: Optional[str]) -> str:
     unit = (db_unit or "").strip().upper()
     if unit in {"KILOGRAMME", "KILOGRAMMES", "KGS"}:
         unit = "KG"
     if unit and unit not in {"", "KG"}:
         return unit
+    # Détection UNIQUE d'un animal compté à la tête (domain/quantity_unit.py) : l'ancienne
+    # recherche par sous-chaîne dans une liste locale classait « lait de vache » ou
+    # « fromage de chèvre » comme animaux (affichés en TETE).
     if is_livestock_product(product_name):
         return "TETE"
     return unit or "KG"
@@ -394,9 +369,27 @@ class BuyerMixin(BaseMixin):
 
                 unit_label = _guess_display_unit(row["name"], row["unit"])
 
+                # Qualité de l'offre AVANT de la proposer à l'achat (incident
+                # 2026-09-28 : `boeufs / 461000 / 461000 / UNITE`). Une offre sans prix
+                # valide n'est jamais achetable : écartée, mais TRACÉE (pas de
+                # disparition silencieuse). Une unité incompatible avec la nature du
+                # produit est SIGNALÉE (donnée héritée, décision du propriétaire).
+                dq_flags, purchasable = offer_data_quality_flags(
+                    row["name"], row["unit"], row["price"]
+                )
+                if dq_flags:
+                    logger.warning(
+                        "SEARCH_OFFER_DATA_QUALITY | product_id=%s | flags=%s | "
+                        "excluded=%s | unit=%s | price=%s",
+                        row["id"], dq_flags, not purchasable, row["unit"], row["price"],
+                    )
+                if not purchasable:
+                    continue
+
                 combined_results.append(
                     {
                         "id": str(row["id"]),
+                        "data_quality_flags": dq_flags,
                         "name": f"{row['name']} ({tag})",
                         "price": float(row["price"]),
                         "priority": int(row.get("priority") or 3),

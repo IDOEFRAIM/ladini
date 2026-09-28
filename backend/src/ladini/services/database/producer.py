@@ -40,6 +40,7 @@ from ladini.domain.pricing_tiers import (
     tiers_to_dicts,
     validate_pricing_tiers,
 )
+from ladini.domain.unit_taxonomy import UnitAction, validate_product_unit
 
 from .base import BaseMixin
 from .common import clamp_limit, clean_text, positive_float
@@ -596,6 +597,42 @@ class ProducerMgmtMixin(BaseMixin):
             quantity_for_sale, "quantity_for_sale", allow_zero=True
         )
         unit = clean_text(unit, "unit", required=False, max_length=20) or "KG"
+
+        # INVARIANT DE DOMAINE produit ↔ famille de mesure ↔ unité autorisée
+        # (incident 2026-09-28 : `boeufs` persisté en `UNITE`, voir
+        # domain/unit_taxonomy.py). La couche service ne fait plus confiance à
+        # l'unité de l'appelant : config admin de la sous-catégorie si elle existe,
+        # sinon taxonomie de repli (élevage => comptage). Rejet explicite plutôt
+        # que conversion silencieuse quand la quantité changerait de sens.
+        category_config = None
+        try:
+            _cfg = await self.get_product_category_unit_config(name)
+            if isinstance(_cfg, dict) and _cfg.get("status") == "success":
+                category_config = _cfg.get("data")
+        except Exception:  # config indisponible => repli taxonomique pur
+            category_config = None
+        _verdict = validate_product_unit(name, unit, category_config=category_config)
+        if _verdict.action == UnitAction.REJECT:
+            logger.warning(
+                "PRODUCT_UNIT_REJECTED | product=%s | unit=%s | reason=%s",
+                name, unit, _verdict.reason,
+            )
+            raise BusinessRuleException(
+                f"L'unité « {unit} » ne convient pas à « {name} »."
+                + (
+                    f" Unité(s) possible(s) : {', '.join(_verdict.suggested)}."
+                    if _verdict.suggested
+                    else ""
+                ),
+                reason=_verdict.reason,
+                suggested_units=list(_verdict.suggested),
+            )
+        if _verdict.action == UnitAction.CANONICALIZE:
+            logger.warning(
+                "PRODUCT_UNIT_CANONICALIZED | product=%s | %s -> %s | reason=%s",
+                name, unit, _verdict.unit, _verdict.reason,
+            )
+            unit = _verdict.unit
 
         # Validation typée unique (2026-08-30, voir domain/pricing_tiers.py) —
         # remplace le sanitizing champ-par-champ qui acceptait silencieusement

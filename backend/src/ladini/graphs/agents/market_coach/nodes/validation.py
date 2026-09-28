@@ -9,9 +9,14 @@ slot_enrichment.  This node only:
 5. Delegates prompt generation to response_handlers.final_response.
 """
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ladini.core.logger import get_logger
+from ladini.domain.price_basis import (
+    PriceBasisAction,
+    conflict_question,
+    reconcile_price_basis,
+)
 from ladini.graphs.agents.market_coach.core.goals import BUYER_CART_GOALS
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     SUBFLOW_OWNED_KINDS,
@@ -44,9 +49,15 @@ from ladini.graphs.agents.market_coach.utils import (
     _normalize_quantity_to_kg,
     canonical_unit_label,
     normalize_slot_keys,
+    slot_has_value,
 )
 
 logger = get_logger("Ladini.MarketCoach.Validator")
+
+#: Goals dont le prix est exécuté dans l'unité de la quantité (voir domain/price_basis.py).
+_PRICE_BASIS_GOALS = frozenset(
+    {"SALES_PUBLISH_PRODUCT", "PROCUREMENT_CREATE_REQUEST", "PRODUCTION_DECLARE_FUTURE"}
+)
 
 
 def _canonical_field_name(field: str) -> str:
@@ -311,6 +322,47 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
 
     payload = _normalize_quantity_to_kg(payload)
 
+    # BASE DU PRIX ↔ UNITÉ DE LA QUANTITÉ (incident 2026-09-28 : « 500f le sachet »
+    # pour 50 LITRE était affiché « 500 FCFA/SAC » puis EXÉCUTÉ à 500 FCFA/LITRE).
+    # Voir domain/price_basis.py : jamais de réinterprétation silencieuse du prix.
+    basis_question: Optional[str] = None
+    if (
+        goal_upper in _PRICE_BASIS_GOALS
+        and payload.get("price_unit")
+        and slot_has_value(payload.get("price"))
+        and not payload.get("pricing_tiers")
+    ):
+        basis = reconcile_price_basis(
+            payload.get("price"), payload.get("price_unit"), payload.get("unit")
+        )
+        if basis.action == PriceBasisAction.CONVERTED:
+            logger.info(
+                "[Validator] PRICE_BASIS_CONVERTED | %s %s -> %s %s",
+                basis.original_price, basis.original_price_unit, basis.price, basis.unit,
+            )
+            payload["price"] = basis.price
+            payload["price_unit"] = None  # le prix est désormais dans l'unité de la quantité
+            payload["price_conversion_note"] = (
+                f"{basis.original_price:g} FCFA/{canonical_unit_label(basis.original_price_unit)}"
+            )
+        elif basis.action == PriceBasisAction.CONFLICT:
+            logger.warning(
+                "[Validator] PRICE_BASIS_CONFLICT | price=%s per %s but quantity unit=%s "
+                "— price re-asked, never guessed",
+                basis.original_price, basis.original_price_unit, basis.unit,
+            )
+            basis_question = conflict_question(
+                basis,
+                unit_label=canonical_unit_label(basis.unit),
+                basis_label=canonical_unit_label(basis.original_price_unit),
+            )
+            payload["price"] = None  # `pop` laisserait l'ancienne valeur (merge_dict)
+            payload["price_unit"] = None
+            payload["price_conversion_note"] = None
+            if "price" not in missing:
+                missing.insert(0, "price")
+            completed = [f for f in completed if f != "price"]
+
     unit_raw = str(payload.get("unit") or "KG").upper()
     unit_display = canonical_unit_label(
         payload.get("unit_display") or payload.get("original_unit") or unit_raw
@@ -426,6 +478,7 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
                 "validation_errors": errors + warnings,
                 "last_missing_field": first_missing,
                 "response_strategy": "ASK_MISSING_FIELD",
+                **({"final_response": basis_question} if basis_question else {}),
                 "transaction_payload": payload,
                 "conversation_progress": progress,
                 "proactive_hint": hint,

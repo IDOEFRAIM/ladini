@@ -371,6 +371,113 @@ groups:
         labels:
           severity: warning
 
+  # ─────────────────────────────────────────────────────────────────────
+  # Fiabilité transactionnelle de l'agent (clôture reliability hardening,
+  # 2026-09-28) — voir backend/docs/agent/AGENT_PILOT_RUNBOOK.md pour la
+  # conduite à tenir de CHAQUE alerte. Volontairement 3 règles, pas plus.
+  #
+  # `noDataState: OK` : ces compteurs n'apparaissent qu'à leur première
+  # incrémentation (labels) ou, côté worker, ne sont visibles que si le
+  # push OTLP/le scrape worker est en place (gap connu, voir
+  # infra/alloy/README.md). Une absence de série = "rien ne s'est passé",
+  # pas une panne : on ne veut pas d'alerte NoData bruyante. La forme
+  # `sum(x) - (sum(x offset 10m) or vector(0))` détecte aussi la TOUTE
+  # PREMIÈRE apparition de la série (là où `increase()` la manquerait).
+  # ─────────────────────────────────────────────────────────────────────
+  - orgId: 1
+    name: ladini-agent-reliability
+    folder: Ladini
+    interval: 1m
+    rules:
+      # ── 13. Échec d'enqueue d'un message entrant (INVARIANT I6) ──────
+      # Incrémenté côté API (webhook) → scrapable via api:8000/metrics.
+      - uid: ladini-inbound-enqueue-failure
+        title: "Agent — échec d'enqueue d'un message entrant"
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: 'sum(ladini_inbound_enqueue_failures_total) - (sum(ladini_inbound_enqueue_failures_total offset 10m) or vector(0))'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # Tout échec (> 0) est une attention immédiate : le webhook a
+              # répondu 503 et libéré son claim — le message n'est récupéré
+              # que si le provider redélivre (pas de dead-letter durable).
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        annotations:
+          summary: "Un webhook n'a pas pu mettre un message en file Celery (503 renvoyé) — vérifier le broker/Redis MAINTENANT."
+          runbook_url: "backend/docs/agent/AGENT_PILOT_RUNBOOK.md#1-inbound_enqueue_failures--0"
+        labels:
+          severity: critical
+
+      # ── 14. Réconciliation workspace en échec ────────────────────────
+      # Incrémenté côté WORKER : n'a d'effet que si les métriques worker
+      # atteignent Grafana (OTLP push actif) — sinon voir le signal LOG
+      # `WORKSPACE_RECONCILIATION_FAILED` dans le runbook.
+      - uid: ladini-workspace-reconciliation-failure
+        title: "Agent — réconciliation workspace en échec"
+        condition: C
+        for: 0s
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: 'sum(ladini_workspace_reconciliation_failures_total) - (sum(ladini_workspace_reconciliation_failures_total offset 30m) or vector(0))'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        annotations:
+          summary: "Après un tour en erreur, la relecture du checkpoint a échoué — un goal périmé peut ressusciter au tour suivant (investigation, pas urgence)."
+          runbook_url: "backend/docs/agent/AGENT_PILOT_RUNBOOK.md#2-workspace_reconciliation_failures--0"
+        labels:
+          severity: warning
+
+      # ── 15. Pic de retries de tâche agent ────────────────────────────
+      # Incrémenté côté WORKER (même réserve que la règle 14).
+      - uid: ladini-transaction-retry-spike
+        title: "Agent — pic de retries de tâche"
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: Error
+        data:
+          - refId: A
+            datasourceUid: ${DS_PROMETHEUS_UID}
+            model:
+              expr: 'sum(ladini_transaction_retry_count_total) - (sum(ladini_transaction_retry_count_total offset 15m) or vector(0))'
+              instant: true
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: threshold
+              expression: A
+              # ADJUST THIS THRESHOLD — 5 retries/15 min = point de départ
+              # SANS donnée de prod : à recalibrer sur le bruit observé pendant
+              # la première semaine de pilote (la baseline réelle est inconnue).
+              conditions:
+                - evaluator: { type: gt, params: [5] }
+        annotations:
+          summary: "Des tâches agent sont rejouées anormalement souvent (timeouts MCP/LLM, worker instable) — risque de double action à surveiller."
+          runbook_url: "backend/docs/agent/AGENT_PILOT_RUNBOOK.md#3-pic-de-transaction_retry_count"
+        labels:
+          severity: warning
+
 contactPoints:
   - orgId: 1
     name: ladini-default

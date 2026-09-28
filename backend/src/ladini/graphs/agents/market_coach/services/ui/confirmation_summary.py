@@ -273,6 +273,18 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         if price_unit_mismatch
         else ""
     )
+    # Ce que le récap AFFICHE doit être ce qui est EXÉCUTÉ : l'exécution applique le prix à
+    # l'unité de la quantité. Incident 2026-09-28 : « à 500 FCFA/SAC » affiché, puis
+    # « appliqué par LITRE » en avertissement — le montant en gras mentait. Le validateur
+    # (`domain/price_basis.py`) empêche normalement d'arriver ici avec un écart ; ce filet
+    # garantit qu'aucun chemin (brouillon, ancien état) n'affiche une base non exécutée.
+    if price_unit_mismatch:
+        price_unit = quantity_unit_for_price
+    conversion_note = (
+        f" (soit {payload.get('price_conversion_note')})"
+        if payload.get("price_conversion_note")
+        else ""
+    )
     unit_note = _unit_assumed_note(payload, quantity_unit_for_price)
 
     pricing_tiers_block = _format_pricing_tiers(payload)
@@ -297,7 +309,7 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
             else (
                 (
                     f"Vente de {quantity_line} de {product}"
-                    f" à {price_fmt} FCFA/{price_unit}."
+                    f" à {price_fmt} FCFA/{price_unit}{conversion_note}."
                     if price_fmt
                     else f"Vente de {quantity_line} de {product}."
                 )
@@ -321,7 +333,7 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         "PROCUREMENT_CREATE_REQUEST": (
             (
                 f"Lancement d'un appel d'offres pour {quantity_line} de {product}"
-                f" au prix plafond de {price_fmt} FCFA/{price_unit}."
+                f" au prix plafond de {price_fmt} FCFA/{price_unit}{conversion_note}."
                 if price_fmt
                 else f"Lancement d'un appel d'offres pour {quantity_line} de {product}."
             )

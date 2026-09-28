@@ -204,9 +204,11 @@ def build_structured_action_prompt_context(
         return None
 
     if context.expected_action == ActionType.SELECT_PRODUCER:
+        # `index` == index AFFICHÉ dans le menu (`display_index`), pas la
+        # position dans une liste filtrée.
         options = [
-            StructuredActionOption(index=i, label=p.label)
-            for i, p in enumerate(context.producer_options, start=1)
+            StructuredActionOption(index=p.display_index, label=p.label)
+            for p in context.producer_options
         ]
         return StructuredActionPromptContext(
             expected_action=context.expected_action, options=options
@@ -284,8 +286,16 @@ def resolve_decision_to_raw_action(
         idx = _resolve_selection(decision, prompt_context.options)
         if idx is None:
             return None
-        producer_id = domain_context.producer_options[idx - 1].producer_id
-        return {"action": action, "producer_id": producer_id}
+        option = next(
+            (o for o in domain_context.producer_options if o.display_index == idx), None
+        )
+        if option is None:
+            return None
+        return {
+            "action": action,
+            "offer_id": option.offer_id,
+            "producer_id": option.producer_id,
+        }
 
     if action == ActionType.SELECT_PRICING_TIER:
         idx = _resolve_selection(decision, prompt_context.options)
@@ -320,6 +330,8 @@ def adapt_structured_action_to_canonical(
     action structurée."""
     action: ActionType = raw["action"]
     entities: Dict[str, Any] = {"agent_action": action.value}
+    if raw.get("offer_id"):
+        entities["action_offer_id"] = raw["offer_id"]
     if raw.get("producer_id"):
         entities["action_producer_id"] = raw["producer_id"]
     if raw.get("pricing_tier_id"):

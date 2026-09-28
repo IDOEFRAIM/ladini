@@ -145,6 +145,7 @@ class TestSelectProducer:
         result = run(interp(state, StubRuntime(llm=llm)))
         assert result["extracted_entities"] == {
             "agent_action": "SELECT_PRODUCER",
+            "action_offer_id": "P2#2",
             "action_producer_id": "P2",
         }
         assert result["interpreted_event"] == "SELECTION"
@@ -340,6 +341,7 @@ class TestSetPackageCount:
         result = run(interp(state, StubRuntime(llm=llm)))
         assert result["extracted_entities"] == {
             "agent_action": "SELECT_PRODUCER",
+            "action_offer_id": "P1#1",
             "action_producer_id": "P1",
         }
 
@@ -390,6 +392,7 @@ class TestBareDigitsPerAction:
         result = run(interp(state, StubRuntime(llm=ForbiddenLLM())))
         assert result["extracted_entities"] == {
             "agent_action": "SELECT_PRODUCER",
+            "action_offer_id": "P2#2",
             "action_producer_id": "P2",
         }
         assert result["raw_analysis"]["path"] == "fast_path_selection_action"
