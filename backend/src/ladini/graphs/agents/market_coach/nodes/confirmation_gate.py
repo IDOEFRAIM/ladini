@@ -324,12 +324,48 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
     )
     if awaiting_confirmation:
         if event == "CONFIRM":
+            # (2026-09-28, hardening P1-A — invariant "ce que l'utilisateur a
+            # confirmé == ce que le métier exécute") : `confirmation_summary_goal`/
+            # `confirmation_summary_payload` sont le seul snapshot GELÉ de ce qui a
+            # RÉELLEMENT été montré à l'utilisateur (posés une fois, ci-dessous, au
+            # moment où CETTE confirmation a été levée — jamais retouchés depuis,
+            # `state.py` les documente déjà comme le garde-fou anti-péremption de
+            # `render_confirmation`). Sans cette vérification, un `transaction_payload`
+            # devenu périmé ENTRE la levée de la confirmation et la réception de
+            # CONFIRM (contamination cross-flow, correction non voulue d'un autre
+            # tunnel, état orphelin) certifiait quand même l'action — l'exécuteur
+            # (`mcp_tool_executor`) lit `transaction_payload`, pas le récap montré.
+            # Un but courant différent de celui pour lequel la confirmation a été
+            # levée (ex: A8 — une nouvelle action a démarré sans que cette
+            # confirmation-ci ait été explicitement tranchée) est traité EXACTEMENT
+            # comme une confirmation périmée/orpheline : abandon, jamais certification
+            # d'une action que l'utilisateur n'a jamais vue sous cette forme.
+            certified_goal = state.get("confirmation_summary_goal")
+            certified_payload = state.get("confirmation_summary_payload")
+            if certified_goal != goal or not certified_payload:
+                logger.warning(
+                    "[ConfirmationGate] CONFIRM reçu mais confirmation_summary_goal=%r "
+                    "!= goal courant=%r (ou confirmation_summary_payload manquant) — "
+                    "abandon au lieu de certifier une action jamais réellement montrée",
+                    certified_goal,
+                    goal,
+                )
+                return dict(_ABANDON_PATCH)
             return {
                 "is_certified": True,
                 "execution_authorized": True,
                 "confirmation_raised_at": None,
                 "status": "EXECUTING",
                 "ag_ui_component": None,
+                # (2026-09-28, hardening P1-A) : `mcp_tool_executor` lit
+                # `transaction_payload`, PAS `confirmation_summary_payload` — cette
+                # bascule fait consommer à l'exécution EXACTEMENT le snapshot gelé
+                # déjà vérifié ci-dessus, jamais une valeur live qui aurait pu
+                # diverger entre-temps. `{"__reset__": True, **data}` (`merge_dict`,
+                # voir `agents/reducers.py`) REMPLACE entièrement le payload courant
+                # — une simple fusion laisserait survivre des clés périmées absentes
+                # du snapshot certifié.
+                "transaction_payload": {"__reset__": True, **dict(certified_payload)},
                 **resolve_pending_interaction(),
             }
         if event == "REJECT":

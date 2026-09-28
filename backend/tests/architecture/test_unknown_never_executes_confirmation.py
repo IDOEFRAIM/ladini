@@ -6,22 +6,33 @@ pour les goals qui y transitent ; ce test verrouille sa garde CONFIRM
 explicite (`event == "CONFIRM"`, jamais un défaut permissif)."""
 from __future__ import annotations
 
-from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
-    confirmation_gate,
-)
-from tests.conftest import make_state, run
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     set_pending_interaction,
 )
+from ladini.graphs.agents.market_coach.nodes.confirmation_gate import (
+    confirmation_gate,
+)
+from tests.conftest import make_state, run
 
 
 def _pending_confirmation_state(event: str, **extra) -> dict:
+    # `confirmation_summary_goal`/`confirmation_summary_payload` — le snapshot
+    # GELÉ que `confirmation_gate` aurait posé en levant CETTE confirmation
+    # (2026-09-28, hardening P1-A) : le chemin CONFIRM vérifie désormais qu'il
+    # certifie exactement ce qui a été montré, pas un `transaction_payload`
+    # potentiellement retouché depuis — cette fixture doit donc représenter un
+    # état RÉALISTE (comme si `confirmation_gate` avait déjà levé cette
+    # confirmation au tour précédent), pas un raccourci qui omettrait le
+    # snapshot que la garde vérifie.
+    payload = {"product": "mais", "quantity": 50, "price": 500}
     base = {
         "current_goal": "SALES_UPDATE_PRODUCT",
         "interpreted_event": event,
-        "transaction_payload": {"product": "mais", "quantity": 50, "price": 500},
+        "transaction_payload": dict(payload),
         "confirmation_summary": "Récapitulatif : 50 kg de mais — 25000 FCFA",
+        "confirmation_summary_goal": "SALES_UPDATE_PRODUCT",
+        "confirmation_summary_payload": dict(payload),
         **set_pending_interaction(
             InteractionKind.CONFIRM_ACTION, context_ref="confirmation"
         ),
