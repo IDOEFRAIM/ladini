@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
@@ -87,6 +88,10 @@ class MarketOffer(Base):
         Index("market_offers_public_status_idx", "is_public", "status"),
         Index("market_offers_preorder_idx", "preorder_enabled"),
         Index("ix_market_offers_label_trgm", "product_label", postgresql_using="gin", postgresql_ops={"product_label": "gin_trgm_ops"}),
+        CheckConstraint(
+            "pricing_snapshot IS NULL OR (jsonb_typeof(pricing_snapshot) = 'object' AND pricing_snapshot ? 'schema_version')",
+            name="market_offers_pricing_snapshot_chk",
+        ),
         {"schema": "marketplace"},
     )
 
@@ -110,6 +115,8 @@ class MarketOffer(Base):
 
     unit = Column(Text, default="KG", nullable=False, server_default=text("'KG'"))
     price_per_unit = Column(Numeric(12, 2))
+    # Phase B2a — sémantique commerciale complète (projection MUTABLE du catalogue ; JSONB versionné).
+    pricing_snapshot = Column(JSONB)
     available_quantity = Column(Numeric(14, 3), default=0, nullable=False, server_default=text("'0'"))
     reserved_quantity = Column(Numeric(14, 3), default=0, nullable=False, server_default=text("'0'"))
     current_stock = Column(Numeric(14, 3), default=0, nullable=False, server_default=text("'0'"))
@@ -231,6 +238,10 @@ class Product(Base):
         Index("products_producer_available_idx", "producer_id", "is_available"),
         Index("products_category_available_idx", "category_label", "is_available"),
         Index("ix_products_name_trgm", "name", postgresql_using="gin", postgresql_ops={"name": "gin_trgm_ops"}),
+        CheckConstraint(
+            "commercial_pricing IS NULL OR (jsonb_typeof(commercial_pricing) = 'object' AND commercial_pricing ? 'schema_version')",
+            name="products_commercial_pricing_chk",
+        ),
         {"schema": "marketplace"},
     )
 
@@ -258,6 +269,10 @@ class Product(Base):
     # encore `pricing_tiers`). NULL = produit à tarif unique (comportement
     # historique inchangé).
     pricing_tiers = Column(JSONB, nullable=True)
+    # Phase B2a — sémantique commerciale CERTIFIÉE à la publication (base du prix, conditionnement,
+    # TOTAL_LOT explicite, prix normalisé DÉRIVÉ). `price`/`unit` restent la projection legacy
+    # (dual-write vérifié). NULL = produit antérieur à B2a.
+    commercial_pricing = Column(JSONB, nullable=True)
     images = Column(
         PG_ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )

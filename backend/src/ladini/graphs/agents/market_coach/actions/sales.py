@@ -150,6 +150,7 @@ def prep_sales_publish_product(
         description=dto.description,
         category_label=dto.category_label,
         pricing_tiers=dto.pricing_tiers,
+        commercial_offer=dto.commercial_offer,
     )
 
     service = SalesService(context=context)

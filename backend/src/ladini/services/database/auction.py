@@ -34,6 +34,11 @@ from .category import _is_confident_category_match
 from .common import clean_text, normalize_phone, positive_float
 from .errors import BusinessRuleException
 from .moderation import _fold as _fold_for_moderation
+from .pricing_persistence import (
+    award_total_and_snapshot,
+    bid_snapshot_columns,
+    reprice_bid_columns,
+)
 from .search import fuzzy_match, similarity_rank
 
 logger = logging.getLogger("ladini.services.database.auction")
@@ -605,8 +610,21 @@ class AuctionMixin(BaseMixin):
         phone: str,
         offered_price: float,
         message: str | None = None,
+        *,
+        price_basis: str | None = None,
+        price_unit: str | None = None,
+        package_type: str | None = None,
+        package_content_amount: float | None = None,
+        package_content_unit: str | None = None,
     ) -> Dict[str, Any]:
-        """Permet à un producteur d'émettre un prix (Bid) sur un marché ouvert."""
+        """Permet à un producteur d'émettre un prix (Bid) sur un marché ouvert.
+
+        Phase B2a — CONTRAT DE PRIX : `price_basis` (PER_BASE_UNIT + `price_unit` | PER_PACKAGE +
+        conditionnement | TOTAL_LOT) dit À QUOI se rapporte `offered_price`. Fourni, il est validé
+        contre l'unité de l'enchère (jamais déduit d'elle) et persisté avec son snapshot. Omis (flux
+        conversationnel actuel, câblé en B2b), le bid est écrit SANS base — donc « base de prix
+        inconnue » à la relecture — et l'événement est journalisé ; sur un bid déjà certifié, omettre la
+        base conserve celle du bid (seul le montant change)."""
         current_session = self.session
         if not current_session:
             raise BusinessRuleException("Session de base de données indisponible.")
@@ -676,7 +694,16 @@ class AuctionMixin(BaseMixin):
                     reason="bid_already_processed",
                 )
             old_price = existing_bid.offered_price
-            existing_bid.offered_price = float(offered_price)
+            if price_basis:
+                for _col, _val in bid_snapshot_columns(
+                    amount=offered_price, basis=price_basis, price_unit=price_unit, auction=auction,
+                    package_type=package_type, package_content_amount=package_content_amount,
+                    package_content_unit=package_content_unit, source="BID_EXPLICIT",
+                ).items():
+                    setattr(existing_bid, _col, _val)
+            else:
+                for _col, _val in reprice_bid_columns(existing_bid, auction, offered_price).items():
+                    setattr(existing_bid, _col, _val)
             if message:
                 existing_bid.message = message.strip()
             existing_bid.updated_at = now
@@ -691,20 +718,34 @@ class AuctionMixin(BaseMixin):
                 ),
             }
 
+        pricing_columns: Dict[str, Any] = {"offered_price": float(offered_price)}
+        if price_basis:
+            pricing_columns = bid_snapshot_columns(
+                amount=offered_price, basis=price_basis, price_unit=price_unit, auction=auction,
+                package_type=package_type, package_content_amount=package_content_amount,
+                package_content_unit=package_content_unit, source="BID_EXPLICIT",
+            )
+        else:
+            logger.warning(
+                "BID_PRICE_BASIS_UNSPECIFIED | auction=%s | producer=%s — bid écrit sans base de prix "
+                "(lecture: base historique inconnue, jamais « par unité de l'enchère »)",
+                auction.id, producer_id,
+            )
         new_bid = Bid(
             id=uuid.uuid4(),
             auction_id=a_uuid,
             producer_id=producer_id,
-            offered_price=float(offered_price),
             is_winner=False,
             status="PENDING",
             message=message.strip() if message else None,
             created_at=now,
             updated_at=now,
+            **pricing_columns,
         )
 
         current_session.add(new_bid)
         await current_session.flush()
+        bid_total, _ = award_total_and_snapshot(new_bid, auction)
 
         await BusinessEventEmitter(current_session).emit(
             event_name=BusinessEventName.TENDER_BID_RECEIVED,
@@ -720,7 +761,7 @@ class AuctionMixin(BaseMixin):
             sub_category_id=auction.sub_category_id,
             quantity=float(auction.quantity),
             unit=auction.unit,
-            amount=float(offered_price) * float(auction.quantity),
+            amount=float(bid_total),
         )
 
         return {
@@ -1665,13 +1706,19 @@ class AuctionMixin(BaseMixin):
         ).scalars().all()
 
         # 2. Calcul financier & Instanciation de l'accord commercial officiel (Order)
-        total = float(bid.offered_price * auction.quantity)
+        # Phase B2a : le total suit la BASE DÉCLARÉE du bid (450000/TONNE × 10 TONNE ; TOTAL_LOT = le
+        # montant), jamais « prix × quantité de l'enchère » supposé. Bid antérieur sans base : total
+        # historique inchangé, aucun instantané (base inconnue). L'instantané gelé vit sur la commande
+        # (un appel d'offres n'a pas de `order_items`, faute de produit).
+        _total_dec, award_snapshot = award_total_and_snapshot(bid, auction)
+        total = float(_total_dec)
 
         new_order = Order(
             id=uuid.uuid4(),
             buyer_id=auction.buyer_id,
             auction_id=auction.id,
             winning_bid_id=bid.id,
+            award_pricing_snapshot=award_snapshot,
             total_amount=total,
             status="CONFIRMED",
             zone_id=auction.target_zone_id,
@@ -1891,7 +1938,15 @@ class AuctionMixin(BaseMixin):
         if float(new_price) <= 0:
             raise BusinessRuleException("Le prix proposé doit être supérieur à 0 CFA.")
 
-        bid.offered_price = float(new_price)
+        # l'enchère n'est nécessaire que pour recalculer un snapshot CERTIFIÉ ; un bid ancien (sans base)
+        # ne change que de montant, sa base reste inconnue.
+        _auction = (
+            await current_session.get(Auction, bid.auction_id)
+            if getattr(bid, "pricing_snapshot_version", None) is not None
+            else None
+        )
+        for _col, _val in reprice_bid_columns(bid, _auction, new_price).items():
+            setattr(bid, _col, _val)
         bid.updated_at = datetime.now()
         await current_session.flush()
 

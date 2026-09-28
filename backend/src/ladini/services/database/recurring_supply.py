@@ -90,6 +90,7 @@ from ladini.domain.recurring_supply.recurrence import (
 from .base import BaseMixin
 from .common import normalize_phone
 from .errors import BusinessRuleException
+from .pricing_persistence import order_item_snapshot_columns
 
 logger = logging.getLogger("ladini.services.database.recurring_supply")
 
@@ -842,6 +843,16 @@ class RecurringSupplyMixin(BaseMixin):
                     product_id=product.id,
                     quantity=debit,
                     price_at_sale=float(alloc.unit_price),
+                    # Phase B2a : le prix et l'unité de l'ALLOCATION (convenus à l'appariement), pas
+                    # ceux — éventuellement modifiés depuis — du produit.
+                    **order_item_snapshot_columns(
+                        product,
+                        quantity=debit,
+                        price_at_sale=float(alloc.unit_price),
+                        unit=str(getattr(alloc, "unit", None) or getattr(product, "unit", None) or "KG"),
+                        unit_price_override=float(alloc.unit_price),
+                        price_source="RECURRING_ALLOCATION",
+                    ),
                 )
                 current_session.add(item)
                 await current_session.flush()

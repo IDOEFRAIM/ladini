@@ -20,6 +20,7 @@ from ladini.domain.models import (
 from .base import BaseMixin
 from .common import clean_text, positive_float
 from .errors import BusinessRuleException
+from .pricing_persistence import declared_sale_snapshot_columns
 
 logger = logging.getLogger("ladini.services.database")
 
@@ -505,12 +506,20 @@ class MarketplaceMixin(BaseMixin):
         current_session.add(order)
 
         item_price = amount_value / quantity_value if quantity_value else amount_value
+        # Phase B2a : le producteur a dit un TOTAL (« 50 kg pour 25 000 ») -> TOTAL_LOT exact ;
+        # `price_at_sale` n'est que le dérivé par unité.
         order_item = OrderItem(
             id=_uuid(),
             order_id=order_id,
             product_id=product.id,
             quantity=quantity_value,
             price_at_sale=item_price,
+            **declared_sale_snapshot_columns(
+                total_amount=amount_value,
+                quantity=quantity_value,
+                unit=unit_clean,
+                price_at_sale=item_price,
+            ),
         )
         current_session.add(order_item)
 

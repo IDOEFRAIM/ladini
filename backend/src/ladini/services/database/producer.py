@@ -45,6 +45,7 @@ from ladini.domain.unit_taxonomy import UnitAction, validate_product_unit
 from .base import BaseMixin
 from .common import clamp_limit, clean_text, positive_float
 from .errors import BusinessRuleException
+from .pricing_persistence import certify_commercial_offer
 from .search import fuzzy_match, similarity_rank
 
 logger = logging.getLogger("ladini.services.producer_mgmt")
@@ -576,9 +577,17 @@ class ProducerMgmtMixin(BaseMixin):
         *,
         producer_id: str | None = None,
         phone: str | None = None,
+        commercial_offer: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Ajoute un produit au catalogue public de vente du producteur via self.session.
+
+        `commercial_offer` (Phase B2a) : l'offre commerciale CERTIFIÉE (sérialisation de
+        `domain/commercial_offer.py::CommercialOffer`). L'appelant ne fournit JAMAIS un snapshot :
+        le service reconstruit et RE-VALIDE l'offre, en dérive le snapshot persisté
+        (`products.commercial_pricing`, TOTAL_LOT et conditionnement compris) et vérifie que les
+        champs legacy (`price`, `unit`, `pricing_tiers`) en sont bien la projection — sinon rejet
+        AVANT l'écriture.
 
         `pricing_tiers` (2026-08-27) : déclinaisons de prix/conditionnement
         pour ce MÊME produit (ex: "500f le demi-litre en sachet et 600f le
@@ -645,6 +654,14 @@ class ProducerMgmtMixin(BaseMixin):
             raise BusinessRuleException(str(exc)) from exc
         clean_tiers: Optional[list] = tiers_to_dicts(validated_tiers) or None
 
+        commercial_pricing = certify_commercial_offer(
+            commercial_offer,
+            price=price,
+            unit=unit,
+            quantity_for_sale=quantity_for_sale,
+            pricing_tiers=clean_tiers,
+        )
+
         profile_res = await self.get_producer_profile(phone)
 
         if not profile_res or profile_res[0] is None:
@@ -696,6 +713,7 @@ class ProducerMgmtMixin(BaseMixin):
             description=description.strip() if description else None,
             local_names=local_names,
             pricing_tiers=clean_tiers,
+            commercial_pricing=commercial_pricing,
             created_at=datetime.now(),
             updated_at=datetime.now(),
         )
