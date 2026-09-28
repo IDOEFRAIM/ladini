@@ -800,6 +800,24 @@ def product_pricing_view(product: Any) -> PricingView:
     )
 
 
+def market_offer_pricing_view(offer_row: Any) -> PricingView:
+    """Sémantique d'un `MarketOffer` (production future) — même contrat que `product_pricing_view` :
+    un snapshot présent (`pricing_snapshot`) est CERTIFIÉ ; sinon `price_per_unit` legacy est affiché
+    tel quel, JAMAIS relu comme « certainement par unité » (une ligne antérieure à B2c.3 ne dit rien
+    sur sa base — voir `market_offers_pricing_snapshot_chk`, la colonne n'est contrainte que si non
+    NULL, donc son absence est une vraie inconnue, pas une omission à combler)."""
+    snapshot = CommercialPricingSnapshot.from_dict(getattr(offer_row, "pricing_snapshot", None))
+    if snapshot is None:
+        return legacy_pricing_view(getattr(offer_row, "price_per_unit", None), partial=True)
+    return PricingView(
+        amount=snapshot.commercial_price_amount,
+        currency=snapshot.currency,
+        basis=snapshot.price_basis,
+        reliability=PricingReliability.CERTIFIED,
+        snapshot=snapshot,
+    )
+
+
 __all__ = [
     "SNAPSHOT_SCHEMA_VERSION",
     "DEFAULT_CURRENCY",
@@ -827,4 +845,5 @@ __all__ = [
     "bid_pricing_view",
     "order_item_pricing_view",
     "product_pricing_view",
+    "market_offer_pricing_view",
 ]
