@@ -59,13 +59,17 @@ class _FakePlaceBidSession:
 
 
 class _FakeSelectWinningBidSession:
-    def __init__(self, row):
+    def __init__(self, row, owner_phone=None):
         from sqlalchemy.sql.dml import Update as _UpdateStmt
 
         self._row = row
         self._UpdateStmt = _UpdateStmt
+        self._owner_phone = owner_phone
         self.added: list = []
         self._select_served = False
+
+    async def scalar(self, stmt):
+        return self._owner_phone
 
     async def execute(self, stmt):
         if isinstance(stmt, self._UpdateStmt):
@@ -161,7 +165,7 @@ class TestRfqFullJourneyToCompletion:
         # ── BUYER -> select A (winner) ──
         sub_cat = types.SimpleNamespace(name="Riz")
         row = (bid_a, auction, "Producteur A", phone_a, sub_cat)
-        svc_buyer = _auction_svc(_FakeSelectWinningBidSession(row))
+        svc_buyer = _auction_svc(_FakeSelectWinningBidSession(row, owner_phone=buyer_phone))
         select_session = svc_buyer.session
         win = run(svc_buyer.select_winning_bid(bid_id=str(bid_a.id), phone=buyer_phone))
         assert win["status"] == "success"

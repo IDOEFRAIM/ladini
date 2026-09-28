@@ -19,6 +19,7 @@ import inspect
 import pytest
 
 from ladini.infrastructure.mcp.security import TOOL_SCOPE_MAP
+from ladini.services.database.auction import AuctionMixin
 from ladini.services.database.buyer import BuyerMixin
 from ladini.services.database.producer import ProducerMgmtMixin
 
@@ -56,6 +57,13 @@ class TestOrderStateMutationsAreOwnershipChecked:
         (BuyerMixin.cancel_pending_order, ("get_buyer_profile", "Order.buyer_id ==")),
         (BuyerMixin.confirm_preorder_draft, ("get_buyer_profile", "Order.buyer_id ==")),
         (BuyerMixin.cancel_preorder_draft, ("get_buyer_profile", "Order.buyer_id ==")),
+        # (2026-09-28, audit fiabilité agent) : `select_winning_bid` clôt une
+        # enchère ET instancie une VRAIE `Order` — même catégorie de
+        # mutation que ses voisins ci-dessus, mais ne vérifiait AUCUNE
+        # propriété acheteur avant ce correctif (contrairement à son voisin
+        # dans le MÊME fichier, `cancel_auction`). Verrouille le garde
+        # ajouté (résolution du propriétaire réel + rejet `not_owner`).
+        (AuctionMixin.select_winning_bid, ("BuyerProfile.id == auction.buyer_id", "not_owner")),
     }
 
     @pytest.mark.parametrize(

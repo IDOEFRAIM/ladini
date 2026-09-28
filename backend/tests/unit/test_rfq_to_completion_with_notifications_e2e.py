@@ -74,15 +74,19 @@ class _FakeSingleBidSession:
 
 
 class _FakeSelectWinningBidSession:
-    def __init__(self, row, loser_producer_ids, phone_by_producer):
+    def __init__(self, row, loser_producer_ids, phone_by_producer, owner_phone=None):
         from sqlalchemy.sql.dml import Update as _UpdateStmt
 
         self._row = row
         self._UpdateStmt = _UpdateStmt
         self._loser_producer_ids = list(loser_producer_ids)
         self._phone_by_producer = phone_by_producer
+        self._owner_phone = owner_phone
         self._select_served = False
         self.added: list = []
+
+    async def scalar(self, stmt):
+        return self._owner_phone
 
     async def execute(self, stmt):
         if isinstance(stmt, self._UpdateStmt):
@@ -202,6 +206,7 @@ class TestRfqWinnerNotificationsThenFulfillment:
             row,
             loser_producer_ids=[producer_b.id],
             phone_by_producer={producer_b.id: phone_b},
+            owner_phone=buyer_phone,
         )
         svc_buyer = _auction_svc(select_session)
         win = run(svc_buyer.select_winning_bid(bid_id=str(bid_a.id), phone=buyer_phone))

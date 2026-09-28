@@ -210,11 +210,33 @@ async def _handle_viewing_offers(
     payload: Dict[str, Any],
     nctx: Dict[str, Any],
     auction_id: str,
+    phone: str,
 ) -> Dict[str, Any]:
-    """Process bid selection or re-display bids."""
+    """Process bid selection or re-display bids.
+
+    (2026-09-28, audit fiabilité agent — gap réel confirmé) : `phone` est
+    désormais un paramètre EXPLICITE — `negotiation_gate` le calcule déjà
+    depuis `state["user_phone"]` (la SEULE source fiable de l'identité de
+    l'appelant réel) pour les 2 AUTRES branches de phase
+    (`_handle_counter_price`/`_handle_negotiation_menu`), mais cette
+    branche-ci recalculait sa propre variable (`_buyer_phone = nctx.get(
+    "buyer_phone") or nctx.get("phone")`) — et `_initiate_negotiation`
+    n'écrit JAMAIS ces deux clés dans `negotiation_context` (vérifié :
+    aucun site d'écriture), donc `_buyer_phone` valait TOUJOURS `None` en
+    pratique. Conséquence directe : `AuctionMixin.select_winning_bid`
+    (services/database/auction.py) ne filtre PAS par propriétaire de
+    l'enchère (contrairement à son voisin `cancel_auction`, MÊME fichier) —
+    son SEUL rôle de sécurité pour ce chemin est le `phone` qu'on lui
+    passe, exploité UNIQUEMENT si on lui en donne un vrai. `bid_id` reste
+    par ailleurs toujours sourcé depuis `get_auction_bids` scopé à CETTE
+    session de négociation (jamais un texte libre arbitraire), donc ce
+    correctif est une défense en profondeur — pas la fermeture d'un
+    exploit conversationnel démontré — mais la seule protection dont
+    dispose cette écriture irréversible (création de commande) ne doit
+    jamais dépendre d'un paramètre systématiquement `None`."""
     bid_id = payload.get("bid_id")
     if bid_id:
-        _buyer_phone = nctx.get("buyer_phone") or nctx.get("phone")
+        _buyer_phone = phone or nctx.get("buyer_phone") or nctx.get("phone")
         # Point GPS de livraison — best-effort, contrairement au tunnel
         # dédié `flows/buyer/order_tracking.py::finalize_winner` (qui
         # redemande explicitement/confirme le point avant de créer la
@@ -534,7 +556,7 @@ async def negotiation_gate(
         return await _handle_counter_price(mc_runtime, phone, payload, nctx, auction_id, state)
 
     if auction_id and nphase == "VIEWING_OFFERS":
-        return await _handle_viewing_offers(mc_runtime, payload, nctx, auction_id)
+        return await _handle_viewing_offers(mc_runtime, payload, nctx, auction_id, phone)
 
     if auction_id and nphase == "NEGOTIATION_MENU":
         return await _handle_negotiation_menu(

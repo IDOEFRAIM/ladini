@@ -62,6 +62,15 @@ class _FakeSelectWinningBidSession:
         self._select_served = False
         self.added: list = []
 
+    async def scalar(self, stmt):
+        # Résolution du propriétaire acheteur (garde de propriété ajouté à
+        # `select_winning_bid`, 2026-09-28) — hors du périmètre testé ici
+        # (notification des perdants) : renvoie systématiquement le même
+        # téléphone que celui passé en argument par CHAQUE test de ce
+        # fichier, pour que le garde de propriété passe sans jamais devenir
+        # l'objet du test.
+        return "+22670000099"
+
     async def execute(self, stmt):
         if isinstance(stmt, self._UpdateStmt):
             ids = self._loser_producer_ids

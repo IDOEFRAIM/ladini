@@ -1598,6 +1598,40 @@ class AuctionMixin(BaseMixin):
                 reason="bid_not_selectable",
             )
 
+        # (2026-09-28, audit fiabilité agent — gap réel confirmé) : AUCUN
+        # garde ne vérifiait que l'appelant est bien l'ACHETEUR propriétaire
+        # de `auction` — contrairement à SON VOISIN DANS CE MÊME FICHIER,
+        # `cancel_auction` (plus bas), qui joint `BuyerProfile`/`User` et
+        # filtre `User.phone == clean_phone` avant toute mutation.
+        # `select_winning_bid` clôt l'enchère ET instancie une VRAIE `Order`
+        # (`auction.buyer_id`) — strictement la même catégorie de mutation
+        # que `cancel_auction`, sans son contrôle de propriété. Requête
+        # séparée (plutôt qu'un JOIN ajouté à la sélection principale
+        # ci-dessus) : la sélection principale est verrouillée par un tuple
+        # à 5 colonnes déjà couvert par une longue suite de tests unitaires
+        # (`test_select_winning_bid_state_guards.py`, `test_auction_bid_row_
+        # locking.py`, `test_auction_loser_notification.py`...) — l'étendre
+        # casserait leur doublure de session (qui rejoue un tuple figé),
+        # sans rapport avec le gap fermé ici. Le contrôle reste bien AVANT
+        # toute écriture (juste après les gardes de statut, avant la
+        # section "Mises à jour atomiques"), donc aussi protecteur.
+        clean_buyer_phone = normalize_phone(phone, required=False)
+        if not clean_buyer_phone:
+            raise BusinessRuleException(
+                "Action non autorisée ou marché introuvable.",
+                reason="not_owner",
+            )
+        owning_buyer_phone = await current_session.scalar(
+            select(User.phone)
+            .join(BuyerProfile, BuyerProfile.user_id == User.id)
+            .where(BuyerProfile.id == auction.buyer_id)
+        )
+        if normalize_phone(owning_buyer_phone, required=False) != clean_buyer_phone:
+            raise BusinessRuleException(
+                "Action non autorisée ou marché introuvable.",
+                reason="not_owner",
+            )
+
         # 1. Mises à jour atomiques des états du Marché
         bid.is_winner = True
         bid.status = "WINNING"
