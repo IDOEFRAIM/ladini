@@ -121,6 +121,64 @@ class TestDeriveExecutionIdempotencyKey:
         assert _derive_execution_idempotency_key(state) == procurement_execution_key(pd)
 
 
+class TestMessageSidFallbackForNonDraftGoals:
+    """(2026-09-28, audit fiabilité agent) : gap réel confirmé — les ~15
+    goals WRITE sans draft versionné (SALES_PLACE_BID, STOCK_REGISTER_
+    HARVEST, PRODUCER_CONFIRM_ORDER, FARM_CREATE...) recevaient TOUJOURS
+    `None` ici, donc chaque tentative de la boucle de retry transitoire de
+    `mcp_tool_executor` (`_MCP_MAX_TRANSIENT_RETRIES`) — ou une
+    redélivraison webhook/Celery du MÊME message — repartait avec un UUID
+    aléatoire côté `AgriMCPClient.call_tool`, rendant le serveur MCP
+    incapable de reconnaître un rejeu : une écriture (bid, mouvement de
+    stock, confirmation de commande...) pouvait s'exécuter deux fois pour
+    un seul message utilisateur. `message_sid` (identifiant stable de
+    l'événement WhatsApp entrant, jamais réécrit en cours de tour) ferme ce
+    trou sans jamais confondre deux messages distincts."""
+
+    def test_no_draft_and_no_tool_name_still_returns_none(self):
+        """Comportement historique inchangé quand l'appelant ne fournit pas
+        `tool_name` (ancien contrat, toujours honoré)."""
+        assert _derive_execution_idempotency_key({"message_sid": "wamid.abc"}) is None
+
+    def test_no_draft_but_tool_name_and_message_sid_derives_a_stable_key(self):
+        state = {"message_sid": "wamid.abc123"}
+        assert (
+            _derive_execution_idempotency_key(state, tool_name="place_bid")
+            == "place_bid:msg:wamid.abc123"
+        )
+
+    def test_no_draft_and_no_message_sid_returns_none_even_with_tool_name(self):
+        assert _derive_execution_idempotency_key({}, tool_name="place_bid") is None
+
+    def test_redelivery_of_the_same_message_derives_the_same_key(self):
+        """Le scénario réel protégé : un timeout transitoire (ou une
+        redélivraison webhook/Celery) rejoue EXACTEMENT le même état pour
+        CE message — la clé doit être identique aux deux tentatives pour
+        que le serveur MCP renvoie REPLAY plutôt que de réexécuter."""
+        state = {"message_sid": "wamid.same-message"}
+        first = _derive_execution_idempotency_key(state, tool_name="add_stock")
+        second = _derive_execution_idempotency_key(dict(state), tool_name="add_stock")
+        assert first == second is not None
+
+    def test_two_distinct_messages_never_collide(self):
+        """Deux demandes légitimes IDENTIQUES envoyées séparément par
+        l'utilisateur (deux SID distincts) ne doivent JAMAIS être
+        confondues — sinon la seconde serait silencieusement absorbée
+        comme un rejeu de la première."""
+        key_a = _derive_execution_idempotency_key({"message_sid": "wamid.A"}, tool_name="place_bid")
+        key_b = _derive_execution_idempotency_key({"message_sid": "wamid.B"}, tool_name="place_bid")
+        assert key_a != key_b
+
+    def test_a_draft_still_takes_precedence_over_the_message_sid_fallback(self):
+        """Un goal drafté garde sa clé stable par draft_id+version — le
+        repli message_sid ne doit jamais la masquer."""
+        d = _procurement_draft()
+        state = {"procurement_draft": d.to_dict(), "message_sid": "wamid.irrelevant"}
+        assert _derive_execution_idempotency_key(
+            state, tool_name="create_auction"
+        ) == procurement_execution_key(d)
+
+
 class TestSelectWinningBidIdempotencyKey:
     """`bid_id` est l'identifiant métier stable de l'action "accepter cette
     offre" — un bid n'est sélectionné gagnant qu'une fois, donc pas besoin

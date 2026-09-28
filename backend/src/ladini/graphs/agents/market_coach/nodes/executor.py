@@ -229,14 +229,50 @@ class _NoopExecutor:
         return payload
 
 
-def _derive_execution_idempotency_key(state: Dict[str, Any]) -> Optional[str]:
+def _derive_execution_idempotency_key(
+    state: Dict[str, Any], *, tool_name: Optional[str] = None
+) -> Optional[str]:
     """Clé d'idempotence CLIENT pour l'exécution MCP de ce tour — générique,
     pas spécifique à un goal câblé en dur ici (l'exécuteur reste agnostique
     des goals, mandat §2) : dérivée du draft versionné (PROCUREMENT ou
     SALES_PUBLISH) SEULEMENT s'il est présent dans l'état de CE tour. `None`
-    pour tout goal sans draft (repli sur un UUID aléatoire par tentative
-    côté `AgriMCPClient.call_tool` — pas de garantie de dédup, comportement
-    historique inchangé pour ces goals).
+    pour tout goal sans draft ET sans `message_sid` exploitable (repli sur un
+    UUID aléatoire par tentative côté `AgriMCPClient.call_tool` — pas de
+    garantie de dédup).
+
+    (2026-09-28, audit fiabilité agent — gap réel confirmé) : AVANT ce
+    correctif, les ~15 goals WRITE sans draft versionné (`SALES_PLACE_BID`,
+    `STOCK_REGISTER_HARVEST`, `PRODUCER_CONFIRM_ORDER`, `PRODUCER_CANCEL_
+    ORDER`, `PRODUCER_CONFIRM_DELIVERY_PAYMENT`, `SALES_RECORD_DIRECT`,
+    `FARM_CREATE`/`FARM_UPDATE`, `FINANCE_LOG_EXPENSE`, etc.) recevaient
+    TOUJOURS `None` ici — `AgriMCPClient.call_tool` mint alors un UUID
+    ALÉATOIRE par appel (`infrastructure/mcp/client.py`), donc la boucle de
+    retry transitoire ci-dessous (`_MCP_MAX_TRANSIENT_RETRIES`, conçue
+    PRÉCISÉMENT pour survivre à un timeout dont l'écriture avait en réalité
+    déjà réussi côté serveur) rejouait l'appel avec une clé DIFFÉRENTE à
+    chaque tentative — le serveur MCP (`mcp_idempotency_store`, clé
+    composite `(idempotency_key, tool_name)`) ne pouvait alors jamais
+    reconnaître un rejeu et exécutait l'écriture une seconde fois pour de
+    vrai (bid en double, mouvement de stock en double, commande confirmée
+    en double...). Même trou pour une redélivraison webhook Twilio du MÊME
+    message (le worker Celery relit le MÊME état et rappelle ce nœud) et
+    pour la boucle `autoretry_for` de `process_agent_task`.
+
+    `message_sid` (`core/state.py` : identifiant STABLE de l'événement
+    WhatsApp entrant, injecté UNE fois par `orchestrator.py::_run_market`,
+    jamais réécrit en cours de tour — sert déjà de clé au cache LLM pour la
+    même raison) est le signal DÉJÀ disponible et déjà conçu pour cet usage
+    exact : "ce tour, pour CE message précis". `f"{tool_name}:msg:
+    {message_sid}"` dédoublonne donc toute repétition de l'exécution de CE
+    tool pour CE message (retry transitoire, redélivraison, retry Celery)
+    SANS jamais confondre deux messages DISTINCTS portant la même intention
+    (chacun a son propre `message_sid`) — contrairement à une clé keyée sur
+    le seul contenu métier (goal+payload), qui collisionnerait deux
+    demandes légitimes IDENTIQUES envoyées séparément par l'utilisateur.
+    Ne couvre PAS le cas "deux messages WhatsApp DISTINCTS confirmant la
+    même chose" (ex: double-tap produisant deux SID différents) — ce
+    résidu reste protégé UNIQUEMENT par `conversation_turn_lock`
+    (`core/conversation_lock.py`), documenté comme risque résiduel.
 
     (2026-09-03, mandat §8 ; étendu 2026-09-17 follow-up pre-Hetzner) : la
     clé est RÉELLEMENT dédupliquée côté serveur depuis 2026-09-03 (voir
@@ -278,6 +314,11 @@ def _derive_execution_idempotency_key(state: Dict[str, Any]) -> Optional[str]:
         _parsed_sales_draft = _SalesPublishDraft.from_dict(_sales_draft_for_key)
         if _parsed_sales_draft is not None:
             return _sales_publish_execution_key(_parsed_sales_draft)
+
+    if tool_name:
+        message_sid = state.get("message_sid")
+        if message_sid:
+            return f"{tool_name}:msg:{message_sid}"
 
     return None
 
@@ -685,7 +726,7 @@ async def mcp_tool_executor(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
 
     provider: ToolProvider = MCPToolProvider(runtime=mc_runtime)
 
-    idempotency_key = _derive_execution_idempotency_key(state)
+    idempotency_key = _derive_execution_idempotency_key(state, tool_name=tool_name)
 
     _MCP_MAX_TRANSIENT_RETRIES = 2
     _TRANSIENT_MARKERS = (
