@@ -1,9 +1,11 @@
 # Agent Reliability Matrix
 
-Statut : audit systémique, 2026-09-28. Périmètre : les 27 intents `action_type:
-"WRITE"` de `interpreter/intent.py::INTENT_CONFIG` (inventaire complet, vérifié
-par grep). Compagnon de `TRANSACTION_STATE_LIFECYCLE.md` (qui documente le
-modèle de state en détail) et `AGENT_PRODUCTION_READINESS.md` (le gate global).
+Statut : audit systémique, 2026-09-28 (Phase 1) — mis à jour 2026-09-28 (Phase 2,
+"AGENT RELIABILITY HARDENING — PHASE 2", fermeture des 3 P1 restants). Périmètre :
+les 27 intents `action_type: "WRITE"` de `interpreter/intent.py::INTENT_CONFIG`
+(inventaire complet, vérifié par grep). Compagnon de `TRANSACTION_STATE_LIFECYCLE.md`
+(qui documente le modèle de state en détail) et `AGENT_PRODUCTION_READINESS.md`
+(le gate global).
 
 Légende :
 - ✅ couvert et prouvé (un test réel existe et passe)
@@ -35,12 +37,11 @@ machine `working_memory` propre).
 |---|---|---|---|---|---|
 | SALES_PLACE_BID | ✅ | ✅ (corrigé cette session — `bid_phase`/`pending_bid_*`) | — (dépose une offre sur SA propre auction) | ✅ (corrigé cette session — message_sid fallback) | |
 | ACCEPT_BID / SELECT_WINNING_BID (`select_winning_bid`) | ✅ | ✅ | ✅ (corrigé cette session — gap réel confirmé, cf. §ci-dessous) | ✅ (bid_id, préexistant) | 2 call sites (`order_tracking.py`, `negotiation.py`) — les deux passent désormais un `phone` réel |
-| SALES_UPDATE_PRODUCT | ⚠️ | ⚠️ (pas de mini-flow `working_memory` connu, non vérifié exhaustivement) | ✅ (service layer) | ❌ (pas de draft, pas de clé stable avant le fallback message_sid de cette session — **⚠️ après**: couvert par le fallback générique, jamais testé spécifiquement pour cet intent) | |
-| SALES_UNPUBLISH_PRODUCT | ⚠️ | — | ✅ | ⚠️ (idem) | |
+| SALES_UPDATE_PRODUCT | ⚠️ | ⚠️ (pas de mini-flow `working_memory` connu, non vérifié exhaustivement) | ✅ (service layer) | ❌ (pas de draft, pas de clé stable avant le fallback message_sid de cette session — **⚠️ après**: couvert par le fallback générique, jamais testé spécifiquement pour cet intent) | CONFIRM/REJECT lit `working_memory["update_pending"]` (même valeur que le récap affiché), jamais `transaction_payload` — vérifié Phase 2 |
+| PRODUCTION_UPDATE_FUTURE | ⚠️ | ⚠️ | ✅ (`services/database/producer.py`, ownership+lock) | ⚠️ (idem) | **ajouté Phase 2** — retiré à tort du tableau générique en Phase 1 ; own-flow réel (`producer_update` tunnel), même pattern self-consistent que SALES_UPDATE_PRODUCT |
 | PRODUCER_CANCEL_ORDER | ⚠️ | — | ✅ (`get_producer_profile`+`not_owner`, testé) | ⚠️ (idem) | |
 | PRODUCER_CONFIRM_ORDER | ⚠️ | — | ✅ | ⚠️ (idem) | |
 | PRODUCER_CONFIRM_DELIVERY_OTP | ⚠️ | — | ✅ (code déterministe) | ⚠️ (idem) | |
-| PRODUCER_CONFIRM_DELIVERY_PAYMENT | ⚠️ | — | ✅ (`get_producer_profile`+`not_owner`, testé) | ⚠️ (idem) | **seul goal de ce groupe sur le chemin de confirmation GÉNÉRIQUE, pas own-flow — cf. P1 confirmation §ci-dessous** |
 | PROCUREMENT_UPDATE_REQUEST | ⚠️ | — | ⚠️ (`tool_name` "symbolique", non vérifié) | ⚠️ (idem) | |
 | BUYER_ADD_TO_CART | ✅ (candidate lists reconstruites à neuf, `domain/selection_actions.py`) | ✅ | — (panier propre à l'acheteur) | — (accumulation, pas une action ponctuelle) | |
 | BUYER_CREATE_PREORDER / BUYER_CANCEL_ORDER / BUYER_NEGOTIATE_PRICE | ⚠️ | ⚠️ | ✅ | ⚠️ (idem fallback générique) | |
@@ -48,24 +49,34 @@ machine `working_memory` propre).
 
 ## Intents génériques (transaction_payload brut, `confirmation_gate` générique)
 
-| Intent | Happy path | Confirmation intégrité | Idempotent | Notes |
-|---|---|---|---|---|
-| STOCK_REGISTER_HARVEST | ✅ | ❌ **P1** (résumé construit depuis `transaction_payload` brut, pas de draft — voir §Confirmation) | ⚠️ (fallback message_sid de cette session, non testé spécifiquement) | |
-| SALES_RECORD_DIRECT | ✅ | ❌ **P1** | ⚠️ | |
-| PRODUCTION_DECLARE_FUTURE / PRODUCTION_UPDATE_FUTURE | ✅ | ❌ **P1** | ⚠️ | |
-| FINANCE_LOG_EXPENSE | ✅ | ❌ **P1** | ⚠️ | |
-| FARM_CREATE / FARM_UPDATE | ✅ | ❌ **P1** (impact limité — champs administratifs, pas d'argent direct) | ⚠️ | |
-| PROFILE_SET_GEO / PROFILE_SET_PREFS | ✅ | — (pas d'argent en jeu) | ⚠️ | |
+Inventaire EXACT (Phase 2, revérifié par 2 traces indépendantes — routeur
+`core/router.py::DomainRouter.build()` + `interpreter/intent.py::
+_TUNNEL_ASSIGNMENTS` d'un côté, lecture directe de chaque flow file de
+l'autre) : **10 goals**, pas "~8" (l'estimation initiale omettait
+`SALES_UNPUBLISH_PRODUCT` et `PRODUCER_CONFIRM_DELIVERY_PAYMENT`, tous deux
+mal classés "own-flow" en Phase 1).
+
+| Intent | Happy path | Confirmation intégrité | TYPE | Idempotent | Notes |
+|---|---|---|---|---|---|
+| STOCK_REGISTER_HARVEST | ✅ | ✅ (Phase 2 — voir §Confirmation) | TYPE2 (quantity = ledger stock) | ⚠️ (fallback message_sid, non testé spécifiquement) | |
+| SALES_RECORD_DIRECT | ✅ | ✅ (Phase 2) | TYPE2 (price = montant vente — risque le plus élevé du groupe) | ⚠️ | |
+| SALES_UNPUBLISH_PRODUCT | ✅ | ✅ (Phase 2) | TYPE1 (id nu) | ⚠️ | corrige le classement "own-flow" erroné de la Phase 1 |
+| PRODUCER_CONFIRM_DELIVERY_PAYMENT | ✅ | ✅ (Phase 2) | TYPE1 (id nu, + ownership DB-layer) | ⚠️ | idem — voir table own-flow ci-dessus |
+| PRODUCTION_DECLARE_FUTURE | ✅ | ✅ (Phase 2) | TYPE2 (price/quantity/date — surface de champs la plus large) | ⚠️ | ownership `farm_id` déjà vérifiée en DB (`services/database/producer.py::declare_future_production`, lignes ~1110-1121) |
+| PRODUCTION_UPDATE_FUTURE | — | — | — | — | **retiré de ce groupe (Phase 2)** : own-flow réel (`producer_update` tunnel), jamais `confirmation_gate` générique — erreur de classement Phase 1 corrigée |
+| FINANCE_LOG_EXPENSE | ✅ | ✅ (Phase 2) | TYPE2 (price = montant dépense) | ⚠️ | |
+| FARM_CREATE / FARM_UPDATE | ✅ | ✅ (Phase 2, impact limité — champs administratifs) | TYPE1 | ⚠️ | |
+| PROFILE_SET_GEO / PROFILE_SET_PREFS | ✅ | ✅ (Phase 2, pas d'argent en jeu) | TYPE1 | ⚠️ | |
 
 ## Sections transverses
 
 | Dimension | État | Preuve |
 |---|---|---|
 | Webhook duplicate delivery | ✅ (3 couches : `msg:{SID}`, `task_claim`/`task_done`, `resp:{event_id}`) | `test_process_agent_task_message_dedup.py`, `test_response_dispatch_idempotency.py` |
-| Webhook enqueue failure (Celery `.delay()` échoue après le claim) | ❌ **P1**, non fixé cette session | aucun test — perte de message silencieuse, 200 renvoyé quand même |
+| Webhook enqueue failure (Celery `.delay()` échoue après le claim) | ✅ **fermé Phase 2** — release-claim + 503 (redélivraison provider), ⚠️ résiduel : pas de dead-letter durable (voir Production Readiness) | `test_twilio_webhook_enqueue_failure_recovery.py`, `test_whatsapp_webhook_enqueue_failure_recovery.py` |
 | Concurrency (verrou par conversation) | ✅ mécanisme, ⚠️ résiduel en mode dégradé | `test_conversation_lock.py` — le fallback "dégradé" en cas de timeout retire la sérialisation, sans backstop pour les ~15 goals sans draft |
 | Retry transitoire MCP après timeout | ✅ (corrigé cette session pour les goals sans draft — fallback `message_sid`) | `test_execution_idempotency_key.py::TestMessageSidFallbackForNonDraftGoals` |
-| Erreur technique mi-tour (`_sync_workspace` non appelé) | ❌ **P1**, non fixé cette session | aucun test — `ws.active_goal` peut ressusciter périmé au tour suivant |
+| Erreur technique mi-tour (`_sync_workspace` non appelé) | ✅ **fermé Phase 2** — `_reconcile_workspace_after_failure`, appelé sur les 3 branches d'échec | `test_orchestrator_workspace_reconciliation_on_error.py` |
 | PendingInteraction (TTL, kind unique, cart tunnel) | ✅ | `test_pending_interaction_lifecycle.py` (préexistant) |
 | Draft registry (4 types, purge conditionnelle) | ✅ (SALES_PUBLISH_PRODUCT), ⚠️ (les 3 autres, mécanisme générique partagé, pas de test dédié par type) | `test_sales_publish_cross_flow_state_leak.py` (cette session), `test_recurring_need_state_leak.py` (préexistant) |
 | Candidate selection (cart/tier) | ✅ | `domain/selection_actions.py` reconstruit à neuf chaque tour |
@@ -73,9 +84,10 @@ machine `working_memory` propre).
 | Same-intent/new-action (SALES_PUBLISH_PRODUCT) | ✅ | `test_sales_publish_cross_flow_state_leak.py` |
 | Same-intent/new-action (bid/auction) | ✅ (corrigé cette session) | `TestMiniFlowKeysArePurgedOnRealGoalTransitions` |
 | Confirmation construction (draft goals) | ✅ | `check_confirmation_target_invariant`, appelé sur le hot path |
-| Confirmation construction (8+ goals génériques) | ❌ **P1**, non fixé cette session | pas de draft, `transaction_payload` brut — voir matrice ci-dessus |
+| Confirmation construction (10 goals génériques) | ✅ **fermé Phase 2** — `confirmation_gate` certifie désormais le snapshot GELÉ (`confirmation_summary_payload`), jamais `transaction_payload` live | `test_confirmation_gate_certified_command.py` (A1-A8) |
 | LLM output trust (schémas stricts) | ✅ (3 contrats sur 4) ⚠️ (ACTIVE_SLOT, `extra` non forbid) | spot-check cette session, pas de test dédié au gap ACTIVE_SLOT |
-| Hallucinated entity IDs | ⚠️ | pas de chemin conversationnel démontré aujourd'hui, mais pas de seconde ligne de défense au niveau ACTIVE_SLOT |
+| Hallucinated entity IDs (post-confirmation) | ✅ **fermé Phase 2** pour les 10 goals génériques — un id substitué APRÈS la levée de la confirmation ne survit jamais au gel | `TestA3A4HallucinatedOrForeignEntityIdNeverSurvivesToExecution` |
+| Hallucinated entity IDs (pré-confirmation, ACTIVE_SLOT) | ⚠️ résiduel, hors scope Phase 2 | pas de chemin conversationnel démontré, mais pas de seconde ligne de défense au niveau ACTIVE_SLOT — P2, cf. Production Readiness |
 | Domain invariants (qty>0, price>0, stock non négatif) | ✅ | `positive_float`, `remove_stock` (`insufficient_stock`) |
 | Authorization (ownership DB-layer) | ✅ (corrigé cette session pour `select_winning_bid`), ✅ ailleurs | `test_order_mutations_require_ownership.py` (étendu cette session) |
 | MCP tool contract hygiene | ✅ (spot-check 4 tools critiques) | — |
@@ -86,7 +98,7 @@ machine `working_memory` propre).
 | Ambiguous short replies | ✅ (déjà géré par `PendingInteraction`/candidate lists fraîches) | préexistant |
 | Legacy interpreter fallback (exposition d'IDs techniques) | ⚠️ **résiduel, non fixé** | mécanisme de secours intentionnel (`MARKET_COACH_NEW_TASK_V2_ENABLED`), jamais désactivé unilatéralement cette session — voir Production Readiness |
 
-## Corrections apportées cette session (résumé)
+## Corrections apportées Phase 1 (résumé)
 
 1. `interpreter/goal_planner.py` RULE 1quater — purge conditionnelle sur
    same-intent/new-action (déjà couvert par la mission précédente, généralisé
@@ -101,15 +113,43 @@ machine `working_memory` propre).
 5. `domain/quantity_unit.py::_parse_number` — rejet de l'ambiguïté
    point-milliers au lieu d'une sous-évaluation silencieuse x1000.
 
-## Ce qui reste ❌ (documenté, non fixé cette session — voir Production Readiness pour la justification)
+## Corrections apportées Phase 2 (résumé) — ferme les 3 P1 restants
 
-- Confirmation construite depuis `transaction_payload` brut pour ~8 goals
-  génériques (P1).
-- Webhook enqueue failure → perte de message silencieuse (P1).
-- `_sync_workspace` non appelé sur erreur technique mi-tour → `ws.active_goal`
-  périmé peut ressusciter (P1).
+6. `nodes/confirmation_gate.py` — branche CONFIRM générique : vérifie
+   `confirmation_summary_goal`/`confirmation_summary_payload` (snapshot gelé,
+   déjà existant, réutilisé — pas de nouvelle classe) avant de certifier, puis
+   remplace `transaction_payload` par ce snapshot (`{"__reset__": True,
+   **data}`, jamais une fusion) avant d'autoriser l'exécution. Ferme
+   l'inventaire exact des 10 goals génériques (voir tableau ci-dessus).
+7. `api/routes/twilio_webhook.py` / `whatsapp_webhook.py` — un échec
+   d'enqueue Celery (ou la pause maintenance) relâche désormais le claim
+   `msg:{id}` posé en tête de webhook AVANT de renvoyer 503, au lieu de
+   laisser ce claim bloquer silencieusement toute redélivraison provider
+   pendant 1h.
+8. `orchestrator/orchestrator.py::_reconcile_workspace_after_failure` —
+   appelé sur les 3 branches d'échec (`AgentCircuitBreaker`, `TimeoutError`,
+   `Exception`), relit le checkpoint réel et réconcilie `ws.active_goal` au
+   lieu de le laisser figé à sa valeur pré-tour.
+9. Observabilité : logs `inbound_queued`/`flow_certified`/`workspace_reconciled`
+   (corrélation seulement, jamais de contenu métier) + 4 compteurs
+   Prometheus/OTel (`inbound_enqueue_failures`, `duplicate_inbound_messages`,
+   `workspace_reconciliation_failures`, `transaction_retry_count`).
+
+## Ce qui reste ❌ / ⚠️ (voir Production Readiness pour le détail et la justification)
+
+- **Résiduel P1-B** : pas de dead-letter DURABLE pour un message dont
+  l'enqueue échoue de façon SOUTENUE (au-delà du budget de redélivraison du
+  provider) — bloqué par une contrainte d'architecture réelle (`schema_contract/`
+  est un miroir en LECTURE SEULE généré depuis un dépôt frontend Drizzle
+  séparé ; `test_no_runtime_ddl_in_backend_source` interdit toute DDL runtime
+  dans ce backend), pas un oubli. Voir Production Readiness pour le détail et
+  l'option de contournement (alerting sur `inbound_enqueue_failures`).
 - ACTIVE_SLOT contract sans `extra="forbid"` (P2, aucun exploit démontré,
-  mais seule ligne de défense pour ce chemin).
+  mais seule ligne de défense pour ce chemin) — hors scope Phase 2.
 - Fallback legacy de l'interpréteur unifié (exposition d'IDs techniques dans
   le prompt) — mécanisme de secours intentionnel, décision produit requise
   avant toute suppression (P2/P3 selon l'usage réel en production).
+- Pas de test DB-layer dédié pour `services/database/producer.py::
+  declare_future_production`'s ownership check (vérifié par lecture directe
+  du code cette session, pas par un test avec session simulée) — dette de
+  test résiduelle, pas un bug connu.
