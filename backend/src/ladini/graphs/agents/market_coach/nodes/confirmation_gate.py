@@ -351,6 +351,14 @@ async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str,
                     goal,
                 )
                 return dict(_ABANDON_PATCH)
+            # (2026-09-28, observability P1-A) : `flow_certified` — corrélation
+            # (goal, message_sid) seulement, jamais le contenu du payload
+            # (prix/quantité/texte libre).
+            logger.info(
+                "flow_certified | goal=%s | message_sid=%s",
+                goal,
+                state.get("message_sid"),
+            )
             return {
                 "is_certified": True,
                 "execution_authorized": True,

@@ -552,4 +552,7 @@ async def _handle_twilio_webhook(
         await _release_message_claim(MessageSid)
         return Response(content=_ENQUEUE_FAILED_MESSAGE, media_type="text/plain", status_code=503)
 
+    # (2026-09-28, observability P1-B) : `inbound_queued` — corrélation
+    # (message_sid) seulement, jamais le texte du message.
+    logger.info("inbound_queued | message_sid=%s", MessageSid)
     return _empty_twiml()

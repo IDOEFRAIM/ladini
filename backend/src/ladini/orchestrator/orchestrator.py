@@ -598,7 +598,18 @@ class Orchestrator:
             langgraph_blob = (
                 copy.deepcopy(ws.agent_state) if isinstance(ws.agent_state, dict) else None
             )
+            goal_before = ws.active_goal
             self._sync_workspace(ws, channel_values, langgraph_blob)
+            # (2026-09-28, observability P1-C) : `workspace_reconciled`, sans texte
+            # de message ni contenu métier — seulement les identifiants de
+            # corrélation et les 2 valeurs de `active_goal` en jeu, utiles pour
+            # distinguer un stale goal réellement effacé d'un no-op silencieux.
+            logger.info(
+                "workspace_reconciled | workspace=%s | goal_before=%s | goal_after=%s",
+                workspace_id,
+                goal_before or None,
+                ws.active_goal or None,
+            )
         except Exception:  # pragma: no cover - défensif, jamais vers l'appelant
             logger.debug(
                 "workspace reconciliation ignorée après échec | workspace=%s",

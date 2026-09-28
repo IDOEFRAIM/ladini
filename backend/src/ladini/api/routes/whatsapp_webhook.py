@@ -641,5 +641,9 @@ async def _process_single_message(
             await _release_message_claim(message_id)
         raise _EnqueueFailed(message_id) from e
 
+    # (2026-09-28, observability P1-B) : `inbound_queued` — corrélation (id)
+    # seulement, jamais le texte du message.
+    logger.info("inbound_queued | message_sid=%s", message_id)
+
 
 __all__ = ["router"]
