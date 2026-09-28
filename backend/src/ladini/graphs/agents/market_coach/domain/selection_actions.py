@@ -266,7 +266,12 @@ def build_selection_context(state: Dict[str, Any]) -> SelectionContext:
         for position, v in enumerate(vendor_ctx["vendors"], start=1):
             if not isinstance(v, dict):
                 continue
-            label = f"{v.get('vendor_name') or 'producteur'} — {v.get('price')} FCFA/{v.get('unit')}"
+            # Mandat B2c.4 §10 : `pricing_label` (search_products, certifié) porte la VRAIE base du
+            # prix — un lot TOTAL_LOT ou un conditionnement ne doivent jamais s'afficher
+            # "X FCFA/unite" ici. Repli legacy uniquement si l'appelant ne l'a pas fourni (résultat
+            # d'une source antérieure à cette phase).
+            price_label = v.get("pricing_label") or f"{v.get('price')} FCFA/{v.get('unit')}"
+            label = f"{v.get('vendor_name') or 'producteur'} — {price_label}"
             producer_options.append(
                 ProducerOption(
                     producer_id=str(v.get("producer_id") or ""),

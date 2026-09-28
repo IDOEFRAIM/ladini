@@ -31,6 +31,8 @@ from ladini.domain.commercial_pricing_snapshot import (
     CommercialPricingSnapshot,
     PricingSnapshotError,
     build_bid_pricing_snapshot,
+    comparable_total,
+    render_pricing_label,
     to_decimal,
 )
 from ladini.domain.pricing_tiers import unit_family
@@ -445,31 +447,10 @@ def resolve_package_reply(pending: BidPriceParse, text: Any, *, auction_unit: st
 
 
 # ---------------------------------------------------------------------------
-# Affichage & comparaison (un bid affiche SA base, jamais celle de l'enchère)
+# Affichage & comparaison — relocalisées dans `commercial_pricing_snapshot.py` (B2c.4 §3 : une
+# seule API canonique, réutilisée par le bid flow ET par les consommateurs buyer). Importées
+# ci-dessus, ré-exportées ici pour les appelants existants de ce module.
 # ---------------------------------------------------------------------------
-
-
-def render_pricing_label(snapshot: CommercialPricingSnapshot) -> str:
-    """« 450 000 FCFA par tonne » / « 4 500 000 FCFA pour l'ensemble » / « 12 000 FCFA par caisse de 25 kg »."""
-    money = f"{fmt_num(float(snapshot.commercial_price_amount))} FCFA"
-    if snapshot.price_basis == PriceBasis.TOTAL_LOT:
-        return f"{money} pour l'ensemble"
-    if snapshot.price_basis == PriceBasis.PER_PACKAGE and snapshot.package_content_amount is not None:
-        content = float(snapshot.package_content_amount)
-        return (
-            f"{money} par {str(snapshot.package_type or 'conditionnement').lower()} de "
-            f"{fmt_num(content)} {unit_display(snapshot.package_content_unit, content)}"
-        )
-    return f"{money} par {unit_display(snapshot.price_unit)}"
-
-
-def comparable_total(snapshot: CommercialPricingSnapshot, auction_quantity: Any, auction_unit: str) -> Optional[Decimal]:
-    """Total comparable d'un bid pour la quantité de l'enchère, ou `None` (jamais deviné)."""
-    try:
-        total: Decimal = snapshot.total_for(auction_quantity, auction_unit)
-        return total
-    except PricingSnapshotError:
-        return None
 
 
 __all__ = [

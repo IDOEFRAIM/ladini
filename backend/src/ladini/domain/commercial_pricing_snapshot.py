@@ -35,10 +35,12 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional
 
+from ladini.core.formatting import fmt_num
 from ladini.domain.commercial_offer import (
     CommercialOffer,
     PriceBasis,
     base_unit_for,
+    unit_display,
 )
 from ladini.domain.pricing_tiers import unit_factor as _unit_factor
 from ladini.domain.pricing_tiers import unit_family as _unit_family
@@ -750,6 +752,39 @@ class PricingView:
     def basis_label(self) -> str:
         return self.basis.value if self.basis else "UNKNOWN"
 
+    @property
+    def status(self) -> str:
+        """`CERTIFIED` / `LEGACY_PARTIAL` / `UNKNOWN_BASIS` (mandat B2c.4 §3) — alias lisible de
+        `reliability`, un seul champ à tester côté consommateur."""
+        return self.reliability.value
+
+    @property
+    def pricing_label(self) -> str:
+        """Le SEUL libellé commercial à afficher (mandat B2c.4 §3-8) — jamais reconstruit dans un
+        node/renderer buyer. Une ligne CERTIFIÉE affiche sa base réelle (« 500 FCFA par sachet de
+        0,5 L », jamais « 1000 FCFA/L » — voir `render_pricing_label`) ; une ligne LEGACY_PARTIAL
+        affiche le montant SANS inventer de base ; une ligne sans montant n'a rien à afficher."""
+        if self.snapshot is not None:
+            return render_pricing_label(self.snapshot)
+        if self.amount is not None:
+            return f"{fmt_num(float(self.amount))} FCFA — base historique non certifiée"
+        return "Prix non disponible"
+
+    @property
+    def is_comparable(self) -> bool:
+        """Un prix normalisé (par unité de BASE) n'existe que pour une vue CERTIFIÉE dont le lot a
+        une quantité connue (mandat B2c.4 §17) — jamais déduit d'une ligne LEGACY_PARTIAL/
+        UNKNOWN_BASIS, ni d'un TOTAL_LOT sans inventaire pour se ramener à un prix unitaire."""
+        return self.snapshot is not None and self.snapshot.normalized_unit_price is not None
+
+    @property
+    def not_comparable_reason(self) -> Optional[str]:
+        if self.is_comparable:
+            return None
+        if self.snapshot is not None:
+            return "quantité de référence inconnue pour normaliser ce lot"
+        return self.note or "base de prix non certifiée"
+
 
 def legacy_pricing_view(amount: Any, *, currency: Optional[str] = None, partial: bool = False) -> PricingView:
     return PricingView(
@@ -787,10 +822,20 @@ def order_item_pricing_view(item: Any) -> PricingView:
     )
 
 
+def _field(row: Any, name: str) -> Any:
+    """Lit `name` sur une ligne ORM (`getattr`) OU une `RowMapping`/dict issue de `.mappings()`
+    (mandat B2c.4 : les consommateurs buyer — `services/database/buyer.py::search_products` —
+    sélectionnent des colonnes en SQL brut, pas des objets ORM ; un seul accesseur ici évite un
+    adaptateur par appelant)."""
+    if isinstance(row, Mapping):
+        return row.get(name)
+    return getattr(row, name, None)
+
+
 def product_pricing_view(product: Any) -> PricingView:
-    snapshot = CommercialPricingSnapshot.from_dict(getattr(product, "commercial_pricing", None))
+    snapshot = CommercialPricingSnapshot.from_dict(_field(product, "commercial_pricing"))
     if snapshot is None:
-        return legacy_pricing_view(getattr(product, "price", None), partial=True)
+        return legacy_pricing_view(_field(product, "price"), partial=True)
     return PricingView(
         amount=snapshot.commercial_price_amount,
         currency=snapshot.currency,
@@ -806,9 +851,9 @@ def market_offer_pricing_view(offer_row: Any) -> PricingView:
     tel quel, JAMAIS relu comme « certainement par unité » (une ligne antérieure à B2c.3 ne dit rien
     sur sa base — voir `market_offers_pricing_snapshot_chk`, la colonne n'est contrainte que si non
     NULL, donc son absence est une vraie inconnue, pas une omission à combler)."""
-    snapshot = CommercialPricingSnapshot.from_dict(getattr(offer_row, "pricing_snapshot", None))
+    snapshot = CommercialPricingSnapshot.from_dict(_field(offer_row, "pricing_snapshot"))
     if snapshot is None:
-        return legacy_pricing_view(getattr(offer_row, "price_per_unit", None), partial=True)
+        return legacy_pricing_view(_field(offer_row, "price_per_unit"), partial=True)
     return PricingView(
         amount=snapshot.commercial_price_amount,
         currency=snapshot.currency,
@@ -816,6 +861,37 @@ def market_offer_pricing_view(offer_row: Any) -> PricingView:
         reliability=PricingReliability.CERTIFIED,
         snapshot=snapshot,
     )
+
+
+# ---------------------------------------------------------------------------
+# Affichage & comparaison (mandat B2c.4 §3 : UNE seule API — un formatter/comparateur
+# canonique, jamais un par node/consumer). Relocalisé depuis `bid_pricing_flow.py`
+# (2026-09-28) : ne dépend que de `CommercialPricingSnapshot`, rien de spécifique aux bids —
+# `bid_pricing_flow` ré-exporte les deux noms pour ses appelants existants.
+# ---------------------------------------------------------------------------
+
+
+def render_pricing_label(snapshot: CommercialPricingSnapshot) -> str:
+    """« 450 000 FCFA par tonne » / « 4 500 000 FCFA pour l'ensemble » / « 12 000 FCFA par caisse de 25 kg »."""
+    money = f"{fmt_num(float(snapshot.commercial_price_amount))} FCFA"
+    if snapshot.price_basis == PriceBasis.TOTAL_LOT:
+        return f"{money} pour l'ensemble"
+    if snapshot.price_basis == PriceBasis.PER_PACKAGE and snapshot.package_content_amount is not None:
+        content = float(snapshot.package_content_amount)
+        return (
+            f"{money} par {str(snapshot.package_type or 'conditionnement').lower()} de "
+            f"{fmt_num(content)} {unit_display(snapshot.package_content_unit, content)}"
+        )
+    return f"{money} par {unit_display(snapshot.price_unit)}"
+
+
+def comparable_total(snapshot: CommercialPricingSnapshot, quantity: Any, unit: str) -> Optional[Decimal]:
+    """Total comparable de ce snapshot pour `quantity`/`unit` demandés, ou `None` (jamais deviné —
+    ex: PER_PACKAGE sur une quantité qui n'est pas un nombre entier de conditionnements)."""
+    try:
+        return snapshot.total_for(quantity, unit)
+    except PricingSnapshotError:
+        return None
 
 
 __all__ = [
@@ -846,4 +922,6 @@ __all__ = [
     "order_item_pricing_view",
     "product_pricing_view",
     "market_offer_pricing_view",
+    "render_pricing_label",
+    "comparable_total",
 ]

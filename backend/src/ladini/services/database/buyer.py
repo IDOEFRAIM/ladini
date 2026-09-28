@@ -10,6 +10,10 @@ from ladini.core.formatting import fmt_num as _fmt_num
 from ladini.domain.analytics.business_events import BusinessEventName
 from ladini.domain.analytics.emitter import BusinessEventEmitter
 from ladini.domain.analytics.metric_dictionary import Journey
+from ladini.domain.commercial_pricing_snapshot import (
+    market_offer_pricing_view,
+    product_pricing_view,
+)
 
 # Import des modèles alignés sur le schéma
 from ladini.domain.models import (
@@ -71,6 +75,35 @@ def _guess_display_unit(product_name: Optional[str], db_unit: Optional[str]) -> 
     if is_livestock_product(product_name):
         return "TETE"
     return unit or "KG"
+
+
+def _pricing_fields(view: Any) -> Dict[str, Any]:
+    """Champs de sémantique commerciale CERTIFIÉE pour un résultat de recherche buyer (mandat
+    B2c.4 §3/§9) — `price`/`unit` bruts restent dans le résultat pour compatibilité, mais ce
+    dict est l'AUTORITÉ d'affichage (jamais reconstruit dans un renderer)."""
+    return {
+        "pricing_label": view.pricing_label,
+        "price_basis": view.basis_label,
+        "certification_status": view.status,
+        "normalized_unit_price": (
+            float(view.snapshot.normalized_unit_price)
+            if view.snapshot is not None and view.snapshot.normalized_unit_price is not None
+            else None
+        ),
+        "normalized_unit": view.snapshot.normalized_unit if view.snapshot is not None else None,
+        "is_comparable": view.is_comparable,
+    }
+
+
+def _sort_price(r: Dict[str, Any]) -> float:
+    """Clé de tri (mandat B2c.4 §17) : un prix normalisé PAR UNITÉ DE BASE
+    (`normalized_unit_price`) n'existe que pour une vue CERTIFIÉE dont le lot a une quantité
+    connue — jamais déduit d'une ligne LEGACY/UNKNOWN_BASIS ni d'un TOTAL_LOT sans inventaire.
+    Comparer le `price` BRUT d'un TOTAL_LOT (le montant du LOT ENTIER) au `price` brut d'un
+    PER_BASE_UNIT (un montant PAR UNITÉ) n'a mathématiquement aucun sens — ne trier sur le brut
+    que quand rien de comparable n'existe, jamais mélanger les deux bases."""
+    normalized = r.get("normalized_unit_price")
+    return float(normalized) if normalized is not None else float(r.get("price") or 0.0)
 
 
 class BuyerMixin(BaseMixin):
@@ -227,6 +260,10 @@ class BuyerMixin(BaseMixin):
                     # `get_stocks` (colonne persistée mais jamais SELECTionnée
                     # ici). Voir domain/pricing_tiers.py.
                     Product.pricing_tiers,
+                    # Mandat B2c.4 : la sémantique commerciale certifiée (base du prix,
+                    # conditionnement, TOTAL_LOT) — sans elle, un produit TOTAL_LOT ("5000 FCFA
+                    # pour 50 kg au total") se serait affiché "5000 FCFA/KG".
+                    Product.commercial_pricing,
                     Producer.id.label("producer_id"),
                     User.name.label("producer_name"),
                     Zone.name.label("zone_name"),
@@ -279,6 +316,9 @@ class BuyerMixin(BaseMixin):
                     MarketOffer.species,
                     MarketOffer.production_type,
                     MarketOffer.price_per_unit,
+                    # Mandat B2c.4 : idem catalogue — un lot futur TOTAL_LOT (B2c.3) ne doit
+                    # jamais s'afficher "X FCFA/TONNE" alors que X est le prix du lot entier.
+                    MarketOffer.pricing_snapshot,
                     MarketOffer.available_quantity,
                     MarketOffer.estimated_available_at,
                     Producer.id.label("producer_id"),
@@ -387,37 +427,37 @@ class BuyerMixin(BaseMixin):
                 if not purchasable:
                     continue
 
-                combined_results.append(
-                    {
-                        "id": str(row["id"]),
-                        "data_quality_flags": dq_flags,
-                        "name": f"{row['name']} ({tag})",
-                        "price": float(row["price"]),
-                        "priority": int(row.get("priority") or 3),
-                        "unit": unit_label,
-                        "vendor": row["producer_name"] or "Producteur Anonyme",
-                        "vendor_name": row["producer_name"] or "Producteur Anonyme",
-                        "producer_name": row["producer_name"] or "Producteur Anonyme",
-                        "producer_id": str(row.get("producer_id") or ""),
-                        "zone_name": row.get("zone_name"),
-                        "is_local": is_local,
-                        "source_type": "DIRECT",
-                        "availability_kind": "CATALOG",
-                        "available_quantity": float(
-                            row.get("quantity_for_sale") or 0.0
-                        ),
-                        # Voir services/search_results_cache.py — permet à l'acheteur
-                        # de demander "photos <numéro>" pour un résultat de recherche.
-                        "images": list(row.get("images") or []),
-                        "pricing_tiers": row.get("pricing_tiers"),
-                        "minimum_order_quantity": (
-                            float(row["minimum_order_quantity"])
-                            if row.get("minimum_order_quantity") is not None
-                            else None
-                        ),
-                        "minimum_order_unit": row.get("minimum_order_unit"),
-                    }
-                )
+                result = {
+                    "id": str(row["id"]),
+                    "data_quality_flags": dq_flags,
+                    "name": f"{row['name']} ({tag})",
+                    "price": float(row["price"]),
+                    "priority": int(row.get("priority") or 3),
+                    "unit": unit_label,
+                    "vendor": row["producer_name"] or "Producteur Anonyme",
+                    "vendor_name": row["producer_name"] or "Producteur Anonyme",
+                    "producer_name": row["producer_name"] or "Producteur Anonyme",
+                    "producer_id": str(row.get("producer_id") or ""),
+                    "zone_name": row.get("zone_name"),
+                    "is_local": is_local,
+                    "source_type": "DIRECT",
+                    "availability_kind": "CATALOG",
+                    "available_quantity": float(
+                        row.get("quantity_for_sale") or 0.0
+                    ),
+                    # Voir services/search_results_cache.py — permet à l'acheteur
+                    # de demander "photos <numéro>" pour un résultat de recherche.
+                    "images": list(row.get("images") or []),
+                    "pricing_tiers": row.get("pricing_tiers"),
+                    "minimum_order_quantity": (
+                        float(row["minimum_order_quantity"])
+                        if row.get("minimum_order_quantity") is not None
+                        else None
+                    ),
+                    "minimum_order_unit": row.get("minimum_order_unit"),
+                }
+                result.update(_pricing_fields(product_pricing_view(row)))
+                combined_results.append(result)
 
             for row in future_rows:
                 estimated = row.get("estimated_available_at")
@@ -433,47 +473,47 @@ class BuyerMixin(BaseMixin):
                 tag = "📍 Local" if is_local else "🌐 National"
                 display_name = f"{crop_name} ({tag} • ⏳ Future)"
 
-                combined_results.append(
-                    {
-                        "id": str(row["id"]),
-                        "name": display_name,
-                        "price": float(row.get("price_per_unit") or 0.0),
-                        "priority": int(row.get("priority") or 3),
-                        "unit": _guess_display_unit(
-                            crop_name,
-                            row.get("production_type") == "LIVESTOCK"
-                            and "TETE"
-                            or "KG",
-                        ),
-                        "vendor": row.get("producer_name") or "Producteur Anonyme",
-                        "vendor_name": row.get("producer_name") or "Producteur Anonyme",
-                        "producer_name": row.get("producer_name")
-                        or "Producteur Anonyme",
-                        "producer_id": str(row.get("producer_id") or ""),
-                        "zone_name": row.get("zone_name"),
-                        "is_local": is_local,
-                        "source_type": "FUTURE",
-                        "availability_kind": "FUTURE",
-                        "estimated_available_at": estimated_iso,
-                        "available_quantity": float(
-                            row.get("available_quantity") or 0.0
-                        ),
-                        "crop_cycle_id": str(row["id"]),
-                        "images": [],  # productions futures : pas de photo avant récolte
-                        "minimum_order_quantity": (
-                            float(row["minimum_order_quantity"])
-                            if row.get("minimum_order_quantity") is not None
-                            else None
-                        ),
-                        "minimum_order_unit": row.get("minimum_order_unit"),
-                    }
-                )
+                future_result = {
+                    "id": str(row["id"]),
+                    "name": display_name,
+                    "price": float(row.get("price_per_unit") or 0.0),
+                    "priority": int(row.get("priority") or 3),
+                    "unit": _guess_display_unit(
+                        crop_name,
+                        row.get("production_type") == "LIVESTOCK"
+                        and "TETE"
+                        or "KG",
+                    ),
+                    "vendor": row.get("producer_name") or "Producteur Anonyme",
+                    "vendor_name": row.get("producer_name") or "Producteur Anonyme",
+                    "producer_name": row.get("producer_name")
+                    or "Producteur Anonyme",
+                    "producer_id": str(row.get("producer_id") or ""),
+                    "zone_name": row.get("zone_name"),
+                    "is_local": is_local,
+                    "source_type": "FUTURE",
+                    "availability_kind": "FUTURE",
+                    "estimated_available_at": estimated_iso,
+                    "available_quantity": float(
+                        row.get("available_quantity") or 0.0
+                    ),
+                    "crop_cycle_id": str(row["id"]),
+                    "images": [],  # productions futures : pas de photo avant récolte
+                    "minimum_order_quantity": (
+                        float(row["minimum_order_quantity"])
+                        if row.get("minimum_order_quantity") is not None
+                        else None
+                    ),
+                    "minimum_order_unit": row.get("minimum_order_unit"),
+                }
+                future_result.update(_pricing_fields(market_offer_pricing_view(row)))
+                combined_results.append(future_result)
 
             combined_results.sort(
                 key=lambda r: (
                     int(r.get("priority") or 3),
                     0 if r.get("source_type") == "DIRECT" else 1,
-                    float(r.get("price") or 0.0),
+                    _sort_price(r),
                 )
             )
             formatted_results = []

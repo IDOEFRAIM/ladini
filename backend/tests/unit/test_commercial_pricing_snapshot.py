@@ -36,8 +36,10 @@ from ladini.domain.commercial_pricing_snapshot import (
     build_bid_pricing_snapshot,
     build_order_item_pricing_snapshot,
     build_total_lot_order_item_snapshot,
+    comparable_total,
     order_item_pricing_view,
     product_pricing_view,
+    render_pricing_label,
     resolve_package_purchase,
     snapshot_from_offer,
 )
@@ -432,6 +434,64 @@ class TestLegacyReads:
         assert view.reliability == PricingReliability.CERTIFIED and view.basis == PriceBasis.PER_BASE_UNIT
         prod = product_pricing_view(SimpleNamespace(price=D("450"), commercial_pricing=s.to_dict()))
         assert prod.reliability == PricingReliability.CERTIFIED
+
+
+# =====================================================================
+# Affichage/comparaison depuis une `PricingView` — API unique pour tout consommateur buyer
+# (mandat B2c.4 §3) : un seul `pricing_label`, jamais reconstruit par node.
+# =====================================================================
+
+
+class TestPricingViewDisplayAndComparability:
+    def test_certified_total_lot_label_says_pour_l_ensemble(self):
+        s = CommercialPricingSnapshot(
+            commercial_price_amount=D("4000000"), price_basis=PriceBasis.TOTAL_LOT,
+            inventory_quantity_amount=D("10000"), inventory_quantity_unit="KG",
+        ).with_normalized()
+        view = product_pricing_view(SimpleNamespace(price=D("400"), commercial_pricing=s.to_dict()))
+        assert view.status == "CERTIFIED"
+        assert "pour l'ensemble" in view.pricing_label
+        assert view.is_comparable and view.not_comparable_reason is None
+
+    def test_certified_package_label_never_becomes_a_per_base_unit_guess(self):
+        s = CommercialPricingSnapshot(
+            commercial_price_amount=D("500"), price_basis=PriceBasis.PER_PACKAGE,
+            package_type="SACHET", package_content_amount=D("0.5"), package_content_unit="LITRE",
+            inventory_quantity_amount=D("50"), inventory_quantity_unit="LITRE",
+        ).with_normalized()
+        view = product_pricing_view(SimpleNamespace(price=D("1000"), commercial_pricing=s.to_dict()))
+        label = view.pricing_label
+        assert "sachet" in label and "0,5" in label
+        assert "1000" not in label.replace(" ", "")
+
+    def test_legacy_partial_label_is_honest_never_a_fabricated_basis(self):
+        view = product_pricing_view(SimpleNamespace(price=D("400000"), commercial_pricing=None))
+        assert view.status == "LEGACY_PARTIAL"
+        assert "non certifi" in view.pricing_label
+        assert not view.is_comparable
+        assert view.not_comparable_reason == "base de prix historique inconnue"
+
+    def test_unknown_basis_with_no_amount_has_nothing_to_show(self):
+        view = bid_pricing_view(SimpleNamespace(offered_price=None, offered_price_basis=None, pricing_snapshot_version=None))
+        assert view.pricing_label == "Prix non disponible"
+
+    def test_total_lot_without_inventory_is_certified_but_not_comparable(self):
+        """TOTAL_LOT sans quantité d'inventaire connue : `normalized_unit_price` est None
+        (`compute_normalized`) — la vue reste CERTIFIÉE (l'utilisateur a bien dit un montant total)
+        mais n'est pas comparable a une autre offre au prix normalisé (mandat B2c.4 §17)."""
+        s = CommercialPricingSnapshot(commercial_price_amount=D("500000"), price_basis=PriceBasis.TOTAL_LOT)
+        view = product_pricing_view(SimpleNamespace(price=D("500000"), commercial_pricing=s.to_dict()))
+        assert view.status == "CERTIFIED"
+        assert not view.is_comparable
+        assert view.not_comparable_reason == "quantité de référence inconnue pour normaliser ce lot"
+
+    def test_render_pricing_label_and_comparable_total_are_the_same_object_from_both_modules(self):
+        """Relocalisées dans `commercial_pricing_snapshot.py` (B2c.4) — `bid_pricing_flow.py` les
+        ré-exporte pour ses appelants existants, jamais une 2e implémentation."""
+        from ladini.domain import bid_pricing_flow
+
+        assert bid_pricing_flow.render_pricing_label is render_pricing_label
+        assert bid_pricing_flow.comparable_total is comparable_total
 
 
 # =====================================================================

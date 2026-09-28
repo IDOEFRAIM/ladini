@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ladini.domain.commercial_pricing_snapshot import market_offer_pricing_view
 from ladini.domain.models import MarketOffer, Producer
 from ladini.workers.automation.targeting import buyers_in_zone_for_category
 from ladini.workers.outbox import templates
@@ -131,6 +132,9 @@ class ProximityMatchingService:
                         "product": offer.product_label,
                         "price": _num(offer.price_per_unit),
                         "unit": (offer.unit or "").upper(),
+                        # Mandat B2c.4 : un lot TOTAL_LOT ne doit jamais s'alerter
+                        # "X FCFA/unité" — `pricing_label` porte la vraie base certifiée.
+                        "pricing_label": market_offer_pricing_view(offer).pricing_label,
                         "producer_name": producer_name or "un producteur local",
                         "ref": ref,
                     },

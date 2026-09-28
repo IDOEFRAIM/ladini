@@ -98,7 +98,13 @@ def _render_new_product_alert(p: Dict[str, Any]) -> str:
     price = _fmt_num(p.get("price"))
     unit = str(p.get("unit") or "").upper()
     ref = str(p.get("ref") or "")
-    price_line = f" à *{price} FCFA/{unit}*" if price else ""
+    # Mandat B2c.4 : `pricing_label` (certifié) prime — sinon un lot TOTAL_LOT s'afficherait
+    # "X FCFA/unité" dans cette alerte proactive.
+    pricing_label = p.get("pricing_label")
+    if pricing_label:
+        price_line = f" à *{pricing_label}*"
+    else:
+        price_line = f" à *{price} FCFA/{unit}*" if price else ""
     return (
         "🌾 *Nouveau produit disponible près de chez vous !*\n\n"
         f"*{product}*{price_line} chez {producer}.\n\n"
