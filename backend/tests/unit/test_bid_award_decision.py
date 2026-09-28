@@ -18,7 +18,10 @@ from ladini.domain.bid_award import (
     compare_bid,
     rank_comparisons,
 )
-from ladini.domain.commercial_pricing_snapshot import PricingReliability, build_bid_pricing_snapshot
+from ladini.domain.commercial_pricing_snapshot import (
+    PricingReliability,
+    build_bid_pricing_snapshot,
+)
 
 D = Decimal
 
