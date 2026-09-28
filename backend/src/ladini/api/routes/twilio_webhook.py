@@ -53,6 +53,38 @@ def _empty_twiml() -> Response:
     return Response(content="<Response></Response>", media_type="application/xml")
 
 
+# (2026-09-28, hardening P1-B) : message N'EST PAS lié à `core/maintenance.py`
+# (pas une pause planifiée) — un échec réel d'enqueue Celery (broker injoignable,
+# timeout). Voir `_release_message_claim`/le bloc §6 ci-dessous pour le
+# mécanisme complet.
+_ENQUEUE_FAILED_MESSAGE = (
+    "Message temporairement indisponible. Réessaie dans un instant."
+)
+
+
+async def _release_message_claim(message_sid: str) -> None:
+    """Relâche la réclamation Redis `msg:{sid}` posée en tête de webhook (§1).
+
+    Appelé UNIQUEMENT quand ce tour renvoie un statut non-2xx à Twilio pour
+    lui demander de redélivrer le MÊME `MessageSid` (maintenance OU échec
+    d'enqueue Celery ci-dessous) : sans ce relâchement, la réclamation
+    (TTL 3600s) posée par LA PREMIÈRE tentative bloquerait silencieusement
+    la redélivraison — elle la trouverait "déjà en cours" (§1) et la
+    laisserait tomber avant même de retenter l'enqueue, rendant illusoire
+    la promesse "Twilio redélivre, le message n'est pas perdu" déjà
+    documentée dans `core/maintenance.py`. Best-effort — une erreur ici ne
+    doit jamais faire échouer la réponse HTTP déjà décidée (fail-open,
+    même esprit que le reste de l'idempotence Redis de ce fichier)."""
+    try:
+        await asyncio.to_thread(redis_client.delete, f"msg:{message_sid}")
+    except Exception as e:  # pragma: no cover - défensif
+        logger.error(
+            "TWILIO_WEBHOOK_CLAIM_RELEASE_FAILED | MessageSid=%s | error=%s",
+            message_sid,
+            e,
+        )
+
+
 # Statuts de livraison sortants à ignorer (callbacks de statut)
 _DELIVERY_STATUSES = frozenset(
     {
@@ -208,6 +240,12 @@ async def _handle_twilio_webhook(
                 "TWILIO_WEBHOOK_DUPLICATE | MessageSid=%s déjà en cours ou traité",
                 MessageSid,
             )
+            try:
+                from ladini.core import telemetry
+
+                telemetry.count_duplicate_inbound_message("twilio")
+            except Exception:
+                pass
             return _empty_twiml()
     except Exception as e:
         # Si Redis flanche, on logue l'erreur mais on laisse passer le message (résilience)
@@ -455,6 +493,12 @@ async def _handle_twilio_webhook(
             phone,
             MessageSid,
         )
+        # (2026-09-28, hardening P1-B) : relâche la réclamation posée en §1 —
+        # sinon la redélivraison Twilio (déclenchée PAR ce 503) trouverait le
+        # même `MessageSid` "déjà en cours" et tomberait silencieusement,
+        # rendant illusoire le "message pas perdu, juste retardé" documenté
+        # dans core/maintenance.py.
+        await _release_message_claim(MessageSid)
         return Response(content=MAINTENANCE_MESSAGE, media_type="text/plain", status_code=503)
 
     # Borne dure (`asyncio.wait_for`) — voir la même note détaillée dans
@@ -463,31 +507,64 @@ async def _handle_twilio_webhook(
     # plusieurs dizaines de secondes pendant une panne Redis/broker malgré
     # le tuning kombu (celery_app.py). Le thread sous-jacent peut continuer
     # en arrière-plan sans bloquer CETTE requête au-delà du timeout.
-    await asyncio.wait_for(
-        asyncio.to_thread(
-            process_agent_task.delay,
-            phone_number=phone,
-            user_query=text,
-            workspace_type=ws_type,
-            role=resolved_role,
-            force_role=force_role,
-            interactive_id=interactive_id,  # Bypass LLM si clic bouton/liste
-            trace_id=trace_id,  # Propagation de la trace d'observabilité
-            location_shared=location_shared,  # Position GPS reçue ce tour (accusé onboarding)
-            # (2026-09-02) Issue EXACTE de la persistance (déjà terminée, ci-dessus,
-            # avant cet enqueue) — l'agent n'a plus besoin de relire la DB pour
-            # savoir si le point a été accepté/rejeté/en erreur. Voir
-            # core/location.py et gps_delivery_gate.py::resolve_gps_stage.
-            location_outcome=location_outcome,
-            location_lat=location_lat,
-            location_lon=location_lon,
-            # (2026-09-02) Clé d'idempotence de l'ENVOI — voir api/tasks.py::
-            # _claim_single_response. Même identifiant que la clé de
-            # dédoublonnage webhook ci-dessus (bloc 1), réutilisé pour protéger
-            # aussi contre un retry Celery de la tâche elle-même.
-            message_sid=MessageSid,
-        ),
-        timeout=_CELERY_DELAY_TIMEOUT_S,
-    )
+    #
+    # (2026-09-28, hardening P1-B) : AVANT ce correctif, une exception ICI
+    # (broker injoignable, `.delay()` qui lève, OU le timeout ci-dessus)
+    # n'était rattrapée QUE par le filet générique de `twilio_webhook()`
+    # (`except Exception: return _empty_twiml()`) — un 200 OK. Twilio
+    # considère alors le message définitivement livré (aucune redélivraison),
+    # alors que la réclamation `msg:{MessageSid}` posée en §1 (TTL 1h) bloque
+    # même une redélivraison éventuelle ou une nouvelle tentative manuelle :
+    # le message disparaît silencieusement, sans réponse, jusqu'à 1h. Un
+    # `try/except` LOCAL distingue maintenant cet échec d'enqueue de toute
+    # autre erreur inattendue plus haut dans le handler : on relâche la
+    # réclamation ET on renvoie un 503 (même contrat que la pause ci-dessus)
+    # pour que Twilio redélivre — le message reste RETROUVABLE au lieu
+    # d'être perdu.
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                process_agent_task.delay,
+                phone_number=phone,
+                user_query=text,
+                workspace_type=ws_type,
+                role=resolved_role,
+                force_role=force_role,
+                interactive_id=interactive_id,  # Bypass LLM si clic bouton/liste
+                trace_id=trace_id,  # Propagation de la trace d'observabilité
+                location_shared=location_shared,  # Position GPS reçue ce tour (accusé onboarding)
+                # (2026-09-02) Issue EXACTE de la persistance (déjà terminée, ci-dessus,
+                # avant cet enqueue) — l'agent n'a plus besoin de relire la DB pour
+                # savoir si le point a été accepté/rejeté/en erreur. Voir
+                # core/location.py et gps_delivery_gate.py::resolve_gps_stage.
+                location_outcome=location_outcome,
+                location_lat=location_lat,
+                location_lon=location_lon,
+                # (2026-09-02) Clé d'idempotence de l'ENVOI — voir api/tasks.py::
+                # _claim_single_response. Même identifiant que la clé de
+                # dédoublonnage webhook ci-dessus (bloc 1), réutilisé pour protéger
+                # aussi contre un retry Celery de la tâche elle-même.
+                message_sid=MessageSid,
+            ),
+            timeout=_CELERY_DELAY_TIMEOUT_S,
+        )
+    except Exception as e:
+        logger.error(
+            "TWILIO_WEBHOOK_ENQUEUE_FAILED | phone=%s | message_sid=%s | error=%s",
+            phone,
+            MessageSid,
+            e,
+        )
+        try:
+            from ladini.core import telemetry
 
+            telemetry.count_inbound_enqueue_failure("twilio")
+        except Exception:
+            pass
+        await _release_message_claim(MessageSid)
+        return Response(content=_ENQUEUE_FAILED_MESSAGE, media_type="text/plain", status_code=503)
+
+    # (2026-09-28, observability P1-B) : `inbound_queued` — corrélation
+    # (message_sid) seulement, jamais le texte du message.
+    logger.info("inbound_queued | message_sid=%s", MessageSid)
     return _empty_twiml()

@@ -66,6 +66,38 @@ def _plain_ok(body: str = "EVENT_RECEIVED") -> Response:
     return Response(content=body, media_type="text/plain")
 
 
+# (2026-09-28, hardening P1-B) — miroir volontaire de twilio_webhook.py :
+# distingue un échec réel d'enqueue Celery (`.delay()` lève, timeout) d'une
+# erreur inattendue quelconque, pour renvoyer un 503 (redélivraison Meta)
+# plutôt que le 200 générique du filet de sécurité de `whatsapp_webhook()`.
+_ENQUEUE_FAILED_MESSAGE = (
+    "Message temporairement indisponible. Réessaie dans un instant."
+)
+
+
+class _EnqueueFailed(Exception):
+    """Signale, jusqu'à `whatsapp_webhook()`, qu'un message précis de ce lot
+    n'a pas pu être remis à Celery — jamais laissé se confondre avec le
+    filet `except Exception` générique (qui renvoie 200, fail-open pour
+    tout le reste)."""
+
+
+async def _release_message_claim(message_id: str) -> None:
+    """Miroir de `twilio_webhook.py::_release_message_claim` — voir sa
+    docstring pour le mécanisme complet. Même rationale : sans ce
+    relâchement, la réclamation `msg:{id}` (TTL 3600s) posée en §1 bloque
+    silencieusement la redélivraison Meta déclenchée par le 503 renvoyé
+    juste après (§6 ci-dessous, ou la pause maintenance)."""
+    try:
+        await asyncio.to_thread(redis_client.delete, f"msg:{message_id}")
+    except Exception as e:  # pragma: no cover - défensif
+        logger.error(
+            "WHATSAPP_WEBHOOK_CLAIM_RELEASE_FAILED | id=%s | error=%s",
+            message_id,
+            e,
+        )
+
+
 # =====================================================================
 # GET — Vérification du webhook (configuration initiale dans Meta for Developers)
 # =====================================================================
@@ -236,6 +268,17 @@ async def whatsapp_webhook(
 ) -> Response:
     try:
         return await _handle_whatsapp_webhook(request, background_tasks)
+    except _EnqueueFailed:
+        # (2026-09-28, hardening P1-B) : ce cas précis (échec d'enqueue Celery
+        # pour un message de ce lot) doit provoquer une redélivraison Meta,
+        # PAS le 200 fail-open du filet générique ci-dessous — voir
+        # `_process_single_message` pour l'endroit où la réclamation Redis
+        # de CE message a déjà été relâchée avant que cette exception ne
+        # remonte jusqu'ici.
+        logger.error("WHATSAPP_WEBHOOK_ENQUEUE_FAILED")
+        return Response(
+            content=_ENQUEUE_FAILED_MESSAGE, media_type="text/plain", status_code=503
+        )
     except Exception:
         logger.exception("WHATSAPP_WEBHOOK_UNHANDLED_ERROR")
         return _plain_ok()
@@ -287,6 +330,9 @@ async def _handle_whatsapp_webhook(
     # la fenêtre de maintenance visée est courte (1-3 minutes) et ponctuelle
     # (voir docstring de core/maintenance.py pour le tradeoff détaillé).
     if is_celery_producer_paused():
+        # (2026-09-28, hardening P1-B) : contrairement à twilio_webhook.py,
+        # ce check a lieu AVANT tout parsing/réclamation de message (aucune
+        # clé `msg:{id}` n'est encore posée à ce stade) — rien à relâcher ici.
         logger.info("WHATSAPP_WEBHOOK_PAUSED — maintenance broker en cours")
         return Response(
             content=MAINTENANCE_MESSAGE, media_type="text/plain", status_code=503
@@ -342,6 +388,12 @@ async def _process_single_message(
                     "WHATSAPP_WEBHOOK_DUPLICATE | id=%s déjà en cours ou traité",
                     message_id,
                 )
+                try:
+                    from ladini.core import telemetry
+
+                    telemetry.count_duplicate_inbound_message("whatsapp_cloud")
+                except Exception:
+                    pass
                 return
         except Exception as e:
             logger.error(
@@ -552,28 +604,58 @@ async def _process_single_message(
     # renvoie 200 quand même (fail-open, cohérent avec le reste de ce
     # fichier), le message est simplement perdu pour cette tentative plutôt
     # que de geler la requête.
-    await asyncio.wait_for(
-        asyncio.to_thread(
-            process_agent_task.delay,
-            phone_number=phone,
-            user_query=text,
-            workspace_type=ws_type,
-            role=resolved_role,
-            force_role=force_role,
-            interactive_id=interactive_id,
-            trace_id=trace_id,
-            location_shared=location_shared,
-            location_outcome=location_outcome,
-            location_lat=location_lat,
-            location_lon=location_lon,
-            # (2026-09-02) Clé d'idempotence de l'ENVOI — voir api/tasks.py::
-            # _claim_single_response. Même identifiant que la clé de
-            # dédoublonnage webhook ci-dessus, réutilisé pour protéger aussi
-            # contre un retry Celery de la tâche elle-même.
-            message_sid=message_id,
-        ),
-        timeout=_CELERY_DELAY_TIMEOUT_S,
-    )
+    # (2026-09-28, hardening P1-B) : AVANT ce correctif, une exception ICI
+    # (broker injoignable, `.delay()` qui lève, ou le timeout) remontait
+    # jusqu'au filet générique de `whatsapp_webhook()` (`except Exception:
+    # return _plain_ok()`) — un 200. Meta considère alors CE MESSAGE livré
+    # (aucune redélivraison), alors que la réclamation `msg:{id}` posée en
+    # §1 (TTL 1h) bloquait silencieusement toute reprise : le message
+    # disparaissait sans réponse, sans trace exploitable. `_EnqueueFailed`
+    # distingue maintenant ce cas précis — voir son site de capture dans
+    # `whatsapp_webhook()` (503, donc redélivraison Meta du lot).
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(
+                process_agent_task.delay,
+                phone_number=phone,
+                user_query=text,
+                workspace_type=ws_type,
+                role=resolved_role,
+                force_role=force_role,
+                interactive_id=interactive_id,
+                trace_id=trace_id,
+                location_shared=location_shared,
+                location_outcome=location_outcome,
+                location_lat=location_lat,
+                location_lon=location_lon,
+                # (2026-09-02) Clé d'idempotence de l'ENVOI — voir api/tasks.py::
+                # _claim_single_response. Même identifiant que la clé de
+                # dédoublonnage webhook ci-dessus, réutilisé pour protéger aussi
+                # contre un retry Celery de la tâche elle-même.
+                message_sid=message_id,
+            ),
+            timeout=_CELERY_DELAY_TIMEOUT_S,
+        )
+    except Exception as e:
+        logger.error(
+            "WHATSAPP_WEBHOOK_ENQUEUE_FAILED | phone=%s | id=%s | error=%s",
+            phone,
+            message_id,
+            e,
+        )
+        try:
+            from ladini.core import telemetry
+
+            telemetry.count_inbound_enqueue_failure("whatsapp_cloud")
+        except Exception:
+            pass
+        if message_id:
+            await _release_message_claim(message_id)
+        raise _EnqueueFailed(message_id) from e
+
+    # (2026-09-28, observability P1-B) : `inbound_queued` — corrélation (id)
+    # seulement, jamais le texte du message.
+    logger.info("inbound_queued | message_sid=%s", message_id)
 
 
 __all__ = ["router"]

@@ -688,10 +688,8 @@ def scan_number_candidates(text: str) -> "list[NumberCandidate]":
     clean = (text or "").strip().lower()
     out: list[NumberCandidate] = []
     for m in _SCAN_NUMBER_RE.finditer(clean):
-        raw = (m.group(1) or "").replace(" ", "").replace(",", ".")
-        try:
-            val = float(raw)
-        except (TypeError, ValueError):
+        val = _parse_number(m.group(1))
+        if val is None:
             continue
         after = clean[m.end() : m.end() + _SCAN_WINDOW]
         before = clean[max(0, m.start() - _SCAN_WINDOW) : m.start()]
@@ -767,7 +765,29 @@ _TIER_PACKAGING_RE = re.compile(
 
 
 def _parse_number(raw: str) -> Optional[float]:
-    cleaned = (raw or "").replace(" ", "").replace(",", ".")
+    """Point UNIQUE d'analyse numérique — `scan_number_candidates`
+    (ci-dessus) délègue ici plutôt que de dupliquer la même logique
+    (2026-09-28, audit fiabilité agent : les deux avaient chacun leur
+    propre copie, corrigées séparément avant ce correctif — source de
+    dérive garantie)."""
+    cleaned = (raw or "").replace(" ", "")
+    # (2026-09-28, audit fiabilité agent — bug réel confirmé, sous-évaluation
+    # x1000) : un SEUL point suivi d'EXACTEMENT 3 chiffres ("500.000",
+    # "12.500") est structurellement AMBIGU — convention francophone
+    # courante du point comme séparateur de milliers (500 000 / 12 500 FCFA)
+    # OU un vrai décimal à 3 chiffres après la virgule (rare mais pas
+    # impossible, ex. "0.250" kg = 250 g). Rien dans le texte ne permet de
+    # trancher de façon fiable ici. Deviner l'une des deux interprétations
+    # produirait silencieusement une valeur 1000x trop PETITE dans le cas le
+    # plus fréquent (un prix/une quantité) — jamais deviner (mandat "Safe
+    # Failure") : rejeter (`None`, l'appelant redemande) plutôt que
+    # certifier une transaction sur un montant faux. Vérifié AVANT la
+    # conversion virgule->point : une virgule reste sans ambiguïté ici
+    # (toujours décimale, jamais un séparateur de milliers dans ce
+    # contexte) et ne doit jamais déclencher ce rejet.
+    if re.fullmatch(r"\d+\.\d{3}", cleaned):
+        return None
+    cleaned = cleaned.replace(",", ".")
     try:
         return float(cleaned)
     except (TypeError, ValueError):

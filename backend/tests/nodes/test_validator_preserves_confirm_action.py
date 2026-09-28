@@ -35,15 +35,24 @@ from tests.conftest import make_state, run
 
 
 def _confirm_action_state(**overrides):
+    # `confirmation_summary_goal`/`confirmation_summary_payload` — snapshot
+    # GELÉ que `confirmation_gate` aurait posé en levant CETTE confirmation
+    # (2026-09-28, hardening P1-A) : la garde CONFIRM vérifie désormais ce
+    # snapshot contre le but/payload courants avant de certifier — la fixture
+    # doit donc représenter un état RÉALISTE (comme si `confirmation_gate`
+    # avait déjà levé cette confirmation au tour précédent).
+    _payload = {"product": "poulets", "quantity": 6000, "unit": "UNITE"}
     base = make_state(
         current_goal="STOCK_REGISTER_HARVEST",
         interpreted_event="CONFIRM",
         goal_status="WAITING_CONFIRMATION",
         status="WAITING_CONFIRMATION",
-        transaction_payload={"product": "poulets", "quantity": 6000, "unit": "UNITE"},
+        transaction_payload=dict(_payload),
         confirmation_summary=(
             "Enregistrement d'une récolte : 6000 UNITE de poulets en stock."
         ),
+        confirmation_summary_goal="STOCK_REGISTER_HARVEST",
+        confirmation_summary_payload=dict(_payload),
         pending_interaction={
             "kind": "CONFIRM_ACTION",
             "goal": "STOCK_REGISTER_HARVEST",

@@ -86,11 +86,22 @@ def test_confirm_event_authorizes_exactly_once(goal):
         confirmation_gate,
     )
 
+    # `confirmation_summary_goal`/`confirmation_summary_payload` — snapshot
+    # GELÉ que `confirmation_gate` aurait posé en levant CETTE confirmation
+    # (2026-09-28, hardening P1-A, invariant "confirmé == exécuté") : le
+    # chemin CONFIRM vérifie désormais que ce snapshot correspond au but/
+    # payload courants avant de certifier — cette fixture doit donc
+    # représenter un état RÉALISTE (comme si `confirmation_gate` avait déjà
+    # levé cette confirmation au tour précédent), pas un raccourci qui
+    # omettrait le snapshot que la garde vérifie.
+    payload = {"product": "maïs", "quantity": 50, "price": 250}
     state = {
         "current_goal": goal,
-        "transaction_payload": {"product": "maïs", "quantity": 50, "price": 250},
+        "transaction_payload": dict(payload),
         "interpreted_event": "CONFIRM",
         "waiting_for_confirmation": True,
+        "confirmation_summary_goal": goal,
+        "confirmation_summary_payload": dict(payload),
     }
     out = run(confirmation_gate(state, None))
     assert out["status"] == "EXECUTING" and out["execution_authorized"] is True, goal

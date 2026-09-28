@@ -73,13 +73,24 @@ class _FakeSelectWinningBidSession:
     """1 seule requête `SELECT ... FOR UPDATE` (celle capturée par
     `select_winning_bid`) ; les statements suivants (bulk UPDATE des
     perdants, INSERT outbox) sont distingués par TYPE, jamais exécutés
-    réellement."""
+    réellement.
 
-    def __init__(self, row):
+    `owner_phone` (2026-09-28, ajout pour le garde de propriété acheteur
+    fermé dans `select_winning_bid`) : `.scalar()` sert UNIQUEMENT cette
+    requête de résolution de propriétaire — doublure minimale, jamais
+    exécutée réellement contre une base. `None` par défaut : les tests de
+    CE fichier qui n'atteignent jamais ce garde (rejetés plus tôt par les
+    contrôles de statut auction/bid qu'ils testent) n'en ont pas besoin."""
+
+    def __init__(self, row, owner_phone=None):
         self._row = row
+        self._owner_phone = owner_phone
         self.added: list = []
         self.update_statements: list = []
         self.other_statements: list = []
+
+    async def scalar(self, stmt):
+        return self._owner_phone
 
     async def execute(self, stmt):
         if isinstance(stmt, _UpdateStmt):
@@ -191,7 +202,7 @@ class TestPriceUsedIsAlwaysTheCurrentOne:
         bid.offered_price = 300.0  # dernière valeur RÉELLEMENT en base au moment du lock
         auction = _auction(quantity=10.0, status="OPEN")
         row = (bid, auction, "Awa", "+22670000001", types.SimpleNamespace(name="Riz"))
-        session = _FakeSelectWinningBidSession(row)
+        session = _FakeSelectWinningBidSession(row, owner_phone="+22670000099")
         svc = _service(session)
 
         result = run(svc.select_winning_bid(bid_id=str(bid.id), phone="+22670000099"))
@@ -204,6 +215,75 @@ class TestPriceUsedIsAlwaysTheCurrentOne:
         assert len(orders) == 1
         assert orders[0].total_amount == 300.0 * 10.0
         assert "3000" in result["summary_buyer"]
+
+
+class TestSelectWinningBidRequiresOwnership:
+    """(2026-09-28, audit fiabilité agent) : gap réel confirmé — cette
+    fonction clôturait une enchère ET instanciait une VRAIE `Order` sans
+    jamais vérifier que l'appelant est bien l'ACHETEUR propriétaire de
+    l'enchère, contrairement à son voisin dans ce même fichier,
+    `cancel_auction` (voir `TestCancelAuctionLocksTheRow` ci-dessous, et
+    surtout `services/database/auction.py::cancel_auction`, qui filtre
+    `User.phone == clean_phone`). Un attaquant en possession d'un `bid_id`
+    d'une enchère qui ne lui appartient pas (buyer A) pouvait la clôturer
+    et créer une `Order` au nom du VRAI propriétaire (buyer B) — jamais à
+    son propre profit direct, mais une mutation métier sur l'entité d'un
+    autre acheteur, jamais approuvée par lui."""
+
+    def _row(self, **auction_overrides):
+        bid = _bid()
+        auction_overrides.setdefault("status", "OPEN")
+        auction = _auction(**auction_overrides)
+        return (bid, auction, "Awa", "+22670000001", types.SimpleNamespace(name="Riz")), bid, auction
+
+    def test_a_caller_without_a_phone_is_rejected(self):
+        row, bid, _auction = self._row()
+        session = _FakeSelectWinningBidSession(row, owner_phone="+22670000099")
+        svc = _service(session)
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            run(svc.select_winning_bid(bid_id=str(bid.id)))
+        assert exc_info.value.reason == "not_owner"
+        assert not session.added, "aucune Order ne doit être créée sans identité vérifiée"
+        assert bid.is_winner is False
+
+    def test_a_caller_whose_phone_does_not_match_the_auction_owner_is_rejected(self):
+        """Le scénario exact de l'audit : buyer A (appelant) tente de
+        clôturer une enchère qui appartient à buyer B."""
+        row, bid, _auction = self._row()
+        session = _FakeSelectWinningBidSession(row, owner_phone="+22670000099")  # buyer B
+        svc = _service(session)
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            run(svc.select_winning_bid(bid_id=str(bid.id), phone="+22670011111"))  # buyer A
+        assert exc_info.value.reason == "not_owner"
+        assert not session.added
+        assert bid.is_winner is False
+        assert bid.status == "PENDING", "le bid ne doit jamais passer WINNING sur un appelant non autorisé"
+
+    def test_the_real_owner_can_still_select_their_own_winning_bid(self):
+        """Non-régression : le correctif ne doit jamais bloquer le VRAI
+        propriétaire — même numéro normalisé des deux côtés."""
+        row, bid, _auction = self._row(quantity=10.0)
+        session = _FakeSelectWinningBidSession(row, owner_phone="+22670000099")
+        svc = _service(session)
+
+        result = run(svc.select_winning_bid(bid_id=str(bid.id), phone="+226 70 00 00 99"))
+        assert result["status"] == "success"
+        assert bid.is_winner is True
+
+    def test_status_guards_still_fire_before_the_ownership_check(self):
+        """Ordre des gardes inchangé pour les tests déjà existants de ce
+        fichier : un appelant SANS identité qui vise une enchère déjà hors
+        cycle de vie voit toujours le message dédié à CE gap, jamais
+        masqué par le nouveau garde de propriété."""
+        row, bid, _auction = self._row(status="CLOSED")
+        session = _FakeSelectWinningBidSession(row)
+        svc = _service(session)
+
+        with pytest.raises(BusinessRuleException) as exc_info:
+            run(svc.select_winning_bid(bid_id=str(bid.id)))
+        assert exc_info.value.reason == "auction_already_closed"
 
 
 class TestCancelAuctionLocksTheRow:

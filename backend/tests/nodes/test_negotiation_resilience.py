@@ -62,6 +62,7 @@ class TestHandleViewingOffersResilience:
         result = run(mod._handle_viewing_offers(
             mc_runtime=None, payload={"bid_id": "b1"},
             nctx={"buyer_phone": "+22670000001"}, auction_id="a1",
+            phone="+22670000001",
         ))
         assert result["response_strategy"] == "ERROR"
         assert result["negotiation_context"] == {"__reset__": True}

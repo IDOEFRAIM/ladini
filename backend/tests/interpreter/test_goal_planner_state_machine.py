@@ -1126,3 +1126,103 @@ class TestBuyerProductFallbackHelpers:
             _looks_like_buyer_product_request,
         )
         assert _looks_like_buyer_product_request("je veux acheter") is False
+
+
+# =====================================================================
+# MINI-FLOWS PRODUCTEUR/ACHETEUR (bid_phase/update_phase/winner_gps_stage)
+# — même classe de bug que le correctif SALES_PUBLISH_PRODUCT, généralisée
+# =====================================================================
+
+class TestMiniFlowKeysArePurgedOnRealGoalTransitions:
+    """(2026-09-28, audit fiabilité agent) : `bid_phase`/`pending_bid_auction`/
+    `pending_bid_price`/`pending_modify_bid`/`update_phase`/`winner_gps_stage`
+    vivent EXCLUSIVEMENT dans `working_memory`, hors du système
+    `PendingInteraction`/`draft_registry` — ils échappaient ENTIÈREMENT à
+    `_purge_transaction_state()` (qui ne connaît que les canaux racine),
+    contrairement au chemin RARE d'abandon max-retries
+    (`core/conversation_reset.py`), qui les nettoyait déjà. Un prix de bid
+    saisi pour une enchère A, puis la conversation part sur un tout autre
+    but, puis l'utilisateur revient sur une enchère B totalement différente
+    : sans ce correctif, `bid_phase`/`pending_bid_auction`/`pending_bid_
+    price` périmés de A pouvaient encore piloter
+    `producer_auction_resolver` et faire déposer une offre sur la MAUVAISE
+    enchère, au MAUVAIS prix — silencieusement."""
+
+    def test_rule5_new_task_clears_stale_bid_tunnel_state(self):
+        r = gp(
+            interpreted_event="NEW_TASK",
+            detected_intent="STOCK_REGISTER_HARVEST",
+            normalized_text="j'ai récolté 200 kg de maïs",
+            current_goal=None,
+            working_memory={
+                "bid_phase": "CONFIRM",
+                "pending_bid_auction": "AUCTION_A_STALE",
+                "pending_bid_price": 461000.0,
+            },
+        )
+        wm = r["working_memory"]
+        assert wm["bid_phase"] is None
+        assert wm["pending_bid_auction"] is None
+        assert wm["pending_bid_price"] is None
+
+    def test_rule4_interruption_clears_stale_bid_tunnel_state(self):
+        r = gp(
+            interpreted_event="INTERRUPTION",
+            detected_intent="STOCK_REGISTER_HARVEST",
+            interpreter_confidence=0.95,
+            cognitive_decision={"action": "INTERRUPT_ACTIVE_GOAL"},
+            current_goal="SALES_PLACE_BID",
+            expected_input="PRICE",
+            working_memory={
+                "active_goal": "SALES_PLACE_BID",
+                "bid_phase": "ASK_PRICE_MODIFY",
+                "pending_modify_bid": "bid-stale",
+                "pending_bid_price": 461000.0,
+            },
+        )
+        wm = r["working_memory"]
+        assert wm["bid_phase"] is None
+        assert wm["pending_modify_bid"] is None
+        assert wm["pending_bid_price"] is None
+
+    def test_a_producer_update_or_gps_key_left_over_is_also_cleared(self):
+        """Même correctif, les 2 autres mini machines à états (`update_phase`
+        côté producteur, `winner_gps_stage` côté acheteur) — même primitive
+        `_mini_flow_reset`, mêmes contrats typés `flows/producer/contexts.py`/
+        `flows/buyer/contexts.py`."""
+        r = gp(
+            interpreted_event="NEW_TASK",
+            detected_intent="FARM_CREATE",
+            normalized_text="je veux créer une nouvelle ferme",
+            current_goal=None,
+            working_memory={
+                "update_phase": "CONFIRM_UPDATE",
+                "update_pending": {"price": 999999.0},
+                "winner_gps_stage": "AWAIT_GPS",
+            },
+        )
+        wm = r["working_memory"]
+        assert wm.get("update_phase") is None
+        assert wm.get("update_pending") is None
+        assert wm.get("winner_gps_stage") is None
+
+    def test_a_live_active_slot_tunnel_lock_still_preserves_the_mini_flow_state(self):
+        """Garde-fou : ce correctif ne doit purger QUE sur une VRAIE
+        transition de but (RULE 4/5/1/0bis/4bis/1quater-sans-draft) — jamais
+        pendant le verrouillage normal d'un tunnel déjà actif (RULE 1bis),
+        qui doit continuer à préserver `bid_phase` intact pendant que
+        l'utilisateur répond au prix demandé."""
+        r = gp(
+            interpreted_event="ANSWER",
+            detected_intent="SALES_PLACE_BID",
+            current_goal="SALES_PLACE_BID",
+            expected_input="PRICE",
+            working_memory={
+                "active_goal": "SALES_PLACE_BID",
+                "bid_phase": "ASK_PRICE",
+                "pending_bid_auction": "AUCTION_LIVE",
+            },
+        )
+        wm = r["working_memory"]
+        assert wm.get("bid_phase") == "ASK_PRICE"
+        assert wm.get("pending_bid_auction") == "AUCTION_LIVE"

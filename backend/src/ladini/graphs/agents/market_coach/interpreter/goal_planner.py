@@ -32,6 +32,13 @@ from ladini.graphs.agents.market_coach.core.state import (
     resolve_current_goal,
 )
 from ladini.graphs.agents.market_coach.core.tunnel_manager import tunnel_manager
+from ladini.graphs.agents.market_coach.flows.buyer.contexts import (
+    WinnerGpsWorkflowState,
+)
+from ladini.graphs.agents.market_coach.flows.producer.contexts import (
+    BidWorkflowState,
+    ProducerUpdateWorkflowState,
+)
 from ladini.graphs.agents.market_coach.interpreter.intent import (
     INTENT_CONFIG,
     INTENT_DISAMBIGUATION,
@@ -198,6 +205,44 @@ def _draft_state_key_for_goal(goal: Optional[str]) -> Optional[str]:
     `goal`, ou `None` si ce goal n'a pas de draft versionné (ex: le panier
     acheteur, qui a son propre mécanisme d'identité — `active_cart`)."""
     return _DRAFT_STATE_KEY_BY_GOAL.get(str(goal or "").upper())
+
+
+def _mini_flow_reset() -> Dict[str, Any]:
+    """Patch `working_memory` qui clôt les 3 mini machines à états
+    auto-suffisantes (`bid_phase`/`update_phase`/`winner_gps_stage` — voir
+    `flows/producer/contexts.py`/`flows/buyer/contexts.py`, contrats typés
+    P2-4), à merger dans le `working_memory` de tout appelant qui purge
+    aussi `_purge_transaction_state()`.
+
+    (2026-09-28, audit fiabilité agent — gap réel confirmé) : ces 3 mini
+    machines vivent EXCLUSIVEMENT dans `working_memory`, hors du système
+    `PendingInteraction`/`draft_registry` (par conception, voir la
+    docstring de module de `flows/producer/auctions.py`) — elles
+    échappaient donc ENTIÈREMENT à `_purge_transaction_state()`, qui ne
+    connaît que les canaux racine (`transaction_payload`, les 4 drafts...)
+    et jamais les sous-clés `working_memory`. Seul le chemin RARE
+    "abandon de tunnel après max retries" (`core/conversation_reset.py::
+    reset_abandoned_conversation_context`, appelé par `cognitive_guard`)
+    les nettoyait déjà — jamais les chemins COURANTS (switch de but réel
+    via RULE 4 INTERRUPTION, RULE 5 NEW_TASK, RULE 1quater). Conséquence
+    réelle : un prix de bid saisi puis la conversation part sur un tout
+    autre but (ex: enregistrer une récolte) ; l'utilisateur revient
+    ensuite sur une enchère TOTALEMENT différente — `bid_phase`/
+    `pending_bid_auction`/`pending_bid_price` périmés peuvent encore
+    piloter `flows/producer/auctions.py::producer_auction_resolver` (qui
+    les lit AVANT de vérifier `event`) et faire déposer une offre sur la
+    MAUVAISE enchère, au MAUVAIS prix — même classe de bug, silencieuse,
+    que l'incident SALES_PUBLISH_PRODUCT documenté dans docs/agent/
+    TRANSACTION_STATE_LIFECYCLE.md. Nettoyage universel (toutes les clés,
+    quel que soit le rôle/but courant) — même politique que
+    `reset_abandoned_conversation_context`, qui ne filtre pas non plus par
+    rôle : un but non-producteur n'a jamais ces clés posées, donc les
+    remettre à None y est un no-op sans risque."""
+    patch: Dict[str, Any] = {}
+    patch.update(BidWorkflowState({}).reset_patch())
+    patch.update(ProducerUpdateWorkflowState({}).reset_patch())
+    patch.update(WinnerGpsWorkflowState({}).reset_patch())
+    return patch
 
 
 # ── Goal planner node ──────────────────────────────────────────────
@@ -415,6 +460,7 @@ async def goal_planner(
                     "interruption_detected": event == "INTERRUPTION",
                     "working_memory": {
                         **_lock(override_goal),
+                        **_mini_flow_reset(),
                         "disambiguation_pending": False,
                         "available_mapping_kind": None,
                     },
@@ -532,7 +578,7 @@ async def goal_planner(
                     "goal_status": "IDLE",
                     "interruption_detected": False,
                     "response_strategy": "CLARIFICATION",
-                    "working_memory": _clear_goal_lock(),
+                    "working_memory": {**_clear_goal_lock(), **_mini_flow_reset()},
                     **_purge_transaction_state(),
                 }
             )
@@ -653,6 +699,7 @@ async def goal_planner(
         updates["goal_status"] = "WAITING_INPUT"
         updates["working_memory"] = _lock(current_goal)
         if not has_active_draft_instance:
+            updates["working_memory"] = {**updates["working_memory"], **_mini_flow_reset()}
             updates.update(_purge_transaction_state())
         return _with_goal_metadata(updates)
 
@@ -740,7 +787,7 @@ async def goal_planner(
                     "suspended_goal": current_goal,
                     "suspended_payload": state.get("transaction_payload") or {},
                     **_purge_transaction_state(),
-                    "working_memory": _lock(new_goal),
+                    "working_memory": {**_lock(new_goal), **_mini_flow_reset()},
                 },
                 new_goal,
             )
@@ -761,7 +808,7 @@ async def goal_planner(
                     "goal_status": "ACTIVE",
                     "interruption_detected": True,
                     **_purge_transaction_state(),
-                    "working_memory": _lock(new_goal),
+                    "working_memory": {**_lock(new_goal), **_mini_flow_reset()},
                 },
                 new_goal,
             )
@@ -802,7 +849,7 @@ async def goal_planner(
                     # merge — this sentinel guarantees a true replace instead.
                     **_purge_transaction_state(),
                     "transaction_payload": {"__reset__": True, **restored_payload},
-                    "working_memory": _lock(resumed),
+                    "working_memory": {**_lock(resumed), **_mini_flow_reset()},
                 },
                 resumed,
             )
@@ -917,7 +964,7 @@ async def goal_planner(
         if new_goal:
             updates["current_goal"] = new_goal
             updates["goal_status"] = "ACTIVE"
-            updates["working_memory"] = _lock(new_goal)
+            updates["working_memory"] = {**_lock(new_goal), **_mini_flow_reset()}
             # Une NOUVELLE tâche repart TOUJOURS d'un état transactionnel PROPRE.
             # Les slots de la tâche précédente (produit, quantité, prix...) ne
             # doivent JAMAIS fuiter dans la nouvelle — les entités du message
