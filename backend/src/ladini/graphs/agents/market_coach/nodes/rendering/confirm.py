@@ -14,6 +14,10 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
 )
 from ladini.graphs.agents.market_coach.domain.preorder_draft import PreorderDraft
+from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
+    SalesPublishDraft,
+    SalesPublishDraftStatus,
+)
 from ladini.graphs.agents.market_coach.nodes.rendering.common import (
     RenderContext,
     apply_corrections,
@@ -109,10 +113,22 @@ async def render_confirmation(ctx: RenderContext) -> Dict[str, Any]:
     # en-tête "📋 *Récapitulatif de votre précommande :*").
     text_output: str
     _preorder_draft = None
+    _sales_draft = None
     if ctx.goal in _BUYER_PREORDER_GOALS:
         _preorder_draft = PreorderDraft.from_dict(state.get("preorder_draft"))
+    elif ctx.goal == "SALES_PUBLISH_PRODUCT":
+        _sales_draft = SalesPublishDraft.from_dict(state.get("sales_publish_draft"))
     if _preorder_draft is not None:
         text_output = f"{ctx.salutation}{_preorder_draft.render_summary()}\n\nConfirmez-vous ?"
+    elif _sales_draft is not None and _sales_draft.status == SalesPublishDraftStatus.DRAFT:
+        # Phase B1 (mandat étape 12) : la confirmation d'une publication est une projection PURE
+        # du draft certifié — JAMAIS reconstruite depuis `transaction_payload`. Reconstruire le
+        # récap depuis le payload brut (`build_confirmation_summary`) affichait « 500 FCFA/SAC »
+        # puis « le prix sera appliqué par LITRE » alors que le draft portait tout autre chose.
+        text_output = (
+            f"{ctx.salutation}Voici le récapitulatif :\n{_sales_draft.render_summary()}"
+            "\n\nConfirmez-vous ?"
+        )
     else:
         summary = state.get("confirmation_summary")
         stale = (

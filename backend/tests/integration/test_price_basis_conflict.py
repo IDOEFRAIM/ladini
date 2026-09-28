@@ -42,35 +42,35 @@ def _start(conv):
 
 
 class TestSachetPriceForLitreQuantity:
+    """Le scénario de la capture, sur le VRAI graphe. Depuis la Phase B1 le vertical slice
+    SALES_PUBLISH_PRODUCT est porté par le modèle commercial (`CommercialOffer`) : « 500f le
+    sachet » ne peut plus atteindre la confirmation tant que le contenu du sachet est inconnu
+    (voir `test_commercial_pricing_vertical_slice.py` pour la suite complète A–F)."""
+
     def test_the_recap_never_shows_a_price_basis_that_is_not_executed(self, conv):
         t1 = _start(conv)
         assert (t1.pending_after.kind.value, t1.pending_after.field) == ("ENTER_FIELD", "price")
 
-        t2 = conv.send("500f le sachet de lait", llm=_answer(price=500.0, price_unit="SAC"))
+        t2 = conv.send("500f le sachet", llm=_answer(price=500.0, price_unit="SAC"))
 
         assert "Confirmez" not in t2.response, t2.response
         assert "500 FCFA/SAC" not in t2.response
+        assert "appliqué par" not in t2.response
         assert t2.draft("sales_publish_draft") is None
-        assert t2.transaction_payload.get("price") in (None, "")
-        assert t2.transaction_payload.get("price_unit") in (None, "")
-        assert (t2.pending_after.kind.value, t2.pending_after.field) == ("ENTER_FIELD", "price")
+        assert (t2.pending_after.kind.value, t2.pending_after.field) == ("ENTER_FIELD", "package_size")
 
-    def test_the_agent_asks_for_the_price_in_the_quantity_unit_without_guessing(self, conv):
+    def test_the_agent_asks_the_content_of_the_package_without_guessing(self, conv):
         _start(conv)
-        t2 = conv.send("500f le sachet de lait", llm=_answer(price=500.0, price_unit="SAC"))
-        text = t2.response
-        assert "500" in text and "SAC" in text and "LITRE" in text
-        assert "deviner" in text
-        assert "par LITRE" in text
+        t2 = conv.send("500f le sachet", llm=_answer(price=500.0, price_unit="SAC"))
+        assert "Quelle quantité contient un *sachet*" in t2.response
+        assert "0,5 L" in t2.response
 
-    def test_after_the_price_per_litre_the_recap_is_consistent(self, conv):
+    def test_after_the_package_size_the_recap_is_consistent(self, conv):
         _start(conv)
-        conv.send("500f le sachet de lait", llm=_answer(price=500.0, price_unit="SAC"))
-        t3 = conv.send("400 fcfa le litre", llm=_answer(price=400.0, price_unit="LITRE"))
-        assert "400" in t3.response and "FCFA/LITRE" in t3.response
-        assert "SAC" not in t3.response
+        conv.send("500f le sachet", llm=_answer(price=500.0, price_unit="SAC"))
+        t3 = conv.send("0,5 litre")
+        assert "500 FCFA par sachet de 0,5 litre" in t3.response
         assert "appliqué par" not in t3.response
-        assert t3.transaction_payload.get("price") == 400.0
         assert t3.pending_after.kind.value == "CONFIRM_ACTION"
 
 
@@ -109,10 +109,10 @@ class TestConvertiblePriceBasisIsConvertedExactly:
         from tests.conftest import StubRuntime
 
         state = {
-            "current_goal": "SALES_PUBLISH_PRODUCT",
+            "current_goal": "PROCUREMENT_CREATE_REQUEST",
             "transaction_payload": {
                 "product": "maïs", "quantity": 200.0, "unit": "TONNE",
-                "price": 500000.0, "price_unit": "TONNE",
+                "price": 500000.0, "price_unit": "TONNE", "deadline": "2026-12-01",
             },
             "working_memory": {},
         }
@@ -120,5 +120,5 @@ class TestConvertiblePriceBasisIsConvertedExactly:
         payload = out["transaction_payload"]
         assert payload["unit"] == "KG" and payload["quantity"] == 200000.0
         assert payload["price"] == 500.0, "500000 F la tonne = 500 F le kg, pas 500000 F/KG"
-        summary = build_confirmation_summary("SALES_PUBLISH_PRODUCT", payload)
+        summary = build_confirmation_summary("PROCUREMENT_CREATE_REQUEST", payload)
         assert "500 FCFA/KG" in summary and "500000 FCFA/TONNE" in summary

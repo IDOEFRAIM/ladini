@@ -2,6 +2,13 @@ import unicodedata
 from typing import Any, Dict, Optional
 
 from ladini.core.logger import get_logger
+from ladini.domain.commercial_offer_flow import (
+    FIELD_PACKAGE_SIZE,
+    FIELD_PRICE_BASIS,
+    parse_basis_reply,
+    parse_package_content,
+    price_expression_in_text,
+)
 from ladini.graphs.agents.market_coach.core.goals import is_goal_refinement
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     CART_TUNNEL_KINDS,
@@ -21,6 +28,9 @@ from ladini.graphs.agents.market_coach.core.state_compaction import (
 from ladini.graphs.agents.market_coach.nodes.cleaner import (
     _EPHEMERAL_WORKING_KEYS as _EPHEMERAL_WORKING_KEYS_TUPLE,
 )
+from ladini.graphs.agents.market_coach.services.domain.commercial_gate import (
+    commercial_question_from_state,
+)
 from ladini.graphs.agents.market_coach.services.domain.slot_enrichment import (
     enrich_payload_from_text,
 )
@@ -29,6 +39,7 @@ from ladini.graphs.agents.market_coach.services.menu_snapshot import (
     snapshot_belongs_to_active_menu,
 )
 from ladini.graphs.agents.market_coach.utils import (
+    _CANONICAL_FIELD_ALIASES,
     MarketRuntime,
     _normalize_quantity_to_kg,
     canonical_unit_label,
@@ -182,8 +193,16 @@ _PRODUCT_CASCADE_FIELDS = (
     "quantity_display",
     "original_quantity",
     "unit_conversion",
+    # Phase B1 : la base du prix, le conditionnement et l'offre commerciale sérialisée sont
+    # ceux d'UN produit — un autre produit ne les hérite jamais (« lait au sachet de 0,5 L »
+    # ne contamine pas « boeufs »).
+    "unit_display",
+    "original_unit",
+    "price_unit",
+    "price_conversion_note",
+    "commercial_offer",
 )
-_UNIT_CASCADE_FIELDS = ("price",)
+_UNIT_CASCADE_FIELDS = ("price", "price_unit", "commercial_offer")
 _CANONICAL_SLOT_ORDER = ("product", "quantity", "unit", "price", "zone")
 
 
@@ -204,6 +223,23 @@ def _mirror_aliases(container: Dict[str, Any]) -> None:
             elif alias in container:
                 # `pop` laissait l'ancien alias vivant dans le canal merge_dict.
                 container[alias] = None
+
+
+def _null_stale_aliases(payload: Dict[str, Any], source: Dict[str, Any]) -> None:
+    """Remet à None les ALIAS encore vivants dans le canal quand leur clé canonique est vide.
+
+    `payload` est `normalize_slot_keys(source)` : les alias (`quantite`, `qty`, `prix`,
+    `montant`…) y sont déjà repliés sur le canonique puis ABSENTS du patch renvoyé — le canal
+    `merge_dict` les garde donc à leur ancienne valeur. Tant que le canonique est renseigné le
+    miroir les réécrit (`_mirror_aliases`) ; mais dès qu'une cascade l'a vidé (changement de
+    produit, d'unité), `normalize_slot_keys` du validateur RESSUSCITAIT l'ancienne quantité/prix
+    depuis l'alias : « finalement je vends des boeufs » gardait « 50 » et « 500 FCFA » du lait."""
+    for raw_key, value in source.items():
+        if not isinstance(raw_key, str) or not slot_has_value(value):
+            continue
+        canonical = _CANONICAL_FIELD_ALIASES.get(raw_key.lower())
+        if canonical and canonical != raw_key and not slot_has_value(payload.get(canonical)):
+            payload[raw_key] = None
 
 
 def _values_equal(a: Any, b: Any) -> bool:
@@ -265,6 +301,58 @@ async def memory_update(
 
     extracted = normalize_slot_keys(extracted_raw)
     payload = normalize_slot_keys(payload_source)
+
+    # ── Phase B1 : une réponse à une QUESTION COMMERCIALE n'est jamais une nouvelle quantité ──
+    # « 0,5 litre » (contenu d'un sachet) ou « par tonne » (base du prix) est interprété par le
+    # `validator` depuis le TEXTE, dans le contexte de la question posée. Toute extraction
+    # quantité/unité/prix/produit du classifieur sur ce tour est donc du bruit (le LLM lit
+    # « 0,5 litre » comme quantity=0.5) et ne doit JAMAIS écraser l'offre établie.
+    _commercial_q = commercial_question_from_state(state)
+    _reply_text = state.get("normalized_text") or state.get("user_query") or ""
+    _commercial_reply_turn = _commercial_q is not None and (
+        (
+            _commercial_q.requested_field == FIELD_PACKAGE_SIZE
+            and parse_package_content(_reply_text, question=_commercial_q) is not None
+        )
+        or (
+            _commercial_q.requested_field == FIELD_PRICE_BASIS
+            and parse_basis_reply(_reply_text, commercial_unit=_commercial_q.expected_basis_unit)
+            is not None
+        )
+    )
+    if _commercial_reply_turn:
+        for _noise in ("quantity", "unit", "price", "price_unit", "pricing_tiers", "product"):
+            extracted.pop(_noise, None)
+    elif str(state.get("current_goal") or "").upper() == "SALES_PUBLISH_PRODUCT":
+        # Correction du contenu en cours de confirmation (« finalement 1L le sachet ») : le LLM lit
+        # « 1L » comme une nouvelle quantité. Si le TEXTE est une phrase de contenu de
+        # conditionnement ET que la « quantité » extraite n'est que ce contenu, on la retire.
+        _content = parse_package_content(state.get("normalized_text") or state.get("user_query"))
+        _established_qty = payload.get("quantity")
+        if (
+            _content is not None
+            and slot_has_value(_established_qty)
+            and slot_has_value(extracted.get("quantity"))
+            and abs(float(extracted["quantity"]) - float(_content[0])) < 1e-9
+            and abs(float(extracted["quantity"]) - float(_established_qty)) > 1e-9
+        ):
+            extracted.pop("quantity", None)
+            extracted.pop("unit", None)
+    # « finalement 600 le sachet » : « <nombre> le/par <unité> » est un PRIX. Le classifieur en fait
+    # parfois une quantité/unité (600 SAC) qui, via `_apply_slot("unit")`, purgerait l'offre établie
+    # (conditionnement compris) — on retire cette lecture avant toute fusion.
+    _price_expr = (
+        price_expression_in_text(state.get("normalized_text") or state.get("user_query"))
+        if str(state.get("current_goal") or "").upper() == "SALES_PUBLISH_PRODUCT"
+        else None
+    )
+    if _price_expr is not None and slot_has_value(payload.get("quantity")):
+        _expr_amount, _expr_unit = _price_expr
+        if slot_has_value(extracted.get("quantity")) and abs(float(extracted["quantity"]) - _expr_amount) < 1e-9:
+            extracted.pop("quantity", None)
+        _extracted_unit = extracted.get("unit")
+        if slot_has_value(_extracted_unit) and canonical_unit_label(_extracted_unit, "") == _expr_unit:
+            extracted.pop("unit", None)
     stable = normalize_slot_keys(stable_source)
     draft_payload = normalize_slot_keys(draft_source)
 
@@ -790,7 +878,7 @@ async def memory_update(
     ).strip()
     _force_clarification = False
     _clarification_reasons = None
-    if normalized_text and current_goal:
+    if normalized_text and current_goal and not _commercial_reply_turn:
         payload = await enrich_payload_from_text(
             payload, normalized_text, current_goal, mc_runtime
         )
@@ -810,6 +898,18 @@ async def memory_update(
         # alimente `lookup_arg_value` (résolution d'arguments MCP) et le
         # récapitulatif de confirmation — un booléen de contrôle interne n'a
         # rien à y faire.
+        # Phase B1 : « finalement 600 le sachet » — l'enrichissement texte lit « 600 sachets »
+        # (QUANTITÉ) alors que « <nombre> le/par <unité> » est un PRIX ; on rétablit la quantité
+        # déjà établie et on pose le prix dit, avec sa base, en source explicite.
+        if _price_expr is not None:
+            _expr_amount, _expr_unit = _price_expr
+            payload["price"] = _expr_amount
+            payload["price_unit"] = _expr_unit
+            if slot_has_value(_established_quantity) and _values_equal(
+                payload.get("quantity"), _expr_amount
+            ) and not _values_equal(_established_quantity, _expr_amount):
+                payload["quantity"] = _established_quantity
+                payload["unit"] = _established_unit
         _force_clarification = bool(payload.get("slot_enrichment_force_clarification"))
         payload["slot_enrichment_force_clarification"] = None
         # Même mésadresse, même correctif — `strategy.py:52` relit
@@ -1107,6 +1207,7 @@ async def memory_update(
         payload, refresh_display=_quantity_or_unit_changed
     )
     _mirror_aliases(payload)
+    _null_stale_aliases(payload, payload_source)
     _mirror_aliases(updated_stable)
     if draft_patch and not draft_patch.get("__reset__"):
         _mirror_aliases(draft_patch)

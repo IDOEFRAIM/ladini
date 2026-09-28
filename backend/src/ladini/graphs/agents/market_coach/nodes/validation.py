@@ -12,6 +12,12 @@ slot_enrichment.  This node only:
 from typing import Any, Dict, List, Optional
 
 from ladini.core.logger import get_logger
+from ladini.domain.commercial_offer_flow import (
+    FIELD_PACKAGE_SIZE,
+    FIELD_PRICE_BASIS,
+    CommercialQuestion,
+    price_question,
+)
 from ladini.domain.price_basis import (
     PriceBasisAction,
     conflict_question,
@@ -41,6 +47,11 @@ from ladini.graphs.agents.market_coach.interpreter.contracts import (
 from ladini.graphs.agents.market_coach.interpreter.intent import INTENT_CONFIG
 from ladini.graphs.agents.market_coach.nodes.response_handlers import (
     _label_for_field,
+)
+from ladini.graphs.agents.market_coach.services.domain.commercial_gate import (
+    SALES_GOAL,
+    evaluate_sales_publish_state,
+    log_gate_events,
 )
 from ladini.graphs.agents.market_coach.utils import (
     _AUTO_RESOLVABLE_FIELDS,
@@ -322,12 +333,36 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
 
     payload = _normalize_quantity_to_kg(payload)
 
+    # ── VERTICAL SLICE COMMERCIAL (Phase B1) — SALES_PUBLISH_PRODUCT ──────────────
+    # L'offre commerciale (quantité + prix + BASE du prix + conditionnement + provenance)
+    # est construite et validée ICI, avant toute certification/confirmation : un prix sans
+    # base fiable ou un conditionnement au contenu inconnu ne peut jamais atteindre
+    # WAITING_CONFIRMATION (voir domain/commercial_offer_flow.py). Le résultat est porté par
+    # `transaction_payload["commercial_offer"]` puis par le `SalesPublishDraft`.
+    gate_result = None
+    gate_question: Optional[CommercialQuestion] = None
+    gate_text: Optional[str] = None
+    if goal_upper == SALES_GOAL:
+        gate_result = evaluate_sales_publish_state(state, payload)
+        if gate_result is not None:
+            payload["commercial_offer"] = gate_result.offer.to_dict()
+            log_gate_events(gate_result, state)
+            if (
+                gate_result.validation.status == "INCOMPLETE"
+                and gate_result.question is not None
+                and gate_result.question.requested_field in (FIELD_PRICE_BASIS, FIELD_PACKAGE_SIZE)
+                and not missing
+            ):
+                gate_question, gate_text = gate_result.question, gate_result.question_text
+                missing.insert(0, gate_question.requested_field)
+
     # BASE DU PRIX ↔ UNITÉ DE LA QUANTITÉ (incident 2026-09-28 : « 500f le sachet »
     # pour 50 LITRE était affiché « 500 FCFA/SAC » puis EXÉCUTÉ à 500 FCFA/LITRE).
     # Voir domain/price_basis.py : jamais de réinterprétation silencieuse du prix.
     basis_question: Optional[str] = None
     if (
         goal_upper in _PRICE_BASIS_GOALS
+        and goal_upper != SALES_GOAL  # SALES_PUBLISH_PRODUCT : porté par le modèle commercial
         and payload.get("price_unit")
         and slot_has_value(payload.get("price"))
         and not payload.get("pricing_tiers")
@@ -468,6 +503,17 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
             label = _label_for_field(goal, first_missing)
             hint = f"Étape {filled + 1}/{total} : {label}"
 
+        # Question de PRIX déterministe (Phase B1) : elle DIT la base (« par litre »), ce qui
+        # rend la réponse nue (« 500 ») non ambiguë — provenance `QUESTION_CONTEXT_EXPLICIT`.
+        if (
+            goal_upper == SALES_GOAL
+            and first_missing == "price"
+            and gate_question is None
+            and gate_result is not None
+            and gate_result.offer.commercial_quantity is not None
+        ):
+            gate_question, gate_text = price_question(gate_result.offer.commercial_quantity.unit)
+
         return _finalize_validator_response(
             state,
             {
@@ -478,7 +524,11 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
                 "validation_errors": errors + warnings,
                 "last_missing_field": first_missing,
                 "response_strategy": "ASK_MISSING_FIELD",
-                **({"final_response": basis_question} if basis_question else {}),
+                **(
+                    {"final_response": gate_text}
+                    if gate_text
+                    else ({"final_response": basis_question} if basis_question else {})
+                ),
                 "transaction_payload": payload,
                 "conversation_progress": progress,
                 "proactive_hint": hint,
@@ -495,6 +545,7 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
                     InteractionKind.ENTER_FIELD,
                     goal=goal_upper,
                     field_name=first_missing,
+                    target=gate_question.to_target() if gate_question is not None else None,
                 ),
             },
         )

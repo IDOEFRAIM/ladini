@@ -71,7 +71,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ladini.domain.pricing_tiers import unit_factor as _unit_factor
 from ladini.domain.pricing_tiers import unit_family as _unit_family
@@ -178,6 +178,11 @@ class Pricing:
     currency: str = "FCFA"
     source: Provenance = Provenance.UNKNOWN
     basis_source: Provenance = Provenance.UNKNOWN
+    #: Pour `PER_BASE_UNIT` : l'unité PHYSIQUE à laquelle le prix se rapporte (« 500000 par
+    #: TONNE » -> "TONNE"). `None` = l'unité de la quantité commerciale. Sans ce champ, un
+    #: prix « par kg » sur une quantité annoncée en tonnes était indiscernable d'un prix
+    #: « par tonne » (Phase B1, scénario `200 tonnes à 500 000`).
+    basis_unit: Optional[str] = None
 
     @property
     def is_basis_known(self) -> bool:
@@ -336,7 +341,370 @@ def convert_commercial_quantity_to_base_unit(
     return quantity.amount * factor, factor
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# PHASE B1 — AGRÉGAT `CommercialOffer` (vertical slice SALES_PUBLISH_PRODUCT)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# La Phase A a livré les briques (quantité, prix, base, conditionnement,
+# provenance, validateur). Il manquait l'OBJET qui les réunit et qui puisse être
+# (a) reconstruit à chaque tour depuis l'état legacy, (b) sérialisé dans le draft
+# versionné, (c) rendu tel que l'utilisateur l'a formulé, (d) converti en payload
+# d'exécution de façon DÉTERMINISTE. Ce n'est PAS un second système : le
+# `SalesPublishDraft` existant le porte, le `validator` existant l'appelle.
+
+_COMMERCIAL_OFFER_SCHEMA_VERSION = 1
+
+#: Unité de base physique retenue par famille convertible (convention existante du
+#: dépôt : `actions/common.py::normalize_quantity_to_kg`, tonnes/grammes -> KG).
+_BASE_UNIT_BY_FAMILY = {"MASS": "KG", "VOLUME": "LITRE"}
+
+_UNIT_LABELS: Dict[str, Tuple[str, str]] = {
+    "LITRE": ("litre", "litres"),
+    "KG": ("kg", "kg"),
+    "TONNE": ("tonne", "tonnes"),
+    "TETE": ("tête", "têtes"),
+    "SAC": ("sac", "sacs"),
+    "PANIER": ("panier", "paniers"),
+    "UNITE": ("unité", "unités"),
+}
+
+
+def unit_display(unit: Optional[str], amount: Optional[float] = None) -> str:
+    """Libellé humain d'une unité (« 50 litres », « 1 litre », « 200 tonnes »)."""
+    code = str(unit or "").strip().upper()
+    singular, plural = _UNIT_LABELS.get(code, (code.lower(), code.lower()))
+    if amount is not None and abs(float(amount)) > 1:
+        return plural
+    return singular
+
+
+def _fmt(value: Optional[float]) -> str:
+    from ladini.core.formatting import fmt_num
+
+    return str(fmt_num(value))
+
+
+def base_unit_for(unit: Optional[str]) -> Optional[str]:
+    """Unité de base physique de `unit` : KG pour la masse, LITRE pour le volume, sinon
+    l'unité elle-même (TETE, SAC, PANIER... comptés tels quels)."""
+    if not unit:
+        return None
+    code = str(unit).strip().upper()
+    family = convertible_measurement_family(code)
+    if family:
+        return _BASE_UNIT_BY_FAMILY[family]
+    return code
+
+
+@dataclass(frozen=True)
+class CommercialOffer:
+    """Ce qu'un producteur propose, avec le SENS de chaque nombre.
+
+    `commercial_quantity` : la quantité comme dite (« 200 TONNE »).
+    `inventory_quantity`  : la même quantité dans l'unité physique de base (« 200000 KG »).
+    `pricing`/`package`   : le prix ET sa base ; le conditionnement et son contenu.
+    `normalized`          : calcul interne uniquement, jamais la formulation affichée.
+    """
+
+    product: Optional[str] = None
+    commercial_quantity: Optional[CommercialQuantity] = None
+    inventory_quantity: Optional[InventoryQuantity] = None
+    pricing: Optional[Pricing] = None
+    package: Optional[PackageDefinition] = None
+    normalized: Optional[NormalizedRepresentation] = None
+
+    # -- validation ---------------------------------------------------------
+    def validate(self) -> CommercialOfferValidation:
+        return validate_offer(self)
+
+    # -- (dé)sérialisation (JSON, sans migration : portée par le draft) -----
+    def to_dict(self) -> Dict[str, Any]:
+        cq, iq, pr, pk, nm = (
+            self.commercial_quantity,
+            self.inventory_quantity,
+            self.pricing,
+            self.package,
+            self.normalized,
+        )
+        return {
+            "schema": _COMMERCIAL_OFFER_SCHEMA_VERSION,
+            "product": self.product,
+            "commercial_quantity": (
+                {"amount": cq.amount, "unit": cq.unit, "source": cq.source.value} if cq else None
+            ),
+            "inventory_quantity": (
+                {"amount": iq.amount, "unit": iq.unit, "source": iq.source.value} if iq else None
+            ),
+            "pricing": (
+                {
+                    "amount": pr.amount,
+                    "basis": pr.basis.value if pr.basis else None,
+                    "basis_unit": pr.basis_unit,
+                    "currency": pr.currency,
+                    "source": pr.source.value,
+                    "basis_source": pr.basis_source.value,
+                }
+                if pr
+                else None
+            ),
+            "package": (
+                {
+                    "package_type": pk.package_type,
+                    "content_amount": pk.content_amount,
+                    "content_unit": pk.content_unit,
+                    "status": pk.status.value,
+                    "source": pk.source.value,
+                }
+                if pk
+                else None
+            ),
+            "normalized": (
+                {
+                    "quantity_amount": nm.quantity_amount,
+                    "quantity_unit": nm.quantity_unit,
+                    "unit_price": nm.unit_price,
+                    "unit_price_basis": nm.unit_price_basis.value if nm.unit_price_basis else None,
+                }
+                if nm
+                else None
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> Optional["CommercialOffer"]:
+        if not isinstance(data, dict) or data.get("schema") != _COMMERCIAL_OFFER_SCHEMA_VERSION:
+            return None
+
+        def _p(value: Any) -> Provenance:
+            try:
+                return Provenance(value)
+            except ValueError:
+                return Provenance.UNKNOWN
+
+        def _num(value: Any) -> Optional[float]:
+            try:
+                return float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        cq = data.get("commercial_quantity")
+        iq = data.get("inventory_quantity")
+        pr = data.get("pricing")
+        pk = data.get("package")
+        nm = data.get("normalized")
+        try:
+            return cls(
+                product=data.get("product"),
+                commercial_quantity=(
+                    CommercialQuantity(float(cq["amount"]), str(cq["unit"]), _p(cq.get("source")))
+                    if isinstance(cq, dict) and _num(cq.get("amount")) is not None
+                    else None
+                ),
+                inventory_quantity=(
+                    InventoryQuantity(float(iq["amount"]), str(iq["unit"]), _p(iq.get("source")))
+                    if isinstance(iq, dict) and _num(iq.get("amount")) is not None
+                    else None
+                ),
+                pricing=(
+                    Pricing(
+                        amount=float(pr["amount"]),
+                        basis=PriceBasis(pr["basis"]) if pr.get("basis") else None,
+                        currency=pr.get("currency") or "FCFA",
+                        source=_p(pr.get("source")),
+                        basis_source=_p(pr.get("basis_source")),
+                        basis_unit=pr.get("basis_unit"),
+                    )
+                    if isinstance(pr, dict) and _num(pr.get("amount")) is not None
+                    else None
+                ),
+                package=(
+                    PackageDefinition(
+                        package_type=pk.get("package_type"),
+                        content_amount=_num(pk.get("content_amount")),
+                        content_unit=pk.get("content_unit"),
+                        status=PackageStatus(pk.get("status") or "NOT_REQUIRED"),
+                        source=_p(pk.get("source")),
+                    )
+                    if isinstance(pk, dict)
+                    else None
+                ),
+                normalized=(
+                    NormalizedRepresentation(
+                        quantity_amount=_num(nm.get("quantity_amount")),
+                        quantity_unit=nm.get("quantity_unit"),
+                        unit_price=_num(nm.get("unit_price")),
+                        unit_price_basis=(
+                            PriceBasis(nm["unit_price_basis"]) if nm.get("unit_price_basis") else None
+                        ),
+                    )
+                    if isinstance(nm, dict)
+                    else None
+                ),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+
+def _content_in_inventory_unit(offer: "CommercialOffer") -> Optional[float]:
+    """Contenu d'UN conditionnement exprimé dans l'unité de base de l'inventaire, ou `None`
+    si le contenu est inconnu ou si son unité n'est pas convertible vers l'inventaire."""
+    pkg, inv = offer.package, offer.inventory_quantity
+    if pkg is None or not pkg.is_content_known or inv is None or pkg.content_amount is None:
+        return None
+    converted = convert_commercial_quantity_to_base_unit(
+        CommercialQuantity(float(pkg.content_amount), str(pkg.content_unit)), inv.unit
+    )
+    if converted is not None:
+        return converted[0]
+    if str(pkg.content_unit).upper() == str(inv.unit).upper():
+        return float(pkg.content_amount)
+    return None
+
+
+def derive_normalized(offer: "CommercialOffer") -> Optional[NormalizedRepresentation]:
+    """Représentation INTERNE (prix par unité de base de l'inventaire) — calcul déterministe,
+    jamais affiché comme formulation commerciale. `None` si l'offre n'est pas normalisable."""
+    inv, pr = offer.inventory_quantity, offer.pricing
+    if inv is None or pr is None or pr.basis is None:
+        return None
+    unit_price: Optional[float] = None
+    if pr.basis == PriceBasis.PER_BASE_UNIT:
+        basis_unit = pr.basis_unit or (
+            offer.commercial_quantity.unit if offer.commercial_quantity else inv.unit
+        )
+        if str(basis_unit).upper() == str(inv.unit).upper():
+            unit_price = pr.amount
+        else:
+            factor = convert_commercial_quantity_to_base_unit(
+                CommercialQuantity(1.0, str(basis_unit)), inv.unit
+            )
+            if factor is not None and factor[0] > 0:
+                unit_price = pr.amount / factor[0]
+    elif pr.basis == PriceBasis.PER_PACKAGE:
+        content = _content_in_inventory_unit(offer)
+        if content:
+            unit_price = pr.amount / content
+    elif pr.basis == PriceBasis.TOTAL_LOT:
+        if inv.amount > 0:
+            unit_price = pr.amount / inv.amount
+    if unit_price is None:
+        return None
+    return NormalizedRepresentation(
+        quantity_amount=inv.amount,
+        quantity_unit=inv.unit,
+        unit_price=round(unit_price, 2),
+        unit_price_basis=PriceBasis.PER_BASE_UNIT,
+    )
+
+
+def validate_offer(offer: "CommercialOffer") -> CommercialOfferValidation:
+    """Validateur de l'AGRÉGAT — étend `validate_commercial_offer` (Phase A, inchangé) avec les
+    incohérences qui n'existent qu'au niveau de l'offre complète :
+
+    - base de prix `PER_BASE_UNIT` sur une unité incommensurable avec la quantité (prix « par
+      SAC » sur du LITRE sans conditionnement défini) -> `price_basis` manquant, jamais un
+      avertissement suivi d'une confirmation ;
+    - contenu d'un conditionnement dans une unité incompatible avec l'inventaire
+      (0,5 KG pour du lait au litre) -> conflit.
+    """
+    base = validate_commercial_offer(
+        inventory_quantity=offer.inventory_quantity, pricing=offer.pricing, package=offer.package
+    )
+    if base.status != "VALID":
+        return base
+
+    pr, inv, pkg = offer.pricing, offer.inventory_quantity, offer.package
+    assert pr is not None and inv is not None  # garanti par un statut VALID
+    conflicts: List[str] = []
+    missing: List[str] = []
+
+    if pr.basis == PriceBasis.PER_BASE_UNIT and pr.basis_unit:
+        same_unit = str(pr.basis_unit).upper() == str(inv.unit).upper()
+        family_basis = convertible_measurement_family(pr.basis_unit)
+        if not same_unit and (family_basis is None or family_basis != convertible_measurement_family(inv.unit)):
+            missing.append("price_basis")
+    if pr.basis == PriceBasis.PER_PACKAGE and pkg is not None and pkg.is_content_known:
+        if _content_in_inventory_unit(offer) is None:
+            conflicts.append("package_content_unit_incompatible_with_inventory")
+
+    if conflicts:
+        return CommercialOfferValidation(status="INVALID", conflicts=tuple(conflicts))
+    if missing:
+        return CommercialOfferValidation(
+            status="INCOMPLETE",
+            missing_fields=tuple(missing),
+            clarification_question=_CLARIFICATION_QUESTIONS.get(missing[0]),
+        )
+    return base
+
+
+def render_offer_summary(offer: "CommercialOffer") -> str:
+    """Formulation COMMERCIALE de l'offre — celle que l'utilisateur a choisie, jamais la
+    représentation normalisée interne (« 500 000 FCFA par tonne », pas « 500 FCFA/kg »)."""
+    cq, pr, pk = offer.commercial_quantity, offer.pricing, offer.package
+    if cq is None:
+        return "Récapitulatif de la publication en cours de construction."
+    head = f"Publication de {_fmt(cq.amount)} {unit_display(cq.unit, cq.amount)} de {offer.product}"
+    if pr is None or pr.basis is None:
+        return head
+    amount = f"{_fmt(pr.amount)} {pr.currency}"
+    if pr.basis == PriceBasis.PER_PACKAGE and pk is not None and pk.is_content_known:
+        ptype = (pk.package_type or "conditionnement").lower()
+        return (
+            f"{head} à {amount} par {ptype} de "
+            f"{_fmt(pk.content_amount)} {unit_display(pk.content_unit, pk.content_amount)}."
+        )
+    if pr.basis == PriceBasis.TOTAL_LOT:
+        return f"{head} pour {amount} au total (lot entier)."
+    basis_unit = pr.basis_unit or cq.unit
+    return f"{head} à {amount} par {unit_display(basis_unit)}."
+
+
+def offer_execution_payload(offer: "CommercialOffer") -> Dict[str, Any]:
+    """Payload MCP DÉRIVÉ de l'offre certifiée — le SEUL passage offre -> base de données.
+
+    Mapping sur la structure EXISTANTE (aucune migration) :
+      - `quantity`/`unit`  = inventaire en unité de base ;
+      - `price`            = prix par unité de base (représentation normalisée) ;
+      - `pricing_tiers`    = un palier `{quantity, unit, price, packaging}` UNIQUEMENT quand
+                             le prix est PAR CONDITIONNEMENT (le JSONB `products.pricing_tiers`
+                             porte alors « 500 FCFA / sachet de 0,5 L »).
+    Aucun champ `original_*`/`*_display` : l'exécuteur n'a plus rien à renormaliser.
+    Lève `ValueError` sur une offre non VALID — l'exécution ne devine jamais."""
+    verdict = offer.validate()
+    normalized = offer.normalized or derive_normalized(offer)
+    if not verdict.is_valid or normalized is None or normalized.unit_price is None:
+        raise ValueError(
+            f"offre non exécutable: {verdict.status} {verdict.missing_fields}{verdict.conflicts}"
+        )
+    inv, pr, pk = offer.inventory_quantity, offer.pricing, offer.package
+    assert inv is not None and pr is not None
+    payload: Dict[str, Any] = {
+        "product": offer.product,
+        "quantity": inv.amount,
+        "unit": inv.unit,
+        "price": normalized.unit_price,
+    }
+    if pr.basis == PriceBasis.PER_PACKAGE and pk is not None and pk.is_content_known:
+        payload["pricing_tiers"] = [
+            {
+                "quantity": pk.content_amount,
+                "unit": pk.content_unit,
+                "price": pr.amount,
+                "packaging": (pk.package_type or "").lower() or None,
+            }
+        ]
+    return payload
+
+
 __all__ = [
+    "CommercialOffer",
+    "unit_display",
+    "base_unit_for",
+    "derive_normalized",
+    "validate_offer",
+    "render_offer_summary",
+    "offer_execution_payload",
     "PriceBasis",
     "Provenance",
     "PackageStatus",

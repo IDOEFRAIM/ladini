@@ -36,6 +36,12 @@ from ladini.agents.confirmation_phrases import (
 )
 from ladini.core.idempotency import get_cached as _get_cached_value
 from ladini.core.idempotency import set_cached as _set_cached_value
+from ladini.domain.commercial_offer_flow import (
+    FIELD_PACKAGE_SIZE,
+    FIELD_PRICE_BASIS,
+    parse_basis_reply,
+    parse_package_content,
+)
 from ladini.domain.quantity_unit import (
     all_numbers_accounted_for,
     extract_unit_only_from_text,
@@ -101,6 +107,9 @@ from ladini.graphs.agents.market_coach.interpreter.interpreter_result import (
 )
 from ladini.graphs.agents.market_coach.interpreter.prompts import (
     INTERPRETER_USER_PROMPT,
+)
+from ladini.graphs.agents.market_coach.services.domain.commercial_gate import (
+    commercial_question_from_state,
 )
 from ladini.graphs.agents.market_coach.services.domain.product_validation import (
     _validate_and_sanitize_product,
@@ -2001,6 +2010,37 @@ def make_input_interpreter(role: str = "PRODUCER"):
                     },
                     "raw_analysis": {"path": "stock_shortage_fast_path"},
                 }
+
+        # 0.45 RÉPONSE À UNE QUESTION COMMERCIALE (Phase B1, 2026-09-28) : « 0,5 litre » répondant
+        # à « quelle quantité contient un sachet ? » est le CONTENU du conditionnement, jamais une
+        # nouvelle quantité à vendre ; « par tonne » répondant à « 500 000 FCFA par tonne ou pour
+        # l'ensemble ? » fixe la base du prix. Déterministe (aucun LLM, aucune extraction
+        # d'entité) : le `validator` relit le TEXTE dans le contexte de la question posée
+        # (domain/commercial_offer_flow.py). Un message qui ne répond pas à la question
+        # (« annuler », une autre demande) retombe sur le classifieur normal.
+        _commercial_q = None if onboarding_active else commercial_question_from_state(state)
+        if _commercial_q is not None and (
+            (
+                _commercial_q.requested_field == FIELD_PACKAGE_SIZE
+                and parse_package_content(text, question=_commercial_q) is not None
+            )
+            or (
+                _commercial_q.requested_field == FIELD_PRICE_BASIS
+                and parse_basis_reply(text, commercial_unit=_commercial_q.expected_basis_unit)
+                is not None
+            )
+        ):
+            logger.info(
+                "[Interpreter CommercialQuestion] fast-path reply to %s",
+                _commercial_q.requested_field,
+            )
+            return {
+                "interpreted_event": "ANSWER",
+                "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+                "interpreter_confidence": 0.98,
+                "extracted_entities": {},
+                "raw_analysis": {"path": "commercial_question_fast_path"},
+            }
 
         # 0.5 CONTRAT D'ACTION STRUCTURÉE (2026-09-01) : reconstruit à chaque
         # tour, JAMAIS depuis un canal générique périmé (voir
