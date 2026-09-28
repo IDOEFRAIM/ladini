@@ -611,8 +611,13 @@ class Orchestrator:
                 ws.active_goal or None,
             )
         except Exception:  # pragma: no cover - défensif, jamais vers l'appelant
-            logger.debug(
-                "workspace reconciliation ignorée après échec | workspace=%s",
+            # WARNING (pas DEBUG) : c'est le signal que le runbook pilote
+            # (`AGENT_PILOT_RUNBOOK.md` §2) demande d'investiguer — le compteur
+            # `workspace_reconciliation_failures` vit côté worker et n'est pas
+            # forcément scrapé, le log est donc le signal de repli fiable.
+            logger.warning(
+                "WORKSPACE_RECONCILIATION_FAILED | workspace=%s — relecture du "
+                "checkpoint ignorée après échec de tour (active_goal pré-tour conservé)",
                 workspace_id,
                 exc_info=True,
             )

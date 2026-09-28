@@ -208,6 +208,57 @@ class TestSalesPublishCrossFlowStateLeak:
             "aucun draft ne doit être bootstrap avec des montants jamais dits dans ce tour"
         )
 
+    def test_pilot_acceptance_scenario_boeufs_asks_next_question_without_premature_confirmation(self):
+        """Critère d'acceptation du pilote (`AGENT_PILOT_RUNBOOK.md`, test manuel
+        post-déploiement) : « je veux vendre mes boeufs » → product=boeufs,
+        unit=TETE, quantity+price MANQUANTS, question suivante = quantity, AUCUN
+        draft, AUCUNE confirmation. Vérifié pour un état vierge ET pour l'état
+        périmé 461000 — les deux doivent converger vers le MÊME résultat
+        (invariant I1 : un nouveau flow ne réutilise pas les slots d'un ancien)."""
+        for label, initial in (
+            ("stale", _abandoned_sales_publish_state()),
+            (
+                "clean",
+                {
+                    "user_phone": "+22670000099",
+                    "user_role": "PRODUCER",
+                    "extracted_entities": {},
+                    "working_memory": {},
+                },
+            ),
+        ):
+            runtime = StubRuntime()
+            interpreter = make_input_interpreter("PRODUCER")
+            runtime.llm = _DeviationThenNewTaskLLM(
+                {
+                    "disposition": "NEW_TASK",
+                    "intent": "SALES_PUBLISH_PRODUCT",
+                    "confidence": 0.95,
+                    "entities": {"product": "boeufs"},
+                }
+            )
+
+            state = run(_run_turn(initial, interpreter, runtime, text="je veux vendre mes boeufs"))
+
+            payload = state.get("transaction_payload") or {}
+            assert payload.get("product") == "boeufs", f"[{label}] {payload!r}"
+            assert payload.get("unit") == "TETE", f"[{label}] {payload!r}"
+            for stale_key, stale_value in (("quantity", 461000.0), ("price", 461000.0)):
+                assert payload.get(stale_key) != stale_value, f"[{label}] {payload!r}"
+            assert set(state.get("missing_fields") or []) == {"quantity", "price"}, (
+                f"[{label}] {state.get('missing_fields')!r}"
+            )
+            pending = state.get("pending_interaction") or {}
+            assert pending.get("kind") == "ENTER_FIELD" and pending.get("field") == "quantity", (
+                f"[{label}] la question suivante doit porter sur la quantité : {pending!r}"
+            )
+            assert state.get("status") == "WAITING_INPUT", f"[{label}] {state.get('status')!r}"
+            assert state.get("sales_publish_draft") is None, f"[{label}] draft prématuré"
+            assert not state.get("confirmation_summary_payload"), (
+                f"[{label}] confirmation prématurée"
+            )
+            assert not state.get("execution_result"), f"[{label}] exécution prématurée"
+
     def test_a_correction_of_an_already_open_draft_is_preserved(self):
         """Garde-fou symétrique : une fois qu'un `sales_publish_draft` existe déjà
         (une VRAIE instance ouverte), un NEW_TASK même-but qui ne restate qu'UNE
