@@ -1447,6 +1447,8 @@ LIVESTOCK_PRODUCT_KEYWORDS = frozenset(
         "lapin",
         "lapins",
         "lapine",
+        "cobaye",
+        "cobayes",
         "lapines",
         "clapier",
         "mouton",
@@ -1517,14 +1519,38 @@ LIVESTOCK_PRODUCT_KEYWORDS = frozenset(
 
 _WORD_RE = re.compile(r"[a-z]+")
 
+#: Mots qui font d'un nom un PRODUIT DÉRIVÉ d'un animal (vendu au litre, au kg, à la pièce…),
+#: jamais l'animal lui-même. Incident réel (2026-09-28) : « lait de vache » contenait le mot
+#: « vache » → produit d'élevage → unité LITRE « corrigée » en TETE (50 litres de lait devenaient
+#: 50 têtes) et, côté service, LITRE rejeté pour un « animal ». Le nom porte l'animal comme
+#: COMPLÉMENT (« de vache »), pas comme tête du groupe nominal. Accents pliés, singulier+pluriel.
+ANIMAL_DERIVED_PRODUCT_MARKERS = frozenset(
+    {
+        "lait", "laits", "laitier", "laitiere", "laitieres",
+        "oeuf", "oeufs",
+        "viande", "viandes", "carcasse", "carcasses", "abats", "gigot", "cotelette", "cotelettes",
+        "fromage", "fromages", "beurre", "creme", "yaourt", "yaourts", "yogourt", "caille",
+        "peau", "peaux", "cuir", "laine", "plume", "plumes",
+        "fumier", "crottin", "engrais",
+        "graisse", "suif", "saucisse", "saucisses", "jambon", "charcuterie",
+        "bouillon", "miel",
+    }
+)
+
 
 def is_livestock_product(product: Any) -> bool:
-    """True when *product* names an animal counted per head rather than weighed."""
+    """True when *product* names an animal counted per head rather than weighed.
+
+    Un produit DÉRIVÉ d'un animal (« lait de vache », « œufs de poule », « viande de bœuf »,
+    « peau de mouton ») n'est pas un animal : voir `ANIMAL_DERIVED_PRODUCT_MARKERS`."""
     if not product:
         return False
     # Expand ligatures NFKD leaves intact (œ→oe, æ→ae) so "bœuf" matches "boeuf".
     folded = normalize_unit_token(str(product).replace("œ", "oe").replace("æ", "ae"))
-    return any(word in LIVESTOCK_PRODUCT_KEYWORDS for word in _WORD_RE.findall(folded))
+    words = _WORD_RE.findall(folded)
+    if any(word in ANIMAL_DERIVED_PRODUCT_MARKERS for word in words):
+        return False
+    return any(word in LIVESTOCK_PRODUCT_KEYWORDS for word in words)
 
 
 def default_unit_for_product(product: Any, fallback: str = "KG") -> str:
@@ -1552,6 +1578,7 @@ __all__ = [
     "NumberCandidate",
     "scan_number_candidates",
     "LIVESTOCK_PRODUCT_KEYWORDS",
+    "ANIMAL_DERIVED_PRODUCT_MARKERS",
     "is_livestock_product",
     "default_unit_for_product",
     "resolve_product_unit",

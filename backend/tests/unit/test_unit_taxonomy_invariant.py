@@ -198,3 +198,54 @@ class TestSearchOfferDataQuality:
         assert flagged["ok"] == [] and flagged["legacy-unite"] == ["unit_generic_for_livestock"]
         logged = " ".join(r.getMessage() for r in caplog.records)
         assert "SEARCH_OFFER_DATA_QUALITY" in logged and "excluded=True" in logged
+
+
+# ── Produits DÉRIVÉ d'un animal : jamais comptés à la tête (capture WhatsApp 2026-09-28) ──
+
+
+class TestAnimalDerivedProductsAreNotLivestock:
+    @pytest.mark.parametrize(
+        "name",
+        ["lait de vache", "Lait de chèvre", "lait de vache caillé", "oeufs de poule", "œufs de pintade",
+         "viande de boeuf", "fromage de brebis", "peau de mouton", "fumier de poulet", "beurre de vache"],
+    )
+    def test_derived_products_are_not_livestock(self, name):
+        from ladini.domain.quantity_unit import is_livestock_product
+
+        assert is_livestock_product(name) is False, name
+
+    @pytest.mark.parametrize("name", ["vache", "boeufs", "poulets", "chèvres", "mouton", "cobayes", "poule pondeuse"])
+    def test_animals_are_still_livestock(self, name):
+        from ladini.domain.quantity_unit import is_livestock_product
+
+        assert is_livestock_product(name) is True, name
+
+    def test_milk_in_litres_is_accepted_by_the_unit_invariant(self):
+        assert validate_product_unit("lait de vache", "LITRE").action == UnitAction.ACCEPT
+        assert validate_product_unit("oeufs de poule", "PLATEAU").ok
+        assert validate_product_unit("viande de boeuf", "KG").ok
+
+    def test_resolve_product_unit_keeps_litre_for_milk(self):
+        from ladini.domain.quantity_unit import resolve_product_unit
+
+        assert resolve_product_unit("lait de vache", current_unit="LITRE") == "LITRE"
+        assert resolve_product_unit("boeufs", current_unit="KG") == "TETE"
+
+    def test_buyer_display_unit_no_longer_calls_milk_a_head(self):
+        from ladini.services.database.buyer import _guess_display_unit
+
+        assert _guess_display_unit("lait de vache", "KG") == "KG"
+        assert _guess_display_unit("fromage de chèvre", None) == "KG"
+        assert _guess_display_unit("boeufs", "KG") == "TETE"
+
+    def test_create_product_accepts_milk_in_litres(self, monkeypatch):
+        import ladini.services.database.producer as mod
+
+        async def _no_event(self, product):
+            return None
+
+        monkeypatch.setattr(mod.BusinessEventEmitter, "emit_product_published_for_sale", _no_event)
+        session = _Session()
+        svc = _service(session)
+        run(svc.create_product("lait de vache", 400, 50, "LITRE", sub_category_id="00000000-0000-0000-0000-0000000000cc", phone="+22670000001"))
+        assert session.added[0].unit == "LITRE"
