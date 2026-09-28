@@ -148,6 +148,35 @@ class TestDeclareCropCycleDerivesFromTheCertifiedOffer:
         assert args["price_per_unit"] == pytest.approx(400.0)
         assert args["commercial_offer"]["pricing"]["basis"] == "PER_BASE_UNIT"
 
+    def test_raw_field_corruption_after_certification_is_ignored_by_execution(self):
+        """Golden F (mandat B2c.3 §28) : le récapitulatif de confirmation est déjà rendu depuis
+        `commercial_offer` (voir `confirmation_summary.py`) — ce test verrouille le CÔTÉ EXÉCUTION du
+        même invariant : si `payload["price"]`/`quantity`/`unit` divergent de l'offre certifiée
+        (bug ailleurs, état corrompu entre l'affichage de la confirmation et le « oui »),
+        `declare_crop_cycle` doit rester sourd à ces champs plats et exécuter UNIQUEMENT les termes
+        de l'offre certifiée — jamais un mélange des deux."""
+        result = _offer(
+            {**BASE_PAYLOAD, "price": 400000.0, "price_unit": "TONNE"},
+            said={"quantity": 10.0, "unit": "TONNE", "price": 400000.0, "price_unit": "TONNE"},
+            text="10 tonnes de tomates à 400000 la tonne",
+        )
+        assert result.validation.is_valid
+        payload = _future_payload(
+            commercial_offer=result.offer.to_dict(),
+            # Corruption délibérée des champs plats legacy APRÈS certification — l'offre
+            # ci-dessus dit 10 TONNE à 400 000 FCFA/TONNE, ces valeurs disent autre chose :
+            quantity=1.0,
+            unit="SAC",
+            price=1.0,
+        )
+        svc = AgronomyService(context=_ctx())
+        out = svc.declare_crop_cycle({"user_phone": "+22670000001"}, payload)
+        args = out.tool_args["payload"]
+        assert args["unit"] == "KG"
+        assert args["quantity"] == pytest.approx(10000.0)
+        assert args["price_per_unit"] == pytest.approx(400.0)
+        assert args["commercial_offer"]["pricing"]["basis"] == "PER_BASE_UNIT"
+
     def test_total_lot_offer_never_multiplies_the_lot_amount_by_the_quantity(self):
         result = _offer(
             {**BASE_PAYLOAD, "price": 4_000_000.0},
