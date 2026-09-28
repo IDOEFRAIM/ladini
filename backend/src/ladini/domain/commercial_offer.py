@@ -71,7 +71,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ladini.domain.pricing_tiers import unit_factor as _unit_factor
 from ladini.domain.pricing_tiers import unit_family as _unit_family
@@ -215,6 +215,88 @@ class CommercialOfferValidation:
         return self.status == "VALID"
 
 
+_CLARIFICATION_QUESTIONS: Dict[str, str] = {
+    "quantity": "Quelle quantité proposez-vous ?",
+    "price": "Quel est votre prix ?",
+    "price_basis": (
+        "Ce prix, c'est pour quoi exactement ? Par kilo (ou litre/tête), "
+        "pour un conditionnement (sac, sachet, bidon...), ou pour tout le lot ?"
+    ),
+    "package_content_amount": (
+        "Quelle quantité contient un exemplaire de ce conditionnement ? "
+        "(ex: 0,5 litre, 50 kg...)"
+    ),
+}
+
+
+def validate_commercial_offer(
+    *,
+    inventory_quantity: Optional[InventoryQuantity],
+    pricing: Optional[Pricing],
+    package: Optional[PackageDefinition] = None,
+) -> CommercialOfferValidation:
+    """Point d'entrée central (Phase 13 du mandat) — VALID/INCOMPLETE/INVALID,
+    jamais un booléen. Règle centrale : `price.amount` seul n'est jamais
+    exécutable (il lui faut un `price.basis` dont la provenance est
+    `is_execution_safe`) ; `PriceBasis.PER_PACKAGE` sans `PackageDefinition`
+    au contenu CONNU n'est jamais exécutable non plus — c'est exactement le
+    scénario "500 F le sachet" de la mission.
+
+    `missing_fields`/`conflicts` sont des listes STRUCTURÉES (jamais un
+    message d'erreur générique) — chaque champ manquant de
+    `missing_fields` a une question de clarification prête à poser
+    (`_CLARIFICATION_QUESTIONS`), consommable directement par le mécanisme
+    `ASK_MISSING_FIELD` déjà existant du pipeline conversationnel (voir
+    `nodes/rendering/ask.py`).
+
+    Conçu pour être appelé PAR un draft existant (`SalesPublishDraft`, ...)
+    avant qu'il ne quitte l'état "collecte" pour "confirmation" — pas encore
+    câblé dans le chemin de conversation live cette session (voir
+    `docs/domain/COMMERCIAL_QUANTITY_PRICING_MODEL.md` §Phase B pour le plan
+    de câblage), mais son contrat est stable et entièrement testé en
+    isolation (`tests/unit/test_commercial_offer_validation.py`)."""
+    missing: List[str] = []
+    conflicts: List[str] = []
+
+    if inventory_quantity is None:
+        missing.append("quantity")
+    elif inventory_quantity.amount <= 0:
+        conflicts.append("quantity_not_positive")
+
+    if pricing is None:
+        missing.append("price")
+    else:
+        if pricing.amount <= 0:
+            conflicts.append("price_amount_not_positive")
+        if not pricing.is_basis_known:
+            # `price.amount` seul, sans base fiable : NON EXÉCUTABLE (règle
+            # centrale du mandat) — qu'elle soit totalement absente
+            # (`basis is None`) ou posée par une provenance non fiable
+            # (LLM_INFERRED/UNKNOWN) ne change rien à la conclusion.
+            missing.append("price_basis")
+        elif pricing.basis == PriceBasis.PER_PACKAGE:
+            if package is None or not package.is_content_known:
+                # PER_PACKAGE sans définition de contenu connue : NON
+                # EXÉCUTABLE (règle centrale) — le scénario "500 F le
+                # sachet" exact de la mission.
+                missing.append("package_content_amount")
+
+    if conflicts:
+        return CommercialOfferValidation(
+            status="INVALID",
+            missing_fields=tuple(missing),
+            conflicts=tuple(conflicts),
+        )
+    if missing:
+        question = _CLARIFICATION_QUESTIONS.get(missing[0])
+        return CommercialOfferValidation(
+            status="INCOMPLETE",
+            missing_fields=tuple(missing),
+            clarification_question=question,
+        )
+    return CommercialOfferValidation(status="VALID")
+
+
 def convertible_measurement_family(unit: Optional[str]) -> Optional[str]:
     """Famille de conversion déterministe pour `unit` (MASS/VOLUME), ou
     `None` si `unit` est une famille singleton (un conditionnement comme
@@ -264,6 +346,7 @@ __all__ = [
     "Pricing",
     "NormalizedRepresentation",
     "CommercialOfferValidation",
+    "validate_commercial_offer",
     "convertible_measurement_family",
     "convert_commercial_quantity_to_base_unit",
 ]
