@@ -156,7 +156,7 @@ def bid_price_reply_expected(state: Mapping[str, Any], text: str) -> bool:
     wm = state.get("working_memory") or {}
     phase = str(wm.get("bid_phase") or "").upper()
     if phase in _BID_PRICE_PHASES:
-        return is_price_reply(text)
+        return bool(is_price_reply(text))
     pending = BidPriceParse.from_state(wm.get("pending_bid_pricing"))
     if pending is None or pending.amount is None:
         return False
@@ -167,7 +167,7 @@ def bid_price_reply_expected(state: Mapping[str, Any], text: str) -> bool:
     if not unit or qty is None:
         return False
     if phase in _BID_BASIS_PHASES:
-        return resolve_basis_reply(text, amount=pending.amount, auction_unit=str(unit), auction_quantity=qty).is_resolved
+        return bool(resolve_basis_reply(text, amount=pending.amount, auction_unit=str(unit), auction_quantity=qty).is_resolved)
     if phase in _BID_PACKAGE_PHASES:
-        return resolve_package_reply(pending, text, auction_unit=str(unit)).is_resolved
+        return bool(resolve_package_reply(pending, text, auction_unit=str(unit)).is_resolved)
     return False

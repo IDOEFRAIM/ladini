@@ -9,10 +9,9 @@ from typing import Any, Dict, List
 
 import pytest
 
+from ladini.domain.commercial_pricing_snapshot import build_bid_pricing_snapshot
 from tests.harness import ConversationHarness, new_task
 from tests.nodes.award_fixtures import bid_row, bids_response
-
-from ladini.domain.commercial_pricing_snapshot import build_bid_pricing_snapshot
 
 pytestmark = pytest.mark.integration
 

@@ -11,13 +11,12 @@ from decimal import Decimal
 
 import pytest
 
-from tests.conftest import run
-from tests.unit.certified_bids import certified_bid_columns
-
 from ladini.domain.bid_award import CertifiedAwardDecision
 from ladini.domain.commercial_pricing_snapshot import bid_pricing_view
 from ladini.services.database.auction import AuctionMixin
 from ladini.services.database.errors import BusinessRuleException
+from tests.conftest import run
+from tests.unit.certified_bids import certified_bid_columns
 
 D = Decimal
 
