@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import unicodedata
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -21,6 +22,14 @@ from ladini.domain.quantity_unit import convert_quantity, normalize_unit
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     set_pending_interaction,
+)
+from ladini.graphs.agents.market_coach.domain.selection_actions import (
+    stamp_offer_identity,
+)
+from ladini.graphs.agents.market_coach.domain.stock_shortage import (
+    SHORTAGE_KEY,
+    build_shortage_state,
+    pending_target,
 )
 from ladini.graphs.agents.market_coach.flows.common.menu_contracts import (
     MenuOption,
@@ -212,8 +221,17 @@ class CartDomainService:
     ) -> Tuple[Dict[str, Any], MenuRequest]:
         header = f"🔍 *Producteurs disponibles pour « {product_name} » :*"
         item_blocks: List[str] = []
+        footer_blocks: List[str] = []
         options: List[MenuOption] = []
         photo_entries: Dict[str, Dict[str, Any]] = {}
+
+        # SNAPSHOT DU MENU (incident 2026-09-28) : l'ordre, l'identité de chaque
+        # OFFRE (`offer_id` = product_id) et un `menu_id` sont figés ICI, une fois,
+        # au moment de l'affichage. Toute réponse « 3 » / « photos 3 » se résout
+        # contre CE snapshot — jamais contre une recherche refaite ni contre le
+        # seul producteur (un producteur peut avoir plusieurs offres).
+        menu_id = uuid.uuid4().hex[:12]
+        vendors = stamp_offer_identity(vendors)
 
         for i, v in enumerate(vendors, start=1):
             source_tag = ""
@@ -235,17 +253,17 @@ class CartDomainService:
             )
             item_blocks.append(f"*{i}.* {label}")
             options.append(
-                MenuOption(
-                    index=str(i), label=label, value=v.get("producer_id") or str(i)
-                )
+                MenuOption(index=str(i), label=label, value=v["offer_id"])
             )
             photo_entries[str(i)] = {
                 "id": v.get("product_id"),
+                "offer_id": v["offer_id"],
+                "menu_id": menu_id,
                 "name": f"{product_name} — {v.get('vendor_name') or 'Producteur'}",
                 "images": v.get("images") or [],
             }
 
-        item_blocks.append(render_selection_prompt(noun="producteur"))
+        footer_blocks.append(render_selection_prompt(noun="producteur"))
         # Même mécanisme que le catalogue de recherche brut
         # (nodes/rendering/success.py) — voir services/search_results_cache.py.
         # Numérotation PARTAGÉE avec la sélection de producteur ci-dessus
@@ -254,15 +272,23 @@ class CartDomainService:
         # jamais un chiffre seul.
         if phone and any(entry["images"] for entry in photo_entries.values()):
             _store_search_photo_results(str(phone), photo_entries)
-            item_blocks.append(
+            footer_blocks.append(
                 "📸 Tapez *photos <numéro>* pour voir des photos d'un producteur."
             )
         if post_hint:
-            item_blocks.append(post_hint.strip())
+            footer_blocks.append(post_hint.strip())
+        logger.info(
+            "BUYER_SEARCH_SNAPSHOT_CREATED | menu_id=%s | options=%s",
+            menu_id,
+            [
+                f"{v['display_index']}:{v.get('product_id')}"
+                for v in vendors
+            ],
+        )
         # Pagination (incident 2026-08-27) : une recherche produit avec
         # beaucoup de producteurs disponibles produisait un texte non borné
         # — voir services/text_pagination.py.
-        menu_text = paginate_item_blocks(header, item_blocks)
+        menu_text = paginate_item_blocks(header, item_blocks, footer_blocks=footer_blocks)
 
         menu = MenuRequest(
             title=f"Choix producteur — {product_name}",
@@ -275,6 +301,7 @@ class CartDomainService:
         vendor_context = {
             "product": product_name,
             "vendors": vendors,
+            "menu_id": menu_id,
             "available_mapping_kind": "product_vendor",
         }
         if extra_context:
@@ -827,6 +854,26 @@ class CartDomainService:
             if available is not None:
                 wm["buyer_request_available_quantity"] = available
                 wm["buyer_request_available_unit"] = unit_lbl
+                logger.info(
+                    "BUYER_STOCK_SHORTAGE | requested=%s | available=%s | product_id=%s | producer_id=%s",
+                    stock_check_qty,
+                    available,
+                    resolved_pid,
+                    ref.get("producer_id"),
+                )
+                # Décision de rupture EXPLICITE (voir domain/stock_shortage.py) :
+                # l'OFFRE exacte est mémorisée. Pas pour un palier — la quantité
+                # disponible y est en unité de base, pas en nombre de paquets ; on
+                # ne propose alors pas de prise directe automatique.
+                if selected_tier is None:
+                    _vctx = state.get("vendor_selection_context")
+                    wm[SHORTAGE_KEY] = build_shortage_state(
+                        offer=ref,
+                        requested_quantity=stock_check_qty,
+                        available_quantity=float(available),
+                        unit=unit_lbl,
+                        menu_id=_vctx.get("menu_id") if isinstance(_vctx, dict) else None,
+                    )
             payload_seed = {"product": display_name}
             # Même correction : l'appel d'offres proposé en repli doit porter la
             # quantité RÉELLE en unité de base (`unit` ci-dessous), pas un
@@ -836,9 +883,16 @@ class CartDomainService:
             if ref.get("unit"):
                 payload_seed["unit"] = ref.get("unit")
 
+            _shortage_state = wm.get(SHORTAGE_KEY)
             return {
                 "status": "WAITING_INPUT",
-                **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
+                **set_pending_interaction(
+                    InteractionKind.CONFIRM_ACTION,
+                    context_ref="confirmation",
+                    target=pending_target(_shortage_state)
+                    if isinstance(_shortage_state, dict)
+                    else None,
+                ),
                 "response_strategy": "ASK_MISSING_FIELD",
                 "final_response": msg
                 + ("\n\n💡 Des alternatives sont disponibles." if recos else "")

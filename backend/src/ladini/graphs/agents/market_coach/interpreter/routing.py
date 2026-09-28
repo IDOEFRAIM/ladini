@@ -73,6 +73,10 @@ from ladini.graphs.agents.market_coach.domain.selection_actions import (
     fast_path_action,
     tier_menu_prompt_block,
 )
+from ladini.graphs.agents.market_coach.domain.stock_shortage import (
+    resolve_quantity_reply,
+    shortage_awaiting_reply,
+)
 from ladini.graphs.agents.market_coach.domain.tier_interaction import (
     pending_pack_count_tier,
 )
@@ -296,6 +300,7 @@ Ta sortie OBLIGATOIRE est un JSON strict avec EXACTEMENT ces clés :
       "movement_type": "<IN|OUT|null>",
       "reason": "<str|null>",
       "agent_action": "<SELECT_PRODUCER|SELECT_PRICING_TIER|SET_PACKAGE_COUNT|SET_QUANTITY|null>",
+      "action_offer_id": "<str|null>",
       "action_producer_id": "<str|null>",
       "action_pricing_tier_id": "<str|null>",
       "action_package_count": <float|null>,
@@ -304,7 +309,7 @@ Ta sortie OBLIGATOIRE est un JSON strict avec EXACTEMENT ces clés :
   }
 }
 
-Les 6 champs `agent_action`/`action_*` ne sont utilisés QUE quand le contexte
+Les 7 champs `agent_action`/`action_*` ne sont utilisés QUE quand le contexte
 agent fournit un bloc `action_structuree_attendue` (voir règle 4bis) — sinon
 laisse-les tous `null`.
 
@@ -451,9 +456,11 @@ RÈGLES STRICTES DE CLASSIFICATION :
    `selected_value` pour ce message : n'utilise PAS ces deux champs ici.
    - `extracted_entities.agent_action` = le nom EXACT de l'action choisie
      (string, une des 4 valeurs ci-dessus).
-   - `SELECT_PRODUCER` → `extracted_entities.action_producer_id` = le
-     `producer_id` EXACT listé dans le bloc, copié tel quel — jamais un id
-     que tu inventes, jamais un id d'une AUTRE liste.
+   - `SELECT_PRODUCER` → `extracted_entities.action_offer_id` = le
+     `offer_id` EXACT listé dans le bloc, copié tel quel — jamais un id
+     que tu inventes, jamais un id d'une AUTRE liste. (Un même producteur
+     peut avoir PLUSIEURS offres : c'est l'`offer_id`, pas le producteur, qui
+     désigne la ligne choisie.)
    - `SELECT_PRICING_TIER` → `extracted_entities.action_pricing_tier_id` =
      le `pricing_tier_id` EXACT listé. Un message comme "le premier, c'est
      à dire 5 L" ou "le bidon de 5 L" ou "celui à 450 FCFA" doit être mappé
@@ -1506,6 +1513,8 @@ def _selection_action_output(
     jamais deux formats concurrents."""
     action: ActionType = raw["action"]
     entities: Dict[str, Any] = {"agent_action": action.value}
+    if raw.get("offer_id"):
+        entities["action_offer_id"] = raw["offer_id"]
     if raw.get("producer_id"):
         entities["action_producer_id"] = raw["producer_id"]
     if raw.get("pricing_tier_id"):
@@ -1966,6 +1975,32 @@ def make_input_interpreter(role: str = "PRODUCER"):
                 "extracted_entities": extracted,
                 "raw_analysis": {"path": source, "role": role_up},
             }
+
+        # 0.4 DÉCISION DE RUPTURE DE STOCK (incident 2026-09-28) : le système vient
+        # de demander lui-même « répondez N pour prendre directement le stock
+        # disponible ». Cette réponse-là est déterministe — aucun LLM : un nombre nu
+        # devient l'action `TAKE_AVAILABLE` (quantité d'achat = N), jamais une
+        # nouvelle quantité générique, une sélection de menu ou une nouvelle tâche.
+        # Générique (voir `domain/stock_shortage.py::resolve_quantity_reply`).
+        _shortage = None if onboarding_active else shortage_awaiting_reply(state)
+        if _shortage is not None:
+            _reply = resolve_quantity_reply(_shortage, text)
+            if _reply is not None:
+                logger.info(
+                    "[Interpreter StockShortage] fast-path %s quantity=%s",
+                    _reply["branch"].value,
+                    _reply["purchase_quantity"],
+                )
+                return {
+                    "interpreted_event": "ANSWER",
+                    "detected_intent": str(locked_goal or "BUYER_REQUEST").upper(),
+                    "interpreter_confidence": 0.98,
+                    "extracted_entities": {
+                        "shortage_decision": _reply["branch"].value,
+                        "shortage_quantity": _reply["purchase_quantity"],
+                    },
+                    "raw_analysis": {"path": "stock_shortage_fast_path"},
+                }
 
         # 0.5 CONTRAT D'ACTION STRUCTURÉE (2026-09-01) : reconstruit à chaque
         # tour, JAMAIS depuis un canal générique périmé (voir
