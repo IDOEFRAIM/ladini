@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from ladini.domain.commercial_offer import (
+    CommercialQuantity,
+    convert_commercial_quantity_to_base_unit,
+)
 from ladini.graphs.agents.market_coach.actions.common import (
     normalize_quantity_to_kg,
     require,
@@ -22,8 +26,19 @@ def _pick_first_value(*candidates: Any) -> Any:
     return None
 
 
-def _resolve_mass_payload(payload: Mapping[str, Any]) -> Tuple[float, str]:
-    """Resolve quantity + unit for publish / record intents from raw payload."""
+def _resolve_mass_payload(payload: Mapping[str, Any]) -> Tuple[float, str, float]:
+    """Resolve quantity + unit for publish / record intents from raw payload.
+
+    Returns `(quantity_in_base_unit, base_unit, price_rescale_factor)`.
+    `price_rescale_factor` is what a PER-BASE-UNIT price must be DIVIDED by
+    to stay correctly paired with the returned quantity/unit (2026-09-28,
+    mandat "Commercial Quantity & Pricing Domain Hardening", bug P0 confirmé
+    par audit : ce facteur était calculé pour la quantité mais jamais
+    répercuté sur le prix — "200 tonnes à 500 000 F la tonne" devenait
+    500 000 F/KG, un facteur 1000x, sans aucune erreur). 1.0 when no
+    conversion happened (already KG, or a package/unrecognized unit that
+    `normalize_quantity_to_kg` now deliberately leaves untouched — see its
+    docstring)."""
 
     quantity_raw = _pick_first_value(
         payload.get("original_quantity"),
@@ -46,7 +61,16 @@ def _resolve_mass_payload(payload: Mapping[str, Any]) -> Tuple[float, str]:
         raise ValueError(f"Quantité invalide: {quantity_raw!r}") from exc
 
     qty_kg, canonical_unit = normalize_quantity_to_kg(qty_value, unit_raw)
-    return qty_kg, canonical_unit
+    # Même règle déterministe que `normalize_quantity_to_kg` (MASS/VOLUME
+    # uniquement) pour retrouver le facteur EXACT qu'elle a appliqué —
+    # `convert_commercial_quantity_to_base_unit` renvoie `None` (donc
+    # facteur neutre 1.0 ici) exactement quand `normalize_quantity_to_kg`
+    # a choisi de ne rien convertir (package/unité inconnue).
+    converted = convert_commercial_quantity_to_base_unit(
+        CommercialQuantity(qty_value, str(unit_raw or "KG")), canonical_unit
+    )
+    factor = converted[1] if converted is not None else 1.0
+    return qty_kg, canonical_unit, factor
 
 
 @dataclass(frozen=True)
@@ -201,16 +225,24 @@ class SalesService:
         return DomainResult(tool_id=ToolId.CHECK_PRICE_ANOMALY, tool_args=args)
 
     def publish_product(self, command: SalesPublishProductCommand) -> DomainResult:
-        qty_kg, unit = _resolve_mass_payload(
+        qty_kg, unit, price_rescale_factor = _resolve_mass_payload(
             {
                 "quantity": command.quantity,
                 "unit": command.unit,
             }
         )
+        # (2026-09-28, hardening P0) : `Product.price` est documenté comme
+        # "par `Product.unit`" (voir confirmation_summary.py et le schéma
+        # DB) — si la quantité a été convertie (ex: TONNE -> KG, facteur
+        # 1000), le prix DOIT être re-basé dans la MÊME proportion pour
+        # rester correct ("500 000 F/TONNE" -> "500 F/KG"), jamais laissé
+        # tel quel comme avant ce correctif (bug confirmé : le prix restait
+        # à 500 000, silencieusement réétiqueté F/KG).
+        rebased_price = command.price / price_rescale_factor
         args: Dict[str, Any] = {
             "producer_id": command.producer_id,
             "name": command.product,
-            "price": command.price,
+            "price": rebased_price,
             "quantity_for_sale": qty_kg,
             "unit": unit,
         }
@@ -223,7 +255,13 @@ class SalesService:
         return DomainResult(tool_id=ToolId.CREATE_PRODUCT, tool_args=args)
 
     def record_direct_sale(self, command: SalesRecordDirectCommand) -> DomainResult:
-        qty_kg, unit = _resolve_mass_payload(
+        # `command.price` est un TOTAL de lot ici (voir `ToolId.RECORD_SALE` /
+        # `services/database/marketplace.py::record_sale`, qui dérive
+        # lui-même un prix unitaire via `total_price / quantity`) — jamais
+        # rebasé par unité comme dans `publish_product` : un total de lot ne
+        # change pas de valeur selon l'unité dans laquelle la quantité est
+        # exprimée.
+        qty_kg, unit, _price_rescale_factor = _resolve_mass_payload(
             {
                 "quantity": command.quantity,
                 "unit": command.unit,

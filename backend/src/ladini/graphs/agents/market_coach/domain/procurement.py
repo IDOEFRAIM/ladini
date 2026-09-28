@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
+from ladini.domain.commercial_offer import (
+    CommercialQuantity,
+    convert_commercial_quantity_to_base_unit,
+)
 from ladini.graphs.agents.market_coach.actions.common import (
     normalize_quantity_to_kg,
 )
@@ -44,6 +48,16 @@ class ProcurementService:
         qty_raw = float(command.quantity)
         price = float(command.max_price)
         qty_kg, unit = normalize_quantity_to_kg(qty_raw, command.unit)
+        # (2026-09-28, hardening P0 — même bug que `sales.py::publish_product`,
+        # confirmé par audit) : `max_price` est un prix plafond PAR unité (le
+        # buyer dit "500 000 F la tonne" pour 200 tonnes) — si la quantité est
+        # convertie (TONNE -> KG), le plafond doit être re-basé dans la même
+        # proportion, jamais laissé inchangé pendant que `unit` change.
+        converted = convert_commercial_quantity_to_base_unit(
+            CommercialQuantity(qty_raw, str(command.unit or "KG")), unit
+        )
+        price_rescale_factor = converted[1] if converted is not None else 1.0
+        price = price / price_rescale_factor
 
         # 1. Gestion de la date limite
         deadline = command.deadline

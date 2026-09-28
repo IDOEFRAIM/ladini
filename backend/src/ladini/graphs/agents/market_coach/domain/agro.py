@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional
 
+from ladini.domain.commercial_offer import (
+    CommercialQuantity,
+    convert_commercial_quantity_to_base_unit,
+)
 from ladini.graphs.agents.market_coach.actions.common import (
     normalize_quantity_to_kg,
     require,
@@ -41,14 +45,24 @@ class AgronomyService:
 
         qty_raw = float(require(payload, "quantity"))
         unit_in = payload.get("unit")
+        price_per_unit = float(require(payload, "price"))
         if production_type == "CROP":
             qty, unit = normalize_quantity_to_kg(qty_raw, unit_in)
+            # (2026-09-28, hardening P0 — même bug que `sales.py::publish_product`,
+            # confirmé par audit) : `price_per_unit` est documenté comme "par
+            # `unit`" — si la quantité a été convertie (TONNE -> KG), le prix
+            # doit être re-basé dans la même proportion, jamais laissé
+            # inchangé pendant que `unit` change sous ses pieds.
+            converted = convert_commercial_quantity_to_base_unit(
+                CommercialQuantity(qty_raw, str(unit_in or "KG")), unit
+            )
+            price_rescale_factor = converted[1] if converted is not None else 1.0
+            price_per_unit = price_per_unit / price_rescale_factor
         else:
             qty = qty_raw
             unit = str(unit_in or "HEAD").upper().strip()
 
         estimated_available_at = str(require(payload, "estimated_available_at"))
-        price_per_unit = float(require(payload, "price"))
 
         production_payload: Dict[str, Any] = {
             "farm_id": farm_id,

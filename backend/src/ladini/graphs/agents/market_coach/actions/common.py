@@ -49,14 +49,23 @@ _UNIT_TO_KG: Dict[str, float] = {
     "TONES": 1000.0,
     "QUINTAL": 100.0,
     "QUINTAUX": 100.0,
-    "SAC": 100.0,
-    "SACS": 100.0,
-    "PANIER": 25.0,
-    "PANIERS": 25.0,
-    "CHARRETTE": 250.0,
-    "CHARRETTES": 250.0,
 }
 
+# (2026-09-28, mandat "Commercial Quantity & Pricing Domain Hardening") :
+# SAC/PANIER/CHARRETTE ont été RETIRÉS de `_UNIT_TO_KG` — bug P0 confirmé par
+# audit : ces mots désignent un CONTENANT (conditionnement), jamais une unité
+# de masse. La table les traitait comme des unités convertibles avec un poids
+# FIXE deviné (SAC=100kg, PANIER=25kg, CHARRETTE=250kg) — "3 sacs" devenait
+# silencieusement "300 KG" quel que soit le poids réel du sac du producteur.
+# `domain/quantity_unit.py::UNIT_SYNONYMS` mappe même "sachet"/"sachets" vers
+# ce même code "SAC" — un sachet de lait de 0,5L et un sac de céréales de
+# 50kg auraient reçu le MÊME poids deviné. Voir
+# `docs/domain/COMMERCIAL_QUANTITY_PRICING_MODEL.md` §PackageDefinition :
+# un conditionnement sans contenu physique connu doit rester NON CONVERTI
+# (comportement de cette fonction depuis ce correctif), jamais deviné —
+# `domain/commercial_offer.py::convert_commercial_quantity_to_base_unit`
+# encode la même règle (aucune conversion hors familles MASS/VOLUME
+# déterministes) pour tout nouveau code qui a besoin de cette distinction.
 _NON_MASS_UNITS = frozenset(
     {
         "HEAD",
@@ -77,12 +86,29 @@ _NON_MASS_UNITS = frozenset(
         "L",
         "LITRE",
         "LITRES",
+        "SAC",
+        "SACS",
+        "PANIER",
+        "PANIERS",
+        "CHARRETTE",
+        "CHARRETTES",
     }
 )
 
 
 def normalize_quantity_to_kg(qty: float, unit_raw: Any) -> Tuple[float, str]:
-    """Convert (quantity, unit) to kilograms when the unit is a mass unit."""
+    """Convert (quantity, unit) to kilograms ONLY when `unit` is a genuine,
+    deterministically-convertible mass unit (KG/G/TONNE/QUINTAL). A
+    conditionnement (SAC/PANIER/CHARRETTE/...) or any unrecognized unit is
+    returned UNCHANGED — never guessed. See `_NON_MASS_UNITS` docstring
+    above for why (2026-09-28 hardening): a package's real content is
+    producer-specific and unknown to this function; converting it with a
+    fixed factor would silently corrupt the quantity that gets written to
+    the database. Callers that need "N sacs" resolved into a real quantity
+    must go through `domain/commercial_offer.py::PackageDefinition`
+    (explicit content, known or requiring clarification), never through a
+    guessed coefficient here.
+    """
     try:
         qty_f = float(qty)
     except (TypeError, ValueError) as exc:
@@ -91,22 +117,31 @@ def normalize_quantity_to_kg(qty: float, unit_raw: Any) -> Tuple[float, str]:
     unit_clean = str(unit_raw or "KG").upper().strip()
     unit_canonical = canonical_unit_label(unit_clean, "KG")
 
-    if unit_clean in _NON_MASS_UNITS:
-        logger.info(
-            "[UnitNormalize] Non-mass unit '%s' — bypassing conversion (qty=%s)",
-            unit_canonical,
-            qty_f,
-        )
+    coef = _UNIT_TO_KG.get(unit_clean)
+    if unit_clean in _NON_MASS_UNITS or coef is None:
+        # Conditionnement connu (bypass délibéré) OU unité non reconnue —
+        # dans les deux cas, jamais de conversion devinée. Un unit inconnu
+        # était auparavant silencieusement relabellé "KG" (dangereux, un
+        # texte non reconnu n'est justement PAS prouvé être du KG) ; il
+        # traverse maintenant tel quel, à charge pour l'appelant/la couche
+        # domaine de le signaler si le contexte l'exige.
+        if coef is None and unit_clean not in _NON_MASS_UNITS:
+            logger.warning(
+                "[UnitNormalize] Unknown unit '%s' — passed through unchanged, "
+                "NOT guessed as KG (qty=%s). Add to _UNIT_TO_KG only if it is "
+                "a genuine, fixed-factor mass unit.",
+                unit_clean,
+                qty_f,
+            )
+        else:
+            logger.info(
+                "[UnitNormalize] Non-mass/package unit '%s' — bypassing "
+                "conversion (qty=%s)",
+                unit_canonical,
+                qty_f,
+            )
         return qty_f, unit_canonical
 
-    coef = _UNIT_TO_KG.get(unit_clean)
-    if coef is None:
-        logger.warning(
-            "Unknown unit '%s' — assuming KG (qty=%s). Add to _UNIT_TO_KG if recurrent.",
-            unit_clean,
-            qty_f,
-        )
-        return qty_f, "KG"
     if coef == 1.0:
         return qty_f, "KG"
     qty_kg = qty_f * coef
