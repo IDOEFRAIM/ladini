@@ -30,14 +30,12 @@ producteur. `domain/quantity_unit.py::UNIT_SYNONYMS` mappe même
 """
 from __future__ import annotations
 
-import pytest
-
 from ladini.domain.commercial_offer import (
     CommercialQuantity,
     PackageDefinition,
     PackageStatus,
-    Pricing,
     PriceBasis,
+    Pricing,
     Provenance,
     convert_commercial_quantity_to_base_unit,
     convertible_measurement_family,

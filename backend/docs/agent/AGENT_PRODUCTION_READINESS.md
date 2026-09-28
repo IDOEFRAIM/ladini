@@ -8,6 +8,17 @@ inchangée entre les 2 phases : reproduire AVANT de corriger (un test qui
 échoue sur le code pré-correctif, vérifié en le stashant, avant tout fix),
 jamais une correction "à l'aveugle".
 
+**Périmètre distinct (2026-09-28)** : la mission "Commercial Quantity &
+Pricing Domain Hardening" (même journée, session séparée) couvre la
+SÉMANTIQUE commerciale (prix sans base, conditionnement confondu avec
+unité physique, ex. "500 F le sachet" lu comme 500 F/litre) — un sujet
+distinct de la fiabilité transactionnelle couverte par ce document, non
+fusionné ici pour ne pas mélanger deux audits à la portée différente. Voir
+`docs/domain/COMMERCIAL_QUANTITY_PRICING_MODEL.md`. Deux bugs P0 réels y
+ont été fermés (poids de conditionnement deviné, prix désynchronisé d'une
+conversion d'unité) ; le verdict de CETTE mission séparée est documenté
+dans son propre fichier, pas répété ici.
+
 ## Verdict
 
 **AGENT TRANSACTION CORE READY FOR RESTRICTED PILOT — PAS ENCORE READY POUR
