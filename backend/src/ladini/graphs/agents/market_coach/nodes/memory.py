@@ -119,7 +119,7 @@ _EXPECTED_INPUT_EXTRA_FIELDS: Dict[str, frozenset] = {
         {
             "unit",
             "pricing_tiers",
-            "agent_action", "action_producer_id", "action_pricing_tier_id",
+            "agent_action", "action_offer_id", "action_producer_id", "action_pricing_tier_id",
             "action_package_count", "action_quantity", "action_unit",
         }
     ),

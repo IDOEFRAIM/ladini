@@ -809,6 +809,13 @@ async def _send_search_result_photos(
         get_dispatcher,
     )
 
+    # Lecture seule : `photos <n>` ne touche ni le graphe, ni le cache, ni le menu.
+    logger.info(
+        "BUYER_PHOTO_PREVIEW | menu_id=%s | option_index=%s | product_id=%s",
+        entry.get("menu_id"),
+        index_clean,
+        entry.get("offer_id") or entry.get("id"),
+    )
     photo_items = _photo_items_for_product(entry)
     if not photo_items:
         # Même apology que `_send_photos_for_product` pour ce cas — voir sa
