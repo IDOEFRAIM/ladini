@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Set
 
+from ladini.graphs.agents.market_coach.core.draft_registry import draft_reset_patch
 from ladini.graphs.agents.market_coach.core.state import (
     MarketAgentState,
     resolve_current_goal,
@@ -151,6 +152,33 @@ async def state_cleaner_node(
         patch["last_missing_field"] = None
         patch["missing_fields"] = []
         patch["conversation_progress"] = None
+        # (2026-09-28, audit lifecycle transactionnel) : les 4 drafts
+        # versionnés du registre (`sales_publish_draft`/`procurement_draft`/
+        # `preorder_draft`/`recurring_need_draft`) n'étaient JAMAIS purgés
+        # ICI — seule `interpreter/goal_planner.py::_purge_transaction_state`
+        # les efface, et UNIQUEMENT sur un changement de but explicite. Un
+        # goal qui se termine avec SUCCÈS (COMPLETED) sans qu'un AUTRE but
+        # ne s'intercale laissait son draft FINALISÉ posé dans l'état ; la
+        # PROCHAINE tentative du MÊME goal (ex: publier un second produit)
+        # retombait alors sur `confirmation_gate.py::_resolve_*_based_
+        # confirmation`, qui réutilise inconditionnellement tout draft déjà
+        # présent (`if state.get(...) is not None: reuse`) — voir
+        # docs/agent/TRANSACTION_STATE_LIFECYCLE.md, "Fin de flow réussie".
+        #
+        # Restreint à COMPLETED, jamais FAILED/ERROR : un nœud qui lève une
+        # exception APRÈS avoir déjà persisté le draft en base (fenêtre
+        # `_persist` domaine avant le retour LangGraph — voir
+        # `tests/integration/test_conversation_characterization.py::
+        # TestS_MidTurnCrashAfterDomainPersist`) laisse le draft DB toujours
+        # `DRAFT`, parfaitement rejouable au tour suivant ; le purger ICI sur
+        # un simple ERROR de nœud orphelinerait un draft encore bien vivant
+        # (draft_id perdu de l'état alors que la ligne DB, elle, existe
+        # toujours) au lieu de laisser l'utilisateur retenter la correction.
+        # COMPLETED, lui, ne peut par construction survenir qu'après un
+        # commit métier réel (goal_status -> statut terminal du draft) : y
+        # purger est donc toujours sûr.
+        if status_flag == "COMPLETED":
+            patch.update(draft_reset_patch())
         wm_terminal = dict(patch.get("working_memory") or working)
         for key in (
             "active_goal",
