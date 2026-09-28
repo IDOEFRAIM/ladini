@@ -8,7 +8,91 @@ inchangée entre les 2 phases : reproduire AVANT de corriger (un test qui
 échoue sur le code pré-correctif, vérifié en le stashant, avant tout fix),
 jamais une correction "à l'aveugle".
 
-## Verdict
+## CLÔTURE — baseline gelée (2026-09-28)
+
+**Verdict final : AGENT TRANSACTION CORE CLOSED FOR RESTRICTED PILOT.**
+
+Le chantier reliability hardening est **clos et figé**. Il ne vise pas « zéro
+bug » : il vise *aucun risque transactionnel critique CONNU non traité sans
+garde opérationnelle explicite*. Cette clôture n'a introduit aucune nouvelle
+fonctionnalité et n'a ouvert aucun nouvel audit.
+
+- **Baseline** : `origin/main` à `dda9a67` (PR #33 et #34 mergées) + la PR de
+  clôture (un test de plus sur `declare_future_production`, un test
+  d'acceptation « boeufs », un log de réconciliation passé de DEBUG à WARNING,
+  trois règles d'alerte, ces docs).
+- **Non fermé, et pourquoi c'est acceptable pour un pilote restreint** : le
+  durable inbound inbox / dead-letter (backlog B1). Il exige une migration
+  Drizzle cross-repo. Il est compensé par une garde **opérationnelle** (runbook
+  G1–G7, alerte critique, procédure de rejeu manuel), et reste un **bloquant
+  pour le déploiement non restreint**.
+- **Documents de la clôture** : `AGENT_PILOT_RUNBOOK.md` (périmètre, 7 cas,
+  alertes, test manuel, checklist de lancement), `AGENT_POST_PILOT_BACKLOG.md`
+  (backlog, critères UNRESTRICTED mesurables, registre des issues),
+  `AGENT_RELIABILITY_MATRIX.md` (détail par intent).
+
+### Invariants de production (figés)
+
+Toute modification future du chemin transactionnel de l'agent doit préserver
+ces sept invariants. Chacun est verrouillé par des tests nommés ; en casser un
+est une régression, pas un choix de conception.
+
+| # | Invariant | Verrouillé par |
+|---|---|---|
+| I1 | **Un nouveau flow ne réutilise pas les slots d'un ancien flow.** | `test_sales_publish_cross_flow_state_leak.py`, `test_goal_planner_state_machine.py::TestMiniFlowKeysArePurgedOnRealGoalTransitions` |
+| I2 | **Ce que l'utilisateur confirme == ce que le métier exécute.** | `test_confirmation_gate_certified_command.py` (A1–A8) |
+| I3 | **Retry / double livraison ne crée pas de write métier dupliqué.** | `test_execution_idempotency_key.py`, `test_process_agent_task_message_dedup.py`, `test_response_dispatch_idempotency.py` |
+| I4 | **Une entité modifiée doit appartenir à l'acteur autorisé.** | `test_order_mutations_require_ownership.py`, `test_select_winning_bid_state_guards.py`, `test_declare_future_production_ownership.py` |
+| I5 | **Une erreur mi-tour ne peut pas ressusciter un goal périmé.** | `test_orchestrator_workspace_reconciliation_on_error.py` |
+| I6 | **Un webhook n'est pas ACKé 200 si son enqueue a échoué.** | `test_twilio_webhook_enqueue_failure_recovery.py`, `test_whatsapp_webhook_enqueue_failure_recovery.py` |
+| I7 | **En cas d'ambiguïté : clarifier, jamais deviner-et-écrire.** | `test_dot_thousands_separator_ambiguity.py` (« 500.000 » redemandé, pas deviné), `test_confirmation_gate_certified_command.py` (id substitué neutralisé), gardes `tests/architecture/test_unknown_never_executes_confirmation.py` |
+
+Limite honnête de I6 : il garantit qu'on ne **ment** pas au provider (pas de
+faux 200). Il ne garantit pas que le message soit récupéré après une panne plus
+longue que la fenêtre de redélivrance du provider — c'est le backlog B1.
+
+### Gates de clôture (exécutés sur cette PR)
+
+| Gate | Résultat |
+|---|---|
+| Tests ciblés des 10 correctifs critiques (`test_sales_publish_cross_flow_state_leak` 3, `test_goal_planner_state_machine` 78, `test_execution_idempotency_key` 18, `test_order_mutations_require_ownership` 17, `test_select_winning_bid_state_guards` 11, `test_dot_thousands_separator_ambiguity` 13, `test_confirmation_gate_certified_command` 10, `test_twilio_webhook_enqueue_failure_recovery` 5, `test_whatsapp_webhook_enqueue_failure_recovery` 4, `test_orchestrator_workspace_reconciliation_on_error` 5, `test_process_agent_task_message_dedup` 5, `test_declare_future_production_ownership` 5) | **tous verts** |
+| `tests/architecture` | 1132 passed |
+| `tests/integration` (multi-tours, chaîne de nœuds réels) | 381 passed, 5 xfailed |
+| `tests/chaos` | 171 passed |
+| `tests/nodes` | 899 passed |
+| `tests/interpreter` | 385 passed |
+| MCP (`-k mcp`) / autorisation (`-k owner or authoriz or security or idor or permission`) / confirmation (`-k confirm`) / webhook (`-k webhook`, unit) | 351 / 297 / 650 (+29 skipped, 3 xfailed) / 49 passed |
+| **Suite backend complète** | **5169 passed, 2 failed, 363 skipped, 5 xfailed** |
+| Ruff (`src` + `tests`) | 711 erreurs = **identique au baseline** (0 nouvelle) ; 0 erreur sur tous les fichiers touchés ou ajoutés |
+| mypy | 0 erreur dans le fichier de test ajouté ; **aucune modification de type** dans les sources (seul changement source : un appel `logger.debug` → `logger.warning`) ; les 138 erreurs mypy des fichiers touchés sont préexistantes (non comparées ligne à ligne au baseline dans cette clôture — la comparaison fichier par fichier de la Phase 2 reste la référence) |
+
+Les **2 échecs** (`test_turn_policy_classification.py`, deux gardes
+architecturales) sont **préexistants et propres à Windows** : elles comparent
+des chemins avec `/` et reçoivent `core\turn_trace.py` — vérifié en les
+rejouant sur `dda9a67` sans aucun changement de cette PR. Ils ne touchent pas
+au chemin transactionnel.
+
+Conditions d'exécution locale à connaître (Windows, pas un défaut de code) :
+`PYTHONUTF8=1` est nécessaire (un test lance un vrai worker Celery dont la
+sortie cp1252 empoisonne la capture pytest, ce qui fait échouer ~200 tests
+suivants en erreur de setup) ; et `REDIS_URL` doit pointer un Redis injoignable
+ou vierge (`test_process_agent_task_message_dedup.py` utilise des clés de
+dédup fixes et échoue à tort contre un Redis local persistant). Le `.env`
+local contenait de plus une `REDIS_URL` distante dont le mot de passe n'est pas
+URL-encodé, ce qui fait planter l'import de `twilio_webhook.py` ; il n'a pas été
+modifié (surcharge par variable d'environnement pour la session de test).
+
+Scénario réel (`« je veux vendre mes boeufs »`) : rejoué avec la **chaîne de
+nœuds réels et un LLM scripté** (état vierge ET état périmé 461000) ; résultat
+identique dans les deux cas : `product=boeufs`, `unit=TETE`, `quantity` et
+`price` manquants, question suivante sur la quantité, aucun draft, aucune
+confirmation, aucune exécution. **Non rejoué sur le vrai canal WhatsApp avec le
+vrai LLM** (aucun canal ni compte pilote dans cet environnement, et je n'ai pas
+utilisé les identifiants LLM/DB du `.env` pour ne pas toucher de données
+réelles) : procédure exacte à exécuter après déploiement dans
+`AGENT_PILOT_RUNBOOK.md` §6.
+
+## Verdict (détail de la Phase 2, conservé pour l'historique)
 
 **AGENT TRANSACTION CORE READY FOR RESTRICTED PILOT — PAS ENCORE READY POUR
 UN DÉPLOIEMENT LARGE/HAUT-VOLUME SANS CONTRÔLE COMPENSATOIRE.**
@@ -210,15 +294,16 @@ puis correctif minimal, puis le même test passe, puis gates complets
     service + cron de reconciliation testés). Infrastructure manquante,
     pas un bug — ajouter un draft à chacun de ces 15 goals serait le
     "gros refactor" que ce mandat exclut explicitement.
-11. **Pas de test DB-layer dédié pour l'ownership check de
-    `declare_future_production`** (`services/database/producer.py`, farm
-    inexistante → `ValueError` ; farm d'un autre producteur → `ValueError`) —
-    vérifié par lecture directe du code cette session (Phase 2, pour A3/A4),
-    jamais exécuté avec une session DB simulée/réelle. Le code EST correct
-    (lu ligne par ligne), mais n'a pas de filet automatisé qui empêcherait
-    une régression future. Fix recommandé : un test unitaire avec double de
-    session AsyncSession (mirroring `test_select_winning_bid_state_guards.py`),
-    pas urgent (comportement déjà vérifié, pas un bug ouvert).
+11. ~~**Pas de test DB-layer dédié pour l'ownership check de
+    `declare_future_production`**~~ — **FERMÉ à la clôture** :
+    `tests/unit/test_declare_future_production_ownership.py` (5 tests : ferme
+    inconnue, ferme d'un autre producteur, appelant sans profil producteur ×2,
+    chemin légitime atteignant l'écriture avec le `producer_id` de l'appelant,
+    jamais celui du payload). Même doublure de session que
+    `test_select_winning_bid_state_guards.py` (pas de Postgres réel — limite
+    honnête identique). Vérifié discriminant par mutation : en neutralisant
+    `if farm.producer_id != producer_obj.id:`, le test « ferme d'un autre
+    producteur » échoue ; source restaurée ensuite.
 12. **`inbound_recovered_messages`/`transaction_idempotency_hits` non
     instrumentés** (2 des 6 métriques listées par la mission Phase 2 sur 4
     ajoutées). Le premier a besoin d'un signal de tentative-de-redélivraison
@@ -259,7 +344,10 @@ ce dépôt ne peut pas posséder proprement.
 le nouveau compteur `inbound_enqueue_failures` (Prometheus/OTel, voir
 Matrix) + un runbook manuel ("si ce compteur reste > 0 pendant N minutes,
 vérifier le broker et rejouer manuellement les MessageSid loggés par
-`TWILIO_WEBHOOK_ENQUEUE_FAILED`/`WHATSAPP_WEBHOOK_ENQUEUE_FAILED`"). Une
+`TWILIO_WEBHOOK_ENQUEUE_FAILED`/`WHATSAPP_WEBHOOK_ENQUEUE_FAILED`").
+**Mis en œuvre à la clôture** : règle `ladini-inbound-enqueue-failure`
+(`infra/grafana/alerts/alerts.yaml`) + `AGENT_PILOT_RUNBOOK.md` cas 1 et 4.
+Cela réduit le risque au pilote ; cela ne ferme pas l'invariant (backlog B1). Une
 vraie fermeture complète de l'invariant 2 nécessite soit une migration
 Drizzle côté dépôt frontend (hors de portée de cette session), soit un
 changement de politique (dépendre du provider comme SEULE source de
@@ -367,7 +455,9 @@ touchent des couches différentes mais ont été développés et testés comme u
 tout cohérent sur la MÊME branche — contrainte de session non négociable
 (un seul dépôt/branche désignés, `claude/laughing-dirac-tzipit`, aucune
 stratégie multi-branches/multi-PR possible depuis cette session ; **aucune
-PR n'a été créée ni mergée automatiquement**, conformément au mandat). Pour
+PR n'a été créée ni mergée automatiquement**, conformément au mandat —
+[mis à jour à la clôture : le travail a ensuite été mergé via les PR #33 et #34 ; la clôture fait l'objet d'une PR séparée, non mergée
+automatiquement]). Pour
 un futur découpage en PRs séparées si le processus de revue l'exige :
 
 **Phase 1** (rappel, inchangé) :

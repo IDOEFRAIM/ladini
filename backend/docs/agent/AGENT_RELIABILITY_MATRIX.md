@@ -62,7 +62,7 @@ mal classés "own-flow" en Phase 1).
 | SALES_RECORD_DIRECT | ✅ | ✅ (Phase 2) | TYPE2 (price = montant vente — risque le plus élevé du groupe) | ⚠️ | |
 | SALES_UNPUBLISH_PRODUCT | ✅ | ✅ (Phase 2) | TYPE1 (id nu) | ⚠️ | corrige le classement "own-flow" erroné de la Phase 1 |
 | PRODUCER_CONFIRM_DELIVERY_PAYMENT | ✅ | ✅ (Phase 2) | TYPE1 (id nu, + ownership DB-layer) | ⚠️ | idem — voir table own-flow ci-dessus |
-| PRODUCTION_DECLARE_FUTURE | ✅ | ✅ (Phase 2) | TYPE2 (price/quantity/date — surface de champs la plus large) | ⚠️ | ownership `farm_id` déjà vérifiée en DB (`services/database/producer.py::declare_future_production`, lignes ~1110-1121) |
+| PRODUCTION_DECLARE_FUTURE | ✅ | ✅ (Phase 2) | TYPE2 (price/quantity/date — surface de champs la plus large) | ⚠️ | ownership `farm_id` vérifiée en DB (`services/database/producer.py::declare_future_production`) et **verrouillée par `test_declare_future_production_ownership.py`** (clôture) |
 | PRODUCTION_UPDATE_FUTURE | — | — | — | — | **retiré de ce groupe (Phase 2)** : own-flow réel (`producer_update` tunnel), jamais `confirmation_gate` générique — erreur de classement Phase 1 corrigée |
 | FINANCE_LOG_EXPENSE | ✅ | ✅ (Phase 2) | TYPE2 (price = montant dépense) | ⚠️ | |
 | FARM_CREATE / FARM_UPDATE | ✅ | ✅ (Phase 2, impact limité — champs administratifs) | TYPE1 | ⚠️ | |
@@ -149,7 +149,13 @@ mal classés "own-flow" en Phase 1).
 - Fallback legacy de l'interpréteur unifié (exposition d'IDs techniques dans
   le prompt) — mécanisme de secours intentionnel, décision produit requise
   avant toute suppression (P2/P3 selon l'usage réel en production).
-- Pas de test DB-layer dédié pour `services/database/producer.py::
-  declare_future_production`'s ownership check (vérifié par lecture directe
-  du code cette session, pas par un test avec session simulée) — dette de
-  test résiduelle, pas un bug connu.
+- ~~Pas de test DB-layer dédié pour `declare_future_production`'s ownership
+  check~~ — **fermé à la clôture** : `tests/unit/test_declare_future_production_ownership.py`
+  (doublure de session, pas de Postgres réel).
+
+**Clôture (2026-09-28)** : l'état définitif de chaque issue (CLOSED /
+ACCEPTED_FOR_RESTRICTED_PILOT / BLOCKER_FOR_UNRESTRICTED / DEFERRED) est dans
+`AGENT_POST_PILOT_BACKLOG.md` §3. Les ⚠️ ci-dessus qui portent sur
+l'idempotence des goals génériques sont **acceptés pour le pilote restreint**
+(garde : `AGENT_PILOT_RUNBOOK.md` G2/G6) et leur décision de sortie dépend des
+doublons réellement observés (critère U4).
