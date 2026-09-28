@@ -124,6 +124,10 @@ class SalesPublishProductPayload(BaseModel):
     # racine ci-dessus) : ce champ n'existe QUE pour préserver exactement ce
     # que l'utilisateur a dit.
     pricing_tiers: Optional[List[Dict[str, Any]]] = None
+    # Phase B2a : l'offre commerciale CERTIFIÉE (sérialisation de `CommercialOffer`, produite par
+    # `SalesPublishDraft.execution_payload`). Transportée telle quelle jusqu'à `create_product`, qui la
+    # reconstruit et la re-valide — ce champ n'est JAMAIS un snapshot fourni par un appelant.
+    commercial_offer: Optional[Dict[str, Any]] = None
 
     model_config = ConfigDict(extra="ignore")
 
@@ -175,6 +179,11 @@ class SalesPublishProductPayload(BaseModel):
             description=payload.get("description"),
             category_label=payload.get("category_label"),
             pricing_tiers=clean_tiers,
+            commercial_offer=(
+                dict(payload["commercial_offer"])
+                if isinstance(payload.get("commercial_offer"), dict) and payload.get("commercial_offer")
+                else None
+            ),
         )
 
 

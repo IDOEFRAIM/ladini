@@ -44,6 +44,7 @@ from ladini.domain.unit_taxonomy import offer_data_quality_flags
 from .base import BaseMixin
 from .common import normalize_phone
 from .errors import BusinessRuleException
+from .pricing_persistence import order_item_snapshot_columns
 from .search import fuzzy_match, similarity_rank
 
 logger = logging.getLogger("ladini.services.database.buyer")
@@ -647,6 +648,9 @@ class BuyerMixin(BaseMixin):
 
             running_total += line_total
 
+            # Phase B2a : instantané IMMUABLE de la sémantique commerciale de CETTE ligne (base du prix,
+            # conditionnement, prix normalisé dérivé) — jamais relu depuis le `Product` courant. Toute
+            # incohérence avec `price_at_sale` échoue ICI, avant le commit.
             current_session.add(
                 OrderItem(
                     id=uuid.uuid4(),
@@ -656,6 +660,13 @@ class BuyerMixin(BaseMixin):
                     price_at_sale=price_at_sale,
                     tier_id=str(tier_id) if tier_id else None,
                     base_unit_quantity=base_unit_quantity,
+                    **order_item_snapshot_columns(
+                        product,
+                        quantity=qty,
+                        price_at_sale=price_at_sale,
+                        tier_id=str(tier_id) if tier_id else None,
+                        base_unit_quantity=base_unit_quantity,
+                    ),
                 )
             )
 
@@ -1841,6 +1852,15 @@ class BuyerMixin(BaseMixin):
             order_item_kwargs["order_id"] = target_order.id
             totals_by_producer[producer_key] = (
                 totals_by_producer.get(producer_key, 0.0) + line_total
+            )
+            order_item_kwargs.update(
+                order_item_snapshot_columns(
+                    product,
+                    quantity=order_item_kwargs["quantity"],
+                    price_at_sale=order_item_kwargs["price_at_sale"],
+                    tier_id=order_item_kwargs.get("tier_id"),
+                    base_unit_quantity=order_item_kwargs.get("base_unit_quantity"),
+                )
             )
             current_session.add(OrderItem(**order_item_kwargs))
 

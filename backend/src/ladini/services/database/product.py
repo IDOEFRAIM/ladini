@@ -15,6 +15,7 @@ from ladini.domain.pricing_tiers import (
 
 from .base import BaseMixin
 from .common import clean_text, positive_float
+from .pricing_persistence import invalidate_commercial_pricing_on_edit
 
 logger = logging.getLogger("ladini.services.catalog")
 
@@ -140,6 +141,18 @@ class ProductMixin(BaseMixin):
                     "status": "error",
                     "message": "Aucun champ à modifier n'a été fourni.",
                 }
+
+            # Phase B2a : une édition ad hoc de prix/unité/paliers contredirait le snapshot certifié
+            # (`commercial_pricing`) — on le retire (sémantique redevenue « inconnue ») plutôt que de le
+            # laisser affirmer un prix que les champs legacy ne portent plus.
+            if invalidate_commercial_pricing_on_edit(
+                product,
+                price_changed=price is not None,
+                unit_changed="unité" in changed,
+                tiers_changed=pricing_tiers is not None,
+                quantity_changed=quantity is not None,
+            ):
+                logger.info("PRODUCT_COMMERCIAL_PRICING_INVALIDATED | product=%s | edit=%s", product_id, changed)
 
             if quantity is not None:
                 await BusinessEventEmitter(self.session).emit_product_quantity_changed(

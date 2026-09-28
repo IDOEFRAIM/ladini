@@ -352,6 +352,9 @@ class SalesPublishDraft:
                 derived["description"] = self.description
             if slot_has_value(self.category_label):
                 derived["category_label"] = self.category_label
+            # Phase B2a : l'offre certifiée voyage jusqu'à `create_product`, qui en dérive le snapshot
+            # persisté (`products.commercial_pricing`) et vérifie le dual-write legacy.
+            derived["commercial_offer"] = offer.to_dict()
             return dict(derived)
         payload = {
             f: getattr(self, f)

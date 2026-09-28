@@ -115,6 +115,8 @@ class SalesPublishProductCommand:
     # passé par `_resolve_mass_payload` (conversion kg), contrairement à
     # `quantity`/`unit` ci-dessus : ces unités restent LITTÉRALES.
     pricing_tiers: Optional[List[Dict[str, Any]]] = None
+    # Phase B2a — offre commerciale certifiée (sérialisée), reconstruite et re-validée par `create_product`.
+    commercial_offer: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -252,6 +254,8 @@ class SalesService:
             args["category_label"] = command.category_label
         if command.pricing_tiers:
             args["pricing_tiers"] = command.pricing_tiers
+        if command.commercial_offer:
+            args["commercial_offer"] = command.commercial_offer
         return DomainResult(tool_id=ToolId.CREATE_PRODUCT, tool_args=args)
 
     def record_direct_sale(self, command: SalesRecordDirectCommand) -> DomainResult:
