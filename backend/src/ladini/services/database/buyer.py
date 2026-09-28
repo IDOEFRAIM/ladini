@@ -39,6 +39,7 @@ from ladini.domain.pricing_tiers import (
     resolve_stock_debit,
     resolve_tier,
 )
+from ladini.domain.quantity_unit import is_livestock_product
 
 from .base import BaseMixin
 from .common import normalize_phone
@@ -57,57 +58,24 @@ def _naive_utc(dt_value: Optional[datetime]) -> Optional[datetime]:
     return dt_value
 
 
-_LIVESTOCK_KEYWORDS: tuple[str, ...] = (
-    "chevre",
-    "chevres",
-    "chevrettes",
-    "mouton",
-    "moutons",
-    "ovin",
-    "ovins",
-    "caprin",
-    "caprins",
-    "bovin",
-    "bovins",
-    "vache",
-    "vaches",
-    "boeuf",
-    "boeufs",
-    "taureau",
-    "taureaux",
-    "veau",
-    "veaux",
-    "poulet",
-    "poulets",
-    "poule",
-    "poules",
-    "volaille",
-    "volailles",
-    "canard",
-    "canards",
-    "dinde",
-    "dindes",
-    "dindon",
-    "dindons",
-    "pintade",
-    "pintades",
-    "porc",
-    "porcs",
-    "cochon",
-    "cochons",
-    "porcelet",
-    "porcelets",
-    "lapin",
-    "lapins",
-    "cobaye",
-    "cobayes",
-    "ane",
-    "anes",
-    "cheval",
-    "chevaux",
-    "poussins",
-    "poussin",
-)
+# (2026-09-28, mandat "Commercial Quantity & Pricing Domain Hardening",
+# consolidation P0) : l'ancienne `_LIVESTOCK_KEYWORDS` locale a été RETIRÉE.
+# Bug confirmé par audit : elle testait `keyword in normalized_name` — un
+# SIMPLE SUBSTRING, sans frontière de mot — donc "ane" (âne) matchait à
+# l'intérieur de "banane", classant une banane comme bétail (`unit=TETE`).
+# C'était en plus une DEUXIÈME liste de mots-clés, indépendante et en
+# désaccord avec `domain/quantity_unit.py::LIVESTOCK_PRODUCT_KEYWORDS`
+# (celle-ci en frontière de mot, la source déjà utilisée par
+# `resolve_product_unit`/`slot_enrichment.py` côté producteur) — deux
+# sources de vérité qui pouvaient diverger sur le MÊME produit selon qu'on
+# le voit côté achat ou côté vente. `is_livestock_product` (même module)
+# reste sujet à un faux positif sur un nom composé légitime ("lait de
+# vache" — un mot entier "vache" y apparaît bel et bien) : ce résidu est
+# documenté dans `docs/domain/COMMERCIAL_QUANTITY_PRICING_MODEL.md`, sa
+# vraie fermeture passe par la config taxonomy déjà câblée de bout en bout
+# (`SubCategory.allowed_units`/`priority_unit`, colonnes déjà présentes en
+# base — `services/database/base.py::get_product_category_unit_config`) une
+# fois ces sous-catégories effectivement configurées (donnée, pas code).
 
 
 def _normalize_ascii_lower(text: Optional[str]) -> str:
@@ -124,10 +92,7 @@ def _guess_display_unit(product_name: Optional[str], db_unit: Optional[str]) -> 
         unit = "KG"
     if unit and unit not in {"", "KG"}:
         return unit
-    normalized_name = _normalize_ascii_lower(product_name)
-    if normalized_name and any(
-        keyword in normalized_name for keyword in _LIVESTOCK_KEYWORDS
-    ):
+    if is_livestock_product(product_name):
         return "TETE"
     return unit or "KG"
 

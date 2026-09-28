@@ -821,17 +821,25 @@ class BaseMixin:
         par `resolve_product_unit(..., category_config=...)`
         (`domain/quantity_unit.py`).
 
-        ⚠️ `priority_unit`/`allowed_units` N'EXISTENT PAS ENCORE dans la table
-        réelle `governance.sub_categories` (gérée côté site par Drizzle, hors
-        de ce dépôt) — seul un SELECT brut (hors ORM) est utilisé ici, dans un
-        SAVEPOINT dédié (`begin_nested`), pour que l'absence de ces colonnes
-        ne fasse jamais échouer ni la résolution de sous-catégorie qui
-        précède, ni le reste de la transaction de l'appelant : tant que le
-        site n'a pas ajouté ces colonnes, cette méthode se dégrade proprement
-        en `{"status": "error"}` et `resolve_product_unit` retombe sur son
-        comportement historique. Dès qu'elles existent (types attendus :
-        `priority_unit text`, `allowed_units text[]`), cette méthode les
-        consomme automatiquement, sans changement de code.
+        (2026-09-28, correction : `priority_unit`/`allowed_units` EXISTENT
+        bien dans `governance.sub_categories` depuis la migration Drizzle de
+        référence — `schema_contract/migrations/0000_baseline.sql` les
+        déclare déjà. Cette docstring affirmait auparavant l'inverse ; c'était
+        faux depuis le début (vérifié par audit du mandat "Commercial
+        Quantity & Pricing Domain Hardening"). Le SELECT brut (hors ORM) dans
+        un SAVEPOINT dédié (`begin_nested`) est conservé par prudence — il ne
+        coûte rien et protège contre un futur schéma qui les retirerait —
+        mais ce N'EST PLUS pourquoi cette méthode renvoie souvent
+        `{"status": "error", "message": "Aucune config d'unité..."}` : la
+        cause réelle, aujourd'hui, est qu'AUCUNE sous-catégorie n'a encore
+        ces colonnes RENSEIGNÉES (un problème de DONNÉE administrative, pas de
+        schéma ni de code) — voir
+        `docs/domain/COMMERCIAL_QUANTITY_PRICING_MODEL.md` pour le détail et
+        la recommandation (peupler `allowed_units`/`priority_unit` pour les
+        sous-catégories à risque de confusion, ex. "Lait" -> `[LITRE, ML]`,
+        "Bovins vivants" -> `[TETE]`). Consommée par
+        `resolve_product_unit(..., category_config=...)`
+        (`domain/quantity_unit.py`).
         """
         current_session = self.session
         if not current_session:

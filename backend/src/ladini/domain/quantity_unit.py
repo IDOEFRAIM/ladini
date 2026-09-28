@@ -424,15 +424,20 @@ def resolve_product_unit(
     `SubCategory.minimum_order_quantity`/`minimum_order_unit`, voir
     `domain/governance/models.py`) : un ENSEMBLE d'unités autorisées + une
     unité PRIORITAIRE pour standardiser (« lait » → LITRE seul ; « bœuf » →
-    TETE/UNITE ; « maïs » → G/KG/TONNE/SAC avec un ordre de priorité). Cette
-    config n'existe pas encore en base (à configurer côté site/Drizzle,
-    hors de ce dépôt) — `category_config` est donc `None` par défaut
-    aujourd'hui, ce qui fait tomber le comportement EXACTEMENT sur les règles
-    1-4 historiques ci-dessous (zéro régression). Dès qu'un appelant peut
-    fournir une config réelle (voir `services/database/base.py::
-    get_product_category_unit_config`, résolution paresseuse et
-    défensive), elle devient PRIORITAIRE sur tout le reste — voir la
-    RÈGLE 0 ci-dessous.
+    TETE/UNITE ; « maïs » → G/KG/TONNE/SAC avec un ordre de priorité). Les
+    colonnes existent bien en base (`priority_unit text`, `allowed_units
+    text[]` sur `governance.sub_categories` — déjà dans
+    `schema_contract/migrations/0000_baseline.sql`, corrigé 2026-09-28 :
+    l'affirmation précédente qu'elles "n'existent pas encore" était fausse,
+    voir `services/database/base.py::get_product_category_unit_config`).
+    `category_config` reste `None` en pratique tant qu'AUCUNE sous-catégorie
+    n'a ces colonnes RENSEIGNÉES (un problème de donnée administrative à
+    combler côté site, pas de schéma manquant) — ce qui fait tomber le
+    comportement EXACTEMENT sur les règles 1-4 historiques ci-dessous (zéro
+    régression). Dès qu'un appelant peut fournir une config réelle (voir
+    `services/database/base.py::get_product_category_unit_config`,
+    résolution paresseuse et défensive), elle devient PRIORITAIRE sur tout
+    le reste — voir la RÈGLE 0 ci-dessous.
 
     ## La règle
 
