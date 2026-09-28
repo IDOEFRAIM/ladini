@@ -232,6 +232,12 @@ async def _execute_and_finalize(
                 executing_draft.draft_id,
             )
 
+    if finalized.status == PreorderDraftStatus.EXECUTED:
+        logger.info(
+            "BUYER_DIRECT_EXECUTED | order_id=%s | draft_id=%s",
+            getattr(finalized, "order_id", None),
+            executing_draft.draft_id,
+        )
     outcome_kind = _TERMINAL_OUTCOME_KIND_BY_STATUS.get(finalized.status)
     if outcome_kind is None:
         logger.error("PREORDER_FINALIZER_UNEXPECTED_STATUS | status=%s", finalized.status)
@@ -574,6 +580,15 @@ async def bootstrap_preorder_draft(
     server_total = draft_res.get("total_amount")
     resolved_total = server_total if server_total is not None else meta.get("total_amount")
 
+    logger.info(
+        "BUYER_DIRECT_COMMAND_CERTIFIED | order_id=%s | items=%s",
+        order_id,
+        [
+            (i.get("product_id"), i.get("producer_id"), i.get("quantity"), i.get("unit"))
+            for i in resolved_items
+            if isinstance(i, dict)
+        ],
+    )
     fields = {
         "order_id": str(order_id),
         "items": resolved_items,

@@ -42,7 +42,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ActionType(str, Enum):
@@ -72,6 +72,10 @@ class SelectionAction(BaseModel):
 
     action: ActionType
     producer_id: Optional[str] = None
+    #: Identité EXACTE de l'offre choisie (SELECT_PRODUCER) — `producer_id` seul
+    #: n'identifie PAS une offre : un même producteur peut en avoir plusieurs
+    #: (produits/prix/stocks différents). Voir `vendor_offer_id`.
+    offer_id: Optional[str] = None
     pricing_tier_id: Optional[str] = None
     package_count: Optional[float] = None
     quantity: Optional[float] = None
@@ -81,7 +85,15 @@ class SelectionAction(BaseModel):
 
 
 class ProducerOption(BaseModel):
-    producer_id: str
+    producer_id: str = ""
+    #: Rang (1-based) de cette option dans le menu AFFICHÉ — égal à la position
+    #: dans `vendor_selection_context.vendors`, jamais recalculé.
+    display_index: int = 0
+    #: Identité de l'OFFRE affichée à cet index (jamais dérivée du seul
+    #: producteur). Unique dans un menu. Les contextes RÉELS (`build_selection_context`)
+    #: la renseignent toujours ; le défaut vide n'existe que pour les contextes
+    #: construits à la main (voir `SelectionContext._normalize_legacy_options`).
+    offer_id: str = ""
     label: str
 
 
@@ -111,8 +123,26 @@ class SelectionContext(BaseModel):
 
     model_config = {"frozen": True}
 
+    @model_validator(mode="after")
+    def _normalize_legacy_options(self) -> "SelectionContext":
+        """Contexte construit à la main sans identité d'offre : rang = position,
+        offre = producteur (seul repli possible, non ambigu tant que chaque
+        producteur n'apparaît qu'une fois — `validate_action` refuse sinon)."""
+        for position, option in enumerate(self.producer_options, start=1):
+            if not option.display_index:
+                option.display_index = position
+            if not option.offer_id:
+                option.offer_id = option.producer_id or f"option#{position}"
+        return self
+
     def producer_ids(self) -> set:
         return {p.producer_id for p in self.producer_options}
+
+    def offer_ids(self) -> set:
+        return {p.offer_id for p in self.producer_options}
+
+    def offer_for(self, offer_id: str) -> Optional["ProducerOption"]:
+        return next((p for p in self.producer_options if p.offer_id == offer_id), None)
 
     def tier_ids(self) -> set:
         return {t.tier_id for t in self.tier_options}
@@ -122,6 +152,36 @@ def _live_ctx(ctx: Any) -> Optional[Dict[str, Any]]:
     if isinstance(ctx, dict) and ctx and not ctx.get("__reset__"):
         return ctx
     return None
+
+
+def vendor_offer_id(vendor: Dict[str, Any], position: int) -> str:
+    """Identité de l'OFFRE d'une ligne du menu vendeur.
+
+    Incident réel (2026-09-28) : le menu « Producteurs disponibles » liste des
+    OFFRES (un produit d'un producteur), pas des producteurs. Deux lignes du même
+    producteur (`Gilbert-prod` 450000/stock 20 et 461000/stock 461000) ont le même
+    `producer_id` : résoudre « 3 » par `producer_id` retombait sur la PREMIÈRE
+    offre de ce producteur (la n°2). L'identité minimale d'une offre est son
+    `product_id` (pour une production future, l'id du MarketOffer, voir
+    `resolve_product_vendors`). Repli positionnel stable uniquement si le catalogue
+    n'a renvoyé aucun id (jamais deux offres avec la même clé)."""
+    explicit = vendor.get("offer_id") or vendor.get("product_id")
+    if explicit:
+        return str(explicit)
+    return f"{vendor.get('producer_id') or 'unknown'}#{position}"
+
+
+def stamp_offer_identity(vendors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Copie des lignes du menu avec `offer_id` et `display_index` (1-based)
+    figés — le snapshot ne dépend plus jamais de l'ordre recalculé d'une
+    recherche ultérieure."""
+    stamped: List[Dict[str, Any]] = []
+    for position, v in enumerate(vendors, start=1):
+        row = dict(v)
+        row["offer_id"] = vendor_offer_id(v, position)
+        row["display_index"] = position
+        stamped.append(row)
+    return stamped
 
 
 def build_selection_context(state: Dict[str, Any]) -> SelectionContext:
@@ -201,14 +261,20 @@ def build_selection_context(state: Dict[str, Any]) -> SelectionContext:
     # --- Aucun vendeur choisi encore : liste producteurs, si active ---
     if vendor_ctx and isinstance(vendor_ctx.get("vendors"), list):
         producer_options = []
-        for v in vendor_ctx["vendors"]:
+        # Aucune ligne n'est écartée : `display_index` == index affiché dans le
+        # menu (un filtre sur `producer_id` décalait les index suivants).
+        for position, v in enumerate(vendor_ctx["vendors"], start=1):
             if not isinstance(v, dict):
                 continue
-            pid = v.get("producer_id")
-            if not pid:
-                continue
             label = f"{v.get('vendor_name') or 'producteur'} — {v.get('price')} FCFA/{v.get('unit')}"
-            producer_options.append(ProducerOption(producer_id=str(pid), label=label))
+            producer_options.append(
+                ProducerOption(
+                    producer_id=str(v.get("producer_id") or ""),
+                    display_index=position,
+                    offer_id=vendor_offer_id(v, position),
+                    label=label,
+                )
+            )
         if len(producer_options) > 1:
             return SelectionContext(
                 expected_action=ActionType.SELECT_PRODUCER,
@@ -234,6 +300,7 @@ def parse_raw_action(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {
         "action": action,
         "producer_id": payload.get("action_producer_id"),
+        "offer_id": payload.get("action_offer_id"),
         "pricing_tier_id": payload.get("action_pricing_tier_id"),
         "package_count": payload.get("action_package_count"),
         "quantity": payload.get("action_quantity"),
@@ -264,10 +331,26 @@ def validate_action(
     if action == ActionType.SELECT_PRODUCER:
         if context.expected_action != ActionType.SELECT_PRODUCER:
             return None
+        oid = raw.get("offer_id")
+        if oid:
+            option = context.offer_for(str(oid))
+            if option is None:
+                return None
+            return SelectionAction(
+                action=action, offer_id=option.offer_id, producer_id=option.producer_id
+            )
+        # Contrat historique (producer_id seul) : accepté UNIQUEMENT si non
+        # ambigu — un producteur à plusieurs offres dans ce menu ne désigne PAS
+        # une offre. On ne devine jamais (clarifier, jamais deviner-et-écrire).
         pid = raw.get("producer_id")
-        if not pid or str(pid) not in context.producer_ids():
+        if not pid:
             return None
-        return SelectionAction(action=action, producer_id=str(pid))
+        matches = [o for o in context.producer_options if o.producer_id == str(pid)]
+        if len(matches) != 1:
+            return None
+        return SelectionAction(
+            action=action, offer_id=matches[0].offer_id, producer_id=matches[0].producer_id
+        )
 
     if action == ActionType.SELECT_PRICING_TIER:
         # Autorisé pendant SELECT_PRICING_TIER (choix initial) ET pendant
@@ -330,10 +413,14 @@ def fast_path_action(
     idx = int(clean) - 1
 
     if context.expected_action == ActionType.SELECT_PRODUCER:
-        if 0 <= idx < len(context.producer_options):
+        option = next(
+            (o for o in context.producer_options if o.display_index == idx + 1), None
+        )
+        if option is not None:
             return {
                 "action": ActionType.SELECT_PRODUCER,
-                "producer_id": context.producer_options[idx].producer_id,
+                "offer_id": option.offer_id,
+                "producer_id": option.producer_id,
             }
         return None
 
@@ -401,6 +488,8 @@ __all__ = [
     "TierOption",
     "SelectionContext",
     "build_selection_context",
+    "vendor_offer_id",
+    "stamp_offer_identity",
     "parse_raw_action",
     "validate_action",
     "fast_path_action",

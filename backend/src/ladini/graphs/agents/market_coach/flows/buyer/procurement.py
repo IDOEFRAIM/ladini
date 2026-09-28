@@ -10,6 +10,13 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     clear_pending_interaction,
     set_pending_interaction,
 )
+from ladini.graphs.agents.market_coach.domain.stock_shortage import (
+    SHORTAGE_KEY,
+    ShortageBranch,
+    clear_shortage_patch,
+    resolve_quantity_reply,
+    shortage_awaiting_reply,
+)
 from ladini.graphs.agents.market_coach.services.mcp.gateway import (
     ModerationGateway,
 )
@@ -113,6 +120,9 @@ def build_procurement_escalation(
         "buyer_request_waiting_choice",
         "buyer_request_catalog_checked",
         "buyer_request_last_product",
+        "buyer_request_available_quantity",
+        "buyer_request_available_unit",
+        SHORTAGE_KEY,
     ):
         wm[key] = None
 
@@ -140,6 +150,74 @@ def build_procurement_escalation(
 # =====================================================================
 
 
+async def _take_available_stock(
+    state: Dict[str, Any],
+    mc_runtime: MarketRuntime,
+    shortage: Dict[str, Any],
+    purchase_quantity: float,
+) -> Dict[str, Any]:
+    """Branche `TAKE_AVAILABLE` : achat DIRECT de `purchase_quantity` sur l'OFFRE EXACTE
+    mémorisée dans la décision de rupture (incident 2026-09-28).
+
+    - La quantité demandée initialement (`original_requested_quantity`) est HISTORIQUE :
+      elle ne pilote plus rien. `purchase_quantity` est la seule quantité transmise.
+    - L'offre est celle du snapshot (product_id + prix du moment), jamais re-résolue
+      depuis le nom du produit ni le seul producteur.
+    - Le stock est revalidé par `add_to_cart_with_ref` (mêmes gardes que tout ajout) :
+      si le stock a encore baissé, une NOUVELLE décision de rupture est posée.
+    - Aucune passe par `PROCUREMENT_CREATE_REQUEST` : la branche appel d'offres est
+      exclusive et n'est plus atteignable depuis cet état (états de décision effacés).
+    """
+    offer = dict(shortage["offer"])
+    unit = offer.get("unit") or shortage.get("unit")
+    logger.info(
+        "BUYER_SHORTAGE_DECISION | decision=%s | product_id=%s | purchase_quantity=%s | "
+        "original_requested_quantity=%s | available=%s",
+        ShortageBranch.TAKE_AVAILABLE.value,
+        shortage.get("product_id"),
+        purchase_quantity,
+        shortage.get("original_requested_quantity"),
+        shortage.get("available_quantity"),
+    )
+    clear_patch = clear_shortage_patch()
+    wm = dict(state.get("working_memory") or {})
+    wm.update(clear_patch)
+    wm["original_requested_quantity"] = shortage.get("original_requested_quantity")
+
+    synthetic = dict(state)
+    synthetic["current_goal"] = "BUYER_ADD_TO_CART"
+    synthetic["working_memory"] = wm
+    synthetic["transaction_payload"] = {
+        "product": offer.get("name") or shortage.get("product_name"),
+        "quantity": float(purchase_quantity),
+        "unit": unit,
+        "selection_index": None,
+        "selected_value": None,
+    }
+    synthetic["vendor_selection_context"] = {
+        "product": offer.get("name") or shortage.get("product_name"),
+        "vendors": [offer],
+        "chosen_vendor": offer,
+        "menu_id": shortage.get("menu_id"),
+        "requested_quantity": float(purchase_quantity),
+        "requested_unit": unit,
+        "available_mapping_kind": "product_vendor",
+    }
+    result = dict(await cart_management(synthetic, mc_runtime) or {})
+    result_wm = dict(result.get("working_memory") or {})
+    for key, value in {
+        **clear_patch,
+        "original_requested_quantity": wm["original_requested_quantity"],
+    }.items():
+        result_wm.setdefault(key, value)
+    result["working_memory"] = result_wm
+    # La question de rupture est RÉSOLUE : sauf si le stock a de nouveau manqué (le
+    # panier a alors posé une nouvelle interaction), plus rien ne reste en attente.
+    if "pending_interaction" not in result:
+        result.update(clear_pending_interaction("stock_shortage_resolved"))
+    return result
+
+
 async def buyer_request_resolver(
     state: Dict[str, Any], mc_runtime: MarketRuntime
 ) -> Dict[str, Any]:
@@ -156,6 +234,21 @@ async def buyer_request_resolver(
     phone = str(state.get("user_phone") or "")
     if not phone:
         return phone_missing_error()
+
+    # --- Décision de rupture de stock en cours (voir domain/stock_shortage.py) ---
+    # La réponse à « répondez N pour prendre le stock disponible » est traitée AVANT
+    # toute autre lecture de l'état : la branche est portée par la décision
+    # elle-même, elle n'est jamais re-déduite d'un drapeau ni d'un payload périmé.
+    _shortage = shortage_awaiting_reply(state)
+    if _shortage is not None:
+        _reply_text = str(
+            state.get("normalized_text") or state.get("user_query") or ""
+        ).strip()
+        _reply = resolve_quantity_reply(_shortage, _reply_text)
+        if _reply is not None:
+            return await _take_available_stock(
+                state, mc_runtime, _shortage, _reply["purchase_quantity"]
+            )
 
     vendor_ctx = state.get("vendor_selection_context")
     vendor_ctx_active = bool(vendor_ctx) and not (
@@ -300,7 +393,21 @@ async def buyer_request_resolver(
         # oui/non (une liste locale, vocabulaire plus étroit et désynchronisé
         # de `_CONFIRM_EXACT_PHRASES`) a été supprimé.
         if interpreted_event == "CONFIRM" or normalized_text in ESCALATE_KEYWORDS:
-            return _escalate(_ESCALATION_MSG)
+            _tender_form = None
+            if _shortage is not None:
+                # Branche START_TENDER : la quantité ORIGINALEMENT demandée est
+                # conservée pour l'appel d'offres (mode TENDER exclusif).
+                logger.info(
+                    "BUYER_SHORTAGE_DECISION | decision=%s | product_id=%s | "
+                    "original_requested_quantity=%s",
+                    ShortageBranch.START_TENDER.value,
+                    _shortage.get("product_id"),
+                    _shortage.get("original_requested_quantity"),
+                )
+                _tender_form = {
+                    "quantity": _shortage.get("original_requested_quantity"),
+                }
+            return _escalate(_ESCALATION_MSG, existing_form_data=_tender_form)
 
         # §FAILLE CORRIGÉE ICI (2026-09-22, incident réel de production) :
         # un acheteur en rupture de stock partielle répond très naturellement
@@ -334,6 +441,12 @@ async def buyer_request_resolver(
                 for c in scan_number_candidates(normalized_text)
                 if not c.near_currency and c.value > 0
             ]
+            if len(bare_candidates) == 1 and _shortage is not None:
+                # Message composé (« non, je prends 15 ») : la décision de rupture
+                # porte l'offre exacte — on ne repasse pas par une recherche.
+                return await _take_available_stock(
+                    state, mc_runtime, _shortage, bare_candidates[0].value
+                )
             if len(bare_candidates) == 1:
                 corrected_qty = bare_candidates[0].value
                 available_unit = (
@@ -368,12 +481,21 @@ async def buyer_request_resolver(
 
         if interpreted_event == "REJECT":
             wm = dict(working_memory)
+            if _shortage is not None:
+                logger.info(
+                    "BUYER_SHORTAGE_DECISION | decision=%s | product_id=%s",
+                    ShortageBranch.CANCEL.value,
+                    _shortage.get("product_id"),
+                )
             # None-overwrite (merge_dict) — voir explication plus haut : un pop
             # ici laissait `buyer_request_waiting_choice` actif après un refus.
             for key in (
                 "buyer_request_waiting_choice",
                 "buyer_request_catalog_checked",
                 "buyer_request_last_product",
+                "buyer_request_available_quantity",
+                "buyer_request_available_unit",
+                SHORTAGE_KEY,
             ):
                 wm[key] = None
             return {

@@ -14,6 +14,7 @@ from ladini.graphs.agents.market_coach.domain.selection_actions import (
     build_selection_context,
     parse_raw_action,
     validate_action,
+    vendor_offer_id,
 )
 from ladini.graphs.agents.market_coach.services.domain.cart_service import (
     CartDomainService,
@@ -184,6 +185,7 @@ def _tier_resolved_patch(
 
 _ACTION_PAYLOAD_FIELDS = (
     "agent_action",
+    "action_offer_id",
     "action_producer_id",
     "action_pricing_tier_id",
     "action_package_count",
@@ -246,17 +248,27 @@ async def _execute_selection_action(
 
     if action.action == ActionType.SELECT_PRODUCER:
         vendors_list = vendor_ctx.get("vendors") or []
+        # Résolution par OFFRE (jamais par producteur seul : un producteur peut
+        # avoir plusieurs offres dans le même menu — incident 2026-09-28,
+        # « 3 » retombait sur la 1ʳᵉ offre de Gilbert-prod).
         chosen = next(
             (
                 v
-                for v in vendors_list
+                for position, v in enumerate(vendors_list, start=1)
                 if isinstance(v, dict)
-                and str(v.get("producer_id")) == action.producer_id
+                and vendor_offer_id(v, position) == action.offer_id
             ),
             None,
         )
         if chosen is None:
             return None
+        logger.info(
+            "BUYER_OFFER_SELECTED | menu_id=%s | option_index=%s | product_id=%s | producer_id=%s",
+            vendor_ctx.get("menu_id"),
+            chosen.get("display_index"),
+            chosen.get("product_id"),
+            chosen.get("producer_id"),
+        )
         vendor_ctx["chosen_vendor"] = chosen
         vendor_ctx.pop("resolved_tier_id", None)
         payload["product"] = chosen.get("name") or product_name

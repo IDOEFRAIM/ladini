@@ -14,7 +14,7 @@ retiré par ``_chunk_whatsapp_body``.
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 MAX_ITEMS_PER_PAGE = 5
 MAX_CHARS_PER_PAGE = 1200
@@ -27,13 +27,23 @@ def paginate_item_blocks(
     *,
     max_items: int = MAX_ITEMS_PER_PAGE,
     max_chars: int = MAX_CHARS_PER_PAGE,
+    footer_blocks: Optional[List[str]] = None,
 ) -> str:
     """Regroupe `item_blocks` en pages d'au plus `max_items` éléments,
     chacune bornée à `max_chars` caractères (header + éléments compris).
     Les pages sont jointes par `PAGE_BREAK`. Sans éléments, renvoie
-    simplement `header`."""
+    simplement `header`.
+
+    `footer_blocks` (invite « répondez avec le numéro », astuce photos, conseil
+    d'appel d'offres…) ne sont PAS des éléments : ils s'attachent à la DERNIÈRE
+    page sans compter dans `max_items`. Incident réel (2026-09-28) : 3 offres +
+    2 pieds de page remplissaient la page 1 (5 « éléments »), et le 3ᵉ pied
+    atterrissait seul sur une « Page 2/2 » sans aucune option. Les index des
+    options sont écrits dans chaque bloc élément (`*3.* …`) et ne dépendent donc
+    jamais de la pagination."""
+    footers = [f for f in (footer_blocks or []) if f]
     if not item_blocks:
-        return header.strip()
+        return "\n".join([header.strip(), *footers]).strip()
 
     pages: List[List[str]] = [[]]
     for block in item_blocks:
@@ -49,6 +59,8 @@ def paginate_item_blocks(
     rendered: List[str] = []
     for i, items in enumerate(pages, start=1):
         parts = [header, *items]
+        if i == total:
+            parts.extend(footers)
         if total > 1:
             suffix = " ➡️ *(suite ci-dessous)*" if i < total else ""
             parts.append(f"_Page {i}/{total}_{suffix}")

@@ -39,6 +39,7 @@ from ladini.domain.pricing_tiers import (
     resolve_stock_debit,
     resolve_tier,
 )
+from ladini.domain.unit_taxonomy import offer_data_quality_flags
 
 from .base import BaseMixin
 from .common import normalize_phone
@@ -429,9 +430,27 @@ class BuyerMixin(BaseMixin):
 
                 unit_label = _guess_display_unit(row["name"], row["unit"])
 
+                # Qualité de l'offre AVANT de la proposer à l'achat (incident
+                # 2026-09-28 : `boeufs / 461000 / 461000 / UNITE`). Une offre sans prix
+                # valide n'est jamais achetable : écartée, mais TRACÉE (pas de
+                # disparition silencieuse). Une unité incompatible avec la nature du
+                # produit est SIGNALÉE (donnée héritée, décision du propriétaire).
+                dq_flags, purchasable = offer_data_quality_flags(
+                    row["name"], row["unit"], row["price"]
+                )
+                if dq_flags:
+                    logger.warning(
+                        "SEARCH_OFFER_DATA_QUALITY | product_id=%s | flags=%s | "
+                        "excluded=%s | unit=%s | price=%s",
+                        row["id"], dq_flags, not purchasable, row["unit"], row["price"],
+                    )
+                if not purchasable:
+                    continue
+
                 combined_results.append(
                     {
                         "id": str(row["id"]),
+                        "data_quality_flags": dq_flags,
                         "name": f"{row['name']} ({tag})",
                         "price": float(row["price"]),
                         "priority": int(row.get("priority") or 3),
