@@ -1,5 +1,4 @@
 import logging
-import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -39,6 +38,7 @@ from ladini.domain.pricing_tiers import (
     resolve_stock_debit,
     resolve_tier,
 )
+from ladini.domain.quantity_unit import is_livestock_product
 from ladini.domain.unit_taxonomy import offer_data_quality_flags
 
 from .base import BaseMixin
@@ -58,77 +58,16 @@ def _naive_utc(dt_value: Optional[datetime]) -> Optional[datetime]:
     return dt_value
 
 
-_LIVESTOCK_KEYWORDS: tuple[str, ...] = (
-    "chevre",
-    "chevres",
-    "chevrettes",
-    "mouton",
-    "moutons",
-    "ovin",
-    "ovins",
-    "caprin",
-    "caprins",
-    "bovin",
-    "bovins",
-    "vache",
-    "vaches",
-    "boeuf",
-    "boeufs",
-    "taureau",
-    "taureaux",
-    "veau",
-    "veaux",
-    "poulet",
-    "poulets",
-    "poule",
-    "poules",
-    "volaille",
-    "volailles",
-    "canard",
-    "canards",
-    "dinde",
-    "dindes",
-    "dindon",
-    "dindons",
-    "pintade",
-    "pintades",
-    "porc",
-    "porcs",
-    "cochon",
-    "cochons",
-    "porcelet",
-    "porcelets",
-    "lapin",
-    "lapins",
-    "cobaye",
-    "cobayes",
-    "ane",
-    "anes",
-    "cheval",
-    "chevaux",
-    "poussins",
-    "poussin",
-)
-
-
-def _normalize_ascii_lower(text: Optional[str]) -> str:
-    if not text:
-        return ""
-    decomposed = unicodedata.normalize("NFKD", text)
-    stripped = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
-    return stripped.lower()
-
-
 def _guess_display_unit(product_name: Optional[str], db_unit: Optional[str]) -> str:
     unit = (db_unit or "").strip().upper()
     if unit in {"KILOGRAMME", "KILOGRAMMES", "KGS"}:
         unit = "KG"
     if unit and unit not in {"", "KG"}:
         return unit
-    normalized_name = _normalize_ascii_lower(product_name)
-    if normalized_name and any(
-        keyword in normalized_name for keyword in _LIVESTOCK_KEYWORDS
-    ):
+    # Détection UNIQUE d'un animal compté à la tête (domain/quantity_unit.py) : l'ancienne
+    # recherche par sous-chaîne dans une liste locale classait « lait de vache » ou
+    # « fromage de chèvre » comme animaux (affichés en TETE).
+    if is_livestock_product(product_name):
         return "TETE"
     return unit or "KG"
 
