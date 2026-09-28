@@ -616,6 +616,12 @@ class Orchestrator:
                 workspace_id,
                 exc_info=True,
             )
+            try:
+                from ladini.core import telemetry
+
+                telemetry.count_workspace_reconciliation_failure()
+            except Exception:
+                pass
 
     async def _load_before_state(self, workspace_id: str) -> Dict[str, Any]:
         """État métier plat du DERNIER checkpoint LangGraph de ce thread — best-effort,

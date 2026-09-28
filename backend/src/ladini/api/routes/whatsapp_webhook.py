@@ -388,6 +388,12 @@ async def _process_single_message(
                     "WHATSAPP_WEBHOOK_DUPLICATE | id=%s déjà en cours ou traité",
                     message_id,
                 )
+                try:
+                    from ladini.core import telemetry
+
+                    telemetry.count_duplicate_inbound_message("whatsapp_cloud")
+                except Exception:
+                    pass
                 return
         except Exception as e:
             logger.error(
@@ -637,6 +643,12 @@ async def _process_single_message(
             message_id,
             e,
         )
+        try:
+            from ladini.core import telemetry
+
+            telemetry.count_inbound_enqueue_failure("whatsapp_cloud")
+        except Exception:
+            pass
         if message_id:
             await _release_message_claim(message_id)
         raise _EnqueueFailed(message_id) from e

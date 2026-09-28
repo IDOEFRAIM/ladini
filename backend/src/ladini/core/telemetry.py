@@ -310,6 +310,30 @@ def _init_prometheus() -> None:
             "Coût USD estimé des appels LLM (prix venant de config, spec §23/§24).",
             ["prompt_family", "model"],
         ),
+        # (2026-09-28, Phase 2 hardening P1-B/P1-C) : instrumentation minimale
+        # ajoutée pour les 2 correctifs de fiabilité de cette session — pas de
+        # dashboard construit ici (mandat), juste les compteurs eux-mêmes,
+        # exposés comme le reste (`/metrics` Prometheus + push OTel).
+        "inbound_enqueue_failures": _counter(
+            "ladini_inbound_enqueue_failures_total",
+            "Échecs d'enqueue Celery pour un message entrant déjà réclamé (webhook).",
+            ["channel"],
+        ),
+        "duplicate_inbound_messages": _counter(
+            "ladini_duplicate_inbound_messages_total",
+            "Messages entrants droppés par le dédoublonnage webhook (déjà en cours/traités).",
+            ["channel"],
+        ),
+        "workspace_reconciliation_failures": _counter(
+            "ladini_workspace_reconciliation_failures_total",
+            "Échecs (best-effort) de la relecture du checkpoint après un tour en échec.",
+            [],
+        ),
+        "transaction_retry_count": _counter(
+            "ladini_transaction_retry_count_total",
+            "Tentatives Celery >1 pour process_agent_task (redelivery/autoretry).",
+            [],
+        ),
     }
 
 
@@ -880,6 +904,46 @@ def count_webhook(channel: str = "twilio") -> None:
         pass
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Fiabilité (2026-09-28, Phase 2 hardening P1-B/P1-C) — mêmes garanties que
+# le reste de ce module : jamais d'exception vers l'appelant, best-effort.
+# ─────────────────────────────────────────────────────────────────────
+def count_inbound_enqueue_failure(channel: str) -> None:
+    try:
+        metric = _metric("inbound_enqueue_failures")
+        if metric is not None:
+            metric.labels(channel=channel).inc()
+    except Exception:
+        pass
+
+
+def count_duplicate_inbound_message(channel: str) -> None:
+    try:
+        metric = _metric("duplicate_inbound_messages")
+        if metric is not None:
+            metric.labels(channel=channel).inc()
+    except Exception:
+        pass
+
+
+def count_workspace_reconciliation_failure() -> None:
+    try:
+        metric = _metric("workspace_reconciliation_failures")
+        if metric is not None:
+            metric.labels().inc()
+    except Exception:
+        pass
+
+
+def count_transaction_retry() -> None:
+    try:
+        metric = _metric("transaction_retry_count")
+        if metric is not None:
+            metric.labels().inc()
+    except Exception:
+        pass
+
+
 def prometheus_asgi_response():
     """Retourne (body, content_type) pour l'endpoint /metrics, ou None si absent."""
     try:
@@ -904,6 +968,10 @@ __all__ = [
     "record_circuit_open",
     "observe_http",
     "count_webhook",
+    "count_inbound_enqueue_failure",
+    "count_duplicate_inbound_message",
+    "count_workspace_reconciliation_failure",
+    "count_transaction_retry",
     "prometheus_asgi_response",
     "flush",
 ]

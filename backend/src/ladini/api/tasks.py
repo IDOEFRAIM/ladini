@@ -230,17 +230,27 @@ def process_agent_task(
     from ladini.core import turn_telemetry
 
     _rec = None
+    _task_retries = int(getattr(self.request, "retries", 0) or 0)
     try:
         _rec = turn_telemetry.TurnRecorder(
             phone=phone_number,
             message_sid=message_sid,
-            task_retries=int(getattr(self.request, "retries", 0) or 0),
+            task_retries=_task_retries,
             user_message=user_query,
             enqueued_at=turn_telemetry.enqueued_at_from_request(self.request),
         )
         turn_telemetry.begin_turn(_rec)
     except Exception:  # pragma: no cover
         _rec = None
+    if _task_retries > 0:
+        # (2026-09-28, observability P1-B) : `transaction_retry_count` —
+        # aucune donnée métier, juste le fait qu'une redelivery Celery a eu lieu.
+        try:
+            from ladini.core import telemetry
+
+            telemetry.count_transaction_retry()
+        except Exception:  # pragma: no cover
+            pass
 
     # --- Dédoublonnage GLOBAL par message_sid (voir commentaire au-dessus
     # de la déclaration de la tâche) — AVANT tout traitement métier coûteux. ---

@@ -240,6 +240,12 @@ async def _handle_twilio_webhook(
                 "TWILIO_WEBHOOK_DUPLICATE | MessageSid=%s déjà en cours ou traité",
                 MessageSid,
             )
+            try:
+                from ladini.core import telemetry
+
+                telemetry.count_duplicate_inbound_message("twilio")
+            except Exception:
+                pass
             return _empty_twiml()
     except Exception as e:
         # Si Redis flanche, on logue l'erreur mais on laisse passer le message (résilience)
@@ -549,6 +555,12 @@ async def _handle_twilio_webhook(
             MessageSid,
             e,
         )
+        try:
+            from ladini.core import telemetry
+
+            telemetry.count_inbound_enqueue_failure("twilio")
+        except Exception:
+            pass
         await _release_message_claim(MessageSid)
         return Response(content=_ENQUEUE_FAILED_MESSAGE, media_type="text/plain", status_code=503)
 
