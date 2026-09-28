@@ -113,7 +113,7 @@ async def execute_award(
         "BID_AWARD_EXECUTING | auction=%s | bid=%s | fingerprint=%s | idempotency_key=%s",
         decision.auction_id, decision.bid_id, decision.fingerprint[:12], decision.idempotency_key,
     )
-    return await AuctionGateway(mc_runtime).select_winning_bid(
+    result: Dict[str, Any] = await AuctionGateway(mc_runtime).select_winning_bid(
         bid_id=decision.bid_id,
         phone=phone,
         delivery_lat=delivery_lat,
@@ -121,6 +121,7 @@ async def execute_award(
         idempotency_key=decision.idempotency_key,
         expected_award={"fingerprint": decision.fingerprint},
     )
+    return result
 
 
 __all__ = [

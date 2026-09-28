@@ -99,7 +99,7 @@ class CertifiedAwardDecision:
 
     def frozen_snapshot(self) -> Dict[str, Any]:
         """Contenu de `orders.award_pricing_snapshot` : le snapshot du bid + les termes de l'attribution."""
-        frozen = self.pricing.to_dict()
+        frozen: Dict[str, Any] = self.pricing.to_dict()
         frozen["award"] = {
             "auction_id": self.auction_id,
             "bid_id": self.bid_id,

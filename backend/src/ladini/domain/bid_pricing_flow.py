@@ -110,7 +110,7 @@ def find_amounts(text: Any) -> List[_Amount]:
 
 
 def _fmt(value: Decimal) -> str:
-    return fmt_num(float(value))
+    return str(fmt_num(float(value)))
 
 
 @dataclass(frozen=True)
@@ -466,7 +466,8 @@ def render_pricing_label(snapshot: CommercialPricingSnapshot) -> str:
 def comparable_total(snapshot: CommercialPricingSnapshot, auction_quantity: Any, auction_unit: str) -> Optional[Decimal]:
     """Total comparable d'un bid pour la quantité de l'enchère, ou `None` (jamais deviné)."""
     try:
-        return snapshot.total_for(auction_quantity, auction_unit)
+        total: Decimal = snapshot.total_for(auction_quantity, auction_unit)
+        return total
     except PricingSnapshotError:
         return None
 
