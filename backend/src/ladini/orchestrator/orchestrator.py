@@ -227,6 +227,7 @@ class Orchestrator:
                 )
                 _tt_error("AGENT_CIRCUIT_BREAKER", "INTERNAL")
                 turn_trace.finish(error_class="AgentCircuitBreaker")
+                await self._reconcile_workspace_after_failure(ws, workspace_id)
                 await self._flush_workspace(ws, reason="circuit_breaker")
                 return self._build_failure_response(ws, workspace_id)
             except asyncio.TimeoutError:
@@ -241,6 +242,7 @@ class Orchestrator:
                 )
                 _tt_error("AGENT_TIMEOUT", "TIMEOUT")
                 turn_trace.finish(error_class="TimeoutError")
+                await self._reconcile_workspace_after_failure(ws, workspace_id)
                 await self._flush_workspace(ws, reason="timeout")
                 return self._build_failure_response(ws, workspace_id)
             except Exception as exc:  # pragma: no cover - safety net
@@ -256,6 +258,7 @@ class Orchestrator:
                 )
                 _tt_error(type(exc).__name__, "INTERNAL")
                 turn_trace.finish(error_class=type(exc).__name__)
+                await self._reconcile_workspace_after_failure(ws, workspace_id)
                 await self._flush_workspace(ws, reason="agent_error")
                 return self._build_failure_response(ws, workspace_id)
             else:
@@ -565,6 +568,43 @@ class Orchestrator:
         else:
             ws.locked_agent = None
         ws.mark_dirty()
+
+    async def _reconcile_workspace_after_failure(self, ws: Workspace, workspace_id: str) -> None:
+        """Réconciliation best-effort de `ws.active_goal`/`ws.active_form`/... sur les 3
+        chemins d'échec (`AgentCircuitBreaker`, `TimeoutError`, `Exception` générique).
+
+        `_sync_workspace` est la SEULE fonction qui dérive ces champs d'un résultat de
+        tour RÉEL — elle n'était appelée que sur le chemin succès. Or chaque nœud qui a
+        RÉELLEMENT terminé avant l'échec a déjà persisté sa progression dans le
+        checkpoint LangGraph (`workspace/checkpointer.py::_persist_state`, après CHAQUE
+        nœud) — ce checkpoint est donc une vérité fiable même quand le tour entier
+        échoue plus loin. Sans cette réconciliation, `ws.active_goal` reste figé à sa
+        valeur D'AVANT ce tour, et `_run_market` la réinjecte comme INPUT explicite du
+        graphe au tour suivant (`MarketAgentState.current_goal` est `replace_value`),
+        ressuscitant un but déjà invalide/abandonné.
+
+        Best-effort à dessein (même esprit que `_load_before_state`) : une erreur ici
+        ne doit jamais faire remonter une 2e exception — dans le pire cas, `ws` garde
+        sa valeur pré-tour, dégradation silencieuse plutôt qu'un crash du tour.
+        """
+        try:
+            config = {"configurable": {"thread_id": workspace_id}}
+            tup = await self._checkpointer.aget_tuple(config)
+            if tup is None:
+                return
+            channel_values = tup.checkpoint.get("channel_values")
+            if not isinstance(channel_values, dict) or not channel_values:
+                return
+            langgraph_blob = (
+                copy.deepcopy(ws.agent_state) if isinstance(ws.agent_state, dict) else None
+            )
+            self._sync_workspace(ws, channel_values, langgraph_blob)
+        except Exception:  # pragma: no cover - défensif, jamais vers l'appelant
+            logger.debug(
+                "workspace reconciliation ignorée après échec | workspace=%s",
+                workspace_id,
+                exc_info=True,
+            )
 
     async def _load_before_state(self, workspace_id: str) -> Dict[str, Any]:
         """État métier plat du DERNIER checkpoint LangGraph de ce thread — best-effort,
