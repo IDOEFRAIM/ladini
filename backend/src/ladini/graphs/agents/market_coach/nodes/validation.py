@@ -16,6 +16,7 @@ from ladini.domain.commercial_offer_flow import (
     FIELD_PACKAGE_SIZE,
     FIELD_PRICE_BASIS,
     CommercialQuestion,
+    SalesOfferGateResult,
     price_question,
 )
 from ladini.domain.price_basis import (
@@ -51,6 +52,7 @@ from ladini.graphs.agents.market_coach.nodes.response_handlers import (
 from ladini.graphs.agents.market_coach.services.domain.commercial_gate import (
     SALES_GOAL,
     evaluate_sales_publish_state,
+    flow_id_of,
     log_gate_events,
 )
 from ladini.graphs.agents.market_coach.utils import (
@@ -69,6 +71,39 @@ logger = get_logger("Ladini.MarketCoach.Validator")
 _PRICE_BASIS_GOALS = frozenset(
     {"SALES_PUBLISH_PRODUCT", "PROCUREMENT_CREATE_REQUEST", "PRODUCTION_DECLARE_FUTURE"}
 )
+
+#: Goals « modèle commercial complet » (Phase B1 + B2c.3) : prix ET sa BASE (par unité, par
+#: conditionnement, ou pour l'ensemble du lot) construits et validés par `domain/commercial_offer_flow.py`
+#: (`evaluate_sales_publish_state`, nom historique — générique malgré le nom, voir sa docstring) AVANT
+#: toute confirmation. `PROCUREMENT_CREATE_REQUEST` reste sur l'ancien mécanisme plus étroit
+#: (`reconcile_price_basis`, seulement la conversion d'unité) — hors périmètre de cette phase.
+_COMMERCIAL_OFFER_GOALS = frozenset({SALES_GOAL, "PRODUCTION_DECLARE_FUTURE"})
+
+#: `SalesOfferGateResult.events` (générique, `log_gate_events`) -> noms d'observabilité PROPRES à la
+#: production future (mandat B2c.3 §22). Même contenu, juste renommé pour ce goal : aucune 2e logique.
+_FUTURE_OFFER_EVENT_NAMES = {
+    "COMMERCIAL_OFFER_PARSED": "FUTURE_OFFER_PRICING_PARSED",
+    "PRICE_BASIS_RESOLVED": "FUTURE_OFFER_PRICE_BASIS_RESOLVED",
+    "PRICE_BASIS_AMBIGUOUS": "FUTURE_OFFER_PRICE_BASIS_AMBIGUOUS",
+}
+
+
+def _log_future_offer_gate_events(result: SalesOfferGateResult, state: Dict[str, Any]) -> None:
+    """`FUTURE_OFFER_PRICING_PARSED`/`FUTURE_OFFER_PRICE_BASIS_RESOLVED`/`_AMBIGUOUS` — jamais le
+    texte utilisateur, seulement `flow_id`/statut/base (même champs que `log_gate_events`)."""
+    pricing = result.offer.pricing
+    for event in result.events:
+        mapped = _FUTURE_OFFER_EVENT_NAMES.get(event)
+        if mapped is None:
+            continue
+        logger.info(
+            "%s | flow_id=%s | status=%s | basis=%s | basis_source=%s",
+            mapped,
+            flow_id_of(state),
+            result.validation.status,
+            pricing.basis.value if pricing and pricing.basis else None,
+            pricing.basis_source.value if pricing else None,
+        )
 
 
 def _canonical_field_name(field: str) -> str:
@@ -333,20 +368,25 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
 
     payload = _normalize_quantity_to_kg(payload)
 
-    # ── VERTICAL SLICE COMMERCIAL (Phase B1) — SALES_PUBLISH_PRODUCT ──────────────
+    # ── VERTICAL SLICE COMMERCIAL (Phase B1, étendue B2c.3) — SALES_PUBLISH_PRODUCT +
+    # PRODUCTION_DECLARE_FUTURE ────────────────────────────────────────────────────
     # L'offre commerciale (quantité + prix + BASE du prix + conditionnement + provenance)
     # est construite et validée ICI, avant toute certification/confirmation : un prix sans
     # base fiable ou un conditionnement au contenu inconnu ne peut jamais atteindre
     # WAITING_CONFIRMATION (voir domain/commercial_offer_flow.py). Le résultat est porté par
-    # `transaction_payload["commercial_offer"]` puis par le `SalesPublishDraft`.
+    # `transaction_payload["commercial_offer"]` puis par le `SalesPublishDraft` (SALES_PUBLISH_PRODUCT)
+    # ou directement par `transaction_payload`/`confirmation_summary_payload` gelé
+    # (PRODUCTION_DECLARE_FUTURE — pas de draft dédié, voir domain/agro.py::declare_crop_cycle).
     gate_result = None
     gate_question: Optional[CommercialQuestion] = None
     gate_text: Optional[str] = None
-    if goal_upper == SALES_GOAL:
+    if goal_upper in _COMMERCIAL_OFFER_GOALS:
         gate_result = evaluate_sales_publish_state(state, payload)
         if gate_result is not None:
             payload["commercial_offer"] = gate_result.offer.to_dict()
             log_gate_events(gate_result, state)
+            if goal_upper == "PRODUCTION_DECLARE_FUTURE":
+                _log_future_offer_gate_events(gate_result, state)
             if (
                 gate_result.validation.status == "INCOMPLETE"
                 and gate_result.question is not None
@@ -362,7 +402,7 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
     basis_question: Optional[str] = None
     if (
         goal_upper in _PRICE_BASIS_GOALS
-        and goal_upper != SALES_GOAL  # SALES_PUBLISH_PRODUCT : porté par le modèle commercial
+        and goal_upper not in _COMMERCIAL_OFFER_GOALS  # porté par le modèle commercial (ci-dessus)
         and payload.get("price_unit")
         and slot_has_value(payload.get("price"))
         and not payload.get("pricing_tiers")
@@ -506,7 +546,7 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
         # Question de PRIX déterministe (Phase B1) : elle DIT la base (« par litre »), ce qui
         # rend la réponse nue (« 500 ») non ambiguë — provenance `QUESTION_CONTEXT_EXPLICIT`.
         if (
-            goal_upper == SALES_GOAL
+            goal_upper in _COMMERCIAL_OFFER_GOALS
             and first_missing == "price"
             and gate_question is None
             and gate_result is not None

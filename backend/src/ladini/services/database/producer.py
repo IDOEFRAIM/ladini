@@ -248,6 +248,9 @@ def _normalize_offer_payload(
         )
 
     normalized["sub_category_id"] = payload.get("sub_category_id")
+    # Phase B2c.3 : l'offre commerciale CERTIFIÉE (sérialisation de `CommercialOffer`), quand
+    # présente — voir `declare_future_production` ci-dessous, même contrat que `create_product`.
+    normalized["commercial_offer"] = payload.get("commercial_offer")
     return normalized
 
 
@@ -1175,7 +1178,23 @@ class ProducerMgmtMixin(BaseMixin):
                 "Cette exploitation n'appartient pas a votre profil producteur"
             )
 
-        offer = MarketOffer(
+        # Phase B2c.3 : `MarketOffer.pricing_snapshot` à partir de l'offre commerciale CERTIFIÉE
+        # (`commercial_offer` — sérialisation de `domain/commercial_offer.py::CommercialOffer`,
+        # construite par le validator conversationnel, jamais fournie « à la main » ici). Même
+        # garde-fou que `create_product` (`certify_commercial_offer`) : re-valide l'offre, en dérive
+        # le snapshot, et REJETTE avant écriture si les champs legacy (`price_per_unit`, `unit`,
+        # `available_quantity`) ne sont pas exactement la projection du snapshot. `None` -> aucune
+        # offre certifiée transmise (repli legacy de `declare_crop_cycle`) : `pricing_snapshot` reste
+        # NULL — sémantique INCONNUE, jamais « probablement par unité ».
+        pricing_snapshot_dict = certify_commercial_offer(
+            normalized.get("commercial_offer"),
+            price=normalized.get("price_per_unit"),
+            unit=str(normalized.get("unit") or "KG"),
+            quantity_for_sale=normalized.get("available_quantity"),
+            pricing_tiers=None,
+        )
+
+        market_offer = MarketOffer(
             id=uuid.uuid4(),
             farm_id=farm.id,
             producer_id=producer_obj.id,
@@ -1190,6 +1209,7 @@ class ProducerMgmtMixin(BaseMixin):
             or normalized.get("available_quantity")
             or 0.0,
             price_per_unit=normalized.get("price_per_unit"),
+            pricing_snapshot=pricing_snapshot_dict,
             preorder_enabled=normalized.get("preorder_enabled", False),
             is_public=normalized.get("is_public", False),
             status=normalized.get("status", "DRAFT"),
@@ -1200,11 +1220,18 @@ class ProducerMgmtMixin(BaseMixin):
             else None,
         )
 
-        self.session.add(offer)
+        self.session.add(market_offer)
         await self.session.flush()
-        await self.session.refresh(offer)
+        await self.session.refresh(market_offer)
 
-        snapshot = _offer_to_payload(offer, farm)
+        logger.info(
+            "FUTURE_OFFER_PERSISTED | market_offer_id=%s | price_basis=%s | certified=%s",
+            market_offer.id,
+            (pricing_snapshot_dict or {}).get("price_basis"),
+            pricing_snapshot_dict is not None,
+        )
+
+        snapshot = _offer_to_payload(market_offer, farm)
         label = snapshot.get("display_label") or "production"
         return {
             "status": "success",
