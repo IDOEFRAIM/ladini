@@ -427,6 +427,47 @@ class ProducerSupplyDailySnapshotRecord(Base):
     computed_at = Column(_tz(), server_default=func.now(), nullable=False)
 
 
+class MarketBalanceDailySnapshotRecord(Base):
+    """Market Balance (Phase E). Grain (snapshot_day, zone_scope, category_id, sub_category_id,
+    canonical_unit, demand_scope) — `demand_scope` is part of the grain, not presentational
+    metadata: the same cell computed with a different journey mix (RECURRING vs
+    RECURRING+TENDER) is not the same fact (docs/analytics/MARKET_BALANCE.md §13). A SNAPSHOT,
+    never a flow, same discipline as `ProducerSupplyDailySnapshotRecord` — never backfilled for a
+    past day. Stores only the raw quantities, never a computed rate."""
+
+    __tablename__ = "market_balance_daily_snapshot"
+    __table_args__ = (
+        Index(
+            "market_balance_daily_snapshot_grain_uq", "snapshot_day", "zone_scope",
+            "category_id", "sub_category_id", "canonical_unit", "demand_scope", unique=True,
+        ),
+        Index("market_balance_daily_snapshot_date_idx", "snapshot_day"),
+        CheckConstraint("measurement_family IN ('MASS','VOLUME','COUNT','PACKAGE','OTHER')", name="market_balance_daily_snapshot_family_chk"),
+        CheckConstraint("demand_scope IN ('RECURRING','TENDER','RECURRING+TENDER')", name="market_balance_daily_snapshot_scope_chk"),
+        CheckConstraint(
+            "open_demand_quantity >= 0 AND available_supply_quantity >= 0 AND potential_coverable_quantity >= 0 "
+            "AND demand_gap_quantity >= 0 AND excess_supply_quantity >= 0",
+            name="market_balance_daily_snapshot_qty_chk",
+        ),
+        {"schema": "analytics"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    snapshot_day = Column(Date, nullable=False)
+    zone_scope = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    category_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    sub_category_id = Column(PG_UUID(as_uuid=True), nullable=False, server_default=text("'00000000-0000-0000-0000-000000000000'"))
+    canonical_unit = Column(Text, nullable=False)
+    measurement_family = Column(Text, nullable=False)
+    demand_scope = Column(Text, nullable=False)
+    open_demand_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    available_supply_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    potential_coverable_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    demand_gap_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    excess_supply_quantity = Column(Numeric(16, 3), nullable=False, server_default=text("'0'"))
+    computed_at = Column(_tz(), server_default=func.now(), nullable=False)
+
+
 __all__ = [
     "EventOutboxRecord",
     "BusinessEventRecord",
@@ -438,4 +479,5 @@ __all__ = [
     "ProducerDailyMetricRecord",
     "ProducerQuantityDailyMetricRecord",
     "ProducerSupplyDailySnapshotRecord",
+    "MarketBalanceDailySnapshotRecord",
 ]

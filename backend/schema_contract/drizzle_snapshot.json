@@ -1,6 +1,6 @@
 {
-  "id": "1e6a13bb-0ab0-4239-9a81-dd1a49bdf274",
-  "prevId": "1844458c-ba81-4ab2-9044-e03acebe30a2",
+  "id": "2b99f719-439e-40cc-b784-df2650684b83",
+  "prevId": "1e6a13bb-0ab0-4239-9a81-dd1a49bdf274",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -10726,6 +10726,187 @@
         "event_outbox_journey_chk": {
           "name": "event_outbox_journey_chk",
           "value": "\"analytics\".\"event_outbox\".\"journey\" IN ('DIRECT','TENDER','RECURRING','SUPPLY')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "analytics.market_balance_daily_snapshot": {
+      "name": "market_balance_daily_snapshot",
+      "schema": "analytics",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "snapshot_day": {
+          "name": "snapshot_day",
+          "type": "date",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "zone_scope": {
+          "name": "zone_scope",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "category_id": {
+          "name": "category_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "sub_category_id": {
+          "name": "sub_category_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'00000000-0000-0000-0000-000000000000'"
+        },
+        "canonical_unit": {
+          "name": "canonical_unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "measurement_family": {
+          "name": "measurement_family",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "demand_scope": {
+          "name": "demand_scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "open_demand_quantity": {
+          "name": "open_demand_quantity",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "available_supply_quantity": {
+          "name": "available_supply_quantity",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "potential_coverable_quantity": {
+          "name": "potential_coverable_quantity",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "demand_gap_quantity": {
+          "name": "demand_gap_quantity",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "excess_supply_quantity": {
+          "name": "excess_supply_quantity",
+          "type": "numeric(16, 3)",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'0'"
+        },
+        "computed_at": {
+          "name": "computed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "market_balance_daily_snapshot_grain_uq": {
+          "name": "market_balance_daily_snapshot_grain_uq",
+          "columns": [
+            {
+              "expression": "snapshot_day",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "zone_scope",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "category_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "sub_category_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "canonical_unit",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "demand_scope",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "market_balance_daily_snapshot_date_idx": {
+          "name": "market_balance_daily_snapshot_date_idx",
+          "columns": [
+            {
+              "expression": "snapshot_day",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "market_balance_daily_snapshot_family_chk": {
+          "name": "market_balance_daily_snapshot_family_chk",
+          "value": "\"analytics\".\"market_balance_daily_snapshot\".\"measurement_family\" IN ('MASS','VOLUME','COUNT','PACKAGE','OTHER')"
+        },
+        "market_balance_daily_snapshot_scope_chk": {
+          "name": "market_balance_daily_snapshot_scope_chk",
+          "value": "\"analytics\".\"market_balance_daily_snapshot\".\"demand_scope\" IN ('RECURRING','TENDER','RECURRING+TENDER')"
+        },
+        "market_balance_daily_snapshot_qty_chk": {
+          "name": "market_balance_daily_snapshot_qty_chk",
+          "value": "\"analytics\".\"market_balance_daily_snapshot\".\"open_demand_quantity\" >= 0 AND \"analytics\".\"market_balance_daily_snapshot\".\"available_supply_quantity\" >= 0 AND \"analytics\".\"market_balance_daily_snapshot\".\"potential_coverable_quantity\" >= 0 AND \"analytics\".\"market_balance_daily_snapshot\".\"demand_gap_quantity\" >= 0 AND \"analytics\".\"market_balance_daily_snapshot\".\"excess_supply_quantity\" >= 0"
         }
       },
       "isRLSEnabled": false

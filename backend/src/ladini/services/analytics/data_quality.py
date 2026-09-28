@@ -292,7 +292,58 @@ async def run_producer_metric_quality_checks(
     return issues
 
 
+_MARKET_BALANCE_GRAIN = "snapshot_day, zone_scope, category_id, sub_category_id, canonical_unit, demand_scope"
+
+
+async def run_market_balance_quality_checks(session: AsyncSession, *, now: Optional[datetime] = None) -> list[QualityIssue]:
+    """Market Balance (Phase E) — checks over `market_balance_daily_snapshot` itself plus its two
+    upstream dependencies (the producer supply snapshot it reads, and the recurring/tender demand
+    it queries live). Mirrors `run_producer_metric_quality_checks`'s conventions for this table's
+    own grain/unit/staleness; negative quantities are already prevented by CHECK constraints."""
+    now = now or datetime.now(timezone.utc)
+    mb = "analytics.market_balance_daily_snapshot"
+    issues: list[QualityIssue] = []
+
+    async def scalar(sql: str, params: dict) -> int:
+        return int((await session.execute(text(sql), params)).scalar() or 0)
+
+    n = await scalar(f"SELECT count(*) FROM (SELECT 1 FROM {mb} GROUP BY {_MARKET_BALANCE_GRAIN} HAVING count(*) > 1) t", {})
+    if n:
+        issues.append(QualityIssue("duplicate_grain", mb, "ERROR", n, f"More than one row for the same grain ({_MARKET_BALANCE_GRAIN})."))
+
+    rows = (await session.execute(text(f"SELECT DISTINCT canonical_unit FROM {mb} WHERE measurement_family = 'OTHER'"))).all()
+    if rows:
+        issues.append(QualityIssue("unknown_canonical_unit", mb, "WARNING", len(rows),
+                                   "Units outside the registry (cannot be aggregated): " + ", ".join(sorted(str(r[0]) for r in rows))))
+
+    n = await scalar(
+        f"SELECT count(*) FROM (SELECT sub_category_id FROM {mb} WHERE sub_category_id <> '00000000-0000-0000-0000-000000000000' "
+        "GROUP BY sub_category_id HAVING count(DISTINCT measurement_family) > 1) t", {},
+    )
+    if n:
+        issues.append(QualityIssue("incompatible_aggregation", mb, "ERROR", n,
+                                   "A sub-category appears with several measurement families (units cannot be combined)."))
+
+    n = await scalar(
+        f"SELECT count(*) FROM {mb} t WHERE t.sub_category_id <> '00000000-0000-0000-0000-000000000000' "
+        "AND NOT EXISTS (SELECT 1 FROM governance.sub_categories sc WHERE sc.id = t.sub_category_id)", {},
+    )
+    if n:
+        issues.append(QualityIssue("orphan_sub_category", mb, "WARNING", n, "sub_category_id no longer exists in governance.sub_categories."))
+
+    last_mb = (await session.execute(text(f"SELECT max(computed_at) FROM {mb}"))).scalar()
+    if last_mb is None or now - last_mb > STALE_AFTER:
+        issues.append(QualityIssue("stale_refresh", mb, "WARNING", 1, "No refresh in the last 36h" if last_mb else "Never refreshed."))
+
+    last_supply = (await session.execute(text("SELECT max(computed_at) FROM analytics.producer_supply_daily_snapshot"))).scalar()
+    if last_supply is not None and now - last_supply > STALE_AFTER:
+        issues.append(QualityIssue("stale_upstream_supply_snapshot", "analytics.producer_supply_daily_snapshot", "WARNING", 1,
+                                   "The producer supply snapshot Market Balance reads is stale (>36h) — its own available_supply is equally stale."))
+
+    return issues
+
+
 __all__ = [
     "QualityIssue", "run_data_quality_checks", "run_supply_data_quality_checks",
-    "run_producer_metric_quality_checks", "STALE_AFTER",
+    "run_producer_metric_quality_checks", "run_market_balance_quality_checks", "STALE_AFTER",
 ]

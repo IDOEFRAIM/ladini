@@ -2,6 +2,12 @@
 
 Status: **Phase C and D — DONE and merged. Phase D.5 — DONE and merged.** Phase E (admin API + dashboard): backend merged and deployed to production, real server-to-server auth/route/KPI proof done — see section 16 and [BUYER_DASHBOARD.md](BUYER_DASHBOARD.md); frontend merge blocked on Vercel env configuration (human action required). Phases A/B: [ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md](../ANALYTICS_PHASE1_AUDIT_CARTOGRAPHY_2026-09-27.md), [ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md](../ANALYTICS_PHASE1_PR_CLEANUP_GATE_2026-09-27.md). Event list: [BUSINESS_EVENT_CATALOG.md](BUSINESS_EVENT_CATALOG.md).
 
+This buyer-side `recurring_daily_metrics`/`unmatched_demand` KPI is a historical **flow/cohort**
+figure — it is deliberately **not** reused as-is for the cross-cockpit Market Balance view (Phase E,
+a separate mission): that view needs a *current, still-actionable* demand definition, audited from
+scratch against the same recurring-occurrence state machine. See
+[MARKET_BALANCE.md](MARKET_BALANCE.md).
+
 Code lives in `backend/src/ladini/domain/analytics/`:
 - `units.py` — canonical unit / measurement-family classification.
 - `aggregation.py` — weighted-rate and compatible-quantity-summing primitives.

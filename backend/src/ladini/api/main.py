@@ -9,6 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ladini.api.routes.admin import router as admin_router
 from ladini.api.routes.analytics_admin import router as analytics_admin_router
+from ladini.api.routes.analytics_admin_market_balance import (
+    router as analytics_admin_market_balance_router,
+)
 from ladini.api.routes.analytics_admin_producers import (
     router as analytics_admin_producers_router,
 )
@@ -190,6 +193,7 @@ app.include_router(
 app.include_router(admin_router)  # endpoint réel : /admin/llm/health (auth token)
 app.include_router(analytics_admin_router)  # /internal/analytics/buyers/* (token interne, lecture seule)
 app.include_router(analytics_admin_producers_router)  # /internal/analytics/producers/* (token interne, lecture seule)
+app.include_router(analytics_admin_market_balance_router)  # /internal/analytics/market-balance/* (token interne, lecture seule)
 
 
 # ── Métadonnées de release (hardening DevOps 2026-09-10) ─────────────
