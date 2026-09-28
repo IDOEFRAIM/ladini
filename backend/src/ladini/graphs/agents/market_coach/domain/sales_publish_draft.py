@@ -63,6 +63,11 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 from ladini.core.formatting import fmt_num as _fmt_num
 from ladini.core.idempotency import claim_once
+from ladini.domain.commercial_offer import (
+    CommercialOffer,
+    offer_execution_payload,
+    render_offer_summary,
+)
 from ladini.graphs.agents.market_coach.core.confirmation_target import (
     ConfirmationTarget,
 )
@@ -101,6 +106,12 @@ _FIELD_NAMES = (
     "description",
     "category_label",
     "pricing_tiers",
+    # Phase B1 : offre commerciale SÉRIALISÉE (`CommercialOffer.to_dict()`), versionnée avec le
+    # draft (JSON dans `marketplace.sales_publish_drafts.payload` — aucune migration). Quand elle
+    # est présente elle est la SEULE source de vérité du sens de quantité/prix/conditionnement :
+    # `render_summary()` et `execution_payload()` la lisent, jamais les champs plats ci-dessus
+    # (conservés pour compatibilité des drafts antérieurs et des lecteurs legacy).
+    "commercial_offer",
 )
 _REQUIRED_FOR_COMPLETION = ("product", "quantity", "price")
 
@@ -137,6 +148,8 @@ _MISSING_FIELD_LABELS = {
     "product": "le nom du produit",
     "quantity": "la quantité",
     "price": "le prix",
+    "price_basis": "la base du prix (par unité, par conditionnement ou pour tout le lot)",
+    "package_size": "le contenu d'un conditionnement",
 }
 
 
@@ -152,6 +165,7 @@ class SalesPublishDraft:
     description: Optional[str] = None
     category_label: Optional[str] = None
     pricing_tiers: Optional[Tuple[Dict[str, Any], ...]] = None
+    commercial_offer: Optional[Dict[str, Any]] = None
     created_at: float = 0.0
 
     # ------------------------------------------------------------
@@ -169,6 +183,7 @@ class SalesPublishDraft:
             "description": self.description,
             "category_label": self.category_label,
             "pricing_tiers": list(self.pricing_tiers) if self.pricing_tiers else None,
+            "commercial_offer": self.commercial_offer,
             "created_at": self.created_at,
         }
 
@@ -193,6 +208,9 @@ class SalesPublishDraft:
             description=d.get("description"),
             category_label=d.get("category_label"),
             pricing_tiers=tiers,
+            commercial_offer=(
+                d.get("commercial_offer") if isinstance(d.get("commercial_offer"), dict) else None
+            ),
             created_at=float(d.get("created_at") or 0.0),
         )
 
@@ -261,11 +279,28 @@ class SalesPublishDraft:
     # ------------------------------------------------------------
     # lecture
     # ------------------------------------------------------------
+    @property
+    def offer(self) -> Optional[CommercialOffer]:
+        """L'offre commerciale certifiée portée par ce draft, ou `None` (draft antérieur à B1 /
+        chemin `pricing_tiers` fourni par l'utilisateur)."""
+        return CommercialOffer.from_dict(self.commercial_offer)
+
     def is_complete(self) -> bool:
-        return all(slot_has_value(getattr(self, f)) for f in _REQUIRED_FOR_COMPLETION)
+        if not all(slot_has_value(getattr(self, f)) for f in _REQUIRED_FOR_COMPLETION):
+            return False
+        offer = self.offer
+        # Un draft dont l'offre n'est pas VALID n'est JAMAIS « complet » : aucune confirmation ni
+        # exécution ne peut en découler (invariant Phase B1).
+        return offer is None or offer.validate().is_valid
 
     def missing_fields(self) -> list:
-        return [f for f in _REQUIRED_FOR_COMPLETION if not slot_has_value(getattr(self, f))]
+        missing = [f for f in _REQUIRED_FOR_COMPLETION if not slot_has_value(getattr(self, f))]
+        offer = self.offer
+        if offer is not None and not missing:
+            verdict = offer.validate()
+            for name in verdict.missing_fields:
+                missing.append("package_size" if name == "package_content_amount" else name)
+        return missing
 
     def render_summary(self) -> str:
         """Projection PURE de CE draft — jamais un texte mémorisé
@@ -273,6 +308,16 @@ class SalesPublishDraft:
         docstring du module)."""
         if not slot_has_value(self.product) or not slot_has_value(self.quantity):
             return "Récapitulatif de la publication en cours de construction."
+        offer = self.offer
+        if offer is not None and offer.validate().is_valid:
+            # Formulation COMMERCIALE choisie par l'utilisateur (« 500 FCFA par sachet de
+            # 0,5 litre »), projection PURE de l'offre certifiée — jamais du payload brut.
+            lines = [render_offer_summary(offer)]
+            if slot_has_value(self.description):
+                lines.append(f"Description : {self.description}")
+            if slot_has_value(self.category_label):
+                lines.append(f"Catégorie : {self.category_label}")
+            return "\n".join(lines)
         unit_label = canonical_unit_label(self.unit or "KG")
         quantity_line = f"{_fmt_num(self.quantity)} {unit_label}".strip()
         base = f"Publication de {quantity_line} de {self.product}"
@@ -297,7 +342,22 @@ class SalesPublishDraft:
         consomme — SEUL point de contact avec le pipeline d'exécution MCP
         existant, volontairement non touché par cette refonte (même
         principe que `ProcurementDraft.execution_payload`)."""
-        payload = {f: getattr(self, f) for f in _FIELD_NAMES if slot_has_value(getattr(self, f))}
+        offer = self.offer
+        if offer is not None:
+            # Payload DÉRIVÉ de l'offre certifiée (`offer_execution_payload` : quantité en unité de
+            # base, prix normalisé par unité, palier `pricing_tiers` pour un prix PAR
+            # CONDITIONNEMENT). Lève sur une offre non VALID : l'exécution ne devine jamais.
+            derived = offer_execution_payload(offer)
+            if slot_has_value(self.description):
+                derived["description"] = self.description
+            if slot_has_value(self.category_label):
+                derived["category_label"] = self.category_label
+            return dict(derived)
+        payload = {
+            f: getattr(self, f)
+            for f in _FIELD_NAMES
+            if f != "commercial_offer" and slot_has_value(getattr(self, f))
+        }
         if isinstance(payload.get("pricing_tiers"), tuple):
             payload["pricing_tiers"] = list(payload["pricing_tiers"])
         return payload
@@ -589,6 +649,23 @@ def build_response_plan(
 
     if kind == SalesPublishOutcomeKind.NEEDS_MORE_INFO:
         missing = draft.missing_fields()
+        offer = draft.offer if draft is not None else None
+        if offer is not None and missing and missing[0] in ("price_basis", "package_size"):
+            # Offre incomplète : la question PRÉCISE du modèle commercial (avec son contexte de
+            # réponse), jamais l'invite générique « j'ai encore besoin de : … ».
+            from ladini.domain.commercial_offer_flow import clarification_for
+
+            question, question_text = clarification_for(offer, offer.validate())
+            if question is not None and question_text:
+                return SalesPublishResponsePlan(
+                    final_response=question_text,
+                    response_strategy="ASK_MISSING_FIELD",
+                    graph_status="WAITING_INPUT",
+                    draft=draft,
+                    pending_kind="ENTER_FIELD",
+                    pending_field=question.requested_field,
+                    pending_target=question.to_target(),
+                )
         return SalesPublishResponsePlan(
             final_response=_missing_field_prompt(missing),
             response_strategy="ASK_MISSING_FIELD",

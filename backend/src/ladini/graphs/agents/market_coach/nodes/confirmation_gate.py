@@ -270,6 +270,22 @@ async def _resolve_sales_draft_based_confirmation(
         state_after=candidate.status.value,
         outcome="DRAFT_CREATED" if inserted else "DRAFT_CREATED_DEGRADED_CACHE_ONLY",
     )
+    if candidate.offer is not None:
+        # CERTIFICATION (Phase B1) : draft_id + version + offre + représentation normalisée figés
+        # au passage en attente de confirmation ; la clé d'idempotence de l'écriture dérive de la
+        # version qui suivra le CONFIRM (voir `sales_publish_draft.execution_key`).
+        from ladini.graphs.agents.market_coach.services.domain.commercial_gate import (
+            log_offer_lifecycle,
+        )
+
+        log_offer_lifecycle(
+            "COMMERCIAL_OFFER_CERTIFIED",
+            state,
+            candidate.offer,
+            draft_id=candidate.draft_id,
+            version=candidate.version,
+            idempotency_key=f"sales_publish:{candidate.draft_id}:{candidate.version + 1}",
+        )
     return {
         "sales_publish_draft": candidate.to_dict(),
         "status": "WAITING_INPUT",

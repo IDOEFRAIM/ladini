@@ -79,7 +79,13 @@ class TestStructuredFieldsHaveADedicatedResolver:
     table de dispatch et l'ajouter ici)."""
 
     def test_every_structured_field_has_a_resolver_in_recurring_need(self):
-        assert set(_STRUCTURED_FIELD_RESOLVERS) == STRUCTURED_FIELDS
+        # Deux domaines propriétaires de champs STRUCTURED, chacun avec SA table de dispatch :
+        # l'approvisionnement récurrent (`_STRUCTURED_FIELD_RESOLVERS`) et le vertical slice
+        # commercial de SALES_PUBLISH_PRODUCT (`COMMERCIAL_STRUCTURED_FIELDS`, Phase B1).
+        from ladini.domain.commercial_offer_flow import COMMERCIAL_STRUCTURED_FIELDS
+
+        assert set(_STRUCTURED_FIELD_RESOLVERS) | set(COMMERCIAL_STRUCTURED_FIELDS) == STRUCTURED_FIELDS
+        assert not (set(_STRUCTURED_FIELD_RESOLVERS) & set(COMMERCIAL_STRUCTURED_FIELDS))
 
     def test_no_resolver_is_registered_for_an_undeclared_field(self):
         for field in _STRUCTURED_FIELD_RESOLVERS:

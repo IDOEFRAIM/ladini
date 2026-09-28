@@ -1041,8 +1041,14 @@ async def _run_producer_write_flow(
     goal: str,
     payload: Dict[str, Any],
     phone: str = COMMAND_TEST_PHONE,
+    text: Optional[str] = None,
+    said: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Rejoue le chemin WRITE du graphe producteur pour `goal`, sans LLM.
+
+    `text`/`said` : le message utilisateur simulé et les entités « dites » de ce tour. Le modèle
+    commercial (SALES_PUBLISH_PRODUCT, Phase B1) exige une PROVENANCE réelle pour la base du prix :
+    un `price_unit` absent du texte serait « inféré » et refusé.
 
     Retourne l'état final accumulé (après confirmation + exécution +
     composition de la réponse) pour assertion par l'appelant.
@@ -1058,6 +1064,8 @@ async def _run_producer_write_flow(
         "interpreted_event": "NEW_TASK",
         "transaction_payload": dict(payload),
         "working_memory": {},
+        "normalized_text": text or "",
+        "extracted_entities": dict(said or {}),
     }
 
     # 1. validator — complétude INTENT_CONFIG.required + contrats Phase 2.
@@ -1121,7 +1129,15 @@ async def demo_producer_publish_product_flow() -> Dict[str, Any]:
     return await _run_producer_write_flow(
         runtime,
         goal="SALES_PUBLISH_PRODUCT",
-        payload={"product": "Maïs blanc", "quantity": 50, "unit": "KG", "price": 250},
+        payload={
+            "product": "Maïs blanc",
+            "quantity": 50,
+            "unit": "KG",
+            "price": 250,
+            "price_unit": "KG",
+        },
+        text="50 kg de maïs blanc à 250 FCFA le kg",
+        said={"quantity": 50, "unit": "KG", "price": 250, "price_unit": "KG"},
     )
 
 

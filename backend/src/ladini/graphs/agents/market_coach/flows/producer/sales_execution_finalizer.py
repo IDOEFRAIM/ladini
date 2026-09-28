@@ -38,6 +38,9 @@ from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
 from ladini.graphs.agents.market_coach.flows.producer.sales_confirmation import (
     apply_response_plan,
 )
+from ladini.graphs.agents.market_coach.services.domain.commercial_gate import (
+    log_offer_lifecycle,
+)
 from ladini.services.database import sales_publish_draft_store
 from ladini.services.database.draft_store_support import cas_finalize
 
@@ -90,6 +93,16 @@ async def finalize_sales_publish_execution(
     if outcome_kind is None:
         logger.error("SALES_PUBLISH_FINALIZER_UNEXPECTED_STATUS | status=%s", finalized_draft.status)
         return {}
+
+    if result.success and draft.offer is not None:
+        log_offer_lifecycle(
+            "COMMERCIAL_OFFER_EXECUTED",
+            state,
+            draft.offer,
+            draft_id=draft.draft_id,
+            version=draft.version,
+            idempotency_key=_execution_key(draft),
+        )
 
     outcome = SalesPublishOutcome(kind=outcome_kind, draft=finalized_draft)
     plan = build_response_plan(outcome)

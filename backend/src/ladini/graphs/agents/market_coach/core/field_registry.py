@@ -85,6 +85,20 @@ FIELD_REGISTRY: Tuple[FieldContract, ...] = (
         FieldContractKind.STRUCTURED,
         "flows/buyer/recurring_need.py::_resolve_orphan_quantity_reply",
     ),
+    # Phase B1 (2026-09-28) — questions commerciales du vertical slice SALES_PUBLISH_PRODUCT :
+    # portent un `target` (`domain/commercial_offer_flow.py::CommercialQuestion`) et sont résolues
+    # par le `validator` (adaptateur legacy -> CommercialOffer) même si le classifieur générique
+    # renvoie UNKNOWN pour « 0,5 litre » / « par tonne ».
+    FieldContract(
+        "price_basis",
+        FieldContractKind.STRUCTURED,
+        "domain/commercial_offer_flow.py::build_commercial_offer_from_sales_state (via nodes/validation.py)",
+    ),
+    FieldContract(
+        "package_size",
+        FieldContractKind.STRUCTURED,
+        "domain/commercial_offer_flow.py::build_commercial_offer_from_sales_state (via nodes/validation.py)",
+    ),
     FieldContract("order_id", FieldContractKind.MINI_FLOW, "flows/buyer/order_tracking.py"),
     FieldContract("cancellation_reason", FieldContractKind.MINI_FLOW, "flows/buyer/order_tracking.py"),
     FieldContract(

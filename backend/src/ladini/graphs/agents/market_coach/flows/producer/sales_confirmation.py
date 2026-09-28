@@ -45,6 +45,9 @@ from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
 from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
     SalesPublishOutcomeKind as _Kind,
 )
+from ladini.graphs.agents.market_coach.services.domain.commercial_gate import (
+    log_offer_lifecycle,
+)
 from ladini.graphs.agents.market_coach.utils import llm_deviation_reply
 from ladini.services.database import sales_publish_draft_store
 from ladini.services.database.draft_store_support import cas_finalize
@@ -85,6 +88,17 @@ async def resolve_sales_confirmation(
     entry_violation = check_confirmation_target_invariant(pending_target, draft)
     if entry_violation:
         logger.warning("SALES_PUBLISH_INVARIANT_VIOLATION | on_entry | %s", entry_violation)
+
+    # Phase B1 : l'offre commerciale évaluée par le `validator` CE tour (adaptateur legacy ->
+    # CommercialOffer, provenance + contexte de question) est la source d'une CORRECTION. Sans
+    # elle, « finalement 1L le sachet » (aucune entité champ-plat) ne changerait rien au draft,
+    # et « finalement 600 le sachet » n'en mettrait à jour que le prix brut. Jamais injectée sur
+    # CONFIRM/CANCEL : la version certifiée se confirme telle quelle (I2, WHAT USER CONFIRMS ==
+    # WHAT EXECUTES).
+    if interpreted_event not in {"CONFIRM", "CANCEL"} and draft is not None:
+        _payload_offer = (state.get("transaction_payload") or {}).get("commercial_offer")
+        if isinstance(_payload_offer, dict) and _payload_offer != draft.commercial_offer:
+            extracted_entities = {**extracted_entities, "commercial_offer": _payload_offer}
 
     action = resolve_domain_action(
         interpreted_event=interpreted_event,
@@ -133,7 +147,7 @@ async def resolve_sales_confirmation(
             )
 
     plan = build_response_plan(outcome, deviation_note=deviation_note)
-    patch = apply_response_plan(plan)
+    patch = apply_response_plan(plan, state)
 
     exit_target = _target_of(patch.get("pending_interaction"))
     exit_violation = check_confirmation_target_invariant(exit_target, outcome.draft)
@@ -162,7 +176,9 @@ async def resolve_sales_confirmation(
     return patch
 
 
-def apply_response_plan(plan: SalesPublishResponsePlan) -> Dict[str, Any]:
+def apply_response_plan(
+    plan: SalesPublishResponsePlan, state: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """`SalesPublishResponsePlan` → patch d'état. MÉCANIQUE uniquement —
     n'importe même pas `SalesPublishOutcomeKind` (même preuve structurelle
     que `procurement_confirmation.py::apply_response_plan`)."""
@@ -181,6 +197,20 @@ def apply_response_plan(plan: SalesPublishResponsePlan) -> Dict[str, Any]:
         patch["current_goal"] = None
         patch["goal_status"] = "COMPLETED"
 
+    if plan.pending_kind == "CONFIRM_ACTION" and plan.draft is not None and plan.draft.offer:
+        # CERTIFICATION : à cet instant précis (récap affiché, en attente du OUI), la version
+        # (draft_id, version, offre, représentation normalisée) est figée ; CONFIRM référencera
+        # exactement cette version. `expected_execution_key` = clé d'idempotence de l'écriture
+        # (dérivée de la version qui SUIVRA la confirmation, voir `execution_key`).
+        log_offer_lifecycle(
+            "COMMERCIAL_OFFER_CERTIFIED",
+            state or {},
+            plan.draft.offer,
+            draft_id=plan.draft.draft_id,
+            version=plan.draft.version,
+            idempotency_key=f"sales_publish:{plan.draft.draft_id}:{plan.draft.version + 1}",
+        )
+
     if plan.pending_untouched:
         pass
     elif plan.pending_kind == "CONFIRM_ACTION":
@@ -190,7 +220,13 @@ def apply_response_plan(plan: SalesPublishResponsePlan) -> Dict[str, Any]:
             )
         )
     elif plan.pending_kind == "ENTER_FIELD":
-        patch.update(set_pending_interaction(InteractionKind.ENTER_FIELD, field_name=plan.pending_field))
+        patch.update(
+            set_pending_interaction(
+                InteractionKind.ENTER_FIELD,
+                field_name=plan.pending_field,
+                target=plan.pending_target,
+            )
+        )
     elif plan.ready_for_execution or plan.graph_status == "COMPLETED":
         patch.update(resolve_pending_interaction())
     else:
