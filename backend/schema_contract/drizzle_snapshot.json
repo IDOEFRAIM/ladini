@@ -1,6 +1,6 @@
 {
-  "id": "2b99f719-439e-40cc-b784-df2650684b83",
-  "prevId": "1e6a13bb-0ab0-4239-9a81-dd1a49bdf274",
+  "id": "14cc023f-3905-40ad-a0ea-fba89b39100a",
+  "prevId": "2b99f719-439e-40cc-b784-df2650684b83",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -2013,6 +2013,60 @@
           "primaryKey": false,
           "notNull": true
         },
+        "offered_price_basis": {
+          "name": "offered_price_basis",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "offered_price_unit": {
+          "name": "offered_price_unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "offered_price_currency": {
+          "name": "offered_price_currency",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "package_type": {
+          "name": "package_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "package_content_amount": {
+          "name": "package_content_amount",
+          "type": "numeric(14, 3)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "package_content_unit": {
+          "name": "package_content_unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "normalized_unit_price": {
+          "name": "normalized_unit_price",
+          "type": "numeric(18, 4)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "normalized_unit": {
+          "name": "normalized_unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pricing_snapshot_version": {
+          "name": "pricing_snapshot_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
         "linked_stock_id": {
           "name": "linked_stock_id",
           "type": "uuid",
@@ -2225,7 +2279,16 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "bids_price_basis_chk": {
+          "name": "bids_price_basis_chk",
+          "value": "\"marketplace\".\"bids\".\"offered_price_basis\" IS NULL OR \"marketplace\".\"bids\".\"offered_price_basis\" IN ('PER_BASE_UNIT','PER_PACKAGE','TOTAL_LOT','LEGACY_UNSPECIFIED')"
+        },
+        "bids_snapshot_chk": {
+          "name": "bids_snapshot_chk",
+          "value": "\"marketplace\".\"bids\".\"pricing_snapshot_version\" IS NULL OR (\"marketplace\".\"bids\".\"pricing_snapshot_version\" >= 1 AND \"marketplace\".\"bids\".\"offered_price\" > 0 AND \"marketplace\".\"bids\".\"offered_price_currency\" IS NOT NULL AND \"marketplace\".\"bids\".\"offered_price_basis\" IS NOT NULL AND \"marketplace\".\"bids\".\"offered_price_basis\" IN ('PER_BASE_UNIT','PER_PACKAGE','TOTAL_LOT') AND (\"marketplace\".\"bids\".\"offered_price_basis\" <> 'PER_BASE_UNIT' OR \"marketplace\".\"bids\".\"offered_price_unit\" IS NOT NULL) AND (\"marketplace\".\"bids\".\"offered_price_basis\" = 'PER_BASE_UNIT' OR \"marketplace\".\"bids\".\"offered_price_unit\" IS NULL) AND (\"marketplace\".\"bids\".\"offered_price_basis\" <> 'PER_PACKAGE' OR (\"marketplace\".\"bids\".\"package_type\" IS NOT NULL AND \"marketplace\".\"bids\".\"package_content_amount\" IS NOT NULL AND \"marketplace\".\"bids\".\"package_content_amount\" > 0 AND \"marketplace\".\"bids\".\"package_content_unit\" IS NOT NULL)) AND (\"marketplace\".\"bids\".\"offered_price_basis\" = 'PER_PACKAGE' OR (\"marketplace\".\"bids\".\"package_type\" IS NULL AND \"marketplace\".\"bids\".\"package_content_amount\" IS NULL AND \"marketplace\".\"bids\".\"package_content_unit\" IS NULL)) AND (\"marketplace\".\"bids\".\"normalized_unit_price\" IS NULL OR (\"marketplace\".\"bids\".\"normalized_unit_price\" > 0 AND \"marketplace\".\"bids\".\"normalized_unit\" IS NOT NULL)))"
+        }
+      },
       "isRLSEnabled": false
     },
     "marketplace.buyer_profiles": {
@@ -3308,6 +3371,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "pricing_snapshot": {
+          "name": "pricing_snapshot",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "available_quantity": {
           "name": "available_quantity",
           "type": "numeric(14, 3)",
@@ -3538,7 +3607,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "market_offers_pricing_snapshot_chk": {
+          "name": "market_offers_pricing_snapshot_chk",
+          "value": "\"marketplace\".\"market_offers\".\"pricing_snapshot\" IS NULL OR (jsonb_typeof(\"marketplace\".\"market_offers\".\"pricing_snapshot\") = 'object' AND \"marketplace\".\"market_offers\".\"pricing_snapshot\" ? 'schema_version')"
+        }
+      },
       "isRLSEnabled": false
     },
     "marketplace.need_allocations": {
@@ -4028,6 +4102,72 @@
           "type": "numeric(14, 3)",
           "primaryKey": false,
           "notNull": false
+        },
+        "quantity_unit": {
+          "name": "quantity_unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "commercial_price_amount": {
+          "name": "commercial_price_amount",
+          "type": "numeric(14, 2)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "price_basis": {
+          "name": "price_basis",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "price_unit": {
+          "name": "price_unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "package_type": {
+          "name": "package_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "package_content_amount": {
+          "name": "package_content_amount",
+          "type": "numeric(14, 3)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "package_content_unit": {
+          "name": "package_content_unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "normalized_unit_price": {
+          "name": "normalized_unit_price",
+          "type": "numeric(18, 4)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "normalized_unit": {
+          "name": "normalized_unit",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "currency": {
+          "name": "currency",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pricing_snapshot_version": {
+          "name": "pricing_snapshot_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -4095,7 +4235,16 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "order_items_snapshot_all_null_chk": {
+          "name": "order_items_snapshot_all_null_chk",
+          "value": "\"marketplace\".\"order_items\".\"pricing_snapshot_version\" IS NOT NULL OR (\"marketplace\".\"order_items\".\"commercial_price_amount\" IS NULL AND \"marketplace\".\"order_items\".\"price_basis\" IS NULL AND \"marketplace\".\"order_items\".\"price_unit\" IS NULL AND \"marketplace\".\"order_items\".\"package_type\" IS NULL AND \"marketplace\".\"order_items\".\"package_content_amount\" IS NULL AND \"marketplace\".\"order_items\".\"package_content_unit\" IS NULL AND \"marketplace\".\"order_items\".\"normalized_unit_price\" IS NULL AND \"marketplace\".\"order_items\".\"normalized_unit\" IS NULL AND \"marketplace\".\"order_items\".\"quantity_unit\" IS NULL AND \"marketplace\".\"order_items\".\"currency\" IS NULL)"
+        },
+        "order_items_snapshot_chk": {
+          "name": "order_items_snapshot_chk",
+          "value": "\"marketplace\".\"order_items\".\"pricing_snapshot_version\" IS NULL OR (\"marketplace\".\"order_items\".\"pricing_snapshot_version\" >= 1 AND \"marketplace\".\"order_items\".\"commercial_price_amount\" IS NOT NULL AND \"marketplace\".\"order_items\".\"commercial_price_amount\" > 0 AND \"marketplace\".\"order_items\".\"quantity_unit\" IS NOT NULL AND \"marketplace\".\"order_items\".\"currency\" IS NOT NULL AND \"marketplace\".\"order_items\".\"price_basis\" IS NOT NULL AND \"marketplace\".\"order_items\".\"price_basis\" IN ('PER_BASE_UNIT','PER_PACKAGE','TOTAL_LOT') AND (\"marketplace\".\"order_items\".\"price_basis\" <> 'PER_BASE_UNIT' OR \"marketplace\".\"order_items\".\"price_unit\" IS NOT NULL) AND (\"marketplace\".\"order_items\".\"price_basis\" = 'PER_BASE_UNIT' OR \"marketplace\".\"order_items\".\"price_unit\" IS NULL) AND (\"marketplace\".\"order_items\".\"price_basis\" <> 'PER_PACKAGE' OR (\"marketplace\".\"order_items\".\"package_type\" IS NOT NULL AND \"marketplace\".\"order_items\".\"package_content_amount\" IS NOT NULL AND \"marketplace\".\"order_items\".\"package_content_amount\" > 0 AND \"marketplace\".\"order_items\".\"package_content_unit\" IS NOT NULL)) AND (\"marketplace\".\"order_items\".\"price_basis\" = 'PER_PACKAGE' OR (\"marketplace\".\"order_items\".\"package_type\" IS NULL AND \"marketplace\".\"order_items\".\"package_content_amount\" IS NULL AND \"marketplace\".\"order_items\".\"package_content_unit\" IS NULL)) AND (\"marketplace\".\"order_items\".\"normalized_unit_price\" IS NULL OR (\"marketplace\".\"order_items\".\"normalized_unit_price\" > 0 AND \"marketplace\".\"order_items\".\"normalized_unit\" IS NOT NULL)))"
+        }
+      },
       "isRLSEnabled": false
     },
     "marketplace.order_reminders": {
@@ -4597,6 +4746,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "award_pricing_snapshot": {
+          "name": "award_pricing_snapshot",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "order_type": {
           "name": "order_type",
           "type": "text",
@@ -5012,7 +5167,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "orders_award_pricing_snapshot_chk": {
+          "name": "orders_award_pricing_snapshot_chk",
+          "value": "\"marketplace\".\"orders\".\"award_pricing_snapshot\" IS NULL OR (jsonb_typeof(\"marketplace\".\"orders\".\"award_pricing_snapshot\") = 'object' AND \"marketplace\".\"orders\".\"award_pricing_snapshot\" ? 'schema_version')"
+        }
+      },
       "isRLSEnabled": false
     },
     "marketplace.payments": {
@@ -5477,6 +5637,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "commercial_pricing": {
+          "name": "commercial_pricing",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "images": {
           "name": "images",
           "type": "text[]",
@@ -5759,7 +5925,12 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "products_commercial_pricing_chk": {
+          "name": "products_commercial_pricing_chk",
+          "value": "\"marketplace\".\"products\".\"commercial_pricing\" IS NULL OR (jsonb_typeof(\"marketplace\".\"products\".\"commercial_pricing\") = 'object' AND \"marketplace\".\"products\".\"commercial_pricing\" ? 'schema_version')"
+        }
+      },
       "isRLSEnabled": false
     },
     "marketplace.recurring_need_occurrences": {

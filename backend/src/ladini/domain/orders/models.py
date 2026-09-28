@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
@@ -20,6 +21,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import relationship
 
@@ -89,6 +91,10 @@ class Order(Base):
         Index("orders_market_offer_idx", "market_offer_id"),
         Index("orders_auction_unique", "auction_id", unique=True),
         Index("orders_winning_bid_idx", "winning_bid_id"),
+        CheckConstraint(
+            "award_pricing_snapshot IS NULL OR (jsonb_typeof(award_pricing_snapshot) = 'object' AND award_pricing_snapshot ? 'schema_version')",
+            name="orders_award_pricing_snapshot_chk",
+        ),
         Index("orders_buyer_status_idx", "buyer_id", "status"),
         Index("orders_payment_status_idx", "payment_status"),
         Index("ix_orders_paydunya_token", "paydunya_invoice_token", unique=True, postgresql_where=text("paydunya_invoice_token IS NOT NULL")),
@@ -164,6 +170,9 @@ class Order(Base):
         PG_UUID(as_uuid=True), ForeignKey("marketplace.auctions.id"), unique=True
     )
     winning_bid_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.bids.id"))
+    # Phase B2a — instantané IMMUABLE du prix attribué d'une commande d'appel d'offres (elle n'a pas de
+    # `order_items`, faute de produit). JSONB versionné, écrit une fois à l'attribution.
+    award_pricing_snapshot = Column(JSONB)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
@@ -188,6 +197,8 @@ class OrderItem(Base):
     __table_args__ = (
         Index("order_items_order_idx", "order_id"),
         Index("order_items_product_idx", "product_id"),
+        CheckConstraint('pricing_snapshot_version IS NOT NULL OR (commercial_price_amount IS NULL AND price_basis IS NULL AND price_unit IS NULL AND package_type IS NULL AND package_content_amount IS NULL AND package_content_unit IS NULL AND normalized_unit_price IS NULL AND normalized_unit IS NULL AND quantity_unit IS NULL AND currency IS NULL)', name="order_items_snapshot_all_null_chk"),
+        CheckConstraint("pricing_snapshot_version IS NULL OR (pricing_snapshot_version >= 1 AND commercial_price_amount IS NOT NULL AND commercial_price_amount > 0 AND quantity_unit IS NOT NULL AND currency IS NOT NULL AND price_basis IS NOT NULL AND price_basis IN ('PER_BASE_UNIT','PER_PACKAGE','TOTAL_LOT') AND (price_basis <> 'PER_BASE_UNIT' OR price_unit IS NOT NULL) AND (price_basis = 'PER_BASE_UNIT' OR price_unit IS NULL) AND (price_basis <> 'PER_PACKAGE' OR (package_type IS NOT NULL AND package_content_amount IS NOT NULL AND package_content_amount > 0 AND package_content_unit IS NOT NULL)) AND (price_basis = 'PER_PACKAGE' OR (package_type IS NULL AND package_content_amount IS NULL AND package_content_unit IS NULL)) AND (normalized_unit_price IS NULL OR (normalized_unit_price > 0 AND normalized_unit IS NOT NULL)))", name="order_items_snapshot_chk"),
         {"schema": "marketplace"},
     )
 
@@ -212,6 +223,20 @@ class OrderItem(Base):
     # palier est impliqué (voir domain/pricing_tiers.py::resolve_stock_debit,
     # le SEUL point de calcul du débit de stock).
     base_unit_quantity = Column(Numeric(14, 3), nullable=True)
+    # Phase B2a — INSTANTANÉ IMMUABLE de la sémantique commerciale (domain/commercial_pricing_snapshot.py).
+    # NULL partout sur une ligne antérieure : sa base de prix est INCONNUE, jamais rétro-inférée.
+    # Gelé par trigger (order_items_snapshot_immutable_trg) une fois `pricing_snapshot_version` posée.
+    quantity_unit = Column(Text)
+    commercial_price_amount = Column(Numeric(14, 2))
+    price_basis = Column(Text)
+    price_unit = Column(Text)
+    package_type = Column(Text)
+    package_content_amount = Column(Numeric(14, 3))
+    package_content_unit = Column(Text)
+    normalized_unit_price = Column(Numeric(18, 4))
+    normalized_unit = Column(Text)
+    currency = Column(Text)
+    pricing_snapshot_version = Column(Integer)
 
     order = relationship("Order", back_populates="items")
     product = relationship("Product", lazy="selectin")
@@ -417,6 +442,8 @@ class Bid(Base):
         Index("bids_linked_stock_idx", "linked_stock_id"),
         Index("bids_status_idx", "status"),
         Index("bids_one_winner_per_auction_uq", "auction_id", unique=True, postgresql_where=text("is_winner = true")),
+        CheckConstraint("offered_price_basis IS NULL OR offered_price_basis IN ('PER_BASE_UNIT','PER_PACKAGE','TOTAL_LOT','LEGACY_UNSPECIFIED')", name="bids_price_basis_chk"),
+        CheckConstraint("pricing_snapshot_version IS NULL OR (pricing_snapshot_version >= 1 AND offered_price > 0 AND offered_price_currency IS NOT NULL AND offered_price_basis IS NOT NULL AND offered_price_basis IN ('PER_BASE_UNIT','PER_PACKAGE','TOTAL_LOT') AND (offered_price_basis <> 'PER_BASE_UNIT' OR offered_price_unit IS NOT NULL) AND (offered_price_basis = 'PER_BASE_UNIT' OR offered_price_unit IS NULL) AND (offered_price_basis <> 'PER_PACKAGE' OR (package_type IS NOT NULL AND package_content_amount IS NOT NULL AND package_content_amount > 0 AND package_content_unit IS NOT NULL)) AND (offered_price_basis = 'PER_PACKAGE' OR (package_type IS NULL AND package_content_amount IS NULL AND package_content_unit IS NULL)) AND (normalized_unit_price IS NULL OR (normalized_unit_price > 0 AND normalized_unit IS NOT NULL)))", name="bids_snapshot_chk"),
         {"schema": "marketplace"},
     )
 
@@ -428,6 +455,17 @@ class Bid(Base):
         PG_UUID(as_uuid=True), ForeignKey("marketplace.producers.id", ondelete="RESTRICT"), nullable=False
     )
     offered_price = Column(Numeric(12, 2), nullable=False)
+    # Phase B2a — CONTRAT DE PRIX du bid. NULL = bid antérieur : base de prix INCONNUE (jamais
+    # « par unité de l'enchère »). Bid nouveau : base obligatoire (domain/commercial_pricing_snapshot).
+    offered_price_basis = Column(Text)
+    offered_price_unit = Column(Text)
+    offered_price_currency = Column(Text)
+    package_type = Column(Text)
+    package_content_amount = Column(Numeric(14, 3))
+    package_content_unit = Column(Text)
+    normalized_unit_price = Column(Numeric(18, 4))
+    normalized_unit = Column(Text)
+    pricing_snapshot_version = Column(Integer)
     linked_stock_id = Column(PG_UUID(as_uuid=True), ForeignKey("marketplace.stocks.id", ondelete="SET NULL"))
     is_winner = Column(Boolean, default=False, nullable=False, server_default=text("false"))
     status = Column(Text, default="PENDING", nullable=False, server_default=text("'PENDING'"))
