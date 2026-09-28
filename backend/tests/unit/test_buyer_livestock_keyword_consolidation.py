@@ -55,13 +55,14 @@ class TestExplicitNonKgDbUnitAlwaysWinsOverAnyGuess:
         assert _guess_display_unit("banane", "SAC") == "SAC"
 
 
-class TestResidualLaitDeVacheStillMisclassifiedDocumented:
-    """Non-régression volontaire : ce test documente le résidu CONNU, pas un
-    comportement désiré — voir la docstring de ce fichier et
-    `docs/domain/COMMERCIAL_QUANTITY_PRICING_MODEL.md`. Il échouerait
-    (dans le bon sens) le jour où la config taxonomy est peuplée pour
-    "Lait", ce qui serait un progrès, pas une régression — à mettre à jour
-    à ce moment-là plutôt que traité comme un test cassé."""
+class TestLaitDeVacheIsNoLongerMisclassifiedAsLivestock:
+    """Le résidu documenté en Phase A (« lait de vache » affiché en TETE parce que le mot
+    « vache » est un mot-clé d'élevage) est FERMÉ : un produit DÉRIVÉ d'un animal (lait, œufs,
+    viande, fromage, peau…) n'est jamais un animal compté à la tête — voir
+    `quantity_unit.ANIMAL_DERIVED_PRODUCT_MARKERS`. La taxonomie admin (`allowed_units`) reste la
+    source de vérité quand elle est peuplée ; ce test verrouille le FILET de repli."""
 
-    def test_lait_de_vache_is_still_misclassified_as_livestock_today(self):
-        assert _guess_display_unit("lait de vache", None) == "TETE"
+    def test_lait_de_vache_is_not_livestock_anymore(self):
+        assert _guess_display_unit("lait de vache", None) == "KG"
+        assert _guess_display_unit("lait de vache", "LITRE") == "LITRE"
+        assert _guess_display_unit("vache", None) == "TETE"
