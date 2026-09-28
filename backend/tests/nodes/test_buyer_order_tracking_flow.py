@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+from tests.nodes.award_fixtures import bid_row, bids_response, frozen_state
 from tests.conftest import StubRuntime, make_state, run
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
@@ -583,12 +584,15 @@ class TestConfirmWinnerSelection:
             available_mapping={"1": "b1"},
             transaction_payload={"selection_index": 1},
         )
-        runtime = rt({"get_auction_bids": {"bids": [{"bid_id": "b1", "producer": "Awa", "price": 250}], "auction": {"product": "mais"}}})
+        runtime = rt({"get_auction_bids": bids_response(bid_row(250), product="mais")})
         result = run(confirm_winner_selection(state, runtime))
         assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
         assert "Awa" in result["final_response"]
         assert "mais" in result["final_response"]
+        # Phase B2b : prix + BASE + quantité + total, et la décision certifiée est GELÉE dans l'état
+        assert "250 FCFA par tonne" in result["final_response"] and "2 500 FCFA" in result["final_response"]
         assert result["working_memory"]["pending_winner_bid"] == "b1"
+        assert result["working_memory"]["pending_award"]["fingerprint"]
 
     def test_refetch_failure_is_swallowed_and_defaults_are_used(self, monkeypatch):
         from ladini.graphs.agents.market_coach.flows.buyer import order_tracking as mod
@@ -600,19 +604,23 @@ class TestConfirmWinnerSelection:
             async def get_auction_bids(self, **kwargs):
                 raise RuntimeError("network down")
 
-        monkeypatch.setattr(mod, "AuctionGateway", _BoomGateway)
+        from ladini.graphs.agents.market_coach.flows.buyer import award_decision as award_mod
+
+        monkeypatch.setattr(award_mod, "AuctionGateway", _BoomGateway)
         state = make_state(
             working_memory={"winner_auction_id": "a1"},
             transaction_payload={"bid_id": "b1"},
         )
         result = run(mod.confirm_winner_selection(state, rt()))
-        assert "ce producteur" in result["final_response"]
+        # B2b : impossible de relire l'offre => JAMAIS de confirmation sur des valeurs par défaut
+        assert "n'est plus disponible" in result["final_response"]
+        assert "pending_award" not in (result["working_memory"] or {}) or result["working_memory"]["pending_award"] is None
 
     def test_no_auction_id_skips_the_refetch(self):
         from ladini.graphs.agents.market_coach.flows.buyer.order_tracking import confirm_winner_selection
         state = make_state(transaction_payload={"bid_id": "b1"})
         result = run(confirm_winner_selection(state, rt()))
-        assert "ce producteur" in result["final_response"]
+        assert "n'est plus disponible" in result["final_response"]
 
 
 # =====================================================================
@@ -695,11 +703,14 @@ class TestFinalizeWinner:
             async def select_winning_bid(self, **kwargs):
                 raise RuntimeError("boom")
 
-        monkeypatch.setattr(mod, "AuctionGateway", _BoomGateway)
+        from ladini.graphs.agents.market_coach.flows.buyer import award_decision as award_mod
+
+        monkeypatch.setattr(award_mod, "AuctionGateway", _BoomGateway)
         state = make_state(
             working_memory={
                 "pending_winner_bid": "b1", "winner_gps_stage": True,
                 "winner_gps_default": {"lat": 12.35, "lon": -1.5},
+                "pending_award": frozen_state(),
             },
             interpreted_event="CONFIRM",
         )
@@ -712,6 +723,7 @@ class TestFinalizeWinner:
             working_memory={
                 "pending_winner_bid": "b1", "winner_gps_stage": True,
                 "winner_gps_default": {"lat": 12.35, "lon": -1.5},
+                "pending_award": frozen_state(),
             },
             interpreted_event="CONFIRM",
         )
@@ -725,6 +737,7 @@ class TestFinalizeWinner:
             working_memory={
                 "pending_winner_bid": "b1", "winner_gps_stage": True,
                 "winner_gps_default": {"lat": 12.35, "lon": -1.5},
+                "pending_award": frozen_state(),
             },
             interpreted_event="CONFIRM",
         )
@@ -790,11 +803,14 @@ class TestFinalizeWinnerGpsStage:
                 seen.update(kwargs)
                 return {"status": "success", "summary_buyer": "🤝 C'est fait !"}
 
-        monkeypatch.setattr(mod, "AuctionGateway", _CapturingGateway)
+        from ladini.graphs.agents.market_coach.flows.buyer import award_decision as award_mod
+
+        monkeypatch.setattr(award_mod, "AuctionGateway", _CapturingGateway)
         state = make_state(
             working_memory={
                 "pending_winner_bid": "b1", "winner_gps_stage": True,
                 "winner_gps_default": {"lat": 12.35, "lon": -1.5},
+                "pending_award": frozen_state(),
             },
             interpreted_event="CONFIRM",
         )
@@ -822,9 +838,11 @@ class TestFinalizeWinnerGpsStage:
                 seen.update(kwargs)
                 return {"status": "success", "summary_buyer": "ok"}
 
-        monkeypatch.setattr(mod, "AuctionGateway", _CapturingGateway)
+        from ladini.graphs.agents.market_coach.flows.buyer import award_decision as award_mod
+
+        monkeypatch.setattr(award_mod, "AuctionGateway", _CapturingGateway)
         state = make_state(
-            working_memory={"pending_winner_bid": "b1", "winner_gps_stage": True},
+            working_memory={"pending_winner_bid": "b1", "winner_gps_stage": True, "pending_award": frozen_state()},
             location_shared=True,
             location_outcome="NEW_LOCATION_ACCEPTED",
             location_lat=13.0,
@@ -957,6 +975,7 @@ class TestOrderTrackingResolver:
                 "pending_winner_bid": "b1",
                 "winner_auction_id": "a1",
                 "pending_winner_price": 250.0,
+                "pending_award": frozen_state(),
                 "winner_gps_stage": True,
                 "winner_gps_default": {"lat": 12.35, "lon": -1.5},
             },
@@ -989,7 +1008,7 @@ class TestOrderTrackingResolver:
             transaction_payload={"bid_id": "b1"},
             working_memory={"winner_auction_id": "a1"},
         )
-        result = run(order_tracking_resolver(state, rt()))
+        result = run(order_tracking_resolver(state, rt({"get_auction_bids": bids_response(bid_row(250))})))
         assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
 
     def test_auction_id_without_bid_id_routes_to_check_auction_status(self):

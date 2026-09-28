@@ -17,6 +17,12 @@ import logging
 from decimal import Decimal
 from typing import Any, Dict, Optional, Tuple
 
+from ladini.domain.bid_award import (
+    AwardNotPossible,
+    CertifiedAwardDecision,
+    build_award_decision,
+    compare_bid,
+)
 from ladini.domain.commercial_offer import CommercialOffer, PriceBasis
 from ladini.domain.commercial_pricing_snapshot import (
     CommercialPricingSnapshot,
@@ -239,7 +245,79 @@ def award_total_and_snapshot(bid: Any, auction: Any) -> Tuple[Decimal, Optional[
     return total, frozen
 
 
+def award_decision_for(
+    bid: Any,
+    auction: Any,
+    *,
+    producer_name: Optional[str] = None,
+    expected_award: Optional[Dict[str, Any]] = None,
+) -> CertifiedAwardDecision:
+    """Décision d'attribution CERTIFIÉE d'un bid, ou refus explicite AVANT toute écriture.
+
+    - bid sans base de prix certifiée (antérieur à B2a) -> refus `bid_basis_unknown` : jamais de « par
+      tonne » ou « par kg » supposé ; le producteur doit requalifier son prix ;
+    - `expected_award` (ce que l'acheteur a CONFIRMÉ) : si l'empreinte des termes actuels diffère
+      (prix, base, quantité, total, producteur…) -> `award_terms_changed`, on n'attribue pas sur d'anciens termes."""
+    view = bid_pricing_view(bid)
+    try:
+        decision = build_award_decision(
+            auction_id=auction.id,
+            bid_id=bid.id,
+            producer_id=bid.producer_id,
+            buyer_id=auction.buyer_id,
+            producer_name=producer_name,
+            pricing=view.snapshot,
+            auction_quantity=auction.quantity,
+            auction_unit=auction.unit,
+        )
+    except AwardNotPossible as exc:
+        if exc.reason == "bid_basis_unknown":
+            logger.warning("BID_LEGACY_BASIS_UNKNOWN | auction=%s | bid=%s", auction.id, bid.id)
+        raise BusinessRuleException(exc.message, reason=exc.reason) from exc
+    if expected_award is not None:
+        expected_fp = str((expected_award or {}).get("fingerprint") or "")
+        if expected_fp != decision.fingerprint:
+            logger.warning(
+                "BID_AWARD_TERMS_CHANGED | auction=%s | bid=%s | expected=%s | current=%s",
+                auction.id, bid.id, expected_fp[:12], decision.fingerprint[:12],
+            )
+            raise BusinessRuleException(
+                "Les termes de cette offre ont changé depuis votre confirmation (prix, base, quantité ou total). "
+                "Consultez les offres à nouveau avant de retenir un gagnant.",
+                reason="award_terms_changed",
+            )
+    return decision
+
+
+def bid_display_fields(
+    bid: Any, auction: Any, *, producer_name: Optional[str] = None, with_decision: bool = True
+) -> Dict[str, Any]:
+    """Champs d'AFFICHAGE d'un bid — sa propre sémantique de prix, JAMAIS `offered_price` + unité de
+    l'enchère. `comparable_total` permet de classer sans jamais mélanger les bases ; un bid sans base est
+    marqué `requires_requalification`."""
+    cmp = compare_bid(bid, auction.quantity, auction.unit)
+    view = bid_pricing_view(bid)
+    fields: Dict[str, Any] = {
+        "pricing_label": cmp.label,
+        "price_basis": view.basis.value if view.basis else None,
+        "pricing_reliability": cmp.reliability.value,
+        "comparable_total": format(cmp.total, "f") if cmp.total is not None else None,
+        "normalized_label": cmp.normalized,
+        "requires_requalification": cmp.reason == "bid_basis_unknown",
+        "pricing": view.snapshot.to_dict() if view.snapshot is not None else None,
+        "award_decision": None,
+    }
+    if cmp.comparable and with_decision:
+        try:
+            fields["award_decision"] = award_decision_for(bid, auction, producer_name=producer_name).to_state()
+        except BusinessRuleException:
+            fields["award_decision"] = None
+    return fields
+
+
 __all__ = [
+    "award_decision_for",
+    "bid_display_fields",
     "certify_commercial_offer",
     "invalidate_commercial_pricing_on_edit",
     "order_item_snapshot_columns",

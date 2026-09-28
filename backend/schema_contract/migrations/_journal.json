@@ -92,6 +92,13 @@
       "when": 1790612492135,
       "tag": "0012_commercial_pricing_persistence",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790615012658,
+      "tag": "0013_order_item_economic_freeze",
+      "breakpoints": true
     }
   ]
 }

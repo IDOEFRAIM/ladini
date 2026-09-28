@@ -334,7 +334,11 @@ class TestProducerAuctionResolverDeviations:
                 "bid_phase": "CONFIRM",
                 "pending_bid_auction": "a1",
                 "pending_bid_price": 250,
-                "auction_brief": {"a1": {"product": "mais", "unit": "KG"}},
+                "pending_bid_pricing": {
+                    "status": "RESOLVED", "amount": "250", "basis": "PER_BASE_UNIT", "price_unit": "KG",
+                    "source": "USER_EXPLICIT",
+                },
+                "auction_brief": {"a1": {"product": "mais", "unit": "KG", "quantity": 100}},
             },
         )
         runtime = rt_with_llm("Pas de souci, prenez votre temps.")
@@ -353,7 +357,7 @@ class TestProducerAuctionResolverDeviations:
             working_memory={
                 "bid_phase": "ASK_PRICE",
                 "pending_bid_auction": "a1",
-                "auction_brief": {"a1": {"product": "mais", "unit": "KG"}},
+                "auction_brief": {"a1": {"product": "mais", "unit": "KG", "quantity": 100}},
             },
         )
         runtime = rt_with_llm("Bonne question — je n'ai pas ce chiffre sous la main.")
@@ -372,7 +376,11 @@ class TestProducerAuctionResolverDeviations:
                 "bid_phase": "CONFIRM_MODIFY",
                 "pending_modify_bid": "b1",
                 "pending_bid_price": 300,
-                "my_bids_brief": {"b1": {"product": "tomates", "unit": "KG"}},
+                "pending_bid_pricing": {
+                    "status": "RESOLVED", "amount": "300", "basis": "PER_BASE_UNIT", "price_unit": "KG",
+                    "source": "USER_EXPLICIT",
+                },
+                "my_bids_brief": {"b1": {"product": "tomates", "unit": "KG", "quantity": 100}},
             },
         )
         runtime = rt_with_llm("D'accord, dites-moi si vous préférez garder l'ancien prix.")
@@ -390,7 +398,7 @@ class TestProducerAuctionResolverDeviations:
             working_memory={
                 "bid_phase": "ASK_PRICE_MODIFY",
                 "pending_modify_bid": "b1",
-                "my_bids_brief": {"b1": {"product": "tomates", "unit": "KG"}},
+                "my_bids_brief": {"b1": {"product": "tomates", "unit": "KG", "quantity": 100}},
             },
         )
         runtime = rt_with_llm("Aucun souci, un prix approximatif suffit pour commencer.")

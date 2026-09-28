@@ -1,6 +1,6 @@
 {
-  "id": "14cc023f-3905-40ad-a0ea-fba89b39100a",
-  "prevId": "2b99f719-439e-40cc-b784-df2650684b83",
+  "id": "9994447a-54c4-4966-91cd-4b3c66bc6187",
+  "prevId": "14cc023f-3905-40ad-a0ea-fba89b39100a",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -100,9 +100,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "accounts_user_idx": {
           "name": "accounts_user_idx",
@@ -115,25 +115,25 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "accounts_user_id_users_id_fk": {
           "name": "accounts_user_id_users_id_fk",
           "tableFrom": "accounts",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -184,35 +184,35 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "sessions_user_id_users_id_fk": {
           "name": "sessions_user_id_users_id_fk",
           "tableFrom": "sessions",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "sessions_session_token_unique": {
           "name": "sessions_session_token_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "session_token"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -389,9 +389,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "users_zone_idx": {
           "name": "users_zone_idx",
@@ -404,9 +404,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "users_created_idx": {
           "name": "users_created_idx",
@@ -419,9 +419,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "users_account_status_idx": {
           "name": "users_account_status_idx",
@@ -434,49 +434,49 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "users_zone_id_zones_id_fk": {
           "name": "users_zone_id_zones_id_fk",
           "tableFrom": "users",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "users_email_unique": {
           "name": "users_email_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "email"
-          ]
+          ],
+          "nullsNotDistinct": false
         },
         "users_phone_unique": {
           "name": "users_phone_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "phone"
-          ]
+          ],
+          "nullsNotDistinct": false
         },
         "users_cnib_number_unique": {
           "name": "users_cnib_number_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "cnib_number"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -532,10 +532,10 @@
       "uniqueConstraints": {
         "categories_name_unique": {
           "name": "categories_name_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "name"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -586,10 +586,10 @@
       "uniqueConstraints": {
         "climatic_regions_name_unique": {
           "name": "climatic_regions_name_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "name"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -659,10 +659,10 @@
       "uniqueConstraints": {
         "organizations_tax_id_unique": {
           "name": "organizations_tax_id_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "tax_id"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -727,9 +727,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -737,10 +737,10 @@
       "uniqueConstraints": {
         "prohibited_terms_term_unique": {
           "name": "prohibited_terms_term_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "term"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -791,10 +791,10 @@
       "uniqueConstraints": {
         "role_definitions_name_unique": {
           "name": "role_definitions_name_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "name"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -876,9 +876,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "standard_prices_zone_idx": {
           "name": "standard_prices_zone_idx",
@@ -891,53 +891,53 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "standard_prices_sub_category_id_sub_categories_id_fk": {
           "name": "standard_prices_sub_category_id_sub_categories_id_fk",
           "tableFrom": "standard_prices",
-          "tableTo": "sub_categories",
-          "schemaTo": "governance",
           "columnsFrom": [
             "sub_category_id"
           ],
+          "tableTo": "sub_categories",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "standard_prices_zone_id_zones_id_fk": {
           "name": "standard_prices_zone_id_zones_id_fk",
           "tableFrom": "standard_prices",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "standard_prices_updated_by_id_users_id_fk": {
           "name": "standard_prices_updated_by_id_users_id_fk",
           "tableFrom": "standard_prices",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "updated_by_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -1033,9 +1033,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "ix_subcategories_name_trgm": {
           "name": "ix_subcategories_name_trgm",
@@ -1049,25 +1049,25 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "gin",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "sub_categories_category_id_categories_id_fk": {
           "name": "sub_categories_category_id_categories_id_fk",
           "tableFrom": "sub_categories",
-          "tableTo": "categories",
-          "schemaTo": "governance",
           "columnsFrom": [
             "category_id"
           ],
+          "tableTo": "categories",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -1137,9 +1137,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "user_org_user_idx": {
           "name": "user_org_user_idx",
@@ -1152,9 +1152,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "user_org_role_idx": {
           "name": "user_org_role_idx",
@@ -1167,9 +1167,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "user_org_org_idx": {
           "name": "user_org_org_idx",
@@ -1182,67 +1182,67 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "user_organizations_user_id_users_id_fk": {
           "name": "user_organizations_user_id_users_id_fk",
           "tableFrom": "user_organizations",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "user_organizations_organization_id_organizations_id_fk": {
           "name": "user_organizations_organization_id_organizations_id_fk",
           "tableFrom": "user_organizations",
-          "tableTo": "organizations",
-          "schemaTo": "governance",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organizations",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "user_organizations_role_id_role_definitions_id_fk": {
           "name": "user_organizations_role_id_role_definitions_id_fk",
           "tableFrom": "user_organizations",
-          "tableTo": "role_definitions",
-          "schemaTo": "governance",
           "columnsFrom": [
             "role_id"
           ],
+          "tableTo": "role_definitions",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "user_organizations_managed_zone_id_zones_id_fk": {
           "name": "user_organizations_managed_zone_id_zones_id_fk",
           "tableFrom": "user_organizations",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "managed_zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -1319,9 +1319,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "work_zones_org_idx": {
           "name": "work_zones_org_idx",
@@ -1334,9 +1334,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "work_zones_zone_idx": {
           "name": "work_zones_zone_idx",
@@ -1349,53 +1349,53 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "work_zones_organization_id_organizations_id_fk": {
           "name": "work_zones_organization_id_organizations_id_fk",
           "tableFrom": "work_zones",
-          "tableTo": "organizations",
-          "schemaTo": "governance",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organizations",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "work_zones_zone_id_zones_id_fk": {
           "name": "work_zones_zone_id_zones_id_fk",
           "tableFrom": "work_zones",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "work_zones_manager_id_users_id_fk": {
           "name": "work_zones_manager_id_users_id_fk",
           "tableFrom": "work_zones",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "manager_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -1504,9 +1504,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "zones_org_idx": {
           "name": "zones_org_idx",
@@ -1519,9 +1519,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "zones_active_idx": {
           "name": "zones_active_idx",
@@ -1534,9 +1534,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "zones_parent_idx": {
           "name": "zones_parent_idx",
@@ -1549,9 +1549,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "zones_path_idx": {
           "name": "zones_path_idx",
@@ -1564,9 +1564,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "ix_zones_name_trgm": {
           "name": "ix_zones_name_trgm",
@@ -1580,70 +1580,70 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "gin",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "zones_climatic_region_id_climatic_regions_id_fk": {
           "name": "zones_climatic_region_id_climatic_regions_id_fk",
           "tableFrom": "zones",
-          "tableTo": "climatic_regions",
-          "schemaTo": "governance",
           "columnsFrom": [
             "climatic_region_id"
           ],
+          "tableTo": "climatic_regions",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "zones_organization_id_organizations_id_fk": {
           "name": "zones_organization_id_organizations_id_fk",
           "tableFrom": "zones",
-          "tableTo": "organizations",
-          "schemaTo": "governance",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organizations",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "zones_parent_id_zones_id_fk": {
           "name": "zones_parent_id_zones_id_fk",
           "tableFrom": "zones",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "parent_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "zones_name_unique": {
           "name": "zones_name_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "name"
-          ]
+          ],
+          "nullsNotDistinct": false
         },
         "zones_code_unique": {
           "name": "zones_code_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "code"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -1840,9 +1840,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "auctions_subcategory_idx": {
           "name": "auctions_subcategory_idx",
@@ -1855,9 +1855,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "auctions_buyer_idx": {
           "name": "auctions_buyer_idx",
@@ -1870,9 +1870,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "auctions_escrow_status_idx": {
           "name": "auctions_escrow_status_idx",
@@ -1885,9 +1885,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "auctions_zone_idx": {
           "name": "auctions_zone_idx",
@@ -1900,9 +1900,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "auctions_deadline_idx": {
           "name": "auctions_deadline_idx",
@@ -1915,67 +1915,67 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "auctions_buyer_id_buyer_profiles_id_fk": {
           "name": "auctions_buyer_id_buyer_profiles_id_fk",
           "tableFrom": "auctions",
-          "tableTo": "buyer_profiles",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "buyer_id"
           ],
+          "tableTo": "buyer_profiles",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "auctions_sub_category_id_sub_categories_id_fk": {
           "name": "auctions_sub_category_id_sub_categories_id_fk",
           "tableFrom": "auctions",
-          "tableTo": "sub_categories",
-          "schemaTo": "governance",
           "columnsFrom": [
             "sub_category_id"
           ],
+          "tableTo": "sub_categories",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "auctions_winner_bid_id_bids_id_fk": {
           "name": "auctions_winner_bid_id_bids_id_fk",
           "tableFrom": "auctions",
-          "tableTo": "bids",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "winner_bid_id"
           ],
+          "tableTo": "bids",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "auctions_target_zone_id_zones_id_fk": {
           "name": "auctions_target_zone_id_zones_id_fk",
           "tableFrom": "auctions",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "target_zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -2151,9 +2151,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "bids_auction_idx": {
           "name": "bids_auction_idx",
@@ -2166,9 +2166,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "bids_producer_idx": {
           "name": "bids_producer_idx",
@@ -2181,9 +2181,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "bids_linked_stock_idx": {
           "name": "bids_linked_stock_idx",
@@ -2196,9 +2196,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "bids_status_idx": {
           "name": "bids_status_idx",
@@ -2211,9 +2211,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "bids_one_winner_per_auction_uq": {
           "name": "bids_one_winner_per_auction_uq",
@@ -2226,54 +2226,54 @@
             }
           ],
           "isUnique": true,
-          "where": "\"marketplace\".\"bids\".\"is_winner\" = true",
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "where": "\"marketplace\".\"bids\".\"is_winner\" = true",
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "bids_auction_id_auctions_id_fk": {
           "name": "bids_auction_id_auctions_id_fk",
           "tableFrom": "bids",
-          "tableTo": "auctions",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "auction_id"
           ],
+          "tableTo": "auctions",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "bids_producer_id_producers_id_fk": {
           "name": "bids_producer_id_producers_id_fk",
           "tableFrom": "bids",
-          "tableTo": "producers",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "producer_id"
           ],
+          "tableTo": "producers",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "bids_linked_stock_id_stocks_id_fk": {
           "name": "bids_linked_stock_id_stocks_id_fk",
           "tableFrom": "bids",
-          "tableTo": "stocks",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "linked_stock_id"
           ],
+          "tableTo": "stocks",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -2397,9 +2397,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "buyer_profiles_type_idx": {
           "name": "buyer_profiles_type_idx",
@@ -2412,9 +2412,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "buyer_profiles_verified_idx": {
           "name": "buyer_profiles_verified_idx",
@@ -2427,63 +2427,63 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "buyer_profiles_user_id_users_id_fk": {
           "name": "buyer_profiles_user_id_users_id_fk",
           "tableFrom": "buyer_profiles",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "buyer_profiles_buyer_type_id_buyer_types_id_fk": {
           "name": "buyer_profiles_buyer_type_id_buyer_types_id_fk",
           "tableFrom": "buyer_profiles",
-          "tableTo": "buyer_types",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "buyer_type_id"
           ],
+          "tableTo": "buyer_types",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "buyer_profiles_verified_by_id_users_id_fk": {
           "name": "buyer_profiles_verified_by_id_users_id_fk",
           "tableFrom": "buyer_profiles",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "verified_by_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "buyer_profiles_user_id_unique": {
           "name": "buyer_profiles_user_id_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "user_id"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -2534,10 +2534,10 @@
       "uniqueConstraints": {
         "buyer_types_name_unique": {
           "name": "buyer_types_name_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "name"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -2644,9 +2644,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "clients_name_idx": {
           "name": "clients_name_idx",
@@ -2659,9 +2659,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "clients_producer_idx": {
           "name": "clients_producer_idx",
@@ -2674,25 +2674,25 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "clients_producer_id_producers_id_fk": {
           "name": "clients_producer_id_producers_id_fk",
           "tableFrom": "clients",
-          "tableTo": "producers",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "producer_id"
           ],
+          "tableTo": "producers",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -2842,9 +2842,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "deliveries_agent_idx": {
           "name": "deliveries_agent_idx",
@@ -2857,9 +2857,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "deliveries_status_idx": {
           "name": "deliveries_status_idx",
@@ -2872,9 +2872,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "deliveries_agent_status_idx": {
           "name": "deliveries_agent_status_idx",
@@ -2893,39 +2893,39 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "deliveries_order_id_orders_id_fk": {
           "name": "deliveries_order_id_orders_id_fk",
           "tableFrom": "deliveries",
-          "tableTo": "orders",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "order_id"
           ],
+          "tableTo": "orders",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "deliveries_delivery_agent_id_delivery_agents_id_fk": {
           "name": "deliveries_delivery_agent_id_delivery_agents_id_fk",
           "tableFrom": "deliveries",
-          "tableTo": "delivery_agents",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "delivery_agent_id"
           ],
+          "tableTo": "delivery_agents",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -3003,9 +3003,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "delivery_agents_status_idx": {
           "name": "delivery_agents_status_idx",
@@ -3018,49 +3018,49 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "delivery_agents_user_id_users_id_fk": {
           "name": "delivery_agents_user_id_users_id_fk",
           "tableFrom": "delivery_agents",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "delivery_agents_zone_id_zones_id_fk": {
           "name": "delivery_agents_zone_id_zones_id_fk",
           "tableFrom": "delivery_agents",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "delivery_agents_user_id_unique": {
           "name": "delivery_agents_user_id_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "user_id"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -3123,9 +3123,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "expenses_category_idx": {
           "name": "expenses_category_idx",
@@ -3138,9 +3138,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "expenses_date_idx": {
           "name": "expenses_date_idx",
@@ -3153,25 +3153,25 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "expenses_farm_id_farms_id_fk": {
           "name": "expenses_farm_id_farms_id_fk",
           "tableFrom": "expenses",
-          "tableTo": "farms",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "farm_id"
           ],
+          "tableTo": "farms",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -3248,9 +3248,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "farms_zone_idx": {
           "name": "farms_zone_idx",
@@ -3263,39 +3263,39 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "farms_zone_id_zones_id_fk": {
           "name": "farms_zone_id_zones_id_fk",
           "tableFrom": "farms",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "farms_producer_id_producers_id_fk": {
           "name": "farms_producer_id_producers_id_fk",
           "tableFrom": "farms",
-          "tableTo": "producers",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "producer_id"
           ],
+          "tableTo": "producers",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -3458,9 +3458,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "market_offers_farm_idx": {
           "name": "market_offers_farm_idx",
@@ -3473,9 +3473,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "market_offers_subcategory_idx": {
           "name": "market_offers_subcategory_idx",
@@ -3488,9 +3488,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "market_offers_available_at_idx": {
           "name": "market_offers_available_at_idx",
@@ -3503,9 +3503,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "market_offers_public_status_idx": {
           "name": "market_offers_public_status_idx",
@@ -3524,9 +3524,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "market_offers_preorder_idx": {
           "name": "market_offers_preorder_idx",
@@ -3539,9 +3539,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "ix_market_offers_label_trgm": {
           "name": "ix_market_offers_label_trgm",
@@ -3555,53 +3555,53 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "gin",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "market_offers_producer_id_producers_id_fk": {
           "name": "market_offers_producer_id_producers_id_fk",
           "tableFrom": "market_offers",
-          "tableTo": "producers",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "producer_id"
           ],
+          "tableTo": "producers",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "market_offers_farm_id_farms_id_fk": {
           "name": "market_offers_farm_id_farms_id_fk",
           "tableFrom": "market_offers",
-          "tableTo": "farms",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "farm_id"
           ],
+          "tableTo": "farms",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "market_offers_sub_category_id_sub_categories_id_fk": {
           "name": "market_offers_sub_category_id_sub_categories_id_fk",
           "tableFrom": "market_offers",
-          "tableTo": "sub_categories",
-          "schemaTo": "governance",
           "columnsFrom": [
             "sub_category_id"
           ],
+          "tableTo": "sub_categories",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -3714,9 +3714,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "need_allocations_occurrence_idx": {
           "name": "need_allocations_occurrence_idx",
@@ -3729,9 +3729,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "need_allocations_producer_idx": {
           "name": "need_allocations_producer_idx",
@@ -3744,9 +3744,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "need_allocations_product_idx": {
           "name": "need_allocations_product_idx",
@@ -3759,9 +3759,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "need_allocations_order_item_idx": {
           "name": "need_allocations_order_item_idx",
@@ -3774,67 +3774,67 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "need_allocations_occurrence_id_recurring_need_occurrences_id_fk": {
           "name": "need_allocations_occurrence_id_recurring_need_occurrences_id_fk",
           "tableFrom": "need_allocations",
-          "tableTo": "recurring_need_occurrences",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "occurrence_id"
           ],
+          "tableTo": "recurring_need_occurrences",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "need_allocations_producer_id_producers_id_fk": {
           "name": "need_allocations_producer_id_producers_id_fk",
           "tableFrom": "need_allocations",
-          "tableTo": "producers",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "producer_id"
           ],
+          "tableTo": "producers",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "need_allocations_product_id_products_id_fk": {
           "name": "need_allocations_product_id_products_id_fk",
           "tableFrom": "need_allocations",
-          "tableTo": "products",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "product_id"
           ],
+          "tableTo": "products",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "need_allocations_order_item_id_order_items_id_fk": {
           "name": "need_allocations_order_item_id_order_items_id_fk",
           "tableFrom": "need_allocations",
-          "tableTo": "order_items",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "order_item_id"
           ],
+          "tableTo": "order_items",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -3970,9 +3970,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "order_disputes_status_idx": {
           "name": "order_disputes_status_idx",
@@ -3985,9 +3985,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "order_disputes_raised_by_idx": {
           "name": "order_disputes_raised_by_idx",
@@ -4000,9 +4000,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "order_disputes_escrow_idx": {
           "name": "order_disputes_escrow_idx",
@@ -4015,39 +4015,39 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "order_disputes_order_id_orders_id_fk": {
           "name": "order_disputes_order_id_orders_id_fk",
           "tableFrom": "order_disputes",
-          "tableTo": "orders",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "order_id"
           ],
+          "tableTo": "orders",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "order_disputes_raised_by_id_users_id_fk": {
           "name": "order_disputes_raised_by_id_users_id_fk",
           "tableFrom": "order_disputes",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "raised_by_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -4182,9 +4182,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "order_items_product_idx": {
           "name": "order_items_product_idx",
@@ -4197,39 +4197,39 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "order_items_order_id_orders_id_fk": {
           "name": "order_items_order_id_orders_id_fk",
           "tableFrom": "order_items",
-          "tableTo": "orders",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "order_id"
           ],
+          "tableTo": "orders",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "order_items_product_id_products_id_fk": {
           "name": "order_items_product_id_products_id_fk",
           "tableFrom": "order_items",
-          "tableTo": "products",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "product_id"
           ],
+          "tableTo": "products",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4336,9 +4336,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "order_reminders_due_idx": {
           "name": "order_reminders_due_idx",
@@ -4357,25 +4357,25 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "order_reminders_order_id_orders_id_fk": {
           "name": "order_reminders_order_id_orders_id_fk",
           "tableFrom": "order_reminders",
-          "tableTo": "orders",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "order_id"
           ],
+          "tableTo": "orders",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4451,9 +4451,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "osh_order_type_idx": {
           "name": "osh_order_type_idx",
@@ -4472,9 +4472,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "osh_created_idx": {
           "name": "osh_created_idx",
@@ -4487,25 +4487,25 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "order_status_history_order_id_orders_id_fk": {
           "name": "order_status_history_order_id_orders_id_fk",
           "tableFrom": "order_status_history",
-          "tableTo": "orders",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "order_id"
           ],
+          "tableTo": "orders",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -4810,9 +4810,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "orders_client_idx": {
           "name": "orders_client_idx",
@@ -4825,9 +4825,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "orders_org_idx": {
           "name": "orders_org_idx",
@@ -4840,9 +4840,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "orders_status_idx": {
           "name": "orders_status_idx",
@@ -4855,9 +4855,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "orders_delivery_status_idx": {
           "name": "orders_delivery_status_idx",
@@ -4870,9 +4870,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "orders_zone_idx": {
           "name": "orders_zone_idx",
@@ -4885,9 +4885,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "orders_created_idx": {
           "name": "orders_created_idx",
@@ -4900,9 +4900,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "orders_phone_idx": {
           "name": "orders_phone_idx",
@@ -4915,9 +4915,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "orders_auction_unique": {
           "name": "orders_auction_unique",
@@ -4930,9 +4930,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "orders_winning_bid_idx": {
           "name": "orders_winning_bid_idx",
@@ -4945,9 +4945,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "orders_type_idx": {
           "name": "orders_type_idx",
@@ -4960,9 +4960,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "orders_market_offer_idx": {
           "name": "orders_market_offer_idx",
@@ -4975,9 +4975,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "orders_buyer_status_idx": {
           "name": "orders_buyer_status_idx",
@@ -4996,9 +4996,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "orders_payment_status_idx": {
           "name": "orders_payment_status_idx",
@@ -5011,9 +5011,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "ix_orders_paydunya_token": {
           "name": "ix_orders_paydunya_token",
@@ -5026,10 +5026,10 @@
             }
           ],
           "isUnique": true,
-          "where": "\"marketplace\".\"orders\".\"paydunya_invoice_token\" IS NOT NULL",
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "where": "\"marketplace\".\"orders\".\"paydunya_invoice_token\" IS NOT NULL",
+          "concurrently": false
         },
         "ix_orders_payment_expires_at": {
           "name": "ix_orders_payment_expires_at",
@@ -5042,10 +5042,10 @@
             }
           ],
           "isUnique": false,
-          "where": "\"marketplace\".\"orders\".\"payment_status\" = 'PENDING'",
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "where": "\"marketplace\".\"orders\".\"payment_status\" = 'PENDING'",
+          "concurrently": false
         },
         "ix_orders_checkout_group": {
           "name": "ix_orders_checkout_group",
@@ -5058,110 +5058,110 @@
             }
           ],
           "isUnique": false,
-          "where": "\"marketplace\".\"orders\".\"checkout_group_id\" IS NOT NULL",
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "where": "\"marketplace\".\"orders\".\"checkout_group_id\" IS NOT NULL",
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "orders_buyer_id_buyer_profiles_id_fk": {
           "name": "orders_buyer_id_buyer_profiles_id_fk",
           "tableFrom": "orders",
-          "tableTo": "buyer_profiles",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "buyer_id"
           ],
+          "tableTo": "buyer_profiles",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "orders_client_id_clients_id_fk": {
           "name": "orders_client_id_clients_id_fk",
           "tableFrom": "orders",
-          "tableTo": "clients",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "client_id"
           ],
+          "tableTo": "clients",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "orders_organization_id_organizations_id_fk": {
           "name": "orders_organization_id_organizations_id_fk",
           "tableFrom": "orders",
-          "tableTo": "organizations",
-          "schemaTo": "governance",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organizations",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "orders_zone_id_zones_id_fk": {
           "name": "orders_zone_id_zones_id_fk",
           "tableFrom": "orders",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "orders_auction_id_auctions_id_fk": {
           "name": "orders_auction_id_auctions_id_fk",
           "tableFrom": "orders",
-          "tableTo": "auctions",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "auction_id"
           ],
+          "tableTo": "auctions",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "orders_winning_bid_id_bids_id_fk": {
           "name": "orders_winning_bid_id_bids_id_fk",
           "tableFrom": "orders",
-          "tableTo": "bids",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "winning_bid_id"
           ],
+          "tableTo": "bids",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "orders_market_offer_id_market_offers_id_fk": {
           "name": "orders_market_offer_id_market_offers_id_fk",
           "tableFrom": "orders",
-          "tableTo": "market_offers",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "market_offer_id"
           ],
+          "tableTo": "market_offers",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -5288,9 +5288,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "payments_status_idx": {
           "name": "payments_status_idx",
@@ -5303,9 +5303,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "payments_provider_ref_unique": {
           "name": "payments_provider_ref_unique",
@@ -5318,25 +5318,25 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "payments_order_id_orders_id_fk": {
           "name": "payments_order_id_orders_id_fk",
           "tableFrom": "payments",
-          "tableTo": "orders",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "order_id"
           ],
+          "tableTo": "orders",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -5470,9 +5470,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "producers_org_idx": {
           "name": "producers_org_idx",
@@ -5485,9 +5485,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "producers_zone_idx": {
           "name": "producers_zone_idx",
@@ -5500,63 +5500,63 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "producers_user_id_users_id_fk": {
           "name": "producers_user_id_users_id_fk",
           "tableFrom": "producers",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "producers_organization_id_organizations_id_fk": {
           "name": "producers_organization_id_organizations_id_fk",
           "tableFrom": "producers",
-          "tableTo": "organizations",
-          "schemaTo": "governance",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organizations",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "producers_zone_id_zones_id_fk": {
           "name": "producers_zone_id_zones_id_fk",
           "tableFrom": "producers",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "producers_user_id_unique": {
           "name": "producers_user_id_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "user_id"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -5732,9 +5732,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "products_category_idx": {
           "name": "products_category_idx",
@@ -5747,9 +5747,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "products_subcategory_idx": {
           "name": "products_subcategory_idx",
@@ -5762,9 +5762,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "products_price_idx": {
           "name": "products_price_idx",
@@ -5777,9 +5777,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "products_created_idx": {
           "name": "products_created_idx",
@@ -5792,9 +5792,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "products_verifier_idx": {
           "name": "products_verifier_idx",
@@ -5807,9 +5807,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "products_producer_available_idx": {
           "name": "products_producer_available_idx",
@@ -5828,9 +5828,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "products_category_available_idx": {
           "name": "products_category_available_idx",
@@ -5849,9 +5849,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "ix_products_name_trgm": {
           "name": "ix_products_name_trgm",
@@ -5865,63 +5865,63 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "gin",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "products_sub_category_id_sub_categories_id_fk": {
           "name": "products_sub_category_id_sub_categories_id_fk",
           "tableFrom": "products",
-          "tableTo": "sub_categories",
-          "schemaTo": "governance",
           "columnsFrom": [
             "sub_category_id"
           ],
+          "tableTo": "sub_categories",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "products_producer_id_producers_id_fk": {
           "name": "products_producer_id_producers_id_fk",
           "tableFrom": "products",
-          "tableTo": "producers",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "producer_id"
           ],
+          "tableTo": "producers",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "products_verified_by_id_users_id_fk": {
           "name": "products_verified_by_id_users_id_fk",
           "tableFrom": "products",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "verified_by_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "products_short_code_unique": {
           "name": "products_short_code_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "short_code"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -6060,9 +6060,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "recurring_need_occurrences_status_date_idx": {
           "name": "recurring_need_occurrences_status_date_idx",
@@ -6081,25 +6081,25 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "recurring_need_occurrences_recurring_need_id_recurring_needs_id_fk": {
           "name": "recurring_need_occurrences_recurring_need_id_recurring_needs_id_fk",
           "tableFrom": "recurring_need_occurrences",
-          "tableTo": "recurring_needs",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "recurring_need_id"
           ],
+          "tableTo": "recurring_needs",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -6245,9 +6245,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "recurring_needs_subcategory_status_idx": {
           "name": "recurring_needs_subcategory_status_idx",
@@ -6266,39 +6266,39 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "recurring_needs_buyer_id_buyer_profiles_id_fk": {
           "name": "recurring_needs_buyer_id_buyer_profiles_id_fk",
           "tableFrom": "recurring_needs",
-          "tableTo": "buyer_profiles",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "buyer_id"
           ],
+          "tableTo": "buyer_profiles",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "recurring_needs_sub_category_id_sub_categories_id_fk": {
           "name": "recurring_needs_sub_category_id_sub_categories_id_fk",
           "tableFrom": "recurring_needs",
-          "tableTo": "sub_categories",
-          "schemaTo": "governance",
           "columnsFrom": [
             "sub_category_id"
           ],
+          "tableTo": "sub_categories",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -6409,9 +6409,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "seed_allocations_zone_idx": {
           "name": "seed_allocations_zone_idx",
@@ -6424,53 +6424,53 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "seed_allocations_organization_id_organizations_id_fk": {
           "name": "seed_allocations_organization_id_organizations_id_fk",
           "tableFrom": "seed_allocations",
-          "tableTo": "organizations",
-          "schemaTo": "governance",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organizations",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "seed_allocations_zone_id_zones_id_fk": {
           "name": "seed_allocations_zone_id_zones_id_fk",
           "tableFrom": "seed_allocations",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "seed_allocations_allocated_by_id_users_id_fk": {
           "name": "seed_allocations_allocated_by_id_users_id_fk",
           "tableFrom": "seed_allocations",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "allocated_by_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -6546,39 +6546,39 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "seed_distribution_attempts_distribution_id_seed_distributions_id_fk": {
           "name": "seed_distribution_attempts_distribution_id_seed_distributions_id_fk",
           "tableFrom": "seed_distribution_attempts",
-          "tableTo": "seed_distributions",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "distribution_id"
           ],
+          "tableTo": "seed_distributions",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "seed_distribution_attempts_actor_id_users_id_fk": {
           "name": "seed_distribution_attempts_actor_id_users_id_fk",
           "tableFrom": "seed_distribution_attempts",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "actor_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -6712,9 +6712,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "seed_distributions_producer_idx": {
           "name": "seed_distributions_producer_idx",
@@ -6727,9 +6727,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "seed_distributions_agent_idx": {
           "name": "seed_distributions_agent_idx",
@@ -6742,9 +6742,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "seed_distributions_org_idx": {
           "name": "seed_distributions_org_idx",
@@ -6757,9 +6757,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "seed_distributions_status_idx": {
           "name": "seed_distributions_status_idx",
@@ -6772,81 +6772,81 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "seed_distributions_allocation_id_seed_allocations_id_fk": {
           "name": "seed_distributions_allocation_id_seed_allocations_id_fk",
           "tableFrom": "seed_distributions",
-          "tableTo": "seed_allocations",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "allocation_id"
           ],
+          "tableTo": "seed_allocations",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "seed_distributions_producer_id_producers_id_fk": {
           "name": "seed_distributions_producer_id_producers_id_fk",
           "tableFrom": "seed_distributions",
-          "tableTo": "producers",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "producer_id"
           ],
+          "tableTo": "producers",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "seed_distributions_agent_id_users_id_fk": {
           "name": "seed_distributions_agent_id_users_id_fk",
           "tableFrom": "seed_distributions",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "agent_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "seed_distributions_organization_id_organizations_id_fk": {
           "name": "seed_distributions_organization_id_organizations_id_fk",
           "tableFrom": "seed_distributions",
-          "tableTo": "organizations",
-          "schemaTo": "governance",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organizations",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         },
         "seed_distributions_zone_id_zones_id_fk": {
           "name": "seed_distributions_zone_id_zones_id_fk",
           "tableFrom": "seed_distributions",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -6910,9 +6910,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "stock_movements_created_idx": {
           "name": "stock_movements_created_idx",
@@ -6925,25 +6925,25 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "stock_movements_stock_id_stocks_id_fk": {
           "name": "stock_movements_stock_id_stocks_id_fk",
           "tableFrom": "stock_movements",
-          "tableTo": "stocks",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "stock_id"
           ],
+          "tableTo": "stocks",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -7047,9 +7047,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "stocks_warehouse_idx": {
           "name": "stocks_warehouse_idx",
@@ -7062,9 +7062,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "stocks_org_idx": {
           "name": "stocks_org_idx",
@@ -7077,9 +7077,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "stocks_type_idx": {
           "name": "stocks_type_idx",
@@ -7092,9 +7092,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "stocks_verifier_idx": {
           "name": "stocks_verifier_idx",
@@ -7107,67 +7107,67 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "stocks_farm_id_farms_id_fk": {
           "name": "stocks_farm_id_farms_id_fk",
           "tableFrom": "stocks",
-          "tableTo": "farms",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "farm_id"
           ],
+          "tableTo": "farms",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "stocks_warehouse_id_warehouses_id_fk": {
           "name": "stocks_warehouse_id_warehouses_id_fk",
           "tableFrom": "stocks",
-          "tableTo": "warehouses",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "warehouse_id"
           ],
+          "tableTo": "warehouses",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "stocks_organization_id_organizations_id_fk": {
           "name": "stocks_organization_id_organizations_id_fk",
           "tableFrom": "stocks",
-          "tableTo": "organizations",
-          "schemaTo": "governance",
           "columnsFrom": [
             "organization_id"
           ],
+          "tableTo": "organizations",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "stocks_verified_by_id_users_id_fk": {
           "name": "stocks_verified_by_id_users_id_fk",
           "tableFrom": "stocks",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "verified_by_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -7244,25 +7244,25 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "warehouses_zone_id_zones_id_fk": {
           "name": "warehouses_zone_id_zones_id_fk",
           "tableFrom": "warehouses",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -7383,9 +7383,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_actions_user_idx": {
           "name": "agent_actions_user_idx",
@@ -7398,9 +7398,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_actions_batch_idx": {
           "name": "agent_actions_batch_idx",
@@ -7413,9 +7413,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_actions_name_idx": {
           "name": "agent_actions_name_idx",
@@ -7428,9 +7428,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_actions_order_unique": {
           "name": "agent_actions_order_unique",
@@ -7443,9 +7443,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_actions_queue_idx": {
           "name": "agent_actions_queue_idx",
@@ -7464,39 +7464,39 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "agent_actions_order_id_orders_id_fk": {
           "name": "agent_actions_order_id_orders_id_fk",
           "tableFrom": "agent_actions",
-          "tableTo": "orders",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "order_id"
           ],
+          "tableTo": "orders",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "agent_actions_user_id_users_id_fk": {
           "name": "agent_actions_user_id_users_id_fk",
           "tableFrom": "agent_actions",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -7578,9 +7578,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "audit_logs_entity_idx": {
           "name": "audit_logs_entity_idx",
@@ -7593,9 +7593,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "audit_logs_entity_time_idx": {
           "name": "audit_logs_entity_time_idx",
@@ -7614,25 +7614,25 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "audit_logs_actor_id_users_id_fk": {
           "name": "audit_logs_actor_id_users_id_fk",
           "tableFrom": "audit_logs",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "actor_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         }
       },
       "compositePrimaryKeys": {},
@@ -7779,9 +7779,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "conversations_agent_idx": {
           "name": "conversations_agent_idx",
@@ -7794,9 +7794,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "conversations_created_idx": {
           "name": "conversations_created_idx",
@@ -7809,9 +7809,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "conversations_followup_idx": {
           "name": "conversations_followup_idx",
@@ -7824,9 +7824,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "conversations_audit_unique": {
           "name": "conversations_audit_unique",
@@ -7839,39 +7839,39 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "conversations_user_id_users_id_fk": {
           "name": "conversations_user_id_users_id_fk",
           "tableFrom": "conversations",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "restrict",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "restrict"
         },
         "conversations_zone_id_zones_id_fk": {
           "name": "conversations_zone_id_zones_id_fk",
           "tableFrom": "conversations",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -7962,9 +7962,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "demand_signals_occurrences_idx": {
           "name": "demand_signals_occurrences_idx",
@@ -7977,39 +7977,39 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "demand_signals_user_id_users_id_fk": {
           "name": "demand_signals_user_id_users_id_fk",
           "tableFrom": "demand_signals",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "demand_signals_zone_id_zones_id_fk": {
           "name": "demand_signals_zone_id_zones_id_fk",
           "tableFrom": "demand_signals",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -8085,9 +8085,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "moderation_events_user_idx": {
           "name": "moderation_events_user_idx",
@@ -8100,9 +8100,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "moderation_events_kind_idx": {
           "name": "moderation_events_kind_idx",
@@ -8115,25 +8115,25 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "moderation_events_user_id_users_id_fk": {
           "name": "moderation_events_user_id_users_id_fk",
           "tableFrom": "moderation_events",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -8262,9 +8262,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "outbox_due_idx": {
           "name": "outbox_due_idx",
@@ -8283,9 +8283,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "outbox_solicitation_idx": {
           "name": "outbox_solicitation_idx",
@@ -8298,39 +8298,39 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "notification_outbox_solicitation_id_solicitations_id_fk": {
           "name": "notification_outbox_solicitation_id_solicitations_id_fk",
           "tableFrom": "notification_outbox",
-          "tableTo": "solicitations",
-          "schemaTo": "intelligence",
           "columnsFrom": [
             "solicitation_id"
           ],
+          "tableTo": "solicitations",
+          "schemaTo": "intelligence",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "notification_outbox_recipient_user_id_users_id_fk": {
           "name": "notification_outbox_recipient_user_id_users_id_fk",
           "tableFrom": "notification_outbox",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "recipient_user_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -8444,9 +8444,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "solicitations_offer_buyer_uq": {
           "name": "solicitations_offer_buyer_uq",
@@ -8465,9 +8465,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "solicitations_kind_status_idx": {
           "name": "solicitations_kind_status_idx",
@@ -8486,9 +8486,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "solicitations_auction_idx": {
           "name": "solicitations_auction_idx",
@@ -8501,95 +8501,95 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "solicitations_auction_id_auctions_id_fk": {
           "name": "solicitations_auction_id_auctions_id_fk",
           "tableFrom": "solicitations",
-          "tableTo": "auctions",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "auction_id"
           ],
+          "tableTo": "auctions",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "solicitations_market_offer_id_market_offers_id_fk": {
           "name": "solicitations_market_offer_id_market_offers_id_fk",
           "tableFrom": "solicitations",
-          "tableTo": "market_offers",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "market_offer_id"
           ],
+          "tableTo": "market_offers",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "solicitations_target_producer_id_producers_id_fk": {
           "name": "solicitations_target_producer_id_producers_id_fk",
           "tableFrom": "solicitations",
-          "tableTo": "producers",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "target_producer_id"
           ],
+          "tableTo": "producers",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "solicitations_target_buyer_id_buyer_profiles_id_fk": {
           "name": "solicitations_target_buyer_id_buyer_profiles_id_fk",
           "tableFrom": "solicitations",
-          "tableTo": "buyer_profiles",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "target_buyer_id"
           ],
+          "tableTo": "buyer_profiles",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         },
         "solicitations_sub_category_id_sub_categories_id_fk": {
           "name": "solicitations_sub_category_id_sub_categories_id_fk",
           "tableFrom": "solicitations",
-          "tableTo": "sub_categories",
-          "schemaTo": "governance",
           "columnsFrom": [
             "sub_category_id"
           ],
+          "tableTo": "sub_categories",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "solicitations_zone_id_zones_id_fk": {
           "name": "solicitations_zone_id_zones_id_fk",
           "tableFrom": "solicitations",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -8670,26 +8670,26 @@
         "trust_scores_user_id_users_id_fk": {
           "name": "trust_scores_user_id_users_id_fk",
           "tableFrom": "trust_scores",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {
         "trust_scores_user_id_unique": {
           "name": "trust_scores_user_id_unique",
-          "nullsNotDistinct": false,
           "columns": [
             "user_id"
-          ]
+          ],
+          "nullsNotDistinct": false
         }
       },
       "policies": {},
@@ -8901,9 +8901,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "ix_preorder_drafts_order_id": {
           "name": "ix_preorder_drafts_order_id",
@@ -8916,10 +8916,10 @@
             }
           ],
           "isUnique": false,
-          "where": "\"marketplace\".\"preorder_drafts\".\"order_id\" IS NOT NULL",
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "where": "\"marketplace\".\"preorder_drafts\".\"order_id\" IS NOT NULL",
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -8990,9 +8990,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -9063,9 +9063,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -9136,9 +9136,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -9252,9 +9252,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_llm_calls_provider_idx": {
           "name": "agent_llm_calls_provider_idx",
@@ -9273,25 +9273,25 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "agent_llm_calls_turn_id_agent_turns_id_fk": {
           "name": "agent_llm_calls_turn_id_agent_turns_id_fk",
           "tableFrom": "agent_llm_calls",
-          "tableTo": "agent_turns",
-          "schemaTo": "intelligence",
           "columnsFrom": [
             "turn_id"
           ],
+          "tableTo": "agent_turns",
+          "schemaTo": "intelligence",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -9407,9 +9407,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_tool_calls_tool_idx": {
           "name": "agent_tool_calls_tool_idx",
@@ -9428,9 +9428,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_tool_calls_status_idx": {
           "name": "agent_tool_calls_status_idx",
@@ -9449,25 +9449,25 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "agent_tool_calls_turn_id_agent_turns_id_fk": {
           "name": "agent_tool_calls_turn_id_agent_turns_id_fk",
           "tableFrom": "agent_tool_calls",
-          "tableTo": "agent_turns",
-          "schemaTo": "intelligence",
           "columnsFrom": [
             "turn_id"
           ],
+          "tableTo": "agent_turns",
+          "schemaTo": "intelligence",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "cascade"
         }
       },
       "compositePrimaryKeys": {},
@@ -9752,9 +9752,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_turns_conversation_idx": {
           "name": "agent_turns_conversation_idx",
@@ -9773,9 +9773,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_turns_user_idx": {
           "name": "agent_turns_user_idx",
@@ -9788,9 +9788,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_turns_phone_idx": {
           "name": "agent_turns_phone_idx",
@@ -9809,9 +9809,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_turns_intent_idx": {
           "name": "agent_turns_intent_idx",
@@ -9830,9 +9830,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_turns_workflow_idx": {
           "name": "agent_turns_workflow_idx",
@@ -9851,9 +9851,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_turns_outcome_idx": {
           "name": "agent_turns_outcome_idx",
@@ -9872,9 +9872,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "agent_turns_error_idx": {
           "name": "agent_turns_error_idx",
@@ -9893,10 +9893,10 @@
             }
           ],
           "isUnique": false,
-          "where": "\"intelligence\".\"agent_turns\".\"error_code\" IS NOT NULL",
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "where": "\"intelligence\".\"agent_turns\".\"error_code\" IS NOT NULL",
+          "concurrently": false
         },
         "agent_turns_trace_idx": {
           "name": "agent_turns_trace_idx",
@@ -9909,10 +9909,10 @@
             }
           ],
           "isUnique": false,
-          "where": "\"intelligence\".\"agent_turns\".\"trace_id\" IS NOT NULL",
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "where": "\"intelligence\".\"agent_turns\".\"trace_id\" IS NOT NULL",
+          "concurrently": false
         },
         "agent_turns_sid_retry_uq": {
           "name": "agent_turns_sid_retry_uq",
@@ -9931,26 +9931,26 @@
             }
           ],
           "isUnique": true,
-          "where": "\"intelligence\".\"agent_turns\".\"message_sid\" IS NOT NULL",
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "where": "\"intelligence\".\"agent_turns\".\"message_sid\" IS NOT NULL",
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "agent_turns_user_id_users_id_fk": {
           "name": "agent_turns_user_id_users_id_fk",
           "tableFrom": "agent_turns",
-          "tableTo": "users",
-          "schemaTo": "auth",
           "columnsFrom": [
             "user_id"
           ],
+          "tableTo": "users",
+          "schemaTo": "auth",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -10139,9 +10139,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "business_events_event_name_idx": {
           "name": "business_events_event_name_idx",
@@ -10160,9 +10160,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "business_events_journey_idx": {
           "name": "business_events_journey_idx",
@@ -10181,9 +10181,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "business_events_occurred_at_idx": {
           "name": "business_events_occurred_at_idx",
@@ -10196,9 +10196,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "business_events_buyer_idx": {
           "name": "business_events_buyer_idx",
@@ -10217,9 +10217,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "business_events_entity_idx": {
           "name": "business_events_entity_idx",
@@ -10238,9 +10238,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "business_events_sub_category_idx": {
           "name": "business_events_sub_category_idx",
@@ -10259,9 +10259,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "business_events_zone_idx": {
           "name": "business_events_zone_idx",
@@ -10280,81 +10280,81 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {
         "business_events_buyer_id_buyer_profiles_id_fk": {
           "name": "business_events_buyer_id_buyer_profiles_id_fk",
           "tableFrom": "business_events",
-          "tableTo": "buyer_profiles",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "buyer_id"
           ],
+          "tableTo": "buyer_profiles",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "business_events_producer_id_producers_id_fk": {
           "name": "business_events_producer_id_producers_id_fk",
           "tableFrom": "business_events",
-          "tableTo": "producers",
-          "schemaTo": "marketplace",
           "columnsFrom": [
             "producer_id"
           ],
+          "tableTo": "producers",
+          "schemaTo": "marketplace",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "business_events_category_id_categories_id_fk": {
           "name": "business_events_category_id_categories_id_fk",
           "tableFrom": "business_events",
-          "tableTo": "categories",
-          "schemaTo": "governance",
           "columnsFrom": [
             "category_id"
           ],
+          "tableTo": "categories",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "business_events_sub_category_id_sub_categories_id_fk": {
           "name": "business_events_sub_category_id_sub_categories_id_fk",
           "tableFrom": "business_events",
-          "tableTo": "sub_categories",
-          "schemaTo": "governance",
           "columnsFrom": [
             "sub_category_id"
           ],
+          "tableTo": "sub_categories",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         },
         "business_events_zone_id_zones_id_fk": {
           "name": "business_events_zone_id_zones_id_fk",
           "tableFrom": "business_events",
-          "tableTo": "zones",
-          "schemaTo": "governance",
           "columnsFrom": [
             "zone_id"
           ],
+          "tableTo": "zones",
+          "schemaTo": "governance",
           "columnsTo": [
             "id"
           ],
-          "onDelete": "set null",
-          "onUpdate": "no action"
+          "onUpdate": "no action",
+          "onDelete": "set null"
         }
       },
       "compositePrimaryKeys": {},
@@ -10563,9 +10563,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "buyer_daily_metrics_date_zone_idx": {
           "name": "buyer_daily_metrics_date_zone_idx",
@@ -10584,9 +10584,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -10741,9 +10741,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "direct_daily_metrics_date_idx": {
           "name": "direct_daily_metrics_date_idx",
@@ -10756,9 +10756,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -10859,9 +10859,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "event_outbox_claim_idx": {
           "name": "event_outbox_claim_idx",
@@ -10880,9 +10880,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -11042,9 +11042,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "market_balance_daily_snapshot_date_idx": {
           "name": "market_balance_daily_snapshot_date_idx",
@@ -11057,9 +11057,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -11180,9 +11180,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -11341,9 +11341,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "producer_daily_metrics_date_zone_idx": {
           "name": "producer_daily_metrics_date_zone_idx",
@@ -11362,9 +11362,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -11478,9 +11478,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "producer_quantity_daily_metrics_date_idx": {
           "name": "producer_quantity_daily_metrics_date_idx",
@@ -11493,9 +11493,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -11634,9 +11634,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "producer_supply_daily_snapshot_date_idx": {
           "name": "producer_supply_daily_snapshot_date_idx",
@@ -11649,9 +11649,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -11883,9 +11883,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "recurring_daily_metrics_date_idx": {
           "name": "recurring_daily_metrics_date_idx",
@@ -11898,9 +11898,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -12080,9 +12080,9 @@
             }
           ],
           "isUnique": true,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         },
         "tender_daily_metrics_date_idx": {
           "name": "tender_daily_metrics_date_idx",
@@ -12095,9 +12095,9 @@
             }
           ],
           "isUnique": false,
-          "concurrently": false,
+          "with": {},
           "method": "btree",
-          "with": {}
+          "concurrently": false
         }
       },
       "foreignKeys": {},
@@ -12115,10 +12115,10 @@
   },
   "enums": {},
   "schemas": {},
+  "views": {},
   "sequences": {},
   "roles": {},
   "policies": {},
-  "views": {},
   "_meta": {
     "columns": {},
     "schemas": {},

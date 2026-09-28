@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ladini.agents.reducers import mark_deleted
 from ladini.core.formatting import fmt_num as _fmt_num
+from ladini.domain.bid_award import CertifiedAwardDecision
 from ladini.domain.quantity_unit import parse_quantity_unit_from_text
 from ladini.graphs.agents.market_coach.core.goals import (
     BUYER_AUCTION_TRACKING_GOALS as AUCTION_TRACKING_GOALS,
@@ -36,6 +37,13 @@ from ladini.graphs.agents.market_coach.core.goals import (
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     set_pending_interaction,
+)
+from ladini.graphs.agents.market_coach.flows.buyer.award_decision import (
+    confirmation_message,
+    execute_award,
+    lookup_award,
+    requalification_message,
+    unavailable_message,
 )
 
 # Gate GPS partagé avec preorder.py — voir
@@ -56,6 +64,7 @@ from ladini.graphs.agents.market_coach.flows.common.menu_text import (
     render_quick_actions,
     render_selection_prompt,
 )
+from ladini.graphs.agents.market_coach.services.domain.commercial_gate import flow_id_of
 from ladini.graphs.agents.market_coach.services.mcp.error_translation import (
     BUSINESS_ERROR_CODE,
 )
@@ -912,6 +921,7 @@ async def list_buyer_auctions(
     wm["available_mapping_kind"] = "buyer_auction_list"
     wm["winner_auction_id"] = None
     wm["pending_winner_bid"] = None
+    wm["pending_award"] = None
 
     return {
         "status": "WAITING_INPUT",
@@ -1000,7 +1010,10 @@ async def check_auction_status(
         for i, bid in enumerate(bids, start=1):
             bid_id = str(bid.get("bid_id") or bid.get("id") or "")
             producer = bid.get("producer") or bid.get("producer_name") or "Producteur"
-            price = bid.get("price") or bid.get("offered_price") or "?"
+            # Phase B2b : SA sémantique de prix (« 450 000 FCFA par tonne »), jamais `offered_price` + l'unité de
+            # l'enchère ; total comparable ensuite ; une offre sans base est signalée, pas interprétée.
+            price = bid.get("pricing_label") or bid.get("price") or bid.get("offered_price") or "?"
+            _total = bid.get("comparable_total")
             bid_status = str(bid.get("status") or "PENDING").upper()
             bid_emoji = (
                 "🟡"
@@ -1010,7 +1023,14 @@ async def check_auction_status(
                 else "🔴"
             )
 
-            label = f"{producer} — {price} FCFA"
+            if bid.get("pricing_label"):
+                label = f"{producer} — {price}"
+                if _total is not None:
+                    label += f" → total {_fmt_num(float(_total))} FCFA"
+                elif bid.get("requires_requalification"):
+                    label += " ⚠️ à préciser par le producteur"
+            else:
+                label = f"{producer} — {price} FCFA"
             lines.append(f"\n*{i}.* {bid_emoji} {label}")
             mapping[str(i)] = bid_id
             options.append(MenuOption(index=str(i), label=label, value=bid_id))
@@ -1509,35 +1529,21 @@ def _selection_index(state: Dict[str, Any]) -> Optional[int]:
 async def _fetch_winner_recap(
     mc_runtime: MarketRuntime, auction_id: Optional[str], bid_id: str, phone: str
 ) -> Dict[str, Any]:
-    """Projette le récap "vous allez retenir X" depuis l'état RÉEL de
-    l'offre, jamais depuis un texte mis en cache (2026-09-04, correctif
-    stale recap). SEULE fonction qui sait construire ce récap — utilisée à
-    la fois pour l'affichage initial (`confirm_winner_selection`) et pour
-    la revalidation juste avant exécution (`_execute_winner_selection`) :
-    un seul point de vérité, jamais deux implémentations qui pourraient
-    diverger."""
-    producer = "ce producteur"
-    price = None
-    product = "votre produit"
-    bid_status: Optional[str] = None
-    if auction_id:
-        gw = AuctionGateway(mc_runtime)
-        try:
-            detail = await gw.get_auction_bids(auction_id=str(auction_id), phone=phone)
-            product = (detail.get("auction") or {}).get("product") or product
-            for b in detail.get("bids") or []:
-                if str(b.get("bid_id") or b.get("id")) == str(bid_id):
-                    producer = b.get("producer") or b.get("producer_name") or producer
-                    price = b.get("price") or b.get("offered_price")
-                    bid_status = str(b.get("status") or "").upper() or None
-                    break
-        except Exception as exc:
-            logger.warning("_fetch_winner_recap: refetch failed: %s", exc)
+    """Projette le récap "vous allez retenir X" depuis l'état RÉEL de l'offre, jamais depuis un texte mis
+    en cache (2026-09-04, correctif stale recap). SEULE fonction qui sait construire ce récap — utilisée à la
+    fois pour l'affichage initial (`confirm_winner_selection`) et pour la revalidation juste avant exécution
+    (`_execute_winner_selection`).
+
+    Phase B2b : la source est `lookup_award` (`flows/buyer/award_decision.py`) — l'offre porte SA sémantique
+    de prix (base, total) et une `CertifiedAwardDecision` ; `price` (montant brut) ne sert plus qu'à
+    l'affichage de secours d'une offre sans base."""
+    lookup = await lookup_award(mc_runtime, auction_id, bid_id, phone)
     return {
-        "producer": producer,
-        "price": price,
-        "product": product,
-        "bid_status": bid_status,
+        "producer": lookup.producer,
+        "price": lookup.price,
+        "product": lookup.product,
+        "bid_status": lookup.bid_status,
+        "lookup": lookup,
     }
 
 
@@ -1545,7 +1551,11 @@ async def confirm_winner_selection(
     state: Dict[str, Any],
     mc_runtime: MarketRuntime,
 ) -> Dict[str, Any]:
-    """L'acheteur a choisi une offre : afficher un récap + demander confirmation."""
+    """L'acheteur a choisi une offre : afficher PRIX + BASE + QUANTITÉ + TOTAL et demander confirmation.
+
+    Ce qui est confirmé est une `CertifiedAwardDecision` FIGÉE (`working_memory.pending_award`) : c'est elle,
+    et non l'état relu ensuite, qui sera exécutée. Une offre sans base de prix certifiée n'est jamais
+    proposée à l'attribution (le producteur doit la requalifier)."""
     working = state.get("working_memory") or {}
     payload = state.get("transaction_payload") or {}
     auction_id = working.get("winner_auction_id")
@@ -1569,32 +1579,54 @@ async def confirm_winner_selection(
     recap = await _fetch_winner_recap(
         mc_runtime, auction_id, str(bid_id), str(state.get("user_phone") or "")
     )
-    price_txt = (
-        f" à *{_fmt_num(recap['price'])} FCFA*" if recap["price"] is not None else ""
-    )
+    lookup = recap["lookup"]
+
+    def _drop_selection() -> Dict[str, Any]:
+        wm = dict(working)
+        for k in ("available_mapping_kind", "pending_winner_bid", "pending_winner_price", "pending_award",
+                  "winner_gps_stage", "winner_gps_default"):
+            wm[k] = None
+        return wm
+
+    if lookup.found and lookup.requires_requalification:
+        logger.info("BID_LEGACY_BASIS_UNKNOWN | auction=%s | bid=%s — attribution bloquée, requalification requise",
+                    auction_id, bid_id)
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "SUCCESS",
+            "final_response": requalification_message(lookup),
+            "working_memory": _drop_selection(),
+            "available_mapping": {},
+            "ag_ui_component": None,
+        }
+    if not lookup.selectable:
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "ERROR",
+            "final_response": unavailable_message(),
+            "working_memory": _drop_selection(),
+            "available_mapping": {},
+            "ag_ui_component": None,
+        }
+
+    decision = lookup.decision
+    assert decision is not None
+    logger.info("BID_AWARD_PREPARED | flow_id=%s | auction=%s | bid=%s | version=%s | fingerprint=%s", flow_id_of(state), auction_id, bid_id, decision.decision_version, decision.fingerprint[:12])
 
     wm = dict(working)
     wm["available_mapping_kind"] = "confirm_winner"
     wm["pending_winner_bid"] = str(bid_id)
-    # (2026-09-04, correctif stale recap) : le prix EFFECTIVEMENT montré à
-    # l'acheteur devient la cible de confirmation — pas juste un texte,
-    # une VALEUR comparable. `_execute_winner_selection` la revalide contre
-    # l'état réel juste avant d'exécuter (voir sa docstring) : c'est CETTE
-    # comparaison, pas un `refresh_confirmation()` cosmétique, qui ferme
-    # la fenêtre de péremption autour de l'étape GPS.
-    wm["pending_winner_price"] = recap["price"]
+    # La décision CERTIFIÉE est ce que l'acheteur va confirmer : `_execute_winner_selection` la revalide
+    # (empreinte des termes) contre l'état réel juste avant d'exécuter et n'exécute QUE celle-ci.
+    wm["pending_award"] = decision.to_state()
+    wm["pending_winner_price"] = lookup.price
 
     return {
         "status": "WAITING_INPUT",
         **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
         "response_strategy": "ASK_MISSING_FIELD",
         "current_goal": "BUYER_CHECK_AUCTION_STATUS",
-        "final_response": (
-            f"🤝 Vous allez retenir la proposition de *{recap['producer']}*{price_txt} "
-            f"pour *{recap['product']}*.\n\n"
-            "⚠️ Cette action *clôture l'appel d'offres* et crée la commande.\n"
-            "👉 Répondez *oui* pour confirmer, ou *non* pour annuler."
-        ),
+        "final_response": confirmation_message(lookup),
         "working_memory": wm,
         "ag_ui_component": None,
     }
@@ -1610,91 +1642,82 @@ async def _execute_winner_selection(
     auction_id: Optional[str] = None,
     expected_price: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Exécute la sélection — MAIS revalide d'abord contre l'état RÉEL
-    (2026-09-04, correctif stale recap).
+    """Exécute l'attribution SUR LA DÉCISION CONFIRMÉE — après revalidation contre l'état RÉEL.
 
-    Entre le "oui" de l'acheteur (`confirm_winner_selection`, où
-    `expected_price` a été capturé) et cet appel, une étape GPS s'intercale
-    (1+ tour conversationnel). Le producteur reste libre de modifier son
-    prix ou de retirer son offre PENDANT cette fenêtre (`Bid` n'est
-    verrouillé/figé qu'au moment de `select_winning_bid` lui-même — aucune
-    nouvelle table/Draft introduite pour "geler" plus tôt, voir le rapport
-    d'audit). La BASE reste toujours cohérente dans tous les cas (le verrou
-    de `select_winning_bid` garantit qu'elle utilise TOUJOURS le prix
-    réellement courant) — ce qui manquait, c'est que le RÉCAP déjà montré à
-    l'acheteur pouvait diverger silencieusement de ce qui allait réellement
-    s'exécuter. On revalide donc ICI, juste avant d'exécuter : si le prix a
-    changé ou que l'offre n'est plus sélectionnable, on n'exécute JAMAIS
-    silencieusement sur l'ancienne valeur — on reconstruit le récap à
-    partir de `_fetch_winner_recap` (LA même projection que l'affichage
-    initial, jamais un second calcul divergent) et on redemande une
-    confirmation EXPLICITE sur l'état actuel."""
-    if auction_id and expected_price is not None:
-        recap = await _fetch_winner_recap(
-            mc_runtime, auction_id, str(bid_id), str(state.get("user_phone") or "")
-        )
-        current_status = recap["bid_status"]
-        current_price = recap["price"]
+    Entre le "oui" de l'acheteur et cet appel, une étape GPS s'intercale (1+ tour). Le producteur reste libre
+    de modifier son prix / sa base ou de retirer son offre PENDANT cette fenêtre. Règles (Phase B2b) :
 
-        if current_status is not None and current_status != "PENDING":
-            return {
-                "status": "COMPLETED",
-                "response_strategy": "ERROR",
-                "final_response": (
-                    "⚠️ Cette proposition n'est plus disponible (retirée ou déjà "
-                    "traitée entre-temps). Tapez *mes appels d'offres* pour revoir "
-                    "les offres actuelles."
-                ),
-                "working_memory": clear_wm(),
-                "ag_ui_component": None,
-            }
+    - ce qui est exécuté est `working_memory.pending_award` (objet figé), JAMAIS le bid mutable relu ou un
+      prix mémorisé dans un état brut ; il est transmis au serveur (`expected_award`) qui le revalide sous
+      verrou ;
+    - offre retirée / plus sélectionnable -> refus ; termes changés (prix, base, quantité, total) -> aucune
+      exécution silencieuse : nouvelle confirmation EXPLICITE sur les termes actuels ;
+    - pas de décision figée (session antérieure à B2b) -> on reconfirme, on n'exécute pas."""
+    working = state.get("working_memory") or {}
+    phone = str(state.get("user_phone") or "")
+    frozen = CertifiedAwardDecision.from_state(working.get("pending_award"))
+    if frozen is not None and frozen.bid_id != str(bid_id):
+        frozen = None  # décision figée d'une AUTRE offre : jamais exécutée pour celle-ci
 
-        if current_price is not None and float(current_price) != float(expected_price):
-            wm = dict(state.get("working_memory") or {})
-            wm["pending_winner_bid"] = str(bid_id)
-            wm["pending_winner_price"] = current_price
-            wm["winner_gps_stage"] = None
-            wm["winner_gps_default"] = None
-            return {
-                "status": "WAITING_INPUT",
-                **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
-                "response_strategy": "ASK_MISSING_FIELD",
-                "final_response": (
-                    f"⚠️ Le prix de cette offre a changé entre-temps : il est "
-                    f"maintenant *{_fmt_num(current_price)} FCFA*.\n\n"
-                    "👉 Répondez *oui* pour confirmer à ce nouveau prix, ou *non* pour annuler."
-                ),
-                "working_memory": wm,
-                "ag_ui_component": None,
-            }
+    lookup = await lookup_award(mc_runtime, auction_id, str(bid_id), phone)
+    if lookup.found and lookup.bid_status is not None and lookup.bid_status != "PENDING":
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "ERROR",
+            "final_response": unavailable_message(),
+            "working_memory": clear_wm(),
+            "ag_ui_component": None,
+        }
+    if lookup.found and lookup.requires_requalification:
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "SUCCESS",
+            "final_response": requalification_message(lookup),
+            "working_memory": clear_wm(),
+            "ag_ui_component": None,
+        }
+    if lookup.found and lookup.decision is not None and (
+        frozen is None or lookup.decision.fingerprint != frozen.fingerprint
+    ):
+        wm = dict(working)
+        wm["pending_winner_bid"] = str(bid_id)
+        wm["pending_award"] = lookup.decision.to_state()
+        wm["pending_winner_price"] = lookup.price
+        wm["winner_gps_stage"] = None
+        wm["winner_gps_default"] = None
+        logger.info("BID_AWARD_TERMS_CHANGED | auction=%s | bid=%s", auction_id, bid_id)
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": (
+                "⚠️ Les termes de cette offre ont *changé* entre-temps.\n\n"
+                f"{confirmation_message(lookup)}"
+            ),
+            "working_memory": wm,
+            "ag_ui_component": None,
+        }
+    if frozen is None:
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "ERROR",
+            "final_response": unavailable_message(),
+            "working_memory": clear_wm(),
+            "ag_ui_component": None,
+        }
 
-    gw = AuctionGateway(mc_runtime)
+    logger.info("BID_AWARD_CERTIFIED | flow_id=%s | auction=%s | bid=%s | version=%s | idempotency_key=%s", flow_id_of(state), auction_id, bid_id, frozen.decision_version, frozen.idempotency_key)
     try:
-        # `idempotency_key` (2026-09-17, follow-up pre-Hetzner, priorité
-        # explicite "accept bid") : accepter une offre GAGNANTE crée un
-        # `Order` — irréversible, non réexécutable sans risque (un doublon
-        # créerait une seconde commande sur la même enchère). `bid_id` est
-        # déjà l'identifiant métier stable de CETTE action précise (un bid
-        # ne peut être sélectionné gagnant qu'une fois) — pas besoin d'un
-        # objet draft/version comme PROCUREMENT/SALES_PUBLISH : une
-        # redelivery Celery du MÊME tour relit le MÊME `bid_id` depuis
-        # l'état persisté, jamais un identifiant généré à la volée.
-        result = await gw.select_winning_bid(
-            bid_id=str(bid_id),
-            phone=str(state.get("user_phone") or ""),
-            delivery_lat=delivery_lat,
-            delivery_lon=delivery_lon,
-            idempotency_key=f"select_winning_bid:{bid_id}",
+        # `idempotency_key` (2026-09-17) : accepter une offre GAGNANTE crée un `Order` — irréversible. La clé
+        # est celle de la DÉCISION (mêmes termes = même clé) : un double « oui » ou une redélivrance Celery du
+        # même tour ne crée qu'UNE commande.
+        result = await execute_award(
+            mc_runtime, frozen, phone=phone, delivery_lat=delivery_lat, delivery_lon=delivery_lon,
         )
     except MCPCallError as exc:
-        # (2026-09-02, taxonomie d'erreurs) : un BUSINESS_ERROR_CODE (ex:
-        # BusinessRuleException "hors du Burkina Faso" levée par
-        # services/database/auction.py::select_winning_bid, geofencing en
-        # défense en profondeur) porte un message déjà traduit et
-        # actionnable (error_translation.py) — ne JAMAIS le remplacer par le
-        # générique "réessayez", qui laisse croire qu'un nouvel essai
-        # pourrait suffire alors que la cause ne changera pas. Réservé aux
-        # VRAIES pannes techniques (INFRA_ERROR_CODE).
+        # (2026-09-02, taxonomie d'erreurs) : un BUSINESS_ERROR_CODE (ex: BusinessRuleException "hors du
+        # Burkina Faso", "termes changés", "base inconnue") porte un message déjà traduit et actionnable — ne
+        # JAMAIS le remplacer par le générique "réessayez". Réservé aux VRAIES pannes techniques.
         logger.warning("finalize_winner: select_winning_bid rejeté: %s", exc)
         is_business = exc.error_code == BUSINESS_ERROR_CODE
         return {
@@ -1728,6 +1751,7 @@ async def _execute_winner_selection(
             "ag_ui_component": None,
         }
 
+    logger.info("BID_AWARD_EXECUTED | flow_id=%s | auction=%s | bid=%s | version=%s | idempotency_key=%s", flow_id_of(state), auction_id, bid_id, frozen.decision_version, frozen.idempotency_key)
     summary = (
         result.get("summary_buyer")
         or "🤝 Proposition retenue ! La commande a été créée et le producteur informé."
@@ -1768,6 +1792,7 @@ async def finalize_winner(
             "available_mapping_kind",
             "pending_winner_bid",
             "pending_winner_price",
+            "pending_award",
             "winner_auction_id",
             "winner_gps_stage",
             "winner_gps_default",

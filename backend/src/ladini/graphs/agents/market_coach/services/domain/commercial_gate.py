@@ -17,6 +17,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping, Optional
 
+from ladini.domain.bid_pricing_flow import (
+    BidPriceParse,
+    is_price_reply,
+    resolve_basis_reply,
+    resolve_package_reply,
+)
 from ladini.domain.commercial_offer import CommercialOffer
 from ladini.domain.commercial_offer_flow import (
     CommercialQuestion,
@@ -130,3 +136,38 @@ __all__: list = [
     "log_offer_lifecycle",
     "offer_from_payload",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Bids (Phase B2b) : voie déterministe pour la réponse à une question de PRIX
+# ---------------------------------------------------------------------------
+
+_BID_PRICE_PHASES = frozenset({"ASK_PRICE", "ASK_PRICE_MODIFY", "CONFIRM", "CONFIRM_MODIFY"})
+_BID_BASIS_PHASES = frozenset({"ASK_BASIS", "ASK_BASIS_MODIFY"})
+_BID_PACKAGE_PHASES = frozenset({"ASK_PACKAGE", "ASK_PACKAGE_MODIFY"})
+
+
+def bid_price_reply_expected(state: Mapping[str, Any], text: str) -> bool:
+    """Vrai si l'agent vient de poser une question de prix de bid ET que `text` n'est QUE la réponse.
+
+    Le prix d'un bid ne dépend pas d'un classifieur LLM : « 450000 » après « quel prix par tonne ? », « par
+    tonne » après « par tonne ou pour l'ensemble ? » ou « 25 kg » après « que contient une caisse ? » sont
+    lus par `domain/bid_pricing_flow.py` dans le contexte de la question (le LLM, lui, ne fait que suggérer)."""
+    wm = state.get("working_memory") or {}
+    phase = str(wm.get("bid_phase") or "").upper()
+    if phase in _BID_PRICE_PHASES:
+        return is_price_reply(text)
+    pending = BidPriceParse.from_state(wm.get("pending_bid_pricing"))
+    if pending is None or pending.amount is None:
+        return False
+    brief = ((wm.get("my_bids_brief") if phase.endswith("_MODIFY") else wm.get("auction_brief")) or {})
+    ref = wm.get("pending_modify_bid") if phase.endswith("_MODIFY") else wm.get("pending_bid_auction")
+    info = brief.get(str(ref)) or {}
+    unit, qty = info.get("unit"), info.get("quantity")
+    if not unit or qty is None:
+        return False
+    if phase in _BID_BASIS_PHASES:
+        return resolve_basis_reply(text, amount=pending.amount, auction_unit=str(unit), auction_quantity=qty).is_resolved
+    if phase in _BID_PACKAGE_PHASES:
+        return resolve_package_reply(pending, text, auction_unit=str(unit)).is_resolved
+    return False

@@ -159,7 +159,7 @@ class TestRfqFullJourneyToCompletion:
         # ── PRODUCER A -> bid 250 ──
         svc_a = _auction_svc(_FakePlaceBidSession(auction, None), producer=producer_a)
         session_a = svc_a.session
-        run(svc_a.place_bid(auction_id=str(auction.id), phone=phone_a, offered_price=250.0))
+        run(svc_a.place_bid(auction_id=str(auction.id), phone=phone_a, offered_price=250.0, price_basis="PER_BASE_UNIT", price_unit="TONNE"))
         bid_a = session_a.added[0]
 
         # ── BUYER -> select A (winner) ──
