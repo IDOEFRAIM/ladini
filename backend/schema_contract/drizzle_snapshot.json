@@ -12111,6 +12111,138 @@
         }
       },
       "isRLSEnabled": false
+    },
+    "intelligence.commercial_followups": {
+      "name": "commercial_followups",
+      "schema": "intelligence",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'NONE'"
+        },
+        "assigned_commercial_id": {
+          "name": "assigned_commercial_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "last_follow_up_at": {
+          "name": "last_follow_up_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "commercial_followups_status_idx": {
+          "name": "commercial_followups_status_idx",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "commercial_followups_assigned_idx": {
+          "name": "commercial_followups_assigned_idx",
+          "columns": [
+            {
+              "expression": "assigned_commercial_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "commercial_followups_user_id_users_id_fk": {
+          "name": "commercial_followups_user_id_users_id_fk",
+          "tableFrom": "commercial_followups",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "tableTo": "users",
+          "schemaTo": "auth",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        },
+        "commercial_followups_assigned_commercial_id_users_id_fk": {
+          "name": "commercial_followups_assigned_commercial_id_users_id_fk",
+          "tableFrom": "commercial_followups",
+          "columnsFrom": [
+            "assigned_commercial_id"
+          ],
+          "tableTo": "users",
+          "schemaTo": "auth",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "set null"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "commercial_followups_user_id_unique": {
+          "name": "commercial_followups_user_id_unique",
+          "columns": [
+            "user_id"
+          ],
+          "nullsNotDistinct": false
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "commercial_followups_status_chk": {
+          "name": "commercial_followups_status_chk",
+          "value": "\"intelligence\".\"commercial_followups\".\"status\" IN ('NONE','TO_FOLLOW_UP','FOLLOWED_UP','RESOLVED','NOT_INTERESTED')"
+        }
+      },
+      "isRLSEnabled": false
     }
   },
   "enums": {},

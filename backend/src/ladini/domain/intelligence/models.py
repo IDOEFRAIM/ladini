@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -258,6 +259,10 @@ class CommercialFollowup(Base):
     __table_args__ = (
         Index("commercial_followups_status_idx", "status"),
         Index("commercial_followups_assigned_idx", "assigned_commercial_id"),
+        CheckConstraint(
+            "status IN ('NONE','TO_FOLLOW_UP','FOLLOWED_UP','RESOLVED','NOT_INTERESTED')",
+            name="commercial_followups_status_chk",
+        ),
         {"schema": "intelligence"},
     )
 

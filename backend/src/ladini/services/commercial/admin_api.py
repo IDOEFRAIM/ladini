@@ -120,7 +120,10 @@ async def list_conversations(session: AsyncSession, params: ListParams) -> dict[
         .outerjoin(CommercialFollowup, CommercialFollowup.user_id == User.id)
     )
 
-    now = datetime.now(timezone.utc)
+    # `created_at`/`last_activity` sont des TIMESTAMP WITHOUT TIME ZONE (naïfs, UTC implicite —
+    # voir orm_base.py) : comparer à un datetime aware lève TypeError côté Python et
+    # DataError côté asyncpg. Même convention que services/database/*.py.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     long_threshold = settings.COMMERCIAL_LONG_CONVERSATION_TURNS
     no_response_cutoff = now - timedelta(hours=settings.COMMERCIAL_NO_RESPONSE_HOURS)
 
@@ -291,7 +294,7 @@ async def send_follow_up(session: AsyncSession, *, actor_id: str, user_id_raw: s
     followup = (
         await session.execute(select(CommercialFollowup).where(CommercialFollowup.user_id == user_id))
     ).scalar_one_or_none()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)  # colonne naïve — voir list_conversations
     if followup is None:
         followup = CommercialFollowup(user_id=user_id, status="FOLLOWED_UP", last_follow_up_at=now)
         session.add(followup)
