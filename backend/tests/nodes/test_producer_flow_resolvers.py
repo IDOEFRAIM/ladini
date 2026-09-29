@@ -22,6 +22,28 @@ def rt(responses=None):
     return StubRuntime(responses=responses or {})
 
 
+def _certified_lot_pending(text="200 le kg", *, quantity=100, unit="KG"):
+    """`update_pending` d'un lot dont le prix est DÉJÀ certifié (B2c.7) : `price_offer` + `price_parse`."""
+    from ladini.domain.bid_pricing_flow import parse_bid_price
+    from ladini.domain.production_update_offer import build_production_price_correction
+
+    parsed = parse_bid_price(text, auction_unit=unit, auction_quantity=quantity)
+    assert parsed.is_resolved
+    offer = build_production_price_correction(
+        cycle_id="c1", product_label="maïs", pricing=parsed.snapshot(quantity, unit), quantity=quantity, unit=unit
+    )
+    return {"price_offer": offer.to_state(), "price_parse": parsed.to_state()}
+
+
+_LOT_LISTING = {"cycle_id": "c1", "label": "maïs", "quantity": 100, "unit": "KG"}
+_LIST_ONE_LOT = {
+    "list_producer_productions": {
+        "status": "success",
+        "data": [{"cycle_id": "c1", "product_label": "maïs", "quantity": 100, "unit": "KG", "price": 100}],
+    }
+}
+
+
 class _Msg:
     def __init__(self, content: str) -> None:
         self.content = content
@@ -480,14 +502,20 @@ class TestResolveCycleForUpdate:
 
     def test_confirm_phase_with_a_new_correction_updates_the_recap(self):
         from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
-        working = {"update_phase": "CONFIRM", "update_cycle_id": "c1", "update_pending": {"price": 200}}
+        working = {
+            "update_phase": "CONFIRM", "update_cycle_id": "c1", "update_listing": _LOT_LISTING,
+            "update_pending": _certified_lot_pending("200 le kg"),
+        }
         result = run(_resolve_cycle_for_update(rt(), "+2260", {}, working, "quantité 500 kg", ""))
-        assert result["working_memory"]["update_pending"]["quantity"] == 500
-        assert result["working_memory"]["update_pending"]["price"] == 200
+        pending = result["working_memory"]["update_pending"]
+        assert pending["quantity"] == 500
+        # le prix certifié est re-certifié sur la nouvelle quantité, jamais perdu ni resté périmé
+        assert pending["price_offer"]["pricing"]["commercial_price_amount"] == "200"
+        assert pending["price_offer"]["quantity"] == "500"
 
     def test_confirm_event_success_writes_and_clears_state(self):
         from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
-        working = {"update_phase": "CONFIRM", "update_cycle_id": "c1", "update_pending": {"price": 200}}
+        working = {"update_phase": "CONFIRM", "update_cycle_id": "c1", "update_pending": _certified_lot_pending()}
         runtime = rt({"update_production_fields": {"status": "success", "message": "OK"}})
         result = run(_resolve_cycle_for_update(runtime, "+2260", {}, working, "oui", "CONFIRM"))
         assert result["status"] == "COMPLETED"
@@ -506,13 +534,13 @@ class TestResolveCycleForUpdate:
                 raise RuntimeError("boom")
 
         monkeypatch.setattr(mod, "StockGateway", _BoomGateway)
-        working = {"update_phase": "CONFIRM", "update_cycle_id": "c1", "update_pending": {"price": 200}}
+        working = {"update_phase": "CONFIRM", "update_cycle_id": "c1", "update_pending": _certified_lot_pending()}
         result = run(mod._resolve_cycle_for_update(rt(), "+2260", {}, working, "oui", "CONFIRM"))
         assert result["response_strategy"] == "ERROR"
 
     def test_confirm_event_gateway_failure_result(self):
         from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
-        working = {"update_phase": "CONFIRM", "update_cycle_id": "c1", "update_pending": {"price": 200}}
+        working = {"update_phase": "CONFIRM", "update_cycle_id": "c1", "update_pending": _certified_lot_pending()}
         runtime = rt({"update_production_fields": {"status": "error", "message": "Refusé"}})
         result = run(_resolve_cycle_for_update(runtime, "+2260", {}, working, "oui", "CONFIRM"))
         assert result["final_response"] == "Refusé"
@@ -538,9 +566,13 @@ class TestResolveCycleForUpdate:
     def test_collect_phase_with_correction_moves_to_confirm(self):
         from ladini.graphs.agents.market_coach.flows.producer.flow import _resolve_cycle_for_update
         working = {}
-        result = run(_resolve_cycle_for_update(rt(), "+2260", {"cycle_id": "c1"}, working, "prix 400", ""))
+        result = run(_resolve_cycle_for_update(
+            rt(_LIST_ONE_LOT), "+2260", {"cycle_id": "c1"}, working, "prix 400 le kg", "",
+        ))
         assert to_tunnel_category(get_pending_interaction(result)) == "CONFIRMATION"
-        assert result["working_memory"]["update_pending"]["price"] == 400.0
+        pending = result["working_memory"]["update_pending"]
+        assert "price" not in pending  # jamais de prix brut dans l'état confirmé
+        assert pending["price_offer"]["pricing"]["price_basis"] == "PER_BASE_UNIT"
 
     def test_ambiguous_confirm_reply_gets_an_adaptive_note(self):
         """Chantier résilience 2026-08 : la branche "ni correction ni CONFIRM

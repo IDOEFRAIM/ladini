@@ -23,6 +23,7 @@ from ladini.domain.bid_award import (
     build_award_decision,
     compare_bid,
 )
+from ladini.domain.bid_pricing_flow import BidPriceParse
 from ladini.domain.commercial_offer import CommercialOffer, PriceBasis
 from ladini.domain.commercial_pricing_snapshot import (
     CommercialPricingSnapshot,
@@ -35,6 +36,10 @@ from ladini.domain.commercial_pricing_snapshot import (
     build_total_lot_order_item_snapshot,
     snapshot_from_offer,
     to_decimal,
+)
+from ladini.domain.production_update_offer import (
+    ProductionPriceNotCertifiable,
+    build_production_price_correction,
 )
 from ladini.services.database.errors import BusinessRuleException
 
@@ -103,6 +108,68 @@ def invalidate_commercial_pricing_on_edit(
     total_lot_resized = quantity_changed and current.price_basis == PriceBasis.TOTAL_LOT
     if price_changed or unit_changed or tiers_changed or total_lot_resized:
         product.commercial_pricing = None
+        return True
+    return False
+
+
+def certify_market_offer_price_correction(
+    pricing_state: Optional[Dict[str, Any]],
+    *,
+    cycle_id: Any,
+    product_label: str,
+    quantity: Any,
+    unit: str,
+    expected_fingerprint: Optional[str] = None,
+) -> Tuple[Dict[str, Any], float]:
+    """`(MarketOffer.pricing_snapshot, MarketOffer.price_per_unit)` d'une correction de prix (B2c.7).
+
+    L'appelant ne fournit jamais un snapshot ni un prix par unité : il fournit le prix ANALYSÉ
+    (`BidPriceParse.to_state()` — montant, base, provenance). Le snapshot est reconstruit contre la
+    quantité/unité FINALES du lot, RE-VALIDÉ (base résolue, provenance exécutable, `PER_PACKAGE`
+    refusé), et le prix legacy en est dérivé en Decimal. `expected_fingerprint` (ce que le
+    producteur a CONFIRMÉ) : des termes qui ont changé depuis -> rejet, jamais une écriture sur
+    d'anciens termes. Toute incohérence échoue AVANT l'écriture."""
+    parsed = BidPriceParse.from_state(pricing_state)
+    if parsed is None:
+        raise BusinessRuleException("Prix de la production illisible.", reason="production_pricing_invalid")
+    try:
+        snapshot = parsed.snapshot(quantity, unit)
+        correction = build_production_price_correction(
+            cycle_id=str(cycle_id), product_label=product_label, pricing=snapshot, quantity=quantity, unit=unit,
+        )
+    except ProductionPriceNotCertifiable as exc:
+        raise BusinessRuleException(exc.message, reason=exc.reason) from exc
+    except PricingSnapshotError as exc:
+        logger.warning("PRODUCTION_PRICING_SNAPSHOT_REJECTED | cycle=%s | %s", cycle_id, exc)
+        raise BusinessRuleException(
+            f"Sémantique de prix incohérente : {exc}", reason="production_pricing_invalid"
+        ) from exc
+    if expected_fingerprint is not None and expected_fingerprint != correction.fingerprint:
+        logger.warning(
+            "PRODUCTION_PRICE_TERMS_CHANGED | cycle=%s | expected=%s | current=%s",
+            cycle_id, str(expected_fingerprint)[:12], correction.fingerprint[:12],
+        )
+        raise BusinessRuleException(
+            "Les termes de ce lot (quantité, unité ou prix) ont changé depuis votre confirmation. "
+            "Refaites votre correction.",
+            reason="production_price_terms_changed",
+        )
+    return dict(correction.pricing.to_dict()), float(correction.price_per_unit)
+
+
+def invalidate_market_offer_pricing_on_edit(
+    offer: Any, *, price_changed: bool, unit_changed: bool, quantity_changed: bool
+) -> bool:
+    """Édition d'un `MarketOffer` SANS prix certifié (prix brut, unité, ou quantité d'un lot à prix
+    total) : le `pricing_snapshot` posé à la déclaration (B2c.3) devient FAUX — on le retire plutôt
+    que de le laisser affirmer l'ancien prix/base (la recherche acheteur le lit en priorité). Jamais
+    de re-certification inventée. Retourne True si le snapshot a été retiré."""
+    current = CommercialPricingSnapshot.from_dict(getattr(offer, "pricing_snapshot", None))
+    if current is None:
+        return False
+    total_lot_resized = quantity_changed and current.price_basis == PriceBasis.TOTAL_LOT
+    if price_changed or unit_changed or total_lot_resized:
+        offer.pricing_snapshot = None
         return True
     return False
 
@@ -320,6 +387,8 @@ __all__ = [
     "bid_display_fields",
     "certify_commercial_offer",
     "invalidate_commercial_pricing_on_edit",
+    "certify_market_offer_price_correction",
+    "invalidate_market_offer_pricing_on_edit",
     "order_item_snapshot_columns",
     "declared_sale_snapshot_columns",
     "bid_snapshot_columns",

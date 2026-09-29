@@ -35,6 +35,9 @@ _ORIGINAL_STALE_WM_KEYS = frozenset(
         "pending_bid_pricing",
         "update_phase", "update_cycle_id", "update_product_id",
         "update_pending",
+        # Phase B2c.7 (2026-09-29) : lot relu (quantité/unité) + question de base du prix en attente —
+        # même mini machine à états `update_phase`, purgés avec elle à l'abandon du tunnel.
+        "update_listing", "update_price_pending",
         "winner_gps_stage",
     }
 )

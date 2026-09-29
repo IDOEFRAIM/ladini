@@ -17,6 +17,19 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ladini.agents.reducers import mark_deleted
 from ladini.core.formatting import fmt_num as _fmt_num
+from ladini.domain.bid_pricing_flow import (
+    BidPriceParse,
+    BidPriceStatus,
+    parse_bid_price,
+    resolve_basis_reply,
+)
+from ladini.domain.commercial_offer import PriceBasis
+from ladini.domain.commercial_pricing_snapshot import PricingSnapshotError
+from ladini.domain.production_update_offer import (
+    CertifiedProductionPriceCorrection,
+    ProductionPriceNotCertifiable,
+    build_production_price_correction,
+)
 from ladini.domain.quantity_unit import (
     extract_deterministic_pricing_tiers,
     extract_single_pricing_tier_correction,
@@ -1479,8 +1492,15 @@ def _format_pending_recap(pending: Dict[str, Any], *, noun: str) -> str:
     lines = [f"📝 *Récapitulatif de la modification ({noun})*"]
     if pending.get("product"):
         lines.append(f"- Nouveau nom : {pending['product']}")
-    unit_disp = str(pending.get("unit") or "KG").upper()
-    if pending.get("price") is not None:
+    # B2c.7 : un prix de LOT certifié (`price_offer`) est affiché avec la base que le producteur a
+    # DITE (« pour l'ensemble », « par kg »), jamais réinterprété en « FCFA/{unité} » — qui est
+    # exactement la fausse affirmation d'un prix par unité pour un prix total. Le chemin `price`
+    # brut ne subsiste que pour le flux produit catalogue (hors périmètre B2c.7).
+    price_offer = CertifiedProductionPriceCorrection.from_state(pending.get("price_offer"))
+    unit_disp = str(pending.get("unit") or (price_offer.unit if price_offer else "KG")).upper()
+    if price_offer is not None:
+        lines.append(price_offer.recap_line())
+    elif pending.get("price") is not None:
         lines.append(f"- Nouveau prix : {_fmt_num(pending['price'])} FCFA/{unit_disp}")
     if pending.get("quantity") is not None:
         lines.append(
@@ -1512,6 +1532,7 @@ def _format_pending_recap(pending: Dict[str, Any], *, noun: str) -> str:
     if (
         pending.get("unit")
         and pending.get("price") is None
+        and price_offer is None
         and pending.get("quantity") is None
     ):
         lines.append(f"- Nouvelle unité : {unit_disp}")
@@ -1537,6 +1558,219 @@ def _format_pending_recap(pending: Dict[str, Any], *, noun: str) -> str:
 # font un reset générique total sur REJECT, incapables de distinguer une
 # annulation d'une correction ("non, en fait c'est 973 kg").
 # =====================================================================
+
+
+# ---------------------------------------------------------------------
+# Prix d'un LOT (Phase B2c.7) — certifier AVANT d'écrire. Même moteur que les bids/négociation
+# (`bid_pricing_flow.parse_bid_price`) contre la quantité/unité DU LOT ; jamais la regex nue
+# `_extract_price_correction`, qui ne connaît ni « pour tout » ni « 4 millions ».
+# ---------------------------------------------------------------------
+
+_PRICE_BASIS_QUESTION = (
+    "Quel est le nouveau prix (en FCFA) ? Précisez s'il est *par {unit}* ou *pour tout le lot*.\n"
+    "_Ex : « 400 par {unit} » ou « 4 500 000 pour tout »._"
+)
+_LISTING_UNAVAILABLE = (
+    "Je n'arrive pas à relire ce lot pour vérifier le prix pour le moment. "
+    "Renvoyez votre prix dans un instant."
+)
+
+
+async def _load_update_listing(
+    mc_runtime: MarketRuntime, phone: str, cycle_id: str, working: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Quantité/unité ACTUELLES du lot (dont dépend tout prix « pour tout »). Mis en cache dans
+    `working_memory` ; `None` si le lot n'a pas pu être relu — on ne certifie alors RIEN."""
+    cached = working.get("update_listing")
+    if isinstance(cached, dict) and str(cached.get("cycle_id")) == str(cycle_id):
+        return cached
+    try:
+        result = await StockGateway(mc_runtime).list_productions(str(phone))
+    except Exception as exc:
+        logger.error("PRODUCTION_UPDATE_FUTURE: relecture du lot a échoué: %s", exc)
+        return None
+    if not is_success_response(result):
+        return None
+    for it in (result or {}).get("data") or []:
+        if str(it.get("cycle_id") or "") == str(cycle_id):
+            return {
+                "cycle_id": str(cycle_id),
+                "label": it.get("product_label") or "ce lot",
+                "quantity": it.get("quantity"),
+                "unit": str(it.get("unit") or "KG").upper(),
+            }
+    return None
+
+
+def _lot_terms(listing: Dict[str, Any], pending: Dict[str, Any]) -> tuple[Any, str]:
+    """(quantité, unité) du lot APRÈS la mise à jour en cours (les corrections en attente priment)."""
+    qty = pending.get("quantity") if pending.get("quantity") is not None else listing.get("quantity")
+    unit = str(pending.get("unit") or listing.get("unit") or "KG").upper()
+    return qty, unit
+
+
+def _certify_lot_price(
+    parsed: BidPriceParse, *, cycle_id: str, listing: Dict[str, Any], pending: Dict[str, Any]
+) -> "tuple[Optional[CertifiedProductionPriceCorrection], Optional[str]]":
+    """`(offre, None)` si certifiable ; sinon `(None, message)` — jamais d'exception qui remonte au
+    graphe. `parsed` DOIT déjà être `RESOLVED` (base connue, provenance exécutable)."""
+    qty, unit = _lot_terms(listing, pending)
+    try:
+        snapshot = parsed.snapshot(qty, unit)
+        offer = build_production_price_correction(
+            cycle_id=cycle_id,
+            product_label=str(pending.get("product") or listing.get("label") or "ce lot"),
+            pricing=snapshot,
+            quantity=qty,
+            unit=unit,
+        )
+    except ProductionPriceNotCertifiable as exc:
+        return None, exc.message
+    except PricingSnapshotError as exc:
+        return None, f"Ce prix ne correspond pas à ce lot ({exc}). " + _PRICE_BASIS_QUESTION.format(unit=unit.lower())
+    return offer, None
+
+
+def _lot_response(
+    working: Dict[str, Any],
+    cycle_id: str,
+    pending: Dict[str, Any],
+    *,
+    text: str,
+    ask: bool,
+    price_wait: Optional[BidPriceParse] = None,
+    listing: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """WAITING_INPUT du tunnel « modifier un lot » : soit la question de base du prix (`ask`,
+    phase COLLECT), soit le récap à confirmer (phase CONFIRM). Rien n'est écrit ici."""
+    wm = {
+        **working,
+        "update_cycle_id": str(cycle_id),
+        "update_phase": "COLLECT" if ask else "CONFIRM",
+        "update_pending": pending,
+        "update_price_pending": (
+            {"awaiting": True, **(price_wait.to_state() if price_wait is not None else {})} if ask else None
+        ),
+        "active_goal": "PRODUCTION_UPDATE_FUTURE",
+        "available_mapping_kind": None,
+    }
+    if listing:
+        wm["update_listing"] = listing
+    interaction = (
+        set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="price_basis", goal="PRODUCTION_UPDATE_FUTURE")
+        if ask
+        else set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation")
+    )
+    return {
+        "status": "WAITING_INPUT",
+        **interaction,
+        "response_strategy": "ASK_MISSING_FIELD",
+        "current_goal": "PRODUCTION_UPDATE_FUTURE",
+        "final_response": text,
+        "working_memory": wm,
+        "ag_ui_component": None,
+    }
+
+
+async def _stage_lot_correction(
+    mc_runtime: MarketRuntime,
+    phone: str,
+    cycle_id: str,
+    working: Dict[str, Any],
+    pending: Dict[str, Any],
+    text: str,
+    correction: Dict[str, Any],
+    *,
+    basis_reply: Optional[BidPriceParse] = None,
+) -> Dict[str, Any]:
+    """Applique une correction de lot au `pending` puis CERTIFIE le prix avant tout récap.
+
+    - le prix brut de `_parse_update_correction` est écarté : seul `parse_bid_price` (base +
+      provenance) décide ; un montant sans base fiable -> on DEMANDE la base, on n'écrit rien ;
+    - `basis_reply` : le prix déjà analysé d'une réponse à la question de base ;
+    - une quantité/unité qui change après un prix déjà certifié le RE-certifie (un « pour tout »
+      certifié sur 10 TONNE n'est plus valable sur 5) ; impossible -> prix retiré et redemandé."""
+    correction = dict(correction)
+    price_given = correction.pop("price", None) is not None
+    if price_given and "quantity" not in correction:
+        # `unit` n'était là que comme « base du prix » (`_extract_unit_only`) : ce n'est PAS un
+        # changement d'unité du lot — la base est décidée par `parse_bid_price`.
+        correction.pop("unit", None)
+    pending = {**pending, **correction}
+    pending.pop("price", None)  # jamais de prix brut dans l'état confirmé
+
+    needs_listing = price_given or basis_reply is not None or bool(pending.get("price_parse"))
+    listing: Dict[str, Any] = {}
+    if needs_listing:
+        loaded = await _load_update_listing(mc_runtime, phone, cycle_id, working)
+        if loaded is None:
+            return _lot_response(working, cycle_id, pending, text=_LISTING_UNAVAILABLE, ask=True)
+        listing = loaded
+    qty, unit = _lot_terms(listing, pending)
+    unit_word = unit.lower()
+
+    parsed = basis_reply
+    if parsed is None and price_given:
+        try:
+            qty_ok = qty is not None and float(qty) > 0
+        except (TypeError, ValueError):
+            qty_ok = False
+        if not qty_ok:
+            pending.pop("price_offer", None)
+            pending.pop("price_parse", None)
+            return _lot_response(
+                working, cycle_id, pending, listing=listing, ask=True,
+                text="La quantité de ce lot est inconnue : indiquez-la d'abord (ex : « quantité 500 kg »).",
+            )
+        parsed = parse_bid_price(text, auction_unit=unit, auction_quantity=qty)
+
+    if parsed is not None:
+        pending.pop("price_offer", None)
+        pending.pop("price_parse", None)
+        if parsed.status == BidPriceStatus.NEEDS_PACKAGE_SIZE or (
+            parsed.is_resolved and parsed.basis == PriceBasis.PER_PACKAGE
+        ):
+            return _lot_response(
+                working, cycle_id, pending, listing=listing, ask=True,
+                text=(
+                    "Le prix par conditionnement (« la caisse de 25 kg ») n'est pas pris en charge pour "
+                    "une production future. " + _PRICE_BASIS_QUESTION.format(unit=unit_word)
+                ),
+            )
+        if not parsed.is_resolved:
+            return _lot_response(
+                working, cycle_id, pending, listing=listing, ask=True, price_wait=parsed,
+                text=parsed.message or _PRICE_BASIS_QUESTION.format(unit=unit_word),
+            )
+        offer, err = _certify_lot_price(parsed, cycle_id=cycle_id, listing=listing, pending=pending)
+        if offer is None:
+            return _lot_response(
+                working, cycle_id, pending, listing=listing, ask=True,
+                text=err or _PRICE_BASIS_QUESTION.format(unit=unit_word),
+            )
+        pending["price_offer"] = offer.to_state()
+        pending["price_parse"] = parsed.to_state()
+    elif pending.get("price_parse"):
+        # aucun nouveau prix : quantité/unité ont pu changer -> re-certification du prix déjà compris
+        prior = BidPriceParse.from_state(pending.get("price_parse"))
+        offer, err = (
+            _certify_lot_price(prior, cycle_id=cycle_id, listing=listing, pending=pending)
+            if prior is not None
+            else (None, None)
+        )
+        if offer is None:
+            pending.pop("price_offer", None)
+            pending.pop("price_parse", None)
+            return _lot_response(
+                working, cycle_id, pending, listing=listing, ask=True,
+                text="Ce changement modifie le sens de votre prix. "
+                + (err or _PRICE_BASIS_QUESTION.format(unit=unit_word)),
+            )
+        pending["price_offer"] = offer.to_state()
+
+    return _lot_response(
+        working, cycle_id, pending, listing=listing, ask=False, text=_format_pending_recap(pending, noun="lot")
+    )
 
 
 async def _resolve_cycle_for_update(
@@ -1565,34 +1799,67 @@ async def _resolve_cycle_for_update(
             "update_cycle_id": None,
             "update_phase": None,
             "update_pending": None,
+            "update_listing": None,
+            "update_price_pending": None,
             "active_goal": None,
             "available_mapping_kind": None,
         }
+
+    # ── AWAIT_PRICE_BASIS (B2c.7) : « X FCFA, c'est par kg ou pour tout le lot ? » a été posée ──
+    # Traité AVANT CONFIRM/COLLECT : tant que la base n'est pas certifiée, rien n'est confirmable.
+    price_wait = working.get("update_price_pending")
+    if cycle_id and price_wait:
+        if event == "REJECT":
+            return {
+                "status": "COMPLETED",
+                "response_strategy": "SUCCESS",
+                "final_response": "❌ Modification annulée. Rien n'a été changé.",
+                "working_memory": _clear_wm(),
+                "ag_ui_component": None,
+            }
+        listing = await _load_update_listing(mc_runtime, phone, str(cycle_id), working)
+        if listing is None:
+            return _lot_response(working, str(cycle_id), pending, text=_LISTING_UNAVAILABLE, ask=True)
+        qty, unit = _lot_terms(listing, pending)
+        earlier = BidPriceParse.from_state(price_wait)
+        try:
+            if earlier is not None and earlier.amount is not None:
+                reply = resolve_basis_reply(text, amount=earlier.amount, auction_unit=unit, auction_quantity=qty)
+            else:
+                reply = parse_bid_price(text, auction_unit=unit, auction_quantity=qty)
+        except (PricingSnapshotError, TypeError, ValueError):
+            reply = BidPriceParse(BidPriceStatus.NO_PRICE)
+        return await _stage_lot_correction(
+            mc_runtime, phone, str(cycle_id), working, pending, text, {}, basis_reply=reply
+        )
 
     # ── CONFIRM : recap déjà affiché, on attend oui/correction/non ────
     if phase == "CONFIRM" and cycle_id and pending:
         correction = _parse_update_correction(text, allow_type_date=True)
         if correction:
-            pending.update(correction)
-            return {
-                "status": "WAITING_INPUT",
-                **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
-                "response_strategy": "ASK_MISSING_FIELD",
-                "current_goal": "PRODUCTION_UPDATE_FUTURE",
-                "final_response": _format_pending_recap(pending, noun="lot"),
-                "working_memory": {
-                    **working,
-                    "update_cycle_id": str(cycle_id),
-                    "update_phase": "CONFIRM",
-                    "update_pending": pending,
-                    "active_goal": "PRODUCTION_UPDATE_FUTURE",
-                },
-                "ag_ui_component": None,
-            }
+            return await _stage_lot_correction(
+                mc_runtime, phone, str(cycle_id), working, pending, text, correction
+            )
         # Oui/non : classification déjà faite en amont par le LLM
         # (input_interpreter), pas de liste de mots-clés à maintenir ici.
         if event == "CONFIRM":
+            # Prix : uniquement ce que le producteur a CONFIRMÉ (offre gelée, empreinte vérifiée par
+            # `from_state`), jamais un prix brut ni un état mutable relu après coup.
             gw_fields = dict(pending)
+            offer_state = gw_fields.pop("price_offer", None)
+            parse_state = gw_fields.pop("price_parse", None)
+            offer = CertifiedProductionPriceCorrection.from_state(offer_state) if offer_state else None
+            if gw_fields.pop("price", None) is not None or (offer_state and (offer is None or not parse_state)):
+                for key in ("price", "price_offer", "price_parse"):
+                    pending.pop(key, None)
+                return _lot_response(
+                    working, str(cycle_id), pending, ask=True,
+                    text="Je ne peux pas confirmer ce prix tel quel. "
+                    + _PRICE_BASIS_QUESTION.format(unit="unité"),
+                )
+            if offer is not None:
+                gw_fields["pricing"] = parse_state
+                gw_fields["expected_fingerprint"] = offer.fingerprint
             gw_fields.pop("product", None)
             if "product" in pending:
                 gw_fields["product_label"] = pending["product"]
@@ -1674,7 +1941,8 @@ async def _resolve_cycle_for_update(
         if not correction:
             base_question = (
                 "✏️ Que souhaitez-vous modifier sur ce lot ?\n"
-                "Ex : « prix 400 », « nom maïs », « quantité 500 », « date 2026-12-31 »."
+                "Ex : « prix 400 par kg » (ou « prix 4 500 000 pour tout »), « nom maïs », "
+                "« quantité 500 », « date 2026-12-31 »."
             )
             # Chantier résilience 2026-08 : uniquement sur une vraie déviation
             # (event UNKNOWN/OUT_OF_SCOPE) — ce bloc est AUSSI atteint sur
@@ -1717,23 +1985,9 @@ async def _resolve_cycle_for_update(
                 "final_response": f"{note}\n\n{base_question}" if note else base_question,
                 "ag_ui_component": None,
             }
-        pending.update(correction)
-        return {
-            "status": "WAITING_INPUT",
-            **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
-            "response_strategy": "ASK_MISSING_FIELD",
-            "current_goal": "PRODUCTION_UPDATE_FUTURE",
-            "final_response": _format_pending_recap(pending, noun="lot"),
-            "working_memory": {
-                **working,
-                "update_cycle_id": str(cycle_id),
-                "update_phase": "CONFIRM",
-                "update_pending": pending,
-                "active_goal": "PRODUCTION_UPDATE_FUTURE",
-                "available_mapping_kind": None,
-            },
-            "ag_ui_component": None,
-        }
+        return await _stage_lot_correction(
+            mc_runtime, phone, str(cycle_id), working, pending, text, correction
+        )
 
     # ── SELECT : aucun lot choisi → liste des productions ─────────────
     # NE JAMAIS confondre une erreur technique (outil MCP indisponible, panne

@@ -45,7 +45,11 @@ from ladini.domain.unit_taxonomy import UnitAction, validate_product_unit
 from .base import BaseMixin
 from .common import clamp_limit, clean_text, positive_float
 from .errors import BusinessRuleException
-from .pricing_persistence import certify_commercial_offer
+from .pricing_persistence import (
+    certify_commercial_offer,
+    certify_market_offer_price_correction,
+    invalidate_market_offer_pricing_on_edit,
+)
 from .search import fuzzy_match, similarity_rank
 
 logger = logging.getLogger("ladini.services.producer_mgmt")
@@ -2323,8 +2327,17 @@ class ProducerMgmtMixin(BaseMixin):
         unit: str | None = None,
         estimated_available_at: Any = None,
         production_type: str | None = None,
+        pricing: Dict[str, Any] | None = None,
+        expected_fingerprint: str | None = None,
     ) -> Dict[str, Any]:
         """Met à jour les champs modifiables d'une production future (MarketOffer).
+
+        Prix (Phase B2c.7) : le chemin CERTIFIÉ est `pricing` (prix ANALYSÉ — montant, base,
+        provenance, `BidPriceParse.to_state()`) : le snapshot et `price_per_unit` sont alors
+        re-dérivés ICI contre la quantité/unité finales du lot (`expected_fingerprint` = ce que le
+        producteur a confirmé). Un `price` brut (sans base) reste accepté pour les appelants
+        historiques mais RETIRE `pricing_snapshot` : jamais un snapshot périmé qui affirme
+        l'ancien prix pendant que la colonne brute change dessous.
 
         Seuls les champs fournis (non ``None``) sont modifiés — mise à jour
         partielle. Permet notamment de CORRIGER le nom d'un lot mal nommé
@@ -2362,7 +2375,35 @@ class ProducerMgmtMixin(BaseMixin):
             }
 
         changed: List[str] = []
+        if pricing is not None and price is not None:
+            return {
+                "status": "error",
+                "message": "Fournissez soit un prix certifié, soit un prix brut — pas les deux.",
+            }
         try:
+            if pricing is not None:
+                # quantité/unité FINALES du lot (celles qui suivront cette mise à jour)
+                final_qty = (
+                    positive_float(quantity, "quantity", allow_zero=True)
+                    if quantity is not None
+                    else cycle.available_quantity
+                )
+                unit_in = clean_text(unit, "unit", max_length=16) if unit is not None else None
+                final_unit = (unit_in or cycle.unit or "KG").upper()
+                try:
+                    snapshot_dict, certified_ppu = certify_market_offer_price_correction(
+                        pricing,
+                        cycle_id=cycle.id,
+                        product_label=cycle.product_label,
+                        quantity=final_qty,
+                        unit=final_unit,
+                        expected_fingerprint=expected_fingerprint,
+                    )
+                except BusinessRuleException as exc:
+                    return {"status": "error", "message": str(exc)}
+                cycle.price_per_unit = certified_ppu
+                cycle.pricing_snapshot = snapshot_dict
+                changed.append("prix")
             if price is not None:
                 cycle.price_per_unit = positive_float(price, "price", allow_zero=True)
                 changed.append("prix")
@@ -2403,6 +2444,18 @@ class ProducerMgmtMixin(BaseMixin):
                 "status": "error",
                 "message": "Aucun champ à modifier n'a été fourni.",
             }
+
+        # Phase B2c.7 : une édition SANS prix certifié (prix brut, unité, quantité d'un lot à prix
+        # total) rend `pricing_snapshot` faux -> retiré. Un prix certifié vient de le remplacer.
+        if pricing is None and invalidate_market_offer_pricing_on_edit(
+            cycle,
+            price_changed=price is not None,
+            unit_changed="unité" in changed,
+            quantity_changed=quantity is not None,
+        ):
+            logger.info(
+                "MARKET_OFFER_PRICING_INVALIDATED | cycle=%s | edit=%s", cycle_id, changed
+            )
 
         await self.session.flush()
         snapshot = _offer_to_payload(cycle, farm)
