@@ -1142,7 +1142,13 @@ async def demo_producer_publish_product_flow() -> Dict[str, Any]:
 
 
 async def demo_producer_declare_future_production_flow() -> Dict[str, Any]:
-    """PRODUCTION_DECLARE_FUTURE : déclaration d'une récolte future (préco-commande)."""
+    """PRODUCTION_DECLARE_FUTURE : déclaration d'une récolte future (préco-commande).
+
+    Depuis B2c.3, ce goal partage le même modèle commercial que SALES_PUBLISH_PRODUCT
+    (`_COMMERCIAL_OFFER_GOALS`, `nodes/validation.py`) — `text`/`said` doivent donc porter la
+    PROVENANCE du prix (« le kg »), exactement comme `demo_producer_publish_product_flow`
+    ci-dessus, sinon le prix est ambigu (par unité ou pour l'ensemble ?) et le flow reste
+    WAITING_INPUT au lieu de se terminer."""
     runtime = DemoRuntime()
     return await _run_producer_write_flow(
         runtime,
@@ -1153,8 +1159,11 @@ async def demo_producer_declare_future_production_flow() -> Dict[str, Any]:
             "quantity": 200,
             "unit": "KG",
             "price": 300,
+            "price_unit": "KG",
             "estimated_available_at": "2026-09-01",
         },
+        text="200 kg de sésame à 300 FCFA le kg",
+        said={"quantity": 200, "unit": "KG", "price": 300, "price_unit": "KG"},
     )
 
 
