@@ -1,10 +1,41 @@
-"""Buyer negotiation gate — counter-offers, bid viewing, session lifecycle."""
+"""Buyer negotiation gate — counter-offers, bid viewing, session lifecycle.
+
+## Certification du prix de négociation (Phase B2c.6)
+
+`_initiate_negotiation` et `_handle_counter_price` écrivaient `Auction.max_price_per_unit` depuis
+un float brut extrait du message par l'interprète, sans base ni provenance — la même classe de bug
+que celle déjà fermée pour les bids (B2b, `domain/bid_pricing_flow.py`) et pour
+`PROCUREMENT_CREATE_REQUEST` (B2c.5). Sur une enchère de 10 TONNE, « 4 millions » pouvait devenir
+4 000 000 FCFA/TONNE (une erreur ×10) au lieu d'un budget de 4 000 000 FCFA pour tout le lot.
+
+Ce module réutilise le moteur `bid_pricing_flow.parse_bid_price` (même extraction montant/base/
+provenance que les bids) et `domain/negotiation_offer.py` (même schéma de décision figée que
+`CertifiedAwardDecision`, plus bas dans ce fichier) : AUCUNE écriture (`initiate_negotiation_session`
+/ `update_negotiation_offer`) n'a lieu tant que la base du prix n'est pas certifiée, et ce qui est
+confirmé à l'écran est exactement ce qui est envoyé à l'écriture."""
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from ladini.core.idempotency import claim_once
 from ladini.domain.bid_award import CertifiedAwardDecision
+from ladini.domain.bid_pricing_flow import (
+    BidPriceContext,
+    BidPriceParse,
+    BidPriceStatus,
+    find_amounts,
+    parse_bid_price,
+    price_per_unit_question,
+    resolve_basis_reply,
+    resolve_package_reply,
+)
+from ladini.domain.commercial_pricing_snapshot import PricingSnapshotError
+from ladini.domain.negotiation_offer import (
+    CertifiedNegotiationOffer,
+    NegotiationPriceNotCertifiable,
+    build_negotiation_offer,
+)
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     set_pending_interaction,
@@ -146,6 +177,350 @@ async def _fetch_and_show_bids(
 
 
 # =====================================================================
+# PRICE CERTIFICATION — commun à l'ouverture d'une négociation et à une
+# contre-offre. Réutilise `bid_pricing_flow.parse_bid_price` (moteur B2b) :
+# AUCUNE base n'est jamais devinée, AUCUNE écriture avant résolution.
+# =====================================================================
+
+
+def _to_qty(value: Any) -> Optional[float]:
+    try:
+        qty = float(value)
+    except (TypeError, ValueError):
+        return None
+    return qty if qty > 0 else None
+
+
+def _price_clarification_patch(
+    parsed: BidPriceParse,
+    *,
+    resume_phase: str,
+    nctx_patch: Dict[str, Any],
+) -> Dict[str, Any]:
+    """WAITING_INPUT : la base (ou le contenu du conditionnement) manque — on demande, on n'écrit
+    jamais rien tant qu'elle n'est pas certifiée."""
+    field = "package_size" if parsed.status == BidPriceStatus.NEEDS_PACKAGE_SIZE else "price_basis"
+    question = parsed.message or "Quel est votre prix (FCFA), et est-ce par unité ou pour tout le lot ?"
+    return {
+        "status": "WAITING_INPUT",
+        **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name=field),
+        "response_strategy": "ASK_MISSING_FIELD",
+        "final_response": question,
+        "negotiation_context": {**nctx_patch, "phase": resume_phase, "pending_price": parsed.to_state()},
+        "ag_ui_component": None,
+    }
+
+
+def _certify_negotiation_price(
+    parsed: BidPriceParse,
+    *,
+    ref: Dict[str, Any],
+    quantity: Any,
+    phone: str,
+    auction_id: Optional[str],
+) -> "tuple[Optional[CertifiedNegotiationOffer], Optional[str]]":
+    """`(offer, None)` si certifiable ; sinon `(None, message)` — jamais d'exception qui remonte au
+    graphe. `parsed` DOIT déjà être `RESOLVED` (base connue, provenance exécutable)."""
+    try:
+        snapshot = parsed.snapshot(quantity, ref["unit"])
+    except PricingSnapshotError as exc:
+        return None, f"Ce prix ne correspond pas à cette enchère ({exc}). Quel est votre prix, et est-ce par unité ou pour tout le lot ?"
+    try:
+        offer = build_negotiation_offer(
+            product_id=ref["product_id"],
+            product_name=ref.get("name") or "ce produit",
+            buyer_phone=phone,
+            pricing=snapshot,
+            auction_quantity=quantity,
+            auction_unit=ref["unit"],
+            auction_id=auction_id,
+        )
+    except NegotiationPriceNotCertifiable as exc:
+        return None, exc.message
+    return offer, None
+
+
+def _negotiation_offer_confirm_patch(
+    offer: CertifiedNegotiationOffer,
+    *,
+    confirm_phase: str,
+    nctx_patch: Dict[str, Any],
+    intro: str,
+) -> Dict[str, Any]:
+    """WAITING_INPUT CONFIRM_ACTION : le prix est certifié, RIEN n'est encore écrit. Ce que
+    l'acheteur confirme ici est exactement ce que `_handle_confirm_negotiation_offer` persistera."""
+    text = f"{offer.confirmation_text(intro=intro)}\n\n👉 Répondez *oui* pour confirmer, ou *non* pour annuler."
+    return {
+        "status": "WAITING_INPUT",
+        **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
+        "response_strategy": "ASK_MISSING_FIELD",
+        "final_response": text,
+        "negotiation_context": {**nctx_patch, "phase": confirm_phase, "pending_offer": offer.to_state()},
+        "ag_ui_component": None,
+    }
+
+
+async def _handle_negotiation_price_clarification(
+    mc_runtime: MarketRuntime,
+    state: Dict[str, Any],
+    nctx: Dict[str, Any],
+    phone: str,
+    auction_id: Optional[str],
+) -> Dict[str, Any]:
+    """Réponse à une question de base/conditionnement posée par `_price_clarification_patch` — pour
+    l'ouverture d'une négociation (`auction_id=None`) COMME pour une contre-offre (`auction_id` fixé).
+    Une réponse qui porte SON PROPRE nombre est un NOUVEAU prix, jamais fusionnée avec l'ancien."""
+    ref = dict(nctx.get("pending_product") or {})
+    quantity = nctx.get("pending_quantity")
+    pending = BidPriceParse.from_state(nctx.get("pending_price"))
+    text = str(state.get("normalized_text") or state.get("user_query") or "")
+    unit = str(ref.get("unit") or nctx.get("unit") or "")
+
+    if pending is not None and pending.status == BidPriceStatus.NEEDS_PACKAGE_SIZE:
+        parsed = resolve_package_reply(pending, text, auction_unit=unit)
+    elif pending is not None and pending.amount is not None:
+        parsed = resolve_basis_reply(text, amount=pending.amount, auction_unit=unit, auction_quantity=quantity)
+    else:
+        parsed = parse_bid_price(text, auction_unit=unit, auction_quantity=quantity)
+
+    if not parsed.is_resolved:
+        resume_phase = (
+            "AWAIT_NEGOTIATION_PACKAGE_SIZE"
+            if parsed.status == BidPriceStatus.NEEDS_PACKAGE_SIZE
+            else "AWAIT_NEGOTIATION_PRICE_BASIS"
+        )
+        return _price_clarification_patch(
+            parsed, resume_phase=resume_phase,
+            nctx_patch={**nctx, "pending_product": ref, "pending_quantity": quantity},
+        )
+
+    offer, err = _certify_negotiation_price(parsed, ref=ref, quantity=quantity, phone=phone, auction_id=auction_id)
+    if offer is None:
+        return _price_clarification_patch(
+            BidPriceParse(BidPriceStatus.NEEDS_BASIS, message=err),
+            resume_phase="AWAIT_NEGOTIATION_PRICE_BASIS",
+            nctx_patch={**nctx, "pending_product": ref, "pending_quantity": quantity},
+        )
+    confirm_phase = "CONFIRM_NEGOTIATION_COUNTER" if auction_id else "CONFIRM_NEGOTIATION_INIT"
+    intro = (
+        "🔁 Voici votre nouvelle contre-offre :"
+        if auction_id
+        else f"🤝 Ouverture d'une négociation sur *{ref.get('name') or 'ce produit'}*."
+    )
+    return _negotiation_offer_confirm_patch(
+        offer, confirm_phase=confirm_phase,
+        nctx_patch={**nctx, "pending_product": ref, "pending_quantity": quantity},
+        intro=intro,
+    )
+
+
+async def _handle_confirm_negotiation_offer(
+    mc_runtime: MarketRuntime,
+    state: Dict[str, Any],
+    nctx: Dict[str, Any],
+    phone: str,
+    auction_id: Optional[str],
+) -> Dict[str, Any]:
+    """CONFIRM_NEGOTIATION_INIT (`auction_id=None`) / CONFIRM_NEGOTIATION_COUNTER (`auction_id`
+    fixé) : exécute l'écriture (ouverture ou mise à jour du plafond) sur les TERMES CERTIFIÉS figés
+    par `pending_offer`, jamais sur `transaction_payload`/l'état mutable relu après coup (Golden F)."""
+    event = str(state.get("interpreted_event") or "").upper().strip()
+    text = str(state.get("normalized_text") or state.get("user_query") or "").strip().lower()
+    offer = CertifiedNegotiationOffer.from_state(nctx.get("pending_offer"))
+    ref = dict(nctx.get("pending_product") or {})
+    quantity = nctx.get("pending_quantity")
+
+    def _cancelled() -> Dict[str, Any]:
+        if not auction_id:
+            return {
+                "status": "COMPLETED",
+                "response_strategy": "SUCCESS",
+                "final_response": "D'accord, aucun prix n'a été retenu.",
+                "current_goal": None,
+                "transaction_payload": {"__reset__": True},
+                "negotiation_context": {"__reset__": True},
+                "ag_ui_component": None,
+            }
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(InteractionKind.SELECTION_MENU),
+            "response_strategy": "SELECTION_MENU",
+            "final_response": "D'accord, contre-offre annulée.",
+            "transaction_payload": {"resolved_id": None},
+            "negotiation_context": {**nctx, "phase": "NEGOTIATION_MENU"},
+            "ag_ui_component": None,
+            "pending_menu": negotiation_action_menu(str(auction_id)),
+        }
+
+    if offer is None or event == "REJECT" or text in _AWARD_NO:
+        return _cancelled()
+
+    if not (event == "CONFIRM" or text in _AWARD_YES):
+        # Une correction de prix pendant la confirmation -> une NOUVELLE certification, jamais un
+        # remplacement en place du montant déjà figé (Golden E : "finalement 4 millions pour tout").
+        if find_amounts(text):
+            unit = str(ref.get("unit") or nctx.get("unit") or "")
+            parsed = parse_bid_price(text, auction_unit=unit, auction_quantity=quantity)
+            if parsed.is_resolved:
+                new_offer, err = _certify_negotiation_price(
+                    parsed, ref=ref, quantity=quantity, phone=phone, auction_id=auction_id
+                )
+                if new_offer is not None:
+                    confirm_phase = "CONFIRM_NEGOTIATION_COUNTER" if auction_id else "CONFIRM_NEGOTIATION_INIT"
+                    intro = (
+                        "🔁 Voici votre nouvelle contre-offre :"
+                        if auction_id
+                        else f"🤝 Ouverture d'une négociation sur *{ref.get('name') or 'ce produit'}*."
+                    )
+                    return _negotiation_offer_confirm_patch(
+                        new_offer, confirm_phase=confirm_phase,
+                        nctx_patch={**nctx, "pending_product": ref, "pending_quantity": quantity},
+                        intro=intro,
+                    )
+            return _price_clarification_patch(
+                parsed, resume_phase="AWAIT_NEGOTIATION_PRICE_BASIS",
+                nctx_patch={**nctx, "pending_product": ref, "pending_quantity": quantity},
+            )
+        note = await llm_deviation_reply(
+            mc_runtime, text, "confirmer ce prix (oui/non)",
+        )
+        prompt = "Répondez *oui* pour confirmer, ou *non* pour annuler."
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(InteractionKind.CONFIRM_ACTION, context_ref="confirmation"),
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": f"{note}\n\n{prompt}" if note else prompt,
+            "negotiation_context": nctx,
+            "ag_ui_component": None,
+        }
+
+    # CONFIRM — écriture sur les termes CERTIFIÉS ci-dessus, jamais recalculés depuis le texte brut.
+    if not claim_once(offer.idempotency_key):
+        if not auction_id:
+            return {
+                "status": "COMPLETED",
+                "response_strategy": "SUCCESS",
+                "final_response": "Cette négociation est déjà en cours d'ouverture.",
+                "negotiation_context": {"__reset__": True},
+                "ag_ui_component": None,
+            }
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(InteractionKind.SELECTION_MENU),
+            "response_strategy": "SELECTION_MENU",
+            "final_response": "Ce prix est déjà en cours d'enregistrement.",
+            "negotiation_context": {**nctx, "phase": "NEGOTIATION_MENU"},
+            "ag_ui_component": None,
+            "pending_menu": negotiation_action_menu(str(auction_id)),
+        }
+
+    if auction_id is None:
+        try:
+            res = await NegotiationGateway(mc_runtime).initiate_session(
+                buyer_phone=phone,
+                product_id=offer.product_id,
+                offered_price=float(offer.ceiling_per_unit),
+                quantity=float(offer.auction_quantity),
+            )
+        except Exception as exc:
+            logger.error("_handle_confirm_negotiation_offer: initiate_session a échoué: %s", exc)
+            return {
+                "status": "COMPLETED",
+                "response_strategy": "ERROR",
+                "final_response": "Impossible d'ouvrir la négociation pour le moment. Réessayez dans un instant.",
+                "negotiation_context": {"__reset__": True},
+                "ag_ui_component": None,
+            }
+        if str(res.get("status") or "").upper() not in {"PENDING", "SUCCESS"}:
+            return {
+                "status": "COMPLETED",
+                "response_strategy": "ERROR",
+                "final_response": res.get("message") or "Impossible d'ouvrir la négociation.",
+                "fallback_recommendations": res.get("fallback") or [],
+                "negotiation_context": {"__reset__": True},
+                "ag_ui_component": None,
+            }
+        neg_init_menu = MenuRequest(
+            title="Négociation en cours",
+            options=negotiation_action_menu(str(res.get("negotiation_id") or "")).options,
+            kind="negotiation_action",
+            metadata={"session_id": res.get("negotiation_id")},
+        )
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(InteractionKind.SELECTION_MENU),
+            "response_strategy": "SELECTION_MENU",
+            "final_response": res.get("message"),
+            "negotiation_context": {
+                "session_id": res.get("negotiation_id"),
+                "auction_id": res.get("auction_id"),
+                "product_id": res.get("product_id"),
+                "producer_id": res.get("producer_id"),
+                "buyer_offer": res.get("buyer_offer"),
+                "seller_minimum": res.get("seller_minimum"),
+                "status": "PENDING",
+                "phase": "NEGOTIATION_MENU",
+                "last_message": res.get("message"),
+                # Persistés pour la PROCHAINE contre-offre (unité/quantité de l'enchère, snapshot
+                # de prix déjà certifié) — avant ce correctif, `_initiate_negotiation` ne les
+                # écrivait jamais dans `negotiation_context`, ce qui rendait toute contre-offre
+                # suivante à nouveau ambiguë (aucun contexte de base à réutiliser).
+                "quantity": float(offer.auction_quantity),
+                "unit": offer.auction_unit,
+                "product_name": offer.product_name,
+                "pricing": offer.pricing.to_dict(),
+            },
+            "ag_ui_component": None,
+            "pending_menu": neg_init_menu,
+        }
+
+    # Contre-offre sur une négociation déjà ouverte.
+    try:
+        upd = await NegotiationGateway(mc_runtime).update_offer(
+            buyer_phone=phone,
+            negotiation_id=str(auction_id),
+            new_price=float(offer.ceiling_per_unit),
+        )
+    except Exception as exc:
+        logger.error("_handle_confirm_negotiation_offer: update_offer a échoué: %s", exc)
+        return {
+            "status": "COMPLETED",
+            "response_strategy": "ERROR",
+            "final_response": "Impossible d'enregistrer votre contre-offre pour le moment. Réessayez dans un instant.",
+            "transaction_payload": {"resolved_id": None},
+            "negotiation_context": {"__reset__": True},
+            "ag_ui_component": None,
+        }
+    if not is_success_response(upd):
+        return {
+            "status": "WAITING_INPUT",
+            **set_pending_interaction(InteractionKind.SELECTION_MENU),
+            "response_strategy": "SELECTION_MENU",
+            "final_response": upd.get("message") or "La contre-offre n'a pas pu être enregistrée.",
+            "negotiation_context": {**nctx, "phase": "NEGOTIATION_MENU"},
+            "ag_ui_component": None,
+            "pending_menu": negotiation_action_menu(str(auction_id)),
+        }
+    msg = upd.get("message") or offer.confirmation_text(intro="🔁 Offre mise à jour.")
+    neg_menu = negotiation_action_menu(str(auction_id))
+    return {
+        "status": "WAITING_INPUT",
+        **set_pending_interaction(InteractionKind.SELECTION_MENU),
+        "response_strategy": "SELECTION_MENU",
+        "final_response": msg,
+        "transaction_payload": {"resolved_id": None},
+        "negotiation_context": {
+            **nctx,
+            "phase": "NEGOTIATION_MENU",
+            "buyer_offer": upd.get("new_price") or nctx.get("buyer_offer"),
+            "pricing": offer.pricing.to_dict(),
+        },
+        "ag_ui_component": None,
+        "pending_menu": neg_menu,
+    }
+
+
+# =====================================================================
 # PHASE: AWAIT_COUNTER_PRICE — buyer submits a new price
 # =====================================================================
 
@@ -158,21 +533,23 @@ async def _handle_counter_price(
     auction_id: str,
     state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Process the counter-offer price submission."""
-    price = payload.get("price")
-    if price in (None, "", 0):
+    """Process the counter-offer price submission — certifie la base du prix (comme à l'ouverture)
+    avant toute confirmation ; `update_offer` n'est appelé que depuis
+    `_handle_confirm_negotiation_offer`, jamais ici."""
+    state = state or {}
+    text = str(state.get("normalized_text") or state.get("user_query") or "")
+    if not find_amounts(text):
         base_question = "Quel est votre nouveau prix (FCFA) ?"
         # Chantier résilience 2026-08 (volet acheteur) : cette branche n'est
         # JAMAIS l'affichage initial de la question (celui-ci part de
         # `_handle_negotiation_menu::NEGOTIATION_COUNTER`, qui ne passe pas
         # par ici) — elle traite TOUJOURS une vraie réponse de l'utilisateur
-        # qui n'a pas pu être lue comme un prix. Accuse d'abord réception
-        # via le LLM au lieu de rejouer la même question mot pour mot.
+        # qui n'a pas pu être lue comme un prix (aucun montant dans le texte).
+        # Accuse d'abord réception via le LLM au lieu de rejouer la même question mot pour mot.
         note = None
-        user_text = str((state or {}).get("normalized_text") or (state or {}).get("user_query") or "")
-        if user_text.strip():
+        if text.strip():
             note = await llm_deviation_reply(
-                mc_runtime, user_text, "répondre au nouveau prix de votre contre-offre (en FCFA)",
+                mc_runtime, text, "répondre au nouveau prix de votre contre-offre (en FCFA)",
             )
         return {
             "status": "WAITING_INPUT",
@@ -182,38 +559,39 @@ async def _handle_counter_price(
             "ag_ui_component": None,
         }
 
-    try:
-        upd = await NegotiationGateway(mc_runtime).update_offer(
-            buyer_phone=phone,
-            negotiation_id=str(auction_id),
-            new_price=price,
+    unit = str(nctx.get("unit") or "")
+    quantity = nctx.get("quantity")
+    # Cette branche est TOUJOURS la réponse à la question posée par `NEGOTIATION_COUNTER`
+    # (« Quel prix proposez-vous *par {unit}* ? ») : un montant nu ici est QUESTION_CONTEXT_EXPLICIT
+    # par l'unité de l'enchère (Golden D), jamais ambigu — un montant EXPLICITEMENT marqué autrement
+    # dans le texte (« ... pour tout », « ... la caisse ») garde priorité (voir `parse_bid_price`).
+    context = BidPriceContext.per_auction_unit(unit) if unit else None
+    parsed = parse_bid_price(text, auction_unit=unit, auction_quantity=quantity, context=context)
+    ref = {"unit": unit, "name": nctx.get("product_name"), "product_id": nctx.get("product_id")}
+
+    if not parsed.is_resolved:
+        resume_phase = (
+            "AWAIT_NEGOTIATION_PACKAGE_SIZE"
+            if parsed.status == BidPriceStatus.NEEDS_PACKAGE_SIZE
+            else "AWAIT_NEGOTIATION_PRICE_BASIS"
         )
-    except Exception as exc:
-        logger.error("_handle_counter_price: update_offer a échoué: %s", exc)
-        return {
-            "status": "COMPLETED",
-            "response_strategy": "ERROR",
-            "final_response": "Impossible d'enregistrer votre contre-offre pour le moment. Réessayez dans un instant.",
-            "transaction_payload": {"resolved_id": None},
-            "negotiation_context": {"__reset__": True},
-            "ag_ui_component": None,
-        }
-    msg = upd.get("message") or "Offre mise à jour."
-    neg_menu = negotiation_action_menu(str(auction_id))
-    return {
-        "status": "WAITING_INPUT",
-        **set_pending_interaction(InteractionKind.SELECTION_MENU),
-        "response_strategy": "SELECTION_MENU",
-        "final_response": msg,
-        "transaction_payload": {"resolved_id": None},
-        "negotiation_context": {
-            **nctx,
-            "phase": "NEGOTIATION_MENU",
-            "buyer_offer": upd.get("new_price") or nctx.get("buyer_offer"),
-        },
-        "ag_ui_component": None,
-        "pending_menu": neg_menu,
-    }
+        return _price_clarification_patch(
+            parsed, resume_phase=resume_phase,
+            nctx_patch={**nctx, "pending_product": ref, "pending_quantity": quantity},
+        )
+
+    offer, err = _certify_negotiation_price(parsed, ref=ref, quantity=quantity, phone=phone, auction_id=str(auction_id))
+    if offer is None:
+        return _price_clarification_patch(
+            BidPriceParse(BidPriceStatus.NEEDS_BASIS, message=err),
+            resume_phase="AWAIT_NEGOTIATION_PRICE_BASIS",
+            nctx_patch={**nctx, "pending_product": ref, "pending_quantity": quantity},
+        )
+    return _negotiation_offer_confirm_patch(
+        offer, confirm_phase="CONFIRM_NEGOTIATION_COUNTER",
+        nctx_patch={**nctx, "pending_product": ref, "pending_quantity": quantity},
+        intro="🔁 Voici votre nouvelle contre-offre :",
+    )
 
 
 # =====================================================================
@@ -446,11 +824,15 @@ async def _handle_negotiation_menu(
         )
 
     if action == "NEGOTIATION_COUNTER":
+        # La question FIXE la base (« par TONNE ») : un montant nu en réponse est alors
+        # QUESTION_CONTEXT_EXPLICIT, jamais ambigu — voir `_handle_counter_price` (Golden D).
+        unit = str(nctx.get("unit") or "")
+        question = price_per_unit_question(unit) if unit else "Quel est votre nouveau prix (FCFA) ?"
         return {
             "status": "WAITING_INPUT",
             **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="price"),
             "response_strategy": "ASK_MISSING_FIELD",
-            "final_response": "Quel est votre nouveau prix (FCFA) ?",
+            "final_response": question,
             "transaction_payload": {"resolved_id": None},
             "negotiation_context": {**nctx, "phase": "AWAIT_COUNTER_PRICE"},
             "ag_ui_component": None,
@@ -498,8 +880,12 @@ async def _initiate_negotiation(
     product_name: str,
     quantity: Any,
     payload: Dict[str, Any],
+    state: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Initiate a new negotiation session for a product."""
+    """Initiate a new negotiation session for a product.
+
+    CERTIFIE la base du prix (par unité / pour tout le lot / conditionnement) AVANT toute écriture
+    — jamais d'`Auction` créée depuis un float ambigu (voir en-tête du module)."""
     # Resolve product reference
     ref = await _resolve_product_ref(mc_runtime, phone, product_name)
     if ref is None:
@@ -510,71 +896,33 @@ async def _initiate_negotiation(
             "ag_ui_component": None,
         }
 
-    try:
-        offer = float(payload.get("price"))
-    except (TypeError, ValueError):
-        offer = 0.0
+    qty = _to_qty(quantity) or ref.get("available_quantity") or 1.0
+    text = str(state.get("normalized_text") or state.get("user_query") or "")
+    parsed = parse_bid_price(text, auction_unit=ref["unit"], auction_quantity=qty)
 
-    res = await NegotiationGateway(mc_runtime).initiate_session(
-        buyer_phone=phone,
-        product_id=ref["product_id"],
-        offered_price=offer,
-        quantity=quantity,
+    if not parsed.is_resolved:
+        resume_phase = (
+            "AWAIT_NEGOTIATION_PACKAGE_SIZE"
+            if parsed.status == BidPriceStatus.NEEDS_PACKAGE_SIZE
+            else "AWAIT_NEGOTIATION_PRICE_BASIS"
+        )
+        return _price_clarification_patch(
+            parsed, resume_phase=resume_phase,
+            nctx_patch={"pending_product": ref, "pending_quantity": qty},
+        )
+
+    offer, err = _certify_negotiation_price(parsed, ref=ref, quantity=qty, phone=phone, auction_id=None)
+    if offer is None:
+        return _price_clarification_patch(
+            BidPriceParse(BidPriceStatus.NEEDS_BASIS, message=err),
+            resume_phase="AWAIT_NEGOTIATION_PRICE_BASIS",
+            nctx_patch={"pending_product": ref, "pending_quantity": qty},
+        )
+    return _negotiation_offer_confirm_patch(
+        offer, confirm_phase="CONFIRM_NEGOTIATION_INIT",
+        nctx_patch={"pending_product": ref, "pending_quantity": qty},
+        intro=f"🤝 Ouverture d'une négociation sur *{ref['name']}*.",
     )
-
-    if str(res.get("status") or "").upper() not in {"PENDING", "SUCCESS"}:
-        return {
-            "status": "COMPLETED",
-            "response_strategy": "ERROR",
-            "final_response": res.get("message")
-            or "Impossible d'ouvrir la négociation.",
-            "fallback_recommendations": res.get("fallback") or [],
-            "ag_ui_component": None,
-        }
-
-    seller_min = res.get("seller_minimum")
-    gap = res.get("price_gap")
-    recos = []
-    if (
-        isinstance(gap, (int, float))
-        and isinstance(seller_min, (int, float))
-        and gap > 0
-    ):
-        suggested = round((offer + float(seller_min)) / 2.0, 2)
-        recos = [
-            {
-                "type": "suggested_price",
-                "value": suggested,
-                "label": f"Proposer un prix médian de {suggested} FCFA",
-            }
-        ]
-
-    neg_init_menu = MenuRequest(
-        title="Négociation en cours",
-        options=negotiation_action_menu(str(res.get("negotiation_id") or "")).options,
-        kind="negotiation_action",
-        metadata={"session_id": res.get("negotiation_id")},
-    )
-    return {
-        "status": "WAITING_INPUT",
-        **set_pending_interaction(InteractionKind.SELECTION_MENU),
-        "response_strategy": "SELECTION_MENU",
-        "final_response": res.get("message"),
-        "negotiation_context": {
-            "session_id": res.get("negotiation_id"),
-            "auction_id": res.get("auction_id"),
-            "product_id": res.get("product_id"),
-            "producer_id": res.get("producer_id"),
-            "buyer_offer": res.get("buyer_offer"),
-            "seller_minimum": res.get("seller_minimum"),
-            "status": "PENDING",
-            "phase": "NEGOTIATION_MENU",
-            "last_message": res.get("message"),
-        },
-        "fallback_recommendations": recos,
-        "ag_ui_component": None,
-        "pending_menu": neg_init_menu,
-    }
 
 
 async def _resolve_product_ref(
@@ -605,6 +953,11 @@ async def _resolve_product_ref(
         or best.get("producer_name")
         or best.get("vendor"),
         "producer_id": best.get("producer_id") or best.get("vendor_id"),
+        # Repli de quantité si l'acheteur n'en a donné aucune (mirroir du défaut déjà appliqué
+        # côté serveur, `services/database/buyer.py::initiate_negotiation_session`) — nécessaire
+        # ICI pour certifier le prix (TOTAL_LOT, divisibilité d'un conditionnement) avant d'appeler
+        # le serveur, jamais après.
+        "available_quantity": float(best.get("available_quantity") or 0.0) or None,
     }
 
 
@@ -632,7 +985,15 @@ async def negotiation_gate(
     if goal not in NEGOTIATION_GOALS:
         return {"status": "PLANNING", "ag_ui_component": None}
 
-    # Route by negotiation phase
+    # Route by negotiation phase — certification du prix (ouverture ET contre-offre) : ces 3 phases
+    # existent AVANT toute écriture (`initiate_negotiation_session`/`update_negotiation_offer`),
+    # qu'une enchère existe déjà (`auction_id` fixé, contre-offre) ou non (ouverture).
+    if nphase in ("AWAIT_NEGOTIATION_PRICE_BASIS", "AWAIT_NEGOTIATION_PACKAGE_SIZE"):
+        return await _handle_negotiation_price_clarification(mc_runtime, state, nctx, phone, auction_id)
+
+    if nphase in ("CONFIRM_NEGOTIATION_INIT", "CONFIRM_NEGOTIATION_COUNTER"):
+        return await _handle_confirm_negotiation_offer(mc_runtime, state, nctx, phone, auction_id)
+
     if auction_id and nphase == "AWAIT_COUNTER_PRICE":
         return await _handle_counter_price(mc_runtime, phone, payload, nctx, auction_id, state)
 
@@ -647,21 +1008,21 @@ async def negotiation_gate(
             mc_runtime, phone, payload, state, nctx, auction_id
         )
 
-    # No active session — initiate new negotiation
-    if not product_name or payload.get("price") in (None, "", 0):
+    # No active session — initiate new negotiation. `_initiate_negotiation` fait sa propre
+    # extraction robuste du prix (base + provenance) depuis le TEXTE : on ne bloque plus ici sur
+    # `payload.get("price")` (le slot brut de l'interprète, exactement ce qui causait le bug —
+    # un « 4 millions » sans base finissait tel quel dans `Auction.max_price_per_unit`).
+    if not product_name:
         return {
             "status": "WAITING_INPUT",
-            **set_pending_interaction(
-                InteractionKind.ENTER_FIELD,
-                field_name="product" if not product_name else "price",
-            ),
+            **set_pending_interaction(InteractionKind.ENTER_FIELD, field_name="product"),
             "response_strategy": "ASK_MISSING_FIELD",
             "final_response": "Quel produit souhaitez-vous négocier et à quel prix ?",
             "ag_ui_component": None,
         }
 
     return await _initiate_negotiation(
-        mc_runtime, phone, str(product_name), quantity, payload
+        mc_runtime, phone, str(product_name), quantity, payload, state
     )
 
 
