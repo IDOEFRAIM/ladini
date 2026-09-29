@@ -159,8 +159,6 @@ class SalesPublishProductPayload(BaseModel):
 
         price_raw = payload.get("price") or payload.get("unit_price")
         price_value = to_float(price_raw, field="price")
-        if price_value is None:
-            raise ValueError("Le prix est requis pour la publication du produit.")
 
         unit_value = payload.get("unit")
 
@@ -168,6 +166,16 @@ class SalesPublishProductPayload(BaseModel):
         clean_tiers: Optional[List[Dict[str, Any]]] = None
         if isinstance(raw_tiers, list) and raw_tiers:
             clean_tiers = [tier for tier in raw_tiers if isinstance(tier, dict)] or None
+
+        if price_value is None and clean_tiers:
+            # INVARIANT : `Product.price` (NOT NULL) est un champ de COMPATIBILITÉ LEGACY pour un produit
+            # tiered — il n'est PAS la vérité commerciale (celle-ci est `pricing_tiers`). On y range le
+            # prix BRUT du premier palier, sans conversion ni normalisation, uniquement pour satisfaire
+            # le schéma actuel ; il ne doit jamais être lu comme un prix par unité de base, ni servir à
+            # choisir un palier, débiter le stock ou déterminer un montant payé.
+            price_value = to_float(clean_tiers[0].get("price"), field="pricing_tiers[0].price")
+        if price_value is None:
+            raise ValueError("Le prix est requis pour la publication du produit.")
 
         return cls(
             product=str(product_raw),

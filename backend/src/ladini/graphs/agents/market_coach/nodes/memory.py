@@ -1062,7 +1062,9 @@ async def memory_update(
                 payload["selection_index"] = None
                 payload["selected_value"] = None
 
-    # --- Dérive quantity/price/unit depuis pricing_tiers si absents ---
+    # --- `pricing_tiers` : AUCUNE dérivation de quantity/price/unit (voir l'INVARIANT plus bas) ---
+    # (historique 2026-08-30 : cette section dérivait un prix « représentatif » et une quantité
+    # sommée — supprimé 2026-09-29, incident prod « 60 l de miel »).
     # (2026-08-30) : un producteur donnant plusieurs tarifs/conditionnements
     # ("25 L à 500 fcfa et 40 L à 900 fcfa") sans jamais donner de prix/
     # quantité GLOBAL ne satisfaisait ni `_missing_fields_for_goal`
@@ -1075,23 +1077,8 @@ async def memory_update(
     # l'affiche) ; on dérive juste une valeur REPRÉSENTATIVE pour les champs
     # scalaires que le reste du pipeline (validation, contrat, DTO) exige
     # encore — 1er tarif pour price/unit, somme des quantités pour quantity.
-    def _tier_number(raw: Any) -> Optional[float]:
-        # Le JSON renvoyé par le LLM type parfois les nombres en chaîne
-        # ("500" au lieu de 500) — un simple `isinstance(x, (int, float))`
-        # rejette silencieusement ces tarifs pourtant valides.
-        if isinstance(raw, (int, float)):
-            return float(raw)
-        if isinstance(raw, str):
-            try:
-                return float(raw.strip().replace(",", "."))
-            except ValueError:
-                return None
-        return None
-
     tiers = payload.get("pricing_tiers")
     if isinstance(tiers, list) and tiers:
-        clean_tiers = [t for t in tiers if isinstance(t, dict)]
-
         # Incident réel (2026-08-30) : un producteur avait déjà répondu
         # QUANTITY="300 litres" à un tour précédent, puis répondu au tour
         # PRICE avec 2 tarifs ("5 L à 500 fcfa et 10 L à 900 fcfa"). Le LLM,
@@ -1112,30 +1099,11 @@ async def memory_update(
         if expected_input == "QUANTITY" and slot_has_value(_established_price):
             payload["price"] = _established_price
 
-        if clean_tiers and not slot_has_value(payload.get("price")):
-            first_price = _tier_number(clean_tiers[0].get("price"))
-            if first_price is not None and first_price > 0:
-                payload["price"] = first_price
-                if not slot_has_value(payload.get("price_unit")):
-                    first_unit = clean_tiers[0].get("unit")
-                    if first_unit:
-                        payload["price_unit"] = first_unit
-        if clean_tiers and not slot_has_value(payload.get("quantity")):
-            total_qty = 0.0
-            all_numeric = True
-            for t in clean_tiers:
-                q = _tier_number(t.get("quantity"))
-                if q is not None:
-                    total_qty += q
-                else:
-                    all_numeric = False
-                    break
-            if all_numeric and total_qty > 0:
-                payload["quantity"] = total_qty
-                if not slot_has_value(payload.get("unit")):
-                    first_unit = clean_tiers[0].get("unit")
-                    if first_unit:
-                        payload["unit"] = canonical_unit_label(first_unit)
+        # INVARIANT (fix incident prod « 60 l de miel », 2026-09-29) : `pricing_tiers` est la vérité
+        # commerciale ; on n'en DÉRIVE ni `price` / `price_unit` (le prix du 1er palier n'est pas un prix
+        # par unité : 700 FCFA le bidon de 5 L n'est pas 700 FCFA/L) ni `quantity` (les contenances
+        # 5 L + 9 L ne sont pas un stock de 14 L). Un stock absent est DEMANDÉ (validator :
+        # MISSING_AVAILABLE_QUANTITY), un prix absent est porté par les paliers (domain/packaging_tiers_flow.py).
 
     # --- Update stable entities uniquement après complétion ---
     status = str(state.get("status") or "").upper()

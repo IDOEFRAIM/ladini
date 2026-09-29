@@ -602,8 +602,10 @@ class ProducerMgmtMixin(BaseMixin):
         `unit` y est TOUJOURS conservé LITTÉRALEMENT (seuls espace/casse
         superflus sont nettoyés) — aucune substitution/normalisation
         (`_CANONICAL_UNIT_MAP`/`normalize_quantity_to_kg`) n'est appliquée
-        ici. `price`/`unit`/`quantity_for_sale` restent le PREMIER tier,
-        pour compatibilité avec tout code qui ne connaît pas encore ce champ.
+        ici. INVARIANT : avec des `pricing_tiers` (sans offre certifiée), `Product.price`
+        n'est qu'un champ de compatibilité legacy (prix brut du 1er palier, NOT NULL) et
+        n'est pas la vérité commerciale ; `quantity_for_sale` est le STOCK DISPONIBLE, jamais
+        la somme des contenances des paliers.
         """
         phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
         phone = clean_text(phone, "phone", required=True)

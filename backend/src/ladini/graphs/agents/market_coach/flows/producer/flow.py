@@ -25,6 +25,7 @@ from ladini.domain.bid_pricing_flow import (
 )
 from ladini.domain.commercial_offer import PriceBasis
 from ladini.domain.commercial_pricing_snapshot import PricingSnapshotError
+from ladini.domain.pricing_tiers import describe_tiers
 from ladini.domain.production_update_offer import (
     CertifiedProductionPriceCorrection,
     ProductionPriceNotCertifiable,
@@ -2358,6 +2359,10 @@ async def _resolve_product_for_update(
         price = it.get("price")
         qty_str = f" — {qty} {unit}" if qty not in (None, "") else ""
         price_str = f" — {price} FCFA/{unit}" if price not in (None, "") else ""
+        # Produit à paliers : `price` n'est que le shadow legacy (1er palier) — on affiche les paliers.
+        tiers_label = describe_tiers(it.get("pricing_tiers"))
+        if tiers_label:
+            price_str = f" — {tiers_label}"
         lines.append(f"{i}. *{name}*{qty_str}{price_str}")
         mapping[str(i)] = pid
         options.append(MenuOption(index=str(i), label=f"{name}{qty_str}", value=pid))

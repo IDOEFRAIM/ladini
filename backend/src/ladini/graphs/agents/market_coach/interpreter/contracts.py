@@ -70,7 +70,9 @@ class PublishProductContract(BaseModel):
 
     product: str = Field(..., min_length=2, max_length=80)
     quantity: float = Field(..., gt=0)
-    price: float = Field(..., gt=0)
+    # Optionnel : un produit à paliers (`pricing_tiers`) n'a pas de prix scalaire (la PRÉSENCE est
+    # exigée par INTENT_CONFIG / le validator, ce contrat ne juge que les valeurs présentes).
+    price: Optional[float] = Field(None, gt=0)
     phone: str = Field(..., min_length=8)
 
     @model_validator(mode="before")

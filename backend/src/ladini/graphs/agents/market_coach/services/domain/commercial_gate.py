@@ -25,20 +25,30 @@ from ladini.domain.bid_pricing_flow import (
 )
 from ladini.domain.commercial_offer import CommercialOffer
 from ladini.domain.commercial_offer_flow import (
+    FIELD_PACKAGE_SIZE,
+    FIELD_PRICE_BASIS,
     CommercialQuestion,
     SalesOfferGateResult,
     evaluate_sales_offer,
+)
+from ladini.domain.packaging_tiers_flow import (
+    ClarificationReason,
+    PricingMode,
+    TierPricingResult,
+    evaluate_tier_pricing,
 )
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     get_pending_interaction,
 )
 from ladini.graphs.agents.market_coach.core.state import entities_said_this_turn
+from ladini.graphs.agents.market_coach.utils import slot_has_value
 
 logger = logging.getLogger("Ladini.MarketCoach.CommercialOffer")
 
-#: Un `pricing_tiers` fourni par l'utilisateur (« 5 L à 500 et 10 L à 900 ») suit le moteur de
-#: paliers existant (`domain/pricing_tiers.py`) : hors périmètre du vertical slice B1.
+#: Un `pricing_tiers` fourni par l'utilisateur (« 5 L à 500 et 10 L à 900 ») ne passe PAS par
+#: `evaluate_sales_publish_state` (qui rend `None`) mais par `evaluate_sales_tier_state` ci-dessous —
+#: modes `PER_PACKAGE` (1 palier nommé) / `PACKAGING_TIERS` (voir `domain/packaging_tiers_flow.py`).
 SALES_GOAL = "SALES_PUBLISH_PRODUCT"
 
 
@@ -75,6 +85,48 @@ def evaluate_sales_publish_state(
     )
 
 
+def scalar_price_replaces_tiers(state: Mapping[str, Any]) -> bool:
+    """Vrai si l'utilisateur vient de redonner un prix SCALAIRE sans repréciser de paliers
+    (« finalement 500 par litre ») : il sort du mode paliers — les anciens paliers ne survivent pas."""
+    said = entities_said_this_turn(dict(state))
+    return slot_has_value(said.get("price")) and not slot_has_value(said.get("pricing_tiers"))
+
+
+def evaluate_sales_tier_state(
+    state: Mapping[str, Any], payload: Mapping[str, Any]
+) -> Optional[TierPricingResult]:
+    """Chemin PALIERS du gate (`pricing_tiers` présent). `None` si ce tour n'est pas concerné."""
+    if not payload.get("product") or not payload.get("pricing_tiers"):
+        return None
+    return evaluate_tier_pricing(payload)
+
+
+def log_pricing_mode(
+    mode: PricingMode | str, state: Mapping[str, Any], *, draft_id: Optional[str] = None
+) -> None:
+    """`pricing_mode=…` structuré (jamais le texte ni le montant de l'utilisateur)."""
+    logger.info(
+        "PRICING_MODE | pricing_mode=%s | flow_id=%s | draft_id=%s | message_sid=%s",
+        getattr(mode, "value", mode), flow_id_of(state), draft_id, state.get("message_sid"),
+    )
+
+
+def log_pricing_clarification(
+    reason: ClarificationReason | str, state: Mapping[str, Any], *, pricing_mode: Optional[str] = None
+) -> None:
+    """`reason=…` structuré d'une clarification tarifaire (jamais le texte de l'utilisateur)."""
+    logger.info(
+        "PRICING_CLARIFICATION | reason=%s | pricing_mode=%s | flow_id=%s | message_sid=%s",
+        getattr(reason, "value", reason), pricing_mode, flow_id_of(state), state.get("message_sid"),
+    )
+
+
+_QUESTION_REASON = {
+    FIELD_PACKAGE_SIZE: ClarificationReason.MISSING_PACKAGE_SIZE,
+    FIELD_PRICE_BASIS: ClarificationReason.AMBIGUOUS_PRICING,
+}
+
+
 def log_gate_events(
     result: SalesOfferGateResult,
     state: Mapping[str, Any],
@@ -97,6 +149,14 @@ def log_gate_events(
             pricing.basis.value if pricing and pricing.basis else None,
             pricing.basis_source.value if pricing else None,
             state.get("message_sid"),
+        )
+    if pricing is not None and pricing.basis is not None:
+        log_pricing_mode(pricing.basis.value, state, draft_id=draft_id)
+    question = result.question
+    if question is not None and question.requested_field in _QUESTION_REASON:
+        log_pricing_clarification(
+            _QUESTION_REASON[question.requested_field], state,
+            pricing_mode=pricing.basis.value if pricing and pricing.basis else None,
         )
 
 
@@ -132,6 +192,10 @@ __all__: list = [
     "flow_id_of",
     "commercial_question_from_state",
     "evaluate_sales_publish_state",
+    "evaluate_sales_tier_state",
+    "scalar_price_replaces_tiers",
+    "log_pricing_mode",
+    "log_pricing_clarification",
     "log_gate_events",
     "log_offer_lifecycle",
     "offer_from_payload",

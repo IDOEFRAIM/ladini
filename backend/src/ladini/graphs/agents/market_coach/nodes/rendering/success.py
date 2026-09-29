@@ -211,7 +211,11 @@ def _render_catalog_section(
         if code:
             line_header += f" (Réf: #{code})"
         details = []
-        if price is not None:
+        raw_tiers = product.get("pricing_tiers")
+        is_tiered = isinstance(raw_tiers, list) and any(isinstance(t, dict) for t in raw_tiers)
+        # INVARIANT : `Product.price` d'un produit à paliers est un champ de COMPATIBILITÉ legacy (prix
+        # brut du 1er palier), PAS la vérité commerciale — jamais affiché comme « X FCFA/{unité} ».
+        if price is not None and not is_tiered:
             details.append(f"💰 {fmt_num(price)} FCFA/{unit}")
         if qty not in (None, ""):
             details.append(f"⚖️ {fmt_num(qty)} {unit} dispo")
@@ -240,7 +244,7 @@ def _render_catalog_section(
                     label += f" ({packaging})"
                 tier_lines.append(f"    • {label} — {fmt_num(t_price)} FCFA")
             if tier_lines:
-                block += "\n" + "\n".join(tier_lines)
+                block += "\n  Conditionnements :\n" + "\n".join(tier_lines)
         item_blocks.append(block)
         options.append(
             {

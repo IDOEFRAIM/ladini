@@ -68,6 +68,7 @@ from ladini.domain.commercial_offer import (
     offer_execution_payload,
     render_offer_summary,
 )
+from ladini.domain.packaging_tiers_flow import render_tiers_summary
 from ladini.graphs.agents.market_coach.core.confirmation_target import (
     ConfirmationTarget,
 )
@@ -113,7 +114,10 @@ _FIELD_NAMES = (
     # (conservés pour compatibilité des drafts antérieurs et des lecteurs legacy).
     "commercial_offer",
 )
-_REQUIRED_FOR_COMPLETION = ("product", "quantity", "price")
+#: `price` n'est plus requis À PLAT : un pricing valide est SOIT un prix scalaire (avec son offre
+#: commerciale certifiée), SOIT au moins un palier de conditionnement (`pricing_tiers`, mode
+#: PACKAGING_TIERS — voir `is_complete` / `domain/packaging_tiers_flow.py`).
+_REQUIRED_FOR_COMPLETION = ("product", "quantity")
 
 
 class IllegalDraftTransition(RuntimeError):
@@ -257,6 +261,16 @@ class SalesPublishDraft:
                 same = value == current
             if not same:
                 changed[key] = value
+        # INVARIANT de mode tarifaire : un draft porte SOIT des paliers (PACKAGING_TIERS), SOIT une offre
+        # scalaire — jamais les deux. Passer de l'un à l'autre purge l'autre (un `None` ne se transmet pas
+        # par `fields`, `slot_has_value(None)` est faux).
+        if changed.get("pricing_tiers") and "commercial_offer" not in changed:
+            if self.commercial_offer is not None:
+                changed["commercial_offer"] = None
+            if self.price is not None and "price" not in changed:
+                changed["price"] = None
+        elif changed.get("commercial_offer") and "pricing_tiers" not in changed and self.pricing_tiers:
+            changed["pricing_tiers"] = None
         if not changed:
             return self
         transitioned = self._transition(SalesPublishDraftStatus.DRAFT)
@@ -285,17 +299,28 @@ class SalesPublishDraft:
         chemin `pricing_tiers` fourni par l'utilisateur)."""
         return CommercialOffer.from_dict(self.commercial_offer)
 
+    @property
+    def is_tier_mode(self) -> bool:
+        """Mode PACKAGING_TIERS : `pricing_tiers` est la vérité commerciale (aucune offre scalaire)."""
+        return bool(self.pricing_tiers) and self.offer is None
+
     def is_complete(self) -> bool:
         if not all(slot_has_value(getattr(self, f)) for f in _REQUIRED_FOR_COMPLETION):
             return False
         offer = self.offer
-        # Un draft dont l'offre n'est pas VALID n'est JAMAIS « complet » : aucune confirmation ni
-        # exécution ne peut en découler (invariant Phase B1).
-        return offer is None or offer.validate().is_valid
+        if offer is not None:
+            # Un draft dont l'offre n'est pas VALID n'est JAMAIS « complet » : aucune confirmation ni
+            # exécution ne peut en découler (invariant Phase B1).
+            return bool(slot_has_value(self.price)) and offer.validate().is_valid
+        if self.pricing_tiers:
+            return True  # paliers validés par le gate (`validate_pricing_tiers`) avant d'entrer ici
+        return bool(slot_has_value(self.price))
 
     def missing_fields(self) -> list:
         missing = [f for f in _REQUIRED_FOR_COMPLETION if not slot_has_value(getattr(self, f))]
         offer = self.offer
+        if (offer is not None or not self.pricing_tiers) and not slot_has_value(self.price):
+            missing.append("price")
         if offer is not None and not missing:
             verdict = offer.validate()
             for name in verdict.missing_fields:
@@ -308,6 +333,14 @@ class SalesPublishDraft:
         docstring du module)."""
         if not slot_has_value(self.product) or not slot_has_value(self.quantity):
             return "Récapitulatif de la publication en cours de construction."
+        if self.is_tier_mode:
+            # PACKAGING_TIERS : les conditions commerciales EXACTES, aucun prix par unité affiché.
+            lines = [render_tiers_summary(self.product, self.quantity, self.unit, self.pricing_tiers)]
+            if slot_has_value(self.description):
+                lines.append(f"Description : {self.description}")
+            if slot_has_value(self.category_label):
+                lines.append(f"Catégorie : {self.category_label}")
+            return "\n".join(lines)
         offer = self.offer
         if offer is not None and offer.validate().is_valid:
             # Formulation COMMERCIALE choisie par l'utilisateur (« 500 FCFA par sachet de

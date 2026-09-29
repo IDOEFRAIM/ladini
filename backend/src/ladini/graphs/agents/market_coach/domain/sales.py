@@ -240,7 +240,10 @@ class SalesService:
         # rester correct ("500 000 F/TONNE" -> "500 F/KG"), jamais laissé
         # tel quel comme avant ce correctif (bug confirmé : le prix restait
         # à 500 000, silencieusement réétiqueté F/KG).
-        rebased_price = command.price / price_rescale_factor
+        # Produit à paliers sans offre certifiée : `price` n'est que le « legacy shadow » du 1er palier
+        # (voir sales_dto.py) — un prix de CONDITIONNEMENT ne se re-base jamais avec l'unité de stock.
+        is_tier_shadow = bool(command.pricing_tiers) and not command.commercial_offer
+        rebased_price = command.price if is_tier_shadow else command.price / price_rescale_factor
         args: Dict[str, Any] = {
             "producer_id": command.producer_id,
             "name": command.product,

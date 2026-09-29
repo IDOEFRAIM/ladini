@@ -315,6 +315,34 @@ def price_unit_next_to_amount(text: Any, amount: Optional[float]) -> Optional[st
     return None
 
 
+_PKG_WORDS_ALT = "|".join(sorted(PACKAGING_WORDS, key=len, reverse=True))
+# « le sachet à 500 », « le bidon coûte 700 », « sachet de 1 L à 500 », « le sachet = 500 » : le mot de
+# conditionnement précède le montant, séparé au plus d'un contenu (« de 1 L ») et d'un lien (« à », « coûte »…).
+_PACKAGE_BEFORE_AMOUNT_RE = re.compile(
+    r"\b(" + _PKG_WORDS_ALT + r")s?\b"
+    r"(?:\s+(?:de|d|fait|contient)\s+" + _NUMBER + r"\s*" + _CONTENT_UNIT + r")?"
+    r"\s*(?:est\s+)?(?:a|au prix de|au tarif de|coute|vaut|se vend|=|:|pour)?\s*$"
+)
+
+
+def package_word_before_amount(text: Any, amount: Optional[float]) -> Optional[str]:
+    """Mot de conditionnement (singulier) que l'utilisateur a placé JUSTE AVANT le prix
+    (« le sachet à 500 » -> « sachet »), ou `None`. Symétrique de `price_unit_next_to_amount`
+    (conditionnement APRÈS le montant, « 500 le sachet ») : sans elle, « le sachet à 500 » ne portait
+    aucune base et retombait sur le contexte de question (« prix par litre ») -> 500 FCFA/L."""
+    if amount is None:
+        return None
+    ntext = normalize_text(text)
+    for token in _AMOUNT_TOKEN_RE.finditer(ntext):
+        value = _to_float(token.group(0).strip().rstrip(".,").replace(" ", ""))
+        if value is None or abs(value - amount) > 1e-9:
+            continue
+        match = _PACKAGE_BEFORE_AMOUNT_RE.search(ntext[: token.start()])
+        if match:
+            return match.group(1)
+    return None
+
+
 def price_expression_in_text(text: Any) -> Optional[Tuple[float, str]]:
     """(montant, unité canonique) de la 1re expression de PRIX « <montant> le/la/par/… <unité> »
     du message (« finalement 600 le sachet » -> (600.0, "SAC")), ou `None`.
@@ -512,6 +540,12 @@ def build_commercial_offer_from_sales_state(
                 package_type = package_word or price_unit_in_text.lower()
             else:
                 basis, basis_unit, basis_source = PriceBasis.PER_BASE_UNIT, price_unit_in_text, Provenance.USER_EXPLICIT
+        elif new_price_info and package_word_before_amount(ntext, amount):
+            # Le conditionnement DIT dans la phrase prime sur le contexte de question : « le sachet à
+            # 500 » après « quel prix par litre ? » n'est PAS 500 FCFA/L. Le contenu du conditionnement
+            # est lu plus bas (`parse_package_content`) ; inconnu -> PACKAGE_REQUIRED, jamais halluciné.
+            basis, basis_source = PriceBasis.PER_PACKAGE, Provenance.USER_EXPLICIT
+            package_type = package_word_before_amount(ntext, amount)
         elif (
             new_price_info
             and question is not None
@@ -590,6 +624,45 @@ def build_commercial_offer_from_sales_state(
     )
     offer = replace(offer, normalized=derive_normalized(offer))
     return offer, events
+
+
+def offer_from_package_tier(
+    payload: Mapping[str, Any],
+    tier: Mapping[str, Any],
+    *,
+    category_config: Optional[Mapping[str, Any]] = None,
+) -> Tuple[CommercialOffer, CommercialOfferValidation]:
+    """UN palier avec conditionnement explicite (« bidon de 5 L à 700 ») -> le modèle B1 `PER_PACKAGE`.
+
+    La quantité disponible vient du payload (jamais du palier : 5 L est la CONTENANCE du bidon, pas le
+    stock) ; le prix (700) est celui DU conditionnement. Aucun prix par unité n'est fabriqué ici."""
+    base_payload = {**dict(payload), "price": None, "price_unit": None, "pricing_tiers": None}
+    offer, _ = build_commercial_offer_from_sales_state(
+        base_payload, said={}, text="", question=None, category_config=category_config
+    )
+    content = _convert_content(float(tier["quantity"]), str(tier["unit"]))
+    if content is None:
+        canonical = normalize_unit(str(tier["unit"]))
+        content = (float(tier["quantity"]), str(canonical)) if canonical else None
+    if content is None:
+        raise ValueError(f"unité de contenu inconnue: {tier.get('unit')!r}")
+    package = PackageDefinition(
+        package_type=str(tier["packaging"]).strip().upper(),
+        content_amount=content[0],
+        content_unit=content[1],
+        status=PackageStatus.KNOWN,
+        source=Provenance.USER_EXPLICIT,
+    )
+    pricing = Pricing(
+        amount=float(tier["price"]),
+        basis=PriceBasis.PER_PACKAGE,
+        source=Provenance.USER_EXPLICIT,
+        basis_source=Provenance.USER_EXPLICIT,
+        basis_unit=None,
+    )
+    offer = replace(offer, pricing=pricing, package=package)
+    offer = replace(offer, normalized=derive_normalized(offer))
+    return offer, validate_offer(offer)
 
 
 # ---------------------------------------------------------------------------
@@ -702,6 +775,8 @@ __all__ = [
     "parse_package_content",
     "parse_basis_reply",
     "price_unit_next_to_amount",
+    "package_word_before_amount",
+    "offer_from_package_tier",
     "UNIT_AFTER_PRICE_RE",
     "price_expression_in_text",
     "build_commercial_offer_from_sales_state",

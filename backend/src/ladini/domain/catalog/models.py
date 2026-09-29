@@ -264,9 +264,12 @@ class Product(Base):
     # "packaging": str|null} — `unit` est TOUJOURS la valeur LITTÉRALE saisie
     # par l'utilisateur (jamais passée par `_CANONICAL_UNIT_MAP`/
     # `normalize_quantity_to_kg`, voir services/domain/quantity_unit.py).
-    # `price`/`unit`/`quantity_for_sale` ci-dessus restent renseignés avec le
-    # PREMIER tier (compatibilité avec tout code existant qui ne connaît pas
-    # encore `pricing_tiers`). NULL = produit à tarif unique (comportement
+    # INVARIANT (2026-09-29) : quand `pricing_tiers` est non vide, il est LA vérité
+    # commerciale. `Product.price` (NOT NULL) n'est alors qu'un champ de COMPATIBILITÉ
+    # LEGACY (prix BRUT du premier palier, jamais normalisé) imposé par le schéma actuel :
+    # il n'est PAS un prix par unité de base et ne doit JAMAIS servir à choisir un palier,
+    # calculer le débit de stock ou déterminer un montant payé (voir `resolve_tier` /
+    # `compute_line` / `resolve_stock_debit`). NULL = produit à tarif unique (comportement
     # historique inchangé).
     pricing_tiers = Column(JSONB, nullable=True)
     # Phase B2a — sémantique commerciale CERTIFIÉE à la publication (base du prix, conditionnement,

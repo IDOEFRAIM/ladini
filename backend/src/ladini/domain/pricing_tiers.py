@@ -195,6 +195,26 @@ def tiers_to_dicts(tiers: List[PricingTier]) -> List[Dict[str, Any]]:
     return [t.model_dump() for t in tiers]
 
 
+def describe_tiers(raw_tiers: Optional[List[Dict[str, Any]]]) -> Optional[str]:
+    """« Bidon de 5 L : 700 FCFA · Bidon de 9 L : 1 000 FCFA » — libellé COMMERCIAL d'un produit à
+    paliers, ou `None` s'il n'en a pas. Projection pure des paliers persistés : aucun prix par unité
+    n'est calculé (700 FCFA le bidon de 5 L n'est pas 140 FCFA/L)."""
+    from ladini.core.formatting import fmt_num
+
+    parts: List[str] = []
+    for tier in raw_tiers or []:
+        if not isinstance(tier, dict):
+            continue
+        qty, unit, price = tier.get("quantity"), str(tier.get("unit") or "").strip(), tier.get("price")
+        if qty in (None, "") or not unit or price in (None, ""):
+            continue
+        packaging = str(tier.get("packaging") or "").strip()
+        content = f"{fmt_num(qty)} {unit}"
+        label = f"{packaging[:1].upper()}{packaging[1:]} de {content}" if packaging else content
+        parts.append(f"{label} : {fmt_num(price)} FCFA")
+    return " · ".join(parts) or None
+
+
 # ---------------------------------------------------------------------------
 # Côté acheteur (Phase B) — sélection d'un palier + calcul de ligne.
 # ---------------------------------------------------------------------------
@@ -338,6 +358,7 @@ __all__ = [
     "PricingTierError",
     "validate_pricing_tiers",
     "tiers_to_dicts",
+    "describe_tiers",
     "resolve_tier",
     "ComputedLine",
     "compute_line",

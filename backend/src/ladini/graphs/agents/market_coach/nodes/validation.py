@@ -19,6 +19,7 @@ from ladini.domain.commercial_offer_flow import (
     SalesOfferGateResult,
     price_question,
 )
+from ladini.domain.packaging_tiers_flow import ClarificationReason, PricingMode
 from ladini.domain.price_basis import (
     PriceBasisAction,
     conflict_question,
@@ -52,8 +53,12 @@ from ladini.graphs.agents.market_coach.nodes.response_handlers import (
 from ladini.graphs.agents.market_coach.services.domain.commercial_gate import (
     SALES_GOAL,
     evaluate_sales_publish_state,
+    evaluate_sales_tier_state,
     flow_id_of,
     log_gate_events,
+    log_pricing_clarification,
+    log_pricing_mode,
+    scalar_price_replaces_tiers,
 )
 from ladini.graphs.agents.market_coach.utils import (
     _AUTO_RESOLVABLE_FIELDS,
@@ -392,7 +397,55 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
     gate_result = None
     gate_question: Optional[CommercialQuestion] = None
     gate_text: Optional[str] = None
-    if goal_upper in _COMMERCIAL_OFFER_GOALS:
+    # ── PALIERS DE CONDITIONNEMENT (`pricing_tiers`) — SALES_PUBLISH_PRODUCT ─────────────────────
+    # Incident prod « 60 l de miel » + « bidon de 5 l à 700 et celui de 9 l à 1000 » -> fallback
+    # générique : ce chemin rendait `None`, l'offre incomplète du tour précédent survivait. Ici : un
+    # prix scalaire REDIT sans paliers sort du mode paliers ; sinon le mode est décidé par
+    # `domain/packaging_tiers_flow.py` (PER_PACKAGE B1 / PACKAGING_TIERS / clarification ciblée).
+    tier_result = None
+    if goal_upper == SALES_GOAL and payload.get("pricing_tiers"):
+        if scalar_price_replaces_tiers(state):
+            payload["pricing_tiers"] = None
+        else:
+            tier_result = evaluate_sales_tier_state(state, payload)
+    if tier_result is not None:
+        if tier_result.mode == PricingMode.PACKAGING_TIERS:
+            # pricing_tiers = vérité commerciale : aucun prix scalaire ni offre périmée ne survit.
+            payload["pricing_tiers"] = [dict(t) for t in tier_result.tiers]
+            payload["commercial_offer"] = None
+            payload["price"] = None
+            payload["price_unit"] = None
+            log_pricing_mode(PricingMode.PACKAGING_TIERS, state)
+        elif tier_result.mode == PricingMode.PER_PACKAGE and tier_result.offer is not None:
+            tier = tier_result.tiers[0]
+            payload["commercial_offer"] = tier_result.offer.to_dict()
+            payload["pricing_tiers"] = None
+            payload["price"] = tier["price"]
+            payload["price_unit"] = str(tier["packaging"]).upper()
+            log_pricing_mode(PricingMode.PER_PACKAGE, state)
+        elif tier_result.reason == ClarificationReason.MISSING_AVAILABLE_QUANTITY:
+            # la quantité disponible est demandée par le chemin normal (`quantity` est requis) ;
+            # les paliers sont conservés, jamais sommés en stock.
+            payload["commercial_offer"] = None
+            payload["price"] = None
+            log_pricing_clarification(tier_result.reason, state, pricing_mode="PACKAGING_TIERS")
+        else:
+            payload["pricing_tiers"] = None
+            gate_text = tier_result.message
+            log_pricing_clarification(
+                tier_result.reason or ClarificationReason.INVALID_PRICING_TIER, state
+            )
+        if tier_result.is_valid or tier_result.reason == ClarificationReason.MISSING_AVAILABLE_QUANTITY:
+            # le prix est tenu par les paliers/l'offre : il n'est plus « manquant »
+            missing = [f for f in missing if f != "price"]
+            completed = [f for f in required_for_goal if f not in missing]
+            if tier_result.reason == ClarificationReason.MISSING_AVAILABLE_QUANTITY and "quantity" not in missing:
+                missing.insert(0, "quantity")
+                completed = [f for f in completed if f != "quantity"]
+        elif "price" not in missing:
+            missing.insert(0, "price")
+            completed = [f for f in completed if f != "price"]
+    if goal_upper in _COMMERCIAL_OFFER_GOALS and tier_result is None:
         gate_result = evaluate_sales_publish_state(state, payload)
         if gate_result is not None:
             payload["commercial_offer"] = gate_result.offer.to_dict()
