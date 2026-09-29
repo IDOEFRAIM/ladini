@@ -236,7 +236,33 @@ async def _resolve_sales_draft_based_confirmation(
 
     candidate = SalesPublishDraft.new(draft_id=uuid.uuid4().hex[:12], **payload)
     if not candidate.is_complete():
-        return {"execution_authorized": False, "is_certified": False}
+        # Un état tarifaire COMPRIS ne doit jamais finir sur le fallback générique (incident prod
+        # « 60 l de miel ») : on redemande le champ qui manque, dans le tunnel SALES_PUBLISH_PRODUCT.
+        # Le `validator` pose déjà la question ciblée ; ceci est le filet si un chemin l'a laissée passer.
+        missing = candidate.missing_fields()
+        if not missing:
+            return {"execution_authorized": False, "is_certified": False}
+        logger.warning(
+            "[ConfirmationGate] %s : draft candidat incomplet (manque=%s) — clarification, pas de fallback",
+            goal,
+            ",".join(missing),
+        )
+        from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
+            _missing_field_prompt,
+        )
+
+        return {
+            "status": "WAITING_INPUT",
+            "response_strategy": "ASK_MISSING_FIELD",
+            "final_response": _missing_field_prompt(missing),
+            "missing_fields": missing,
+            "last_missing_field": missing[0],
+            "execution_authorized": False,
+            "is_certified": False,
+            **set_pending_interaction(
+                InteractionKind.ENTER_FIELD, goal=goal, field_name=missing[0]
+            ),
+        }
 
     conversation_id = str(state.get("user_phone") or state.get("session_id") or "")
     inserted = await sales_publish_draft_store.insert(candidate, conversation_id=conversation_id)

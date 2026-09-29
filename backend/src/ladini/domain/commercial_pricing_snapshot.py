@@ -747,6 +747,9 @@ class PricingView:
     reliability: PricingReliability
     snapshot: Optional[CommercialPricingSnapshot] = None
     note: Optional[str] = None
+    #: produit à `pricing_tiers` sans snapshot certifié : le libellé COMMERCIAL est celui des paliers ;
+    #: `amount` (le `Product.price` legacy shadow, prix brut du 1er palier) n'est alors JAMAIS affiché.
+    tiers_label: Optional[str] = None
 
     @property
     def basis_label(self) -> str:
@@ -766,6 +769,8 @@ class PricingView:
         affiche le montant SANS inventer de base ; une ligne sans montant n'a rien à afficher."""
         if self.snapshot is not None:
             return render_pricing_label(self.snapshot)
+        if self.tiers_label:
+            return self.tiers_label
         if self.amount is not None:
             return f"{fmt_num(float(self.amount))} FCFA — base historique non certifiée"
         return "Prix non disponible"
@@ -835,6 +840,20 @@ def _field(row: Any, name: str) -> Any:
 def product_pricing_view(product: Any) -> PricingView:
     snapshot = CommercialPricingSnapshot.from_dict(_field(product, "commercial_pricing"))
     if snapshot is None:
+        from ladini.domain.pricing_tiers import describe_tiers
+
+        tiers_label = describe_tiers(_field(product, "pricing_tiers"))
+        if tiers_label:
+            # `Product.price` d'un produit à paliers = champ de COMPATIBILITÉ legacy, pas la vérité
+            # commerciale : le montant n'est pas exposé, seuls les paliers font foi.
+            return PricingView(
+                amount=None,
+                currency=normalize_currency(None),
+                basis=None,
+                reliability=PricingReliability.LEGACY_PARTIAL,
+                note="tarification par conditionnements",
+                tiers_label=tiers_label,
+            )
         return legacy_pricing_view(_field(product, "price"), partial=True)
     return PricingView(
         amount=snapshot.commercial_price_amount,

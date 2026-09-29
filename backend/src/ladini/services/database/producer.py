@@ -35,6 +35,7 @@ from ladini.domain.models import (
 )
 from ladini.domain.pricing_tiers import (
     PricingTierError,
+    describe_tiers,
     resolve_stock_debit,
     resolve_tier,
     tiers_to_dicts,
@@ -45,7 +46,11 @@ from ladini.domain.unit_taxonomy import UnitAction, validate_product_unit
 from .base import BaseMixin
 from .common import clamp_limit, clean_text, positive_float
 from .errors import BusinessRuleException
-from .pricing_persistence import certify_commercial_offer
+from .pricing_persistence import (
+    certify_commercial_offer,
+    certify_market_offer_price_correction,
+    invalidate_market_offer_pricing_on_edit,
+)
 from .search import fuzzy_match, similarity_rank
 
 logger = logging.getLogger("ladini.services.producer_mgmt")
@@ -598,8 +603,10 @@ class ProducerMgmtMixin(BaseMixin):
         `unit` y est TOUJOURS conservé LITTÉRALEMENT (seuls espace/casse
         superflus sont nettoyés) — aucune substitution/normalisation
         (`_CANONICAL_UNIT_MAP`/`normalize_quantity_to_kg`) n'est appliquée
-        ici. `price`/`unit`/`quantity_for_sale` restent le PREMIER tier,
-        pour compatibilité avec tout code qui ne connaît pas encore ce champ.
+        ici. INVARIANT : avec des `pricing_tiers` (sans offre certifiée), `Product.price`
+        n'est qu'un champ de compatibilité legacy (prix brut du 1er palier, NOT NULL) et
+        n'est pas la vérité commerciale ; `quantity_for_sale` est le STOCK DISPONIBLE, jamais
+        la somme des contenances des paliers.
         """
         phone = await self._resolve_producer_phone(phone=phone, producer_id=producer_id)
         phone = clean_text(phone, "phone", required=True)
@@ -784,6 +791,7 @@ class ProducerMgmtMixin(BaseMixin):
 
             for i, p in enumerate(products, start=1):
                 price_val = float(p.price) if isinstance(p.price, Decimal) else p.price
+                tiers_label = describe_tiers(p.pricing_tiers)
                 products_list.append(
                     {
                         "product_id": str(p.id),
@@ -792,12 +800,19 @@ class ProducerMgmtMixin(BaseMixin):
                         "price": price_val,
                         "quantity": p.quantity_for_sale,
                         "unit": p.unit,
+                        "pricing_tiers": p.pricing_tiers or None,
                     }
                 )
 
+                # Produit à paliers : `Product.price` est un shadow legacy, jamais « X CFA/unité ».
+                price_line = (
+                    f"💰 Conditionnements : *{tiers_label}*"
+                    if tiers_label
+                    else f"💰 Prix : *{price_val} CFA/{p.unit}*"
+                )
                 line = (
                     f"\n*{i}. {p.name}* (Réf: #{p.short_code})\n"
-                    f"💰 Prix : *{price_val} CFA/{p.unit}*\n"
+                    f"{price_line}\n"
                     f"⚖️ Stock dispo : {p.quantity_for_sale} {p.unit}"
                 )
                 menu_lines.append(line)
@@ -2323,8 +2338,17 @@ class ProducerMgmtMixin(BaseMixin):
         unit: str | None = None,
         estimated_available_at: Any = None,
         production_type: str | None = None,
+        pricing: Dict[str, Any] | None = None,
+        expected_fingerprint: str | None = None,
     ) -> Dict[str, Any]:
         """Met à jour les champs modifiables d'une production future (MarketOffer).
+
+        Prix (Phase B2c.7) : le chemin CERTIFIÉ est `pricing` (prix ANALYSÉ — montant, base,
+        provenance, `BidPriceParse.to_state()`) : le snapshot et `price_per_unit` sont alors
+        re-dérivés ICI contre la quantité/unité finales du lot (`expected_fingerprint` = ce que le
+        producteur a confirmé). Un `price` brut (sans base) reste accepté pour les appelants
+        historiques mais RETIRE `pricing_snapshot` : jamais un snapshot périmé qui affirme
+        l'ancien prix pendant que la colonne brute change dessous.
 
         Seuls les champs fournis (non ``None``) sont modifiés — mise à jour
         partielle. Permet notamment de CORRIGER le nom d'un lot mal nommé
@@ -2362,7 +2386,35 @@ class ProducerMgmtMixin(BaseMixin):
             }
 
         changed: List[str] = []
+        if pricing is not None and price is not None:
+            return {
+                "status": "error",
+                "message": "Fournissez soit un prix certifié, soit un prix brut — pas les deux.",
+            }
         try:
+            if pricing is not None:
+                # quantité/unité FINALES du lot (celles qui suivront cette mise à jour)
+                final_qty = (
+                    positive_float(quantity, "quantity", allow_zero=True)
+                    if quantity is not None
+                    else cycle.available_quantity
+                )
+                unit_in = clean_text(unit, "unit", max_length=16) if unit is not None else None
+                final_unit = (unit_in or cycle.unit or "KG").upper()
+                try:
+                    snapshot_dict, certified_ppu = certify_market_offer_price_correction(
+                        pricing,
+                        cycle_id=cycle.id,
+                        product_label=cycle.product_label,
+                        quantity=final_qty,
+                        unit=final_unit,
+                        expected_fingerprint=expected_fingerprint,
+                    )
+                except BusinessRuleException as exc:
+                    return {"status": "error", "message": str(exc)}
+                cycle.price_per_unit = certified_ppu
+                cycle.pricing_snapshot = snapshot_dict
+                changed.append("prix")
             if price is not None:
                 cycle.price_per_unit = positive_float(price, "price", allow_zero=True)
                 changed.append("prix")
@@ -2403,6 +2455,18 @@ class ProducerMgmtMixin(BaseMixin):
                 "status": "error",
                 "message": "Aucun champ à modifier n'a été fourni.",
             }
+
+        # Phase B2c.7 : une édition SANS prix certifié (prix brut, unité, quantité d'un lot à prix
+        # total) rend `pricing_snapshot` faux -> retiré. Un prix certifié vient de le remplacer.
+        if pricing is None and invalidate_market_offer_pricing_on_edit(
+            cycle,
+            price_changed=price is not None,
+            unit_changed="unité" in changed,
+            quantity_changed=quantity is not None,
+        ):
+            logger.info(
+                "MARKET_OFFER_PRICING_INVALIDATED | cycle=%s | edit=%s", cycle_id, changed
+            )
 
         await self.session.flush()
         snapshot = _offer_to_payload(cycle, farm)

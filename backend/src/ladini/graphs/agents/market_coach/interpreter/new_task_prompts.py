@@ -102,7 +102,8 @@ pas seulement la dernière. Un tarif est TOUJOURS "par UN conditionnement" : \
 "L"), JAMAIS le nombre de paquets en stock ("60 bidons de 5 L" à 10000 FCFA \
 LE BIDON donne quantity=5.0/unit="L"/price=10000.0 — jamais quantity=60.0/ \
 unit="bidon", qui confond le compte de paquets avec le contenu tarifé). \
-Vide (`[]`) s'il n'y a qu'un seul tarif.
+Vide (`[]`) s'il n'y a qu'un seul tarif. `packaging` : mot DIT, sinon \
+`null`.
 - Dates (`estimated_available_at`/`expected_harvest_date`/`deadline`) : \
 toujours au format `YYYY-MM-DD`, calculées à partir de la date de référence \
 donnée dans le message utilisateur ci-dessous (jamais une année devinée). \

@@ -358,6 +358,16 @@ def _build_task_payload(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     unit = payload.get("unit") or state.get("unit") or "KG"
 
     required_fields = get_required_fields(goal)
+    if (
+        goal == "SALES_PUBLISH_PRODUCT"
+        and price is None
+        and isinstance(payload.get("pricing_tiers"), list)
+        and payload["pricing_tiers"]
+    ):
+        # Mode PACKAGING_TIERS : `pricing_tiers` EST le pricing (règle « prix scalaire valide OU >= 1
+        # palier valide »). Le `price` NOT NULL de `products` est un shadow legacy posé plus tard, à la
+        # frontière DTO (`SalesPublishProductPayload`) — jamais exigé ni inventé ici.
+        required_fields = [f for f in required_fields if f != "price"]
 
     context_payload = dict(payload)
     context_payload.setdefault("transaction_payload", dict(payload))

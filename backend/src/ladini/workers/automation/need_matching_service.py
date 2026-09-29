@@ -121,7 +121,11 @@ _CANDIDATES_SQL = text(
     "SELECT p.id AS product_id, p.producer_id, p.unit, p.price, p.quantity_for_sale, pr.zone_id "
     "FROM marketplace.products p "
     "JOIN marketplace.producers pr ON pr.id = p.producer_id "
-    "WHERE p.sub_category_id = :sub_category_id AND p.is_available = true AND p.quantity_for_sale > 0"
+    "WHERE p.sub_category_id = :sub_category_id AND p.is_available = true AND p.quantity_for_sale > 0 "
+    # Un produit à paliers SANS prix certifié n'a pas de prix par unité : `p.price` n'est qu'un shadow legacy
+    # (prix brut du 1er palier) et servirait de `unit_price` d'allocation -> jamais candidat au matching récurrent.
+    "AND (p.commercial_pricing IS NOT NULL OR p.pricing_tiers IS NULL OR "
+    "CASE WHEN jsonb_typeof(p.pricing_tiers) = 'array' THEN jsonb_array_length(p.pricing_tiers) ELSE 0 END = 0)"
 )
 
 _ACTIVE_ALLOCATIONS_SQL = text(

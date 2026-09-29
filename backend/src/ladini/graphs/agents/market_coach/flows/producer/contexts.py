@@ -88,7 +88,15 @@ class ProducerUpdateWorkflowState:
     PHASES = ("SELECT", "COLLECT", "CONFIRM")
 
     KEYS: FrozenSet[str] = frozenset(
-        {"update_phase", "update_cycle_id", "update_product_id", "update_pending"}
+        {
+            "update_phase",
+            "update_cycle_id",
+            "update_product_id",
+            "update_pending",
+            # B2c.7 : lot relu (quantité/unité) + question de base du prix en attente
+            "update_listing",
+            "update_price_pending",
+        }
     )
 
     def __init__(self, working_memory: Dict[str, Any]) -> None:

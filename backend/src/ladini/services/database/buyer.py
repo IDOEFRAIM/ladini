@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import case, desc, func, literal, or_, select, update
+from sqlalchemy import and_, case, desc, func, literal, or_, select, update
 from sqlalchemy.orm import joinedload, selectinload
 
 from ladini.core.formatting import fmt_num as _fmt_num
@@ -95,6 +95,38 @@ def _pricing_fields(view: Any) -> Dict[str, Any]:
     }
 
 
+def _is_tiered_sql() -> Any:
+    """Vrai (SQL) si `Product.pricing_tiers` est un tableau non vide SANS prix certifié : son
+    `Product.price` n'est alors qu'un shadow legacy, pas un prix comparable."""
+    return case(
+        (
+            and_(
+                Product.commercial_pricing.is_(None),
+                Product.pricing_tiers.is_not(None),
+                func.coalesce(
+                    case(
+                        (
+                            func.jsonb_typeof(Product.pricing_tiers) == "array",
+                            func.jsonb_array_length(Product.pricing_tiers),
+                        ),
+                        else_=0,
+                    ),
+                    0,
+                )
+                > 0,
+            ),
+            1,
+        ),
+        else_=0,
+    )
+
+
+def _has_uncertified_tiers(row: Any) -> bool:
+    tiers = row.get("pricing_tiers") if hasattr(row, "get") else getattr(row, "pricing_tiers", None)
+    certified = row.get("commercial_pricing") if hasattr(row, "get") else getattr(row, "commercial_pricing", None)
+    return isinstance(tiers, list) and bool(tiers) and not certified
+
+
 def _sort_price(r: Dict[str, Any]) -> float:
     """Clé de tri (mandat B2c.4 §17) : un prix normalisé PAR UNITÉ DE BASE
     (`normalized_unit_price`) n'existe que pour une vue CERTIFIÉE dont le lot a une quantité
@@ -103,6 +135,9 @@ def _sort_price(r: Dict[str, Any]) -> float:
     PER_BASE_UNIT (un montant PAR UNITÉ) n'a mathématiquement aucun sens — ne trier sur le brut
     que quand rien de comparable n'existe, jamais mélanger les deux bases."""
     normalized = r.get("normalized_unit_price")
+    if normalized is None and _has_uncertified_tiers(r):
+        # produit à paliers : le `price` brut est un shadow legacy, jamais une clé de comparaison
+        return float("inf")
     return float(normalized) if normalized is not None else float(r.get("price") or 0.0)
 
 
@@ -300,7 +335,9 @@ class BuyerMixin(BaseMixin):
                     # aucun risque d'exclure des lignes legacy.
                     Product.is_available.is_(True),
                 )
-                .order_by("priority", Product.price.asc())
+                # `Product.price` d'un produit à paliers = shadow legacy : il ne classe JAMAIS une
+                # offre (les produits à paliers passent après, dans leur groupe de proximité).
+                .order_by("priority", _is_tiered_sql().asc(), Product.price.asc())
                 .limit(limit)
             )
 
@@ -649,6 +686,14 @@ class BuyerMixin(BaseMixin):
                 base_unit_quantity = computed.base_unit_quantity
                 stock_debit = base_unit_quantity
             else:
+                if _has_uncertified_tiers(product):
+                    # `Product.price` d'un produit à paliers est un shadow legacy : sans palier choisi,
+                    # il n'existe AUCUN prix à facturer (ni 700 FCFA/L, ni un palier au hasard).
+                    raise BusinessRuleException(
+                        f"« {product.name} » se vend par conditionnement : choisissez un conditionnement "
+                        "avant de commander.",
+                        reason="tier_required",
+                    )
                 price_at_sale = float(product.price)
                 line_total = price_at_sale * qty
                 stock_debit = qty
@@ -1835,6 +1880,14 @@ class BuyerMixin(BaseMixin):
                     f"{product.name} (x{int(qty)} {tier.packaging or tier.unit})"
                 )
             else:
+                if _has_uncertified_tiers(product):
+                    logger.warning(
+                        "create_preorder_draft: produit %s à paliers sans tier_id — article ignoré "
+                        "(Product.price est un shadow legacy, jamais un prix de commande)",
+                        p_uuid,
+                    )
+                    unresolved.append(str(item.get("product_id")))
+                    continue
                 price = float(product.price or 0.0)
                 line_total = price * qty
                 order_item_kwargs["quantity"] = qty
@@ -2039,7 +2092,10 @@ class BuyerMixin(BaseMixin):
                 fallback=[],
             )
 
-        seller_minimum = float(product.price or 0.0)
+        # Produit à paliers : `Product.price` est un shadow legacy (prix brut du 1er palier), pas un
+        # « prix catalogue » comparable à l'offre par unité de l'acheteur.
+        is_tiered = _has_uncertified_tiers(product)
+        seller_minimum = 0.0 if is_tiered else float(product.price or 0.0)
         qty = None
         try:
             qty = float(quantity) if quantity is not None else None
@@ -2077,7 +2133,7 @@ class BuyerMixin(BaseMixin):
         current_session.add(new_auction)
         await current_session.flush()
 
-        price_gap = round(seller_minimum - offer, 2)
+        price_gap = None if is_tiered else round(seller_minimum - offer, 2)
         return {
             "status": "success",
             "negotiation_status": "PENDING",
@@ -2087,13 +2143,15 @@ class BuyerMixin(BaseMixin):
             "product_name": product.name,
             "producer_id": str(product.producer_id) if product.producer_id else None,
             "buyer_offer": offer,
-            "seller_minimum": seller_minimum,
+            "seller_minimum": None if is_tiered else seller_minimum,
             "price_gap": price_gap,
             "quantity": qty,
             "unit": (product.unit or "KG").upper(),
             "next_expected_action": "SELLER_RESPONSE",
             "message": (
-                f"🤝 Négociation ouverte sur {product.name} : vous proposez {offer} FCFA "
+                f"🤝 Négociation ouverte sur {product.name} : vous proposez {offer} FCFA."
+                if is_tiered
+                else f"🤝 Négociation ouverte sur {product.name} : vous proposez {offer} FCFA "
                 f"(prix catalogue {seller_minimum} FCFA)."
             ),
         }
