@@ -35,16 +35,34 @@ class TestFetchAndShowBidsResilience:
 
 class TestHandleCounterPriceResilience:
     def test_a_gateway_exception_is_caught_and_resets_the_negotiation_context(self, monkeypatch):
+        """Phase B2c.6 : `update_offer` n'est plus appelé depuis `_handle_counter_price` (qui ne
+        fait que CERTIFIER le prix et demander confirmation) mais depuis
+        `_handle_confirm_negotiation_offer`, une fois le prix confirmé — voir `negotiation_offer.py`."""
         import ladini.graphs.agents.market_coach.flows.buyer.negotiation as mod
+
+        nctx = {"buyer_phone": "+22670000001", "unit": "TONNE", "quantity": 10}
+        state = {"normalized_text": "450000 la tonne", "user_query": "450000 la tonne"}
+        confirm = run(mod._handle_counter_price(
+            mc_runtime=None, phone="+22670000001", payload={}, nctx=nctx, auction_id="a1", state=state,
+        ))
+        assert confirm["negotiation_context"]["phase"] == "CONFIRM_NEGOTIATION_COUNTER"
 
         class _Boom(_BoomGateway):
             async def update_offer(self, **kwargs):
                 raise RuntimeError("mcp timeout")
 
+        # `claim_once` est une empreinte déterministe (mêmes termes -> même clé) : sans ce
+        # monkeypatch, deux exécutions de CE test dans la même heure contre un Redis réel
+        # partageraient la clé et le second run verrait "déjà en cours d'enregistrement" au lieu
+        # de l'exception simulée — ce test vérifie le rattrapage d'erreur, pas l'idempotence.
+        monkeypatch.setattr(mod, "claim_once", lambda *a, **k: True)
         monkeypatch.setattr(mod, "NegotiationGateway", _Boom)
-        result = run(mod._handle_counter_price(
-            mc_runtime=None, phone="+22670000001", payload={"price": 300},
-            nctx={"buyer_phone": "+22670000001"}, auction_id="a1",
+        result = run(mod._handle_confirm_negotiation_offer(
+            mc_runtime=None,
+            state={"interpreted_event": "CONFIRM", "normalized_text": "oui"},
+            nctx=confirm["negotiation_context"],
+            phone="+22670000001",
+            auction_id="a1",
         ))
         assert result["response_strategy"] == "ERROR"
         assert result["negotiation_context"] == {"__reset__": True}
