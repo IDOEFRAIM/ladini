@@ -257,6 +257,15 @@ class RecurringNeedDraft:
         lines = [_render_item_line(self.product, self.quantity, self.unit)]
         for item in self.additional_items or []:
             lines.append(_render_item_line(item.get("product"), item.get("quantity"), item.get("unit")))
+        # Mandat B2c.5 §16 : le plafond de prix DOIT être confirmé avant création — jusqu'ici il
+        # voyageait jusqu'à `execution_payload()`/`RecurringNeed.max_price_per_unit` sans jamais être
+        # montré ici, donc jamais confirmé. `max_price_per_unit` est structurellement PAR L'UNITÉ de
+        # la demande (colonne dédiée, jamais un budget total) — afficher son unité le rend explicite,
+        # jamais laisser le buyer deviner ce que le nombre veut dire.
+        if slot_has_value(self.max_price_per_unit):
+            lines.append(
+                f"Prix maximum accepté : {_fmt_num(self.max_price_per_unit)} FCFA/{self.unit or 'unité'}."
+            )
         lines.append(_render_frequency(self.recurrence_type, self.weekly_days, self.excluded_weekdays))
         if slot_has_value(self.starts_at):
             lines.append(f"À partir du {self.starts_at}.")
