@@ -271,6 +271,38 @@ class TestRenderBuyerCatalogSections:
         assert len(options) == 1
         assert options[0]["value"] == "p1"
 
+    def test_certified_pricing_label_is_used_verbatim_never_reconstructed_from_raw_price_unit(self):
+        """Mandat B2c.4 §4-10 : un lot TOTAL_LOT/conditionnement affiché avec `pricing_label`
+        (fourni par `search_products` déjà certifié) ne doit jamais être re-fabriqué en
+        "X FCFA/unité" depuis `price`/`unit` bruts — exactement le bug que ce champ ferme."""
+        text, _options = _render_buyer_catalog_sections([
+            {
+                "name": "tomates", "source_type": "DIRECT", "id": "p1",
+                "price": 4000000, "unit": "KG",
+                "pricing_label": "4 000 000 FCFA pour l'ensemble",
+            },
+        ])
+        assert "4 000 000 FCFA pour l'ensemble" in text
+        assert "4 000 000 FCFA/KG" not in text
+
+    def test_certified_pricing_label_used_for_future_items_too(self):
+        text, _options = _render_buyer_catalog_sections([
+            {
+                "name": "tomates", "estimated_available_at": "2026-12-31",
+                "price_per_unit": 4000000, "unit": "KG",
+                "pricing_label": "4 000 000 FCFA pour l'ensemble",
+            },
+        ])
+        assert "4 000 000 FCFA pour l'ensemble" in text
+
+    def test_missing_pricing_label_falls_back_to_the_legacy_raw_format(self):
+        """Compatibilité descendante : un appelant qui ne fournit pas encore `pricing_label`
+        (ancien test/résultat) garde le comportement pré-B2c.4."""
+        text, _options = _render_buyer_catalog_sections([
+            {"name": "mais", "price": 250, "unit": "KG", "source_type": "DIRECT"},
+        ])
+        assert "250 FCFA/KG" in text
+
 
 # =====================================================================
 # _transactional_fallback_text

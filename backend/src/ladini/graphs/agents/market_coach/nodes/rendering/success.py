@@ -539,7 +539,11 @@ def _render_buyer_catalog_sections(
                 product.get("vendor") or product.get("producer_name") or "Producteur"
             )
             zone = product.get("zone_name") or product.get("zone")
-            price_label = (
+            # Mandat B2c.4 §4-10 : `pricing_label` (search_products, certifié) porte la VRAIE base
+            # du prix — un conditionnement ("500 FCFA/sachet de 0,5 L") ou un lot TOTAL_LOT ne
+            # doivent jamais se retrouver ici reconstruits en "X FCFA/unité". Repli legacy
+            # uniquement si l'appelant n'a pas fourni ce champ (résultat antérieur à cette phase).
+            price_label = product.get("pricing_label") or (
                 f"{fmt_num(price)} FCFA/{unit}"
                 if price not in (None, "")
                 else "Prix communiqué par le producteur"
@@ -580,7 +584,7 @@ def _render_buyer_catalog_sections(
             vendor = (
                 product.get("vendor") or product.get("producer_name") or "Producteur"
             )
-            price_label = (
+            price_label = product.get("pricing_label") or (
                 f"{fmt_num(price)} FCFA/{unit}"
                 if price not in (None, "")
                 else "Prix communiqué lors de la confirmation"

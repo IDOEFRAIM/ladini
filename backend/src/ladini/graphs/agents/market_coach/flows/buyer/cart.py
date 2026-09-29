@@ -288,7 +288,11 @@ async def _execute_selection_action(
         vendor_label = chosen.get("vendor_name") or "ce producteur"
         unit_hint = chosen.get("unit") or "KG"
         price_hint = chosen.get("price")
-        price_info = f" (prix : {price_hint} FCFA/{unit_hint})" if price_hint else ""
+        price_info = (
+            f" (prix : {chosen['pricing_label']})"
+            if chosen.get("pricing_label")
+            else (f" (prix : {price_hint} FCFA/{unit_hint})" if price_hint else "")
+        )
         return {
             "status": "WAITING_INPUT",
             **set_pending_interaction(InteractionKind.ENTER_QUANTITY, field_name="quantity"),
@@ -712,10 +716,15 @@ async def cart_management(
 
         switch_ack = ""
         if vendor_switched and isinstance(chosen_vendor, dict):
+            # Mandat B2c.4 : `pricing_label` (certifié) prime sur `price`/`unit` bruts — sinon un
+            # lot TOTAL_LOT ou un conditionnement s'afficherait comme "X FCFA/unité".
+            vendor_price_label = chosen_vendor.get("pricing_label") or (
+                f"{chosen_vendor.get('price')} FCFA/{chosen_vendor.get('unit') or 'KG'}"
+            )
             switch_ack = (
                 f"🔁 Changement pris en compte : vous avez maintenant choisi "
                 f"*{chosen_vendor.get('vendor_name') or 'ce producteur'}* "
-                f"(*{chosen_vendor.get('price')} FCFA/{chosen_vendor.get('unit') or 'KG'}*).\n\n"
+                f"(*{vendor_price_label}*).\n\n"
             )
 
         # --- TIER SELECTION (2026-08-30, voir domain/pricing_tiers.py) ---
@@ -934,7 +943,9 @@ async def cart_management(
             unit_hint = chosen_vendor.get("unit") or "KG"
             price_hint = chosen_vendor.get("price")
             price_info = (
-                f" (prix : {price_hint} FCFA/{unit_hint})" if price_hint else ""
+                f" (prix : {chosen_vendor['pricing_label']})"
+                if chosen_vendor.get("pricing_label")
+                else (f" (prix : {price_hint} FCFA/{unit_hint})" if price_hint else "")
             )
             n_vendors = len(vendor_ctx_payload.get("vendors") or [])
             switch_hint = (
@@ -1162,7 +1173,11 @@ async def cart_management(
     vendor_label = ref.get("vendor_name") or "un producteur"
     unit_hint = ref.get("unit") or "KG"
     price_hint = ref.get("price")
-    price_info = f" (prix : {price_hint} FCFA/{unit_hint})" if price_hint else ""
+    price_info = (
+        f" (prix : {ref['pricing_label']})"
+        if ref.get("pricing_label")
+        else (f" (prix : {price_hint} FCFA/{unit_hint})" if price_hint else "")
+    )
     payload["product"] = product_name
     extras_hint = additional_products_hint(payload, state)
 

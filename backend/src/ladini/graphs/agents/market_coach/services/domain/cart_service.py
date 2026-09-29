@@ -183,6 +183,11 @@ class CartDomainService:
                     ),
                     "price": float(item.get("price") or 0.0),
                     "unit": str(item.get("unit") or "KG").upper(),
+                    # Mandat B2c.4 : sémantique commerciale CERTIFIÉE (search_products) — portée
+                    # jusqu'au menu vendeur, jamais reconstruite depuis price/unit bruts.
+                    "pricing_label": item.get("pricing_label"),
+                    "price_basis": item.get("price_basis"),
+                    "certification_status": item.get("certification_status"),
                     "vendor": item.get("vendor"),
                     "vendor_name": item.get("vendor_name")
                     or item.get("producer_name")
@@ -247,8 +252,11 @@ class CartDomainService:
             qty_info = (
                 f" — Dispo: {v['available_qty']}" if v.get("available_qty") else ""
             )
+            # Mandat B2c.4 §9-10 : le libellé certifié prime — un lot TOTAL_LOT ou un
+            # conditionnement ne doivent jamais s'afficher "X FCFA/unité" dans ce menu.
+            price_label = v.get("pricing_label") or f"{v['price']} FCFA/{v['unit']}"
             label = (
-                f"{v['vendor_name']}{zone_info} — {v['price']} FCFA/{v['unit']}"
+                f"{v['vendor_name']}{zone_info} — {price_label}"
                 f"{qty_info}{source_tag}"
             )
             item_blocks.append(f"*{i}.* {label}")

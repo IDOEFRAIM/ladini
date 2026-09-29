@@ -468,3 +468,39 @@ class TestProximityMatchingService:
         assert _num("not-a-number") is None
         assert _num(None) is None
         assert _num("42.5") == 42.5
+
+    def test_total_lot_offer_alert_carries_the_certified_label_not_a_per_unit_guess(self, monkeypatch):
+        """Mandat B2c.4 : une alerte proactive pour un lot TOTAL_LOT ne doit jamais afficher
+        "X FCFA/unité" — voir `_render_new_product_alert` (workers/outbox/templates.py)."""
+        from decimal import Decimal
+
+        from ladini.domain.commercial_offer import PriceBasis
+        from ladini.domain.commercial_pricing_snapshot import CommercialPricingSnapshot
+        from ladini.workers.outbox.templates import _render_new_product_alert
+
+        snapshot = CommercialPricingSnapshot(
+            commercial_price_amount=Decimal("4000000"), price_basis=PriceBasis.TOTAL_LOT,
+            inventory_quantity_amount=Decimal("10000"), inventory_quantity_unit="KG",
+        ).with_normalized()
+        offer = SimpleNamespace(
+            id="o1", sub_category_id="sc1", product_label="Tomates",
+            price_per_unit=4000000, unit="KG", pricing_snapshot=snapshot.to_dict(),
+        )
+        rows = [(offer, "z1", "Ferme Bio")]
+        created = [{"solicitation_id": "sol-1", "buyer_id": "b1"}]
+        captured: list = []
+        service, mod = self._service(monkeypatch, rows=rows, created=created)
+
+        async def _capture_enqueue(session, entries):
+            captured.extend(entries)
+            return len(entries)
+
+        mod.outbox_repo.enqueue = _capture_enqueue
+        run(service.run())
+
+        assert len(captured) == 1
+        payload = captured[0]["payload"]
+        assert "pour l'ensemble" in payload["pricing_label"]
+        text = _render_new_product_alert(payload)
+        assert "pour l'ensemble" in text
+        assert "4000000 FCFA/KG" not in text.replace(" ", "")
