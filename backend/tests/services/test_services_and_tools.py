@@ -115,6 +115,36 @@ class TestConfirmationSummary:
         s = build_confirmation_summary("PROCUREMENT_CREATE_REQUEST", payload)
         assert "⚠️" in s and "SAC" in s
 
+    def test_procurement_create_request_with_a_certified_total_budget_offer_never_shows_per_unit(self):
+        """Mandat B2c.5 : "10 tonnes pour 4 millions au total" ne doit JAMAIS s'afficher
+        "4 000 000 FCFA/TONNE" (l'ancien bug — `reconcile_price_basis` n'avait pas de notion de
+        TOTAL_LOT). Le récap projette l'offre CERTIFIÉE, jamais `payload["price"]` brut."""
+        from ladini.domain.commercial_offer import (
+            CommercialOffer,
+            CommercialQuantity,
+            InventoryQuantity,
+            PriceBasis,
+            Pricing,
+            Provenance,
+        )
+
+        offer = CommercialOffer(
+            product="mais",
+            commercial_quantity=CommercialQuantity(10.0, "TONNE", Provenance.USER_EXPLICIT),
+            inventory_quantity=InventoryQuantity(10.0, "TONNE", Provenance.USER_EXPLICIT),
+            pricing=Pricing(
+                amount=4_000_000.0, basis=PriceBasis.TOTAL_LOT,
+                source=Provenance.USER_EXPLICIT, basis_source=Provenance.USER_EXPLICIT,
+            ),
+        )
+        payload = {
+            "product": "mais", "quantity": 10.0, "unit": "TONNE",
+            "price": 4_000_000.0, "commercial_offer": offer.to_dict(),
+        }
+        s = build_confirmation_summary("PROCUREMENT_CREATE_REQUEST", payload)
+        assert "Budget maximal total : 4 000 000 FCFA pour l'ensemble" in s
+        assert "4 000 000 FCFA/TONNE" not in s
+
     def test_an_assumed_unit_is_flagged_for_confirmation(self):
         """Incident réel (2026-09-15) : « Vente de 25 LITRE de boeufs » — un
         producteur qui confirme par habitude, sans tout relire, ne voyait

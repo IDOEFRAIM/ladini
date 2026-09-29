@@ -10,6 +10,9 @@ from typing import Any, Dict, Optional, Tuple
 
 from ladini.core.formatting import fmt_num as _fmt_num
 from ladini.domain.commercial_offer import CommercialOffer, render_offer_summary
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
+    render_procurement_price_line,
+)
 from ladini.graphs.agents.market_coach.utils import canonical_unit_label
 
 
@@ -255,6 +258,26 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
         bullet_list = "\n".join(f"- {line}" for line in lines)
         summary = "Mise à jour du produit"
         return f"{summary} :\n{bullet_list}" if bullet_list else summary
+
+    if goal == "PROCUREMENT_CREATE_REQUEST":
+        offer = CommercialOffer.from_dict(payload.get("commercial_offer"))
+        if offer is not None and offer.validate().is_valid:
+            # Mandat B2c.5 : même invariant que PRODUCTION_DECLARE_FUTURE (B2c.3) — un prix
+            # plafond TOTAL_LOT/budget ne doit jamais s'afficher "FCFA/unité" depuis
+            # `payload["price"]` brut. Chemin de secours seulement : le rendu normal passe par
+            # `ProcurementDraft.render_summary()` (confirmation_gate.py / rendering/confirm.py).
+            product_name = payload.get("product") or "ce produit"
+            quantity_line = _format_quantity(payload)
+            base = (
+                f"Lancement d'un appel d'offres pour {quantity_line} de {product_name}"
+                if quantity_line
+                else f"Lancement d'un appel d'offres pour {product_name}"
+            )
+            price_line = render_procurement_price_line(offer)
+            return f"{base}.\n{price_line}" if price_line else f"{base}."
+        # Pas d'offre certifiée (legacy / chemin non passé par le gate) : repli sur le calcul
+        # générique ci-dessous (quantity_line/price_fmt/price_unit/mismatch_note/unit_note),
+        # exactement le comportement pré-B2c.5.
 
     product = payload.get("product")
     price = payload.get("price")

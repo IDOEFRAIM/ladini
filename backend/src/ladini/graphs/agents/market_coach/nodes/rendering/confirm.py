@@ -14,6 +14,10 @@ from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
 )
 from ladini.graphs.agents.market_coach.domain.preorder_draft import PreorderDraft
+from ladini.graphs.agents.market_coach.domain.procurement_draft import (
+    ProcurementDraft,
+    ProcurementDraftStatus,
+)
 from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
     SalesPublishDraft,
     SalesPublishDraftStatus,
@@ -114,10 +118,13 @@ async def render_confirmation(ctx: RenderContext) -> Dict[str, Any]:
     text_output: str
     _preorder_draft = None
     _sales_draft = None
+    _procurement_draft = None
     if ctx.goal in _BUYER_PREORDER_GOALS:
         _preorder_draft = PreorderDraft.from_dict(state.get("preorder_draft"))
     elif ctx.goal == "SALES_PUBLISH_PRODUCT":
         _sales_draft = SalesPublishDraft.from_dict(state.get("sales_publish_draft"))
+    elif ctx.goal == "PROCUREMENT_CREATE_REQUEST":
+        _procurement_draft = ProcurementDraft.from_dict(state.get("procurement_draft"))
     if _preorder_draft is not None:
         text_output = f"{ctx.salutation}{_preorder_draft.render_summary()}\n\nConfirmez-vous ?"
     elif _sales_draft is not None and _sales_draft.status == SalesPublishDraftStatus.DRAFT:
@@ -127,6 +134,14 @@ async def render_confirmation(ctx: RenderContext) -> Dict[str, Any]:
         # puis « le prix sera appliqué par LITRE » alors que le draft portait tout autre chose.
         text_output = (
             f"{ctx.salutation}Voici le récapitulatif :\n{_sales_draft.render_summary()}"
+            "\n\nConfirmez-vous ?"
+        )
+    elif _procurement_draft is not None and _procurement_draft.status == ProcurementDraftStatus.DRAFT:
+        # Mandat B2c.5 : même garde-fou que SALES_PUBLISH_PRODUCT ci-dessus — un prix plafond
+        # TOTAL_LOT/budget ne doit jamais retomber sur `build_confirmation_summary` (payload brut,
+        # aucune notion de base certifiée) dans ce chemin de secours.
+        text_output = (
+            f"{ctx.salutation}Voici le récapitulatif :\n{_procurement_draft.render_summary()}"
             "\n\nConfirmez-vous ?"
         )
     else:

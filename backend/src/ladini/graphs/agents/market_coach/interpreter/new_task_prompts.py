@@ -110,7 +110,11 @@ donnée dans le message utilisateur ci-dessous (jamais une année devinée). \
 - `recurrence_type`/`weekly_days`/`excluded_weekdays`/`max_price_per_unit` \
 (CREATE_RECURRING_NEED) : DAILY/WEEKLY_DAYS(+weekly_days)/WEEKLY/MONTHLY/ \
 ONE_OFF ; ISO 1=lundi..7=dimanche ; "sauf dimanche" = DAILY + \
-excluded_weekdays=[7].
+excluded_weekdays=[7]. `max_price_per_unit` est TOUJOURS un prix PAR L'UNITÉ de la demande \
+("500 FCFA/KG" pour "100 kg par semaine, max 500 FCFA le kg") — jamais un budget total pour \
+l'ensemble de la commande. Si le message donne un montant SANS préciser "le kg"/"l'unité" \
+explicitement (ex: "budget 500000" sans dire "par kg"), laisse `max_price_per_unit` à `null` \
+plutôt que de deviner — le buyer reverra et pourra préciser au récapitulatif.
 - `additional_items` (CREATE_RECURRING_NEED) : produits en plus, avec leur \
 quantité+unité, en objets {"product","quantity","unit"} — jamais \
 `additional_products`.
