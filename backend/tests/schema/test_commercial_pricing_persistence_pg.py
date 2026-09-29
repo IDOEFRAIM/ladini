@@ -314,6 +314,96 @@ class TestJsonbSnapshots:
 
 
 # =====================================================================
+# Phase B2c.3 — Production future (PRODUCTION_DECLARE_FUTURE) -> MarketOffer
+# =====================================================================
+
+
+def _future_offer(*, amount, basis, basis_unit=None, quantity=10.0, unit="TONNE"):
+    """Offre certifiée minimale — mêmes constructeurs que le domaine, jamais une 2e fabrique."""
+    from ladini.domain.commercial_offer import (
+        CommercialOffer as _CommercialOffer,
+    )
+    from ladini.domain.commercial_offer import (
+        CommercialQuantity as _CommercialQuantity,
+    )
+    from ladini.domain.commercial_offer import InventoryQuantity as _InventoryQuantity
+    from ladini.domain.commercial_offer import Pricing as _Pricing
+    from ladini.domain.commercial_offer import Provenance as _Provenance
+
+    return _CommercialOffer(
+        product="tomates",
+        commercial_quantity=_CommercialQuantity(quantity, unit, _Provenance.USER_EXPLICIT),
+        inventory_quantity=_InventoryQuantity(quantity, unit, _Provenance.USER_EXPLICIT),
+        pricing=_Pricing(
+            amount=amount, basis=PriceBasis(basis), basis_unit=basis_unit,
+            source=_Provenance.USER_EXPLICIT, basis_source=_Provenance.USER_EXPLICIT,
+        ),
+    )
+
+
+class TestMarketOfferFutureProductionSnapshot:
+    """`market_offers.pricing_snapshot` — même contrat que `products.commercial_pricing`
+    (Phase B2c.3, réutilise `snapshot_from_offer`/`market_offer_pricing_view`, aucune 2e fabrique)."""
+
+    def test_per_base_unit_persists_and_reloads_certified(self, db, g):
+        from ladini.domain.commercial_pricing_snapshot import (
+            market_offer_pricing_view,
+            snapshot_from_offer,
+        )
+
+        offer = _future_offer(amount=400000, basis="PER_BASE_UNIT", basis_unit="TONNE")
+        snap = snapshot_from_offer(offer)
+        with db.cursor() as cur:
+            row_id = insert(
+                cur, "marketplace.market_offers", producer_id=g.producer, product_label="tomates",
+                unit="TONNE", available_quantity=10, price_per_unit=400000,
+                pricing_snapshot=snap.to_dict(),
+            )
+        row = _row(db, "market_offers", row_id)
+        view = market_offer_pricing_view(row)
+        assert view.reliability == PricingReliability.CERTIFIED
+        assert view.basis == PriceBasis.PER_BASE_UNIT and view.amount == D("400000")
+        assert view.snapshot.price_unit == "TONNE"
+
+    def test_total_lot_stores_the_lot_amount_never_multiplied_by_quantity(self, db, g):
+        from ladini.domain.commercial_pricing_snapshot import (
+            market_offer_pricing_view,
+            snapshot_from_offer,
+        )
+
+        offer = _future_offer(amount=4_000_000, basis="TOTAL_LOT")
+        snap = snapshot_from_offer(offer)
+        with db.cursor() as cur:
+            row_id = insert(
+                cur, "marketplace.market_offers", producer_id=g.producer, product_label="tomates",
+                unit="TONNE", available_quantity=10, price_per_unit=float(snap.normalized_unit_price),
+                pricing_snapshot=snap.to_dict(),
+            )
+        row = _row(db, "market_offers", row_id)
+        view = market_offer_pricing_view(row)
+        assert view.basis == PriceBasis.TOTAL_LOT and view.amount == D("4000000")
+        assert view.snapshot.price_unit is None  # TOTAL_LOT n'a pas de price_unit
+        # jamais 4 000 000 x 10 : le montant du lot reste EXACTEMENT ce que le producteur a dit.
+        assert view.amount != D("4000000") * D("10")
+
+    def test_a_legacy_row_without_a_snapshot_is_never_read_as_certainly_per_unit(self, db, g):
+        from ladini.domain.commercial_pricing_snapshot import PricingReliability as _PR
+        from ladini.domain.commercial_pricing_snapshot import market_offer_pricing_view
+
+        with db.cursor() as cur:
+            row_id = insert(
+                cur, "marketplace.market_offers", producer_id=g.producer, product_label="mil",
+                unit="TONNE", available_quantity=5, price_per_unit=300000,
+            )
+        row = _row(db, "market_offers", row_id)
+        assert row.pricing_snapshot is None
+        view = market_offer_pricing_view(row)
+        assert view.basis is None  # JAMAIS "certainement par unité" — même sans snapshot
+        assert view.amount == D("300000")
+        assert view.reliability == _PR.LEGACY_PARTIAL
+
+
+# =====================================================================
 # Phase B2b — Bid -> Award
 # =====================================================================
 

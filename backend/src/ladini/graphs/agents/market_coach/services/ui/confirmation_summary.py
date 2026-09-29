@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 
 from ladini.core.formatting import fmt_num as _fmt_num
+from ladini.domain.commercial_offer import CommercialOffer, render_offer_summary
 from ladini.graphs.agents.market_coach.utils import canonical_unit_label
 
 
@@ -132,16 +133,33 @@ def build_confirmation_summary(goal: str, payload: Dict[str, Any]) -> str:
     if goal == "PRODUCTION_DECLARE_FUTURE":
         production_type = str(payload.get("production_type") or "CROP").upper()
         product = payload.get("product") or payload.get("species") or "production"
+        farm = payload.get("farm_name") or payload.get("farm_id")
+        eta = payload.get("estimated_available_at") or payload.get(
+            "expected_harvest_date"
+        )
+
+        # Phase B2c.3 : l'offre commerciale CERTIFIÉE (base du prix comprise — par unité, par
+        # conditionnement ou pour l'ensemble du lot) est l'AUTORITÉ de ce récapitulatif dès qu'elle
+        # est présente et VALID. INTERDIT : rendre depuis `payload["price"]` brut, qui laisserait
+        # supposer « par unité » même pour un TOTAL_LOT (« 4 000 000 pour tout » affiché
+        # « 4 000 000 FCFA/tonne » — exactement le bug fermé par cette phase).
+        offer = CommercialOffer.from_dict(payload.get("commercial_offer"))
+        if offer is not None and offer.validate().is_valid:
+            lines = [
+                f"Type : {production_type}",
+                render_offer_summary(offer),
+                f"Disponible vers : {eta}" if eta not in (None, "", [], {}) else None,
+                f"Exploitation : {farm}" if farm not in (None, "", [], {}) else None,
+            ]
+            bullet_list = "\n".join(f"- {line}" for line in lines if line)
+            return f"Déclaration d'un lot futur :\n{bullet_list}" if bullet_list else "Déclaration d'un lot futur"
+
         default_unit = payload.get("unit") or (
             "KG" if production_type == "CROP" else "HEAD"
         )
         quantity_line = _format_quantity(payload, default_unit)
         display_unit, converted_unit = _resolve_units(payload, default_unit)
         price = payload.get("price") or payload.get("price_per_unit")
-        eta = payload.get("estimated_available_at") or payload.get(
-            "expected_harvest_date"
-        )
-        farm = payload.get("farm_name") or payload.get("farm_id")
         # Le prix a sa propre base (ex: "10000 FCFA/kg" alors que la quantité
         # totale est en tonnes) — ne jamais réutiliser aveuglément l'unité de
         # la quantité pour l'affichage du prix si l'utilisateur en a donné une
