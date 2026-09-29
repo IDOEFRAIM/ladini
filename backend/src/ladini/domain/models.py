@@ -75,6 +75,7 @@ from ladini.domain.identity.models import (
 from ladini.domain.intelligence.models import (
     AgentAction,
     AuditLog,
+    CommercialFollowup,
     Conversation,
     DemandSignal,
     ModerationEvent,
@@ -166,4 +167,5 @@ __all__ = [
     "DemandSignal",
     "Solicitation",
     "NotificationOutbox",
+    "CommercialFollowup",
 ]

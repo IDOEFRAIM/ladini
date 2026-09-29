@@ -1,0 +1,172 @@
+"""Espace COMMERCIAL — comportement SQL réel (agrégation par utilisateur, jointures
+conversations/commercial_followups/audit_logs) contre une base PostgreSQL fraîche,
+reconstruite UNIQUEMENT depuis les migrations officielles (voir conftest.py::pg_dsn).
+
+Isolated day base (2030-01-01) : loin de tous les autres compteurs `_fresh_day()`/`_day()`
+de ce dossier (2005/2010+), sur une base partagée au niveau de la session de test.
+
+`WhatsAppChannel.send` est monkeypatché : ces tests valident l'agrégation SQL et l'audit
+trail, jamais un envoi réseau réel (voir tests/unit/test_commercial_admin_api.py pour la
+validation pure et l'invariant anti-LangGraph)."""
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timedelta, timezone
+
+import psycopg2
+import pytest
+from factories import insert, uniq
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+import ladini.services.commercial.admin_api as api
+from ladini.workers.outbox.channels.base import SendResult
+
+
+def _run(dsn, fn):
+    async def go():
+        engine = create_async_engine(dsn.replace("postgresql://", "postgresql+asyncpg://", 1))
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as session:
+                return await fn(session)
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(go())
+
+
+@pytest.fixture(autouse=True)
+def _no_real_whatsapp(monkeypatch):
+    async def _send(self, *, body, recipient_phone=None, **kw):
+        return SendResult.success(provider_ref="SM-fake")
+
+    monkeypatch.setattr(api.WhatsAppChannel, "send", _send)
+
+
+@pytest.fixture
+def user(pg_dsn):
+    conn = psycopg2.connect(pg_dsn)
+    with conn, conn.cursor() as cur:
+        uid = insert(cur, "auth.users", phone=uniq("+226"), name="Aminata", role="BUYER")
+    conn.close()
+    return uid
+
+
+def _conversation(pg_dsn, user_id, *, created_at, needs_follow_up=False, user_intent=None, response="ok"):
+    conn = psycopg2.connect(pg_dsn)
+    with conn, conn.cursor() as cur:
+        insert(
+            cur,
+            "intelligence.conversations",
+            user_id=user_id,
+            query="Bonjour",
+            response=response,
+            needs_follow_up=needs_follow_up,
+            user_intent=user_intent,
+            created_at=created_at,
+        )
+    conn.close()
+
+
+class TestListConversations:
+    def test_aggregates_turns_and_last_activity_per_user(self, pg_dsn, user):
+        t0 = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        _conversation(pg_dsn, user, created_at=t0, user_intent="SALES_PUBLISH_PRODUCT")
+        _conversation(pg_dsn, user, created_at=t0 + timedelta(hours=1), user_intent="SALES_PUBLISH_PRODUCT_PRICE")
+
+        result = _run(pg_dsn, lambda s: api.list_conversations(s, api.ListParams()))
+        row = next(r for r in result["items"] if r["user_id"] == str(user))
+        assert row["turns"] == 2
+        assert row["last_intent"] == "SALES_PUBLISH_PRODUCT_PRICE"
+
+    def test_to_follow_up_filter_matches_the_commercial_status_table(self, pg_dsn, user):
+        _conversation(pg_dsn, user, created_at=datetime(2030, 1, 2, tzinfo=timezone.utc))
+        conn = psycopg2.connect(pg_dsn)
+        with conn, conn.cursor() as cur:
+            insert(cur, "intelligence.commercial_followups", user_id=user, status="TO_FOLLOW_UP")
+        conn.close()
+
+        result = _run(pg_dsn, lambda s: api.list_conversations(s, api.ListParams(status_filter="to_follow_up")))
+        assert any(r["user_id"] == str(user) for r in result["items"])
+
+        result_resolved = _run(pg_dsn, lambda s: api.list_conversations(s, api.ListParams(status_filter="resolved")))
+        assert not any(r["user_id"] == str(user) for r in result_resolved["items"])
+
+    def test_long_filter_uses_the_configured_threshold(self, pg_dsn, user, monkeypatch):
+        monkeypatch.setattr(api.settings, "COMMERCIAL_LONG_CONVERSATION_TURNS", 2)
+        base = datetime(2030, 1, 3, tzinfo=timezone.utc)
+        for i in range(3):
+            _conversation(pg_dsn, user, created_at=base + timedelta(minutes=i))
+
+        result = _run(pg_dsn, lambda s: api.list_conversations(s, api.ListParams(status_filter="long")))
+        row = next(r for r in result["items"] if r["user_id"] == str(user))
+        assert row["is_long"] is True and row["turns"] == 3
+
+
+class TestConversationDetailTimeline:
+    def test_merges_turns_and_commercial_outbound_in_chronological_order(self, pg_dsn, user):
+        # `audit_logs.created_at` est écrit par `func.now()` côté serveur (non
+        # paramétrable depuis `send_follow_up`) — le tour utilisateur doit donc
+        # être daté dans le PASSÉ RÉCENT réel (pas une date arbitraire future
+        # comme les autres tests de ce fichier), sinon il apparaîtrait APRÈS
+        # la relance commerciale dans le tri chronologique.
+        t0 = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
+        _conversation(pg_dsn, user, created_at=t0, response="Bonjour, que puis-je faire ?")
+
+        async def _send_followup(session):
+            conn = psycopg2.connect(pg_dsn)
+            with conn, conn.cursor() as cur:
+                commercial_id = insert(cur, "auth.users", phone=uniq("+226"))
+            conn.close()
+            return await api.send_follow_up(
+                session, actor_id=str(commercial_id), user_id_raw=str(user), message="Toujours dispo ?"
+            )
+
+        sent = _run(pg_dsn, _send_followup)
+        assert sent["sent"] is True
+
+        detail = _run(pg_dsn, lambda s: api.get_conversation_detail(s, str(user)))
+        roles = [m["role"] for m in detail["timeline"]]
+        assert roles[0] == "USER"
+        assert "COMMERCIAL" in roles
+        commercial_msg = next(m for m in detail["timeline"] if m["role"] == "COMMERCIAL")
+        assert commercial_msg["text"] == "Toujours dispo ?"
+        # La relance a fait passer le statut de NONE -> FOLLOWED_UP.
+        assert detail["commercial_status"] == "FOLLOWED_UP"
+
+
+class TestSendFollowUpGuards:
+    def test_refuses_to_send_to_a_blocked_account(self, pg_dsn):
+        conn = psycopg2.connect(pg_dsn)
+        with conn, conn.cursor() as cur:
+            blocked = insert(cur, "auth.users", phone=uniq("+226"), account_status="BLOCKED")
+            actor = insert(cur, "auth.users", phone=uniq("+226"))
+        conn.close()
+
+        with pytest.raises(api.ApiError) as e:
+            _run(pg_dsn, lambda s: api.send_follow_up(s, actor_id=str(actor), user_id_raw=str(blocked), message="hello"))
+        assert e.value.status == 409
+
+
+class TestUpdateStatus:
+    def test_transition_is_persisted_and_audited(self, pg_dsn, user):
+        conn = psycopg2.connect(pg_dsn)
+        with conn, conn.cursor() as cur:
+            actor = insert(cur, "auth.users", phone=uniq("+226"))
+        conn.close()
+
+        result = _run(
+            pg_dsn,
+            lambda s: api.update_status(s, actor_id=str(actor), user_id_raw=str(user), status="to_follow_up"),
+        )
+        assert result == {"status": "TO_FOLLOW_UP"}
+
+        conn = psycopg2.connect(pg_dsn)
+        with conn, conn.cursor() as cur:
+            cur.execute("SELECT status FROM intelligence.commercial_followups WHERE user_id = %s", (str(user),))
+            assert cur.fetchone()[0] == "TO_FOLLOW_UP"
+            cur.execute(
+                "SELECT action FROM intelligence.audit_logs WHERE entity_id = %s AND entity_type = 'conversation'",
+                (str(user),),
+            )
+            assert cur.fetchone()[0] == "COMMERCIAL_STATUS_CHANGE"
+        conn.close()

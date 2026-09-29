@@ -686,6 +686,15 @@ class Settings(BaseSettings):
     # ADMIN_API_TOKEN ci-dessus.
     INTERNAL_API_TOKEN: str = ""
 
+    # --- Espace COMMERCIAL (dashboard) ---
+    # Seuil (nombre de tours) au-delà duquel une conversation est classée
+    # "longue" dans la liste commerciale — un seul endroit, jamais dispersé
+    # dans les filtres/requêtes.
+    COMMERCIAL_LONG_CONVERSATION_TURNS: int = 20
+    # Silence utilisateur (heures) au-delà duquel une conversation est
+    # classée "sans réponse".
+    COMMERCIAL_NO_RESPONSE_HOURS: int = 48
+
     # --- RAG (adaptatif par profil) ---
     # Default RAG embedding model aligned with 768D pgvector schema.
     EMBEDDING_MODEL: str = "BAAI/bge-base-en-v1.5"

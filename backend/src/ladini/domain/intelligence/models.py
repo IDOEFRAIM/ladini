@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -245,6 +246,37 @@ class NotificationOutbox(Base):
     )
 
 
+class CommercialFollowup(Base):
+    """Suivi commercial d'un utilisateur (relances manuelles, dashboard).
+
+    Un statut par utilisateur — pas par tour de conversation : le commercial
+    relance une personne, pas un message isolé. Le contenu des messages
+    envoyés n'est jamais stocké ici (voir `AuditLog`, action=COMMERCIAL_OUTBOUND).
+    Table Drizzle-authored (mirror, voir schema_contract/migrations/0014).
+    """
+
+    __tablename__ = "commercial_followups"
+    __table_args__ = (
+        Index("commercial_followups_status_idx", "status"),
+        Index("commercial_followups_assigned_idx", "assigned_commercial_id"),
+        CheckConstraint(
+            "status IN ('NONE','TO_FOLLOW_UP','FOLLOWED_UP','RESOLVED','NOT_INTERESTED')",
+            name="commercial_followups_status_chk",
+        ),
+        {"schema": "intelligence"},
+    )
+
+    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=_uuid4, server_default=text("gen_random_uuid()"))
+    user_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="CASCADE"), unique=True, nullable=False)
+    status = Column(Text, default="NONE", nullable=False, server_default=text("'NONE'"))
+    assigned_commercial_id = Column(PG_UUID(as_uuid=True), ForeignKey("auth.users.id", ondelete="SET NULL"))
+    last_follow_up_at = Column(DateTime)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 __all__ = [
     "AuditLog",
     "AgentAction",
@@ -253,4 +285,5 @@ __all__ = [
     "DemandSignal",
     "Solicitation",
     "NotificationOutbox",
+    "CommercialFollowup",
 ]
