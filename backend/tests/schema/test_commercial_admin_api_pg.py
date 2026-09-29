@@ -104,7 +104,12 @@ class TestListConversations:
 
 class TestConversationDetailTimeline:
     def test_merges_turns_and_commercial_outbound_in_chronological_order(self, pg_dsn, user):
-        t0 = datetime(2030, 1, 4, 8, 0, tzinfo=timezone.utc)
+        # `audit_logs.created_at` est écrit par `func.now()` côté serveur (non
+        # paramétrable depuis `send_follow_up`) — le tour utilisateur doit donc
+        # être daté dans le PASSÉ RÉCENT réel (pas une date arbitraire future
+        # comme les autres tests de ce fichier), sinon il apparaîtrait APRÈS
+        # la relance commerciale dans le tri chronologique.
+        t0 = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
         _conversation(pg_dsn, user, created_at=t0, response="Bonjour, que puis-je faire ?")
 
         async def _send_followup(session):
