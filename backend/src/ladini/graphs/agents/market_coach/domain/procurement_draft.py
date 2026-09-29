@@ -62,6 +62,16 @@ from typing import Any, Dict, Optional, Union
 
 from ladini.core.formatting import fmt_num as _fmt_num
 from ladini.core.idempotency import claim_once
+from ladini.domain.commercial_offer import (
+    CommercialOffer,
+    PriceBasis,
+    offer_execution_payload,
+    unit_display,
+)
+from ladini.domain.commercial_pricing_snapshot import (
+    PricingSnapshotError,
+    snapshot_from_offer,
+)
 from ladini.graphs.agents.market_coach.core.confirmation_target import (
     ConfirmationTarget,
 )
@@ -97,7 +107,7 @@ class ProcurementDraftStatus(str, Enum):
     CANCELLED = "CANCELLED"  # utilisateur a rejeté — terminal
 
 
-_FIELD_NAMES = ("product", "quantity", "unit", "price", "price_unit", "deadline")
+_FIELD_NAMES = ("product", "quantity", "unit", "price", "price_unit", "deadline", "commercial_offer")
 _REQUIRED_FOR_COMPLETION = ("product", "quantity", "unit", "price")
 
 
@@ -159,6 +169,11 @@ class ProcurementDraft:
     price_unit: Optional[str] = None
     deadline: Optional[str] = None
     created_at: float = 0.0
+    #: Offre commerciale CERTIFIÉE (mandat B2c.5 §3-9) — sérialisation de
+    #: `domain/commercial_offer.py::CommercialOffer`. Un prix plafond acheteur a EXACTEMENT la
+    #: même ambiguïté "par unité ou pour l'ensemble" qu'un prix de vente producteur ; `TOTAL_LOT`
+    #: porte ici "budget total pour toute la quantité demandée", jamais une 2e sémantique inventée.
+    commercial_offer: Optional[Dict[str, Any]] = None
 
     # ------------------------------------------------------------
     # (de)sérialisation — pour le canal d'état `procurement_draft`
@@ -175,6 +190,7 @@ class ProcurementDraft:
             "price_unit": self.price_unit,
             "deadline": self.deadline,
             "created_at": self.created_at,
+            "commercial_offer": self.commercial_offer,
         }
 
     @classmethod
@@ -196,6 +212,9 @@ class ProcurementDraft:
             price_unit=d.get("price_unit"),
             deadline=d.get("deadline"),
             created_at=float(d.get("created_at") or 0.0),
+            commercial_offer=(
+                d.get("commercial_offer") if isinstance(d.get("commercial_offer"), dict) else None
+            ),
         )
 
     @classmethod
@@ -276,11 +295,28 @@ class ProcurementDraft:
     # ------------------------------------------------------------
     # lecture
     # ------------------------------------------------------------
+    @property
+    def offer(self) -> Optional[CommercialOffer]:
+        """L'offre commerciale certifiée (prix plafond + sa base) portée par ce draft, ou `None`
+        (draft antérieur à B2c.5 / chemin où le gate n'a pas construit d'offre)."""
+        return CommercialOffer.from_dict(self.commercial_offer)
+
     def is_complete(self) -> bool:
-        return all(slot_has_value(getattr(self, f)) for f in _REQUIRED_FOR_COMPLETION)
+        if not all(slot_has_value(getattr(self, f)) for f in _REQUIRED_FOR_COMPLETION):
+            return False
+        offer = self.offer
+        # Un draft dont l'offre n'est pas VALID n'est jamais « complet » (même invariant que
+        # `SalesPublishDraft`) : un prix plafond sans base fiable ne peut jamais atteindre la
+        # confirmation.
+        return offer is None or offer.validate().is_valid
 
     def missing_fields(self) -> list:
-        return [f for f in _REQUIRED_FOR_COMPLETION if not slot_has_value(getattr(self, f))]
+        missing = [f for f in _REQUIRED_FOR_COMPLETION if not slot_has_value(getattr(self, f))]
+        offer = self.offer
+        if offer is not None and not missing:
+            verdict = offer.validate()
+            missing.extend(verdict.missing_fields)
+        return missing
 
     def render_summary(self) -> str:
         """Projection PURE — aucun état mémorisé séparément (mandat §8).
@@ -289,19 +325,77 @@ class ProcurementDraft:
             return "Récapitulatif de l'appel d'offres en cours de construction."
         unit_label = canonical_unit_label(self.unit or "KG")
         quantity_line = f"{_fmt_num(self.quantity)} {unit_label}".strip()
-        price_unit_label = canonical_unit_label(self.price_unit or self.unit or "KG")
         base = f"Lancement d'un appel d'offres pour {quantity_line} de {self.product}"
+        offer = self.offer
+        if offer is not None and offer.validate().is_valid:
+            # Mandat B2c.5 §8 : la BASE certifiée du prix plafond (jamais le payload brut) —
+            # "budget total" et "prix par unité" ne s'affichent JAMAIS l'un comme l'autre.
+            price_line = render_procurement_price_line(offer)
+            return f"{base}.\n{price_line}" if price_line else f"{base}."
+        price_unit_label = canonical_unit_label(self.price_unit or self.unit or "KG")
         if slot_has_value(self.price):
             return f"{base} au prix plafond de {_fmt_num(self.price)} FCFA/{price_unit_label}."
         return f"{base}."
 
     def execution_payload(self) -> Dict[str, Any]:
         """Le dict `transaction_payload`-shaped que
-        `actions/procure.py::prep_procurement_create_request` (inchangé)
-        consomme — SEUL point de contact avec le pipeline d'exécution MCP
-        existant, volontairement non touché par cette refonte."""
-        payload = {f: getattr(self, f) for f in _FIELD_NAMES if slot_has_value(getattr(self, f))}
-        return payload
+        `actions/procure.py::prep_procurement_create_request` consomme — SEUL point de contact
+        avec le pipeline d'exécution MCP existant.
+
+        Mandat B2c.5 §3/§18 (pas de migration `Auction` approuvée cette phase — voir rapport) :
+        quand une offre certifiée est présente, `price`/`unit`/`quantity` sont DÉRIVÉS d'elle
+        (`offer_execution_payload`, même helper que `SalesPublishDraft`/`declare_crop_cycle`) —
+        `price` devient alors le prix plafond NORMALISÉ par unité de base, jamais le budget total
+        brut réinterprété comme un prix unitaire. `PER_PACKAGE` est refusé fail-closed (`Auction`
+        n'a ni conditionnement ni palier — un appel d'offres porte sur une quantité en unité de
+        base ou un lot entier, jamais un nombre de paquets)."""
+        offer = self.offer
+        if offer is not None:
+            if offer.pricing is not None and offer.pricing.basis == PriceBasis.PER_PACKAGE:
+                raise ValueError(
+                    "Le prix par conditionnement (« la caisse de 25 kg ») n'est pas encore pris en "
+                    "charge pour un appel d'offres. Indiquez un prix plafond par unité ou un budget "
+                    "total pour l'ensemble."
+                )
+            derived = offer_execution_payload(offer)
+            payload = {
+                f: getattr(self, f)
+                for f in _FIELD_NAMES
+                if f not in ("price", "unit", "quantity", "commercial_offer") and slot_has_value(getattr(self, f))
+            }
+            payload["quantity"] = derived["quantity"]
+            payload["unit"] = derived["unit"]
+            payload["price"] = derived["price"]
+            return payload
+        return {f: getattr(self, f) for f in _FIELD_NAMES if slot_has_value(getattr(self, f))}
+
+
+def render_procurement_price_line(offer: CommercialOffer) -> str:
+    """Libellé du prix plafond d'un appel d'offres, dérivé de l'offre certifiée — jamais
+    "Publication de ..." (`domain/commercial_offer.py::render_offer_summary`, formulé pour un
+    producteur qui VEND, pas pour un acheteur qui DEMANDE). PER_BASE_UNIT montre en plus le
+    budget total correspondant à la quantité demandée (mandat B2c.5 §8) — dérivé, jamais autoritaire
+    (le prix plafond PAR UNITÉ reste ce que le producteur voit et contre quoi un bid est comparé)."""
+    pr = offer.pricing
+    if pr is None:
+        return ""
+    money = f"{_fmt_num(pr.amount)} FCFA"
+    if pr.basis == PriceBasis.TOTAL_LOT:
+        return f"Budget maximal total : {money} pour l'ensemble."
+    if pr.basis == PriceBasis.PER_PACKAGE:
+        pk = offer.package
+        content = f"{_fmt_num(pk.content_amount)} {unit_display(pk.content_unit, pk.content_amount)}" if pk and pk.content_amount is not None else "conditionnement"
+        return f"Prix plafond : {money} par {str(pk.package_type or 'conditionnement').lower() if pk else 'conditionnement'} de {content}."
+    line = f"Prix plafond : {money} par {unit_display(pr.basis_unit)}."
+    try:
+        snapshot = snapshot_from_offer(offer)
+        cq = offer.commercial_quantity
+        if cq is not None:
+            total = snapshot.total_for(cq.amount, cq.unit)
+            line += f" Budget maximal correspondant : {_fmt_num(float(total))} FCFA."
+    except PricingSnapshotError:  # affichage secondaire best-effort, jamais bloquant
+        pass
+    return line
 
 
 # `ConfirmationTarget` (2026-09-03, hardening transverse) — extrait vers

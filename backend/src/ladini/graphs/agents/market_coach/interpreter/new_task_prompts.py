@@ -110,7 +110,8 @@ donnée dans le message utilisateur ci-dessous (jamais une année devinée). \
 - `recurrence_type`/`weekly_days`/`excluded_weekdays`/`max_price_per_unit` \
 (CREATE_RECURRING_NEED) : DAILY/WEEKLY_DAYS(+weekly_days)/WEEKLY/MONTHLY/ \
 ONE_OFF ; ISO 1=lundi..7=dimanche ; "sauf dimanche" = DAILY + \
-excluded_weekdays=[7].
+excluded_weekdays=[7]. `max_price_per_unit` = prix PAR UNITÉ, jamais un budget total ; `null` \
+si l'unité n'est pas précisée.
 - `additional_items` (CREATE_RECURRING_NEED) : produits en plus, avec leur \
 quantité+unité, en objets {"product","quantity","unit"} — jamais \
 `additional_products`.

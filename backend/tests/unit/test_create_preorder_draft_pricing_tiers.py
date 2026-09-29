@@ -137,6 +137,17 @@ class TestTieredCartItemIsCorrectlyResolvedServerSide:
         assert item.price_at_sale == 5000.0
         assert item.quantity == 3  # nombre de paquets, préservé tel quel
 
+        # Mandat B2c.5 §11/§29 (Golden Preorder) : le contrat B2a
+        # (`build_order_item_pricing_snapshot`/`order_item_snapshot_columns`, déjà verrouillé pour
+        # le direct-purchase) doit produire les MÊMES colonnes certifiées ici — jusqu'ici seules les
+        # colonnes legacy (`tier_id`/`price_at_sale`/`quantity`) étaient vérifiées sur ce chemin réel.
+        assert item.price_basis == "PER_PACKAGE"
+        assert item.package_type == "BIDON"
+        assert item.package_content_amount == 10.0
+        assert item.package_content_unit == "L"
+        assert item.commercial_price_amount == 5000.0
+        assert item.pricing_snapshot_version is not None
+
         resolved = result["items"][0]
         assert resolved["base_unit_quantity"] == 30.0
         assert resolved["price"] == 5000.0

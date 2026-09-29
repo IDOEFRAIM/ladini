@@ -355,10 +355,19 @@ class TestPromptSizeGuard:
     # donner au LLM un endroit où mettre une quantité SANS produit reste très
     # loin de l'ancien prompt à 5000 tokens que cette garde vise réellement à
     # empêcher (spec §50).
+    # Seuils relevés de 2430 à 2460 (2026-09-29, mandat B2c.5) : consigne
+    # ajoutée pour `max_price_per_unit` (CREATE_RECURRING_NEED) — sans elle,
+    # un buyer disant "budget 500000" (sans dire "par kg") pouvait voir ce
+    # montant TOTAL capturé tel quel dans un champ structurellement PAR
+    # UNITÉ, un plafond de prix silencieusement faux d'un facteur = à la
+    # quantité (même classe de bug que le mandat de certification des prix,
+    # phases B1/B2c.3/B2c.5). +~20 tokens pour fermer cette ambiguïté reste
+    # très loin de l'ancien prompt à 5000 tokens que cette garde vise
+    # réellement à empêcher (spec §50).
     def test_system_prompt_never_regresses_towards_the_old_5000_token_prompt(self):
         system_prompt = build_new_task_system_prompt(CATALOG)
         estimated_tokens = int(len(system_prompt.split()) * 1.3)
-        assert estimated_tokens < 2430, (
+        assert estimated_tokens < 2460, (
             f"system_prompt new_task_v2 ~{estimated_tokens} tokens — "
             "seuil de garde anti-régression dépassé (spec §50)"
         )
@@ -369,7 +378,7 @@ class TestPromptSizeGuard:
             _ctx(), "je veux vendre 20 sacs de mais a 250 le kilo"
         )
         total_tokens = int((len(system_prompt.split()) + len(user_prompt.split())) * 1.3)
-        assert 800 <= total_tokens <= 2430
+        assert 800 <= total_tokens <= 2460
 
 
 class TestMaxTokensIsExplicitAndLargeEnough:

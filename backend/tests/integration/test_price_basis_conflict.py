@@ -114,11 +114,27 @@ class TestConvertiblePriceBasisIsConvertedExactly:
                 "product": "maïs", "quantity": 200.0, "unit": "TONNE",
                 "price": 500000.0, "price_unit": "TONNE", "deadline": "2026-12-01",
             },
+            # Depuis B2c.5, PROCUREMENT_CREATE_REQUEST partage le gate CommercialOffer
+            # (`_COMMERCIAL_OFFER_GOALS`) — la PROVENANCE du prix (dit CE tour, pas hérité) vient de
+            # `extracted_entities`/`normalized_text`, jamais du seul payload plat (voir
+            # `test_procurement_commercial_offer.py` pour les scénarios dorés équivalents).
+            "extracted_entities": {
+                "quantity": 200.0, "unit": "TONNE", "price": 500000.0, "price_unit": "TONNE",
+            },
+            "normalized_text": "200 tonnes de maïs à 500000 la tonne",
             "working_memory": {},
         }
         out = asyncio.new_event_loop().run_until_complete(validator(state, StubRuntime()))
         payload = out["transaction_payload"]
         assert payload["unit"] == "KG" and payload["quantity"] == 200000.0
-        assert payload["price"] == 500.0, "500000 F la tonne = 500 F le kg, pas 500000 F/KG"
+        # Depuis B2c.5 : le validator ne réécrit plus `payload["price"]` pour ce goal (la
+        # normalisation par unité de base est déférée à `ProcurementDraft.execution_payload()`,
+        # voir test_procurement_commercial_offer.py) — il certifie une `CommercialOffer` qui garde
+        # les termes EXACTS de l'utilisateur (500 000 FCFA PAR TONNE), jamais réinterprétés.
+        offer = payload.get("commercial_offer") or {}
+        pricing = offer.get("pricing") or {}
+        assert pricing.get("basis") == "PER_BASE_UNIT"
+        assert pricing.get("amount") == 500000.0 and pricing.get("basis_unit") == "TONNE"
         summary = build_confirmation_summary("PROCUREMENT_CREATE_REQUEST", payload)
-        assert "500 FCFA/KG" in summary and "500000 FCFA/TONNE" in summary
+        assert "500 000 FCFA par tonne" in summary
+        assert "Budget maximal correspondant : 100 000 000 FCFA" in summary

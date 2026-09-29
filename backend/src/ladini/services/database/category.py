@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import Numeric, cast, desc, func, select, update
 
+from ladini.domain.commercial_pricing_snapshot import product_pricing_view
 from ladini.domain.models import (
     Category,
     Producer,
@@ -691,12 +692,27 @@ class PublicProductMixin:
     # ─── SECTION 4 : FORMATAGE INTERNE ─────────────────────────────────────
 
     def _format_public_product_minimal(self, p: Product) -> Dict[str, Any]:
-        """Formateur défensif unifié pour le catalogue public."""
+        """Formateur défensif unifié pour le catalogue public.
+
+        `price`/`unit` bruts restent pour compatibilité, mais ne sont plus l'AUTORITÉ d'affichage
+        (mandat B2c.4) : un produit TOTAL_LOT dont `price` est le montant du lot entier ne doit
+        jamais être lu comme « prix par `unit` » — `pricing_label`/`price_basis`/
+        `certification_status` (dérivés de `product_pricing_view`) portent la sémantique réelle."""
+        view = product_pricing_view(p)
         return {
             "id": str(p.id),
             "name": p.name,
             "price": float(p.price) if isinstance(p.price, Decimal) else p.price,
             "unit": str(p.unit or "KG").upper(),
+            "pricing_label": view.pricing_label,
+            "price_basis": view.basis_label,
+            "certification_status": view.status,
+            "normalized_unit_price": (
+                float(view.snapshot.normalized_unit_price)
+                if view.snapshot is not None and view.snapshot.normalized_unit_price is not None
+                else None
+            ),
+            "normalized_unit": view.snapshot.normalized_unit if view.snapshot is not None else None,
             "category_label": p.category_label,
             "stock": p.quantity_for_sale,
         }

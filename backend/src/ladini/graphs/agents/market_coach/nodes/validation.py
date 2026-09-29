@@ -72,28 +72,40 @@ _PRICE_BASIS_GOALS = frozenset(
     {"SALES_PUBLISH_PRODUCT", "PROCUREMENT_CREATE_REQUEST", "PRODUCTION_DECLARE_FUTURE"}
 )
 
-#: Goals « modèle commercial complet » (Phase B1 + B2c.3) : prix ET sa BASE (par unité, par
-#: conditionnement, ou pour l'ensemble du lot) construits et validés par `domain/commercial_offer_flow.py`
-#: (`evaluate_sales_publish_state`, nom historique — générique malgré le nom, voir sa docstring) AVANT
-#: toute confirmation. `PROCUREMENT_CREATE_REQUEST` reste sur l'ancien mécanisme plus étroit
-#: (`reconcile_price_basis`, seulement la conversion d'unité) — hors périmètre de cette phase.
-_COMMERCIAL_OFFER_GOALS = frozenset({SALES_GOAL, "PRODUCTION_DECLARE_FUTURE"})
+#: Goals « modèle commercial complet » (Phase B1 + B2c.3 + B2c.5) : prix ET sa BASE (par unité, par
+#: conditionnement, ou pour l'ensemble du lot/budget) construits et validés par
+#: `domain/commercial_offer_flow.py` (`evaluate_sales_publish_state`, nom historique — générique
+#: malgré le nom, voir sa docstring) AVANT toute confirmation. `PROCUREMENT_CREATE_REQUEST`
+#: (mandat B2c.5 §3-9) rejoint ce gate : le prix plafond d'un acheteur a EXACTEMENT la même
+#: ambiguïté « par unité ou pour l'ensemble » qu'un prix de vente producteur — aucune 2e sémantique
+#: `PriceBasis` créée, `TOTAL_LOT` porte ici « budget total pour toute la quantité demandée ».
+_COMMERCIAL_OFFER_GOALS = frozenset(
+    {SALES_GOAL, "PRODUCTION_DECLARE_FUTURE", "PROCUREMENT_CREATE_REQUEST"}
+)
 
 #: `SalesOfferGateResult.events` (générique, `log_gate_events`) -> noms d'observabilité PROPRES à la
-#: production future (mandat B2c.3 §22). Même contenu, juste renommé pour ce goal : aucune 2e logique.
+#: production future (mandat B2c.3 §22) / à l'appel d'offres acheteur (mandat B2c.5 §33). Même
+#: contenu, juste renommé pour ces goals : aucune 2e logique.
 _FUTURE_OFFER_EVENT_NAMES = {
     "COMMERCIAL_OFFER_PARSED": "FUTURE_OFFER_PRICING_PARSED",
     "PRICE_BASIS_RESOLVED": "FUTURE_OFFER_PRICE_BASIS_RESOLVED",
     "PRICE_BASIS_AMBIGUOUS": "FUTURE_OFFER_PRICE_BASIS_AMBIGUOUS",
 }
+_PROCUREMENT_OFFER_EVENT_NAMES = {
+    "COMMERCIAL_OFFER_PARSED": "PROCUREMENT_PRICING_PARSED",
+    "PRICE_BASIS_RESOLVED": "PROCUREMENT_PRICING_CERTIFIED",
+    "PRICE_BASIS_AMBIGUOUS": "PROCUREMENT_PRICING_AMBIGUOUS",
+}
 
 
-def _log_future_offer_gate_events(result: SalesOfferGateResult, state: Dict[str, Any]) -> None:
-    """`FUTURE_OFFER_PRICING_PARSED`/`FUTURE_OFFER_PRICE_BASIS_RESOLVED`/`_AMBIGUOUS` — jamais le
-    texte utilisateur, seulement `flow_id`/statut/base (même champs que `log_gate_events`)."""
+def _log_renamed_offer_gate_events(
+    result: SalesOfferGateResult, state: Dict[str, Any], event_names: Dict[str, str]
+) -> None:
+    """`log_gate_events` générique, sous des noms d'observabilité PROPRES à un goal donné — jamais
+    le texte utilisateur, seulement `flow_id`/statut/base (même champs que `log_gate_events`)."""
     pricing = result.offer.pricing
     for event in result.events:
-        mapped = _FUTURE_OFFER_EVENT_NAMES.get(event)
+        mapped = event_names.get(event)
         if mapped is None:
             continue
         logger.info(
@@ -386,7 +398,9 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
             payload["commercial_offer"] = gate_result.offer.to_dict()
             log_gate_events(gate_result, state)
             if goal_upper == "PRODUCTION_DECLARE_FUTURE":
-                _log_future_offer_gate_events(gate_result, state)
+                _log_renamed_offer_gate_events(gate_result, state, _FUTURE_OFFER_EVENT_NAMES)
+            elif goal_upper == "PROCUREMENT_CREATE_REQUEST":
+                _log_renamed_offer_gate_events(gate_result, state, _PROCUREMENT_OFFER_EVENT_NAMES)
             if (
                 gate_result.validation.status == "INCOMPLETE"
                 and gate_result.question is not None

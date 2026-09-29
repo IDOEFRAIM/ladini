@@ -93,6 +93,27 @@ def test_render_summary_lists_every_product_not_only_the_first():
     assert "Oignon : 20 KG" in summary
 
 
+def test_render_summary_shows_the_price_cap_before_confirmation():
+    """Mandat B2c.5 §16 : le plafond de prix doit etre confirme avant creation - jusqu'ici il
+    voyageait jusqu'a execution_payload()/RecurringNeed.max_price_per_unit sans jamais etre
+    montre au buyer. L'unite est explicite (colonne structurellement PAR UNITE, jamais un
+    budget total)."""
+    d = RecurringNeedDraft.new(
+        "d1", product="tomate", quantity=100, unit="KG", recurrence_type="WEEKLY",
+        max_price_per_unit=500,
+    )
+    summary = d.render_summary()
+    assert "500" in summary and "KG" in summary
+    assert "Prix maximum" in summary
+
+
+def test_render_summary_says_nothing_about_price_when_none_was_given():
+    d = RecurringNeedDraft.new(
+        "d1", product="tomate", quantity=100, unit="KG", recurrence_type="WEEKLY",
+    )
+    assert "Prix maximum" not in d.render_summary()
+
+
 def test_with_updates_replaces_the_whole_additional_items_list():
     d = RecurringNeedDraft.new(
         "d1", product="tomate", quantity=10, unit="KG", recurrence_type="DAILY",
