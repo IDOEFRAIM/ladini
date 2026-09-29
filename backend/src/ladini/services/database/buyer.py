@@ -522,6 +522,21 @@ class BuyerMixin(BaseMixin):
                 item.pop("priority", None)
                 formatted_results.append(item)
 
+            # Observabilité (mandat B2c.4 §27, jamais posé à l'origine) : un compte AGRÉGÉ par
+            # recherche — jamais un log par ligne (volume) ni le texte de recherche de l'acheteur.
+            certified_count = sum(
+                1 for r in formatted_results if r.get("certification_status") == "CERTIFIED"
+            )
+            if formatted_results:
+                logger.info(
+                    "BUYER_PRICING_VIEW_%s | flow_id=…%s | results=%s | certified=%s | legacy=%s",
+                    "CERTIFIED" if certified_count == len(formatted_results) else "MIXED",
+                    str(phone or "")[-4:],
+                    len(formatted_results),
+                    certified_count,
+                    len(formatted_results) - certified_count,
+                )
+
             return {
                 "status": "success",
                 "results": formatted_results,

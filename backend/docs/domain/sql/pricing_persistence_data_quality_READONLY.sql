@@ -48,3 +48,22 @@ LIMIT 200;
 SELECT count(*) AS market_offers_total,
        count(*) FILTER (WHERE pricing_snapshot IS NULL) AS market_offers_without_snapshot
 FROM marketplace.market_offers;
+
+-- 8. (Phase B2c.5) Appels d'offres (Auction) : `max_price_per_unit` reste la SEULE colonne de prix
+--    (pas de migration cette phase, voir rapport B2c.5) — cette requête ne peut donc PAS distinguer
+--    un plafond PER_BASE_UNIT certifié d'un ancien plafond ambigu pré-B2c.5 : elle sert seulement à
+--    dater le volume concerné par créneau, à comparer manuellement avec la date de déploiement de
+--    B2c.5, jamais à "corriger" une ligne.
+SELECT date_trunc('week', created_at) AS week, count(*) AS auctions_created
+FROM marketplace.auctions
+GROUP BY 1
+ORDER BY 1 DESC
+LIMIT 52;
+
+-- 9. (Phase B2c.5) Besoins récurrents : `max_price_per_unit` n'a jamais eu de colonne de base — sûr en
+--    pratique via `products.price`/`unit` (toujours la projection normalisée, voir
+--    assert_legacy_projection_matches), mais AUCUNE ligne `recurring_needs` n'est "certifiée" au sens
+--    snapshot. Ce compte sert juste à dimensionner l'existant avant le pilote, pas à le corriger.
+SELECT count(*) AS recurring_needs_with_a_price_cap
+FROM marketplace.recurring_needs
+WHERE max_price_per_unit IS NOT NULL;
