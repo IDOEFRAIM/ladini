@@ -35,6 +35,7 @@ from ladini.domain.models import (
 )
 from ladini.domain.pricing_tiers import (
     PricingTierError,
+    describe_tiers,
     resolve_stock_debit,
     resolve_tier,
     tiers_to_dicts,
@@ -790,6 +791,7 @@ class ProducerMgmtMixin(BaseMixin):
 
             for i, p in enumerate(products, start=1):
                 price_val = float(p.price) if isinstance(p.price, Decimal) else p.price
+                tiers_label = describe_tiers(p.pricing_tiers)
                 products_list.append(
                     {
                         "product_id": str(p.id),
@@ -798,12 +800,19 @@ class ProducerMgmtMixin(BaseMixin):
                         "price": price_val,
                         "quantity": p.quantity_for_sale,
                         "unit": p.unit,
+                        "pricing_tiers": p.pricing_tiers or None,
                     }
                 )
 
+                # Produit à paliers : `Product.price` est un shadow legacy, jamais « X CFA/unité ».
+                price_line = (
+                    f"💰 Conditionnements : *{tiers_label}*"
+                    if tiers_label
+                    else f"💰 Prix : *{price_val} CFA/{p.unit}*"
+                )
                 line = (
                     f"\n*{i}. {p.name}* (Réf: #{p.short_code})\n"
-                    f"💰 Prix : *{price_val} CFA/{p.unit}*\n"
+                    f"{price_line}\n"
                     f"⚖️ Stock dispo : {p.quantity_for_sale} {p.unit}"
                 )
                 menu_lines.append(line)

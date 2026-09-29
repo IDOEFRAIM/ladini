@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import Numeric, cast, desc, func, select, update
+from sqlalchemy import Numeric, case, cast, desc, func, or_, select, update
 
 from ladini.domain.commercial_pricing_snapshot import product_pricing_view
 from ladini.domain.models import (
@@ -21,6 +21,25 @@ from ladini.domain.models import (
 )
 
 from .search import fuzzy_match, similarity_rank
+
+
+def _has_comparable_price() -> Any:
+    """Filtre SQL des statistiques de prix de marché (moyenne / minimum par sous-catégorie) : exclut
+    les produits à paliers SANS prix certifié — leur `Product.price` n'est qu'un shadow legacy (prix
+    brut du 1er palier), pas un prix par unité, et faussait ces agrégats."""
+    return or_(
+        Product.commercial_pricing.is_not(None),
+        Product.pricing_tiers.is_(None),
+        case(
+            (
+                func.jsonb_typeof(Product.pricing_tiers) == "array",
+                func.jsonb_array_length(Product.pricing_tiers),
+            ),
+            else_=0,
+        )
+        == 0,
+    )
+
 
 logger = logging.getLogger("Ladini.DatabaseService.Public")
 
@@ -162,6 +181,7 @@ class PublicProductMixin:
                         ).where(
                             Product.sub_category_id == row.id,
                             Product.quantity_for_sale > 0,
+                            _has_comparable_price(),
                         )
                     )
                     if avg_price is not None:
@@ -266,6 +286,9 @@ class PublicProductMixin:
                     "stock": p.quantity_for_sale,
                     "category_label": p.category_label,
                     "images": p.images if p.images else [],
+                    # produit à paliers : `price` n'est qu'un shadow legacy — les paliers font foi
+                    "pricing_tiers": p.pricing_tiers or None,
+                    "pricing_label": product_pricing_view(p).pricing_label,
                 }
                 for p in products
             ]
@@ -356,7 +379,7 @@ class PublicProductMixin:
                     avg_price_rounded,
                 )
                 .join(Product, Product.sub_category_id == SubCategory.id)
-                .where(Product.quantity_for_sale > 0)
+                .where(Product.quantity_for_sale > 0, _has_comparable_price())
             )
 
             if zone_query and zone_query.strip():

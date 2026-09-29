@@ -1105,6 +1105,51 @@ async def memory_update(
         # 5 L + 9 L ne sont pas un stock de 14 L). Un stock absent est DEMANDÉ (validator :
         # MISSING_AVAILABLE_QUANTITY), un prix absent est porté par les paliers (domain/packaging_tiers_flow.py).
 
+        # SCOPE (hardening 2026-09-29) : cet INVARIANT ne vaut que pour SALES_PUBLISH_PRODUCT, seul goal qui
+        # sait porter des paliers de bout en bout (`domain/packaging_tiers_flow.py`). Les AUTRES goals
+        # (ex. PRODUCTION_DECLARE_FUTURE : `MarketOffer` n'a ni paliers ni conditionnement) gardent
+        # explicitement leur comportement HISTORIQUE — 1er palier pour price/price_unit, somme des
+        # quantités pour quantity — ce chantier ne les modifie pas en silence (voir
+        # tests/unit/test_memory_tiers_scope_by_goal.py).
+        if goal_upper != "SALES_PUBLISH_PRODUCT":
+
+            def _tier_number(raw: Any) -> Optional[float]:
+                # Le JSON du LLM type parfois les nombres en chaîne ("500") : accepté.
+                if isinstance(raw, (int, float)):
+                    return float(raw)
+                if isinstance(raw, str):
+                    try:
+                        return float(raw.strip().replace(",", "."))
+                    except ValueError:
+                        return None
+                return None
+
+            clean_tiers = [t for t in tiers if isinstance(t, dict)]
+            if clean_tiers and not slot_has_value(payload.get("price")):
+                first_price = _tier_number(clean_tiers[0].get("price"))
+                if first_price is not None and first_price > 0:
+                    payload["price"] = first_price
+                    if not slot_has_value(payload.get("price_unit")):
+                        first_unit = clean_tiers[0].get("unit")
+                        if first_unit:
+                            payload["price_unit"] = first_unit
+            if clean_tiers and not slot_has_value(payload.get("quantity")):
+                total_qty = 0.0
+                all_numeric = True
+                for tier in clean_tiers:
+                    q = _tier_number(tier.get("quantity"))
+                    if q is not None:
+                        total_qty += q
+                    else:
+                        all_numeric = False
+                        break
+                if all_numeric and total_qty > 0:
+                    payload["quantity"] = total_qty
+                    if not slot_has_value(payload.get("unit")):
+                        first_unit = clean_tiers[0].get("unit")
+                        if first_unit:
+                            payload["unit"] = canonical_unit_label(first_unit)
+
     # --- Update stable entities uniquement après complétion ---
     status = str(state.get("status") or "").upper()
     goal_status = str(state.get("goal_status") or "").upper()

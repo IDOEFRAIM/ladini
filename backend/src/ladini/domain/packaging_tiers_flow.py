@@ -28,7 +28,11 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ladini.domain.commercial_offer import CommercialOffer
 from ladini.domain.commercial_offer_flow import offer_from_package_tier
-from ladini.domain.pricing_tiers import PricingTierError, validate_pricing_tiers
+from ladini.domain.pricing_tiers import (
+    PricingTierError,
+    describe_tiers,
+    validate_pricing_tiers,
+)
 
 
 class PricingMode(str, Enum):
@@ -119,6 +123,19 @@ def evaluate_tier_pricing(
             tiers=tuple(tiers),
             reason=ClarificationReason.MISSING_AVAILABLE_QUANTITY,
             message=QUANTITY_QUESTION,
+        )
+    incomplete = [t for t in tiers if t["quantity"] is None or t["price"] is None or not t["unit"]]
+    if incomplete:
+        # « 5 L à 700 et je sais pas pour l'autre » : un palier est lisible, l'autre non. On DIT ce qui a été
+        # compris et on redemande précisément — jamais un fallback générique, jamais un palier deviné.
+        understood = describe_tiers([t for t in tiers if t not in incomplete])
+        return TierPricingResult(
+            reason=ClarificationReason.AMBIGUOUS_PRICING,
+            message=(
+                (f"J'ai bien compris : {understood}. " if understood else "")
+                + "Il me manque la contenance ou le prix d'un conditionnement. Redonnez vos conditionnements "
+                "avec leur prix, par exemple « bidon de 5 L à 700 FCFA et bidon de 9 L à 1000 FCFA »."
+            ),
         )
     try:
         validate_pricing_tiers(tiers, unit)
