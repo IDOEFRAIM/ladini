@@ -40,6 +40,7 @@ from ladini.domain.commercial_offer_flow import (
     FIELD_PACKAGE_SIZE,
     FIELD_PRICE_BASIS,
     parse_basis_reply,
+    parse_generic_package_count_and_size,
     parse_package_content,
 )
 from ladini.domain.quantity_unit import (
@@ -1098,6 +1099,50 @@ def _interpret_fast_path(
                 "désaccord avec le balayage numérique — repli sur le LLM "
                 "plutôt qu'un résultat partiel"
             )
+
+        # ── STOCK GÉNÉRIQUE "N <label libre> de M <unité>" ──
+        # (2026-09-30, Étape 3 du mandat "PARSER GÉNÉRIQUE package_count ×
+        # package_size") : "j'ai 50 pot de 4 litre" décrit le STOCK
+        # disponible, jamais un tarif — d'où le scope `expected == "QUANTITY"`
+        # strict ici (§9 du mandat : ne jamais mélanger stock et pricing tier ;
+        # une déclaration de PRIX passe par la branche tarifaire ci-dessus,
+        # inchangée). `parse_generic_package_count_and_size` (domain/
+        # commercial_offer_flow.py) fait tout son propre travail de sûreté
+        # (aucune devise dans le texte, exactement 1 groupe, tous les nombres
+        # expliqués, compte entier) — aucune whitelist de conditionnement,
+        # contrairement à `packaged_compound_total` juste en dessous (limité à
+        # `_TIER_PACKAGING_WORDS`, 9 mots fermés, conservé pour ses propres
+        # tests de non-régression). Produit `package_count`/`package_label`/
+        # `package_size`/`package_unit` — JAMAIS `quantity`/`unit` directement
+        # : c'est `derive_available_quantity_from_package` (domain/
+        # commercial_offer.py), appelé plus loin par `commercial_offer_flow`,
+        # qui fait l'unique calcul `count × size` (mandat §7 — jamais recalculé
+        # ici).
+        if expected == "QUANTITY":
+            _generic_package = parse_generic_package_count_and_size(text)
+            if _generic_package is not None:
+                logger.info(
+                    "PACKAGED_QUANTITY_PARSED count=%s label=%s size=%s "
+                    "unit=%s",
+                    _generic_package.count,
+                    _generic_package.package_type,
+                    _generic_package.content_amount,
+                    _generic_package.content_unit,
+                )
+                return {
+                    "interpreted_event": "ANSWER",
+                    "detected_intent": str(locked_goal or "UNKNOWN").upper(),
+                    "interpreter_confidence": 0.98,
+                    "extracted_entities": {
+                        "package_count": _generic_package.count,
+                        "package_label": _generic_package.package_type,
+                        "package_size": _generic_package.content_amount,
+                        "package_unit": _generic_package.content_unit,
+                    },
+                    "raw_analysis": {
+                        "path": "fast_path_generic_package_count_size"
+                    },
+                }
 
         # Jamais quand un prix traîne AILLEURS dans le même message ("60
         # bidons de 5L et 30 bidons de 20L. prix : 3000fcfa/L...") : ce

@@ -44,6 +44,7 @@ from ladini.domain.commercial_offer import (
     Provenance,
     base_unit_for,
     convert_commercial_quantity_to_base_unit,
+    derive_available_quantity_from_package,
     derive_normalized,
     unit_display,
     validate_offer,
@@ -238,6 +239,109 @@ def parse_package_content(
             elif question.content_unit:
                 return amount, question.content_unit, Provenance.QUESTION_CONTEXT_EXPLICIT
     return None
+
+
+# ---------------------------------------------------------------------------
+# Parser générique "N <label libre> de M <unité>" — package_count/size
+# (mandat 2026-09-30, Étape 3, "PARSER GÉNÉRIQUE package_count × package_size")
+# ---------------------------------------------------------------------------
+# Incident réel : "j'ai 50 pot de 4 litre" perdait le "50" (rôle PACKAGED_GROUP
+# de `domain/quantity_unit.py::_classify_packaging_clause` inatteignable, son
+# motif `_PACKAGE_COUNT_UNIT_RE` exige un mot de `_TIER_PACKAGING_WORDS`, une
+# liste fermée de 9 mots — "pot" n'y est pas). Root cause CONFIRMÉE par audit
+# direct (trace `scan_number_candidates`/`parse_packaging_message` sur ce texte
+# exact) : le mot de conditionnement, pas la logique de calcul — celle-ci
+# fonctionne déjà correctement pour les 9 mots connus.
+#
+# Ce parser NE remplace PAS le moteur de paliers tarifaires
+# (`quantity_unit.py::parse_packaging_message`, resté INCHANGÉ) — il couvre un
+# cas DIFFÉRENT et plus simple : un SEUL groupe "compte × contenant" décrivant
+# le STOCK disponible, jamais un tarif (voir §9 du mandat — le contexte du
+# slot, QUANTITY vs PRICE, reste géré par l'appelant, pas par ce parser).
+#
+# Généricité (mandat §3/§5) : AUCUN mot de conditionnement hardcodé. Le label
+# est capturé comme un SEUL mot libre entre le compte et "de/à <taille>
+# <unité>" — volontairement conservateur : "50 gros pots rouges de 4 L" (3
+# mots avant "de") ne matche structurellement PAS ce motif -> abstention
+# (`None`), jamais un label absurde. Voir tests dédiés.
+_GENERIC_PACKAGE_LABEL_TOKEN = r"[a-zà-öø-ÿ]{2,20}"
+_GENERIC_PACKAGE_UNIT_ALTERNATION = "|".join(
+    sorted((re.escape(k) for k in _CONTENT_UNIT_MAP), key=len, reverse=True)
+)
+_GENERIC_PACKAGE_COUNT_SIZE_RE = re.compile(
+    r"(?<!\d)(?P<count>\d[\d\s.,]*)\s+"
+    r"(?P<label>" + _GENERIC_PACKAGE_LABEL_TOKEN + r")\b\s*"
+    r"(?:,\s*)?(?:de|d|a|à)\s+"
+    r"(?P<qty>\d[\d\s.,]*)\s*"
+    r"(?P<unit>" + _GENERIC_PACKAGE_UNIT_ALTERNATION + r")\b",
+    re.IGNORECASE,
+)
+_ANY_NUMBER_RE = re.compile(r"\d[\d\s.,]*")
+
+
+def _singularize_label(word: str) -> str:
+    """Même heuristique simple que `extract_package_word` ci-dessus — pas de
+    second mécanisme de singularisation, juste le même repli minimal
+    ("pots" -> "pot", jamais appliqué aux mots courts type "riz")."""
+    return word[:-1] if word.lower().endswith("s") and len(word) > 3 else word
+
+
+def parse_generic_package_count_and_size(text: Any) -> Optional[PackageDefinition]:
+    """"N <label libre> de M <unité>" -> `PackageDefinition(count=N,
+    content_amount=M, content_unit=<canonique>)`, ou `None` si la structure
+    n'est pas suffisamment certaine (mandat §4 : "zéro confusion silencieuse"
+    prime sur la généralité).
+
+    Abstient (`None`) si :
+      - aucune correspondance, ou 2+ correspondances (structure trop composée
+        pour ce parser conservateur — laisser la main au moteur de paliers ou
+        au LLM) ;
+      - un mot de devise apparaît n'importe où dans le texte (un prix est
+        présent -> ce n'est plus une simple déclaration de stock, voir §9) ;
+      - `count`/`qty` non strictement positifs ;
+      - un troisième nombre traîne dans le texte, inexpliqué par `count`/`qty`
+        (ex: un prix nu sans mot de devise détecté autrement) — jamais un
+        résultat partiel deviné.
+
+    N'appelle PAS `derive_available_quantity_from_package` : c'est à
+    l'appelant de le faire (mandat §7 — un seul endroit calcule `count ×
+    size`, celui-ci ne fait QUE produire le `PackageDefinition`)."""
+    ntext = normalize_text(text)
+    if not ntext or _CURRENCY_RE.search(ntext):
+        return None
+    matches = list(_GENERIC_PACKAGE_COUNT_SIZE_RE.finditer(ntext))
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    count_val = _to_float(match.group("count"))
+    qty_val = _to_float(match.group("qty"))
+    if count_val is None or qty_val is None or count_val <= 0 or qty_val <= 0:
+        return None
+    if count_val != int(count_val):
+        # Un compte de conditionnements est un ENTIER par nature ("50,5 pots"
+        # n'a pas de sens) — structure douteuse, jamais un résultat partiel.
+        return None
+    converted = _convert_content(qty_val, match.group("unit"))
+    if converted is None:
+        return None
+    content_amount, content_unit = converted
+
+    # Aucun troisième nombre inexpliqué dans le texte (ex: un prix nu isolé,
+    # "50 pots de 4 L 2000" — structure ambiguë, jamais devinée ici).
+    all_numbers = [_to_float(m.group(0)) for m in _ANY_NUMBER_RE.finditer(ntext)]
+    explained = {count_val, qty_val}
+    if any(n is not None and n not in explained for n in all_numbers):
+        return None
+
+    label = _singularize_label(match.group("label")).upper()
+    return PackageDefinition(
+        package_type=label,
+        content_amount=content_amount,
+        content_unit=content_unit,
+        count=int(count_val),
+        status=PackageStatus.KNOWN,
+        source=Provenance.USER_EXPLICIT,
+    )
 
 
 _CONTENT_REPLY_FILLER = frozenset(
@@ -495,6 +599,39 @@ def build_commercial_offer_from_sales_state(
         else:
             inventory = InventoryQuantity(q_amount, commercial_unit, q_source)
 
+    # ------------------------------------------------------ conditionnement STOCK
+    # (2026-09-30, Étape 3) : "j'ai 50 pots de 4 L" — `interpreter/routing.py::
+    # fast_path_generic_package_count_size` a posé package_count/package_label/
+    # package_size/package_unit dans le payload (jamais quantity/unit directement,
+    # voir son commentaire de câblage). Reconstruit ICI le `PackageDefinition`
+    # correspondant et en dérive la disponibilité via l'UNIQUE calculateur du
+    # dépôt (`derive_available_quantity_from_package`, mandat §7 — jamais
+    # recalculé ici). Prend le pas sur un `quantity`/`unit` legacy éventuellement
+    # présent (signal plus récent/spécifique) ; ne s'applique QUE si les trois
+    # composants (count/size/unit) sont explicitement connus (I9) — sinon
+    # `inventory`/`commercial_quantity` restent ce que le bloc ci-dessus a
+    # calculé (ou `None`), jamais une estimation.
+    package_from_count_size: Optional[PackageDefinition] = None
+    pkg_count = _num(payload.get("package_count"))
+    pkg_size = _num(payload.get("package_size"))
+    pkg_unit = payload.get("package_unit")
+    if pkg_count is not None and pkg_size is not None and pkg_unit:
+        package_from_count_size = PackageDefinition(
+            package_type=(str(payload["package_label"]).upper() if payload.get("package_label") else None),
+            content_amount=pkg_size,
+            content_unit=str(pkg_unit).upper(),
+            count=int(pkg_count) if pkg_count == int(pkg_count) else None,
+            status=PackageStatus.KNOWN,
+            source=Provenance.USER_EXPLICIT,
+        )
+        derived_availability = derive_available_quantity_from_package(package_from_count_size)
+        if derived_availability is not None:
+            inventory = derived_availability
+            commercial_quantity = CommercialQuantity(
+                derived_availability.amount, derived_availability.unit, derived_availability.source
+            )
+            events.append("PACKAGED_QUANTITY_DERIVED")
+
     # ------------------------------------------------------------ prix
     amount = _num(payload.get("price"))
     amount_said = "price" in said and _num(said.get("price")) is not None
@@ -582,7 +719,11 @@ def build_commercial_offer_from_sales_state(
             events.append("PRICE_BASIS_AMBIGUOUS")
 
     # ------------------------------------------------------------ conditionnement
-    package: Optional[PackageDefinition] = None
+    # Par défaut, le conditionnement de STOCK dérivé ci-dessus (Étape 3) survit
+    # tel quel — la branche PER_PACKAGE ci-dessous (pricing, inchangée cette
+    # étape) le REMPLACE explicitement dès qu'un prix par conditionnement est
+    # établi, jamais les deux en même temps.
+    package: Optional[PackageDefinition] = package_from_count_size
     if pricing is not None and pricing.basis == PriceBasis.PER_PACKAGE:
         ptype = (package_type or package_word or "conditionnement")
         ptype_key = normalize_text(ptype)
@@ -773,6 +914,7 @@ __all__ = [
     "extract_package_word",
     "has_total_cue",
     "parse_package_content",
+    "parse_generic_package_count_and_size",
     "parse_basis_reply",
     "price_unit_next_to_amount",
     "package_word_before_amount",
