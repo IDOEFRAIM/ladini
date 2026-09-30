@@ -12,6 +12,9 @@ from ladini.graphs.agents.market_coach.core.base import (
     _READ_GOALS,
     get_node_logger,
 )
+from ladini.graphs.agents.market_coach.core.goals import (
+    DRAFT_BASED_CONFIRMATION_GOALS as _DRAFT_BASED_CONFIRMATION_GOALS,
+)
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     clear_pending_interaction,
@@ -42,9 +45,12 @@ logger = get_node_logger("ConfirmationGateNode")
 # transverse) — audité et confirmé utiliser AVANT ce chantier exactement le
 # mécanisme générique `transaction_payload`/`confirmation_summary` que
 # cette liste existe pour remplacer (voir rapport final, section C).
-_DRAFT_BASED_CONFIRMATION_GOALS = frozenset(
-    {"PROCUREMENT_CREATE_REQUEST", "SALES_PUBLISH_PRODUCT"}
-)
+#
+# (2026-09-30, "interruption d'une confirmation active") : déplacé vers
+# `core/goals.py::DRAFT_BASED_CONFIRMATION_GOALS` — `nodes/cognitive.py` a
+# désormais besoin de la même information (détection d'une nouvelle
+# intention pendant WAITING_CONFIRMATION) ; ré-exporté ici sous l'ancien nom
+# pour ne pas toucher le reste de ce fichier.
 
 
 async def _llm_deviation_reply(
@@ -334,11 +340,156 @@ _DRAFT_BASED_RESOLVER_BY_GOAL = {
 }
 
 
+async def _cancel_old_draft_for_switch(
+    old_goal: str, old_draft_dict: Dict[str, Any], old_pending_interaction: Optional[Dict[str, Any]],
+    state: Dict[str, Any], mc_runtime: Any,
+) -> Dict[str, Any]:
+    """Annule (persistance CAS comprise) le draft canonique du goal ABANDONNÉ, en
+    réutilisant le résolveur CANCEL déjà testé de ce goal (`resolve_sales_confirmation`/
+    `resolve_procurement_confirmation`) plutôt qu'en dupliquant sa logique — mandat
+    Étape 5 : « une transaction terminée doit être définitivement morte dans le state
+    actif, tout en restant disponible dans l'historique/persistence » s'applique ICI
+    exactement comme à un CANCEL ordinaire, ce draft n'ayant jamais été confirmé."""
+    cancel_state = {
+        **state,
+        "current_goal": old_goal,
+        "sales_publish_draft": old_draft_dict if old_goal == "SALES_PUBLISH_PRODUCT" else state.get("sales_publish_draft"),
+        "procurement_draft": old_draft_dict if old_goal == "PROCUREMENT_CREATE_REQUEST" else state.get("procurement_draft"),
+        "interpreted_event": "CANCEL",
+        "extracted_entities": {},
+        "pending_interaction": old_pending_interaction,
+    }
+    if old_goal == "SALES_PUBLISH_PRODUCT":
+        from ladini.graphs.agents.market_coach.flows.producer.sales_confirmation import (
+            resolve_sales_confirmation,
+        )
+
+        return dict(await resolve_sales_confirmation(cancel_state, mc_runtime))
+    if old_goal == "PROCUREMENT_CREATE_REQUEST":
+        from ladini.graphs.agents.market_coach.flows.buyer.procurement_confirmation import (
+            resolve_procurement_confirmation,
+        )
+
+        return dict(await resolve_procurement_confirmation(cancel_state, mc_runtime))
+    return {}
+
+
+def _render_summary_for_goal(old_goal: str, old_draft_dict: Dict[str, Any]) -> str:
+    if not old_draft_dict:
+        return ""
+    if old_goal == "SALES_PUBLISH_PRODUCT":
+        from ladini.graphs.agents.market_coach.domain.sales_publish_draft import (
+            SalesPublishDraft,
+        )
+
+        draft = SalesPublishDraft.from_dict(old_draft_dict)
+        return draft.render_summary() if draft else ""
+    if old_goal == "PROCUREMENT_CREATE_REQUEST":
+        from ladini.graphs.agents.market_coach.domain.procurement_draft import (
+            ProcurementDraft,
+        )
+
+        draft = ProcurementDraft.from_dict(old_draft_dict)
+        return draft.render_summary() if draft else ""
+    return ""
+
+
+async def _resolve_confirmation_switch(
+    state: Dict[str, Any], mc_runtime: Any
+) -> Dict[str, Any]:
+    """Résout la réponse oui/non à la question posée par `nodes/cognitive.py`
+    (`ASK_SWITCH_CONFIRMATION`, `pending_interaction.context_ref ==
+    "confirmation_switch"`) quand une nouvelle intention explicite est arrivée pendant
+    une CONFIRM_ACTION sur un draft canonique versionné déjà actif (mandat §A2/§A3).
+
+    Interceptée en tête de `confirmation_gate` (avant le dispatch `_DRAFT_BASED_
+    CONFIRMATION_GOALS` normal) : `current_goal` porte encore l'ANCIEN goal à ce
+    stade — le dispatch générique interpréterait `pending_interaction.target` (la
+    forme dédiée posée par `cognitive_guard`, PAS `{"draft_id":..., "draft_version":
+    ...}`) comme une cible de confirmation ordinaire et échouerait silencieusement.
+
+    - CONFIRM (« oui ») : annule l'ancien draft (persistance CAS comprise, voir
+      `_cancel_old_draft_for_switch`) PUIS démarre la nouvelle intention à partir des
+      entités déjà dites (« je veux vendre mon miel » -> product=miel), en réutilisant
+      le bootstrap standard (`_DRAFT_BASED_RESOLVER_BY_GOAL`) pour poser la question du
+      premier champ manquant — jamais de re-saisie demandée à l'utilisateur.
+    - Tout le reste (REJECT, ou toute déviation) : reste CONSERVATEUR (mandat §A3) —
+      restaure la confirmation d'origine telle quelle, l'ancien draft n'est JAMAIS
+      touché."""
+    pending = get_pending_interaction(state)
+    target = pending.target or {}
+    old_goal = str(target.get("old_goal") or "").upper()
+    old_draft_dict = dict(target.get("old_draft") or {})
+    old_pending_interaction = target.get("old_pending_interaction")
+    incoming_goal = str(target.get("incoming_goal") or "").upper()
+    incoming_entities = dict(target.get("incoming_entities") or {})
+    event = str(state.get("interpreted_event") or "").upper()
+
+    if event != "CONFIRM":
+        # (§A3) Non/déviation : l'ancien draft n'a JAMAIS été touché par la question
+        # elle-même (cognitive_guard ne fait que poser `pending_interaction` — voir sa
+        # docstring) — il suffit de restaurer la confirmation qui attendait déjà.
+        summary = _render_summary_for_goal(old_goal, old_draft_dict)
+        return {
+            "pending_interaction": old_pending_interaction,
+            "pending_goal": None,
+            "status": "WAITING_INPUT",
+            "response_strategy": "SUCCESS",
+            "final_response": (
+                f"D'accord, on reste sur la confirmation en cours.\n{summary}\n\nConfirmez-vous ?"
+                if summary
+                else "D'accord, on reste sur la confirmation en cours."
+            ),
+            "ag_ui_component": None,
+        }
+
+    logger.info(
+        "CONFIRMATION_INTERRUPTION_DETECTED | current_goal=%s | incoming_goal=%s | "
+        "current_status=%s | action=CONFIRMED_SWITCH",
+        old_goal,
+        incoming_goal,
+        state.get("status"),
+    )
+    cancel_patch = await _cancel_old_draft_for_switch(
+        old_goal, old_draft_dict, old_pending_interaction, state, mc_runtime
+    )
+
+    bootstrap_resolver = _DRAFT_BASED_RESOLVER_BY_GOAL.get(incoming_goal)
+    new_goal_patch: Dict[str, Any] = {}
+    if bootstrap_resolver is not None:
+        bootstrap_state = {
+            **state,
+            "sales_publish_draft": None,
+            "procurement_draft": None,
+        }
+        new_goal_patch = await bootstrap_resolver(
+            bootstrap_state, mc_runtime, incoming_goal, incoming_entities
+        )
+
+    return {
+        **cancel_patch,
+        "current_goal": incoming_goal,
+        "goal_status": "ACTIVE",
+        "pending_goal": None,
+        "sales_publish_draft": None,
+        "procurement_draft": None,
+        "transaction_payload": {"__reset__": True, **incoming_entities},
+        "stable_entities": {
+            "__reset__": True,
+            **{k: v for k, v in incoming_entities.items() if k in ("product", "unit")},
+        },
+        **new_goal_patch,
+    }
+
+
 async def confirmation_gate(state: Dict[str, Any], mc_runtime: Any) -> Dict[str, Any]:
     """Gère l'état d'approbation explicite avant l'écriture en base de données."""
     goal = (state.get("current_goal") or "").upper()
     payload: Dict[str, Any] = state.get("transaction_payload") or {}
     event = str(state.get("interpreted_event") or "").upper()
+
+    if get_pending_interaction(state).context_ref == "confirmation_switch":
+        return await _resolve_confirmation_switch(state, mc_runtime)
 
     if goal in _DRAFT_BASED_CONFIRMATION_GOALS:
         resolver = _DRAFT_BASED_RESOLVER_BY_GOAL[goal]

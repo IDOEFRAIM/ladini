@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ladini.graphs.agents.market_coach.core.base import get_node_logger
 from ladini.graphs.agents.market_coach.core.conversation_decision import (
@@ -11,11 +11,14 @@ from ladini.graphs.agents.market_coach.core.conversation_reset import (
 )
 from ladini.graphs.agents.market_coach.core.field_registry import STRUCTURED_FIELDS
 from ladini.graphs.agents.market_coach.core.goals import (
+    DRAFT_BASED_CONFIRMATION_GOALS,
+    DRAFT_BASED_CONFIRMATION_STATE_KEY,
     NAVIGATION_BREAKOUT_GOALS,
 )
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     InteractionKind,
     get_pending_interaction,
+    set_pending_interaction,
     to_tunnel_category,
 )
 from ladini.graphs.agents.market_coach.core.state import resolve_current_goal
@@ -87,6 +90,48 @@ def _entity_carry_forward(
             entities[key] = stable[key]
             carried = True
     return entities if carried else None
+
+
+def _active_confirmation_switch_candidate(
+    state: Dict[str, Any],
+    *,
+    current_goal: Optional[str],
+    event: str,
+    detected_intent: str,
+    pending: Any,
+) -> Optional[Tuple[str, str]]:
+    """(Retour non-`None` = candidat de "switch d'intention pendant une confirmation
+    active", voir son appelant.) Un NEW_TASK dont l'intention détectée porte le MÊME
+    nom que `current_goal` — donc EXCLU du bloc d'interruption générique juste en
+    dessous, qui suppose que "même nom de goal" == "continuation du même sujet" — mais
+    dont le PRODUIT nommé diffère de celui du draft canonique déjà actif, pendant que ce
+    draft est EN ATTENTE de confirmation (`CONFIRM_ACTION`). Ne compare QUE le produit :
+    générique par construction, aucun nom de produit n'est jamais codé en dur ici.
+
+    Retourne `(produit_du_draft_actif, produit_entrant)` si c'est le cas, `None` sinon
+    (rien de spécial à faire — le flux normal, potentiellement `CONTINUE_ACTIVE_GOAL`,
+    s'applique)."""
+    if not (
+        current_goal
+        and event == "NEW_TASK"
+        and detected_intent == str(current_goal).upper()
+        and current_goal in DRAFT_BASED_CONFIRMATION_GOALS
+        and pending.kind == InteractionKind.CONFIRM_ACTION
+    ):
+        return None
+    incoming_product = str(
+        (state.get("extracted_entities") or {}).get("product") or ""
+    ).strip()
+    if not incoming_product:
+        return None
+    draft_key = DRAFT_BASED_CONFIRMATION_STATE_KEY.get(current_goal)
+    active_draft = state.get(draft_key) if draft_key else None
+    if not isinstance(active_draft, dict):
+        return None
+    active_product = str(active_draft.get("product") or "").strip()
+    if not active_product or active_product.lower() == incoming_product.lower():
+        return None
+    return active_product, incoming_product
 
 
 def _classify_nominal_action(
@@ -357,6 +402,83 @@ async def cognitive_guard(
     # (OTP inviolable), c.-à-d. le droit d'INTERDIRE une transition, jamais
     # celui d'en choisir une (voir sa docstring de classe).
     #
+    # (2026-09-30, "interruption d'une confirmation active par une nouvelle intention",
+    # incident réel) : un NEW_TASK du MÊME type de goal que `current_goal` (ex: encore
+    # SALES_PUBLISH_PRODUCT, mais pour un AUTRE produit) est explicitement EXCLU du bloc
+    # d'interruption ci-dessous (`detected_intent not in {"UNKNOWN", current_goal_upper}`)
+    # — conçu pour ne pas casser un tunnel sur sa propre continuation ("encore un peu de
+    # lait", "ajoute 10kg"). Mais pendant une CONFIRM_ACTION sur un draft canonique
+    # versionné (`DRAFT_BASED_CONFIRMATION_GOALS`), CE même silence laissait la nouvelle
+    # intention retomber sur `_classify_nominal_action` -> CONTINUE_ACTIVE_GOAL : le
+    # message ("je veux vendre mon miel") atteignait alors `resolve_domain_action` comme
+    # une simple entité `product` à FUSIONNER dans le draft actif (fallthrough générique,
+    # `domain/sales_publish_draft.py`) — un producteur qui n'avait PAS encore confirmé sa
+    # vente de lait se retrouvait avec un draft "miel" portant encore le prix/la quantité/
+    # le conditionnement du lait, jamais nettoyé, jamais réellement annulé. Détecté ICI, au
+    # même niveau d'autorité que l'interruption générique (mandat §A1/A2) : ni une
+    # correction (le PRODUIT diffère, pas juste un champ du même produit), ni une
+    # interruption automatique (mandat §A3, "pas de switch automatique") — une QUESTION
+    # fermée oui/non, voir `_active_confirmation_switch_candidate` ci-dessous.
+    switch_candidate = _active_confirmation_switch_candidate(
+        state,
+        current_goal=current_goal,
+        event=event,
+        detected_intent=detected_intent,
+        pending=pending,
+    )
+    if switch_candidate is not None:
+        old_product, incoming_product = switch_candidate
+        logger.info(
+            "CONFIRMATION_INTERRUPTION_DETECTED | current_goal=%s | incoming_goal=%s | "
+            "current_status=%s | action=ASK_SWITCH_CONFIRMATION",
+            current_goal,
+            detected_intent,
+            state.get("status"),
+        )
+        target = {
+            "old_goal": current_goal,
+            "old_draft": dict(state.get(DRAFT_BASED_CONFIRMATION_STATE_KEY[current_goal]) or {}),
+            "old_pending_interaction": pending.to_dict(),
+            "incoming_goal": detected_intent,
+            "incoming_entities": dict(state.get("extracted_entities") or {}),
+        }
+        ask_text = (
+            f"Vous avez encore une vente de {old_product} en attente de confirmation. "
+            f"Voulez-vous l'annuler et commencer la vente de {incoming_product} ?"
+        )
+        updates.update(
+            {
+                "response_strategy": "SUCCESS",
+                "status": "WAITING_INPUT",
+                "final_response": ask_text,
+                "ag_ui_component": {
+                    "lc_type": "constructor",
+                    "id": ["ag_ui", "QuickReplies"],
+                    "kwargs": {
+                        "body": ask_text,
+                        "buttons": [
+                            {"id": "CONFIRM", "title": "✅ Oui, annuler et continuer"},
+                            {"id": "REJECT", "title": "❌ Non, garder l'ancienne vente"},
+                        ],
+                        "metadata": {"goal": current_goal},
+                    },
+                },
+                "pending_goal": detected_intent,
+                "intent_competition": competition,
+                "cognitive_decision": {
+                    **decision,
+                    "action": ConversationAction.ASK_SWITCH_CONFIRMATION,
+                    "reason": "confirmation_switch_candidate",
+                },
+                **set_pending_interaction(
+                    InteractionKind.CONFIRM_ACTION,
+                    context_ref="confirmation_switch",
+                    target=target,
+                ),
+            }
+        )
+        return updates
+
     # Pourquoi le breakout ignore le seuil de confiance : ce n'est pas une
     # intention métier concurrente à arbitrer, c'est une demande de
     # NAVIGATION ("voir mon panier", "mes commandes"). La refuser piège

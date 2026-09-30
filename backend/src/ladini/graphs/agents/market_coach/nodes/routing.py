@@ -103,12 +103,20 @@ def _route_after_session_bootstrap(state: MarketAgentState) -> str:
 # ABANDON_ACTIVE_GOAL reste routé vers `clarification_node` : CE nœud, lui,
 # contribue réellement (message LLM contextualisé sur l'abandon) — voir
 # `_route_after_clarification` pour le repli quand le LLM échoue.
+# ASK_SWITCH_CONFIRMATION route DIRECTEMENT vers `response_strategy` (comme
+# RECOVER_ACTIVE_GOAL ci-dessus) : `cognitive_guard` pose déjà lui-même
+# `response_strategy="SUCCESS"` + `final_response` (le texte de la question
+# de bascule) + le `pending_interaction` CONFIRM_ACTION dédié — aucun nœud
+# supplémentaire (`goal_planner`/`validator`/`confirmation_gate`) n'a besoin
+# de tourner ce tour-ci : le draft ACTIF ne doit surtout pas être touché
+# tant que l'utilisateur n'a pas répondu (voir `nodes/cognitive.py`).
 _COGNITIVE_ACTION_ROUTES = {
     ConversationAction.START_OR_PLAN_GOAL: "to_planner",
     ConversationAction.CONTINUE_ACTIVE_GOAL: "to_planner",
     ConversationAction.INTERRUPT_ACTIVE_GOAL: "to_planner",
     ConversationAction.DISAMBIGUATE: "to_disambiguation",
     ConversationAction.CLARIFY: "to_clarification",
+    ConversationAction.ASK_SWITCH_CONFIRMATION: "to_strategy",
     ConversationAction.RECOVER_ACTIVE_GOAL: "to_strategy",
     ConversationAction.ABANDON_ACTIVE_GOAL: "to_clarification",
 }
