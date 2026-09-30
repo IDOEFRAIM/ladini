@@ -95,7 +95,18 @@ async def resolve_sales_confirmation(
     # et « finalement 600 le sachet » n'en mettrait à jour que le prix brut. Jamais injectée sur
     # CONFIRM/CANCEL : la version certifiée se confirme telle quelle (I2, WHAT USER CONFIRMS ==
     # WHAT EXECUTES).
-    if interpreted_event not in {"CONFIRM", "CANCEL"} and draft is not None:
+    # (2026-09-30, Étape 5, incident réel) : `validator` RE-DÉRIVE `transaction_payload
+    # .commercial_offer` depuis les champs plats À CHAQUE TOUR (normalisation — remplit
+    # `package.count`, calcule `normalized`), donc il diffère STRUCTURELLEMENT de
+    # `draft.commercial_offer` (figé depuis la création du draft) même quand l'utilisateur
+    # n'a RIEN dit ce tour-ci. Sans le garde `extracted_entities` ci-dessous, un « annule »
+    # nu (fast-path, `extracted_entities=={}`) déclenchait quand même cette injection —
+    # `resolve_domain_action` voyait alors des `fields` non vides et transformait un CANCEL
+    # en UPDATE silencieux (le draft ne passait jamais CANCELLED, `pending_interaction`
+    # restait actif, `state_cleaner_node` ne se déclenchait donc jamais). Le garde restreint
+    # l'injection aux tours où l'utilisateur a RÉELLEMENT dit quelque chose (« non, finalement
+    # 600 le sachet » produit des `extracted_entities` non vides ; « annule » seul, non).
+    if interpreted_event not in {"CONFIRM", "CANCEL"} and draft is not None and extracted_entities:
         _payload_offer = (state.get("transaction_payload") or {}).get("commercial_offer")
         if isinstance(_payload_offer, dict) and _payload_offer != draft.commercial_offer:
             extracted_entities = {**extracted_entities, "commercial_offer": _payload_offer}

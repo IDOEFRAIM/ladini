@@ -183,6 +183,105 @@ class TestNodeLevelConfirmAuthorizesExecution:
         assert patch["transaction_payload"] == v1.execution_payload()
 
 
+class TestNodeLevelBareRejectTerminatesTheDraft:
+    """(2026-09-30, Étape 5, incident réel) : `validator` re-dérive
+    `transaction_payload.commercial_offer` depuis les champs plats à CHAQUE
+    tour (remplit `package.count`, calcule `normalized`) — il diffère donc
+    STRUCTURELLEMENT du `commercial_offer` figé du draft persisté même quand
+    l'utilisateur n'a RIEN dit ce tour-ci. Avant correctif, ce diff
+    déclenchait quand même l'injection de correction de
+    `sales_confirmation.py` (gardée seulement contre CONFIRM/CANCEL, pas
+    REJECT) : un « annule » nu se lisait en aval comme un refus PORTEUR de
+    valeurs, produisait un `UpdateSalesPublishDraft` au lieu d'un
+    `CancelSalesPublishDraft`, et le draft ne passait donc jamais
+    CANCELLED — laissant `pending_interaction`/`transaction_payload`/
+    `stable_entities` actifs pour polluer l'opération suivante (mandat
+    Étape 5 §2)."""
+
+    def _offer(self, *, enriched: bool) -> dict:
+        package = {
+            "package_type": "SACHET",
+            "content_amount": 2.0,
+            "content_unit": "LITRE",
+            "status": "KNOWN",
+            "source": "USER_EXPLICIT",
+        }
+        normalized = None
+        if enriched:
+            package = {**package, "count": None}
+            normalized = {
+                "quantity_amount": 60.0,
+                "quantity_unit": "LITRE",
+                "unit_price": 250.0,
+                "unit_price_basis": "PER_BASE_UNIT",
+            }
+        return {
+            "schema": 1,
+            "product": "lait",
+            "commercial_quantity": {"amount": 60.0, "unit": "LITRE", "source": "USER_EXPLICIT"},
+            "inventory_quantity": {"amount": 60.0, "unit": "LITRE", "source": "USER_EXPLICIT"},
+            "pricing": {
+                "amount": 500.0, "basis": "PER_PACKAGE", "basis_unit": None, "currency": "FCFA",
+                "source": "USER_EXPLICIT", "basis_source": "USER_EXPLICIT",
+            },
+            "package": package,
+            "normalized": normalized,
+        }
+
+    def test_bare_reject_cancels_even_when_payload_offer_differs_from_the_draft(self, monkeypatch):
+        _install_fake_db(monkeypatch)
+        raw_offer = self._offer(enriched=False)
+        v1 = _draft(draft_id="node-reject1", product="lait", quantity=60.0, unit="LITRE",
+                     price=500.0, commercial_offer=raw_offer)
+        run(store_mod.insert(v1, conversation_id="c"))
+
+        state = make_state(
+            current_goal="SALES_PUBLISH_PRODUCT",
+            sales_publish_draft=v1.to_dict(),
+            interpreted_event="REJECT",
+            extracted_entities={},
+            # champ plat re-dérivé par le validator CE tour — structurellement
+            # différent du draft persisté (count/normalized) bien qu'AUCUNE
+            # entité n'ait été dite (extracted_entities vide ci-dessus).
+            transaction_payload={"commercial_offer": self._offer(enriched=True)},
+        )
+        state["pending_interaction"] = {
+            "kind": "CONFIRM_ACTION",
+            "target": {"draft_id": v1.draft_id, "draft_version": v1.version},
+        }
+        patch = run(resolve_sales_confirmation(state, None))
+        assert patch["sales_publish_draft"] is None
+        assert patch["status"] == "COMPLETED"
+        assert patch["current_goal"] is None
+
+    def test_reject_carrying_a_real_correction_still_updates_the_draft(self, monkeypatch):
+        # Non-régression : « non, finalement 600 le sachet » doit rester une
+        # CORRECTION (UpdateSalesPublishDraft), jamais un cancel silencieux —
+        # le garde ajouté ne doit exclure que les REJECT VIDES de contenu.
+        _install_fake_db(monkeypatch)
+        raw_offer = self._offer(enriched=False)
+        v1 = _draft(draft_id="node-reject2", product="lait", quantity=60.0, unit="LITRE",
+                     price=500.0, commercial_offer=raw_offer)
+        run(store_mod.insert(v1, conversation_id="c"))
+
+        state = make_state(
+            current_goal="SALES_PUBLISH_PRODUCT",
+            sales_publish_draft=v1.to_dict(),
+            interpreted_event="REJECT",
+            extracted_entities={"price": 600.0},
+            transaction_payload={"commercial_offer": self._offer(enriched=True)},
+        )
+        state["pending_interaction"] = {
+            "kind": "CONFIRM_ACTION",
+            "target": {"draft_id": v1.draft_id, "draft_version": v1.version},
+        }
+        patch = run(resolve_sales_confirmation(state, None))
+        assert patch["sales_publish_draft"] is not None
+        assert patch["sales_publish_draft"]["status"] == "DRAFT"
+        assert patch["sales_publish_draft"]["price"] == 600.0
+        assert patch.get("status") != "COMPLETED"
+
+
 class TestRealThreadConcurrencyUpdateAndConfirm:
     def test_real_threads_racing_update_and_confirm_yield_at_most_one_execution(self, monkeypatch):
         """UPDATE + CONFIRM concurrents (mandat §19) — soit UPDATE gagne

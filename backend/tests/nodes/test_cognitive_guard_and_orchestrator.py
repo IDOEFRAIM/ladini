@@ -89,6 +89,42 @@ class TestEntityCarryForward:
         state = make_state(stable_entities={}, extracted_entities={"product": "mais"})
         assert _entity_carry_forward(state, "SALES_PUBLISH_PRODUCT", True) is None
 
+    def test_none_on_reject_event_even_with_carryable_stable_entities(self):
+        # (2026-09-30, Étape 5, incident réel) : un « annule »/« non » nu ne doit jamais
+        # récupérer product/unit depuis stable_entities — sinon un CANCEL sans contenu se
+        # lit, en aval, comme un refus PORTEUR de valeurs (UpdateDraft au lieu de Cancel).
+        state = make_state(
+            stable_entities={"product": "lait", "unit": "LITRE"},
+            extracted_entities={},
+        )
+        assert _entity_carry_forward(state, "SALES_PUBLISH_PRODUCT", True, "REJECT") is None
+
+    def test_none_on_cancel_event_even_with_carryable_stable_entities(self):
+        state = make_state(
+            stable_entities={"product": "lait", "unit": "LITRE"},
+            extracted_entities={},
+        )
+        assert _entity_carry_forward(state, "SALES_PUBLISH_PRODUCT", True, "CANCEL") is None
+
+    def test_still_carries_on_answer_event(self):
+        # Non-régression (mandat §18) : le carry-forward doit continuer à fonctionner
+        # tant que le flow n'est pas terminé/annulé (ex: "500" répond à PRICE, product
+        # doit rester disponible).
+        state = make_state(
+            stable_entities={"product": "miel", "unit": "KG"},
+            extracted_entities={},
+        )
+        result = _entity_carry_forward(state, "SALES_PUBLISH_PRODUCT", True, "ANSWER")
+        assert result == {"product": "miel", "unit": "KG"}
+
+    def test_default_event_argument_preserves_prior_behavior(self):
+        state = make_state(
+            stable_entities={"product": "mais", "unit": "KG", "zone_name": "Ouaga"},
+            extracted_entities={},
+        )
+        result = _entity_carry_forward(state, "SALES_PUBLISH_PRODUCT", True)
+        assert result == {"product": "mais", "unit": "KG", "zone_name": "Ouaga"}
+
 
 class TestShouldTriggerDisambiguationRemoved:
     """Preuve négative directe (revue de validation) : la fonction ne doit
