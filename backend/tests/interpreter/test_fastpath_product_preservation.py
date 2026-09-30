@@ -14,13 +14,20 @@ s'abstient (`return None`) et laisse la main à l'interprétation complète
 (micro-prompt ACTIVE_SLOT), seule capable d'extraire `product` et d'atteindre
 la logique de conflit déjà correcte de `nodes/memory.py::_apply_slot`.
 
-Ce garde ne s'applique QUE quand un LLM existe réellement sur le runtime
-(`llm_available=True`) : sans LLM, il n'y a nulle part d'autre où renvoyer le
-message (voir le repli documenté de `skip_numeric_shortcut` dans
-`_interpret_fast_path.__doc__`) — abstenir serait alors strictement pire que
-le résultat partiel existant. Les tests `llm_available=False` (déjà couverts
-par `tests/interpreter/test_extraction_and_llm_primacy.py`) restent donc
-inchangés par construction et ne sont pas dupliqués ici.
+(2026-09-30, durcissement post-revue) — CETTE abstention est désormais
+INDÉPENDANTE de `llm_available` : la sûreté métier (ne jamais attacher
+silencieusement une quantité/un prix au mauvais produit) ne peut pas dépendre
+d'un provider LLM disponible, d'un timeout ou d'un mode dégradé — sinon la
+même panne réseau qui rend le LLM indisponible réintroduirait exactement le
+bug corrigé plus haut. `llm_available` ne change QUE ce qui se passe APRÈS
+l'abstention :
+  - LLM disponible   -> interprétation complète (micro-prompt ACTIVE_SLOT) ;
+  - LLM indisponible -> repli SANS MUTATION déjà existant dans
+    `_input_interpreter_impl` (`interpreted_event="UNKNOWN"`, aucune entité
+    extraite — voir le warning "No LLM on runtime"), jamais un second
+    mécanisme de clarification créé pour l'occasion.
+Voir `TestQuantityFastPathAbstentionWithoutLLM`/`TestPriceFastPathAbstentionWithoutLLM`
+ci-dessous pour les mêmes scénarios rejoués avec `llm_available=False`.
 """
 from __future__ import annotations
 
@@ -48,6 +55,23 @@ def fast(text: str, expected_input: str, *, product: str = "lait"):
     )
 
 
+def fast_no_llm(text: str, expected_input: str, *, product: str = "lait"):
+    """Même scénario que `fast()`, mais LLM RÉELLEMENT indisponible sur ce
+    runtime (`llm_available=False`) — reproduit le câblage réel de production
+    dans ce cas (`_skip_numeric_shortcut = expected_input in ("PRICE",
+    "QUANTITY") and llm is not None` -> `False` quand `llm is None`)."""
+    state = make_state(
+        expected_input=expected_input,
+        current_goal="SALES_PUBLISH_PRODUCT",
+        working_memory={"active_goal": "SALES_PUBLISH_PRODUCT"},
+        transaction_payload={"product": product},
+        user_role="PRODUCER",
+    )
+    return _interpret_fast_path(
+        state, text, skip_numeric_shortcut=False, llm_available=False
+    )
+
+
 # =====================================================================
 # Primitive is_pure_numeric_answer — testée isolément
 # =====================================================================
@@ -66,6 +90,17 @@ class TestIsPureNumericAnswer:
             "60kg",
             "500fcfa",
             "1 000 kg",
+            # (2026-09-30, revue) : un simple marqueur de correction/hedging
+            # SEUL (sans nom de produit ni autre mot de fond) ne bloque pas le
+            # fast-path — voir "non, 500 kg" et "je veux 60 litre",
+            # tests/architecture/test_fastpath_pipeline_safety.py et
+            # tests/integration/test_tier_selection_full_node_chain.py,
+            # cassés par une première version trop stricte de ce garde.
+            "finalement 60 L",
+            "non plutôt 60 L",
+            "non, 500 kg",
+            "je veux 60 litre",
+            "environ 300",
         ],
     )
     def test_pure_shapes(self, text):
@@ -77,9 +112,7 @@ class TestIsPureNumericAnswer:
             "60 L de miel",
             "j ai 60 L de miel",
             "finalement 60 L de miel",
-            "finalement 60 L",
             "non, 60 L de miel",
-            "non plutôt 60 L",
             "60 L mais de miel",
             "500 pour le miel",
             "le miel à 500",
@@ -180,4 +213,84 @@ def test_invariant_explicit_product_never_silently_kept_from_memory():
         "message porte un produit explicite différent du produit mémoire — "
         "il doit s'abstenir et laisser l'interprétation complète (et "
         "`nodes/memory.py::_apply_slot`) trancher le conflit"
+    )
+
+
+# =====================================================================
+# Mandat 2026-09-30 (revue) — la sûreté ne dépend PAS de `llm_available`
+# =====================================================================
+# Cas A-D (QUANTITY) et E-G (PRICE) du mandat, rejoués avec `llm_available=
+# False` : le trou signalé après la première revue ("le garde ne s'applique
+# que si llm_available=True") est fermé — voir `fast_no_llm()` et le retrait
+# de `llm_available and`/`not llm_available or` dans `interpreter/routing.py`.
+
+
+class TestQuantityFastPathAbstentionWithoutLLM:
+    def test_a_bare_quantity_still_fast_without_llm(self):
+        """Cas A : « 60 L », LLM indisponible -> fast-path OK (comportement
+        existant conservé, voir aussi `test_extraction_and_llm_primacy.py::
+        test_ambiguous_bare_number_resolved_when_llm_unavailable` pour le
+        principe général du repli sans LLM)."""
+        r = fast_no_llm("60 L", "QUANTITY")
+        assert r is not None
+        assert r["interpreted_event"] == "ANSWER"
+        assert r["extracted_entities"]["quantity"] == 60.0
+        assert r["extracted_entities"]["unit"] == "LITRE"
+
+    def test_b_explicit_product_abstains_without_llm(self):
+        """Cas B : « 60 L de miel », LLM indisponible -> ABSTAIN. Jamais
+        quantity=60 attachée à "lait", jamais de draft, jamais de progression
+        silencieuse vers PRICE comme si la quantité était résolue."""
+        assert fast_no_llm("60 L de miel", "QUANTITY") is None
+
+    def test_c_deviation_marker_with_product_abstains_without_llm(self):
+        """Cas C : « j ai 60 L de miel », LLM indisponible -> ABSTAIN."""
+        assert fast_no_llm("j ai 60 L de miel", "QUANTITY") is None
+
+    def test_d_correction_marker_with_product_abstains_without_llm(self):
+        """Cas D : « finalement 60 L de miel », LLM indisponible -> ABSTAIN."""
+        assert fast_no_llm("finalement 60 L de miel", "QUANTITY") is None
+
+
+class TestPriceFastPathAbstentionWithoutLLM:
+    def test_e_bare_price_still_fast_without_llm(self):
+        """Cas E : « 500 », LLM indisponible -> fast-path OK (comportement
+        existant conservé — nombre nu, aucun mot hors périmètre)."""
+        r = fast_no_llm("500", "PRICE")
+        assert r is not None
+        assert r["extracted_entities"]["price"] == 500.0
+
+    def test_f_explicit_product_abstains_without_llm(self):
+        """Cas F : « 500 FCFA pour le miel », LLM indisponible -> ABSTAIN. Pas
+        d'application du prix à "lait", pas de progression silencieuse."""
+        assert fast_no_llm("500 FCFA pour le miel", "PRICE") is None
+
+    def test_g_product_stated_as_verb_abstains_without_llm(self):
+        """Cas G : « le miel à 500 », LLM indisponible -> ABSTAIN."""
+        assert fast_no_llm("le miel à 500", "PRICE") is None
+
+
+# =====================================================================
+# §7 du mandat — tests d'invariant explicites (sûreté indépendante du LLM)
+# =====================================================================
+
+
+def test_invariant_non_pure_message_never_uses_lossy_fast_path_without_llm():
+    """`non_pure_business_message AND llm_available=False =>
+    must_not_use_lossy_numeric_fast_path` — un message impur ne doit jamais
+    produire de résultat partiel, que le LLM soit disponible ou non."""
+    assert fast_no_llm("60 L de miel", "QUANTITY") is None
+    assert fast_no_llm("500 FCFA pour le miel", "PRICE") is None
+
+
+def test_invariant_explicit_product_never_silently_wins_without_llm():
+    """`explicit_product_in_message AND explicit_product != memory_product AND
+    llm_unavailable => memory_product must not silently win` — le pendant,
+    sans LLM, de `test_invariant_explicit_product_never_silently_kept_from_memory`
+    ci-dessus."""
+    memory_product = "lait"
+    result = fast_no_llm("J ai 60 L de miel", "QUANTITY", product=memory_product)
+    assert result is None, (
+        "sans LLM non plus, le fast-path ne doit jamais laisser 'lait' "
+        "gagner silencieusement face à un 'miel' explicite dans le message"
     )

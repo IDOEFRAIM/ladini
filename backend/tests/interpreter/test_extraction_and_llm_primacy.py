@@ -61,21 +61,61 @@ class TestFastPathExtraction:
         assert "unit" not in ents, "l'unité du PRIX ne doit jamais devenir celle de la QUANTITÉ"
 
     def test_compound_quantity_and_price_in_one_message(self):
-        """Régression : « 775 kg ... 175 fcfa » remplit les DEUX slots.
+        """Régression : un message PUR (que des nombres/unités/devise) portant
+        quantité ET prix remplit les DEUX slots. Avant, un seul était pris et
+        l'agent redemandait l'autre en boucle.
 
-        Avant, un seul était pris et l'agent redemandait l'autre en boucle.
+        « kilogrammes »/« francs » (formes longues), pas « kg »/« fcfa » : la
+        fenêtre de balayage de `scan_number_candidates` (18 caractères,
+        `_SCAN_WINDOW`, détail d'implémentation PRÉ-EXISTANT et sans rapport
+        avec ce test) associerait sinon les deux nombres l'un à l'autre sur un
+        message aussi court — la forme longue les sépare naturellement assez.
         """
-        r = fast("j ai 775 kg d oignon et le kg coute 175 fcfa", "QUANTITY")
+        r = fast("775 kilogrammes 175 francs", "QUANTITY")
         ents = r["extracted_entities"]
         assert ents["quantity"] == 775.0 and ents["unit"] == "KG"
         assert ents["price"] == 175.0
         assert r["raw_analysis"]["path"] == "fast_path_slot_numeric_compound_answer"
 
+    def test_compound_extraction_abstains_when_other_business_content_is_present(self):
+        """(2026-09-30, durcissement fast-path/product) : la MÊME extraction
+        composée que ci-dessus, mais avec « d oignon »/« et le kg coute » en
+        plus — le fast-path ne comprend QUE les nombres, jamais ce reste de
+        phrase (ici, un nom de produit différent de "tomates", le produit
+        courant du payload par défaut de `fast()`) — il doit s'ABSTENIR,
+        indépendamment de la disponibilité d'un LLM (`fast()` n'en fournit
+        jamais ici), plutôt que de deviner quand même quantity/price en
+        ignorant silencieusement "oignon". Avant ce durcissement, ce message
+        exact était accepté par le fast-path (voir l'ancienne version de ce
+        test) — exactement la classe de bug fermée par ce commit."""
+        assert fast("j ai 775 kg d oignon et le kg coute 175 fcfa", "QUANTITY") is None
+
     def test_currency_number_is_never_mistaken_for_quantity(self):
-        """« 14 chèvres et l'unité coûte 34500 fcfa » -> qty=14, pas 34500."""
-        r = fast("14 chevres et l unite coute 34500 fcfa", "QUANTITY", goal="PRODUCTION_DECLARE_FUTURE")
+        """« 14 unite ... 34500 francs » (message PUR, séparé par de purs mots-
+        outils grammaticaux pour la même raison de fenêtre de balayage que le
+        test précédent — "unite"/"tetes" n'ont pas de forme longue comme
+        "kilogrammes") -> qty=14, pas 34500."""
+        r = fast(
+            "14 unites de la de la 34500 francs",
+            "QUANTITY",
+            goal="PRODUCTION_DECLARE_FUTURE",
+        )
         assert r["extracted_entities"]["quantity"] == 14.0
         assert r["extracted_entities"]["price"] == 34500.0
+
+    def test_currency_number_extraction_abstains_with_other_business_content(self):
+        """(2026-09-30, durcissement) : même montage que ci-dessus, mais avec
+        « chèvres »/« et l'unité coûte » — un nom de produit différent de
+        "tomates" (le produit courant par défaut de `fast()`) et des mots non
+        reconnus ("et", "coute") -> ABSTAIN, indépendamment du LLM."""
+        assert (
+            fast(
+                "14 chevres et l unite coute 34500 fcfa",
+                "QUANTITY",
+                goal="PRODUCTION_DECLARE_FUTURE",
+            )
+            is None
+        )
 
     @pytest.mark.parametrize("text,field,value", [
         ("j ai plutot 795 kg", "quantity", 795.0),
@@ -98,10 +138,23 @@ class TestFastPathExtraction:
 
     def test_ambiguous_bare_number_is_deferred_to_llm(self):
         """Nombre nu SANS unité ni devise : le LLM doit décider."""
-        assert fast("environ 300", "PRICE", skip=True) is None
+        assert fast("300", "PRICE", skip=True) is None
 
     def test_ambiguous_bare_number_resolved_when_llm_unavailable(self):
-        """…mais si le LLM est indisponible, le repli déterministe s'applique."""
+        """…mais si le LLM est indisponible ET le message reste PUR (rien
+        d'autre que le nombre), le repli déterministe s'applique toujours."""
+        r = fast("300", "PRICE", skip=False)
+        assert r["extracted_entities"]["price"] == 300.0
+
+    def test_hedge_word_alone_does_not_block_fast_path(self):
+        """« environ 300 » : "environ" est un mot de hedging PUR (aucune entité
+        métier propre — même famille que `domain/commercial_offer_flow.py::
+        _CONTENT_REPLY_FILLER`, qui le traite déjà comme filler pour le même
+        type de décision). Il ne bloque donc PAS le fast-path à lui seul,
+        contrairement à un nom de produit explicite (voir
+        `tests/interpreter/test_fastpath_product_preservation.py` pour "60 L
+        de miel" et consorts, où c'est bien "miel" — jamais un simple mot de
+        hedging — qui déclenche l'abstention)."""
         r = fast("environ 300", "PRICE", skip=False)
         assert r["extracted_entities"]["price"] == 300.0
 

@@ -176,3 +176,63 @@ class TestExplicitProductNeverSilentlyReplacedByFastPath:
         assert payload.get("unit") == "LITRE"
         missing = state.get("missing_fields") or []
         assert "quantity" not in missing, f"quantity aurait dû être résolue : missing={missing!r}"
+
+
+class TestExplicitProductPreservationWithoutLLM:
+    """(mandat 2026-09-30, §8) — mêmes deux scénarios que la classe ci-dessus,
+    mais LLM RÉELLEMENT indisponible sur le runtime (`StubRuntime()` sans LLM
+    scripté, `runtime.llm` reste `None`) : la sûreté métier ne doit PAS en
+    dépendre."""
+
+    def test_explicit_different_product_never_corrupted_when_llm_unavailable(self):
+        state = _mid_sales_publish_asking_quantity()
+        runtime = StubRuntime()  # llm=None : aucun LLM sur ce runtime.
+        interpreter = make_input_interpreter("PRODUCER")
+
+        state = run(_run_turn(state, interpreter, runtime, text="J'ai 60 L de miel"))
+
+        payload = state.get("transaction_payload") or {}
+        # L'invariant central, sans LLM cette fois : jamais 60 L attaché à
+        # "lait" simplement parce qu'aucun LLM n'était là pour voir "miel".
+        assert not (payload.get("product") == "lait" and payload.get("quantity") == 60.0), (
+            f"BUG reproduit SANS LLM : 60 L attaché à 'lait' — payload={payload!r}"
+        )
+        # Le fast-path s'est abstenu ET il n'y avait nulle part d'autre où
+        # renvoyer le message (pas de LLM) -> repli sûr SANS MUTATION déjà
+        # existant (`interpreted_event="UNKNOWN"`, voir `_input_interpreter_impl`) :
+        # aucune quantité n'est appliquée du tout, `quantity` reste manquant,
+        # `expected` ne progresse pas silencieusement vers PRICE.
+        missing = state.get("missing_fields") or []
+        assert "quantity" in missing, (
+            f"quantity ne doit pas être résolue silencieusement sans LLM : missing={missing!r}"
+        )
+        assert "price" not in (state.get("transaction_payload") or {}), (
+            "aucune progression silencieuse vers PRICE ne doit avoir lieu"
+        )
+        # Aucune publication prématurée.
+        draft = state.get("sales_publish_draft")
+        assert draft is None or draft.get("status") not in ("EXECUTING", "PUBLISHED"), (
+            f"publication prématurée sans LLM disponible : draft={draft!r}"
+        )
+        # Le tunnel reste actif en attente sûre (WAITING_INPUT), pas d'état cassé.
+        assert state.get("status") == "WAITING_INPUT", (
+            f"l'état doit rester en attente sûre, pas progresser ni casser : status={state.get('status')!r}"
+        )
+
+    def test_control_bare_quantity_unaffected_when_llm_unavailable(self):
+        """Cas de contrôle du §8 : même flow, mais l'utilisateur répond « 60 L »
+        (pas de produit explicite) -> comportement normal conservé, LLM jamais
+        nécessaire (le fast-path suffit)."""
+        state = _mid_sales_publish_asking_quantity()
+        runtime = StubRuntime()  # llm=None, mais ForbiddenLLM prouverait la même chose.
+        runtime.llm = ForbiddenLLM()
+        interpreter = make_input_interpreter("PRODUCER")
+
+        state = run(_run_turn(state, interpreter, runtime, text="60 L"))
+
+        payload = state.get("transaction_payload") or {}
+        assert payload.get("product") == "lait"
+        assert payload.get("quantity") == 60.0
+        assert payload.get("unit") == "LITRE"
+        missing = state.get("missing_fields") or []
+        assert "quantity" not in missing

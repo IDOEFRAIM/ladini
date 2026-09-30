@@ -22,7 +22,16 @@ Deux questions posées explicitement par le mandat :
 Ce fichier ajoute le test explicitement demandé par le mandat (Test J) :
 équivalence métier FastPath vs LLM pour une MÊME entrée utilisateur, sur le
 cas de repli documenté ("nombre nu sans unité ni devise pendant PRICE" —
-`interpreter/routing.py::_interpret_fast_path`, docstring `skip_numeric_shortcut`)."""
+`interpreter/routing.py::_interpret_fast_path`, docstring `skip_numeric_shortcut`).
+
+(2026-09-30) `TEXT` était à l'origine "environ 300" ; changé en "300" (nombre
+nu PUR, sans mot de couverture) suite au durcissement fast-path/product qui
+fait désormais s'abstenir tout fast-path numérique dès qu'un mot hors de son
+périmètre est présent ("environ" y compris) — INDÉPENDAMMENT de la
+disponibilité du LLM (voir `domain/quantity_unit.py::is_pure_numeric_answer`).
+L'intention originale de ce test (parité fast-path/LLM sur un nombre
+GENUINEMENT ambigu — aucune unité, aucune devise à proximité) reste
+entièrement préservée avec "300" ; seul le mot de battage superflu disparaît."""
 from __future__ import annotations
 
 import ast
@@ -37,12 +46,12 @@ from tests.conftest import ScriptedLLM, StubRuntime, make_state, run
 
 class TestFastPathVsLlmBusinessEquivalence:
     """Test J (mandat §18) : même entrée -> même état métier, que le nombre
-    nu ambigu ("environ 300" pendant PRICE) soit résolu par le repli
-    déterministe (LLM indisponible) ou par le LLM (disponible) — cas
-    explicitement documenté comme un point de bascule réel entre les deux
-    chemins (voir `_interpret_fast_path.__doc__`)."""
+    nu ambigu ("300" pendant PRICE) soit résolu par le repli déterministe
+    (LLM indisponible) ou par le LLM (disponible) — cas explicitement
+    documenté comme un point de bascule réel entre les deux chemins (voir
+    `_interpret_fast_path.__doc__`)."""
 
-    TEXT = "environ 300"
+    TEXT = "300"
 
     def _state(self):
         return make_state(

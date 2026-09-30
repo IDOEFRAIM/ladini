@@ -728,14 +728,40 @@ def scan_number_candidates(text: str) -> "list[NumberCandidate]":
 # jamais atteindre la logique de conflit produit existante de
 # `nodes/memory.py::_apply_slot`.
 # ---------------------------------------------------------------------------
-# Mots strictement grammaticaux (articles/prépositions élidés) qui ne portent
-# JAMAIS de sens métier propre — volontairement un ensemble FERMÉ et minuscule
-# de mots-outils du français, PAS une liste de produits ni de packaging (voir
-# §5 du mandat : ne jamais hardcoder un catalogue ici). "l" n'y figure pas :
-# c'est déjà un symbole d'unité valide dans `UNIT_SYNONYMS` (LITRE), donc déjà
-# couvert par cette vérification-là.
+# Mots-outils du français (articles/prépositions/conjonctions/pronoms, verbes
+# de déclaration courants, marqueurs de correction/hedging) qui ne portent
+# JAMAIS de sens métier propre — un ensemble FERMÉ, PAS une liste de produits
+# ni de packaging (voir §5 du mandat : ne jamais hardcoder un catalogue ici).
+# "l" n'y figure pas : c'est déjà un symbole d'unité valide dans
+# `UNIT_SYNONYMS` (LITRE), donc déjà couvert par cette vérification-là.
+#
+# (2026-09-30, revue) — élargi après un premier passage trop étroit (une
+# simple liaison grammaticale ne suffisait pas : "je veux 60 litre",
+# "non, 500 kg" — sans nom de produit différent en jeu, ces corrections
+# chiffrées légitimes se sont retrouvées bloquées à tort, cassant des tests de
+# non-régression déjà en place). Modelé sur le primitive SŒUR déjà existante
+# et du même esprit, `domain/commercial_offer_flow.py::_is_pure_content_reply`
+# / `_CONTENT_REPLY_FILLER` ("après retrait des nombres/unités/liaisons, il ne
+# reste aucun mot de fond") — non importée ici pour éviter un import circulaire
+# (`commercial_offer_flow.py` importe déjà de ce module), mais son ensemble de
+# mots-outils partage la même philosophie et sert de référence.
 _ANSWER_GLUE_WORDS = frozenset(
-    {"de", "du", "des", "d", "le", "la", "les", "un", "une", "par", "a", "au", "aux"}
+    {
+        # articles / prépositions / pronoms
+        "de", "du", "des", "d", "le", "la", "les", "l", "un", "une",
+        "par", "pour", "a", "au", "aux", "et", "ou", "en", "ca", "ça",
+        "cela", "il", "elle", "moi", "je", "j", "ce", "cet", "cette",
+        # verbes de déclaration/possession courants ("je veux X", "j'ai X",
+        # "il faut X") — ne désignent jamais un produit à eux seuls
+        "veux", "voudrais", "ai", "as", "faut", "avoir", "vends",
+        "vend", "est", "cest", "c",
+        # marqueurs de correction/négation/hedging — signalent une correction
+        # mais ne portent, seuls, aucune entité métier (voir docstring de
+        # `is_pure_numeric_answer` : un nom de produit accolé à l'un de ces
+        # mots reste, lui, détecté comme impur — ce ne sont que les mots eux-
+        # mêmes qui sont neutres)
+        "non", "finalement", "plutot", "plutôt", "mais", "environ",
+    }
 )
 
 _ANSWER_WORD_TOKEN_RE = re.compile(r"[a-zà-öø-ÿ]+", re.IGNORECASE)
