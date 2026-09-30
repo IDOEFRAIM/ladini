@@ -45,6 +45,7 @@ from ladini.domain.commercial_offer_flow import (
 from ladini.domain.quantity_unit import (
     all_numbers_accounted_for,
     extract_unit_only_from_text,
+    is_pure_numeric_answer,
     packaged_compound_total,
     parse_compound_quantity,
     parse_packaging_message,
@@ -1177,6 +1178,7 @@ def _interpret_fast_path(
             _qty_candidate is not None
             and _price_candidate is not None
             and _qty_candidate is not _price_candidate
+            and (not llm_available or is_pure_numeric_answer(text))
         ):
             _qty_value: Any = _qty_candidate["value"]
             _qty_unit: Any = _qty_candidate["unit"]
@@ -1359,7 +1361,34 @@ def _interpret_fast_path(
             number_match = None
 
         if number_match:
-            if numeric_value is not None:
+            if (
+                numeric_value is not None
+                and llm_available
+                and not is_pure_numeric_answer(text)
+            ):
+                # (2026-09-30, incident réel : "60 L de miel" avec product
+                # courant="lait" et expected=QUANTITY) — un nombre typé sans
+                # ambiguïté ("60", unité LITRE) ne suffit PAS à autoriser ce
+                # fast-path : le reste du message ("de miel") peut porter une
+                # entité métier explicite (nom de produit, marqueur de
+                # correction "finalement"/"non"...) que ce fast-path ne sait
+                # pas lire — il ne regarde que les nombres. L'invariant :
+                # un fast-path ne peut produire un résultat QUE s'il comprend
+                # complètement les éléments métier significatifs du message
+                # pour son périmètre ; sinon il s'abstient et laisse la main
+                # à l'interprétation complète, seule capable d'extraire
+                # `product` et d'atteindre la logique de conflit déjà
+                # correcte de `nodes/memory.py::_apply_slot`. Gardé derrière
+                # `llm_available` : sans LLM sur ce runtime, il n'y a nulle
+                # part d'autre où renvoyer le message (voir le repli
+                # documenté de `skip_numeric_shortcut` plus haut) — mieux
+                # vaut alors le résultat partiel existant que rien du tout.
+                logger.info(
+                    "[Interpreter fast-path] ABSTAIN expected=%s "
+                    "reason=NON_NUMERIC_BUSINESS_CONTENT",
+                    expected,
+                )
+            elif numeric_value is not None:
                 # Désambiguïsation par unité (extraction structurée déterministe,
                 # PAS de la classification d'intention) : on classe le nombre
                 # selon son UNITÉ réelle, pas selon ce que l'agent attendait.

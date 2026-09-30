@@ -720,6 +720,57 @@ def scan_number_candidates(text: str) -> "list[NumberCandidate]":
 
 
 # ---------------------------------------------------------------------------
+# Fast-path purity guard (2026-09-30, incident réel : "60 L de miel" avec
+# product courant="lait" perdait silencieusement "miel" — le fast-path
+# numérique QUANTITY/PRICE ne regardait QUE les nombres/unités/devises du
+# message, jamais le reste du texte, et un mot métier explicite (nom de
+# produit, marqueur de correction "finalement"/"non"...) disparaissait sans
+# jamais atteindre la logique de conflit produit existante de
+# `nodes/memory.py::_apply_slot`.
+# ---------------------------------------------------------------------------
+# Mots strictement grammaticaux (articles/prépositions élidés) qui ne portent
+# JAMAIS de sens métier propre — volontairement un ensemble FERMÉ et minuscule
+# de mots-outils du français, PAS une liste de produits ni de packaging (voir
+# §5 du mandat : ne jamais hardcoder un catalogue ici). "l" n'y figure pas :
+# c'est déjà un symbole d'unité valide dans `UNIT_SYNONYMS` (LITRE), donc déjà
+# couvert par cette vérification-là.
+_ANSWER_GLUE_WORDS = frozenset(
+    {"de", "du", "des", "d", "le", "la", "les", "un", "une", "par", "a", "au", "aux"}
+)
+
+_ANSWER_WORD_TOKEN_RE = re.compile(r"[a-zà-öø-ÿ]+", re.IGNORECASE)
+
+
+def is_pure_numeric_answer(text: str) -> bool:
+    """True si *text* ne contient RIEN d'autre qu'un nombre et son
+    unité/devise/liaison grammaticale — aucun autre mot.
+
+    Utilisé par les fast-paths de réponse numérique (QUANTITY/PRICE) de
+    l'interpréteur pour décider s'ils peuvent résoudre le message sans passer
+    par l'interprétation complète. Un fast-path ne doit JAMAIS se contenter de
+    reconnaître les nombres qu'il comprend et ignorer silencieusement le
+    reste — si un mot survit après avoir écarté unités/devises/liaisons, une
+    entité métier explicite (nom de produit, marqueur de correction) peut être
+    présente et le message doit repasser par l'interprétation complète.
+
+    Conservateur par construction : dès qu'un mot n'est reconnu dans aucune
+    des catégories sûres ci-dessous, la fonction renvoie `False` — mieux vaut
+    un appel LLM/interpreter de plus que perdre une entité métier explicite.
+    """
+    clean = unicodedata.normalize("NFKD", (text or "").strip().lower())
+    clean = "".join(ch for ch in clean if not unicodedata.combining(ch))
+    for word in _ANSWER_WORD_TOKEN_RE.findall(clean):
+        if word in UNIT_SYNONYMS or word in _CURRENCY_WORDS:
+            continue
+        if word in _ANSWER_GLUE_WORDS:
+            continue
+        if _looks_like_fcfa_typo(word):
+            continue
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Deterministic multi-tier pricing parser
 # ---------------------------------------------------------------------------
 # Incident réel (2026-08-30) : la règle 5bis du prompt LLM ("plusieurs
