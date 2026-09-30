@@ -462,6 +462,19 @@ async def validator(state: Dict[str, Any], mc_runtime: MarketRuntime) -> Dict[st
             ):
                 gate_question, gate_text = gate_result.question, gate_result.question_text
                 missing.insert(0, gate_question.requested_field)
+            # (2026-09-30, Étape 3 — parser générique package_count × package_size)
+            # « quantity » a été calculé plus haut (ligne ~355) sur le SEUL
+            # `payload.get("quantity")` LEGACY, avant que `gate_result` (donc
+            # `derive_available_quantity_from_package`, voir `domain/
+            # commercial_offer_flow.py`) n'existe — une quantité dérivée d'un
+            # conditionnement ("50 pots de 4 L") ne peut alors JAMAIS retirer
+            # « quantity » de `missing`, même une fois l'offre correctement
+            # calculée. Même principe symétrique que l'ajustement `pricing_tiers`
+            # ci-dessus (ligne ~442, "quantity" réinséré) — ici RETIRÉ quand
+            # l'offre porte désormais une disponibilité CONNUE.
+            if gate_result.offer.inventory_quantity is not None and "quantity" in missing:
+                missing = [f for f in missing if f != "quantity"]
+                completed = [f for f in required_for_goal if f not in missing]
 
     # BASE DU PRIX ↔ UNITÉ DE LA QUANTITÉ (incident 2026-09-28 : « 500f le sachet »
     # pour 50 LITRE était affiché « 500 FCFA/SAC » puis EXÉCUTÉ à 500 FCFA/LITRE).

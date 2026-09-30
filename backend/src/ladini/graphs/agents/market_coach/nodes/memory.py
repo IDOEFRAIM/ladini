@@ -132,6 +132,17 @@ _EXPECTED_INPUT_EXTRA_FIELDS: Dict[str, frozenset] = {
             "pricing_tiers",
             "agent_action", "action_offer_id", "action_producer_id", "action_pricing_tier_id",
             "action_package_count", "action_quantity", "action_unit",
+            # `package_count`/`package_label`/`package_size`/`package_unit`
+            # (2026-09-30, Étape 3 — parser générique "N <label> de M <unité>",
+            # `interpreter/routing.py::fast_path_generic_package_count_size`) :
+            # concept PRODUCTEUR ("j'ai 50 pots de 4 L"), distinct
+            # d'`action_package_count` ci-dessus (concept ACHETEUR, "combien de
+            # paquets d'un tarif déjà publié je commande" — voir
+            # `PackageDefinition.count`, `domain/commercial_offer.py`, pour la
+            # distinction complète). Nom bare volontairement différent
+            # (`package_count`, jamais `action_package_count`) : aucune
+            # collision possible.
+            "package_count", "package_label", "package_size", "package_unit",
         }
     ),
     "PRICE": frozenset({"price_unit", "pricing_tiers"}),
@@ -201,6 +212,14 @@ _PRODUCT_CASCADE_FIELDS = (
     "price_unit",
     "price_conversion_note",
     "commercial_offer",
+    # Étape 3 (2026-09-30) : un conditionnement déclaré ("50 pots de 4 L")
+    # est une propriété du STOCK d'UN produit — un changement de produit ne
+    # doit jamais laisser survivre le conditionnement de l'ancien (même
+    # raisonnement que `quantity`/`unit` juste au-dessus).
+    "package_count",
+    "package_label",
+    "package_size",
+    "package_unit",
 )
 _UNIT_CASCADE_FIELDS = ("price", "price_unit", "commercial_offer")
 _CANONICAL_SLOT_ORDER = ("product", "quantity", "unit", "price", "zone")
