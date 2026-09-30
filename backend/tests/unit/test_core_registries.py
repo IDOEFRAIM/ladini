@@ -132,7 +132,12 @@ class TestQuantityUnit:
 
     def test_unit_synonyms_map_only_to_valid_units(self):
         valid = set(UNIT_SYNONYMS.values())
-        assert valid == {"KG", "TONNE", "SAC", "PANIER", "TETE", "UNITE", "LITRE"}
+        # (2026-09-30, Étape 6 — centralisation des unités) : GRAMME/MILLILITRE/
+        # CENTILITRE/DECILITRE ajoutés au registre central — voir quantity_unit.py.
+        assert valid == {
+            "KG", "TONNE", "SAC", "PANIER", "TETE", "UNITE", "LITRE",
+            "GRAMME", "MILLILITRE", "CENTILITRE", "DECILITRE",
+        }
 
     @pytest.mark.parametrize("text,qty,unit", [
         ("200 kg", 200.0, "KG"),
