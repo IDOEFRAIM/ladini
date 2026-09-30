@@ -410,9 +410,19 @@ async def _resolve_confirmation_switch(
 
     - CONFIRM (« oui ») : annule l'ancien draft (persistance CAS comprise, voir
       `_cancel_old_draft_for_switch`) PUIS démarre la nouvelle intention à partir des
-      entités déjà dites (« je veux vendre mon miel » -> product=miel), en réutilisant
-      le bootstrap standard (`_DRAFT_BASED_RESOLVER_BY_GOAL`) pour poser la question du
-      premier champ manquant — jamais de re-saisie demandée à l'utilisateur.
+      entités déjà dites (« je veux vendre mon miel » -> product=miel).
+      (2026-09-30, corrigé — incident trouvé en non-régression : "finalement je vends
+      20 boeufs à 450000 la tête" créait directement un draft "complet" sans jamais
+      passer par `validator`/`commercial_gate`, donc sans jamais détecter une base de
+      prix ambiguë ("par tête ou pour l'ensemble ?") qu'un tour NORMAL aurait posée
+      AVANT toute confirmation — voir `tests/integration/
+      test_commercial_pricing_vertical_slice.py::TestInvalidation`.) Les entités
+      déjà dites sont donc d'abord rejouées à travers le VALIDATEUR normal (même
+      nœud qu'un tour ordinaire) ; s'il lève sa propre question (ENTER_FIELD), CE
+      tour s'arrête là, comme n'importe quel démarrage de goal ordinaire — seulement
+      s'il résout proprement, le bootstrap standard (`_DRAFT_BASED_RESOLVER_BY_GOAL`)
+      pose la question du premier champ manquant. Jamais de re-saisie demandée à
+      l'utilisateur pour ce qu'il a déjà dit.
     - Tout le reste (REJECT, ou toute déviation) : reste CONSERVATEUR (mandat §A3) —
       restaure la confirmation d'origine telle quelle, l'ancien draft n'est JAMAIS
       touché."""
@@ -454,17 +464,60 @@ async def _resolve_confirmation_switch(
         old_goal, old_draft_dict, old_pending_interaction, state, mc_runtime
     )
 
-    bootstrap_resolver = _DRAFT_BASED_RESOLVER_BY_GOAL.get(incoming_goal)
+    bootstrap_state = {
+        **state,
+        "current_goal": incoming_goal,
+        "interpreted_event": "NEW_TASK",
+        "extracted_entities": incoming_entities,
+        "transaction_payload": incoming_entities,
+        "sales_publish_draft": None,
+        "procurement_draft": None,
+        "pending_interaction": None,
+    }
+    from ladini.graphs.agents.market_coach.nodes.validation import validator
+
+    validator_patch = await validator(bootstrap_state, mc_runtime)
+    bootstrap_state = {**bootstrap_state, **validator_patch}
+    validator_pending = validator_patch.get("pending_interaction")
+    # Étroit DÉLIBÉRÉMENT : `validator` pose aussi `pending_interaction=ENTER_FIELD` pour un
+    # champ manquant ORDINAIRE (ex: "quantity") — ce cas-là, `_DRAFT_BASED_RESOLVER_BY_GOAL`
+    # (ci-dessous) le gère déjà très bien tout seul (même `missing_fields()`/prompt). Seule une
+    # VRAIE ambiguïté COMMERCIALE (base de prix/contenu de conditionnement — voir
+    # `services/domain/commercial_gate.py::CommercialQuestion`) doit court-circuiter le
+    # bootstrap : c'est la question qu'un tour ORDINAIRE aurait posée AVANT toute confirmation
+    # et que le bootstrap, lui, ne sait pas reproduire (il construit directement un draft
+    # "complet" dès que product+quantity+price sont là, sans trancher la base du prix).
+    validator_asks_something = bool(
+        isinstance(validator_pending, dict)
+        and str(validator_pending.get("kind") or "NONE") != "NONE"
+        and isinstance(validator_pending.get("target"), dict)
+        and validator_pending["target"].get("kind") == "COMMERCIAL_QUESTION"
+    )
+
     new_goal_patch: Dict[str, Any] = {}
-    if bootstrap_resolver is not None:
-        bootstrap_state = {
-            **state,
-            "sales_publish_draft": None,
-            "procurement_draft": None,
-        }
-        new_goal_patch = await bootstrap_resolver(
-            bootstrap_state, mc_runtime, incoming_goal, incoming_entities
-        )
+    if not validator_asks_something:
+        bootstrap_resolver = _DRAFT_BASED_RESOLVER_BY_GOAL.get(incoming_goal)
+        if bootstrap_resolver is not None:
+            new_goal_patch = await bootstrap_resolver(
+                bootstrap_state, mc_runtime, incoming_goal,
+                bootstrap_state.get("transaction_payload") or incoming_entities,
+            )
+    else:
+        new_goal_patch = dict(validator_patch)
+
+    # (2026-09-30, corrigé — incident trouvé en non-régression) : QUELLE QUE SOIT la
+    # branche ci-dessus, `transaction_payload` DOIT porter le sentinel `__reset__` —
+    # `transaction_payload` est un canal `merge_dict` (voir `agents/reducers.py`) : un
+    # patch de `new_goal_patch`/`validator_patch` SANS ce sentinel (le cas normal pour
+    # CE champ, puisqu'un tour ORDINAIRE part d'un état déjà propre) se fusionnerait
+    # avec l'ANCIEN `transaction_payload` — encore celui du goal abandonné à ce
+    # stade — au lieu de le remplacer. D'où le calcul explicite ici plutôt que de
+    # laisser `**new_goal_patch` fournir sa propre clé `transaction_payload` telle
+    # quelle.
+    final_payload = new_goal_patch.get("transaction_payload") or bootstrap_state.get(
+        "transaction_payload"
+    ) or incoming_entities
+    new_goal_patch = {k: v for k, v in new_goal_patch.items() if k != "transaction_payload"}
 
     return {
         **cancel_patch,
@@ -473,7 +526,7 @@ async def _resolve_confirmation_switch(
         "pending_goal": None,
         "sales_publish_draft": None,
         "procurement_draft": None,
-        "transaction_payload": {"__reset__": True, **incoming_entities},
+        "transaction_payload": {"__reset__": True, **final_payload},
         "stable_entities": {
             "__reset__": True,
             **{k: v for k, v in incoming_entities.items() if k in ("product", "unit")},

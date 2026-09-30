@@ -312,22 +312,60 @@ class TestCorrectionsBumpTheDraftVersion:
 
 
 class TestInvalidation:
+    """(2026-09-30, "interruption d'une confirmation active") : un produit différent
+    pendant WAITING_CONFIRMATION est désormais capté par `cognitive_guard` AVANT
+    d'atteindre le draft (`ASK_SWITCH_CONFIRMATION`, voir `nodes/cognitive.py`) —
+    "finalement je vends 20 boeufs..." partage EXACTEMENT la même forme classifiée
+    (NEW_TASK, même intent, produit différent) que "je veux vendre mon miel", le
+    scénario que ce garde-fou existe pour intercepter. Ces deux tests, qui attendaient
+    auparavant une correction SILENCIEUSE du draft actif, sont mis à jour pour le
+    nouveau contrat : une question fermée d'abord, la correction/l'invalidation
+    ENSUITE, seulement après un "oui" explicite — jamais plus de fusion silencieuse
+    d'un produit dans le draft d'un AUTRE produit."""
+
     def test_product_change_with_full_data_does_not_inherit_the_package(self, conv):
         _lait_to_confirmation(conv)
         t = conv.send(
             "finalement je vends 20 boeufs à 450000 la tête",
             llm=_nt(product="boeufs", quantity=20.0, unit="TETE", price=450000.0, price_unit="TETE"),
         )
-        assert "sachet" not in t.response
-        assert _offer(conv)["package"] is None
+        assert t.decision.get("action") == "ASK_SWITCH_CONFIRMATION"
+        assert t.pending_after.context_ref == "confirmation_switch"
+        assert "boeufs" in t.response and "lait" in t.response
+        # le draft lait n'a PAS été touché par la seule question
+        assert _draft(conv).get("product") == "lait"
+        assert not _creates(conv)
+
+        t2 = conv.send("oui")
+        # Le nouveau bootstrap rejoue les entités à travers le VALIDATEUR normal (voir
+        # `confirmation_gate.py::_resolve_confirmation_switch`) — il pose donc la MÊME
+        # question de base de prix qu'un tour ordinaire "20 boeufs à 450000" aurait posée,
+        # AVANT de créer un draft (jamais un draft "complet" construit à l'aveugle).
+        assert "par t" in t2.response.lower() and "ensemble" in t2.response.lower()
+        assert t2.pending_after.field == "price_basis"
+        assert not _draft(conv), "pas encore de draft tant que la base du prix n'est pas tranchée"
+        assert not _creates(conv)
+
+        t3 = conv.send("par tête")
+        assert "sachet" not in t3.response
+        assert _draft(conv).get("product") == "boeufs"
+        assert not (_draft(conv).get("pricing_tiers") or None)
+        assert not _offer(conv).get("package")
+        assert not _creates(conv), "le nouveau draft boeufs est complet -> repasse par sa PROPRE confirmation"
+
         conv.send("oui")
         (call,) = _creates(conv)
         assert call["name"] == "boeufs" and "pricing_tiers" not in call
 
     def test_product_change_without_data_purges_quantity_and_price(self, conv):
         _lait_to_confirmation(conv)
-        conv.send("finalement je vends des boeufs", llm=_nt(product="boeufs"))
+        t = conv.send("finalement je vends des boeufs", llm=_nt(product="boeufs"))
+        assert t.decision.get("action") == "ASK_SWITCH_CONFIRMATION"
+        assert _draft(conv).get("product") == "lait", "le draft lait n'a pas été touché par la seule question"
+
+        conv.send("oui")
         tp = conv.state().get("transaction_payload") or {}
+        assert tp.get("product") == "boeufs"
         assert tp.get("quantity") in (None, "") and tp.get("price") in (None, "")
         # les ALIAS (quantite, prix, montant…) ne ressuscitent pas 50 / 500 dans le validateur
         for alias in ("quantite", "qty", "volume", "prix", "montant", "prix_unitaire", "offered_price"):
