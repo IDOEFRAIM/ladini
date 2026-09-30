@@ -5,6 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
+from ladini.domain.quantity_unit import convert_quantity as _convert_quantity
+from ladini.domain.quantity_unit import measurement_family as _measurement_family
+from ladini.domain.quantity_unit import normalize_unit as _normalize_unit
 from ladini.graphs.agents.market_coach.utils import (
     canonical_unit_label,
     is_success_response,
@@ -33,75 +36,37 @@ def require_phone(state: Mapping[str, Any]) -> str:
     return str(phone)
 
 
-_UNIT_TO_KG: Dict[str, float] = {
-    "KG": 1.0,
-    "KILOGRAMME": 1.0,
-    "KILOGRAMMES": 1.0,
-    "G": 0.001,
-    "GRAMME": 0.001,
-    "GRAMMES": 0.001,
-    "TONNE": 1000.0,
-    "TONNES": 1000.0,
-    "T": 1000.0,
-    "TON": 1000.0,
-    "TONS": 1000.0,
-    "TONE": 1000.0,
-    "TONES": 1000.0,
-    "QUINTAL": 100.0,
-    "QUINTAUX": 100.0,
-}
-
 # (2026-09-28, mandat "Commercial Quantity & Pricing Domain Hardening") :
-# SAC/PANIER/CHARRETTE ont été RETIRÉS de `_UNIT_TO_KG` — bug P0 confirmé par
-# audit : ces mots désignent un CONTENANT (conditionnement), jamais une unité
-# de masse. La table les traitait comme des unités convertibles avec un poids
-# FIXE deviné (SAC=100kg, PANIER=25kg, CHARRETTE=250kg) — "3 sacs" devenait
-# silencieusement "300 KG" quel que soit le poids réel du sac du producteur.
+# SAC/PANIER/CHARRETTE n'ont JAMAIS été convertis en masse depuis ce
+# correctif — bug P0 confirmé par audit : ces mots désignent un CONTENANT
+# (conditionnement), jamais une unité de masse. Ce fichier maintenait
+# auparavant sa PROPRE table `_UNIT_TO_KG` (+ `_NON_MASS_UNITS`) traitant
+# ces mots comme des unités convertibles avec un poids FIXE deviné (SAC=100kg,
+# PANIER=25kg, CHARRETTE=250kg) — "3 sacs" devenait silencieusement "300 KG"
+# quel que soit le poids réel du sac du producteur.
 # `domain/quantity_unit.py::UNIT_SYNONYMS` mappe même "sachet"/"sachets" vers
 # ce même code "SAC" — un sachet de lait de 0,5L et un sac de céréales de
 # 50kg auraient reçu le MÊME poids deviné. Voir
 # `docs/domain/COMMERCIAL_QUANTITY_PRICING_MODEL.md` §PackageDefinition :
-# un conditionnement sans contenu physique connu doit rester NON CONVERTI
-# (comportement de cette fonction depuis ce correctif), jamais deviné —
-# `domain/commercial_offer.py::convert_commercial_quantity_to_base_unit`
-# encode la même règle (aucune conversion hors familles MASS/VOLUME
-# déterministes) pour tout nouveau code qui a besoin de cette distinction.
-_NON_MASS_UNITS = frozenset(
-    {
-        "HEAD",
-        "TETE",
-        "TÊTES",
-        "TETES",
-        "HEADS",
-        "UNIT",
-        "UNITE",
-        "UNITÉ",
-        "UNITES",
-        "UNITÉS",
-        "UNITS",
-        "PIECE",
-        "PIÈCE",
-        "PIECES",
-        "PIÈCES",
-        "L",
-        "LITRE",
-        "LITRES",
-        "SAC",
-        "SACS",
-        "PANIER",
-        "PANIERS",
-        "CHARRETTE",
-        "CHARRETTES",
-    }
-)
-
-
+# un conditionnement sans contenu physique connu doit rester NON CONVERTI,
+# jamais deviné.
+#
+# (2026-09-30, Étape 6 clôture — "une seule vérité physique sur les unités") :
+# `_UNIT_TO_KG` remplacée par une délégation vers `domain/quantity_unit.py`
+# (`normalize_unit`/`measurement_family`/`convert_quantity`) — la même règle
+# MASS/VOLUME-uniquement que `domain/commercial_offer.py::
+# convert_commercial_quantity_to_base_unit` (qui délègue déjà à
+# `domain/pricing_tiers.py`, elle-même déléguée à `quantity_unit.py` depuis
+# la 1ère passe de l'Étape 6). Toute unité dont `measurement_family` n'est
+# pas "MASS" — conditionnement (SAC/PANIER/SACHET), dénombrement
+# (TETE/UNITE), famille VOLUME (LITRE), ou alias non reconnu — reste NON
+# CONVERTIE, exactement comme avant.
 def normalize_quantity_to_kg(qty: float, unit_raw: Any) -> Tuple[float, str]:
     """Convert (quantity, unit) to kilograms ONLY when `unit` is a genuine,
-    deterministically-convertible mass unit (KG/G/TONNE/QUINTAL). A
-    conditionnement (SAC/PANIER/CHARRETTE/...) or any unrecognized unit is
-    returned UNCHANGED — never guessed. See `_NON_MASS_UNITS` docstring
-    above for why (2026-09-28 hardening): a package's real content is
+    deterministically-convertible mass unit (KG/G/TONNE/QUINTAL — see
+    `domain/quantity_unit.py::_MASS_FACTORS`, la source canonique unique).
+    A conditionnement (SAC/PANIER/CHARRETTE/...) or any unrecognized unit is
+    returned UNCHANGED — never guessed. A package's real content is
     producer-specific and unknown to this function; converting it with a
     fixed factor would silently corrupt the quantity that gets written to
     the database. Callers that need "N sacs" resolved into a real quantity
@@ -117,19 +82,23 @@ def normalize_quantity_to_kg(qty: float, unit_raw: Any) -> Tuple[float, str]:
     unit_clean = str(unit_raw or "KG").upper().strip()
     unit_canonical = canonical_unit_label(unit_clean, "KG")
 
-    coef = _UNIT_TO_KG.get(unit_clean)
-    if unit_clean in _NON_MASS_UNITS or coef is None:
-        # Conditionnement connu (bypass délibéré) OU unité non reconnue —
-        # dans les deux cas, jamais de conversion devinée. Un unit inconnu
-        # était auparavant silencieusement relabellé "KG" (dangereux, un
-        # texte non reconnu n'est justement PAS prouvé être du KG) ; il
-        # traverse maintenant tel quel, à charge pour l'appelant/la couche
-        # domaine de le signaler si le contexte l'exige.
-        if coef is None and unit_clean not in _NON_MASS_UNITS:
+    canonical_token = _normalize_unit(unit_clean)
+    family = _measurement_family(canonical_token) if canonical_token else None
+
+    if family != "MASS":
+        # Conditionnement/dénombrement/VOLUME reconnu (bypass délibéré) OU
+        # alias non reconnu — dans les deux cas, jamais de conversion
+        # devinée. Un unit inconnu était auparavant silencieusement
+        # relabellé "KG" (dangereux, un texte non reconnu n'est justement
+        # PAS prouvé être du KG) ; il traverse maintenant tel quel, à charge
+        # pour l'appelant/la couche domaine de le signaler si le contexte
+        # l'exige.
+        if canonical_token is None:
             logger.warning(
                 "[UnitNormalize] Unknown unit '%s' — passed through unchanged, "
-                "NOT guessed as KG (qty=%s). Add to _UNIT_TO_KG only if it is "
-                "a genuine, fixed-factor mass unit.",
+                "NOT guessed as KG (qty=%s). Add it to "
+                "domain/quantity_unit.py::UNIT_SYNONYMS only if it is a "
+                "genuine, fixed-factor mass unit.",
                 unit_clean,
                 qty_f,
             )
@@ -142,15 +111,20 @@ def normalize_quantity_to_kg(qty: float, unit_raw: Any) -> Tuple[float, str]:
             )
         return qty_f, unit_canonical
 
-    if coef == 1.0:
+    if canonical_token == "KG":
         return qty_f, "KG"
-    qty_kg = qty_f * coef
+
+    qty_kg = _convert_quantity(qty_f, canonical_token, "KG")
+    if qty_kg is None:
+        # Ne devrait jamais arriver (measurement_family == "MASS" garantit
+        # une conversion déterministe vers KG) — filet de sécurité, jamais
+        # de conversion devinée.
+        return qty_f, unit_canonical
     logger.info(
-        "[UnitNormalize] %s %s -> %s KG (coef=%s)",
+        "[UnitNormalize] %s %s -> %s KG",
         qty_f,
         unit_canonical,
         qty_kg,
-        coef,
     )
     return qty_kg, "KG"
 

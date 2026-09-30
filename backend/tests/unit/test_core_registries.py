@@ -134,9 +134,11 @@ class TestQuantityUnit:
         valid = set(UNIT_SYNONYMS.values())
         # (2026-09-30, Étape 6 — centralisation des unités) : GRAMME/MILLILITRE/
         # CENTILITRE/DECILITRE ajoutés au registre central — voir quantity_unit.py.
+        # QUINTAL ajouté lors de la clôture de l'Étape 6 (2026-09-30) : n'était
+        # reconnu qu'par `actions/common.py::_UNIT_TO_KG`, invisible ici.
         assert valid == {
             "KG", "TONNE", "SAC", "PANIER", "TETE", "UNITE", "LITRE",
-            "GRAMME", "MILLILITRE", "CENTILITRE", "DECILITRE",
+            "GRAMME", "MILLILITRE", "CENTILITRE", "DECILITRE", "QUINTAL",
         }
 
     @pytest.mark.parametrize("text,qty,unit", [
