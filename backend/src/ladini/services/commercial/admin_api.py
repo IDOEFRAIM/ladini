@@ -27,7 +27,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ladini.core.settings import settings
 from ladini.domain.identity.models import User
-from ladini.domain.intelligence.models import AuditLog, CommercialFollowup, Conversation
+from ladini.domain.intelligence.models import AuditLog, CommercialFollowup
+from ladini.domain.telemetry import AgentTurn
 from ladini.services.database.common import normalize_phone
 from ladini.workers.outbox.channels.whatsapp import WhatsAppChannel
 from ladini.workspace.store import WorkspaceStore
@@ -81,23 +82,30 @@ def _uuid_or_404(raw: str) -> uuid.UUID:
 
 
 async def list_conversations(session: AsyncSession, params: ListParams) -> dict[str, Any]:
-    """Une ligne par utilisateur ayant au moins une conversation, agrégée."""
+    """Une ligne par utilisateur ayant au moins un tour d'agent, agrégée.
+
+    Source : `intelligence.agent_turns` (télémétrie, alimentée à CHAQUE tour réel
+    WhatsApp/webchat) — PAS `intelligence.conversations`, qui n'est pas alimentée
+    par l'agent en production (même source que le cockpit monitoring existant,
+    `features/monitoring/cockpit/conversations.ts` côté frontend).
+    """
 
     agg = (
         select(
-            Conversation.user_id.label("user_id"),
-            func.count(Conversation.id).label("turns"),
-            func.max(Conversation.created_at).label("last_activity"),
-            func.bool_or(Conversation.needs_follow_up).label("needs_follow_up"),
+            AgentTurn.user_id.label("user_id"),
+            func.count(AgentTurn.id).label("turns"),
+            func.max(AgentTurn.created_at).label("last_activity"),
         )
-        .group_by(Conversation.user_id)
+        .where(AgentTurn.user_id.is_not(None))
+        .group_by(AgentTurn.user_id)
         .subquery()
     )
-    # Dernier intent = celui de la ligne la plus récente par utilisateur.
+    # Dernier intent = celui du tour le plus récent par utilisateur (DISTINCT ON).
     last_intent_sq = (
-        select(Conversation.user_id, Conversation.user_intent, Conversation.created_at)
-        .order_by(Conversation.user_id, Conversation.created_at.desc())
-        .distinct(Conversation.user_id)
+        select(AgentTurn.user_id, AgentTurn.intent, AgentTurn.created_at)
+        .where(AgentTurn.user_id.is_not(None))
+        .order_by(AgentTurn.user_id, AgentTurn.created_at.desc())
+        .distinct(AgentTurn.user_id)
         .subquery()
     )
 
@@ -109,8 +117,7 @@ async def list_conversations(session: AsyncSession, params: ListParams) -> dict[
             User.role,
             agg.c.turns,
             agg.c.last_activity,
-            agg.c.needs_follow_up,
-            last_intent_sq.c.user_intent,
+            last_intent_sq.c.intent,
             CommercialFollowup.status,
             CommercialFollowup.assigned_commercial_id,
             CommercialFollowup.last_follow_up_at,
@@ -120,10 +127,10 @@ async def list_conversations(session: AsyncSession, params: ListParams) -> dict[
         .outerjoin(CommercialFollowup, CommercialFollowup.user_id == User.id)
     )
 
-    # `created_at`/`last_activity` sont des TIMESTAMP WITHOUT TIME ZONE (naïfs, UTC implicite —
-    # voir orm_base.py) : comparer à un datetime aware lève TypeError côté Python et
-    # DataError côté asyncpg. Même convention que services/database/*.py.
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    # `agent_turns.created_at` est TIMESTAMP WITH TIME ZONE (aware) — contrairement à
+    # `commercial_followups`/`audit_logs` (naïfs, voir send_follow_up ci-dessous). Ne
+    # PAS appliquer le même `.replace(tzinfo=None)` ici, sinon TypeError/DataError.
+    now = datetime.now(timezone.utc)
     long_threshold = settings.COMMERCIAL_LONG_CONVERSATION_TURNS
     no_response_cutoff = now - timedelta(hours=settings.COMMERCIAL_NO_RESPONSE_HOURS)
 
@@ -157,8 +164,7 @@ async def list_conversations(session: AsyncSession, params: ListParams) -> dict[
             "role": r.role,
             "turns": r.turns,
             "last_activity": r.last_activity.isoformat() if r.last_activity else None,
-            "needs_follow_up": bool(r.needs_follow_up),
-            "last_intent": r.user_intent,
+            "last_intent": r.intent,
             "commercial_status": r.status or "NONE",
             "assigned_commercial_id": str(r.assigned_commercial_id) if r.assigned_commercial_id else None,
             "last_follow_up_at": r.last_follow_up_at.isoformat() if r.last_follow_up_at else None,
@@ -188,9 +194,10 @@ async def get_conversation_detail(session: AsyncSession, user_id_raw: str) -> di
     turns = (
         (
             await session.execute(
-                select(Conversation)
-                .where(Conversation.user_id == user_id)
-                .order_by(Conversation.created_at.asc())
+                select(AgentTurn)
+                .where(AgentTurn.user_id == user_id)
+                .order_by(AgentTurn.started_at.asc())
+                .limit(200)
             )
         )
         .scalars()
@@ -215,9 +222,14 @@ async def get_conversation_detail(session: AsyncSession, user_id_raw: str) -> di
 
     timeline: list[dict[str, Any]] = []
     for t in turns:
-        timeline.append({"role": "USER", "text": t.query, "at": t.created_at.isoformat()})
-        if t.response:
-            timeline.append({"role": "AGENT", "text": t.response, "at": t.created_at.isoformat()})
+        # `started_at`/`completed_at` sont aware (agent_turns) ; on les ramène en naïf-UTC
+        # pour rester comparables lexicalement aux timestamps naïfs de `audit_logs`
+        # (COMMERCIAL) au tri ci-dessous — tous représentent la même horloge UTC.
+        started = t.started_at.replace(tzinfo=None).isoformat() if t.started_at else None
+        completed = t.completed_at.replace(tzinfo=None).isoformat() if t.completed_at else started
+        timeline.append({"role": "USER", "text": t.user_message_excerpt, "at": started})
+        if t.agent_response_excerpt:
+            timeline.append({"role": "AGENT", "text": t.agent_response_excerpt, "at": completed})
     for a in outbound:
         payload = a.new_value or {}
         timeline.append(

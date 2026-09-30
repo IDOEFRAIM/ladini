@@ -1,6 +1,10 @@
 """Espace COMMERCIAL — comportement SQL réel (agrégation par utilisateur, jointures
-conversations/commercial_followups/audit_logs) contre une base PostgreSQL fraîche,
+agent_turns/commercial_followups/audit_logs) contre une base PostgreSQL fraîche,
 reconstruite UNIQUEMENT depuis les migrations officielles (voir conftest.py::pg_dsn).
+
+Source de la liste/du détail : `intelligence.agent_turns` (télémétrie réelle, alimentée à
+chaque tour WhatsApp/webchat) — PAS `intelligence.conversations`, qui n'est pas alimentée
+par l'agent en production (même source que le cockpit monitoring existant).
 
 Isolated day base (2030-01-01) : loin de tous les autres compteurs `_fresh_day()`/`_day()`
 de ce dossier (2005/2010+), sur une base partagée au niveau de la session de test.
@@ -11,6 +15,7 @@ validation pure et l'invariant anti-LangGraph)."""
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import psycopg2
@@ -51,17 +56,26 @@ def user(pg_dsn):
     return uid
 
 
-def _conversation(pg_dsn, user_id, *, created_at, needs_follow_up=False, user_intent=None, response="ok"):
+def _turn(pg_dsn, user_id, *, created_at, intent=None, user_message="Bonjour", agent_response="ok"):
+    """Un tour d'agent réel (`intelligence.agent_turns`) — la table qu'exploite
+    réellement `admin_api.list_conversations`/`get_conversation_detail`."""
     conn = psycopg2.connect(pg_dsn)
     with conn, conn.cursor() as cur:
         insert(
             cur,
-            "intelligence.conversations",
+            "intelligence.agent_turns",
+            conversation_id=uuid.uuid4(),
             user_id=user_id,
-            query="Bonjour",
-            response=response,
-            needs_follow_up=needs_follow_up,
-            user_intent=user_intent,
+            phone_hash=uniq("hash"),
+            phone_last4="1234",
+            intent=intent,
+            outcome="COMPLETED",
+            started_at=created_at,
+            completed_at=created_at,
+            duration_ms=100,
+            response_status="SENT",
+            user_message_excerpt=user_message,
+            agent_response_excerpt=agent_response,
             created_at=created_at,
         )
     conn.close()
@@ -70,8 +84,8 @@ def _conversation(pg_dsn, user_id, *, created_at, needs_follow_up=False, user_in
 class TestListConversations:
     def test_aggregates_turns_and_last_activity_per_user(self, pg_dsn, user):
         t0 = datetime(2030, 1, 1, tzinfo=timezone.utc)
-        _conversation(pg_dsn, user, created_at=t0, user_intent="SALES_PUBLISH_PRODUCT")
-        _conversation(pg_dsn, user, created_at=t0 + timedelta(hours=1), user_intent="SALES_PUBLISH_PRODUCT_PRICE")
+        _turn(pg_dsn, user, created_at=t0, intent="SALES_PUBLISH_PRODUCT")
+        _turn(pg_dsn, user, created_at=t0 + timedelta(hours=1), intent="SALES_PUBLISH_PRODUCT_PRICE")
 
         result = _run(pg_dsn, lambda s: api.list_conversations(s, api.ListParams()))
         row = next(r for r in result["items"] if r["user_id"] == str(user))
@@ -79,7 +93,7 @@ class TestListConversations:
         assert row["last_intent"] == "SALES_PUBLISH_PRODUCT_PRICE"
 
     def test_to_follow_up_filter_matches_the_commercial_status_table(self, pg_dsn, user):
-        _conversation(pg_dsn, user, created_at=datetime(2030, 1, 2, tzinfo=timezone.utc))
+        _turn(pg_dsn, user, created_at=datetime(2030, 1, 2, tzinfo=timezone.utc))
         conn = psycopg2.connect(pg_dsn)
         with conn, conn.cursor() as cur:
             insert(cur, "intelligence.commercial_followups", user_id=user, status="TO_FOLLOW_UP")
@@ -95,7 +109,7 @@ class TestListConversations:
         monkeypatch.setattr(api.settings, "COMMERCIAL_LONG_CONVERSATION_TURNS", 2)
         base = datetime(2030, 1, 3, tzinfo=timezone.utc)
         for i in range(3):
-            _conversation(pg_dsn, user, created_at=base + timedelta(minutes=i))
+            _turn(pg_dsn, user, created_at=base + timedelta(minutes=i))
 
         result = _run(pg_dsn, lambda s: api.list_conversations(s, api.ListParams(status_filter="long")))
         row = next(r for r in result["items"] if r["user_id"] == str(user))
@@ -110,7 +124,7 @@ class TestConversationDetailTimeline:
         # comme les autres tests de ce fichier), sinon il apparaîtrait APRÈS
         # la relance commerciale dans le tri chronologique.
         t0 = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
-        _conversation(pg_dsn, user, created_at=t0, response="Bonjour, que puis-je faire ?")
+        _turn(pg_dsn, user, created_at=t0, agent_response="Bonjour, que puis-je faire ?")
 
         async def _send_followup(session):
             conn = psycopg2.connect(pg_dsn)
