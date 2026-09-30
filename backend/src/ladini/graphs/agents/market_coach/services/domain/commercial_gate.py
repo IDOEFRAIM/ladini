@@ -23,7 +23,7 @@ from ladini.domain.bid_pricing_flow import (
     resolve_basis_reply,
     resolve_package_reply,
 )
-from ladini.domain.commercial_offer import CommercialOffer
+from ladini.domain.commercial_offer import CommercialOffer, Provenance
 from ladini.domain.commercial_offer_flow import (
     FIELD_PACKAGE_SIZE,
     FIELD_PRICE_BASIS,
@@ -150,6 +150,34 @@ def log_gate_events(
             pricing.basis_source.value if pricing else None,
             state.get("message_sid"),
         )
+        if event == "PRICE_BASIS_RESOLVED":
+            # (2026-09-30, Étape 4) : log dédié, plus riche que la ligne
+            # générique ci-dessus — permet de répondre à "pourquoi ce prix a
+            # été interprété PER_PACKAGE ?" (mandat §11/§18) sans avoir à
+            # recouper draft_id/version dans les logs. `context_overridden` :
+            # une question de base était active ET le texte explicite du tour
+            # l'a emporté (jamais la mémoire/le contexte implicite).
+            question = commercial_question_from_state(state)
+            question_context = question.expected_basis_unit if question else None
+            context_overridden = bool(
+                question_context
+                and pricing is not None
+                and pricing.basis_source != Provenance.QUESTION_CONTEXT_EXPLICIT
+            )
+            pkg = offer.package
+            logger.info(
+                "PRICE_BASIS_RESOLVED | flow_id=%s | basis=%s | source=%s | "
+                "package_label=%s | package_size=%s | package_unit=%s | "
+                "question_context=%s | context_overridden=%s",
+                flow_id_of(state),
+                pricing.basis.value if pricing and pricing.basis else None,
+                pricing.basis_source.value if pricing else None,
+                pkg.package_type if pkg else None,
+                pkg.content_amount if pkg else None,
+                pkg.content_unit if pkg else None,
+                question_context,
+                context_overridden,
+            )
     if pricing is not None and pricing.basis is not None:
         log_pricing_mode(pricing.basis.value, state, draft_id=draft_id)
     question = result.question

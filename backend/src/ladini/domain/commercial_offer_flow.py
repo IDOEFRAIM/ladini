@@ -344,6 +344,83 @@ def parse_generic_package_count_and_size(text: Any) -> Optional[PackageDefinitio
     )
 
 
+# ---------------------------------------------------------------------------
+# Parser générique "<label libre> de <taille> <unité>" AUTOUR d'un PRIX
+# (mandat 2026-09-30, Étape 4, "PRIORITÉ DU PRICING EXPLICITE SUR LE CONTEXTE
+# DE QUESTION")
+# ---------------------------------------------------------------------------
+# Incident réel : question posée "Quel est votre prix par litre ?", réponse
+# "le pot de 4 litre coute 2750 fcfa" -> interprété 2750 FCFA/L. Root cause
+# CONFIRMÉE par audit direct : `package_word_before_amount`/
+# `price_unit_next_to_amount` (juste au-dessus) ne reconnaissent un
+# conditionnement AVANT/APRÈS le montant QUE via `_PACKAGE_WORD_RE`, bâtie sur
+# `PACKAGING_WORDS` (`_TIER_PACKAGING_WORDS`, la même liste fermée de 9 mots
+# qu'à l'Étape 3) — "pot" n'y figure pas, la fonction renvoie `None`, la
+# résolution retombe alors sur `question.expected_basis_unit` (le contexte de
+# la question, PER_BASE_UNIT/LITRE).
+#
+# Généralisation DÉLIBÉRÉMENT plus étroite que le chemin whitelist existant :
+# celui-ci accepte un conditionnement CONNU sans taille ("500 le sachet" ->
+# PER_PACKAGE, taille inconnue, voir cas obligatoire §5.C du mandat) parce que
+# le mot lui-même EST le signal de confiance. Un label LIBRE n'a pas ce
+# signal — seule la présence d'une clause de taille explicite ("de 4 litre")
+# offre un signal structurel assez fort pour conclure PER_PACKAGE sans
+# deviner (mandat §12, "la sûreté prime sur la complétion automatique") :
+# "500 le cageot" (label libre, SANS taille) reste donc hors du périmètre de
+# CE chemin générique — documenté comme limite explicite, voir le rapport
+# final de cette étape. Tous les cas obligatoires du mandat pour un label
+# libre (§10, §13.10-11) portent une taille explicite ; aucun ne demande la
+# variante "libre sans taille".
+_GENERIC_PACKAGE_WITH_SIZE_BEFORE_AMOUNT_RE = re.compile(
+    r"(?:\ble\s+|\bla\s+|\bun\s+|\bune\s+)?"
+    r"\b(" + _GENERIC_PACKAGE_LABEL_TOKEN + r")s?\s+"
+    r"(?:de|d)\s*" + _NUMBER + r"\s*" + r"(" + _GENERIC_PACKAGE_UNIT_ALTERNATION + r")\b"
+    r"\s*(?:est\s+)?(?:a|au prix de|au tarif de|coute|vaut|se vend|=|:|pour)?\s*$",
+    re.IGNORECASE,
+)
+_GENERIC_PACKAGE_WITH_SIZE_AFTER_AMOUNT_RE = re.compile(
+    r"^\s*(?:fcfa|cfa|francs?|f)?\s*"
+    r"(?:/|par\b|chaque\b|le\b|la\b|l\s?['’]|l\b|au\b|a la\b|pour\b|pour un\b|pour une\b)\s*"
+    r"(?:un\s+|une\s+)?"
+    r"(" + _GENERIC_PACKAGE_LABEL_TOKEN + r")s?\s+"
+    r"(?:de|d)\s*" + _NUMBER + r"\s*" + r"(" + _GENERIC_PACKAGE_UNIT_ALTERNATION + r")\b",
+    re.IGNORECASE,
+)
+
+
+def parse_generic_package_price_context(
+    text: Any, amount: Optional[float]
+) -> Optional[Tuple[str, float, str]]:
+    """`(label, content_amount, content_unit)` si un conditionnement LIBRE
+    portant EXPLICITEMENT sa taille encadre `amount` — avant ("le pot de 4 L
+    coûte 2750") ou après ("2750 le pot de 4 L", "2750 fcfa pour le pot de
+    4 L"). `None` sinon (aucune whitelist, mais taille obligatoire — voir la
+    docstring de section ci-dessus pour la limite assumée)."""
+    if amount is None:
+        return None
+    ntext = normalize_text(text)
+    for token in _AMOUNT_TOKEN_RE.finditer(ntext):
+        value = _to_float(token.group(0).strip().rstrip(".,").replace(" ", ""))
+        if value is None or abs(value - amount) > 1e-9:
+            continue
+        before = ntext[: token.start()]
+        match = _GENERIC_PACKAGE_WITH_SIZE_BEFORE_AMOUNT_RE.search(before)
+        if match is None:
+            after = ntext[token.end():]
+            match = _GENERIC_PACKAGE_WITH_SIZE_AFTER_AMOUNT_RE.match(after)
+        if match is None:
+            continue
+        size_val = _to_float(match.group(2))
+        if size_val is None or size_val <= 0:
+            continue
+        converted = _convert_content(size_val, match.group(3))
+        if converted is None:
+            continue
+        label = _singularize_label(match.group(1)).upper()
+        return label, converted[0], converted[1]
+    return None
+
+
 _CONTENT_REPLY_FILLER = frozenset(
     "le la les un une de du des d l par c est ca cest fait contient environ a peu pres je dirais "
     "disons mets mettons chaque chacun et demi stp svp merci ok en gros pour moi cela il elle "
@@ -638,6 +715,16 @@ def build_commercial_offer_from_sales_state(
     price_unit_raw = normalize_unit(str(payload["price_unit"])) if payload.get("price_unit") else None
     price_unit_in_text = price_unit_next_to_amount(text, amount) if amount is not None else None
     package_word = extract_package_word(ntext)
+    # (2026-09-30, Étape 4) : label LIBRE (aucune whitelist) portant
+    # EXPLICITEMENT sa taille autour du montant — voir `parse_generic_
+    # package_price_context`. Calculé une seule fois ici, réutilisé à la fois
+    # pour résoudre `basis` (ci-dessous) et pour construire directement le
+    # `PackageDefinition` (section "conditionnement" plus bas) SANS repasser
+    # par `parse_package_content` (whitelist-gatée elle aussi — recalculer y
+    # échouerait pour le même mot "pot").
+    generic_price_context_match: Optional[Tuple[str, float, str]] = (
+        parse_generic_package_price_context(text, amount) if amount is not None else None
+    )
     unit_changed = bool(
         previous
         and previous.commercial_quantity
@@ -683,6 +770,15 @@ def build_commercial_offer_from_sales_state(
             # est lu plus bas (`parse_package_content`) ; inconnu -> PACKAGE_REQUIRED, jamais halluciné.
             basis, basis_source = PriceBasis.PER_PACKAGE, Provenance.USER_EXPLICIT
             package_type = package_word_before_amount(ntext, amount)
+        elif new_price_info and generic_price_context_match is not None:
+            # (2026-09-30, Étape 4) : même principe que la branche whitelist
+            # juste au-dessus, mais pour un label LIBRE — « le pot de 4 litre
+            # coûte 2750 » n'est whitelisté nulle part (voir `docstring` de
+            # `parse_generic_package_price_context`) ; sans cette branche, la
+            # résolution retombait sur `question.expected_basis_unit`
+            # (PER_BASE_UNIT/LITRE) — exactement l'incident de cette étape.
+            basis, basis_source = PriceBasis.PER_PACKAGE, Provenance.USER_EXPLICIT
+            package_type = generic_price_context_match[0]
         elif (
             new_price_info
             and question is not None
@@ -731,7 +827,18 @@ def build_commercial_offer_from_sales_state(
         content_unit: Optional[str] = None
         content_source = Provenance.UNKNOWN
         parsed = parse_package_content(text, question=question)
-        if parsed is not None:
+        if (
+            generic_price_context_match is not None
+            and normalize_text(generic_price_context_match[0]) == ptype_key
+        ):
+            # (Étape 4) Le même motif qui a résolu `basis`=PER_PACKAGE pour un
+            # label LIBRE porte déjà sa taille — la réutiliser directement
+            # évite un second passage par `parse_package_content`
+            # (whitelist-gatée, échouerait pour le même mot).
+            _, content_amount, content_unit = generic_price_context_match
+            content_source = Provenance.USER_EXPLICIT
+            events.append("PACKAGE_RESOLVED")
+        elif parsed is not None:
             content_amount, content_unit, content_source = parsed
             events.append("PACKAGE_RESOLVED")
         elif (
@@ -915,6 +1022,7 @@ __all__ = [
     "has_total_cue",
     "parse_package_content",
     "parse_generic_package_count_and_size",
+    "parse_generic_package_price_context",
     "parse_basis_reply",
     "price_unit_next_to_amount",
     "package_word_before_amount",
