@@ -126,6 +126,27 @@ class PackageDefinition:
     conditionnement contient RÉELLEMENT, en unité physique — inconnus tant
     que l'utilisateur (ou une règle déterministe certifiée) ne les a pas
     fournis.
+
+    `count` (mandat 2026-09-30, "MODELE CANONIQUE package_count/package_size/
+    available_quantity") — COMBIEN d'exemplaires de ce conditionnement le
+    producteur déclare avoir ("50 pots de 4 L" -> count=50). Concept
+    DISTINCT du `package_count` déjà existant côté ACHETEUR
+    (`interpreter/structured_action_contract.py::SET_PACKAGE_COUNT`,
+    surfacé en état sous `action_package_count`) : celui-ci est "combien
+    d'exemplaires d'un `PricingTier` déjà PUBLIÉ l'acheteur veut commander",
+    calculé à la commande, jamais persisté sur l'offre elle-même — voir
+    `domain/pricing_tiers.py::compute_line`/`requested_pack_count`. Nommer ce
+    champ `count`, toujours qualifié par `PackageDefinition.` (jamais un
+    `package_count` nu dans un dict plat), évite la collision par
+    construction plutôt que par convention.
+
+    `count` seul (sans `content_amount`) et `content_amount` seul (sans
+    `count`) sont tous deux des états VALIDES ("50 pots" taille inconnue ;
+    "pot de 4 L" nombre inconnu — voir invariant I6 du mandat) : aucune
+    quantité totale ne doit alors être dérivée, voir
+    `derive_available_quantity_from_package` plus bas, seul endroit où
+    `count × content_amount` est calculé (mandat §5 : un seul endroit, pas
+    dispersé).
     """
 
     package_type: Optional[str] = None
@@ -133,14 +154,46 @@ class PackageDefinition:
     content_unit: Optional[str] = None
     status: PackageStatus = PackageStatus.NOT_REQUIRED
     source: Provenance = Provenance.UNKNOWN
+    # `count` ajouté APRÈS `source`, volontairement en DERNIÈRE position —
+    # des appelants existants construisent `PackageDefinition` par arguments
+    # POSITIONNELS (ex: `tests/unit/test_pricing_persistence_services.py`,
+    # `PackageDefinition("SACHET", 0.5, "LITRE", PackageStatus.KNOWN, ...)`)
+    # ; l'insérer plus tôt aurait décalé silencieusement tous ces appels.
+    count: Optional[int] = None
 
     @property
     def is_content_known(self) -> bool:
+        # (2026-09-30) `> 0` ajouté explicitement pour l'invariant I2 du
+        # mandat ("package_size > 0 lorsqu'il est présent") — ne change AUCUN
+        # comportement existant : les deux call sites qui posent déjà
+        # `status=KNOWN` (`commercial_offer_flow.py::
+        # build_commercial_offer_from_sales_state`/`offer_from_package_tier`)
+        # ne le font déjà QUE quand `content_amount > 0` est vérifié en amont
+        # (le second via `PricingTier.quantity: Field(gt=0)`).
         return (
             self.status == PackageStatus.KNOWN
             and self.content_amount is not None
+            and self.content_amount > 0
             and bool(self.content_unit)
         )
+
+    @property
+    def is_count_known(self) -> bool:
+        """Invariant I1 du mandat ("package_count > 0 lorsqu'il est
+        présent") appliqué OPÉRATIONNELLEMENT plutôt que par exception à la
+        construction (cohérent avec `is_content_known` ci-dessus, qui ne
+        valide pas non plus `content_amount` à la construction) : un
+        `count` présent mais <= 0 n'est jamais "connu" — il ne peut donc
+        jamais servir de base à `derive_available_quantity_from_package`,
+        exactement comme s'il était absent. Voir les tests dédiés
+        (`test_package_quantity_model.py`) qui verrouillent ce choix."""
+        return self.count is not None and self.count > 0
+
+    @property
+    def can_derive_available_quantity(self) -> bool:
+        """I9 : le calcul `count × content_amount` n'a de sens QUE si les
+        DEUX facteurs (et l'unité du contenu) sont explicitement connus."""
+        return self.is_count_known and self.is_content_known
 
 
 @dataclass(frozen=True)
@@ -341,6 +394,42 @@ def convert_commercial_quantity_to_base_unit(
     return quantity.amount * factor, factor
 
 
+def derive_available_quantity_from_package(
+    package: Optional[PackageDefinition],
+) -> Optional[InventoryQuantity]:
+    """SEUL endroit du dépôt où `package_count × package_size` produit une
+    quantité disponible (mandat 2026-09-30 §5 : un calcul, pas dispersé).
+
+    Ferme l'incident réel : "j'ai 50 pot de 4 litre" doit produire une
+    disponibilité de 200 L (50 × 4), jamais rester à "4 L" (le contenu d'UN
+    pot) en perdant le "50", ni devenir "50 L" en perdant la taille — voir
+    les cas canoniques A-E du mandat, verrouillés par
+    `tests/unit/test_package_quantity_model.py`.
+
+    Ne calcule QUE si `count`/`content_amount`/`content_unit` sont TOUS
+    explicitement connus (`PackageDefinition.can_derive_available_quantity`)
+    — I9 : "aucune estimation implicite". Un `PackageDefinition` partiel
+    (compte seul, ou taille seule — I6) renvoie `None` : c'est à l'appelant
+    de traiter ce `None` comme une disponibilité encore manquante, jamais
+    comme zéro ni comme une valeur devinée.
+
+    Aucune conversion d'unité n'intervient ici : `count` et `content_amount`
+    portent déjà la MÊME unité physique (`content_unit`, celle du
+    conditionnement tel que déclaré) — la quantité dérivée est directement
+    exprimée dans cette unité. Une éventuelle réconciliation avec une
+    disponibilité déjà connue dans une AUTRE unité est un problème de
+    flow/parser, explicitement hors périmètre de cette étape (mandat §15)."""
+    if package is None or not package.can_derive_available_quantity:
+        return None
+    assert package.count is not None and package.content_amount is not None
+    assert package.content_unit is not None
+    return InventoryQuantity(
+        amount=float(package.count) * float(package.content_amount),
+        unit=package.content_unit,
+        source=Provenance.DOMAIN_DERIVED,
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # PHASE B1 — AGRÉGAT `CommercialOffer` (vertical slice SALES_PUBLISH_PRODUCT)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -452,6 +541,7 @@ class CommercialOffer:
                     "package_type": pk.package_type,
                     "content_amount": pk.content_amount,
                     "content_unit": pk.content_unit,
+                    "count": pk.count,
                     "status": pk.status.value,
                     "source": pk.source.value,
                 }
@@ -484,6 +574,12 @@ class CommercialOffer:
         def _num(value: Any) -> Optional[float]:
             try:
                 return float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        def _int(value: Any) -> Optional[int]:
+            try:
+                return int(value) if value is not None else None
             except (TypeError, ValueError):
                 return None
 
@@ -522,6 +618,7 @@ class CommercialOffer:
                         package_type=pk.get("package_type"),
                         content_amount=_num(pk.get("content_amount")),
                         content_unit=pk.get("content_unit"),
+                        count=_int(pk.get("count")),
                         status=PackageStatus(pk.get("status") or "NOT_REQUIRED"),
                         source=_p(pk.get("source")),
                     )
@@ -717,4 +814,5 @@ __all__ = [
     "validate_commercial_offer",
     "convertible_measurement_family",
     "convert_commercial_quantity_to_base_unit",
+    "derive_available_quantity_from_package",
 ]
