@@ -45,6 +45,28 @@ UNIT_SYNONYMS: Dict[str, str] = {
     "l": "LITRE",
     "litre": "LITRE",
     "litres": "LITRE",
+    # (2026-09-30, Étape 6 — centralisation des unités) : sous-multiples MASS/VOLUME,
+    # auparavant reconnus UNIQUEMENT par la table locale et délibérément isolée
+    # `commercial_offer_flow.py::_CONTENT_UNIT_MAP` ("jamais ajoutés aux registres
+    # globaux d'unités") — absents d'ici, donc invisibles à `normalize_unit`/
+    # `convert_quantity`/au moteur de packaging déterministe (`_TIER_QTY_UNIT_RE` et
+    # consorts, plus bas dans ce fichier), qui ne reconnaissaient donc PAS "500 ml"
+    # comme une unité valide. Canonicalisés en tokens de famille PROPRES
+    # (MILLILITRE/CENTILITRE/DECILITRE/GRAMME), jamais collapsés en LITRE/KG ici —
+    # cette conversion est le rôle de `convert_quantity`/`measurement_family`
+    # ci-dessous, pas de la table d'alias.
+    "g": "GRAMME",
+    "gramme": "GRAMME",
+    "grammes": "GRAMME",
+    "ml": "MILLILITRE",
+    "millilitre": "MILLILITRE",
+    "millilitres": "MILLILITRE",
+    "cl": "CENTILITRE",
+    "centilitre": "CENTILITRE",
+    "centilitres": "CENTILITRE",
+    "dl": "DECILITRE",
+    "decilitre": "DECILITRE",
+    "decilitres": "DECILITRE",
 }
 
 VALID_UNITS = frozenset(UNIT_SYNONYMS.values())
@@ -111,7 +133,42 @@ def _extract_match(match: "re.Match") -> "tuple[Optional[float], Optional[str]]"
         qty_val = None
     unit_raw = normalize_unit_token(match.group("unit") or "")
     mapped_unit = UNIT_SYNONYMS.get(unit_raw)
-    return qty_val, mapped_unit
+    return _collapse_to_base_unit(qty_val, mapped_unit)
+
+
+#: Unités dont ce module collapse désormais la quantité vers la base de leur
+#: famille AU POINT D'EXTRACTION (mandat Étape 6 §7/§11) — restreint
+#: DÉLIBÉRÉMENT aux 4 tokens canoniques introduits par cette étape
+#: (MILLILITRE/CENTILITRE/DECILITRE/GRAMME), jamais TONNE (ni aucune autre
+#: unité déjà reconnue AVANT l'Étape 6) : TONNE a TOUJOURS été retournée telle
+#: quelle par ce module (jamais auto-convertie en KG) — un collapse générique
+#: "toute unité != sa base" aurait changé ce comportement établi
+#: (`parse_quantity_unit_from_text("2 tonnes")` devait rester `(2.0, "TONNE")`,
+#: pas devenir `(2000.0, "KG")` — régression réelle détectée et corrigée avant
+#: ce correctif, voir `tests/unit/test_canonical_unit_system.py::
+#: TestNoRegressionOnAlreadyRecognizedUnits`). Pur ADDITIF pour ces 4 tokens
+#: précisément : avant l'Étape 6, aucun appelant ne pouvait les recevoir
+#: (absents d'`UNIT_SYNONYMS`), donc ce collapse ne change AUCUN comportement
+#: pour une unité déjà reconnue.
+_COLLAPSIBLE_SUB_UNITS = frozenset({"MILLILITRE", "CENTILITRE", "DECILITRE", "GRAMME"})
+
+
+def _collapse_to_base_unit(
+    qty_val: Optional[float], mapped_unit: Optional[str]
+) -> "tuple[Optional[float], Optional[str]]":
+    """Convertit un sous-multiple NOUVELLEMENT introduit (voir
+    `_COLLAPSIBLE_SUB_UNITS`) vers l'unité de base de sa famille (LITRE/KG) —
+    mandat Étape 6 §7/§11 : "normalisation au bord du système", jamais une
+    unité de sous-multiple qui circule dans l'état/le domaine."""
+    if qty_val is None or mapped_unit is None or mapped_unit not in _COLLAPSIBLE_SUB_UNITS:
+        return qty_val, mapped_unit
+    base = base_unit_for(mapped_unit)
+    if base is None or base == mapped_unit:
+        return qty_val, mapped_unit
+    converted = convert_quantity(qty_val, mapped_unit, base)
+    if converted is None:
+        return qty_val, mapped_unit
+    return converted, base
 
 
 def parse_quantity_unit_from_text(text: str) -> QuantityUnitResult:
@@ -285,22 +342,127 @@ def find_bare_number_candidates(
     return result
 
 
-def convert_quantity(quantity: float, from_unit: str, to_unit: str) -> Optional[float]:
-    """Convert *quantity* from one canonical unit to another.
+# ---------------------------------------------------------------------------
+# Familles MASS/VOLUME — source canonique unique (2026-09-30, Étape 6)
+# ---------------------------------------------------------------------------
+# Avant ce correctif, le facteur de conversion MASS/VOLUME le plus complet du
+# dépôt vivait dans `domain/pricing_tiers.py::_MASS_FACTORS`/`_VOLUME_FACTORS`
+# (documenté comme tel, "la plus complète du dépôt" — déjà réutilisé par
+# `commercial_offer.py`, `commercial_pricing_snapshot.py`, `price_basis.py`,
+# `domain/analytics/units.py`) — mais CE module, plus bas dans la même
+# dépendance (`pricing_tiers.py` importe déjà `normalize_unit`/`convert_quantity`
+# d'ici, jamais l'inverse), ne connaissait que KG/TONNE via `_UNIT_TO_KG`
+# (ci-dessus, volontairement INCHANGÉ — voir sa propre docstring d'usage :
+# `parse_compound_quantity`/`find_convertible_quantity_pairs` restent scopés à
+# leur usage historique). Cette table-ci est la SOURCE UNIQUE désormais pour
+# `measurement_family`/`are_units_compatible`/`convert_quantity` (ci-dessous) —
+# `pricing_tiers.py::unit_family`/`unit_factor` délèguent ici plutôt que de
+# maintenir leur propre copie (voir leur nouvelle implémentation).
+#
+# Clés = tokens CANONIQUES (sortie de `normalize_unit`/`UNIT_SYNONYMS`),
+# jamais les alias bruts — `measurement_family`/`convert_quantity` normalisent
+# leurs entrées avant consultation.
+_MASS_FACTORS: Dict[str, float] = {
+    "KG": 1.0,
+    "GRAMME": 0.001,
+    "TONNE": 1000.0,
+}
+_VOLUME_FACTORS: Dict[str, float] = {
+    "LITRE": 1.0,
+    "MILLILITRE": 0.001,
+    "CENTILITRE": 0.01,
+    "DECILITRE": 0.1,
+}
 
-    Only safe for units with a FIXED, universal factor (weight units in
-    `_UNIT_TO_KG`: KG, TONNE). Returns ``None`` when no safe conversion
-    exists (e.g. SAC/PANIER/TETE have no universal kg-equivalent) — callers
-    must not guess in that case, only ask the user to restate the quantity
-    in the target unit.
+#: Unité de base physique retenue par famille (même convention déjà établie et
+#: documentée dans `domain/commercial_offer.py::_BASE_UNIT_BY_FAMILY` — reprise
+#: ici à l'identique, jamais une seconde décision divergente).
+BASE_UNIT_BY_FAMILY: Dict[str, str] = {"MASS": "KG", "VOLUME": "LITRE"}
+
+
+def _canonicalize_for_conversion(unit: Optional[str]) -> str:
+    """Normalise *unit* (alias brut OU déjà canonique) pour la consultation des
+    tables ci-dessus — jamais d'exception, une unité non reconnue traverse
+    telle quelle (elle ne matchera simplement aucune table)."""
+    if not unit:
+        return ""
+    return normalize_unit(unit) or str(unit).strip().upper()
+
+
+def measurement_family(unit: Optional[str]) -> Optional[str]:
+    """``MASS`` / ``VOLUME`` / ``None`` (unité inconnue OU famille singleton —
+    SAC/PANIER/TETE/UNITE : aucune conversion déterministe n'existe pour elles,
+    voir le module docstring de `commercial_offer.py::convertible_measurement_
+    family`, dont ceci est désormais la source)."""
+    canonical = _canonicalize_for_conversion(unit)
+    if canonical in _MASS_FACTORS:
+        return "MASS"
+    if canonical in _VOLUME_FACTORS:
+        return "VOLUME"
+    return None
+
+
+def are_units_compatible(unit_a: Optional[str], unit_b: Optional[str]) -> bool:
+    """True si une quantité dans *unit_a* peut être convertie en *unit_b* SANS
+    information métier supplémentaire — même famille MASS/VOLUME uniquement.
+    Une unité identique à elle-même (y compris une famille singleton comme
+    TETE==TETE) est toujours compatible ; jamais entre familles différentes
+    (KG/LITRE, UNITE/KG...) ni entre deux familles singleton distinctes."""
+    a = _canonicalize_for_conversion(unit_a)
+    b = _canonicalize_for_conversion(unit_b)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    fam_a, fam_b = measurement_family(a), measurement_family(b)
+    return fam_a is not None and fam_a == fam_b
+
+
+def convert_quantity(quantity: float, from_unit: str, to_unit: str) -> Optional[float]:
+    """Convert *quantity* from one unit to another — canonical or a raw alias
+    (both are normalized before lookup, e.g. "ml"/"millilitres"/"MILLILITRE"
+    all resolve identically).
+
+    Only safe for units with a FIXED, universal factor (MASS: KG/GRAMME/TONNE ;
+    VOLUME: LITRE/MILLILITRE/CENTILITRE/DECILITRE — see `_MASS_FACTORS`/
+    `_VOLUME_FACTORS` above, the single canonical source for this repo).
+    Returns ``None`` when no safe conversion exists (e.g. SAC/PANIER/TETE have
+    no universal equivalent, and MASS<->VOLUME is never attempted) — callers
+    must not guess in that case, only ask the user to restate the quantity in
+    the target unit. NEVER an inter-family conversion (mandat Étape 6 §6) :
+    `are_units_compatible(KG, LITRE)` is False, and so is this function's
+    result for that pair.
     """
     if from_unit == to_unit:
+        # Préserve le raccourci d'identité brut d'origine (y compris pour une
+        # chaîne vide/inconnue non canonisable) — jamais de régression sur ce
+        # cas dégénéré, même s'il est peu probable en pratique.
         return quantity
-    from_kg = _UNIT_TO_KG.get(from_unit or "")
-    to_kg = _UNIT_TO_KG.get(to_unit or "")
-    if from_kg is None or to_kg is None:
+    from_canonical = _canonicalize_for_conversion(from_unit)
+    to_canonical = _canonicalize_for_conversion(to_unit)
+    if from_canonical and from_canonical == to_canonical:
+        return quantity
+    from_family = measurement_family(from_canonical)
+    to_family = measurement_family(to_canonical)
+    if from_family is None or from_family != to_family:
         return None
-    return quantity * from_kg / to_kg
+    table = _MASS_FACTORS if from_family == "MASS" else _VOLUME_FACTORS
+    return quantity * table[from_canonical] / table[to_canonical]
+
+
+def base_unit_for(unit: Optional[str]) -> Optional[str]:
+    """Unité de base canonique de la famille de *unit* : KG pour MASS, LITRE
+    pour VOLUME, sinon l'unité elle-même (TETE, SAC, PANIER... comptés tels
+    quels — une famille singleton EST sa propre base). ``None`` uniquement si
+    *unit* est vide/absent. Même décision que `commercial_offer.py::
+    base_unit_for` (dont c'est désormais la source canonique — voir Étape 6)."""
+    if not unit:
+        return None
+    canonical = _canonicalize_for_conversion(unit)
+    family = measurement_family(canonical)
+    if family:
+        return BASE_UNIT_BY_FAMILY[family]
+    return canonical
 
 
 #: Apostrophes (droite et typographique) marquant une ÉLISION française.
@@ -543,6 +705,13 @@ _SCAN_UNIT_RE = re.compile(
     r"(?<![a-zàâäéèêëïîôöùûüÿçA-ZÀÂÄÉÈÊËÏÎÔÖÙÛÜŸÇ])"
     r"(k|kg|kgs|kilo|kilogramme|kilogrammes|ton|tons|tone|tones|tonne|tonnes|t|"
     r"sac|sacs|sachet|sachets|panier|paniers|tete|têtes|tetes|unite|unité|unites|unités|"
+    # (2026-09-30, Étape 6) : sous-multiples MASS/VOLUME — voir UNIT_SYNONYMS
+    # plus haut pour pourquoi ils étaient absents (table locale isolée dans
+    # commercial_offer_flow.py). Formes accentuées ET non-accentuées pour
+    # "décilitre" : ce scan ne passe QUE par `.lower()` (pas de pliage
+    # d'accent) avant consultation, contrairement à `normalize_unit_token`.
+    r"g|gramme|grammes|ml|millilitre|millilitres|cl|centilitre|centilitres|"
+    r"dl|decilitre|decilitres|décilitre|décilitres|"
     r"l|litre|litres)\b(?!['’])"
 )
 _SCAN_CURRENCY_RE = re.compile(
@@ -827,10 +996,20 @@ def is_pure_numeric_answer(text: str) -> bool:
 _TIER_CLAUSE_SPLIT_RE = re.compile(
     r"\bet\b|\bou\b|\bpuis\b|,|;|\.(?:\s+|$)|\n", re.IGNORECASE
 )
+#: Alternance d'unités partagée par `_TIER_QTY_UNIT_RE`/`_PACKAGE_COUNT_UNIT_RE`
+#: (2026-09-30, Étape 6 — un seul endroit à étendre plutôt que deux copies qui
+#: pourraient diverger). Sous-multiples MASS/VOLUME ajoutés (ml/cl/dl/g) — même
+#: raison que `_SCAN_UNIT_RE` plus haut : auparavant absents, "50 sachets de
+#: 500 ml" ne matchait PAS cette alternance et retombait sur une lecture
+#: ambiguë/LLM au lieu du moteur de packaging déterministe.
+_TIER_UNIT_ALTERNATION = (
+    r"kg|kgs|kilo|kilogramme|kilogrammes|tonnes?|tones?|tons?|"
+    r"sacs?|sachets?|paniers?|t[êe]tes?|unit[ée]s?|"
+    r"g|grammes?|ml|millilitres?|cl|centilitres?|dl|d[ée]cilitres?|"
+    r"litres?|l"
+)
 _TIER_QTY_UNIT_RE = re.compile(
-    r"(\d+[\d\s,.]*)\s*"
-    r"(kg|kgs|kilo|kilogramme|kilogrammes|tonnes?|tones?|tons?|"
-    r"sacs?|sachets?|paniers?|t[êe]tes?|unit[ée]s?|litres?|l)\b",
+    r"(\d+[\d\s,.]*)\s*(" + _TIER_UNIT_ALTERNATION + r")\b",
     re.IGNORECASE,
 )
 _TIER_PRICE_CURRENCY_RE = re.compile(
@@ -883,8 +1062,7 @@ _PACKAGE_COUNT_UNIT_RE = re.compile(
     r"(?P<count>\d[\d\s.,]*)\s*(?:" + "|".join(_TIER_PACKAGING_WORDS) + r")\b"
     r"\s*(?:de|d['’])\s*"
     r"(?P<qty>\d[\d\s.,]*)\s*"
-    r"(?P<unit>kg|kgs|kilo|kilogramme|kilogrammes|tonnes?|tones?|tons?|"
-    r"sacs?|sachets?|paniers?|t[êe]tes?|unit[ée]s?|litres?|l)\b",
+    r"(?P<unit>" + _TIER_UNIT_ALTERNATION + r")\b",
     re.IGNORECASE,
 )
 
@@ -1084,6 +1262,17 @@ def _classify_packaging_clause(clause: str) -> PackagingClause:
                 and price_val > 0
             ):
                 explained = {1.0, content_val, price_val}
+                # PAS de collapse ici, délibérément : `parse_packaging_message`
+                # reconstruit `pricing_tiers` depuis `(clause.quantity,
+                # clause.unit_raw)` COUPLÉS (voir plus bas — jamais `.unit`) —
+                # un `PricingTier.unit` reste littéral PAR CONTRAT
+                # (`pricing_tiers.py::PricingTier.unit`, "jamais normalisé").
+                # `.quantity`/`.unit` DOIVENT donc rester dans la MÊME unité
+                # que `.unit_raw` pour ce rôle ; c'est `validate_pricing_tiers`
+                # (via `_unit_factor`, désormais délégué à ce module — voir sa
+                # nouvelle implémentation) qui calcule `base_unit_quantity`
+                # correctement à partir de cette paire littérale, PAS un
+                # collapse anticipé ici.
                 return PackagingClause(
                     role=PackagingClauseRole.TIER,
                     text=clause,
@@ -1121,13 +1310,18 @@ def _classify_packaging_clause(clause: str) -> PackagingClause:
                 )
             total = count_val * content_val
             # `count` et `content` sont CONSOMMÉS par la multiplication —
-            # seul le total survit dans le contrat canonique.
+            # seul le total survit dans le contrat canonique. `explained`
+            # compare aux nombres BRUTS ("100"/"500" pour "100 sachets de
+            # 500 ml") — le collapse vers l'unité de base (mandat §7/§8 :
+            # "100 sachets de 500 ml" -> disponibilité 50 L) n'intervient
+            # qu'APRÈS, sur `.quantity`/`.unit` uniquement.
             explained = {count_val, content_val}
+            collapsed_total, collapsed_unit = _collapse_to_base_unit(total, content_unit)
             return PackagingClause(
                 role=PackagingClauseRole.PACKAGED_GROUP,
                 text=clause,
-                quantity=total,
-                unit=content_unit,
+                quantity=collapsed_total,
+                unit=collapsed_unit,
                 unit_raw=pack_match.group("unit"),
                 packaging=packaging,
                 numbers=numbers,
@@ -1181,11 +1375,19 @@ def _classify_packaging_clause(clause: str) -> PackagingClause:
                 numbers=numbers,
                 unexplained=numbers,
             )
+        # `.quantity`/`.unit` ALIMENTENT DIRECTEMENT `PackagingParse.quantity`/
+        # `.unit` (la disponibilité globale, voir `parse_packaging_message`
+        # plus bas — contrairement au rôle TIER ci-dessus) : collapse vers
+        # l'unité de base requis ici (mandat §7/§8). `unexplained` compare
+        # au nombre BRUT (`qty_val`), jamais à la valeur collapsée.
+        collapsed_qty, collapsed_unit = _collapse_to_base_unit(
+            qty_val, UNIT_SYNONYMS.get(normalize_unit_token(unit_raw))
+        )
         return PackagingClause(
             role=PackagingClauseRole.BARE_QUANTITY,
             text=clause,
-            quantity=qty_val,
-            unit=UNIT_SYNONYMS.get(normalize_unit_token(unit_raw)),
+            quantity=collapsed_qty,
+            unit=collapsed_unit,
             unit_raw=unit_raw.strip(),
             packaging=packaging,
             numbers=numbers,
@@ -1656,6 +1858,10 @@ __all__ = [
     "extract_single_pricing_tier_correction",
     "find_matching_tier_index",
     "convert_quantity",
+    "measurement_family",
+    "are_units_compatible",
+    "base_unit_for",
+    "BASE_UNIT_BY_FAMILY",
     "extract_unit_only_from_text",
     "NumberCandidate",
     "scan_number_candidates",

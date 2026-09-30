@@ -53,6 +53,12 @@ from ladini.domain.quantity_unit import (
     _TIER_PACKAGING_WORDS as PACKAGING_WORDS,
 )
 from ladini.domain.quantity_unit import (
+    base_unit_for as _base_unit_for,
+)
+from ladini.domain.quantity_unit import (
+    convert_quantity as _convert_quantity,
+)
+from ladini.domain.quantity_unit import (
     normalize_unit,
     resolve_product_unit,
 )
@@ -90,14 +96,33 @@ _BARE_CONTENT_RE = re.compile(_NUMBER + r"\s*" + _CONTENT_UNIT + r"?\b")
 _WORD_NUMBERS = {"demi": 0.5, "quart": 0.25}
 _CURRENCY_RE = re.compile(r"\b(fcfa|cfa|francs?|f)\b")
 
-#: Conversion locale des sous-multiples de contenu (ml/cl/dl/g) — jamais ajoutés aux registres
-#: globaux d'unités. Retourne (facteur, unité canonique).
-_CONTENT_UNIT_MAP: Dict[str, Tuple[float, str]] = {
-    "l": (1.0, "LITRE"), "litre": (1.0, "LITRE"), "litres": (1.0, "LITRE"),
-    "ml": (0.001, "LITRE"), "cl": (0.01, "LITRE"), "dl": (0.1, "LITRE"),
-    "kg": (1.0, "KG"), "kilo": (1.0, "KG"), "kilos": (1.0, "KG"),
-    "g": (0.001, "KG"), "gramme": (0.001, "KG"), "grammes": (0.001, "KG"),
-}
+#: Vocabulaire des unités de CONTENU d'un paquet — restreint à MASS/VOLUME
+#: (jamais SAC/TETE/UNITE : le contenu d'un sachet n'est jamais "3 têtes").
+#: (2026-09-30, Étape 6 — centralisation des unités) : les FACTEURS ne sont
+#: plus dupliqués ici — dérivés de `domain/quantity_unit.py::convert_quantity`/
+#: `base_unit_for` (la source canonique unique désormais), jamais un second
+#: jeu de 0.001/0.01/0.1 maintenu à la main. Forme (facteur, unité canonique)
+#: strictement inchangée pour ses 4 consommateurs existants dans ce fichier.
+_CONTENT_UNIT_TOKENS: Tuple[str, ...] = (
+    "l", "litre", "litres", "ml", "cl", "dl",
+    "kg", "kilo", "kilos", "g", "gramme", "grammes",
+)
+
+
+def _build_content_unit_map() -> Dict[str, Tuple[float, str]]:
+    table: Dict[str, Tuple[float, str]] = {}
+    for token in _CONTENT_UNIT_TOKENS:
+        canonical = normalize_unit(token)
+        base = _base_unit_for(canonical) if canonical else None
+        if not canonical or base not in ("LITRE", "KG"):
+            continue
+        factor = _convert_quantity(1.0, canonical, base)
+        if factor is not None:
+            table[token] = (factor, base)
+    return table
+
+
+_CONTENT_UNIT_MAP: Dict[str, Tuple[float, str]] = _build_content_unit_map()
 
 
 def normalize_text(text: Any) -> str:

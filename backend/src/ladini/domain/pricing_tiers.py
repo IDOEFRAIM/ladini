@@ -26,63 +26,48 @@ from ladini.domain.quantity_unit import (
     convert_quantity,
     normalize_unit,
 )
+from ladini.domain.quantity_unit import (
+    measurement_family as _measurement_family,
+)
 
 # ---------------------------------------------------------------------------
-# Familles d'unités — voir la décision de scope du plan : seules les
-# conversions déjà connues du codebase (masse KG<->TONNE, volume LITRE) sont
-# supportées. SAC/PANIER/TETE/UNITE restent des familles à elles seules
-# (aucune conversion connue) : un tarif dans l'une de ces unités doit
-# correspondre EXACTEMENT à l'unité de base du produit.
+# Familles d'unités — SOURCE DÉLÉGUÉE (2026-09-30, Étape 6 — centralisation
+# des unités). Cette table était auparavant LOCALE ici, documentée comme "la
+# plus complète du dépôt" (seule à connaître G/GRAMME) et réutilisée telle
+# quelle par `commercial_offer.py`, `commercial_pricing_snapshot.py`,
+# `price_basis.py`, `domain/analytics/units.py`. Elle délègue désormais à
+# `domain/quantity_unit.py::measurement_family`/`convert_quantity` — la
+# NOUVELLE source canonique unique, qui connaît EN PLUS les sous-multiples
+# MILLILITRE/CENTILITRE/DECILITRE (absents d'ici auparavant, tout comme de
+# la table historique). `_unit_family`/`_unit_factor` gardent EXACTEMENT
+# leur contrat public d'origine (family = l'unité elle-même en majuscules
+# si singleton, jamais `None` ; factor = 1.0 si singleton) — aucun des
+# nombreux appelants existants n'a besoin de changer.
 # ---------------------------------------------------------------------------
-_MASS_FACTORS: Dict[str, float] = {
-    "KG": 1.0,
-    "KGS": 1.0,
-    "KILO": 1.0,
-    "KILOS": 1.0,
-    "KILOGRAMME": 1.0,
-    "KILOGRAMMES": 1.0,
-    "G": 0.001,
-    "GRAMME": 0.001,
-    "GRAMMES": 0.001,
-    "TONNE": 1000.0,
-    "TONNES": 1000.0,
-    "TON": 1000.0,
-    "TONS": 1000.0,
-    "TONE": 1000.0,
-    "TONES": 1000.0,
-    "T": 1000.0,
-}
-_VOLUME_FACTORS: Dict[str, float] = {
-    "L": 1.0,
-    "LITRE": 1.0,
-    "LITRES": 1.0,
-}
 
 
 def _unit_family(unit: str) -> str:
     u = unit.strip().upper()
-    if u in _MASS_FACTORS:
-        return "MASS"
-    if u in _VOLUME_FACTORS:
-        return "VOLUME"
-    return u  # famille singleton (SAC/PANIER/TETE/UNITE/...) : elle-même
+    fam = _measurement_family(u)
+    return fam or u  # famille singleton (SAC/PANIER/TETE/UNITE/...) : elle-même
 
 
 def _unit_factor(unit: str) -> float:
     u = unit.strip().upper()
-    if u in _MASS_FACTORS:
-        return _MASS_FACTORS[u]
-    if u in _VOLUME_FACTORS:
-        return _VOLUME_FACTORS[u]
-    return 1.0  # famille singleton : jamais convertie, facteur neutre
+    fam = _measurement_family(u)
+    if fam is None:
+        return 1.0  # famille singleton : jamais convertie, facteur neutre
+    base = "KG" if fam == "MASS" else "LITRE"
+    factor = convert_quantity(1.0, u, base)
+    return factor if factor is not None else 1.0
 
 
 # Alias publics (2026-09-27, Analytics Phase B) : cette table MASS/VOLUME est
-# la plus complète du dépôt (seule à connaître G/GRAMME, absent de
-# `domain/quantity_unit.py::_UNIT_TO_KG`) — `domain/analytics/units.py` la
-# réutilise telle quelle pour la compatibilité d'agrégation au lieu d'en
-# recopier une 4e version. Ne PAS dupliquer `_MASS_FACTORS`/`_VOLUME_FACTORS`
-# ailleurs ; étendre ICI si une nouvelle unité convertible apparaît.
+# la plus complète du dépôt — `domain/analytics/units.py` la réutilise telle
+# quelle pour la compatibilité d'agrégation au lieu d'en recopier une 4e
+# version. Ne PAS dupliquer un jeu de facteurs ici ; étendre
+# `domain/quantity_unit.py::_MASS_FACTORS`/`_VOLUME_FACTORS` si une nouvelle
+# unité convertible apparaît (source unique désormais, voir Étape 6).
 unit_family: Callable[[str], str] = _unit_family
 unit_factor: Callable[[str], float] = _unit_factor
 
