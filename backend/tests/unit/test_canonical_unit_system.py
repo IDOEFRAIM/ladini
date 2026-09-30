@@ -62,7 +62,16 @@ class TestNormalizeUnit:
 
     def test_unknown_string_returns_none(self):
         assert normalize_unit("bizarre") is None
-        assert normalize_unit("quintal") is None  # jamais deviné, voir rapport §23
+
+    def test_quintal_is_recognized_since_etape_6_closure(self):
+        # (2026-09-30, Étape 6 clôture) : QUINTAL, auparavant reconnu
+        # UNIQUEMENT par `actions/common.py::_UNIT_TO_KG` (jamais devant le
+        # registre central — voir le rapport de clôture), est maintenant sa
+        # propre famille MASS ici, 100 KG. Pas d'alias "q" : aucune preuve
+        # d'usage trouvée dans le dépôt.
+        assert normalize_unit("quintal") == "QUINTAL"
+        assert normalize_unit("QUINTAUX") == "QUINTAL"
+        assert normalize_unit("q") is None
 
     def test_normalization_is_idempotent(self):
         # I5 du mandat : normalize(normalize(x)) == normalize(x).

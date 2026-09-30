@@ -67,6 +67,15 @@ UNIT_SYNONYMS: Dict[str, str] = {
     "dl": "DECILITRE",
     "decilitre": "DECILITRE",
     "decilitres": "DECILITRE",
+    # (2026-09-30, Étape 6 clôture) : QUINTAL était converti UNIQUEMENT par
+    # `market_coach/actions/common.py::_UNIT_TO_KG` (1 quintal = 100 kg,
+    # verrouillé par `tests/unit/test_commercial_offer_price_basis_hardening.py
+    # ::test_quintal_still_converts`, preuve d'usage réel) — absent d'ici, donc
+    # invisible à `measurement_family`/`convert_quantity`. Pas d'alias "q" :
+    # aucune preuve d'usage trouvée dans le dépôt (prompts, interpréteur,
+    # tests) — un caractère unique ambigu n'est ajouté que sur preuve.
+    "quintal": "QUINTAL",
+    "quintaux": "QUINTAL",
 }
 
 VALID_UNITS = frozenset(UNIT_SYNONYMS.values())
@@ -366,6 +375,7 @@ _MASS_FACTORS: Dict[str, float] = {
     "KG": 1.0,
     "GRAMME": 0.001,
     "TONNE": 1000.0,
+    "QUINTAL": 100.0,
 }
 _VOLUME_FACTORS: Dict[str, float] = {
     "LITRE": 1.0,

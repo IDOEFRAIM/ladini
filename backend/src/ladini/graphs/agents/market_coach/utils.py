@@ -15,6 +15,9 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Set
 
 from ladini.core.llm import get_llm
 from ladini.core.settings import settings
+from ladini.domain.quantity_unit import convert_quantity as _convert_quantity
+from ladini.domain.quantity_unit import measurement_family as _measurement_family
+from ladini.domain.quantity_unit import normalize_unit as _normalize_unit
 from ladini.graphs.agents.market_coach.core.slots import (
     build_canonical_field_aliases,
 )
@@ -241,39 +244,31 @@ _GENERIC_TECHNICAL_ERROR = (
 )
 
 
-_CANONICAL_UNIT_MAP: Dict[str, str] = {
-    "KG": "KG",
-    "KILO": "KG",
-    "KGS": "KG",
-    "KILOS": "KG",
-    "KILOGRAMME": "KG",
-    "KILOGRAMMES": "KG",
-    "G": "KG",
+# (2026-09-30, Étape 6 clôture — "une seule vérité physique sur les unités") :
+# cette table maintenait sa PROPRE copie, alias par alias, de ce que
+# `domain/quantity_unit.py::UNIT_SYNONYMS` sait déjà (KG/TONNE/SAC/UNITE/
+# TETE/LITRE...) — risque de divergence silencieuse à chaque nouvel alias
+# ajouté d'un côté et oublié de l'autre (déjà arrivé : QUINTAL n'existait que
+# dans `actions/common.py`). `canonical_unit_label` délègue maintenant à
+# `normalize_unit` pour tout ce que le registre central reconnaît déjà ; ne
+# reste ici que ce qui est GENUINEMENT spécifique à ce module :
+# - `_DISPLAY_LABEL_OVERRIDES` : un choix d'AFFICHAGE délibéré qui diverge du
+#   token de conversion interne (GRAMME reste sa PROPRE famille convertible
+#   dans `quantity_unit.py` — voir `_MASS_FACTORS` — mais s'est toujours
+#   affiché "KG" ici ; comportement préservé tel quel, jamais un facteur).
+# - `_ALIAS_OVERRIDES` : variantes d'écriture que le registre central ne
+#   couvre PAS (il n'a pas vocation à connaître l'anglais "head"/"unit", ni
+#   "pièce" — un mot de packaging, jamais une unité physique). Chacune de ces
+#   entrées existe pour une raison documentée ci-dessous ; ce n'est PAS une
+#   deuxième table de facteurs, seulement des libellés.
+_DISPLAY_LABEL_OVERRIDES: Dict[str, str] = {
+    # GRAMME est sa propre famille convertible dans `quantity_unit.py`
+    # (500g -> 0.5kg reste exact) mais ce module a TOUJOURS affiché "KG" —
+    # divergence display-only assumée, jamais un facteur numérique ici.
     "GRAMME": "KG",
-    "GRAMMES": "KG",
-    "TON": "TONNE",
-    "TONS": "TONNE",
-    "TONE": "TONNE",
-    "TONES": "TONNE",
-    "T": "TONNE",
-    "T.": "TONNE",
-    "TONNE": "TONNE",
-    "TONNES": "TONNE",
-    "SAC": "SAC",
-    "SACS": "SAC",
-    "SACHET": "SAC",
-    "SACHETS": "SAC",
-    "UNITE": "UNITE",
-    "UNITÉ": "UNITE",
-    "UNITE.": "UNITE",
-    "UNIT": "UNITE",
-    "UNITES": "UNITE",
-    "UNITÉS": "UNITE",
-    "UNITS": "UNITE",
-    "PIECE": "UNITE",
-    "PIÈCE": "UNITE",
-    "PIECES": "UNITE",
-    "PIÈCES": "UNITE",
+}
+
+_ALIAS_OVERRIDES: Dict[str, str] = {
     # (Phase 2 hardening, commit 8, P1 de l'audit du 2026-09-24) : TETE n'est PAS un
     # synonyme d'UNITE — c'est son PROPRE canonique, distinct, pour l'élevage compté à la
     # tête (voir `domain/quantity_unit.py::default_unit_for_product`, seule source de
@@ -290,25 +285,21 @@ _CANONICAL_UNIT_MAP: Dict[str, str] = {
     # bétail, avec deux valeurs `unit` littéralement différentes ("UNITE" vs "TETE") —
     # toute comparaison littérale ultérieure (regroupement, dédup, l'assertion `{it["unit"]
     # for it in items} == {"TETE"}`) échouait silencieusement à les reconnaître comme la
-    # même unité. `HEAD`/`HEADS` (synonymes anglais déjà présents) suivent le même
-    # correctif — "une tête" reste TETE, jamais généralisé en "une unité".
-    "TETE": "TETE",
-    "TÊTE": "TETE",
-    "TETES": "TETE",
-    "TÊTES": "TETE",
+    # même unité. `HEAD`/`HEADS` (anglais — hors du registre central, qui ne couvre que le
+    # français) suivent le même correctif — "une tête" reste TETE, jamais "unité".
     "HEAD": "TETE",
     "HEADS": "TETE",
-    # Analytics Phase C (2026-09-27) : LITRE n'avait AUCUNE entrée ici (ni "L"
-    # ni "LITRES" ne se repliaient sur "LITRE" — seul le mot déjà exact
-    # "LITRE" passait, par le fallback `.get(unit, unit)`, pas par une vraie
-    # règle). Combiné à l'absence de "LITRE" dans `_PRIMARY_CANONICAL_UNITS`
-    # plus bas, une réponse "litre"/"L"/"litres" à "quelle unité ?" était
-    # rejetée alors que LITRE est un canonique pleinement supporté partout
-    # ailleurs (`domain/quantity_unit.py::VALID_UNITS`, `domain/pricing_tiers.py`)
-    # depuis son ajout au registre le 2026-08-29.
-    "L": "LITRE",
-    "LITRE": "LITRE",
-    "LITRES": "LITRE",
+    # PIECE/PIÈCE/UNIT(S) : un synonyme d'UNITE spécifique à ce module —
+    # PIECE désigne un dénombrement générique (pas un conditionnement au sens
+    # SAC/PANIER), et "unit"/"units" est l'anglais d'UNITE ; hors du
+    # périmètre du registre central (langue/orthographe métier locales à ce
+    # module, pas une unité physique nouvelle).
+    "UNIT": "UNITE",
+    "UNITS": "UNITE",
+    "PIECE": "UNITE",
+    "PIÈCE": "UNITE",
+    "PIECES": "UNITE",
+    "PIÈCES": "UNITE",
 }
 
 
@@ -316,7 +307,13 @@ def canonical_unit_label(value: Any, default: str = "KG") -> str:
     unit = str(value or "").strip().upper()
     if not unit:
         return default
-    return _CANONICAL_UNIT_MAP.get(unit, unit)
+    override = _ALIAS_OVERRIDES.get(unit)
+    if override:
+        return override
+    canonical: Optional[str] = _normalize_unit(unit)
+    if canonical is None:
+        return unit
+    return _DISPLAY_LABEL_OVERRIDES.get(canonical, canonical)
 
 
 class MarketRuntimeError(RuntimeError):
@@ -1067,34 +1064,40 @@ def _normalize_quantity_to_kg(
     except (TypeError, ValueError):
         return normalized
 
-    if unit in {"TONNE", "TONNES", "T", "TON", "TONS", "TONE", "TONES"}:
-        normalized["quantity"] = qf * 1000.0
-        normalized["unit"] = "KG"
-        normalized["unit_conversion"] = {
-            "from_unit": normalized.get("original_unit")
-            or canonical_unit_label(unit, "TONNE"),
-            "to_unit": "KG",
-            "factor": 1000,
-            "original_quantity": normalized.get("original_quantity", qf),
-            "converted_quantity": normalized["quantity"],
-        }
-    elif unit in {"G", "GRAMME", "GRAMMES"}:
-        normalized["quantity"] = qf * 0.001
-        normalized["unit"] = "KG"
-        normalized.setdefault("unit_display", "KG")
-        normalized.setdefault("original_unit", "KG")
-        normalized["unit_conversion"] = {
-            "from_unit": canonical_unit_label(unit, "KG"),
-            "to_unit": "KG",
-            "factor": 0.001,
-            "original_quantity": normalized.get("original_quantity", qf),
-            "converted_quantity": normalized["quantity"],
-        }
-    elif unit in {"KG", "KILO", "KILOS", "KILOGRAMME", "KILOGRAMMES"}:
+    # (2026-09-30, Étape 6 clôture) : cette fonction maintenait son PROPRE
+    # if/elif de facteurs (TONNE ×1000, GRAMME ×0.001, KG ×1) — une 2e copie
+    # de `domain/quantity_unit.py::_MASS_FACTORS`, invisible à QUINTAL (jamais
+    # ajouté ici alors qu'`actions/common.py` le convertissait déjà — la
+    # divergence exacte que la centralisation doit éliminer). Délègue
+    # maintenant à `normalize_unit`/`measurement_family`/`convert_quantity` :
+    # même règle "MASS uniquement, jamais deviné" que partout ailleurs dans
+    # le dépôt, plus QUINTAL/tout futur ajout au registre central pour libre.
+    canonical_token = _normalize_unit(unit)
+    family = _measurement_family(canonical_token) if canonical_token else None
+    if family != "MASS":
+        return normalized
+
+    if canonical_token == "KG":
         normalized["quantity"] = qf
         normalized["unit"] = "KG"
         normalized.setdefault("unit_display", "KG")
         normalized.setdefault("original_unit", "KG")
+        return normalized
+
+    converted_qty = _convert_quantity(qf, canonical_token, "KG")
+    factor = _convert_quantity(1.0, canonical_token, "KG")
+    if converted_qty is None or factor is None:
+        return normalized
+    normalized["quantity"] = converted_qty
+    normalized["unit"] = "KG"
+    normalized["unit_conversion"] = {
+        "from_unit": normalized.get("original_unit")
+        or canonical_unit_label(unit, canonical_token),
+        "to_unit": "KG",
+        "factor": factor,
+        "original_quantity": normalized.get("original_quantity", qf),
+        "converted_quantity": normalized["quantity"],
+    }
     return normalized
 
 
