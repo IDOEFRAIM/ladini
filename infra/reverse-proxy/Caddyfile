@@ -73,6 +73,17 @@
 		}
 	}
 
+	@commercial_internal path /internal/commercial/*
+	handle @commercial_internal {
+		reverse_proxy api:8000 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 30s
+			}
+		}
+	}
 	# /metrics, /admin/*, /api/market/*, le reste de /internal/* : JAMAIS
 	# exposés publiquement (scrape Prometheus et exploitation passent par le
 	# réseau interne / tunnel SSH).
