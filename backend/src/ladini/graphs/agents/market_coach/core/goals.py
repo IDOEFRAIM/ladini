@@ -15,7 +15,7 @@ divergent (intent tunnel inconnu, rôle incohérent, tunnel vide).
 
 from __future__ import annotations
 
-from typing import FrozenSet
+from typing import Dict, FrozenSet
 
 from ladini.graphs.agents.market_coach.interpreter.intent import (
     INTENT_CONFIG,
@@ -175,6 +175,32 @@ BUYER_REQUEST_SPECIALIZATIONS: FrozenSet[str] = frozenset(
 )
 
 
+# =====================================================================
+# DRAFTS CANONIQUES VERSIONNÉS (mandat 2026-09-30, "interruption d'une
+# confirmation active par une nouvelle intention") : goals qui possèdent leur
+# propre cycle de confirmation versionné (`domain/sales_publish_draft.py`,
+# `domain/procurement_draft.py`) plutôt que le mécanisme générique
+# `confirmation_summary`/`transaction_payload`. Déclaré ici, PAS dérivé de
+# `INTENT_CONFIG` (aucun champ du catalogue ne porte cette information) —
+# source unique quand même : c'était auparavant SEULEMENT
+# `nodes/confirmation_gate.py::_DRAFT_BASED_CONFIRMATION_GOALS`, que
+# `nodes/cognitive.py` a désormais besoin de lire aussi (détection d'une
+# nouvelle intention pendant WAITING_CONFIRMATION) — une 2e copie locale y
+# aurait dérivé exactement comme l'historique documenté en tête de fichier.
+DRAFT_BASED_CONFIRMATION_GOALS: FrozenSet[str] = frozenset(
+    {"PROCUREMENT_CREATE_REQUEST", "SALES_PUBLISH_PRODUCT"}
+)
+
+#: Clé d'état où vit le draft versionné de chaque goal ci-dessus, et nom du
+#: champ produit qu'il porte — permet à `cognitive_guard` de comparer le
+#: produit du draft ACTIF au produit de la nouvelle intention SANS connaître
+#: la forme exacte de chaque draft (juste où lire un `product`).
+DRAFT_BASED_CONFIRMATION_STATE_KEY: Dict[str, str] = {
+    "SALES_PUBLISH_PRODUCT": "sales_publish_draft",
+    "PROCUREMENT_CREATE_REQUEST": "procurement_draft",
+}
+
+
 def is_goal_refinement(previous: str, incoming: str) -> bool:
     """``BUYER_REQUEST`` → ``BUYER_ADD_TO_CART`` (et symétriquement) est une
     spécialisation, pas un vrai changement de goal.
@@ -208,5 +234,7 @@ __all__ = [
     "PRODUCER_ESCROW_GOALS",
     "NAVIGATION_BREAKOUT_GOALS",
     "BUYER_REQUEST_SPECIALIZATIONS",
+    "DRAFT_BASED_CONFIRMATION_GOALS",
+    "DRAFT_BASED_CONFIRMATION_STATE_KEY",
     "is_goal_refinement",
 ]

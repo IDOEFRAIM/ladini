@@ -30,6 +30,14 @@ class ConversationAction:
     INTERRUPT_ACTIVE_GOAL = "INTERRUPT_ACTIVE_GOAL"
     DISAMBIGUATE = "DISAMBIGUATE"
     CLARIFY = "CLARIFY"
+    # (2026-09-30, "interruption d'une confirmation active") : une nouvelle intention
+    # EXPLICITE du MÊME type de goal que celui déjà verrouillé (ex: SALES_PUBLISH_PRODUCT
+    # pour un autre produit) arrive pendant une CONFIRM_ACTION sur un draft canonique versionné
+    # (`core/goals.py::DRAFT_BASED_CONFIRMATION_GOALS`). Ni une correction du draft actif, ni
+    # une intention assez différente pour déclencher INTERRUPT_ACTIVE_GOAL (même nom de goal —
+    # voir la condition d'exclusion de ce dernier). Ne bascule JAMAIS automatiquement (mandat
+    # §A3) : pose une question fermée oui/non, voir `nodes/cognitive.py`.
+    ASK_SWITCH_CONFIRMATION = "ASK_SWITCH_CONFIRMATION"
     # Legacy literal maintained for downstream compatibility (see module docstring).
     RECOVER_ACTIVE_GOAL = "recover_active_tunnel"
     ABANDON_ACTIVE_GOAL = "abandon_tunnel_max_retries"
@@ -41,6 +49,7 @@ class ConversationAction:
             INTERRUPT_ACTIVE_GOAL,
             DISAMBIGUATE,
             CLARIFY,
+            ASK_SWITCH_CONFIRMATION,
             RECOVER_ACTIVE_GOAL,
             ABANDON_ACTIVE_GOAL,
         }

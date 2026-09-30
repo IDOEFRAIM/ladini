@@ -107,6 +107,69 @@ class TestInvariantCancelIsTerminal:
         assert further.kind == SalesPublishOutcomeKind.DRAFT_FINALIZED
 
 
+class TestInvariantProductChangeInvalidatesStalePricing:
+    """(2026-09-30, incident réel — "interruption d'une confirmation active par une
+    nouvelle intention") : une offre certifiée/des paliers/un prix/une quantité visent
+    TOUJOURS un produit précis. `with_updates(product=...)` SEUL (sans repréciser ces
+    champs dans la MÊME mise à jour) ne doit jamais les laisser survivre attachés au
+    NOUVEAU nom de produit — sinon `execution_payload()` peut publier un produit sous
+    le prix/la quantité/le conditionnement d'un AUTRE produit (voir
+    `domain/commercial_offer.py::offer_execution_payload`, qui dérive `product` de
+    l'offre certifiée, pas du champ plat)."""
+
+    def test_product_only_update_clears_commercial_offer_pricing_price_and_quantity(self):
+        offer = {
+            "schema": 1, "product": "lait",
+            "commercial_quantity": {"amount": 55.0, "unit": "LITRE", "source": "USER_EXPLICIT"},
+            "inventory_quantity": {"amount": 55.0, "unit": "LITRE", "source": "USER_EXPLICIT"},
+            "pricing": {"amount": 500.0, "basis": "PER_PACKAGE", "basis_unit": None, "currency": "FCFA",
+                        "source": "USER_EXPLICIT", "basis_source": "USER_EXPLICIT"},
+            "package": {"package_type": "SACHET", "content_amount": 0.5, "content_unit": "LITRE",
+                        "status": "KNOWN", "source": "USER_EXPLICIT"},
+            "normalized": None,
+        }
+        draft = _draft(draft_id="d10", product="lait", quantity=55.0, price=500.0, commercial_offer=offer)
+        renamed = draft.with_updates(product="miel")
+        assert renamed.product == "miel"
+        assert renamed.commercial_offer is None
+        assert renamed.price is None
+        assert renamed.quantity is None
+        assert renamed.version == draft.version + 1
+
+    def test_product_only_update_clears_stale_pricing_tiers(self):
+        draft = _draft(
+            draft_id="d11", product="lait", quantity=55.0, price=500.0, commercial_offer=None,
+            pricing_tiers=[
+                {"quantity": 0.5, "unit": "LITRE", "price": 500.0, "packaging": "sachet"},
+                {"quantity": 0.5, "unit": "LITRE", "price": 600.0, "packaging": "bidon"},
+            ],
+        )
+        renamed = draft.with_updates(product="miel")
+        assert renamed.product == "miel"
+        assert renamed.pricing_tiers is None
+        assert renamed.price is None
+        assert renamed.quantity is None
+
+    def test_product_change_does_not_clobber_fields_reprecised_in_the_same_update(self):
+        # Une correction qui redonne product ET price dans le MÊME tour ne doit pas
+        # perdre le prix qu'elle vient elle-même de fournir.
+        draft = _draft(draft_id="d12", product="lait", quantity=55.0, price=500.0)
+        renamed = draft.with_updates(product="miel", price=700.0)
+        assert renamed.product == "miel"
+        assert renamed.price == 700.0
+        # quantity n'a pas été re-précisée ce tour-ci : toujours invalidée.
+        assert renamed.quantity is None
+
+    def test_update_without_a_product_change_never_touches_pricing(self):
+        # Non-régression : une correction de prix SEULE (produit inchangé) ne doit
+        # jamais invalider quoi que ce soit — seul un changement de PRODUIT le fait.
+        draft = _draft(draft_id="d13", product="lait", quantity=55.0, price=500.0)
+        corrected = draft.with_updates(price=600.0)
+        assert corrected.product == "lait"
+        assert corrected.price == 600.0
+        assert corrected.quantity == 55.0
+
+
 class TestInvariantDomainNeverComparesRawText:
     def test_resolve_domain_action_signature_has_no_text_parameter(self):
         import inspect

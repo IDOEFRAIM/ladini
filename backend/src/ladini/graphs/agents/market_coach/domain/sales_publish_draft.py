@@ -271,6 +271,29 @@ class SalesPublishDraft:
                 changed["price"] = None
         elif changed.get("commercial_offer") and "pricing_tiers" not in changed and self.pricing_tiers:
             changed["pricing_tiers"] = None
+        # INVARIANT d'identité produit (2026-09-30, incident réel — "interruption d'une
+        # confirmation active par une nouvelle intention") : une offre certifiée/des paliers/
+        # un prix/une quantité visent TOUJOURS un produit précis. Un changement de `product`
+        # SEUL (ex: une correction textuelle "non, en fait c'est du miel" qui ne repasse pas
+        # par `pricing_tiers`/`commercial_offer` cette fois-ci) laissait ces champs survivre
+        # TELS QUELS, attachés au NOUVEAU nom de produit — `execution_payload()` dérive alors
+        # `product`/`quantity`/`price` de l'offre CERTIFIÉE, pas du champ plat `self.product`
+        # (voir `domain/commercial_offer.py::offer_execution_payload`), donc le produit
+        # réellement publié restait l'ANCIEN malgré le draft affichant le nouveau — et sans
+        # offre certifiée, des `pricing_tiers` d'un autre produit atteignaient `create_product`
+        # avec un `price`/une `quantity_for_sale` qui ne leur correspondaient plus. Un `product`
+        # explicitement fourni dans CETTE MÊME mise à jour (rare : une correction qui redonne
+        # aussi le prix/la quantité du nouveau produit) n'est jamais écrasé — seuls les champs
+        # NON re-précisés ce tour-ci sont invalidés.
+        if changed.get("product"):
+            for stale_field, stale_current in (
+                ("commercial_offer", self.commercial_offer),
+                ("pricing_tiers", self.pricing_tiers),
+                ("price", self.price),
+                ("quantity", self.quantity),
+            ):
+                if stale_field not in changed and stale_current is not None:
+                    changed[stale_field] = None
         if not changed:
             return self
         transitioned = self._transition(SalesPublishDraftStatus.DRAFT)

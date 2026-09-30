@@ -275,7 +275,20 @@ class Product(Base):
     # Phase B2a — sémantique commerciale CERTIFIÉE à la publication (base du prix, conditionnement,
     # TOTAL_LOT explicite, prix normalisé DÉRIVÉ). `price`/`unit` restent la projection legacy
     # (dual-write vérifié). NULL = produit antérieur à B2a.
-    commercial_pricing = Column(JSONB, nullable=True)
+    #
+    # `none_as_null=True` (2026-09-30, incident réel — `products_commercial_pricing_chk`
+    # violé en production) : SANS ce paramètre, SQLAlchemy sérialise un attribut Python
+    # `None` en littéral JSON `null` (un SCALAIRE JSONB valide, PAS un SQL NULL — vérifié
+    # directement via `JSONB().bind_processor(...)`, qui renvoie la chaîne `'null'` par
+    # défaut). `certify_commercial_offer(...)` retourne `None` pour TOUT produit sans offre
+    # certifiée (le cas legacy/PACKAGING_TIERS le plus courant) — la ligne INSERTée portait
+    # alors un JSONB `null` réel. Le CHECK `commercial_pricing IS NULL OR (jsonb_typeof(...)
+    # = 'object' AND ...)` échoue sur les DEUX branches pour un JSONB `null` (`IS NULL` est
+    # FAUX — la colonne n'est PAS NULL au sens SQL — et `jsonb_typeof` renvoie `'null'`, pas
+    # `'object'`) : violation garantie, systématique, indépendante de tout état de draft.
+    # `none_as_null=True` fait correspondre `None` Python à un VRAI SQL NULL, comme le
+    # CHECK (et l'intention du modèle, "NULL = produit antérieur à B2a" ci-dessus) l'exige.
+    commercial_pricing = Column(JSONB(none_as_null=True), nullable=True)
     images = Column(
         PG_ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
