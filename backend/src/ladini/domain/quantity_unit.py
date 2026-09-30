@@ -720,6 +720,83 @@ def scan_number_candidates(text: str) -> "list[NumberCandidate]":
 
 
 # ---------------------------------------------------------------------------
+# Fast-path purity guard (2026-09-30, incident réel : "60 L de miel" avec
+# product courant="lait" perdait silencieusement "miel" — le fast-path
+# numérique QUANTITY/PRICE ne regardait QUE les nombres/unités/devises du
+# message, jamais le reste du texte, et un mot métier explicite (nom de
+# produit, marqueur de correction "finalement"/"non"...) disparaissait sans
+# jamais atteindre la logique de conflit produit existante de
+# `nodes/memory.py::_apply_slot`.
+# ---------------------------------------------------------------------------
+# Mots-outils du français (articles/prépositions/conjonctions/pronoms, verbes
+# de déclaration courants, marqueurs de correction/hedging) qui ne portent
+# JAMAIS de sens métier propre — un ensemble FERMÉ, PAS une liste de produits
+# ni de packaging (voir §5 du mandat : ne jamais hardcoder un catalogue ici).
+# "l" n'y figure pas : c'est déjà un symbole d'unité valide dans
+# `UNIT_SYNONYMS` (LITRE), donc déjà couvert par cette vérification-là.
+#
+# (2026-09-30, revue) — élargi après un premier passage trop étroit (une
+# simple liaison grammaticale ne suffisait pas : "je veux 60 litre",
+# "non, 500 kg" — sans nom de produit différent en jeu, ces corrections
+# chiffrées légitimes se sont retrouvées bloquées à tort, cassant des tests de
+# non-régression déjà en place). Modelé sur le primitive SŒUR déjà existante
+# et du même esprit, `domain/commercial_offer_flow.py::_is_pure_content_reply`
+# / `_CONTENT_REPLY_FILLER` ("après retrait des nombres/unités/liaisons, il ne
+# reste aucun mot de fond") — non importée ici pour éviter un import circulaire
+# (`commercial_offer_flow.py` importe déjà de ce module), mais son ensemble de
+# mots-outils partage la même philosophie et sert de référence.
+_ANSWER_GLUE_WORDS = frozenset(
+    {
+        # articles / prépositions / pronoms
+        "de", "du", "des", "d", "le", "la", "les", "l", "un", "une",
+        "par", "pour", "a", "au", "aux", "et", "ou", "en", "ca", "ça",
+        "cela", "il", "elle", "moi", "je", "j", "ce", "cet", "cette",
+        # verbes de déclaration/possession courants ("je veux X", "j'ai X",
+        # "il faut X") — ne désignent jamais un produit à eux seuls
+        "veux", "voudrais", "ai", "as", "faut", "avoir", "vends",
+        "vend", "est", "cest", "c",
+        # marqueurs de correction/négation/hedging — signalent une correction
+        # mais ne portent, seuls, aucune entité métier (voir docstring de
+        # `is_pure_numeric_answer` : un nom de produit accolé à l'un de ces
+        # mots reste, lui, détecté comme impur — ce ne sont que les mots eux-
+        # mêmes qui sont neutres)
+        "non", "finalement", "plutot", "plutôt", "mais", "environ",
+    }
+)
+
+_ANSWER_WORD_TOKEN_RE = re.compile(r"[a-zà-öø-ÿ]+", re.IGNORECASE)
+
+
+def is_pure_numeric_answer(text: str) -> bool:
+    """True si *text* ne contient RIEN d'autre qu'un nombre et son
+    unité/devise/liaison grammaticale — aucun autre mot.
+
+    Utilisé par les fast-paths de réponse numérique (QUANTITY/PRICE) de
+    l'interpréteur pour décider s'ils peuvent résoudre le message sans passer
+    par l'interprétation complète. Un fast-path ne doit JAMAIS se contenter de
+    reconnaître les nombres qu'il comprend et ignorer silencieusement le
+    reste — si un mot survit après avoir écarté unités/devises/liaisons, une
+    entité métier explicite (nom de produit, marqueur de correction) peut être
+    présente et le message doit repasser par l'interprétation complète.
+
+    Conservateur par construction : dès qu'un mot n'est reconnu dans aucune
+    des catégories sûres ci-dessous, la fonction renvoie `False` — mieux vaut
+    un appel LLM/interpreter de plus que perdre une entité métier explicite.
+    """
+    clean = unicodedata.normalize("NFKD", (text or "").strip().lower())
+    clean = "".join(ch for ch in clean if not unicodedata.combining(ch))
+    for word in _ANSWER_WORD_TOKEN_RE.findall(clean):
+        if word in UNIT_SYNONYMS or word in _CURRENCY_WORDS:
+            continue
+        if word in _ANSWER_GLUE_WORDS:
+            continue
+        if _looks_like_fcfa_typo(word):
+            continue
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Deterministic multi-tier pricing parser
 # ---------------------------------------------------------------------------
 # Incident réel (2026-08-30) : la règle 5bis du prompt LLM ("plusieurs

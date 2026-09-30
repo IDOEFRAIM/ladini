@@ -45,6 +45,7 @@ from ladini.domain.commercial_offer_flow import (
 from ladini.domain.quantity_unit import (
     all_numbers_accounted_for,
     extract_unit_only_from_text,
+    is_pure_numeric_answer,
     packaged_compound_total,
     parse_compound_quantity,
     parse_packaging_message,
@@ -1177,6 +1178,7 @@ def _interpret_fast_path(
             _qty_candidate is not None
             and _price_candidate is not None
             and _qty_candidate is not _price_candidate
+            and is_pure_numeric_answer(text)
         ):
             _qty_value: Any = _qty_candidate["value"]
             _qty_unit: Any = _qty_candidate["unit"]
@@ -1359,7 +1361,43 @@ def _interpret_fast_path(
             number_match = None
 
         if number_match:
-            if numeric_value is not None:
+            if numeric_value is not None and not is_pure_numeric_answer(text):
+                # (2026-09-30, incident réel : "60 L de miel" avec product
+                # courant="lait" et expected=QUANTITY) — un nombre typé sans
+                # ambiguïté ("60", unité LITRE) ne suffit PAS à autoriser ce
+                # fast-path : le reste du message ("de miel") peut porter une
+                # entité métier explicite (nom de produit, marqueur de
+                # correction "finalement"/"non"...) que ce fast-path ne sait
+                # pas lire — il ne regarde que les nombres. L'invariant :
+                # un fast-path ne peut produire un résultat QUE s'il comprend
+                # complètement les éléments métier significatifs du message
+                # pour son périmètre ; sinon il s'abstient et laisse la main
+                # à l'interprétation complète, seule capable d'extraire
+                # `product` et d'atteindre la logique de conflit déjà
+                # correcte de `nodes/memory.py::_apply_slot`.
+                #
+                # (2026-09-30, durcissement) — CETTE abstention ne dépend PLUS
+                # de `llm_available` : la sûreté métier (ne jamais attacher
+                # silencieusement une quantité/un prix au mauvais produit) ne
+                # peut pas dépendre de la disponibilité d'un provider LLM, d'un
+                # timeout ou d'un mode dégradé. `llm_available` ne change QUE
+                # ce qui se passe APRÈS cette abstention :
+                #   - LLM disponible  -> l'interprétation complète (micro-
+                #     prompt ACTIVE_SLOT) tranche avec le contexte réel ;
+                #   - LLM indisponible -> `_interpret_fast_path` renvoie quand
+                #     même `None` ici, et l'appelant (`_input_interpreter_impl`)
+                #     retombe sur son repli déjà existant sans LLM
+                #     (`interpreted_event="UNKNOWN"`, voir le warning "No LLM
+                #     on runtime" — AUCUN champ métier n'est écrit, donc AUCUNE
+                #     mutation incorrecte n'est possible en aval) — jamais un
+                #     second mécanisme de clarification créé ici.
+                logger.info(
+                    "[Interpreter fast-path] ABSTAIN expected=%s "
+                    "reason=NON_NUMERIC_BUSINESS_CONTENT fallback=%s",
+                    expected,
+                    "FULL_INTERPRETATION" if llm_available else "SAFE_UNKNOWN",
+                )
+            elif numeric_value is not None:
                 # Désambiguïsation par unité (extraction structurée déterministe,
                 # PAS de la classification d'intention) : on classe le nombre
                 # selon son UNITÉ réelle, pas selon ce que l'agent attendait.
