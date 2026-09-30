@@ -66,12 +66,18 @@ def _build_proactive_hint(
 _CARRY_FORWARD_KEYS = ("product", "unit", "zone_name")
 
 
+_TERMINATING_EVENTS = frozenset({"REJECT", "CANCEL"})
+
+
 def _entity_carry_forward(
     state: Dict[str, Any],
     current_goal: Optional[str],
     in_tunnel: bool,
+    event: str = "",
 ) -> Optional[Dict[str, Any]]:
     if not (in_tunnel and current_goal):
+        return None
+    if event in _TERMINATING_EVENTS:
         return None
     stable = state.get("stable_entities") or {}
     entities = dict(state.get("extracted_entities") or {})
@@ -317,7 +323,7 @@ async def cognitive_guard(
             }
         )
 
-    carried_entities = _entity_carry_forward(state, current_goal, in_tunnel)
+    carried_entities = _entity_carry_forward(state, current_goal, in_tunnel, event)
     if carried_entities:
         said = state.get("extracted_entities") or {}
         updates["extracted_entities"] = carried_entities
