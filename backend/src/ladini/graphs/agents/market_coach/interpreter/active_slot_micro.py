@@ -52,6 +52,7 @@ from ladini.graphs.agents.market_coach.interpreter.active_slot_contract import (
     ActiveSlotDecision,
     ActiveSlotDisposition,
     adapt_active_slot_to_canonical,
+    buyer_slot_answer_conflict,
 )
 from ladini.graphs.agents.market_coach.interpreter.active_slot_prompts import (
     ACTIVE_SLOT_PROMPT_VERSION,
@@ -150,6 +151,42 @@ def _outcome_for_decision(
         return ActiveSlotOutcome.RESULT, adapt_active_slot_to_canonical(decision, context)
     if decision.disposition == ActiveSlotDisposition.DEVIATION:
         return ActiveSlotOutcome.DEVIATION, None
+    # Garde structurel acheteur (incident 2026-10-01) : un ANSWER/UPDATE qui ne
+    # peut pas répondre au slot ne doit jamais atteindre la fast-path acheteur
+    # (qui saute `cognitive_guard`). Autre produit → déviation ; aucune valeur
+    # → UNKNOWN. Évalué AVANT le repli confiance-basse.
+    logger.debug(
+        "[Interpreter ACTIVE_SLOT] décision disposition=%s entity_keys=%s",
+        decision.disposition.value,
+        sorted(decision.extracted_entities),
+    )
+    _conflict = buyer_slot_answer_conflict(decision, context)
+    if _conflict is not None:
+        logger.info(
+            "BUYER_ACTIVE_SLOT_FASTPATH_REJECTED goal=%s expected_slot=%s "
+            "reason=%s competing_product_present=%s",
+            context.goal,
+            context.category,
+            _conflict,
+            _conflict == "product_switch",
+        )
+        if _conflict == "product_switch":
+            return ActiveSlotOutcome.DEVIATION, None
+        # `no_slot_value` : réponse inexploitable, PAS une nouvelle tâche
+        # (« je ne sais pas », « beaucoup ») — jamais un ANSWER (la fast-path
+        # sauterait `cognitive_guard`), mais pas non plus une déviation : même
+        # primitive que « j ai » ci-dessous (UNKNOWN → `recover_active_tunnel`,
+        # qui redemande le slot avec son compteur de retries).
+        return ActiveSlotOutcome.RESULT, {
+            "interpreted_event": "UNKNOWN",
+            "detected_intent": "UNKNOWN",
+            "interpreter_confidence": decision.confidence,
+            "extracted_entities": {},
+            "raw_analysis": {
+                "path": "active_slot_no_slot_value_treated_as_unknown",
+                "original_disposition": decision.disposition.value,
+            },
+        }
     if decision.confidence < INTERRUPTION_CONFIDENCE_THRESHOLD:
         # (2026-09-21, correctif UX — réponse partielle mid-tunnel, ex: "j ai"
         # pendant la collecte de quantité) : AVANT ce correctif, une
