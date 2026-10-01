@@ -37,12 +37,15 @@ métier d'un champ.
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, model_validator
 
+from ladini.domain.quantity_unit import text_states_a_quantity
 from ladini.graphs.agents.market_coach.core.pending_interaction import (
     get_pending_interaction,
     to_tunnel_category,
@@ -102,6 +105,11 @@ class ActiveSlotContext:
     category: str
     field_name: Optional[str]
     goal: Optional[str]
+    #: Produit déjà suivi par la transaction (`transaction_payload.product`) —
+    #: sert UNIQUEMENT au garde `buyer_slot_answer_conflict` ci-dessous.
+    current_product: Optional[str] = None
+    #: Texte du tour — sert au garde de provenance de `quantity`.
+    message_text: Optional[str] = None
 
 
 def build_active_slot_context(state: Dict[str, Any]) -> ActiveSlotContext:
@@ -109,11 +117,92 @@ def build_active_slot_context(state: Dict[str, Any]) -> ActiveSlotContext:
     déjà existantes — `get_pending_interaction`/`to_tunnel_category`/
     `resolve_current_goal` — jamais une resynthèse indépendante."""
     pending = get_pending_interaction(state)
+    payload = state.get("transaction_payload")
+    product = payload.get("product") if isinstance(payload, dict) else None
     return ActiveSlotContext(
         category=to_tunnel_category(pending),
         field_name=pending.field,
         goal=resolve_current_goal(state),
+        current_product=str(product).strip() if product else None,
+        message_text=str(
+            state.get("normalized_text") or state.get("user_query") or ""
+        ),
     )
+
+
+#: Slots « valeur numérique/unité » : une réponse légitime y porte au moins une
+#: valeur, et ne peut pas désigner un AUTRE produit que celui déjà suivi.
+_VALUE_SLOT_CATEGORIES = frozenset({"QUANTITY", "UNIT", "PRICE"})
+
+
+def _as_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _product_key(value: Any) -> str:
+    """Clé de comparaison tolérante (casse, accents, article, pluriel) —
+    « poulet »/« Poulets »/« des poulets » désignent le même produit."""
+    text = unicodedata.normalize("NFKD", str(value or "").lower())
+    text = "".join(ch for ch in text if not unicodedata.combining(ch)).strip()
+    text = re.sub(r"^(des|du|de la|de l'|de|le|la|les|l'|un|une)\s+", "", text)
+    return re.sub(r"[sx]$", "", text)
+
+
+def buyer_slot_answer_conflict(
+    decision: ActiveSlotDecision, context: ActiveSlotContext
+) -> Optional[str]:
+    """Raison pour laquelle un ANSWER/UPDATE du micro-prompt ne peut PAS être
+    une réponse au slot acheteur en attente, sinon `None`.
+
+    Incident réel (2026-10-01) : « je veux acheter du lait » pendant
+    `ENTER_QUANTITY` d'un achat de poulets était classé ANSWER ; la fast-path
+    acheteur (`FastPathPolicy.for_buyer`) sautait alors `cognitive_guard`, le
+    produit restait « poulets » et 1 UNITE était ajoutée au panier. Le garde
+    de produit du chemin legacy (`routing.py`, `_is_different_product`) ne
+    couvre pas ce micro-prompt, qui retourne avant. Deux preuves structurelles,
+    jamais lexicales :
+
+    - ``product_switch`` : un produit DIFFÉRENT du produit suivi est extrait —
+      une vraie réponse de quantité/unité/prix ne change jamais de produit ;
+    - ``no_slot_value`` : aucune valeur extraite — ce n'est pas une réponse,
+      rien ne peut remplir le slot (et en laisser passer un ANSWER vide revient
+      à valider une quantité par défaut).
+
+    Limité aux buts acheteur et aux slots valeur (QUANTITY/UNIT/PRICE)."""
+    from ladini.graphs.agents.market_coach.core.goals import ALL_BUYER_TUNNEL_GOALS
+
+    if decision.disposition not in (
+        ActiveSlotDisposition.ANSWER,
+        ActiveSlotDisposition.UPDATE,
+    ):
+        return None
+    if str(context.goal or "").upper() not in ALL_BUYER_TUNNEL_GOALS:
+        return None
+    if context.category not in _VALUE_SLOT_CATEGORIES:
+        return None
+    entities = decision.extracted_entities
+    if not entities:
+        return "no_slot_value"
+    # Provenance : une quantité sans AUCUN nombre dans le message est inventée.
+    if (
+        entities.get("quantity") is not None
+        and context.message_text is not None
+        and not text_states_a_quantity(
+            context.message_text, _as_float(entities.get("quantity"))
+        )
+    ):
+        return "no_slot_value"
+    said_product = entities.get("product")
+    if (
+        said_product
+        and context.current_product
+        and _product_key(said_product) != _product_key(context.current_product)
+    ):
+        return "product_switch"
+    return None
 
 
 def adapt_active_slot_to_canonical(
@@ -158,5 +247,6 @@ __all__ = [
     "ActiveSlotDecision",
     "ActiveSlotContext",
     "build_active_slot_context",
+    "buyer_slot_answer_conflict",
     "adapt_active_slot_to_canonical",
 ]

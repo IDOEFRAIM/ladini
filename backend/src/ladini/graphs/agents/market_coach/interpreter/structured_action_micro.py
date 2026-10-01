@@ -36,6 +36,7 @@ from typing import Any, Dict, Optional, Tuple
 from pydantic import ValidationError
 
 from ladini.core.idempotency import get_cached, increment, set_cached
+from ladini.domain.quantity_unit import text_states_a_quantity
 from ladini.graphs.agents.market_coach.domain.selection_actions import (
     ActionType,
     SelectionContext,
@@ -223,11 +224,19 @@ def _parse_and_validate(
     return decision, ""
 
 
+def _proposed_number(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _outcome_for_decision(
     decision: StructuredActionDecision,
     prompt_context: StructuredActionPromptContext,
     domain_context: SelectionContext,
     locked_goal: Optional[str],
+    text: Optional[str] = None,
 ) -> Tuple[StructuredActionOutcome, Optional[Dict[str, Any]]]:
     from ladini.graphs.agents.market_coach.core.tunnel_manager import (
         INTERRUPTION_CONFIDENCE_THRESHOLD,
@@ -269,6 +278,28 @@ def _outcome_for_decision(
         )
         return StructuredActionOutcome.RESULT, _unknown_result(
             "structured_action_micro_unresolved"
+        )
+
+    # Garde de provenance (incident 2026-10-01) : SET_QUANTITY/SET_PACKAGE_COUNT
+    # produisent un événement ANSWER (fast-path acheteur, cognitive_guard
+    # sauté). Un nombre extrait d'un message qui n'en contient AUCUN est une
+    # invention du modèle (« je veux acheter du lait » → quantity=1) : jamais
+    # une action qui MUTE le panier — UNKNOWN, le slot est redemandé.
+    if (
+        text is not None
+        and raw["action"] in (ActionType.SET_QUANTITY, ActionType.SET_PACKAGE_COUNT)
+        and not text_states_a_quantity(
+            text, _proposed_number(raw.get("quantity", raw.get("package_count")))
+        )
+    ):
+        logger.info(
+            "BUYER_ACTIVE_SLOT_FASTPATH_REJECTED goal=%s expected_slot=%s "
+            "reason=quantity_without_textual_support competing_product_present=false",
+            locked_goal,
+            raw["action"].value,
+        )
+        return StructuredActionOutcome.RESULT, _unknown_result(
+            "structured_action_micro_quantity_unsupported"
         )
 
     return StructuredActionOutcome.RESULT, adapt_structured_action_to_canonical(
@@ -350,7 +381,9 @@ async def run_structured_action_microprompt(
                 )
             except Exception:
                 pass
-            return _outcome_for_decision(decision, prompt_context, domain_context, locked_goal)
+            return _outcome_for_decision(
+                decision, prompt_context, domain_context, locked_goal, text
+            )
 
     call_count_key = f"llm_call_count:{message_sid}" if message_sid else None
 
@@ -408,7 +441,7 @@ async def run_structured_action_microprompt(
         set_cached(cache_key, decision.model_dump_json(), ttl_seconds=_CACHE_TTL_SECONDS)
 
     outcome, result = _outcome_for_decision(
-        decision, prompt_context, domain_context, locked_goal
+        decision, prompt_context, domain_context, locked_goal, text
     )
     # (2026-09-13, Incrément G, spec §9/§33) : STRUCTURED_ACTION est le
     # profil de risque le plus élevé (exécute directement une action sur un
