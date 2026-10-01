@@ -140,6 +140,13 @@ def _parse_and_validate(
             f"intent '{decision.intent}' hors catalogue — choisis une "
             "valeur EXACTE du catalogue fourni"
         )
+    if decision.disposition == NewTaskDisposition.AMBIGUOUS:
+        unknown = [g for g in decision.candidate_goals if g not in classifiable_intents]
+        if unknown:
+            return None, (
+                f"candidate_goals {unknown!r} hors catalogue — chaque valeur "
+                "doit être EXACTE du catalogue fourni"
+            )
     return decision, ""
 
 

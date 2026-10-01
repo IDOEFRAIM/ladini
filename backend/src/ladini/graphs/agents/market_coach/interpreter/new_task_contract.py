@@ -46,6 +46,19 @@ class NewTaskDisposition(str, Enum):
     #: Impossible à classer de façon fiable — sortie VALIDE, jamais forcée
     #: vers une intention juste pour produire quelque chose (spec §23).
     UNKNOWN = "UNKNOWN"
+    #: (2026-10-01, Étape 9A/9B — ambiguïté hors tunnel) : des FAITS métier
+    #: clairs (produit/quantité/...) sont compris, mais AUCUN signal d'action
+    #: explicite ne départage plusieurs intentions du catalogue également
+    #: compatibles avec ces mêmes faits (ex: "j'ai 90 L de miel" — vendre ?
+    #: enregistrer en stock ? les deux lisent product+quantity de façon
+    #: identique). Distinct d'UNKNOWN : ici les faits SONT compris, seule
+    #: l'action reste à choisir — `entities` doit donc être préservé (jamais
+    #: vidé comme pour UNKNOWN/CONFIRM/REJECT/OUT_OF_SCOPE), et
+    #: `candidate_goals` (≥2 intentions du catalogue fourni) porte les choix
+    #: plausibles. Ne JAMAIS deviner une seule intention "la plus probable"
+    #: ici — c'est exactement le biais que cette disposition existe pour
+    #: éliminer (mandat §9 : "pas de simple max confidence wins").
+    AMBIGUOUS = "AMBIGUOUS"
 
 
 class NewTaskPricingTier(BaseModel):
@@ -199,6 +212,10 @@ class NewTaskInterpretation(BaseModel):
     intent: Optional[str] = None
     confidence: float = 0.0
     entities: NewTaskEntities = Field(default_factory=NewTaskEntities)
+    #: AMBIGUOUS uniquement (Étape 9A/9B) — ≥2 intentions du catalogue
+    #: fourni, également plausibles pour les mêmes faits. Vide pour toute
+    #: autre disposition (revérifié par le model_validator ci-dessous).
+    candidate_goals: List[str] = []
 
     @model_validator(mode="before")
     @classmethod
@@ -215,15 +232,34 @@ class NewTaskInterpretation(BaseModel):
         if self.disposition == NewTaskDisposition.NEW_TASK:
             if not self.intent:
                 raise ValueError("NEW_TASK requiert un champ 'intent' explicite")
+            if self.candidate_goals:
+                raise ValueError("NEW_TASK ne doit porter aucun 'candidate_goals'")
+            return self
+
+        if self.disposition == NewTaskDisposition.AMBIGUOUS:
+            if self.intent is not None:
+                raise ValueError("AMBIGUOUS ne doit porter aucun champ 'intent'")
+            if len(self.candidate_goals) < 2:
+                raise ValueError(
+                    "AMBIGUOUS requiert au moins 2 'candidate_goals' — sinon "
+                    "ce n'est pas réellement ambigu, choisis NEW_TASK ou UNKNOWN"
+                )
+            # Les FAITS restent préservés (spec §2 : facts != action) — pas
+            # de contrainte "entities vide" ici, à l'inverse de CONFIRM/
+            # REJECT/OUT_OF_SCOPE/UNKNOWN ci-dessous.
             return self
 
         # CONFIRM/REJECT/OUT_OF_SCOPE/UNKNOWN : jamais d'intent, jamais
-        # d'entités — rien de fiable à en tirer, même règle "one semantic
-        # action" que STRUCTURED_ACTION/ACTIVE_SLOT (protection contre un
-        # mélange de sémantiques dans la même réponse).
+        # d'entités, jamais de candidate_goals — rien de fiable à en tirer,
+        # même règle "one semantic action" que STRUCTURED_ACTION/ACTIVE_SLOT
+        # (protection contre un mélange de sémantiques dans la même réponse).
         if self.intent is not None:
             raise ValueError(
                 f"{self.disposition.value} ne doit porter aucun champ 'intent'"
+            )
+        if self.candidate_goals:
+            raise ValueError(
+                f"{self.disposition.value} ne doit porter aucun 'candidate_goals'"
             )
         if self.entities.model_dump(exclude_defaults=True):
             raise ValueError(
@@ -288,15 +324,23 @@ def adapt_new_task_to_canonical(
     elif decision.disposition in (NewTaskDisposition.CONFIRM, NewTaskDisposition.REJECT):
         detected_intent = str(locked_goal or "UNKNOWN").upper()
     else:
+        # AMBIGUOUS/OUT_OF_SCOPE/UNKNOWN : aucune intention UNIQUE à porter —
+        # pour AMBIGUOUS, les candidats vivent dans `candidate_goals`
+        # ci-dessous, jamais dans `detected_intent` (spec §9 : pas de choix
+        # arbitraire d'un "gagnant" parmi les candidats).
         detected_intent = "UNKNOWN"
 
     out: Dict[str, Any] = {
         "interpreted_event": decision.disposition.value,
         "detected_intent": detected_intent,
         "interpreter_confidence": decision.confidence,
+        # AMBIGUOUS préserve les FAITS déjà compris (spec §2/§13) — jamais
+        # vidés sous prétexte que l'action n'est pas résolue.
         "extracted_entities": entities,
         "raw_analysis": {"path": path},
     }
+    if decision.disposition == NewTaskDisposition.AMBIGUOUS:
+        out["candidate_goals"] = list(decision.candidate_goals)
     if validation_status:
         out["validation_status"] = validation_status
     return out

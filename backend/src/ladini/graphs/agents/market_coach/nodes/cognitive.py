@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from ladini.core.formatting import fmt_num
 from ladini.graphs.agents.market_coach.core.base import get_node_logger
 from ladini.graphs.agents.market_coach.core.conversation_decision import (
     ConversationAction,
@@ -94,6 +95,72 @@ def _entity_carry_forward(
             entities[key] = stable[key]
             carried = True
     return entities if carried else None
+
+
+# (2026-10-01, Étape 9A/9B — ambiguïté hors tunnel) : libellés COURTS,
+# orientés action, pour le menu de clarification — délibérément DISTINCTS
+# du `label` générique d'`INTENT_CONFIG` (qui décrit l'intention pour un
+# contexte de log/catalogue LLM, pas pour un bouton WhatsApp), même principe
+# déjà établi par `interpreter/intent.py::INTENT_DISAMBIGUATION` (ses
+# propres `options` ont toujours leur libellé propre, jamais une reprise
+# verbatim d'INTENT_CONFIG). Repli sur le label générique pour toute
+# intention future absente d'ici — jamais une intention silencieusement
+# sans libellé.
+_INTENT_SELECTION_SHORT_LABELS: Dict[str, str] = {
+    "SALES_PUBLISH_PRODUCT": "🛒 Les mettre en vente",
+    "STOCK_REGISTER_HARVEST": "📦 Les enregistrer dans mon stock",
+}
+
+
+def _short_label_for_goal(goal: str) -> str:
+    override = _INTENT_SELECTION_SHORT_LABELS.get(goal)
+    if override:
+        return override
+    return str((INTENT_CONFIG.get(goal) or {}).get("label", goal))
+
+
+def _facts_summary_text(facts: Dict[str, Any]) -> str:
+    """Résumé déterministe des faits déjà compris — AUCUN appel LLM, ces
+    valeurs ont déjà été extraites/normalisées en amont. Volontairement
+    minimal (produit/quantité/unité) : les autres champs éventuels
+    (zone, prix...) restent dans `facts` (préservés pour l'Étape 9C) sans
+    alourdir cette phrase d'accroche."""
+    product = facts.get("product")
+    quantity = facts.get("quantity")
+    unit = facts.get("unit")
+    qty_part = None
+    if quantity is not None:
+        unit_label = str(unit).strip().lower() if unit else ""
+        qty_part = f"{fmt_num(quantity)} {unit_label}".strip()
+    if qty_part and product:
+        return f"Vous avez {qty_part} de {product}."
+    if product:
+        return f"Vous avez mentionné : {product}."
+    if qty_part:
+        return f"Vous avez mentionné : {qty_part}."
+    return "J'ai compris des informations, mais pas encore ce que vous voulez en faire."
+
+
+def _out_of_tunnel_ambiguity_response(
+    *, facts: Dict[str, Any], candidate_goals: List[str]
+) -> Dict[str, Any]:
+    intro = _facts_summary_text(facts)
+    ask_text = f"{intro}\nSouhaitez-vous :"
+    buttons = [
+        {"id": goal, "title": _short_label_for_goal(goal)} for goal in candidate_goals
+    ]
+    return {
+        "final_response": ask_text,
+        "ag_ui_component": {
+            "lc_type": "constructor",
+            "id": ["ag_ui", "QuickReplies"],
+            "kwargs": {
+                "body": ask_text,
+                "buttons": buttons,
+                "metadata": {"candidate_goals": candidate_goals},
+            },
+        },
+    }
 
 
 def _active_confirmation_switch_candidate(
@@ -479,6 +546,91 @@ async def cognitive_guard(
                     context_ref="confirmation_switch",
                     target=target,
                 ),
+            }
+        )
+        return updates
+
+    # (2026-10-01, Étape 9A/9B — ambiguïté hors tunnel, incident-type "j'ai
+    # 90 L de miel" sans aucun goal actif) : le micro-prompt NEW_TASK
+    # (`new_task_contract.py::NewTaskDisposition.AMBIGUOUS`) rapporte que les
+    # FAITS du message sont clairs mais qu'AUCUN signal d'action explicite ne
+    # départage ≥2 intentions du catalogue également plausibles — jamais une
+    # devinette "max confidence" (mandat §9). Gardé STRICTEMENT à
+    # `not current_goal` : ce event ne peut structurellement provenir que de
+    # la route NEW_TASK sans tunnel (`state_router.py`), mais le garde explicite
+    # protège quand même contre toute reclassification NEW_TASK survenant
+    # pendant un tunnel encore nominalement actif (ex: après une DEVIATION
+    # ACTIVE_SLOT) — l'Étape 7 reste seule autorité sur ce cas-là.
+    #
+    # Ne verrouille JAMAIS `current_goal`, ne crée AUCUN draft, ne touche PAS
+    # `transaction_payload` : route DIRECTEMENT vers `response_strategy`
+    # (`ASK_INTENT_SELECTION`, voir `nodes/routing.py`), exactement comme
+    # `ASK_SWITCH_CONFIRMATION` ci-dessus — `goal_planner`/`memory_update`/
+    # `validator` ne tournent pas ce tour-ci (invariant "AMBIGUOUS => no
+    # business side effect", mandat §17). Les faits+candidats survivent au
+    # tour suivant via `pending_interaction` (DURABLE, `CLARIFY_INTENT`,
+    # dans `SUBFLOW_OWNED_KINDS` — jamais résolu par le classifieur
+    # générique ENTER_FIELD) : l'Étape 9C lira ce `target` pour reprendre
+    # sans redemander produit/quantité/unité.
+    if not current_goal and event == "AMBIGUOUS":
+        candidate_goals = [
+            g for g in (state.get("candidate_goals") or []) if isinstance(g, str) and g
+        ]
+        facts = {
+            k: v
+            for k, v in (state.get("extracted_entities") or {}).items()
+            if v not in (None, "", [], {})
+        }
+        if len(candidate_goals) >= 2:
+            logger.info(
+                "OUT_OF_TUNNEL_INTENT_AMBIGUOUS | extracted_fact_keys=%s | "
+                "candidate_goals=%s | resolution=AMBIGUOUS | "
+                "explicit_action_signal=false",
+                sorted(facts.keys()),
+                candidate_goals,
+            )
+            response = _out_of_tunnel_ambiguity_response(
+                facts=facts, candidate_goals=candidate_goals
+            )
+            updates.update(
+                {
+                    "response_strategy": "SUCCESS",
+                    "status": "WAITING_INPUT",
+                    "intent_competition": competition,
+                    "cognitive_decision": {
+                        **decision,
+                        "action": ConversationAction.ASK_INTENT_SELECTION,
+                        "reason": "out_of_tunnel_intent_ambiguous",
+                        "candidate_goals": candidate_goals,
+                    },
+                    **response,
+                    **set_pending_interaction(
+                        InteractionKind.CLARIFY_INTENT,
+                        context_ref="out_of_tunnel_intent_ambiguity",
+                        target={"facts": facts, "candidate_goals": candidate_goals},
+                    ),
+                }
+            )
+            return updates
+        # (garde-fou — ne devrait pas arriver, le contrat Pydantic exige déjà
+        # ≥2 candidate_goals pour AMBIGUOUS) : moins de 2 candidats valides
+        # après filtrage n'est structurellement plus une ambiguïté réelle —
+        # repli sûr vers UNKNOWN, jamais un goal choisi au hasard.
+        logger.warning(
+            "[CognitiveGuard] AMBIGUOUS avec moins de 2 candidate_goals "
+            "valides (%s) — repli sur UNKNOWN sûr",
+            candidate_goals,
+        )
+        updates.update(
+            {
+                "interpreted_event": "UNKNOWN",
+                "detected_intent": "UNKNOWN",
+                "intent_competition": competition,
+                "cognitive_decision": {
+                    **decision,
+                    "action": ConversationAction.CLARIFY,
+                    "reason": "ambiguous_with_insufficient_candidates",
+                },
             }
         )
         return updates

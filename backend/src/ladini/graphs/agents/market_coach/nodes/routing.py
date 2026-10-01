@@ -110,6 +110,12 @@ def _route_after_session_bootstrap(state: MarketAgentState) -> str:
 # supplémentaire (`goal_planner`/`validator`/`confirmation_gate`) n'a besoin
 # de tourner ce tour-ci : le draft ACTIF ne doit surtout pas être touché
 # tant que l'utilisateur n'a pas répondu (voir `nodes/cognitive.py`).
+# ASK_INTENT_SELECTION (Étape 9A/9B) route de la MÊME façon et pour la MÊME
+# raison : `cognitive_guard` pose déjà `response_strategy`/`final_response`/
+# `pending_interaction` (CLARIFY_INTENT, faits+candidats) lui-même — jamais
+# `goal_planner` (aucun goal ne doit être verrouillé avant le choix de
+# l'utilisateur) ni `memory_update`/`validator` (aucun `transaction_payload`
+# à toucher tant qu'aucun goal n'est choisi).
 _COGNITIVE_ACTION_ROUTES = {
     ConversationAction.START_OR_PLAN_GOAL: "to_planner",
     ConversationAction.CONTINUE_ACTIVE_GOAL: "to_planner",
@@ -117,6 +123,7 @@ _COGNITIVE_ACTION_ROUTES = {
     ConversationAction.DISAMBIGUATE: "to_disambiguation",
     ConversationAction.CLARIFY: "to_clarification",
     ConversationAction.ASK_SWITCH_CONFIRMATION: "to_strategy",
+    ConversationAction.ASK_INTENT_SELECTION: "to_strategy",
     ConversationAction.RECOVER_ACTIVE_GOAL: "to_strategy",
     ConversationAction.ABANDON_ACTIVE_GOAL: "to_clarification",
 }
